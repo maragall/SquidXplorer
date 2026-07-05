@@ -1,0 +1,244 @@
+"""Unit tests for IMA-183: select_fovs, project (primitive), project_well.
+
+Covers the a-priori design contracts:
+  * project() — pure, dtype-preserving, single-pass (bounded-memory) reduction.
+  * project_well() — (T, C, 1, Y, X) TCZYX Z=1, native dtype, channels distinct,
+    iterates z_levels (NOT range(n_z)) so non-contiguous z is correct.
+  * select_fovs() — IMA-187 fold: n_fovs param, list-per-well, positional, loud over-count.
+
+The tiny standard fixture (2 regions x 2 fov x 2 z x 2 ch) comes from conftest;
+non-contiguous-z and multi-timepoint cases build their own minimal datasets.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import numpy as np
+import pytest
+import tifffile
+
+from squidmip import open_reader, project, project_well, select_fovs
+
+
+# --------------------------------------------------------------------------------------
+# helpers
+# --------------------------------------------------------------------------------------
+def _write_plane(folder: Path, region, fov, z, channel, arr, t=0):
+    tp = folder / str(t)
+    tp.mkdir(parents=True, exist_ok=True)
+    tifffile.imwrite(tp / f"{region}_{fov}_{z}_{channel}.tiff", arr)
+
+
+def _plane(val, dtype=np.uint16, shape=(4, 4)):
+    return (np.arange(np.prod(shape), dtype=dtype).reshape(shape) + val).astype(dtype)
+
+
+def _write_min_yaml(root: Path, nz: int, nt: int = 1):
+    # acquisition.yaml is the single required metadata format (JSON support removed).
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "acquisition.yaml").write_text(
+        "objective:\n  pixel_size_um: 0.325\n"
+        f"z_stack:\n  nz: {nz}\n  delta_z_mm: 0.001\n"
+        f"time_series:\n  nt: {nt}\n"
+    )
+
+
+# ======================================================================================
+# A. project() — the pure MIP primitive
+# ======================================================================================
+def test_project_equals_np_max_reference():
+    planes = [_plane(0), _plane(50), _plane(20)]
+    out = project(iter(planes))
+    np.testing.assert_array_equal(out, np.max(np.stack(planes), axis=0))
+
+
+@pytest.mark.parametrize("dtype", [np.uint8, np.uint16])
+def test_project_preserves_native_dtype(dtype):
+    planes = [_plane(1, dtype=dtype), _plane(9, dtype=dtype)]
+    out = project(planes)
+    assert out.dtype == dtype  # no upcast, no overflow
+
+
+def test_project_single_plane_returns_equal_but_own_buffer():
+    p = _plane(7)
+    out = project([p])
+    np.testing.assert_array_equal(out, p)
+    assert out is not p  # pure: does not hand back / mutate the caller's array
+
+
+def test_project_does_not_mutate_caller_planes():
+    first = _plane(3)
+    before = first.copy()
+    project([first, _plane(99)])
+    np.testing.assert_array_equal(first, before)  # first plane untouched
+
+
+def test_project_empty_raises():
+    with pytest.raises(ValueError, match="at least one plane"):
+        project(iter([]))
+
+
+def test_project_shape_mismatch_raises():
+    with pytest.raises(ValueError, match="shape"):
+        project([_plane(0, shape=(4, 4)), _plane(0, shape=(4, 5))])
+
+
+def test_project_dtype_mismatch_raises():
+    with pytest.raises(ValueError, match="dtype"):
+        project([_plane(0, dtype=np.uint16), _plane(0, dtype=np.uint8)])
+
+
+def test_project_streams_single_pass():
+    # Bounded memory: project must consume the iterable exactly once, one plane at a time,
+    # never stacking the whole run. A one-shot generator that records its pulls proves it.
+    pulled = []
+
+    def gen():
+        for i in range(5):
+            pulled.append(i)
+            yield _plane(i * 10)
+
+    out = project(gen())
+    assert pulled == [0, 1, 2, 3, 4]  # single pass, all planes, in order
+    np.testing.assert_array_equal(out, _plane(40))  # max is the last (largest) plane
+
+
+# ======================================================================================
+# B. project_well() — (T, C, 1, Y, X), native dtype, z_levels iteration
+# ======================================================================================
+def test_project_well_shape_and_dtype(squid_dataset):
+    root, _ = squid_dataset
+    reader = open_reader(root)
+    out = project_well(reader, "B2", 0)
+    # n_t=1, n_channels=2, Z=1, frame 4x4
+    assert out.shape == (1, 2, 1, 4, 4)
+    assert out.dtype == np.uint16
+
+
+def test_project_well_matches_np_max_per_channel(squid_dataset):
+    root, arrays = squid_dataset
+    reader = open_reader(root)
+    meta = reader.metadata
+    out = project_well(reader, "B3", 1)
+    for c_i, ch in enumerate(c["name"] for c in meta["channels"]):
+        ref = np.max(np.stack([arrays[("B3", 1, z, ch)] for z in meta["z_levels"]]), axis=0)
+        np.testing.assert_array_equal(out[0, c_i, 0], ref)
+
+
+def test_project_well_channels_distinct_and_ordered(squid_dataset):
+    root, _ = squid_dataset
+    reader = open_reader(root)
+    meta = reader.metadata
+    out = project_well(reader, "B2", 0)
+    assert out.shape[1] == len(meta["channels"])  # C, not C*Nz (no z-as-channel)
+    # distinct channels -> distinct projected planes (fixture values differ per channel)
+    assert not np.array_equal(out[0, 0, 0], out[0, 1, 0])
+
+
+def test_project_well_iterates_z_levels_not_range(tmp_path):
+    # Non-contiguous z: files at z in {0,1,3} (plane 2 missing, e.g. partial acquisition).
+    # range(n_z=3) would read z=2 (KeyError) and skip z=3; z_levels=[0,1,3] is correct.
+    root = tmp_path / "acq"
+    ch = "Fluorescence_638_nm_-_Penta"
+    vals = {0: _plane(0), 1: _plane(10), 3: _plane(30)}
+    for z, arr in vals.items():
+        _write_plane(root, "A1", 0, z, ch, arr)
+    _write_min_yaml(root, nz=3)
+    reader = open_reader(root)
+    assert reader.metadata["z_levels"] == [0, 1, 3]
+    assert reader.metadata["n_z"] == 3
+
+    # spy on read() — project_well calls it positionally as read(region, fov, channel, z, t)
+    read_zs = []
+    orig_read = reader.read
+    reader.read = lambda region, fov, channel, z, t=0: (
+        read_zs.append(z) or orig_read(region, fov, channel, z, t)
+    )
+    out = project_well(reader, "A1", 0)
+
+    assert sorted(set(read_zs)) == [0, 1, 3]  # used z_levels, never attempted the missing z=2
+    np.testing.assert_array_equal(out[0, 0, 0], np.max(np.stack(list(vals.values())), axis=0))
+
+
+def test_project_well_multi_timepoint(tmp_path):
+    root = tmp_path / "acq"
+    ch = "Fluorescence_638_nm_-_Penta"
+    t0 = {0: _plane(0), 1: _plane(5)}
+    t1 = {0: _plane(100), 1: _plane(105)}
+    for z, arr in t0.items():
+        _write_plane(root, "A1", 0, z, ch, arr, t=0)
+    for z, arr in t1.items():
+        _write_plane(root, "A1", 0, z, ch, arr, t=1)
+    _write_min_yaml(root, nz=2, nt=2)
+    reader = open_reader(root)
+    assert reader.metadata["n_t"] == 2
+    out = project_well(reader, "A1", 0)
+    assert out.shape == (2, 1, 1, 4, 4)
+    np.testing.assert_array_equal(out[0, 0, 0], np.max(np.stack(list(t0.values())), axis=0))
+    np.testing.assert_array_equal(out[1, 0, 0], np.max(np.stack(list(t1.values())), axis=0))
+
+
+def test_project_requires_acquisition_yaml(tmp_path):
+    # Single metadata format: acquisition.yaml is required. A dataset with valid frames but
+    # no acquisition.yaml (or only a legacy JSON) must fail loud, not silently degrade.
+    ch = "Fluorescence_638_nm_-_Penta"
+    root = tmp_path / "no_yaml"
+    for z, arr in {0: _plane(0), 1: _plane(30)}.items():
+        _write_plane(root, "A1", 0, z, ch, arr)
+    (root / "acquisition parameters.json").write_text('{"Nz": 2}')  # legacy JSON ignored
+    with pytest.raises(FileNotFoundError, match="acquisition.yaml"):
+        project_well(open_reader(root), "A1", 0)
+
+
+def test_project_well_single_z(tmp_path):
+    root = tmp_path / "acq"
+    ch = "Fluorescence_638_nm_-_Penta"
+    only = _plane(42)
+    _write_plane(root, "A1", 0, 0, ch, only)
+    _write_min_yaml(root, nz=1)
+    reader = open_reader(root)
+    assert reader.metadata["z_levels"] == [0]
+    out = project_well(reader, "A1", 0)
+    np.testing.assert_array_equal(out[0, 0, 0], only)
+
+
+# ======================================================================================
+# C. select_fovs() — IMA-187 fold
+# ======================================================================================
+def _meta(fovs_per_region):
+    return {"regions": sorted(fovs_per_region), "fovs_per_region": fovs_per_region}
+
+
+def test_select_fovs_default_one_per_well():
+    meta = _meta({"B2": [0, 1], "B3": [0, 1]})
+    assert select_fovs(meta) == {"B2": [0], "B3": [0]}  # first FOV positionally, list-shaped
+
+
+def test_select_fovs_keys_are_regions():
+    meta = _meta({"B2": [0], "B3": [0], "B4": [0]})
+    assert set(select_fovs(meta)) == {"B2", "B3", "B4"}
+
+
+def test_select_fovs_n_fovs_two():
+    meta = _meta({"B2": [0, 1, 2], "B3": [0, 1, 2]})
+    assert select_fovs(meta, n_fovs=2) == {"B2": [0, 1], "B3": [0, 1]}  # first 2, sorted
+
+
+def test_select_fovs_over_count_raises_named():
+    meta = _meta({"B2": [0, 1], "B3": [0]})
+    with pytest.raises(ValueError, match="B3.*only 1 FOV"):
+        select_fovs(meta, n_fovs=2)
+
+
+def test_select_fovs_bad_n_fovs_raises():
+    with pytest.raises(ValueError, match="n_fovs must be"):
+        select_fovs(_meta({"B2": [0]}), n_fovs=0)
+
+
+def test_select_fovs_from_real_reader_metadata(squid_dataset):
+    # cross-check against actual reader output (fov [0,1] per region in the fixture)
+    root, _ = squid_dataset
+    meta = open_reader(root).metadata
+    assert select_fovs(meta, n_fovs=1) == {"B2": [0], "B3": [0]}
+    assert select_fovs(meta, n_fovs=2) == {"B2": [0, 1], "B3": [0, 1]}
