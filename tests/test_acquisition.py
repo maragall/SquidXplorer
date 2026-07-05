@@ -49,6 +49,24 @@ def test_json_fallback_recomputes_pixel_size(tmp_path):
     assert m["wellplate_format"] is None          # legacy sidecar has no plate format
 
 
+def test_json_fallback_applies_tube_lens_correction(tmp_path):
+    # a non-design tube lens must scale the effective magnification (sensor px != image px)
+    (tmp_path / "acquisition parameters.json").write_text(
+        json.dumps(
+            {
+                "objective": {"magnification": 20.0, "tube_lens_f_mm": 180.0},
+                "tube_lens_mm": 200.0,
+                "sensor_pixel_size_um": 3.76,
+                "Nz": 1,
+                "Nt": 1,
+            }
+        )
+    )
+    m = load_acquisition_metadata(tmp_path)
+    # effective mag = 20 * (200/180); FOV pixel = sensor / effective_mag
+    assert m["pixel_size_um"] == 3.76 / (20.0 * 200.0 / 180.0)
+
+
 def test_no_sidecar_all_none(tmp_path):
     m = load_acquisition_metadata(tmp_path)
     assert m["source"] is None

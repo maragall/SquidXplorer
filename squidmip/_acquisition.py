@@ -3,8 +3,10 @@
 Primary source is ``acquisition.yaml`` — Squid's authoritative rich metadata: the objective
 pixel size ALREADY computed for the objective + camera binning (so no fragile sensor/mag
 recompute), the wellplate format, and the z-stack / time-series parameters. Datasets that
-predate it fall back to the flat legacy ``acquisition parameters.json`` (where pixel size is
-recomputed as sensor_pixel_size / magnification — best-effort, ignores binning + tube lens).
+predate it fall back to the flat legacy ``acquisition parameters.json``, where the FOV pixel
+size is computed from sensor size, magnification AND the tube-lens ratio it carries (see
+``_fov_pixel_size``) — best-effort, since the legacy sidecar has no binning field. If neither
+sidecar exists, scalars are None (the MIP still runs; physical scale is simply absent).
 
 ``coordinates.csv`` is intentionally NOT read: for one-FOV-per-well (IMA-183) the plate layout
 comes from the well ID + ``wellplate_format``; per-FOV stage positions are a stitching/mosaic
@@ -29,6 +31,27 @@ def _load_json(path: Path):
     if not path.exists():
         return None
     return json.loads(path.read_text())
+
+
+def _fov_pixel_size(sensor_px, magnification, tube_lens_used=None, tube_lens_ref=None):
+    """Object-space (FOV) pixel size from the flat JSON.
+
+    FOV pixel size = sensor_pixel_size / effective_magnification. The objective's stated
+    magnification assumes its reference tube lens (objective.tube_lens_f_mm); a different
+    tube lens (tube_lens_mm) scales it: effective_mag = magnification * used / reference.
+    Applying that correction is the difference between sensor pixel size and image pixel size.
+
+    Best-effort only: the legacy JSON has no camera-binning field, so a binned acquisition
+    (binning != 1) would still be off by the binning factor. acquisition.yaml's stored
+    objective.pixel_size_um already accounts for binning + tube lens, so it is preferred.
+    Returns None when sensor size or magnification is missing.
+    """
+    if not (sensor_px and magnification):
+        return None
+    effective_mag = magnification
+    if tube_lens_used and tube_lens_ref:
+        effective_mag = magnification * (tube_lens_used / tube_lens_ref)
+    return sensor_px / effective_mag
 
 
 def load_acquisition_metadata(root) -> dict:
@@ -64,9 +87,13 @@ def load_acquisition_metadata(root) -> dict:
     # ignores camera binning and any non-design tube lens, so it is best-effort only.
     flat = _load_json(root / "acquisition parameters.json")
     if flat:
-        magnification = (flat.get("objective") or {}).get("magnification")
-        sensor_px = flat.get("sensor_pixel_size_um")
-        pixel_size_um = sensor_px / magnification if (magnification and sensor_px) else None
+        objective = flat.get("objective") or {}
+        pixel_size_um = _fov_pixel_size(
+            flat.get("sensor_pixel_size_um"),
+            objective.get("magnification"),
+            tube_lens_used=flat.get("tube_lens_mm"),
+            tube_lens_ref=objective.get("tube_lens_f_mm"),
+        )
         return {
             "pixel_size_um": pixel_size_um,
             "n_z_declared": flat.get("Nz"),
