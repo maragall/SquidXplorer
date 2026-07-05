@@ -12,6 +12,64 @@
 
 ---
 
+## 0. Post-review corrections (2026-07-05, after technical feedback + Squid-source verification)
+
+Julio's feedback sent me to the `Cephla-Lab/Squid` source (`multi_point_worker.py`,
+`job_processing.py`, `utils_acquisition.py`, `_def.py`, `models/acquisition_config.py`,
+`config/repository.py`). Three earlier claims were **wrong** and two decisions change. The
+corrections below OVERRIDE the corresponding statements later in this doc.
+
+- **Frame size / dtype are NOT fixed.** `4168×4168` is the *unbinned* crop
+  (`_def.py:752 CROP_WIDTH_UNBINNED=4168`); default binning is **2×2**
+  (`BINNING_FACTOR_DEFAULT=2`) → ~2084². Pixel format spans MONO8→uint8, MONO12/MONO16→uint16
+  (`squid/camera/utils.py:389`), plus ROI/crop. **The reader must read `frame_shape` + `dtype`
+  from the first real frame** (the plan already does) and preserve **native dtype**, not
+  "always uint16." (Fixes §3.1 and Decision 5.)
+- **tilefusion's `float32` cast is NOT lossy for us — my "destroys exact uint16" claim was wrong.**
+  uint16 ⊂ float32 exactly (max 65535 < 2²⁴), and `_to_grayscale_2d` is a no-op for a 2D plane
+  (`individual_tiffs.py:234`). So tilefusion's read is lossless for 2D grayscale — which is why
+  **your stitcher's MIP is fine using it.** SquidMIP reads raw only for **native dtype + half the
+  memory (2B vs 4B/px) + zero dependency**, not for correctness. The only genuinely lossy path is
+  grayscale-averaging a real RGB plane, which we exclude anyway. (Fixes §3.2 #1 and Decision-Build.)
+- **`coordinates.csv` schema is version-dependent.** Current Squid writes
+  `region, fov, z_level, x (mm), y (mm), z (um), time` (`multi_point_worker.py:801`) — it *does*
+  have `fov`. The hongquan dataset I tested is an **older** schema (`region, x, y, z(mm)`, no
+  `fov`). The filename token `{region}_{fov}_{z}_{channel}` is the **common denominator across
+  versions**, and `fov` there is the per-region enumeration index (resets per region,
+  `multi_point_worker.py:1063,1107`) — identical to the CSV `fov` when present. So Decision 4
+  (parse filenames) is still correct, and now better justified: filenames are format-robust.
+  (Refines §3.2 #2 and Decision 4.)
+
+**Decision changes:**
+- **Decision 2 (color join) — REVERSED from "strict raise" to LAYERED FALLBACK.** Legacy/pre-YAML
+  acquisitions exist, so never hard-fail on a missing color. Order: (a) YAML channel-level
+  `display_color` (Squid v1.0+, `acquisition_config.py:116`, always written, default `#FFFFFF`);
+  (b) pre-v1.0 nested `camera_settings.*.display_color` (the hongquan layout — read the *first*
+  camera key, not hardcoded `'1'`); (c) hardcoded `CHANNEL_COLORS_MAP` matched by wavelength / BF
+  suffix; (d) neutral default + warning. See the authoritative map below.
+- **Decision 5 (dtype) — WIDENED** to "exact **native** 2D plane (uint8 **or** uint16)"; still
+  raise on `ndim > 2` (RGB/color, brightfield deferred — agreed out of scope for now).
+- **`open_reader` is a FORMAT DISPATCHER, not just a filename parser.** Squid writes
+  `INDIVIDUAL_IMAGES` (default), `MULTI_PAGE_TIFF` (`{region}_{fov}_stack.tiff`), `OME-TIFF`
+  (`ome_tiff/`), and Zarr (`job_processing.py`). Implement the individual-tiffs reader now; leave
+  the dispatch seam for other formats/customers. This mirrors tilefusion's `open_reader` *design*
+  (pattern reuse, not code import) — reconciling your "reuse tilefusion" note with "no cross-repo
+  import."
+
+### Authoritative Squid `CHANNEL_COLORS_MAP` (`software/control/_def.py:1041`)
+| Key | Hex | Name | | Key | Hex | Name |
+|-----|-----|------|-|-----|-----|------|
+| 405 | `#20ADF8` | bop blue | | 730 | `#770000` | dark red |
+| 488 | `#1FFF00` | green | | R | `#FF0000` | red |
+| 561 | `#FFCF00` | yellow | | G | `#1FFF00` | green |
+| 638 | `#FF0000` | red | | B | `#3300FF` | blue |
+
+This differs from the draft map pasted in review feedback (which had 405→`#0000FF`, 488→`#00FF00`,
+and `_B/_G/_R` keys). The map above is verbatim from Squid master and **matches the hongquan
+YAML** — use it. Match brightfield by wavelength/letter substring in the channel name.
+
+---
+
 ## 1. Executive summary
 
 IMA-189 is the **keystone** of SquidMIP: a reader that ingests a Squid `individual_tiffs`
@@ -26,7 +84,10 @@ decisions. The headline:
   spec by "one dependency, both ends" — but that reasoning is really about IMA-184 (output /
   OME-zarr writer), not ingest. Once the reader parses filenames itself, the only tilefusion
   reuse left was ~15 trivial lines plus a display-color parser — not enough to justify a
-  cross-repo pinned git dependency. tilefusion re-enters cleanly at IMA-184.
+  cross-repo pinned git dependency. At IMA-184 the OME-zarr writer is **vendored (copied in),
+  not imported** — tilefusion's package `__init__` is heavy, so even the output ticket lifts
+  `create_zarr_store` / `write_ome` / `colors.py` rather than depending on the whole library.
+  **SquidMIP takes no cross-repo dependency at any slot.**
 
 - **Net effect: the plan got smaller and safer.** One repo, PyPI-only deps, no cross-repo pin
   dance, and a read path that is correct-by-construction (raw `tifffile.imread`,
@@ -339,7 +400,7 @@ Greenfield — all ship WITH the code (100% of the 6 ACs + every branch above).
 
 ## 12. NOT in scope (deferred, with rationale)
 
-- **tilefusion dependency / OME-zarr output** → IMA-184 (owns the writer + the dep).
+- **OME-zarr output** → IMA-184, which **vendors** tilefusion's writer (`create_zarr_store` / `write_ome` / `colors.py`), not imports it. No cross-repo dependency at any slot.
 - **Projection (`np.max` over z)** → IMA-183/188 (this ticket is ingest only).
 - **Plate-view UI** → IMA-193 (consumes `positions`, `channels[].display_color`).
 - **Scale-test fixture generator (48→1536-well symlink fan-out, ~4 TB logical)** → IMA-188.
