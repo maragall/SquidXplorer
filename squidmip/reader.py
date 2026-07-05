@@ -36,6 +36,7 @@ import warnings
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 import tifffile
 
 from squidmip._acquisition import load_acquisition_params, load_positions
@@ -44,6 +45,28 @@ from squidmip._channels import load_channel_yaml, resolve_channels
 # region has no underscore; fov and z are ints; channel is the remainder (may contain _ and -).
 _STEM_RE = re.compile(r"^(?P<region>[^_]+)_(?P<fov>\d+)_(?P<z>\d+)_(?P<channel>.+)$")
 _TIFF_SUFFIXES = (".tiff", ".tif")
+
+# Squid grayscale planes are MONO8 (uint8) or MONO12/MONO16 (uint16); see
+# software/squid/camera/utils.py get_available_pixel_formats. It never writes uint32/float
+# grayscale (RGB formats are color -> ndim>2, rejected separately). We preserve the native
+# dtype but refuse anything outside this set so a non-raw stack can't be silently projected.
+_SUPPORTED_DTYPES = (np.dtype("uint8"), np.dtype("uint16"))
+
+
+def _validate_plane(arr, path: Path):
+    """Guard a decoded plane: 2D grayscale, dtype uint8/uint16. Returns arr unchanged."""
+    if arr.ndim != 2:
+        raise ValueError(
+            f"{path.name} is not a 2D grayscale plane (shape {arr.shape}); "
+            "color/RGB (brightfield) channels are not supported (deferred)."
+        )
+    if arr.dtype not in _SUPPORTED_DTYPES:
+        raise ValueError(
+            f"{path.name} has dtype {arr.dtype}; Squid writes uint8 (MONO8) or uint16 "
+            "(MONO12/MONO16). An unexpected dtype (e.g. uint32/float) usually means the input "
+            "is not a raw Squid capture; refused rather than silently projected."
+        )
+    return arr
 
 
 def _natural_key(s: str):
@@ -146,12 +169,7 @@ class SquidReader:
         # frame shape + dtype come from a real frame — they vary with binning / pixel format.
         sample_key = next(iter(index))
         sample_path = self._resolve_file(time_folders[0], sample_key, index[sample_key])
-        sample = tifffile.imread(sample_path)
-        if sample.ndim != 2:
-            raise ValueError(
-                f"Expected 2D grayscale planes; {sample_path.name} has shape {sample.shape}. "
-                "Color/RGB (brightfield) channels are not supported (deferred)."
-            )
+        sample = _validate_plane(tifffile.imread(sample_path), sample_path)
 
         coords_path = time_folders[0] / "coordinates.csv"
         if not coords_path.exists():
@@ -188,13 +206,7 @@ class SquidReader:
         if not 0 <= t < len(time_folders):
             raise IndexError(f"t={t} out of range (n_t={len(time_folders)}).")
         path = self._resolve_file(time_folders[t], key, index[key])
-        arr = tifffile.imread(path)
-        if arr.ndim != 2:
-            raise ValueError(
-                f"{path.name} is not a 2D grayscale plane (shape {arr.shape}); "
-                "color/RGB channels are not supported (deferred)."
-            )
-        return arr
+        return _validate_plane(tifffile.imread(path), path)
 
     # -- helpers ----------------------------------------------------------
     @staticmethod

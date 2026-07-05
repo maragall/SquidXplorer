@@ -98,6 +98,26 @@ def test_read_rejects_non_2d(squid_dataset):
         reader.read("B2", 0, CH_IN_YAML, 0)
 
 
+# --- dtype contract: uint8/uint16 only (Squid's real grayscale set) ----------
+def test_read_rejects_uint32(squid_dataset):
+    root, _ = squid_dataset
+    tifffile.imwrite(
+        root / "0" / f"B2_0_0_{CH_IN_YAML}.tiff", np.arange(16, dtype=np.uint32).reshape(4, 4)
+    )
+    with pytest.raises(ValueError, match="dtype"):
+        open_reader(root).read("B2", 0, CH_IN_YAML, 0)
+
+
+def test_read_accepts_uint8_native(squid_dataset):
+    # MONO8 is a valid (if contrast-poor) Squid format; accept it, preserve native dtype
+    root, _ = squid_dataset
+    arr = np.arange(16, dtype=np.uint8).reshape(4, 4)
+    tifffile.imwrite(root / "0" / f"B2_0_0_{CH_IN_YAML}.tiff", arr)
+    got = open_reader(root).read("B2", 0, CH_IN_YAML, 0)
+    assert got.dtype == np.uint8
+    np.testing.assert_array_equal(got, arr)
+
+
 # --- decision 6: time dimension ---------------------------------------------
 def test_multi_timepoint(squid_dataset):
     root, arrays = squid_dataset

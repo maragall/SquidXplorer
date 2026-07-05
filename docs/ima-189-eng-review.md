@@ -47,8 +47,14 @@ corrections below OVERRIDE the corresponding statements later in this doc.
   (b) pre-v1.0 nested `camera_settings.*.display_color` (the hongquan layout — read the *first*
   camera key, not hardcoded `'1'`); (c) hardcoded `CHANNEL_COLORS_MAP` matched by wavelength / BF
   suffix; (d) neutral default + warning. See the authoritative map below.
-- **Decision 5 (dtype) — WIDENED** to "exact **native** 2D plane (uint8 **or** uint16)"; still
-  raise on `ndim > 2` (RGB/color, brightfield deferred — agreed out of scope for now).
+- **Decision 5 (dtype) — native dtype, constrained to Squid's real grayscale set.** Verified from
+  Squid source (`camera/utils.py` `get_available_pixel_formats` = `[MONO8, MONO12, MONO16]`;
+  `utils_acquisition.py:59` writes with no cast): grayscale planes are **uint8 (MONO8) or uint16
+  (MONO12/MONO16)** — never uint32/float; RGB formats are color (`ndim>2`). So `read()` preserves
+  the native dtype but **raises** on `ndim>2` (color/brightfield, deferred) AND on any dtype
+  outside `{uint8, uint16}` (e.g. uint32/float → almost certainly a non-raw stack; refused rather
+  than silently projected). uint16 is the real-world norm (default MONO12); uint8 is accepted but
+  contrast-poor for fluorescence.
 - **`open_reader` is a FORMAT DISPATCHER, not just a filename parser.** Squid writes
   `INDIVIDUAL_IMAGES` (default), `MULTI_PAGE_TIFF` (`{region}_{fov}_stack.tiff`), `OME-TIFF`
   (`ome_tiff/`), and Zarr (`job_processing.py`). Implement the individual-tiffs reader now; leave
