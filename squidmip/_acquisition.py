@@ -1,15 +1,14 @@
-"""Scalar acquisition metadata: physical params and per-FOV stage positions.
+"""Physical / scalar acquisition metadata.
 
-These come from the sidecar files, not the image filenames:
-    acquisition parameters.json  -> Nz, Nt, dz(um), pixel size (sensor / magnification)
-    coordinates.csv              -> per-FOV (x, y) stage positions
+Primary source is ``acquisition.yaml`` — Squid's authoritative rich metadata: the objective
+pixel size ALREADY computed for the objective + camera binning (so no fragile sensor/mag
+recompute), the wellplate format, and the z-stack / time-series parameters. Datasets that
+predate it fall back to the flat legacy ``acquisition parameters.json`` (where pixel size is
+recomputed as sensor_pixel_size / magnification — best-effort, ignores binning + tube lens).
 
-`coordinates.csv` schema is version-dependent (verified against Cephla-Lab/Squid):
-    current : region, fov, z_level, x (mm), y (mm), z (um), time [, z_piezo (um)]
-    legacy  : region, x (mm), y (mm), z (mm)          # no fov, no z_level
-Both are handled. When there is no `fov` column, FOV is the per-region row index —
-identical to the filename fov token, which Squid assigns by enumerating each region's
-coordinate list.
+``coordinates.csv`` is intentionally NOT read: for one-FOV-per-well (IMA-183) the plate layout
+comes from the well ID + ``wellplate_format``; per-FOV stage positions are a stitching/mosaic
+concern, deferred to the ticket that needs them.
 """
 
 from __future__ import annotations
@@ -17,71 +16,71 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pandas as pd
+import yaml
 
 
-def load_acquisition_params(root) -> dict:
-    """Read 'acquisition parameters.json'. Missing file/keys yield None (never raises)."""
-    path = Path(root) / "acquisition parameters.json"
-    params: dict = {}
-    if path.exists():
-        params = json.loads(path.read_text())
+def _load_yaml(path: Path):
+    if not path.exists():
+        return None
+    return yaml.safe_load(path.read_text()) or {}
 
-    magnification = (params.get("objective") or {}).get("magnification")
-    sensor_px = params.get("sensor_pixel_size_um")
-    pixel_size_um = None
-    if magnification and sensor_px:
-        pixel_size_um = sensor_px / magnification
+
+def _load_json(path: Path):
+    if not path.exists():
+        return None
+    return json.loads(path.read_text())
+
+
+def load_acquisition_metadata(root) -> dict:
+    """Return scalar acquisition metadata from the best available sidecar.
+
+    Keys (any may be None if the sidecar lacks them):
+        pixel_size_um    - object-space pixel size (µm)
+        n_z_declared     - Nz as recorded (cross-checked against filenames by the reader)
+        dz_um            - z-step (µm)
+        n_t_declared     - Nt as recorded (cross-checked against timepoint folders)
+        wellplate_format - e.g. "24 well plate" (plate-layout hint for the viewer)
+        source           - which file the values came from
+    """
+    root = Path(root)
+
+    rich = _load_yaml(root / "acquisition.yaml")
+    if rich:
+        objective = rich.get("objective") or {}
+        z_stack = rich.get("z_stack") or {}
+        time_series = rich.get("time_series") or {}
+        sample = rich.get("sample") or {}
+        delta_z_mm = z_stack.get("delta_z_mm")
+        return {
+            "pixel_size_um": objective.get("pixel_size_um"),  # authoritative, binning-aware
+            "n_z_declared": z_stack.get("nz"),
+            "dz_um": delta_z_mm * 1000 if delta_z_mm is not None else None,
+            "n_t_declared": time_series.get("nt"),
+            "wellplate_format": sample.get("wellplate_format"),
+            "source": "acquisition.yaml",
+        }
+
+    # Legacy fallback: flat JSON. pixel size must be recomputed (no stored value); this
+    # ignores camera binning and any non-design tube lens, so it is best-effort only.
+    flat = _load_json(root / "acquisition parameters.json")
+    if flat:
+        magnification = (flat.get("objective") or {}).get("magnification")
+        sensor_px = flat.get("sensor_pixel_size_um")
+        pixel_size_um = sensor_px / magnification if (magnification and sensor_px) else None
+        return {
+            "pixel_size_um": pixel_size_um,
+            "n_z_declared": flat.get("Nz"),
+            "dz_um": flat.get("dz(um)"),
+            "n_t_declared": flat.get("Nt"),
+            "wellplate_format": None,
+            "source": "acquisition parameters.json",
+        }
 
     return {
-        "n_z_declared": params.get("Nz"),
-        "n_t_declared": params.get("Nt"),
-        "dz_um": params.get("dz(um)"),
-        "pixel_size_um": pixel_size_um,
-        "magnification": magnification,
-        "sensor_pixel_size_um": sensor_px,
+        "pixel_size_um": None,
+        "n_z_declared": None,
+        "dz_um": None,
+        "n_t_declared": None,
+        "wellplate_format": None,
+        "source": None,
     }
-
-
-def _find_col(df: pd.DataFrame, *candidates: str):
-    lower = {c.lower().replace(" ", ""): c for c in df.columns}
-    for cand in candidates:
-        hit = lower.get(cand.lower().replace(" ", ""))
-        if hit is not None:
-            return hit
-    return None
-
-
-def load_positions(coords_path) -> dict:
-    """Return {(region, fov): (x_mm, y_mm)}. Empty dict if the file/columns are absent.
-
-    Positions are best-effort auxiliary metadata (for the plate-view UI); a missing or
-    partial coordinates.csv never blocks ingest.
-    """
-    path = Path(coords_path)
-    if not path.exists():
-        return {}
-    df = pd.read_csv(path)
-    x_col = _find_col(df, "x (mm)", "x(mm)", "x")
-    y_col = _find_col(df, "y (mm)", "y(mm)", "y")
-    if "region" not in df.columns or x_col is None or y_col is None:
-        return {}
-
-    positions: dict = {}
-    if "fov" in df.columns:
-        # current schema: fov is explicit; first row per (region, fov) wins (z_level 0)
-        for _, row in df.iterrows():
-            if pd.isna(row["fov"]):
-                continue
-            key = (str(row["region"]), int(row["fov"]))
-            if key not in positions:
-                positions[key] = (float(row[x_col]), float(row[y_col]))
-    else:
-        # legacy schema: one row per FOV; fov = per-region enumeration index
-        counters: dict = {}
-        for _, row in df.iterrows():
-            region = str(row["region"])
-            fov = counters.get(region, 0)
-            positions[(region, fov)] = (float(row[x_col]), float(row[y_col]))
-            counters[region] = fov + 1
-    return positions

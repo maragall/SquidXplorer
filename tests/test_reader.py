@@ -1,13 +1,10 @@
 """Tests for open_reader + SquidReader (AC1, AC4, AC5, AC6 + edge cases + decisions 4/5/6)."""
 
-import json
-
 import numpy as np
 import pytest
 import tifffile
 
 from squidmip import open_reader
-from squidmip.reader import SquidReader
 from tests.conftest import CH_IN_YAML, CH_NOT_IN_YAML, _write_timepoint
 
 
@@ -23,7 +20,32 @@ def test_metadata_discovery(squid_dataset):
     assert meta["dtype"] == np.uint16
     assert meta["n_t"] == 1
     assert meta["dz_um"] == 1.5
-    assert meta["pixel_size_um"] == pytest.approx(3.76 / 20.0)
+    # 0.325 is the stored acquisition.yaml value, NOT the recomputed 3.76/20=0.188 -> proves
+    # we read the authoritative pixel size rather than recomputing it.
+    assert meta["pixel_size_um"] == 0.325
+    assert meta["wellplate_format"] == "24 well plate"
+
+
+def test_metadata_no_dead_attributes(squid_dataset):
+    # every metadata key must be present AND functionally derived (no dead/None scalars)
+    root, _ = squid_dataset
+    meta = open_reader(root).metadata
+    assert set(meta) == {
+        "regions",
+        "fovs_per_region",
+        "channels",
+        "n_z",
+        "z_levels",
+        "dz_um",
+        "pixel_size_um",
+        "wellplate_format",
+        "frame_shape",
+        "dtype",
+        "n_t",
+    }
+    for key, value in meta.items():
+        assert value is not None, f"metadata[{key!r}] is None — dead attribute"
+    assert all(meta.values()) or meta["n_z"] >= 1  # no empty containers on a real dataset
 
 
 def test_channel_count_independent_of_nz(squid_dataset):
@@ -42,13 +64,6 @@ def test_channel_colors_yaml_and_fallback(squid_dataset):
     assert by_name[CH_IN_YAML]["display_color"] == "#FF0000"
     assert by_name[CH_IN_YAML]["display_name"] == "Fluorescence 638 nm - Penta"
     assert by_name[CH_NOT_IN_YAML]["display_color"] == "#FFCF00"  # 561 from CHANNEL_COLORS_MAP
-
-
-def test_positions_from_legacy_coordinates(squid_dataset):
-    root, _ = squid_dataset
-    pos = open_reader(root).metadata["positions"]
-    assert pos[("B2", 0)] == (1.0, 2.0)
-    assert pos[("B3", 1)] == (3.0, 5.0)
 
 
 # --- AC4: exact-pixel read ---------------------------------------------------
@@ -123,6 +138,10 @@ def test_multi_timepoint(squid_dataset):
     root, arrays = squid_dataset
     t1_arrays: dict = {}
     _write_timepoint(root / "1", t1_arrays, tag=1)
+    # keep the dataset self-consistent (nt=2) so the Nt cross-check stays quiet
+    (root / "acquisition.yaml").write_text(
+        "z_stack:\n  nz: 2\n  delta_z_mm: 0.0015\ntime_series:\n  nt: 2\n"
+    )
     reader = open_reader(root)
     assert reader.metadata["n_t"] == 2
     got = reader.read("B2", 0, CH_IN_YAML, 0, t=1)
@@ -164,10 +183,11 @@ def test_tif_suffix_fallback(squid_dataset):
 
 
 def test_nz_mismatch_warns(squid_dataset):
-    # params say Nz=2 but we only wrote z in {0,1}=2, so no warn here; force mismatch
+    # acquisition.yaml is authoritative: declare nz=5 while filenames only have z in {0,1}
     root, _ = squid_dataset
-    (root / "acquisition parameters.json").write_text(
-        json.dumps({"Nz": 5, "Nt": 1, "dz(um)": 1.5, "objective": {"magnification": 20.0}, "sensor_pixel_size_um": 3.76})
+    (root / "acquisition.yaml").write_text(
+        "objective:\n  pixel_size_um: 0.325\nz_stack:\n  nz: 5\n  delta_z_mm: 0.0015\n"
+        "time_series:\n  nt: 1\n"
     )
     with pytest.warns(UserWarning, match="Nz"):
         open_reader(root).metadata

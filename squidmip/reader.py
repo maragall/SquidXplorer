@@ -21,12 +21,14 @@ Discovery flow::
         glob timepoint folders (0/,1/…) ──┤─► n_t
         glob *.tiff in t0, parse stems ───┤─► regions, fovs_per_region, channels, z-levels
         read ONE frame ──────────────────┤─► frame_shape, dtype   (NOT hardcoded)
-        acquisition parameters.json ──────┤─► dz_um, pixel_size_um
-        coordinates.csv ──────────────────┴─► positions{(region,fov):(x,y)}
+        acquisition.yaml (or JSON) ───────┴─► dz_um, pixel_size_um, wellplate_format, Nz/Nt cross-check
 
-The (region, fov, z, channel) index is parsed from FILENAMES — the ground truth across
-coordinates.csv schema versions. read() constructs the path directly and returns exactly
-what tifffile decodes (native dtype), refusing non-2D planes.
+The (region, fov, z, channel) index is parsed from FILENAMES — the ground truth. Scalar
+metadata comes from acquisition.yaml (authoritative pixel size etc.), the flat JSON as a
+legacy fallback. coordinates.csv is not read: for one-FOV-per-well the plate layout comes
+from the well ID + wellplate_format; per-FOV stage positions are a deferred stitching concern.
+read() constructs the path directly and returns exactly what tifffile decodes (native dtype),
+refusing non-2D planes and dtypes outside {uint8, uint16}.
 """
 
 from __future__ import annotations
@@ -39,7 +41,7 @@ from typing import Optional
 import numpy as np
 import tifffile
 
-from squidmip._acquisition import load_acquisition_params, load_positions
+from squidmip._acquisition import load_acquisition_metadata
 from squidmip._channels import load_channel_yaml, resolve_channels
 
 # region has no underscore; fov and z are ints; channel is the remainder (may contain _ and -).
@@ -158,12 +160,19 @@ class SquidReader:
 
         z_sorted = sorted(z_levels)
         n_z = len(z_sorted)
+        n_t = len(time_folders)
 
-        params = load_acquisition_params(self._path)
-        if params["n_z_declared"] is not None and params["n_z_declared"] != n_z:
+        # Filenames + timepoint folders are ground truth; the recorded Nz/Nt are cross-checks.
+        acq = load_acquisition_metadata(self._path)
+        if acq["n_z_declared"] is not None and acq["n_z_declared"] != n_z:
             warnings.warn(
-                f"Nz in acquisition parameters.json ({params['n_z_declared']}) != distinct z "
-                f"levels found in filenames ({n_z}); using the filename-derived value."
+                f"Recorded Nz ({acq['n_z_declared']}) != distinct z levels in filenames "
+                f"({n_z}); using the filename-derived value."
+            )
+        if acq["n_t_declared"] is not None and acq["n_t_declared"] != n_t:
+            warnings.warn(
+                f"Recorded Nt ({acq['n_t_declared']}) != timepoint folders found ({n_t}); "
+                "using the folder-derived value."
             )
 
         # frame shape + dtype come from a real frame — they vary with binning / pixel format.
@@ -171,22 +180,18 @@ class SquidReader:
         sample_path = self._resolve_file(time_folders[0], sample_key, index[sample_key])
         sample = _validate_plane(tifffile.imread(sample_path), sample_path)
 
-        coords_path = time_folders[0] / "coordinates.csv"
-        if not coords_path.exists():
-            coords_path = self._path / "coordinates.csv"
-
         self._meta = {
             "regions": regions,
             "fovs_per_region": {r: sorted(fovs[r]) for r in regions},
             "channels": resolve_channels(sorted(channels), load_channel_yaml(self._path)),
-            "positions": load_positions(coords_path),
             "n_z": n_z,
             "z_levels": z_sorted,
-            "dz_um": params["dz_um"],
-            "pixel_size_um": params["pixel_size_um"],
+            "dz_um": acq["dz_um"],
+            "pixel_size_um": acq["pixel_size_um"],  # authoritative (acquisition.yaml), not recomputed
+            "wellplate_format": acq["wellplate_format"],
             "frame_shape": tuple(sample.shape),
             "dtype": sample.dtype,
-            "n_t": len(time_folders),
+            "n_t": n_t,
         }
         return self._meta
 

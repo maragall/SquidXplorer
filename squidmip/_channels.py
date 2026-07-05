@@ -9,13 +9,17 @@ Squid builds the filename token by replacing whitespace + filesystem-unsafe char
 (dash is safe, so it is preserved). `normalize()` reproduces that, giving one canonical key
 (the FILE form) that `read()` accepts and that metadata is keyed on.
 
-Color resolution is a LAYERED FALLBACK — never hard-fail, because legacy / pre-YAML
-acquisitions exist:
+Color resolution is a LAYERED FALLBACK, but an UNRECOGNIZED channel is a hard error — a
+silent white default would let a mislabeled channel through, which for a scientific tool is
+worse than stopping:
 
-    1. acquisition_channels.yaml, channel-level `display_color`     (Squid v1.0+)
-    2. acquisition_channels.yaml, nested camera_settings.<cam>.display_color   (pre-v1.0)
+    1. channel YAML, channel-level `display_color`                (Squid v1.0+)
+    2. channel YAML, nested camera_settings.<cam>.display_color   (pre-v1.0)
     3. CHANNEL_COLORS_MAP, matched by wavelength / brightfield letter substring
-    4. DEFAULT_COLOR + a warning
+    4. raise ValueError, naming the channel (no white default)
+
+The channel YAML is read from ``acquisition_channels.yaml`` (dedicated snapshot) or, if that
+is absent, from the ``channels:`` block of ``acquisition.yaml`` (which carries the same data).
 """
 
 from __future__ import annotations
@@ -38,7 +42,6 @@ CHANNEL_COLORS_MAP = {
     "G": "#1FFF00",
     "B": "#3300FF",
 }
-DEFAULT_COLOR = "#FFFFFF"
 
 _WAVELENGTHS = ("405", "488", "561", "638", "730")
 # Mirrors Squid's filename sanitization: whitespace + \ / : * ? " < > | -> "_".
@@ -84,11 +87,15 @@ def _extract_exposure(channel: dict):
 
 
 def load_channel_yaml(root) -> dict:
-    """Parse acquisition_channels.yaml into {filename_form_name: {display_name, display_color, ex}}.
+    """Parse the channel YAML into {filename_form_name: {display_name, display_color, ex}}.
 
-    Returns {} when the file is absent (legacy acquisitions) so resolution falls back cleanly.
+    Reads ``acquisition_channels.yaml`` (dedicated snapshot); if absent, reads the ``channels:``
+    block of ``acquisition.yaml`` (same structure). Returns {} when neither exists.
     """
-    path = Path(root) / "acquisition_channels.yaml"
+    root = Path(root)
+    path = root / "acquisition_channels.yaml"
+    if not path.exists():
+        path = root / "acquisition.yaml"
     if not path.exists():
         return {}
     data = yaml.safe_load(path.read_text()) or {}
@@ -115,27 +122,25 @@ def load_channel_yaml(root) -> dict:
 def resolve_channels(filename_channels, yaml_map: dict) -> list[dict]:
     """Produce the metadata `channels` list, keyed on the canonical (filename) name.
 
-    Each entry: {name, display_name, display_color, ex}. Color uses the layered fallback.
+    Each entry: {name, display_name, display_color, ex}. Color: YAML -> CHANNEL_COLORS_MAP ->
+    raise. An unrecognized channel is refused, never given a placeholder color.
     """
     resolved = []
     for name in filename_channels:
         info = yaml_map.get(name)
-        if info is not None:
-            color = info["display_color"] or fallback_color(name) or DEFAULT_COLOR
-            resolved.append(
-                {
-                    "name": name,
-                    "display_name": info["display_name"],
-                    "display_color": color,
-                    "ex": info["ex"],
-                }
+        color = (info["display_color"] if info else None) or fallback_color(name)
+        if color is None:
+            raise ValueError(
+                f"Could not resolve a display color for channel {name!r}: not in the channel "
+                "YAML and no wavelength / brightfield match in CHANNEL_COLORS_MAP. An "
+                "unrecognized channel is refused rather than given a placeholder color."
             )
-        else:
-            color = fallback_color(name)
-            if color is None:
-                warnings.warn(f"No display color found for channel {name!r}; using {DEFAULT_COLOR}.")
-                color = DEFAULT_COLOR
-            resolved.append(
-                {"name": name, "display_name": name, "display_color": color, "ex": None}
-            )
+        resolved.append(
+            {
+                "name": name,
+                "display_name": info["display_name"] if info else name,
+                "display_color": color,
+                "ex": info["ex"] if info else None,
+            }
+        )
     return resolved

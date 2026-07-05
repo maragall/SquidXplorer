@@ -74,6 +74,24 @@ This differs from the draft map pasted in review feedback (which had 405→`#000
 and `_B/_G/_R` keys). The map above is verbatim from Squid master and **matches the hongquan
 YAML** — use it. Match brightfield by wavelength/letter substring in the channel name.
 
+### Round 2 (2026-07-05, low-level code review)
+
+- **Metadata source is `acquisition.yaml`, not `acquisition parameters.json`.** The rich YAML is
+  authoritative and carries `objective.pixel_size_um` **already computed** (binning-aware,
+  tube-lens-correct), `sample.wellplate_format`, plate dims, z-stack + time-series params. The
+  flat JSON is a legacy fallback where pixel size is recomputed `sensor/magnification`
+  (best-effort — ignores binning + tube lens). `pixel_size_um` is now **read**, not recomputed.
+- **`read()` dtype constrained to `{uint8, uint16}`** — Squid emits MONO8/MONO12/MONO16 only,
+  never uint32/float grayscale; uint32/float ⇒ raise (non-raw stack). uint16 is the norm; uint8
+  is contrast-poor but accepted.
+- **Color: fail on unrecognized channel.** YAML → `CHANNEL_COLORS_MAP` → **raise** (no white
+  placeholder). A silent default could mislabel a fluorescence channel's color.
+- **`coordinates.csv` / positions dropped.** For one-FOV-per-well (IMA-183) the plate layout
+  comes from the well ID + `wellplate_format`; per-FOV stage positions are a deferred stitching
+  concern. Metadata now exposes `wellplate_format` instead of `positions`.
+- **`Nt` cross-check added** (symmetric with `Nz`); folder glob is ground truth. No dead
+  metadata attribute remains (guarded by a test).
+
 ---
 
 ## 1. Executive summary

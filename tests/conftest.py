@@ -35,6 +35,8 @@ channels:
       exposure_time_ms: 50.0
 """
 
+# Legacy flat sidecar (fallback source). Note magnification/sensor -> recomputed px 0.188,
+# deliberately DIFFERENT from acquisition.yaml's stored 0.325 so tests prove which is used.
 _PARAMS = {
     "Nz": NZ,
     "Nt": 1,
@@ -43,13 +45,20 @@ _PARAMS = {
     "sensor_pixel_size_um": 3.76,
 }
 
-_COORDS_LEGACY = (
-    "region,x (mm),y (mm),z (mm)\n"
-    "B2,1.0,2.0,\n"
-    "B2,3.0,2.0,\n"
-    "B3,1.0,5.0,\n"
-    "B3,3.0,5.0,\n"
-)
+# Authoritative rich metadata. pixel_size_um is stored (binning-aware), not recomputed.
+_ACQ_YAML = """\
+objective:
+  pixel_size_um: 0.325
+  magnification: 20.0
+  sensor_pixel_size_um: 3.76
+sample:
+  wellplate_format: 24 well plate
+z_stack:
+  nz: 2
+  delta_z_mm: 0.0015
+time_series:
+  nt: 1
+"""
 
 
 def _pixel_value(r_i, fov, z, c_i):
@@ -75,8 +84,8 @@ def squid_dataset(tmp_path):
     arrays: dict = {}
     _write_timepoint(root / "0", arrays, tag=0)
     (root / "acquisition_channels.yaml").write_text(_YAML)
+    (root / "acquisition.yaml").write_text(_ACQ_YAML)
     (root / "acquisition parameters.json").write_text(json.dumps(_PARAMS))
-    (root / "0" / "coordinates.csv").write_text(_COORDS_LEGACY)
     return root, arrays
 
 

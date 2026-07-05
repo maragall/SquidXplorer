@@ -6,7 +6,6 @@ import pytest
 
 from squidmip._channels import (
     CHANNEL_COLORS_MAP,
-    DEFAULT_COLOR,
     fallback_color,
     load_channel_yaml,
     normalize,
@@ -76,6 +75,15 @@ def test_load_channel_yaml_absent_returns_empty(tmp_path):
     assert load_channel_yaml(tmp_path) == {}
 
 
+def test_load_channel_yaml_falls_back_to_acquisition_yaml(tmp_path):
+    # no dedicated acquisition_channels.yaml -> read the channels: block of acquisition.yaml
+    (tmp_path / "acquisition.yaml").write_text(
+        "channels:\n- name: Fluorescence 638 nm - Penta\n  display_color: '#FF0000'\n"
+    )
+    out = load_channel_yaml(tmp_path)
+    assert out["Fluorescence_638_nm_-_Penta"]["display_color"] == "#FF0000"
+
+
 # --- fallback palette --------------------------------------------------------
 @pytest.mark.parametrize(
     "channel, expected",
@@ -115,10 +123,10 @@ def test_resolve_channels_uses_yaml_then_falls_back(tmp_path):
     assert by_name["Fluorescence_561_nm_-_Penta"]["display_name"] == "Fluorescence_561_nm_-_Penta"
 
 
-def test_resolve_channels_unknown_channel_defaults_with_warning():
-    with pytest.warns(UserWarning, match="No display color"):
-        resolved = resolve_channels(["Totally_Unknown"], {})
-    assert resolved[0]["display_color"] == DEFAULT_COLOR
+def test_resolve_channels_unknown_channel_raises():
+    # no YAML entry and no wavelength/BF match -> explicit failure, never a placeholder color
+    with pytest.raises(ValueError, match="Could not resolve a display color"):
+        resolve_channels(["Totally_Unknown"], {})
 
 
 def test_palette_matches_hongquan_yaml():
