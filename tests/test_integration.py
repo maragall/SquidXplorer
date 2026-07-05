@@ -23,7 +23,6 @@ Sections
 
 from __future__ import annotations
 
-import tracemalloc
 from pathlib import Path
 
 import numpy as np
@@ -104,33 +103,7 @@ def test_sim1536_project_sampled_wells_pixel_exact(sim_1536wp):
         _assert_well_matches_np_max(reader, region, 0)
 
 
-@pytest.mark.filterwarnings("ignore:Recorded Nz")  # asserted in test_sim1536_metadata_sanity
-@pytest.mark.integration
-def test_sim1536_single_well_memory_bounded(sim_1536wp):
-    # Streaming MIP must NOT materialise the whole z-stack. For one well the honest peak is
-    # the (1,C,1,Y,X) result plus a couple of in-flight planes — far below stacking all
-    # Nz*C planes. (numpy registers a tracemalloc domain since 1.17, so array buffers count.)
-    reader = open_reader(sim_1536wp)
-    meta = reader.metadata
-    y, x = meta["frame_shape"]
-    itemsize = np.dtype(meta["dtype"]).itemsize
-    plane_bytes = y * x * itemsize
-    n_z, n_c = meta["n_z"], len(meta["channels"])
-    full_materialisation = (
-        n_z * n_c * plane_bytes
-    )  # what a naive np.stack path would need
-
-    tracemalloc.start()
-    out = project_well(reader, meta["regions"][0], 0)
-    peak = tracemalloc.get_traced_memory()[1]
-    tracemalloc.stop()
-
-    result_bytes = out.nbytes  # the (1,C,1,Y,X) output is legitimate, not overhead
-    # generous headroom over result + a few planes, but well under holding the full stack
-    assert peak < result_bytes + 6 * plane_bytes
-    assert (
-        peak < full_materialisation
-    )  # never approaches the naive all-planes footprint
+# (single-well memory-footprint + speed baselines live in tests/test_performance.py)
 
 
 # --- real Squid acquisition on disk (different shape/Nz) ---

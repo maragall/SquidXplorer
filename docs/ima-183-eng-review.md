@@ -256,23 +256,81 @@ The `sim_1536wp` run also confirmed the design under stress: its recorded `Nz=3`
 the 20 z-planes on disk; the reader overrode it (filename-derived) and `project_well` iterated
 `z_levels` correctly — the "filenames are ground truth" contract proving itself.
 
-## 10. Handoff to IMA-188 — throughput + pluggable projector
+## 10. Performance baseline (single-thread) — the number IMA-188 must beat
 
-Inherited state = IMA-183's `project()` primitive + `project_well()` + `select_fovs()`. IMA-188
-wraps `project()` in the parallel/streaming engine and registers it (MIP now, EDF later) via
-`project_well(..., reduce=<projector>)` — the seam is already a parameter, no 183 rewrite needed.
+Measured on `sim_1536wp`, cache-warm, steady state (`tests/test_performance.py`,
+`benchmark_single_well`). Per well = 4 ch × 20 z = 80 planes, 2.78 GB:
+
+| metric | value | note |
+|--------|-------|------|
+| `project_well` full | **~0.35 s/well** | read + streaming MIP |
+| read (decode + I/O) | ~0.2 s | cache-warm; cold disk is storage-bound |
+| MIP compute (`np.maximum`) | ~0.5 s | memory-bandwidth bound (~10 GB/s over 2.78 GB) |
+| peak memory | **~278 MB** | (T,C,1,Y,X) result + ~2 in-flight planes; bounded, flat in Nz |
+| **1536 wells, single-thread** | **~8–9 min (cache-warm)** | the baseline IMA-188 parallelizes |
+
+Reading:
+- **Algorithm is optimal.** Single-pass streaming `np.maximum`, O(planes), one pass,
+  SIMD-vectorized. No faster MIP exists — you're bounded by touching the bytes.
+- **Memory-bandwidth bound when warm** (compute > read); on COLD storage the read term
+  dominates, bounded by real disk bandwidth — the epic's open "throughput vs real storage"
+  question (needs Nick's storage to pin down). The ~8–9 min figure is best-case warm.
+- **IMA-188 target:** parallel across wells → ~1.5 min @ 8 workers, ~45 s @ 16 (ideal I/O scaling).
+- **Committed perf tests** (referenceable by 188): `tests/test_performance.py`
+  `::test_single_well_speed_baseline` and `::test_single_well_memory_footprint`; 188 imports
+  `benchmark_single_well` to compare its per-worker cost apples-to-apples.
+
+## 11. Handoff to IMA-188 — throughput + pluggable projector
+
+**Preamble.** You inherit a correct, memory-bounded, single-threaded per-well projector (183)
+on top of the standalone reader (189). The projection is *done and optimal per well* (§10) —
+your job is **throughput, not correctness**. Take the ~8–9 min single-thread plate down to
+~1 min by running `project_well` across wells in parallel with bounded per-worker memory, and
+make the projector **pluggable** (MIP now, EDF later) without touching 183. Read the
+"Cross commit" rule on the Notion "Squid MIP" page first — you own the 188↔183 cross commit.
+
+Inherited state = `project()` + `project_well(..., reduce=)` + `select_fovs()`, plus the perf
+baseline and `benchmark_single_well` helper in `tests/test_performance.py`. IMA-188 wraps
+`project()` in the parallel/streaming engine and registers it via the `reduce=` seam — already
+a parameter, no 183 rewrite needed.
+
+**Parallelization note (grounded in §10 — read before choosing a design).** The MIP compute is
+`np.maximum`: already SIMD, at the memory-bandwidth roofline, and the tifffile decode that is the
+other half of the cost is C (libtiff/imagecodecs). So **numba / JIT will not speed the MIP up** —
+don't reach for it. The lever is **across-well concurrency**, not within-well JIT: `np.maximum` is
+single-threaded, so run many wells at once and each well's max lands on a different core (aggregate
+= all cores). Prefer a **thread pool** — both tifffile decode and `np.maximum` release the GIL, so
+threads give true parallelism with bounded per-worker memory and no ~139 MB result pickling (a
+process pool would pay that per well). Reserve numba for a genuinely compute-heavy projector (EDF)
+if one lands; MIP does not need it. Boring tech (a `concurrent.futures` thread pool + streaming)
+wins here.
 
 ### Cross-commit (MANDATORY before IMA-188 merges)
 
-IMA-188 **owns the 188↔183 cross commit**: an integration test, no mocks, that drives 183's
-`project()`/`project_well` through 188's parallel/streaming engine on
-`/Users/julioamaragall/CEPHLA/Data/sim_1536wp`, asserting (a) parallel output is pixel-identical
-to the single-threaded `project_well` here, and (b) per-worker memory stays bounded (streaming
-holds, ×N workers). Committed on the 188 slot, `@pytest.mark.integration`, green before merge.
-A slot isn't done until its cross commit is green (see the "Cross commit" preamble on the
-Notion "Squid MIP" page).
+Append a `SECTION: IMA-188 ↔ IMA-183` block to `tests/test_integration.py`. No mocks, on
+`/Users/julioamaragall/CEPHLA/Data/sim_1536wp`, assert: (a) parallel plate output is
+**pixel-identical** to single-threaded `project_well`; (b) **per-worker memory bounded**
+(streaming holds ×N workers, via `benchmark_single_well`); (c) **wall-clock beats the §10
+single-thread baseline**. `@pytest.mark.integration`, green before merge.
+
+## 12. Handoff to IMA-184 — output (OME-zarr + per-well TIFF)  [drafted; 188 finalizes]
+
+Two slots downstream; this is the preliminary contract IMA-188 refines at its close-out.
+
+Inherited state (after 188) = the parallel engine yields, per (well, fov), a projected
+`(T, C, 1, Y, X)` native-dtype array in Squid's canonical Zarr axis order (TCZYX, Z=1) — so it
+serializes **without transposition**. 184's job: write multiscale **OME-zarr** (canonical) +
+per-well **TIFF** export, using the **vendored** tilefusion OME-zarr writer (copied in, NOT
+imported — tilefusion's heavy `__init__`; see IMA-189/184 notes). Reader metadata available and
+**guaranteed present** since JSON removal: `pixel_size_um` (µm scale for zarr axes),
+`wellplate_format` (plate layout), `channels[].display_color` (omero rendering).
+
+Cross commit (184 ↔ 188/183): read the written OME-zarr back and assert it equals the in-memory
+projected plate; confirm it opens in `ndviewer_light`. `@pytest.mark.integration` on `sim_1536wp`.
+Out of scope for 184: UI/montage (185), CLI (186).
 
 ---
 
-**Verdict:** IMA-183 CODE LOCKED — 189+183 cross-slot green on real data. Ready for block-by-block
-review → merge. The reader-facing design in §4 supersedes the tilefusion-based §3 (§0).
+**Verdict:** IMA-183 CODE LOCKED — 189+183 cross-slot green on real data; single-thread perf
+baseline recorded (§10). Ready for block-by-block review → merge. The reader-facing design in
+§4 supersedes the tilefusion-based §3 (§0).
