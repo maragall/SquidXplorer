@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "squidmip"
+version = "0.1.0"
+description = "High-throughput z-stack maximum-intensity projection for Squid well-plate acquisitions"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "BSD-3-Clause" }
+authors = [{ name = "Cephla" }]
+dependencies = [
+    "numpy>=1.24",
+    "tifffile>=2023.1.0",
+    "pandas>=2.0",
+    "pyyaml>=6.0",
+]
+
+# No tilefusion dependency: IMA-189 ingest is self-contained (see docs/ima-189-eng-review.md).
+# tilefusion's OME-zarr writer is vendored, not imported, at IMA-184.
+
+[project.optional-dependencies]
+test = ["pytest>=7.0"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["squidmip"]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: requires the real hongquan dataset on disk (deselect with -m 'not integration')",
+]
