@@ -15,13 +15,18 @@ dependencies = [
     "tifffile>=2023.1.0",
     "pandas>=2.0",
     "pyyaml>=6.0",
+    "tensorstore>=0.1.45",
 ]
 
 # No tilefusion dependency: IMA-189 ingest is self-contained (see docs/ima-189-eng-review.md).
-# tilefusion's OME-zarr writer is vendored, not imported, at IMA-184.
+# tilefusion's OME-zarr writer is vendored (squidmip/_zarr_store.py), not imported, at IMA-184:
+# importing tilefusion runs its heavy __init__ (numba/GPU/basicpy). The vendored piece is the
+# ~40-line tensorstore store-config wrapper; tensorstore is the only new runtime dep.
 
 [project.optional-dependencies]
-test = ["pytest>=7.0"]
+# ome-zarr-models: official OME-NGFF v0.5 pydantic schema — validates written plate metadata
+# in tests (test-time only; the runtime writer stays lean, no extra runtime dep).
+test = ["pytest>=7.0", "ome-zarr-models>=1.7"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["squidmip"]

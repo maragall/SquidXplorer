@@ -34,3 +34,19 @@ so a future session doesn't rediscover it from zero.
 - **Cons:** Ahead of demand; the MIP tool projects over z, not t.
 - **Context:** The `t=0` param + time-folder discovery already exist, so the extension is small.
 - **Depends on / blocked by:** A real Nt>1 acquisition.
+
+## Confirm IMA-193 navigator reads the pyramid + plate/well metadata → IMA-193
+- **What:** Before/during IMA-193, verify its plate-view navigator actually reads multi-level pyramids and OME-NGFF plate/well group metadata — not just full-res array `0` the way ndviewer_light does.
+- **Why:** IMA-184 writes a ≥2-level pyramid + spec plate/well metadata. ndviewer_light (today's only reader) ignores both — it directory-walks and reads only `field/0` + `omero`. So the pyramid is currently invisible; IMA-193 is the consumer that justifies it. If IMA-193 also reads only level 0, that extra output delivered nothing.
+- **Pros:** Validates the load-bearing assumption behind IMA-184's canonical/multiscale scope before more work rides on it.
+- **Cons:** Can't be closed until IMA-193 is designed; until then the pyramid is written on faith.
+- **Context:** ndviewer_light discovers plates by directory walk and reads array `0` + `omero` only (`ndviewer_light/core.py:1149`, `:1070`). IMA-184's cross commit already proves the plate opens under strict `ome-zarr-py`, so the metadata is spec-valid regardless.
+- **Depends on / blocked by:** IMA-193 design.
+
+## Fix upstream squid2minerva/colors.py display_color nesting → external repo
+- **What:** `squid2minerva/colors.py:load_yaml_colors` reads `channel["display_color"]`, but real `acquisition_channels.yaml` nests it under `channel.camera_settings.<cam>.display_color`. Its Minerva OME-TIFF exports only get right colors via the wavelength-fallback map — a custom yaml color is silently ignored.
+- **Why:** Confirmed against a real dataset yaml. It's correct-by-luck today because the fallback palette matches the standard 4 channels; any non-default color drops silently.
+- **Pros:** Fixes silently-wrong colors in a sibling tool's exports.
+- **Cons:** Different repo, different owner; not on any SquidMIP critical path.
+- **Context:** SquidMIP does **not** carry this bug — IMA-189's `squidmip/_channels.py` already resolves `display_color` correctly (top-level v1.0+ *and* nested `camera_settings`, mapped by name, raises on unresolved), and IMA-184 consumes `metadata.channels[].display_color` rather than re-parsing the yaml. This TODO is purely a flag for whoever owns `~/CEPHLA/projects/explorer/squid2minerva`.
+- **Depends on / blocked by:** squid2minerva maintainer.
