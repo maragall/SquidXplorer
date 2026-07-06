@@ -24,7 +24,9 @@ dependencies = [
 # ~40-line tensorstore store-config wrapper; tensorstore is the only new runtime dep.
 
 [project.optional-dependencies]
-test = ["pytest>=7.0"]
+# ome-zarr-models: official OME-NGFF v0.5 pydantic schema — validates written plate metadata
+# in tests (test-time only; the runtime writer stays lean, no extra runtime dep).
+test = ["pytest>=7.0", "ome-zarr-models>=1.7"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["squidmip"]

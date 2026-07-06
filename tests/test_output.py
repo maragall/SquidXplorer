@@ -120,6 +120,11 @@ def test_write_from_stream_layout_and_pixels(tmp_path):
         assert np.array_equal(_read_array(field / "0"), images[region])  # full-res pixel-exact
         assert not (field / "1").exists()  # no pyramid level written
 
+    # every group validates against the official OME-NGFF v0.5 pydantic models
+    from tests.ngff_check import assert_valid_ngff_plate
+
+    assert_valid_ngff_plate(plate)
+
 
 def test_write_from_stream_individual_tiffs(tmp_path):
     images = {r: _image(i) for i, r in enumerate(REGIONS)}

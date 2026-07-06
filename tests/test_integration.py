@@ -303,6 +303,11 @@ def test_ima184_real_plate_roundtrip(real_dataset, tmp_path):
     assert structure == "hcs_plate"
     assert {f["region"] for f in fovs} == set(meta["regions"])
 
+    # 1b. and it validates against the official OME-NGFF v0.5 schema (ome-zarr-models).
+    from tests.ngff_check import assert_valid_ngff_plate
+
+    assert_valid_ngff_plate(tmp_path / "plate.ome.zarr")
+
     # 2. Per well: zarr full-res (array "0") is byte-identical to an independent project_well,
     #    and the individual TIFFs are pixel-exact + native dtype (z collapsed to 0).
     refs = _ref_projected(reader, meta["regions"])
