@@ -12,9 +12,12 @@ The public surface is intentionally tiny::
 
     for region, fov, image in project_plate(reader, workers=8):   # whole plate, parallel + streamed
         ...                                              # (T, C, 1, Y, X) per well, bounded memory
+
+    write_plate(reader, "/path/out")   # canonical OME-zarr plate + individual-TIFF export
 """
 
 from squidmip._engine import add_projector, available_projectors, project_plate
+from squidmip._output import write_plate
 from squidmip.projection import project, project_well, select_fovs
 from squidmip.reader import SquidReader, open_reader
 
@@ -27,5 +30,6 @@ __all__ = [
     "project_plate",
     "add_projector",
     "available_projectors",
+    "write_plate",
 ]
 __version__ = "0.1.0"

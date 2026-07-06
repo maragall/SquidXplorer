@@ -31,8 +31,20 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from squidmip import open_reader, project_plate, project_well, select_fovs
+import tensorstore as ts
+import tifffile
+
+from squidmip import open_reader, project_plate, project_well, select_fovs, write_plate
+from squidmip._output import plate_metadata, split_well, write_from_stream
 from tests.test_performance import benchmark_single_well  # shared single-thread baseline harness
+
+
+def _read_zarr_array(path) -> np.ndarray:
+    """Read a zarr v3 array back the way ndviewer_light does — via tensorstore."""
+    store = ts.open(
+        {"driver": "zarr3", "kvstore": {"driver": "file", "path": str(path)}}, open=True
+    ).result()
+    return np.asarray(store[...].read().result())
 
 SIM_1536WP = Path("/Users/julioamaragall/CEPHLA/Data/sim_1536wp")
 
@@ -261,3 +273,116 @@ def test_ima188_real_projector_registry_swap_end_to_end(real_dataset):
     reader = open_reader(real_dataset)
     for region, fov, img in islice(project_plate(reader, workers=4, projector="mip"), 3):
         np.testing.assert_array_equal(img, project_well(reader, region, fov))
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════
+# SECTION: IMA-184 ↔ 188/183  —  write_plate (OME-zarr HCS plate + individual TIFF)
+#          over project_plate. Real seam, no mocks, on both datasets.
+# (next slot IMA-185: append a "SECTION: IMA-185 ↔ IMA-184" block below, don't edit this one)
+# ══════════════════════════════════════════════════════════════════════════════════════
+
+
+def _ref_projected(reader, regions):
+    """{region: project_well(...)} computed independently (MIP) for pixel-exact comparison."""
+    meta = reader.metadata
+    return {r: project_well(reader, r, meta["fovs_per_region"][r][0]) for r in regions}
+
+
+# --- real Squid acquisition: full plate written + opens in ndviewer_light + pixel-exact ---
+@pytest.mark.integration
+def test_ima184_real_plate_roundtrip(real_dataset, tmp_path):
+    core = pytest.importorskip("ndviewer_light.core")
+    reader = open_reader(real_dataset)
+    meta = reader.metadata
+
+    manifest = write_plate(reader, tmp_path, n_fovs=1, workers=4, tiff=True)
+    assert manifest["pyramid_levels"] >= 2  # acceptance: >=2 pyramid levels
+
+    # 1. ndviewer_light discovers it as an HCS plate with exactly the reader's wells.
+    fovs, structure = core.discover_zarr_v3_fovs(tmp_path)
+    assert structure == "hcs_plate"
+    assert {f["region"] for f in fovs} == set(meta["regions"])
+
+    # 2. Per well: zarr full-res (array "0") is byte-identical to an independent project_well,
+    #    and the individual TIFFs are pixel-exact + native dtype (z collapsed to 0).
+    refs = _ref_projected(reader, meta["regions"])
+    ch_names = [c["name"] for c in meta["channels"]]
+    for region, ref in refs.items():
+        row, col = split_well(region)
+        fov = meta["fovs_per_region"][region][0]
+        np.testing.assert_array_equal(_read_zarr_array(tmp_path / "plate.ome.zarr" / row / col / "0" / "0"), ref)
+        for c_i, ch in enumerate(ch_names):
+            plane = tifffile.imread(tmp_path / "tiff" / "0" / f"{region}_{fov}_0_{ch}.tiff")
+            assert plane.dtype == meta["dtype"]
+            np.testing.assert_array_equal(plane, ref[0, c_i, 0])
+
+
+# --- real data: colors ndviewer will render come straight from the reader's display_color ---
+@pytest.mark.integration
+def test_ima184_real_colors_match_reader(real_dataset, tmp_path):
+    import json
+
+    reader = open_reader(real_dataset)
+    meta = reader.metadata
+    write_plate(reader, tmp_path, n_fovs=1, workers=4, tiff=False)
+
+    region = meta["regions"][0]
+    row, col = split_well(region)
+    field = tmp_path / "plate.ome.zarr" / row / col / "0"
+    omero = json.loads((field / "zarr.json").read_text())["attributes"]["ome"]["omero"]
+    got = [(c["label"], c["color"]) for c in omero["channels"]]
+    want = [(c["display_name"], c["display_color"].lstrip("#")) for c in meta["channels"]]
+    assert got == want  # order + color, straight from IMA-189's resolved channels
+
+
+# --- strict, independent reader (zarr-python, not the tensorstore path) opens the plate ---
+@pytest.mark.integration
+def test_ima184_real_opens_in_zarr_python(real_dataset, tmp_path):
+    zarr = pytest.importorskip("zarr")
+    reader = open_reader(real_dataset)
+    meta = reader.metadata
+    write_plate(reader, tmp_path, n_fovs=1, workers=4, tiff=False)
+
+    grp = zarr.open_group(str(tmp_path / "plate.ome.zarr"), mode="r")
+    plate = grp.attrs["ome"]["plate"]
+    assert len(plate["wells"]) == len(meta["regions"])
+    region = meta["regions"][0]
+    row, col = split_well(region)
+    arr = grp[f"{row}/{col}/0/0"]  # navigate plate -> well -> field -> full-res array
+    assert tuple(arr.shape) == (meta["n_t"], len(meta["channels"]), 1, *meta["frame_shape"])
+
+
+# --- sim_1536wp: plate layout scales to 1536 wells (metadata only, no array writes) ---
+@pytest.mark.integration
+@pytest.mark.filterwarnings("ignore:Recorded Nz")
+def test_ima184_sim1536_plate_metadata_scales(sim_1536wp):
+    meta = open_reader(sim_1536wp).metadata
+    plate = plate_metadata(meta["regions"], field_count=1)["plate"]
+    assert len(plate["wells"]) == 1536
+    # every well path round-trips to its region id (no zero-padding), order preserved
+    for well, region in zip(plate["wells"], meta["regions"]):
+        assert well["path"].replace("/", "") == region
+
+
+# --- sim_1536wp: real project_plate seam, bounded subset written + opens + pixel-exact ---
+@pytest.mark.integration
+@pytest.mark.filterwarnings("ignore:Recorded Nz")
+def test_ima184_sim1536_streamed_subset(sim_1536wp, tmp_path):
+    core = pytest.importorskip("ndviewer_light.core")
+    reader = open_reader(sim_1536wp)
+
+    picked = list(islice(project_plate(reader, n_fovs=1, workers=4), 4))  # 4 wells, real seam
+    assert len(picked) == 4
+    submeta = {
+        **reader.metadata,
+        "regions": [r for r, _, _ in picked],
+        "fovs_per_region": {r: [f] for r, f, _ in picked},
+    }
+    write_from_stream(submeta, iter(picked), tmp_path, n_fovs=1, tiff=False)
+
+    fovs, structure = core.discover_zarr_v3_fovs(tmp_path)
+    assert structure == "hcs_plate"
+    assert {f["region"] for f in fovs} == {r for r, _, _ in picked}
+    for region, fov, img in picked:
+        row, col = split_well(region)
+        np.testing.assert_array_equal(_read_zarr_array(tmp_path / "plate.ome.zarr" / row / col / "0" / "0"), img)
