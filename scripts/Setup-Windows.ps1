@@ -56,15 +56,17 @@ if ($LASTEXITCODE -ne 0) {
     Die "pip install failed (see the errors above). This usually means a package has no wheel for this Python version; tell Julio the error and we'll pin a version."
 }
 
-# 4. Desktop shortcut -> venv pythonw -m module (self-contained; no console, no activation).
+# 4. Desktop shortcut -> venv python.exe -m module. Uses python.exe (NOT pythonw) ON PURPOSE so a
+#    console window opens alongside the app, showing logs/errors + the [footprint] lines. Close that
+#    window to quit the app.
 $desktop = [Environment]::GetFolderPath("Desktop")
 $lnk = Join-Path $desktop ($AppName + ".lnk")
 $shell = New-Object -ComObject WScript.Shell
 $sc = $shell.CreateShortcut($lnk)
-$sc.TargetPath = $vpyw
+$sc.TargetPath = $vpy
 $sc.Arguments = "-m " + $Module
 $sc.WorkingDirectory = $env:USERPROFILE
-$sc.IconLocation = $vpyw + ",0"
+$sc.IconLocation = $vpy + ",0"
 $sc.Description = $AppName
 $sc.Save()
 
