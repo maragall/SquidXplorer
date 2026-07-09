@@ -1284,15 +1284,13 @@ class PlateWindow(QMainWindow):
             from ndviewer_light.core import LightweightViewer
             v = LightweightViewer(None)   # empty -> push mode (we register raw z-planes on demand)
             v.setStyleSheet(_NDV_DARK)    # ndviewer defaults to light; match the plate view
-            # The PLATE is the spatial navigator (double-click a well) — so hide ndviewer's own FOV
-            # slider and its "n per well" FOV-subset control. Both navigate FOVs, which here is exactly
-            # what the plate does; keeping them duplicates navigation and clutters the z-stack detail.
-            # (go_to_well_fov still drives the hidden FOV slider programmatically, keeping z/channel and
-            # the red box in sync.) Guarded by getattr so an older ndviewer without them still loads.
-            for attr in ("_fov_slider_container", "_subset_container"):
-                w = getattr(v, attr, None)
-                if w is not None:
-                    w.hide()
+            # Use ndviewer's OWN FOV slider as the scan navigator (upstreamed control — no external
+            # slider). Its valueChanged drives the red box (_on_fov_slider), and the plate's double-click
+            # drives it back (go_to_well_fov); both stay in sync. Hide only the "n per well" subset
+            # control (an IMA-191 extra that would just clutter the z-stack detail here).
+            sub = getattr(v, "_subset_container", None)
+            if sub is not None:
+                sub.hide()
             return v
         except Exception as e:
             self._readout.setText(f"ndviewer_light unavailable: {e}")
@@ -1396,8 +1394,25 @@ class PlateWindow(QMainWindow):
             # push mode over the RAW acquisition: full z (real z-stack) and full frame; the detail
             # reads the acquisition's own TIFFs (register_image) — nothing copied.
             h, w = meta["frame_shape"]
-            self._detail.start_acquisition([c["name"] for c in meta["channels"]], meta["n_z"],
-                                           h, w, [f"{r}:0" for r in order])
+            channels = [c["name"] for c in meta["channels"]]
+            self._detail.start_acquisition(channels, meta["n_z"], h, w, [f"{r}:0" for r in order])
+            # Register EVERY well's raw plane PATHS up front (cheap — paths only, no image I/O) so the
+            # ndviewer FOV slider spans the whole plate and each well shows a real (lazily read + cached)
+            # image the moment it's scrubbed to. Without this, scrubbing to a not-yet-opened well showed
+            # BLACK. One bulk call = one slider update, not tens of thousands of per-plane signals.
+            if hasattr(self._detail, "register_images_bulk"):
+                entries = []
+                for well in order:
+                    w_idx = self._fov_index[well]["idx"]
+                    fov = meta["fovs_per_region"][well][0]
+                    for z_i, z in enumerate(meta["z_levels"]):
+                        for ch in channels:
+                            try:
+                                entries.append((0, w_idx, z_i, ch, str(reader.plane_path(well, fov, ch, z))))
+                            except (KeyError, IndexError, OSError):
+                                continue
+                self._detail.register_images_bulk(entries)
+                self._pushed.update(order)   # every well is registered; double-click just navigates
 
         self._enable_operators(True)
 
