@@ -1566,15 +1566,17 @@ class PlateWindow(QMainWindow):
 
     def _check_disk(self, out_dir) -> tuple[bool, float, str]:
         """Estimate the persisted plate size and refuse if it won't fit (with headroom). Returns
-        (ok, estimate_GB, message). Estimate = per-well MIP (C·Y·X·itemsize) × 1.34 (the exact 4/3
-        geometric sum of the 2× pyramid tail), UNCOMPRESSED. We do NOT discount for zstd: real
-        fluorescence compresses unpredictably (often <1.2×), so assuming compression would under-
-        estimate and let a multi-hour run fill the disk mid-write — the exact failure this guards. An
+        (ok, estimate_GB, message). Estimate = per-well projection (T·C·Y·X·itemsize) × 1.34 (the exact
+        4/3 geometric sum of the 2× pyramid tail), UNCOMPRESSED. The projection collapses Z only, so
+        every timepoint is preserved — a time-lapse plate writes n_t as many bytes, so n_t MUST be in
+        the estimate (omitting it under-counts n_t× and lets a multi-hour time-lapse run fill the disk
+        mid-write — the exact failure this guards). We do NOT discount for zstd: real fluorescence
+        compresses unpredictably (often <1.2×), so assuming compression would under-estimate. An
         over-estimate only ever asks for a roomier disk, which is the safe way to be wrong."""
         import shutil
         m = self._meta
         ny, nx = m["frame_shape"]
-        est = int(len(self._fov_index) * len(m["channels"]) * ny * nx
+        est = int(len(self._fov_index) * m.get("n_t", 1) * len(m["channels"]) * ny * nx
                   * np.dtype(m["dtype"]).itemsize * 1.34)
         gb = 1024 ** 3
         try:
