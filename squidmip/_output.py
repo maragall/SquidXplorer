@@ -276,6 +276,7 @@ def write_from_stream(
     on_well=None,
     write_workers: int = _WRITE_WORKERS,
     stop=None,
+    regions=None,
 ) -> dict:
     """Write the plate + (optionally) TIFFs from a ``(region, fov, image)`` stream and *metadata*.
 
@@ -301,6 +302,9 @@ def write_from_stream(
     tiff_root = out_dir / "tiff"
 
     wells = select_fovs(metadata, n_fovs=n_fovs)  # {region: [fov, ...]}, deterministic
+    if regions is not None:   # subset: write only these wells (keep the requested order), for previews
+        keep = list(dict.fromkeys(regions))
+        wells = {r: wells[r] for r in keep if r in wells}
 
     # Full plate/row/well group metadata written UP FRONT (layout is fully known from metadata).
     write_group(plate_dir, plate_metadata(wells.keys(), field_count=n_fovs))
@@ -375,6 +379,7 @@ def write_plate(
     write_workers: int = _WRITE_WORKERS,
     stop=None,
     on_error=None,
+    regions=None,
 ) -> dict:
     """Project a plate (IMA-188) and write the canonical OME-zarr + individual TIFFs.
 
@@ -401,6 +406,7 @@ def write_plate(
         Manifest: output paths, well/field counts, pyramid level count.
     """
     metadata = reader.metadata
-    stream = project_plate(reader, n_fovs=n_fovs, workers=workers, projector=projector, on_error=on_error)
+    stream = project_plate(reader, n_fovs=n_fovs, workers=workers, projector=projector,
+                           on_error=on_error, regions=regions)
     return write_from_stream(metadata, stream, out_dir, n_fovs=n_fovs, tiff=tiff, on_well=on_well,
-                             write_workers=write_workers, stop=stop)
+                             write_workers=write_workers, stop=stop, regions=regions)

@@ -54,8 +54,8 @@ from PyQt5.QtCore import Qt, QSocketNotifier, QThread, pyqtSignal
 from PyQt5.QtGui import QColor, QFont, QImage, QPainter, QPalette, QPen, QPixmap
 from PyQt5.QtWidgets import (
     QAction, QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel,
-    QLineEdit, QMainWindow, QPlainTextEdit, QPushButton, QScrollArea, QSplitter, QTabBar,
-    QTabWidget, QVBoxLayout, QWidget,
+    QLineEdit, QMainWindow, QPlainTextEdit, QPushButton, QScrollArea, QSpinBox, QSplitter,
+    QTabBar, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from squidmip._engine import _default_workers
@@ -115,6 +115,15 @@ _BTN_QSS = (
 _COMBO_QSS = "QComboBox{background:#0d1420;color:#e6edf3;border:1px solid #232b3a;border-radius:6px;padding:5px 8px;}"
 _TERM_QSS = ("QPlainTextEdit{background:#05070b;color:#8bffd0;border:none;"
              "font-family:'SF Mono','Menlo',monospace;font-size:12px;padding:10px;}")
+
+
+def _hline():
+    """A thin horizontal divider (a 1px framed line) for separating sections in a pane."""
+    from PyQt5.QtWidgets import QFrame as _QFrame
+    ln = _QFrame()
+    ln.setFrameShape(_QFrame.HLine)
+    ln.setStyleSheet("color:#232b3a;background:#232b3a;max-height:1px;")
+    return ln
 # Strip ANSI CSI/OSC escapes + stray control bytes so shell output renders clean in the QPlainTextEdit
 # (we run the shell with TERM=dumb to minimise these, but zsh still emits a few).
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|[\x00-\x08\x0e-\x1f]")
@@ -303,10 +312,9 @@ _OPERATIONS_BY_KEY = {op.key: op for op in _OPERATIONS}
 
 # Roadmap slots shown (disabled) in the Process console so the direction is visible: hand-off to
 # Minerva Author, and a locally-run agent (Nautilus) that builds the operator you ask it for.
-_TO_BE_ADDED = [
-    ("Open in Minerva Author", "Hand the processed plate to Minerva Author for authoring."),
-    ("Ask Nautilus", "Ask Nautilus (local agent) to build the operator you need."),
-]
+# Roadmap cards shown under "TO BE ADDED". Empty for now — we do NOT advertise Minerva Author or
+# Nautilus in the UI. Add a card as (label, blurb) when a real next operator is ready to surface.
+_TO_BE_ADDED: list = []
 
 
 # --- pure geometry (unit-testable, no Qt display) -------------------------------------------
@@ -669,12 +677,16 @@ class _OperatorWorker(QThread):
     failed = pyqtSignal(str)                        # whole-run failure (not a per-well skip)
     finished_ok = pyqtSignal()
 
-    def __init__(self, operator: str, reader, meta, fov_index: dict, nr: int, nc: int, out_dir: str):
+    def __init__(self, operator: str, reader, meta, fov_index: dict, nr: int, nc: int, out_dir: str,
+                 regions=None, save: bool = True):
         super().__init__()
         self._operator = operator
         self._reader, self._meta = reader, meta
         self._fov_index, self._nr, self._nc = fov_index, nr, nc
         self._out_dir = out_dir
+        self._regions = regions          # None = whole plate; a list = subset preview (those wells only)
+        self._save = save                # False = PREVIEW: compute + push to the viewer, write NOTHING
+        self._total = len(regions) if regions is not None else len(meta["regions"])
         self._channels = [c["name"] for c in meta["channels"]]
         self._colors = np.stack([_hex_to_rgb01(c["display_color"]) for c in meta["channels"]])
         self._dtype = np.dtype(meta["dtype"])
@@ -706,7 +718,7 @@ class _OperatorWorker(QThread):
             self._done += 1
             done = self._done
         self.tileReady.emit(ri, ci, well_id, (np.clip(rgb, 0, 1) * 255).astype(np.uint8))
-        self.progress.emit(done, len(self._meta["regions"]))
+        self.progress.emit(done, self._total)
         # feed the ndviewer growing slider: one ~512px plane per channel, in memory (register_array),
         # so scrubbing the processed wells is instant and z-collapsed (nz=1). Downsampled -> bounded.
         push = [_area_downsample(well[c_i], _PUSH_PX, _PUSH_PX).astype(self._dtype)
@@ -722,15 +734,36 @@ class _OperatorWorker(QThread):
 
     def run(self):
         try:
-            from squidmip import write_plate      # persist + project in one bounded, streaming pass
+            if self._save:
+                from squidmip import write_plate  # persist + project in one bounded, streaming pass
 
-            write_plate(self._reader, self._out_dir, n_fovs=1, workers=_VIEWER_WORKERS,
-                        projector=self._operator, tiff=False, on_well=self._on_well,
-                        stop=self._stop.is_set, on_error=self._on_error)
-            if self._stop.is_set():
-                return  # window closing / re-opening; drop out cleanly (no final/written emit)
-            self.finalReady.emit(self._final_montage())
-            self.writtenReady.emit(str(Path(self._out_dir) / "plate.ome.zarr"))
+                write_plate(self._reader, self._out_dir, n_fovs=1, workers=_VIEWER_WORKERS,
+                            projector=self._operator, tiff=False, on_well=self._on_well,
+                            stop=self._stop.is_set, on_error=self._on_error, regions=self._regions)
+                if self._stop.is_set():
+                    return  # window closing / re-opening; drop out cleanly (no final/written emit)
+                self.finalReady.emit(self._final_montage())
+                self.writtenReady.emit(str(Path(self._out_dir) / "plate.ome.zarr"))
+            else:
+                # PREVIEW: run the engine over the subset and push each result to the plate + slider,
+                # writing NOTHING to disk (so testing an operator on a few wells costs no disk + only
+                # the subset's compute). Same math as the saved run — a faithful preview.
+                from squidmip import project_plate
+
+                stream = project_plate(self._reader, workers=_VIEWER_WORKERS, projector=self._operator,
+                                       on_error=self._on_error, regions=self._regions)
+                try:
+                    for region, fov, image in stream:
+                        if self._stop.is_set():
+                            return
+                        self._on_well(region, fov, image)
+                finally:
+                    close = getattr(stream, "close", None)
+                    if callable(close):
+                        close()
+                if self._stop.is_set():
+                    return
+                self.finalReady.emit(self._final_montage())
             self.finished_ok.emit()
         except Exception as e:
             self.failed.emit(f"{type(e).__name__}: {e}")
@@ -993,13 +1026,14 @@ class PlateWindow(QMainWindow):
             card.clicked.connect(lambda _=False, k=op.key: self._activate_operator(k))
             sv.addWidget(card)
             self._op_cards[op.key] = card
-        sv.addWidget(_section("TO BE ADDED"))
-        for label, blurb in _TO_BE_ADDED:
-            soon = QPushButton(f"{label}\n{blurb}")
-            soon.setEnabled(False)
-            soon.setStyleSheet(_CARD_QSS + "QPushButton:disabled{color:#57606a;border-style:dashed;}")
-            soon.setMinimumHeight(46)
-            sv.addWidget(soon)
+        if _TO_BE_ADDED:                                    # only show the section when it has cards
+            sv.addWidget(_section("TO BE ADDED"))
+            for label, blurb in _TO_BE_ADDED:
+                soon = QPushButton(f"{label}\n{blurb}")
+                soon.setEnabled(False)
+                soon.setStyleSheet(_CARD_QSS + "QPushButton:disabled{color:#57606a;border-style:dashed;}")
+                soon.setMinimumHeight(46)
+                sv.addWidget(soon)
         sv.addStretch(1)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -1094,7 +1128,40 @@ class PlateWindow(QMainWindow):
         pick_btn = QPushButton("Choose output folder…"); pick_btn.setStyleSheet(_BTN_QSS)
         pick_btn.clicked.connect(pick)
         run.clicked.connect(lambda: self.run_operator(op.key, out_parent=state["dir"]))
-        v.addWidget(pick_btn); v.addWidget(dir_lbl); v.addWidget(run); v.addStretch(1)
+        v.addWidget(pick_btn); v.addWidget(dir_lbl); v.addWidget(run)
+
+        # PREVIEW on a subset — test the operator on the first N wells without committing the whole
+        # plate's compute + disk. Default: don't save (compute + push to the viewer only).
+        v.addWidget(_hline())
+        prev_lbl = QLabel("Preview (subset)")
+        prev_lbl.setStyleSheet("color:#57606a;font-size:10px;font-weight:800;letter-spacing:1.5px;padding-top:6px;")
+        v.addWidget(prev_lbl)
+        n_wells = max(1, len(self._order))
+        row = QHBoxLayout(); row.setSpacing(6)
+        row.addWidget(QLabel("First"))
+        spin = QSpinBox(); spin.setRange(1, n_wells); spin.setValue(min(4, n_wells))
+        spin.setStyleSheet(_COMBO_QSS)
+        row.addWidget(spin); row.addWidget(QLabel("wells")); row.addStretch(1)
+        v.addLayout(row)
+        save_cb = QCheckBox("Save previews to disk"); save_cb.setStyleSheet("color:#e6edf3;")
+        v.addWidget(save_cb)
+        prev = QPushButton("▷  Preview"); prev.setStyleSheet(_BTN_QSS); prev.setEnabled(False)
+
+        def do_preview():
+            save = save_cb.isChecked()
+            dest = None
+            if save:
+                dest = state["dir"] or QFileDialog.getExistingDirectory(self, f"Save {op.label} preview to folder")
+                if not dest:
+                    return
+            self.run_operator(op.key, out_parent=dest, preview_limit=spin.value(), save=save)
+
+        prev.clicked.connect(do_preview)
+        v.addWidget(prev)
+        v.addStretch(1)
+        # both run buttons enable once an acquisition is open (the tab is only reachable then, but be safe)
+        for b in (run, prev):
+            b.setEnabled(self._reader is not None)
         return w
 
     def _build_record_tab(self) -> QWidget:
@@ -1432,27 +1499,42 @@ class PlateWindow(QMainWindow):
         self._readout.setText(f"live · {len(self._fov_index)} wells · double-click to open{note}")
 
     # -- run a post-processing operator over the whole plate (persists a navigable OME-Zarr plate) --
-    def run_operator(self, key: str, out_parent: Optional[str] = None):
+    def run_operator(self, key: str, out_parent: Optional[str] = None,
+                     preview_limit: Optional[int] = None, save: bool = True):
+        """Run a projector operator (MIP / reference) over the plate.
+
+        preview_limit=N runs on only the first N wells (a subset) — a cheap way to test an operator.
+        save=False is PREVIEW: compute + stream results into the plate + ndviewer slider, writing
+        NOTHING to disk (no folder, no disk-space cost). save=True persists a navigable OME-Zarr;
+        combined with preview_limit it saves just that subset. Tests pass out_parent to skip the dialog.
+        """
         if self._reader is None or self._overview is None:
             return
         if self._worker is not None and self._worker.isRunning():
             self._readout.setText("already processing — let the current run finish first")
             return
         label = _OPERATIONS_BY_KEY[key].label
-        # Ask WHERE to persist: the output can be hundreds of GB, so let the user aim it at a disk
-        # with room (e.g. an external drive) rather than silently filling the acquisition's disk.
-        # Tests pass out_parent to skip the modal dialog.
-        if out_parent is None:
-            out_parent = QFileDialog.getExistingDirectory(self, f"Save {label} plate to folder")
-            if not out_parent:
+        regions = self._order[:preview_limit] if preview_limit is not None else None
+        scope = f"first {len(regions)} wells" if regions is not None else "the whole plate"
+        out_dir = est_gb = None
+        if save:
+            # Ask WHERE to persist: output can be hundreds of GB, so let the user aim it at a roomy
+            # disk rather than silently filling the acquisition's. Tests pass out_parent.
+            if out_parent is None:
+                out_parent = QFileDialog.getExistingDirectory(self, f"Save {label} plate to folder")
+                if not out_parent:
+                    return
+            out_dir = Path(out_parent) / f"{self._acq_name}.hcs"
+            ok, est_gb, msg = self._check_disk(out_dir)   # whole-plate estimate; a subset only uses less
+            if not ok and regions is None:
+                self._readout.setText(msg)
                 return
-        out_dir = Path(out_parent) / f"{self._acq_name}.hcs"
-        ok, est_gb, msg = self._check_disk(out_dir)
-        if not ok:
-            self._readout.setText(msg)
-            return
         self._stop_preview()                                 # the operator supersedes the raw preview
-        self._overview.set_all_status("processing")          # amber across the plate
+        if regions is not None:                              # amber only the wells we'll actually run
+            for r in regions:
+                self._overview.set_status(*self._fov_index[r]["rc"], "processing")
+        else:
+            self._overview.set_all_status("processing")      # amber across the plate
         self._plate_mode = label                             # plate now shows this operator's result
         self._plate_title.setText(f"{self._acq_name}   ·   {label}")
         self._active_op_key = key                            # tiles stream into this layer
@@ -1465,18 +1547,21 @@ class PlateWindow(QMainWindow):
             self._detail.start_acquisition([c["name"] for c in self._meta["channels"]], 1,
                                            _PUSH_PX, _PUSH_PX, [f"{r}:0" for r in self._order])
         self._worker = _OperatorWorker(key, self._reader, self._meta, self._fov_index,
-                                       self._overview._nr, self._overview._nc, str(out_dir))
+                                       self._overview._nr, self._overview._nc,
+                                       str(out_dir) if out_dir else "", regions=regions, save=save)
+        dest = f" → {out_dir.name}" if save else " (preview — not saved)"
         self._worker.tileReady.connect(self._on_tile)
         self._worker.pushReady.connect(self._on_push)
         self._worker.progress.connect(
-            lambda d, t: self._readout.setText(f"● {label} · {d}/{t} wells → {out_dir.name} (~{est_gb:.0f} GB)"))
+            lambda d, t: self._readout.setText(f"● {label} · {d}/{t} wells{dest}"))
         self._worker.finalReady.connect(self._set_final)
         self._worker.writtenReady.connect(self._on_written)
         self._worker.wellFailed.connect(                     # a skipped well -> red x, run continues
             lambda ri, ci: self._overview.set_status(ri, ci, "failed") if self._overview else None)
         self._worker.failed.connect(self._on_failed)
         self._worker.finished_ok.connect(lambda: self._readout.setText(
-            f"✓ {label} · {len(self._fov_index)} wells → {out_dir.name}  (re-openable OME-Zarr)"))
+            f"✓ {label} · {scope}{dest}" + ("  (re-openable OME-Zarr)" if save else "")))
+        self._readout.setText(f"● {label} · {scope}{dest} …")
         self._worker.start()
 
     def _check_disk(self, out_dir) -> tuple[bool, float, str]:

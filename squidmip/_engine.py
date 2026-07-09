@@ -135,6 +135,7 @@ def project_plate(
     workers: int | None = None,
     projector: str = "mip",
     on_error=None,
+    regions=None,
 ) -> Iterator[tuple[str, int, np.ndarray]]:
     """Project every selected well of a plate in parallel, streaming results well-by-well.
 
@@ -200,6 +201,9 @@ def project_plate(
     # Warm the reader's lazy index/time-folders/metadata single-threaded BEFORE fan-out.
     meta = reader.metadata
     wells = select_fovs(meta, n_fovs=n_fovs)
+    if regions is not None:   # subset preview: keep only the requested wells (in their given order)
+        keep = list(dict.fromkeys(regions))
+        wells = {r: wells[r] for r in keep if r in wells}
     tasks: Iterator[tuple[str, int]] = (
         (region, fov) for region, fovs in wells.items() for fov in fovs
     )

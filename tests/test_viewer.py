@@ -173,8 +173,9 @@ def test_run_operator_persists_via_write_plate(qapp, stub_detail, squid_dataset,
     captured = {}
 
     def fake_write_plate(reader, out_dir, *, n_fovs=1, workers=None, projector="mip",
-                         tiff=True, on_well=None, write_workers=4, stop=None, on_error=None):
-        captured.update(projector=projector, tiff=tiff, out_dir=str(out_dir))
+                         tiff=True, on_well=None, write_workers=4, stop=None, on_error=None,
+                         regions=None):
+        captured.update(projector=projector, tiff=tiff, out_dir=str(out_dir), regions=regions)
         return {"plate": str(out_dir), "levels": 1}      # no wells — we only assert the dispatch
     monkeypatch.setattr(squidmip, "write_plate", fake_write_plate)
 

@@ -51,8 +51,19 @@ class ProcessParameters(BaseModel, use_attribute_docstrings=True):
     """Also write the individual per-plane TIFF export (Squid filename convention). This is a SECOND,
     uncompressed copy — roughly doubles on-disk size — so it's off by default."""
 
+    limit: Optional[int] = None
+    """Process only the first N wells — a quick SLICE of the plate (subset preview) so you can test
+    the operator without committing the whole plate's compute + disk. Default: every well."""
+
     verbose: bool = False
     """Show debug-level logging."""
+
+    @field_validator("limit")
+    @classmethod
+    def _positive_limit(cls, v):
+        if v is not None and v < 1:
+            raise ValueError(f"limit must be >= 1, got {v}")
+        return v
 
     @field_validator("input_folder")
     @classmethod
@@ -90,6 +101,14 @@ def run(params: ProcessParameters) -> dict:
     name = Path(params.input_folder).name
     out_parent = Path(params.output_folder) if params.output_folder else Path(params.input_folder).parent
     out_dir = out_parent / f"{name}.hcs"
+    # Optional plate slice: process only the first N wells (a subset preview that won't cost the
+    # whole plate). Order = the reader's region order (deterministic).
+    regions = None
+    if params.limit is not None:
+        all_regions = list(reader.metadata["regions"])
+        regions = all_regions[: params.limit]
+        logger.info("SLICE: first %d of %d wells (%s%s)", len(regions), len(all_regions),
+                    ", ".join(regions[:8]), " …" if len(regions) > 8 else "")
     logger.info("running '%s' over %s -> %s", params.projector, name, out_dir)
 
     # Resilient batch: a single corrupt/missing plane should NOT abort a multi-hour plate run. Log
@@ -102,7 +121,7 @@ def run(params: ProcessParameters) -> dict:
 
     manifest = write_plate(
         reader, out_dir, projector=params.projector, workers=params.workers,
-        tiff=params.tiff, on_error=on_error,
+        tiff=params.tiff, on_error=on_error, regions=regions,
     )
     logger.info(
         "done: %s (%d/%d wells written, %d pyramid level(s))%s",
