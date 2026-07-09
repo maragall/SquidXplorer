@@ -122,18 +122,18 @@ def test_ingest_bad_folder_does_not_crash(qapp, stub_detail, tmp_path):
     win.close()
 
 
-def test_ingest_loads_grey_plate_without_processing(qapp, stub_detail, squid_dataset):
+def test_ingest_loads_plate_and_previews_without_processing(qapp, stub_detail, squid_dataset):
     root, _ = squid_dataset          # tiny real acquisition (B2, B3)
     win = V.PlateWindow(None)
     win.ingest(str(root))
-    # the plate loads immediately: every acquired well present, ALL grey (not processed), no tiles,
-    # and NO operator worker running until the Process menu is used.
+    # the plate loads immediately with every acquired well; a raw PREVIEW fills thumbnails but
+    # leaves status grey ("empty"); NO operator worker runs until the Process menu is used.
     assert win._overview is not None
     assert set(win._overview._by_rc.values()) == {"B2", "B3"}
-    assert set(win._overview._status.values()) == {"empty"}
-    assert win._overview._tiles == set()
+    assert _drain_until(qapp, lambda: len(win._overview._tiles) == 2)   # preview filled thumbnails
+    assert set(win._overview._status.values()) == {"empty"}            # ...but status stays grey
     assert win._worker is None
-    assert all(a.isEnabled() for a in win._op_actions.values())   # operators enabled once loaded
+    assert all(a.isEnabled() for a in win._op_actions.values())        # operators enabled once loaded
     win.close()
 
 
@@ -166,30 +166,34 @@ def test_ingest_readable_non_wellplate_reports_not_crashes(qapp, stub_detail, tm
     win.close(); win2.close()
 
 
-def test_run_operator_dispatches_selected_projector(qapp, stub_detail, squid_dataset, monkeypatch):
-    # run_operator must pass the SELECTED operator to project_plate, not silently always MIP.
+def test_run_operator_persists_via_write_plate(qapp, stub_detail, squid_dataset, monkeypatch, tmp_path):
+    # run_operator now PERSISTS: it drives write_plate with the SELECTED projector, and the GUI must
+    # NOT write the uncompressed individual-TIFF copy (tiff=False) — that would double disk use.
     import squidmip
     captured = {}
 
-    def fake_project_plate(reader, *, n_fovs=1, workers=None, projector="mip"):
-        captured["projector"] = projector
-        return iter(())                          # no wells — we only assert the dispatch
-    monkeypatch.setattr(squidmip, "project_plate", fake_project_plate)
+    def fake_write_plate(reader, out_dir, *, n_fovs=1, workers=None, projector="mip",
+                         tiff=True, on_well=None, write_workers=4, stop=None, on_error=None):
+        captured.update(projector=projector, tiff=tiff, out_dir=str(out_dir))
+        return {"plate": str(out_dir), "levels": 1}      # no wells — we only assert the dispatch
+    monkeypatch.setattr(squidmip, "write_plate", fake_write_plate)
 
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
-    win.run_operator("mip")
+    win.run_operator("mip", out_parent=str(tmp_path))
     _drain_until(qapp, lambda: "projector" in captured)
     assert captured["projector"] == "mip"
+    assert captured["tiff"] is False                     # never the uncompressed TIFF duplicate
+    assert captured["out_dir"].endswith(".hcs")          # persisted next to the acquisition
     win._stop_worker(); win.close()
 
 
-def test_run_operator_fills_tiles_and_hue_status(qapp, stub_detail, squid_dataset):
+def test_run_operator_fills_tiles_and_hue_status(qapp, stub_detail, squid_dataset, tmp_path):
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
-    win.run_operator("mip")
+    win.run_operator("mip", out_parent=str(tmp_path))
     assert _drain_until(
         qapp, lambda: win._overview is not None and len(win._overview._tiles) == 2
         and win._overview._final is not None
@@ -207,6 +211,7 @@ def test_double_click_pushes_raw_zstack(qapp, stub_detail, squid_dataset):
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
+    win._detail.registered.clear()   # ignore the first well auto-opened on ingest
     win.activate_well("B3", 0)       # double-click B3 -> register its raw z-planes + navigate
     regs = win._detail.registered
     assert regs, "no raw planes registered"
@@ -235,11 +240,11 @@ def test_fov_slider_moves_red_box(qapp, stub_detail, squid_dataset):
     win.close()
 
 
-def test_second_ingest_resets_state(qapp, stub_detail, squid_dataset):
+def test_second_ingest_resets_state(qapp, stub_detail, squid_dataset, tmp_path):
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
-    win.run_operator("mip")
+    win.run_operator("mip", out_parent=str(tmp_path))
     _drain_until(qapp, lambda: win._overview is not None and len(win._overview._tiles) == 2)
     win.ingest(str(root))            # second open: must stop the old worker + reset state
     qapp.processEvents()
