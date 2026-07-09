@@ -909,7 +909,7 @@ class _ComputedPlateWorker(QThread):
 class PlateWindow(QMainWindow):
     def __init__(self, initial_path: Optional[str] = None):
         super().__init__()
-        self.setWindowTitle("HCS viewer")
+        self.setWindowTitle("MIP tool")
         self.resize(1600, 950)
         self._worker = None           # the operator (MIP) run
         self._preview = None          # the raw preview fill on open
@@ -1021,7 +1021,7 @@ class PlateWindow(QMainWindow):
         detail_bar.setStyleSheet(f"background:{_BG};")
         dbl = QHBoxLayout(detail_bar)
         dbl.setContentsMargins(8, 5, 8, 5)
-        self._focus_btn = QPushButton("⊚  Focus reference plane")
+        self._focus_btn = QPushButton("Focus reference plane")
         self._focus_btn.setStyleSheet(_BTN_QSS)
         self._focus_btn.setToolTip("Jump the z-slider to the sharpest plane of the FOV in view")
         self._focus_btn.clicked.connect(self._focus_reference_plane)
@@ -1097,19 +1097,20 @@ class PlateWindow(QMainWindow):
         scroll.setWidget(stack)
         v.addWidget(scroll, 1)
 
-        open_btn = QPushButton("📂  Open a computed MIP…")  # load a previously written .hcs plate
+        open_btn = QPushButton("Open a computed MIP…")     # load a previously written .hcs plate
         open_btn.setStyleSheet(_BTN_QSS)
         open_btn.clicked.connect(self._open_computed)
         v.addWidget(open_btn)
-        raw_btn = QPushButton("⟲  Return to raw view")     # stop previewing -> restore raw downsampled plate
-        raw_btn.setStyleSheet(_BTN_QSS)
-        raw_btn.clicked.connect(self._return_to_raw)
-        v.addWidget(raw_btn)
-        cli_btn = QPushButton("⌨  Open CLI")               # opens a CLI tab within this pane (ABOVE Layers)
+        self._raw_btn = QPushButton("Return to raw view")  # only shown once an operator has run
+        self._raw_btn.setStyleSheet(_BTN_QSS)
+        self._raw_btn.clicked.connect(self._return_to_raw)
+        self._raw_btn.hide()
+        v.addWidget(self._raw_btn)
+        cli_btn = QPushButton("Open CLI")                  # opens a CLI tab within this pane (ABOVE Layers)
         cli_btn.setStyleSheet(_BTN_QSS)
         cli_btn.clicked.connect(lambda: self._open_op_tab("cli", "CLI", self._build_cli_tab))
         v.addWidget(cli_btn)
-        layers_btn = QPushButton("▤  Layers")              # toggle/reorder applied operation layers
+        layers_btn = QPushButton("Layers")                 # toggle/reorder applied operation layers
         layers_btn.setStyleSheet(_BTN_QSS)
         layers_btn.clicked.connect(lambda: self._open_op_tab("layers", "Layers", self._build_layers_tab))
         v.addWidget(layers_btn)
@@ -1174,7 +1175,7 @@ class PlateWindow(QMainWindow):
         state = {"dir": None}
         dir_lbl = QLabel("(no folder chosen)"); dir_lbl.setWordWrap(True)
         dir_lbl.setStyleSheet("color:#8b98ad;font-size:12px;")
-        run = QPushButton("▶  Run on the whole plate"); run.setStyleSheet(_BTN_QSS); run.setEnabled(False)
+        run = QPushButton("Run on the whole plate"); run.setStyleSheet(_BTN_QSS); run.setEnabled(False)
 
         def pick():
             d = QFileDialog.getExistingDirectory(self, f"Save {op.label} plate to folder")
@@ -1205,7 +1206,7 @@ class PlateWindow(QMainWindow):
         v.addLayout(row)
         save_cb = QCheckBox("Save previews to disk"); save_cb.setStyleSheet(_CHECK_QSS)
         v.addWidget(save_cb)
-        prev = QPushButton("▷  Preview"); prev.setStyleSheet(_BTN_QSS); prev.setEnabled(False)
+        prev = QPushButton("Preview"); prev.setStyleSheet(_BTN_QSS); prev.setEnabled(False)
 
         def do_preview():
             save = save_cb.isChecked()
@@ -1279,18 +1280,32 @@ class PlateWindow(QMainWindow):
         Pre-seeded with the how-to (MIP every well; `--tiff` -> FIJI-openable TIFFs). `squidmip` is
         aliased to this app's interpreter so it runs regardless of PATH/conda. Falls back to a static
         command preview where a PTY isn't available (e.g. Windows)."""
-        acq = str(self._acq_path) if self._acq_path else "<acquisition>"
+        acq = str(self._acq_path) if self._acq_path else "your acquisition folder"
+        py = sys.executable
         banner = [
-            "──────────────────────────────────────────────────────────",
-            " HCS viewer · batch CLI (IMA-186) — MIP every well, headless",
-            "──────────────────────────────────────────────────────────",
-            "# MIP every well -> navigable OME-Zarr + FIJI-openable TIFFs:",
-            f'#   squidmip "{acq}" --tiff',
-            "# sharpest reference plane per well:",
-            f'#   squidmip "{acq}" --projector reference --tiff',
-            "# preview a slice (first N wells) so a test costs neither the whole plate nor the disk:",
-            f'#   squidmip "{acq}" --limit 8 --tiff',
-            "# --tiff writes the projected planes as TIFFs so FIJI/ImageJ can open them.",
+            "══════════════════════════════════════════════════════════",
+            "  Process a whole plate from the command line",
+            "══════════════════════════════════════════════════════════",
+            "",
+            "  This runs the same MIP as the buttons, on every well, and saves the",
+            "  result. Just copy a line below and press Enter.",
+            "",
+            "  ▸ Flatten every well and save it (also saves TIFFs you can open in FIJI):",
+            f'      squidmip "{acq}" --tiff',
+            "",
+            "  ▸ Try it on just the first 8 wells first (quick, uses little disk):",
+            f'      squidmip "{acq}" --limit 8 --tiff',
+            "",
+            "  ▸ Choose where to save (e.g. your Downloads folder):",
+            f'      squidmip "{acq}" --limit 8 --tiff --output-folder ~/Downloads',
+            "",
+            "  ▸ See all options:",
+            "      squidmip --help",
+            "",
+            "  ── To run this in your OWN Terminal (outside this app) ──",
+            "  Open Terminal (Applications ▸ Utilities ▸ Terminal), then paste:",
+            "      conda activate ndviewer_light",
+            f'      {py} -m squidmip "{acq}" --limit 8 --tiff --output-folder ~/Downloads',
             "",
         ]
         # `squidmip` is aliased to this app's interpreter so it runs regardless of PATH/conda. The
@@ -1306,12 +1321,13 @@ class PlateWindow(QMainWindow):
         term = QPlainTextEdit(); term.setReadOnly(True)   # fallback: static command preview
         term.setStyleSheet(_TERM_QSS)
         term.setPlainText(
-            "HCS viewer — CLI  (preview; no terminal on this platform)\n"
+            "Process a whole plate from the command line\n"
             "──────────────────────────────\n"
-            "Run headlessly (IMA-186 — the `squidmip` command):\n\n"
-            f"  $ squidmip \"{acq}\" --tiff               # MIP every well -> OME-zarr + FIJI TIFFs\n"
-            f"  $ squidmip \"{acq}\" --projector reference --tiff\n"
-            f"  $ squidmip \"{acq}\" --workers 8 --tiff\n")
+            "Open your Terminal, then paste:\n\n"
+            "    conda activate ndviewer_light\n"
+            f'    {py} -m squidmip "{acq}" --limit 8 --tiff --output-folder ~/Downloads\n\n'
+            "This flattens the first 8 wells (MIP) and saves TIFFs you can open in FIJI.\n"
+            "Drop --limit 8 to do the whole plate. Run with --help to see all options.\n")
         return term
 
     def _enable_operators(self, flag: bool):
@@ -1400,7 +1416,7 @@ class PlateWindow(QMainWindow):
             self._reader = self._meta = None
             self._readout.setText(
                 f"not a well-plate acquisition — regions like {list(meta['regions'])[:3]} aren't "
-                f"well ids (e.g. B2); the HCS viewer needs a well plate. ({type(e).__name__})")
+                f"well ids (e.g. B2); the MIP tool needs a well plate. ({type(e).__name__})")
             self._drop.show()
             return
         # Prefer the FULL plate-format grid (every position, evenly spaced — no collapsed gaps).
@@ -1431,6 +1447,8 @@ class PlateWindow(QMainWindow):
         self._plate_title.setText(f"{self._acq_name}   ·   raw")   # bottom-left plate-pane title
         self._op_stack.reset()                       # fresh layer stack (base only)
         self._active_op_key = None
+        if getattr(self, "_raw_btn", None):
+            self._raw_btn.hide()                     # raw view on open -> nothing to return from
         self._refresh_layers_tab()
         self._drop.hide()
         self._left_l.addWidget(self._overview, 1)   # fills the pane and self-fits — no scrollbars
@@ -1486,6 +1504,8 @@ class PlateWindow(QMainWindow):
             return
         self._stop_worker()
         self._active_op_key = None
+        if getattr(self, "_raw_btn", None):
+            self._raw_btn.hide()                             # nothing to return from now
         self._plate_mode = "raw"
         self._plate_title.setText(f"{self._acq_name}   ·   raw")
         self._overview.set_active_layer("raw")
@@ -1552,6 +1572,8 @@ class PlateWindow(QMainWindow):
         self._overview.hovered.connect(self._on_hover)
         self._overview.wellActivated.connect(self.activate_well)
         self._active_op_key = "computed"
+        if getattr(self, "_raw_btn", None):
+            self._raw_btn.hide()                      # a computed plate has no raw to return to
         self._plate_mode = "computed MIP"
         self._plate_title.setText(f"{self._acq_name}   ·   computed MIP")
         self._op_stack.reset(); self._op_stack.add("computed", "computed MIP")
@@ -1619,6 +1641,8 @@ class PlateWindow(QMainWindow):
         self._plate_mode = label                             # plate now shows this operator's result
         self._plate_title.setText(f"{self._acq_name}   ·   {label}")
         self._active_op_key = key                            # tiles stream into this layer
+        if getattr(self, "_raw_btn", None):
+            self._raw_btn.show()                             # now there's a processed view to return from
         self._op_stack.add(key, label)                       # push the operator layer onto the stack
         self._overview.set_active_layer(key)                 # show it
         self._refresh_layers_tab()

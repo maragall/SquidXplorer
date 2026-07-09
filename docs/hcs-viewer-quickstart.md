@@ -1,4 +1,4 @@
-# HCS viewer, quick start
+# MIP tool, quick start
 
 A desktop app for reviewing a **finished** Squid well-plate acquisition and processing it (MIP,
 best-focus reference plane, or an .mp4 movie) without hand-tracking which files came from which well.
@@ -122,8 +122,19 @@ squidmip "/path/to/acquisition" --limit 8 --tiff --output-folder ~/Downloads
   - `plate.ome.zarr/` a navigable multiscale plate.
   - `tiff/` plain TIFFs, one per well/channel/timepoint. **Open these in FIJI** (File, Open).
 - Drop `--limit 8` to do the whole plate. Drop `--tiff` if you do not need the FIJI copy.
-- `--projector reference` gives the sharpest plane per well instead of MIP.
 - `--workers 8` tunes throughput. A corrupt well is skipped and reported, never aborts the run.
+
+### Running it in your own Terminal (independently)
+
+The in-app CLI tab is the easy path. To run the same thing from your own Terminal (Applications ▸
+Utilities ▸ Terminal on a Mac):
+
+```bash
+conda activate ndviewer_light
+python -m squidmip "/path/to/acquisition" --limit 8 --tiff --output-folder ~/Downloads
+```
+
+`python -m squidmip` is the command; everything after it is the same as above.
 
 ### View the result
 
