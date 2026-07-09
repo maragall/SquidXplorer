@@ -922,6 +922,16 @@ class PlateWindow(QMainWindow):
         self._pushed = set()          # wells whose raw z-stack is already registered in the detail viewer
         self._final_arr = None        # keep the final montage array alive for its QImage
 
+        # File menu: a reliable "Open acquisition folder" (drag-drop can be blocked on Windows by the
+        # GL child pane or an elevation mismatch, so this is the always-works path).
+        file_menu = self.menuBar().addMenu("&File")
+        open_act = QAction("&Open acquisition folder…", self)
+        open_act.triggered.connect(self._open_acquisition_dialog)
+        file_menu.addAction(open_act)
+        open_hcs = QAction("Open a &computed MIP (.hcs)…", self)
+        open_hcs.triggered.connect(self._open_computed)
+        file_menu.addAction(open_hcs)
+
         # Process-well-plates menu (operators). MIP is #1; disabled until an acquisition is open.
         self._op_actions = {}
         proc_menu = self.menuBar().addMenu("&Process well-plates")
@@ -1355,13 +1365,24 @@ class PlateWindow(QMainWindow):
             return None
 
     # -- drag & drop --
+    def _open_acquisition_dialog(self):
+        """File > Open: pick a Squid acquisition folder (the reliable alternative to drag-drop)."""
+        d = QFileDialog.getExistingDirectory(self, "Open a Squid acquisition folder")
+        if d:
+            self.ingest(d)
+
     def dragEnterEvent(self, e):
+        if e.mimeData().hasUrls():
+            e.acceptProposedAction()
+
+    def dragMoveEvent(self, e):   # some Windows setups require dragMove to also accept, or drop is refused
         if e.mimeData().hasUrls():
             e.acceptProposedAction()
 
     def dropEvent(self, e):
         urls = e.mimeData().urls()
         if urls:
+            e.acceptProposedAction()
             self.ingest(urls[0].toLocalFile())
 
     # -- open an acquisition (no processing yet — that's the Process menu) --
