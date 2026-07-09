@@ -36,16 +36,18 @@ python -m squidmip._viewer /path/to/acquisition  # or open one straight away
 To open an acquisition once the window is up: **drag its folder onto the window**, or pass the path
 as above. An acquisition folder is the one holding the numbered timepoint dirs (`0/`, `1/`, ...).
 
-### Windows: a Desktop shortcut
+### Windows: one-command setup + Desktop shortcut
 
-After the environment exists, make a double-click launcher on the Desktop:
+In Windows PowerShell, from the repo root:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\Install-Desktop-Shortcut.ps1
+powershell -ExecutionPolicy Bypass -File scripts\Setup-Windows.ps1
 ```
 
-This adds a **MIP tool** icon to the Desktop that opens the app (drag an acquisition folder onto the
-window). Or just double-click `scripts\mip-tool.bat`.
+This finds conda (even if it is not on PowerShell's PATH and you never ran `conda init`), creates the
+`squidmip` environment if it is missing, and adds a **MIP tool** icon to the Desktop. The shortcut
+launches the app with no console window and with the conda env activated (required on Windows, or Qt
+fails to load). Double-click **MIP tool**, then drag an acquisition folder onto the window.
 
 The window has three panes:
 
