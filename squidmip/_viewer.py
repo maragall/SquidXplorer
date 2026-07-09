@@ -51,12 +51,13 @@ import numpy as np
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap
 from PyQt5.QtWidgets import (
-    QAction, QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QLabel, QMainWindow,
-    QPlainTextEdit, QPushButton, QScrollArea, QSplitter, QTabBar, QTabWidget,
+    QAction, QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel,
+    QMainWindow, QPlainTextEdit, QPushButton, QScrollArea, QSplitter, QTabBar, QTabWidget,
     QVBoxLayout, QWidget,
 )
 
 from squidmip._engine import _default_workers
+from squidmip._layers import OperationStack
 from squidmip._montage import _area_downsample, _hex_to_rgb01, _window
 from squidmip._output import parse_well_id
 
@@ -254,7 +255,13 @@ class PlateOverview(QWidget):
         self._tiles: set[tuple] = set()                        # cells that have a MIP tile painted
         self._canvas = QImage(self._nc * _CELL, self._nr * _CELL, QImage.Format_RGB888)
         self._canvas.fill(QColor(_BG))
-        self._final = None            # crisp global-contrast montage swapped in when the run ends
+        self._final = None            # crisp global-contrast montage of the ACTIVE layer (or None)
+        # Layer stack render: the base ("raw") is self._canvas; each operator draws into its own
+        # per-layer canvas/final. self._active is the layer the plate currently shows (LayersTab picks
+        # it via set_active_layer). Keeps memory to one small montage-canvas per layer used.
+        self._op_canvas: dict[str, QImage] = {}
+        self._op_final: dict[str, QImage] = {}
+        self._active = "raw"
         self._scaled = None           # cached pixmap of (final|canvas) scaled to the current zoom;
         self._scaled_cd = None        # rebuilt only when zoom (cd) or the source image changes — so
         #                               a hover/pan repaint blits 1:1 instead of re-resampling 12 MP.
@@ -281,18 +288,32 @@ class PlateOverview(QWidget):
         w, h = self.width(), self.height()
         return max(2.0, min((w - _HDR - 2 * _PAD) / self._nc, (h - _COLH - 2 * _PAD) / self._nr))
 
+    def _canvas_for(self, layer: str) -> QImage:
+        if layer == "raw":
+            return self._canvas
+        cv = self._op_canvas.get(layer)
+        if cv is None:
+            cv = QImage(self._nc * _CELL, self._nr * _CELL, QImage.Format_RGB888)
+            cv.fill(QColor(_BG))
+            self._op_canvas[layer] = cv
+        return cv
+
+    def _active_source(self) -> QImage:
+        return self._final or self._canvas_for(self._active)
+
     # -- data in --
-    def add_tile(self, ri: int, ci: int, well_id: str, rgb: np.ndarray):
+    def add_tile(self, ri: int, ci: int, well_id: str, rgb: np.ndarray, layer: str = "raw"):
         if (ri, ci) not in self._by_rc:    # ignore a stale tile from a retired run / foreign cell
             return
         rgb = np.ascontiguousarray(rgb, dtype=np.uint8)
         img = QImage(rgb.data, _CELL, _CELL, 3 * _CELL, QImage.Format_RGB888)
-        p = QPainter(self._canvas)
+        p = QPainter(self._canvas_for(layer))
         p.drawImage(ci * _CELL, ri * _CELL, img)
         p.end()
         self._tiles.add((ri, ci))
-        self._scaled = None           # source changed -> the scaled cache is stale
-        self.update()
+        if layer == self._active:         # only the shown layer needs a repaint / cache rebuild
+            self._scaled = None
+            self.update()
 
     def set_status(self, ri: int, ci: int, state: str):
         if (ri, ci) not in self._status:   # never let a foreign/stale key leak into the status map
@@ -305,9 +326,18 @@ class PlateOverview(QWidget):
             self._status[rc] = state
         self.update()
 
-    def set_final(self, img: QImage):
-        self._final = img
-        self._scaled = None           # source changed -> the scaled cache is stale
+    def set_final(self, img: QImage, layer: str = "raw"):
+        self._op_final[layer] = img
+        if layer == self._active:
+            self._final = img
+            self._scaled = None       # source changed -> the scaled cache is stale
+            self.update()
+
+    def set_active_layer(self, layer: str):
+        """Show a layer (LayersTab toggle/reorder). Swaps in its montage + streamed canvas."""
+        self._active = layer
+        self._final = self._op_final.get(layer)   # None for "raw" -> falls back to the base canvas
+        self._scaled = None
         self.update()
 
     def select(self, ri: int, ci: int):
@@ -387,7 +417,7 @@ class PlateOverview(QWidget):
         # resample runs ONCE per zoom/source-change (not every repaint) — pan/hover just re-blit.
         w, h = max(1, int(W)), max(1, int(H))
         if self._scaled is None or self._scaled_cd != cd or self._scaled.width() != w or self._scaled.height() != h:
-            self._scaled = QPixmap.fromImage(self._final or self._canvas).scaled(
+            self._scaled = QPixmap.fromImage(self._active_source()).scaled(
                 w, h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
             self._scaled_cd = cd
         p.drawPixmap(int(ax), int(ay), self._scaled)
@@ -630,6 +660,9 @@ class PlateWindow(QMainWindow):
         self._acq_path = None         # the opened acquisition dir (persist writes next to it)
         self._processed_plate = None  # path of the written plate.ome.zarr once an operator persists it
         self._plate_mode = "raw"      # what the plate view is showing — shown in the plate-pane title
+        self._op_stack = OperationStack()   # the toggleable layer stack (base + applied operators)
+        self._active_op_key = None    # operator whose tiles are streaming into its layer right now
+        self._layers_tab = None       # the Layers tab widget, once opened
         self._op_tabs = {}            # key -> operator-UI widget currently open as a tab in _left_tabs
 
         # THREE-PANE layout. Tabs live ONLY inside the top-left pane (their bar sits at the pane's top,
@@ -764,6 +797,10 @@ class PlateWindow(QMainWindow):
         scroll.setWidget(stack)
         v.addWidget(scroll, 1)
 
+        layers_btn = QPushButton("▤  Layers")              # toggle/reorder applied operation layers
+        layers_btn.setStyleSheet(_BTN_QSS)
+        layers_btn.clicked.connect(lambda: self._open_op_tab("layers", "Layers", self._build_layers_tab))
+        v.addWidget(layers_btn)
         cli_btn = QPushButton("⌨  Open CLI")               # opens a CLI tab within this pane
         cli_btn.setStyleSheet(_BTN_QSS)
         cli_btn.clicked.connect(lambda: self._open_op_tab("cli", "CLI", self._build_cli_tab))
@@ -788,6 +825,9 @@ class PlateWindow(QMainWindow):
         for k, v in list(self._op_tabs.items()):
             if v is w:
                 del self._op_tabs[k]
+        if w is self._layers_tab:                          # drop the stale ref so refresh no-ops
+            self._layers_tab = None
+            self._layers_box = None
         w.deleteLater()
 
     def _activate_operator(self, key: str):
@@ -888,6 +928,56 @@ class PlateWindow(QMainWindow):
             return
         self._run_record(wells, self._rec_dir, int(self._rec_fps.currentText()),
                          record_z=self._rec_z.isChecked())
+
+    def _build_layers_tab(self) -> QWidget:
+        """The Layers tab: the OperationStack as a list of toggleable, reorderable layers. The topmost
+        enabled layer is what the plate shows. Base 'raw' plus each operator you have run."""
+        w = QWidget(); w.setStyleSheet(f"background:{_BG};color:#e6edf3;")
+        self._layers_box = QVBoxLayout(w)
+        self._layers_box.setContentsMargins(14, 12, 14, 12); self._layers_box.setSpacing(6)
+        self._layers_tab = w
+        self._refresh_layers_tab()
+        return w
+
+    def _refresh_layers_tab(self):
+        box = getattr(self, "_layers_box", None)
+        if self._layers_tab is None or box is None:
+            return
+        while box.count():                       # rebuild from the current stack
+            item = box.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        title = QLabel("Layers (top shows on the plate)")
+        title.setStyleSheet("font-size:14px;font-weight:800;")
+        box.addWidget(title)
+        for ly in reversed(self._op_stack.layers()):   # topmost first
+            row = QWidget(); h = QHBoxLayout(row); h.setContentsMargins(0, 0, 0, 0)
+            cb = QCheckBox(ly.label); cb.setChecked(ly.enabled); cb.setStyleSheet("color:#e6edf3;")
+            cb.toggled.connect(lambda on, k=ly.key: self._on_layer_toggle(k, on))
+            up = QPushButton("↑"); up.setStyleSheet(_BTN_QSS); up.setFixedWidth(34)
+            up.clicked.connect(lambda _=False, k=ly.key: self._on_layer_move(k, +1))
+            dn = QPushButton("↓"); dn.setStyleSheet(_BTN_QSS); dn.setFixedWidth(34)
+            dn.clicked.connect(lambda _=False, k=ly.key: self._on_layer_move(k, -1))
+            h.addWidget(cb, 1); h.addWidget(up); h.addWidget(dn)
+            box.addWidget(row)
+        box.addStretch(1)
+
+    def _on_layer_toggle(self, key, enabled):
+        self._op_stack.toggle(key, enabled)
+        self._apply_layers()
+
+    def _on_layer_move(self, key, delta):
+        self._op_stack.move(key, delta)
+        self._apply_layers()
+        self._refresh_layers_tab()
+
+    def _apply_layers(self):
+        """Show the topmost enabled layer on the plate; keep the title in sync."""
+        top = self._op_stack.top_enabled()
+        if top is not None and self._overview is not None:
+            self._overview.set_active_layer(top.key)
+            self._plate_mode = "raw" if top.key == "raw" else top.label
+            self._plate_title.setText(f"{self._acq_name}   ·   {self._plate_mode}")
 
     def _build_cli_tab(self) -> QWidget:
         """The headless-CLI stub as a tab (IMA-186 wires it; this shows the equivalent commands)."""
@@ -1042,6 +1132,9 @@ class PlateWindow(QMainWindow):
         self._overview.wellActivated.connect(self.activate_well)
         self._plate_mode = "raw"                     # a freshly-opened plate shows raw previews
         self._plate_title.setText(f"{self._acq_name}   ·   raw")   # bottom-left plate-pane title
+        self._op_stack.reset()                       # fresh layer stack (base only)
+        self._active_op_key = None
+        self._refresh_layers_tab()
         self._drop.hide()
         self._left_l.addWidget(self._overview, 1)   # fills the pane and self-fits — no scrollbars
 
@@ -1093,6 +1186,10 @@ class PlateWindow(QMainWindow):
         self._overview.set_all_status("processing")          # amber across the plate
         self._plate_mode = label                             # plate now shows this operator's result
         self._plate_title.setText(f"{self._acq_name}   ·   {label}")
+        self._active_op_key = key                            # tiles stream into this layer
+        self._op_stack.add(key, label)                       # push the operator layer onto the stack
+        self._overview.set_active_layer(key)                 # show it
+        self._refresh_layers_tab()
         self._worker = _OperatorWorker(key, self._reader, self._meta, self._fov_index,
                                        self._overview._nr, self._overview._nc, str(out_dir))
         self._worker.tileReady.connect(self._on_tile)
@@ -1134,13 +1231,13 @@ class PlateWindow(QMainWindow):
         self._processed_plate = plate_path
 
     def _on_preview_tile(self, ri, ci, well_id, rgb):
-        if self._overview is not None:                       # raw thumbnail only; status stays grey
-            self._overview.add_tile(ri, ci, well_id, rgb)
+        if self._overview is not None:                       # raw preview fills the base ("raw") layer
+            self._overview.add_tile(ri, ci, well_id, rgb, layer="raw")
 
     def _on_tile(self, ri, ci, well_id, rgb):
         if self._overview is None:
             return
-        self._overview.add_tile(ri, ci, well_id, rgb)
+        self._overview.add_tile(ri, ci, well_id, rgb, layer=self._active_op_key or "raw")
         self._overview.set_status(ri, ci, "done")           # blue
 
     def _on_failed(self, msg):
@@ -1155,7 +1252,8 @@ class PlateWindow(QMainWindow):
             return
         self._final_arr = np.ascontiguousarray(rgb)
         h, w, _ = self._final_arr.shape
-        self._overview.set_final(QImage(self._final_arr.data, w, h, 3 * w, QImage.Format_RGB888))
+        self._overview.set_final(QImage(self._final_arr.data, w, h, 3 * w, QImage.Format_RGB888),
+                                 layer=self._active_op_key or "raw")
 
     # -- navigation links --
     def _on_hover(self, text: str):
