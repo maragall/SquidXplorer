@@ -1,70 +1,148 @@
-# HCS viewer — quick start
+# HCS viewer, quick start
 
-A desktop app for reviewing a **finished** Squid well-plate acquisition and processing it — MIP,
-best-focus reference plane, or an .mp4 movie — **without** hand-tracking which files came from which
-well or round-tripping through FIJI. It reads your data **read-only** and writes results to a folder
-*you* choose.
+A desktop app for reviewing a **finished** Squid well-plate acquisition and processing it (MIP,
+best-focus reference plane, or an .mp4 movie) without hand-tracking which files came from which well.
+It reads your data **read-only** and writes results only to a folder you choose.
 
-> Post-acquisition only: it opens data already saved to disk. It never controls the microscope.
+> Post-acquisition only. It opens data already on disk. It never controls the microscope.
 
 ---
 
 ## 1. Install (one time)
 
-Python 3.10+. In a terminal:
+Python 3.10+.
 
 ```bash
-pip install "git+https://github.com/maragall/ndviewer_light"   # the embedded z-stack/array viewer
-pip install "squidmip[gui]"                                    # the HCS viewer (this tool)
+conda activate ndviewer_light          # or your env with PyQt5 + ndviewer_light
+cd /path/to/SquidMIP
+pip install -e ".[gui]"                 # squidmip + the GUI extra (PyQt5, ndviewer_light, imageio)
 ```
 
-*(Given a folder instead of a package: `cd` into it and `pip install ".[gui]"`.)*
-A frozen desktop build (Linux AppImage / Windows / macOS) is produced by CI — no Python needed then.
-
-## 2. Launch
+Check it imports:
 
 ```bash
-hcs-viewer                     # then drag an acquisition onto the window
-hcs-viewer /path/to/acquisition
+python -c "import squidmip, ndviewer_light; print('ok')"
 ```
 
-## 3. Use it — step by step
+---
 
-1. **Drop your acquisition folder** (the one with the numbered timepoint folder `0/` inside). The
-   plate map draws immediately — one dot per acquired well, laid out A,B,C… down and 1,2,3… across.
-   Grey = not processed. Hover shows the well; **double-click** a well to open its raw z-stack on the
-   right.
-2. **Process wells** (top-left console):
-   - **Maximum Intensity Projection** — collapse each well's z-stack to one max image.
-   - **Reference plane** — pick each well's sharpest z (Tenengrad autofocus).
-   - **Record video (.mp4)** — one movie per well (time-lapse if there's a time series, else a focus
-     sweep), at a playback fps you choose.
-   Pick an operator, choose an output folder, run. Wells turn **amber** (working) → **blue** (done),
-   filling in as they go. A well that can't be read is marked red-✕ and **skipped** — one bad file
-   never aborts the run.
-3. **Output.** MIP / Reference write a **navigable multiscale `plate.ome.zarr`** you can re-open here
-   or in any OME-Zarr tool. Record writes `<well>.mp4`.
-
-## 4. Same thing headless (CLI)
+## 2. Open the viewer
 
 ```bash
-squidmip /path/to/acquisition                        # MIP every well -> <acq>.hcs/plate.ome.zarr
-squidmip /path/to/acquisition --projector reference  # sharpest-plane per well
-squidmip /path/to/acquisition --workers 8 --tiff     # tune threads + also export per-plane TIFFs
+python -m squidmip._viewer                       # opens empty, then drag a folder in
+python -m squidmip._viewer /path/to/acquisition  # or open one straight away
 ```
 
-## 5. Notes
+To open an acquisition once the window is up: **drag its folder onto the window**, or pass the path
+as above. An acquisition folder is the one holding the numbered timepoint dirs (`0/`, `1/`, ...).
 
-- **Nothing is written into your acquisition folder** — outputs go to the folder you pick.
-- **One FOV per well** is the current scope (a well = a condition). Wells with multiple FOVs are
-  reported and **one FOV is sampled** until high-throughput stitching lands.
-- Large plates (384/1536) are supported; the plate view is a navigation map, memory is bounded
-  (it streams from disk — a 1536-well plate uses the same RAM as a 4-well one).
+The window has three panes:
 
-## 6. If something looks wrong
+- **Top left, Process wells.** Pick an operator to run. Home tab lists the operators plus an
+  Open CLI button and a Layers button. Each operator opens its own tab.
+- **Bottom left, plate view.** One cell per well, laid out like the real plate.
+- **Right, detail viewer.** The embedded ndviewer. Shows the z-stack of the well in view.
 
-- *"not a readable Squid acquisition"* — drop the top-level folder (the one with `0/` and
-  `acquisition.yaml`/`acquisition parameters.json` inside).
-- *"ndviewer_light unavailable"* — re-run the first `pip install` line.
-- *"MIP would persist ~N GB … only M GB free"* — point the output at a disk with room (the full-res
-  multiscale plate is large; the estimate is deliberately conservative).
+---
+
+## 3. Navigate the plate
+
+- **Double-click a well** to open it in the detail viewer on the right.
+- **FOV slider** (inside the detail viewer) scrubs across every well of the plate. Each well loads
+  its image on demand and is cached, so revisits are instant.
+- **Play button** on the FOV slider auto-advances through wells. While playing it loads only the
+  plane you are viewing, so it stays responsive.
+- **z / t sliders** (inside the detail viewer) move through focus and time. The z slider disappears
+  when there is nothing to scrub (a projected result has one z).
+- Plate view: the **red box** marks the well in view, a **red dot** follows your cursor. Wheel to
+  zoom, drag to pan.
+- Dots appear on the plate **only while an operator is running**: amber = processing, red x = a well
+  that failed and was skipped. A clean or finished plate shows no dots.
+
+---
+
+## 4. Run MIP or reference plane
+
+Click **Maximum Intensity Projection** or **Reference plane** in Process wells. Its tab opens.
+
+Two ways to run:
+
+- **Preview (subset).** Set "First N wells" and click **Preview**. It computes those wells and
+  streams the result into the plate and the detail viewer, writing nothing to disk. Leave
+  "Save previews to disk" unchecked to just look. This is the cheap way to test an operator before
+  committing the whole plate.
+- **Whole plate.** Choose an output folder (it estimates the disk needed and refuses if it will not
+  fit), then click **Run on the whole plate**. It writes a navigable OME-Zarr plate you can reopen
+  here or in any OME-Zarr tool.
+
+As each well finishes, its result appears in the detail viewer's FOV slider (z collapses to the
+single projected plane) and its tile fills in on the plate.
+
+- **MIP** takes the brightest value across z per pixel.
+- **Reference plane** picks each well's sharpest z (Tenengrad focus) and shows that single plane.
+
+---
+
+## 5. Layers
+
+Click **Layers** (Process wells) to toggle and reorder what the plate shows: the raw preview plus
+each operator you have run. The topmost enabled layer is what the plate renders.
+
+---
+
+## 6. Record a movie
+
+Click **Record video (.mp4)**. Pick scope (current well or every well), playback fps, and an output
+folder, then **Record .mp4**. One movie per well. It runs in the background, so the window stays
+responsive while it encodes. By default it records time (T); tick "Record Z focus sweep" to record
+the z sweep instead.
+
+---
+
+## 7. Run it headless (the CLI)
+
+Same engine, no window. Good for batch and for feeding FIJI.
+
+Open the **CLI** tab (Process wells, Open CLI) for a live terminal inside the app, or run in any
+terminal:
+
+```bash
+squidmip /path/to/acquisition --tiff                 # MIP every well -> OME-Zarr + FIJI TIFFs
+squidmip /path/to/acquisition --projector reference  # sharpest plane per well
+squidmip /path/to/acquisition --limit 8 --tiff       # SLICE: just the first 8 wells (a quick test)
+squidmip /path/to/acquisition --workers 8            # tune throughput
+squidmip --help                                      # all options
+```
+
+- `--tiff` also writes the projected planes as plain TIFFs, so FIJI / ImageJ can open them.
+- `--limit N` processes only the first N wells. Use it to try an operator without paying for the
+  whole plate's compute and disk.
+- A corrupt or missing well is skipped and reported, never aborts the run.
+- Output goes to `<acquisition>.hcs/` next to the input unless you pass `--output-folder`.
+
+---
+
+## 8. Watching memory
+
+While the GUI runs it prints a line every few seconds:
+
+```
+[footprint] peak 1993 MB, current 1186 MB
+```
+
+When you close the window (or if it ever crashes) it prints the final peak:
+
+```
+[footprint] FINAL peak RSS: 1993 MB  (window closed)
+```
+
+Memory stays flat in plate size: only the well in view plus a bounded cache is ever resident, the
+plate lives on disk.
+
+---
+
+## Notes and limits
+
+- One FOV per well is the current scope. Wells with more than one FOV sample the first and say so.
+- The tool never writes into your acquisition folder. Results go only where you point them.
+- Reopening a written `<name>.hcs` plate: it is standard multiscale OME-Zarr.
