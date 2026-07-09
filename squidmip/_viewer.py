@@ -609,29 +609,31 @@ class PlateOverview(QWidget):
             self._scaled_cd = cd
         p.drawPixmap(int(ax), int(ay), self._scaled)
 
-        # per-well DOT: amber = processing, red x = failed, GREY = no image on the active layer yet
-        # (nothing downsampled to show there). A well that HAS an image on the active layer draws no dot
-        # (the image speaks for itself). So a fully-previewed/processed plate shows no dots; a plate
-        # mid-preview shows grey where the operator has not reached. Dot size is a capped absolute size.
+        # per-cell DOT over the WHOLE plate grid (so a sparse acquisition still shows the full plate
+        # shape — e.g. 32x48 for 1536, 16x24 for 384 — with grey dots on the un-acquired wells):
+        # amber = processing, red x = failed, GREY = no image on the active layer, no dot once a cell
+        # HAS an image (the image speaks for itself). Dot size is a capped absolute size.
         d = min(max(3.0, cd * 0.36), 15.0)
         active_tiles = self._tiles_by_layer.get(self._active, set())
-        for (ri, ci), state in self._status.items():
-            has_img = (ri, ci) in active_tiles
-            x0, y0 = ax + ci * cd, ay + ri * cd
-            ex, ey = int(x0 + (cd - d) / 2), int(y0 + (cd - d) / 2)
-            if state == "processing":                   # amber dot
-                p.setPen(Qt.NoPen)
-                p.setBrush(_STATUS["processing"])
-                p.drawEllipse(ex, ey, int(d), int(d))
-            elif state == "failed":                     # red x within the dot box
-                p.setPen(QPen(_STATUS["failed"], max(1.5, min(cd * 0.09, 3.0))))
-                p.drawLine(ex, ey, ex + int(d), ey + int(d))
-                p.drawLine(ex + int(d), ey, ex, ey + int(d))
-            elif not has_img:                           # grey dot ONLY where no downsampled image
-                p.setPen(Qt.NoPen)
-                p.setBrush(_STATUS["empty"])
-                p.drawEllipse(ex, ey, int(d), int(d))
-            # else: has an image on the active layer -> no dot
+        for ri in range(nr):
+            for ci in range(nc):
+                state = self._status.get((ri, ci), "empty")
+                has_img = (ri, ci) in active_tiles
+                x0, y0 = ax + ci * cd, ay + ri * cd
+                ex, ey = int(x0 + (cd - d) / 2), int(y0 + (cd - d) / 2)
+                if state == "processing":                   # amber dot
+                    p.setPen(Qt.NoPen)
+                    p.setBrush(_STATUS["processing"])
+                    p.drawEllipse(ex, ey, int(d), int(d))
+                elif state == "failed":                     # red x within the dot box
+                    p.setPen(QPen(_STATUS["failed"], max(1.5, min(cd * 0.09, 3.0))))
+                    p.drawLine(ex, ey, ex + int(d), ey + int(d))
+                    p.drawLine(ex + int(d), ey, ex, ey + int(d))
+                elif not has_img:                           # grey dot: an empty plate position
+                    p.setPen(Qt.NoPen)
+                    p.setBrush(_STATUS["empty"])
+                    p.drawEllipse(ex, ey, int(d), int(d))
+                # else: has an image on the active layer -> no dot
         p.setBrush(Qt.NoBrush)
 
         p.setPen(QPen(_GRID, 3))       # black grid lines between wells (room for multi-FOV, IMA-187)
