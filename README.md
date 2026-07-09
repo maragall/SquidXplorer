@@ -1,29 +1,24 @@
 # MIP tool
 
-High throughput maximum intensity projection (MIP) for Squid well plate acquisitions. Opens a
+High throughput maximum intensity projection (MIP) for Squid well plate acquisitions. It opens a
 finished acquisition, flattens each well's z stack into one image across the whole plate, and saves a
 result you can reopen here, in napari, or in FIJI. Read only, it never changes your acquisition.
-
-(Package name: `squidmip`. Repo: `maragall/SquidMIP`.)
-
----
 
 ## What it does
 
 - Opens a finished Squid well plate acquisition.
 - Flattens each well's z stack into one max intensity projection (MIP), across the whole plate.
-- Saves the result you can open again here, in napari, or in FIJI.
+- Saves the result as a plate you can reopen here, in napari, or in FIJI.
 - Read only. It never changes your acquisition and never runs the microscope.
-- A second small app, TIFFs to MP4, turns a folder of images into a movie.
 
 ## Setup (one time, Windows)
 
-- Install Python 3.11 from python.org. In the installer, tick "Add python.exe to PATH".
-- Open PowerShell in the tool folder and run the setup line:
+- You need Python 3.10, 3.11, or 3.12.
+- If you do not have Python, install it from https://www.python.org/downloads/ . In the installer, tick "Add python.exe to PATH".
+- Open PowerShell in the tool folder and run:
   - `powershell -ExecutionPolicy Bypass -File scripts\Setup-Windows.ps1`
-- It puts an icon on your Desktop: "MIP tool" (and "TIFFs to MP4" in that repo).
-- Nothing else on your machine is touched.
-- To update later: `git pull` in the folder, then open the icon again.
+- This puts a "MIP tool" shortcut on your Desktop.
+- To update later: go into the folder and run `git pull`, then open the icon again.
 
 ## Open an acquisition
 
@@ -36,7 +31,7 @@ result you can reopen here, in napari, or in FIJI. Read only, it never changes y
 
 - Left: the buttons (run MIP, open CLI, layers).
 - Bottom left: the plate. Grey dots are empty wells, so you always see the full plate shape. Scanned wells show their image.
-- Right: the well in view, with focus (z), time (t), and FOV sliders.
+- Right: the detail viewer for the well in view. It has its own controls: play and frames per second, a channel subset, and z (focus), t (time), and FOV sliders.
 - Double click a well to open it on the right. The red box marks the well in view.
 
 ## Run MIP
@@ -47,28 +42,28 @@ result you can reopen here, in napari, or in FIJI. Read only, it never changes y
 - "Focus reference plane" jumps the z slider to the sharpest plane of the well in view.
 - "Return to raw view" goes back to the unprocessed plate.
 
-## The output
+## The result
 
-- Writes a folder: `<acquisition name>.hcs`, with `plate.ome.zarr` inside.
-- Reopen it here (File, Open a computed MIP), or in napari or FIJI.
-- For plain TIFFs for FIJI, use the command line with `--tiff` (adds a tiff folder next to the zarr).
+- MIP writes a plate folder named `<acquisition name>.hcs`.
+- That folder is your result. To look at it again later, open the "MIP tool" and use File, then Open a computed MIP, and pick that .hcs folder.
+- It also opens in napari or in FIJI.
+- For plain TIFFs you can open directly in FIJI, run from the command line with `--tiff` (it adds a tiff folder next to the plate).
 
-## Command line (optional, for batch or FIJI TIFFs)
+## Command line (optional)
 
 - Click "Open CLI" for a terminal inside the app, or use your own PowerShell.
-- First 8 wells, save TIFFs to Downloads:
-  - `python -m squidmip "C:\path\to\acquisition" --limit 8 --tiff --output-folder ~/Downloads`
-- Drop "--limit 8" to do the whole plate.
-- `python -m squidmip --help` lists all options.
-
-## Make a movie (TIFFs to MP4)
-
-- Separate tool: `maragall/tiff2mp4`.
-- Double click "TIFFs to MP4". Drop a folder of TIFFs on it, set frames per second, click "Make MP4".
-- One TIFF is one frame, in file name order. Set "first N" to try a few frames first.
+- Helpful commands:
+  - MIP the whole plate and save FIJI TIFFs:
+    - `python -m squidmip "C:\path\to\acquisition" --tiff`
+  - Try the first 8 wells first (quick):
+    - `python -m squidmip "C:\path\to\acquisition" --limit 8 --tiff`
+  - Choose where to save:
+    - `python -m squidmip "C:\path\to\acquisition" --tiff --output-folder C:\Users\you\Downloads`
+  - See all options:
+    - `python -m squidmip --help`
 
 ## Good to know
 
-- Wells with more than one FOV: for now it uses the first FOV per well (no stitching yet). Full multi FOV is available on request.
+- Wells with more than one FOV: for now it uses the first FOV per well. Full multi FOV support (for example with the stitcher) is coming soon.
 - It never writes into your acquisition folder. Results go only where you point them.
-- Memory stays low even on a 1536 plate: it only holds the well in view plus a small cache.
+- Memory stays low: it holds at most one well at a time, so even a 1536 plate opens fine.
