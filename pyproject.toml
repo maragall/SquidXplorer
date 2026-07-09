@@ -17,6 +17,7 @@ dependencies = [
     "pyyaml>=6.0",
     "tensorstore>=0.1.45",
     "pillow>=10.0",
+    "pydantic-settings>=2.3",   # declarative CLI (IMA-186), same pattern as the stitcher
 ]
 
 # No tilefusion dependency: IMA-189 ingest is self-contained (see docs/ima-189-eng-review.md).
@@ -34,6 +35,7 @@ test = ["pytest>=7.0", "ome-zarr-models>=1.7"]
 gui = ["PyQt5>=5.15"]
 
 [project.scripts]
+squidmip = "squidmip._cli:main"           # headless CLI (IMA-186): run an operator over an HCS plate
 hcs-viewer = "squidmip._viewer:main"
 squidmip-view = "squidmip._viewer:main"   # legacy alias for the same entry point
 
