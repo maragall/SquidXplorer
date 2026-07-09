@@ -51,7 +51,7 @@ import numpy as np
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap
 from PyQt5.QtWidgets import (
-    QAction, QApplication, QComboBox, QFileDialog, QFrame, QLabel, QMainWindow,
+    QAction, QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QLabel, QMainWindow,
     QPlainTextEdit, QPushButton, QScrollArea, QSplitter, QTabBar, QTabWidget,
     QVBoxLayout, QWidget,
 )
@@ -857,6 +857,9 @@ class PlateWindow(QMainWindow):
         self._rec_fps = QComboBox(); self._rec_fps.setStyleSheet(_COMBO_QSS)
         self._rec_fps.addItems(["2", "5", "10", "15"]); self._rec_fps.setCurrentText("5")
         v.addWidget(self._rec_fps)
+        self._rec_z = QCheckBox("Record Z focus sweep (instead of time)")  # opt-in; default T
+        self._rec_z.setStyleSheet("color:#e6edf3;")
+        v.addWidget(self._rec_z)
         self._rec_dir = None
         pick = QPushButton("Choose output folder…"); pick.setStyleSheet(_BTN_QSS)
         pick.clicked.connect(self._pick_rec_dir)
@@ -883,7 +886,8 @@ class PlateWindow(QMainWindow):
         else:
             self._readout.setText("double-click a well first, or choose 'Every well on the plate'")
             return
-        self._run_record(wells, self._rec_dir, int(self._rec_fps.currentText()))
+        self._run_record(wells, self._rec_dir, int(self._rec_fps.currentText()),
+                         record_z=self._rec_z.isChecked())
 
     def _build_cli_tab(self) -> QWidget:
         """The headless-CLI stub as a tab (IMA-186 wires it; this shows the equivalent commands)."""
@@ -901,7 +905,7 @@ class PlateWindow(QMainWindow):
             "# this tab is a preview; run the command in a terminal.\n")
         return term
 
-    def _run_record(self, wells, out, fps):
+    def _run_record(self, wells, out, fps, record_z=False):
         """Record each well's video → ``<out>/<well>.mp4`` (time-lapse if there's a T series, else a
         Z focus-sweep), composited by display colour at *fps*. Post-acquisition: reads existing frames.
 
@@ -912,7 +916,7 @@ class PlateWindow(QMainWindow):
             return
         from squidmip._video import default_axis, well_movie_frames, write_mp4
         reader, meta = self._reader, self._meta       # `out`, `wells`, `fps` are local args
-        axis = default_axis(meta)
+        axis = default_axis(meta, record_z)
         self._recording = True
         try:
             for i, well in enumerate(wells, 1):

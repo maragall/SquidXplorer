@@ -72,6 +72,10 @@ def well_movie_frames(reader, region: str, fov: int, *, axis: str = "t", z: int 
             yield _composite([reader.read(region, fov, ch, z_use, t) for ch in channels], colors, dmax)
 
 
-def default_axis(meta: dict) -> str:
-    """Auto-pick the video axis: T when there's a time series, else Z (focus sweep)."""
+def default_axis(meta: dict, record_z: bool = False) -> str:
+    """Pick the video axis. Default T (time-lapse): in HCS you project Z (MIP / reference plane) and
+    the movie runs on T. ``record_z=True`` is the opt-in to record the Z focus sweep instead. Falls
+    back to Z when there is no time series."""
+    if record_z:
+        return "z"
     return "t" if meta.get("n_t", 1) > 1 else "z"
