@@ -101,24 +101,39 @@ the z sweep instead.
 
 ## 7. Run it headless (the CLI)
 
-Same engine, no window. Good for batch and for feeding FIJI.
+Same engine, no window. Good for batch and for feeding FIJI. Open the **CLI** tab in Process wells
+(Open CLI) for a live terminal inside the app, or use any terminal.
 
-Open the **CLI** tab (Process wells, Open CLI) for a live terminal inside the app, or run in any
-terminal:
+### See every option
 
 ```bash
-squidmip /path/to/acquisition --tiff                 # MIP every well -> OME-Zarr + FIJI TIFFs
-squidmip /path/to/acquisition --projector reference  # sharpest plane per well
-squidmip /path/to/acquisition --limit 8 --tiff       # SLICE: just the first 8 wells (a quick test)
-squidmip /path/to/acquisition --workers 8            # tune throughput
-squidmip --help                                      # all options
+squidmip --help
 ```
 
-- `--tiff` also writes the projected planes as plain TIFFs, so FIJI / ImageJ can open them.
-- `--limit N` processes only the first N wells. Use it to try an operator without paying for the
-  whole plate's compute and disk.
-- A corrupt or missing well is skipped and reported, never aborts the run.
-- Output goes to `<acquisition>.hcs/` next to the input unless you pass `--output-folder`.
+### Run MIP and save a slice you can open in FIJI
+
+This is the common one. It runs MIP on the first 8 wells and writes them to your Downloads:
+
+```bash
+squidmip "/path/to/acquisition" --limit 8 --tiff --output-folder ~/Downloads
+```
+
+- It creates `~/Downloads/<acquisition-name>.hcs/` with two things:
+  - `plate.ome.zarr/` a navigable multiscale plate.
+  - `tiff/` plain TIFFs, one per well/channel/timepoint. **Open these in FIJI** (File, Open).
+- Drop `--limit 8` to do the whole plate. Drop `--tiff` if you do not need the FIJI copy.
+- `--projector reference` gives the sharpest plane per well instead of MIP.
+- `--workers 8` tunes throughput. A corrupt well is skipped and reported, never aborts the run.
+
+### View the result
+
+Open the written plate straight back in the viewer:
+
+```bash
+python -m squidmip._viewer "~/Downloads/<acquisition-name>.hcs"
+```
+
+or reopen the raw acquisition and use **Preview** in the MIP tab to see it without writing anything.
 
 ---
 
