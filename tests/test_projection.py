@@ -19,6 +19,7 @@ import pytest
 import tifffile
 
 from squidmip import open_reader, project, project_well, select_fovs
+from squidmip.projection import project_reference, select_reference_z
 
 
 # --------------------------------------------------------------------------------------
@@ -258,3 +259,127 @@ def test_project_reference_picks_sharpest_plane():
     # registered as a pluggable projector, so the engine/CLI can select it by name
     import squidmip
     assert "reference" in squidmip.available_projectors()
+
+
+# ======================================================================================
+# D. c-alignment: a z-SELECTING reduction must not re-solve the focus per channel
+#
+# The bug this section exists to prevent, measured on the real 10x tissue z-stack before
+# the fix: 23 of 55 (t, fov) units had their channels land on DIFFERENT z planes, worst
+# case spanning four ({405:3, 488:0, 561:8, 638:9}). Channels sampled at different z do
+# not overlay. project_reference is z-selecting, so the focus is solved ONCE per (t, fov)
+# on a reference channel and that z is read for every channel.
+# ======================================================================================
+# Real Squid channel names: _channels.py refuses an unrecognised channel rather than
+# handing back a placeholder colour, so the fixture must use resolvable names.
+CH_A = "Fluorescence_405_nm_-_Penta"
+CH_B = "Fluorescence_638_nm_-_Penta"
+
+
+def _sharp(shape=(8, 8), dtype=np.uint16):
+    """A high-gradient plane: Tenengrad scores it far above a flat one."""
+    a = np.zeros(shape, dtype=dtype)
+    a[::2, :] = np.iinfo(dtype).max // 4
+    return a
+
+
+def _flat(val=3, shape=(8, 8), dtype=np.uint16):
+    return np.full(shape, val, dtype=dtype)
+
+
+def _per_channel_sharpest(root: Path, sharp_z: dict, nz=4, shape=(8, 8)):
+    """Build a 1-fov acquisition where EACH channel is sharpest at a DIFFERENT z.
+
+    This is the fixture that makes the bug reproducible: a per-channel focus solve picks
+    sharp_z[channel] for each channel, so the channels disagree. A c-aligned solve picks
+    the reference channel's z for all of them.
+    """
+    _write_min_yaml(root, nz=nz)
+    for channel, zc in sharp_z.items():
+        for z in range(nz):
+            _write_plane(root, "A1", 0, z, channel,
+                         _sharp(shape) if z == zc else _flat(shape=shape))
+    return root
+
+
+def test_select_reference_z_returns_position_of_sharpest():
+    assert select_reference_z([_flat(), _sharp(), _flat()]) == 1
+
+
+def test_select_reference_z_ties_keep_earliest():
+    assert select_reference_z([_sharp(), _sharp()]) == 0
+
+
+def test_select_reference_z_empty_raises():
+    with pytest.raises(ValueError, match="at least one plane"):
+        select_reference_z(iter([]))
+
+
+def test_project_reference_advertises_that_it_selects_an_index():
+    """The marker attribute IS the contract; project_well dispatches on it."""
+    assert getattr(project_reference, "select_index", None) is select_reference_z
+    assert getattr(project, "select_index", None) is None   # MIP combines, it does not select
+
+
+def test_the_fixture_really_does_split_channels_per_channel(tmp_path):
+    """Guard the guard: prove this fixture WOULD misregister under a per-channel solve.
+
+    Without this, the invariant test below could pass against a fixture where every
+    channel happens to be sharpest at the same z -- i.e. it would prove nothing.
+    """
+    root = _per_channel_sharpest(tmp_path / "split", {CH_A: 0, CH_B: 3})
+    reader = open_reader(str(root))
+    per_channel = {
+        ch: reader.metadata["z_levels"][
+            select_reference_z(reader.read("A1", 0, ch, z, 0)
+                               for z in reader.metadata["z_levels"])
+        ]
+        for ch in [c["name"] for c in reader.metadata["channels"]]
+    }
+    assert len(set(per_channel.values())) > 1, (
+        f"fixture is useless -- channels already agree: {per_channel}")
+
+
+def test_reference_projection_lands_every_channel_on_one_z(tmp_path):
+    """THE INVARIANT. len({picked_z[c] for c in channels}) == 1, checked on data."""
+    root = _per_channel_sharpest(tmp_path / "aligned", {CH_A: 0, CH_B: 3})
+    reader = open_reader(str(root))
+    channels = [c["name"] for c in reader.metadata["channels"]]
+    picked: dict = {}
+    project_well(reader, "A1", 0, reduce=project_reference, picked_z=picked)
+    assert len({picked[(0, c)] for c in channels}) == 1, picked
+
+
+def test_reference_projection_defaults_to_the_first_channel(tmp_path):
+    """The default is deterministic: the acquisition's first channel drives focus."""
+    root = _per_channel_sharpest(tmp_path / "first", {CH_A: 0, CH_B: 3})
+    reader = open_reader(str(root))
+    picked: dict = {}
+    project_well(reader, "A1", 0, reduce=project_reference, picked_z=picked)
+    assert picked[(0, CH_A)] == 0        # CH_A is sharpest at z 0, and CH_A leads
+    assert picked[(0, CH_B)] == 0        # CH_B follows rather than picking its own z 3
+
+
+def test_reference_channel_override_moves_every_channel(tmp_path):
+    root = _per_channel_sharpest(tmp_path / "override", {CH_A: 0, CH_B: 3})
+    reader = open_reader(str(root))
+    picked: dict = {}
+    project_well(reader, "A1", 0, reduce=project_reference,
+                 reference_channel=CH_B, picked_z=picked)
+    assert picked[(0, CH_A)] == picked[(0, CH_B)] == 3
+
+
+def test_unknown_reference_channel_is_loud(tmp_path):
+    root = _per_channel_sharpest(tmp_path / "bad", {CH_A: 0, CH_B: 3})
+    reader = open_reader(str(root))
+    with pytest.raises(ValueError, match="is not a channel"):
+        project_well(reader, "A1", 0, reduce=project_reference, reference_channel="Fluorescence_999_nm_-_Penta")
+
+
+def test_a_combining_reduction_records_no_picked_z(tmp_path):
+    """A MIP consumes every z, so no single index describes it; picked_z stays empty."""
+    root = _per_channel_sharpest(tmp_path / "mip", {CH_A: 0, CH_B: 3})
+    reader = open_reader(str(root))
+    picked: dict = {}
+    project_well(reader, "A1", 0, reduce=project, picked_z=picked)
+    assert picked == {}
