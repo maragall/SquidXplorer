@@ -7,10 +7,11 @@ _viewer.py moved, so READ THE PROSE FIRST — the diff below is a convenience, t
 specification. If the diff rejects, hand-apply from the prose; it is two edits and one new
 method.
 
-Verified, not guessed: this exact patch was applied to a scratch copy of _viewer.py at
-493045d, and against it `tests/test_viewer.py` ran 157 passed, plus an added check that opens
-all three new tabs on the `squid_dataset` fixture (1 passed). _viewer.py in the worktree is
-untouched.
+Verified, not guessed, TWICE — once at 493045d and again after rebasing onto main at db52703
+(IMA-220, which moved _viewer.py by ~110 lines). Both times: `git apply` clean, then
+`tests/test_viewer.py` 158 passed — 157 existing plus the added check below that opens all
+three new tabs on the `squid_dataset` fixture. _viewer.py in the worktree is untouched; the
+patch was reverted after each verification.
 
 WHAT IT ADDS
 ------------
@@ -19,8 +20,9 @@ opening a PREVIEW-ONLY tab. Nothing else in the viewer changes: the projector se
 CLI already read `available_projectors()`, so the three names appear there with no edit at all
 once `squidmip/__init__.py` imports the operator modules (that part is already committed).
 
-HUNK 1 — three entries in the `_OPERATIONS` tuple (currently ~line 554-565)
---------------------------------------------------------------------------
+HUNK 1 — three entries in the `_OPERATIONS` tuple (~line 560 at db52703; FIND IT BY NAME,
+not by line number — it has already moved twice)
+-----------------------------------------------------------------------------------------
 Append three `Operation(...)` records after the existing `minerva` entry, INSIDE the closing
 `)` of the tuple. Nothing else in that region moves.
 
@@ -43,7 +45,7 @@ already generic over `_OPERATIONS`, so this hunk alone is what makes the three f
 in the UI. No dispatch edit anywhere.
 
 HUNK 2 — three thin builders plus one generic `_build_plane_op_tab`, inserted between
-`_build_stitch_tab` and `_build_run_tab` (currently ~line 3174)
+`_build_stitch_tab` and `_build_run_tab` (~line 3285 at db52703 — again, find by name)
 --------------------------------------------------------------------------------------
 Insert, in this order, immediately after `_build_stitch_tab`'s `return` line and immediately
 before `def _build_run_tab(self, op)`:
@@ -103,7 +105,7 @@ there, not in my files). This is the one I ran to verify the patch:
         win.close()
 
 =====================================================================================
-THE DIFF (against _viewer.py at 493045d; -U6 context)
+THE DIFF (generated at 493045d, re-verified clean against db52703; -U6 context)
 =====================================================================================
 --- a/squidmip/_viewer.py
 +++ b/squidmip/_viewer.py
