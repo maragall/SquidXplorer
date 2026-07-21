@@ -156,25 +156,45 @@ def test_single_row_region_gets_fov_zero(tmp_path):
     assert set(positions) == {(f"A{i}", 0) for i in range(1, 6)}
 
 
-def test_multi_row_region_is_omitted_not_guessed(tmp_path):
-    # THE decision this module exists for. Row order cannot be verified, so we decline.
+def test_multi_row_region_indexed_by_row_order_when_count_agrees(tmp_path):
+    # The IMA-187 case: multi-FOV wells in the unlabelled schema with no labelled copy.
     write_coordinates_unlabelled(
         tmp_path,
         [("B2", 1.0, 2.0, 0.0), ("B2", 1.5, 2.0, 0.0), ("B2", 2.0, 2.0, 0.0)],
     )
-    with pytest.warns(UserWarning, match="omitted rather than guessed"):
-        positions = load_fov_positions_um(tmp_path)
+    positions = load_fov_positions_um(tmp_path, None, {"B2": [0, 1, 2]})
+    assert set(positions) == {("B2", 0), ("B2", 1), ("B2", 2)}
+    assert positions[("B2", 0)][0] == pytest.approx(1000.0)      # row 0 -> fov 0
+    assert positions[("B2", 2)][0] == pytest.approx(2000.0)      # row 2 -> fov 2
+
+
+def test_multi_row_region_omitted_when_count_disagrees(tmp_path):
+    # An aborted run leaves the planned table longer than the images: row position would shift
+    # every subsequent FOV, so the region is dropped rather than mis-assigned.
+    write_coordinates_unlabelled(
+        tmp_path,
+        [("B2", 1.0, 2.0, 0.0), ("B2", 1.5, 2.0, 0.0), ("B2", 2.0, 2.0, 0.0)],
+    )
+    with pytest.warns(UserWarning, match="row count disagrees"):
+        positions = load_fov_positions_um(tmp_path, None, {"B2": [0, 1]})
     assert positions == {}
 
 
-def test_multi_row_region_omitted_while_single_row_regions_survive(tmp_path):
+def test_mismatched_region_dropped_while_agreeing_regions_survive(tmp_path):
     write_coordinates_unlabelled(
         tmp_path,
         [("B2", 1.0, 2.0, 0.0), ("B3", 3.0, 4.0, 0.0), ("B3", 3.5, 4.0, 0.0)],
     )
-    with pytest.warns(UserWarning, match="omitted rather than guessed"):
-        positions = load_fov_positions_um(tmp_path)
+    with pytest.warns(UserWarning, match="row count disagrees"):
+        positions = load_fov_positions_um(tmp_path, None, {"B2": [0], "B3": [0]})
     assert set(positions) == {("B2", 0)}
+
+
+def test_multi_row_without_fovs_per_region_warns_but_indexes(tmp_path):
+    write_coordinates_unlabelled(tmp_path, [("B2", 1.0, 2.0, 0.0), ("B2", 1.5, 2.0, 0.0)])
+    with pytest.warns(UserWarning, match="without a cross-check"):
+        positions = load_fov_positions_um(tmp_path)
+    assert set(positions) == {("B2", 0), ("B2", 1)}
 
 
 def test_labelled_multi_fov_is_not_omitted(tmp_path):
@@ -228,13 +248,16 @@ def test_positions_without_matching_files_warn_but_are_kept(tmp_path):
     assert set(positions) == {("B2", 0), ("B2", 9)}   # kept — filenames inform, never gate
 
 
-def test_reordered_rows_are_not_rescued_by_the_cross_check(tmp_path):
-    # Why D5 was reversed: a set/count check is permutation-invariant. Here the fabricated set
-    # would equal the filename set, yet ordering is unverifiable — so we omit instead.
+def test_count_check_is_permutation_invariant_by_construction(tmp_path):
+    # Documents the residual risk honestly: the count check cannot detect a reordered file.
+    # Both orderings parse, and they disagree — which is why ordering rests on the writer
+    # contract (verified below against real data), not on this check.
+    write_coordinates_unlabelled(tmp_path, [("B2", 1.0, 0.0, 0.0), ("B2", 5.0, 0.0, 0.0)])
+    forward = load_fov_positions_um(tmp_path, None, {"B2": [0, 1]})
     write_coordinates_unlabelled(tmp_path, [("B2", 5.0, 0.0, 0.0), ("B2", 1.0, 0.0, 0.0)])
-    with pytest.warns(UserWarning):
-        positions = load_fov_positions_um(tmp_path, None, {"B2": [0, 1]})
-    assert positions == {}
+    reversed_ = load_fov_positions_um(tmp_path, None, {"B2": [0, 1]})
+    assert set(forward) == set(reversed_)
+    assert forward[("B2", 0)] != reversed_[("B2", 0)]
 
 
 # --- reader integration (D6, D10) --------------------------------------------
@@ -301,6 +324,41 @@ def test_ome_reader_exposes_positions(tmp_path):
     reader = open_reader(tmp_path)
     assert type(reader).__name__ == "SquidOMEReader"
     assert reader.metadata["fov_positions_um"][("B2", 0)][0] == pytest.approx(1000.0)
+
+
+def test_row_order_matches_labelled_truth_on_real_data():
+    """The assumption row-order fabrication rests on, pinned to real Squid output.
+
+    20x_scan_2025-09-05 is the one dataset carrying BOTH schemas for the same acquisition, so
+    the unlabelled root table can be checked against the labelled timepoint table's real fov
+    column. If Squid ever stops writing root rows in acquisition order, this fails loudly here
+    rather than silently misplacing tiles in the IMA-187 mosaic.
+    """
+    import csv
+    from pathlib import Path
+
+    root_dir = Path("/Users/julioamaragall/Downloads/20x_scan_2025-09-05_17-57-50")
+    if not (root_dir / "coordinates.csv").is_file() or not (root_dir / "0" / "coordinates.csv").is_file():
+        pytest.skip("20x_scan dataset (with both schemas) not present")
+
+    with (root_dir / "0" / "coordinates.csv").open(newline="", encoding="utf-8-sig") as fh:
+        truth = {
+            (r["region"], int(r["fov"])): (float(r["x (mm)"]) * 1000, float(r["y (mm)"]) * 1000)
+            for r in csv.DictReader(fh)
+        }
+    fovs_per_region: dict = {}
+    for region, fov in truth:
+        fovs_per_region.setdefault(region, []).append(fov)
+
+    # Parse the ROOT (unlabelled) table only — this is the fabricating path.
+    fabricated = load_fov_positions_um(root_dir, root_dir, fovs_per_region)
+    assert set(fabricated) == set(truth), "fabricated keys diverged from the labelled truth"
+
+    worst = max(
+        max(abs(fabricated[k][0] - truth[k][0]), abs(fabricated[k][1] - truth[k][1]))
+        for k in truth
+    )
+    assert worst < 2.0, f"row-order fabrication disagrees with labelled truth by {worst:.3f} um"
 
 
 # --- real data (skip when absent) --------------------------------------------

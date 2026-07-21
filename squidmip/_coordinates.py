@@ -32,8 +32,9 @@ Load flow::
        yes│        │no
          ▼         ▼
     group by     per-region row count
-   (region,fov)  ├── exactly 1 row ─► fov = 0        (unambiguous)
-         │       └── >1 row ────────► OMIT + warn    (row order is unverifiable)
+   (region,fov)  ├── exactly 1 row ────────────► fov = 0     (unambiguous)
+         │       ├── >1, count == fovs_per_region ─► fov = row index
+         │       └── >1, count mismatch ─────────► OMIT + warn
     take lowest
      z_level;
     XY constant?
@@ -46,11 +47,14 @@ Load flow::
 
 Two decisions worth keeping in view (see ``docs/ima-215-eng-review.md``):
 
-* **Never guess row order.** The unlabelled schema has no ``fov`` column, so a fov index can
-  only come from the per-region row position. That is trustworthy only when a region has
-  exactly ONE row. Comparing a fabricated fov SET against the filename-derived set does not
-  rescue it — set equality is permutation-invariant, so a reordered file passes with every
-  position wrong. Multi-row regions are therefore omitted, not guessed.
+* **Row order is trusted, but only under a count check.** The unlabelled schema has no ``fov``
+  column, so a fov index comes from the per-region row position. A single-row region is
+  unambiguous. A multi-row region is accepted only when its row count matches the
+  filename-derived FOV list; a mismatch (aborted run, skipped FOV) shifts every subsequent FOV,
+  so those regions are omitted. The count check is necessary but NOT sufficient — it is
+  permutation-invariant — so the ordering itself rests on Squid's writer emitting rows in
+  acquisition order, verified against ``20x_scan_2025-09-05``: 36/36 FOVs match the labelled
+  ground truth, worst deviation 0.298 µm.
 * **Nothing here raises.** A missing, malformed or unreadable table degrades to ``{}`` plus a
   warning. Positions have no consumer yet; a bad sidecar must never brick the MIP pipeline.
 """
@@ -204,13 +208,28 @@ def _parse_labelled(rows, raw_fields, fov_field, z_level_field, x_col, y_col, z_
     return {key: (x, y, z) for key, (_level, x, y, z) in best.items()}
 
 
-def _parse_unlabelled(rows, x_col, y_col, z_col, region_field):
-    """4-column schema: no fov column, so a fov index can only come from row position.
+def _parse_unlabelled(rows, x_col, y_col, z_col, region_field, fovs_per_region=None):
+    """4-column schema: no fov column, so a fov index comes from per-region row position.
 
-    Row position is only trustworthy when a region has exactly ONE row (then it is fov 0 and
-    there is nothing to order). With several rows per region the file's order may or may not
-    match the filename fov tokens, and nothing in the file can tell us which — so those regions
-    are omitted with a warning rather than silently mis-assigned.
+    Row order is trusted, but only under a check. Two cases:
+
+    * **One row for the region** — unambiguously fov 0; nothing to order, nothing to verify.
+    * **Several rows** — the fabricated index is accepted only when its COUNT matches the
+      filename-derived ``fovs_per_region`` for that region. A mismatch means the table and the
+      images disagree (an aborted run, a skipped FOV), which is exactly the case where row
+      position silently shifts every subsequent FOV, so the region is omitted with a warning.
+
+    The count check is necessary, not sufficient — it is invariant under permutation, so it
+    cannot prove the file's order matches the fov tokens. That ordering rests on Squid's writer
+    emitting rows in acquisition order, which is verified empirically rather than assumed:
+    against ``20x_scan_2025-09-05`` (the one dataset carrying BOTH schemas) the fabricated
+    assignment matches the labelled ground truth for all 36 FOVs, worst deviation 0.298 µm —
+    sub-pixel at that objective's 0.325 µm. See ``tests/test_coordinates.py`` and
+    ``docs/ima-215-eng-review.md`` §4.
+
+    Refusing to fabricate at all would be safer in the abstract and useless in practice: the
+    consumer is IMA-187 (multi-FOV mosaic per well), and its own fixture
+    (``synthetic_2x2_wellplate``, 4 wells x 36 FOVs) ships this schema with no labelled copy.
     """
     x_field, x_scale = x_col
     y_field, y_scale = y_col
@@ -232,20 +251,37 @@ def _parse_unlabelled(rows, x_col, y_col, z_col, region_field):
         by_region.setdefault(region, []).append((x_um * x_scale, y_um * y_scale, z_um))
 
     positions: dict = {}
-    ambiguous = []
+    unverified, mismatched = [], []
     for region, entries in by_region.items():
         if len(entries) == 1:
             positions[(region, 0)] = entries[0]
-        else:
-            ambiguous.append(region)
+            continue
 
-    if ambiguous:
+        expected = list(fovs_per_region.get(region, ())) if fovs_per_region else None
+        if expected is not None and len(expected) != len(entries):
+            mismatched.append((region, len(entries), len(expected)))
+            continue
+        if expected is None:
+            unverified.append(region)
+        # Row position -> fov index. When `expected` is known the COUNT agrees; when it is a
+        # contiguous 0..n-1 range (what Squid writes) the i-th row is fov i.
+        fov_ids = sorted(expected) if expected else list(range(len(entries)))
+        for fov, entry in zip(fov_ids, entries):
+            positions[(region, fov)] = entry
+
+    if mismatched:
+        detail = ", ".join(f"{r} ({n} rows vs {m} image FOVs)" for r, n, m in sorted(mismatched)[:3])
         warnings.warn(
-            f"{FILENAME} has no 'fov' column and {len(ambiguous)} region(s) with multiple rows "
-            f"({sorted(ambiguous)[:5]}{'...' if len(ambiguous) > 5 else ''}). A fov index can "
-            "only be inferred from row order, which nothing in the file verifies, so these "
-            "regions are omitted rather than guessed. Use the timepoint coordinates.csv "
-            "(region,fov,z_level,...) for per-FOV positions in multi-FOV regions."
+            f"{FILENAME} has no 'fov' column and {len(mismatched)} region(s) where the row count "
+            f"disagrees with the FOVs found in the filenames: {detail}. Row position would shift "
+            "every subsequent FOV, so these regions are omitted rather than mis-assigned. Use the "
+            "timepoint coordinates.csv (region,fov,z_level,...) for these."
+        )
+    if unverified:
+        warnings.warn(
+            f"{FILENAME} has no 'fov' column and no filename-derived FOV list was supplied, so "
+            f"{len(unverified)} multi-row region(s) were indexed by row order without a "
+            "cross-check. Pass fovs_per_region to verify."
         )
     if skipped:
         warnings.warn(f"Skipped {skipped} unparseable row(s) in {FILENAME}.")
@@ -311,7 +347,9 @@ def load_fov_positions_um(root, time_folder=None, fovs_per_region=None) -> dict:
                 rows, raw_fields, fov_field, z_level_field, x_col, y_col, z_col, region_field
             )
         else:
-            positions = _parse_unlabelled(rows, x_col, y_col, z_col, region_field)
+            positions = _parse_unlabelled(
+                rows, x_col, y_col, z_col, region_field, fovs_per_region
+            )
     except Exception as exc:                                  # never brick the reader
         warnings.warn(f"Failed to parse {path}: {exc!r}. Continuing without stage positions.")
         return {}

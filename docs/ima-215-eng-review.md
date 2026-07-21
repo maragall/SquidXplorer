@@ -3,8 +3,8 @@
 **Ticket:** IMA-215 — Coordinates reader (parse `coordinates.csv` → per-FOV stage positions)
 **Branch:** `juliomaragall/ima-215-coords-reader`
 **Review:** `/plan-eng-review`, completed 2026-07-20. Outside voice: Claude subagent (Codex not installed).
-**Status:** IMPLEMENTED — CLEARED WITH CONCERNS — 8 issues found, 12 decisions locked, 2 decisions reversed by the
-outside voice, 0 unresolved, 1 strategic flag left open for Julio.
+**Status:** IMPLEMENTED — CLEARED — 8 issues found, 12 decisions locked, 2 decisions reversed by the
+outside voice, 0 unresolved. The strategic flag is RESOLVED (§8).
 
 > This document is the reviewable record of the plan-eng-review. The working plan lives at
 > `.spec/open/ima-215.md` (gitignored), so everything load-bearing is reproduced here and the
@@ -85,7 +85,7 @@ ignored, but that float noise is itself load-bearing for D3-R below.
 | **D2** | Read `<acq>/{t}/coordinates.csv` by preference, fall back to `<acq>/coordinates.csv`. Dispatch on the presence of `fov`/`z_level` columns, tolerant of BOM, CRLF, trailing whitespace and the optional `time` column. | *Rationale restated after the outside voice.* The XY gain is only ~1 pixel, so accuracy is **not** the justification. The real one: the root file has **no fov labels and no z at all** (empty in 3 of 4 datasets). The timepoint file is the only source with both. |
 | **D3-R** | Collapse to `(region,fov) → (x, y, z@ lowest z_level)`. Check XY constancy across z with a **sub-pixel tolerance and a warning**, not a hard assert. | *Revised by outside voice.* Float repr noise is real and observed (914 lines of it). A hard assert inside `metadata` would brick the whole reader on formatting drift. |
 | **D4-R** | Normalize everything to micrometres, and name the key **`fov_positions_um`**. | `z (um)`≈3930 vs `z (mm)`≈3.9 is a silent 1000× error. *Revised:* every other physical key carries its unit (`dz_um`, `pixel_size_um`), so the bare name was inconsistent. |
-| **D5-R** | **Fabricate a fov index only for regions with exactly one row.** For multi-row regions in the unlabelled schema, **omit the region and warn** — never guess ordering. | **Reversal.** My original D5 compared the fabricated fov set against `fovs_per_region` and raised on mismatch. That check is **permutation-invariant**: a shuffled CSV has identical counts and passes, so it did not catch the bug it existed for. Single-row regions are unambiguous (fov=0); multi-row ordering is unverifiable, so we decline rather than guess. |
+| **D5-R2** | Single-row region → fov 0. Multi-row region → index by row order, but **only when the row count matches the filename-derived `fovs_per_region`**; on mismatch, omit the region and warn. | **Revised twice.** The original D5 raised on a set comparison that is permutation-invariant, so it caught nothing. D5-R then omitted all multi-row regions — safe in the abstract, but it returned **0 entries** for `synthetic_2x2_wellplate`, which is IMA-187's own multi-FOV fixture, i.e. it blocked the consumer this ticket exists to serve. D5-R2 keeps the count check (it catches the realistic corruption: an aborted run leaving the planned table longer than the images) and grounds the ordering empirically instead of assuming it — see §4a. |
 | **D6** | Shared parser in new `squidmip/_coordinates.py`, wired into `SquidReader` **and** `SquidOMEReader`. | The two classes deliberately present the same metadata interface, and the only 10-z dataset is OME-TIFF. |
 | **D7** | Fix four stale docstrings: `reader.py:28`, `reader.py:29` (already false today), `_acquisition.py:13`, `tests/conftest.py:5`. | `reader.py:29` promises "the flat JSON as a legacy fallback" while `_acquisition.py:47` raises `FileNotFoundError` and refuses JSON. Stale docs are worse than none. |
 | **D8** | stdlib `csv`, not pandas. | `pandas>=2.0` at `pyproject.toml:17` has **zero** usage package-wide. A ≤7-column file does not justify the first import. Removal filed as a TODO rather than done here (packaging blast radius). |
@@ -106,7 +106,7 @@ raised 14 points. Dispositions:
 |---|---|---|
 | 1 | No evidence dataset is openable (missing `acquisition.yaml`) | **Accepted, and escalated** — I additionally found `sim_1536wp`'s 122,880 TIFFs are broken symlinks. Fixture work added as T7. |
 | 2 | D5 refuses on a normal condition; could brick `metadata` | **Accepted** → D5-R omits+warns, D9-R never raises. |
-| 3 | D5 is permutation-invariant, doesn't catch its target bug | **Accepted — the most important finding.** → D5-R. |
+| 3 | D5 is permutation-invariant, doesn't catch its target bug | **Accepted — the most important finding.** → D5-R, then D5-R2 after §4a. |
 | 4 | Dual-format path buys ~1 pixel; parse labelled-only instead | **Partially accepted.** Delta confirmed at 1.08 px, so D2's rationale is restated. Rejected as a plan: labelled-only drops `sim_1536wp`, the 1536-well plate case, which is the tool's headline input. |
 | 5 | `original_coordinates` differs from `0/` | **Rejected on the evidence.** All 914 differing lines are float repr noise, not semantic. Kept as a TODO. |
 | 6 | OME datasets carry in-band positions | **Accepted as a deferral** → D12. |
@@ -117,13 +117,33 @@ raised 14 points. Dispositions:
 | 11 | pandas decision never made | **Rejected as stated** — D8 did make it (stdlib `csv`). Removal stays a TODO, not this ticket. |
 | 12 | Header-spacing tell distinguishes nothing | **Accepted** → D2 dispatches on the `fov`/`z_level` column set. |
 | 13 | Hard XY assert will fire on float formatting | **Accepted** → D3-R uses tolerance + warn. |
-| 14 | Strategic: zero consumers, reverses IMA-189, absent from build order | **Surfaced, not resolved** → Section 8. |
+| 14 | Strategic: zero consumers, reverses IMA-189, absent from build order | **Investigated and rejected on the evidence** → §8. IMA-215 is Linear sub-task **B1 of IMA-187** (Urgent keystone, current cycle). |
 
 **Cross-model tension.** The outside voice argued for the minimal labelled-only parser (its #4); I
 kept the dual-format path because `sim_1536wp` is the 1536-well plate the product is built around
 and labelled-only silently yields nothing for it. D5-R absorbs the safety half of that argument —
 we no longer *guess* in the ambiguous case, we decline — which is where the two positions actually
 converge.
+
+### 4a. The experiment that settled row-order fabrication
+
+D5-R assumed the ordering of the unlabelled table could not be checked. It can, on one dataset:
+`20x_scan_2025-09-05` carries BOTH schemas for the same acquisition, so the fabricated
+row-order index can be compared against the labelled table's real `fov` column.
+
+**Result: 36 of 36 FOVs match, worst deviation 0.298 µm** — sub-pixel at that objective's
+0.325 µm. Squid's writer does emit root rows in acquisition order.
+
+That is now pinned by `test_row_order_matches_labelled_truth_on_real_data`, so if the writer
+ever changes, this fails loudly instead of silently misplacing tiles in the IMA-187 mosaic.
+
+The residual risk is stated rather than hidden: the count check cannot detect a *reordered*
+file (`test_count_check_is_permutation_invariant_by_construction` documents exactly that), so
+ordering rests on the writer contract above, not on the check.
+
+**Impact of the fix:** `synthetic_2x2_wellplate` (4 wells × 36 FOVs, unlabelled schema, no
+labelled copy — IMA-187's own shape) went from **0 entries under D5-R to 144 entries with zero
+warnings**. The other three datasets are unchanged.
 
 ---
 
@@ -214,22 +234,29 @@ none can brick `metadata` for a field that currently has no consumer.
 
 ---
 
-## 8. Open flag for Julio (not resolved by this review)
+## 8. Strategic flag — RESOLVED
 
-The outside voice's strongest point is strategic, and I could not settle it from the codebase:
+The outside voice argued this ticket may not be worth building: zero consumers, reverses an
+IMA-189 decision, absent from the build order. Checked against Linear, each premise fails:
 
-- **No consumer exists.** `grep` for the field returns zero hits.
-- **It reverses a deliberate IMA-189 decision**, whose rationale is written into three docstrings.
-- **IMA-215 is absent from the recorded build order** (189→183→188→184→185→186→192).
-- **Nothing validates it end to end**: no real dataset is currently openable.
-- **The consumer's requirement is unknown** — whether IMA-193 wants the planned grid or the actual
-  post-AF positions, stage-absolute or well-relative, is undecided. If it wants something other
-  than what D2/D3-R produce, this parser gets rewritten.
+- **The consumer exists and is the parent.** IMA-215's Linear `parentId` is **IMA-187** — it is
+  literally *"B1 · Coordinates reader"*, the first sub-task of *"Multi-FOV mosaic in the plate
+  view (keystone)"* (**Urgent**, 5 points, project SquidHCS v.1, current cycle). `_montage.py:247`
+  already carries the placeholder: *"a well will hold a multi-FOV grid later (IMA-187)"*.
+- **IMA-193 was never the consumer.** It is **Done** (completed 2026-07-10), so the "what does
+  IMA-193 want" question was moot.
+- **The team's model already assumes this field.** IMA-231 (*B7 · FOV ROI table*) states:
+  *"Not needed for the live viewer (coordinates.csv already has positions)."*
+- **"Absent from the build order" was stale.** 189→183→188→184→185→186→192 is the old MIP-tool
+  order. IMA-215 belongs to the newer SquidHCS v.1 stream as B1 — the first item, not an orphan.
+- **It does not really reverse IMA-189.** IMA-189 deferred positions as *"a stitching concern,
+  deferred to the ticket that needs them."* IMA-187 is that ticket.
 
-I built the plan to minimise what gets thrown away if that happens: one self-contained module, no
-guessing, non-fatal everywhere. **If you want the smaller bet, the alternative is the outside
-voice's labelled-format-only parser (~40 lines, no fabrication, no `sim_1536wp` support)** — say so
-and T1/T2 collapse into one task.
+**Stage-absolute is the right storage.** A per-well mosaic needs offsets relative to the well,
+but those are a subtraction away from absolute stage coordinates, whereas the reverse is lossy.
+
+**Consequence for the code:** resolving this exposed a real defect. D5-R's blanket omission of
+multi-row unlabelled regions returned nothing for IMA-187's own fixture. Fixed by D5-R2 (§4a).
 
 ---
 
@@ -243,6 +270,7 @@ and T1/T2 collapse into one task.
 - [x] **T6 (P2, human ~45min / CC ~10min)** — docs: fix four stale docstrings, extend the discovery diagram (D7)
 - [x] **T7 (P1, human ~2h / CC ~15min)** — tests: add 7-col / 4-col / absent CSV fixtures to `conftest.py` **and update the `test_reader.py:33` key-set assertion** (D13)
 - [x] **T8 (P3, human ~15min / CC ~5min)** — document the t=0 scope in the metadata contract (D11)
+- [x] **T9 (P1)** — D5-R2: row-order indexing under a count check + the real-data ordering pin (§4a)
 
 **Status:** all tasks landed.
 
