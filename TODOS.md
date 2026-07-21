@@ -50,3 +50,11 @@ so a future session doesn't rediscover it from zero.
 - **Cons:** Different repo, different owner; not on any SquidMIP critical path.
 - **Context:** SquidMIP does **not** carry this bug — IMA-189's `squidmip/_channels.py` already resolves `display_color` correctly (top-level v1.0+ *and* nested `camera_settings`, mapped by name, raises on unresolved), and IMA-184 consumes `metadata.channels[].display_color` rather than re-parsing the yaml. This TODO is purely a flag for whoever owns `~/CEPHLA/projects/explorer/squid2minerva`.
 - **Depends on / blocked by:** squid2minerva maintainer.
+
+## True per-FOV stage positions for the ROI table → stitching/fusion ticket
+- **What:** Populate `FOV_ROI_table` with real per-FOV stage origins (µm, relative to the well) instead of the whole-image `(0,0,0)` ROI that IMA-231 ships.
+- **Why:** IMA-231's stated purpose — letting Fractal recover FOV boundaries — is only actually delivered once the ROIs carry real positions. Today every ROI is the field's own extent, which Fractal could already derive from the array shape + `multiscales`.
+- **Pros:** Makes the ROI table carry information that doesn't already exist elsewhere; the same coordinate work unblocks fusion/stitching.
+- **Cons:** Requires solving FOV attribution, which the input format actively resists (see Context). Not a `_output.py` change — it reopens ingest.
+- **Context:** `reader.py:28` and `_acquisition.py:13` deliberately do NOT read `coordinates.csv` ("per-FOV stage positions are a deferred stitching concern"). Verified against real data (`~/CEPHLA/Data/sim_1536wp/coordinates.csv`): the header is `region,x (mm),y (mm),z (mm)` — **no `fov` column**. FOV identity would have to be inferred from row order, and prior learning `squid-coordinates-no-fov-column` (confidence 9/10) records that tilefusion's row-order-derived fov can disagree with the filename fov token, which is the ground truth this repo parses. Getting this wrong means Fractal silently places FOVs in the wrong spots — a wrong-answer bug, not a crash. Start by deciding how (region, fov) is attributed to a CSV row, and prove it against a multi-FOV acquisition.
+- **Depends on / blocked by:** IMA-231 (lands the table shape); the fusion/stitching ticket that owns ingest coordinates.
