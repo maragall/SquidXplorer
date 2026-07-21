@@ -62,6 +62,7 @@ from squidmip._engine import _default_workers
 from squidmip._layers import OperationStack
 from squidmip._montage import _area_downsample, _hex_to_rgb01, _window
 from squidmip._output import parse_well_id
+from squidmip._plate_shape import PlateShapeError, resolve_plate_format
 
 _SUPPORTED_PLATES = ("384", "1536")   # well-plate formats the tool currently accepts (no stitching yet)
 _CELL = 88                 # per-well px in the low-res overview (1536wp -> ~4224x2816)
@@ -1040,6 +1041,8 @@ class PlateWindow(QMainWindow):
         self._acq_path = None         # the opened acquisition dir (persist writes next to it)
         self._processed_plate = None  # path of the written plate.ome.zarr once an operator persists it
         self._plate_mode = "raw"      # what the plate view is showing — shown in the plate-pane title
+        self._plate_format = None     # the format the plate is laid out with (declared or inferred)
+        self._plate_format_override = None   # manual override; also read from SQUIDMIP_WELLPLATE_FORMAT
         self._op_stack = OperationStack()   # the toggleable layer stack (base + applied operators)
         self._active_op_key = None    # operator whose tiles are streaming into its layer right now
         self._layers_tab = None       # the Layers tab widget, once opened
@@ -1512,7 +1515,16 @@ class PlateWindow(QMainWindow):
             self._readout.setText(f"not a readable Squid acquisition: {e}")
             self._drop.show()
             return
-        fmt = str(meta.get("wellplate_format", ""))
+        # Resolve the layout format ONCE: an explicit override wins, then the declared field, then
+        # inference from the well ids (IMA-219 — two real acquisitions carry no format at all).
+        # Never fatal: an un-inferable plate keeps the declared value and falls through the guard.
+        try:
+            fmt = resolve_plate_format(meta, override=self._plate_format_override)
+        except PlateShapeError as e:
+            self._readout.setText(f"cannot lay out this acquisition: {e}")
+            self._drop.show()
+            return
+        self._plate_format = fmt
         if not any(s in fmt for s in _SUPPORTED_PLATES):   # scope guard: supported formats only
             self._readout.setText(f"only 384- and 1536-well plates are supported right now — this is a {fmt or 'other'}")
             self._drop.show()
@@ -1539,7 +1551,7 @@ class PlateWindow(QMainWindow):
             return
         # Prefer the FULL plate-format grid (every position, evenly spaced — no collapsed gaps).
         # Fall back to present-only when the format is unknown or the wells don't fit it.
-        grid = _plate_grid(meta.get("wellplate_format"))
+        grid = _plate_grid(fmt)
         if grid and set(present_rows) <= set(grid[0]) and set(present_cols) <= set(grid[1]):
             rows, cols = grid
         else:
