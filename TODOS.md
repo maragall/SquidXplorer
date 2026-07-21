@@ -43,6 +43,42 @@ so a future session doesn't rediscover it from zero.
 - **Context:** ndviewer_light discovers plates by directory walk and reads array `0` + `omero` only (`ndviewer_light/core.py:1149`, `:1070`). IMA-184's cross commit already proves the plate opens under strict `ome-zarr-py`, so the metadata is spec-valid regardless.
 - **Depends on / blocked by:** IMA-193 design.
 
+## 16-bit export + in-browser contrast windowing → follow-up after IMA-206
+- **What:** Export per-channel data at 16 bits (PNG-16 or a small binary sidecar) and window it in
+  the generated HTML on a `<canvas>`, so contrast means the same thing in the shared artifact as
+  it does in the Qt viewer.
+- **Why:** P1 for IMA-206 says "one PNG per channel; toggle **and contrast adjustment**". IMA-206
+  ships toggles only in HTML (decision D9), because an 8-bit PNG has already crushed the shadows —
+  re-stretching it in a browser cannot bring detail back, and a control that silently degrades the
+  image is worse than no control in a scientific tool. So half of P1's sentence is deferred, not met.
+- **Pros:** The shared artifact stops being a second-class citizen; a collaborator without the tool
+  installed can do real contrast work. Keeps the exported HTML honest instead of limited.
+- **Cons:** Much bigger export files (16-bit, and one per channel); real JS canvas work; the montage
+  module is deliberately dependency-free and this pushes on that.
+- **Context:** `_montage.py:340` already holds the per-channel `(C, H, W)` float canvas before it
+  composites at `:371-382`, so the data exists at export time — what is missing is a 16-bit encoder
+  and the browser-side windowing. The sidecar already records the per-channel window
+  (`_montage.py:395-397`), which is what IMA-206's HTML displays instead. Surfaced by the
+  /plan-eng-review outside voice (2026-07-20), which read D9 as possibly violating the P1 it quotes.
+- **Depends on / blocked by:** IMA-206 landing the per-channel export first. Worth a stakeholder
+  check with Nick before building — it may be that toggles are all anyone wanted.
+
+## Grayscale rendering for a single visible channel → taste call, needs a user
+- **What:** When exactly one channel is visible, render it grayscale instead of tinted with its LUT
+  color; probably a user preference toggle rather than automatic behavior.
+- **Why:** Many microscopists inspect single channels in grayscale — a red-tinted 638 image throws
+  away perceived dynamic range compared to the same data in grey. IMA-206 keeps LUT color (decision
+  OV9) because that matches the acceptance oracle and the existing compositing machinery.
+- **Pros:** Matches how the target users actually look at single-channel data; better perceived
+  contrast for exactly the inspection task the toggle exists to serve.
+- **Cons:** Contradicts the "colors match the resolved display_color" oracle unless scoped as an
+  explicit display mode; adds a second rendering rule to a path this ticket just unified.
+- **Context:** With IMA-206's `composite(store, colors, windows, mask)` this is a small change —
+  pass an identity/white color when `mask.sum() == 1` and a grayscale preference is set. Do NOT
+  guess the default: ask Nick and You Yan which they expect, since it is a domain habit, not an
+  engineering choice. Surfaced by the /plan-eng-review outside voice (2026-07-20).
+- **Depends on / blocked by:** IMA-206's `composite()` seam; a user answer on the default.
+
 ## Fix upstream squid2minerva/colors.py display_color nesting → external repo
 - **What:** `squid2minerva/colors.py:load_yaml_colors` reads `channel["display_color"]`, but real `acquisition_channels.yaml` nests it under `channel.camera_settings.<cam>.display_color`. Its Minerva OME-TIFF exports only get right colors via the wavelength-fallback map — a custom yaml color is silently ignored.
 - **Why:** Confirmed against a real dataset yaml. It's correct-by-luck today because the fallback palette matches the standard 4 channels; any non-default color drops silently.
