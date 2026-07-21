@@ -33,6 +33,7 @@ so a future session doesn't rediscover it from zero.
 - **Cons:** Slightly more design up front than "add a modifier check"; needs agreement across three backlog tickets.
 - **Context:** Today `mousePressEvent` unconditionally arms pan state on LeftButton. Shift-drag must branch BEFORE that. The loupe (IMA-208) wants press-and-hold, which competes with the same 3px pan threshold on the time axis rather than the modifier axis — so a modifier check alone won't settle it. `_sel` is currently a single `(ri,ci)` (:548) painted as one red box (:752-756); marquee select needs it to become a set with a multi-cell paint path.
 - **Depends on / blocked by:** IMA-221 owns the selection gesture; coordinate with IMA-208 before either lands.
+- **Status (IMA-205 rebase):** the MODIFIER axis is settled — Shift owns selection (`mousePressEvent` branches before pan arms), Shift+drag now also opens the exploration tab (`marqueeSelected` -> `_on_marquee_selected`), Shift+click stays a refine-one-well toggle that deliberately opens nothing. The TIME axis is still open: IMA-208's press-and-hold loupe competes with the plain-drag 3px pan threshold, not with a modifier, so it still needs a policy.
 
 ## Exploration-tab persistence across acquisitions → post-IMA-205
 - **What:** Decide whether exploration tabs survive re-ingesting a different acquisition, and if so how their region sets are revalidated.

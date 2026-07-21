@@ -482,6 +482,11 @@ class _FloatWindow(QWidget):
         v.addWidget(content, 1)
         self.resize(560, 480)
 
+    def content(self):
+        """The widget this window is holding (None once taken) — lets the window ask WHAT floated
+        without reaching into a private attribute."""
+        return self._content
+
     def take_content(self):
         """Detach and return the live widget (re-dock / app-exit); the window becomes an empty
         shell whose close is then a plain close (see closeEvent's guard)."""
@@ -742,6 +747,10 @@ class PlateOverview(QWidget):
     hovered = pyqtSignal(str)              # region id (or "" off-plate), for the window's readout
     wellActivated = pyqtSignal(str, int)   # (well_id, fov_index) double-clicked -> load in ndviewer
     selectionChanged = pyqtSignal(list)    # acquired well ids the operator picked (row-major)
+    marqueeSelected = pyqtSignal(list)     # ...and specifically by a Shift-DRAG: opens an exploration
+                                           # tab (IMA-205). Shift+CLICK refines the selection one well
+                                           # at a time and deliberately does NOT fire it — otherwise
+                                           # every corrective click spawns another tab.
 
     def __init__(self, rows, cols, wells: dict):
         """``wells``: (row_index, col_index) -> well_id for every acquired well (drawn grey until
@@ -1128,7 +1137,8 @@ class PlateOverview(QWidget):
         if self._marquee is not None and e.button() == Qt.LeftButton:
             x0, y0, x1, y1 = self._marquee
             add, self._marquee, self._marquee_add = self._marquee_add, None, False
-            if abs(x1 - x0) + abs(y1 - y0) <= _CLICK_SLOP:      # Shift+CLICK -> toggle ONE well
+            dragged = abs(x1 - x0) + abs(y1 - y0) > _CLICK_SLOP
+            if not dragged:                                     # Shift+CLICK -> toggle ONE well
                 hit = self._cell(x1, y1)
                 if hit and hit["well_id"]:
                     self._selection ^= {(hit["row_index"], hit["col_index"])}
@@ -1138,7 +1148,10 @@ class PlateOverview(QWidget):
                 self._selection = set(self._cells_in(x0, y0, x1, y1))
             # ONE emission per gesture. A live emit would rebuild a 1536-item list per mouse-move
             # on a 1536wp; the rubber band already gave the user live feedback.
-            self.selectionChanged.emit(self.selected_wells())
+            wells = self.selected_wells()
+            self.selectionChanged.emit(wells)
+            if dragged:                    # "hold shift [and drag] to open an exploration tab"
+                self.marqueeSelected.emit(wells)
             self.update()
         self._press = None
         self._panning = False
@@ -1669,6 +1682,16 @@ class _ExplorationTab(QWidget):
         self.regions = list(regions)
         self.tab_key = tab_key
         self.status: dict = {}      # this tab's plate dots, restored when it becomes active
+        self.sync_note = None       # set by _build_exploration_tab; the "not synced yet" banner
+        self.sync_pending = False   # True while this tab is in front but the view still shows a run
+
+    def set_sync_pending(self, pending: bool):
+        """Say out loud that this tab is in FRONT but the plate/detail beside it still belong to a
+        run that is finishing. A tab which silently shows someone else's wells is the whole bug —
+        the banner is the honest state until _on_run_drained catches the view up."""
+        self.sync_pending = bool(pending)
+        if self.sync_note is not None:
+            self.sync_note.setVisible(self.sync_pending)
 
     def shutdown(self):
         """Called by _close_op_tab (duck-typed, like the CLI terminal's). The window does the real
@@ -1936,14 +1959,18 @@ class PlateWindow(QMainWindow):
         if index == 0:                                     # 'Process wells' home tab — never closable
             return
         w = self._left_tabs.widget(index)
-        if isinstance(w, _ExplorationTab):                 # stop its run + free its layers FIRST
-            self._discard_exploration(w)
         self._left_tabs.removeTab(index)
         self._dispose_tab_widget(w)
 
     def _dispose_tab_widget(self, w):
         """The ONE teardown path for an operator UI — tab close, float close, and app exit all
-        route here so they can't drift: registry pop, stale-ref clear, shell kill, delete."""
+        route here so they can't drift: registry pop, stale-ref clear, shell kill, delete.
+
+        An exploration tab owns MORE than a widget (a possibly-live run and a set of plate layers),
+        so its extra teardown hangs off this same path rather than off the tab-close caller — a
+        float-close or an app exit must free it exactly as a tab close does (IMA-209 + IMA-205)."""
+        if isinstance(w, _ExplorationTab):                 # stop its run + free its layers FIRST
+            self._discard_exploration(w)
         for k, v in list(self._op_tabs.items()):
             if v is w:
                 del self._op_tabs[k]
@@ -2015,6 +2042,15 @@ class PlateWindow(QMainWindow):
             self._note_partial_output()  # a stopped SAVE run leaves a half-written .hcs on disk
             self._run_tab_key = None
             stopped = True
+        if self._active_exploration is tab:
+            # BUG 1: the tab in front is being deleted. Leaving _active_exploration pointing at it
+            # strands the whole view — _on_tab_changed would later park status onto a dead widget,
+            # and _push_index / the FOV slider stay scoped to a subset nobody can see. Drop the ref
+            # NOW and ask for a re-sync; if a run is still draining, _on_run_drained does it once
+            # the thread is actually gone (a stopped run keeps _busy() True for a while, which is
+            # exactly why the deferred path exists).
+            self._active_exploration = None
+            self._request_resync()
         gone = self._op_stack.remove_suffix(f"@{tab.tab_key}")
         if self._overview is not None:
             for layer in gone:
@@ -2056,15 +2092,25 @@ class PlateWindow(QMainWindow):
             for i in range(self._left_tabs.count() - 1, 0, -1):
                 if isinstance(self._left_tabs.widget(i), _ExplorationTab):
                     self._close_op_tab(i)
+            # ...and the ones dragged out into floating windows (IMA-209). A float is off the tab
+            # bar but NOT off the plate: it still owns layers and can still own the live run.
+            for key, win in list(self._floating.items()):
+                if isinstance(win.content(), _ExplorationTab):
+                    self._floating.pop(key, None)
+                    w = win.take_content()
+                    win.close()
+                    win.deleteLater()
+                    if w is not None:
+                        self._dispose_tab_widget(w)
         finally:
             self._tabs_muted = False
 
     def open_exploration_tab(self, regions) -> Optional[str]:
         """Open (or focus) the exploration tab for ``regions``. Returns its key, or None.
 
-        This is the seam IMA-221 (marquee/shift selection) calls once it lands; until then it is
-        driven programmatically (and by tests). Identity is content-addressed, so calling it twice
-        with the same wells focuses the existing tab rather than opening a duplicate."""
+        The UI entry point is IMA-221's Shift-drag marquee, via ``_on_marquee_selected``; it is also
+        callable programmatically (and by tests). Identity is content-addressed, so dragging the
+        same wells twice focuses the existing tab rather than opening a duplicate."""
         if self._reader is None or self._overview is None:
             self._readout.setText("open an acquisition first")
             return None
@@ -2081,12 +2127,21 @@ class PlateWindow(QMainWindow):
                           lambda: self._build_exploration_tab(regions, key))
         return key
 
-    def _on_tab_changed(self, index: int):
+    def _on_tab_changed(self, index: int, force: bool = False):
         """The plate + detail follow the ACTIVE tab (IMA-205).
 
         An exploration tab claims to be scoped to its subset, so the plate's status dots and the
         detail's FOV slider have to agree with it — otherwise the tab says '4 wells' while the
         viewer beside it lists all 1536, and scrubbing lands on wells the tab never selected.
+
+        A LIVE run is the one thing we won't retarget under: the worker is pushing into the slider
+        this call would rebuild. So the switch is DEFERRED, not dropped (``_request_resync``) —
+        dropping it is what left the front tab lying about what the viewer shows (BUG 2), because
+        nothing re-emits ``currentChanged`` when the run later drains.
+
+        ``force=True`` re-runs the sync from ``_on_run_drained`` even when there is no outgoing
+        exploration tab to park — after a mid-run tab close there ISN'T one, and that is precisely
+        the case that has to fall back to the whole plate (BUG 1).
 
         Honest limitation: ndviewer's only retarget seam is ``start_acquisition``, which RESETS the
         viewer. Computed frames pushed via register_array are in-memory and do not survive the
@@ -2095,9 +2150,10 @@ class PlateWindow(QMainWindow):
         if self._reader is None or self._overview is None or self._tabs_muted:
             return
         if self._busy():
-            return           # never retarget the slider a live run is pushing into
+            self._request_resync()   # never retarget the slider a live run is pushing into — LATER
+            return
         w = self._left_tabs.widget(index)
-        prev = getattr(self, "_active_exploration", None)
+        prev = self._active_exploration
         if prev is not None and self._overview is not None:
             prev.status = self._overview.status_snapshot()      # park the outgoing tab's dots
         if isinstance(w, _ExplorationTab):
@@ -2108,16 +2164,44 @@ class PlateWindow(QMainWindow):
             top = next((ly.key for ly in reversed(self._op_stack.layers())
                         if ly.key.endswith(f"@{w.tab_key}")), None)
             self._overview.set_active_layer(top or "raw")
+            w.set_sync_pending(False)
             # NB: do NOT reset _push_index here — _setup_raw_detail just built the subset map for
             # this tab's slider, and clearing it would send register_image straight back to global
             # plate indices (the exact off-by-a-lot this whole path exists to prevent).
         else:
-            if prev is None:
+            if prev is None and not force:
                 return                   # home -> operator tab: the plate is already plate-wide
             self._active_exploration = None
             self._setup_raw_detail(order=None)
             self._overview.set_all_status("empty")
             self._overview.set_active_layer(self._active_op_key or "raw")
+
+    def _request_resync(self):
+        """Remember that the plate/detail need to catch up with the front tab once the run drains.
+
+        Both IMA-205 bugs are the same missing edge: a tab switch that arrives while a run is live
+        is silently discarded, and no later event re-delivers it. The pending flag IS that later
+        event; ``_on_run_drained`` fires it as soon as the last worker thread actually exits."""
+        self._pending_resync = True
+        w = self._left_tabs.widget(self._left_tabs.currentIndex())
+        if isinstance(w, _ExplorationTab):
+            # say so IN THE TAB rather than in _readout: the run's progress writes _readout on every
+            # well, so a note there would be gone before the user could read it.
+            w.set_sync_pending(True)
+
+    def _on_run_drained(self):
+        """A worker thread has exited. Deliver any tab switch that was deferred while it ran.
+
+        Fires on QThread.finished, so it also covers a run that was STOPPED (closing a tab mid-run)
+        — ``_stop_worker`` returns immediately but the thread keeps going until its current well is
+        done, and ``_busy()`` stays True for all of that window."""
+        if self._busy():
+            return                       # another (retired) worker is still draining — wait for it
+        self._run_tab_key = None
+        if not self._pending_resync:
+            return
+        self._pending_resync = False
+        self._on_tab_changed(self._left_tabs.currentIndex(), force=True)
 
     def _activate_operator(self, key: str):
         """Operator card / menu clicked: open the operator's UI tab. Fully generic — driven by the
@@ -2235,6 +2319,15 @@ class PlateWindow(QMainWindow):
         scroll.setMaximumHeight(90)
         v.addWidget(scroll)
         w.listing = listing                        # tests assert the tab lists exactly its regions
+
+        note = QLabel("A run is still finishing — the plate and viewer beside this tab still show "
+                      "it. They will switch to this subset when it is done.")
+        note.setWordWrap(True)
+        note.setStyleSheet("color:#d29922;font-size:11px;")
+        note.setVisible(False)
+        v.addWidget(note)
+        w.sync_note = note
+        w.set_sync_pending(w.sync_pending)
 
         v.addWidget(_hline())
         lab = QLabel("RUN ON THIS SUBSET")
@@ -2519,6 +2612,7 @@ class PlateWindow(QMainWindow):
         self._overview.hovered.connect(self._on_hover)
         self._overview.wellActivated.connect(self.activate_well)
         self._overview.selectionChanged.connect(self._on_selection_changed)
+        self._overview.marqueeSelected.connect(self._on_marquee_selected)
         self._plate_mode = "raw"                     # a freshly-opened plate shows raw previews
         self._plate_title.setText(f"{self._acq_name}   ·   raw")   # bottom-left plate-pane title
         self._op_stack.reset()                       # fresh layer stack (base only)
@@ -2840,6 +2934,10 @@ class PlateWindow(QMainWindow):
         # a run that FINISHED wrote a complete plate — forget the path so a later stop can never
         # retroactively flag it incomplete
         self._worker.finished_ok.connect(lambda: setattr(self, "_run_out_dir", None))
+        # QThread.finished (not finished_ok): it fires for a FAILED or STOPPED run too, and a tab
+        # switch deferred during any of those still has to be delivered. _retire only disconnects
+        # the worker's own signals, so this survives a stop.
+        self._worker.finished.connect(self._on_run_drained)
         self._readout.setText(f"● {label} · {scope}{dest} …")
         self._worker.start()
 
@@ -2960,6 +3058,21 @@ class PlateWindow(QMainWindow):
         picked = set(wells)
         self._selected_regions = [w for w in self._order if w in picked]   # plate row-major
 
+    def _on_marquee_selected(self, wells: list):
+        """Shift-DRAG released on the plate -> open the exploration tab for that subset (IMA-205).
+
+        This is the user's sentence end to end: "hold shift to open an 'exploration' tab with the
+        selected FOV subset". The marquee (IMA-221) is the only gesture wired here — Shift+CLICK
+        toggles single wells while you refine a selection, and opening a tab per corrective click
+        would bury the one you actually wanted (each distinct set is a distinct content-addressed
+        tab, so they would NOT dedupe).
+
+        An empty drag (over blank plate) is a miss, not a request: return quietly rather than
+        writing 'empty selection' over whatever the readout is saying."""
+        if not wells:
+            return
+        self.open_exploration_tab(wells)
+
     def selected_region_fovs(self) -> list:
         """The current selection as (region, fov) pairs — the payload IMA-205 will consume."""
         per = (self._meta or {}).get("fovs_per_region", {})
@@ -2990,12 +3103,18 @@ class PlateWindow(QMainWindow):
         has run, the slider already holds the results) just navigate the slider to that well."""
         if self._detail is None or well_id not in self._fov_index:
             return
+        # Resolve the slider position BEFORE moving the red box. The box says "this is the well you
+        # are looking at"; if the detail's slider does not contain the well (an exploration tab
+        # scopes it to a subset) we cannot show it, and moving the box anyway is how you get a red
+        # box on one well and another well's pixels beside it — silently.
+        idx = self._slider_pos(well_id)
+        if idx is None:
+            self._readout.setText(
+                f"{well_id} is not in this tab's subset — switch to 'Process wells' to open it")
+            return
         self._current_well = well_id
         if self._overview is not None:                 # current well at view = the red BOX
             self._overview.select(*self._fov_index[well_id]["rc"])
-        idx = self._slider_pos(well_id)
-        if idx is None:
-            return       # not in the slider the detail is currently showing (e.g. a subset tab)
         if self._active_op_key is not None or self._reader is None:   # processed/computed: already pushed
             try:
                 row, col = parse_well_id(well_id)
@@ -3077,6 +3196,10 @@ class PlateWindow(QMainWindow):
             w.stop()
             self._retired.append(w)
             w.finished.connect(lambda: self._retired.remove(w) if w in self._retired else None)
+            # _busy() counts EVERY retired thread (the raw preview included), so a deferred tab
+            # switch can only be delivered once the last one exits — hook them all, not just the
+            # operator run, or the resync waits for an event that never comes.
+            w.finished.connect(self._on_run_drained)
 
     def _stop_worker(self):
         self._retire(self._worker)

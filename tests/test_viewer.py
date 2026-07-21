@@ -1399,3 +1399,264 @@ def test_set_mosaic_boxes_is_actually_called_by_the_viewer(
             "always returns FOV 0 and the mosaic is invisible to hit-testing and paint.")
     finally:
         win._stop_worker(); win.close()
+
+
+# --- IMA-205 + IMA-221: the SHIFT GESTURE opens the exploration tab ---------------------------
+#
+# This is the user's verbatim sentence, end to end: "hold shift to open an 'exploration' tab with
+# the selected FOV subset". IMA-221 landed the marquee; before this wiring `open_exploration_tab`
+# had no UI entry point at all and was reachable only programmatically.
+
+def _freeze(ov, cd=20.0):
+    """Freeze the plate view so synthetic widget coordinates hit the cells we mean (paintEvent's
+    auto-fit would otherwise move the plate under the drag)."""
+    ov._user_view = True
+    ov._cd, ov._ox, ov._oy = cd, 0.0, 0.0
+    return ov
+
+
+def _shift_drag_over(win, wells, cd=20.0):
+    """Shift-drag a marquee across exactly `wells` on the window's own plate."""
+    ov = _freeze(win._overview, cd)
+    rcs = [win._fov_index[w]["rc"] for w in wells]
+    r0, c0 = min(r for r, _ in rcs), min(c for _, c in rcs)
+    r1, c1 = max(r for r, _ in rcs), max(c for _, c in rcs)
+    if (r0, c0) == (r1, c1):                      # one cell: still a DRAG, not a Shift+click
+        a, b = _within(r0, c0, cd)
+    else:
+        a, b = _pt(r0, c0, cd), _pt(r1, c1, cd)
+    _drag(ov, a, b, Qt.ShiftModifier)
+
+
+def test_shift_drag_opens_an_exploration_tab_scoped_to_the_selected_wells(
+        qapp, stub_detail, squid_dataset):
+    root, _ = squid_dataset                            # B2, B3
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    _shift_drag_over(win, ["B3"])                      # marquee over ONE of the two wells
+    qapp.processEvents()
+
+    tabs = [win._left_tabs.widget(i) for i in range(win._left_tabs.count())
+            if isinstance(win._left_tabs.widget(i), V._ExplorationTab)]
+    assert len(tabs) == 1, "the shift-drag gesture did not open an exploration tab"
+    tab = tabs[0]
+    assert tab.regions == ["B3"]                       # scoped to EXACTLY the selected wells
+    assert tab.listing.text() == "B3"
+    assert win._left_tabs.currentWidget() is tab       # ...and it is brought to the front
+    assert win._active_exploration is tab
+    assert win._detail._fov_labels == ["B3:0"]         # the viewer follows the subset
+    assert win._selected_regions == ["B3"]             # IMA-221 scoping is untouched
+    win.close()
+
+
+def test_shift_drag_over_several_wells_scopes_the_tab_to_all_of_them(
+        qapp, stub_detail, squid_dataset):
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    _shift_drag_over(win, ["B2", "B3"])
+    qapp.processEvents()
+    tab = win._left_tabs.currentWidget()
+    assert isinstance(tab, V._ExplorationTab)
+    assert tab.regions == ["B2", "B3"]
+    assert win._detail._fov_labels == ["B2:0", "B3:0"]
+    win.close()
+
+
+def test_repeating_the_same_shift_drag_focuses_the_same_tab(qapp, stub_detail, squid_dataset):
+    """Content-addressed identity, driven through the GESTURE: dragging the same wells again must
+    focus the open tab, not pile up duplicates on every stray drag."""
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    _shift_drag_over(win, ["B3"])
+    qapp.processEvents()
+    first = win._left_tabs.currentWidget()
+    _shift_drag_over(win, ["B3"])
+    qapp.processEvents()
+    tabs = [win._left_tabs.widget(i) for i in range(win._left_tabs.count())
+            if isinstance(win._left_tabs.widget(i), V._ExplorationTab)]
+    assert tabs == [first]
+    win.close()
+
+
+def test_shift_click_refines_the_selection_without_opening_a_tab(qapp, stub_detail, squid_dataset):
+    """Only the DRAG opens a tab. Shift+click is the refine-one-well gesture, and since every
+    distinct set is a distinct tab, opening one per corrective click would bury the real one."""
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    ov = _freeze(win._overview)
+    rc = win._fov_index["B3"]["rc"]
+    ov.mousePressEvent(_mouse("press", _pt(*rc), Qt.ShiftModifier))
+    ov.mouseReleaseEvent(_mouse("release", _pt(*rc), Qt.ShiftModifier, buttons=Qt.NoButton))
+    qapp.processEvents()
+    assert ov.selected_wells() == ["B3"]                       # selection still happens...
+    assert not [i for i in range(win._left_tabs.count())
+                if isinstance(win._left_tabs.widget(i), V._ExplorationTab)]   # ...no tab
+    win.close()
+
+
+def test_shift_drag_over_empty_plate_opens_nothing_and_says_nothing(
+        qapp, stub_detail, squid_dataset):
+    """A miss is a miss: no tab, and no 'empty selection' text stomping the readout."""
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    before = win._readout.text()
+    ov = _freeze(win._overview)
+    _drag(ov, _pt(0, 0), _pt(0, 0.5), Qt.ShiftModifier)        # row A: no acquired wells
+    qapp.processEvents()
+    assert not [i for i in range(win._left_tabs.count())
+                if isinstance(win._left_tabs.widget(i), V._ExplorationTab)]
+    assert win._readout.text() == before
+    win.close()
+
+
+# --- IMA-205 bug 1: closing an exploration tab MID-RUN stranded the whole view ----------------
+# --- IMA-205 bug 2: a second tab opened MID-RUN sat in front lying about what was shown --------
+#
+# Same root cause: `_on_tab_changed` returned early while `_busy()` and nothing re-delivered the
+# switch when the run drained. These use a worker that blocks until the test releases it, so the
+# mid-run window is deterministic instead of a race against a 2-well run.
+
+class _BlockingWorker(V.QThread):
+    """An _OperatorWorker stand-in that stays RUNNING until stop() (or the test) releases it."""
+    tileReady = V.pyqtSignal(int, int, str, object)
+    pushReady = V.pyqtSignal(int, object)
+    progress = V.pyqtSignal(int, int)
+    finalReady = V.pyqtSignal(object)
+    writtenReady = V.pyqtSignal(str)
+    wellFailed = V.pyqtSignal(int, int)
+    failed = V.pyqtSignal(str)
+    finished_ok = V.pyqtSignal()
+
+    def __init__(self, *a, **kw):
+        super().__init__()
+        import threading
+        self.mosaic_boxes = {}
+        self._go = threading.Event()
+
+    def run(self):
+        self._go.wait(20)          # bounded: a hung test must not hang the suite
+
+    def stop(self):
+        self._go.set()
+
+    release = stop
+
+
+@pytest.fixture
+def blocking_worker(monkeypatch):
+    made = []
+    monkeypatch.setattr(V, "_OperatorWorker", lambda *a, **kw: made.append(_BlockingWorker()) or made[-1])
+    return made
+
+
+def test_closing_the_front_tab_mid_run_restores_a_coherent_plate_view(
+        qapp, stub_detail, squid_dataset, blocking_worker):
+    """BUG 1 — click one well, see another.
+
+    Closing the front exploration tab while its run is live used to strand everything: the switch
+    back was dropped (`_busy()`), nothing re-emitted it when the run drained, so the FOV slider
+    stayed pinned to the closed tab's subset, `_push_index` stayed stale and `_active_exploration`
+    pointed at a deleted widget. Double-clicking another well then moved the red box but showed the
+    OLD well's pixels — silently."""
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    key = win.open_exploration_tab(["B3"])
+    qapp.processEvents()
+    win.run_operator("mip", regions=["B3"], save=False, tab_key=key)
+    assert win._busy()                                        # the run is live and blocked
+    assert win._push_index == {win._fov_index["B3"]["idx"]: 0}
+
+    idx = next(i for i in range(win._left_tabs.count())
+               if win._left_tabs.widget(i) is win._op_tabs[key])
+    win._close_op_tab(idx)                                    # close it MID-RUN
+    assert _drain_until(qapp, lambda: not win._busy())
+    qapp.processEvents()
+
+    assert win._active_exploration is None                    # no dangling deleted widget
+    assert win._push_index is None                            # back to identity plate indexing
+    assert win._detail._fov_labels == ["B2:0", "B3:0"]        # slider is the whole plate again
+    # ...and the double-click path is coherent again: the red box and the pixels agree.
+    win._detail.nav.clear()
+    win.activate_well("B2", 0)
+    assert win._overview._sel == win._fov_index["B2"]["rc"]
+    assert win._detail.nav[-1][0] == "B2"
+    win.close()
+
+
+def test_double_click_never_moves_the_box_to_a_well_the_viewer_cannot_show(
+        qapp, stub_detail, squid_dataset):
+    """The other half of BUG 1's symptom, on its own: while a subset tab scopes the slider, a well
+    outside it cannot be shown — so the red box must NOT claim it is being shown."""
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    win.open_exploration_tab(["B3"])
+    qapp.processEvents()
+    win.activate_well("B3", 0)
+    box = win._overview._sel
+    win.activate_well("B2", 0)                                 # B2 is NOT in this tab's slider
+    assert win._overview._sel == box, "the red box moved to a well the viewer isn't showing"
+    assert win._current_well == "B3"
+    assert "not in this tab" in win._readout.text()            # and it says so, instead of silence
+    win.close()
+
+
+def test_a_second_tab_opened_mid_run_syncs_when_the_run_finishes(
+        qapp, stub_detail, squid_dataset, blocking_worker):
+    """BUG 2 — the front tab lies.
+
+    Opening a second exploration tab while the first tab's run is live left the new tab in front
+    while the slider and plate still showed the FIRST tab's run, and it never resynced when the run
+    finished. The switch is now deferred (and said out loud), then delivered on drain."""
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    key_a = win.open_exploration_tab(["B2"])
+    qapp.processEvents()
+    win.run_operator("mip", regions=["B2"], save=False, tab_key=key_a)
+    assert win._detail._fov_labels == ["B2:0"]                 # the live run's slider
+
+    key_b = win.open_exploration_tab(["B3"])                   # ...open a SECOND tab mid-run
+    qapp.processEvents()
+    tab_b = win._op_tabs[key_b]
+    assert win._left_tabs.currentWidget() is tab_b             # it is in front...
+    assert win._detail._fov_labels == ["B2:0"]                 # ...but the view still shows tab A
+    assert tab_b.sync_pending, "the front tab shows another tab's run and says nothing"
+    assert tab_b.sync_note.isVisibleTo(tab_b)
+    assert win._pending_resync
+
+    blocking_worker[-1].release()                              # let the run finish
+    assert _drain_until(qapp, lambda: not win._busy())
+    qapp.processEvents()
+
+    assert win._detail._fov_labels == ["B3:0"]                 # the front tab is now the truth
+    assert win._active_exploration is tab_b
+    assert not tab_b.sync_pending
+    assert not win._pending_resync
+    win.close()
+
+
+def test_deferred_resync_survives_a_failed_run(qapp, stub_detail, squid_dataset, blocking_worker):
+    """The resync hangs off QThread.finished, not finished_ok, so a run that fails or is stopped
+    still hands the view back instead of leaving it pinned to a dead run's subset."""
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    key_a = win.open_exploration_tab(["B2"])
+    qapp.processEvents()
+    win.run_operator("mip", regions=["B2"], save=False, tab_key=key_a)
+    win._left_tabs.setCurrentIndex(0)                          # switch home MID-RUN (deferred)
+    qapp.processEvents()
+    assert win._detail._fov_labels == ["B2:0"]
+    blocking_worker[-1].failed.emit("boom")
+    blocking_worker[-1].release()
+    assert _drain_until(qapp, lambda: not win._busy())
+    qapp.processEvents()
+    assert win._detail._fov_labels == ["B2:0", "B3:0"]         # whole plate restored
+    assert win._active_exploration is None
+    win.close()
