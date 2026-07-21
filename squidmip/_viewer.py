@@ -2776,18 +2776,20 @@ class _MinervaWorker(QThread):
             def on_progress(done, total):
                 self.progress.emit(done, total)
 
-            # Export FOV by FOV so a stop between them takes effect promptly; every file already
-            # written stays on disk and is reported.
-            for i, item in enumerate(self._selection):
+            # Export REGION by REGION — the export unit is a fused mosaic per region, so this
+            # is also the finest granularity a stop can act on. A stop between regions takes
+            # effect promptly; every file already written stays on disk and is reported.
+            grouped = _minerva.group_selection(self._selection)
+            for i, (region, fovs) in enumerate(grouped.items()):
                 if self._stop.is_set():
                     break
                 pairs.extend(
                     _minerva.export_selection(
-                        self._reader, [item], self._out_dir,
+                        self._reader, [(region, f) for f in fovs], self._out_dir,
                         t=self._t, projector=self._projector,
                     )
                 )
-                on_progress(i + 1, len(self._selection))
+                on_progress(i + 1, len(grouped))
             self.exported.emit(pairs)
             if pairs and self._launch and not self._stop.is_set():
                 # should_stop: the liveness wait is up to 90 s and closeEvent joins this thread.
@@ -3923,21 +3925,25 @@ class PlateWindow(QMainWindow):
     def minerva_selection(self) -> list:
         """The ``[(region, fov), ...]`` the user actually selected — never a silent stand-in.
 
-        The requirement is "open minerva-author with selected FOV(s)", so this reads the
-        selection instead of inventing one. Sources, most specific first:
+        The requirement is "open minerva-author with the selected region(s)", so this reads the
+        selection instead of inventing one. Exactly two sources, in order:
 
-        1. ``selected_region_fovs()`` — IMA-221's per-FOV plate selection payload. It landed on
-           **PlateWindow** (the overview is display-only; the metadata needed to expand wells to
-           FOVs lives here), so we probe ``self`` FIRST and the overview second — a future move
-           of the method onto the widget keeps working. Still duck-typed (``getattr``) and both
-           plausible shapes are accepted: ``{region: [fov, ...]}`` and ``[(region, fov), ...]``.
-        2. ``PlateOverview.selected_wells()`` — whole wells selected on the plate: EVERY FOV
-           of each, because a selected well means the well, not its first tile. This is the
-           fallback for a plate whose selection API is well-granular only.
-        3. The well open in the detail viewer (``_current_well``): every FOV of it.
+        1. :meth:`selected_region_fovs` — **this window's** selection. ``PlateOverview`` is
+           display-only: it maps grid cells to well ids and emits them, and ``PlateWindow`` is
+           where they land (``_on_selection_changed`` -> ``_selected_regions``) because
+           expanding a well to its FOVs needs ``fovs_per_region``, which only this side has.
+           So we call our own method directly. The previous version probed the overview too and
+           fell back to ``PlateOverview.selected_wells()``; the overview never had a
+           ``selected_region_fovs`` and the fallback was what made the export appear to work at
+           all — a duck-typed chain standing in for reading the selection from its owner.
+        2. The region open in the detail viewer (``_current_well``): every FOV of it.
+
+        Note the unit. The pairs are ``(region, fov)`` but the export groups them BY REGION and
+        fuses each into one mosaic — a region is a mosaic containing an array of FOVs, never a
+        FOV. Selecting a whole region yields all its FOVs here and one fused mosaic downstream.
 
         Nothing selected returns ``[]`` — the caller says so rather than exporting fov 0 of 36
-        and calling it "the selected well" (the IMA-228 bug this replaces).
+        and calling it "the selected well".
         """
         fovs_per_region = (self._meta or {}).get("fovs_per_region", {}) or {}
 
@@ -3947,40 +3953,10 @@ class PlateWindow(QMainWindow):
                 out.extend((str(region), int(f)) for f in fovs_per_region.get(str(region), []))
             return out
 
-        def normalise(raw) -> list:
-            """Accept {region: [fov...]} or [(region, fov), ...]; keep only real (region, fov)."""
-            pairs = []
-            if isinstance(raw, dict):
-                for region, fovs in raw.items():
-                    pairs.extend((str(region), int(f)) for f in (fovs or []))
-            else:
-                for item in (raw or []):
-                    try:
-                        region, fov = item
-                    except (TypeError, ValueError):
-                        continue
-                    pairs.append((str(region), int(fov)))
-            seen, keep = set(), []
-            for region, fov in pairs:
-                if fov in fovs_per_region.get(region, []) and (region, fov) not in seen:
-                    seen.add((region, fov))
-                    keep.append((region, fov))
-            return keep
-
-        ov = self._overview
-        for owner, attr, to_pairs in ((self, "selected_region_fovs", normalise),
-                                      (ov, "selected_region_fovs", normalise),
-                                      (ov, "selected_wells", expand)):
-            getter = getattr(owner, attr, None)
-            if not callable(getter):
-                continue
-            try:
-                sel = to_pairs(getter())
-            except Exception:
-                continue          # a selection API we cannot read is not a reason to crash
-            if sel:
-                return sel
-
+        sel = [(str(r), int(f)) for r, f in self.selected_region_fovs()
+               if int(f) in fovs_per_region.get(str(r), [])]
+        if sel:
+            return sel
         if self._current_well:
             return expand([self._current_well])
         return []
@@ -4007,8 +3983,10 @@ class PlateWindow(QMainWindow):
                 "(double-click a well on the plate), then export again")
             return
 
+        # The export unit is a REGION (one fused mosaic each), so count regions, not FOVs.
         regions = list(dict.fromkeys(r for r, _ in sel))
-        what = f"{len(sel)} FOV{'s' if len(sel) != 1 else ''} from {', '.join(regions)}"
+        what = (f"{len(regions)} mosaic{'s' if len(regions) != 1 else ''} "
+                f"({', '.join(regions)}, {len(sel)} FOVs)")
         n_t = self._meta.get("n_t", 1) or 1
         t_note = f" (t={t} of {n_t})" if n_t > 1 else ""
         self._minerva = w = _MinervaWorker(
@@ -4028,13 +4006,14 @@ class PlateWindow(QMainWindow):
             if not pairs:
                 self._readout.setText("nothing exported")
                 return
-            done = list(dict.fromkeys(r for r, _ in sel[: len(pairs)]))
-            note = "" if len(pairs) == len(sel) else f" of {len(sel)} (stopped)"
+            done = regions[: len(pairs)]
+            note = "" if len(pairs) == len(regions) else f" of {len(regions)} (stopped)"
             self._readout.setText(
-                f"✓ exported {len(pairs)} FOV{'s' if len(pairs) != 1 else ''}{note} from "
+                f"✓ exported {len(pairs)} mosaic{'s' if len(pairs) != 1 else ''}{note} from "
                 f"{', '.join(done)}{t_note} → {Path(pairs[0][0]).parent}")
 
-        w.progress.connect(lambda d, n: self._readout.setText(f"● Minerva export · {d}/{n} FOVs"))
+        w.progress.connect(
+            lambda d, n: self._readout.setText(f"● Minerva export · {d}/{n} mosaics"))
         if on_exported is not None:
             w.exported.connect(on_exported)
         w.exported.connect(on_exported_readout)

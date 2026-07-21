@@ -2723,23 +2723,30 @@ def test_minerva_tab_builds_and_lists_projectors(qapp, stub_detail, squid_datase
     win.close()
 
 
-def test_run_minerva_export_writes_every_fov_of_the_selected_well(qapp, stub_detail, squid_dataset,
-                                                                 tmp_path):
-    """The IMA-228 bug: the GUI built its own 1-element selection pinned to fov 0, so a user who
-    selected a well got 1 of its N FOVs while the readout said the well was exported. Selecting
-    the well must export the WHOLE well (the fixture has 2 FOVs per region)."""
+def test_run_minerva_export_writes_one_fused_mosaic_for_the_selected_region(
+        qapp, stub_detail, squid_dataset, tmp_path):
+    """Selecting a region must export ONE fused mosaic of it, not one file per FOV.
+
+    Two bugs are pinned here, in the order they were found. The first was the GUI building its
+    own 1-element selection pinned to fov 0, so a user who picked a well got 1 of its N FOVs.
+    The fix for that produced N files — which is also wrong, and worse because it looks right:
+    Minerva Author hardcodes ``"Layout": {"Grid": [["i0"]]}`` and opens only ``series[0]``, so
+    it would have rendered one of the N and silently dropped the rest. The fixture has 2 FOVs
+    per region; the export is 1 mosaic.
+    """
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
     win.activate_well("B2", 0)                                       # the user's selection
     win.run_minerva_export(out_dir=str(tmp_path), launch=False)      # launch=False: no server, no browser
-    assert _drain_until(qapp, lambda: len(list(tmp_path.glob("*.ome.tiff"))) == 2)
     assert _drain_until(qapp, lambda: "✓ exported" in win._readout.text())
     names = sorted(p.name for p in tmp_path.glob("*.ome.tiff"))
-    assert [("B2_fov0" in n) for n in names].count(True) == 1
-    assert [("B2_fov1" in n) for n in names].count(True) == 1        # NOT fov 0 alone
-    assert len(list(tmp_path.glob("*.story.json"))) == 2
-    assert "2 FOVs from B2" in win._readout.text()                   # honest count + region
+    assert len(names) == 1, f"one mosaic per region, got {names}"
+    assert "B2" in names[0]
+    assert "fov" not in names[0], "a per-FOV filename means the per-FOV model came back"
+    assert len(list(tmp_path.glob("*.story.json"))) == 1
+    assert "1 mosaic" in win._readout.text()                         # honest unit + count
+    assert "B2" in win._readout.text()
     win._stop_minerva(); win.close()
 
 
@@ -2758,28 +2765,36 @@ def test_run_minerva_export_with_nothing_selected_says_so(qapp, stub_detail, squ
     win.close()
 
 
-def test_minerva_selection_prefers_the_plates_selected_fovs(qapp, stub_detail, squid_dataset):
-    """IMA-221's plate selection is duck-typed: whichever of its two APIs the overview grows, the
-    export follows it in preference to the detail viewer's well. (The real per-FOV payload lives
-    on PlateWindow — see the shift-drag test below; this one pins the overview-side shapes.)"""
+def test_minerva_selection_reads_the_window_not_the_overview(qapp, stub_detail, squid_dataset):
+    """The selection has ONE owner: ``PlateWindow``.
+
+    ``PlateOverview`` is display-only — it maps grid cells to well ids and emits them; the
+    expansion to (region, fov) needs ``fovs_per_region``, which lives on the window. The
+    previous version of ``minerva_selection`` duck-typed a chain of three probes, two of them
+    on the overview, and reached the right answer only through the last one
+    (``selected_wells``) — the overview never had a ``selected_region_fovs`` at all. That
+    accident is what this test forbids: attributes bolted onto the overview must be IGNORED,
+    and the window's own selection must be what the export sees.
+    """
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
-    win.activate_well("B2", 0)                       # would otherwise mean "all of B2"
+    win.activate_well("B2", 0)                       # detail well: the last-resort source
 
+    # Decoys on the display-only widget. Reading either would be reading the wrong owner.
     win._overview.selected_wells = lambda: ["B3"]
-    assert win.minerva_selection() == [("B3", 0), ("B3", 1)]      # whole well, every FOV
+    win._overview.selected_region_fovs = lambda: {"B3": [1]}
+    assert win.minerva_selection() == [("B2", 0), ("B2", 1)], "read the overview, not the window"
 
-    win._overview.selected_region_fovs = lambda: {"B3": [1], "B2": [0]}
-    assert win.minerva_selection() == [("B3", 1), ("B2", 0)]      # per-FOV wins over per-well
-    win._overview.selected_region_fovs = lambda: [("B2", 1)]      # the pair-list shape too
-    assert win.minerva_selection() == [("B2", 1)]
+    # The real owner. Setting it is what must move the export scope.
+    win._selected_regions = ["B3"]
+    assert win.minerva_selection() == [("B3", 0), ("B3", 1)]
+    win._selected_regions = ["B3", "B2"]
+    assert win.minerva_selection() == [("B3", 0), ("B3", 1), ("B2", 0), ("B2", 1)]
 
-    win._overview.selected_region_fovs = lambda: [("ZZ", 0), ("B2", 99)]   # not in the acquisition
-    assert win.minerva_selection() == [("B3", 0), ("B3", 1)]      # falls back, never exports junk
-
-    win._overview.selected_region_fovs = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
-    assert win.minerva_selection() == [("B3", 0), ("B3", 1)]      # a broken API is not a crash
+    # A selection naming things the acquisition does not have is dropped, never exported.
+    win._selected_regions = ["ZZ"]
+    assert win.minerva_selection() == [("B2", 0), ("B2", 1)]   # falls back to the detail well
     win.close()
 
 

@@ -63,6 +63,7 @@ from __future__ import annotations
 import contextlib
 import os
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Callable, Iterator, Optional, Sequence
 
 import numpy as np
@@ -550,6 +551,20 @@ def stitch_plate(
         control). See :func:`add_region_operator`.
     regions:
         Optional subset of wells, in the given order (deduplicated) — the preview path.
+
+        Two shapes, and the second is the reason this parameter is not just a list:
+
+        * a **sequence** of region names — each contributes the FOVs ``n_fovs`` selected,
+          i.e. the whole well;
+        * a **mapping** ``{region: [fov, ...]}`` — each contributes exactly those FOVs, and
+          ``n_fovs`` is ignored for it. This is how a caller expresses a FOV *subset within*
+          a region (IMA-228's Minerva export of a marquee'd corner of a well). The result is
+          still ONE fused mosaic per region — the crop of that region spanned by the given
+          FOVs, because :func:`_mosaic_geometry` derives the canvas from the positions it is
+          handed. It is NOT one mosaic per FOV; a region is a mosaic, never a FOV.
+
+        Unknown region names are dropped in both shapes (a stale selection is not fatal); a
+        region mapped to an empty FOV list contributes no task, like an empty well.
     on_error:
         ``on_error(region, fov, exc)``: opt-in per-well fault isolation. A well that raises is
         reported and SKIPPED instead of aborting the plate. ``None`` (default) is fail-fast.
@@ -578,7 +593,20 @@ def stitch_plate(
     # project_plate does, so concurrent read() only touches immutable state.
     meta = reader.metadata
     wells = select_fovs(meta, n_fovs=n_fovs)
-    if regions is not None:  # subset preview: keep only the requested wells, in their order
+    if isinstance(regions, Mapping):
+        # Explicit per-region FOV lists: the caller has already decided which FOVs of each
+        # well to fuse, so n_fovs does not apply. Intersect with what the acquisition actually
+        # has (order and duplicates as given by the caller, minus the ones that don't exist)
+        # rather than trusting the request — a selection can outlive the acquisition it came
+        # from. Each surviving region is still exactly one task, hence exactly one mosaic.
+        available = meta["fovs_per_region"]
+        wells = {}
+        for region in dict.fromkeys(regions):
+            if region not in available:
+                continue
+            have = set(available[region])
+            wells[region] = [int(f) for f in dict.fromkeys(regions[region]) if int(f) in have]
+    elif regions is not None:  # subset preview: keep only the requested wells, in their order
         keep = list(dict.fromkeys(regions))
         wells = {r: wells[r] for r in keep if r in wells}
     tasks: Iterator[tuple[str, list[int]]] = iter(

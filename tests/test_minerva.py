@@ -30,25 +30,65 @@ from tests.conftest import CH_IN_YAML, CH_NOT_IN_YAML, NZ, _pixel_value
 
 # --- export_selection ------------------------------------------------------------------------
 
-def test_export_writes_one_pair_per_fov(squid_dataset, tmp_path):
+def test_export_writes_one_fused_mosaic_per_region_never_one_per_fov(squid_dataset, tmp_path):
+    """THE contract. Minerva Author lays out exactly one image — ``"Layout": {"Grid": [["i0"]]}``
+    is hardcoded in its ``src/app.py`` and only ``series[0]`` is ever opened — so a selection of
+    4 FOVs across 2 regions must become 2 fused mosaics, not 4 files. N files would silently
+    render the first and discard the rest.
+    """
     root, _ = squid_dataset
     out = tmp_path / "out"
-    pairs = export_selection(open_reader(root), [("B2", 0), ("B3", 1)], out)
+    sel = [("B2", 0), ("B2", 1), ("B3", 0), ("B3", 1)]      # 4 FOVs, 2 regions
+    pairs = export_selection(open_reader(root), sel, out)
 
-    assert len(pairs) == 2
+    assert len(pairs) == 2, "one pair per REGION — a region is a mosaic, not a FOV"
+    assert len(list(out.glob("*.ome.tiff"))) == 2
     for ome, story in pairs:
         assert ome.exists() and story.exists()
         assert ome.name.endswith(".ome.tiff")
         assert story.name.endswith(".story.json")
-    # order is the caller's order, not completion order — IMA-205 relies on this
-    assert "B2_fov0" in pairs[0][0].name
-    assert "B3_fov1" in pairs[1][0].name
+        assert "fov" not in ome.name, "a per-FOV filename means the per-FOV model came back"
+    # order is the caller's region order, not stitch_plate's completion order
+    assert "B2" in pairs[0][0].name and "B3" in pairs[1][0].name
 
 
-def test_exported_pixels_are_the_mip_byte_for_byte(squid_dataset, tmp_path):
-    """The OME-TIFF must carry the real projection in native uint16 — no rescale, no cast."""
+def test_each_exported_file_holds_exactly_one_series(squid_dataset, tmp_path):
+    """Minerva reads ``self.io.series[0]`` and nothing else. A file with a second series would
+    have its remainder silently dropped, so the writer must never produce one."""
+    root, _ = squid_dataset
+    (ome, _), = export_selection(open_reader(root), [("B2", 0), ("B2", 1)], tmp_path)
+    with tifffile.TiffFile(str(ome)) as tf:
+        assert len(tf.series) == 1
+
+
+def test_a_fov_subset_is_one_cropped_mosaic_not_n_files(squid_dataset, tmp_path):
+    """Selecting some of a region's FOVs fuses only those — and still emits ONE mosaic, the crop
+    of the region they span. The fixture's two FOVs sit 0.5 mm apart, so the whole region is far
+    wider than either FOV: the crop must be strictly narrower than the full mosaic.
+    """
+    root, _ = squid_dataset
+    (whole, _), = export_selection(open_reader(root), [("B2", 0), ("B2", 1)], tmp_path / "whole")
+    (crop, _), = export_selection(open_reader(root), [("B2", 1)], tmp_path / "crop")
+
+    assert len(list((tmp_path / "crop").glob("*.ome.tiff"))) == 1
+    full_px, crop_px = tifffile.imread(str(whole)), tifffile.imread(str(crop))
+    assert crop_px.shape[0] == full_px.shape[0]                  # same channels
+    assert crop_px.shape[2] < full_px.shape[2], "the subset was not cropped to its own FOVs"
+
+
+def test_exported_pixels_are_the_fused_mosaic_byte_for_byte(squid_dataset, tmp_path):
+    """The OME-TIFF must carry the real fused pixels in native uint16 — no rescale, no cast.
+
+    Checked on a single-FOV region selection, where the fused mosaic is exactly that FOV's
+    projection, so the expected pixels can be computed from the fixture planes with no
+    assumption about how fusion blends overlaps.
+    """
     root, arrays = squid_dataset
-    (ome, _), = export_selection(open_reader(root), [("B3", 1)], tmp_path)
+    # blend_px=0: the fixture's tiles are 4 px wide and the default 128 px feather would
+    # taper every one of them to zero at the edge. Turning the feather off is what makes a
+    # byte-for-byte comparison meaningful at this size; it is a fixture concession, not a
+    # claim that fusion normally copies pixels through untouched.
+    (ome, _), = export_selection(open_reader(root), [("B3", 1)], tmp_path, blend_px=0)
 
     written = tifffile.imread(str(ome))
     assert written.dtype == np.uint16
@@ -60,6 +100,69 @@ def test_exported_pixels_are_the_mip_byte_for_byte(squid_dataset, tmp_path):
         np.testing.assert_array_equal(written[c_i], expected)
 
 
+def test_export_goes_through_the_region_operator_seam(squid_dataset, tmp_path):
+    """The fusion path is IMA-222's region-operator table, not a private stitcher and not
+    ``project_plate`` (the z-reduction path, which cannot fuse FOVs at all). An operator
+    registered at runtime must therefore be selectable with no edit to _minerva.py."""
+    import squidmip
+    from squidmip import _stitch
+
+    calls = []
+
+    def spy(reader, region, fovs, **kwargs):
+        calls.append((region, tuple(fovs)))
+        return _stitch.stitch_region(reader, region, fovs, register=False, **kwargs)
+
+    name = "minerva_test_op"
+    _stitch._REGION_OPERATORS.pop(name, None)
+    squidmip.add_region_operator(name, spy)
+    try:
+        pairs = export_selection(
+            open_reader(root := squid_dataset[0]), [("B2", 0), ("B2", 1)], tmp_path,
+            operator=name,
+        )
+    finally:
+        _stitch._REGION_OPERATORS.pop(name, None)
+
+    assert calls == [("B2", (0, 1))], "the whole region reached the operator in one call"
+    assert len(pairs) == 1 and name in pairs[0][0].name
+    assert root  # the fixture root was used
+
+
+def test_export_rejects_an_unknown_region_operator(squid_dataset, tmp_path):
+    root, _ = squid_dataset
+    with pytest.raises(KeyError, match="unknown region operator"):
+        export_selection(open_reader(root), [("B2", 0)], tmp_path, operator="nope")
+
+
+def test_export_refuses_a_channel_with_no_name(squid_dataset, tmp_path, monkeypatch):
+    """Minerva builds its label list as ``[c.name for c in channels if c.name]`` — an unnamed
+    channel is DROPPED from the labels but not from the pixels, so every later channel gets its
+    predecessor's name. A silent mislabel is worse than a refused export."""
+    root, _ = squid_dataset
+    reader = open_reader(root)
+    meta = dict(reader.metadata)
+    meta["channels"] = [dict(meta["channels"][0], name=""), *meta["channels"][1:]]
+    monkeypatch.setattr(type(reader), "metadata", property(lambda self: meta))
+    with pytest.raises(ValueError, match="no name"):
+        export_selection(reader, [("B2", 0)], tmp_path)
+    assert not list(tmp_path.glob("*.ome.tiff"))
+
+
+def test_export_rejects_a_timepoint_out_of_range(squid_dataset, tmp_path):
+    root, _ = squid_dataset
+    out = tmp_path / "out"
+    with pytest.raises(ValueError, match="out of range"):
+        export_selection(open_reader(root), [("B2", 0)], out, t=7)
+    assert not out.exists() or not list(out.iterdir())
+
+
+def test_group_selection_groups_by_region_in_first_seen_order():
+    from squidmip._minerva import group_selection
+    assert group_selection([("B3", 1), ("B2", 0), ("B3", 0), ("B3", 1)]) == {
+        "B3": [1, 0], "B2": [0]}
+
+
 def test_export_honours_the_projector_choice(squid_dataset, tmp_path):
     """`reference` picks the sharpest plane rather than reducing — a different image.
 
@@ -69,9 +172,10 @@ def test_export_honours_the_projector_choice(squid_dataset, tmp_path):
     match ITS OWN one and differ from the other.
     """
     root, arrays = squid_dataset
-    (mip, _), = export_selection(open_reader(root), [("B2", 0)], tmp_path / "a", projector="mip")
+    (mip, _), = export_selection(open_reader(root), [("B2", 0)], tmp_path / "a",
+                                 projector="mip", blend_px=0)
     (ref, _), = export_selection(
-        open_reader(root), [("B2", 0)], tmp_path / "b", projector="reference"
+        open_reader(root), [("B2", 0)], tmp_path / "b", projector="reference", blend_px=0
     )
     assert "mip" in mip.name and "reference" in ref.name
 
@@ -167,11 +271,15 @@ def test_export_reads_only_the_requested_timepoint(squid_dataset, tmp_path):
     assert set(seen_t) == {0}
 
 
-def test_export_reports_progress(squid_dataset, tmp_path):
+def test_export_reports_progress_in_regions_not_fovs(squid_dataset, tmp_path):
+    """The export unit is a fused mosaic per region, so the readout counts regions. Four FOVs
+    across two regions is 2 steps, not 4 — a FOV count here would promise progress the export
+    cannot deliver (a region is indivisible: it fuses or it does not)."""
     root, _ = squid_dataset
     seen = []
     export_selection(
-        open_reader(root), [("B2", 0), ("B2", 1)], tmp_path, on_progress=lambda d, t: seen.append((d, t))
+        open_reader(root), [("B2", 0), ("B2", 1), ("B3", 0), ("B3", 1)], tmp_path,
+        on_progress=lambda d, t: seen.append((d, t)),
     )
     assert seen == [(1, 2), (2, 2)]
 

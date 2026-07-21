@@ -1,21 +1,39 @@
-"""Minerva Author export (IMA-228): projected FOV -> OME-TIFF + .story.json -> launch.
+"""Minerva Author export (IMA-228): fused region mosaic -> OME-TIFF + .story.json -> launch.
 
-Hands the well the user is looking at to `Minerva Author <https://github.com/labsyspharm/
+Hands the region(s) the user selected to `Minerva Author <https://github.com/labsyspharm/
 minerva-author>`_ without leaving the viewer.
+
+Minerva's unit is ONE FUSED MOSAIC PER REGION
+---------------------------------------------
+This is the fact the whole module is shaped around, and it was read out of minerva-author's
+own source, not assumed:
+
+* ``src/app.py`` emits ``"Layout": {"Grid": [["i0"]]}`` **unconditionally** — a single 1x1
+  grid cell. There is no code path that lays out N images.
+* ``Opener.__init__`` opens ``self.io.series[0]`` and nothing else.
+
+So handing Minerva a set of per-FOV files cannot work: it silently renders only the first
+one. A region is a MOSAIC containing an array of FOVs, and it is that mosaic — fused — that
+Minerva ingests. The earlier version of this module exported one file per FOV; that was
+provably wrong, not merely suboptimal.
 
 Pipeline
 --------
 ::
 
-    (region, fov)
+    [(region, fov), ...]  selection
          │
+         │  group by region ──▶ {region: [fov, ...]}
          │  require pixel_size_um ──── missing ──▶ ValueError (see "Pixel size" below)
          ▼
-    project_well(reader, region, fov, reduce=op.fn, consumes=op.consumes, t=t)  →  (1, C, 1, Y, X)
+    stitch_plate(reader, regions={region: [fov, ...]}, operator=..., projector=...)
+         │        the IMA-222 region-operator seam. NOT project_plate: that is the
+         │        z-reduction path and cannot fuse FOVs into a mosaic.
          │
-         │  [0, :, 0]
+         │  ONE (T, C, 1, H, W) per region — a FOV subset gives the CROP of the
+         │  region spanned by those FOVs, still one mosaic, never N files.
          ▼
-    (C, Y, X) native dtype
+    [t, :, 0]  →  (C, H, W) native dtype
          ├──▶ write_ome_tiff()  →  <stem>.ome.tiff    pixels + names + PhysicalSize
          └──▶ auto_groups()     →  write_story()  →  <stem>.story.json    COLOUR + contrast
                                                           │
@@ -49,6 +67,18 @@ Minerva side:
   physical scale into Minerva. So this module refuses the export instead.
 * **The filename is a gate.** Minerva takes the last two extension components of the path;
   anything not ending ``.ome.tif`` / ``.ome.tiff`` is rejected as "Invalid tiff file".
+* **Channel names are opaque labels — but an empty one shifts every channel after it.**
+  Minerva does *not* parse channel names. ``Opener.load_xml_markers`` returns
+  ``[c.name for c in metadata.images[0].pixels.channels if c.name]`` and ``make_channel_labels``
+  yields them straight through as display text; there is no regex over them anywhere in
+  ``app.py``, ``story.py``, ``render.py`` or ``storyexport.py``. So the failure mode petakit's
+  OME-TIFF reader has — emitting a name like ``"488"`` that its own ``wavelength_from_channel``
+  regex then cannot parse — has no counterpart here, and SquidMIP's names
+  (``"Fluorescence_638_nm_-_Penta"``) are safe as-is.
+  What *is* a live hazard is the ``if c.name`` filter: a channel whose name is empty is
+  DROPPED from the list, so every later channel is labelled with its predecessor's name while
+  the pixel data stays put — a silent mislabel, not an error. :func:`_channel_names` therefore
+  refuses to write a blank name.
 * **Write it flat.** ``imwrite(path, img, photometric="minisblack", metadata=...)`` — OME is
   inferred from the extension. Do not pass ``ome=True``: Minerva branches on an OME-version
   probe (SubIFDs tag 330) and re-opens the file down a different axis path when the tag is
@@ -76,6 +106,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 __all__ = [
     "export_selection",
+    "group_selection",
     "write_ome_tiff",
     "auto_groups",
     "write_story",
@@ -273,6 +304,40 @@ def default_out_dir(reader: "SquidReader") -> Path:
     return Path.home() / "minerva_export" / name
 
 
+def group_selection(selection: Iterable[tuple[str, int]]) -> "dict[str, list[int]]":
+    """``[(region, fov), ...]`` -> ``{region: [fov, ...]}``, first-seen order, deduplicated.
+
+    The selection the plate hands us is a flat list of pairs, but the EXPORT unit is a region.
+    This is the one place that regrouping happens, and keeping it a named function is what
+    stops "one file per pair" from creeping back in: everything downstream iterates regions.
+    """
+    grouped: dict[str, list[int]] = {}
+    for region, fov in selection:
+        fovs = grouped.setdefault(str(region), [])
+        fov = int(fov)
+        if fov not in fovs:
+            fovs.append(fov)
+    return grouped
+
+
+def _channel_names(channels: Sequence[dict]) -> list[str]:
+    """Channel display names, refusing a blank one.
+
+    Minerva drops falsy channel names (``[c.name for c in ... if c.name]``) without shortening
+    the pixel data, which silently shifts every later channel's label onto the wrong image. A
+    blank name is therefore a mislabel waiting to happen, and we fail here instead.
+    """
+    names = [str(c.get("name") or "").strip() for c in channels]
+    blank = [i for i, n in enumerate(names) if not n]
+    if blank:
+        raise ValueError(
+            f"channel(s) at index {blank} have no name. Minerva Author drops unnamed channels "
+            "from its label list but not from the image, which would put every later channel's "
+            "name on the wrong one. Name them in acquisition_channels.yaml and re-export."
+        )
+    return names
+
+
 def export_selection(
     reader: "SquidReader",
     selection: Iterable[tuple[str, int]],
@@ -280,56 +345,75 @@ def export_selection(
     *,
     t: int = 0,
     projector: str = "mip",
+    operator: str = "stitch",
     on_progress=None,
+    **operator_kwargs,
 ) -> list[tuple[Path, Path]]:
-    """Export ``[(region, fov), ...]`` to Minerva-ingestable file pairs.
+    """Export the selected region(s) to Minerva-ingestable file pairs — ONE PAIR PER REGION.
 
-    Returns ``[(ome_path, story_path), ...]`` in the order given. One pair *per FOV*:
-    Minerva Author opens one 2D image at a time, and SquidMIP has no stitcher, so a
-    multi-FOV selection is N files rather than one mosaic.
+    *selection* is ``[(region, fov), ...]`` (what the plate emits). It is grouped by region,
+    and each region is fused into a single mosaic through :func:`squidmip.stitch_plate` — the
+    IMA-222 region-operator seam — then written as one OME-TIFF plus one ``.story.json``.
 
-    The list shape is the point — today the viewer passes one well, and IMA-205's
-    exploration pane widens the list without this signature changing.
+    A FOV subset within a region does NOT become N files. It becomes the crop of that region
+    spanned by those FOVs: still one mosaic, because Minerva Author lays out exactly one image
+    (``"Layout": {"Grid": [["i0"]]}``, hardcoded) and reads only ``series[0]``. Handing it N
+    files would silently render the first and discard the rest.
+
+    Returns ``[(ome_path, story_path), ...]``, one per region, in the order the regions first
+    appear in *selection*.
 
     Parameters
     ----------
     t:
-        Timepoint to export (default 0). Only this one is read; see ``project_well``.
+        Timepoint to export (default 0). The region operator returns every timepoint; this
+        picks the plane written.
     projector:
-        Z-reduction mode from the projector registry (``"mip"``, ``"reference"``, ...).
+        Z-reduction applied per FOV *before* fusion (``"mip"``, ``"reference"``, ...). Passed
+        through to the region operator, which owns the z axis.
+    operator:
+        Region-operator name (default ``"stitch"``, i.e. registered fusion; ``"coordinate"``
+        places by stage position only). Anything added via ``add_region_operator`` works here
+        with no edit to this module — that is the point of the seam.
     on_progress:
-        Optional ``fn(done, total)`` called after each FOV, for a GUI readout.
+        Optional ``fn(done, total)`` called after each REGION, for a GUI readout. ``total`` is
+        the number of regions, not FOVs.
+    **operator_kwargs:
+        Forwarded to the region operator (``blend_px=``, ``channels=``, ``register=``, ...).
 
     Raises
     ------
     ValueError
-        If the selection is empty, the acquisition has no pixel size, or a ``(region, fov)``
-        is not in the acquisition. All are raised *before* anything is written.
+        If the selection is empty, the acquisition has no pixel size, a ``(region, fov)`` is
+        not in the acquisition, a channel has no name, or *t* is out of range. All are raised
+        *before* anything is written.
     """
-    from squidmip.projection import project_well   # local: avoids an import cycle at module load
+    from squidmip._stitch import stitch_plate   # local: avoids an import cycle at module load
 
-    sel = [(str(r), int(f)) for r, f in selection]
-    if not sel:
+    grouped = group_selection(selection)
+    if not grouped:
         raise ValueError("nothing selected: export_selection needs at least one (region, fov)")
 
     meta = reader.metadata
     pixel_um = _require_pixel_size(meta)                  # refuse early — nothing written yet
-    # IMA-210 made the registry hand back an Operator (name, fn, consumes), not a bare callable.
-    # Pass BOTH halves through, exactly as _engine.project_plate does: `consumes` is what decides
-    # project_well's grouping, and defaulting it would silently mis-shape any future plane-op.
-    op = _resolve_projector(projector)
+    _resolve_projector(projector)     # unknown projector: fail here, named, not mid-stitch
 
     fovs_per_region = meta.get("fovs_per_region", {})
-    for region, fov in sel:
+    for region, fovs in grouped.items():
         if region not in fovs_per_region:
             raise ValueError(f"unknown region {region!r}; acquisition has {sorted(fovs_per_region)}")
-        if fov not in fovs_per_region[region]:
-            raise ValueError(
-                f"unknown fov {fov} for region {region!r}; available: {fovs_per_region[region]}"
-            )
+        for fov in fovs:
+            if fov not in fovs_per_region[region]:
+                raise ValueError(
+                    f"unknown fov {fov} for region {region!r}; available: {fovs_per_region[region]}"
+                )
+
+    n_t = int(meta.get("n_t", 1) or 1)
+    if not 0 <= t < n_t:
+        raise ValueError(f"t={t} is out of range: this acquisition has {n_t} timepoint(s)")
 
     channels = meta["channels"]
-    names = [c["name"] for c in channels]
+    names = _channel_names(channels)
     colors = [_hex_to_rgb(c.get("display_color")) for c in channels]
     ppm = 1.0 / pixel_um if pixel_um else 0.0
 
@@ -337,26 +421,36 @@ def export_selection(
     out_dir.mkdir(parents=True, exist_ok=True)
     stem_prefix = _safe(Path(getattr(reader, "_path", "acquisition")).name)
 
-    written: list[tuple[Path, Path]] = []
-    for i, (region, fov) in enumerate(sel):
-        # Stream: project one FOV, write it, drop it. Peak memory is one (C, Y, X) frame
-        # regardless of how many FOVs were selected.
-        image = project_well(reader, region, fov, reduce=op.fn, consumes=op.consumes, t=t)
-        img_cyx = image[0, :, 0]
-
-        stem = f"{stem_prefix}_{_safe(region)}_fov{fov}_t{t}_{_safe(projector)}"
+    # workers=1: peak memory is `workers x one fused mosaic`, and a mosaic is orders of
+    # magnitude larger than the single FOV this used to hold. Fusion is internally parallel
+    # anyway, so one region in flight still saturates the CPU (see stitch_plate).
+    written: dict[str, tuple[Path, Path]] = {}
+    stream = stitch_plate(
+        reader, regions=grouped, workers=1, operator=operator,
+        projector=projector, **operator_kwargs,
+    )
+    for region, _anchor_fov, image in stream:
+        # Stream: fuse one region, write it, drop it.
+        img_cyx = np.asarray(image[t, :, 0])
+        fovs = grouped[region]
+        whole = len(fovs) == len(fovs_per_region.get(region, []))
+        stem = f"{stem_prefix}_{_safe(region)}_t{t}_{_safe(projector)}_{_safe(operator)}"
+        if not whole:      # a crop, not the region — say so in the filename, not just the story
+            stem += f"_{len(fovs)}fov"
+        label = region if whole else f"{region} ({len(fovs)} FOVs)"
         ome_path = write_ome_tiff(img_cyx, out_dir / f"{stem}.ome.tiff", names, pixel_um, colors)
         story_path = write_story(
             out_dir / f"{stem}.story.json",
             ome_path,
-            auto_groups(img_cyx, names, colors, label=f"{region} fov{fov}"),
+            auto_groups(img_cyx, names, colors, label=label),
             pixels_per_micron=ppm,
         )
-        written.append((ome_path, story_path))
+        written[region] = (ome_path, story_path)
         del image, img_cyx
         if on_progress is not None:
-            on_progress(i + 1, len(sel))
-    return written
+            on_progress(len(written), len(grouped))
+    # stitch_plate yields in COMPLETION order; the caller asked in selection order.
+    return [written[r] for r in grouped if r in written]
 
 
 # --- launch ----------------------------------------------------------------------------------
