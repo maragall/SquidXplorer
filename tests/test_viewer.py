@@ -2344,3 +2344,126 @@ def test_loupe_geometry_maps_cursor_to_the_right_well_and_crop(qapp, stub_detail
     assert off is None
     ov.set_loupe_source(None)
     win.close()
+# --- IMA-228: Minerva export -------------------------------------------------------------------
+
+def test_minerva_is_a_registered_operation():
+    """One registry entry buys the console card, the menu item and the tab — no scattered edits."""
+    op = V._OPERATIONS_BY_KEY["minerva"]
+    assert op.build_tab == "_build_minerva_tab"
+    assert hasattr(V.PlateWindow, op.build_tab)
+
+
+def test_minerva_tab_builds_and_lists_projectors(qapp, stub_detail, squid_dataset):
+    """The projector choice must be real: squid2minerva's convert.py offers --mip/--z, so a
+    hardcoded projection here would be a capability regression."""
+    from PyQt5.QtWidgets import QComboBox
+    from squidmip import available_projectors
+
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    win._open_op_tab("minerva", "Minerva", win._build_minerva_tab)
+    tab = win._op_tabs["minerva"]
+
+    combos = tab.findChildren(QComboBox)
+    assert combos, "no projector selector in the Minerva tab"
+    listed = [combos[0].itemText(i) for i in range(combos[0].count())]
+    assert listed == available_projectors()
+    assert combos[0].currentText() == "mip"
+    win.close()
+
+
+def test_run_minerva_export_writes_files_for_the_selected_well(qapp, stub_detail, squid_dataset, tmp_path):
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    win.run_minerva_export(out_dir=str(tmp_path), launch=False)      # launch=False: no server, no browser
+    assert _drain_until(qapp, lambda: bool(list(tmp_path.glob("*.ome.tiff"))))
+    assert _drain_until(qapp, lambda: "✓ exported" in win._readout.text())
+    assert len(list(tmp_path.glob("*.story.json"))) == 1
+    win._stop_minerva(); win.close()
+
+
+def test_run_minerva_export_refuses_a_second_concurrent_run(qapp, stub_detail, squid_dataset, tmp_path):
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+
+    class _Busy:
+        def isRunning(self):
+            return True
+
+    win._minerva = _Busy()
+    win.run_minerva_export(out_dir=str(tmp_path), launch=False)
+    assert "already exporting" in win._readout.text()
+    assert not list(tmp_path.glob("*.ome.tiff"))
+    win._minerva = None
+    win.close()
+
+
+def test_run_minerva_export_without_an_acquisition_is_a_message_not_a_crash(qapp, stub_detail):
+    win = V.PlateWindow(None)
+    win.run_minerva_export(launch=False)
+    assert "open an acquisition" in win._readout.text()
+    win.close()
+
+
+def test_minerva_export_failure_surfaces_in_the_readout(qapp, stub_detail, squid_dataset, monkeypatch, tmp_path):
+    """A worker never raises across the thread boundary; the user must still see why."""
+    from squidmip import _minerva
+
+    def boom(*a, **k):
+        raise ValueError("no objective pixel size")
+
+    monkeypatch.setattr(_minerva, "export_selection", boom)
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    win.run_minerva_export(out_dir=str(tmp_path), launch=False)
+    assert _drain_until(qapp, lambda: "failed" in win._readout.text())
+    assert "no objective pixel size" in win._readout.text()
+    win._stop_minerva(); win.close()
+
+
+def test_minerva_reports_when_author_is_not_installed(qapp, stub_detail, squid_dataset, monkeypatch, tmp_path):
+    """The export still succeeded — a missing sibling checkout must not read as a failure."""
+    from squidmip import _minerva
+
+    monkeypatch.setattr(_minerva, "is_running", lambda timeout=1.0: False)
+    monkeypatch.setattr(_minerva, "minerva_home", lambda: None)
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    win.run_minerva_export(out_dir=str(tmp_path), launch=True)
+    assert _drain_until(qapp, lambda: "not found" in win._readout.text())
+    assert "✓ exported" in win._readout.text()          # the files are still good
+    assert list(tmp_path.glob("*.ome.tiff"))
+    win._stop_minerva(); win.close()
+
+
+def test_signal_names_discovers_every_worker_signal():
+    """The regression guard: _retire used to disconnect a HARDCODED name list, so any worker
+    declaring a signal outside it stayed connected through teardown and could paint onto the
+    next plate. Introspection makes a new worker correct by construction."""
+    names = set(V._signal_names(V._MinervaWorker))
+    assert {"progress", "exported", "launched", "failed", "finished_ok"} <= names
+    assert "finished" not in names and "started" not in names   # QThread's own — never torn down
+    # the pre-existing worker keeps full coverage too
+    assert {"tileReady", "pushReady", "finalReady", "writtenReady", "wellFailed"} <= set(
+        V._signal_names(V._OperatorWorker))
+
+
+def test_closing_mid_export_disconnects_the_worker(qapp, stub_detail, squid_dataset, tmp_path):
+    """Close the window mid-export: no signal may reach the (now dead) window afterward."""
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    win.run_minerva_export(out_dir=str(tmp_path), launch=False)
+    worker = win._minerva
+    win.close()
+
+    seen = []
+    worker.exported.connect(lambda p: seen.append(p))   # reconnect: proves the old ones are gone
+    worker.wait(5000)
+    qapp.processEvents()
+    assert win._minerva is None

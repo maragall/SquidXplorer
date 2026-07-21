@@ -265,6 +265,7 @@ def project_well(
     reference_channel: Optional[str] = None,
     picked_z: Optional[dict] = None,
     consumes=None,
+    t: Optional[int] = None,
 ) -> np.ndarray:
     """Apply one operator to a FOV's planes for every channel and timepoint.
 
@@ -318,13 +319,19 @@ def project_well(
     So the focus is estimated ONCE per ``(t, fov)`` on *reference_channel* and that single z is
     read for every channel; the invariant ``len({picked_z[(t, c)] for c in channels}) == 1`` is
     asserted here, per timepoint, not merely documented.
+    t:
+        Which timepoint to project. ``None`` (default) projects *all* of them, which is
+        what every plate-scale caller wants. An int projects only that one and returns
+        ``T=1`` — the single-frame consumers (IMA-228's Minerva export) need one timepoint,
+        and reading all ``n_t`` to then discard ``n_t - 1`` of them is an ``n_t``-fold
+        wasted read of the whole z-stack.
 
     Returns
     -------
     np.ndarray
-        Shape ``(n_t, n_channels, 1, Y, X)``, dtype ``reader.metadata["dtype"]``.
-        Channels are ordered as ``reader.metadata["channels"]`` (kept distinct — no
-        z-as-channel collapse).
+        Shape ``(T, n_channels, 1, Y, X)`` where ``T`` is ``n_t`` when ``t is None`` and
+        ``1`` otherwise; dtype ``reader.metadata["dtype"]``. Channels are ordered as
+        ``reader.metadata["channels"]`` (kept distinct — no z-as-channel collapse).
 
     Notes
     -----
@@ -345,6 +352,13 @@ def project_well(
         consumes = getattr(reduce, "consumes", Z_REDUCER)
     consumes = normalise_consumes(consumes)
 
+    if t is None:
+        timepoints = tuple(range(n_t))
+    else:
+        if not 0 <= t < n_t:
+            raise ValueError(f"timepoint {t} out of range for an acquisition with n_t={n_t}")
+        timepoints = (t,)
+
     # A z-SELECTING projector advertises how to pick the index (see project_reference).
     select_index = getattr(reduce, "select_index", None)
 
@@ -360,12 +374,12 @@ def project_well(
         #   z not consumed -> one group per (t, c, z): a single plane -> Z survives at full depth
         # Both cases call the SAME callable shape, so a new plane-op needs no engine edit.
         z_groups = [tuple(z_levels)] if "z" in consumes else [(z,) for z in z_levels]
-        out = np.empty((n_t, len(channels), len(z_groups), y, x), dtype=meta["dtype"])
-        for t in range(n_t):
+        out = np.empty((len(timepoints), len(channels), len(z_groups), y, x), dtype=meta["dtype"])
+        for t_i, t_src in enumerate(timepoints):
             for c_i, channel in enumerate(channels):
                 for k, group in enumerate(z_groups):
-                    planes = (reader.read(region, fov, channel, z, t) for z in group)
-                    out[t, c_i, k] = reduce(planes)  # streamed z; bounded memory
+                    planes = (reader.read(region, fov, channel, z, t_src) for z in group)
+                    out[t_i, c_i, k] = reduce(planes)  # streamed z; bounded memory
         # Nothing lands in picked_z: a combining reduction consumes every z (no single index
         # describes it) and a plane-op chooses nothing (every plane is kept, at its own z).
         return out
@@ -377,17 +391,17 @@ def project_well(
             f"reference_channel {ref!r} is not a channel of this acquisition: {channels}"
         )
 
-    out = np.empty((n_t, len(channels), 1, y, x), dtype=meta["dtype"])
-    for t in range(n_t):
-        planes = (reader.read(region, fov, ref, z, t) for z in z_levels)
+    out = np.empty((len(timepoints), len(channels), 1, y, x), dtype=meta["dtype"])
+    for t_i, t_src in enumerate(timepoints):
+        planes = (reader.read(region, fov, ref, z, t_src) for z in z_levels)
         z_star = z_levels[select_index(planes)]   # position -> real z label
         for c_i, channel in enumerate(channels):
-            out[t, c_i, 0] = reader.read(region, fov, channel, z_star, t)
-            picked_z[(t, channel)] = z_star       # provenance: the z actually consumed
+            out[t_i, c_i, 0] = reader.read(region, fov, channel, z_star, t_src)
+            picked_z[(t_src, channel)] = z_star   # provenance: the z actually consumed
         # Data-checked invariant, not a comment: one z per (t, fov) across ALL channels.
-        assert len({picked_z[(t, c)] for c in channels}) == 1, (
-            f"channel misregistration at region={region!r} fov={fov} t={t}: "
-            f"{ {c: picked_z[(t, c)] for c in channels} }"
+        assert len({picked_z[(t_src, c)] for c in channels}) == 1, (
+            f"channel misregistration at region={region!r} fov={fov} t={t_src}: "
+            f"{ {c: picked_z[(t_src, c)] for c in channels} }"
         )
     return out
 

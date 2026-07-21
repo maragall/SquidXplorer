@@ -66,8 +66,9 @@ from PyQt5.QtWidgets import (
     QStyleFactory, QTabBar, QTabWidget, QVBoxLayout, QWidget,
 )
 
-from squidmip._engine import _default_workers
+from squidmip._engine import _default_workers, available_projectors
 from squidmip._layers import OperationStack
+from squidmip._minerva import MINERVA_HOME_ENV as _MINERVA_HOME_ENV
 from squidmip._montage import _area_downsample, _hex_to_rgb01, _window, composite
 from squidmip._output import parse_well_id
 from squidmip._plate import PlateBuildError, build_plate
@@ -134,6 +135,25 @@ _CHECK_QSS = (   # checkbox with a visible white outline on the box
 )
 _TERM_QSS = ("QPlainTextEdit{background:#05070b;color:#8bffd0;border:none;"
              "font-family:'SF Mono','Menlo',monospace;font-size:12px;padding:10px;}")
+
+
+def _signal_names(cls) -> tuple:
+    """Every pyqtSignal declared on *cls* or its bases, by attribute name.
+
+    ``pyqtSignal`` is a class attribute until Qt binds it per-instance, so the class object is
+    where the declarations are discoverable. Excludes ``finished``/``started`` — QThread's own,
+    which the retire path connects deliberately and must not tear down.
+    """
+    from PyQt5.QtCore import pyqtSignal as _sig
+    seen, out = set(), []
+    for klass in cls.__mro__:
+        for name, value in vars(klass).items():
+            if name in seen or name in ("finished", "started"):
+                continue
+            if isinstance(value, _sig) or type(value).__name__ in ("pyqtSignal", "unbound_signal"):
+                seen.add(name)
+                out.append(name)
+    return tuple(out)
 
 
 def _hline():
@@ -524,13 +544,15 @@ _OPERATIONS = (
     Operation("mip", "Maximum Intensity Projection",
               "Collapse each well's z-stack to one max-intensity image; save a navigable OME-Zarr plate.",
               "_build_mip_tab"),
+    Operation("minerva", "Open in Minerva Author",
+              "Export the selected well to a Minerva-ingestable OME-TIFF and open Minerva Author on it.",
+              "_build_minerva_tab"),
 )
 _OPERATIONS_BY_KEY = {op.key: op for op in _OPERATIONS}
 
-# Roadmap slots shown (disabled) in the Process console so the direction is visible: hand-off to
-# Minerva Author, and a locally-run agent (Nautilus) that builds the operator you ask it for.
-# Roadmap cards shown under "TO BE ADDED". Empty for now — we do NOT advertise Minerva Author or
-# Nautilus in the UI. Add a card as (label, blurb) when a real next operator is ready to surface.
+# Roadmap cards shown under "TO BE ADDED", as (label, blurb). Empty: everything currently on the
+# roadmap that we're willing to advertise has shipped as a real Operation above. Add an entry when
+# a next operator (e.g. the Nautilus agent) is close enough to promise.
 _TO_BE_ADDED: list = []
 
 
@@ -2263,6 +2285,68 @@ class _OperatorWorker(QThread):
             self.failed.emit(f"{type(e).__name__}: {e}")
 
 
+class _MinervaWorker(QThread):
+    """Export the selection to Minerva-ingestable files, then start Minerva Author (IMA-228).
+
+    Two stages with deliberately different failure semantics::
+
+        export  ──ok──▶  launch  ──ok──▶  exported(paths) + launched(True)
+           │                │
+           │                └──fail──▶  exported(paths) + launched(False)   ← files still good
+           └──fail──▶  failed(msg)                                          ← nothing written
+
+    A launch failure must NEVER invalidate a successful export: Minerva Author lives in a
+    separate checkout that may not be installed, and the OME-TIFF on disk is the deliverable.
+    The user always gets the story path either way, because Minerva has no deep link — the
+    file is picked by hand in its "Select File" dialog.
+    """
+    progress = pyqtSignal(int, int)          # (done, total) FOVs exported
+    exported = pyqtSignal(object)            # [(ome_path, story_path), ...]
+    launched = pyqtSignal(bool)              # did a Minerva server end up answering?
+    failed = pyqtSignal(str)
+    finished_ok = pyqtSignal()
+
+    def __init__(self, reader, selection, out_dir, projector: str, t: int = 0, launch: bool = True):
+        super().__init__()
+        self._reader = reader
+        self._selection = list(selection)
+        self._out_dir = out_dir
+        self._projector = projector
+        self._t = t
+        self._launch = launch
+        self._stop = threading.Event()
+
+    def stop(self):
+        self._stop.set()
+
+    def run(self):
+        from squidmip import _minerva
+        try:
+            pairs = []
+
+            def on_progress(done, total):
+                self.progress.emit(done, total)
+
+            # Export FOV by FOV so a stop between them takes effect promptly; every file already
+            # written stays on disk and is reported.
+            for i, item in enumerate(self._selection):
+                if self._stop.is_set():
+                    break
+                pairs.extend(
+                    _minerva.export_selection(
+                        self._reader, [item], self._out_dir,
+                        t=self._t, projector=self._projector,
+                    )
+                )
+                on_progress(i + 1, len(self._selection))
+            self.exported.emit(pairs)
+            if pairs and self._launch and not self._stop.is_set():
+                self.launched.emit(_minerva.launch_minerva(pairs[0][1]))
+            self.finished_ok.emit()
+        except Exception as e:
+            self.failed.emit(f"{type(e).__name__}: {e}")
+
+
 class _PreviewWorker(QThread):
     """Fast RAW preview so the plate shows imagery the moment it opens — before any operator runs
     (the "downsample the plate before opening" step). Reads ONE representative z-plane per channel
@@ -2412,6 +2496,7 @@ class PlateWindow(QMainWindow):
         self.resize(1600, 950)
         self._worker = None           # the operator (MIP) run
         self._preview = None          # the raw preview fill on open
+        self._minerva = None          # the Minerva export + Author launch (IMA-228)
         self._retired = []            # workers asked to stop; kept alive until they actually finish
         self._overview = None
         self._reader = None
@@ -3065,6 +3150,131 @@ class PlateWindow(QMainWindow):
         w.minerva_btn = minerva
         v.addStretch(1)
         return w
+
+    def _build_minerva_tab(self) -> QWidget:
+        """Minerva Author hand-off (IMA-228): export the current well, then open Author on it.
+
+        Scoped to the well the plate has selected. There is no multi-FOV selection gesture yet
+        (``wellActivated`` always carries fov 0 and the app runs one FOV per well), so this
+        passes a ONE-element list into an API that already takes many — IMA-205's exploration
+        pane widens the list without this code changing.
+        """
+        op = _OPERATIONS_BY_KEY["minerva"]
+        w, v = self._op_tab_shell(
+            op.label,
+            "Writes an OME-TIFF plus a Minerva story for the selected well, then starts Minerva "
+            "Author. Minerva has no deep link, so pick the .story.json below in its “Select File” "
+            "dialog — the colours and contrast are already applied.",
+        )
+        state = {"dir": None, "pairs": []}
+
+        dir_lbl = QLabel("(defaults to a minerva_export folder in your home directory)")
+        dir_lbl.setWordWrap(True)
+        dir_lbl.setStyleSheet("color:#8b98ad;font-size:12px;")
+
+        # Projection mode — the salesperson tool (squid2minerva convert.py) offers --mip/--z, so
+        # hardcoding one here would be a capability regression. Driven by the projector registry.
+        row = QHBoxLayout(); row.setSpacing(6)
+        row.addWidget(QLabel("Projection"))
+        proj = QComboBox(); proj.setStyleSheet(_COMBO_QSS)
+        proj.addItems(available_projectors())
+        proj.setCurrentText("mip")
+        row.addWidget(proj); row.addStretch(1)
+
+        launch_cb = QCheckBox("Open Minerva Author after exporting")
+        launch_cb.setStyleSheet(_CHECK_QSS)
+        launch_cb.setChecked(True)
+
+        path_lbl = QLabel("")
+        path_lbl.setWordWrap(True)
+        path_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        path_lbl.setStyleSheet("color:#8b98ad;font-size:11px;")
+        copy_btn = QPushButton("Copy story path"); copy_btn.setStyleSheet(_BTN_QSS); copy_btn.hide()
+        reveal_btn = QPushButton("Show in folder"); reveal_btn.setStyleSheet(_BTN_QSS); reveal_btn.hide()
+
+        def pick():
+            d = QFileDialog.getExistingDirectory(self, "Save the Minerva export to folder")
+            if not d:
+                return
+            state["dir"] = d
+            dir_lbl.setText(d)
+
+        def on_exported(pairs):
+            state["pairs"] = pairs
+            if not pairs:
+                return
+            path_lbl.setText("\n".join(str(story) for _, story in pairs))
+            copy_btn.show(); reveal_btn.show()
+
+        def do_copy():
+            if state["pairs"]:
+                QApplication.clipboard().setText("\n".join(str(s) for _, s in state["pairs"]))
+                self._readout.setText("story path copied")
+
+        def do_reveal():
+            if state["pairs"]:
+                from squidmip._minerva import reveal
+                reveal(state["pairs"][0][1])
+
+        pick_btn = QPushButton("Choose output folder…"); pick_btn.setStyleSheet(_BTN_QSS)
+        pick_btn.clicked.connect(pick)
+        run = QPushButton("Export the selected well"); run.setStyleSheet(_BTN_QSS)
+        run.clicked.connect(lambda: self.run_minerva_export(
+            out_dir=state["dir"], projector=proj.currentText(),
+            launch=launch_cb.isChecked(), on_exported=on_exported,
+        ))
+        copy_btn.clicked.connect(do_copy)
+        reveal_btn.clicked.connect(do_reveal)
+
+        v.addWidget(pick_btn); v.addWidget(dir_lbl)
+        v.addLayout(row); v.addWidget(launch_cb); v.addWidget(run)
+        v.addWidget(_hline()); v.addWidget(path_lbl); v.addWidget(copy_btn); v.addWidget(reveal_btn)
+        v.addStretch(1)
+        run.setEnabled(self._reader is not None)
+        return w
+
+    def run_minerva_export(self, out_dir=None, projector: str = "mip", launch: bool = True,
+                           on_exported=None, t: int = 0):
+        """Export the currently selected well for Minerva Author and (optionally) open it.
+
+        Runs off the GUI thread: projecting a well is real I/O plus compute, and starting
+        Minerva Author polls a port for up to 90 s. Tests call this directly with launch=False.
+        """
+        if self._reader is None or self._meta is None:
+            self._readout.setText("open an acquisition first")
+            return
+        if self._minerva is not None and self._minerva.isRunning():
+            self._readout.setText("already exporting — let the current export finish first")
+            return
+
+        region = self._current_well or (self._order[0] if self._order else None)
+        if region is None:
+            self._readout.setText("select a well first")
+            return
+        fov = (self._meta.get("fovs_per_region", {}).get(region) or [0])[0]
+
+        n_t = self._meta.get("n_t", 1) or 1
+        t_note = f" (t={t} of {n_t})" if n_t > 1 else ""
+        self._minerva = w = _MinervaWorker(
+            self._reader, [(region, fov)], out_dir, projector, t=t, launch=launch)
+
+        def on_launched(ok):
+            if ok:
+                self._readout.setText(f"✓ Minerva Author open — pick the .story.json for {region}")
+            else:
+                self._readout.setText(
+                    f"✓ exported {region}{t_note} — Minerva Author not found "
+                    f"(set ${_MINERVA_HOME_ENV} to an explorer checkout)")
+
+        w.progress.connect(lambda d, n: self._readout.setText(f"● Minerva export · {d}/{n} FOVs"))
+        if on_exported is not None:
+            w.exported.connect(on_exported)
+        w.exported.connect(lambda pairs: self._readout.setText(
+            f"✓ exported {region}{t_note} → {Path(pairs[0][0]).parent}" if pairs else "nothing exported"))
+        w.launched.connect(on_launched)
+        w.failed.connect(lambda m: self._readout.setText(f"Minerva export failed: {m}"))
+        self._readout.setText(f"● Minerva export · {region}{t_note} …")
+        w.start()
 
     def _build_layers_tab(self) -> QWidget:
         """The Layers tab: the OperationStack as a list of toggleable, reorderable layers. The topmost
@@ -3978,10 +4188,16 @@ class PlateWindow(QMainWindow):
         """Retire a worker thread WITHOUT ever destroying a running QThread (that aborts the app).
         Disconnect its signals first so a tile already queued before the stop can't paint onto a
         freshly-opened plate (the cross-plate corruption the review found); then keep a reference
-        alive until it actually finishes (stop() returns after the current item, which is bounded)."""
+        alive until it actually finishes (stop() returns after the current item, which is bounded).
+
+        The signal list is DISCOVERED from the worker class, not hardcoded. It used to be a literal
+        tuple of names, which silently failed open: a worker declaring a signal absent from that
+        tuple kept it connected through teardown and could paint onto the next plate — the very bug
+        this method exists to prevent, re-armed by every new worker. Introspection makes a new
+        worker correct by construction."""
         if w is None:
             return
-        for name in ("tileReady", "progress", "streamEnded", "writtenReady", "wellFailed", "pushReady", "failed", "finished_ok"):
+        for name in _signal_names(type(w)):
             sig = getattr(w, name, None)
             if sig is not None:
                 try:
@@ -4005,9 +4221,14 @@ class PlateWindow(QMainWindow):
         self._retire(self._preview)
         self._preview = None
 
+    def _stop_minerva(self):
+        self._retire(self._minerva)
+        self._minerva = None
+
     def closeEvent(self, e):
         self._stop_worker()          # stop the run cleanly; nothing on disk to clean up (no cache)
         self._stop_preview()
+        self._stop_minerva()         # files already written stay; only the launch poll is abandoned
         for key in list(self._floating):   # floated tabs are top-levels of their own — Qt won't
             win = self._floating.pop(key)  # close them for us, and each may hold a live shell
             w = win.take_content()

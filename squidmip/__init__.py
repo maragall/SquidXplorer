@@ -20,6 +20,9 @@ The public surface is intentionally tiny::
     src = ZarrPyramidSource("/path/out/plate.ome.zarr")   # TileSource over the written plate
     preview = InMemoryMultiscale(ladder, channels)        # TileSource for a live run (byte-budgeted)
     tiles = select_tiles(bbox_um, um_per_px, src.ladder.geometry)   # O(viewport), see _tiling.py
+
+    export_selection(reader, [("B3", 0)])     # Minerva Author: OME-TIFF + .story.json per FOV
+    launch_minerva()                          # best-effort; returns False if it isn't installed
 """
 
 from squidmip._engine import (
@@ -29,6 +32,7 @@ from squidmip._engine import (
     project_plate,
     projector_consumes,
 )
+from squidmip._minerva import export_selection, launch_minerva
 from squidmip._montage import build_montage
 from squidmip._output import write_plate
 from squidmip._stitch import (
@@ -82,5 +86,8 @@ __all__ = [
     "PlateLadder",
     "ZarrPyramidSource",
     "InMemoryMultiscale",
+    # IMA-228 Minerva export
+    "export_selection",
+    "launch_minerva",
 ]
 __version__ = "0.1.0"

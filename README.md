@@ -62,6 +62,21 @@ result you can reopen here, in napari, or in FIJI. Read only, it never changes y
   - See all options:
     - `python -m squidmip --help`
 
+## Open in Minerva Author (optional)
+
+- In "Process wells", click "Open in Minerva Author". It exports the well you have selected and
+  starts Minerva Author on it.
+- You get two files per well: a `.ome.tiff` (the image) and a `.story.json` (the colours and
+  contrast). They go to a `minerva_export` folder in your home directory unless you choose another.
+- Minerva Author cannot be pointed at a file automatically, so when it opens, click "Select File"
+  and pick the `.story.json` the tab shows you. Use "Copy story path" or "Show in folder" if you
+  need to find it. Your channel colours are already applied.
+- Exporting works on its own. Opening Minerva Author needs Minerva installed: point
+  `SQUIDMIP_MINERVA_HOME` at an `explorer` checkout that has already run its `setup.py`. Without
+  it the export still succeeds and the tab tells you where the files are.
+- One file per well. Combining several wells into one image needs the stitcher, which is coming
+  later.
+
 ## Good to know
 
 - Wells with more than one FOV: for now it uses the first FOV per well. Full multi FOV support (for example with the stitcher) is coming soon.
