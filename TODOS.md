@@ -50,3 +50,19 @@ so a future session doesn't rediscover it from zero.
 - **Cons:** Different repo, different owner; not on any SquidMIP critical path.
 - **Context:** SquidMIP does **not** carry this bug — IMA-189's `squidmip/_channels.py` already resolves `display_color` correctly (top-level v1.0+ *and* nested `camera_settings`, mapped by name, raises on unresolved), and IMA-184 consumes `metadata.channels[].display_color` rather than re-parsing the yaml. This TODO is purely a flag for whoever owns `~/CEPHLA/projects/explorer/squid2minerva`.
 - **Depends on / blocked by:** squid2minerva maintainer.
+
+## Remove the unused `pandas>=2.0` runtime dependency → packaging ticket
+- **What:** Drop `pandas>=2.0` from `pyproject.toml:17`, or actually use it.
+- **Why:** Declared as a runtime dependency but has **zero** usage anywhere in the package (`grep -rn "pandas\|pd\." --include=*.py` returns nothing). It inflates install size and cold-start for every user of the headless CLI.
+- **Pros:** Smaller install, faster import, honest dependency list. The MIP tool ships to microscope operators who install it into a venv on Windows; pandas is a large wheel.
+- **Cons:** Someone may have added it in anticipation of a ticket that still intends to use it — check before removing.
+- **Context:** Surfaced by /plan-eng-review during IMA-215 (2026-07-20). IMA-215 was the natural place to reach for pandas (CSV parsing) and deliberately chose stdlib `csv` instead (decision D8) — a ≤7-column, ≤1536-row file does not justify the import. So after IMA-215 lands, pandas is still unused.
+- **Depends on / blocked by:** Nothing. Confirm no in-flight ticket plans to use it.
+
+## Reconcile `original_coordinates/original_coordinates_0.csv` → revisit if it ever disagrees
+- **What:** Decide whether the third coordinates copy at `<acq>/original_coordinates/` carries information the timepoint copy does not.
+- **Why:** IMA-215 found three copies of coordinate data in one acquisition (root, timepoint, original_coordinates). It reads the timepoint copy and ignores the other two. `original_coordinates_0.csv` uses the labelled 7-col schema and appeared byte-similar to `0/coordinates.csv` in the one dataset that has it.
+- **Pros:** Removes a known unknown about which copy is authoritative under laser AF.
+- **Cons:** Only one dataset on hand has the folder; likely a pre-AF snapshot with no independent value.
+- **Context:** Observed in `~/Downloads/test_10x_laser_af_z_stack_2025-10-28.../`. If a dataset appears where the two labelled copies differ, that difference is the answer to "planned vs actual" and may be more reliable than the root file.
+- **Depends on / blocked by:** A dataset where the copies actually disagree.
