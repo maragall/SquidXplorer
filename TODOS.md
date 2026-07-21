@@ -26,6 +26,29 @@ so a future session doesn't rediscover it from zero.
 - **Cons:** Genuinely blocked, and it invalidates `cells_in_rect`'s one-cell-per-well model once cells subdivide.
 - **Context:** `reader.py:197` builds `fovs_per_region` from parsed filenames as **ids only — no x/y positions**. The learning `fov-axis-needs-geometry` (8/10, cross-model, 2026-07-04) already flagged per-FOV position + overlap as the load-bearing missing piece. Sibling of the FOV-composition/stitch TODO — they should land together.
 - **Depends on / blocked by:** per-FOV geometry (position + overlap) reaching reader metadata, i.e. the deferred stitch work.
+## Gesture arbitration on PlateOverview (shift-select vs pan vs loupe) → IMA-221
+- **What:** A single explicit gesture policy for `PlateOverview`'s mouse handlers, deciding between drag-to-pan (shipped), shift-drag marquee select (IMA-221), and press-and-hold loupe (IMA-208).
+- **Why:** Three tickets independently add a gesture to the SAME handlers (`mousePressEvent:647`, `mouseMoveEvent:652`, `mouseReleaseEvent:670`). Whoever lands second inherits an undocumented conflict; the pan path already claims plain left-drag with a 3px threshold (:655).
+- **Pros:** One place decides what a drag means; each later gesture ticket becomes additive instead of a rewrite of someone else's branch.
+- **Cons:** Slightly more design up front than "add a modifier check"; needs agreement across three backlog tickets.
+- **Context:** Today `mousePressEvent` unconditionally arms pan state on LeftButton. Shift-drag must branch BEFORE that. The loupe (IMA-208) wants press-and-hold, which competes with the same 3px pan threshold on the time axis rather than the modifier axis — so a modifier check alone won't settle it. `_sel` is currently a single `(ri,ci)` (:548) painted as one red box (:752-756); marquee select needs it to become a set with a multi-cell paint path.
+- **Depends on / blocked by:** IMA-221 owns the selection gesture; coordinate with IMA-208 before either lands.
+
+## Exploration-tab persistence across acquisitions → post-IMA-205
+- **What:** Decide whether exploration tabs survive re-ingesting a different acquisition, and if so how their region sets are revalidated.
+- **Why:** `ingest()` (:1493-1505) resets reader/`_fov_index`/`_overview` but never `_op_tabs`. The eng-review fix closes exploration tabs on ingest (the safe default), but the richer behavior — reopen the same selection on a re-ingest of the SAME acquisition — is a real workflow for anyone iterating on one plate.
+- **Pros:** Users re-open the same plate constantly while tuning operators; losing their exploration set every time is friction.
+- **Cons:** Requires acquisition identity in the tab key plus revalidation that every region still exists in the new `_fov_index`.
+- **Context:** Surfaced by the /plan-eng-review outside voice (2026-07-20) and confirmed in code. The eng-review decision includes acquisition id in the content-addressed tab key specifically so this extension stays cheap.
+- **Depends on / blocked by:** IMA-205 landing its ingest-teardown fix first.
+
+## Partial `.hcs` cleanup after a stopped save run → fast-follow after IMA-205
+- **What:** Clean up (or mark as partial) the `.hcs` output directory when a `save=True` operator run is stopped mid-flight.
+- **Why:** IMA-205 makes stopping routine (closing an exploration tab stops its run). A stopped save leaves a partial plate that `resolve_plate_root` will later happily recognize as a real plate, so the user can re-open a half-written result as if it were complete.
+- **Pros:** Prevents silently trusting a truncated plate; complements the resume/checkpoint TODO already filed against IMA-184.
+- **Cons:** Needs a "complete output" definition — the same definition the resume/checkpoint item needs, so the two should be designed together.
+- **Context:** Before IMA-205, stopping only happened on app close (`closeEvent:1970`) or re-ingest, both of which end the session anyway. Making close-tab stop a run turns a rare path into a common one. Surfaced by the /plan-eng-review outside voice (2026-07-20).
+- **Depends on / blocked by:** Overlaps the existing "Resume / checkpoint for long plate runs" TODO — resolve as one design.
 
 ## Scale-test fixture generator → IMA-188
 - **What:** A generator that fans the 48 real hongquan FOVs across a 1536-well plate via **symlinks** (Squid layout), synthesizing 20 z (cycling the real 3) × 4 channels. On-disk ≈ source (~19 GB); logical read ≈ 1536×20×4×33 MB ≈ **4 TB** (served from OS cache — proves scale/parse/decode/memory, NOT raw disk bandwidth; that needs Nick's real storage).
