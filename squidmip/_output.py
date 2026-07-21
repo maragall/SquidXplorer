@@ -43,6 +43,19 @@ while the plate becomes self-describing in world space. ``squidmip._tilesource``
 whole plate layout from it without ever re-reading coordinates.csv. Acquisitions with no stage
 positions get no translation and are byte-identical to the pre-IMA-217 output.
 
+IMA-230 puts a DISK PRE-FLIGHT in front of the whole thing: the write is estimated from the real
+numbers (fields x n_t x channels x frame bytes x the exact pyramid factor) and refused up front,
+naming the estimate and the free space, instead of dying most of the way through and leaving a
+half-written store. While it runs, the store carries a ``.squidmip-incomplete`` marker, every
+field is published by atomic rename (so a field is never half-visible) and each region's
+intermediates are swept as it finishes. See :func:`estimate_write_bytes` / :func:`check_disk_space`.
+
+IMA-231 adds, per WELL and only on this persist path (the live viewer already has
+coordinates.csv), a Fractal/ngio ``tables/FOV_ROI_table``: an AnnData-encoded ROI table giving
+every FOV's box in µm, so an external tool can recover FOV boundaries after the region is fused.
+Its corners are :func:`field_origin_um` — the same top-left corner as the NGFF ``translation`` and
+as ``_tilesource.fov_bboxes_um``. See :func:`fov_roi_records_um`.
+
 Colors come from ``metadata.channels[].display_color`` (IMA-189 already resolves them, mapped
 by name, raising on an unrecognised channel) — the writer never re-parses the acquisition YAML.
 Channel order in ``omero`` and in the TIFF filenames follows ``metadata.channels`` order, which
@@ -51,7 +64,10 @@ is exactly the array's C-axis order (IMA-183 builds the C axis from that list).
 
 from __future__ import annotations
 
+import json
+import os
 import re
+import shutil
 from pathlib import Path
 from typing import Iterable, Iterator, Optional
 
@@ -76,6 +92,206 @@ _WRITE_WORKERS = min(4, _default_workers())   # bounded writer pool overlapping 
 #                            (~75% of end-to-end wall time when serial) with projection. Adapt to the
 #                            machine like the engine (never more writer threads than usable cores);
 #                            4 is plenty — the write stage is I/O + compress bound, not CPU-scaling.
+
+
+# --- IMA-230: disk pre-flight guard ----------------------------------------------------------
+#
+# Squid already stops an acquisition BEFORE it overflows the disk, in
+# ``control/widgets.py::check_space_available_with_error_dialog`` +
+# ``control/core/multi_point_controller.py::get_estimated_acquisition_disk_storage``. Four things
+# are reused here, deliberately, rather than a new policy being invented:
+#   1. count the units of work first (Squid: Nt x NZ x FOVs x configs = images), multiply by a
+#      per-unit byte cost;
+#   2. a FACTOR OF SAFETY on the estimate before the comparison (Squid: 1.03) — an over-estimate
+#      only ever asks for a roomier disk, which is the safe way to be wrong;
+#   3. a small fixed allowance for the non-image files (Squid: 100 kB of metadata/JSON);
+#   4. ``shutil.disk_usage(dir).free`` on the SAVE DIRECTORY (Squid's ``utils.get_available_disk_space``)
+#      and refuse up front with a message naming BOTH numbers.
+# SquidMIP adds what Squid cannot know: the pyramid tail (:func:`plate_pyramid_factor`, the exact
+# level-shape sum this module writes, not a 4/3 approximation) and the optional second TIFF copy.
+#
+# This is the SAME policy the plate viewer's pre-flight check applies (``_viewer._check_disk``,
+# which refused a ~6 GB write during IMA-206): field count x n_t x channels x frame bytes x
+# pyramid, refused when it would eat past the headroom. That check is the GUI's early warning —
+# it can only warn a user before a run starts. This one is the ENFORCEMENT point on the write
+# path itself, so the CLI, the tests and any programmatic caller get the same refusal; it uses
+# the exact pyramid factor where the viewer uses the 1.34 closed form, so it is never the looser
+# of the two. ``_viewer._check_disk`` should be reduced to a call to
+# :func:`estimate_write_bytes` / :func:`check_disk_space` (that file is owned elsewhere today).
+
+_DISK_SAFETY_FACTOR = 1.03          # Squid's `factor_of_safecty`
+_DISK_NON_IMAGE_BYTES = 100 * 1024  # Squid's `non_image_file_size`: zarr.json/omero/attrs allowance
+_DISK_HEADROOM = 0.10               # keep this FRACTION of free space free (viewer: est > free*0.9)
+_DISK_MIN_FREE_BYTES = 256 * 1024 ** 2   # ...and never less than this, however small the disk is.
+#                                          A percentage alone lets an almost-full disk approve a
+#                                          write that lands it at a few MB free, where everything
+#                                          else on the machine then fails. Both are overridable.
+_INCOMPLETE_MARKER = ".squidmip-incomplete"
+_PARTIAL_PREFIX = "."               # in-progress field dirs are ".{fov}.partial" — a leading dot
+#                                     keeps them out of ndviewer's digit-named field discovery.
+_PARTIAL_SUFFIX = ".partial"
+_GB = 1024 ** 3
+
+
+class InsufficientDiskSpaceError(OSError):
+    """Refusing to start a write that would not fit (raised BEFORE anything is created)."""
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def plate_pyramid_factor(frame_shape, **kw) -> float:
+    """Total written pixels per level-0 pixel, i.e. the exact pyramid overhead of one field.
+
+    ``1 + 1/4 + 1/16 + ...`` truncated at the real level ladder :func:`pyramid_shapes` produces
+    (and, for odd axes, at the real cropped shapes) — not the 4/3 infinite-sum approximation. A
+    field too small to pyramid returns exactly 1.0.
+    """
+    shapes = pyramid_shapes(frame_shape, **kw)
+    y0, x0 = shapes[0]
+    return float(sum(y * x for y, x in shapes) / (y0 * x0))
+
+
+def estimate_write_bytes(metadata: dict, *, n_fovs: Optional[int] = 1, regions=None,
+                         tiff: bool = False, n_z: int = 1) -> int:
+    """Bytes :func:`write_from_stream` will need for this acquisition, from the real numbers.
+
+    ``n_regions x n_fovs x n_channels x n_z x frame_bytes``, times the pyramid factor, times the
+    safety factor, plus the fixed non-image allowance — and times ``n_t``, which is the term whose
+    omission let a time-lapse fill the disk mid-write.
+
+    ``n_z`` is the number of Z planes *written per field*, which is 1 on this path: the MIP
+    collapses Z (the writer asserts ``shape[2] == 1``). It is a parameter, not a constant, so a
+    caller that persists a stack passes the stack depth and gets the same arithmetic — but it
+    defaults to what this module actually writes, because a 10x over-estimate refuses runs that
+    would have fit and is no kinder than an under-estimate.
+
+    UNCOMPRESSED throughout: real fluorescence zstds unpredictably (often < 1.2x), so discounting
+    for compression would under-estimate. Returns 0 when the metadata cannot support an estimate
+    (no ``frame_shape``); the caller then skips the check rather than blocking on a guess.
+    """
+    frame_shape = metadata.get("frame_shape")
+    channels = metadata.get("channels") or []
+    if not frame_shape or not channels:
+        return 0
+    ny, nx = int(frame_shape[0]), int(frame_shape[1])
+    itemsize = np.dtype(metadata.get("dtype", "uint16")).itemsize
+    fovs_per_region = metadata.get("fovs_per_region") or {}
+
+    scoped = list(fovs_per_region) if regions is None else [r for r in regions if r in fovs_per_region]
+    if n_fovs is None:
+        n_fields = sum(len(fovs_per_region[r]) for r in scoped)
+    else:                                   # select_fovs takes at most n_fovs per region
+        n_fields = sum(min(int(n_fovs), len(fovs_per_region[r])) for r in scoped)
+
+    frame_bytes = n_fields * int(metadata.get("n_t", 1) or 1) * len(channels) * int(n_z) * ny * nx * itemsize
+    total = frame_bytes * plate_pyramid_factor((ny, nx))
+    if tiff:
+        total += frame_bytes                # a second, uncompressed, pyramid-free copy
+    return int(total * _DISK_SAFETY_FACTOR) + _DISK_NON_IMAGE_BYTES
+
+
+def free_bytes(path) -> int:
+    """Free bytes on the filesystem that will hold *path* — Squid's ``get_available_disk_space``.
+
+    Squid requires the directory to exist; a write destination legitimately does not yet, so the
+    nearest EXISTING ancestor is stat-ed instead (same filesystem, same answer). Returns -1 when
+    the filesystem cannot be stat-ed at all, which the caller reads as "don't block".
+    """
+    p = Path(path).absolute()
+    for candidate in (p, *p.parents):
+        if candidate.is_dir():
+            try:
+                return int(shutil.disk_usage(candidate).free)
+            except OSError:
+                return -1
+    return -1
+
+
+def check_disk_space(out_dir, required_bytes: int, *, headroom: Optional[float] = None,
+                     min_free_bytes: Optional[int] = None, what: str = "this write") -> None:
+    """Raise :class:`InsufficientDiskSpaceError` unless *required_bytes* fits with headroom.
+
+    Headroom defaults to :data:`_DISK_HEADROOM` of the free space but never less than
+    :data:`_DISK_MIN_FREE_BYTES`, so an estimate can never consume the last of the disk; both are
+    overridable per call and via ``SQUIDMIP_DISK_HEADROOM`` / ``SQUIDMIP_MIN_FREE_BYTES``.
+    """
+    if required_bytes <= 0:
+        return
+    frac = _env_float("SQUIDMIP_DISK_HEADROOM", _DISK_HEADROOM) if headroom is None else float(headroom)
+    floor = (int(_env_float("SQUIDMIP_MIN_FREE_BYTES", _DISK_MIN_FREE_BYTES))
+             if min_free_bytes is None else int(min_free_bytes))
+    free = free_bytes(out_dir)
+    if free < 0:
+        return                                    # can't stat the disk -> don't block the run
+    reserve = max(int(free * frac), floor)
+    budget = free - reserve
+    if required_bytes > budget:
+        raise InsufficientDiskSpaceError(
+            f"refusing to start: {what} needs ~{required_bytes / _GB:.2f} GB but "
+            f"{Path(out_dir).absolute()} has {free / _GB:.2f} GB free "
+            f"(keeping {reserve / _GB:.2f} GB headroom, so {max(budget, 0) / _GB:.2f} GB usable). "
+            "Free space, pick another disk, or lower the headroom "
+            "(disk_headroom= / SQUIDMIP_DISK_HEADROOM)."
+        )
+
+
+# --- IMA-230: partial-write hygiene ----------------------------------------------------------
+
+def is_incomplete(plate_dir) -> bool:
+    """True while a plate store is mid-write, or if the write that made it never finished."""
+    return (Path(plate_dir) / _INCOMPLETE_MARKER).exists()
+
+
+def _mark_incomplete(plate_dir: Path, info: dict) -> None:
+    (plate_dir / _INCOMPLETE_MARKER).write_text(json.dumps(info, indent=2))
+
+
+def _clear_incomplete(plate_dir: Path) -> None:
+    try:
+        (plate_dir / _INCOMPLETE_MARKER).unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _partial_dir(well_dir: Path, fov) -> Path:
+    return well_dir / f"{_PARTIAL_PREFIX}{fov}{_PARTIAL_SUFFIX}"
+
+
+def _publish(tmp: Path, final: Path) -> None:
+    """Atomically make *tmp* visible as *final* — a field appears whole or not at all.
+
+    ``os.replace`` on a directory needs the target absent (or an empty dir), so a rerun's old
+    field is removed first; the window between the two is the only moment a reader could see the
+    field missing, and a missing field is honest where a half-written one is not.
+    """
+    if final.exists():
+        shutil.rmtree(final)
+    os.replace(tmp, final)
+
+
+def _cleanup_partials(directory: Path) -> int:
+    """Remove any leftover ``.{fov}.partial`` intermediates under *directory*. Returns the count.
+
+    Called per REGION as its last field lands (and once at the end), so a long multi-region run
+    never accumulates every region's intermediates at once — a crashed field's temp directory is
+    reclaimed while the next region is still being projected, not hours later.
+    """
+    n = 0
+    if not directory.is_dir():
+        return 0
+    for child in directory.iterdir():
+        if child.is_dir() and child.name.startswith(_PARTIAL_PREFIX) and child.name.endswith(_PARTIAL_SUFFIX):
+            shutil.rmtree(child, ignore_errors=True)
+            n += 1
+    return n
 
 
 # --- well id <-> row/col --------------------------------------------------------------------
@@ -330,14 +546,228 @@ def _write_field(field_dir: Path, image: np.ndarray, channels: list[dict], pixel
 
 
 def _write_tiffs(tiff_root: Path, region: str, fov: int, image: np.ndarray, channel_names: list[str]) -> None:
-    """Individual per-plane TIFFs: tiff/{t}/{region}_{fov}_0_{channel}.tiff, native dtype."""
+    """Individual per-plane TIFFs: tiff/{t}/{region}_{fov}_0_{channel}.tiff, native dtype.
+
+    Each plane is written to a ``.partial`` sibling and atomically renamed into place (IMA-230):
+    a run killed by a full disk used to leave an 8-byte ``.tiff`` that every downstream tool
+    happily opened as a real file. A rename either happens or does not, so a published TIFF is
+    always a complete one; the temp file is removed on the way out of a failure.
+    """
     n_t = image.shape[0]
     for t in range(n_t):
         tdir = tiff_root / str(t)
         tdir.mkdir(parents=True, exist_ok=True)
         for c_i, channel in enumerate(channel_names):
             plane = image[t, c_i, 0]  # (Y, X), native dtype, z collapsed
-            tifffile.imwrite(tdir / f"{region}_{fov}_0_{channel}.tiff", plane)
+            final = tdir / f"{region}_{fov}_0_{channel}.tiff"
+            tmp = final.with_name(final.name + _PARTIAL_SUFFIX)
+            try:
+                tifffile.imwrite(tmp, plane)
+                os.replace(tmp, final)
+            except BaseException:
+                tmp.unlink(missing_ok=True)
+                raise
+
+
+# --- IMA-231: FOV_ROI_table (Fractal / ngio ROI-table convention) -----------------------------
+#
+# WHAT THE SPEC ACTUALLY SAYS (read from ngio's source — the fractal-tasks-core "Table
+# specifications" page 404s now, table I/O moved to ngio, which fractal-tasks-core 2.x depends on):
+#
+#   * location   — ``<image group>/tables/<table_name>``; the ``tables`` group's attrs list the
+#                  table names: ``{"tables": ["FOV_ROI_table"]}``.
+#   * name       — ``FOV_ROI_table`` (``fractal_tasks_core.roi.v1.prepare_FOV_ROI_table``).
+#   * payload    — an AnnData object; the six REQUIRED columns are, exactly
+#                  (``ngio/tables/v1/_roi_table.py::REQUIRED_COLUMNS``):
+#                     x_micrometer, y_micrometer, z_micrometer,
+#                     len_x_micrometer, len_y_micrometer, len_z_micrometer
+#                  optional ones used here: x_micrometer_original / y_micrometer_original /
+#                  z_micrometer_original (ORIGIN_COLUMNS) and path_in_well (PLATE_COLUMNS).
+#   * index      — ``FieldIndex``, string, values ``FOV_1``, ``FOV_2``, ... (ngio
+#                  ``RoiTableV1Meta.index_key`` default; fractal's prepare_FOV_ROI_table does
+#                  ``adata.obs_names = "FOV_" + adata.obs.index``).
+#   * attrs      — ngio writes ``{"type": "roi_table", "table_version": "1",
+#                  "backend": "anndata_v1", "index_key": "FieldIndex", "index_type": "str"}``;
+#                  fractal-tasks-core <= 1.6 requires ``fractal_table_version: "1"`` instead.
+#                  Both are written — ngio's model is ``extra="allow"``, so old and new readers work.
+#   * origin     — "the axes origin for the ROI positions corresponds to the top-left corner of the
+#                  image (for the YX axes) and to the lowest Z plane", i.e. the LOWER BOUND of the
+#                  interval, a CORNER, never a centre; and ``prepare_FOV_ROI_table`` calls
+#                  ``reset_origin()``, so x/y_micrometer are relative to the image (here: the well)
+#                  while the absolute stage coordinate is kept in x/y_micrometer_original.
+#
+# UNITS. SquidMIP's contract is micrometres with a ``_um`` suffix on every key; ngio's contract is
+# micrometres with a ``_micrometer`` suffix. Same unit, different spelling — so the two vocabularies
+# are joined by ONE explicit table (:data:`_NGIO_COLUMN`) and nothing is renamed by coincidence.
+# There is no scale factor in that map, and there must never be one: a millimetre anywhere here is
+# a bug (positions arrive from ``metadata["fov_positions_um"]``, which the reader already converted
+# from coordinates.csv's mm).
+
+_ROI_TABLE_NAME = "FOV_ROI_table"
+_ROI_INDEX_KEY = "FieldIndex"
+
+# SquidMIP key (µm) -> ngio/fractal column (µm). A RENAME, never a conversion.
+_NGIO_COLUMN = {
+    "x_um": "x_micrometer",
+    "y_um": "y_micrometer",
+    "z_um": "z_micrometer",
+    "len_x_um": "len_x_micrometer",
+    "len_y_um": "len_y_micrometer",
+    "len_z_um": "len_z_micrometer",
+    "x_original_um": "x_micrometer_original",
+    "y_original_um": "y_micrometer_original",
+    "z_original_um": "z_micrometer_original",
+}
+_ROI_NUMERIC_UM = list(_NGIO_COLUMN)          # X columns, in written order
+_ROI_OBS_COLUMNS = ("path_in_well",)          # string columns -> AnnData obs (ngio PLATE_COLUMNS)
+
+
+def fov_roi_records_um(fovs, positions_um, frame_shape, pixel_size_um, *,
+                       dz_um: Optional[float] = None, n_z: int = 1) -> list[dict]:
+    """One ROI record per FOV of one region — all lengths and positions in MICROMETRES (``_um``).
+
+    ``x_um``/``y_um`` are the TOP-LEFT CORNER, derived by :func:`field_origin_um` from the recorded
+    FOV **centre** — the same function that produces the NGFF ``translation`` this writer stamps on
+    every dataset, and the same corner ``squidmip._tilesource.fov_bboxes_um`` computes. One
+    definition, so a fused region's ROI boxes cannot drift half an FOV from the pixels.
+
+    ``*_original_um`` is that corner in ABSOLUTE stage µm; ``x_um``/``y_um`` are relative to the
+    region's own top-left corner (min over its FOVs), which is fractal's ``reset_origin`` — after a
+    region is fused, pixel (0, 0) of the fused image is exactly that minimum, so a consumer can use
+    the ROI boxes as pixel offsets without knowing where the stage was.
+
+    FOVs with no recorded position are skipped; an empty list means "no table" (the acquisition had
+    no coordinates.csv), never a table full of zeros.
+    """
+    p = float(pixel_size_um or 0.0)
+    if not p > 0:
+        return []
+    h, w = int(frame_shape[0]), int(frame_shape[1])
+    len_x_um, len_y_um = w * p, h * p
+    # A projected field is one plane, but the ROI describes the physical volume it came from:
+    # z-spacing x n planes (the ngio spec's own rule for a 2D table). Unknown spacing -> one plane.
+    len_z_um = float(dz_um) * max(1, int(n_z)) if dz_um else 1.0
+
+    raw = []
+    for fov in fovs:
+        corner = field_origin_um(positions_um.get(fov), (h, w), p)
+        if corner is None:
+            continue
+        raw.append((fov, float(corner[0]), float(corner[1])))
+    if not raw:
+        return []
+    x0 = min(x for _, x, _ in raw)      # the region's own origin: its top-left corner
+    y0 = min(y for _, _, y in raw)
+    return [
+        {
+            "FieldIndex": f"FOV_{fov}",   # ngio index convention; the RAW fov id, so the name
+            "path_in_well": str(fov),     # and path_in_well point at the field dir on disk
+            "x_um": x - x0, "y_um": y - y0, "z_um": 0.0,
+            "len_x_um": len_x_um, "len_y_um": len_y_um, "len_z_um": len_z_um,
+            "x_original_um": x, "y_original_um": y, "z_original_um": 0.0,
+        }
+        for fov, x, y in raw
+    ]
+
+
+def _check_roi_micrometres(records: list[dict], frame_extent_um: float) -> None:
+    """Fail loud if the FOV pitch says the positions were millimetres wearing a ``_um`` key.
+
+    Same invariant (and the same 1000x defect) as ``_tilesource._check_micrometres``, applied at
+    the other end of the pipe: a table is a durable artifact an external tool will trust, so it
+    must not be the place a unit bug becomes permanent.
+    """
+    xs = sorted({round(r["x_um"], 6) for r in records})
+    ys = sorted({round(r["y_um"], 6) for r in records})
+    gaps = [b - a for v in (xs, ys) for a, b in zip(v, v[1:]) if b > a]
+    if gaps and min(gaps) < frame_extent_um / 100.0:
+        raise ValueError(
+            f"FOV pitch is {min(gaps):.4g} µm for a {frame_extent_um:.4g} µm frame — that is "
+            "millimetres in a `_um` key (1000x). Refusing to write an FOV_ROI_table that would "
+            "put every downstream tool 1000x off; positions come from metadata['fov_positions_um']."
+        )
+
+
+def _zarr_write_anndata_roi_table(table_dir: Path, records: list[dict]) -> None:
+    """Write *records* as an AnnData-encoded zarr v3 group at *table_dir* (no anndata dependency).
+
+    The AnnData zarr encoding is a documented on-disk contract (``encoding-type`` /
+    ``encoding-version`` attrs), so it is written directly with zarr-python rather than taking a
+    dependency on anndata + h5py for nine columns. Numeric ``_micrometer`` columns go in ``X``
+    (``var`` names them, which is where ngio and fractal look for them); the string columns go in
+    ``obs``, whose ``_index`` is the ``FieldIndex``.
+    """
+    import zarr
+
+    root = zarr.open_group(str(table_dir), mode="w", zarr_format=3)
+    root.attrs.update({
+        "encoding-type": "anndata", "encoding-version": "0.1.0",
+        "type": "roi_table",
+        "fractal_table_version": "1",     # fractal-tasks-core <= 1.6 refuses a table without it
+        "table_version": "1",             # ngio's spelling (extra="allow" keeps both)
+        "backend": "anndata_v1",
+        "index_key": _ROI_INDEX_KEY, "index_type": "str",
+    })
+
+    x = np.array([[float(r[k]) for k in _ROI_NUMERIC_UM] for r in records], dtype=np.float64)
+    arr = root.create_array("X", shape=x.shape, dtype="float64")
+    arr[...] = x
+    arr.attrs.update({"encoding-type": "array", "encoding-version": "0.2.0"})
+
+    def _string_column(group, name: str, values: list[str]) -> None:
+        a = group.create_array(name, shape=(len(values),), dtype=str)
+        a[...] = np.array(values, dtype=object)
+        a.attrs.update({"encoding-type": "string-array", "encoding-version": "0.2.0"})
+
+    obs = root.create_group("obs")
+    obs.attrs.update({"encoding-type": "dataframe", "encoding-version": "0.2.0",
+                      "_index": _ROI_INDEX_KEY, "column-order": list(_ROI_OBS_COLUMNS)})
+    _string_column(obs, _ROI_INDEX_KEY, [str(r[_ROI_INDEX_KEY]) for r in records])
+    for col in _ROI_OBS_COLUMNS:
+        _string_column(obs, col, [str(r[col]) for r in records])
+
+    var = root.create_group("var")
+    var.attrs.update({"encoding-type": "dataframe", "encoding-version": "0.2.0",
+                      "_index": "_index", "column-order": []})
+    _string_column(var, "_index", [_NGIO_COLUMN[k] for k in _ROI_NUMERIC_UM])
+
+    for empty in ("layers", "obsm", "varm", "obsp", "varp", "uns"):
+        g = root.create_group(empty)
+        g.attrs.update({"encoding-type": "dict", "encoding-version": "0.1.0"})
+
+
+def write_fov_roi_table(image_dir, records: list[dict], *, table_name: str = _ROI_TABLE_NAME) -> Optional[Path]:
+    """Write ``<image_dir>/tables/<table_name>`` from :func:`fov_roi_records_um` records.
+
+    Returns the table path, or None when there is nothing to write. The ``tables`` group's attrs
+    accumulate the table names (``{"tables": [...]}``), which is how ngio discovers them.
+    """
+    if not records:
+        return None
+    _check_roi_micrometres(records, float(records[0]["len_x_um"]))
+    image_dir = Path(image_dir)
+    tables_dir = image_dir / "tables"
+    table_dir = tables_dir / table_name
+    tmp = tables_dir / f"{_PARTIAL_PREFIX}{table_name}{_PARTIAL_SUFFIX}"
+    shutil.rmtree(tmp, ignore_errors=True)
+    try:
+        _zarr_write_anndata_roi_table(tmp, records)
+        _publish(tmp, table_dir)
+    except BaseException:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
+    # The tables group is a plain zarr group whose attrs index its members.
+    existing = []
+    zj = tables_dir / "zarr.json"
+    if zj.exists():
+        try:
+            existing = json.loads(zj.read_text()).get("attributes", {}).get("tables", [])
+        except (OSError, ValueError):
+            existing = []
+    names = list(dict.fromkeys([*existing, table_name]))
+    zj.write_text(json.dumps({"zarr_format": 3, "node_type": "group",
+                              "attributes": {"tables": names}}, indent=2))
+    return table_dir
 
 
 # --- orchestration ---------------------------------------------------------------------------
@@ -353,6 +783,10 @@ def write_from_stream(
     write_workers: int = _WRITE_WORKERS,
     stop=None,
     regions=None,
+    check_disk: bool = True,
+    disk_headroom: Optional[float] = None,
+    min_free_bytes: Optional[int] = None,
+    roi_table: bool = True,
 ) -> dict:
     """Write the plate + (optionally) TIFFs from a ``(region, fov, image)`` stream and *metadata*.
 
@@ -370,12 +804,27 @@ def write_from_stream(
     viewer guards its shared contrast/tiles with a lock). ``stop()`` is an optional predicate polled
     before each submit; when it returns True the stream is abandoned and in-flight writes are drained
     — a clean partial-plate stop for a cancelled GUI run.
+
+    IMA-230: before anything is created, the write is estimated (:func:`estimate_write_bytes`) and
+    refused with :class:`InsufficientDiskSpaceError` if it would not fit with headroom — nothing
+    is written at all, rather than dying 94% of the way through. ``check_disk=False`` opts out;
+    ``disk_headroom`` / ``min_free_bytes`` tune the reserve. While the store is being written it
+    carries a ``.squidmip-incomplete`` marker (:func:`is_incomplete`), each field is published by
+    atomic rename so a half-written one is never visible, and each region's intermediates are
+    swept as its last field lands.
     """
     from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+    from threading import Lock
 
     out_dir = Path(out_dir)
     plate_dir = out_dir / "plate.ome.zarr"
     tiff_root = out_dir / "tiff"
+
+    if check_disk:
+        need = estimate_write_bytes(metadata, n_fovs=n_fovs, regions=regions, tiff=tiff)
+        scope = "this plate write" if regions is None else f"this {len(list(regions))}-well write"
+        check_disk_space(out_dir, need, headroom=disk_headroom, min_free_bytes=min_free_bytes,
+                         what=scope)
 
     wells = select_fovs(metadata, n_fovs=n_fovs)  # {region: [fov, ...]}, deterministic
     # NGFF field_count is a single plate-level scalar and is int()-ed below, so n_fovs=None
@@ -389,6 +838,9 @@ def write_from_stream(
 
     # Full plate/row/well group metadata written UP FRONT (layout is fully known from metadata).
     write_group(plate_dir, plate_metadata(wells.keys(), field_count=field_count))
+    # ...and the store declares itself unfinished from its first byte until its last (IMA-230), so
+    # a run killed mid-write leaves something a reader can TELL is incomplete.
+    _mark_incomplete(plate_dir, {"wells": list(wells), "fields": sum(len(f) for f in wells.values())})
     for region, fovs in wells.items():
         row, col = parse_well_id(region)
         write_group(plate_dir / row)  # bare row group
@@ -405,28 +857,56 @@ def write_from_stream(
     dz_um = metadata.get("dz_um")
     positions_um = metadata.get("fov_positions_um") or {}   # {} when there is no coordinates.csv
 
+    remaining = {r: len(f) for r, f in wells.items()}   # fields still owed per region
+    remaining_lock = Lock()
+
     def _write_one(region, fov, image):
         row, col = parse_well_id(region)
+        well_dir = plate_dir / row / col
         # Stage µm of the field's top-left pixel -> the NGFF translation. Frame shape comes from the
         # IMAGE, not the metadata, so a cropped/binned field is placed at its true extent.
         origin_um = field_origin_um(positions_um.get((region, fov)), image.shape[-2:], pixel_size_um)
-        # field directory is the RAW fov id (Squid convention), digit-named for ndviewer.
-        levels = _write_field(plate_dir / row / col / str(fov), image, channels, pixel_size_um, dz_um,
-                              position_um=origin_um)
-        if tiff:
-            _write_tiffs(tiff_root, region, fov, image, channel_names)
+        # Build the field in a ".{fov}.partial" directory and RENAME it into place: the field
+        # directory is the RAW fov id (Squid convention, digit-named for ndviewer), and it only
+        # ever appears complete. A crash leaves a dot-named temp, which no reader walks.
+        tmp = _partial_dir(well_dir, fov)
+        shutil.rmtree(tmp, ignore_errors=True)
+        try:
+            levels = _write_field(tmp, image, channels, pixel_size_um, dz_um, position_um=origin_um)
+            if tiff:
+                _write_tiffs(tiff_root, region, fov, image, channel_names)
+            _publish(tmp, well_dir / str(fov))
+        except BaseException:
+            shutil.rmtree(tmp, ignore_errors=True)     # never leave this field's intermediate behind
+            raise
+        with remaining_lock:                            # per-REGION cleanup as the region finishes,
+            remaining[region] -= 1                      # so a long run doesn't hoard every region's
+            done_region = remaining[region] <= 0        # intermediates until the very end
+        if done_region:
+            _cleanup_partials(well_dir)
+            if roi_table:
+                # IMA-231: the region is complete, so its FOV boundaries can be published for
+                # whoever fuses it later (Fractal). Persist path ONLY — the live viewer has
+                # coordinates.csv already. Frame shape comes from the IMAGE, like the translation.
+                fov_pos = {f: positions_um[(region, f)] for f in wells[region]
+                           if (region, f) in positions_um}
+                write_fov_roi_table(well_dir, fov_roi_records_um(
+                    wells[region], fov_pos, image.shape[-2:], pixel_size_um,
+                    dz_um=dz_um, n_z=int(metadata.get("n_z", 1) or 1)))
         if on_well is not None:  # live consumer (plate viewer): render tile + push to ndviewer
             on_well(region, fov, image)
         return levels
 
     n_written = 0
     n_levels = 1
+    stopped = False
     n_writers = max(1, int(write_workers))
     try:
         with ThreadPoolExecutor(max_workers=n_writers, thread_name_prefix="squidmip-write") as ex:
             pending: set = set()
             for region, fov, image in stream:
                 if stop is not None and stop():
+                    stopped = True
                     break
                 pending.add(ex.submit(_write_one, region, fov, image))
                 if len(pending) >= n_writers:    # keep <= n_writers wells in flight (bounded memory)
@@ -443,6 +923,15 @@ def write_from_stream(
         close = getattr(stream, "close", None)
         if callable(close):
             close()
+        # Sweep every well's leftovers, however this run ended (a failure that skipped the
+        # per-region sweep, or a stop that abandoned regions mid-flight).
+        for region in wells:
+            row, col = parse_well_id(region)
+            _cleanup_partials(plate_dir / row / col)
+
+    complete = not stopped
+    if complete:
+        _clear_incomplete(plate_dir)   # last act of a finished write: the store is now trustworthy
 
     return {
         "plate": str(plate_dir),
@@ -450,6 +939,7 @@ def write_from_stream(
         "n_wells": len(wells),
         "n_fields_written": n_written,
         "levels": n_levels,
+        "complete": complete,
     }
 
 
@@ -466,6 +956,10 @@ def write_plate(
     stop=None,
     on_error=None,
     regions=None,
+    check_disk: bool = True,
+    disk_headroom: Optional[float] = None,
+    min_free_bytes: Optional[int] = None,
+    roi_table: bool = True,
 ) -> dict:
     """Project a plate (IMA-188) and write the canonical OME-zarr + individual TIFFs.
 
@@ -495,4 +989,6 @@ def write_plate(
     stream = project_plate(reader, n_fovs=n_fovs, workers=workers, projector=projector,
                            on_error=on_error, regions=regions)
     return write_from_stream(metadata, stream, out_dir, n_fovs=n_fovs, tiff=tiff, on_well=on_well,
-                             write_workers=write_workers, stop=stop, regions=regions)
+                             write_workers=write_workers, stop=stop, regions=regions,
+                             check_disk=check_disk, disk_headroom=disk_headroom,
+                             min_free_bytes=min_free_bytes, roi_table=roi_table)

@@ -17,6 +17,10 @@ dependencies = [
     "pandas>=2.0",
     "pyyaml>=6.0",
     "tensorstore>=0.1.45",
+    "zarr>=3.0",                # IMA-231: writes the AnnData-encoded FOV_ROI_table (vlen-utf8
+    #                             string arrays in zarr v3), which tensorstore cannot encode.
+    #                             anndata itself is NOT a dependency — the encoding is a documented
+    #                             on-disk contract and the table is nine columns wide.
     "pillow>=10.0",
     "pydantic-settings>=2.3",   # declarative CLI (IMA-186), same pattern as the stitcher
 ]
