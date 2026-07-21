@@ -556,11 +556,13 @@ def test_double_click_pushes_raw_zstack(qapp, stub_detail, squid_dataset):
     win.activate_well("B3", 0)       # double-click B3 -> register its raw z-planes + navigate
     regs = win._detail.registered
     assert regs, "no raw planes registered"
-    # every registration points at a real on-disk TIFF at B3's plate index, across both z-levels
-    idx = win._fov_index["B3"]["idx"]
-    assert {r[1] for r in regs} == {idx}
+    # IMA-250: the slider index is a POSITION IN B3's OWN FOV LIST, not B3's plate index. B3 has
+    # two FOVs, so both positions are registered — it used to be one entry at the plate index,
+    # which is what made the control a region control wearing a FOV label.
+    assert {r[1] for r in regs} == {0, 1}
     assert {r[2] for r in regs} == {0, 1}                        # z-stack: both z-levels pushed
     assert all(r[4].endswith(".tiff") and os.path.exists(r[4]) for r in regs)
+    assert win._detail._fov_labels == ["B3:0", "B3:1"]
     assert win._detail.nav[-1] == ("B3", 0)                      # navigated to the well
     # second double-click doesn't re-register (idempotent push)
     n = len(regs)
@@ -573,11 +575,14 @@ def test_fov_slider_moves_red_box(qapp, stub_detail, squid_dataset):
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
-    # drive the ndviewer FOV slider -> the plate's red box should select that well
-    idx = win._detail._fov_labels.index("B3:0")
+    # drive the ndviewer FOV slider -> the plate's red box should select that FIELD. The control
+    # is scoped to one region (IMA-250), so pick the region first and scrub within it.
+    win.activate_well("B3", 0)
+    idx = win._detail._fov_labels.index("B3:1")
     win._detail._fov_slider.setValue(idx)
     qapp.processEvents()
     assert win._overview._sel == win._fov_index["B3"]["rc"]
+    assert win._overview._sel_fov == 1        # the FOV, not just the region
     win.close()
 
 

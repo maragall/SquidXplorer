@@ -1393,6 +1393,9 @@ class PlateOverview(QWidget):
         self._ox = self._oy = _PAD    # top-left of the plate within the widget (pan-able)
         self._hover = None
         self._sel = None              # well selected from the ndviewer FOV slider
+        self._sel_fov = None          # WHICH FOV of that well the detail is on (IMA-250), or None.
+        #                               The red box narrows onto that FOV's own box, so the plate
+        #                               and the FOV control can never name different fields.
         # SELECTION (IMA-221) is a DIFFERENT concept from _sel above: _sel is "the one well the
         # detail viewer is showing" (red box, driven by the FOV slider); _selection is "the set the
         # operator picked" (tint, driven by Shift-gestures). Never merge them — the red box must
@@ -1853,10 +1856,41 @@ class PlateOverview(QWidget):
                 self._status[rc] = state
         self.update()
 
-    def select(self, ri: int, ci: int):
-        """Move the red box to a well (driven by the ndviewer FOV slider)."""
+    def select(self, ri: int, ci: int, fov: Optional[int] = None):
+        """Move the red box onto the field the detail view is showing.
+
+        ``fov=None`` selects the whole CELL, which is all a single-tile cell can mean. Passing a
+        FOV narrows the box onto that FOV's own sub-rectangle when this cell holds a mosaic —
+        requirement 4 of IMA-250: whatever the FOV control shows, the overview must indicate the
+        same field. The sub-rectangle is read from ``self._boxes``, the same index the FOV
+        control enumerates from (:func:`region_fov_order`), so the two cannot name different
+        fields; a FOV with no box (single-tile cell) falls back to the cell.
+        """
         self._sel = (ri, ci)
+        self._sel_fov = fov
         self.update()
+
+    def selected_fov_rect(self) -> Optional[tuple]:
+        """Widget-px rect of the SELECTED FOV's box, or None when the selection is a whole cell.
+
+        Inverse of :meth:`_fov_at`'s forward map, and deliberately the same three lines: the
+        hit-test and the highlight must agree about where a FOV sits, or a double-click would
+        open a field the red box does not sit on.
+        """
+        if self._sel is None or self._sel_fov is None:
+            return None
+        ri, ci = self._sel
+        box = self._boxes.get((self._by_rc.get((ri, ci)), self._sel_fov))
+        if box is None:
+            return None
+        top, left, bh, bw = box
+        rx, ry, rw, rh = self._cell_rect(ri, ci)
+        sx, sy, sw, sh = self._cell_source(ri, ci)
+        if not (rw > 0 and rh > 0 and sw > 0 and sh > 0):
+            return None
+        x = rx + (left - (sx - ci * _CELL)) / sw * rw
+        y = ry + (top - (sy - ri * _CELL)) / sh * rh
+        return (x, y, bw / sw * rw, bh / sh * rh)
 
     def resizeEvent(self, e):
         self._user_view = False       # a resize re-fits (drop any zoom/pan)
@@ -2324,11 +2358,19 @@ class PlateOverview(QWidget):
                 continue
             p.setPen(_ACCENT if hov else _MUTED)
             p.drawText(int(self._ox), int(ay + r * cd), _HDR, int(cd), Qt.AlignCenter, str(self._rows[r]))
-        if self._sel is not None:          # the CURRENT well in the detail viewer = a red BOX
-            p.setPen(QPen(_RED, 2))
+        if self._sel is not None:          # the CURRENT field in the detail viewer = a red BOX
             p.setBrush(Qt.NoBrush)
             sx, sy, sw, sh = self._cell_rect(*self._sel)
+            fov_rect = self.selected_fov_rect()
+            # A mosaic cell gets BOTH: a thin dashed outline round the region (which region am I
+            # in) and the bold box on the one FOV the detail view is showing (which field am I
+            # on). Drawing only the cell is exactly the conflation IMA-250 is about.
+            p.setPen(QPen(_RED, 1, Qt.DashLine) if fov_rect else QPen(_RED, 2))
             p.drawRect(int(sx), int(sy), int(sw), int(sh))
+            if fov_rect:
+                p.setPen(QPen(_RED, 2))
+                fx, fy, fw, fh = fov_rect
+                p.drawRect(int(fx), int(fy), int(max(1, fw)), int(max(1, fh)))
         if self._hover is not None:        # where the cursor is, moving around the plate = a red DOT
             ri, ci = self._hover           # SAME geometry as the status dots -> overlays them exactly
             x0, y0, hw, hh = self._cell_rect(ri, ci)
@@ -2512,6 +2554,34 @@ def _mosaic_boxes(meta: dict) -> dict:
         except (KeyError, ValueError):
             continue                     # this region renders single-tile; the rest still mosaic
     return out
+
+
+def region_fov_order(meta: dict, region: str, boxes: Optional[dict] = None) -> list:
+    """THE enumeration of one region's FOVs (IMA-250). One producer, two consumers.
+
+    A REGION IS A MOSAIC OF FOVs (IMA-253), and exactly two things have to agree about which
+    FOVs it holds and in what order: the plate overview, which draws one box per FOV, and the
+    detail view's FOV control, which scrubs through them. They used to disagree by construction
+    because only the overview enumerated FOVs at all — the control enumerated REGIONS, so on
+    the 10x tissue set it offered 2 positions for 55 fields.
+
+    Passing ``boxes`` (the dict :func:`_mosaic_boxes` built for the overview) makes the control
+    read the overview's OWN index: the order comes straight off its keys, in their insertion
+    order, so the control cannot offer a FOV the overview does not draw, or skip one it does.
+    Recomputing the list from ``fovs_per_region`` here instead would be a SECOND representation
+    of one truth, hand-synced — the defect class that has already produced millimetres under a
+    key ending ``_um`` and a ``_push_index`` that disagreed with its producer.
+
+    The fallback is for regions ``_mosaic_boxes`` deliberately leaves out: a single-FOV region
+    (nothing to box) and a region whose geometry would not resolve. Both render as one tile, so
+    "the FOVs the overview drew" is the region's whole FOV list, which is the same list
+    ``_mosaic_boxes`` iterated before deciding not to box it. Never a different one.
+    """
+    if boxes:
+        fovs = [f for (r, f) in boxes if r == region]
+        if fovs:
+            return fovs
+    return list((meta.get("fovs_per_region") or {}).get(region, ()) or [])
 
 
 def region_mosaic_extent_px(meta: dict, regions: Optional[list] = None) -> Optional[tuple]:
@@ -3162,7 +3232,13 @@ class PlateWindow(QMainWindow):
         self._meta = None
         self._fov_index = {}
         self._selected_regions = []   # wells picked on the plate (IMA-221); scopes an operator run
-        self._pushed = set()          # wells whose raw z-stack is already registered in the detail viewer
+        self._pushed = set()          # (region, fov) whose raw z-stack is registered in the detail viewer
+        self._mosaic_index = {}       # THE per-region FOV index (IMA-253's _mosaic_boxes), built once
+        #                               per acquisition and read by BOTH the overview's boxes and the
+        #                               detail's FOV control. Two computations of it would drift.
+        self._detail_region = None    # the region the FOV control is scoped to (IMA-250)
+        self._detail_fovs = []        # that region's FOVs, in control-position order
+        self._current_fov = None      # the FOV of _current_well the detail viewer is showing
         self._channel_bar = None      # per-channel toggle + contrast strip under the plate (IMA-206)
 
         # File menu: a reliable "Open acquisition folder" (drag-drop can be blocked on Windows by the
@@ -3209,6 +3285,7 @@ class PlateWindow(QMainWindow):
         self._dropped_pushes = 0
         self._active_exploration = None   # the exploration tab currently in front, if any
         self._tabs_muted = False      # suppress _on_tab_changed during bulk teardown (ingest)
+        self._region_muted = False    # suppress _on_region_combo while the combo is repopulated
         self._run_out_dir = None      # output dir of the in-flight SAVE run (for partial cleanup)
         self._run_tab_key = None      # exploration tab that owns the in-flight run, if any
         self._pending_resync = False  # a tab switch was deferred because a run was live (IMA-205 bugs)
@@ -3343,6 +3420,25 @@ class PlateWindow(QMainWindow):
         detail_bar.setStyleSheet(f"background:{_BG};")
         dbl = QHBoxLayout(detail_bar)
         dbl.setContentsMargins(8, 5, 8, 5)
+        # REGION picker (IMA-250). Region and FOV are two different axes and they now have two
+        # different controls: this combo picks the mosaic, ndviewer's own FOV slider scrubs the
+        # fields INSIDE it. One control cannot express both — the single slider was stepping
+        # regions while calling itself FOV, which is how 55 fields presented as 2 positions.
+        # A combo rather than a second slider because regions are a short NAMED list (manual0,
+        # manual1) with no meaningful adjacency to scrub through, whereas FOVs are a dense
+        # ordered sweep, which is exactly what a slider is for.
+        region_lbl = QLabel("Region")
+        region_lbl.setStyleSheet("color:#8b98ad;font-size:12px;")
+        dbl.addWidget(region_lbl)
+        self._region_combo = QComboBox()
+        self._region_combo.setStyleSheet(_COMBO_QSS)
+        self._region_combo.setMinimumWidth(140)
+        self._region_combo.setToolTip(
+            "Which REGION (mosaic) the FOV slider above is scrubbing through.\n"
+            "The slider lists that region's own FOVs — a region is a mosaic of FOVs, not a FOV.")
+        self._region_combo.currentIndexChanged.connect(self._on_region_combo)
+        dbl.addWidget(self._region_combo)
+        dbl.addSpacing(12)
         self._focus_btn = QPushButton("Focus reference plane")
         self._focus_btn.setStyleSheet(_BTN_QSS)
         self._focus_btn.setToolTip("Jump the z-slider to the sharpest plane of the FOV in view")
@@ -4486,6 +4582,10 @@ class PlateWindow(QMainWindow):
         self._selected_regions = []   # wells picked on the plate (IMA-221); scopes an operator run
         self._pushed = set()
         self._current_well = None
+        self._current_fov = None
+        self._mosaic_index = {}       # belongs to the plate being dropped, not the next one
+        self._detail_region = None
+        self._detail_fovs = []
         self._enable_operators(False)
         if self._overview is not None:
             self._release_loupe_sources()   # join the read thread BEFORE dropping its owner
@@ -4557,6 +4657,18 @@ class PlateWindow(QMainWindow):
         self._left_l.addWidget(self._overview, 1)   # fills the pane and self-fits — no scrollbars
         self._install_channel_bar(meta["channels"], meta["dtype"])
 
+        # THE per-region FOV index, built ONCE here (IMA-250). The mosaic geometry is known the
+        # moment the acquisition opens — it is pure arithmetic on coordinates.csv — so hand it to
+        # the plate NOW rather than waiting for an operator run (IMA-249: it was only ever set
+        # from run_operator, which is why the plate looked like a grid of lone frames until
+        # something was run). The preview below composites into exactly these boxes, and
+        # `_setup_raw_detail` enumerates the FOV control from the SAME dict, which is why the
+        # control and the overview cannot disagree about what a region contains. It is built
+        # BEFORE _setup_raw_detail because that is its first consumer.
+        self._mosaic_index = _mosaic_boxes(meta)
+        self._overview.set_mosaic_boxes(self._mosaic_index)
+
+        self._detail_region = None                   # a new acquisition starts unscoped
         self._setup_raw_detail()
 
         self._enable_operators(True)
@@ -4567,13 +4679,6 @@ class PlateWindow(QMainWindow):
         self._loupe_sources = {"raw": _RawLoupeSource(
             reader, meta, lambda w: _fov_of_well(w, meta.get("fovs_per_region")))}
         self._update_loupe_source()
-
-        # The mosaic geometry is known the moment the acquisition opens — it is pure arithmetic on
-        # coordinates.csv — so hand it to the plate NOW rather than waiting for an operator run
-        # (IMA-249: it was only ever set from run_operator, which is why the plate looked like a
-        # grid of lone frames until something was run). The preview below composites into exactly
-        # these boxes.
-        self._overview.set_mosaic_boxes(_mosaic_boxes(meta))
 
         # fast RAW preview: fill the plate with downsampled thumbnails immediately (grey dots),
         # in the SAME row-major order the operator will later process them in.
@@ -4588,22 +4693,47 @@ class PlateWindow(QMainWindow):
         # reads a single plane per well precisely to stay fast), so say which one you're looking at.
         multi = sum(1 for r in order if len(meta["fovs_per_region"][r]) > 1)
         note = (f" · {multi} multi-FOV region(s), previewing as mosaics" if multi else "")
-        self._readout.setText(f"live · {len(self._fov_index)} wells · double-click to open{note}")
+        # Name the two axes and their two counts (IMA-250). "2 wells" was the whole of what the
+        # window said about a 55-field acquisition, and the FOV control agreed with it.
+        scope = (f" · FOV slider: {len(self._detail_fovs)} in {self._detail_region}"
+                 if self._detail_region else "")
+        self._readout.setText(
+            f"live · {len(self._fov_index)} regions · double-click to open{note}{scope}")
 
-    def _setup_raw_detail(self, order: Optional[list] = None):
-        """Point the detail viewer at the RAW acquisition: full z-stack, full frame, FOV slider.
+    def _setup_raw_detail(self, order: Optional[list] = None, region: Optional[str] = None):
+        """Point the detail viewer at ONE REGION's FOVs: full z-stack, full frame, FOV slider.
 
         ``order=None`` is the whole plate (open / 'Return to raw view'). An exploration tab passes
-        its own region subset so the slider lists exactly the wells that tab is scoped to.
-        Registers each well's raw plane PATHS up front (cheap — paths only, no image I/O) so
-        scrubbing shows a real (lazily read + cached) image per well instead of black."""
+        its own region subset, which scopes the REGION control to that tab's wells.
+
+        IMA-250. ``region`` is the region the FOV control is scoped to; ``None`` keeps the current
+        one when ``order`` still contains it, else lands on ``order[0]``. The control lists THAT
+        REGION'S FOVs and nothing else — 27 positions on the tissue set's manual0 — because a
+        region is a mosaic of FOVs, not a FOV. It used to be handed ``[f"{r}:0" for r in order]``,
+        i.e. one position per REGION and always field 0, so 53 of the tissue set's 55 fields were
+        unreachable from the detail view and the control was stepping the wrong axis entirely.
+        Changing REGION is the separate ``_region_combo``; see :meth:`_on_region_combo`.
+
+        The FOV list comes from :func:`region_fov_order` against the SAME mosaic index the plate
+        overview draws its boxes from, so the two consumers cannot enumerate different fields.
+
+        Registers the region's raw plane PATHS up front (cheap — paths only, no image I/O) so
+        scrubbing shows a real (lazily read + cached) image per FOV instead of black."""
         if self._detail is None or self._reader is None:
             return
         meta, reader = self._meta, self._reader
         order = self._order if order is None else list(order)
+        if region is None or region not in order:
+            region = (self._detail_region if self._detail_region in order
+                      else (order[0] if order else None))
+        self._detail_region = region
+        self._detail_fovs = [] if region is None else region_fov_order(
+            meta, region, self._mosaic_index)
         h, w = meta["frame_shape"]
         channels = [c["name"] for c in meta["channels"]]
-        self._detail.start_acquisition(channels, meta["n_z"], h, w, [f"{r}:0" for r in order])
+        self._detail.start_acquisition(
+            channels, meta["n_z"], h, w, [f"{region}:{f}" for f in self._detail_fovs])
+        self._sync_region_combo(order)
         self._push_shape = None       # raw mode registers PATHS, not arrays — no array canvas here
         self._push_problem = None
         # Re-scope the RAW preview to the same wells the slider now lists. Without this the
@@ -4632,22 +4762,61 @@ class PlateWindow(QMainWindow):
         self._push_order = list(order)
         self._push_index = (None if order == self._order
                             else {self._fov_index[r]["idx"]: pos for pos, r in enumerate(order)})
-        if hasattr(self._detail, "register_images_bulk"):
+        if region is not None and hasattr(self._detail, "register_images_bulk"):
+            # One slider position per FOV OF THIS REGION. `pos` is the position IN THE CONTROL,
+            # and it indexes self._detail_fovs — the same list the labels were built from, so a
+            # position and its label can never name different fields.
             entries = []
-            for pos, well in enumerate(order):
-                w_idx = pos            # position IN THIS SLIDER (== plate idx only for a full plate)
-                fov = meta["fovs_per_region"][well][0]
+            for pos, fov in enumerate(self._detail_fovs):
                 for z_i, z in enumerate(meta["z_levels"]):
                     for ch in channels:
                         try:
-                            path, page = reader.plane_ref(well, fov, ch, z)   # (file, page) — OME-safe
-                            entries.append((0, w_idx, z_i, ch, path, page))
+                            path, page = reader.plane_ref(region, fov, ch, z)  # (file, page) — OME-safe
+                            entries.append((0, pos, z_i, ch, path, page))
                         except (KeyError, IndexError, OSError):
                             continue
             self._detail.register_images_bulk(entries)
-            self._pushed.update(order)   # every well is registered; double-click just navigates
-        if order:                        # land on the first well so the viewer isn't blank
-            self.activate_well(order[0], 0)
+            self._pushed.update((region, f) for f in self._detail_fovs)
+        elif region is not None:
+            for pos, fov in enumerate(self._detail_fovs):      # ndviewer without the bulk API
+                for z_i, z in enumerate(meta["z_levels"]):
+                    for ch in channels:
+                        try:
+                            path, page = reader.plane_ref(region, fov, ch, z)
+                            self._detail.register_image(0, pos, z_i, ch, path, page)
+                        except (KeyError, IndexError, OSError, RuntimeError):
+                            continue
+            self._pushed.update((region, f) for f in self._detail_fovs)
+        if region is not None:           # land on the region's first FOV so the viewer isn't blank
+            self.activate_well(region, self._detail_fovs[0] if self._detail_fovs else 0)
+
+    def _sync_region_combo(self, order: list):
+        """Make the REGION combo list *order* with ``_detail_region`` current, without recursing.
+
+        The combo is a VIEW of ``_detail_region``; every write here is muted so repopulating it
+        cannot fire the handler that repopulates it.
+        """
+        combo = getattr(self, "_region_combo", None)
+        if combo is None:
+            return
+        self._region_muted = True
+        try:
+            combo.clear()
+            combo.addItems([str(r) for r in order])
+            if self._detail_region in order:
+                combo.setCurrentIndex(order.index(self._detail_region))
+            combo.setEnabled(len(order) > 1)
+        finally:
+            self._region_muted = False
+
+    def _on_region_combo(self, idx: int):
+        """The user picked a region -> re-scope the FOV control to THAT region's FOVs."""
+        if getattr(self, "_region_muted", False) or idx < 0 or self._reader is None:
+            return
+        region = self._region_combo.itemText(idx)
+        if not region or region == self._detail_region or region not in self._fov_index:
+            return
+        self.activate_well(region, 0)
 
     def _return_to_raw(self):
         """Stop previewing/processing and restore the raw downsampled view across the whole plate."""
@@ -4663,7 +4832,7 @@ class PlateWindow(QMainWindow):
         # The raw preview is itself a MOSAIC now (IMA-253), so returning to it restores the
         # acquisition's own boxes rather than clearing them — clearing them broke both the paint
         # (a mosaic redrawn as if it filled its cell) and the double-click FOV hit-test.
-        self._overview.set_mosaic_boxes(_mosaic_boxes(self._meta))
+        self._overview.set_mosaic_boxes(self._mosaic_index)
         self._update_loupe_source()                          # back to the acquisition's own pixels
         for rc in list(self._overview._status):
             self._overview.set_status(*rc, "empty")
@@ -4986,6 +5155,12 @@ class PlateWindow(QMainWindow):
             ph, pw = self._push_shape
             self._detail.start_acquisition([c["name"] for c in self._meta["channels"]], 1,
                                            ph, pw, [f"{r}:0" for r in run_order])
+            # A run pushes ONE fused result per region, so here the slider legitimately IS a
+            # region axis; the FOV control has nothing per-region left to scrub. Keep the region
+            # combo listing this run's regions so changing region still works (IMA-250 req 2),
+            # and clear the raw scoping so 'Return to raw view' rebuilds it from scratch.
+            self._detail_region, self._detail_fovs = None, []
+            self._sync_region_combo(list(run_order))
         self._run_out_dir = str(out_dir) if (save and out_dir) else None   # for partial-output cleanup
         self._run_tab_key = tab_key
         # A re-run must not composite on top of the LAST run's pixels: with a mosaic, a run that
@@ -5259,58 +5434,92 @@ class PlateWindow(QMainWindow):
         return self._push_index.get(info["idx"])
 
     def activate_well(self, well_id: str, fov_index: int):
-        """Double-click -> show the well in the ndviewer. In RAW mode (no operator run yet) push the
-        well's raw z-stack lazily (the true z-stack, zero bytes copied). In PROCESSED mode (an operator
-        has run, the slider already holds the results) just navigate the slider to that well."""
+        """Show region ``well_id``'s FOV ``fov_index`` in the ndviewer.
+
+        RAW mode (no operator run yet): the FOV control is scoped to ONE region, so opening a
+        DIFFERENT region re-scopes it (``_setup_raw_detail``) — that is what makes the control
+        have 27 positions on manual0 and 28 on manual1 rather than one position per region. The
+        region's z-stacks are registered as paths, so nothing is copied. PROCESSED mode (an
+        operator has run and its results are already in the slider) just navigates.
+        """
         if self._detail is None or well_id not in self._fov_index:
             return
-        # Resolve the slider position BEFORE moving the red box. The box says "this is the well you
-        # are looking at"; if the detail's slider does not contain the well (an exploration tab
-        # scopes it to a subset) we cannot show it, and moving the box anyway is how you get a red
-        # box on one well and another well's pixels beside it — silently.
-        idx = self._slider_pos(well_id)
-        if idx is None:
+        if self._active_op_key is None and self._reader is not None:     # RAW
+            order = getattr(self, "_push_order", None) or self._order
+            if well_id not in order:
+                # The detail is scoped to an exploration tab's subset. Saying so beats moving the
+                # red box onto a well whose pixels are not the ones on screen.
+                self._readout.setText(
+                    f"{well_id} is not in this tab's subset — switch to 'Process wells' to open it")
+                return
+            if well_id != self._detail_region:
+                self._setup_raw_detail(order, region=well_id)   # re-scopes, then recurses here
+                if fov_index in self._detail_fovs:
+                    self._goto_fov(well_id, fov_index)
+                return
+            self._goto_fov(well_id, fov_index)
+            return
+        # PROCESSED / computed: one slider slot per region, already pushed. Resolve it BEFORE
+        # moving the red box — a box on one well and another well's pixels beside it, silently,
+        # is the failure this guard exists for.
+        if self._slider_pos(well_id) is None:
             self._readout.setText(
                 f"{well_id} is not in this tab's subset — switch to 'Process wells' to open it")
             return
         self._current_well = well_id
-        if self._overview is not None:                 # current well at view = the red BOX
+        self._current_fov = fov_index
+        if self._overview is not None:
             self._overview.select(*self._fov_index[well_id]["rc"])
-        if self._active_op_key is not None or self._reader is None:   # processed/computed: already pushed
-            try:
-                row, col = parse_well_id(well_id)
-                self._detail.go_to_well_fov(f"{row}{col}", fov_index)
-            except Exception:
-                pass
-            return
-        if well_id not in self._pushed:
-            fov = self._meta["fovs_per_region"][well_id][0]
-            for z_i, z in enumerate(self._meta["z_levels"]):
-                for ch in (c["name"] for c in self._meta["channels"]):
-                    try:
-                        path, page = self._reader.plane_ref(well_id, fov, ch, z)
-                        self._detail.register_image(0, idx, z_i, ch, path, page)
-                    except (KeyError, IndexError, OSError, RuntimeError):
-                        continue   # a genuinely-missing plane / closed viewer shouldn't block the rest
-            self._pushed.add(well_id)
         try:
-            # Region ids are not necessarily well ids (a slide carrier's are freeform), and this
-            # is only a label for the detail viewer's well/FOV combo -- never worth raising over.
-            row, col = parse_well_id(well_id)
-            self._detail.go_to_well_fov(f"{row}{col}", fov_index)
+            self._detail.go_to_well_fov(well_id, fov_index)
         except Exception:
             pass
 
-    def _on_fov_slider(self, flat_idx: int):
-        """ndviewer FOV slider moved -> move the red box on the plate to that well."""
+    def _goto_fov(self, region: str, fov: int):
+        """Point the detail viewer at ``(region, fov)`` and put the red box on that same field.
+
+        Region ids are passed to ``go_to_well_fov`` VERBATIM because that is how the labels were
+        built (``f"{region}:{fov}"``). They used to be run through ``parse_well_id`` first, which
+        raises on every freeform id — so on the tissue set the navigation call was swallowed by
+        the surrounding ``except`` and the detail viewer never moved at all.
+        """
+        self._current_well = region
+        self._current_fov = fov
+        if self._overview is not None:
+            self._overview.select(*self._fov_index[region]["rc"], fov)
+        try:
+            self._detail.go_to_well_fov(region, fov)
+        except Exception:
+            pass
+
+    def _on_fov_slider(self, pos: int):
+        """The FOV control moved -> move the red box onto THAT FIELD of the plate.
+
+        The label at ``pos`` is the authority for both halves of the answer (which region, which
+        FOV), so the box the overview draws is the box the control is on — requirement 4.
+        """
         if self._detail is None or self._overview is None:
             return
         labels = getattr(self._detail, "_fov_labels", None)
-        if not labels or not (0 <= flat_idx < len(labels)):
+        flat = pos
+        to_flat = getattr(self._detail, "_fov_pos_to_flat", None)
+        if callable(to_flat):
+            try:
+                flat = to_flat(pos)          # the ndviewer subset control remaps position -> flat
+            except Exception:
+                flat = pos
+        if not labels or not (0 <= flat < len(labels)):
             return
-        info = self._fov_index.get(labels[flat_idx].split(":")[0])
-        if info:
-            self._overview.select(*info["rc"])
+        region, _, fov_txt = labels[flat].rpartition(":")
+        info = self._fov_index.get(region)
+        if not info:
+            return
+        try:
+            fov = int(fov_txt)
+        except ValueError:
+            fov = None
+        self._current_well, self._current_fov = region, fov
+        self._overview.select(*info["rc"], fov)
 
     def _focus_reference_plane(self):
         """Jump the detail viewer's z-slider to the CURRENT FOV's sharpest plane (Tenengrad autofocus).
@@ -5324,7 +5533,11 @@ class PlateWindow(QMainWindow):
             return
         from squidmip.projection import _tenengrad
         well = self._current_well
-        fov = self._meta["fovs_per_region"][well][0]
+        # The FOV IN VIEW, not the region's first one (IMA-250). This is a per-FOV autofocus, and
+        # while the control stepped regions there was only ever one FOV it could mean; now that it
+        # steps fields, focusing field 0 while looking at field 12 would be a plain lie.
+        fovs = self._meta["fovs_per_region"][well]
+        fov = self._current_fov if self._current_fov in fovs else fovs[0]
         chan = self._meta["channels"][0]["name"]        # rank on one representative channel
         best_z_i, best_f = 0, -1.0
         for z_i, z in enumerate(self._meta["z_levels"]):
@@ -5339,7 +5552,8 @@ class PlateWindow(QMainWindow):
             self._detail.set_current_index("z_level", best_z_i)
         except Exception:
             pass
-        self._readout.setText(f"{well}: focused on reference plane z={best_z_i} (sharpest)")
+        self._readout.setText(
+            f"{well}:{fov} focused on reference plane z={best_z_i} (sharpest)")
 
     def _retire(self, w):
         """Retire a worker thread WITHOUT ever destroying a running QThread (that aborts the app).
