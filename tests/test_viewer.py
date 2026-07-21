@@ -1691,12 +1691,30 @@ def test_deferred_resync_survives_a_failed_run(qapp, stub_detail, squid_dataset,
 # level selection at all).
 
 class _FakeLoupeSource(V._LoupeSource):
-    """A source with known pixels, so gesture tests don't need zarr or TIFF decode."""
+    """A source with known pixels, so gesture tests don't need zarr or TIFF decode.
+
+    It HOLDS A FIELD and slices it with ordinary numpy semantics, which is the whole point: the
+    original fake ignored y0/x0 and returned ``np.full((2, h, w), 500)``, so it could not
+    produce an empty array no matter what rectangle it was handed — and every gesture test ran
+    on it while the real raw source was returning nothing over ~75% of each well (a negative
+    origin makes ``a[-427:1399]`` empty, not an error). A test double that cannot express the
+    failure it is standing in for is worse than no double: it certifies the bug."""
 
     def __init__(self, well_px=1000, n_levels=3, pixel_size_um=0.325, missing=()):
         self.well_px, self.n_levels, self.pixel_size_um = well_px, n_levels, pixel_size_um
         self._missing = set(missing)
         self.reads = []
+        self._fields = {}
+
+    def _field(self, level):
+        """A (2, span, span) field at ``level``, with a per-pixel ramp so a crop's CONTENT
+        identifies where it came from (a constant fill would hide an off-by-one origin)."""
+        span = max(1, self.well_px >> int(level))
+        if span not in self._fields:
+            yy, xx = np.mgrid[0:span, 0:span]
+            plane = ((yy + xx) % 1000).astype(np.uint16) + 1        # never 0 -> "read pixels"
+            self._fields[span] = np.stack([plane, plane[::-1]])
+        return self._fields[span]
 
     def available(self, well_id):
         if well_id in self._missing:
@@ -1705,10 +1723,14 @@ class _FakeLoupeSource(V._LoupeSource):
 
     def read_crop(self, well_id, level, y0, x0, h, w):
         self.reads.append((well_id, level, y0, x0, h, w))
-        return np.full((2, max(1, h), max(1, w)), 500, np.uint16)
+        f = self._field(level)
+        span = f.shape[-1]
+        y0, x0, h, w = V.loupe_clamp_crop(y0, x0, h, w, span, span)   # what a real source must do
+        step = V.loupe_decimation(max(h, w))
+        return f[:, y0:y0 + h:step, x0:x0 + w:step]
 
     def coarse(self, well_id):
-        return np.full((2, 8, 8), 500, np.uint16)
+        return self._field(max(0, self.n_levels - 1))
 
 
 def _loupe_win(qapp, root, tmp_path=None):
@@ -1787,6 +1809,25 @@ def test_loupe_crop_px_shrinks_with_level():
     assert V.loupe_crop_px(1.0, 0, inset_px=240) == 240
     assert V.loupe_crop_px(0.25, 2, inset_px=240) == 240
     assert V.loupe_crop_px(0.25, 0, inset_px=240) == 960
+
+
+def test_loupe_clamp_crop_shifts_the_origin_in_and_keeps_the_extent():
+    assert V.loupe_clamp_crop(-427, -427, 1826, 1826, 2084, 2084) == (0, 0, 1826, 1826)
+    assert V.loupe_clamp_crop(-5, 10, 32, 32, 640, 640) == (0, 10, 32, 32)
+    assert V.loupe_clamp_crop(630, 630, 32, 32, 640, 640) == (608, 608, 32, 32)  # not a 10px sliver
+    assert V.loupe_clamp_crop(0, 0, 9999, 9999, 64, 64) == (0, 0, 64, 64)        # rect > field
+    ny = nx = 100
+    for y0 in range(-150, 150, 7):                  # never negative, never past the field
+        cy, cx, h, w = V.loupe_clamp_crop(y0, y0, 40, 40, ny, nx)
+        assert 0 <= cy <= ny - h and 0 <= cx <= nx - w and (h, w) == (40, 40)
+
+
+def test_loupe_decimation_bounds_the_sample_count_by_powers_of_two():
+    assert V.loupe_decimation(240) == 1                       # already inset-sized
+    assert V.loupe_decimation(V._LOUPE_MAX_CROP) == 1         # exactly at the ceiling
+    assert V.loupe_decimation(V._LOUPE_MAX_CROP + 1) == 2
+    for px in (600, 1826, 4168, 10000):
+        assert px // V.loupe_decimation(px) <= V._LOUPE_MAX_CROP
 
 
 def test_loupe_um_per_screen_px_refuses_to_guess():
@@ -2020,6 +2061,131 @@ def test_raw_source_reads_real_acquisition_pixels(qapp, stub_detail, squid_datas
     win.close()
 
 
+def test_raw_source_clamps_a_negative_crop_origin(qapp, stub_detail, squid_dataset):
+    """THE bug (IMA-208): raw is the DEFAULT source on every folder open, and it did not clamp.
+
+    A crop centred anywhere in the upper-left of a well starts at a negative origin, and
+    ``plane[-3:1]`` is not an error in numpy — it is an EMPTY array. The inset drew "no pixels
+    here" over roughly three quadrants of every well while the fourth worked, which is exactly
+    what "broken over most of every well" looked like. The zarr source clamped; this one didn't."""
+    root, arrays = squid_dataset
+    win = _loupe_win(qapp, root)
+    src = win._loupe_sources["raw"]
+    names = [c["name"] for c in win._meta["channels"]]
+    full = np.stack([arrays[("B2", 0, 1, ch)] for ch in names])    # 4x4 frames, mid z
+
+    for y0, x0 in ((-3, -3), (-3, 1), (1, -3), (-100, -100)):
+        crop = src.read_crop("B2", 0, y0, x0, 4, 4)
+        assert crop.size > 0, f"empty crop at origin {(y0, x0)}"
+        assert np.array_equal(crop, full)             # shifted in whole, not truncated to a sliver
+    win.close()
+
+
+def test_loupe_shows_pixels_in_every_quadrant_of_a_well(qapp, stub_detail, squid_dataset):
+    """The user-visible contract, driven through the widget: hold anywhere in a well and pixels
+    appear. Quadrant-by-quadrant because the failure was positional, not total."""
+    root, _ = squid_dataset
+    win = _loupe_win(qapp, root)
+    ov = win._overview
+    ov.resize(600, 400)
+    ov.set_loupe_source(_FakeLoupeSource(well_px=2084, n_levels=1), np.ones((2, 3), np.float32))
+    rc = sorted(ov._by_rc)[0]
+    ov._fit()
+    ax, ay = ov._ox + V._HDR, ov._oy + V._COLH
+    for fx, fy in ((0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75)):
+        x = int(ax + (rc[1] + fx) * ov._cd)
+        y = int(ay + (rc[0] + fy) * ov._cd)
+        ov.mousePressEvent(_press(x, y))
+        ov._arm_loupe()
+        assert _drain_until(qapp, lambda: ov._loupe_img is not None), f"no pixels at {(fx, fy)}"
+        assert ov._loupe_note == ""
+        ov.mouseReleaseEvent(_press(x, y))
+    ov.set_loupe_source(None)
+    win.close()
+
+
+def test_loupe_read_stays_bounded_when_the_source_has_no_pyramid(qapp, stub_detail, squid_dataset):
+    """Raw has n_levels == 1, so level selection cannot shrink the read: at plate fit the rect
+    IS the whole field. What crosses to the GUI thread must still be inset-sized."""
+    root, _ = squid_dataset
+    win = _loupe_win(qapp, root)
+    ov = win._overview
+    ov.resize(600, 400)
+    src = _FakeLoupeSource(well_px=4168, n_levels=1)
+    ov.set_loupe_source(src, np.ones((2, 3), np.float32))
+    rc = sorted(ov._by_rc)[0]
+    x, y = _cell_center(ov, *rc)
+    _w, level, (y0, x0, h, w), _s, _m = ov._loupe_geometry(x, y)
+    assert level == 0 and max(h, w) > V._LOUPE_MAX_CROP          # the rect really is huge
+    crop = src.read_crop("B2", level, y0, x0, h, w)
+    assert max(crop.shape[-2:]) <= V._LOUPE_MAX_CROP             # ...the ARRAY never is
+    ov.set_loupe_source(None)
+    win.close()
+
+
+def test_raw_plane_cache_is_safe_across_threads(qapp, stub_detail, squid_dataset):
+    """Two wells, many threads: a crop must never carry another well's pixels.
+
+    ``_planes`` memoises ONE well and was mutated from both the loupe worker (read_crop) and the
+    GUI thread (coarse, via the old window derivation). An interleave between the key test and
+    the store returns the wrong well's data under the right well's label."""
+    import concurrent.futures as cf
+
+    root, arrays = squid_dataset
+    win = _loupe_win(qapp, root)
+    src = win._loupe_sources["raw"]
+    names = [c["name"] for c in win._meta["channels"]]
+    expect = {w: np.stack([arrays[(w, 0, 1, ch)] for ch in names]) for w in ("B2", "B3")}
+
+    def one(i):
+        well = "B2" if i % 2 == 0 else "B3"
+        if i % 5 == 0:
+            src.window(well)                       # the other caller, on the same cache
+        return well, np.array(src.read_crop(well, 0, 0, 0, 4, 4))
+
+    with cf.ThreadPoolExecutor(8) as ex:
+        for well, got in ex.map(one, range(400)):
+            assert np.array_equal(got, expect[well]), f"{well} came back as another well"
+    win.close()
+
+
+def test_opening_another_plate_joins_the_previous_loupe_thread(qapp, stub_detail, squid_dataset):
+    """A _LoupeWorker QThread hangs off the OVERVIEW, so replacing the overview without stopping
+    it leaked one thread (plus its plane cache) per plate open — _open_computed cleared
+    ``_loupe_sources`` directly and never went near the thread."""
+    root, _ = squid_dataset
+    win = _loupe_win(qapp, root)
+    first = win._overview._loupe_worker
+    assert first is not None and first.isRunning()
+    win.ingest(str(root))                          # open a plate again: the overview is rebuilt
+    _drain_until(qapp, lambda: win._overview is not None)
+    assert not first.isRunning()                   # the old plate's reader thread is joined
+    second = win._overview._loupe_worker
+    assert second is not first
+    win.close()
+    assert not second.isRunning()                  # ...and closing joins the current one too
+
+
+def test_dragging_off_the_widget_dismisses_a_live_loupe(qapp, stub_detail, squid_dataset):
+    """Qt GRABS the mouse for the duration of a press, so no leaveEvent is delivered while the
+    button is down — dragging off-widget mid-hold left the inset pinned on stale pixels. The
+    move events keep coming (that is what the grab means), with coordinates outside rect()."""
+    root, _ = squid_dataset
+    win = _loupe_win(qapp, root)
+    ov = win._overview
+    ov.resize(600, 400)
+    ov.set_loupe_source(_FakeLoupeSource(), np.ones((2, 3), np.float32))
+    rc = sorted(ov._by_rc)[0]
+    x, y = _cell_center(ov, *rc)
+    ov.mousePressEvent(_press(x, y))
+    ov._arm_loupe()
+    assert ov._loupe is not None
+    ov.mouseMoveEvent(_move(x, ov.height() + 40))   # dragged below the plate pane, button still down
+    assert ov._loupe is None and ov._loupe_img is None
+    ov.set_loupe_source(None)
+    win.close()
+
+
 def test_preview_run_gets_no_loupe_source(qapp, stub_detail, squid_dataset, tmp_path):
     """An unsaved preview writes nothing, so its layer must NOT inherit a zarr source — this is
     the stale-run trap: OperationStack dedupes by key, so the layer name alone proves nothing."""
@@ -2084,8 +2250,16 @@ def test_zarr_source_crop_read_against_a_real_pyramid(qapp, pyramid_dataset, tmp
 
     crop = src.read_crop(region, 0, 100, 100, 32, 32)
     assert crop.shape[1:] == (32, 32)               # a WINDOW, not the whole 640px plane
+    around = src.read_crop(region, 0, 100, 100, V._LOUPE_MAX_CROP, V._LOUPE_MAX_CROP)
+    assert np.array_equal(crop[0], around[0][:32, :32])         # the crop is where we asked
+
+    # A rect bigger than the ceiling comes back DECIMATED, not truncated: same region, fewer
+    # samples. (A field with too few levels is the case that used to pull a whole plane.)
     full = src.read_crop(region, 0, 0, 0, size, size)
-    assert np.array_equal(crop[0], full[0][100:132, 100:132])   # the crop is where we asked
+    assert max(full.shape[-2:]) <= V._LOUPE_MAX_CROP
+    step = V.loupe_decimation(size)
+    assert full.shape[-1] == size // step
+    assert np.array_equal(full[0][:16, :16], src.read_crop(region, 0, 0, 0, size, size)[0][:16, :16])
 
     coarse = src.coarse(region)                     # coarsest level, for the contrast window
     assert coarse.shape[-1] < size

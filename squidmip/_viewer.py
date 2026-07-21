@@ -761,6 +761,17 @@ _LOUPE_MAG = 8.0           # target magnification over the plate's current scale
 _LOUPE_HOLD_MS = 350       # press-and-hold dwell before the loupe arms
 _LOUPE_SLOP = 3            # cursor may drift this many px while arming (matches the pan threshold)
 _LOUPE_CACHE = 8           # decoded crops kept (small: a crop is a few MB, not a whole well)
+_LOUPE_MAX_CROP = 2 * _LOUPE_PX   # ceiling on the RETURNED array's side, in px
+# Why a ceiling at all, when level selection is supposed to bound the read: a source can run OUT
+# of levels. Raw TIFFs have no pyramid on disk (n_levels == 1), and a written field below
+# _PYRAMID_MIN_YX collapses to level 0 alone, so loupe_level clamps to 0 and the crop becomes
+# inset/s_loupe — the WHOLE field. Measured on the 2084 px synthetic plate at fit: a 1826 px
+# crop, 4 channels, 26.7 MB, composited ON THE GUI THREAD at ~118 ms per cursor move, and the
+# worker's LRU — keyed on (well, level, y0, x0, h, w), i.e. a new key for every pixel of motion
+# — held eight of them (213 MB). A 4168 px field is 4x worse on both counts. The fix is decimation, not truncation: the requested RECTANGLE
+# still defines the region the inset covers (truncating it would silently change the
+# magnification), but a source returns it at no more than this many samples per side. The inset
+# is 240 px on screen; beyond 2x that, nobody can see the difference.
 
 
 def _fov_of_well(well_id, fovs_per_region=None) -> int:
@@ -822,6 +833,32 @@ def loupe_crop_px(s_loupe: float, level: int, inset_px: int = _LOUPE_PX) -> int:
     return int(max(1, np.ceil(inset_px / eff)))
 
 
+def loupe_decimation(crop_px: int, max_px: int = _LOUPE_MAX_CROP) -> int:
+    """Power-of-two stride that brings a ``crop_px``-wide read down to <= ``max_px`` samples.
+
+    Applied by the SOURCE, after the rectangle is fixed: the region the inset covers is set by
+    the crop rect and must not change, only the sample count within it."""
+    step = 1
+    while crop_px // step > max(1, int(max_px)):
+        step *= 2
+    return step
+
+
+def loupe_clamp_crop(y0: int, x0: int, h: int, w: int, ny: int, nx: int):
+    """Fit a crop rect inside a ``ny`` x ``nx`` field: shift the ORIGIN in, keep the extent.
+
+    Every source must do this, and the reason it is a free function rather than four lines
+    repeated per source is IMA-208's primary bug: ``_ZarrLoupeSource`` clamped and
+    ``_RawLoupeSource`` did not, so raw mode — the DEFAULT on every folder open — passed a
+    negative origin straight into a numpy slice. ``a[-427:1399]`` is not an error, it is an
+    EMPTY array, so the inset said "no pixels here" over the ~75% of every well whose crop
+    starts left of or above the field. Clamping the origin (rather than truncating the extent,
+    which would return a 1 px sliver at an edge) keeps the inset full near the field border."""
+    ny, nx = max(1, int(ny)), max(1, int(nx))
+    h, w = max(1, min(int(h), ny)), max(1, min(int(w), nx))
+    return max(0, min(int(y0), ny - h)), max(0, min(int(x0), nx - w)), h, w
+
+
 def loupe_um_per_screen_px(pixel_size_um, s_loupe: float):
     """µm per SCREEN pixel inside the inset, or None when the pixel size isn't trustworthy.
 
@@ -876,6 +913,9 @@ def _percentile_window(plane, pct=(1.0, 99.8)) -> tuple[float, float]:
     return lo, hi if hi > lo else lo + 1
 
 
+_LOUPE_WIN_LOCK = threading.Lock()   # guards the per-source window memo (worker thread writes)
+
+
 class _LoupeSource:
     """Where the loupe's real pixels come from for the layer currently on the plate.
 
@@ -893,12 +933,32 @@ class _LoupeSource:
         return False, "no pixel source"
 
     def read_crop(self, well_id, level, y0, x0, h, w):
-        """(C, y, x) crop at ``level``, clipped to the field. Runs on the loupe worker thread."""
+        """(C, y, x) crop at ``level``, CLAMPED into the field (see loupe_clamp_crop) and
+        decimated to at most _LOUPE_MAX_CROP samples per side. Runs on the worker thread."""
         raise NotImplementedError
 
     def coarse(self, well_id):
         """A small whole-field (C, y, x) plane used ONLY to derive the contrast window."""
         raise NotImplementedError
+
+    def window(self, well_id):
+        """Per-channel contrast window for a well, mirroring the tile's rule.
+
+        Computed HERE, on the loupe worker thread, and memoised per well — never on the GUI
+        thread. It used to be derived in ``_on_loupe_crop`` by calling ``coarse()``, which for
+        raw meant decoding a whole TIFF plane inside a paint-driven slot AND touching the same
+        plane cache the worker was writing (two threads, no lock, one well's pixels labelled as
+        another's). One owner, one thread."""
+        with _LOUPE_WIN_LOCK:
+            cache = self.__dict__.setdefault("_win_cache", {})
+            hit = cache.get(well_id)
+        if hit is not None:
+            return hit
+        coarse = self.coarse(well_id)
+        win = [_percentile_window(coarse[c]) for c in range(coarse.shape[0])]
+        with _LOUPE_WIN_LOCK:
+            cache[well_id] = win
+        return win
 
 
 class _RawLoupeSource(_LoupeSource):
@@ -913,13 +973,15 @@ class _RawLoupeSource(_LoupeSource):
         self._reader, self._meta, self._fov_of = reader, meta, fov_of
         ny, nx = meta["frame_shape"]
         self.well_px = int(min(ny, nx))
-        self.n_levels = 1                      # raw TIFFs have no pyramid
+        self.n_levels = 1                      # raw TIFFs have no pyramid ON DISK
         self.pixel_size_um = meta.get("pixel_size_um")
         self._channels = [c["name"] for c in meta["channels"]]
         zs = meta["z_levels"]
         self._z = zs[len(zs) // 2]             # mid plane, as the preview does
+        self._lock = threading.RLock()         # _planes is touched by the worker AND the GUI thread
         self._cache_key = None
         self._cache = None
+        self._coarse: dict[str, np.ndarray] = {}
 
     def available(self, well_id) -> tuple[bool, str]:
         if well_id in self._meta["regions"]:
@@ -927,20 +989,49 @@ class _RawLoupeSource(_LoupeSource):
         return False, "no image for this well"
 
     def _planes(self, well_id):
-        if self._cache_key != well_id:
-            fov = self._fov_of(well_id)
-            self._cache = np.stack([
-                np.asarray(self._reader.read(well_id, fov, ch, self._z)) for ch in self._channels])
-            self._cache_key = well_id
-        return self._cache
+        """The well's (C, y, x) planes, decoded once and cached.
+
+        Held under a lock for the whole check-decode-publish sequence. Unsynchronised, the two
+        callers (worker thread reading a crop, GUI thread deriving a window) could interleave
+        between the key test and the store and hand back ANOTHER well's pixels labelled as the
+        well under the cursor — a wrong-image bug in a microscopy tool, not a glitch. The GUI
+        thread no longer calls in at all (see _LoupeSource.window), but the lock stays: the class
+        must be correct for its callers, not for today's call sites."""
+        with self._lock:
+            if self._cache_key != well_id:
+                fov = self._fov_of(well_id)
+                planes = np.stack([
+                    np.asarray(self._reader.read(well_id, fov, ch, self._z))
+                    for ch in self._channels])
+                self._cache, self._cache_key = planes, well_id
+            return self._cache
 
     def read_crop(self, well_id, level, y0, x0, h, w):
-        p = self._planes(well_id)              # level is always 0 here (n_levels == 1)
-        return p[:, y0:y0 + h, x0:x0 + w]
+        """Level is always 0 here — raw has no pyramid — so the whole burden of bounding the
+        work falls on decimation. At plate fit the rect IS most of the field (2084 px on the
+        synthetic plate); area-averaging it down to <= _LOUPE_MAX_CROP happens HERE, on the
+        worker thread, so what crosses to the GUI thread to be composited is a 456 px square
+        (3.3 MB, 11 ms) instead of a 1826 px one (26.7 MB, 118 ms) — which is also what the
+        worker's LRU then caches."""
+        p = self._planes(well_id)
+        ny, nx = p.shape[-2], p.shape[-1]
+        y0, x0, h, w = loupe_clamp_crop(y0, x0, h, w, ny, nx)   # NEGATIVE origin -> empty slice
+        crop = p[:, y0:y0 + h, x0:x0 + w]
+        step = loupe_decimation(max(h, w))
+        if step == 1:
+            return crop
+        oh, ow = max(1, h // step), max(1, w // step)
+        # float32, not _area_downsample's float64 default: the compositor casts to float32 anyway,
+        # and this array crosses a thread boundary and sits in the worker's LRU.
+        return np.stack([_area_downsample(crop[c], oh, ow).astype(np.float32, copy=False)
+                         for c in range(crop.shape[0])])
 
     def coarse(self, well_id):
-        p = self._planes(well_id)
-        return np.stack([_area_downsample(p[c], _CELL, _CELL) for c in range(p.shape[0])])
+        if well_id not in self._coarse:
+            p = self._planes(well_id)
+            self._coarse[well_id] = np.stack(
+                [_area_downsample(p[c], _CELL, _CELL) for c in range(p.shape[0])])
+        return self._coarse[well_id]
 
 
 class _ZarrLoupeSource(_LoupeSource):
@@ -1012,10 +1103,12 @@ class _ZarrLoupeSource(_LoupeSource):
         ny, nx = arr.shape[-2], arr.shape[-1]
         # Clamp the ORIGIN so the window stays whole near an edge (shift it in), rather than
         # truncating the extent — clamping y0 to ny-1 first would return a 1px sliver.
-        h, w = max(1, min(int(h), ny)), max(1, min(int(w), nx))
-        y0 = max(0, min(int(y0), ny - h))
-        x0 = max(0, min(int(x0), nx - w))
-        return np.asarray(arr[0, :, 0, y0:y0 + h, x0:x0 + w].read().result())
+        y0, x0, h, w = loupe_clamp_crop(y0, x0, h, w, ny, nx)
+        # A field below _PYRAMID_MIN_YX writes level 0 alone, so level selection cannot bound
+        # this read; stride it in tensorstore so the I/O itself shrinks, not just the result.
+        step = loupe_decimation(max(h, w))
+        return np.asarray(
+            arr[0, :, 0, y0:y0 + h:step, x0:x0 + w:step].read().result())
 
     def coarse(self, well_id):
         if well_id not in self._coarse:
@@ -1032,7 +1125,7 @@ class _LoupeWorker(QThread):
     each new request) IS the coalescing. Results carry the generation they were asked for, so a
     late arrival for a stale position is dropped by the widget rather than flashing."""
 
-    ready = pyqtSignal(int, str, object, object)    # (gen, well_id, crop|None, error|None)
+    ready = pyqtSignal(int, str, object, object, object)  # (gen, well, crop|None, window|None, err)
 
     def __init__(self, source: _LoupeSource):
         super().__init__()
@@ -1081,9 +1174,15 @@ class _LoupeWorker(QThread):
                 if crop is None:
                     crop = self._source.read_crop(well_id, level, y0, x0, h, w)
                     self._store(key, crop)
-                self.ready.emit(gen, well_id, crop, None)
+                # The contrast window belongs on this side too: deriving it on the GUI thread
+                # meant a paint-driven slot could decode a whole TIFF plane (IMA-208).
+                try:
+                    win = self._source.window(well_id)
+                except Exception:
+                    win = None                        # the widget falls back to a flat window
+                self.ready.emit(gen, well_id, crop, win, None)
             except Exception as e:                    # a racing writer / deleted plate / bad path
-                self.ready.emit(gen, well_id, None, f"{type(e).__name__}: {e}")
+                self.ready.emit(gen, well_id, None, None, f"{type(e).__name__}: {e}")
 
 
 # --- plate overview widget (one cell per well; hue-coded status; fit-to-view) ---------------
@@ -1172,6 +1271,7 @@ class PlateOverview(QWidget):
         self._hold.setInterval(_LOUPE_HOLD_MS)
         self._hold.timeout.connect(self._arm_loupe)
         self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.ClickFocus)   # so focusOutEvent can actually fire (see below)
         self.setMinimumSize(240, 200)
 
     # -- loupe wiring --
@@ -1231,11 +1331,21 @@ class PlateOverview(QWidget):
         fx = (x - (ax + c["col_index"] * self._cd)) / max(1e-9, self._cd)
         span = max(1, src.well_px >> level)
         cy, cx = int(fy * span), int(fx * span)
-        return c["well_id"], level, (cy - crop // 2, cx - crop // 2, crop, crop), s_loupe, mag
+        # Clamp HERE as well as in the source. Two reasons beyond belt-and-braces: the request
+        # that reaches the worker is then always a rectangle that exists, and a hold near a field
+        # edge produces the SAME key as the cursor drifts, so the LRU hits instead of decoding a
+        # fresh full-field crop per pixel of motion.
+        y0, x0, h, w = loupe_clamp_crop(cy - crop // 2, cx - crop // 2, crop, crop, span, span)
+        return c["well_id"], level, (y0, x0, h, w), s_loupe, mag
 
     def _request_loupe(self, x, y):
         geo = self._loupe_geometry(x, y)
-        if geo is None or self._loupe_worker is None:
+        if geo is None:                    # dragged onto the margin / an un-acquired cell
+            if self._loupe_img is not None or not self._loupe_note:
+                self._loupe_img, self._loupe_note = None, "no well here"
+                self.update()
+            return
+        if self._loupe_worker is None:
             return
         well, level, (y0, x0, h, w), _s, _m = geo
         ok, why = self._loupe_src.available(well)
@@ -1246,26 +1356,25 @@ class PlateOverview(QWidget):
         self._loupe_gen += 1
         self._loupe_worker.request(self._loupe_gen, well, level, y0, x0, h, w)
 
-    def _on_loupe_crop(self, gen, well_id, crop, error):
-        """A crop landed. Drop it unless it is the newest request and the loupe is still up."""
+    def _on_loupe_crop(self, gen, well_id, crop, window, error):
+        """A crop landed. Drop it unless it is the newest request and the loupe is still up.
+
+        Everything expensive already happened on the worker thread: this slot only windows and
+        colours a <= _LOUPE_MAX_CROP square. It must stay that way — it runs inside the paint
+        loop of a widget the user is dragging across."""
         if gen != self._loupe_gen or self._loupe is None:
             return
         if error is not None or crop is None or crop.size == 0:
             self._loupe_img, self._loupe_note = None, error or "no pixels here"
             self.update()
             return
-        win = self._loupe_win.get(well_id)
+        # Mirror the TILE's contrast rule on the WELL's pixels (computed by the source, per well)
+        # — never percentiles of the crop under the cursor, which would make brightness lurch as
+        # the cursor moves and make the inset look like different data.
+        win = window if window is not None else self._loupe_win.get(well_id)
         if win is None:
-            # Mirror the TILE's contrast rule on the WELL's pixels — never percentiles of the crop
-            # under the cursor, which would make brightness lurch as the cursor moves and make the
-            # inset look like different data. There is no shared window object to borrow: the
-            # streaming _RunningContrast dies with its worker and computed plates stretch per well.
-            try:
-                coarse = self._loupe_src.coarse(well_id)
-                win = [_percentile_window(coarse[c]) for c in range(coarse.shape[0])]
-            except Exception:
-                win = [(0.0, 1.0)] * crop.shape[0]
-            self._loupe_win[well_id] = win
+            win = [(0.0, 1.0)] * crop.shape[0]
+        self._loupe_win[well_id] = win
         colors = self._loupe_colors
         if colors is None:
             colors = np.ones((crop.shape[0], 3), np.float32)
@@ -1554,7 +1663,8 @@ class PlateOverview(QWidget):
     #                  │  (unchanged)     │   │  pan is DEAD while up;   │
     #                  └────────┬─────────┘   │  hover + wheel suppressed│
     #                           │             └────────────┬─────────────┘
-    #                           │ release                  │ release / leave / focus-out
+    #                           │ release                  │ release / dragged off the widget
+    #                           │                          │ / leave / focus-out
     #                           ▼                          ▼
     #                        ┌───────────────────────────────────────────┐
     #                        │                  IDLE                     │
@@ -1626,6 +1736,15 @@ class PlateOverview(QWidget):
 
     def mouseMoveEvent(self, e):
         if self._loupe is not None:                  # LOUPE: the inset tracks; panning is dead
+            # Drag off the widget and the loupe must go. leaveEvent CANNOT do this: Qt grabs the
+            # mouse for the duration of a press, so no leave is delivered until the button comes
+            # up — the inset used to stay pinned over the neighbouring pane showing stale pixels.
+            # The grab is also why this works: move events keep arriving, with coordinates
+            # outside rect(), which is the signal.
+            if not self.rect().contains(e.x(), e.y()):
+                self._hold.stop()
+                self._dismiss_loupe()
+                return
             self._loupe["x"], self._loupe["y"] = e.x(), e.y()
             self._request_loupe(e.x(), e.y())
             self.update()
@@ -1720,7 +1839,10 @@ class PlateOverview(QWidget):
         return hit
 
     def focusOutEvent(self, e):
-        self._hold.stop()                            # window deactivated mid-hold: same reasoning
+        # Only reachable because __init__ sets ClickFocus: with the default NoFocus this widget
+        # never held focus, so this handler was dead code pretending to cover "window
+        # deactivated mid-hold". A press now focuses the plate, so losing focus is a real signal.
+        self._hold.stop()
         self._dismiss_loupe()
         super().focusOutEvent(e)
 
@@ -3003,6 +3125,18 @@ class PlateWindow(QMainWindow):
     # _processed_plate still names the older save. Re-registering on every transition is what
     # keeps the inset showing the same run the tiles came from.
 
+    def _release_loupe_sources(self):
+        """Drop every source AND join the read thread that serves them.
+
+        The one call every "the plate is being replaced" path must make. Assigning
+        ``self._loupe_sources = {}`` (which _open_computed did) only forgets the sources: the
+        _LoupeWorker QThread lives on the OVERVIEW, so the old overview walked off with a running
+        thread and its ~35 MB plane cache on every plate open — confirmed still isRunning() after
+        the overview was replaced. Only PlateOverview.set_loupe_source(None) stops and joins it."""
+        if self._overview is not None:
+            self._overview.set_loupe_source(None)
+        self._loupe_sources = {}
+
     def _set_loupe_source(self, layer_key, source):
         self._loupe_sources[layer_key] = source
         self._update_loupe_source()
@@ -3151,6 +3285,7 @@ class PlateWindow(QMainWindow):
         self._current_well = None
         self._enable_operators(False)
         if self._overview is not None:
+            self._release_loupe_sources()   # join the read thread BEFORE dropping its owner
             self._overview.setParent(None)
             self._overview.deleteLater()
             self._overview = None
@@ -3366,7 +3501,7 @@ class PlateWindow(QMainWindow):
 
         self._stop_worker()
         self._stop_preview()
-        self._loupe_sources = {}                  # a new plate: no source survives from the old one
+        self._release_loupe_sources()             # a new plate: no source (and no thread) survives
         self._acq_name, self._acq_path = base.name, base
         self._processed_plate = str(zroot)
         self._reader = None                       # a computed plate has no raw reader
@@ -3879,9 +4014,7 @@ class PlateWindow(QMainWindow):
             if w is not None:
                 self._dispose_tab_widget(w)
             win.close()
-        if self._overview is not None:
-            self._overview.set_loupe_source(None)   # joins the loupe read thread
-        self._loupe_sources = {}
+        self._release_loupe_sources()   # joins the loupe read thread
         for w in list(self._op_tabs.values()):
             if hasattr(w, "shutdown"):
                 w.shutdown()         # kill any live embedded terminal's shell
