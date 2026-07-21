@@ -23,6 +23,13 @@ dependencies = [
     #                             on-disk contract and the table is nine columns wide.
     "pillow>=10.0",
     "pydantic-settings>=2.3",   # declarative CLI (IMA-186), same pattern as the stitcher
+    "scipy>=1.10",              # IMA-223/224/225 plane-ops: ndimage gaussian_filter (the
+    #                             kernel-free Richardson-Lucy) and zoom (the flat-field /
+    #                             background resampling). Imported lazily inside the operators,
+    #                             so the reader/writer path still starts without touching it.
+    "scikit-image>=0.22",       # IMA-224: restoration.rolling_ball — Sternberg's algorithm, i.e.
+    #                             the same one as ImageJ's Subtract Background. Reused, not
+    #                             reimplemented; also the cross-check reference for IMA-223.
 ]
 
 # No tilefusion dependency: IMA-189 ingest is self-contained (see docs/ima-189-eng-review.md).

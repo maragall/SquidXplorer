@@ -54,6 +54,24 @@ from squidmip.projection import (
 )
 from squidmip.reader import SquidReader, open_reader
 
+# --- the IMA-223/224/225 plane-ops ------------------------------------------------------------
+#
+# Imported for their SIDE EFFECT: each module ends in one ``add_projector`` call, which is the
+# entire cost of adding an operator under IMA-210 (no engine edit, no dispatch table anywhere
+# else). Importing them here — rather than leaving each module to be found by whoever needs it —
+# is what makes the names appear in ``available_projectors()``, and therefore automatically in
+# the CLI's ``--projector`` validation and the viewer's projector selector, which both read that
+# list rather than a hardcoded one.
+#
+# KNOWN LIMIT (documented in _engine's docstring): these are plane-ops, so their output keeps z
+# at FULL depth, and ``_output._validate_image`` accepts only Z == 1. A plane-op therefore
+# streams correctly out of ``project_plate`` but fails LOUD at ``write_plate``. That is by
+# design for now — loud, not silently wrong — and it lifts the moment the writer learns Z > 1.
+from squidmip import _background, _decon, _flatfield  # noqa: E402,F401  (registration side effect)
+from squidmip._background import BackgroundParams, bgsub_op, subtract_background
+from squidmip._decon import decon_op, deconvolve, richardson_lucy_gaussian
+from squidmip._flatfield import FlatfieldProfile, correct_flatfield, estimate_profile, flatfield_op
+
 __all__ = [
     "open_reader",
     "SquidReader",
@@ -89,5 +107,16 @@ __all__ = [
     # IMA-228 Minerva export
     "export_selection",
     "launch_minerva",
+    # IMA-223/224/225 plane-ops (registered as "decon" / "bgsub" / "flatfield")
+    "richardson_lucy_gaussian",
+    "deconvolve",
+    "decon_op",
+    "subtract_background",
+    "BackgroundParams",
+    "bgsub_op",
+    "correct_flatfield",
+    "estimate_profile",
+    "FlatfieldProfile",
+    "flatfield_op",
 ]
 __version__ = "0.1.0"
