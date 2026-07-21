@@ -4386,7 +4386,17 @@ class PlateWindow(QMainWindow):
         order = self._order if order is None else list(order)
         h, w = meta["frame_shape"]
         channels = [c["name"] for c in meta["channels"]]
-        self._detail.start_acquisition(channels, meta["n_z"], h, w, [f"{r}:0" for r in order])
+        # pixel_size_um/dz_um are what make ndv's 3D button render this z-stack with the
+        # right geometry (IMA-255). This is the ONLY call site that declares a real n_z —
+        # the processed/mosaic ones below declare n_z=1, where a volume is meaningless — so
+        # it is the only one that needs them. Omitting them renders the stack isotropic:
+        # on the tissue set that is dz 1.5um against pixel 0.752um, i.e. 2x squashed in z.
+        # Passed positionally-by-keyword and NOT guarded: a stale ndviewer_light without
+        # these parameters must fail loudly here rather than silently drop back to
+        # isotropic. See tests/test_viewer_3d.py.
+        self._detail.start_acquisition(channels, meta["n_z"], h, w, [f"{r}:0" for r in order],
+                                       pixel_size_um=meta.get("pixel_size_um"),
+                                       dz_um=meta.get("dz_um"))
         self._push_shape = None       # raw mode registers PATHS, not arrays — no array canvas here
         self._push_problem = None
         # Re-scope the RAW preview to the same wells the slider now lists. Without this the

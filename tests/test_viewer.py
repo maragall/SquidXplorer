@@ -61,12 +61,18 @@ class _StubDetail(QWidget):
         self.nav = []
         self.acquisitions = []    # one entry per start_acquisition — the slider's label list
         self.canvases = []        # (h, w) declared by each start_acquisition
+        # (pixel_size_um, dz_um) per start_acquisition. The real viewer needs both to give
+        # ndv's 3D button the right voxel aspect (IMA-255); recording them is what lets
+        # tests/test_viewer_3d.py prove the metadata actually reaches the seam.
+        self.voxel_um = []
 
-    def start_acquisition(self, channels, nz, h, w, labels):
+    def start_acquisition(self, channels, nz, h, w, labels,
+                          pixel_size_um=None, dz_um=None):
         self._fov_labels = list(labels)
         self._fov_slider.setMaximum(max(0, len(labels) - 1))
         self.acquisitions.append(list(labels))
         self.canvases.append((h, w))
+        self.voxel_um.append((pixel_size_um, dz_um))
 
     def register_image(self, t, idx, z, ch, path, page_idx=0):
         self.registered.append((t, idx, z, ch, path))
