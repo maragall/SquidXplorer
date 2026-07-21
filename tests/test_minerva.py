@@ -9,6 +9,7 @@ manual check in ``docs/ima-228-eng-review.md`` (T10) is for.
 from __future__ import annotations
 
 import json
+import threading
 
 import numpy as np
 import pytest
@@ -60,15 +61,32 @@ def test_exported_pixels_are_the_mip_byte_for_byte(squid_dataset, tmp_path):
 
 
 def test_export_honours_the_projector_choice(squid_dataset, tmp_path):
-    """`reference` picks the sharpest plane rather than reducing — a different image."""
-    root, _ = squid_dataset
+    """`reference` picks the sharpest plane rather than reducing — a different image.
+
+    Asserted on PIXELS, not on the filename: the name's projector token is interpolated from the
+    caller's string, so a build that ignored the choice and always MIP'd would still be named
+    "reference". Both reductions are computed here from the fixture planes and the file must
+    match ITS OWN one and differ from the other.
+    """
+    root, arrays = squid_dataset
     (mip, _), = export_selection(open_reader(root), [("B2", 0)], tmp_path / "a", projector="mip")
     (ref, _), = export_selection(
         open_reader(root), [("B2", 0)], tmp_path / "b", projector="reference"
     )
     assert "mip" in mip.name and "reference" in ref.name
-    # fixture planes increase with z, so MIP (max over z) beats any single plane
-    assert tifffile.imread(str(mip)).max() >= tifffile.imread(str(ref)).max()
+
+    names = [c["name"] for c in open_reader(root).metadata["channels"]]
+    mip_px, ref_px = tifffile.imread(str(mip)), tifffile.imread(str(ref))
+    for c_i, ch in enumerate(names):
+        planes = [arrays[("B2", 0, z, ch)] for z in range(NZ)]
+        expected_mip = np.maximum.reduce(planes)
+        # every fixture plane has the same gradient, so Tenengrad ties and `reference` keeps the
+        # lowest z — a single plane, NOT the max over z.
+        expected_ref = planes[0]
+        np.testing.assert_array_equal(mip_px[c_i], expected_mip)
+        np.testing.assert_array_equal(ref_px[c_i], expected_ref)
+        assert not np.array_equal(expected_mip, expected_ref)      # the two really differ
+    assert not np.array_equal(mip_px, ref_px)
 
 
 def test_export_rejects_an_empty_selection(squid_dataset, tmp_path):
@@ -289,6 +307,38 @@ def test_launch_reuses_an_already_running_server(monkeypatch):
     monkeypatch.setattr("subprocess.Popen", boom)
     assert launch_minerva() is True
     assert opened == [_minerva.MINERVA_URL]
+
+
+def test_launch_abandons_the_liveness_wait_when_told_to_stop(monkeypatch, tmp_path):
+    """The wait is up to 90 s and the GUI JOINS this thread on close, so a stop flag the poll
+    never reads froze the window for the rest of it (measured 84 s). Bounded here at ~1 s."""
+    import time
+
+    app = tmp_path / "vendor" / "minerva-author" / "src" / "app.py"
+    app.parent.mkdir(parents=True)
+    app.write_text("")
+    py = tmp_path / ".venv" / "bin" / "python"
+    py.parent.mkdir(parents=True)
+    py.write_text("")
+    monkeypatch.setenv(_minerva.MINERVA_HOME_ENV, str(tmp_path))
+    monkeypatch.setattr(_minerva, "is_running", lambda timeout=1.0: False)   # never comes up
+    monkeypatch.setattr("subprocess.Popen", lambda *a, **k: None)
+    monkeypatch.setattr("webbrowser.open", lambda url: None)
+
+    stop = [False]
+    t0 = time.monotonic()
+    # flip the flag from another thread while the poll is sleeping
+    threading.Timer(0.3, lambda: stop.__setitem__(0, True)).start()
+    assert launch_minerva(timeout=90.0, should_stop=lambda: stop[0]) is False
+    assert time.monotonic() - t0 < 5.0            # not 90 — the poll honoured the flag
+
+
+def test_launch_does_not_start_a_server_when_already_stopped(monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("spawned a server after the caller gave up")
+
+    monkeypatch.setattr("subprocess.Popen", boom)
+    assert launch_minerva(should_stop=lambda: True) is False
 
 
 def test_minerva_home_prefers_the_env_var(monkeypatch, tmp_path):

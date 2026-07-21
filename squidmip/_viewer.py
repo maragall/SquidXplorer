@@ -545,7 +545,7 @@ _OPERATIONS = (
               "Collapse each well's z-stack to one max-intensity image; save a navigable OME-Zarr plate.",
               "_build_mip_tab"),
     Operation("minerva", "Open in Minerva Author",
-              "Export the selected well to a Minerva-ingestable OME-TIFF and open Minerva Author on it.",
+              "Export the selected FOVs to Minerva-ingestable OME-TIFFs and open Minerva Author on them.",
               "_build_minerva_tab"),
 )
 _OPERATIONS_BY_KEY = {op.key: op for op in _OPERATIONS}
@@ -2341,7 +2341,10 @@ class _MinervaWorker(QThread):
                 on_progress(i + 1, len(self._selection))
             self.exported.emit(pairs)
             if pairs and self._launch and not self._stop.is_set():
-                self.launched.emit(_minerva.launch_minerva(pairs[0][1]))
+                # should_stop: the liveness wait is up to 90 s and closeEvent joins this thread.
+                # Without it, closing mid-poll froze the GUI for the rest of the wait (84 s).
+                self.launched.emit(
+                    _minerva.launch_minerva(pairs[0][1], should_stop=self._stop.is_set))
             self.finished_ok.emit()
         except Exception as e:
             self.failed.emit(f"{type(e).__name__}: {e}")
@@ -3152,17 +3155,16 @@ class PlateWindow(QMainWindow):
         return w
 
     def _build_minerva_tab(self) -> QWidget:
-        """Minerva Author hand-off (IMA-228): export the current well, then open Author on it.
+        """Minerva Author hand-off (IMA-228): export the SELECTION, then open Author on it.
 
-        Scoped to the well the plate has selected. There is no multi-FOV selection gesture yet
-        (``wellActivated`` always carries fov 0 and the app runs one FOV per well), so this
-        passes a ONE-element list into an API that already takes many — IMA-205's exploration
-        pane widens the list without this code changing.
+        Scope comes from :meth:`minerva_selection` — the plate's selected FOVs/wells, else the
+        well open in the detail viewer, which means every FOV of it. One file pair per FOV
+        (Minerva opens one 2D image at a time and SquidMIP has no stitcher).
         """
         op = _OPERATIONS_BY_KEY["minerva"]
         w, v = self._op_tab_shell(
             op.label,
-            "Writes an OME-TIFF plus a Minerva story for the selected well, then starts Minerva "
+            "Writes an OME-TIFF plus a Minerva story for every selected FOV, then starts Minerva "
             "Author. Minerva has no deep link, so pick the .story.json below in its “Select File” "
             "dialog — the colours and contrast are already applied.",
         )
@@ -3218,7 +3220,7 @@ class PlateWindow(QMainWindow):
 
         pick_btn = QPushButton("Choose output folder…"); pick_btn.setStyleSheet(_BTN_QSS)
         pick_btn.clicked.connect(pick)
-        run = QPushButton("Export the selected well"); run.setStyleSheet(_BTN_QSS)
+        run = QPushButton("Export the selected FOVs"); run.setStyleSheet(_BTN_QSS)
         run.clicked.connect(lambda: self.run_minerva_export(
             out_dir=state["dir"], projector=proj.currentText(),
             launch=launch_cb.isChecked(), on_exported=on_exported,
@@ -3233,12 +3235,74 @@ class PlateWindow(QMainWindow):
         run.setEnabled(self._reader is not None)
         return w
 
+    def minerva_selection(self) -> list:
+        """The ``[(region, fov), ...]`` the user actually selected — never a silent stand-in.
+
+        The requirement is "open minerva-author with selected FOV(s)", so this reads the
+        selection instead of inventing one. Sources, most specific first:
+
+        1. ``PlateOverview.selected_region_fovs()`` — IMA-221's per-FOV plate selection. That
+           branch is NOT merged here, so it is duck-typed (``getattr``), never imported, and
+           both plausible shapes are accepted: ``{region: [fov, ...]}`` and an iterable of
+           ``(region, fov)`` pairs.
+        2. ``PlateOverview.selected_wells()`` — whole wells selected on the plate: EVERY FOV
+           of each, because a selected well means the well, not its first tile.
+        3. The well open in the detail viewer (``_current_well``): every FOV of it.
+
+        Nothing selected returns ``[]`` — the caller says so rather than exporting fov 0 of 36
+        and calling it "the selected well" (the IMA-228 bug this replaces).
+        """
+        fovs_per_region = (self._meta or {}).get("fovs_per_region", {}) or {}
+
+        def expand(regions) -> list:
+            out = []
+            for region in regions:
+                out.extend((str(region), int(f)) for f in fovs_per_region.get(str(region), []))
+            return out
+
+        def normalise(raw) -> list:
+            """Accept {region: [fov...]} or [(region, fov), ...]; keep only real (region, fov)."""
+            pairs = []
+            if isinstance(raw, dict):
+                for region, fovs in raw.items():
+                    pairs.extend((str(region), int(f)) for f in (fovs or []))
+            else:
+                for item in (raw or []):
+                    try:
+                        region, fov = item
+                    except (TypeError, ValueError):
+                        continue
+                    pairs.append((str(region), int(fov)))
+            seen, keep = set(), []
+            for region, fov in pairs:
+                if fov in fovs_per_region.get(region, []) and (region, fov) not in seen:
+                    seen.add((region, fov))
+                    keep.append((region, fov))
+            return keep
+
+        ov = self._overview
+        for attr, to_pairs in (("selected_region_fovs", normalise), ("selected_wells", expand)):
+            getter = getattr(ov, attr, None)
+            if not callable(getter):
+                continue
+            try:
+                sel = to_pairs(getter())
+            except Exception:
+                continue          # a selection API we cannot read is not a reason to crash
+            if sel:
+                return sel
+
+        if self._current_well:
+            return expand([self._current_well])
+        return []
+
     def run_minerva_export(self, out_dir=None, projector: str = "mip", launch: bool = True,
-                           on_exported=None, t: int = 0):
-        """Export the currently selected well for Minerva Author and (optionally) open it.
+                           on_exported=None, t: int = 0, selection=None):
+        """Export the user's selection for Minerva Author and (optionally) open it.
 
         Runs off the GUI thread: projecting a well is real I/O plus compute, and starting
         Minerva Author polls a port for up to 90 s. Tests call this directly with launch=False.
+        *selection* overrides :meth:`minerva_selection` (tests and future callers).
         """
         if self._reader is None or self._meta is None:
             self._readout.setText("open an acquisition first")
@@ -3247,33 +3311,47 @@ class PlateWindow(QMainWindow):
             self._readout.setText("already exporting — let the current export finish first")
             return
 
-        region = self._current_well or (self._order[0] if self._order else None)
-        if region is None:
-            self._readout.setText("select a well first")
+        sel = list(selection) if selection is not None else self.minerva_selection()
+        if not sel:
+            self._readout.setText(
+                "nothing selected — pick the well or FOVs to export "
+                "(double-click a well on the plate), then export again")
             return
-        fov = (self._meta.get("fovs_per_region", {}).get(region) or [0])[0]
 
+        regions = list(dict.fromkeys(r for r, _ in sel))
+        what = f"{len(sel)} FOV{'s' if len(sel) != 1 else ''} from {', '.join(regions)}"
         n_t = self._meta.get("n_t", 1) or 1
         t_note = f" (t={t} of {n_t})" if n_t > 1 else ""
         self._minerva = w = _MinervaWorker(
-            self._reader, [(region, fov)], out_dir, projector, t=t, launch=launch)
+            self._reader, sel, out_dir, projector, t=t, launch=launch)
 
         def on_launched(ok):
             if ok:
-                self._readout.setText(f"✓ Minerva Author open — pick the .story.json for {region}")
+                self._readout.setText(
+                    f"✓ Minerva Author open — pick a .story.json ({what}{t_note} exported)")
             else:
                 self._readout.setText(
-                    f"✓ exported {region}{t_note} — Minerva Author not found "
+                    f"✓ exported {what}{t_note} — Minerva Author not found "
                     f"(set ${_MINERVA_HOME_ENV} to an explorer checkout)")
+
+        def on_exported_readout(pairs):
+            # Report what LANDED, not what was asked for: a stop mid-export writes fewer.
+            if not pairs:
+                self._readout.setText("nothing exported")
+                return
+            done = list(dict.fromkeys(r for r, _ in sel[: len(pairs)]))
+            note = "" if len(pairs) == len(sel) else f" of {len(sel)} (stopped)"
+            self._readout.setText(
+                f"✓ exported {len(pairs)} FOV{'s' if len(pairs) != 1 else ''}{note} from "
+                f"{', '.join(done)}{t_note} → {Path(pairs[0][0]).parent}")
 
         w.progress.connect(lambda d, n: self._readout.setText(f"● Minerva export · {d}/{n} FOVs"))
         if on_exported is not None:
             w.exported.connect(on_exported)
-        w.exported.connect(lambda pairs: self._readout.setText(
-            f"✓ exported {region}{t_note} → {Path(pairs[0][0]).parent}" if pairs else "nothing exported"))
+        w.exported.connect(on_exported_readout)
         w.launched.connect(on_launched)
         w.failed.connect(lambda m: self._readout.setText(f"Minerva export failed: {m}"))
-        self._readout.setText(f"● Minerva export · {region}{t_note} …")
+        self._readout.setText(f"● Minerva export · {what}{t_note} …")
         w.start()
 
     def _build_layers_tab(self) -> QWidget:
@@ -3479,9 +3557,13 @@ class PlateWindow(QMainWindow):
         if is_plate:
             self._readout.setText("this is already a written plate — drop a raw Squid acquisition")
             return
-        # stop any in-flight run/preview and clear prior state before opening a new acquisition
+        # stop any in-flight run/preview/export and clear prior state before opening a new
+        # acquisition. _stop_minerva matters as much as the other two: a Minerva worker left
+        # running holds the OLD reader and would keep exporting (and launching) against an
+        # acquisition the window no longer shows.
         self._stop_worker()
         self._stop_preview()
+        self._stop_minerva()
         # Exploration tabs belong to the acquisition they were opened from: their region sets and
         # layer keys point at a _fov_index that is about to be rebuilt for a different plate.
         self._close_exploration_tabs()

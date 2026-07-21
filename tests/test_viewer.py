@@ -2373,15 +2373,79 @@ def test_minerva_tab_builds_and_lists_projectors(qapp, stub_detail, squid_datase
     win.close()
 
 
-def test_run_minerva_export_writes_files_for_the_selected_well(qapp, stub_detail, squid_dataset, tmp_path):
+def test_run_minerva_export_writes_every_fov_of_the_selected_well(qapp, stub_detail, squid_dataset,
+                                                                 tmp_path):
+    """The IMA-228 bug: the GUI built its own 1-element selection pinned to fov 0, so a user who
+    selected a well got 1 of its N FOVs while the readout said the well was exported. Selecting
+    the well must export the WHOLE well (the fixture has 2 FOVs per region)."""
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
+    win.activate_well("B2", 0)                                       # the user's selection
     win.run_minerva_export(out_dir=str(tmp_path), launch=False)      # launch=False: no server, no browser
-    assert _drain_until(qapp, lambda: bool(list(tmp_path.glob("*.ome.tiff"))))
+    assert _drain_until(qapp, lambda: len(list(tmp_path.glob("*.ome.tiff"))) == 2)
     assert _drain_until(qapp, lambda: "✓ exported" in win._readout.text())
-    assert len(list(tmp_path.glob("*.story.json"))) == 1
+    names = sorted(p.name for p in tmp_path.glob("*.ome.tiff"))
+    assert [("B2_fov0" in n) for n in names].count(True) == 1
+    assert [("B2_fov1" in n) for n in names].count(True) == 1        # NOT fov 0 alone
+    assert len(list(tmp_path.glob("*.story.json"))) == 2
+    assert "2 FOVs from B2" in win._readout.text()                   # honest count + region
     win._stop_minerva(); win.close()
+
+
+def test_run_minerva_export_with_nothing_selected_says_so(qapp, stub_detail, squid_dataset, tmp_path):
+    """No selection must be a message, not a silent export of fov 0 of the first well."""
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    win._current_well = None            # nothing selected and nothing open in the detail viewer
+    assert win.minerva_selection() == []
+    win.run_minerva_export(out_dir=str(tmp_path), launch=False)
+    assert "nothing selected" in win._readout.text()
+    qapp.processEvents()
+    assert not list(tmp_path.glob("*.ome.tiff"))
+    assert win._minerva is None
+    win.close()
+
+
+def test_minerva_selection_prefers_the_plates_selected_fovs(qapp, stub_detail, squid_dataset):
+    """IMA-221's plate selection is duck-typed (that branch is not merged): whichever of its two
+    APIs the overview grows, the export follows it in preference to the detail viewer's well."""
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    win.activate_well("B2", 0)                       # would otherwise mean "all of B2"
+
+    win._overview.selected_wells = lambda: ["B3"]
+    assert win.minerva_selection() == [("B3", 0), ("B3", 1)]      # whole well, every FOV
+
+    win._overview.selected_region_fovs = lambda: {"B3": [1], "B2": [0]}
+    assert win.minerva_selection() == [("B3", 1), ("B2", 0)]      # per-FOV wins over per-well
+    win._overview.selected_region_fovs = lambda: [("B2", 1)]      # the pair-list shape too
+    assert win.minerva_selection() == [("B2", 1)]
+
+    win._overview.selected_region_fovs = lambda: [("ZZ", 0), ("B2", 99)]   # not in the acquisition
+    assert win.minerva_selection() == [("B3", 0), ("B3", 1)]      # falls back, never exports junk
+
+    win._overview.selected_region_fovs = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+    assert win.minerva_selection() == [("B3", 0), ("B3", 1)]      # a broken API is not a crash
+    win.close()
+
+
+def test_ingest_stops_a_running_minerva_export(qapp, stub_detail, squid_dataset, tmp_path):
+    """Re-ingesting mid-export used to leave the worker running against the OLD reader."""
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    win.activate_well("B2", 0)
+    win.run_minerva_export(out_dir=str(tmp_path), launch=False)
+    worker = win._minerva
+    assert worker is not None
+
+    win.ingest(str(root))                       # open an acquisition again, mid-export
+    assert win._minerva is None                 # ...the export is retired, not orphaned
+    assert worker.wait(10000)
+    win._stop_worker(); win._stop_preview(); win.close()
 
 
 def test_run_minerva_export_refuses_a_second_concurrent_run(qapp, stub_detail, squid_dataset, tmp_path):
@@ -2419,6 +2483,7 @@ def test_minerva_export_failure_surfaces_in_the_readout(qapp, stub_detail, squid
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
+    win.activate_well("B2", 0)
     win.run_minerva_export(out_dir=str(tmp_path), launch=False)
     assert _drain_until(qapp, lambda: "failed" in win._readout.text())
     assert "no objective pixel size" in win._readout.text()
@@ -2434,6 +2499,7 @@ def test_minerva_reports_when_author_is_not_installed(qapp, stub_detail, squid_d
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
+    win.activate_well("B2", 0)
     win.run_minerva_export(out_dir=str(tmp_path), launch=True)
     assert _drain_until(qapp, lambda: "not found" in win._readout.text())
     assert "✓ exported" in win._readout.text()          # the files are still good
@@ -2453,11 +2519,38 @@ def test_signal_names_discovers_every_worker_signal():
         V._signal_names(V._OperatorWorker))
 
 
+def test_retire_disconnects_every_declared_signal(qapp, stub_detail, squid_dataset, tmp_path):
+    """_signal_names being right is worthless unless _retire USES it: this test failed to notice
+    the loop being emptied, so it now drives _retire itself and emits every signal afterwards.
+    Nothing may reach a handler connected before the retire."""
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    worker = V._MinervaWorker(win._reader, [("B2", 0)], str(tmp_path), "mip", t=0, launch=False)
+
+    payload = {"progress": (1, 1), "exported": ([],), "launched": (False,), "failed": ("x",),
+               "finished_ok": ()}
+    seen = []
+    names = [n for n in V._signal_names(V._MinervaWorker) if n in payload]
+    assert set(names) == set(payload), "a declared worker signal is not covered here"
+    for name in names:
+        getattr(worker, name).connect(lambda *a, _n=name: seen.append(_n))
+
+    win._retire(worker)                       # not running -> retire is pure disconnection
+
+    for name in names:
+        getattr(worker, name).emit(*payload[name])
+    qapp.processEvents()
+    assert seen == [], f"signals still connected after _retire: {sorted(set(seen))}"
+    win._stop_worker(); win._stop_preview(); win.close()
+
+
 def test_closing_mid_export_disconnects_the_worker(qapp, stub_detail, squid_dataset, tmp_path):
     """Close the window mid-export: no signal may reach the (now dead) window afterward."""
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
+    win.activate_well("B2", 0)
     win.run_minerva_export(out_dir=str(tmp_path), launch=False)
     worker = win._minerva
     win.close()

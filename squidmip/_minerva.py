@@ -395,7 +395,8 @@ def is_running(timeout: float = 1.0) -> bool:
         return False
 
 
-def launch_minerva(story_path=None, *, open_browser: bool = True, timeout: float = 90.0) -> bool:
+def launch_minerva(story_path=None, *, open_browser: bool = True, timeout: float = 90.0,
+                   should_stop=None) -> bool:
     """Start minerva-author if it isn't up, then open the browser. Best-effort.
 
     Returns ``True`` when a server is answering. **Never raises** — the export has already
@@ -403,9 +404,22 @@ def launch_minerva(story_path=None, *, open_browser: bool = True, timeout: float
     successful export into a failure. The caller reports the outcome and always shows the
     user the story path, because Minerva has no deep link: the file is chosen by hand in
     Author's "Select File" dialog.
+
+    Parameters
+    ----------
+    should_stop:
+        Optional ``fn() -> bool`` polled while waiting for the server. The liveness wait is
+        up to *timeout* seconds long, and a GUI that joins this thread on close (``closeEvent``
+        -> ``QThread.wait()``) would freeze for the remainder of it — measured at 84 s. The
+        viewer passes its worker's stop flag here so closing abandons the wait at once. The
+        files are already on disk; only the wait is abandoned.
     """
     import time
     import webbrowser
+
+    stopped = should_stop if callable(should_stop) else (lambda: False)
+    if stopped():
+        return False
 
     if not is_running():
         home = minerva_home()
@@ -429,12 +443,18 @@ def launch_minerva(story_path=None, *, open_browser: bool = True, timeout: float
             return False
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
+            if stopped():        # the caller (a GUI closing) gave up — do not hold it for 90 s
+                return False
             if is_running():
                 break
-            time.sleep(1.0)
+            # Short naps, not one long one: the stop flag is honoured within ~0.2 s instead of
+            # up to a second, which is what makes closing the window feel immediate.
+            time.sleep(0.2)
         else:
             return False
 
+    if stopped():
+        return False
     if open_browser:
         try:
             webbrowser.open(MINERVA_URL)
