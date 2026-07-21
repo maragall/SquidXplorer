@@ -18,6 +18,17 @@ Data flow::
                 out[t, c, 0] = project(planes)        # running np.maximum, bounded memory
             └──► (T, C, 1, Y, X) native dtype
 
+Axis scope — what this module does NOT do (IMA-222 review, 2026-07-20)::
+
+    z-axis     REDUCED here (Nz -> 1). The ``reduce=`` seam below is a *z*-reduction:
+               Iterable[plane] -> plane. That is the ONLY operator seam this module has.
+    fov-axis   NOT touched. ``select_fovs`` *selects* FOVs, it never fuses them. An
+               operator that consumes the FOV axis (stitch) cannot ride the ``reduce=``
+               seam: a flat plane iterator carries no tile geometry (stage positions,
+               overlap, pixel size), and the caller pins Z to size 1 at ``out[t, c, 0]``.
+               Such an operator needs IMA-210's consumes-axis registry, not this seam.
+    t-axis     Preserved, never reduced.
+
 Design contracts:
   * ``project`` is a pure, dtype-preserving, bounded-memory reduction — it streams planes
     and never materialises the whole z-stack. It is the primitive IMA-188 wraps in its
@@ -171,6 +182,11 @@ def select_fovs(metadata: dict, n_fovs: int = 1) -> dict[str, list[int]]:
     per well). Selection is positional — the first ``n_fovs`` FOVs of each well, in the
     reader's sorted ``fovs_per_region`` order (so it never depends on a literal, possibly
     1-based, filename FOV label).
+
+    SELECT, not fuse. With ``n_fovs > 1`` the caller gets N independent per-FOV results,
+    NOT one composite — callers that want a single image per well must fuse downstream
+    (mosaic: IMA-187; registration+blend: IMA-222). The viewer states this honestly in its
+    readout ("sampling 1 FOV/well"); do not let a future edit make this quietly fuse.
 
     Parameters
     ----------
