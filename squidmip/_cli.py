@@ -55,6 +55,13 @@ class ProcessParameters(BaseModel, use_attribute_docstrings=True):
     """Process only the first N wells — a quick SLICE of the plate (subset preview) so you can test
     the operator without committing the whole plate's compute + disk. Default: every well."""
 
+    odon: bool = False
+    """Also write an Odon samplesheet next to the plate and launch Odon on it (IMA-212).
+
+    Odon is a separately-installed GPL-3 desktop viewer — SquidMIP never bundles it. Install it
+    from https://github.com/alexcoulton/odon/releases, or set $ODON_BIN. Note Odon has no
+    well-plate model, so it shows the fields as a flat mosaic, and it ignores our channel colors."""
+
     verbose: bool = False
     """Show debug-level logging."""
 
@@ -137,6 +144,21 @@ def run(params: ProcessParameters) -> dict:
         logger.warning("%d well(s) SKIPPED due to read errors: %s",
                        len(skipped), ", ".join(skipped[:15]) + (" …" if len(skipped) > 15 else ""))
     manifest["skipped"] = skipped
+
+    # IMA-212: hand the finished plate to Odon. Deliberately AFTER the plate is fully written
+    # and recorded in the manifest, so a missing binary costs the user nothing — the output is
+    # already on disk and complete. The samplesheet is derived by walking that output, not from
+    # `regions`/`n_fovs`, so it cannot disagree with what was actually written.
+    if params.odon:
+        from squidmip._odon import launch_odon, write_samplesheet
+
+        samplesheet = write_samplesheet(out_dir)
+        manifest["odon_samplesheet"] = str(samplesheet)
+        try:
+            launch_odon(samplesheet)
+        except FileNotFoundError as exc:
+            raise SystemExit(f"{exc}\n\nThe plate itself is written: {manifest['plate']}") from exc
+
     return manifest
 
 

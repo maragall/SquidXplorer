@@ -3,23 +3,25 @@
 - **Ticket:** IMA-212
 - **Branch:** juliomaragall/ima-212-odon-zarr-bridge
 - **Spec:** .spec/open/ima-212.md
-- **Phase:** PLAN LOCKED (eng review complete 2026-07-20) — **gated on a manual Phase 0 spike**
-- **Mode:** attended → user delegated finalize+push (2026-07-20)
+- **Phase:** BUILT (T1–T7 implemented 2026-07-20; T0 gate deferred at user's explicit direction)
+- **Mode:** attended → user delegated finalize+push, then directed implementation ahead of the gate
 
 ## Now
-Plan locked and pushed. **Do NOT arm the ralph watcher** (`.sprint/oracle.md`) yet — T0 is a
-human step and the AFK build has nothing to do until it passes.
+Code landed and pushed. `squidmip/_odon.py` + `--odon` CLI flag + `tests/test_odon.py`.
+Verified: 27 passed / 1 skipped (the real-binary test — odon is not installed here); full
+suite 138 passed / 2 skipped / 20 deselected, no regressions.
+
+**The Phase 0 gate was NOT run.** The user chose to implement first and test in the master
+merger workspace. So the open question the gate exists to answer is still open: Odon has no
+plate model, so its mosaic is a linear sequence, not plate geometry — which may still turn
+out to be disqualifying for plate work. The code is correct regardless; whether it is
+*wanted* is what remains unanswered.
 
 ## Next
-T0 GATE (manual, ~30 min): install Odon, hand-write a ~20-row `id,path,well,fov` CSV over an
-existing `.hcs`, run `odon --mosaic-samplesheet <csv>`, and answer the Phase 0 table in the
-spec. **Key question: does the mosaic preserve plate geometry?** Odon has no plate model, so
-it renders a linear sequence — plausibly disqualifying for plate work. If it is, close IMA-212
-with the finding recorded; that is a successful evaluation, not a failure.
-
-Only if T0 passes: T1 `write_samplesheet` (directory glob) → T2 `find_odon` → T3 `launch_odon`
-→ T4 `check_odon` → T5 `--odon` CLI flag → T6 tests → T7 docs → T8 oracle rewrite.
-Full task list with files/verify steps: spec "Implementation Tasks".
+Manual: install Odon (Apple Silicon mac), run `squidmip <acq> --odon`, and answer the Phase 0
+table in the spec — above all whether the flat mosaic is usable for plate work. Then either
+adopt (consider the deferred GUI button) or close IMA-212 with the negative finding recorded.
+T8 (rewrite `.sprint/oracle.md`) stays open; the watcher is still unarmed.
 
 ## Decisions
 - **The spec's premise was false and was rewritten.** Odon v0.1.5 is a native Rust DESKTOP GUI
@@ -63,3 +65,9 @@ _(none technical — T0 needs a human with an Apple Silicon mac; Odon is not ins
   voice (Claude subagent; Codex CLI not installed) returned 7 findings, all absorbed — two
   real defects the interactive review missed (exists-check predicate, false "cannot disagree"
   claim), one structural reversal (directory glob), one strategic (Phase 0 gate added).
+- 1 — build T1–T7 (user directed implementation ahead of the T0 gate). `_odon.py`
+  (write_samplesheet / iter_fields / find_odon / check_odon / launch_odon), `--odon` on the
+  CLI, `tests/test_odon.py` (28 tests). Verify: `pytest tests/test_odon.py` 27 passed 1
+  skipped; full suite 138 passed 2 skipped 20 deselected. End-to-end smoke confirmed natural
+  plate ordering (B2, B3, B10, AA1), relative paths resolving from the CSV dir, and a
+  half-written field (arrays present, zarr.json removed) correctly excluded.
