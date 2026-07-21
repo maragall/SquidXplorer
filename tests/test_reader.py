@@ -255,19 +255,22 @@ def test_empty_dir_raises(tmp_path):
         open_reader(tmp_path).metadata
 
 
-# --- integration: the real hongquan dataset (AC1 + AC4 on real data) ---------
+# --- integration: the real 10x laser-AF tissue acquisition (AC1 + AC4 on real data) ---------
+# Repointed from the deleted hongquan z-stack. This is the harder and more representative case:
+# a GLASS SLIDE with freeform regions, which the viewer refused outright until IMA-214.
 @pytest.mark.integration
 def test_real_dataset(real_dataset):
     reader = open_reader(real_dataset)
     meta = reader.metadata
-    assert set(meta["regions"]) == {"B2", "B3", "B4"}
-    total_fovs = sum(len(v) for v in meta["fovs_per_region"].values())
-    assert total_fovs == 48
+    assert set(meta["regions"]) == {"manual0", "manual1"}
+    assert len(meta["fovs_per_region"]["manual0"]) == 27
+    assert len(meta["fovs_per_region"]["manual1"]) == 28
     assert len(meta["channels"]) == 4
-    assert meta["n_z"] == 3
-    assert meta["frame_shape"] == (4168, 4168)
+    assert meta["n_z"] == 10
+    assert meta["frame_shape"] == (2084, 2084)
     assert meta["dtype"] == np.uint16
-    # AC4 exact read against tifffile
-    got = reader.read("B3", 15, "Fluorescence_638_nm_-_Penta", 0)
-    direct = tifffile.imread(real_dataset / "0" / "B3_15_0_Fluorescence_638_nm_-_Penta.tiff")
-    np.testing.assert_array_equal(got, direct)
+    assert meta["pixel_size_um"] == pytest.approx(0.752, abs=1e-3)
+    # the units contract: positions are MICROMETRES and the key says so
+    assert "fov_positions" not in meta
+    xs = [v[0] for v in meta["fov_positions_um"].values()]
+    assert max(xs) - min(xs) > 1000        # a mm value here would be ~1000x too small

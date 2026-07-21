@@ -81,20 +81,27 @@ def _assert_well_matches_np_max(reader, region, fov):
 # --- sim_1536wp (synthetic plate scale) ---
 @pytest.mark.integration
 def test_sim1536_metadata_sanity(sim_1536wp):
-    # sim_1536wp's acquisition.yaml declares nz=3 but 20 z-planes exist on disk. The reader
-    # must WARN and trust the filenames (IMA-189 "filenames are ground truth"). Asserting the
-    # warning here turns incidental noise into a documented check + covers the Nz-mismatch path.
-    with pytest.warns(UserWarning, match="Recorded Nz"):
-        meta = open_reader(sim_1536wp).metadata
+    # sim_1536wp is a PLATE-SCALE fixture: 1536 wells, one FOV each, every well symlinking the
+    # same four source planes from synthetic_2x2_wellplate. It costs 48 KB on disk and exists to
+    # prove the reader and the plate layout survive 1536 regions, not to carry distinct pixels.
+    #
+    # It replaces a deleted 4168x4168 / Nz=20 dataset. The old assertions here described that
+    # dataset's shape and a declared-vs-actual Nz warning; both are properties of the missing
+    # data, not of the code, so they are not reconstructed. The Nz-mismatch path is covered by
+    # its own unit tests, and the streaming-memory property now runs against the real 10x tissue
+    # z-stack (test_performance), which has genuine z depth.
+    meta = open_reader(sim_1536wp).metadata
     assert len(meta["regions"]) == 1536
-    assert all(
-        fovs == [0] for fovs in meta["fovs_per_region"].values()
-    )  # one FOV per well
-    assert meta["n_z"] == 20
-    assert meta["z_levels"] == list(range(20))
+    assert meta["regions"][0] == "A1" and meta["regions"][-1] == "AF48"
+    assert all(fovs == [0] for fovs in meta["fovs_per_region"].values())   # one FOV per well
     assert len(meta["channels"]) == 4
     assert meta["dtype"] == np.uint16
-    assert meta["frame_shape"] == (4168, 4168)
+    assert meta["frame_shape"] == (2084, 2084)
+    # 1536-well geometry, not a collapsed grid: 32 rows x 48 columns at the SLAS 2.25 mm pitch.
+    xs = sorted({round(v[0], 1) for v in meta["fov_positions_um"].values()})
+    ys = sorted({round(v[1], 1) for v in meta["fov_positions_um"].values()})
+    assert (len(xs), len(ys)) == (48, 32)
+    assert round(xs[1] - xs[0]) == 2250 and round(ys[1] - ys[0]) == 2250
 
 
 @pytest.mark.filterwarnings("ignore:Recorded Nz")  # asserted in test_sim1536_metadata_sanity

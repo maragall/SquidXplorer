@@ -137,8 +137,15 @@ def pyramid_dataset(tmp_path):
 
 @pytest.fixture
 def real_dataset():
-    """The real hongquan dataset if present locally; else skip (used by integration tests)."""
-    path = Path.home() / "Downloads" / "z_stack_2026-05-15_18-39-28.532906 hongquan"
+    """The real 10x laser-AF tissue acquisition; else skip (used by integration tests).
+
+    Repointed from the old `hongquan` z-stack, which was deleted. This is the acquisition the
+    product is actually demoed on, and it is the harder case: a GLASS SLIDE with freeform regions
+    (manual0 27 FOVs / manual1 28), Nz=10, 4 channels, 0.752 um/px, OME-TIFF on disk. Real pixels,
+    real overlap (~209 px, ~10%), real per-channel focus disagreement.
+    """
+    path = Path("/Users/julioamaragall/Downloads/"
+                "test_10x_laser_af_z_stack_2025-10-28_13-40-43.939945 yy")
     if not path.is_dir():
-        pytest.skip("real hongquan dataset not present")
+        pytest.skip(f"real tissue acquisition not present at {path}")
     return path

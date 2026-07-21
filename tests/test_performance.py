@@ -115,10 +115,15 @@ def test_single_well_speed_baseline(sim_1536wp, capsys):
 
 @pytest.mark.filterwarnings("ignore:Recorded Nz")
 @pytest.mark.integration
-def test_single_well_memory_footprint(sim_1536wp):
-    # streaming MIP must NOT materialise the whole z-stack: peak ≈ the (T,C,1,Y,X) result
+def test_single_well_memory_footprint(real_dataset):
+    # streaming MIP must NOT materialise the whole z-stack: peak is about the (T,C,1,Y,X) result
     # plus a couple of in-flight planes, far below stacking all Nz*C planes.
-    reader = open_reader(sim_1536wp)
+    #
+    # Runs on the real 10x tissue acquisition (Nz=10, 4 channels) rather than sim_1536wp, which
+    # is a symlink fixture with Nz=1: with a single plane there is no stack to avoid
+    # materialising, so the assertion below would pass or fail for reasons unrelated to
+    # streaming. A memory-streaming claim needs real z depth to mean anything.
+    reader = open_reader(real_dataset)
     b = benchmark_single_well(reader, reader.metadata["regions"][0], 0)
     assert b["peak_bytes"] < b["result_bytes"] + 6 * b["plane_bytes"]
     assert b["peak_bytes"] < b["full_stack_bytes"]      # never the naive all-planes footprint

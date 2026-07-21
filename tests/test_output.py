@@ -65,12 +65,18 @@ def _read_array(path: Path) -> np.ndarray:
 
 # --- pure helpers ---------------------------------------------------------------------------
 
-def test_parse_well_id_uppercases_no_padding_roundtrips():
-    # vendored Squid semantics: uppercase, multi-letter rows, no zero-padding
+def test_parse_well_id_preserves_case_and_roundtrips_exactly():
+    # Vendored Squid semantics EXCEPT the .upper(): multi-letter rows, no zero-padding, and the
+    # region id preserved verbatim. Squid upper-cases, but the id is reconstructed from the
+    # directory names by concatenation, so upper-casing is data loss rather than normalisation:
+    # a freeform region "manual0" round-tripped through MANUAL/0/ and came back "MANUAL0",
+    # silently renaming the acquisition's own regions. Caught by test_ima184_real_plate_roundtrip
+    # once it was pointed at the real glass-slide acquisition.
     assert parse_well_id("B2") == ("B", "2")
-    assert parse_well_id("aa3") == ("AA", "3")  # lowercase -> upper (Squid parse_well_id)
-    assert split_well is parse_well_id  # back-compat alias
-    for region in ("B2", "H12", "AA1", "AF48"):
+    assert parse_well_id("aa3") == ("aa", "3")      # case preserved, NOT upper-cased
+    assert parse_well_id("manual0") == ("manual", "0")
+    assert split_well is parse_well_id              # back-compat alias
+    for region in ("B2", "H12", "AA1", "AF48", "aa3", "manual0", "manual1"):
         row, col = parse_well_id(region)
         assert row + col == region  # ndviewer reconstructs well_id = row + col
 

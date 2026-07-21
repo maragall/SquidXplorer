@@ -345,12 +345,20 @@ def parse_well_id(region: str) -> tuple[str, str]:
     NOT zero-padded — ``B2 -> B/2`` (``B/02`` would still be discovered, ``"02".isdigit()`` is
     True, but report the well as ``B02`` != the real id ``B2``, breaking well-id fidelity).
 
-    We match Squid's accepted inputs exactly (uppercase, multi-letter rows, no padding) but,
+    We match Squid's accepted inputs exactly (multi-letter rows, no padding) but,
     for a scientific tool, additionally ASSERT the canonical ``<letters><digits>`` shape and
     fail loud: a manual/no-plate region (Squid would silently accumulate stray chars into the
     column) must not be written to a mislabelled directory.
+
+    CASE IS PRESERVED, deliberately diverging from Squid's ``.upper()``. The region id is
+    reconstructed from the directory names by concatenation, so upper-casing here is not a
+    normalisation, it is data loss: a freeform region ``manual0`` round-tripped through
+    ``MANUAL/0/`` and came back as ``MANUAL0``, silently renaming the acquisition's own regions.
+    The shape assertion below already guarantees ``letters + digits == region``, so preserving
+    case keeps the round trip exact for every input it accepts. Squid writes uppercase well ids,
+    so real well-plate acquisitions are unaffected.
     """
-    s = str(region).upper()
+    s = str(region)
     letters = "".join(c for c in s if c.isalpha())
     digits = "".join(c for c in s if not c.isalpha())
     if not letters or not digits.isdigit() or letters + digits != s:
