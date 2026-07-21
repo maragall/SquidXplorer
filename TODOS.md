@@ -43,6 +43,22 @@ so a future session doesn't rediscover it from zero.
 - **Context:** ndviewer_light discovers plates by directory walk and reads array `0` + `omero` only (`ndviewer_light/core.py:1149`, `:1070`). IMA-184's cross commit already proves the plate opens under strict `ome-zarr-py`, so the metadata is spec-valid regardless.
 - **Depends on / blocked by:** IMA-193 design.
 
+## Stitched layer in the Layers tab → blocked on a stitcher
+- **What:** A `stitched` layer alongside `raw` and the operator layers, so a multi-FOV well renders as one composited image instead of a sampled single FOV.
+- **Why:** IMA-227's ticket title promises "stitched / raw / MIP", but nothing in the repo stitches. `_OPERATIONS` (`_viewer.py:410`) holds exactly one entry (`mip`), and stitching is explicitly deferred in `_cli.py:104`, `_viewer.py:66`, and `README.md:67`. The layer machinery is ready; the pixels are not.
+- **Pros:** The layer stack already supports N layers, so adding one is a registry entry plus a worker — the expensive part (toggle/reorder/render) is done.
+- **Cons:** Needs per-FOV geometry (stage position + overlap) that the reader does not currently expose; without it there is nothing to composite.
+- **Context:** IMA-227 was rescoped from "build the toggle" to "fix the toggle's defects" precisely because the toggle exists. The stitched layer is the one part of the original ticket that was genuinely unbuildable. Related learning: `fov-axis-needs-geometry` — a bare-index FOV list re-hardcodes the API the moment stitch is built, so model `metadata.fovs` as `list[{index,position,overlap}]` first.
+- **Depends on / blocked by:** A stitcher (tilefusion `compose()` or equivalent) + per-FOV geometry in `metadata`. Related: IMA-187 (multi-FOV per well).
+
+## Layers tab vs "Return to raw view" — two affordances, one action → product call
+- **What:** Decide whether the Layers tab and the "Return to raw view" button (`_viewer.py:1208`) should both exist, or whether one should go.
+- **Why:** With exactly one operator, the Layers tab reduces to a checkbox that hides MIP and shows raw — which is what the Return-to-raw button already does, via a different code path with different side effects (`_raw_btn` visibility, preview-worker restart, status reset).
+- **Pros:** Removing one affordance removes a whole class of "these two controls disagree" bugs, and the eng review already found one such disagreement.
+- **Cons:** They are not strictly equivalent — Return-to-raw also restarts the raw preview worker and resets well status, which unticking a layer does not. Collapsing them means deciding which of those side effects is the intended behaviour.
+- **Context:** IMA-227 T2 unifies the *code path* (both route through `_apply_layers`), which fixes the correctness bug. Whether both should be *surfaced to users* is a UX/product question the eng review deliberately did not decide. Surfaced by /plan-eng-review outside-voice §7 (2026-07-20). Revisit when operator #2 lands, since the Layers tab earns its keep the moment there are two operators to stack.
+- **Depends on / blocked by:** IMA-227 T2 landing first; ideally a second operator existing so the tab's value is testable.
+
 ## Fix upstream squid2minerva/colors.py display_color nesting → external repo
 - **What:** `squid2minerva/colors.py:load_yaml_colors` reads `channel["display_color"]`, but real `acquisition_channels.yaml` nests it under `channel.camera_settings.<cam>.display_color`. Its Minerva OME-TIFF exports only get right colors via the wavelength-fallback map — a custom yaml color is silently ignored.
 - **Why:** Confirmed against a real dataset yaml. It's correct-by-luck today because the fallback palette matches the standard 4 channels; any non-default color drops silently.
