@@ -50,3 +50,27 @@ so a future session doesn't rediscover it from zero.
 - **Cons:** Different repo, different owner; not on any SquidMIP critical path.
 - **Context:** SquidMIP does **not** carry this bug — IMA-189's `squidmip/_channels.py` already resolves `display_color` correctly (top-level v1.0+ *and* nested `camera_settings`, mapped by name, raises on unresolved), and IMA-184 consumes `metadata.channels[].display_color` rather than re-parsing the yaml. This TODO is purely a flag for whoever owns `~/CEPHLA/projects/explorer/squid2minerva`.
 - **Depends on / blocked by:** squid2minerva maintainer.
+
+## Viewport tiling / LOD for deep zoom → exploration-pane ticket
+- **What:** `viewport(bbox, zoom) -> tiles` with level-of-detail selection and frustum culling, so a single well can be zoomed into without fetching the whole mosaic.
+- **Why:** Cut from IMA-187 during /plan-eng-review (2026-07-21). The plate overview does not need it: `PlateOverview` is a fixed-resolution bitmap montage (`_viewer.py:533` allocates `QImage(nc*88, nr*88)`, `:588` blits 88x88 blocks, `:697-701` smooth-scales the one bitmap), so a 36-FOV mosaic occupies 88 px at every zoom and there is nothing to cull.
+- **Pros:** Unlocks true deep-zoom navigation into a well, which is what the exploration pane is for.
+- **Cons:** The IMA-187 draft specified it as "framework-neutral (pyqtgraph now, Viv later)" — but pyqtgraph appears nowhere in the repo or `pyproject.toml`, and Viv is an explicit non-goal. Designing it before a real consumer exists means guessing the interface.
+- **Context:** IMA-187 composites at *thumbnail* scale into the existing 88 px cell instead. Deep zoom was consciously deferred here, not forgotten. The outside voice argued tiling is what makes coordinate placement pay off at all, which is a reason to sequence the exploration pane sooner rather than to build tiling early.
+- **Depends on / blocked by:** The exploration-pane ticket, which supplies the first real consumer and therefore the right interface shape.
+
+## Freeform / manual-region layout (tissue, slide carrier) → own ticket
+- **What:** A second layout mode so non-wellplate acquisitions (tissue, slide carrier, freeform ROIs) can be written and rendered by stage coordinate rather than row/column.
+- **Why:** Split out of IMA-187 acceptance criterion 5 during /plan-eng-review (2026-07-21). It is not a small allowance inside the mosaic work — `_output.py:90-95` raises on any region that is not `<letters><digits>`, by design, to prevent mislabeled output directories; and `PlateOverview` indexes every cell by `(row_index, col_index)`.
+- **Pros:** Extends the tool past wellplates to the tissue acquisitions the team actually wants next.
+- **Cons:** Touches the well-id contract in the writer and the grid indexing in the viewer. Cannot be validated today — the tissue dataset is still TBD (the sample was removed from the machine).
+- **Context:** IMA-187's coordinate placement is deliberately layout-agnostic (offsets derive purely from stage mm), so this ticket inherits the placement math for free and only owns the writer/viewer layout modes. Do NOT soften the `_output.py` raise to a warning as a shortcut — it exists to stop silent directory mislabeling.
+- **Depends on / blocked by:** A real tissue acquisition to validate against; IMA-187's placement math (landing first).
+
+## Per-FOV hit-testing on plate double-click → exploration-pane ticket
+- **What:** Make double-clicking a mosaic cell open the FOV actually under the cursor, instead of always FOV 0.
+- **Why:** `_viewer.py:682` hardcodes `self.wellActivated.emit(c["well_id"], 0)`. Once a cell shows 36 FOVs, "which one did I click" becomes the obvious user expectation and is arguably the real payoff of the mosaic.
+- **Pros:** Turns the mosaic from a picture into a navigation surface.
+- **Cons:** Needs an inverse of the placement transform (pixel in cell -> FOV index), plus `_fov_index` widening — it is keyed by region only today, and slider labels are `f"{r}:0"`, one slot per well.
+- **Context:** Deliberately excluded from IMA-187's acceptance criteria. `go_to_well_fov(well, fov)`, `plane_ref(region, fov, ...)` and the `wellActivated(str, int)` signal already carry a fov index, so the plumbing largely exists — the gap is `_fov_index` and the hit-test.
+- **Depends on / blocked by:** IMA-187 placement math (supplies the transform to invert).
