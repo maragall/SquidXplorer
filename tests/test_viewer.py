@@ -174,8 +174,9 @@ def test_run_operator_persists_via_write_plate(qapp, stub_detail, squid_dataset,
 
     def fake_write_plate(reader, out_dir, *, n_fovs=1, workers=None, projector="mip",
                          tiff=True, on_well=None, write_workers=4, stop=None, on_error=None,
-                         regions=None):
-        captured.update(projector=projector, tiff=tiff, out_dir=str(out_dir), regions=regions)
+                         regions=None, min_free_bytes=None):
+        captured.update(projector=projector, tiff=tiff, out_dir=str(out_dir), regions=regions,
+                        min_free_bytes=min_free_bytes, stop=stop)
         return {"plate": str(out_dir), "levels": 1}      # no wells — we only assert the dispatch
     monkeypatch.setattr(squidmip, "write_plate", fake_write_plate)
 
@@ -187,6 +188,10 @@ def test_run_operator_persists_via_write_plate(qapp, stub_detail, squid_dataset,
     assert captured["projector"] == "mip"
     assert captured["tiff"] is False                     # never the uncompressed TIFF duplicate
     assert captured["out_dir"].endswith(".hcs")          # persisted next to the acquisition
+    # IMA-230: the GUI is the likeliest path to a full disk and previously passed no limit at all.
+    assert captured["min_free_bytes"] == V._VIEWER_MIN_FREE_BYTES
+    # ...and the guard must NOT have displaced the cancel predicate: both are wired, independently.
+    assert callable(captured["stop"])
     win._stop_worker(); win.close()
 
 

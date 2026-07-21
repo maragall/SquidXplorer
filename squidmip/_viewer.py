@@ -72,6 +72,11 @@ _VIEWER_WORKERS = min(6, _default_workers())   # adapt to the machine, but CAP a
                            # peak RAM is ~workers x one-well (~139 MB each on a 1536wp), and projection
                            # throughput scales only sublinearly past ~6 threads — so more workers buys
                            # little speed for linearly more memory. 6 balances both, leaves GUI cores.
+# Storage guard reserve for GUI runs (IMA-230), matching the CLI's --min-free-gb default. The GUI has
+# no flag for it: an operator driving the viewer is the least likely to want to tune a byte budget and
+# the most likely to be on the acquisition machine, where filling the disk hurts more than a stopped run.
+_VIEWER_MIN_FREE_BYTES = 5 * 1024**3
+
 _BG = "#070a0f"
 _GRID, _RED, _MUTED, _ACCENT = QColor(0, 0, 0), QColor("#ff2d2d"), QColor("#8b98ad"), QColor("#58a6ff")
 
@@ -850,9 +855,16 @@ class _OperatorWorker(QThread):
             if self._save:
                 from squidmip import write_plate  # persist + project in one bounded, streaming pass
 
+                # The GUI is the likeliest path to a full disk (an operator MIPping a plate on the
+                # acquisition machine), so it gets the same storage guard as the CLI — previously it
+                # passed no limit at all. Only the SAVING branch needs it; PREVIEW below writes
+                # nothing and must never be blocked. An InsufficientDiskSpace propagates to the
+                # except clause at the bottom of run() and reaches the user via failed.emit, which
+                # is exactly right: it is an error, not the clean cancel that self._stop signals.
                 write_plate(self._reader, self._out_dir, n_fovs=1, workers=_VIEWER_WORKERS,
                             projector=self._operator, tiff=False, on_well=self._on_well,
-                            stop=self._stop.is_set, on_error=self._on_error, regions=self._regions)
+                            stop=self._stop.is_set, on_error=self._on_error, regions=self._regions,
+                            min_free_bytes=_VIEWER_MIN_FREE_BYTES)
                 if self._stop.is_set():
                     return  # window closing / re-opening; drop out cleanly (no final/written emit)
                 self.finalReady.emit(self._final_montage())

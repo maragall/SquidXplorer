@@ -29,9 +29,21 @@ Flow::
                                        (full layout known from metadata, so the stream's
                                         completion-order arrival needs no ordering logic)
     project_plate(reader, ...) ─► (region, fov, (T,C,1,Y,X))
-                                       │  per well, as it arrives:
+                                       │  per field, as it arrives:
+                                       ├─ stop()? ────────────────► clean USER CANCEL
+                                       ├─ storage guard (IMA-230):
+                                       │    free < min_free + (in_flight+1) * est_per_field
+                                       │                     └────► InsufficientDiskSpace
                                        ├─► field group: array 0 (full-res) + multiscales + omero
-                                       └─► individual TIFFs (one per channel, per timepoint)
+                                       ├─► individual TIFFs (one per channel, per timepoint)
+                                       └─► record bytes written (prices the NEXT guard check)
+
+    on abort (guard fired, or a real out-of-space error beat it):
+        discard half-written field dirs  ─► rewrite plate + well metadata to what survived
+                                         ─► raise InsufficientDiskSpace (never a silent partial)
+
+The guard is armed only when a caller passes ``min_free_bytes``; the estimate is measured from the
+bytes this writer actually wrote, never assumed from a compression ratio. See ``squidmip._storage``.
 
 Colors come from ``metadata.channels[].display_color`` (IMA-189 already resolves them, mapped
 by name, raising on an unrecognised channel) — the writer never re-parses the acquisition YAML.
@@ -41,7 +53,10 @@ is exactly the array's C-axis order (IMA-183 builds the C axis from that list).
 
 from __future__ import annotations
 
+import logging
+import os
 import re
+import shutil as _shutil
 from pathlib import Path
 from typing import Iterable, Iterator, Optional
 
@@ -49,8 +64,17 @@ import numpy as np
 import tifffile
 
 from squidmip._engine import _default_workers, project_plate
+from squidmip._storage import (
+    InsufficientDiskSpace,
+    WrittenBytes,
+    estimate_field_bytes,
+    free_bytes,
+    is_out_of_space,
+)
 from squidmip._zarr_store import create_array, write_array, write_group
 from squidmip.projection import select_fovs
+
+logger = logging.getLogger("squidmip")
 
 _NGFF_VERSION = "0.5"
 _WAVELENGTH_RE = re.compile(r"(?<!\d)(\d{3,4})(?!\d)")  # a standalone 3-4 digit nm in a channel name
@@ -232,10 +256,11 @@ def _validate_image(image: np.ndarray, channels: list[dict]) -> None:
         )
 
 
-def _write_field(field_dir: Path, image: np.ndarray, channels: list[dict], pixel_size_um, dz_um=None) -> int:
+def _write_field(field_dir: Path, image: np.ndarray, channels: list[dict], pixel_size_um, dz_um=None) -> tuple[int, list[Path]]:
     """Write one field: pyramid levels ``0..L`` (0 = full-res, pixel-exact) + multiscales + omero.
 
-    Returns the number of levels written (1 for a small field with no pyramid)."""
+    Returns ``(levels_written, paths)`` — *paths* being every file this field put on disk, so the
+    storage guard can price the field exactly (IMA-230) instead of walking the output tree."""
     _validate_image(image, channels)
     levels = _pyramid(image)
     for i, lvl in enumerate(levels):
@@ -250,18 +275,115 @@ def _write_field(field_dir: Path, image: np.ndarray, channels: list[dict], pixel
             "omero": _omero(channels, image.dtype),
         },
     )
-    return len(levels)
+    return len(levels), _files_under(field_dir)
 
 
-def _write_tiffs(tiff_root: Path, region: str, fov: int, image: np.ndarray, channel_names: list[str]) -> None:
-    """Individual per-plane TIFFs: tiff/{t}/{region}_{fov}_0_{channel}.tiff, native dtype."""
+def _files_under(root: Path) -> list[Path]:
+    """Every file under *root* (chunks + zarr.json). Scoped to ONE field directory, so this is
+    O(that field), never O(plate) — see squidmip._storage on why the guard must not walk the tree."""
+    if not root.exists():
+        return []
+    return [Path(dp) / f for dp, _, fns in os.walk(root) for f in fns]
+
+
+def _write_tiffs(tiff_root: Path, region: str, fov: int, image: np.ndarray, channel_names: list[str]) -> list[Path]:
+    """Individual per-plane TIFFs: tiff/{t}/{region}_{fov}_0_{channel}.tiff, native dtype.
+
+    Returns the written paths. These live in a tree that is a SIBLING of the plate, so a guard that
+    measured only ``plate.ome.zarr`` would miss them entirely and under-reserve by ~2x."""
     n_t = image.shape[0]
+    written: list[Path] = []
     for t in range(n_t):
         tdir = tiff_root / str(t)
         tdir.mkdir(parents=True, exist_ok=True)
         for c_i, channel in enumerate(channel_names):
             plane = image[t, c_i, 0]  # (Y, X), native dtype, z collapsed
-            tifffile.imwrite(tdir / f"{region}_{fov}_0_{channel}.tiff", plane)
+            path = tdir / f"{region}_{fov}_0_{channel}.tiff"
+            tifffile.imwrite(path, plane)
+            written.append(path)
+    return written
+
+
+# --- honest partial output (IMA-230) ---------------------------------------------------------
+
+def _truncate_plate(plate_dir: Path, written: dict[str, list[int]], intended: dict[str, list[int]],
+                    n_fovs: int) -> None:
+    """Rewrite the plate + well metadata to describe EXACTLY what is on disk.
+
+    The full layout is declared up front (see :func:`write_from_stream`), because the writer needs no
+    ordering logic when wells arrive in completion order. That declaration becomes a LIE the moment a
+    run stops early: it names wells that hold no arrays. ndviewer_light dir-walks so it silently hides
+    the gap and shows a plausible-looking partial plate; a reader that follows the declared layout
+    breaks on the missing wells. Either way the operator cannot tell a truncated plate from a
+    complete one, which is the failure this whole module-level guard exists to prevent.
+
+    Truncation happens at BOTH levels. The stream is per FIELD ``(region, fov)`` and ``select_fovs``
+    can return several FOVs per region, so a well can be half-written — plate-level truncation alone
+    would leave a well group declaring FOVs with no arrays.
+
+    ``intended`` is preserved under ``ome.squidmip``: :func:`plate_metadata` recomputes rows/columns
+    from whatever region list it is handed, renumbering indices and destroying the record of what was
+    MEANT to be written. Without it a resume cannot tell "never attempted" from "not in this plate".
+
+    Ordered so the honesty flag rides on the rewrite itself rather than a separate file: a new inode
+    is the write most likely to fail on a full disk, whereas this rewrite replaces a document with a
+    SMALLER one in place and is the most likely to succeed.
+    """
+    regions = [r for r in intended if written.get(r)]
+
+    # The up-front declaration also CREATED a directory for every intended well. Leaving those
+    # behind would re-run the same lie one level down: ndviewer_light discovers wells by walking
+    # directories, so an empty well dir shows up as a real (blank) well no matter what the metadata
+    # says. Remove the wells that never got a field, then any row left with no wells.
+    for region in intended:
+        if written.get(region):
+            continue
+        try:
+            row, col = parse_well_id(region)
+        except ValueError:
+            continue
+        _shutil.rmtree(plate_dir / row / col, ignore_errors=True)
+    for row_dir in [p for p in plate_dir.iterdir() if p.is_dir()] if plate_dir.exists() else []:
+        if not any(p.is_dir() for p in row_dir.iterdir()):
+            _shutil.rmtree(row_dir, ignore_errors=True)
+
+    meta = plate_metadata(regions, field_count=n_fovs)
+    meta["squidmip"] = {
+        "truncated": True,
+        "intended_regions": list(intended),
+        "written_regions": regions,
+        "n_fields_written": sum(len(v) for v in written.values()),
+        "n_fields_intended": sum(len(v) for v in intended.values()),
+    }
+    write_group(plate_dir, meta)
+    for region in regions:
+        row, col = parse_well_id(region)
+        write_group(
+            plate_dir / row / col,
+            {"version": _NGFF_VERSION,
+             "well": {"images": [{"path": str(f)} for f in sorted(written[region])]}},
+        )
+
+
+def _discard_incomplete_fields(plate_dir: Path, written: dict[str, list[int]],
+                               attempted: list[tuple[str, int]]) -> None:
+    """Delete field directories that were started but never completed.
+
+    The guard fires per SUBMIT, but one field is 100+ chunk writes across up to 6 pyramid levels, so
+    a real out-of-space error lands mid-field. ``create_array`` opens with ``delete_existing=True``,
+    which writes the array ``zarr.json`` BEFORE its chunks — so an interrupted field leaves a
+    structurally valid, data-missing array that ndviewer will happily display as if it were real.
+    That is "looks finished but silently isn't" reintroduced at field granularity, so the directory
+    has to go rather than merely be undeclared.
+    """
+    for region, fov in attempted:
+        if fov in written.get(region, []):
+            continue
+        try:
+            row, col = parse_well_id(region)
+        except ValueError:
+            continue
+        _shutil.rmtree(plate_dir / row / col / str(fov), ignore_errors=True)
 
 
 # --- orchestration ---------------------------------------------------------------------------
@@ -277,6 +399,7 @@ def write_from_stream(
     write_workers: int = _WRITE_WORKERS,
     stop=None,
     regions=None,
+    min_free_bytes: Optional[int] = None,
 ) -> dict:
     """Write the plate + (optionally) TIFFs from a ``(region, fov, image)`` stream and *metadata*.
 
@@ -294,6 +417,14 @@ def write_from_stream(
     viewer guards its shared contrast/tiles with a lock). ``stop()`` is an optional predicate polled
     before each submit; when it returns True the stream is abandoned and in-flight writes are drained
     — a clean partial-plate stop for a cancelled GUI run.
+
+    ``min_free_bytes`` arms the IMA-230 storage guard: bytes to keep free on the output filesystem.
+    ``None`` (default) disables it entirely, so existing callers are unchanged. When armed, the run
+    stops before the submit that would breach the reserve and raises
+    :class:`~squidmip._storage.InsufficientDiskSpace` — deliberately NOT via ``stop()``, which means
+    "the operator cancelled" and is read that way by the viewer. A real out-of-space error that beats
+    the guard is translated into the same exception. Either way the output is left honest: partial
+    field directories are removed and the plate/well metadata is rewritten to exactly what survived.
     """
     from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
@@ -326,31 +457,85 @@ def write_from_stream(
     def _write_one(region, fov, image):
         row, col = parse_well_id(region)
         # field directory is the RAW fov id (Squid convention), digit-named for ndviewer.
-        levels = _write_field(plate_dir / row / col / str(fov), image, channels, pixel_size_um, dz_um)
+        levels, paths = _write_field(plate_dir / row / col / str(fov), image, channels,
+                                     pixel_size_um, dz_um)
         if tiff:
-            _write_tiffs(tiff_root, region, fov, image, channel_names)
+            paths += _write_tiffs(tiff_root, region, fov, image, channel_names)
+        # Price the field from the files it just wrote — exact, spans BOTH trees, and O(this field).
+        written_bytes.record_field(paths)
         if on_well is not None:  # live consumer (plate viewer): render tile + push to ndviewer
             on_well(region, fov, image)
         return levels
 
+    written_bytes = WrittenBytes()
+    # Conservative stand-in until a field completes: for the first ``n_writers`` submits there is no
+    # measurement yet, and a nearly-full disk is exactly when that window matters.
+    bound_per_field = estimate_field_bytes(metadata, tiff=tiff)
+    min_free = max(0, int(min_free_bytes or 0))
+
+    def _headroom_shortfall(n_in_flight: int) -> Optional[tuple[int, int]]:
+        """(free, needed) when the next submit would breach the reserve, else None.
+
+        Reserves for the fields ALREADY committed to writer threads, not just the next one: the pool
+        keeps up to ``n_writers`` in flight, so checking room for a single field would pass and then
+        let several land at once and blow straight through. Deriving the count from ``pending``
+        rather than a tuned constant keeps this correct if ``_WRITE_WORKERS`` or the core count
+        changes.
+        """
+        if min_free <= 0 and not guard_enabled:
+            return None
+        per_field = written_bytes.per_field() or bound_per_field
+        needed = min_free + per_field * (n_in_flight + 1)
+        free = free_bytes(out_dir)
+        return (free, needed) if free < needed else None
+
+    guard_enabled = min_free_bytes is not None
     n_written = 0
     n_levels = 1
     n_writers = max(1, int(write_workers))
+    written_fovs: dict[str, list[int]] = {}
+    attempted: list[tuple[str, int]] = []
+    shortfall: Optional[tuple[int, int]] = None
+    out_of_space_exc: Optional[BaseException] = None
+
+    def _harvest(futures):
+        """Collect finished futures, recording which fields actually landed."""
+        nonlocal n_written, n_levels, out_of_space_exc
+        for f in futures:
+            region, fov = pending[f]
+            try:
+                n_levels = f.result()          # re-raises a writer-thread exception here
+            except BaseException as exc:       # noqa: BLE001 - re-raised below unless out-of-space
+                if is_out_of_space(exc):
+                    # The guard predicts; predictions lose to another process on the same disk, or
+                    # to a field that compressed worse than its predecessors. Funnel it into the
+                    # SAME typed failure so the operator gets one error and the same honest cleanup.
+                    out_of_space_exc = exc
+                    continue
+                raise
+            written_fovs.setdefault(region, []).append(fov)
+            n_written += 1
+
     try:
         with ThreadPoolExecutor(max_workers=n_writers, thread_name_prefix="squidmip-write") as ex:
-            pending: set = set()
+            pending: dict = {}   # future -> (region, fov), so the abort path knows what landed
             for region, fov, image in stream:
                 if stop is not None and stop():
                     break
-                pending.add(ex.submit(_write_one, region, fov, image))
+                if guard_enabled:
+                    shortfall = _headroom_shortfall(len(pending))
+                    if shortfall is not None:
+                        break
+                attempted.append((region, fov))
+                pending[ex.submit(_write_one, region, fov, image)] = (region, fov)
                 if len(pending) >= n_writers:    # keep <= n_writers wells in flight (bounded memory)
-                    done, pending = wait(pending, return_when=FIRST_COMPLETED)
-                    for f in done:
-                        n_levels = f.result()    # re-raises a writer-thread exception here
-                        n_written += 1
-            for f in pending:                     # drain the tail (and any in-flight after a stop)
-                n_levels = f.result()
-                n_written += 1
+                    done, still = wait(set(pending), return_when=FIRST_COMPLETED)
+                    _harvest(done)
+                    pending = {f: pending[f] for f in still}
+                    if out_of_space_exc is not None:
+                        break
+            _harvest(list(pending))              # drain the tail (and any in-flight after a stop)
+            pending = {}
     finally:
         # Close the producer promptly on a stop/exception (don't wait for GC) so project_plate's
         # own thread pool shuts down now. Guarded: a plain iterator (used in tests) has no close().
@@ -358,12 +543,29 @@ def write_from_stream(
         if callable(close):
             close()
 
+    if shortfall is not None or out_of_space_exc is not None:
+        # Leave an artifact that tells the truth: drop half-written fields, then rewrite the plate
+        # and well metadata to exactly what survived.
+        _discard_incomplete_fields(plate_dir, written_fovs, attempted)
+        _truncate_plate(plate_dir, written_fovs, wells, n_fovs)
+        free, needed = shortfall or (free_bytes(out_dir), written_bytes.per_field() or bound_per_field)
+        raise InsufficientDiskSpace(
+            bytes_free=free,
+            bytes_needed=needed,
+            path=out_dir,
+            fields_written=n_written,
+            truncated=True,
+            detail=None if shortfall is not None else f"writer failed: {out_of_space_exc}",
+        ) from out_of_space_exc
+
     return {
         "plate": str(plate_dir),
         "tiff": str(tiff_root) if tiff else None,
         "n_wells": len(wells),
         "n_fields_written": n_written,
         "levels": n_levels,
+        "truncated": False,
+        "bytes_written": written_bytes.total,
     }
 
 
@@ -380,6 +582,7 @@ def write_plate(
     stop=None,
     on_error=None,
     regions=None,
+    min_free_bytes: Optional[int] = None,
 ) -> dict:
     """Project a plate (IMA-188) and write the canonical OME-zarr + individual TIFFs.
 
@@ -409,4 +612,5 @@ def write_plate(
     stream = project_plate(reader, n_fovs=n_fovs, workers=workers, projector=projector,
                            on_error=on_error, regions=regions)
     return write_from_stream(metadata, stream, out_dir, n_fovs=n_fovs, tiff=tiff, on_well=on_well,
-                             write_workers=write_workers, stop=stop, regions=regions)
+                             write_workers=write_workers, stop=stop, regions=regions,
+                             min_free_bytes=min_free_bytes)

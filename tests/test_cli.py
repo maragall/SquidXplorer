@@ -54,3 +54,78 @@ def test_run_defaults_output_next_to_acquisition(squid_dataset):
     assert params.output_folder is None
     manifest = run(params)
     assert Path(manifest["plate"]).parent.parent == Path(root).parent
+
+
+# --- IMA-230 storage guard -----------------------------------------------------------------------
+
+def test_min_free_gb_rejects_negative():
+    with pytest.raises(ValueError):
+        ProcessParameters(input_folder=".", min_free_gb=-1)
+
+
+def test_min_free_gb_defaults_to_five(squid_dataset):
+    root, _ = squid_dataset
+    assert ProcessParameters(input_folder=str(root)).min_free_gb == 5.0
+
+
+def test_run_aborts_before_writing_when_disk_cannot_hold_one_field(squid_dataset, tmp_path,
+                                                                   monkeypatch):
+    """Acceptance #1: pre-flight rejection writes nothing at all."""
+    import shutil as _sh
+    from squidmip._storage import InsufficientDiskSpace
+
+    monkeypatch.setattr(
+        _sh, "disk_usage", lambda p: type("U", (), {"total": 100, "used": 99, "free": 1})()
+    )
+    root, _ = squid_dataset
+    params = ProcessParameters(input_folder=str(root), output_folder=str(tmp_path))
+    with pytest.raises(InsufficientDiskSpace):
+        run(params)
+    assert not list(tmp_path.glob("*.hcs")), "nothing may be written when pre-flight rejects"
+
+
+def test_run_proceeds_when_bound_exceeds_free_but_compression_may_save_it(squid_dataset, tmp_path,
+                                                                         monkeypatch, caplog):
+    """The bound is uncompressed. Refusing here would be the cry-wolf failure — warn and run."""
+    import logging as _lg
+    import shutil as _sh
+
+    real = _sh.disk_usage
+    root, _ = squid_dataset
+    # Plenty for the tiny real fields, but we shrink the *reported* total so the bound looks huge.
+    monkeypatch.setattr(
+        _sh, "disk_usage",
+        lambda p: type("U", (), {"total": 1 << 40, "used": 0, "free": 40_000})(),
+    )
+    params = ProcessParameters(input_folder=str(root), output_folder=str(tmp_path), min_free_gb=0)
+    with caplog.at_level(_lg.WARNING, logger="squidmip"):
+        run(params)
+    assert any("disk check" in r.message for r in caplog.records)
+
+
+def test_run_disk_check_logs_when_it_fits(squid_dataset, tmp_path, caplog):
+    import logging as _lg
+
+    root, _ = squid_dataset
+    params = ProcessParameters(input_folder=str(root), output_folder=str(tmp_path), min_free_gb=0)
+    with caplog.at_level(_lg.INFO, logger="squidmip"):
+        run(params)
+    assert any("fits uncompressed" in r.message for r in caplog.records)
+
+
+def test_main_exits_nonzero_with_a_clean_message_not_a_traceback(squid_dataset, tmp_path,
+                                                                 monkeypatch, caplog):
+    """A full disk is an operator problem: one actionable line and exit 2."""
+    import logging as _lg
+    import shutil as _sh
+    from squidmip._cli import main
+
+    monkeypatch.setattr(
+        _sh, "disk_usage", lambda p: type("U", (), {"total": 100, "used": 99, "free": 1})()
+    )
+    root, _ = squid_dataset
+    with caplog.at_level(_lg.ERROR, logger="squidmip"):
+        with pytest.raises(SystemExit) as ei:
+            main([str(root), "--output-folder", str(tmp_path)])
+    assert ei.value.code == 2
+    assert any("not enough disk space" in r.message for r in caplog.records)

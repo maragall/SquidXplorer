@@ -55,6 +55,11 @@ class ProcessParameters(BaseModel, use_attribute_docstrings=True):
     """Process only the first N wells — a quick SLICE of the plate (subset preview) so you can test
     the operator without committing the whole plate's compute + disk. Default: every well."""
 
+    min_free_gb: float = 5.0
+    """Keep at least this many GB free on the output disk. The run stops cleanly before the write
+    that would breach it, and the partial plate is truncated so its metadata matches what was
+    actually written (never a plate that looks complete but isn't). Set 0 to disable the guard."""
+
     verbose: bool = False
     """Show debug-level logging."""
 
@@ -63,6 +68,13 @@ class ProcessParameters(BaseModel, use_attribute_docstrings=True):
     def _positive_limit(cls, v):
         if v is not None and v < 1:
             raise ValueError(f"limit must be >= 1, got {v}")
+        return v
+
+    @field_validator("min_free_gb")
+    @classmethod
+    def _non_negative_min_free(cls, v):
+        if v < 0:
+            raise ValueError(f"min_free_gb must be >= 0, got {v}")
         return v
 
     @field_validator("input_folder")
@@ -90,6 +102,7 @@ class ProcessParameters(BaseModel, use_attribute_docstrings=True):
 def run(params: ProcessParameters) -> dict:
     """Open the acquisition and write the operator's OME-Zarr plate; return write_plate's manifest."""
     from squidmip import open_reader, write_plate
+    from squidmip._storage import preflight
 
     reader = open_reader(params.input_folder)
     # Scope guard: 1536-well plates only for now (not a general product yet). Fail loud, before any write.
@@ -116,6 +129,28 @@ def run(params: ProcessParameters) -> dict:
                     ", ".join(regions[:8]), " …" if len(regions) > 8 else "")
     logger.info("running '%s' over %s -> %s", params.projector, name, out_dir)
 
+    # Storage pre-flight (IMA-230). Rejects only when the disk cannot hold even one field above the
+    # reserve — the total figure is an UNCOMPRESSED bound and compression routinely beats it, so
+    # refusing on that alone would be a false alarm. But when the bound does exceed free space the
+    # operator needs to hear it NOW, at WARNING, not discover it hours in: that is the single most
+    # actionable number this command can print.
+    min_free_bytes = int(params.min_free_gb * 1024**3)
+    n_fields = sum(len(fovs[:1]) for fovs in fpr.values()) if regions is None else len(regions)
+    report = preflight(out_dir, reader.metadata, n_fields, tiff=params.tiff,
+                       min_free_bytes=min_free_bytes)
+    gb = 1024**3
+    if report["fits_uncompressed"]:
+        logger.info("disk check: %.1f GB free, run needs at most %.1f GB — fits uncompressed",
+                    report["free_bytes"] / gb, report["bound_bytes"] / gb)
+    else:
+        logger.warning(
+            "disk check: %.1f GB free but this run could need up to %.1f GB uncompressed. "
+            "Compression usually beats that bound, so the run will START — but it will stop cleanly "
+            "and truncate the plate if the disk actually fills. Free space or use --output-folder "
+            "to target a bigger disk.",
+            report["free_bytes"] / gb, report["bound_bytes"] / gb,
+        )
+
     # Resilient batch: a single corrupt/missing plane should NOT abort a multi-hour plate run. Log
     # and SKIP the offending well (fault isolation, opt-in via on_error), then report the count.
     skipped: list[str] = []
@@ -127,6 +162,7 @@ def run(params: ProcessParameters) -> dict:
     manifest = write_plate(
         reader, out_dir, projector=params.projector, workers=params.workers,
         tiff=params.tiff, on_error=on_error, regions=regions,
+        min_free_bytes=min_free_bytes,
     )
     logger.info(
         "done: %s (%d/%d wells written, %d pyramid level(s))%s",
@@ -141,10 +177,18 @@ def run(params: ProcessParameters) -> dict:
 
 
 def main(args: Optional[list[str]] = None) -> None:
+    from squidmip._storage import InsufficientDiskSpace
+
     argv = list(sys.argv[1:] if args is None else args)
     params = CliApp.run(ProcessParameters, cli_args=argv)
     logging.basicConfig(level=logging.DEBUG if params.verbose else logging.INFO)
-    run(params)
+    try:
+        run(params)
+    except InsufficientDiskSpace as exc:
+        # A full disk is an operator problem, not a bug: report it as one line they can act on and
+        # exit nonzero, rather than dumping a traceback from inside a writer thread.
+        logger.error("%s", exc)
+        raise SystemExit(2) from None
 
 
 if __name__ == "__main__":
