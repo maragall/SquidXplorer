@@ -256,3 +256,107 @@ def test_second_ingest_resets_state(qapp, stub_detail, squid_dataset, tmp_path):
     assert set(win._overview._status.values()) == {"empty"}     # fresh grey plate
     win._stop_worker()
     win.close()
+
+
+# --- IMA-218: coordinate-placed mosaic ------------------------------------------------------
+
+def test_mosaic_boxes_single_fov_fills_the_cell():
+    """N=1 must fill the cell exactly — the no-hidden-special-case guarantee, by construction."""
+    boxes = V.mosaic_boxes({0: (10.0, 20.0)}, (4, 4), 0.325)
+    assert boxes[0] == (0, 0, V._CELL, V._CELL)
+
+
+def test_mosaic_boxes_two_fovs_side_by_side():
+    """Two FOVs one frame-width apart in X land side by side, each half the cell, same row."""
+    pitch = 4 * 0.325 / 1000.0                      # one frame width in mm
+    boxes = V.mosaic_boxes({0: (10.0, 20.0), 1: (10.0 + pitch, 20.0)}, (4, 4), 0.325)
+    (x0, y0, w0, h0), (x1, y1, w1, h1) = boxes[0], boxes[1]
+    assert y0 == y1                                  # same stage Y -> same row
+    assert x0 == 0 and x1 == pytest.approx(V._CELL // 2, abs=1)
+    assert w0 == pytest.approx(V._CELL // 2, abs=1)  # one scale for both axes, no stretch
+    assert h0 == h1 == pytest.approx(V._CELL // 2, abs=1)   # square region letterboxed
+
+
+def test_mosaic_boxes_flips_y_stage_up_to_rows_down():
+    """Stage Y increases UP; image rows increase DOWN. The HIGHER stage Y must be the TOP row."""
+    pitch = 4 * 0.325 / 1000.0
+    boxes = V.mosaic_boxes({0: (10.0, 20.0), 1: (10.0, 20.0 + pitch)}, (4, 4), 0.325)
+    assert boxes[1][1] < boxes[0][1], "higher stage Y should map to a smaller row index"
+
+
+def test_compose_mosaic_later_fov_wins_on_overlap():
+    """Overlap policy is documented as ascending-fov, later wins — pin it so it can't drift."""
+    boxes = {0: (0, 0, 4, 4), 1: (2, 0, 4, 4)}       # fov 1 overlaps fov 0's right half
+    out = V.compose_mosaic({0: np.full((4, 4), 10.0), 1: np.full((4, 4), 20.0)}, boxes, cell=8)
+    assert out[0, 0] == 10 and out[0, 3] == 20       # the overlap column belongs to fov 1
+    assert out[7, 7] == 0                            # uncovered stays background, never stretched
+
+
+def test_compose_mosaic_uncovered_area_stays_zero():
+    out = V.compose_mosaic({0: np.ones((4, 4))}, {0: (0, 0, 4, 4)}, cell=8)
+    assert out[:4, :4].all() and not out[4:, 4:].any()
+
+
+def test_run_operator_renders_a_two_fov_mosaic(qapp, stub_detail, squid_dataset, tmp_path):
+    """End-to-end: the fixture's 2 coordinated FOVs per well render as one placed mosaic tile."""
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    assert win._plan_fovs()[0]["B2"] == [0, 1], "both FOVs should be planned (coords are complete)"
+    win.run_operator("mip", out_parent=str(tmp_path))
+    assert _drain_until(qapp, lambda: win._overview is not None
+                        and len(win._overview._tiles) == 2 and win._overview._final is not None)
+    # one tile per WELL (not per FOV) — the accumulator emitted exactly once per region
+    assert len(win._worker._raw) == 2
+    # the mosaic is 2 FOVs wide: both halves carry signal, and they differ (distinct pixel values)
+    tile = win._worker._raw[win._fov_index["B2"]["rc"]][0]
+    left, right = tile[:, :V._CELL // 2], tile[:, V._CELL // 2:]
+    assert left.any() and right.any(), "both FOVs should be placed"
+    assert not np.array_equal(left, right), "the two FOVs are distinct planes, not one duplicated"
+    assert not win._worker._pending, "no region left half-accumulated"
+    win._stop_worker()
+    win.close()
+
+
+def test_progress_counts_wells_not_fovs(qapp, stub_detail, squid_dataset, tmp_path):
+    """Regression for the 144/4 bug: _done counts completed WELLS even though on_well is per FOV."""
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    seen = []
+    win.run_operator("mip", out_parent=str(tmp_path))
+    win._worker.progress.connect(lambda d, t: seen.append((d, t)))
+    assert _drain_until(qapp, lambda: win._overview is not None and len(win._overview._tiles) == 2)
+    assert win._worker._total == 2                     # 2 wells, NOT 4 (region, fov) pairs
+    assert all(d <= t for d, t in seen), f"progress overshot its total: {seen}"
+    win._stop_worker()
+    win.close()
+
+
+def test_single_fov_tile_is_byte_identical_to_the_pre_mosaic_path(squid_dataset):
+    """CRITICAL (IMA-187 oracle): with one FOV the tile must be exactly _fit_cell(plane).
+
+    Guards against a mosaic path that quietly re-samples the N=1 case — 'no hidden if n_fov==1'
+    cuts both ways: no special case, and no silent change either.
+    """
+    plane = np.arange(16, dtype=np.float32).reshape(4, 4) * 7.0
+    boxes = V.mosaic_boxes({0: (10.0, 20.0)}, (4, 4), 0.325)
+    via_mosaic = V.compose_mosaic({0: plane}, boxes)
+    np.testing.assert_array_equal(via_mosaic, V._fit_cell(plane))
+
+
+def test_well_with_incomplete_coordinates_is_flagged_not_guessed(qapp, stub_detail,
+                                                                 squid_dataset, tmp_path):
+    """D5: a multi-FOV well missing a coordinate falls back to 1 FOV and is reported, not placed."""
+    root, _ = squid_dataset
+    # drop B3's second FOV row -> its coordinate cover is now incomplete
+    lines = (root / "coordinates.csv").read_text().splitlines()
+    kept = [ln for ln in lines if not ln.startswith("B3,1,")]
+    (root / "coordinates.csv").write_text("\n".join(kept) + "\n")
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    plan, bad = win._plan_fovs()
+    assert bad == ["B3"], f"B3 should be flagged, got {bad}"
+    assert plan["B3"] == [0], "a well without full coordinates falls back to its first FOV"
+    assert plan["B2"] == [0, 1], "the fully-coordinated well is unaffected"
+    win.close()

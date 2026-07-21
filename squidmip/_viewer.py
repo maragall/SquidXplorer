@@ -11,7 +11,9 @@ opens a completed scan and lets you navigate it and apply post-processing operat
                CLI). Operators gather any parameters through dialogs — MIP prompts for a destination,
                Record prompts for scope + folder — so the pane is self-contained, no tabs.
       -> BOTTOM-LEFT (<= half the display): a low-resolution PLATE OVERVIEW — one cell per well, laid
-               out in true plate row-major (A,B,...,Z,AA,...). Each well is HUE-CODED by its PROCESSING
+               out in true plate row-major (A,B,...,Z,AA,...). A well with several FOVs shows them
+               placed at their STAGE COORDINATES as a mosaic inside its cell (IMA-218), not as a
+               single thumbnail. Each well is HUE-CODED by its PROCESSING
                status (Hongquan Li's record-zstack-viewer palette): grey = not processed, amber =
                processing, blue = done, red-x = failed. The CURRENT well in view is a red box; the
                cursor's well (as you move around) is a red dot. Wheel-zoom + drag-pan; double-click
@@ -30,11 +32,16 @@ Design notes:
   match its stack. PyQt5 is imported here, never in squidmip/__init__, so the pipeline stays Qt-free.
 - Nothing is written to the user's disk: the detail view reads the acquisition's own read-only
   TIFFs. Memory is NOT one-well-at-a-time on the plate side: the MIP run retains one downsampled
-  88x88xC float32 tile PER WELL (_OperatorWorker._raw) for the final global-contrast montage, so
-  the plate-side footprint is O(n_wells x C) (~190 MB for a 1536wp, C=4), plus a grid-sized RGB
-  canvas (~36 MB) and a transient float32 montage buffer at run end. Bounded by the plate format
-  (<=1536 wells), not by z/frame size. What IS one-well-at-a-time is project_plate's producer
-  (workers x one ~139 MB well) and the detail viewer's LRU-bounded decoded planes.
+  88x88xC tile PER WELL (_OperatorWorker._raw) for the final global-contrast montage, in the
+  acquisition's NATIVE dtype (uint16 for a Squid plate — not float32), so the plate-side
+  footprint is O(n_wells x C) (~95 MB for a 1536wp, C=4, uint16), plus a grid-sized RGB canvas
+  (~36 MB) PER RENDERED LAYER and a transient float32 montage buffer at run end (~430 MB on a
+  1536wp — the largest single allocation). All four scale with _CELL**2, so raising _CELL to fit
+  a denser mosaic is quadratic in every one of them. Bounded by the plate format (<=1536 wells),
+  not by z/frame size. What IS one-well-at-a-time is project_plate's producer (workers x one
+  ~139 MB well) and the detail viewer's LRU-bounded decoded planes. A multi-FOV well additionally
+  holds its FOV planes until the whole well arrives (_OperatorWorker._pending), which is bounded
+  by write_workers x one well's FOVs, never the plate.
 - Hit-testing / cell fitting are pure functions (unit-testable); widgets run headless under
   QT_QPA_PLATFORM=offscreen.
 """
@@ -438,19 +445,102 @@ def well_at(rows, cols, by_rc, px: float, py: float, cell_disp: float) -> Option
             "well_id": by_rc.get((ri, ci))}
 
 
-def _fit_cell(a: np.ndarray) -> np.ndarray:
-    """Resize a 2D plane to EXACTLY (_CELL, _CELL) for the montage tile.
+def _fit_to(a: np.ndarray, out_h: int, out_w: int) -> np.ndarray:
+    """Resize a 2D plane to EXACTLY (out_h, out_w).
 
-    Area-downsample when larger (the common case: a ~768px tile -> 88); nearest-upscale a tiny
-    frame so the tile shape is always (_CELL, _CELL) (guards the <88px-frame crash the review found).
+    Area-downsample when larger (the common case: a ~768px frame -> 88); nearest-upscale a tiny
+    frame so the shape is always exact (guards the <88px-frame crash an earlier review found).
     """
-    if a.shape == (_CELL, _CELL):
+    out_h, out_w = max(1, int(out_h)), max(1, int(out_w))
+    if a.shape == (out_h, out_w):
         return a
-    if a.shape[0] >= _CELL and a.shape[1] >= _CELL:
-        return _area_downsample(a, _CELL, _CELL)
-    yi = (np.arange(_CELL) * a.shape[0]) // _CELL
-    xi = (np.arange(_CELL) * a.shape[1]) // _CELL
+    if a.shape[0] >= out_h and a.shape[1] >= out_w:
+        return _area_downsample(a, out_h, out_w)
+    yi = (np.arange(out_h) * a.shape[0]) // out_h
+    xi = (np.arange(out_w) * a.shape[1]) // out_w
     return a[yi][:, xi].astype(np.float32)
+
+
+def _fit_cell(a: np.ndarray) -> np.ndarray:
+    """Resize a 2D plane to EXACTLY (_CELL, _CELL) for the single-FOV montage tile."""
+    return _fit_to(a, _CELL, _CELL)
+
+
+def mosaic_boxes(positions: dict, frame_shape, pixel_size_um: float, cell: int = _CELL) -> dict:
+    """Map per-FOV stage coordinates to integer, cell-local pixel boxes (IMA-218).
+
+    ``positions`` is ``{fov: (x_mm, y_mm)}`` — the stage position of each FOV in a SINGLE region.
+    Returns ``{fov: (x0, y0, w, h)}`` in pixels within a ``cell`` x ``cell`` box.
+
+    The three coordinate decisions this encodes, none of which were in the spec::
+
+        origin   the region's own bounding box (min corner), NOT a plate-global origin, so
+                 each well fills its cell regardless of where it sits on the stage
+        Y sign   stage Y increases UP, image rows increase DOWN -> Y is FLIPPED here
+        scale    ONE scale for both axes (max span), so the mosaic never stretches; a
+                 non-square region is letterboxed inside the square cell
+
+           stage (mm), Y up                     cell (px), Y down
+           ┌───────────────┐                    ┌───────────────┐
+           │  f2      f3   │   x_mm -> px       │  f0      f1   │
+           │               │   ============>    │               │
+           │  f0      f1   │   y flipped        │  f2      f3   │
+           └───────────────┘                    └───────────────┘
+
+    A single FOV yields the full cell, which makes the N=1 path identical to the pre-mosaic
+    behaviour by construction rather than by a special case.
+    """
+    if not positions:
+        return {}
+    fh, fw = int(frame_shape[0]), int(frame_shape[1])
+    px_mm = (float(pixel_size_um) or 1.0) / 1000.0
+    fw_mm, fh_mm = fw * px_mm, fh * px_mm       # one FOV's physical extent
+
+    xs = [p[0] for p in positions.values()]
+    ys = [p[1] for p in positions.values()]
+    x_min, x_max = min(xs) - fw_mm / 2.0, max(xs) + fw_mm / 2.0
+    y_min, y_max = min(ys) - fh_mm / 2.0, max(ys) + fh_mm / 2.0
+    span = max(x_max - x_min, y_max - y_min)
+    if span <= 0:
+        span = max(fw_mm, fh_mm) or 1.0
+    scale = cell / span                          # px per mm, SAME on both axes (no stretch)
+
+    boxes: dict = {}
+    for fov, pos in positions.items():
+        x, y = float(pos[0]), float(pos[1])
+        x0 = int(round((x - fw_mm / 2.0 - x_min) * scale))
+        y0 = int(round((y_max - (y + fh_mm / 2.0)) * scale))    # Y flip: stage up -> rows down
+        w = max(1, int(round(fw_mm * scale)))
+        h = max(1, int(round(fh_mm * scale)))
+        x0 = max(0, min(x0, cell - 1))
+        y0 = max(0, min(y0, cell - 1))
+        boxes[fov] = (x0, y0, min(w, cell - x0), min(h, cell - y0))
+    return boxes
+
+
+def compose_mosaic(planes: dict, boxes: dict, cell: int = _CELL) -> np.ndarray:
+    """Place each FOV's 2D plane into its box on one ``cell`` x ``cell`` canvas (IMA-218).
+
+    ``planes`` is ``{fov: 2D array}``, ``boxes`` the output of :func:`mosaic_boxes`.
+
+    **Overlap draw order: ascending FOV index, so the LATER FOV wins.** Squid scans typically
+    carry ~10% overlap, so FOVs genuinely do overwrite one another; this makes which one wins
+    deterministic and documented rather than dict-iteration order. Blending is out of scope
+    (IMA-222 op-stitch).
+
+    Cells not covered by any FOV stay 0 (the plate background shows through), which is what
+    makes a sparse or L-shaped scan region read as sparse instead of being stretched to fill.
+    """
+    out = np.zeros((cell, cell), np.float32)
+    for fov in sorted(planes):                   # ascending fov -> later FOV wins on overlap
+        box = boxes.get(fov)
+        if box is None:
+            continue
+        x0, y0, w, h = box
+        if w <= 0 or h <= 0:
+            continue
+        out[y0:y0 + h, x0:x0 + w] = _fit_to(np.asarray(planes[fov], np.float32), h, w)
+    return out
 
 
 # The Squid well-plate formats we fit a plate to (well count -> (rows, cols)). An acquisition whose
@@ -679,7 +769,11 @@ class PlateOverview(QWidget):
     def mouseDoubleClickEvent(self, e):
         c = self._cell(e.x(), e.y())
         if c and c["well_id"]:
-            self.wellActivated.emit(c["well_id"], 0)   # 1 FOV/well (IMA-183); IMA-187 will pick the FOV
+            # Opens the well at its FIRST fov. A mosaic cell shows several FOVs (IMA-218), but
+            # picking the one under the cursor needs cell-local FOV geometry in the widget, which
+            # arrives with the viewport tiler — until then this is deliberately well-level, so it
+            # is never WRONG about which FOV you asked for, only coarse.
+            self.wellActivated.emit(c["well_id"], 0)
 
     # -- paint --
     def paintEvent(self, _):
@@ -727,7 +821,7 @@ class PlateOverview(QWidget):
                 # else: has an image on the active layer -> no dot
         p.setBrush(Qt.NoBrush)
 
-        p.setPen(QPen(_GRID, 3))       # black grid lines between wells (room for multi-FOV, IMA-187)
+        p.setPen(QPen(_GRID, 3))       # black grid lines: the cell border around each well mosaic
         for c in range(nc + 1):
             p.drawLine(int(ax + c * cd), int(ay), int(ax + c * cd), int(ay + H))
         for r in range(nr + 1):
@@ -791,7 +885,7 @@ class _OperatorWorker(QThread):
     finished_ok = pyqtSignal()
 
     def __init__(self, operator: str, reader, meta, fov_index: dict, nr: int, nc: int, out_dir: str,
-                 regions=None, save: bool = True):
+                 regions=None, save: bool = True, fov_counts=None, positions=None):
         super().__init__()
         self._operator = operator
         self._reader, self._meta = reader, meta
@@ -799,6 +893,8 @@ class _OperatorWorker(QThread):
         self._out_dir = out_dir
         self._regions = regions          # None = whole plate; a list = subset preview (those wells only)
         self._save = save                # False = PREVIEW: compute + push to the viewer, write NOTHING
+        # Progress counts WELLS, not FOVs — _on_well fires per FOV, so _done is only incremented
+        # when a region completes (see _on_well). Without this a 36-FOV plate reported 144/4.
         self._total = len(regions) if regions is not None else len(meta["regions"])
         self._channels = [c["name"] for c in meta["channels"]]
         self._colors = np.stack([_hex_to_rgb01(c["display_color"]) for c in meta["channels"]])
@@ -808,17 +904,63 @@ class _OperatorWorker(QThread):
         self._lock = threading.Lock()             # guards _contrast/_raw/_done (on_well runs on writer threads)
         self._done = 0
         self._stop = threading.Event()            # set by the window to end the run cleanly
+        # IMA-218 mosaic: write_from_stream calls on_well ONCE PER FOV, from several writer
+        # threads, in no guaranteed order — there is no "well complete" event. So FOV planes are
+        # accumulated per region and the tile is composed + emitted exactly once, when the last
+        # FOV of that region arrives. A half-filled mosaic is never painted.
+        # _expect is the number of FOVs the writer will DELIVER for a region (every FOV it has),
+        # so the completion counter is always right. _mosaic says whether those FOVs may be
+        # PLACED by coordinate; a region with incomplete coordinates still arrives in full but
+        # renders from its first FOV only (D5), never from a guessed position.
+        fpr = meta["fovs_per_region"]
+        self._expect = {r: len(fpr.get(r, [1])) for r in meta["regions"]}
+        self._mosaic = {r: len(f) > 1 for r, f in (fov_counts or {}).items()}
+        self._pending: dict[str, dict] = {}       # region -> {fov: (C, y, x) planes}
+        self._positions = positions or {}         # {(region, fov): (x_mm, y_mm, z_um)}
+        self._frame_shape = meta["frame_shape"]
+        self._pixel_size_um = meta.get("pixel_size_um") or 1.0
 
     def stop(self):
         """Ask the run to stop; write_plate polls this and abandons after in-flight wells drain."""
         self._stop.set()
 
     def _on_well(self, region, fov, image):
-        """Called per written well (on a write_plate WRITER THREAD): render the plate thumbnail."""
+        """Called per written (region, FOV) on a write_plate WRITER THREAD — several may overlap.
+
+        Accumulates the region's FOVs and renders its tile ONCE, when the last one arrives. For
+        the single-FOV case this reduces to the original behaviour on the first call.
+        """
         info = self._fov_index[region]
         ri, ci, well_id = *info["rc"], info["well_id"]
         well = image[0, :, 0]  # (C, Y, X)
-        tiles = [_fit_cell(well[c_i]) for c_i in range(len(self._channels))]  # downsample OUTSIDE lock
+
+        expect = self._expect.get(region, 1)
+        if expect > 1:
+            with self._lock:                      # several writer threads land here concurrently
+                bucket = self._pending.setdefault(region, {})
+                bucket[fov] = well
+                if len(bucket) < expect:
+                    return                        # not complete yet — never paint a partial mosaic
+                planes = self._pending.pop(region)
+            if not self._mosaic.get(region):      # D5: incomplete coordinates -> first FOV only
+                planes = {min(planes): planes[min(planes)]}
+        else:
+            planes = {fov: well}
+
+        if len(planes) > 1:
+            pos = {f: self._positions[(region, f)] for f in planes}
+            boxes = mosaic_boxes(pos, self._frame_shape, self._pixel_size_um)
+            push_boxes = mosaic_boxes(pos, self._frame_shape, self._pixel_size_um, cell=_PUSH_PX)
+            tiles = [compose_mosaic({f: p[c_i] for f, p in planes.items()}, boxes)
+                     for c_i in range(len(self._channels))]
+            push_src = [compose_mosaic({f: p[c_i] for f, p in planes.items()}, push_boxes, cell=_PUSH_PX)
+                        for c_i in range(len(self._channels))]
+        else:                                     # N=1: byte-identical to the pre-mosaic path
+            only = planes[next(iter(planes))]
+            tiles = [_fit_cell(only[c_i]) for c_i in range(len(self._channels))]  # OUTSIDE the lock
+            push_src = [_area_downsample(only[c_i], _PUSH_PX, _PUSH_PX)
+                        for c_i in range(len(self._channels))]
+
         raw = np.empty((len(tiles), _CELL, _CELL), self._dtype)              # native dtype (half the RAM)
         rgb = np.zeros((_CELL, _CELL, 3), np.float32)
         with self._lock:                          # shared contrast/raw/counter -> serialize (cheap part)
@@ -828,15 +970,14 @@ class _OperatorWorker(QThread):
                 lo, hi = self._contrast.window(c_i)
                 rgb += _window(ds, lo, hi)[:, :, None] * self._colors[c_i][None, None, :]
             self._raw[(ri, ci)] = raw
-            self._done += 1
+            self._done += 1                       # counts WELLS: only reached once per region
             done = self._done
         self.tileReady.emit(ri, ci, well_id, (np.clip(rgb, 0, 1) * 255).astype(np.uint8))
         self.progress.emit(done, self._total)
         # feed the ndviewer growing slider: one ~512px plane per channel, in memory (register_array),
         # so scrubbing the processed wells is instant and z-collapsed (nz=1). Downsampled -> bounded.
-        push = [_area_downsample(well[c_i], _PUSH_PX, _PUSH_PX).astype(self._dtype)
-                for c_i in range(len(self._channels))]
-        self.pushReady.emit(info["idx"], push)
+        # Emitted ONCE per well (not once per FOV), so a 36-FOV well no longer stomps its slot 36x.
+        self.pushReady.emit(info["idx"], [p.astype(self._dtype) for p in push_src])
 
     def _on_error(self, region, fov, exc):
         """A well's projection failed (corrupt/missing plane): SKIP it, mark its dot failed, keep the
@@ -850,7 +991,9 @@ class _OperatorWorker(QThread):
             if self._save:
                 from squidmip import write_plate  # persist + project in one bounded, streaming pass
 
-                write_plate(self._reader, self._out_dir, n_fovs=1, workers=_VIEWER_WORKERS,
+                # n_fovs=None -> EVERY FOV of every well (IMA-218). The written plate now
+                # contains what the plate view shows; a ragged plate stays faithful per well.
+                write_plate(self._reader, self._out_dir, n_fovs=None, workers=_VIEWER_WORKERS,
                             projector=self._operator, tiff=False, on_well=self._on_well,
                             stop=self._stop.is_set, on_error=self._on_error, regions=self._regions)
                 if self._stop.is_set():
@@ -863,7 +1006,8 @@ class _OperatorWorker(QThread):
                 # the subset's compute). Same math as the saved run — a faithful preview.
                 from squidmip import project_plate
 
-                stream = project_plate(self._reader, workers=_VIEWER_WORKERS, projector=self._operator,
+                stream = project_plate(self._reader, n_fovs=None, workers=_VIEWER_WORKERS,
+                                       projector=self._operator,
                                        on_error=self._on_error, regions=self._regions)
                 try:
                     for region, fov, image in stream:
@@ -948,7 +1092,15 @@ class _ComputedPlateWorker(QThread):
 
     Streams each well from disk: a coarse pyramid level -> the plate thumbnail, and a ~512px level ->
     the ndviewer slider (register_array). Bounded (one well in flight); reads via tensorstore off the
-    GUI thread so opening a big computed plate never freezes the window."""
+    GUI thread so opening a big computed plate never freezes the window.
+
+    KNOWN LIMITATION (IMA-218): this shows the well's FIRST field, not the coordinate-placed mosaic
+    a live run renders. The written plate stores every field (n_fovs=None) but carries NO per-field
+    stage translation — OME-NGFF would express that as a translation coordinateTransformation per
+    field, which the writer does not emit yet. Reconstructing the mosaic here would mean either
+    extending the output format or re-reading the source acquisition's coordinates.csv, so it is
+    deliberately deferred rather than guessed. Consequence the user sees: run MIP -> mosaic tiles;
+    close and reopen the computed plate -> first-field tiles."""
 
     tileReady = pyqtSignal(int, int, str, object)   # (ri, ci, well_id, rgb tile)
     pushReady = pyqtSignal(int, object)             # (fov_idx, [per-channel ~512px plane])
@@ -1727,6 +1879,28 @@ class PlateWindow(QMainWindow):
         self._worker.start()
 
     # -- run a post-processing operator over the whole plate (persists a navigable OME-Zarr plate) --
+    def _plan_fovs(self, regions=None) -> tuple[dict, list]:
+        """``({region: [fov, ...]}, [wells dropped to 1 FOV])`` — the per-well mosaic plan (IMA-218).
+
+        A well earns a mosaic only when EVERY one of its FOVs has a stage coordinate. Anything
+        else falls back to its first FOV and is reported, so an incomplete coordinates.csv can
+        never silently place images at the wrong physical position.
+        """
+        meta, plan, bad = self._meta, {}, []
+        positions = meta.get("fov_positions") or {}
+        wanted = regions if regions is not None else meta["regions"]
+        for region in wanted:
+            fovs = list(meta["fovs_per_region"].get(region, []))
+            if len(fovs) <= 1:
+                plan[region] = fovs
+                continue
+            if all((region, f) in positions for f in fovs):
+                plan[region] = fovs                    # full coordinate cover -> real mosaic
+            else:
+                plan[region] = fovs[:1]                # incomplete -> first FOV, flagged
+                bad.append(region)
+        return plan, bad
+
     def run_operator(self, key: str, out_parent: Optional[str] = None,
                      preview_limit: Optional[int] = None, save: bool = True):
         """Run a projector operator (MIP / reference) over the plate.
@@ -1776,9 +1950,25 @@ class PlateWindow(QMainWindow):
         if self._detail is not None:
             self._detail.start_acquisition([c["name"] for c in self._meta["channels"]], 1,
                                            _PUSH_PX, _PUSH_PX, [f"{r}:0" for r in self._order])
+        # IMA-218: decide the per-well FOV plan BEFORE the run. A well is only rendered as a
+        # mosaic when every one of its FOVs has a stage coordinate; a well with N>1 FOVs but
+        # incomplete coordinates is marked FAILED here (red x) and dropped to its first FOV,
+        # rather than being placed at a guessed position (D5 fail-loud). Checking up front means
+        # the failure never has to travel back from a writer thread mid-run.
+        fov_counts, bad = self._plan_fovs(regions)
+        for wid in bad:
+            info = self._fov_index.get(wid)
+            if info is not None:
+                self._overview.set_status(*info["rc"], "failed")
+        if bad:
+            self._readout.setText(
+                f"{len(bad)} well(s) have multiple FOVs but incomplete coordinates.csv — "
+                "showing their first FOV only (marked red)")
         self._worker = _OperatorWorker(key, self._reader, self._meta, self._fov_index,
                                        self._overview._nr, self._overview._nc,
-                                       str(out_dir) if out_dir else "", regions=regions, save=save)
+                                       str(out_dir) if out_dir else "", regions=regions, save=save,
+                                       fov_counts=fov_counts,
+                                       positions=self._meta.get("fov_positions") or {})
         dest = f" → {out_dir.name}" if save else " (preview — not saved)"
         self._worker.tileReady.connect(self._on_tile)
         self._worker.pushReady.connect(self._on_push)

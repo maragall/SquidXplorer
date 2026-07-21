@@ -271,7 +271,7 @@ def write_from_stream(
     stream: Iterator[tuple[str, int, np.ndarray]],
     out_dir,
     *,
-    n_fovs: int = 1,
+    n_fovs: Optional[int] = 1,
     tiff: bool = False,
     on_well=None,
     write_workers: int = _WRITE_WORKERS,
@@ -307,7 +307,10 @@ def write_from_stream(
         wells = {r: wells[r] for r in keep if r in wells}
 
     # Full plate/row/well group metadata written UP FRONT (layout is fully known from metadata).
-    write_group(plate_dir, plate_metadata(wells.keys(), field_count=n_fovs))
+    # field_count is the MAX fields any well has (n_fovs=None -> ragged plate, IMA-218);
+    # NGFF wants one number for the plate, and the widest well is the honest one.
+    field_count = n_fovs if n_fovs is not None else max((len(v) for v in wells.values()), default=1)
+    write_group(plate_dir, plate_metadata(wells.keys(), field_count=field_count))
     for region, fovs in wells.items():
         row, col = parse_well_id(region)
         write_group(plate_dir / row)  # bare row group
@@ -371,7 +374,7 @@ def write_plate(
     reader,
     out_dir,
     *,
-    n_fovs: int = 1,
+    n_fovs: Optional[int] = 1,
     workers: Optional[int] = None,
     projector: str = "mip",
     tiff: bool = False,

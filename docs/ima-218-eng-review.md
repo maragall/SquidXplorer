@@ -3,11 +3,16 @@
 **Ticket:** IMA-218 — B1 · PlateOverview mosaic (render integration), child of the IMA-187 B1 keystone
 **Branch:** `juliomaragall/ima-218-plateoverview-mosaic`
 **Review:** `/plan-eng-review`, completed 2026-07-20. Outside voice: Claude subagent (Codex not installed).
-**Status:** NOT CLEARED — 6 decisions locked, 2 corrected after code verification, 6 unresolved, 2 critical gaps.
+**Status:** REVIEWED, then IMPLEMENTED — 6 decisions locked, 2 corrected after code verification.
+136 tests pass. Two gaps remain open by choice (§14).
 
 > This document is the reviewable record of the plan-eng-review. The working plan lives at
 > `.spec/open/ima-218.md` (gitignored). Everything load-bearing is reproduced here so the
-> diff on merge is self-contained. No implementation lands in this commit.
+> diff on merge is self-contained.
+>
+> **§0-12 are the review as written BEFORE implementation** — kept intact so the reasoning is
+> auditable. **§14 records what actually shipped**, including where the build diverged from the
+> review. Read §14 first if you only want the outcome.
 
 ---
 
@@ -288,3 +293,80 @@ P1 blocks ship. Full task records (with verify commands) are in the working plan
   corrections, 2 reversed the mechanism of a locked decision, 1 (G7) left to the user.
 - Failure modes: 6 mapped, **2 critical gaps**.
 - Verdict: **NOT CLEARED** — dependencies unbuilt, 6 unresolved decisions.
+
+---
+
+## 14. What actually shipped (implementation, 2026-07-21)
+
+The review above was written first; this section records the build. **136 tests pass**
+(`PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest tests/ -m "not integration"`), up from 111.
+
+### IMA-215 was built here, not in its own branch
+
+IMA-218 is unbuildable without stage coordinates and the `ima-215` branch had zero commits, so
+the parser landed in `reader.py` — exactly the file and surface IMA-215 specifies — as a
+module-level `read_fov_positions(path, fovs_per_region)`. That branch should now merge cleanly
+or become a no-op. New metadata key: `metadata["fov_positions"] = {(region, fov): (x_mm, y_mm, z_um)}`.
+
+Both on-disk layouts are handled. The Monkey layout has an explicit `fov` column. The 20x layout
+(`region,x,y,z`) has **none**, so FOV identity comes from per-region row order — an assumption,
+not a fact. When a region's row count disagrees with its filename-derived FOV count the region's
+coordinates are **omitted with a warning** rather than mis-assigned. That closes the review's
+first critical gap: silent physical misplacement is now impossible, because a well without full
+coordinate cover never gets placed at all.
+
+### The two corrected decisions were implemented as corrected
+
+- **D3** — `_OperatorWorker` gained a per-region accumulator (`_pending`, `_expect`) under the
+  existing `_lock`. `on_well` fires per FOV from several writer threads; the tile is composed and
+  emitted **once**, when the region's last FOV lands. A partial mosaic is never painted. Verified
+  end to end: `on_well` fired 4× for 2 wells, one tile each.
+- **D5** — the coordinate check moved **before** the run (`PlateWindow._plan_fovs`), so an
+  unusable well is marked red-x up front and never has to raise from a writer thread (which would
+  have aborted the whole run through `f.result()`). Such a well falls back to its first FOV.
+
+### Placement math (G1/G2, which the review left unspecified)
+
+`mosaic_boxes()` and `compose_mosaic()` are pure and unit-tested, with the three decisions the
+spec never made now explicit in code and docstring: **origin** = the region's own bounding box;
+**Y is flipped** (stage up → rows down); **one scale for both axes** so a non-square region is
+letterboxed rather than stretched. Overlap draw order is **ascending FOV, later wins** — pinned
+by a test so it cannot drift. Uncovered cell area stays background, so a sparse scan reads as
+sparse.
+
+`mosaic_boxes` returns the full cell for a single FOV, which makes the N=1 path identical to the
+pre-mosaic path **by construction rather than by a special case** — the parent's "no hidden
+`if n_fov == 1`" requirement. A test asserts `compose_mosaic(single) == _fit_cell(plane)` exactly.
+
+### Other fixes folded in
+
+- `select_fovs(meta, n_fovs=None)` → every FOV of every well, which is the only ragged-plate-safe
+  option (D4). Plumbed through `project_plate`/`write_plate`; `field_count` now derives from the
+  widest well.
+- **G3 progress bug fixed**: `_done` counts completed *wells*, so a 36-FOV plate no longer reports
+  144/4. `pushReady` fires once per well instead of stomping one slider slot 36×.
+- **D6 docs**: the module docstring's memory budget was wrong *before* this ticket (claimed
+  float32; `_raw` is native uint16) — corrected to ~95 MB, and it now states that all four
+  buffers scale with `_CELL**2`. Both `IMA-187 will…` promissory comments retired.
+- `tests/conftest.py` now writes the `coordinates.csv` its docstring always claimed to.
+
+### Two gaps left open, deliberately
+
+1. **Reopening a computed plate shows first-field tiles, not the mosaic.** The written plate
+   stores every field but carries **no per-field stage translation**; OME-NGFF expresses that as
+   a per-field translation `coordinateTransformation` the writer does not emit. Fixing it means
+   extending the output format (IMA-184/217 territory) or re-reading the source acquisition.
+   Documented in `_ComputedPlateWorker`'s docstring rather than guessed at. **User-visible:** run
+   MIP → mosaic; close and reopen → first-field.
+2. **Oracle #1 (4-well × 36-FOV) is covered by unit tests on the placement math, not a 576-TIFF
+   fixture.** `_SUPPORTED_PLATES` still rejects a 2×2 plate through the app (`_viewer.py`), which
+   the review flagged as an undeclared scope change and I did not smuggle in.
+
+`G7` (fixed-pitch vs exact coordinate placement) was **not** revisited — exact placement shipped,
+per locked D1/D2 and the parent oracle. If you accept G7 later, `mosaic_boxes` is the single
+function to swap.
+
+### Not caused by this change
+
+`scripts/smoke_import.py` reports 9 import failures. Clean `main` (`1504c05`) reports the
+identical 9 — a stale installed `squidmip` shadowing the worktree. Untouched.

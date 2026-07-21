@@ -42,6 +42,7 @@ def test_metadata_no_dead_attributes(squid_dataset):
         "frame_shape",
         "dtype",
         "n_t",
+        "fov_positions",
     }
     for key, value in meta.items():
         assert value is not None, f"metadata[{key!r}] is None — dead attribute"
@@ -270,3 +271,69 @@ def test_real_dataset(real_dataset):
     got = reader.read("B3", 15, "Fluorescence_638_nm_-_Penta", 0)
     direct = tifffile.imread(real_dataset / "0" / "B3_15_0_Fluorescence_638_nm_-_Penta.tiff")
     np.testing.assert_array_equal(got, direct)
+
+
+# --- IMA-215: coordinates.csv -> fov_positions ----------------------------------------------
+
+def test_fov_positions_monkey_layout(squid_dataset):
+    """Explicit fov column: positions are keyed straight off it."""
+    root, _ = squid_dataset
+    pos = open_reader(root).metadata["fov_positions"]
+    assert set(pos) == {("B2", 0), ("B2", 1), ("B3", 0), ("B3", 1)}
+    x0, y0, _ = pos[("B2", 0)]
+    x1, y1, _ = pos[("B2", 1)]
+    assert x1 > x0 and y1 == y0            # fov 1 sits to the RIGHT of fov 0, same row
+
+
+def test_fov_positions_absent_file_is_not_an_error(squid_dataset):
+    """An older acquisition with no coordinates.csv yields {} — absence is normal, not a failure."""
+    root, _ = squid_dataset
+    (root / "coordinates.csv").unlink()
+    assert open_reader(root).metadata["fov_positions"] == {}
+
+
+def test_fov_positions_20x_layout_without_fov_column(squid_dataset):
+    """20x layout (region,x,y,z — NO fov column): per-region ROW ORDER supplies the fov identity."""
+    root, _ = squid_dataset
+    (root / "coordinates.csv").write_text(
+        "region,x (mm),y (mm),z (mm)\n"
+        "B2,10.0,20.0,0.05\n"
+        "B2,10.5,20.0,0.05\n"
+        "B3,15.0,25.0,0.05\n"
+        "B3,15.5,25.0,0.05\n"
+    )
+    pos = open_reader(root).metadata["fov_positions"]
+    assert set(pos) == {("B2", 0), ("B2", 1), ("B3", 0), ("B3", 1)}
+    assert pos[("B2", 0)][0] == 10.0 and pos[("B2", 1)][0] == 10.5
+    assert pos[("B2", 0)][2] == 50.0       # z (mm) normalised to um
+
+
+def test_fov_positions_row_count_mismatch_omits_the_region(squid_dataset):
+    """The silent-misplacement guard: fewer CSV rows than filename FOVs -> omit, never mis-assign.
+
+    Without a fov column the row order is only an ASSUMPTION about identity. When the counts
+    disagree that assumption is unsafe, so the region is dropped (and the caller fails the well
+    loudly) rather than placing real images at the wrong physical position.
+    """
+    root, _ = squid_dataset
+    (root / "coordinates.csv").write_text(
+        "region,x (mm),y (mm),z (mm)\n"
+        "B2,10.0,20.0,0.05\n"          # only ONE row for a region whose filenames declare TWO FOVs
+        "B3,15.0,25.0,0.05\n"
+        "B3,15.5,25.0,0.05\n"
+    )
+    with pytest.warns(UserWarning, match="omitting the region"):
+        pos = open_reader(root).metadata["fov_positions"]
+    assert not any(r == "B2" for r, _ in pos), "B2 must be omitted, not half-assigned"
+    assert set(pos) == {("B3", 0), ("B3", 1)}
+
+
+def test_fov_positions_malformed_rows_are_skipped_not_guessed(squid_dataset):
+    root, _ = squid_dataset
+    (root / "coordinates.csv").write_text(
+        "region,fov,z_level,x (mm),y (mm),z (um),time\n"
+        "B2,0,0,10.0,20.0,0.0,0.0\n"
+        "B2,1,0,NOT_A_NUMBER,20.0,0.0,0.0\n"
+    )
+    pos = open_reader(root).metadata["fov_positions"]
+    assert set(pos) == {("B2", 0)}

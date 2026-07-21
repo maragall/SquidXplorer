@@ -33,7 +33,7 @@ Design contracts:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Callable, Iterable
+from typing import TYPE_CHECKING, Callable, Iterable, Optional
 
 import numpy as np
 
@@ -163,7 +163,7 @@ def project_well(
     return out
 
 
-def select_fovs(metadata: dict, n_fovs: int = 1) -> dict[str, list[int]]:
+def select_fovs(metadata: dict, n_fovs: Optional[int] = 1) -> dict[str, list[int]]:
     """Pick the FOV(s) to project for each well.
 
     Folds IMA-187: the FOV *count* is a data-model parameter and the return is a list per
@@ -177,12 +177,16 @@ def select_fovs(metadata: dict, n_fovs: int = 1) -> dict[str, list[int]]:
     metadata:
         ``reader.metadata`` from IMA-189.
     n_fovs:
-        FOVs to select per well (default 1).
+        FOVs to select per well (default 1). ``None`` means EVERY FOV the well has, which is
+        how the plate view renders a mosaic (IMA-218): a global count cannot describe a ragged
+        plate whose wells differ in FOV count, and silently short-slicing the rich wells is the
+        partial-well bug this function already refuses to commit for an explicit count.
 
     Returns
     -------
     dict[str, list[int]]
-        ``{region: [fov, ...]}`` for every region, each list of length ``n_fovs``.
+        ``{region: [fov, ...]}`` for every region — each of length ``n_fovs``, or of that
+        region's own FOV count when ``n_fovs`` is None.
 
     Raises
     ------
@@ -190,6 +194,9 @@ def select_fovs(metadata: dict, n_fovs: int = 1) -> dict[str, list[int]]:
         If ``n_fovs < 1``, or a well has fewer than ``n_fovs`` FOVs (named loud, never a
         silent short slice).
     """
+    if n_fovs is None:                            # every FOV of every well, ragged-plate safe
+        fpr = metadata["fovs_per_region"]
+        return {region: list(fpr[region]) for region in metadata["regions"]}
     if n_fovs < 1:
         raise ValueError(f"n_fovs must be >= 1, got {n_fovs}")
 

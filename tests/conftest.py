@@ -78,6 +78,23 @@ def _write_timepoint(folder: Path, arrays: dict, tag: int = 0):
                     arrays[(region, fov, z, ch)] = arr
 
 
+# Legacy-schema coordinates.csv (Monkey layout: an explicit fov column). The two FOVs of each
+# region sit side by side in X at a 1-frame pitch (4 px * 0.325 um/px = 0.0013 mm), so a mosaic
+# of them is 2 wide x 1 tall — small, but a REAL relative offset the placement math must honour.
+_FOV_PITCH_MM = 4 * 0.325 / 1000.0
+_COORDS_HEADER = "region,fov,z_level,x (mm),y (mm),z (um),time"
+
+
+def _coords_csv() -> str:
+    lines = [_COORDS_HEADER]
+    for r_i, region in enumerate(REGIONS):
+        for fov in FOVS:
+            x = 10.0 + r_i * 5.0 + fov * _FOV_PITCH_MM     # fov 1 is one frame-width right of fov 0
+            y = 20.0 + r_i * 5.0                            # same row -> a 2x1 mosaic
+            lines.append(f"{region},{fov},0,{x:.6f},{y:.6f},0.0,0.0")
+    return "\n".join(lines) + "\n"
+
+
 @pytest.fixture
 def squid_dataset(tmp_path):
     root = tmp_path / "acq"
@@ -86,6 +103,7 @@ def squid_dataset(tmp_path):
     (root / "acquisition_channels.yaml").write_text(_YAML)
     (root / "acquisition.yaml").write_text(_ACQ_YAML)
     (root / "acquisition parameters.json").write_text(json.dumps(_PARAMS))
+    (root / "coordinates.csv").write_text(_coords_csv())
     return root, arrays
 
 

@@ -42,7 +42,7 @@ from __future__ import annotations
 
 import os
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from typing import TYPE_CHECKING, Callable, Iterable, Iterator
+from typing import TYPE_CHECKING, Callable, Iterable, Iterator, Optional
 
 import numpy as np
 
@@ -131,7 +131,7 @@ def _resolve_projector(name: str) -> Projector:
 def project_plate(
     reader: "SquidReader",
     *,
-    n_fovs: int = 1,
+    n_fovs: Optional[int] = 1,
     workers: int | None = None,
     projector: str = "mip",
     on_error=None,
