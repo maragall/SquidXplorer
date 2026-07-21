@@ -251,26 +251,67 @@ def run_all():
         assert len(sel) == 144, f"expected 144 (region, fov) pairs, got {len(sel)}"
         return f"drag over the whole plate -> {wells}, {len(sel)} (region, fov) pairs"
 
-    @check("IMA-237", "Three panes: pane 3 hidden until an exploration tab exists")
+    @check("IMA-260", "Three panes on OPEN, and the empty one teaches by example")
     def _():
+        # IMA-237 shipped pane 3 collapsed until a Shift-drag revealed it; IMA-260 reverses that,
+        # because a pane that is not there cannot be discovered. Pane 3 now opens at a real width
+        # showing EXAMPLE USAGE, and the copy stands down only while it holds content.
         w = open_window(PLATE)
         outer = w._split
-        before = [outer.sizes(), outer.count()]
+        before = outer.sizes()
         if outer.count() != 3:
             w.close(); raise AssertionError(f"outer splitter has {outer.count()} children, want 3")
-        hidden_before = outer.sizes()[2] == 0
+        empty_before = w.explore_empty_text()
+        live_w = w._explore_pane.width()
         key = w.open_exploration_tab(["A1", "A2"])
         _app().processEvents()
         after = outer.sizes()
-        plate_kept = after[0] == before[0][0]
+        empty_after = w.explore_empty_text()
         n_tabs = w._explore_tabs.count()
+        # ...and it comes back when the pane empties again
+        for i in range(w._explore_tabs.count() - 1, -1, -1):
+            w._close_op_tab(i, w._explore_tabs)
+        _app().processEvents()
+        empty_again = w.explore_empty_text()
         w.close()
-        assert hidden_before, f"pane 3 visible before any exploration tab: {before[0]}"
+        assert before[2] > 0, f"pane 3 opened collapsed: {before}"
+        assert live_w > 0, "pane 3 has no real width on the shown window"
+        low = empty_before.lower()
+        assert "right-click" in low and "control well" in low, f"no example usage: {empty_before!r}"
+        assert "hold shift" in low and "for example" in low, f"not framed as an example: {low!r}"
         assert key, f"open_exploration_tab returned {key!r}: {w._readout.text()!r}"
-        assert after[2] > 0, f"pane 3 still collapsed after opening a tab: {after}"
-        assert plate_kept, f"plate pane shrank: {before[0][0]} -> {after[0]}"
-        return (f"{before[0]} -> {after}; tab {key!r} in pane 3 ({n_tabs} tab(s)); "
-                f"plate pane preserved")
+        assert empty_after == "", "the example copy stayed up behind real content"
+        assert after == before, f"opening a tab moved a divider: {before} -> {after}"
+        assert empty_again.strip(), "the example never came back when the pane emptied"
+        return (f"panes {before} (pane 3 live {live_w}px); tab {key!r} in pane 3 "
+                f"({n_tabs} tab(s)); example copy on -> off -> on")
+
+    @check("IMA-248", "Control Well: right-click sets ONE reference, pinned first in pane 3")
+    def _():
+        w = open_window(PLATE)
+        w.set_control_well("A2")
+        _app().processEvents()
+        first = (w.control_well(), w._overview.control_well(), w._explore_tabs.tabText(0))
+        from PyQt5.QtWidgets import QTabBar
+        pinned = w._explore_tabs.tabBar().tabButton(0, QTabBar.RightSide) is None
+        w.set_control_well("B1")            # a second control RELEASES the first
+        _app().processEvents()
+        agree = (w.control_well(), w._overview.control_well())
+        n_control = sum(1 for i in range(w._explore_tabs.count())
+                        if w._explore_tabs.tabText(i).startswith("Control"))
+        w.set_control_well(None)
+        _app().processEvents()
+        cleared = (w.control_well(), w._overview.control_well(), w._explore_tabs.count())
+        back = w.explore_empty_text().strip() != ""
+        w.close()
+        assert first[0] == first[1] == "A2", f"plate and window disagree: {first}"
+        assert "A2" in first[2], f"control tab not pinned first: {first[2]!r}"
+        assert pinned, "the control tab is closable — it is supposed to be pinned"
+        assert agree == ("B1", "B1"), f"a second control did not take over cleanly: {agree}"
+        assert n_control == 1, f"{n_control} control tabs after re-setting — one is stale"
+        assert cleared == (None, None, 0), f"clearing left something behind: {cleared}"
+        assert back, "clearing the control did not restore the example copy"
+        return f"set A2 -> {first[2]!r}, re-set to B1 (1 pinned tab), cleared -> example copy back"
 
     @check("IMA-209", "Drag-out floating window, and Re-dock (dead until today)")
     def _():

@@ -2978,13 +2978,17 @@ def test_closing_mid_export_disconnects_the_worker(qapp, stub_detail, squid_data
 # pane 3 must not exist for a user who never Shift-drags, so these drive the REAL splitter and the
 # REAL gesture rather than asserting on a builder's return value.
 
-def test_outer_split_has_three_panes_and_pane3_starts_collapsed(qapp, stub_detail):
+def test_outer_split_has_three_panes_and_pane3_opens_with_width(qapp, stub_detail):
+    """IMA-260 reversed IMA-237's collapsed-until-revealed rule: the third pane is there from the
+    first frame, because a pane that is not there cannot be found. It opens on its EXAMPLE page —
+    holding no tabs is a state with copy in it, not a state with nothing in it."""
     win = V.PlateWindow(None)
     outer = win._split
     assert outer.count() == 3, "the window is not a three-pane layout"
-    assert outer.widget(2) is win._explore_tabs, "pane 3 is not the exploration pane"
-    assert win._explore_tabs.isHidden()                 # collapsed: zero width, not an empty strip
-    assert outer.sizes()[2] == 0
+    assert outer.widget(2) is win._explore_pane, "pane 3 is not the exploration pane"
+    assert outer.sizes()[2] > 0, "pane 3 opened collapsed"
+    assert win._explore_pane.currentWidget() is win._explore_empty
+    assert win._explore_tabs.count() == 0
     win.close()
 
 
@@ -3010,10 +3014,14 @@ def test_window_resize_never_grows_pane3_at_the_plate_pane_s_expense(qapp, stub_
     win.close()
 
 
-def test_pane3_appears_only_after_a_real_shift_drag_and_takes_width_from_the_viewer(
+def test_a_real_shift_drag_fills_pane3_without_moving_a_single_divider(
         qapp, stub_detail, squid_dataset):
-    """The headline: unchanged two-pane app until the gesture, three panes after it — and the
-    plate pane keeps every pixel it had."""
+    """Pane 3 already exists (IMA-260), so the gesture changes its CONTENT and nothing else.
+
+    The requirement that outlived IMA-237's reveal is that pane 3 must never squash the plate:
+    under a fixed-width third column that is now stronger than it was — no divider moves at all,
+    so neither neighbour can lose a pixel to a tab opening.
+    """
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.resize(1600, 900)
@@ -3022,21 +3030,17 @@ def test_pane3_appears_only_after_a_real_shift_drag_and_takes_width_from_the_vie
     win.ingest(str(root))
     qapp.processEvents()
 
-    assert win._explore_tabs.isHidden()                 # BEFORE: pane 3 does not exist
-    assert win._explore_tabs.count() == 0
-    plate_before = win._split.sizes()[0]
-    viewer_before = win._split.sizes()[1]
+    assert win._explore_tabs.count() == 0               # BEFORE: pane 3 is present but empty...
+    assert win._explore_pane.currentWidget() is win._explore_empty     # ...showing the example
+    before = win._split.sizes()
 
     _shift_drag_over(win, ["B3"])
     qapp.processEvents()
 
-    assert not win._explore_tabs.isHidden(), "the shift-drag did not reveal pane 3"
-    assert win._explore_tabs.count() == 1               # ...and it is POPULATED, not just visible
+    assert win._explore_tabs.count() == 1               # POPULATED, and the page swapped to it
+    assert win._explore_pane.currentWidget() is win._explore_tabs
     assert isinstance(win._explore_tabs.currentWidget(), V._ExplorationTab)
-    plate_after, viewer_after, explore_after = win._split.sizes()
-    assert explore_after > 0
-    assert plate_after == plate_before, "pane 3 squashed the plate view"
-    assert viewer_after < viewer_before, "pane 3's width came from somewhere other than the viewer"
+    assert win._split.sizes() == before, "opening a tab moved a divider"
     win.close()
 
 
@@ -3879,3 +3883,243 @@ def test_ima253_empty_slots_are_visibly_distinct_from_occupied_ones(qapp, stub_d
     assert abs(float(occupied.mean()) - float(empty.mean())) > 1.5, \
         "an empty slot must not look like an occupied one"
     ov.deleteLater()
+
+
+# --- IMA-260: three panes on OPEN, and the empty third pane teaches by EXAMPLE ------------------
+#
+# IMA-237 shipped pane 3 collapsed until a Shift-drag revealed it, which made the whole feature
+# undiscoverable: you cannot find a pane that is not there, and the only gesture that summoned it
+# was itself invisible. IMA-260 opens with all three and fills the empty one with EXAMPLE USAGE.
+#
+# The earlier three-pane check passed FAKE-GREEN because it never showed the window: an unshown
+# QSplitter reports whatever sizes it was handed and every child has zero geometry, so "the pane
+# is there" was trivially true and "the pane has width" was unaskable. Everything below shows the
+# window at a real size first and asserts on REAL widget geometry.
+
+def _drain_preview(win, app, timeout_s=60):
+    """Block until the raw preview worker has stopped streaming (tools/walkthrough's helper).
+
+    A fixed settle() races it: the fill's duration is however many fields the acquisition has.
+    """
+    _drain_until(app, lambda: getattr(win, "_preview", None) is None or not win._preview.isRunning(),
+                 timeout=timeout_s)
+    for _ in range(20):                 # let the queued tileReady slots actually run
+        app.processEvents()
+
+
+def _shown(qapp, path=None, size=(1600, 900)):
+    """A window the user could actually look at: real size, really shown, really ingested."""
+    win = V.PlateWindow(None)
+    win.resize(*size)
+    win.show()
+    qapp.processEvents()
+    if path is not None:
+        win.ingest(str(path))
+        _drain_preview(win, qapp)
+    return win
+
+
+def _right_click(qapp, ov, pos):
+    """A REAL right-click: a QContextMenuEvent through Qt's dispatch, not a direct handler call."""
+    from PyQt5.QtGui import QContextMenuEvent
+    p = pos.toPoint() if hasattr(pos, "toPoint") else pos
+    ev = QContextMenuEvent(QContextMenuEvent.Mouse, p, ov.mapToGlobal(p))
+    qapp.sendEvent(ov, ev)
+    qapp.processEvents()
+    return ov._context_menu
+
+
+def _menu_action(menu, needle):
+    return next((a for a in menu.actions() if needle.lower() in a.text().lower()), None)
+
+
+def test_ima260_all_three_panes_have_real_width_on_open(qapp, stub_detail, squid_dataset):
+    """The headline. Not 'the splitter has three children' — three panes a user can SEE."""
+    root, _ = squid_dataset
+    win = _shown(qapp, root)
+    assert win._split.count() == 3
+    assert win._split.widget(2) is win._explore_pane, "pane 3 is not the exploration pane"
+
+    plate, viewer, explore = win._split.sizes()
+    assert explore > 0, "the exploration pane opened collapsed — IMA-237's undiscoverable state"
+    assert explore >= 360, f"pane 3 opened at {explore} px, too narrow to read its own copy"
+    # ...and the same claim measured off the LIVE widget, which is what fake-green missed.
+    assert win._explore_pane.isVisible()
+    assert win._explore_pane.width() > 0
+    assert win._explore_pane.height() > 0
+    assert plate > 0 and viewer > 0, "opening pane 3 collapsed one of the other two"
+    win.close()
+
+
+def test_ima260_the_empty_pane_shows_example_usage_not_a_blank_strip(qapp, stub_detail,
+                                                                     squid_dataset):
+    root, _ = squid_dataset
+    win = _shown(qapp, root)
+    text = win.explore_empty_text()
+    assert text.strip(), "the empty exploration pane is blank"
+
+    low = text.lower()
+    # PRIMARY: right-click -> Control Well, in that order (Julio's priority, and his correction:
+    # the unit is the WELL, never the FOV).
+    assert "right-click" in low and "control well" in low
+    assert low.index("right-click") < low.index("hold shift"), \
+        "the Shift line came before the right-click line — the primary message is right-click"
+    assert "control fov" not in low, "the action is Control Well, not Control FOV"
+    # SECONDARY: hold Shift to view a subset here.
+    assert "hold shift" in low
+    # ...and the whole thing is framed as an EXAMPLE, never as an instruction. This is Julio's
+    # explicit second correction, so it is asserted rather than left to the reviewer's eye.
+    assert "for example" in low
+    assert "only examples" in low
+    win.close()
+
+
+def test_ima260_empty_state_copy_meets_the_legibility_floor(qapp, stub_detail, squid_dataset):
+    """16 arcmin minimum = 17.3 px at 60 cm and (scaling 28.8 px @ 20 arcmin) 23.0 px at 1 m.
+
+    Copy sized for the near case only is unreadable from the chair the big monitor is viewed
+    from, which is the entire reason this pane carries text at all.
+    """
+    from PyQt5.QtWidgets import QLabel
+    root, _ = squid_dataset
+    win = _shown(qapp, root)
+    labels = [w for w in win._explore_empty.findChildren(QLabel) if w.text().strip()]
+    assert labels, "no copy to measure"
+    floor = 23.0                       # px = 16 arcmin at 1 m
+    for lab in labels:
+        px = lab.font().pixelSize()
+        if px <= 0:                    # a point-sized font: convert through the screen's DPI
+            px = lab.fontMetrics().height()
+        assert px >= floor, f"{lab.text()[:32]!r} renders at {px} px, under the {floor} px floor"
+        # and it is really on screen at that size, not merely configured
+        assert lab.isVisible() and lab.height() >= floor
+    win.close()
+
+
+def test_ima260_the_example_goes_away_with_content_and_comes_back_when_empty(
+        qapp, stub_detail, squid_dataset):
+    """Both directions. A user who explores once and tidies up must not be left with the blank
+    strip the empty state exists to prevent."""
+    root, _ = squid_dataset
+    win = _shown(qapp, root)
+    assert win.explore_empty_text().strip()             # present on open
+
+    _shift_drag_over(win, ["B3"])
+    qapp.processEvents()
+    assert win._explore_tabs.count() == 1
+    assert win.explore_empty_text() == "", "the example copy stayed up behind real content"
+    assert win._explore_pane.currentWidget() is win._explore_tabs
+
+    _close_exploration_pane(win)                        # the REAL tab-close path
+    qapp.processEvents()
+    assert win._explore_tabs.count() == 0
+    assert win.explore_empty_text().strip(), "the example never came back when the pane emptied"
+    assert win._split.sizes()[2] > 0, "the pane collapsed instead of returning to its empty state"
+    win.close()
+
+
+def test_ima260_right_click_offers_control_well_and_setting_it_pins_the_reference(
+        qapp, stub_detail, squid_dataset):
+    """The example points at an action, so the action has to exist and has to work."""
+    root, _ = squid_dataset
+    win = _shown(qapp, root)
+    ov = _freeze(win._overview)
+    ri, ci = win._fov_index["B3"]["rc"]
+
+    menu = _right_click(qapp, ov, _pt(ri, ci))
+    act = _menu_action(menu, "control well")
+    assert act is not None, "right-click offers no Control Well — the empty pane's example is a lie"
+    assert act.isEnabled()
+    act.trigger()
+    qapp.processEvents()
+
+    # ONE identity, read from the owner and from the plate — never compared across three copies.
+    assert win.control_well() == "B3"
+    assert win._overview.control_well() == "B3", "the plate disagrees with the window"
+    # ...pinned FIRST in pane 3, and not closable by the normal affordance.
+    assert win._explore_tabs.count() >= 1
+    assert win._explore_tabs.widget(0) is win._op_tabs[V.PlateWindow.CONTROL_KEY]
+    assert win._explore_tabs.widget(0).regions == ["B3"]
+    assert "B3" in win._explore_tabs.tabText(0)
+    from PyQt5.QtWidgets import QTabBar
+    assert win._explore_tabs.tabBar().tabButton(0, QTabBar.RightSide) is None
+    assert win._detach_tab(0, win._explore_tabs) is None, "the pinned control tab floated away"
+    # ...and the pane now holds content, so the example stands down.
+    assert win.explore_empty_text() == ""
+    menu.close()
+    win.close()
+
+
+def test_ima260_a_second_control_releases_the_first(qapp, stub_detail, squid_dataset):
+    """One control at a time. The release is implicit in there being one variable — this asserts
+    there is no stale second tab and no stale second frame."""
+    root, _ = squid_dataset
+    win = _shown(qapp, root)
+    win.set_control_well("B2")
+    qapp.processEvents()
+    win.set_control_well("B3")
+    qapp.processEvents()
+
+    assert win.control_well() == "B3"
+    assert win._overview.control_well() == "B3"
+    controls = [i for i in range(win._explore_tabs.count())
+                if win._explore_tabs.tabText(i).startswith("Control")]
+    assert controls == [0], f"expected exactly one pinned control tab, got {controls}"
+    assert win._explore_tabs.widget(0).regions == ["B3"]
+    win.close()
+
+
+def test_ima260_clearing_the_control_drops_the_frame_the_tab_and_restores_the_example(
+        qapp, stub_detail, squid_dataset):
+    root, _ = squid_dataset
+    win = _shown(qapp, root)
+    ov = _freeze(win._overview)
+    ri, ci = win._fov_index["B3"]["rc"]
+    win.set_control_well("B3")
+    qapp.processEvents()
+
+    menu = _right_click(qapp, ov, _pt(ri, ci))          # right-click the control itself
+    clear = _menu_action(menu, "clear control well")
+    assert clear is not None, "no way to release a control from the plate that set it"
+    clear.trigger()
+    qapp.processEvents()
+
+    assert win.control_well() is None
+    assert win._overview.control_well() is None, "a stale blue frame survived the clear"
+    assert win._explore_tabs.count() == 0
+    assert win.explore_empty_text().strip(), "the empty pane went blank instead of back to example"
+    menu.close()
+    win.close()
+
+
+def test_ima260_the_control_frame_is_really_painted_and_is_not_the_red_box(qapp, stub_detail,
+                                                                          squid_dataset):
+    """Pixels, not state: a control the user cannot see on the plate is not a control."""
+    from PyQt5.QtGui import QImage
+    root, _ = squid_dataset
+    win = _shown(qapp, root)
+    ov = _freeze(win._overview, cd=60.0)
+    ov.resize(500, 400)
+    qapp.processEvents()
+
+    def _grab():
+        img = ov.grab().toImage().convertToFormat(QImage.Format_RGB32)
+        a = np.frombuffer(img.constBits().asstring(img.byteCount()), np.uint8)
+        return a.reshape(img.height(), img.bytesPerLine() // 4, 4)[:, :img.width(), :3]
+
+    before = _grab()
+    win.set_control_well("B3")
+    qapp.processEvents()
+    after = _grab()
+    assert not np.array_equal(before, after), "setting the control changed no pixels at all"
+
+    ri, ci = win._fov_index["B3"]["rc"]
+    x, y, w, h = ov._cell_rect(ri, ci)
+    cell = after[int(y):int(y + h), int(x):int(x + w)].astype(int)
+    blue = V._CONTROL_BLUE
+    hit = (np.abs(cell[..., 2] - blue.red()) <= 24) & (np.abs(cell[..., 1] - blue.green()) <= 24) \
+        & (np.abs(cell[..., 0] - blue.blue()) <= 24)
+    assert hit.sum() > 20, "no light-blue control frame on the control well's cell"
+    # ...and it is NOT the transient red current-FOV box wearing a different name.
+    assert blue.red() < blue.blue(), "the control frame must be blue, not red"
+    win.close()

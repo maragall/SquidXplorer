@@ -64,8 +64,8 @@ from PyQt5.QtCore import (
 from PyQt5.QtGui import QColor, QFont, QImage, QPainter, QPalette, QPen, QPixmap, QRegion
 from PyQt5.QtWidgets import (
     QAction, QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel,
-    QLineEdit, QMainWindow, QPlainTextEdit, QPushButton, QScrollArea, QSlider, QSpinBox, QSplitter,
-    QStyleFactory, QTabBar, QTabWidget, QVBoxLayout, QWidget,
+    QLineEdit, QMainWindow, QMenu, QPlainTextEdit, QPushButton, QScrollArea, QSlider, QSpinBox,
+    QSplitter, QStackedWidget, QStyleFactory, QTabBar, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from squidmip._engine import _default_workers, available_projectors
@@ -95,6 +95,33 @@ _MIN_PREVIEW_BOX_PX = 4    # smallest FOV box (of _CELL) the RAW preview will bo
 #                            field to draw specks is pure cost. The operator path is unaffected.
 _CLICK_SLOP = 3                       # px of travel below which a Shift-drag counts as a click
 #                                        (matches the pan threshold, so the two gestures agree)
+_CONTROL_BLUE = QColor("#7fd4ff")     # the CONTROL WELL's persistent frame (IMA-248/IMA-260).
+#                                       Light blue, and deliberately NOT _RED: the red box is the
+#                                       transient current-FOV, the blue frame is a pinned reference.
+
+# --- Legibility floor for read-at-a-distance copy (project-wide constraint) --------------------
+# The spec is angular, not typographic: 16 arcmin MINIMUM, 20 arcmin optimal, which this project
+# has already converted to 17.3 px at 60 cm and 28.8 px at 1 m. Scaling the floor to 1 m gives
+# 28.8 * 16/20 = 23.0 px, so 24 px clears the 16-arcmin minimum at BOTH seating distances, and
+# 30 px clears the 20-arcmin optimum at 1 m. Empty-state copy is exactly the text a user reads
+# while leaning back from the big monitor, so it is sized for the far case, not the near one.
+_EMPTY_BODY_PX = 24                   # >= 23.0 px = 16 arcmin at 1 m (20.3 arcmin at 60 cm)
+_EMPTY_HEAD_PX = 30                   # >= 28.8 px = 20 arcmin at 1 m (the optimum, not the floor)
+
+# The empty exploration pane's copy (IMA-260). Framed as an EXAMPLE of what you might do, never as
+# an instruction: Julio asked for "example usage", so the pane shows one concrete path and then
+# says out loud that it is only an example. Primary line first (right-click -> Control Well),
+# secondary second (Shift-drag). Plain sentences, no UI jargon.
+_EMPTY_EXPLORE_HEAD = "Exploration pane"
+_EMPTY_EXPLORE_LEDE = "Nothing here yet. Here is an example of how you might use this pane."
+_EMPTY_EXPLORE_PRIMARY = (
+    "For example, you can right-click a well on the plate and choose Control Well from the menu. "
+    "That well opens here and stays, so you can compare the other wells against it.")
+_EMPTY_EXPLORE_SECONDARY = (
+    "You can also hold Shift and drag across the plate to pick a few wells. They open here in "
+    "their own tab.")
+_EMPTY_EXPLORE_CODA = "These are only examples. Whatever you open lands in this pane."
+_EXPLORE_W = 380                      # pane 3's width on open, in px (see PlateWindow.__init__)
 
 # Processing-status hue coding, adopted from Hongquan Li's record-zstack-viewer plate navigator.
 # Deliberately colorblind-safe (blue/amber, never red/green) with a shape cue for failure (the x).
@@ -142,6 +169,12 @@ _CHECK_QSS = (   # checkbox with a visible white outline on the box
 )
 _TERM_QSS = ("QPlainTextEdit{background:#05070b;color:#8bffd0;border:none;"
              "font-family:'SF Mono','Menlo',monospace;font-size:12px;padding:10px;}")
+# The plate's right-click dropdown (IMA-260). Sized at 16 px — a menu is read at a glance with the
+# cursor already on it, so it does not carry the empty-state copy's read-from-your-chair floor.
+_MENU_QSS = ("QMenu{background:#0d1420;color:#e6edf3;border:1px solid #232b3a;font-size:16px;}"
+             "QMenu::item{padding:7px 18px;}"
+             "QMenu::item:selected{background:#1c2b44;}"
+             "QMenu::item:disabled{color:#57606a;}")
 
 
 def _signal_names(cls) -> tuple:
@@ -1338,6 +1371,10 @@ class PlateOverview(QWidget):
     hovered = pyqtSignal(str)              # region id (or "" off-plate), for the window's readout
     wellActivated = pyqtSignal(str, int)   # (well_id, fov_index) double-clicked -> load in ndviewer
     selectionChanged = pyqtSignal(list)    # acquired well ids the operator picked (row-major)
+    controlRequested = pyqtSignal(str)     # right-click menu: set this region as the CONTROL WELL
+                                           # ("" = clear it). The plate ASKS; the window owns the
+                                           # answer and hands it back via set_control — the widget
+                                           # never sets its own frame (IMA-248's one-owner rule).
     marqueeSelected = pyqtSignal(list)     # ...and specifically by a Shift-DRAG: opens an exploration
                                            # tab (IMA-205). Shift+CLICK refines the selection one well
                                            # at a time and deliberately does NOT fire it — otherwise
@@ -1401,6 +1438,9 @@ class PlateOverview(QWidget):
         #                               paintEvent membership-tests it once per cell, 1536x on a 1536wp.
         self._marquee = None          # (x0, y0, x1, y1) widget px while a Shift-drag is in flight
         self._marquee_add = False     # this drag unions (Shift+Alt) rather than replaces
+        self._control = None          # (row_index, col_index) of the CONTROL WELL, or None. A
+        #                               MIRROR of PlateWindow._control_well, written only by
+        #                               set_control — the window owns the identity (IMA-248).
         self._press = None            # (x, y, ox, oy) at left-press, for drag-to-pan
         self._panning = False
         self._user_view = False       # True once the user wheel-zooms/pans (stop auto-fitting)
@@ -2200,6 +2240,51 @@ class PlateOverview(QWidget):
         self._dismiss_loupe()
         super().focusOutEvent(e)
 
+    # -- CONTROL WELL (IMA-248, made reachable by IMA-260's empty-state example) -------------------
+    def set_control(self, well_id: Optional[str]):
+        """Mirror the window's control-well identity onto the plate. ``None``/unknown clears it.
+
+        Deliberately a setter and not a toggle: there is ONE control at a time and ONE thing that
+        decides which, so the plate cannot drift out of agreement with the exploration pane by
+        answering a click locally."""
+        rc = next((k for k, v in self._by_rc.items() if v == well_id), None) if well_id else None
+        if rc == self._control:
+            return
+        self._control = rc
+        self.update()
+
+    def control_well(self) -> Optional[str]:
+        """The control's region id as the PLATE currently draws it — for asserting that all three
+        views agree by reading them, rather than by trusting that they were all told."""
+        return self._by_rc.get(self._control) if self._control is not None else None
+
+    def contextMenuEvent(self, e):
+        """Right-click a region -> the dropdown the empty pane's example points at.
+
+        This menu IS the example: 'right-click a well and choose Control Well'. It exists on the
+        plate rather than in a menu bar because that is the sentence the user said, and an example
+        that names a gesture the app does not have is worse than no example at all."""
+        c = self._cell(e.x(), e.y())
+        well = c["well_id"] if c else None
+        menu = QMenu(self)
+        menu.setStyleSheet(_MENU_QSS)
+        if well:
+            if self._control is not None and self._by_rc.get(self._control) == well:
+                act = menu.addAction(f"Clear Control Well ({well})")
+                act.triggered.connect(lambda *_: self.controlRequested.emit(""))
+            else:
+                act = menu.addAction(f"Control Well  ·  set {well} as the reference")
+                act.triggered.connect(lambda *_, w=well: self.controlRequested.emit(w))
+        else:
+            act = menu.addAction("Control Well")     # off-plate: say why it is unavailable
+            act.setEnabled(False)
+        if self._control is not None and self._by_rc.get(self._control) != well:
+            clear = menu.addAction(f"Clear Control Well ({self._by_rc.get(self._control)})")
+            clear.triggered.connect(lambda *_: self.controlRequested.emit(""))
+        self._context_menu = menu           # keep a ref so offscreen tests can drive the actions
+        menu.popup(e.globalPos())
+        e.accept()
+
     def mouseDoubleClickEvent(self, e):
         # Qt sends press/release/dblclick — the second press already re-armed the hold timer, so
         # kill it here or one double-click both opens the well AND raises a loupe.
@@ -2324,6 +2409,17 @@ class PlateOverview(QWidget):
                 continue
             p.setPen(_ACCENT if hov else _MUTED)
             p.drawText(int(self._ox), int(ay + r * cd), _HDR, int(cd), Qt.AlignCenter, str(self._rows[r]))
+        if self._control is not None and self._control in self._by_rc:
+            # THE CONTROL WELL: a PERSISTENT light-blue frame, labelled, drawn UNDER the red box so
+            # the transient current-FOV marker still reads when the two land on the same cell. The
+            # label is what stops "a blue box" from being a mystery a week later.
+            cx, cy, cw, ch = self._cell_rect(*self._control)
+            p.setPen(QPen(_CONTROL_BLUE, 3))
+            p.setBrush(Qt.NoBrush)
+            p.drawRect(int(cx) + 1, int(cy) + 1, int(cw) - 2, int(ch) - 2)
+            p.setFont(QFont("Helvetica Neue", 10, QFont.Bold))
+            p.drawText(QRectF(cx, cy + 2, max(cw, 50.0), 16.0), int(Qt.AlignCenter), "Control")
+            p.setFont(QFont("Helvetica Neue", 11, QFont.DemiBold))
         if self._sel is not None:          # the CURRENT well in the detail viewer = a red BOX
             p.setPen(QPen(_RED, 2))
             p.setBrush(Qt.NoBrush)
@@ -3208,6 +3304,8 @@ class PlateWindow(QMainWindow):
         self._readout_base = ""
         self._dropped_pushes = 0
         self._active_exploration = None   # the exploration tab currently in front, if any
+        self._control_well = None     # THE control well (IMA-248/IMA-260): one region id, owned
+        #                               here, mirrored onto the plate frame and pane 3's pinned tab
         self._tabs_muted = False      # suppress _on_tab_changed during bulk teardown (ingest)
         self._run_out_dir = None      # output dir of the in-flight SAVE run (for partial cleanup)
         self._run_tab_key = None      # exploration tab that owns the in-flight run, if any
@@ -3230,11 +3328,13 @@ class PlateWindow(QMainWindow):
         #            switch; raw plane paths are re-registered so it isn't black.
         #   PANE 3 = the EXPLORATION pane: one tab per Shift-dragged FOV subset (IMA-205/221).
         #
-        # Pane 3 starts COLLAPSED and HIDDEN, and it is the first exploration tab that reveals it
-        # (_sync_explore_pane). A user who never Shift-drags sees the unchanged two-pane app — an
-        # empty third pane permanently eating a fifth of the monitor is a cost you would pay for a
-        # feature you are not using. Exploration tabs moved OUT of the process console to get here:
-        # the console is pane 1, and pane 1 is not where the user asked exploration to live.
+        # Pane 3 is VISIBLE FROM OPEN (IMA-260), reversing IMA-237's reveal-on-first-drag. The
+        # saving of a fifth of the monitor bought undiscoverability: you cannot find a pane that is
+        # not there, so nobody found the Shift-drag that was the only way to make it appear. It now
+        # opens showing EXAMPLE USAGE (_build_explore_empty) and swaps to the tab bar the moment it
+        # holds real content — a pane that teaches costs its width back immediately.
+        # Exploration tabs moved OUT of the process console to get here: the console is pane 1, and
+        # pane 1 is not where the user asked exploration to live.
 
         # top-left: the process console (build the home tab first — it owns self._readout, which
         # _make_detail_viewer writes to if ndviewer is unavailable).
@@ -3263,11 +3363,22 @@ class PlateWindow(QMainWindow):
         self._explore_tabs.setAutoFillBackground(True)
         self._explore_tabs.setStyleSheet(_TABS_DARK)
         self._explore_tabs.setTabsClosable(True)
-        self._explore_tabs.setMinimumWidth(300)   # revealed at a readable width or not at all
         self._explore_tabs.tabCloseRequested.connect(
             lambda i: self._close_op_tab(i, self._explore_tabs))
         self._explore_tabs.currentChanged.connect(self._on_tab_changed)
-        self._explore_tabs.hide()                 # collapsed until the first exploration tab opens
+        # Pane 3 is a two-page STACK, not a bare tab bar: page 0 is the example-usage empty state,
+        # page 1 is the tab bar. One widget owns "what pane 3 shows", so the empty copy and the
+        # tabs can never be on screen together and can never both be off it. _explore_tabs.isHidden()
+        # stays truthful for free — QStackedWidget hides the page that is not current — which is
+        # exactly what "there are no exploration tabs" means, and what callers already read.
+        self._explore_empty = self._build_explore_empty()
+        self._explore_pane = QStackedWidget()
+        self._explore_pane.setStyleSheet(f"background:{_BG};")
+        self._explore_pane.addWidget(self._explore_empty)   # page 0: example usage
+        self._explore_pane.addWidget(self._explore_tabs)    # page 1: real content
+        # Wide enough to set 24 px copy without one word per line — the legibility floor is a floor
+        # on the TEXT, and text you have to read a syllable at a time is not legible either.
+        self._explore_pane.setMinimumWidth(360)
 
         # right: the ndviewer array viewer directly (a singleton — no tab)
         self._detail = self._make_detail_viewer()
@@ -3356,18 +3467,19 @@ class PlateWindow(QMainWindow):
         outer.setChildrenCollapsible(False)
         outer.addWidget(left_col)                  # pane 1: plate + controls with the tabs
         outer.addWidget(right_frame)               # pane 2: the initial viewer
-        outer.addWidget(self._explore_tabs)        # pane 3: exploration (hidden -> zero width)
-        self._explore_tabs.hide()                  # re-assert: addWidget reparents and can re-show
-        outer.setSizes([760, 760, 0])              # divider at the middle while pane 3 is collapsed
-        # Stretch: panes 1 and 2 share the window as before; pane 3 gets 0 so a window RESIZE grows
-        # the plate and the viewer, never the exploration strip. Requirement 5 — pane 3 must not
-        # squash the plate view — is enforced twice: here, and in _sync_explore_pane, which carves
-        # pane 3's width out of the VIEWER pane on reveal rather than out of the plate pane.
+        outer.addWidget(self._explore_pane)        # pane 3: exploration — VISIBLE from open
+        outer.setSizes([600, 620, _EXPLORE_W])     # three real panes on a 1600 px window
+        # Stretch: panes 1 and 2 share the window; pane 3 gets 0 so a window RESIZE grows the plate
+        # and the viewer, never the exploration strip. Requirement 5 — pane 3 must not squash the
+        # plate view — is why its width is a CONSTANT taken once at construction rather than a
+        # share: the pane never widens behind the user's back, and never has to be carved out of a
+        # neighbour later, because it was there from the first frame.
         outer.setStretchFactor(0, 1)
         outer.setStretchFactor(1, 1)
         outer.setStretchFactor(2, 0)
         self._split = outer
         self.setCentralWidget(outer)
+        self._sync_explore_pane()                  # page 0 (the example copy) is what an empty pane shows
 
         self.setAcceptDrops(True)
         if initial_path:
@@ -3447,40 +3559,62 @@ class PlateWindow(QMainWindow):
 
     # -- operator UIs live as tabs INSIDE pane 1 (home tab + one per opened operator); exploration
     # -- tabs live in pane 3. Both bars share every path below — *tabs* says which one. -----------
+    def _build_explore_empty(self) -> QWidget:
+        """Pane 3 with nothing in it: EXAMPLE USAGE, not a blank strip (IMA-260).
+
+        The pane is visible from open, so 'empty' is a state a user will actually look at, and a
+        blank column teaches nothing — the Shift-drag and the right-click that fill this pane are
+        both invisible gestures with no button anywhere. So the empty state names one concrete
+        path (right-click -> Control Well, the primary), then a second (Shift-drag), then says
+        plainly that these are only examples. It is illustration, not instruction: the user asked
+        to be shown a way in, not told what to do.
+
+        Every string here is sized at or above the project's legibility floor — see
+        _EMPTY_BODY_PX. Copy nobody can read from their chair is a blank pane with extra steps.
+        """
+        w = QWidget()
+        w.setStyleSheet(f"background:{_BG};color:#e6edf3;")
+        v = QVBoxLayout(w)
+        v.setContentsMargins(22, 26, 22, 26)
+        v.setSpacing(18)
+
+        head = QLabel(_EMPTY_EXPLORE_HEAD)
+        head.setWordWrap(True)
+        head.setStyleSheet(f"color:#e6edf3;font-size:{_EMPTY_HEAD_PX}px;font-weight:800;")
+        v.addWidget(head)
+
+        for text, color in ((_EMPTY_EXPLORE_LEDE, "#c3ccd9"),
+                            (_EMPTY_EXPLORE_PRIMARY, "#e6edf3"),      # PRIMARY: Control Well
+                            (_EMPTY_EXPLORE_SECONDARY, "#c3ccd9"),    # secondary: Shift-drag
+                            (_EMPTY_EXPLORE_CODA, "#8b98ad")):
+            lab = QLabel(text)
+            lab.setWordWrap(True)
+            lab.setStyleSheet(f"color:{color};font-size:{_EMPTY_BODY_PX}px;line-height:150%;")
+            v.addWidget(lab)
+        v.addStretch(1)
+        return w
+
+    def explore_empty_text(self) -> str:
+        """Everything pane 3 is currently SAYING while empty — '' once it holds content.
+
+        One reader for the whole empty state, so a check cannot pass by finding a label that is on
+        the widget but not on the screen: it returns text only while the empty page is the page
+        pane 3 is showing."""
+        if self._explore_pane.currentWidget() is not self._explore_empty:
+            return ""
+        head = self._explore_empty.findChildren(QLabel)
+        return "\n".join(lab.text() for lab in head)
+
     def _sync_explore_pane(self):
-        """Reveal pane 3 on its first tab, collapse it again when its last tab goes.
+        """Show the tab bar once pane 3 holds a tab, and the EXAMPLE COPY whenever it does not.
 
-        The pane is a real QSplitter child from construction, but HIDDEN — a hidden splitter child
-        occupies zero width, so before the first Shift-drag the window is the unchanged two-pane
-        app rather than a two-pane app with an empty strip bolted on.
-
-        The width it takes on reveal comes out of the VIEWER pane, never the plate pane: the plate
-        is the thing the user is navigating, and a new tab appearing must not shrink it."""
-        # isHidden(), NOT isVisible(): isVisible() is False for every child of a window that has
-        # not been shown yet, so keying off it would re-run the reveal on each call (and would make
-        # "is pane 3 collapsed?" unanswerable before the first show()). isHidden() is the explicit
-        # hide flag, which is exactly the state this method owns.
-        want_visible = self._explore_tabs.count() > 0
-        if want_visible == (not self._explore_tabs.isHidden()):
-            return
-        if not want_visible:
-            self._explore_tabs.hide()
-            sizes = self._split.sizes()
-            if len(sizes) == 3 and sizes[2]:
-                sizes[1] += sizes[2]              # give the width back to the viewer it came from
-                sizes[2] = 0
-                self._split.setSizes(sizes)
-            return
-        sizes = self._split.sizes()
-        self._explore_tabs.show()
-        if len(sizes) == 3:
-            floor = 360                           # leave the viewer usable, or don't take from it
-            want = max(self._explore_tabs.minimumWidth(), int(sum(sizes) * 0.22))
-            take = max(0, min(want, sizes[1] - floor))
-            if take:
-                sizes[1] -= take
-                sizes[2] = take
-                self._split.setSizes(sizes)
+        Pane 3 keeps its width either way (IMA-260) — it is a permanent third column, so this is a
+        page swap inside it, never a collapse. Both directions matter: the copy has to come back
+        when the last tab closes, or a user who explores once and tidies up is left with the blank
+        strip the empty state exists to prevent."""
+        page = self._explore_tabs if self._explore_tabs.count() > 0 else self._explore_empty
+        if self._explore_pane.currentWidget() is not page:
+            self._explore_pane.setCurrentWidget(page)
 
     def _open_op_tab(self, key: str, title: str, builder, tabs=None):
         """Open (or focus) a UI as a tab. Built lazily, once. *tabs* is the bar it belongs in —
@@ -3544,6 +3678,9 @@ class PlateWindow(QMainWindow):
         if index < 0:
             return None
         w = tabs.widget(index)
+        if w is not None and w is self._op_tabs.get(self.CONTROL_KEY):
+            return None      # the CONTROL tab is pinned: floating it would leave pane 3 claiming
+            #                  no control while the plate still wears the blue frame (IMA-248)
         key = next((k for k, v in self._op_tabs.items() if v is w), None)
         if key is None:
             return None
@@ -3698,6 +3835,65 @@ class PlateWindow(QMainWindow):
                           lambda: self._build_exploration_tab(regions, key),
                           tabs=self._explore_tabs)
         return key
+
+    # -- CONTROL WELL (IMA-248's unit, corrected from FOV to WELL; reachable because IMA-260's
+    # -- empty-state example points at it) ---------------------------------------------------------
+    CONTROL_KEY = "control"           # the pinned tab's registry key: there is only ever one
+
+    def set_control_well(self, well_id: Optional[str]):
+        """Pin *well_id* as THE control: the reference region every other well is compared against.
+
+        A control well is standard HCS practice — you read a treated well against an untreated one
+        — and under IMA-253's model a well IS a region (a mosaic of FOVs), which is why the unit
+        here is the well and not a single field.
+
+        ONE piece of state, ``self._control_well``, owned here. The plate and the exploration pane
+        are told from it; neither keeps its own answer and neither is asked. That is the whole
+        design constraint of IMA-248: this project has already shipped four bugs whose shape was
+        two places holding the same fact and disagreeing.
+
+        ``None`` or ``""`` clears it. Setting a different well releases the previous one — the
+        release is implicit in there being one variable, not a step that can be forgotten."""
+        well_id = well_id or None
+        if well_id is not None and well_id not in self._fov_index:
+            self._readout.setText(f"{well_id} is not a region of this acquisition")
+            return
+        self._control_well = well_id
+        if self._overview is not None:
+            self._overview.set_control(well_id)          # the frame is DERIVED, never independent
+        self._sync_control_tab()
+        self._readout.setText(f"control well: {well_id}" if well_id else "control well cleared")
+
+    def control_well(self) -> Optional[str]:
+        """The one control-well identity. Every view answers this question by asking here."""
+        return self._control_well
+
+    def _sync_control_tab(self):
+        """Make pane 3's pinned first tab agree with ``self._control_well``.
+
+        The control is a PINNED tab (IMA-248): always index 0, and with no close button — you clear
+        a control from the plate, where you set it, not by tidying a tab away and leaving a blue
+        frame behind on a well that is no longer anything."""
+        old = self._op_tabs.get(self.CONTROL_KEY)
+        if old is not None and getattr(old, "regions", None) != ([self._control_well]
+                                                                 if self._control_well else None):
+            idx = self._explore_tabs.indexOf(old)        # a DIFFERENT (or no) control: retire it
+            if idx >= 0:
+                self._explore_tabs.removeTab(idx)
+            self._dispose_tab_widget(old)
+        if not self._control_well:
+            self._sync_explore_pane()
+            return
+        if self._op_tabs.get(self.CONTROL_KEY) is None:
+            w = self._build_exploration_tab([self._control_well], self.CONTROL_KEY)
+            self._op_tabs[self.CONTROL_KEY] = w
+            self._explore_tabs.addTab(w, f"Control · {self._control_well}")
+        idx = self._explore_tabs.indexOf(self._op_tabs[self.CONTROL_KEY])
+        if idx > 0:
+            self._explore_tabs.tabBar().moveTab(idx, 0)  # pinned FIRST, ahead of every subset tab
+        self._explore_tabs.tabBar().setTabButton(0, QTabBar.RightSide, None)   # ...and not closable
+        self._sync_explore_pane()
+        self._explore_tabs.setCurrentIndex(0)
 
     def _current_exploration(self) -> Optional["_ExplorationTab"]:
         """The exploration tab the plate and viewer follow: pane 3's FRONT tab, or None when pane 3
@@ -4479,6 +4675,8 @@ class PlateWindow(QMainWindow):
         # layer keys point at a _fov_index that is about to be rebuilt for a different plate.
         self._close_exploration_tabs()
         self._active_exploration = None
+        self._control_well = None     # a control is a region OF THIS acquisition; the next plate
+        #                               has no reference until the user picks one on it
         self._push_index = None
         self._run_tab_key = None
         self._reader = self._meta = None
@@ -4546,6 +4744,7 @@ class PlateWindow(QMainWindow):
         self._overview.wellActivated.connect(self.activate_well)
         self._overview.selectionChanged.connect(self._on_selection_changed)
         self._overview.marqueeSelected.connect(self._on_marquee_selected)
+        self._overview.controlRequested.connect(self.set_control_well)
         self._plate_mode = "raw"                     # a freshly-opened plate shows raw previews
         self._plate_title.setText(f"{self._acq_name}   ·   raw")   # bottom-left plate-pane title
         self._op_stack.reset()                       # fresh layer stack (base only)
@@ -4761,6 +4960,7 @@ class PlateWindow(QMainWindow):
         # to the raw acquisition) and go back to identity push indexing over the full plate.
         self._close_exploration_tabs()
         self._active_exploration = None
+        self._control_well = None                 # ...including the control (a raw-plate region)
         self._push_index = None
         self._run_tab_key = None
         wells_rc, self._fov_index, self._order, worker_wells = {}, {}, [], []
@@ -4790,6 +4990,7 @@ class PlateWindow(QMainWindow):
         self._overview.set_contrast_scope(self._scope_combo.currentText())   # IMA-207
         self._overview.hovered.connect(self._on_hover)
         self._overview.wellActivated.connect(self.activate_well)
+        self._overview.controlRequested.connect(self.set_control_well)
         self._active_op_key = "computed"
         if getattr(self, "_raw_btn", None):
             self._raw_btn.hide()                      # a computed plate has no raw to return to
