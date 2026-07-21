@@ -114,16 +114,63 @@ stitch-quality run against a broken-AF acquisition measures autofocus, not stitc
 
 Neither blocks the synthetic harness, which runs today.
 
-## 4. Recommendation
+## 4. What was built, and what it measured
+
+Two things landed on this branch. Both run today; neither waits on the laser-AF fix.
+
+**`squidmip/_oracle.py` + 26 tests — the acceptance gate.** It grades a stitcher without
+containing one: cut a known image into overlapping tiles at known positions, hand the tiles to a
+stitcher, check whether it puts them back. Deliberately no registration inside it — a grader that
+reimplements the thing it grades is circular. numpy only, so it costs the shipped package nothing.
+The load-bearing tests are the negative ones: a stitcher that ignores the pixels and returns the
+nominal grid must FAIL, and the seam metric must spike when a tile is misplaced. A gate that
+passes everything is worse than no gate.
+
+Two bugs surfaced while building it, both worth recording. Random per-tile offsets leave parts of
+the canvas covered by no tile, so "bit-exact" and the seam metric were both scoring zero-padding;
+every metric now masks by actual coverage. And perturbing tiles by more than half the overlap
+**tears** the mosaic — a real property of stitching, not a quirk of the harness — so the fixture
+refuses to build one rather than silently under-testing.
+
+**`scripts/measure_overlap.py` + 14 tests — the survey.** Run over all 5 acquisitions on disk:
+
+| Acquisition | FOV/well | Grid | Overlap | `original_coordinates/` |
+|---|---|---|---|---|
+| `20x_scan_2025-09-05_17-57-50` | 36 | 6×6 | **9.2%** | yes |
+| `synthetic_2x2_wellplate` | 36 ×4 wells | 6×6 | **9.2%** | no |
+| `test_10x_laser_af_z_stack…yy` | 27 / 28 | 6×5 partial | n/a | yes |
+| `sim_1536wp` (×2) | 1 | 1×1 | n/a | no |
+
+Six results that change decisions:
+
+1. **Overlap is ~9.2% and consistent, so registration is viable.** The 0%-overlap case that would
+   have killed correlation outright does not occur anywhere on disk.
+2. **`original_coordinates/` exists in only 2 of 5 acquisitions — a fallback is mandatory**, not a
+   nice-to-have. Its necessity is now settled; its design is not.
+3. **`manual0`/`manual1` regions are real**, so the `parse_well_id` blocker is a live defect.
+4. **Non-rectangular scans are real** — 27 and 28 FOVs that do not fill their 6×5 grid. A strict
+   lattice gate would have refused valid data, exactly as the outside voice predicted.
+5. **Multi-z coordinate files are real** (10 z_levels). IMA-187's recorded worry is genuine, and
+   `original_coordinates`' explicit `z_level` column resolves it by filtering rather than guessing
+   — which strengthens the case for the correction in §3.
+6. **A 20× units trap.** `acquisition parameters.json` stores the raw *sensor* pitch plus
+   `objective.magnification`; `acquisition.yaml` stores object-space directly. Reading the JSON
+   value as object-space reports **95% overlap on a 9% scan**. Caught during this work and pinned
+   with a regression test.
+
+## 5. Recommendation
 
 Re-scope IMA-211 to the oracle; close the rest as duplicated. Highest value first: the synthetic
 cut-and-restitch harness (runs today, becomes IMA-222's acceptance gate), then measuring the real
 overlap fraction, then raising the geometry correction against IMA-187 before it merges.
 
-## 5. Open questions for merge review
+## 6. Open questions for merge review
 
 1. Does IMA-187 accept the geometry correction? If yes its FOV-keying task shrinks and its multi-z
-   worry closes; if no, record why `original_coordinates` was rejected.
+   worry closes; if no, record why `original_coordinates` was rejected. The survey found a real
+   10-z_level dataset, so this is not theoretical.
+1b. What is the fallback when `original_coordinates/` is absent (3 of 5 acquisitions)? Row-order
+   inference with a loud cross-check, or refuse outright? Necessity is settled; design is not.
 2. IMA-222's B1 — naive placement vs. re-opening the no-tilefusion rule vs. shipping mislabeled —
    remains open. The scale and overlap findings are inputs to it; IMA-211 does not decide it.
 3. Does IMA-211 stay a separate ticket once re-scoped to the oracle, or fold into IMA-222?

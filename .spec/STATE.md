@@ -4,7 +4,7 @@
 - **Branch:** juliomaragall/ima-211-stitcher-operators
 - **Spec:** .spec/open/ima-211.md
 - **Tracked record:** docs/ima-211-eng-review.md
-- **Phase:** PLAN complete (eng review + outside voice, 2026-07-20)
+- **Phase:** THINK
 - **Mode:** attended → handed off; verified factual corrections applied without re-asking
 
 ## Now
