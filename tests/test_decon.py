@@ -390,3 +390,25 @@ def test_decon3d_op_receives_the_stack_through_project_well(squid_dataset):
 def test_deconvolve_stack_rejects_a_2d_input():
     with pytest.raises(ValueError, match=r"needs \(Z, Y, X\)"):
         deconvolve_stack(np.zeros((8, 8), np.float32), FAST_OPTICS)
+
+
+# --- the channel-label seam (IMA-252) ------------------------------------------------------
+
+def test_channel_labels_from_squidmips_own_reader_parse_into_a_wavelength():
+    """A caller holds the label squidmip's reader gave them. It has to work.
+
+    Squid writes channels as ``Fluorescence_488_nm_Ex`` - UNDERSCORED - and that is what
+    ``reader.metadata["channels"]`` reports. petakit's parser matches ``(\\d{3})\\s*nm``, so
+    the underscored form raised ValueError and ``OpticsParams.from_acquisition(path,
+    channel=...)`` could not be called with the project's own channel names at all. All
+    three spellings must land on the same emission wavelength.
+    """
+    from squidmip._decon import _as_channel_name
+    import petakit
+
+    wavelengths = {
+        petakit.wavelength_from_channel(_as_channel_name(name))
+        for name in ("488", "488 nm", "Fluorescence_488_nm_Ex", "Fluorescence 488 nm Ex")
+    }
+    assert len(wavelengths) == 1
+    assert 0.50 < wavelengths.pop() < 0.55       # the 488 line's Stokes-shifted emission

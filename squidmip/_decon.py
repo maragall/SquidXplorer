@@ -136,7 +136,13 @@ def _as_channel_name(channel) -> str:
     than duplicate the Stokes-shift table here, re-spell the label and keep using his table.
     """
     text = str(channel).strip()
-    return f"{text} nm" if text.isdigit() else text
+    if text.isdigit():
+        return f"{text} nm"
+    # Squid's own channel labels are UNDERSCORED ("Fluorescence_405_nm_Ex"), which is what
+    # squidmip's reader reports and therefore what a caller has in hand. petakit's regex wants
+    # whitespace before "nm", so the underscored form raises there too (IMA-252). Same one-line
+    # re-spelling, same table.
+    return text.replace("_", " ")
 
 
 @dataclass(frozen=True)
