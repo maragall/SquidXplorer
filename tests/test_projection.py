@@ -179,6 +179,68 @@ def test_project_well_multi_timepoint(tmp_path):
     np.testing.assert_array_equal(out[1, 0, 0], np.max(np.stack(list(t1.values())), axis=0))
 
 
+def _two_timepoint_reader(tmp_path):
+    """A 2-timepoint, 2-z, single-channel acquisition; returns (reader, t0_planes, t1_planes)."""
+    root = tmp_path / "acq"
+    ch = "Fluorescence_638_nm_-_Penta"
+    t0 = {0: _plane(0), 1: _plane(5)}
+    t1 = {0: _plane(100), 1: _plane(105)}
+    for z, arr in t0.items():
+        _write_plane(root, "A1", 0, z, ch, arr, t=0)
+    for z, arr in t1.items():
+        _write_plane(root, "A1", 0, z, ch, arr, t=1)
+    _write_min_yaml(root, nz=2, nt=2)
+    return open_reader(root), t0, t1
+
+
+def test_project_well_t_selects_one_timepoint(tmp_path):
+    """IMA-228: single-frame consumers need one timepoint, not all of them."""
+    reader, t0, t1 = _two_timepoint_reader(tmp_path)
+
+    out = project_well(reader, "A1", 0, t=1)
+    assert out.shape == (1, 1, 1, 4, 4)
+    np.testing.assert_array_equal(out[0, 0, 0], np.max(np.stack(list(t1.values())), axis=0))
+
+    out0 = project_well(reader, "A1", 0, t=0)
+    np.testing.assert_array_equal(out0[0, 0, 0], np.max(np.stack(list(t0.values())), axis=0))
+
+
+def test_project_well_t_reads_only_that_timepoint(tmp_path):
+    """The reason the parameter exists: without it a caller wanting one frame paid an
+    n_t-fold read of the whole z-stack and then discarded n_t-1 of the results."""
+    reader, _, _ = _two_timepoint_reader(tmp_path)
+    seen = []
+    real_read = type(reader).read
+
+    def spy(self, region, fov, channel, z, t=0):
+        seen.append(t)
+        return real_read(self, region, fov, channel, z, t)
+
+    type(reader).read = spy
+    try:
+        project_well(reader, "A1", 0, t=1)
+    finally:
+        type(reader).read = real_read
+    assert set(seen) == {1}
+    assert len(seen) == 2, "one read per z level, for the single requested timepoint only"
+
+
+def test_project_well_t_none_keeps_every_timepoint(tmp_path):
+    """Backward compatibility: the default must remain 'project everything'."""
+    reader, _, _ = _two_timepoint_reader(tmp_path)
+    assert project_well(reader, "A1", 0).shape == (2, 1, 1, 4, 4)
+    np.testing.assert_array_equal(
+        project_well(reader, "A1", 0), project_well(reader, "A1", 0, t=None)
+    )
+
+
+@pytest.mark.parametrize("bad", [2, -1, 99])
+def test_project_well_t_out_of_range_raises_named(tmp_path, bad):
+    reader, _, _ = _two_timepoint_reader(tmp_path)
+    with pytest.raises(ValueError, match="out of range"):
+        project_well(reader, "A1", 0, t=bad)
+
+
 def test_project_requires_acquisition_yaml(tmp_path):
     # Single metadata format: acquisition.yaml is required. A dataset with valid frames but
     # no acquisition.yaml (or only a legacy JSON) must fail loud, not silently degrade.

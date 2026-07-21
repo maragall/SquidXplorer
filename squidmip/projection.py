@@ -33,7 +33,7 @@ Design contracts:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Callable, Iterable
+from typing import TYPE_CHECKING, Callable, Iterable, Optional
 
 import numpy as np
 
@@ -121,6 +121,7 @@ def project_well(
     region: str,
     fov: int,
     reduce: Callable[[Iterable[np.ndarray]], np.ndarray] = project,
+    t: Optional[int] = None,
 ) -> np.ndarray:
     """Project one FOV's z-stack for every channel and timepoint.
 
@@ -136,13 +137,19 @@ def project_well(
     reduce:
         The z-reduction primitive. Defaults to :func:`project` (MIP). IMA-188 passes its
         own projector here (EDF/EMF/…) — this is the pluggable seam; 183 ships MIP only.
+    t:
+        Which timepoint to project. ``None`` (default) projects *all* of them, which is
+        what every plate-scale caller wants. An int projects only that one and returns
+        ``T=1`` — the single-frame consumers (IMA-228's Minerva export) need one timepoint,
+        and reading all ``n_t`` to then discard ``n_t - 1`` of them is an ``n_t``-fold
+        wasted read of the whole z-stack.
 
     Returns
     -------
     np.ndarray
-        Shape ``(n_t, n_channels, 1, Y, X)``, dtype ``reader.metadata["dtype"]``.
-        Channels are ordered as ``reader.metadata["channels"]`` (kept distinct — no
-        z-as-channel collapse).
+        Shape ``(T, n_channels, 1, Y, X)`` where ``T`` is ``n_t`` when ``t is None`` and
+        ``1`` otherwise; dtype ``reader.metadata["dtype"]``. Channels are ordered as
+        ``reader.metadata["channels"]`` (kept distinct — no z-as-channel collapse).
 
     Notes
     -----
@@ -155,11 +162,18 @@ def project_well(
     n_t = meta["n_t"]
     y, x = meta["frame_shape"]
 
-    out = np.empty((n_t, len(channels), 1, y, x), dtype=meta["dtype"])
-    for t in range(n_t):
+    if t is None:
+        timepoints = range(n_t)
+    else:
+        if not 0 <= t < n_t:
+            raise ValueError(f"timepoint {t} out of range for an acquisition with n_t={n_t}")
+        timepoints = (t,)
+
+    out = np.empty((len(timepoints), len(channels), 1, y, x), dtype=meta["dtype"])
+    for t_i, t_src in enumerate(timepoints):
         for c_i, channel in enumerate(channels):
-            planes = (reader.read(region, fov, channel, z, t) for z in z_levels)
-            out[t, c_i, 0] = reduce(planes)  # streamed z; bounded memory
+            planes = (reader.read(region, fov, channel, z, t_src) for z in z_levels)
+            out[t_i, c_i, 0] = reduce(planes)  # streamed z; bounded memory
     return out
 
 

@@ -15,9 +15,13 @@ The public surface is intentionally tiny::
 
     write_plate(reader, "/path/out")          # canonical multiscale OME-zarr plate (tiff=True adds TIFFs)
     build_montage("/path/out")                # static plate montage PNG + region-jump sidecar + hover viewer
+
+    export_selection(reader, [("B3", 0)])     # Minerva Author: OME-TIFF + .story.json per FOV
+    launch_minerva()                          # best-effort; returns False if it isn't installed
 """
 
 from squidmip._engine import add_projector, available_projectors, project_plate
+from squidmip._minerva import export_selection, launch_minerva
 from squidmip._montage import build_montage
 from squidmip._output import write_plate
 from squidmip.projection import project, project_well, select_fovs
@@ -34,5 +38,7 @@ __all__ = [
     "available_projectors",
     "write_plate",
     "build_montage",
+    "export_selection",
+    "launch_minerva",
 ]
 __version__ = "0.1.0"
