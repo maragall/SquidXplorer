@@ -22,12 +22,25 @@ The public surface is intentionally tiny::
     tiles = select_tiles(bbox_um, um_per_px, src.ladder.geometry)   # O(viewport), see _tiling.py
 """
 
-from squidmip._engine import add_projector, available_projectors, project_plate
+from squidmip._engine import (
+    Operator,
+    add_projector,
+    available_projectors,
+    project_plate,
+    projector_consumes,
+)
 from squidmip._montage import build_montage
 from squidmip._output import write_plate
 from squidmip._tiling import Geometry, TileCache, TileDescriptor, select_tiles
 from squidmip._tilesource import InMemoryMultiscale, PlateLadder, ZarrPyramidSource, plate_ladder
-from squidmip.projection import project, project_well, select_fovs
+from squidmip.projection import (
+    PLANE_OP,
+    Z_REDUCER,
+    plane_op,
+    project,
+    project_well,
+    select_fovs,
+)
 from squidmip.reader import SquidReader, open_reader
 
 __all__ = [
@@ -39,6 +52,12 @@ __all__ = [
     "project_plate",
     "add_projector",
     "available_projectors",
+    # IMA-210 consumes-axis registry
+    "projector_consumes",
+    "Operator",
+    "plane_op",
+    "PLANE_OP",
+    "Z_REDUCER",
     "write_plate",
     "build_montage",
     # IMA-216 tiler + IMA-217 sources

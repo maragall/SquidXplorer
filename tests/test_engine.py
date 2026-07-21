@@ -22,6 +22,7 @@ import squidmip._engine as engine
 from squidmip import (
     add_projector,
     available_projectors,
+    plane_op,
     project_plate,
     project_well,
 )
@@ -236,3 +237,163 @@ def test_invalid_workers_raises():
     reader = FakeReader(n_wells=2)
     with pytest.raises(ValueError, match="workers must be >= 1"):
         next(project_plate(reader, workers=0))
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════════
+# IMA-210 — the consumes-axis registry
+#
+# An operator declares WHICH AXIS it eats, and the engine derives the loop from that:
+#   consumes = frozenset()      plane-op   plane -> plane, z SURVIVES (decon/bgsub/flatfield)
+#   consumes = frozenset({"z"}) z-reducer  all z -> one plane, z collapses to 1 (mip/reference)
+# One group-by-then-reduce loop serves both. `consumes` is orthogonal to `select_index`
+# (which is HOW a z-reducer picks, not WHICH axis it eats) — both mip and reference are {"z"}.
+# ══════════════════════════════════════════════════════════════════════════════════════════
+
+def _first(planes):
+    return next(iter(planes))
+
+
+def _plus_one(plane):
+    """A plane-op written the natural way: plane -> plane."""
+    return plane + 1
+
+
+# ── the declaration ───────────────────────────────────────────────────────────────────────
+
+def test_shipped_projectors_declare_the_z_axis():
+    # BOTH mip and reference consume z. z-SELECTING (reference) is not a different axis: it is
+    # a different way of picking within z. Splitting them here is what broke channel alignment.
+    assert engine.projector_consumes("mip") == frozenset({"z"})
+    assert engine.projector_consumes("reference") == frozenset({"z"})
+
+
+def test_consumes_is_orthogonal_to_select_index():
+    from squidmip.projection import project as mip, project_reference
+    assert getattr(mip, "select_index", None) is None
+    assert getattr(project_reference, "select_index", None) is not None
+    # ...yet they declare the SAME consumed axis.
+    assert engine.projector_consumes("mip") == engine.projector_consumes("reference")
+
+
+def test_add_projector_defaults_to_z_reducer():
+    add_projector("legacy_style", _first)                 # no consumes= → the old contract
+    assert engine.projector_consumes("legacy_style") == frozenset({"z"})
+
+
+def test_add_projector_records_a_plane_op():
+    add_projector("planeop", plane_op(_plus_one), consumes=frozenset())
+    assert engine.projector_consumes("planeop") == frozenset()
+
+
+def test_consumes_accepts_any_iterable_of_axis_names():
+    add_projector("as_set", _first, consumes={"z"})
+    add_projector("as_str", _first, consumes="z")
+    add_projector("as_tuple", _first, consumes=())
+    assert engine.projector_consumes("as_set") == frozenset({"z"})
+    assert engine.projector_consumes("as_str") == frozenset({"z"})
+    assert engine.projector_consumes("as_tuple") == frozenset()
+
+
+def test_projector_consumes_unknown_name_is_loud():
+    with pytest.raises(KeyError, match="unknown projector 'nope'"):
+        engine.projector_consumes("nope")
+
+
+# ── the axes this seam refuses (IMA-222 owns inter-FOV) ───────────────────────────────────
+
+def test_fov_is_refused_by_name_and_points_at_the_region_seam():
+    # A stitcher consumes fov, but a _PROJECTORS callable is Iterable[plane] -> plane and never
+    # sees a tile's x/y stage geometry. Declaring {"fov"} here would be a promise we cannot keep.
+    with pytest.raises(ValueError, match="fov"):
+        add_projector("stitch", _first, consumes=frozenset({"fov"}))
+
+
+def test_unknown_axis_is_refused_named():
+    with pytest.raises(ValueError, match="unsupported.*'t'|'t'.*unsupported"):
+        add_projector("timelapse", _first, consumes=frozenset({"t"}))
+
+
+# ── the engine: one group-by-then-reduce loop, two shapes ─────────────────────────────────
+
+def test_plane_op_preserves_z_and_maps_each_plane():
+    add_projector("plus_one", plane_op(_plus_one), consumes=frozenset())
+    reader = FakeReader(n_wells=2, z_levels=(0, 1, 3))
+    out = _collect(reader, workers=2, projector="plus_one")
+    for (region, fov), img in out.items():
+        # z SURVIVES a plane-op — one output plane per input plane, in z_levels order.
+        assert img.shape == (reader._n_t, len(reader._channels), 3, *reader._shape)
+        for c_i, ch in enumerate(reader._channels):
+            for k, z in enumerate(reader._z_levels):
+                np.testing.assert_array_equal(img[0, c_i, k], reader.read(region, fov, ch, z) + 1)
+
+
+def test_plane_op_is_never_routed_through_the_z_reduction():
+    # THE point of `consumes`: a plane-op must see exactly ONE plane per call, never the stack.
+    seen = []
+
+    def spy(planes):
+        planes = list(planes)
+        seen.append(len(planes))
+        return planes[0]
+
+    add_projector("spy", spy, consumes=frozenset())
+    reader = FakeReader(n_wells=1, z_levels=(0, 1, 2, 3))
+    _collect(reader, workers=1, projector="spy")
+    assert seen and set(seen) == {1}, f"plane-op was handed stacks of {sorted(set(seen))} planes"
+
+
+def test_z_reducer_still_sees_the_whole_stack():
+    seen = []
+
+    def spy(planes):
+        planes = list(planes)
+        seen.append(len(planes))
+        return planes[0]
+
+    add_projector("spy_z", spy, consumes=frozenset({"z"}))
+    reader = FakeReader(n_wells=1, z_levels=(0, 1, 2, 3))
+    _collect(reader, workers=1, projector="spy_z")
+    assert seen and set(seen) == {4}
+
+
+def test_adding_a_plane_op_needs_zero_engine_edits():
+    # The whole abstraction test: a new operator is ONE add_projector call + a name at the
+    # call site. If this ever needs an engine branch, the registry is the wrong shape.
+    add_projector("bgsub_like", plane_op(lambda p: (p // 2)), consumes=frozenset())
+    assert "bgsub_like" in available_projectors()
+    reader = FakeReader(n_wells=1, z_levels=(0, 1))
+    ((_, img),) = list(_collect(reader, workers=1, projector="bgsub_like").items())
+    np.testing.assert_array_equal(img[0, 0, 0], reader.read("W0000", 0, "c0", 0) // 2)
+
+
+# ── regression guards: MIP behaviour is untouched ─────────────────────────────────────────
+
+def test_mip_shape_is_still_z_collapsed_to_one():
+    reader = FakeReader(n_wells=3, z_levels=(0, 1, 2))
+    for img in _collect(reader, workers=2).values():
+        assert img.shape[2] == 1
+
+
+def test_n_equals_1_mip_is_byte_identical_to_the_single_plane():
+    # THE regression guard: with one z, a MIP must return that plane's bytes, unchanged.
+    reader = FakeReader(n_wells=2, z_levels=(7,))
+    for (region, fov), img in _collect(reader, workers=2).items():
+        for c_i, ch in enumerate(reader._channels):
+            plane = reader.read(region, fov, ch, 7)
+            np.testing.assert_array_equal(img[0, c_i, 0], plane)
+            assert img.dtype == plane.dtype
+
+
+def test_mip_pixels_unchanged_by_the_registry_rewrite():
+    reader = FakeReader(n_wells=4, channels=("c0", "c1", "c2"), z_levels=(0, 2, 5))
+    for (region, fov), img in _collect(reader, workers=3).items():
+        for c_i, ch in enumerate(reader._channels):
+            stack = [reader.read(region, fov, ch, z) for z in reader._z_levels]
+            np.testing.assert_array_equal(img[0, c_i, 0], np.max(np.stack(stack), axis=0))
+
+
+def test_plane_op_adapter_makes_the_declaration_inferable():
+    # plane_op() stamps `consumes` on the callable, so the registration site does not have to
+    # repeat it — the same idiom project_reference already uses for `select_index`.
+    add_projector("inferred", plane_op(_plus_one))
+    assert engine.projector_consumes("inferred") == frozenset()

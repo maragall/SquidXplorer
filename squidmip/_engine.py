@@ -21,7 +21,8 @@ Data flow::
         │                              touches immutable state; no locks needed downstream)
         ▼  select_fovs(meta, n_fovs)  → {region: [fov, ...]}  → flat [(region, fov), ...]
         │                              (n_fovs=None → every FOV; a 36-FOV well emits 36 tasks)
-        ▼  _PROJECTORS[projector]     → the z-reduce callable passed as project_well(reduce=)
+        ▼  _PROJECTORS[projector]     → Operator(fn, consumes) passed as project_well(reduce=,
+        │                              consumes=); `consumes` alone decides the grouping (IMA-210)
         │
         ▼  ThreadPoolExecutor(max_workers=N)          bounded window: ≤ N wells in flight
         │     prime N tasks ─┐                        so completed ~139 MB results can NOT
@@ -37,27 +38,109 @@ Data flow::
 The projector table is the IMA-188 half of the pluggable-projector contract: 183 ships
 ``project`` (MIP); a future EDF/EMF/mean projector is added by name here and runs through
 ``project_plate(..., projector="<name>")`` with **zero engine edits**.
+
+IMA-210 widens that table from "z-reductions" to "operators" by making each entry declare the
+axis it CONSUMES (see :class:`Operator`), and deriving the loop from that declaration:
+
+    consumes=frozenset({"z"})   z-reducer   stack -> plane, output (T, C,  1, Y, X)   mip, reference
+    consumes=frozenset()        plane-op    plane -> plane, output (T, C, Nz, Y, X)   decon, bgsub…
+
+One group-by-then-reduce loop (in ``project_well``) serves both, so a new plane-op is ONE
+``add_projector`` call and no engine edit. ``{"fov"}`` is deliberately not a member — inter-FOV
+work needs stage geometry a ``Iterable[plane] -> plane`` callable never sees (IMA-222's seam).
+
+NOTE for plane-ops: ``write_plate``/IMA-184 currently accept only ``Z == 1`` frames and reject a
+Z>1 frame LOUD (``_validate_image``). So a plane-op streams correctly out of ``project_plate``
+today, and gains a persistence path when the writer learns Z>1 — it is not silently wrong.
+
+Prior art (what established pipelines declare, and what IMA-210 took from each)
+------------------------------------------------------------------------------
+* **ITK** — ``itk::ProjectionImageFilter`` declares ``m_ProjectionDimension``: the ONE axis it
+  accumulates over, and it "reduces the size of the accumulated dimension to 1". A plain
+  ``ImageToImageFilter``/``InPlaceImageFilter`` declares nothing and is shape-preserving.
+  TAKEN: the whole model. ``consumes={"z"}`` → that axis becomes size 1; ``consumes={}`` →
+  shape-preserving map. Also taken: keep the collapsed axis at size 1 instead of dropping it
+  (ITK's ExtractImageFilter shows that removing an axis forces the caller to invent a
+  direction/geometry for what is left; our writer would need the same special-casing).
+* **Fractal** (fractal-tasks-core ``__FRACTAL_MANIFEST__.json``) — each task declares
+  ``input_types``/``output_types``: "Project Image (HCS Plate)" is ``{"is_3D": true}`` →
+  ``{"is_3D": false}``, while "Illumination Correction" is
+  ``{"illumination_corrected": false}`` → ``{"illumination_corrected": true}`` and leaves
+  ``is_3D`` alone. That is EXACTLY the z-reducer / plane-op split, declared as data.
+  TAKEN: one declarative record per operator that the runner dispatches on, so the runner has
+  no per-task branch. NOT taken: the general input/output type-filter machinery (arbitrary
+  provenance flags, task chaining by filter) — that is workflow bookkeeping, not this ticket.
+* **dask / scikit-image** — ``da.map_blocks(func, drop_axis=…, new_axis=…)`` vs ``da.reduction``,
+  and ``skimage.util.apply_parallel(function, array, depth=…, channel_axis=…)``: the axis
+  arguments are the declaration; the SAME map machinery serves both, and per-block funcs stay
+  plain array->array. TAKEN: one callable shape (``Iterable[plane] -> plane``) plus an axis
+  declaration, rather than two call conventions — which is why one loop covers both cases.
+  NOT taken: ``depth``/halo (overlap is meaningless when the group is a single plane).
+* **CellProfiler** — ``Module.volumetric()`` returns ``False`` by default, i.e. "run me per
+  plane"; a module opts IN to seeing a volume. Modules declare I/O through settings
+  (``ImageSubscriber`` consumes a named image, ``ImageName`` provides one).
+  TAKEN: the *default* is the conservative one. Ours is inverted only because this table's
+  history is z-reductions: ``add_projector`` with no ``consumes=`` still means ``{"z"}``, so no
+  pre-IMA-210 registration changes meaning. NOT taken: named-image wiring — a projector's input
+  is positional (the FOV's planes), so a name-based dataflow graph would be ceremony.
 """
 
 from __future__ import annotations
 
 import os
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Iterable, Iterator, Optional
 
 import numpy as np
 
-from squidmip.projection import project, project_reference, project_well, select_fovs
+from squidmip.projection import (
+    PLANE_OP,
+    Z_REDUCER,
+    normalise_consumes,
+    project,
+    project_reference,
+    project_well,
+    select_fovs,
+)
 
 if TYPE_CHECKING:  # avoid import cost / cycle at runtime
     from squidmip.reader import SquidReader
 
-# A projector reduces one channel's z-planes to a single plane (the ``reduce=`` argument of
-# project_well). MIP is the only one 183 ships; the projector table is the seam for the rest.
+# An operator maps a GROUP of planes to one plane (the ``reduce=`` argument of project_well).
+# One callable shape for every operator — what differs is which axis the engine groups over.
 Projector = Callable[[Iterable[np.ndarray]], np.ndarray]
 
-# name -> z-reduction callable. Selected by name in project_plate; extended via add_projector.
-_PROJECTORS: dict[str, Projector] = {"mip": project, "reference": project_reference}
+
+@dataclass(frozen=True)
+class Operator:
+    """A registry entry: a name, the callable, and the axis it consumes (IMA-210).
+
+    ``consumes`` is the whole dispatch. The engine derives its loop from it instead of asking what
+    kind of operator this is:
+
+      * ``frozenset()``       — **plane-op**: plane -> plane. z is not consumed, so z SURVIVES at
+        full depth and the operator is MAPPED over the planes (deconvolution, background
+        subtraction, flat-field — IMA-223/224/225).
+      * ``frozenset({"z"})``  — **z-reducer**: a (t, c)'s whole stack -> one plane, z collapses to
+        size 1 (``mip``, ``reference``).
+
+    It is a declaration of WHICH AXIS, not of HOW: ``reference`` picks one z and ``mip`` combines
+    all of them, and both are ``{"z"}``. The "how" already has its own marker — the ``select_index``
+    attribute that makes ``project_well`` solve focus once per (t, fov) and share it across
+    channels. Encoding "selects" as a distinct consumed axis would re-open the bug where the
+    channels of one FOV were sampled at different z and stopped overlaying.
+    """
+    name: str
+    fn: Projector
+    consumes: frozenset[str]
+
+
+# name -> Operator. Selected by name in project_plate; extended via add_projector.
+_PROJECTORS: dict[str, Operator] = {
+    "mip": Operator("mip", project, Z_REDUCER),
+    "reference": Operator("reference", project_reference, Z_REDUCER),
+}
 
 
 def _default_workers() -> int:
@@ -78,12 +161,16 @@ def _default_workers() -> int:
     return n or 1
 
 
-def add_projector(name: str, projector: Projector) -> None:
-    """Add a named z-reduction so it can be selected by name in :func:`project_plate`.
+def add_projector(name: str, projector: Projector, *, consumes=None) -> None:
+    """Add a named operator so it can be selected by name in :func:`project_plate`.
 
-    This is how a future projector (EDF/EMF/mean) plugs in **without touching the engine**:
-    add a name, then call ``project_plate(..., projector="<name>")``. (Named ``add_``, not
-    ``register_``, to avoid confusion with image *registration* / alignment.)
+    This is how a new operator plugs in **without touching the engine**: add a name and its
+    consumed axis, then call ``project_plate(..., projector="<name>")``. (Named ``add_``, not
+    ``register_``, to avoid confusion with image *registration* / alignment.)::
+
+        add_projector("mean", lambda planes: ...)                       # z-reducer (the default)
+        add_projector("bgsub", plane_op(subtract_background))           # plane-op, consumes inferred
+        add_projector("decon", my_decon, consumes=frozenset())          # plane-op, declared
 
     Parameters
     ----------
@@ -93,13 +180,21 @@ def add_projector(name: str, projector: Projector) -> None:
         A callable with the :func:`squidmip.project` signature — takes an iterable of
         equal-shape planes and returns one plane. It SHOULD stream (bounded memory) to keep
         the plate engine's per-worker footprint flat; a projector that materialises the whole
-        z-stack (e.g. EDF) is allowed but owns its own, documented, memory profile.
+        z-stack (e.g. EDF) is allowed but owns its own, documented, memory profile. A natural
+        ``plane -> plane`` function is lifted into this shape by :func:`squidmip.plane_op`.
+    consumes:
+        Which axis the operator eats — see :class:`Operator`. Any iterable of axis names
+        (``frozenset()``, ``{"z"}``, ``"z"``). ``None`` (default) reads the callable's own
+        ``consumes`` attribute (:func:`squidmip.plane_op` stamps one) and otherwise falls back to
+        ``frozenset({"z"})``, the shipped z-reduction contract — so every pre-IMA-210 registration
+        keeps its exact meaning. ``{"fov"}`` is refused by name: see :class:`Operator`.
 
     Raises
     ------
     ValueError
-        If *name* is empty, *projector* is not callable, or *name* is already defined
-        (a silent clobber of an existing projector would be a quiet correctness bug).
+        If *name* is empty, *projector* is not callable, *consumes* names an axis this engine
+        cannot group over, or *name* is already defined (a silent clobber of an existing
+        projector would be a quiet correctness bug).
     """
     if not name:
         raise ValueError("projector name must be a non-empty string")
@@ -110,7 +205,9 @@ def add_projector(name: str, projector: Projector) -> None:
             f"projector {name!r} is already defined; pick a distinct name "
             f"(defined: {available_projectors()})."
         )
-    _PROJECTORS[name] = projector
+    if consumes is None:
+        consumes = getattr(projector, "consumes", Z_REDUCER)
+    _PROJECTORS[name] = Operator(name, projector, normalise_consumes(consumes))
 
 
 def available_projectors() -> list[str]:
@@ -118,8 +215,17 @@ def available_projectors() -> list[str]:
     return sorted(_PROJECTORS)
 
 
-def _resolve_projector(name: str) -> Projector:
-    """Look up a projector by name, failing loud (named) on an unknown key."""
+def projector_consumes(name: str) -> frozenset[str]:
+    """Return the axis a registered operator consumes — ``frozenset()`` (plane-op) or ``{"z"}``.
+
+    The registry's declaration, for callers that must branch on output shape (a plane-op keeps z at
+    full depth, a z-reducer collapses it to 1) rather than re-deriving it from the callable.
+    """
+    return _resolve_projector(name).consumes
+
+
+def _resolve_projector(name: str) -> Operator:
+    """Look up an operator by name, failing loud (named) on an unknown key."""
     try:
         return _PROJECTORS[name]
     except KeyError:
@@ -198,7 +304,7 @@ def project_plate(
         raise ValueError(f"workers must be >= 1, got {workers}")
     n_workers = workers if workers is not None else _default_workers()
 
-    reduce = _resolve_projector(projector)
+    op = _resolve_projector(projector)
 
     # Warm the reader's lazy index/time-folders/metadata single-threaded BEFORE fan-out.
     meta = reader.metadata
@@ -219,7 +325,8 @@ def project_plate(
                 region, fov = next(tasks)
             except StopIteration:
                 return False
-            future = pool.submit(project_well, reader, region, fov, reduce=reduce)
+            future = pool.submit(project_well, reader, region, fov,
+                                 reduce=op.fn, consumes=op.consumes)
             in_flight[future] = (region, fov)
             return True
 

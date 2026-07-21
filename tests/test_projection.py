@@ -18,7 +18,7 @@ import numpy as np
 import pytest
 import tifffile
 
-from squidmip import open_reader, project, project_well, select_fovs
+from squidmip import open_reader, plane_op, project, project_well, select_fovs
 from squidmip.projection import project_reference, select_reference_z
 
 
@@ -383,3 +383,100 @@ def test_a_combining_reduction_records_no_picked_z(tmp_path):
     picked: dict = {}
     project_well(reader, "A1", 0, reduce=project, picked_z=picked)
     assert picked == {}
+
+
+# ======================================================================================
+# E. IMA-210 — project_well's consumes= seam (plane-op vs z-reducer), on real files
+# ======================================================================================
+def _z_stack_acq(root: Path, nz=3, channels=(CH_A, CH_B), nt=1):
+    """A tiny real acquisition: value == z*10 + channel index, so every plane is identifiable."""
+    _write_min_yaml(root, nz=nz, nt=nt)
+    for t in range(nt):
+        for c_i, ch in enumerate(channels):
+            for z in range(nz):
+                _write_plane(root, "A1", 0, z, ch, _plane(z * 10 + c_i), t=t)
+    return root
+
+
+def test_plane_op_keeps_every_z_plane(tmp_path):
+    """consumes={} maps plane->plane: Z survives at full depth, in z_levels order."""
+    reader = open_reader(_z_stack_acq(tmp_path / "planeop", nz=3))
+    out = project_well(reader, "A1", 0, reduce=plane_op(lambda p: p), consumes=frozenset())
+    assert out.shape == (1, 2, 3, 4, 4)
+    for c_i, ch in enumerate([c["name"] for c in reader.metadata["channels"]]):
+        for k, z in enumerate(reader.metadata["z_levels"]):
+            np.testing.assert_array_equal(out[0, c_i, k], reader.read("A1", 0, ch, z, 0))
+
+
+def test_plane_op_output_is_the_op_applied_per_plane(tmp_path):
+    reader = open_reader(_z_stack_acq(tmp_path / "shift", nz=3))
+    out = project_well(reader, "A1", 0, reduce=plane_op(lambda p: p + 1), consumes=frozenset())
+    for c_i, ch in enumerate([c["name"] for c in reader.metadata["channels"]]):
+        for k, z in enumerate(reader.metadata["z_levels"]):
+            np.testing.assert_array_equal(out[0, c_i, k], reader.read("A1", 0, ch, z, 0) + 1)
+
+
+def test_plane_op_sees_exactly_one_plane_per_call(tmp_path):
+    reader = open_reader(_z_stack_acq(tmp_path / "one", nz=4))
+    seen = []
+
+    def spy(planes):
+        planes = list(planes)
+        seen.append(len(planes))
+        return planes[0]
+
+    project_well(reader, "A1", 0, reduce=spy, consumes=frozenset())
+    assert set(seen) == {1}, f"plane-op handed stacks of {sorted(set(seen))} planes"
+    assert len(seen) == 4 * 2      # nz x channels calls, one per output plane
+
+
+def test_plane_op_records_no_picked_z(tmp_path):
+    """A plane-op makes no geometric CHOICE, so there is no provenance to record."""
+    reader = open_reader(_z_stack_acq(tmp_path / "prov", nz=2))
+    picked: dict = {}
+    project_well(reader, "A1", 0, reduce=plane_op(lambda p: p),
+                 consumes=frozenset(), picked_z=picked)
+    assert picked == {}
+
+
+def test_plane_op_preserves_dtype_and_timepoints(tmp_path):
+    reader = open_reader(_z_stack_acq(tmp_path / "t", nz=2, nt=2))
+    out = project_well(reader, "A1", 0, reduce=plane_op(lambda p: p), consumes=frozenset())
+    assert out.shape == (2, 2, 2, 4, 4)
+    assert out.dtype == reader.metadata["dtype"]
+
+
+def test_default_consumes_is_the_z_reducer_contract(tmp_path):
+    """No consumes= → the shipped behaviour, byte for byte: Z collapses to 1 and it is a MIP."""
+    reader = open_reader(_z_stack_acq(tmp_path / "default", nz=3))
+    out = project_well(reader, "A1", 0)
+    assert out.shape == (1, 2, 1, 4, 4)
+    for c_i, ch in enumerate([c["name"] for c in reader.metadata["channels"]]):
+        stack = [reader.read("A1", 0, ch, z, 0) for z in reader.metadata["z_levels"]]
+        np.testing.assert_array_equal(out[0, c_i, 0], np.max(np.stack(stack), axis=0))
+
+
+def test_z_selecting_reduction_is_unaffected_by_the_consumes_seam(tmp_path):
+    """reference is consumes={"z"} AND select_index: the c-alignment invariant still holds."""
+    root = _per_channel_sharpest(tmp_path / "still_aligned", {CH_A: 0, CH_B: 3})
+    reader = open_reader(str(root))
+    channels = [c["name"] for c in reader.metadata["channels"]]
+    picked: dict = {}
+    out = project_well(reader, "A1", 0, reduce=project_reference,
+                       consumes=frozenset({"z"}), picked_z=picked)
+    assert out.shape[2] == 1
+    assert len({picked[(0, c)] for c in channels}) == 1, picked
+
+
+def test_plane_op_adapter_rejects_a_multi_plane_group(tmp_path):
+    """plane_op() lifts a plane->plane function; handing it a stack is a seam bug, not a silent take-first."""
+    with pytest.raises(ValueError, match="plane-op"):
+        plane_op(lambda p: p)([_plane(0), _plane(1)])
+
+
+def test_n_equals_1_mip_is_byte_identical(tmp_path):
+    """Regression guard: a single-z MIP returns that plane's bytes untouched."""
+    reader = open_reader(_z_stack_acq(tmp_path / "n1", nz=1))
+    out = project_well(reader, "A1", 0)
+    for c_i, ch in enumerate([c["name"] for c in reader.metadata["channels"]]):
+        np.testing.assert_array_equal(out[0, c_i, 0], reader.read("A1", 0, ch, 0, 0))

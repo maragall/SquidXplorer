@@ -39,12 +39,105 @@ Design contracts:
 
 from __future__ import annotations
 
+import functools
 from typing import TYPE_CHECKING, Callable, Iterable, Optional
 
 import numpy as np
 
 if TYPE_CHECKING:  # avoid import cost / cycle at runtime
     from squidmip.reader import SquidReader
+
+
+# --- IMA-210: which axis does an operator consume? -------------------------------------------
+#
+# Every operator here has ONE callable shape — ``Iterable[plane] -> plane`` — and differs only in
+# which axis the engine groups over before calling it. That single declaration drives the loop:
+#
+#   PLANE_OP  = frozenset()        plane -> plane. z is NOT consumed, so z SURVIVES at full depth.
+#                                  Deconvolution, background subtraction, flat-field (IMA-223/4/5).
+#   Z_REDUCER = frozenset({"z"})   all z of one (t, c) -> one plane. z collapses to size 1.
+#                                  MIP (``project``) and reference (``project_reference``).
+#
+# ``consumes`` is WHICH axis an operator eats. It is orthogonal to ``select_index``, which is HOW a
+# z-reducer picks within z (combine every plane vs choose one). ``project_reference`` is BOTH a
+# ``{"z"}`` consumer and z-selecting; conflating the two is what once landed the channels of one
+# FOV on different z. Do not encode "selects" as a separate consumed axis.
+#
+# {"fov"} is deliberately NOT a member: stitching is inter-FOV and needs each tile's x/y stage
+# geometry, which an ``Iterable[plane] -> plane`` callable never sees. That seam is IMA-222's
+# ``_REGION_OPERATORS``/``stitch_plate()``, not this table.
+PLANE_OP: frozenset[str] = frozenset()
+Z_REDUCER: frozenset[str] = frozenset({"z"})
+CONSUMABLE_AXES: frozenset[str] = frozenset({"z"})
+
+
+def normalise_consumes(consumes) -> frozenset[str]:
+    """Coerce a ``consumes`` declaration to a frozenset of axis names, refusing anything unsupported.
+
+    Accepts any iterable of axis names (``{"z"}``, ``()``, ``"z"``) so callers are not forced to
+    spell ``frozenset`` at every registration site. Refuses by name rather than silently ignoring:
+    a projector that believes it consumes an axis the engine does not group over would run over the
+    wrong data.
+
+    Raises
+    ------
+    ValueError
+        If an axis is not consumable here. ``"fov"`` gets its own message pointing at IMA-222's
+        region-operator seam, because it is the one people reach for and the one this shape of
+        callable structurally cannot serve.
+    """
+    if isinstance(consumes, str):
+        consumes = (consumes,)
+    axes = frozenset(consumes)
+    if "fov" in axes:
+        raise ValueError(
+            "consumes={'fov'} is not supported by the projector table: a projector is "
+            "Iterable[plane] -> plane and never sees a tile's x/y stage geometry, which any "
+            "inter-FOV operation (stitching, illumination-field fitting across a well) requires. "
+            "Inter-FOV operators belong to the region-operator seam (IMA-222), not here."
+        )
+    unknown = axes - CONSUMABLE_AXES
+    if unknown:
+        raise ValueError(
+            f"unsupported axis {sorted(unknown)[0]!r} in consumes={sorted(axes)}; this engine "
+            f"groups over {sorted(CONSUMABLE_AXES)} only. A plane-op declares consumes=frozenset(), "
+            "a z-reduction declares consumes=frozenset({'z'})."
+        )
+    return axes
+
+
+def plane_op(fn: Callable[[np.ndarray], np.ndarray]) -> Callable[[Iterable[np.ndarray]], np.ndarray]:
+    """Lift a natural ``plane -> plane`` function into the engine's ``Iterable[plane] -> plane`` shape.
+
+    The point of ONE callable shape is that the engine has ONE loop: it groups the input planes over
+    the consumed axes and calls the operator per group. For a plane-op the group is a single plane,
+    so the author should not have to unpack an iterable by hand — this adapter does it, and stamps
+    ``consumes = PLANE_OP`` on the result so :func:`squidmip.add_projector` infers the declaration::
+
+        add_projector("bgsub", plane_op(subtract_background))    # consumes inferred = frozenset()
+
+    Handing the adapted callable more than one plane raises instead of quietly using the first: that
+    can only happen if it was registered as a z-reducer, i.e. a seam bug that would otherwise show up
+    as "my background subtraction silently dropped all but one z".
+    """
+    @functools.wraps(fn)
+    def _apply(planes: Iterable[np.ndarray]) -> np.ndarray:
+        it = iter(planes)
+        try:
+            plane = next(it)
+        except StopIteration:
+            raise ValueError(f"plane-op {getattr(fn, '__name__', fn)!r} requires one plane; "
+                             "got an empty iterable.") from None
+        if next(it, None) is not None:
+            raise ValueError(
+                f"plane-op {getattr(fn, '__name__', fn)!r} was handed more than one plane. A "
+                "plane-op maps plane -> plane and must be registered with consumes=frozenset(); "
+                "registered as a z-reducer it would silently discard every plane but the first."
+            )
+        return fn(plane)
+
+    _apply.consumes = PLANE_OP      # the declaration, carried on the callable (cf. select_index)
+    return _apply
 
 
 def project(planes: Iterable[np.ndarray]) -> np.ndarray:
@@ -158,6 +251,11 @@ def project_reference(planes: Iterable[np.ndarray]) -> np.ndarray:
 # across channels instead of calling the projector per channel.
 project_reference.select_index = select_reference_z
 
+# The consumed-axis declarations (IMA-210). BOTH shipped projectors eat z — combining every plane
+# (mip) and choosing one (reference) are two ways to consume the SAME axis, not two axes.
+project.consumes = Z_REDUCER
+project_reference.consumes = Z_REDUCER
+
 
 def project_well(
     reader: "SquidReader",
@@ -166,11 +264,25 @@ def project_well(
     reduce: Callable[[Iterable[np.ndarray]], np.ndarray] = project,
     reference_channel: Optional[str] = None,
     picked_z: Optional[dict] = None,
+    consumes=None,
 ) -> np.ndarray:
-    """Project one FOV's z-stack for every channel and timepoint.
+    """Apply one operator to a FOV's planes for every channel and timepoint.
 
-    Reduces z only; t and c are preserved. Output is ``(T, C, 1, Y, X)`` (TCZYX, Z=1) in
-    the reader's native dtype.
+    Group-by-then-reduce, with the grouping derived from the operator's ``consumes``
+    declaration (IMA-210) — never from a per-operator branch:
+
+    ====================  ==================================  ===================
+    ``consumes``          group handed to *reduce*            output shape
+    ====================  ==================================  ===================
+    ``frozenset({"z"})``  every z of one (t, c) — the stack   ``(T, C, 1, Y, X)``
+    ``frozenset()``       one plane                           ``(T, C, Nz, Y, X)``
+    ====================  ==================================  ===================
+
+    So a z-reduction (MIP, reference) collapses z to 1, and a plane-op (deconvolution,
+    background subtraction, flat-field) leaves z at full depth — it is mapped over the planes,
+    never routed through the z-reduction. t and c are preserved either way, output is TCZYX in
+    the reader's native dtype, and z stays an axis (never removed) so the OME-zarr writer needs
+    no special-casing.
 
     Parameters
     ----------
@@ -188,8 +300,15 @@ def project_well(
     picked_z:
         Optional out-dict for **provenance**: filled with ``{(t, channel): z}`` — the z index
         actually consumed for every (t, channel) written. Left empty by combining reductions
-        (a MIP consumes every z, so no single index describes it). Callers/tests use it to
+        (a MIP consumes every z, so no single index describes it) and by plane-ops (which make
+        no geometric choice — every plane is kept, at its own z). Callers/tests use it to
         assert the c-alignment invariant on data rather than trusting a comment.
+    consumes:
+        The operator's consumed-axis declaration (see the table above). ``None`` (default) reads
+        it off the callable's ``consumes`` attribute — :func:`plane_op` stamps one — and falls
+        back to ``frozenset({"z"})``, the shipped z-reduction contract, so every existing caller
+        is byte-for-byte unchanged. :func:`squidmip.add_projector` passes the registry's
+        declaration through :func:`squidmip.project_plate`.
 
     c-alignment (the invariant)
     ---------------------------
@@ -221,17 +340,34 @@ def project_well(
     if picked_z is None:
         picked_z = {}
 
+    # The operator's own declaration wins; absent one, the shipped z-reduction contract.
+    if consumes is None:
+        consumes = getattr(reduce, "consumes", Z_REDUCER)
+    consumes = normalise_consumes(consumes)
+
     # A z-SELECTING projector advertises how to pick the index (see project_reference).
     select_index = getattr(reduce, "select_index", None)
 
+    if select_index is not None and "z" not in consumes:
+        raise ValueError(
+            f"{getattr(reduce, '__name__', reduce)!r} carries select_index (it CHOOSES a z) but "
+            f"declares consumes={sorted(consumes)}; a z-selecting operator must consume z."
+        )
+
     if select_index is None:
-        # Combining reduction (MIP, mean, …): every z is consumed in every channel, so there is
-        # no shared geometric choice to align and nothing to record in picked_z.
-        out = np.empty((n_t, len(channels), 1, y, x), dtype=meta["dtype"])
+        # THE group-by-then-reduce loop. The consumed axes decide the grouping and nothing else:
+        #   z consumed     -> one group per (t, c): the whole stack  -> one output plane, Z=1
+        #   z not consumed -> one group per (t, c, z): a single plane -> Z survives at full depth
+        # Both cases call the SAME callable shape, so a new plane-op needs no engine edit.
+        z_groups = [tuple(z_levels)] if "z" in consumes else [(z,) for z in z_levels]
+        out = np.empty((n_t, len(channels), len(z_groups), y, x), dtype=meta["dtype"])
         for t in range(n_t):
             for c_i, channel in enumerate(channels):
-                planes = (reader.read(region, fov, channel, z, t) for z in z_levels)
-                out[t, c_i, 0] = reduce(planes)  # streamed z; bounded memory
+                for k, group in enumerate(z_groups):
+                    planes = (reader.read(region, fov, channel, z, t) for z in group)
+                    out[t, c_i, k] = reduce(planes)  # streamed z; bounded memory
+        # Nothing lands in picked_z: a combining reduction consumes every z (no single index
+        # describes it) and a plane-op chooses nothing (every plane is kept, at its own z).
         return out
 
     # z-selecting: ONE focus solve per (t, fov), shared by every channel.
