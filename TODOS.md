@@ -50,3 +50,61 @@ so a future session doesn't rediscover it from zero.
 - **Cons:** Different repo, different owner; not on any SquidMIP critical path.
 - **Context:** SquidMIP does **not** carry this bug — IMA-189's `squidmip/_channels.py` already resolves `display_color` correctly (top-level v1.0+ *and* nested `camera_settings`, mapped by name, raises on unresolved), and IMA-184 consumes `metadata.channels[].display_color` rather than re-parsing the yaml. This TODO is purely a flag for whoever owns `~/CEPHLA/projects/explorer/squid2minerva`.
 - **Depends on / blocked by:** squid2minerva maintainer.
+
+## External stitchers as the ACCEPTANCE ORACLE (ASHLAR first) → IMA-211 (re-scoped to exactly this)
+- **What:** Run ASHLAR out-of-process on a dev box over 3-5 real wells and compare its per-tile
+  displacements against SquidMIP's own stitch output (IMA-222's operator). Require max disagreement ≤ 2 px. Optionally
+  extend to BigStitcher/PetaKit5D later; ASHLAR alone carries most of the signal.
+- **Why:** IMA-211 asked to *prototype/evaluate* four stitchers. The review's first answer —
+  "none is shippable inside our Windows app" — is true but answers a different question.
+  Evaluation does not require shipping, and this is the **acceptance oracle the ticket otherwise
+  lacks**: build our own stitcher and never run ASHLAR once, and we have no way to know ours is
+  any good.
+- **Pros:** Turns a discarded scope item into the missing quality gate. Independent implementation
+  disagreement is the strongest correctness signal available without ground truth.
+- **Cons:** Needs a dev box with conda + a JVM (ASHLAR boots one via pyjnius at import). It is a
+  lab harness, never packaged or shipped.
+- **Context (verified 2026-07-20, do not re-research):**
+  - **MCmicro is NOT a stitcher** — it is a Nextflow orchestrator that shells out to ASHLAR.
+    Drop it from any bake-off; it would be measuring ASHLAR twice.
+  - **ASHLAR** — the only importable Python option, and the only one with a native plate/well
+    concept (`--plates`, `PlateReader`, `plate=`/`well=` kwargs on `FileSeriesReader`). Derives
+    tile positions from a filename pattern + grid + overlap, no CSV/XML needed. **But
+    `ashlar/reg.py` boots a JVM via pyjnius at import time regardless of which reader you use**,
+    so it carries a Java prerequisite even for pure-TIFF input. Actively maintained (v1.20.0).
+  - **BigStitcher** — Java/Fiji; no Python API (macro or BigStitcher-Spark subprocess only;
+    PyImageJ is known-flaky for it). Requires a mandatory BigDataViewer XML+HDF5/N5 **resave**
+    before it can read anything. No plate/well concept. Repo moved to JaneliaSciComp.
+  - **PetaKit5D** — MATLAB; `PyPetaKit5D` wraps the MATLAB Compiler Runtime, is **Linux-only**,
+    and defaults to SLURM. Needs a hand-built `ImageList_*.csv` with an `axisOrder` string. Its
+    whole parameter surface assumes 3D light-sheet. Worst fit of the four for 2D plate wells.
+- **Depends on / blocked by:** IMA-222's stitch operator (the baseline to compare against). NOT
+  blocked on Nick's laser-AF fix — real multi-FOV acquisitions already exist on disk
+  (`~/Downloads/20x_scan_2025-09-05_17-57-50` is 36 FOV/well at ~9% overlap).
+
+## Reconcile IMA-187's FOV keying with `original_coordinates_{t}.csv` → raise before IMA-187 merges
+- **What:** IMA-187 locked FOV keying as "row-order-per-region with a loud cross-check" against
+  `coordinates.csv`. Squid also writes `original_coordinates/original_coordinates_{t}.csv` =
+  `region,fov,z_level,x (mm),y (mm),z (um),time` — an explicit `fov` key, and the *actual* stage
+  position rather than the *planned* grid. Switch the mapping to that file.
+- **Why:** Row-order mapping is the "silent wrong tile" hazard `docs/ima-189-eng-review.md`
+  already refused once. With an explicit key, cell assignment is arithmetic, not inference.
+- **Pros:** Removes a whole risk class from a locked ticket. Also dissolves IMA-187's own recorded
+  open worry ("whether coordinates.csv carries one row per z-level on multi-z acquisitions, which
+  would break the row-count cross-check") — `original_coordinates` carries `z_level` explicitly.
+- **Cons:** Needs a fallback for acquisitions lacking the `original_coordinates/` folder; nobody
+  has surveyed how common that is.
+- **Context:** Verified by hand 2026-07-20 on `~/Downloads/20x_scan_2025-09-05_17-57-50`. Same
+  dataset shows `acquisition parameters.json` reporting `Nx=1,Ny=1,dx=0.9` for a region that
+  actually holds 36 FOVs in a 6x6 grid at 0.7056 mm — so never derive grid geometry from that JSON;
+  derive spacing from the coordinates themselves.
+- **Depends on / blocked by:** TIME-SENSITIVE — only useful before `juliomaragall/ima-187-multi-fov-mosaic` merges.
+
+## Measure the real overlap fraction across all acquisitions → gates IMA-222 registration
+- **What:** Compute the actual tile overlap for every acquisition on disk, per objective/binning.
+- **Why:** If any real acquisition runs 0% overlap, phase correlation is dead on arrival there and
+  only nominal placement works. This is cheap and it gates a real design decision in IMA-222.
+- **Pros:** Hours of work; decides whether registration code is worth writing at all.
+- **Cons:** None material.
+- **Context:** Measured ~9% on the 20x scan (2084 px frame, 0.7056 mm step). Sample size of one.
+- **Depends on / blocked by:** nothing — runs today.
