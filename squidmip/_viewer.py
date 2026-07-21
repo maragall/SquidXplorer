@@ -2296,18 +2296,29 @@ class PlateOverview(QWidget):
                 p.drawLine(int(ax), int(ay + r * cd), int(ax + W), int(ay + r * cd))
         # (a freeform holder has no shared grid lines to draw — its cells are individually placed
         #  rectangles, and _paint_carrier already outlined each one.)
-        # Column/row labels THIN OUT as cells shrink so they never overlap (a 48-col 1536wp would
-        # otherwise cram "1..48" into a few px). Always draw the hovered row/col so hover still reads.
         p.setFont(QFont("Helvetica Neue", 11, QFont.DemiBold))
+        if self._layout is not None:
+            # A freeform region is named, not numbered, and the gutter is sized for "A".."AF" —
+            # "manual0" gets sliced in half there. Its own cell is the only place wide enough and
+            # the only place that is unambiguous when cells are individually positioned.
+            for rc, region in self._by_rc.items():
+                rx, ry, rw, _rh = self._cell_rect(*rc)
+                p.setPen(_ACCENT if self._hover == rc else _MUTED)
+                p.drawText(QRectF(rx, ry - _COLH, max(rw, 60.0), _COLH),
+                           int(Qt.AlignCenter), str(region))
+        # Column/row labels THIN OUT as cells shrink so they never overlap (a 48-col 1536wp would
+        # otherwise cram "1..48" into a few px). Always draw the hovered row/col so hover still
+        # reads. Skipped entirely for a freeform holder: its rows and columns are an internal
+        # bookkeeping key, not something on the glass, and the names are already on the cells.
         cstep = max(1, int(np.ceil(22.0 / cd)))
         rstep = max(1, int(np.ceil(18.0 / cd)))
-        for c in range(nc):
+        for c in range(nc if self._layout is None else 0):
             hov = bool(self._hover and self._hover[1] == c)
             if c % cstep and not hov:
                 continue
             p.setPen(_ACCENT if hov else _MUTED)
             p.drawText(int(ax + c * cd), int(self._oy), int(cd), _COLH, Qt.AlignCenter, str(self._cols[c]))
-        for r in range(nr):
+        for r in range(nr if self._layout is None else 0):
             hov = bool(self._hover and self._hover[0] == r)
             if r % rstep and not hov:
                 continue

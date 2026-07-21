@@ -99,6 +99,26 @@ def settle(ms=4000):
     loop.exec_()
 
 
+def drain_preview(win, timeout_s=120):
+    """Block until the window's raw preview worker has finished streaming (or the timeout).
+
+    Deterministic where ``settle(ms)`` is calibrated: a check that grabs pixels before/after a
+    setting must not race the background fill, and the fill's duration depends on how many fields
+    the acquisition has.
+    """
+    import time
+    t0 = time.time()
+    while time.time() - t0 < timeout_s:
+        p = getattr(win, "_preview", None)
+        if p is None or not p.isRunning():
+            break
+        _app().processEvents()
+        time.sleep(0.02)
+    for _ in range(20):                 # let the queued tileReady slots actually run
+        _app().processEvents()
+        time.sleep(0.01)
+
+
 def rendered(widget, w=900, h=700):
     """Grab a widget as an RGB array - what a human would actually see."""
     widget.resize(w, h)
@@ -307,7 +327,11 @@ def run_all():
     def _():
         w = open_window(PLATE)
         ov = w._overview
-        settle()                       # the preview stream must finish, or we diff stream states
+        # The preview stream must FINISH, or the three grabs below diff stream states rather than
+        # channel settings. Wait on the worker itself instead of a fixed sleep: since IMA-253 the
+        # preview composites every FOV of a multi-FOV well (144 fields on this plate, not 4), so
+        # how long the stream takes is a property of the acquisition, not a constant to calibrate.
+        drain_preview(w)
         base = rendered(ov)
         if not hasattr(ov, "set_channel_visible"):
             w.close(); raise SkipCheck("set_channel_visible() not present")
