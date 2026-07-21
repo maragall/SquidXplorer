@@ -38,6 +38,14 @@ class ProcessParameters(BaseModel, use_attribute_docstrings=True):
     """Operator to run over every well — a z-reduction. 'mip' = maximum intensity projection.
     (Register more with squidmip.add_projector; the CLI needs no change to gain one.)"""
 
+    background: Optional[float] = None
+    """Subtract a background level before writing (IMA-224). Give the percentile of image
+    pixels to treat as background, e.g. 10. Omitted = no subtraction, byte-identical to before.
+
+    This needs its own flag rather than being a --projector value: a correction is not a
+    z-reduction, so it cannot be a projector-table entry (it would break the Z=1 output
+    contract), and it carries a per-run parameter that a name-keyed table cannot hold."""
+
     output_folder: Optional[str] = None
     """Directory to receive ``<acquisition-name>.hcs/`` (plate.ome.zarr). Defaults to a sibling of
     the input acquisition. The output can be hundreds of GB on a large plate — aim it at a disk with
@@ -72,6 +80,15 @@ class ProcessParameters(BaseModel, use_attribute_docstrings=True):
         if not p.is_dir():
             raise ValueError(f"input_folder {v!r} is not an existing directory")
         return str(p.resolve())
+
+    @field_validator("background")
+    @classmethod
+    def _valid_background(cls, v):
+        # Validate UP FRONT, for the same reason as _known_projector below: a bad value must
+        # fail before write_plate creates an empty plate skeleton on disk.
+        if v is not None and not 0.0 <= v <= 100.0:
+            raise ValueError(f"--background is a percentile in [0, 100]; got {v}")
+        return v
 
     @field_validator("projector")
     @classmethod
@@ -124,10 +141,36 @@ def run(params: ProcessParameters) -> dict:
         skipped.append(region)
         logger.warning("SKIP well %s (fov %s): %s: %s", region, fov, type(exc).__name__, exc)
 
+    # Background subtraction (IMA-224): estimate ONE level for the whole run, then decorate the
+    # reducer. AFTER is safe for 'mip' only — max commutes exactly with a z-invariant subtraction,
+    # at 1/Nz the cost. Any other reducer gets BEFORE, which is always correct.
+    projector = params.projector
+    background = None
+    if params.background is not None:
+        from squidmip._correction import (AFTER, BEFORE, background_corrector,
+                                          estimate_background, with_correction)
+        from squidmip._engine import _resolve_projector
+
+        background = estimate_background(reader, params.background)
+        side = AFTER if params.projector == "mip" else BEFORE
+        logger.info("background: subtracting %.4g (p%.4g, applied %s the z-reduction)",
+                    background, params.background, side)
+        projector = with_correction(_resolve_projector(params.projector),
+                                    background_corrector(background), side)
+        out_dir = out_parent / f"{name}.bgsub{params.background:g}.hcs"
+
     manifest = write_plate(
-        reader, out_dir, projector=params.projector, workers=params.workers,
+        reader, out_dir, projector=projector, workers=params.workers,
         tiff=params.tiff, on_error=on_error, regions=regions,
     )
+    if params.background is not None:
+        from squidmip._correction import write_provenance
+        write_provenance(out_dir, {
+            "operator": params.projector,
+            "background_percentile": params.background,
+            "background_level": background,
+            "source": str(Path(params.input_folder).resolve()),
+        })
     logger.info(
         "done: %s (%d/%d wells written, %d pyramid level(s))%s",
         manifest["plate"], manifest["n_fields_written"], manifest["n_wells"], manifest["levels"],
