@@ -22,8 +22,9 @@ opens a completed scan and lets you navigate it and apply post-processing operat
                bytes copied, nothing written to disk. The z / t sliders are the real acquisition axes.
 
 The plate is the spatial navigator; ndviewer handles the per-FOV z-stack. "Processing" here means
-post-processing: MIP is operator #1, and more operators stack behind the same menu (the moment a
-second operator lands this is a general HCS viewer, not just a MIP tool).
+post-processing: MIP is operator #1, reference-plane is #2, and more operators stack behind the same
+menu — every one of them streams live into the plate tiles and the detail slider through the same
+operator-agnostic path (the run derives its shape from the operator's registry declaration).
 
 Design notes:
 - ndviewer_light is the embedded detail viewer (its LightweightViewer QWidget + push API); PyQt5 to
@@ -58,7 +59,7 @@ from PyQt5.QtWidgets import (
     QStyleFactory, QTabBar, QTabWidget, QVBoxLayout, QWidget,
 )
 
-from squidmip._engine import _default_workers
+from squidmip._engine import _default_workers, projector_consumes
 from squidmip._layers import OperationStack
 from squidmip._montage import _area_downsample, _hex_to_rgb01, _window
 from squidmip._output import parse_well_id
@@ -411,6 +412,10 @@ _OPERATIONS = (
     Operation("mip", "Maximum Intensity Projection",
               "Collapse each well's z-stack to one max-intensity image; save a navigable OME-Zarr plate.",
               "_build_mip_tab"),
+    Operation("reference", "Reference Plane",
+              "Collapse each well's z-stack to its single sharpest in-focus plane; save a navigable "
+              "OME-Zarr plate.",
+              "_build_reference_tab"),
 )
 _OPERATIONS_BY_KEY = {op.key: op for op in _OPERATIONS}
 
@@ -510,6 +515,90 @@ class _RunningContrast:
         lo = np.searchsorted(cdf, self._pct[0] / 100.0) / self._bins * self._dmax
         hi = np.searchsorted(cdf, self._pct[1] / 100.0) / self._bins * self._dmax
         return float(lo), float(max(hi, lo + 1))
+
+
+def _running_window(contrast: _RunningContrast):
+    """Contrast strategy for the STREAMING tile producers (operator run, raw preview): fold each
+    tile into the running histogram, then window on the plate-wide distribution seen so far."""
+    def window(c_i: int, tile: np.ndarray) -> tuple[float, float]:
+        contrast.add(c_i, tile)
+        return contrast.window(c_i)
+    return window
+
+
+def _percentile_window(c_i: int, tile: np.ndarray) -> tuple[float, float]:
+    """Contrast strategy for the REOPEN path (a written plate read back): per-well 1/99.8
+    percentile. No cross-well state — wells arrive already final, so there is nothing to grow."""
+    lo, hi = float(np.percentile(tile, 1.0)), float(np.percentile(tile, 99.8))
+    return lo, hi if hi > lo else lo + 1
+
+
+def _compose_tile(tiles, colors, window_fn) -> np.ndarray:
+    """Composite per-channel (_CELL, _CELL) tiles into one RGB plate tile, uint8.
+
+    ONE compositor for all three tile producers (operator run, raw preview, computed-plate reopen)
+    — they differ only in how the display window is chosen, so the contrast strategy is INJECTED as
+    ``window_fn(channel_index, tile) -> (lo, hi)`` rather than re-implemented per worker.
+    """
+    rgb = np.zeros((_CELL, _CELL, 3), np.float32)
+    for c_i, ds in enumerate(tiles):
+        lo, hi = window_fn(c_i, ds)
+        rgb += _window(ds, lo, hi)[:, :, None] * colors[c_i][None, None, :]
+    return (np.clip(rgb, 0, 1) * 255).astype(np.uint8)
+
+
+# --- operator kind gate: what the live path can stream (IMA-226) -----------------------------
+
+# The live path (plate tiles + the ndviewer growing slider) streams ONE flat image per region:
+# t=0, z collapsed to 1. That is exactly the z-reducer contract, so an operator's declared
+# ``consumes`` axis (squidmip.projector_consumes) decides how many FOVs we ask the engine for and
+# how many z-planes each slider push carries. The other kinds are declarable but not yet wired
+# end to end — they raise NAMED here instead of rendering silently-wrong pixels, so the ticket
+# that ships the operator flips a branch rather than re-deriving the design.
+_LIVE_STREAM_SHAPE = {frozenset({"z"}): (1, 1)}          # z-reducer: one FOV per well, Nz -> 1
+_LIVE_NOT_WIRED = {
+    frozenset(): ("plane operators (Nz planes in, Nz planes out)", "IMA-223"),
+    frozenset({"fov"}): ("FOV reducers (every FOV in, one stitched image out)", "IMA-222"),
+}
+
+
+def live_stream_shape(consumes) -> tuple[int, int]:
+    """``(n_fovs, nz_push)`` for an operator that consumes *consumes*; raise if it can't stream.
+
+    ``n_fovs`` is what the engine is asked for per well; ``nz_push`` is the z-depth the detail
+    viewer is started with (and therefore the number of planes each well pushes into the slider).
+
+    Raises
+    ------
+    NotImplementedError
+        For an operator kind the live path does not stream yet, naming the ticket that lands it.
+    """
+    key = frozenset(consumes)
+    shape = _LIVE_STREAM_SHAPE.get(key)
+    if shape is not None:
+        return shape
+    what, ticket = _LIVE_NOT_WIRED.get(key, (f"operators consuming {sorted(key)}", "IMA-210"))
+    raise NotImplementedError(
+        f"the live plate/slider path streams z-reducing operators only; it cannot stream "
+        f"{what} yet — that wiring lands with {ticket}."
+    )
+
+
+def _disk_multiplier(consumes, meta) -> float:
+    """Output bytes per region RELATIVE to a z-reducer (which writes exactly one frame per region).
+
+    An FOV reducer writes the stitched mosaic: estimated at ZERO overlap, i.e. every FOV's pixels
+    (a deliberate over-estimate — the disk guard's own doctrine is that asking for a roomier disk
+    is the safe way to be wrong). A plane operator preserves z, so it writes n_z frames. Currently
+    only the z-reducer branch is reachable (the others are gated in :func:`live_stream_shape`), but
+    it is written and tested so IMA-222/223 inherit a correct guard.
+    """
+    consumes = frozenset(consumes)
+    if "fov" in consumes:
+        return float(max((len(f) for f in meta["fovs_per_region"].values()), default=1))
+    if not consumes:
+        return float(meta.get("n_z", 1) or 1)
+    return 1.0
 
 
 # --- plate overview widget (one cell per well; hue-coded status; fit-to-view) ---------------
@@ -771,9 +860,12 @@ class PlateOverview(QWidget):
 # --- operator worker: stream a projection over the plate, fill row-major -------------------
 
 class _OperatorWorker(QThread):
-    """Runs an operator (MIP) over the plate AND persists it as a navigable multiscale OME-Zarr plate
-    (``write_plate``), filling one thumbnail per well as each is written. Projection + pyramid write
-    run in write_plate's bounded producer/writer pools; our ``_on_well`` renders the plate tile and
+    """Runs ANY registered z-reducing operator (MIP, reference, …) over the plate AND persists it as a
+    navigable multiscale OME-Zarr plate (``write_plate``), filling one thumbnail per well as each is
+    written. The operator is a registry name forwarded straight to the engine and the streaming shape
+    is derived from its declared ``consumes`` axis (``live_stream_shape``), so a new operator needs no
+    worker changes. Projection + pyramid write run in write_plate's bounded producer/writer pools; our
+    ``_on_well`` renders the plate tile and
     is called FROM THOSE WRITER THREADS, several at once — so the shared running-contrast, the ``_raw``
     tile store, and the done-counter are guarded by ``_lock`` (the expensive per-channel downsample
     happens OUTSIDE the lock, so downsampling still parallelises). Memory stays O(engine + write
@@ -791,9 +883,10 @@ class _OperatorWorker(QThread):
     finished_ok = pyqtSignal()
 
     def __init__(self, operator: str, reader, meta, fov_index: dict, nr: int, nc: int, out_dir: str,
-                 regions=None, save: bool = True):
+                 regions=None, save: bool = True, n_fovs: int = 1):
         super().__init__()
         self._operator = operator
+        self._n_fovs = n_fovs            # derived from the operator's consumes axis, not hardcoded
         self._reader, self._meta = reader, meta
         self._fov_index, self._nr, self._nc = fov_index, nr, nc
         self._out_dir = out_dir
@@ -817,20 +910,17 @@ class _OperatorWorker(QThread):
         """Called per written well (on a write_plate WRITER THREAD): render the plate thumbnail."""
         info = self._fov_index[region]
         ri, ci, well_id = *info["rc"], info["well_id"]
-        well = image[0, :, 0]  # (C, Y, X)
+        well = image[0, :, 0]  # (C, Y, X) — t=0, z collapsed by the reducer (the gated live contract)
         tiles = [_fit_cell(well[c_i]) for c_i in range(len(self._channels))]  # downsample OUTSIDE lock
         raw = np.empty((len(tiles), _CELL, _CELL), self._dtype)              # native dtype (half the RAM)
-        rgb = np.zeros((_CELL, _CELL, 3), np.float32)
+        for c_i, ds in enumerate(tiles):
+            raw[c_i] = ds                         # local buffer -> fill outside the lock too
         with self._lock:                          # shared contrast/raw/counter -> serialize (cheap part)
-            for c_i, ds in enumerate(tiles):
-                raw[c_i] = ds
-                self._contrast.add(c_i, ds)
-                lo, hi = self._contrast.window(c_i)
-                rgb += _window(ds, lo, hi)[:, :, None] * self._colors[c_i][None, None, :]
+            rgb = _compose_tile(tiles, self._colors, _running_window(self._contrast))
             self._raw[(ri, ci)] = raw
             self._done += 1
             done = self._done
-        self.tileReady.emit(ri, ci, well_id, (np.clip(rgb, 0, 1) * 255).astype(np.uint8))
+        self.tileReady.emit(ri, ci, well_id, rgb)
         self.progress.emit(done, self._total)
         # feed the ndviewer growing slider: one ~512px plane per channel, in memory (register_array),
         # so scrubbing the processed wells is instant and z-collapsed (nz=1). Downsampled -> bounded.
@@ -850,7 +940,7 @@ class _OperatorWorker(QThread):
             if self._save:
                 from squidmip import write_plate  # persist + project in one bounded, streaming pass
 
-                write_plate(self._reader, self._out_dir, n_fovs=1, workers=_VIEWER_WORKERS,
+                write_plate(self._reader, self._out_dir, n_fovs=self._n_fovs, workers=_VIEWER_WORKERS,
                             projector=self._operator, tiff=False, on_well=self._on_well,
                             stop=self._stop.is_set, on_error=self._on_error, regions=self._regions)
                 if self._stop.is_set():
@@ -863,8 +953,9 @@ class _OperatorWorker(QThread):
                 # the subset's compute). Same math as the saved run — a faithful preview.
                 from squidmip import project_plate
 
-                stream = project_plate(self._reader, workers=_VIEWER_WORKERS, projector=self._operator,
-                                       on_error=self._on_error, regions=self._regions)
+                stream = project_plate(self._reader, n_fovs=self._n_fovs, workers=_VIEWER_WORKERS,
+                                       projector=self._operator, on_error=self._on_error,
+                                       regions=self._regions)
                 try:
                     for region, fov, image in stream:
                         if self._stop.is_set():
@@ -932,13 +1023,9 @@ class _PreviewWorker(QThread):
                 for region, tiles in ex.map(load, self._order):   # row-major order preserved
                     if self._stop.is_set():
                         return
-                    rgb = np.zeros((_CELL, _CELL, 3), np.float32)
-                    for c_i, ds in enumerate(tiles):
-                        self._contrast.add(c_i, ds)
-                        lo, hi = self._contrast.window(c_i)
-                        rgb += _window(ds, lo, hi)[:, :, None] * self._colors[c_i][None, None, :]
+                    rgb = _compose_tile(tiles, self._colors, _running_window(self._contrast))
                     ri, ci = self._fov_index[region]["rc"]
-                    self.tileReady.emit(ri, ci, region, (np.clip(rgb, 0, 1) * 255).astype(np.uint8))
+                    self.tileReady.emit(ri, ci, region, rgb)
         except Exception:
             pass   # preview is best-effort; the operator run is the authoritative result
 
@@ -981,12 +1068,9 @@ class _ComputedPlateWorker(QThread):
                 if self._stop.is_set():
                     return
                 coarse = self._read(wpath, fov, self._coarse)             # thumbnail source (C,y,x)
-                rgb = np.zeros((_CELL, _CELL, 3), np.float32)
-                for c_i, plane in enumerate(coarse):
-                    ds = _fit_cell(plane.astype(np.float32))
-                    lo, hi = float(np.percentile(ds, 1.0)), float(np.percentile(ds, 99.8))
-                    rgb += _window(ds, lo, hi if hi > lo else lo + 1)[:, :, None] * self._colors[c_i][None, None, :]
-                self.tileReady.emit(ri, ci, wid, (np.clip(rgb, 0, 1) * 255).astype(np.uint8))
+                tiles = [_fit_cell(plane.astype(np.float32)) for plane in coarse]
+                rgb = _compose_tile(tiles, self._colors, _percentile_window)
+                self.tileReady.emit(ri, ci, wid, rgb)
                 push_src = self._read(wpath, fov, self._push)             # detail-slider source (C,Y,X)
                 push = [_area_downsample(push_src[c], _PUSH_PX, _PUSH_PX).astype(self._dtype)
                         for c in range(push_src.shape[0])]
@@ -1013,6 +1097,7 @@ class PlateWindow(QMainWindow):
         self._meta = None
         self._fov_index = {}
         self._pushed = set()          # wells whose raw z-stack is already registered in the detail viewer
+        self._push_failures = 0       # slider pushes that failed in the current run (surfaced, not hidden)
         self._final_arr = None        # keep the final montage array alive for its QImage
 
         # File menu: a reliable "Open acquisition folder" (drag-drop can be blocked on Windows by the
@@ -1271,10 +1356,16 @@ class PlateWindow(QMainWindow):
     def _build_mip_tab(self) -> QWidget:
         return self._build_run_tab(_OPERATIONS_BY_KEY["mip"])
 
+    def _build_reference_tab(self) -> QWidget:
+        return self._build_run_tab(_OPERATIONS_BY_KEY["reference"])
+
     def _build_run_tab(self, op) -> QWidget:
-        """Generic projector-operator tab (MIP, …): pick a destination, run over the whole plate → a
-        navigable OME-Zarr plate. ONE builder for every z-reduction operator — a new one needs no new
-        tab code. Per-tab state lives in a closure (no per-operator instance attrs)."""
+        """Generic projector-operator tab (MIP, reference, …): pick a destination, run over the whole
+        plate → a navigable OME-Zarr plate. ONE builder for every registered operator — a new one costs
+        an ``Operation`` entry plus a two-line ``_build_<x>_tab``, no tab code. Everything the run needs
+        that varies by operator (FOVs per well, slider depth, disk estimate) is derived from the
+        registry's ``consumes`` declaration, not hardcoded per operator. Per-tab state lives in a
+        closure (no per-operator instance attrs)."""
         w, v = self._op_tab_shell(op.label, op.blurb + " Pick a destination with room — output can be large.")
         state = {"dir": None}
         dir_lbl = QLabel("(no folder chosen)"); dir_lbl.setWordWrap(True)
@@ -1286,7 +1377,7 @@ class PlateWindow(QMainWindow):
             if not d:
                 return
             state["dir"] = d
-            ok, est_gb, _ = self._check_disk(Path(d) / f"{self._acq_name}.hcs")
+            ok, est_gb, _ = self._check_disk(Path(d) / f"{self._acq_name}.hcs", op.key)
             dir_lbl.setText(f"{d}\n~{est_gb:.0f} GB needed" + ("" if ok else "  (not enough free space)"))
             run.setEnabled(True)
 
@@ -1721,15 +1812,23 @@ class PlateWindow(QMainWindow):
         self._worker.progress.connect(
             lambda i, n: self._readout.setText(f"loading computed plate — {i}/{n} wells"))
         self._worker.failed.connect(self._on_failed)
+        self._push_failures = 0
         self._worker.finished_ok.connect(
-            lambda: self._readout.setText(f"✓ computed MIP · {len(self._order)} wells (read-only)"))
+            lambda: self._readout.setText(f"✓ computed MIP · {len(self._order)} wells (read-only)"
+                                          + self._push_failure_note()))
         self._readout.setText(f"loading computed plate · {len(self._order)} wells …")
         self._worker.start()
 
     # -- run a post-processing operator over the whole plate (persists a navigable OME-Zarr plate) --
     def run_operator(self, key: str, out_parent: Optional[str] = None,
                      preview_limit: Optional[int] = None, save: bool = True):
-        """Run a projector operator (MIP / reference) over the plate.
+        """Run ANY registered operator (MIP, reference, …) over the plate, streaming as it computes.
+
+        *key* names both an ``Operation`` (label/blurb/tab) and a projector in the engine registry.
+        Nothing here is operator-specific: the FOVs per well and the slider's z-depth are derived from
+        the operator's declared ``consumes`` axis (:func:`live_stream_shape`), which also GATES the
+        kinds the live path cannot stream yet — those raise NotImplementedError naming their ticket,
+        rather than painting silently-wrong pixels.
 
         preview_limit=N runs on only the first N wells (a subset) — a cheap way to test an operator.
         save=False is PREVIEW: compute + stream results into the plate + ndviewer slider, writing
@@ -1742,6 +1841,9 @@ class PlateWindow(QMainWindow):
             self._readout.setText("already processing — let the current run finish first")
             return
         label = _OPERATIONS_BY_KEY[key].label
+        # derive the streaming shape from the operator itself; unsupported kinds raise LOUD, here,
+        # before any plate state is touched (so a gated operator leaves the view exactly as it was).
+        n_fovs, nz_push = live_stream_shape(projector_consumes(key))
         regions = self._order[:preview_limit] if preview_limit is not None else None
         scope = f"first {len(regions)} wells" if regions is not None else "the whole plate"
         out_dir = est_gb = None
@@ -1753,7 +1855,7 @@ class PlateWindow(QMainWindow):
                 if not out_parent:
                     return
             out_dir = Path(out_parent) / f"{self._acq_name}.hcs"
-            ok, est_gb, msg = self._check_disk(out_dir)   # whole-plate estimate; a subset only uses less
+            ok, est_gb, msg = self._check_disk(out_dir, key)  # whole-plate estimate; a subset uses less
             if not ok and regions is None:
                 self._readout.setText(msg)
                 return
@@ -1771,14 +1873,18 @@ class PlateWindow(QMainWindow):
         self._op_stack.add(key, label)                       # push the operator layer onto the stack
         self._overview.set_active_layer(key)                 # show it
         self._refresh_layers_tab()
-        # switch the detail to processed mode: z collapsed (nz=1 -> ndv drops the z-slider), frames at
-        # the push size, same well order. Each computed well is pushed into the growing slider below.
+        # switch the detail to processed mode: the operator's own z-depth (a z-reducer gives nz=1 ->
+        # ndv drops the z-slider), frames at the push size, same well order. Each computed well is
+        # pushed into the growing slider below.
+        self._push_failures = 0                              # per-run counter, surfaced in the readout
         if self._detail is not None:
-            self._detail.start_acquisition([c["name"] for c in self._meta["channels"]], 1,
-                                           _PUSH_PX, _PUSH_PX, [f"{r}:0" for r in self._order])
+            self._detail.start_acquisition([c["name"] for c in self._meta["channels"]], nz_push,
+                                           _PUSH_PX, _PUSH_PX,
+                                           [f"{r}:{f}" for r in self._order for f in range(n_fovs)])
         self._worker = _OperatorWorker(key, self._reader, self._meta, self._fov_index,
                                        self._overview._nr, self._overview._nc,
-                                       str(out_dir) if out_dir else "", regions=regions, save=save)
+                                       str(out_dir) if out_dir else "", regions=regions, save=save,
+                                       n_fovs=n_fovs)
         dest = f" → {out_dir.name}" if save else " (preview — not saved)"
         self._worker.tileReady.connect(self._on_tile)
         self._worker.pushReady.connect(self._on_push)
@@ -1790,14 +1896,17 @@ class PlateWindow(QMainWindow):
             lambda ri, ci: self._overview.set_status(ri, ci, "failed") if self._overview else None)
         self._worker.failed.connect(self._on_failed)
         self._worker.finished_ok.connect(lambda: self._readout.setText(
-            f"✓ {label} · {scope}{dest}" + ("  (re-openable OME-Zarr)" if save else "")))
+            f"✓ {label} · {scope}{dest}" + ("  (re-openable OME-Zarr)" if save else "")
+            + self._push_failure_note()))
         self._readout.setText(f"● {label} · {scope}{dest} …")
         self._worker.start()
 
-    def _check_disk(self, out_dir) -> tuple[bool, float, str]:
+    def _check_disk(self, out_dir, key: str = "mip") -> tuple[bool, float, str]:
         """Estimate the persisted plate size and refuse if it won't fit (with headroom). Returns
-        (ok, estimate_GB, message). Estimate = per-well projection (T·C·Y·X·itemsize) × 1.34 (the exact
-        4/3 geometric sum of the 2× pyramid tail), UNCOMPRESSED. The projection collapses Z only, so
+        (ok, estimate_GB, message). Estimate = per-well output (T·C·Y·X·itemsize) × the operator's
+        bytes-per-region multiplier (:func:`_disk_multiplier`, 1 for a z-reducer — the only kind that
+        runs today) × 1.34 (the exact 4/3 geometric sum of the 2× pyramid tail), UNCOMPRESSED.
+        A z-reduction collapses Z only, so
         every timepoint is preserved — a time-lapse plate writes n_t as many bytes, so n_t MUST be in
         the estimate (omitting it under-counts n_t× and lets a multi-hour time-lapse run fill the disk
         mid-write — the exact failure this guards). We do NOT discount for zstd: real fluorescence
@@ -1806,15 +1915,16 @@ class PlateWindow(QMainWindow):
         import shutil
         m = self._meta
         ny, nx = m["frame_shape"]
+        label = _OPERATIONS_BY_KEY[key].label if key in _OPERATIONS_BY_KEY else key
         est = int(len(self._fov_index) * m.get("n_t", 1) * len(m["channels"]) * ny * nx
-                  * np.dtype(m["dtype"]).itemsize * 1.34)
+                  * np.dtype(m["dtype"]).itemsize * _disk_multiplier(projector_consumes(key), m) * 1.34)
         gb = 1024 ** 3
         try:
             free = shutil.disk_usage(Path(out_dir).parent).free
         except OSError:
             return True, est / gb, ""      # can't stat the disk — don't block
         if est > free * 0.9:
-            return False, est / gb, (f"MIP would persist ~{est/gb:.0f} GB to {Path(out_dir).parent} "
+            return False, est / gb, (f"{label} would persist ~{est/gb:.0f} GB to {Path(out_dir).parent} "
                                      f"but only {free/gb:.0f} GB free — free space or pick another disk.")
         return True, est / gb, ""
 
@@ -1834,15 +1944,25 @@ class PlateWindow(QMainWindow):
 
     def _on_push(self, fov_idx, planes):
         """A computed well's ~512px channels -> the ndviewer growing slider (in-memory register_array,
-        LRU bounded). z collapsed (nz=1). No-op if the detail has no register_array (older ndv / stub)."""
+        LRU bounded). One entry per channel per z: a 2-D plane is the z-collapsed case (nz=1, every
+        operator that runs today), a 3-D ``(Z, Y, X)`` channel registers plane-by-plane. Failures are
+        COUNTED, not swallowed — a systematic push failure showed up as a mysteriously empty slider.
+        No-op if the detail has no register_array (older ndv / stub)."""
         if self._detail is None or not hasattr(self._detail, "register_array"):
             return
         channels = [c["name"] for c in self._meta["channels"]]
-        for c_i, plane in enumerate(planes):
-            try:
-                self._detail.register_array(0, fov_idx, 0, channels[c_i], plane)
-            except Exception:
-                pass   # one bad push must not break the run
+        for c_i, chan in enumerate(planes):
+            stack = chan if chan.ndim == 3 else chan[None]      # (Z, Y, X); Z == 1 for a z-reducer
+            for z_i, plane in enumerate(stack):
+                try:
+                    self._detail.register_array(0, fov_idx, z_i, channels[c_i], plane)
+                except Exception:
+                    self._push_failures += 1   # one bad push must not break the run, but must be seen
+
+    def _push_failure_note(self) -> str:
+        """Readout suffix reporting slider pushes that failed during the run (empty when none did)."""
+        n = getattr(self, "_push_failures", 0)
+        return f"  ({n} slider pushes failed)" if n else ""
 
     def _on_failed(self, msg):
         if self._overview is not None:

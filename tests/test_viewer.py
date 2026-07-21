@@ -1,8 +1,9 @@
 """HCS viewer — headless (offscreen) tests.
 
 Gates the viewer contract: pure hit-testing + fit-cell shape guard, ingest that LOADS a grey plate
-without processing, the Process-well-plates operator that fills tiles + drives the hue status, the
-raw-z-stack push into the embedded ndviewer on double-click (pointing at the acquisition's own
+without processing, ANY registered operator (MIP, reference) filling tiles + slider pushes + the hue
+status through one operator-agnostic path, the loud gate on operator kinds the live path can't stream
+yet, the raw-z-stack push into the embedded ndviewer on double-click (pointing at the acquisition's own
 TIFFs — nothing copied), the FOV-slider -> red-box link, and second-open state reset. PyQt5 is
 optional (the GUI is an extra), so this whole module skips when it isn't installed — the headless
 pipeline never depends on Qt.
@@ -39,24 +40,36 @@ from squidmip import _viewer as V  # noqa: E402
 class _StubDetail(QWidget):
     """Stand-in for the embedded ndviewer_light detail viewer.
 
-    Records the push API (start_acquisition / register_image / go_to_well_fov) so we can assert
-    the seam WITHOUT constructing ndviewer's real vispy/GL widget — which segfaults offscreen
-    under pytest's PySide6/napari-loaded environment (a Qt-binding conflict, not a code bug).
+    Records the push API (start_acquisition / register_image / register_array / go_to_well_fov) so we
+    can assert the seam WITHOUT constructing ndviewer's real vispy/GL widget — which segfaults
+    offscreen under pytest's PySide6/napari-loaded environment (a Qt-binding conflict, not a code bug).
+    ``register_array`` is the LIVE seam (a computed well streaming into the growing slider); without it
+    here the whole pushReady path silently no-ops in every test.
     """
+
+    push_raises = False   # flip to simulate a slider that rejects every push (failure-counter test)
 
     def __init__(self):
         super().__init__()
         self._fov_labels = []
         self._fov_slider = QSlider(Qt.Horizontal, self)
         self.registered = []
+        self.arrays = []      # (t, fov_idx, z, channel) per live push
         self.nav = []
+        self.nz = None        # nz the acquisition was started with (1 for a z-reducing operator)
 
     def start_acquisition(self, channels, nz, h, w, labels):
         self._fov_labels = list(labels)
+        self.nz = nz
         self._fov_slider.setMaximum(max(0, len(labels) - 1))
 
     def register_image(self, t, idx, z, ch, path, page_idx=0):
         self.registered.append((t, idx, z, ch, path))
+
+    def register_array(self, t, idx, z, ch, arr):
+        if self.push_raises:
+            raise RuntimeError("synthetic slider push failure")
+        self.arrays.append((t, idx, z, ch))
 
     def go_to_well_fov(self, well_id, fov):
         self.nav.append((well_id, fov))
@@ -99,6 +112,42 @@ def test_fit_cell_always_returns_cell_shape():
     assert V._fit_cell(np.zeros((768, 768), np.float32)).shape == (V._CELL, V._CELL)
     assert V._fit_cell(np.zeros((V._CELL, V._CELL), np.float32)).shape == (V._CELL, V._CELL)
     assert V._fit_cell(np.zeros((40, 40), np.float32)).shape == (V._CELL, V._CELL)  # tiny frame upscaled
+
+
+def test_live_stream_shape_for_a_z_reducer():
+    # the kind the live path streams today: one FOV per well, z collapsed to a single push plane
+    assert V.live_stream_shape(frozenset({"z"})) == (1, 1)
+
+
+@pytest.mark.parametrize("consumes, ticket", [(frozenset(), "IMA-223"), (frozenset({"fov"}), "IMA-222")])
+def test_live_stream_shape_gates_unwired_kinds_loudly(consumes, ticket):
+    # a plane operator / FOV reducer must fail NAMED, never render silently-wrong pixels
+    with pytest.raises(NotImplementedError, match=ticket):
+        V.live_stream_shape(consumes)
+
+
+def test_disk_multiplier_per_operator_kind():
+    meta = {"n_z": 5, "fovs_per_region": {"B2": [0, 1, 2], "B3": [0]}}
+    assert V._disk_multiplier(frozenset({"z"}), meta) == 1.0        # one frame per region
+    assert V._disk_multiplier(frozenset(), meta) == 5.0             # plane op: z preserved
+    assert V._disk_multiplier(frozenset({"fov"}), meta) == 3.0      # stitch: zero-overlap upper bound
+
+
+def test_compose_tile_applies_the_injected_contrast_strategy():
+    # ONE compositor, two strategies: a running histogram (live/preview) vs a per-well percentile
+    # (reopen). Same tiles + same window must give the same pixels either way.
+    tiles = [np.linspace(0, 1000, V._CELL * V._CELL, dtype=np.float32).reshape(V._CELL, V._CELL)]
+    colors = np.array([[1.0, 0.0, 0.0]])
+    fixed = V._compose_tile(tiles, colors, lambda c_i, t: (0.0, 1000.0))
+    assert fixed.shape == (V._CELL, V._CELL, 3) and fixed.dtype == np.uint8
+    assert fixed[..., 1].max() == 0 and fixed[..., 0].max() == 255      # red channel only
+    pct = V._compose_tile(tiles, colors, V._percentile_window)
+    running = V._compose_tile(tiles, colors, V._running_window(V._RunningContrast(1, 1000.0)))
+    assert not np.array_equal(pct, running)      # the strategies are genuinely distinct
+    # the running strategy folds each tile it sees into the shared histogram
+    contrast = V._RunningContrast(1, 1000.0)
+    V._compose_tile(tiles, colors, V._running_window(contrast))
+    assert contrast.window(0)[1] > 0
 
 
 def test_resolve_plate_root(tmp_path):
@@ -206,6 +255,63 @@ def test_run_operator_fills_tiles_and_hue_status(qapp, stub_detail, squid_datase
     assert len(win._worker._raw) == 2
     win._stop_worker()
     win.close()
+
+
+@pytest.mark.parametrize("key", ["mip", "reference"])
+def test_any_registered_operator_streams_tiles_and_slider_pushes(qapp, stub_detail, squid_dataset,
+                                                                 tmp_path, key):
+    # ACCEPTANCE (IMA-226): a NON-MIP operator streams partial results to the plate tiles AND the
+    # ndviewer growing slider exactly like MIP — same worker, same signals, nothing operator-specific.
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    win._detail.arrays.clear()
+    win.run_operator(key, out_parent=str(tmp_path / key))
+    assert _drain_until(qapp, lambda: len(win._overview._tiles) == 2 and len(win._detail.arrays) == 4)
+    assert win._detail.nz == 1                                   # z-reducer -> ndv drops the z-slider
+    assert win._detail._fov_labels == [f"{w}:0" for w in win._order]
+    channels = [c["name"] for c in win._meta["channels"]]
+    expected = {(0, win._fov_index[w]["idx"], 0, ch) for w in ("B2", "B3") for ch in channels}
+    assert set(win._detail.arrays) == expected                   # one push per well per channel, z=0
+    assert set(win._overview._status.values()) == {"done"}
+    win._stop_worker(); win.close()
+
+
+def test_run_operator_gates_an_unstreamable_operator_kind(qapp, stub_detail, squid_dataset,
+                                                          monkeypatch, tmp_path):
+    # A plane operator (Nz -> Nz) can't stream through the z-collapsed live path yet: it must raise
+    # NAMED (with the ticket that lands the wiring) and leave the plate untouched — never paint
+    # silently-wrong pixels.
+    import squidmip._engine as engine
+    saved = dict(engine._PROJECTORS)
+    engine.add_projector("plane_noop", lambda planes: next(iter(planes)), consumes=frozenset())
+    monkeypatch.setattr(V, "_OPERATIONS_BY_KEY", dict(
+        V._OPERATIONS_BY_KEY, plane_noop=V.Operation("plane_noop", "Plane Op", "", "_build_mip_tab")))
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    try:
+        with pytest.raises(NotImplementedError, match="IMA-223"):
+            win.run_operator("plane_noop", out_parent=str(tmp_path))
+        assert win._worker is None                              # no run started
+        assert set(win._overview._status.values()) == {"empty"}  # plate untouched
+    finally:
+        engine._PROJECTORS.clear(); engine._PROJECTORS.update(saved)
+        win.close()
+
+
+def test_failing_slider_pushes_are_counted_and_surfaced(qapp, stub_detail, squid_dataset, tmp_path):
+    # A slider that rejects every push used to be invisible (`except Exception: pass`) — the run
+    # completed with a mysteriously empty detail view. Now the run still completes, and says so.
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    win._detail.push_raises = True
+    win.run_operator("mip", out_parent=str(tmp_path))
+    assert _drain_until(qapp, lambda: win._readout.text().startswith("✓"))
+    assert "4 slider pushes failed" in win._readout.text()       # 2 wells x 2 channels
+    assert win._detail.arrays == []
+    win._stop_worker(); win.close()
 
 
 def test_double_click_pushes_raw_zstack(qapp, stub_detail, squid_dataset):

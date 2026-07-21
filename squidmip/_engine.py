@@ -20,7 +20,10 @@ Data flow::
         │                              lazy index/time-folders/meta so concurrent read() only
         │                              touches immutable state; no locks needed downstream)
         ▼  select_fovs(meta, n_fovs)  → {region: [fov, ...]}  → flat [(region, fov), ...]
-        ▼  _PROJECTORS[projector]     → the z-reduce callable passed as project_well(reduce=)
+        ▼  _PROJECTORS[projector]     → ProjectorSpec(fn, consumes)
+        │                               .fn       the z-reduce callable passed as project_well(reduce=)
+        │                               .consumes which axis the operator eats — the shape contract
+        │                                         downstream (the viewer's live path) gates on
         │
         ▼  ThreadPoolExecutor(max_workers=N)          bounded window: ≤ N wells in flight
         │     prime N tasks ─┐                        so completed ~139 MB results can NOT
@@ -36,12 +39,20 @@ Data flow::
 The projector table is the IMA-188 half of the pluggable-projector contract: 183 ships
 ``project`` (MIP); a future EDF/EMF/mean projector is added by name here and runs through
 ``project_plate(..., projector="<name>")`` with **zero engine edits**.
+
+Each entry also declares which axis it *consumes* (IMA-226, the registry half of IMA-210's
+consumes-axis contract). ``{"z"}`` — every projector shipped today — means "Nz planes in, ONE
+plane out", the ``(T, C, 1, Y, X)`` shape the writer and the viewer's live path both assume.
+``frozenset()`` (a plane operator: Nz -> Nz) and ``{"fov"}`` (an FOV reducer: Nfov -> 1) are
+declarable but not yet wired end to end — consumers gate on the declaration and fail LOUD
+rather than render a silently-wrong image. Nothing here reduces anything but z yet.
 """
 
 from __future__ import annotations
 
 import os
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Iterable, Iterator
 
 import numpy as np
@@ -55,8 +66,30 @@ if TYPE_CHECKING:  # avoid import cost / cycle at runtime
 # project_well). MIP is the only one 183 ships; the projector table is the seam for the rest.
 Projector = Callable[[Iterable[np.ndarray]], np.ndarray]
 
-# name -> z-reduction callable. Selected by name in project_plate; extended via add_projector.
-_PROJECTORS: dict[str, Projector] = {"mip": project, "reference": project_reference}
+# The axes an operator may declare it consumes. "z": Nz planes -> one plane (every projector today).
+# "fov": Nfov frames -> one frame (a stitcher, IMA-222). An EMPTY set is a plane operator (Nz -> Nz,
+# IMA-223/224/225). Anything else is a typo, and a typo'd contract is a silent correctness bug.
+CONSUMABLE_AXES = frozenset({"z", "fov"})
+Z_REDUCER = frozenset({"z"})          # the default, and the only kind wired end to end today
+
+
+@dataclass(frozen=True)
+class ProjectorSpec:
+    """One registry entry: the reduction callable plus the axis contract it satisfies.
+
+    A flat record, not a class hierarchy — an operator is a callable plus a declaration, and the
+    declaration is what lets a consumer (the viewer's live path) decide how many FOVs to ask for
+    and how many z-planes each result carries, instead of assuming MIP's shape everywhere.
+    """
+    fn: Projector
+    consumes: frozenset[str] = Z_REDUCER
+
+
+# name -> ProjectorSpec. Selected by name in project_plate; extended via add_projector.
+_PROJECTORS: dict[str, ProjectorSpec] = {
+    "mip": ProjectorSpec(project, Z_REDUCER),
+    "reference": ProjectorSpec(project_reference, Z_REDUCER),
+}
 
 
 def _default_workers() -> int:
@@ -77,8 +110,8 @@ def _default_workers() -> int:
     return n or 1
 
 
-def add_projector(name: str, projector: Projector) -> None:
-    """Add a named z-reduction so it can be selected by name in :func:`project_plate`.
+def add_projector(name: str, projector: Projector, *, consumes: Iterable[str] = Z_REDUCER) -> None:
+    """Add a named reduction so it can be selected by name in :func:`project_plate`.
 
     This is how a future projector (EDF/EMF/mean) plugs in **without touching the engine**:
     add a name, then call ``project_plate(..., projector="<name>")``. (Named ``add_``, not
@@ -93,12 +126,19 @@ def add_projector(name: str, projector: Projector) -> None:
         equal-shape planes and returns one plane. It SHOULD stream (bounded memory) to keep
         the plate engine's per-worker footprint flat; a projector that materialises the whole
         z-stack (e.g. EDF) is allowed but owns its own, documented, memory profile.
+    consumes:
+        The axis this operator eats, from :data:`CONSUMABLE_AXES` (default ``{"z"}`` — an
+        Nz -> 1 z-reduction, the contract every existing caller already assumes). Consumers
+        read it back with :func:`projector_consumes` to derive their shape handling; declaring
+        it wrong is worse than not declaring it, so unknown axes raise here rather than at
+        render time.
 
     Raises
     ------
     ValueError
-        If *name* is empty, *projector* is not callable, or *name* is already defined
-        (a silent clobber of an existing projector would be a quiet correctness bug).
+        If *name* is empty, *projector* is not callable, *consumes* names an axis outside
+        :data:`CONSUMABLE_AXES`, or *name* is already defined (a silent clobber of an
+        existing projector would be a quiet correctness bug).
     """
     if not name:
         raise ValueError("projector name must be a non-empty string")
@@ -109,7 +149,20 @@ def add_projector(name: str, projector: Projector) -> None:
             f"projector {name!r} is already defined; pick a distinct name "
             f"(defined: {available_projectors()})."
         )
-    _PROJECTORS[name] = projector
+    _PROJECTORS[name] = ProjectorSpec(projector, _validate_consumes(name, consumes))
+
+
+def _validate_consumes(name: str, consumes: Iterable[str]) -> frozenset[str]:
+    """Normalise *consumes* to a frozenset, failing loud (named) on an unknown axis."""
+    axes = frozenset(consumes)
+    unknown = axes - CONSUMABLE_AXES
+    if unknown:
+        raise ValueError(
+            f"projector {name!r} declares unknown consumed axis/axes {sorted(unknown)}; "
+            f"consumes must be a subset of {sorted(CONSUMABLE_AXES)} "
+            "(empty = a plane operator that preserves z)."
+        )
+    return axes
 
 
 def available_projectors() -> list[str]:
@@ -117,8 +170,18 @@ def available_projectors() -> list[str]:
     return sorted(_PROJECTORS)
 
 
-def _resolve_projector(name: str) -> Projector:
-    """Look up a projector by name, failing loud (named) on an unknown key."""
+def projector_consumes(name: str) -> frozenset[str]:
+    """Return the axis a named projector consumes (``{"z"}`` for MIP / reference).
+
+    The seam a consumer gates on: the viewer derives its live-stream shape from this instead of
+    hardcoding MIP's one-flat-image-per-well assumption. Raises the same named ``KeyError`` as
+    :func:`project_plate` for an unknown projector.
+    """
+    return _resolve_spec(name).consumes
+
+
+def _resolve_spec(name: str) -> ProjectorSpec:
+    """Look up a registry entry by name, failing loud (named) on an unknown key."""
     try:
         return _PROJECTORS[name]
     except KeyError:
@@ -126,6 +189,11 @@ def _resolve_projector(name: str) -> Projector:
             f"unknown projector {name!r}; available: {available_projectors()}. "
             "Add new modes with squidmip.add_projector(name, fn)."
         ) from None
+
+
+def _resolve_projector(name: str) -> Projector:
+    """Look up a projector's reduction callable by name, failing loud on an unknown key."""
+    return _resolve_spec(name).fn
 
 
 def project_plate(
@@ -158,7 +226,9 @@ def project_plate(
         process — affinity/cgroup aware, not a hardcoded constant). Peak RSS scales with this,
         so pin it on many-core machines.
     projector:
-        A projector name from the table (default ``"mip"``). See :func:`add_projector`.
+        A projector name from the table (default ``"mip"``). See :func:`add_projector`. Every
+        projector in the table today consumes z (``{"z"}``), so every yielded image is
+        ``(T, C, 1, Y, X)``; :func:`projector_consumes` reports the declaration.
 
     Yields
     ------

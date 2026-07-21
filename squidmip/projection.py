@@ -1,11 +1,14 @@
 """One-FOV-per-well maximum-intensity projection (IMA-183, folds IMA-187).
 
 Consumes the IMA-189 reader (``open_reader``) and produces one projected image per
-selected FOV. The projection reduces the **z-axis only**; timepoint (t) and channel (c)
+selected FOV. The reductions in this module reduce the **z-axis only** (they are the
+``consumes={"z"}`` entries of the IMA-226 projector registry); timepoint (t) and channel (c)
 are preserved. Per-FOV output is 5-D ``(T, C, 1, Y, X)`` in Squid's canonical Zarr axis
 order (TCZYX, verified in ``Squid/.../job_processing.py``) with **Z kept size-1** — the
 MIP is an in-place z-reduction (Nz -> 1), not an axis removal, so the IMA-184 OME-zarr
-writer needs no special-casing.
+writer needs no special-casing. Operators that consume a different axis (a plane operator
+preserving z, an FOV reducer) declare it on the registry and do NOT flow through this
+``reduce=`` seam unchanged — see ``_engine.ProjectorSpec``.
 
 Data flow::
 

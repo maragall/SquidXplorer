@@ -24,6 +24,7 @@ from squidmip import (
     available_projectors,
     project_plate,
     project_well,
+    projector_consumes,
 )
 
 
@@ -136,6 +137,46 @@ def test_add_rejects_empty_name_and_non_callable():
         add_projector("bad", object())  # type: ignore[arg-type]
 
 
+# ── consumes-axis contract (IMA-226) ────────────────────────────────────────────────────
+
+def test_shipped_projectors_declare_z():
+    # Every projector that exists today is an Nz -> 1 z-reduction; downstream (the viewer's live
+    # path) reads this declaration instead of assuming MIP's shape.
+    assert projector_consumes("mip") == frozenset({"z"})
+    assert projector_consumes("reference") == frozenset({"z"})
+
+
+def test_add_projector_defaults_to_z_and_accepts_other_kinds():
+    add_projector("zdefault", lambda planes: next(iter(planes)))
+    add_projector("planeop", lambda planes: next(iter(planes)), consumes=frozenset())
+    add_projector("stitcher", lambda planes: next(iter(planes)), consumes={"fov"})
+    assert projector_consumes("zdefault") == frozenset({"z"})
+    assert projector_consumes("planeop") == frozenset()
+    assert projector_consumes("stitcher") == frozenset({"fov"})
+
+
+def test_add_projector_rejects_unknown_consumed_axis():
+    # A typo'd contract is worse than no contract: it would be read as a shape promise downstream.
+    with pytest.raises(ValueError, match="unknown consumed axis"):
+        add_projector("typo", lambda planes: next(iter(planes)), consumes={"zed"})
+    assert "typo" not in available_projectors()
+
+
+def test_projector_consumes_unknown_name_raises_named():
+    with pytest.raises(KeyError, match="unknown projector 'nope'"):
+        projector_consumes("nope")
+
+
+def test_declared_consumes_does_not_change_the_engine_path():
+    # consumes is a DECLARATION the callers gate on — the engine still just calls the reduction.
+    add_projector("first_z_plane_op", lambda planes: next(iter(planes)), consumes=frozenset())
+    reader = FakeReader(n_wells=2, z_levels=(0, 1, 2))
+    out = _collect(reader, workers=2, projector="first_z_plane_op")
+    for (region, fov), img in out.items():
+        np.testing.assert_array_equal(
+            img[0, 0, 0], reader.read(region, fov, reader._channels[0], reader._z_levels[0]))
+
+
 def test_project_plate_unknown_projector_raises_named():
     reader = FakeReader(n_wells=2)
     with pytest.raises(KeyError, match="unknown projector 'nope'"):
@@ -159,6 +200,18 @@ def test_parallel_output_is_pixel_identical_to_single_thread():
     for (region, fov), img in parallel.items():
         expected = project_well(reader, region, fov)  # single-thread reference
         np.testing.assert_array_equal(img, expected)
+
+
+def test_output_is_pixel_identical_at_every_n_fovs():
+    # REGRESSION GUARD (IMA-226): n_fovs is now DERIVED from the operator's consumes axis instead of
+    # being the literal 1 the viewer passed. Pin MIP's pixels at n_fovs > 1 too, so a wrong derivation
+    # can never change what MIP writes.
+    reader = FakeReader(n_wells=3, n_fovs=3)
+    for n_fovs in (1, 2, 3):
+        out = _collect(reader, workers=2, n_fovs=n_fovs)
+        assert len(out) == 3 * n_fovs
+        for (region, fov), img in out.items():
+            np.testing.assert_array_equal(img, project_well(reader, region, fov))
 
 
 def test_result_is_deterministic_across_worker_counts():

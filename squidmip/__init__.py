@@ -17,7 +17,12 @@ The public surface is intentionally tiny::
     build_montage("/path/out")                # static plate montage PNG + region-jump sidecar + hover viewer
 """
 
-from squidmip._engine import add_projector, available_projectors, project_plate
+from squidmip._engine import (
+    add_projector,
+    available_projectors,
+    project_plate,
+    projector_consumes,
+)
 from squidmip._montage import build_montage
 from squidmip._output import write_plate
 from squidmip.projection import project, project_well, select_fovs
@@ -32,6 +37,7 @@ __all__ = [
     "project_plate",
     "add_projector",
     "available_projectors",
+    "projector_consumes",
     "write_plate",
     "build_montage",
 ]
