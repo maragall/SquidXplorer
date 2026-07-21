@@ -21,12 +21,19 @@ Discovery flow::
         glob timepoint folders (0/,1/…) ──┤─► n_t
         glob *.tiff in t0, parse stems ───┤─► regions, fovs_per_region, channels, z-levels
         read ONE frame ──────────────────┤─► frame_shape, dtype   (NOT hardcoded)
-        acquisition.yaml (or JSON) ───────┴─► dz_um, pixel_size_um, wellplate_format, Nz/Nt cross-check
+        acquisition.yaml ────────────────┤─► dz_um, pixel_size_um, wellplate_format, Nz/Nt cross-check
+        coordinates.csv ─────────────────┴─► fov_positions_um {(region,fov):(x,y,z|None)}
 
 The (region, fov, z, channel) index is parsed from FILENAMES — the ground truth. Scalar
-metadata comes from acquisition.yaml (authoritative pixel size etc.), the flat JSON as a
-legacy fallback. coordinates.csv is not read: for one-FOV-per-well the plate layout comes
-from the well ID + wellplate_format; per-FOV stage positions are a deferred stitching concern.
+metadata comes from acquisition.yaml, which is required (the legacy flat
+'acquisition parameters.json' is deliberately NOT supported — see _acquisition.py).
+
+coordinates.csv IS read (IMA-215), for per-FOV stage positions only — the plate layout still
+comes from the well ID + wellplate_format, never from the CSV. Parsing lives in
+squidmip/_coordinates.py because both readers here expose the same field; it prefers the
+timepoint copy, dispatches on the header's column set, normalizes to micrometres, and never
+raises (a missing or malformed table yields {}). See docs/ima-215-eng-review.md.
+
 read() constructs the path directly and returns exactly what tifffile decodes (native dtype),
 refusing non-2D planes and dtypes outside {uint8, uint16}.
 """
@@ -43,6 +50,7 @@ import tifffile
 
 from squidmip._acquisition import load_acquisition_metadata
 from squidmip._channels import load_channel_yaml, resolve_channels
+from squidmip._coordinates import load_fov_positions_um
 
 # region has no underscore; fov and z are ints; channel is the remainder (may contain _ and -).
 _STEM_RE = re.compile(r"^(?P<region>[^_]+)_(?P<fov>\d+)_(?P<z>\d+)_(?P<channel>.+)$")
@@ -192,9 +200,10 @@ class SquidReader:
         sample_path = self._resolve_file(time_folders[0], sample_key, index[sample_key])
         sample = _validate_plane(tifffile.imread(sample_path), sample_path)
 
+        fovs_per_region = {r: sorted(fovs[r]) for r in regions}
         self._meta = {
             "regions": regions,
-            "fovs_per_region": {r: sorted(fovs[r]) for r in regions},
+            "fovs_per_region": fovs_per_region,
             "channels": resolve_channels(sorted(channels), load_channel_yaml(self._path)),
             "n_z": n_z,
             "z_levels": z_sorted,
@@ -204,6 +213,12 @@ class SquidReader:
             "frame_shape": tuple(sample.shape),
             "dtype": sample.dtype,
             "n_t": n_t,
+            # Per-FOV stage positions, µm, timepoint 0 (IMA-215). {} when coordinates.csv is
+            # absent/unreadable — computed here so it inherits this property's memoization
+            # (the engine touches .metadata per well).
+            "fov_positions_um": load_fov_positions_um(
+                self._path, time_folders[0], fovs_per_region
+            ),
         }
         return self._meta
 
@@ -320,6 +335,7 @@ class SquidOMEReader:
         for (region, fov) in files:
             fovs.setdefault(region, set()).add(fov)
         regions = sorted(fovs, key=_plate_key)
+        fovs_per_region = {r: sorted(fovs[r]) for r in regions}
 
         # Channels come from acquisition_channels.yaml, in file order (== the writer's C-axis order).
         yaml_map = load_channel_yaml(self._path)
@@ -336,7 +352,7 @@ class SquidOMEReader:
             warnings.warn(f"Recorded Nz ({acq['n_z_declared']}) != OME Z ({n_z}); using {n_z}.")
         self._meta = {
             "regions": regions,
-            "fovs_per_region": {r: sorted(fovs[r]) for r in regions},
+            "fovs_per_region": fovs_per_region,
             "channels": channels,
             "n_z": n_z,
             "z_levels": list(range(n_z)),
@@ -346,6 +362,12 @@ class SquidOMEReader:
             "frame_shape": (int(dims.get("Y", sample.shape[-2])), int(dims.get("X", sample.shape[-1]))),
             "dtype": np.dtype(sample.dtype),
             "n_t": n_t,
+            # Same field as SquidReader — the two classes present one interface, and OME-TIFF
+            # acquisitions carry coordinates.csv too. OME-XML also holds in-band Plane
+            # PositionX/Y/Z; that fourth source is deliberately not parsed (IMA-215 D12).
+            "fov_positions_um": load_fov_positions_um(
+                self._path, None, fovs_per_region
+            ),
         }
         return self._meta
 

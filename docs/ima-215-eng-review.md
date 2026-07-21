@@ -3,12 +3,17 @@
 **Ticket:** IMA-215 — Coordinates reader (parse `coordinates.csv` → per-FOV stage positions)
 **Branch:** `juliomaragall/ima-215-coords-reader`
 **Review:** `/plan-eng-review`, completed 2026-07-20. Outside voice: Claude subagent (Codex not installed).
-**Status:** CLEARED WITH CONCERNS — 8 issues found, 12 decisions locked, 2 decisions reversed by the
+**Status:** IMPLEMENTED — CLEARED WITH CONCERNS — 8 issues found, 12 decisions locked, 2 decisions reversed by the
 outside voice, 0 unresolved, 1 strategic flag left open for Julio.
 
 > This document is the reviewable record of the plan-eng-review. The working plan lives at
 > `.spec/open/ima-215.md` (gitignored), so everything load-bearing is reproduced here and the
-> merge diff is self-contained. No implementation code exists yet; T1–T8 land after this review.
+> merge diff is self-contained.
+>
+> **T1–T8 are implemented** (`squidmip/_coordinates.py`, wired into both readers,
+> `tests/test_coordinates.py`). 31 new tests pass; the full unit suite is 142 passed / 2 skipped.
+> Verified against real tables: `20x_scan` 36 entries, `sim_1536wp` 1536, the 10x dataset 55
+> collapsed from 550 rows — zero warnings on all three.
 
 ---
 
@@ -230,14 +235,16 @@ and T1/T2 collapse into one task.
 
 ## 9. Implementation tasks
 
-- [ ] **T1 (P1, human ~3h / CC ~20min)** — `_coordinates.py`: header-set dispatch + µm normalization (D2, D4-R)
-- [ ] **T2 (P1, human ~2h / CC ~15min)** — `_coordinates.py`: single-row-only fabrication, omit+warn otherwise (D5-R)
-- [ ] **T3 (P1, human ~1h / CC ~10min)** — `_coordinates.py`: per-FOV collapse, tolerance-based XY check (D3-R)
-- [ ] **T4 (P1, human ~1h / CC ~10min)** — `reader.py`: expose `fov_positions_um` on both readers inside memoized `metadata` (D6, D10)
-- [ ] **T5 (P1, human ~30min / CC ~5min)** — tests: absent/malformed-CSV regression guard (D9-R)
-- [ ] **T6 (P2, human ~45min / CC ~10min)** — docs: fix four stale docstrings, extend the discovery diagram (D7)
-- [ ] **T7 (P1, human ~2h / CC ~15min)** — tests: add 7-col / 4-col / absent CSV fixtures to `conftest.py` **and update the `test_reader.py:33` key-set assertion** (D13)
-- [ ] **T8 (P3, human ~15min / CC ~5min)** — document the t=0 scope in the metadata contract (D11)
+- [x] **T1 (P1, human ~3h / CC ~20min)** — `_coordinates.py`: header-set dispatch + µm normalization (D2, D4-R)
+- [x] **T2 (P1, human ~2h / CC ~15min)** — `_coordinates.py`: single-row-only fabrication, omit+warn otherwise (D5-R)
+- [x] **T3 (P1, human ~1h / CC ~10min)** — `_coordinates.py`: per-FOV collapse, tolerance-based XY check (D3-R)
+- [x] **T4 (P1, human ~1h / CC ~10min)** — `reader.py`: expose `fov_positions_um` on both readers inside memoized `metadata` (D6, D10)
+- [x] **T5 (P1, human ~30min / CC ~5min)** — tests: absent/malformed-CSV regression guard (D9-R)
+- [x] **T6 (P2, human ~45min / CC ~10min)** — docs: fix four stale docstrings, extend the discovery diagram (D7)
+- [x] **T7 (P1, human ~2h / CC ~15min)** — tests: add 7-col / 4-col / absent CSV fixtures to `conftest.py` **and update the `test_reader.py:33` key-set assertion** (D13)
+- [x] **T8 (P3, human ~15min / CC ~5min)** — document the t=0 scope in the metadata contract (D11)
+
+**Status:** all tasks landed.
 
 **Parallelization:** sequential — every task converges on one new module and its wiring.
 

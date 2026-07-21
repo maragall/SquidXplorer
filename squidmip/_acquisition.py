@@ -10,9 +10,11 @@ be dead code carrying a permanent second-format test burden. One format, require
 absence. (If a genuinely pre-yaml dataset ever resurfaces, convert it to ``acquisition.yaml``
 up front rather than adding a second read path here.)
 
-``coordinates.csv`` is intentionally NOT read: for one-FOV-per-well (IMA-183) the plate layout
-comes from the well ID + ``wellplate_format``; per-FOV stage positions are a stitching/mosaic
-concern, deferred to the ticket that needs them.
+``coordinates.csv`` is NOT read here — the plate layout comes from the well ID +
+``wellplate_format`` (IMA-183), and this module stays scalar-only. Per-FOV stage positions
+are parsed by :mod:`squidmip._coordinates` (IMA-215) and surface as
+``metadata["fov_positions_um"]``; that table is per-FOV rather than scalar, so it does not
+fit this module's flat return shape.
 """
 
 from __future__ import annotations

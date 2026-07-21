@@ -42,6 +42,9 @@ def test_metadata_no_dead_attributes(squid_dataset):
         "frame_shape",
         "dtype",
         "n_t",
+        # IMA-215: per-FOV stage positions. Empty on this fixture (it writes no
+        # coordinates.csv) — an absent table is a supported state, not a dead attribute.
+        "fov_positions_um",
     }
     for key, value in meta.items():
         assert value is not None, f"metadata[{key!r}] is None — dead attribute"

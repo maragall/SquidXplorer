@@ -1,9 +1,13 @@
 """Shared test fixtures.
 
 `squid_dataset` builds a tiny, real-shaped Squid individual-TIFF acquisition on disk
-(2 regions x 2 fov x 2 z x 2 channels, 4x4 uint16 frames) with a legacy-schema
-coordinates.csv and a pre-v1.0 (camera_settings-nested color) acquisition_channels.yaml,
-plus the acquisition parameters.json scalars. Returns (root_path, {(region,fov,z,ch): array}).
+(2 regions x 2 fov x 2 z x 2 channels, 4x4 uint16 frames) with a pre-v1.0
+(camera_settings-nested color) acquisition_channels.yaml, acquisition.yaml, and the legacy
+acquisition parameters.json scalars. Returns (root_path, {(region,fov,z,ch): array}).
+
+It deliberately writes NO coordinates.csv, so the default fixture exercises the
+absent-table path (metadata["fov_positions_um"] == {}). Tests that need a coordinates
+table write one with the `write_coordinates_*` helpers below.
 """
 
 from __future__ import annotations
@@ -76,6 +80,36 @@ def _write_timepoint(folder: Path, arrays: dict, tag: int = 0):
                     arr = (np.arange(16, dtype=np.uint16).reshape(4, 4) + base).astype(np.uint16)
                     tifffile.imwrite(folder / f"{region}_{fov}_{z}_{ch}.tiff", arr)
                     arrays[(region, fov, z, ch)] = arr
+
+
+def write_coordinates_labelled(folder: Path, entries, z_levels=(0, 1)):
+    """Write the 7-column timepoint schema: region,fov,z_level,x (mm),y (mm),z (um),time.
+
+    *entries* is {(region, fov): (x_mm, y_mm, z0_um)}. One row per (fov, z_level); XY repeats
+    across z (as real Squid files do) and z climbs by 1.5 um per level.
+    """
+    folder.mkdir(parents=True, exist_ok=True)
+    lines = ["region,fov,z_level,x (mm),y (mm),z (um),time"]
+    for (region, fov), (x_mm, y_mm, z0_um) in entries.items():
+        for level in z_levels:
+            lines.append(
+                f"{region},{fov},{level},{x_mm},{y_mm},{z0_um + 1.5 * level},"
+                f"2025-10-28_13-40-4{level}.000000"
+            )
+    (folder / "coordinates.csv").write_text("\n".join(lines) + "\n")
+
+
+def write_coordinates_unlabelled(folder: Path, rows, z_blank=True):
+    """Write the 4-column root schema: region,x (mm),y (mm),z (mm).
+
+    *rows* is an ordered list of (region, x_mm, y_mm, z_mm). Real Squid leaves z empty here
+    (verified in 3 of 4 datasets), which `z_blank` reproduces.
+    """
+    folder.mkdir(parents=True, exist_ok=True)
+    lines = ["region,x (mm),y (mm),z (mm)"]
+    for region, x_mm, y_mm, z_mm in rows:
+        lines.append(f"{region},{x_mm},{y_mm},{'' if z_blank else z_mm}")
+    (folder / "coordinates.csv").write_text("\n".join(lines) + "\n")
 
 
 @pytest.fixture
