@@ -270,3 +270,81 @@ def test_real_dataset(real_dataset):
     got = reader.read("B3", 15, "Fluorescence_638_nm_-_Penta", 0)
     direct = tifffile.imread(real_dataset / "0" / "B3_15_0_Fluorescence_638_nm_-_Penta.tiff")
     np.testing.assert_array_equal(got, direct)
+
+
+# --- IMA-214 regression tests: the two SILENT parse paths --------------------------------
+
+def _minimal_acq(root, stems, *, nz=1, fmt="1536 well plate"):
+    """Write a tiny acquisition whose t0 folder holds exactly *stems* (no suffix)."""
+    import numpy as np
+    import tifffile
+
+    (root / "0").mkdir(parents=True)
+    for stem in stems:
+        tifffile.imwrite(root / "0" / f"{stem}.tiff", np.zeros((4, 4), np.uint16))
+    (root / "acquisition_channels.yaml").write_text(
+        "version: 1\nchannels:\n- name: Fluorescence 488 nm - Penta\n"
+        "  camera_settings:\n    '1':\n      display_color: '#00FF00'\n      exposure_time_ms: 1.0\n")
+    (root / "acquisition.yaml").write_text(
+        f"sample:\n  wellplate_format: {fmt}\nz_stack:\n  nz: {nz}\n  delta_z_mm: 0.0\n"
+        "time_series:\n  nt: 1\n")
+    return root
+
+
+def test_shifted_parse_refused_not_silently_collapsed(tmp_path):
+    """B1: a region id containing '_' slices one segment early and SILENTLY eats the z axis.
+
+        "A1_2_0_1_Fluorescence_488_nm_-_Penta"
+          -> region='A1' (a VALID well id!)  fov=2  z=0  channel='1_Fluorescence_488_nm_-_Penta'
+                                                          ^^^ the real z, glued on
+
+    Every downstream guard passed: 'A1' is a well id, and _channels.fallback_color still
+    finds a standalone '488' in the mangled name and returns a colour. The z axis collapsed
+    to a single plane and the "max projection" projected nothing, reporting success.
+
+    Note the region-anchoring fix alone does NOT catch this — the shifted parse still
+    matches a <letters><digits> region. The signature is the channel's leading integer.
+    """
+    from squidmip._plate import NotAWellPlateError
+
+    root = _minimal_acq(tmp_path / "acq", [
+        "A1_2_0_1_Fluorescence_488_nm_-_Penta",
+        "A1_2_0_2_Fluorescence_488_nm_-_Penta",
+    ], nz=2)
+    r = open_reader(root)
+    with pytest.raises(NotAWellPlateError, match="sliced one segment too early"):
+        _ = r.metadata
+
+
+def test_shifted_parse_guard_does_not_reject_real_channel_names(tmp_path):
+    """The guard must not fire on legitimate Squid channels (which contain digits, just
+    never as a leading `<int>_` token)."""
+    root = _minimal_acq(tmp_path / "acq", ["B2_0_0_Fluorescence_488_nm_-_Penta"])
+    assert open_reader(root).metadata["regions"] == ["B2"]
+
+
+def test_mixed_acquisition_refuses_partial_index(tmp_path):
+    """B3: reader.py used a bare `continue` on any stem that did not parse, so a mixed
+    acquisition built a PARTIAL index and processed the subset as though it were the whole
+    plate — silent data loss. Only an all-skip acquisition raised."""
+    root = _minimal_acq(tmp_path / "acq", [
+        "B2_0_0_Fluorescence_488_nm_-_Penta",     # parses
+        "scan_area_1_0_0_Fluorescence_488_nm_-_Penta",   # does NOT parse
+    ])
+    r = open_reader(root)
+    with pytest.raises(ValueError, match="do not match the Squid"):
+        _ = r.metadata
+
+
+def test_flexible_region_naming_refused_end_to_end(tmp_path):
+    """B2 through the reader: Squid's flexible mode emits R0/R1 (widgets.py:6584). These
+    parse cleanly as stems but must be refused as well ids rather than written to
+    plate.ome.zarr/R/0/."""
+    from squidmip._output import plate_metadata
+    from squidmip._plate import NotAWellPlateError
+
+    root = _minimal_acq(tmp_path / "acq", ["R0_0_0_Fluorescence_488_nm_-_Penta"])
+    meta = open_reader(root).metadata          # the reader itself is happy: R0 is a fine stem
+    assert meta["regions"] == ["R0"]
+    with pytest.raises(NotAWellPlateError):    # the well-id layer refuses it
+        plate_metadata(meta["regions"], field_count=1)

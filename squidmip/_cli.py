@@ -141,10 +141,18 @@ def run(params: ProcessParameters) -> dict:
 
 
 def main(args: Optional[list[str]] = None) -> None:
+    from squidmip._plate import NotAWellPlateError
+
     argv = list(sys.argv[1:] if args is None else args)
     params = CliApp.run(ProcessParameters, cli_args=argv)
     logging.basicConfig(level=logging.DEBUG if params.verbose else logging.INFO)
-    run(params)
+    try:
+        run(params)
+    except NotAWellPlateError as e:
+        # A refusal is an expected outcome, not a crash: these messages are written for the
+        # scientist ("this acquisition isn't a well plate / its filenames are ambiguous"),
+        # so surface them the same way as the format guard above rather than as a traceback.
+        raise SystemExit(str(e))
 
 
 if __name__ == "__main__":

@@ -49,6 +49,7 @@ import numpy as np
 import tifffile
 
 from squidmip._engine import _default_workers, project_plate
+from squidmip._plate import NotAWellPlateError, parse_well_id
 from squidmip._zarr_store import create_array, write_array, write_group
 from squidmip.projection import select_fovs
 
@@ -70,38 +71,22 @@ _WRITE_WORKERS = min(4, _default_workers())   # bounded writer pool overlapping 
 
 # --- well id <-> row/col --------------------------------------------------------------------
 
-def parse_well_id(region: str) -> tuple[str, str]:
-    """Split a well id into (row_letters, col_digits) — vendored from Squid ``utils.parse_well_id``.
-
-    Squid's canonical parser upper-cases then partitions alphabetic vs numeric characters
-    (``"aa3" -> ("AA", "3")``); the HCS layout is ``plate.ome.zarr/{row}/{col}/{fov}/0`` and
-    ndviewer_light rebuilds ``well_id = row_dir + col_dir`` by concatenation. So the column is
-    NOT zero-padded — ``B2 -> B/2`` (``B/02`` would still be discovered, ``"02".isdigit()`` is
-    True, but report the well as ``B02`` != the real id ``B2``, breaking well-id fidelity).
-
-    We match Squid's accepted inputs exactly (uppercase, multi-letter rows, no padding) but,
-    for a scientific tool, additionally ASSERT the canonical ``<letters><digits>`` shape and
-    fail loud: a manual/no-plate region (Squid would silently accumulate stray chars into the
-    column) must not be written to a mislabelled directory.
-    """
-    s = str(region).upper()
-    letters = "".join(c for c in s if c.isalpha())
-    digits = "".join(c for c in s if not c.isalpha())
-    if not letters or not digits.isdigit() or letters + digits != s:
-        raise ValueError(
-            f"region {region!r} is not a canonical <letters><digits> well id (e.g. 'B2', 'AA3'); "
-            "the HCS plate layout needs a row/column split. Manual/no-plate acquisitions are out "
-            "of scope (IMA-189: well-plate layout only)."
-        )
-    return letters, digits
-
-
+# Well-id parsing and row ordering live in squidmip._plate — the single source of truth.
+# Re-exported here (rather than re-implemented) so this module's callers and the
+# long-standing ``split_well`` alias keep working unchanged.
+#
+# The rules _plate enforces, and why each one matters to THIS module: the HCS layout is
+# ``plate.ome.zarr/{row}/{col}/{fov}/0`` and ndviewer_light rebuilds
+# ``well_id = row_dir + col_dir`` by concatenation, so the column must never be
+# zero-padded (``B2 -> B/2``; ``B/02`` would still be discovered but reported as ``B02``,
+# breaking well-id fidelity). A non-canonical region must not be written to a mislabelled
+# directory, so it raises rather than being coerced.
 # Back-compat alias for the earlier name used in this module's history.
 split_well = parse_well_id
 
 
 def _row_sort_key(row: str):
-    # Plate row order: A..Z then AA..AF (shorter labels first, then lexicographic).
+    """Plate row order: A..Z then AA..AF (shorter labels first, then lexicographic)."""
     return (len(row), row)
 
 

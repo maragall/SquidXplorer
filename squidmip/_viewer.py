@@ -62,6 +62,7 @@ from squidmip._engine import _default_workers
 from squidmip._layers import OperationStack
 from squidmip._montage import _area_downsample, _hex_to_rgb01, _window
 from squidmip._output import parse_well_id
+from squidmip._plate import NotAWellPlateError, Plate
 
 _SUPPORTED_PLATES = ("384", "1536")   # well-plate formats the tool currently accepts (no stitching yet)
 _CELL = 88                 # per-well px in the low-res overview (1536wp -> ~4224x2816)
@@ -453,32 +454,19 @@ def _fit_cell(a: np.ndarray) -> np.ndarray:
     return a[yi][:, xi].astype(np.float32)
 
 
-# The Squid well-plate formats we fit a plate to (well count -> (rows, cols)). An acquisition whose
-# format isn't one of these falls back to a present-only grid (see _plate_grid).
-_PLATE_DIMS = {4: (2, 2), 6: (2, 3), 12: (3, 4), 24: (4, 6), 96: (8, 12),
-               384: (16, 24), 1536: (32, 48)}
-
-
-def _row_letter(i: int) -> str:
-    """0->A, 25->Z, 26->AA, ... (plate row labels)."""
-    s, i = "", i + 1
-    while i:
-        i, r = divmod(i - 1, 26)
-        s = chr(65 + r) + s
-    return s
-
-
 def _plate_grid(wellplate_format) -> Optional[tuple[list, list]]:
     """Full (rows, cols) label grid for a Squid wellplate format, so the plate view shows every
     position evenly spaced (present wells fill; absent stay blank) rather than collapsing gaps.
-    Returns None for an unknown/absent format (caller falls back to present-only)."""
-    import re
-    m = re.search(r"(\d+)", str(wellplate_format or ""))
-    dims = _PLATE_DIMS.get(int(m.group(1))) if m else None
-    if not dims:
+    Returns None for an unknown/absent format (caller falls back to present-only).
+
+    The plate table, the A..AF row lettering and the well-id rules all live in
+    squidmip._plate now — this is a thin adapter that keeps the (rows, cols) list-of-labels
+    shape the widgets below already consume.
+    """
+    plate = Plate.from_format(wellplate_format)
+    if plate is None:
         return None
-    nr, nc = dims
-    return [_row_letter(i) for i in range(nr)], [str(c) for c in range(1, nc + 1)]
+    return list(plate.row_labels), list(plate.col_labels)
 
 
 def resolve_plate_root(path) -> tuple[Path, bool]:
@@ -1481,6 +1469,19 @@ class PlateWindow(QMainWindow):
             e.acceptProposedAction()
             self.ingest(urls[0].toLocalFile())
 
+    @staticmethod
+    def _not_a_well_plate_text(exc, regions=None) -> str:
+        """The single 'this isn't a well plate' message, shared by BOTH catch sites in ingest().
+
+        It has to be one function: the two sites previously carried two different messages,
+        so the text a user saw depended on which line happened to raise. Moving a validation
+        between the reader and plate_metadata silently changed the wording — and the reader
+        DOES validate region ids now, so that move has happened.
+        """
+        sample = f" — regions like {list(regions)[:3]} aren't well ids (e.g. B2)" if regions else ""
+        return (f"not a well-plate acquisition{sample}; the MIP tool needs a well plate. "
+                f"({type(exc).__name__}: {exc})")
+
     # -- open an acquisition (no processing yet — that's the Process menu) --
     def ingest(self, path: str):
         from squidmip import open_reader
@@ -1508,6 +1509,14 @@ class PlateWindow(QMainWindow):
         try:
             reader = open_reader(str(p))
             meta = reader.metadata
+        except NotAWellPlateError as e:
+            # Readable, but not a well plate. This MUST report the well-plate message, not
+            # "unreadable": the reader now validates region ids itself, so this failure can
+            # surface here instead of at plate_metadata below. The error type carries the
+            # meaning, so it no longer matters WHICH line raised.
+            self._readout.setText(self._not_a_well_plate_text(e))
+            self._drop.show()
+            return
         except Exception as e:   # not a Squid acquisition / unreadable -> report, don't crash the app
             self._readout.setText(f"not a readable Squid acquisition: {e}")
             self._drop.show()
@@ -1524,17 +1533,15 @@ class PlateWindow(QMainWindow):
 
         # Order wells in TRUE plate row-major (A,B,...,Z,AA,...). NOT lexicographic ("AA" < "B").
         # This parses region ids as well ids — guard it: a readable acquisition whose regions are
-        # NOT well-plate ids (glass slide, manual/coordinate names, "R2C3", "0") must report, not
-        # crash. parse_well_id / plate_metadata raise ValueError on those. (contract: never crash.)
+        # NOT well-plate ids (glass slide, manual/coordinate names, "R2C3", "R0", "0") must report,
+        # not crash. (contract: never crash.)
         try:
             plate = plate_metadata(meta["regions"], field_count=1)["plate"]
             present_rows = [r["name"] for r in plate["rows"]]
             present_cols = [c["name"] for c in plate["columns"]]
         except (ValueError, KeyError) as e:
             self._reader = self._meta = None
-            self._readout.setText(
-                f"not a well-plate acquisition — regions like {list(meta['regions'])[:3]} aren't "
-                f"well ids (e.g. B2); the MIP tool needs a well plate. ({type(e).__name__})")
+            self._readout.setText(self._not_a_well_plate_text(e, meta.get("regions")))
             self._drop.show()
             return
         # Prefer the FULL plate-format grid (every position, evenly spaced — no collapsed gaps).

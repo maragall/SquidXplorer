@@ -29,6 +29,20 @@ legacy fallback. coordinates.csv is not read: for one-FOV-per-well the plate lay
 from the well ID + wellplate_format; per-FOV stage positions are a deferred stitching concern.
 read() constructs the path directly and returns exactly what tifffile decodes (native dtype),
 refusing non-2D planes and dtypes outside {uint8, uint16}.
+
+Parse guards — each closes a path that used to fail SILENTLY::
+
+    stem parses, channel starts <int>_  ─► NotAWellPlateError  (shifted parse; see
+                                           _SHIFTED_CHANNEL_RE — the z had been glued
+                                           onto the channel and the MIP projected 1 plane)
+    stem does not parse at all          ─► ValueError          (was: bare `continue`, which
+                                           built a PARTIAL index on mixed acquisitions)
+    region not a canonical well id      ─► NotAWellPlateError  (raised downstream by
+                                           _plate.parse_well_id; "R0" included — Squid's
+                                           flexible mode really emits R0/R1)
+
+Well-plate geometry and the well-id rules live in squidmip._plate, which is the single
+source of truth; this module holds no plate table of its own.
 """
 
 from __future__ import annotations
@@ -43,10 +57,28 @@ import tifffile
 
 from squidmip._acquisition import load_acquisition_metadata
 from squidmip._channels import load_channel_yaml, resolve_channels
+from squidmip._plate import NotAWellPlateError, sort_key as _plate_key
 
 # region has no underscore; fov and z are ints; channel is the remainder (may contain _ and -).
 _STEM_RE = re.compile(r"^(?P<region>[^_]+)_(?P<fov>\d+)_(?P<z>\d+)_(?P<channel>.+)$")
 _TIFF_SUFFIXES = (".tiff", ".tif")
+
+# A parsed channel that STARTS with an integer followed by "_" is the signature of a
+# shifted parse, not a real channel name. If the region id itself contained an underscore
+# (e.g. a flexible region literally named "A1_2"), _STEM_RE -- whose region token is
+# [^_]+ -- slices one segment too early:
+#
+#     "A1_2_0_1_Fluorescence 488 nm Ex"
+#        -> region='A1' (a VALID well id!)  fov=2  z=0  channel='1_Fluorescence 488 nm Ex'
+#                                                   ^^^ the REAL z, glued onto the channel
+#
+# Every downstream guard then passes: 'A1' parses as a well id, and _channels.fallback_color
+# still finds a standalone '488' in the mangled name and returns a colour. The z axis
+# silently collapses and the "max projection" projects a single plane while reporting
+# success. Squid channel names never begin with a bare integer + underscore, so this is a
+# narrow, low-false-positive signature for the shift. (Anchoring the region to
+# <letters><digits> does NOT fix this -- the shifted parse still matches.)
+_SHIFTED_CHANNEL_RE = re.compile(r"^\d+_")
 
 # Squid grayscale planes are MONO8 (uint8) or MONO12/MONO16 (uint16); see
 # software/squid/camera/utils.py get_available_pixel_formats. It never writes uint32/float
@@ -69,22 +101,6 @@ def _validate_plane(arr, path: Path):
             "is not a raw Squid capture; refused rather than silently projected."
         )
     return arr
-
-
-def _plate_key(region: str):
-    """Sort well ids in true plate ROW-MAJOR order: A,B,...,Z,AA,AB,... with the column by integer
-    (so B2 < B3 < B10, and B < AA — single-letter rows before double-letter, not lexicographic
-    where "AA" < "B"). Downstream consumers (projection engine, plate viewer) then process wells
-    top-to-bottom, left-to-right. Non-well-plate region names fall back after the plate wells.
-
-    Changed from a plain natural sort in IMA-189: the old key ordered "AA" before "B", so a 1536wp
-    plate processed row A, then the AA-AF rows, then B..Z — filling the plate view out of visual
-    order. Row-major here fixes fill/scrub order for every slot. (Owner: IMA-185; see eng review.)
-    """
-    m = re.match(r"^([A-Za-z]+)(\d+)$", region)
-    if not m:
-        return (1, len(region), region, 0)          # non-plate ids: stable, after the wells
-    return (0, len(m.group(1)), m.group(1).upper(), int(m.group(2)))
 
 
 def open_reader(path) -> "SquidReader":
@@ -135,12 +151,25 @@ class SquidReader:
             return self._index
         folder = self._discover_time_folders()[0]
         index: dict = {}
+        unparsed: list[str] = []
         for f in folder.iterdir():
             if f.suffix.lower() not in _TIFF_SUFFIXES:
                 continue
             m = _STEM_RE.match(f.stem)
             if not m:
-                continue  # e.g. {region}_{fov}_stack.tiff (multi-page) — not this reader's format
+                # A TIFF that does not parse is NOT ignorable. Skipping silently builds a
+                # PARTIAL index, and a mixed acquisition then processes a subset as though
+                # it were complete — silent data loss. Collect and report below.
+                unparsed.append(f.name)
+                continue
+            if _SHIFTED_CHANNEL_RE.match(m["channel"]):
+                raise NotAWellPlateError(
+                    f"{f.name}: parsed channel {m['channel']!r} starts with an integer, which "
+                    f"means the filename was sliced one segment too early — region "
+                    f"{m['region']!r} is almost certainly a truncation of a region id that "
+                    "itself contains '_'. Refusing: this misparse silently collapses the z "
+                    "axis and would produce a 'max projection' of a single plane."
+                )
             key = (m["region"], int(m["fov"]), int(m["z"]), m["channel"])
             index[key] = f.suffix
         if not index:
@@ -148,6 +177,14 @@ class SquidReader:
                 "No Squid individual-TIFF files "
                 "({region}_{fov}_{z}_{channel}.tiff) found in "
                 f"{folder!s}"
+            )
+        if unparsed:
+            shown = ", ".join(sorted(unparsed)[:5])
+            raise ValueError(
+                f"{len(unparsed)} TIFF file(s) in {folder!s} do not match the Squid "
+                f"{{region}}_{{fov}}_{{z}}_{{channel}} layout (e.g. {shown}). Refusing rather "
+                f"than indexing only the {len(index)} file(s) that did parse — a partial index "
+                "would process a subset of the acquisition as though it were complete."
             )
         self._index = index
         return index
