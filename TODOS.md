@@ -50,3 +50,35 @@ so a future session doesn't rediscover it from zero.
 - **Cons:** Different repo, different owner; not on any SquidMIP critical path.
 - **Context:** SquidMIP does **not** carry this bug — IMA-189's `squidmip/_channels.py` already resolves `display_color` correctly (top-level v1.0+ *and* nested `camera_settings`, mapped by name, raises on unresolved), and IMA-184 consumes `metadata.channels[].display_color` rather than re-parsing the yaml. This TODO is purely a flag for whoever owns `~/CEPHLA/projects/explorer/squid2minerva`.
 - **Depends on / blocked by:** squid2minerva maintainer.
+
+## End-to-end non-wellplate ingest (glass slide / flexible regions) → new ticket
+- **What:** Actually process acquisitions whose regions are not well ids — `glass slide`, `4 glass slide`, and Squid's flexible-region mode (`region_0`, `scan_area_1`). Requires: a zarr output layout for non-well regions, relaxing `_output.parse_well_id`, and lifting the `384|1536` gates at `_cli.py:97` and `_viewer.py:66`.
+- **Why:** IMA-214 established that a glass slide is structurally just a 1x1 plate, but stopped at the model. Today these acquisitions are refused end to end, and before IMA-214 they were worse than refused — `region_N` filenames silently produced a max projection over a single z-plane.
+- **Pros:** Unblocks glass-slide and multi-slide-carrier users, who are currently rejected outright. Upstream Squid agrees with the premise (`gui_hcs.py:2397`: `TODO(imo): ... It seems like it's just a "1 well plate"`).
+- **Cons:** Touches reader, writer, CLI and viewer in one diff — hard to review and hard to bisect. The genuinely open design question is what the zarr layout should be when there is no `{row}/{col}` to write to; `plate.ome.zarr` and ndviewer_light both assume a well grid.
+- **Context:** IMA-214 deliberately took scope option B (model + DRY adoption) and deferred this. `_output.parse_well_id` hard-raises on non-well regions **by design** (`_output.py:90-95`) — that is not a bug to delete casually, it exists so a manual acquisition can't be written to a mislabelled directory. Start by deciding the output layout, not by relaxing the parser.
+- **Depends on / blocked by:** IMA-214 (Plate model + `NotAWellPlateError`).
+
+## Detect drift between the vendored sample_formats.csv and the user's Squid → follow-up
+- **What:** Compare SquidMIP's vendored `sample_formats.csv` against a located Squid install's `cache/sample_formats.csv` (and warn on mismatch), or checksum it at build time.
+- **Why:** IMA-214 vendors the CSV so squidmip works standalone. But Squid prefers a user-editable `cache/sample_formats.csv` over its shipped copy (`_def.py:1174-1182`). A user who customized a plate definition gets geometry from squidmip that silently disagrees with what their microscope actually used.
+- **Pros:** Closes the one failure mode in IMA-214 that has no test, no detection, and would be completely silent.
+- **Cons:** Requires locating a Squid install, which IMA-214 explicitly rejected as a hard runtime dependency. Would have to be advisory-only and skip cleanly when Squid isn't present.
+- **Context:** IMA-214 decision D4 chose "vendor + explicit override path". The override makes the problem *fixable* by a user who knows about it; this TODO is about making it *detectable* by one who doesn't. Flagged as the single critical gap in the IMA-214 failure-mode table.
+- **Depends on / blocked by:** IMA-214 (vendored data + override path).
+
+## 4-slide carrier has a PNG but no geometry row → blocked on upstream data
+- **What:** Define geometry for the `4 glass slide` carrier so `Plate.carrier_image` and any overlay can position slides on it.
+- **Why:** Squid's carrier-PNG registry lists `"4 glass slide": "images/4 slide carrier_1509x1010.png"` (`core.py:1532`), but `sample_formats.csv` has **no** `4 glass slide` row — only `glass slide,0,0,0,0,0,0,0,1,1`. So there is literally nothing to build a Plate from. IMA-214 makes `carrier_image` refuse it explicitly rather than half-support it.
+- **Pros:** Completes the carrier registry; the 4-slide carrier is the Squid default background image (`core.py:1544` falls back to it), so it is not an exotic case.
+- **Cons:** The data does not exist upstream. Either add a row to `sample_formats.csv` (an upstream Squid change, different repo/owner) or hand-measure the layout, which then drifts from Squid.
+- **Context:** Also note the 4 slides may not be a uniform 2x2 grid with even spacing — if they aren't, a flat `Plate` dataclass can't express it and this is where IMA-214's decision D5 (collapse the class hierarchy) would need revisiting with a subclass.
+- **Depends on / blocked by:** An upstream `sample_formats.csv` row, or a decision to hand-measure.
+
+## number_of_skip is parsed but uninterpreted → low priority
+- **What:** Interpret `sample_formats.csv`'s `number_of_skip` column (384-well plates have `1`, everything else `0`).
+- **Why:** IMA-214's Plate carries the field because it carries the whole CSV row, but nothing reads it. Leaving it unmodelled is fine; leaving it *undocumented* would let a future reader assume it's already honoured.
+- **Pros:** Removes an ambiguity about whether Plate's geometry is complete.
+- **Cons:** Almost certainly acquisition-planning behavior (which wells the scope visits), not projection behavior — so the MIP tool may never need it.
+- **Context:** Squid reads it in `_def.py:1159`. Check how Squid actually uses it before modelling anything.
+- **Depends on / blocked by:** A real case where skipped outer wells matter to projection.
