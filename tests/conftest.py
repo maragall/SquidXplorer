@@ -96,3 +96,28 @@ def real_dataset():
     if not path.is_dir():
         pytest.skip("real hongquan dataset not present")
     return path
+
+
+def require_usable_dataset(path, label):
+    """Skip unless ``path`` holds at least one TIFF whose bytes are actually readable.
+
+    ``is_dir()`` is not a sufficient guard. The ``sim_*`` fixtures are symlink fan-outs
+    over a source acquisition; when that source is deleted the directory survives full
+    of dangling links, an ``is_dir()`` check passes, and the test proceeds to die deep
+    inside tifffile with a bare ``FileNotFoundError`` that reads like a code bug rather
+    than missing data. Resolve one real plane before declaring the fixture usable.
+
+    Call from a fixture; raises ``Skipped`` rather than returning a flag.
+    """
+    if not path.is_dir():
+        pytest.skip(f"{label} not present at {path}")
+    probe = next(path.rglob("*.tif*"), None)
+    if probe is None:
+        pytest.skip(f"{label} at {path} contains no TIFFs")
+    if not probe.exists():
+        target = probe.readlink() if probe.is_symlink() else "(missing)"
+        pytest.skip(
+            f"{label} at {path} is a broken symlink farm "
+            f"({probe.name} -> {target}); regenerate or remove it"
+        )
+    return path

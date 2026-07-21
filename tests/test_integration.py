@@ -31,6 +31,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from tests.conftest import require_usable_dataset
+
 import tensorstore as ts
 import tifffile
 
@@ -51,9 +53,7 @@ SIM_1536WP = Path("/Users/julioamaragall/CEPHLA/Data/sim_1536wp")
 
 @pytest.fixture
 def sim_1536wp():
-    if not SIM_1536WP.is_dir():
-        pytest.skip(f"sim_1536wp not present at {SIM_1536WP}")
-    return SIM_1536WP
+    return require_usable_dataset(SIM_1536WP, "sim_1536wp")
 
 
 def _assert_well_matches_np_max(reader, region, fov):
