@@ -430,10 +430,18 @@ def test_ingest_loads_plate_and_previews_without_processing(qapp, stub_detail, s
     win.close()
 
 
-def test_ingest_readable_non_wellplate_reports_not_crashes(qapp, stub_detail, tmp_path):
-    # A readable Squid acquisition whose region is NOT a well id (glass slide / "R2C3" / manual).
-    # It must report "not a well-plate", show the drop target, and leave no half-set state — NOT
-    # crash out of ingest/__init__ (the HIGH bug the adversarial review found).
+def test_ingest_non_wellplate_region_opens_as_a_slide_carrier(qapp, stub_detail, tmp_path):
+    # IMA-214 INVERTED THIS TEST. It used to assert that a readable acquisition whose region is
+    # not a well id ("R2C3", "manual0", a glass slide) was REFUSED with "not a well-plate".
+    # That refusal is exactly what blocked the real 18 GB tissue dataset from ever opening.
+    #
+    # A slide carrier IS a plate: a grid of cells where a cell holds 0, 1 or many FOVs. So the
+    # acquisition must now OPEN, with the freeform region id as a carrier cell. The old contract
+    # (never crash out of ingest/__init__) still holds -- it is just satisfied by succeeding
+    # rather than by bailing out.
+    #
+    # "R2C3" is deliberate: it does NOT match <letters><digits>, so it is the case that used to
+    # crash activate_well's parse_well_id outside its try. "manual0" survived only by luck.
     import tifffile
     root = tmp_path / "slide_acq"
     (root / "0").mkdir(parents=True)
@@ -450,12 +458,13 @@ def test_ingest_readable_non_wellplate_reports_not_crashes(qapp, stub_detail, tm
 
     win = V.PlateWindow(None)
     win.ingest(str(root))                        # must not raise
-    assert "well-plate" in win._readout.text().lower()
-    assert win._reader is None and win._overview is None
-    assert win._drop.isVisible() or not win._drop.isHidden()
-    # and the initial-path route through __init__ must not crash either
+    assert win._reader is not None, win._readout.text()
+    assert win._overview is not None, "a slide carrier must reach the plate widget"
+    assert "R2C3" in win._fov_index, f"freeform region lost: {list(win._fov_index)}"
+    assert "not a well-plate" not in win._readout.text().lower()
+    # the initial-path route through __init__ must not crash either
     win2 = V.PlateWindow(str(root))
-    assert "well-plate" in win2._readout.text().lower()
+    assert win2._overview is not None
     win.close(); win2.close()
 
 
