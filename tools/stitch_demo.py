@@ -14,6 +14,7 @@ Nothing but the PNG touches disk: the fused mosaics live in RAM and are freed on
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from pathlib import Path
@@ -21,7 +22,12 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-from squidmip import open_reader, stitch_region
+# THIS checkout wins over an editable install pointing somewhere else — same bootstrap as
+# tools/acceptance.py, and the reason is not hypothetical: on the build machine `squidmip`
+# resolved to a different worktree entirely.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from squidmip import open_reader, stitch_region  # noqa: E402
 
 DATASET = (
     "/Users/julioamaragall/Downloads/"
@@ -69,33 +75,10 @@ def _window(a: np.ndarray, lo: float, hi: float) -> np.ndarray:
     return (np.clip(x, 0, 1) * 255).astype(np.uint8)
 
 
-def _overlap_ncc(tile_i: np.ndarray, tile_j: np.ndarray, dy: float, dx: float) -> float:
-    """How well two FOVs agree in their overlap when placed *dy, dx* apart, as NCC in [-1, 1].
-
-    THE seam metric, and the one number that means what it says. (The obvious alternative,
-    gradient energy in the seam band, was tried first and is misleading here: sub-pixel
-    placement bilinearly resamples the tiles, which smooths sensor noise and *lowers* gradient
-    energy even as the seam gets strictly better. Measured on the FOV 10|15 seam of this
-    acquisition: gradient energy FELL 137.3 -> 116.5 while the overlap NCC ROSE 0.666 -> 0.759.
-    A metric that moves the wrong way on a correct result is not a metric.)
-
-    Bounds come from ``tilefusion.registration.compute_pair_bounds`` so the compared rectangle
-    is identical to the one registration itself scored.
-    """
-    from tilefusion.registration import compute_pair_bounds
-
-    Y, X = tile_i.shape
-    idy, idx = int(round(dy)), int(round(dx))
-    bounds = compute_pair_bounds([(0, 1, idy, idx, Y - abs(idy), X - abs(idx))], (Y, X))
-    if not bounds:
-        return float("nan")
-    _i, _j, biy, bix, bjy, bjx = bounds[0]
-    a = tile_i[biy[0]:biy[1], bix[0]:bix[1]].astype(np.float64).ravel()
-    b = tile_j[bjy[0]:bjy[1], bjx[0]:bjx[1]].astype(np.float64).ravel()
-    n = min(a.size, b.size)
-    if n < 16 or a[:n].std() < 1e-6 or b[:n].std() < 1e-6:
-        return float("nan")
-    return float(np.corrcoef(a[:n], b[:n])[0, 1])
+# The seam metric moved to squidmip._benchmark at IMA-233 so the demo and the benchmark
+# harness score seams with ONE implementation. Two copies would eventually disagree, and
+# then the demo's claim and the benchmark table's claim would be about different things.
+from squidmip._benchmark import overlap_ncc as _overlap_ncc  # noqa: E402
 
 
 def main() -> int:
