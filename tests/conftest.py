@@ -90,6 +90,33 @@ def squid_dataset(tmp_path):
 
 
 @pytest.fixture
+def pyramid_dataset(tmp_path):
+    """A Squid acquisition whose fields are big enough to produce a REAL pyramid.
+
+    `squid_dataset` uses 4x4 frames, and `_output._PYRAMID_MIN_YX` (256) collapses anything
+    that small to level 0 alone — so it cannot exercise pyramid level selection at all. This
+    one writes 640px fields (two levels: 640 -> 320) and stays deliberately minimal otherwise
+    (1 well, 1 fov, 1 channel, 2 z) so the extra pixels don't cost real time.
+
+    Returns (root, region, frame_size).
+    """
+    root = tmp_path / "acq_pyr"
+    size, region, ch = 640, "B2", CH_IN_YAML
+    folder = root / "0"
+    folder.mkdir(parents=True, exist_ok=True)
+    for z in range(2):
+        # A gradient plus a per-z offset: downsampled levels stay distinguishable, and a crop
+        # from a known position has a predictable value (so a loupe read can be checked).
+        yy, xx = np.mgrid[0:size, 0:size]
+        arr = ((yy + xx).astype(np.uint16) + z * 7)
+        tifffile.imwrite(folder / f"{region}_0_{z}_{ch}.tiff", arr)
+    (root / "acquisition_channels.yaml").write_text(_YAML)
+    (root / "acquisition.yaml").write_text(_ACQ_YAML)
+    (root / "acquisition parameters.json").write_text(json.dumps(_PARAMS))
+    return root, region, size
+
+
+@pytest.fixture
 def real_dataset():
     """The real hongquan dataset if present locally; else skip (used by integration tests)."""
     path = Path.home() / "Downloads" / "z_stack_2026-05-15_18-39-28.532906 hongquan"

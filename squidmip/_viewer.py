@@ -15,7 +15,10 @@ opens a completed scan and lets you navigate it and apply post-processing operat
                status (Hongquan Li's record-zstack-viewer palette): grey = not processed, amber =
                processing, blue = done, red-x = failed. The CURRENT well in view is a red box; the
                cursor's well (as you move around) is a red dot. Wheel-zoom + drag-pan; double-click
-               opens a well.
+               opens a well; PRESS-AND-HOLD raises a loupe (IMA-208) that overlays the well's real
+               pixels — read from the acquisition's TIFFs, or from the written pyramid once an
+               operator has persisted one — magnified relative to the current plate zoom and capped
+               at native resolution, with a µm scale bar when the pixel size is known.
       -> RIGHT (>= half): ndviewer_light EMBEDDED (dark-themed) — the per-FOV 4D detail, full height.
                DOUBLE-CLICK a well and its RAW z-stack (all z, all channels) opens here by pointing
                ndviewer at the acquisition's existing TIFFs (register_image with the raw paths) — zero
@@ -41,6 +44,7 @@ Design notes:
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
@@ -512,10 +516,361 @@ class _RunningContrast:
         return float(lo), float(max(hi, lo + 1))
 
 
+# --- loupe (IMA-208): press-and-hold magnifier over the plate ------------------------------
+#
+# The plate montage CANNOT be the loupe's source: a tile is _CELL (88) px per well, a ~47x
+# downsample of a ~4168px field (see _fit_cell), so magnifying it yields interpolation, not
+# pixels. The loupe therefore reads the real data behind whatever layer is on screen — the
+# acquisition's TIFFs in raw mode, a windowed read of the written pyramid otherwise.
+#
+# Magnification is derived from the CURRENT plate zoom (so it is dynamic, per the spec) and
+# capped at native resolution (so it never invents detail):
+#
+#     s_plate = cd / well_px            screen px per image px, at the current plate zoom
+#     s_loupe = min(1.0, MAG * s_plate) screen px per image px inside the inset (cap = native)
+#     M       = s_loupe / s_plate       actual magnification, in (1, MAG]
+#     L       = coarsest pyramid level whose own pixels are still >= s_loupe
+#
+# Reading level L instead of level 0 is what keeps this cheap: L is chosen so the level's
+# pixels land ~1:1 on the inset's screen pixels, so the crop is a few hundred px per side no
+# matter how far out the plate is zoomed.
+
+_LOUPE_PX = 240            # inset size on screen (px)
+_LOUPE_MAG = 8.0           # target magnification over the plate's current scale
+_LOUPE_HOLD_MS = 350       # press-and-hold dwell before the loupe arms
+_LOUPE_SLOP = 3            # cursor may drift this many px while arming (matches the pan threshold)
+_LOUPE_CACHE = 8           # decoded crops kept (small: a crop is a few MB, not a whole well)
+
+
+def _fov_of_well(well_id, fovs_per_region=None) -> int:
+    """The FOV index the plate addresses for ``well_id`` — the single seam for multi-FOV.
+
+    The plate hit-test resolves a WELL, never a FOV, so today this is always 0: the viewer is
+    one-FOV-per-well (the library folded IMA-187, the viewer has not). Everything that needs a
+    FOV goes through here rather than writing a bare ``0``, so when the plate grows FOV
+    sub-cells there is one place to change and ``test_fov_seam_is_single_fov`` fails loudly
+    instead of the loupe silently magnifying FOV 0 of every position."""
+    if fovs_per_region:
+        fovs = fovs_per_region.get(well_id)
+        if fovs:
+            return int(fovs[0])
+    return 0
+
+
+def loupe_scale(cd: float, well_px: int, mag: float = _LOUPE_MAG,
+                inset_px: int = _LOUPE_PX) -> tuple[float, float]:
+    """(s_loupe, M) for a plate showing ``cd`` screen px per well of ``well_px`` image px.
+
+    ``s_loupe`` is clamped to 1.0 — one screen pixel per level-0 image pixel is as far as
+    honest magnification goes; past that we would be upsampling, which is the very thing
+    the montage already does badly. ``M`` is what the user actually gains, in [1, mag].
+
+    Two lower clamps, both learned the hard way:
+
+    * Once the user has wheel-zoomed the plate PAST native (a well drawn bigger than its own
+      pixel count), the 1.0 cap alone would put the inset BELOW the plate's own scale — a
+      loupe that shrinks what it points at. Floor at the plate's scale; the caller labels
+      that case "native", since there is no detail left to reveal.
+    * A fixed target magnification does not survive a 1536-well plate. At fit, a well is ~10
+      screen px, so 8x fills only ~85 px of a 240 px inset and the rest would have to come
+      from neighbouring wells. Floor at ``inset_px / well_px`` so the inset shows AT MOST one
+      whole well — which is also what the gesture means: look closely at *this* well. On a
+      1536wp that yields ~22x rather than 8x, still derived entirely from the plate's zoom."""
+    well_px = max(1, int(well_px))
+    s_plate = max(1e-9, float(cd) / well_px)
+    fill_well = float(inset_px) / well_px             # scale at which one well fills the inset
+    # Order matters: cap at native FIRST, then floor at the plate's own scale. Capping last
+    # would drag a plate that is already past native back down to 1.0 and demagnify.
+    s_loupe = max(s_plate, min(1.0, max(mag * s_plate, fill_well)))
+    return s_loupe, s_loupe / s_plate
+
+
+def loupe_level(s_loupe: float, n_levels: int) -> int:
+    """Coarsest pyramid level whose native resolution still satisfies ``s_loupe``.
+
+    Level L is downsampled by 2**L, so its pixels carry scale 1/2**L relative to level 0. We
+    want the largest L with 2**-L >= s_loupe, i.e. L <= log2(1/s_loupe). Clamped into the
+    levels that actually exist (a small field writes a single level — see _PYRAMID_MIN_YX)."""
+    s = min(1.0, max(1e-9, float(s_loupe)))
+    return int(max(0, min(int(np.floor(np.log2(1.0 / s))), max(0, int(n_levels) - 1))))
+
+
+def loupe_crop_px(s_loupe: float, level: int, inset_px: int = _LOUPE_PX) -> int:
+    """Image pixels to read AT ``level`` to fill an ``inset_px`` square inset."""
+    eff = max(1e-9, float(s_loupe) * (2 ** int(level)))   # screen px per level-``level`` px
+    return int(max(1, np.ceil(inset_px / eff)))
+
+
+def loupe_um_per_screen_px(pixel_size_um, s_loupe: float):
+    """µm per SCREEN pixel inside the inset, or None when the pixel size isn't trustworthy.
+
+    Returns None rather than a guess. ``_output.py`` writes 1.0 into the multiscales scale for
+    BOTH "unknown" and a genuine 1.0 µm/px, so a computed plate cannot distinguish them (see
+    TODOS.md) — callers pass None for that case. A microscopy tool that displays a confidently
+    wrong micron figure is worse than one that admits it doesn't know."""
+    if pixel_size_um is None:
+        return None
+    p = float(pixel_size_um)
+    if not np.isfinite(p) or p <= 0:
+        return None
+    return p / max(1e-9, float(s_loupe))
+
+
+def _nice_scale_um(rough: float) -> float:
+    """Round a scale-bar length to a 1/2/5 x 10^n figure, the way a microscope overlay would."""
+    rough = max(1e-6, float(rough))
+    decade = 10.0 ** np.floor(np.log10(rough))
+    for step in (1.0, 2.0, 5.0, 10.0):
+        if rough <= step * decade:
+            return step * decade
+    return 10.0 * decade
+
+
+def _fmt_um(v: float) -> str:
+    if v >= 1000:
+        return f"{v / 1000:g} mm"
+    return f"{v:g} µm" if v >= 1 else f"{v * 1000:g} nm"
+
+
+def _composite_rgb(planes, colors, windows) -> np.ndarray:
+    """(C, y, x) planes -> (y, x, 3) float RGB in [0, 1], one window per channel.
+
+    The single definition of "channels to colour" for the viewer. Windowing stays with the
+    caller: the plate's three renderers legitimately source their window differently (streaming
+    running-contrast, per-well percentiles, the loupe mirroring a tile's window), and folding
+    that in here would force a policy where there isn't one."""
+    out = None
+    for c_i, plane in enumerate(planes):
+        lo, hi = windows[c_i]
+        contrib = _window(plane, lo, hi if hi > lo else lo + 1)[:, :, None] * colors[c_i][None, None, :]
+        out = contrib if out is None else out + contrib
+    if out is None:
+        return np.zeros((1, 1, 3), np.float32)
+    return np.clip(out, 0, 1)
+
+
+def _percentile_window(plane, pct=(1.0, 99.8)) -> tuple[float, float]:
+    """The plate's per-well contrast rule, in one place (mirrors _ComputedPlateWorker)."""
+    lo, hi = float(np.percentile(plane, pct[0])), float(np.percentile(plane, pct[1]))
+    return lo, hi if hi > lo else lo + 1
+
+
+class _LoupeSource:
+    """Where the loupe's real pixels come from for the layer currently on the plate.
+
+    Availability is per (source, WELL) — never per layer key. A layer key cannot express what
+    is actually on disk: ``OperationStack.add`` dedupes by key, so a saved run and a later
+    unsaved preview collapse into one "mip" layer while ``_processed_plate`` still points at
+    the older save. Ask the source about the specific well instead."""
+
+    n_levels = 1
+    well_px = 1
+    pixel_size_um = None
+
+    def available(self, well_id) -> tuple[bool, str]:
+        """(ok, reason-if-not). ``reason`` is shown to the user verbatim."""
+        return False, "no pixel source"
+
+    def read_crop(self, well_id, level, y0, x0, h, w):
+        """(C, y, x) crop at ``level``, clipped to the field. Runs on the loupe worker thread."""
+        raise NotImplementedError
+
+    def coarse(self, well_id):
+        """A small whole-field (C, y, x) plane used ONLY to derive the contrast window."""
+        raise NotImplementedError
+
+
+class _RawLoupeSource(_LoupeSource):
+    """Raw-acquisition source: the loupe works the moment a folder is open, before any operator.
+
+    Reads the same representative plane per channel that _PreviewWorker already reads, so the
+    inset shows exactly the data the raw plate tile was built from. Individual TIFFs hold one
+    plane per file and aren't tiled, so a crop means decoding that plane — hence the one-well
+    plane cache. Bounded to a single well's channels (~C x frame bytes)."""
+
+    def __init__(self, reader, meta, fov_of):
+        self._reader, self._meta, self._fov_of = reader, meta, fov_of
+        ny, nx = meta["frame_shape"]
+        self.well_px = int(min(ny, nx))
+        self.n_levels = 1                      # raw TIFFs have no pyramid
+        self.pixel_size_um = meta.get("pixel_size_um")
+        self._channels = [c["name"] for c in meta["channels"]]
+        zs = meta["z_levels"]
+        self._z = zs[len(zs) // 2]             # mid plane, as the preview does
+        self._cache_key = None
+        self._cache = None
+
+    def available(self, well_id) -> tuple[bool, str]:
+        if well_id in self._meta["regions"]:
+            return True, ""
+        return False, "no image for this well"
+
+    def _planes(self, well_id):
+        if self._cache_key != well_id:
+            fov = self._fov_of(well_id)
+            self._cache = np.stack([
+                np.asarray(self._reader.read(well_id, fov, ch, self._z)) for ch in self._channels])
+            self._cache_key = well_id
+        return self._cache
+
+    def read_crop(self, well_id, level, y0, x0, h, w):
+        p = self._planes(well_id)              # level is always 0 here (n_levels == 1)
+        return p[:, y0:y0 + h, x0:x0 + w]
+
+    def coarse(self, well_id):
+        p = self._planes(well_id)
+        return np.stack([_area_downsample(p[c], _CELL, _CELL) for c in range(p.shape[0])])
+
+
+class _ZarrLoupeSource(_LoupeSource):
+    """Written-plate source: a WINDOWED tensorstore read of one pyramid level.
+
+    Deliberately NOT _ComputedPlateWorker._read, which pulls a whole plane (~139 MB per well at
+    level 0 on a 1536wp) — right for its one-pass streaming job, ruinous for a gesture that
+    re-reads as the cursor moves. Arrays are chunked (1, 1, 1, <=1024, <=1024) (_zarr_store)
+    precisely so a viewer can read a region, so a loupe crop touches a handful of chunks.
+
+    ``written`` is the set of wells this run has actually persisted. It grows as wells land, so
+    the loupe works on completed wells DURING a long run, and a subset save / failed well is
+    reported as "not written yet" instead of magnifying some other well's pixels."""
+
+    def __init__(self, base, path_of, fov_of, levels, well_px, pixel_size_um, written=None):
+        self._base = str(base)
+        self._path_of, self._fov_of = path_of, fov_of
+        self._levels = list(levels) if levels is not None else None   # None -> discover on first use
+        self.n_levels = max(1, len(self._levels)) if self._levels else 1
+        self.well_px = int(well_px)
+        self.pixel_size_um = pixel_size_um
+        self._written = written                # None = every well (a plate opened from disk)
+        self._handles: dict[tuple, object] = {}
+        self._coarse: dict[str, np.ndarray] = {}
+
+    def mark_written(self, well_id):
+        """A well just landed on disk. Availability grows DURING a run — which is exactly when
+        someone is watching the plate fill and wants to glance at what already finished."""
+        if self._written is not None:
+            self._written.add(well_id)
+
+    def available(self, well_id) -> tuple[bool, str]:
+        if self._written is not None and well_id not in self._written:
+            return False, "not written yet"
+        if self._path_of(well_id) is None:
+            return False, "no image for this well"
+        return True, ""
+
+    def _resolve_levels(self, well_id):
+        """Read the field's multiscales once, to learn how many pyramid levels exist.
+
+        Deferred because a run that is still writing hasn't declared its levels yet — and how
+        many there are depends on the field size (_PYRAMID_MIN_YX collapses small fields to a
+        single level, which is exactly what the test fixtures hit)."""
+        if self._levels is not None:
+            return self._levels
+        field = f"{self._base}/{self._path_of(well_id)}/{self._fov_of(well_id)}"
+        try:
+            ome = json.loads((Path(field) / "zarr.json").read_text())["attributes"]["ome"]
+            self._levels = [ds["path"] for ds in ome["multiscales"][0]["datasets"]]
+        except Exception:
+            self._levels = ["0"]               # a field always has a full-res array 0
+        self.n_levels = max(1, len(self._levels))
+        return self._levels
+
+    def _open(self, well_id, level):
+        levels = self._resolve_levels(well_id)
+        level = max(0, min(int(level), len(levels) - 1))
+        key = (well_id, level)
+        if key not in self._handles:
+            import tensorstore as ts
+            path = f"{self._base}/{self._path_of(well_id)}/{self._fov_of(well_id)}/{levels[level]}"
+            self._handles[key] = ts.open(
+                {"driver": "zarr3", "kvstore": {"driver": "file", "path": path}}).result()
+        return self._handles[key]
+
+    def read_crop(self, well_id, level, y0, x0, h, w):
+        arr = self._open(well_id, level)
+        ny, nx = arr.shape[-2], arr.shape[-1]
+        # Clamp the ORIGIN so the window stays whole near an edge (shift it in), rather than
+        # truncating the extent — clamping y0 to ny-1 first would return a 1px sliver.
+        h, w = max(1, min(int(h), ny)), max(1, min(int(w), nx))
+        y0 = max(0, min(int(y0), ny - h))
+        x0 = max(0, min(int(x0), nx - w))
+        return np.asarray(arr[0, :, 0, y0:y0 + h, x0:x0 + w].read().result())
+
+    def coarse(self, well_id):
+        if well_id not in self._coarse:
+            arr = self._open(well_id, self.n_levels - 1)          # coarsest level = cheapest
+            self._coarse[well_id] = np.asarray(arr[0, :, 0].read().result())
+        return self._coarse[well_id]
+
+
+class _LoupeWorker(QThread):
+    """Serves loupe crops off the GUI thread, coalescing to the NEWEST request.
+
+    Only the latest cursor position matters: if the user sweeps across three wells while a read
+    is in flight, the two intermediate reads are worthless. One pending slot (overwritten by
+    each new request) IS the coalescing. Results carry the generation they were asked for, so a
+    late arrival for a stale position is dropped by the widget rather than flashing."""
+
+    ready = pyqtSignal(int, str, object, object)    # (gen, well_id, crop|None, error|None)
+
+    def __init__(self, source: _LoupeSource):
+        super().__init__()
+        self._source = source
+        self._cv = threading.Condition()
+        self._pending = None
+        self._stop = False
+        self._cache: dict[tuple, np.ndarray] = {}
+        self._order: list[tuple] = []
+
+    def request(self, gen, well_id, level, y0, x0, h, w):
+        with self._cv:
+            self._pending = (gen, well_id, level, y0, x0, h, w)
+            self._cv.notify()
+
+    def stop(self):
+        with self._cv:
+            self._stop = True
+            self._cv.notify()
+
+    def _cached(self, key):
+        hit = self._cache.get(key)
+        if hit is not None:
+            self._order.remove(key)
+            self._order.append(key)
+        return hit
+
+    def _store(self, key, val):
+        self._cache[key] = val
+        self._order.append(key)
+        while len(self._order) > _LOUPE_CACHE:
+            self._cache.pop(self._order.pop(0), None)
+
+    def run(self):
+        while True:
+            with self._cv:
+                while self._pending is None and not self._stop:
+                    self._cv.wait()
+                if self._stop:
+                    return
+                gen, well_id, level, y0, x0, h, w = self._pending
+                self._pending = None
+            key = (well_id, level, y0, x0, h, w)
+            try:
+                crop = self._cached(key)
+                if crop is None:
+                    crop = self._source.read_crop(well_id, level, y0, x0, h, w)
+                    self._store(key, crop)
+                self.ready.emit(gen, well_id, crop, None)
+            except Exception as e:                    # a racing writer / deleted plate / bad path
+                self.ready.emit(gen, well_id, None, f"{type(e).__name__}: {e}")
+
+
 # --- plate overview widget (one cell per well; hue-coded status; fit-to-view) ---------------
 
 class PlateOverview(QWidget):
-    """The low-res plate: an RGB canvas of MIP tiles, plus a per-well status hue and a red box."""
+    """The low-res plate: an RGB canvas of MIP tiles, a per-well status hue, a red box, and a
+    press-and-hold LOUPE that overlays real acquisition pixels for the well under the cursor
+    (IMA-208 — the montage itself is far too coarse to magnify; see the loupe block above)."""
 
     hovered = pyqtSignal(str)              # region id (or "" off-plate), for the window's readout
     wellActivated = pyqtSignal(str, int)   # (well_id, fov_index) double-clicked -> load in ndviewer
@@ -549,8 +904,121 @@ class PlateOverview(QWidget):
         self._press = None            # (x, y, ox, oy) at left-press, for drag-to-pan
         self._panning = False
         self._user_view = False       # True once the user wheel-zooms/pans (stop auto-fitting)
+        # -- loupe (IMA-208) --
+        self._loupe_src = None        # _LoupeSource for the ACTIVE layer, or None (loupe disabled)
+        self._loupe_worker = None
+        self._loupe = None            # armed/live state dict, or None when idle
+        self._loupe_gen = 0           # bumped per request; late results for older gens are dropped
+        self._loupe_img = None        # QImage currently shown in the inset
+        self._loupe_note = ""         # user-visible reason when the loupe can't show pixels
+        self._loupe_win = {}          # well_id -> per-channel window, mirroring the tile's rule
+        self._loupe_colors = None     # (C, 3) float RGB, set with the source
+        self._hold = QTimer(self)
+        self._hold.setSingleShot(True)
+        self._hold.setInterval(_LOUPE_HOLD_MS)
+        self._hold.timeout.connect(self._arm_loupe)
         self.setMouseTracking(True)
         self.setMinimumSize(240, 200)
+
+    # -- loupe wiring --
+    def set_loupe_source(self, source, colors=None):
+        """Point the loupe at the data behind the ACTIVE layer. ``None`` disables the gesture.
+
+        Called whenever what the plate is showing changes identity — a new acquisition, an
+        operator run persisting, a layer switch, a preview superseding a saved run. Re-pointing
+        is what stops a stale run's pixels appearing under a newer run's tiles."""
+        self._dismiss_loupe()
+        if self._loupe_worker is not None:
+            self._loupe_worker.stop()
+            self._loupe_worker.wait(2000)
+            self._loupe_worker = None
+        self._loupe_src = source
+        self._loupe_colors = colors
+        self._loupe_win.clear()
+        if source is not None:
+            self._loupe_worker = _LoupeWorker(source)
+            self._loupe_worker.ready.connect(self._on_loupe_crop)
+            self._loupe_worker.start()
+
+    def _arm_loupe(self):
+        """Hold timer fired: the press became a loupe. Only reachable while still ARMED."""
+        if self._press is None or self._panning:
+            return
+        x, y = self._press[0], self._press[1]
+        c = self._cell(x, y)
+        if not c or not c["well_id"]:
+            return
+        self._loupe = {"well": c["well_id"], "x": x, "y": y}
+        self._loupe_img, self._loupe_note = None, ""
+        self._request_loupe(x, y)
+        self.update()
+
+    def _dismiss_loupe(self):
+        if self._loupe is not None or self._loupe_img is not None or self._loupe_note:
+            self._loupe = self._loupe_img = None
+            self._loupe_note = ""
+            self.update()
+
+    def _loupe_geometry(self, x, y):
+        """Map a widget point to (well_id, level, crop rect, s_loupe, M) — or None if off-plate."""
+        src = self._loupe_src
+        c = self._cell(x, y)
+        if src is None or not c or not c["well_id"]:
+            return None
+        s_loupe, mag = loupe_scale(self._cd, src.well_px)
+        level = loupe_level(s_loupe, src.n_levels)
+        crop = loupe_crop_px(s_loupe, level)
+        # cursor -> position within the cell -> image px at level 0 -> image px at ``level``
+        ax, ay = self._ox + _HDR, self._oy + _COLH
+        fy = (y - (ay + c["row_index"] * self._cd)) / max(1e-9, self._cd)
+        fx = (x - (ax + c["col_index"] * self._cd)) / max(1e-9, self._cd)
+        span = max(1, src.well_px >> level)
+        cy, cx = int(fy * span), int(fx * span)
+        return c["well_id"], level, (cy - crop // 2, cx - crop // 2, crop, crop), s_loupe, mag
+
+    def _request_loupe(self, x, y):
+        geo = self._loupe_geometry(x, y)
+        if geo is None or self._loupe_worker is None:
+            return
+        well, level, (y0, x0, h, w), _s, _m = geo
+        ok, why = self._loupe_src.available(well)
+        if not ok:
+            self._loupe_img, self._loupe_note = None, why
+            self.update()
+            return
+        self._loupe_gen += 1
+        self._loupe_worker.request(self._loupe_gen, well, level, y0, x0, h, w)
+
+    def _on_loupe_crop(self, gen, well_id, crop, error):
+        """A crop landed. Drop it unless it is the newest request and the loupe is still up."""
+        if gen != self._loupe_gen or self._loupe is None:
+            return
+        if error is not None or crop is None or crop.size == 0:
+            self._loupe_img, self._loupe_note = None, error or "no pixels here"
+            self.update()
+            return
+        win = self._loupe_win.get(well_id)
+        if win is None:
+            # Mirror the TILE's contrast rule on the WELL's pixels — never percentiles of the crop
+            # under the cursor, which would make brightness lurch as the cursor moves and make the
+            # inset look like different data. There is no shared window object to borrow: the
+            # streaming _RunningContrast dies with its worker and computed plates stretch per well.
+            try:
+                coarse = self._loupe_src.coarse(well_id)
+                win = [_percentile_window(coarse[c]) for c in range(coarse.shape[0])]
+            except Exception:
+                win = [(0.0, 1.0)] * crop.shape[0]
+            self._loupe_win[well_id] = win
+        colors = self._loupe_colors
+        if colors is None:
+            colors = np.ones((crop.shape[0], 3), np.float32)
+        rgb = (_composite_rgb([crop[c].astype(np.float32) for c in range(crop.shape[0])],
+                              colors, win) * 255).astype(np.uint8)
+        rgb = np.ascontiguousarray(rgb)
+        h, w = rgb.shape[:2]
+        img = QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888).copy()   # copy: rgb is transient
+        self._loupe_img, self._loupe_note = img, ""
+        self.update()
 
     def _fit(self):
         """Reset the view: the whole plate fits the widget, centered (zoom = 1)."""
@@ -628,12 +1096,48 @@ class PlateOverview(QWidget):
         self._fit()
         self.update()
 
-    # -- mouse: wheel-zoom anchored at cursor + left-drag pan (Hongquan's navigator gestures) --
+    # -- mouse: wheel-zoom anchored at cursor, left-drag pan (Hongquan's navigator gestures),
+    #    and press-and-hold loupe (IMA-208). The left button now means three different things
+    #    depending on TIMING, so the rules live here as a diagram rather than as scattered flags:
+    #
+    #                        ┌───────────────────────────────────────────┐
+    #                        │                  IDLE                     │
+    #                        └──────────────────┬────────────────────────┘
+    #          left-press on an acquired cell   │   (off-plate / empty: never arms)
+    #                                           ▼
+    #                        ┌───────────────────────────────────────────┐
+    #                        │  ARMED   _hold running (_LOUPE_HOLD_MS)   │
+    #                        │  cursor must stay within _LOUPE_SLOP px   │
+    #                        └───┬───────────────────────┬───────────────┘
+    #          move > slop       │                       │  timer fires
+    #          (kill the timer)  │                       │
+    #                            ▼                       ▼
+    #                  ┌──────────────────┐   ┌──────────────────────────┐
+    #                  │       PAN        │   │          LOUPE           │
+    #                  │  drag the plate  │   │  inset follows cursor;   │
+    #                  │  (unchanged)     │   │  pan is DEAD while up;   │
+    #                  └────────┬─────────┘   │  hover + wheel suppressed│
+    #                           │             └────────────┬─────────────┘
+    #                           │ release                  │ release / leave / focus-out
+    #                           ▼                          ▼
+    #                        ┌───────────────────────────────────────────┐
+    #                        │                  IDLE                     │
+    #                        └───────────────────────────────────────────┘
+    #
+    #    Two edges worth stating because they are easy to regress:
+    #      * SLOW PAN stays a pan. Press, dwell past the timer, then drag — the timer only runs
+    #        while the cursor is still, and any move past the slop kills it. A press that has
+    #        already become a loupe is dismissed on release, so the next drag pans normally.
+    #      * DOUBLE-CLICK must cancel the timer. Qt delivers press/release/dblclick/release, and
+    #        the second press re-arms; without the cancel you would open the detail viewer AND
+    #        raise a loupe from one gesture.
     def _cell(self, x, y):
         px, py = x - (self._ox + _HDR), y - (self._oy + _COLH)
         return well_at(self._rows, self._cols, self._by_rc, px, py, self._cd)
 
     def wheelEvent(self, e):
+        if self._loupe is not None:      # zooming the plate under a live loupe would fight it
+            return
         mx, my = e.x() - (self._ox + _HDR), e.y() - (self._oy + _COLH)    # cursor in plate px
         new_cd = self._cd * (1.0015 ** e.angleDelta().y())
         new_cd = max(self._fit_cd(), min(self._fit_cd() * 40, new_cd))    # never zoom out past fit
@@ -648,12 +1152,21 @@ class PlateOverview(QWidget):
         if e.button() == Qt.LeftButton:
             self._press = (e.x(), e.y(), self._ox, self._oy)
             self._panning = False
+            c = self._cell(e.x(), e.y())
+            if self._loupe_src is not None and c and c["well_id"]:   # ARM (never off-plate/empty)
+                self._hold.start()
 
     def mouseMoveEvent(self, e):
+        if self._loupe is not None:                  # LOUPE: the inset tracks; panning is dead
+            self._loupe["x"], self._loupe["y"] = e.x(), e.y()
+            self._request_loupe(e.x(), e.y())
+            self.update()
+            return
         if self._press is not None and (e.buttons() & Qt.LeftButton):
             dx, dy = e.x() - self._press[0], e.y() - self._press[1]
             if abs(dx) + abs(dy) > 3:
                 self._panning = True
+                self._hold.stop()                    # moved -> this press is a pan, not a hold
             if self._panning:
                 self._ox, self._oy = self._press[2] + dx, self._press[3] + dy
                 self._user_view = True
@@ -668,18 +1181,31 @@ class PlateOverview(QWidget):
         self.update()
 
     def mouseReleaseEvent(self, e):
+        self._hold.stop()
         self._press = None
         self._panning = False
+        self._dismiss_loupe()                        # release always dismisses
 
     def leaveEvent(self, e):
+        self._hold.stop()                            # cursor left mid-hold: release may never come
+        self._dismiss_loupe()
         self._hover = None
         self.hovered.emit("")
         self.update()
 
+    def focusOutEvent(self, e):
+        self._hold.stop()                            # window deactivated mid-hold: same reasoning
+        self._dismiss_loupe()
+        super().focusOutEvent(e)
+
     def mouseDoubleClickEvent(self, e):
+        # Qt sends press/release/dblclick — the second press already re-armed the hold timer, so
+        # kill it here or one double-click both opens the well AND raises a loupe.
+        self._hold.stop()
+        self._dismiss_loupe()
         c = self._cell(e.x(), e.y())
         if c and c["well_id"]:
-            self.wellActivated.emit(c["well_id"], 0)   # 1 FOV/well (IMA-183); IMA-187 will pick the FOV
+            self.wellActivated.emit(c["well_id"], _fov_of_well(c["well_id"]))
 
     # -- paint --
     def paintEvent(self, _):
@@ -761,11 +1287,59 @@ class PlateOverview(QWidget):
             p.setPen(Qt.NoPen)
             p.setBrush(_RED)
             p.drawEllipse(ex, ey, int(d), int(d))
+        if self._loupe is not None:        # press-and-hold magnifier, over everything else
+            self._paint_loupe(p)
         # a fine outer white frame around the whole plate view
         p.setPen(QPen(QColor("#c9d1d9"), 1))
         p.setBrush(Qt.NoBrush)
         p.drawRect(0, 0, self.width() - 1, self.height() - 1)
         p.end()
+
+    def _paint_loupe(self, p: QPainter):
+        """The inset: real pixels, a µm scale bar when the pixel size is known, or the reason
+        there are no pixels. Offset from the cursor so the hand never covers what it points at,
+        and clamped inside the widget so it stays whole at the plate's edges."""
+        x, y = self._loupe["x"], self._loupe["y"]
+        s = _LOUPE_PX
+        bx = x + 18 if x + 18 + s < self.width() else x - 18 - s
+        by = y + 18 if y + 18 + s < self.height() else y - 18 - s
+        bx = int(max(2, min(bx, self.width() - s - 2)))
+        by = int(max(2, min(by, self.height() - s - 2)))
+        p.fillRect(bx, by, s, s, QColor("#05070b"))
+        if self._loupe_img is not None:
+            p.save()
+            p.setClipRect(bx, by, s, s)
+            p.drawPixmap(bx, by, QPixmap.fromImage(self._loupe_img).scaled(
+                s, s, Qt.KeepAspectRatioByExpanding, Qt.FastTransformation))   # 1:1-ish: no smoothing
+            p.restore()
+        else:
+            p.setPen(_MUTED)
+            p.setFont(QFont("Helvetica Neue", 11))
+            p.drawText(bx, by, s, s, Qt.AlignCenter | Qt.TextWordWrap,
+                       self._loupe_note or "reading …")
+        geo = self._loupe_geometry(x, y)
+        if geo is not None and self._loupe_img is not None:
+            _w, _l, _r, s_loupe, mag = geo
+            um_px = loupe_um_per_screen_px(getattr(self._loupe_src, "pixel_size_um", None), s_loupe)
+            p.setFont(QFont("Helvetica Neue", 10, QFont.DemiBold))
+            if um_px is None:
+                # No trustworthy pixel size: say so rather than draw a bar that would be fiction.
+                p.setPen(_MUTED)
+                p.drawText(bx + 8, by + s - 10, "scale unknown")
+            else:
+                target = _nice_scale_um(um_px * (s * 0.4))     # ~40% of the inset, rounded to 1/2/5
+                bar = int(round(target / um_px))
+                p.setPen(QPen(QColor("#e6edf3"), 2))
+                p.drawLine(bx + 10, by + s - 14, bx + 10 + bar, by + s - 14)
+                p.setPen(QColor("#e6edf3"))
+                p.drawText(bx + 10, by + s - 18, f"{_fmt_um(target)}")
+            p.setPen(_ACCENT)
+            label = f"{self._loupe['well']}  ·  {mag:.1f}×" if mag >= 1.05 else \
+                    f"{self._loupe['well']}  ·  native"
+            p.drawText(bx + 8, by + 16, label)
+        p.setPen(QPen(QColor("#c9d1d9"), 1))
+        p.setBrush(Qt.NoBrush)
+        p.drawRect(bx, by, s, s)
 
 
 # --- operator worker: stream a projection over the plate, fill row-major -------------------
@@ -820,17 +1394,16 @@ class _OperatorWorker(QThread):
         well = image[0, :, 0]  # (C, Y, X)
         tiles = [_fit_cell(well[c_i]) for c_i in range(len(self._channels))]  # downsample OUTSIDE lock
         raw = np.empty((len(tiles), _CELL, _CELL), self._dtype)              # native dtype (half the RAM)
-        rgb = np.zeros((_CELL, _CELL, 3), np.float32)
         with self._lock:                          # shared contrast/raw/counter -> serialize (cheap part)
             for c_i, ds in enumerate(tiles):
                 raw[c_i] = ds
                 self._contrast.add(c_i, ds)
-                lo, hi = self._contrast.window(c_i)
-                rgb += _window(ds, lo, hi)[:, :, None] * self._colors[c_i][None, None, :]
+            wins = [self._contrast.window(c_i) for c_i in range(len(tiles))]  # streaming global window
             self._raw[(ri, ci)] = raw
             self._done += 1
             done = self._done
-        self.tileReady.emit(ri, ci, well_id, (np.clip(rgb, 0, 1) * 255).astype(np.uint8))
+        rgb = _composite_rgb(tiles, self._colors, wins)      # colour OUTSIDE the lock
+        self.tileReady.emit(ri, ci, well_id, (rgb * 255).astype(np.uint8))
         self.progress.emit(done, self._total)
         # feed the ndviewer growing slider: one ~512px plane per channel, in memory (register_array),
         # so scrubbing the processed wells is instant and z-collapsed (nz=1). Downsampled -> bounded.
@@ -981,12 +1554,10 @@ class _ComputedPlateWorker(QThread):
                 if self._stop.is_set():
                     return
                 coarse = self._read(wpath, fov, self._coarse)             # thumbnail source (C,y,x)
-                rgb = np.zeros((_CELL, _CELL, 3), np.float32)
-                for c_i, plane in enumerate(coarse):
-                    ds = _fit_cell(plane.astype(np.float32))
-                    lo, hi = float(np.percentile(ds, 1.0)), float(np.percentile(ds, 99.8))
-                    rgb += _window(ds, lo, hi if hi > lo else lo + 1)[:, :, None] * self._colors[c_i][None, None, :]
-                self.tileReady.emit(ri, ci, wid, (np.clip(rgb, 0, 1) * 255).astype(np.uint8))
+                tiles = [_fit_cell(plane.astype(np.float32)) for plane in coarse]
+                wins = [_percentile_window(t) for t in tiles]   # per-well stretch (no global pass)
+                rgb = _composite_rgb(tiles, self._colors, wins)
+                self.tileReady.emit(ri, ci, wid, (rgb * 255).astype(np.uint8))
                 push_src = self._read(wpath, fov, self._push)             # detail-slider source (C,Y,X)
                 push = [_area_downsample(push_src[c], _PUSH_PX, _PUSH_PX).astype(self._dtype)
                         for c in range(push_src.shape[0])]
@@ -1045,6 +1616,7 @@ class PlateWindow(QMainWindow):
         self._layers_tab = None       # the Layers tab widget, once opened
         self._order = []              # well order = the detail's FOV-slider order
         self._op_tabs = {}            # key -> operator-UI widget currently open as a tab in _left_tabs
+        self._loupe_sources = {}      # layer key -> _LoupeSource backing that layer's pixels (IMA-208)
 
         # THREE-PANE layout. Tabs live ONLY inside the top-left pane (their bar sits at the pane's top,
         # like the plate pane's title bar) — never a global strip across the window:
@@ -1378,6 +1950,36 @@ class PlateWindow(QMainWindow):
             self._overview.set_active_layer(top.key)
             self._plate_mode = "raw" if top.key == "raw" else top.label
             self._plate_title.setText(f"{self._acq_name}   ·   {self._plate_mode}")
+            self._update_loupe_source()
+
+    # -- loupe sources (IMA-208) --------------------------------------------------------------
+    # One source per LAYER, registered when that layer's pixels get a real home, and dropped the
+    # moment they don't. This is the "run identity" the review insisted on: the layer KEY alone
+    # can't be trusted, because OperationStack.add dedupes by key — save a MIP, return to raw,
+    # then run an unsaved preview and the same "mip" key now shows preview tiles while
+    # _processed_plate still names the older save. Re-registering on every transition is what
+    # keeps the inset showing the same run the tiles came from.
+
+    def _set_loupe_source(self, layer_key, source):
+        self._loupe_sources[layer_key] = source
+        self._update_loupe_source()
+
+    def _drop_loupe_source(self, layer_key):
+        self._loupe_sources.pop(layer_key, None)
+        self._update_loupe_source()
+
+    def _update_loupe_source(self):
+        """Point the plate at the source for whatever layer is on screen right now."""
+        if self._overview is None:
+            return
+        active = getattr(self._overview, "_active", "raw")
+        source = self._loupe_sources.get(active)
+        if source is self._overview._loupe_src:
+            return                                   # unchanged: don't churn the worker thread
+        colors = None
+        if self._meta and self._meta.get("channels"):
+            colors = np.stack([_hex_to_rgb01(c["display_color"]) for c in self._meta["channels"]])
+        self._overview.set_loupe_source(source, colors)
 
     def _build_cli_tab(self) -> QWidget:
         """A LIVE, interactive shell in the pane: run the `squidmip` batch CLI (IMA-186) right here.
@@ -1575,6 +2177,13 @@ class PlateWindow(QMainWindow):
 
         self._enable_operators(True)
 
+        # The loupe works from the moment the folder opens — the raw layer's real pixels are the
+        # acquisition's own TIFFs, the same planes the preview below is about to downsample. No
+        # operator run is required to look closely at a well.
+        self._loupe_sources = {"raw": _RawLoupeSource(
+            reader, meta, lambda w: _fov_of_well(w, meta.get("fovs_per_region")))}
+        self._update_loupe_source()
+
         # fast RAW preview: fill the plate with downsampled thumbnails immediately (grey dots),
         # in the SAME row-major order the operator will later process them in.
         self._preview = _PreviewWorker(reader, meta, self._fov_index, order)
@@ -1628,6 +2237,7 @@ class PlateWindow(QMainWindow):
         self._plate_mode = "raw"
         self._plate_title.setText(f"{self._acq_name}   ·   raw")
         self._overview.set_active_layer("raw")
+        self._update_loupe_source()                          # back to the acquisition's own pixels
         for rc in list(self._overview._status):
             self._overview.set_status(*rc, "empty")
         self._refresh_layers_tab()
@@ -1662,9 +2272,36 @@ class PlateWindow(QMainWindow):
             cols = [c["name"] for c in plate["columns"]]
             wells_meta = sorted(plate["wells"], key=lambda w: (w["rowIndex"], w["columnIndex"]))
             w0 = wells_meta[0]["path"]
-            fov0 = json.loads((zroot / w0 / "zarr.json").read_text())["attributes"]["ome"]["well"]["images"][0]["path"]
+
+            def _fov_path(well_path, default=None):
+                """Each well declares its OWN first image; do not assume well 0's id fits all.
+
+                Reusing well 0's fov path for every well silently renders the wrong image on a
+                plate whose wells carry differing image ids. No dataset produces that today, so
+                it stayed latent — but the loupe reads through this same mapping, and a loupe
+                that magnifies a different well than the one under the cursor is precisely the
+                failure the FOV seam exists to prevent."""
+                try:
+                    meta_w = json.loads((zroot / well_path / "zarr.json").read_text())
+                    return meta_w["attributes"]["ome"]["well"]["images"][0]["path"]
+                except Exception:
+                    return default
+
+            fov0 = _fov_path(w0)
             ome0 = json.loads((zroot / w0 / fov0 / "zarr.json").read_text())["attributes"]["ome"]
             levels = [ds["path"] for ds in ome0["multiscales"][0]["datasets"]]
+            ms0 = ome0["multiscales"][0]
+            # Pixel size, recovered from the level-0 coordinate transform. The writer collapses an
+            # unknown pixel size to 1.0 (_output.py), so a plate reporting exactly 1.0 is
+            # AMBIGUOUS — treat it as unknown and let the loupe say so rather than draw a scale
+            # bar that might be fiction. See TODOS.md for the writer-side fix.
+            px_um = None
+            try:
+                sc = ms0["datasets"][0]["coordinateTransformations"][0]["scale"]
+                cand = float(sc[-1])
+                px_um = cand if cand > 0 and abs(cand - 1.0) > 1e-9 else None
+            except Exception:
+                px_um = None
             chans = ome0.get("omero", {}).get("channels", [])
             channels = [{"name": c.get("label", f"ch{i}"), "display_color": "#" + c["color"].lstrip("#")}
                         for i, c in enumerate(chans)]
@@ -1677,19 +2314,24 @@ class PlateWindow(QMainWindow):
 
         self._stop_worker()
         self._stop_preview()
+        self._loupe_sources = {}                  # a new plate: no source survives from the old one
         self._acq_name, self._acq_path = base.name, base
         self._processed_plate = str(zroot)
         self._reader = None                       # a computed plate has no raw reader
         self._meta = {"channels": channels, "z_levels": [0], "n_z": 1, "n_t": 1,
+                      "pixel_size_um": px_um,
                       "regions": [f"{rows[w['rowIndex']]}{cols[w['columnIndex']]}" for w in wells_meta]}
         wells_rc, self._fov_index, self._order, worker_wells = {}, {}, [], []
+        well_paths, well_fovs = {}, {}
         for idx, w in enumerate(wells_meta):
             ri, ci = w["rowIndex"], w["columnIndex"]
             wid = f"{rows[ri]}{cols[ci]}"
+            fov = _fov_path(w["path"], fov0)          # per-well, not well 0's for everyone
             wells_rc[(ri, ci)] = wid
             self._fov_index[wid] = {"rc": (ri, ci), "idx": idx, "well_id": wid}
             self._order.append(wid)
-            worker_wells.append((wid, w["path"], fov0, ri, ci, idx))
+            well_paths[wid], well_fovs[wid] = w["path"], fov
+            worker_wells.append((wid, w["path"], fov, ri, ci, idx))
 
         if self._overview is not None:
             self._overview.setParent(None); self._overview.deleteLater()
@@ -1711,6 +2353,18 @@ class PlateWindow(QMainWindow):
         if self._detail is not None:
             self._detail.start_acquisition([c["name"] for c in channels], 1, _PUSH_PX, _PUSH_PX,
                                            [f"{w}:0" for w in self._order])
+        # Every well came from disk, so the loupe is available across the whole plate here.
+        try:
+            import tensorstore as _ts
+            _a = _ts.open({"driver": "zarr3", "kvstore": {"driver": "file",
+                          "path": f"{zroot}/{w0}/{fov0}/{levels[0]}"}}).result()
+            _well_px = int(min(_a.shape[-2], _a.shape[-1]))
+        except Exception:
+            _well_px = _PUSH_PX
+        self._set_loupe_source("computed", _ZarrLoupeSource(
+            str(zroot), path_of=well_paths.get, fov_of=well_fovs.get,
+            levels=levels, well_px=_well_px, pixel_size_um=px_um, written=None))
+
         colors = np.stack([_hex_to_rgb01(c["display_color"]) for c in channels])
         coarse_lvl = levels[-1]                                   # coarsest -> tiny thumbnail
         push_lvl = levels[min(3, len(levels) - 1)]                # ~512px level for the detail slider
@@ -1770,6 +2424,22 @@ class PlateWindow(QMainWindow):
             self._raw_btn.show()                             # now there's a processed view to return from
         self._op_stack.add(key, label)                       # push the operator layer onto the stack
         self._overview.set_active_layer(key)                 # show it
+        # Loupe source for this run. A SAVED run gets a zarr source whose written-well set grows
+        # as wells land (so the loupe works mid-run on what's finished); a PREVIEW writes nothing,
+        # so the layer gets no source and the gesture reports that rather than magnifying the
+        # previous run's pixels through the same reused layer key.
+        if save and out_dir is not None:
+            ny, nx = self._meta["frame_shape"]
+            fovs = self._meta.get("fovs_per_region")
+            self._set_loupe_source(key, _ZarrLoupeSource(
+                str(Path(out_dir) / "plate.ome.zarr"),
+                path_of=lambda w: "/".join(str(x) for x in parse_well_id(w)),
+                fov_of=lambda w: _fov_of_well(w, fovs),
+                levels=None,                                 # discovered from the first written field
+                well_px=min(ny, nx), pixel_size_um=self._meta.get("pixel_size_um"),
+                written=set()))
+        else:
+            self._drop_loupe_source(key)
         self._refresh_layers_tab()
         # switch the detail to processed mode: z collapsed (nz=1 -> ndv drops the z-slider), frames at
         # the push size, same well order. Each computed well is pushed into the growing slider below.
@@ -1829,8 +2499,12 @@ class PlateWindow(QMainWindow):
     def _on_tile(self, ri, ci, well_id, rgb):
         if self._overview is None:
             return
-        self._overview.add_tile(ri, ci, well_id, rgb, layer=self._active_op_key or "raw")
+        layer = self._active_op_key or "raw"
+        self._overview.add_tile(ri, ci, well_id, rgb, layer=layer)
         self._overview.set_status(ri, ci, "done")           # blue
+        src = self._loupe_sources.get(layer)                 # this well is now on disk -> loupe-able
+        if isinstance(src, _ZarrLoupeSource):
+            src.mark_written(well_id)
 
     def _on_push(self, fov_idx, planes):
         """A computed well's ~512px channels -> the ndviewer growing slider (in-memory register_array,
@@ -1969,6 +2643,9 @@ class PlateWindow(QMainWindow):
     def closeEvent(self, e):
         self._stop_worker()          # stop the run cleanly; nothing on disk to clean up (no cache)
         self._stop_preview()
+        if self._overview is not None:
+            self._overview.set_loupe_source(None)   # joins the loupe read thread
+        self._loupe_sources = {}
         for w in list(self._op_tabs.values()):
             if hasattr(w, "shutdown"):
                 w.shutdown()         # kill any live embedded terminal's shell
