@@ -50,3 +50,19 @@ so a future session doesn't rediscover it from zero.
 - **Cons:** Different repo, different owner; not on any SquidMIP critical path.
 - **Context:** SquidMIP does **not** carry this bug — IMA-189's `squidmip/_channels.py` already resolves `display_color` correctly (top-level v1.0+ *and* nested `camera_settings`, mapped by name, raises on unresolved), and IMA-184 consumes `metadata.channels[].display_color` rather than re-parsing the yaml. This TODO is purely a flag for whoever owns `~/CEPHLA/projects/explorer/squid2minerva`.
 - **Depends on / blocked by:** squid2minerva maintainer.
+
+## Web / remote plate viewing → new ticket (IMA-212 could NOT answer this)
+- **What:** An actual way to view a plate from a machine that is not the microscope — a browser-reachable renderer, or a viewer reading OME-Zarr over HTTP/S3 from a shared store.
+- **Why:** IMA-212's spec opened with "evaluate Odon as the web/remote renderer." Reading Odon v0.1.5's source killed that premise: it is a native Rust desktop GUI (`eframe::run_native` on every path except `--check`), with no HTTP server, no WASM build, and no headless render-to-file. Its only listening socket is a localhost MCP control bridge on `127.0.0.1:17870` that its own docs say must not be network-exposed. "Remote" in Odon means it *reads* remote zarr, not that it *serves* pixels. So the original question is still completely open, and IMA-212 must not be read as having answered it.
+- **Pros:** Unblocks anyone who needs to look at plate output without sitting at the instrument — the actual underlying need.
+- **Cons:** Genuinely larger than a bridge ticket: needs a hosting story, an access-control story, and a decision between serving pixels (render server) vs serving bytes (object store + a zarr-reading web viewer).
+- **Context:** SquidMIP's existing output is already a strong starting point — `plate.ome.zarr` is spec OME-NGFF v0.5, zarr v3, with a per-FOV pyramid, so a zarr-capable web viewer could read it over HTTP with no writer changes at all. The `_montage.py` hover viewer is a precedent for a static, server-free artifact. Worth scoping the "object store + web zarr viewer" option first, since it reuses everything already built.
+- **Depends on / blocked by:** nothing technically; needs a product call on who the remote viewer is and where the data lives.
+
+## Non-integer inter-level pyramid scale ratios → possible IMA-184 follow-up
+- **What:** `_multiscales` (`squidmip/_output.py:165`) computes each level's scale as `p * (y0/y)`. Because `_downsample_yx` crops odd axes by one before halving, the ratio between levels is not exactly 2.0 — a 4167-px axis gives 2.0009…, not 2.
+- **Why:** The metadata is *self-consistent* (the scale honestly describes each level's real size), so this is not obviously a bug. But readers that use `scale` for level-of-detail placement can accumulate misalignment, which shows up as image drift while zooming rather than as an error. Nobody has looked for it, and a length-check on the scale array — which is what our conformance tests do — cannot catch it.
+- **Pros:** Rules out a class of subtle, silent geometric error in every downstream viewer.
+- **Cons:** May well be a non-issue; fixing it (padding instead of cropping odd axes) changes pixel content at coarse levels, which is a real behaviour change to a shipped writer.
+- **Context:** Surfaced by the IMA-212 outside-voice pass. Cheapest first step is observational and already on IMA-212's Phase 0 checklist: zoom hard in Odon (which uses `scale` for LOD) and in ndviewer_light, and watch for drift. Only open a real ticket if drift is visible.
+- **Depends on / blocked by:** IMA-212 Phase 0 observation.
