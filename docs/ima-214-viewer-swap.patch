@@ -1,0 +1,92 @@
+diff --git a/squidmip/_viewer.py b/squidmip/_viewer.py
+index d93dd5d..1aef36e 100644
+--- a/squidmip/_viewer.py
++++ b/squidmip/_viewer.py
+@@ -66,6 +66,7 @@ from squidmip._engine import _default_workers
+ from squidmip._layers import OperationStack
+ from squidmip._montage import _area_downsample, _hex_to_rgb01, composite
+ from squidmip._output import parse_well_id
++from squidmip._plate import PlateBuildError, build_plate
+ from squidmip._plate_shape import PlateShapeError, resolve_plate_format
+ 
+ _SUPPORTED_PLATES = ("384", "1536")   # well-plate formats the tool currently accepts (no stitching yet)
+@@ -2561,56 +2562,26 @@ class PlateWindow(QMainWindow):
+         # Resolve the layout format ONCE: an explicit override wins, then the declared field, then
+         # inference from the well ids (IMA-219 — two real acquisitions carry no format at all).
+         # Never fatal: an un-inferable plate keeps the declared value and falls through the guard.
++        # Resolve the sample holder ONCE (IMA-214). build_plate handles wells AND slides: a slide
++        # carrier is a Plate whose cells are the freeform region ids, so a glass-slide/tissue
++        # acquisition reaches this widget by the same path a 384wp does. It also reconciles a
++        # declared format against the MEASURED stage pitch, so a mis-declared plate cannot lay out
++        # at the wrong scale.
+         try:
+-            fmt = resolve_plate_format(meta, override=self._plate_format_override)
+-        except PlateShapeError as e:
++            plate = build_plate(meta, override=self._plate_format_override)
++        except (PlateShapeError, PlateBuildError) as e:
+             self._readout.setText(f"cannot lay out this acquisition: {e}")
+             self._drop.show()
+             return
+-        self._plate_format = fmt
+-        if not any(s in fmt for s in _SUPPORTED_PLATES):   # scope guard: supported formats only
+-            self._readout.setText(f"only 384- and 1536-well plates are supported right now — this is a {fmt or 'other'}")
+-            self._drop.show()
+-            return
++        self._plate = plate
++        self._plate_format = fmt = plate.format_name
+         self._reader, self._meta = reader, meta
+         self._acq_name = Path(p).name
+         self._acq_path = Path(p)
+         self._processed_plate = None
+-
+-        # Order wells in TRUE plate row-major (A,B,...,Z,AA,...). NOT lexicographic ("AA" < "B").
+-        # This parses region ids as well ids — guard it: a readable acquisition whose regions are
+-        # NOT well-plate ids (glass slide, manual/coordinate names, "R2C3", "0") must report, not
+-        # crash. parse_well_id / plate_metadata raise ValueError on those. (contract: never crash.)
+-        try:
+-            plate = plate_metadata(meta["regions"], field_count=1)["plate"]
+-            present_rows = [r["name"] for r in plate["rows"]]
+-            present_cols = [c["name"] for c in plate["columns"]]
+-        except (ValueError, KeyError) as e:
+-            self._reader = self._meta = None
+-            self._readout.setText(
+-                f"not a well-plate acquisition — regions like {list(meta['regions'])[:3]} aren't "
+-                f"well ids (e.g. B2); the MIP tool needs a well plate. ({type(e).__name__})")
+-            self._drop.show()
+-            return
+-        # Prefer the FULL plate-format grid (every position, evenly spaced — no collapsed gaps).
+-        # Fall back to present-only when the format is unknown or the wells don't fit it.
+-        grid = _plate_grid(fmt)
+-        if grid and set(present_rows) <= set(grid[0]) and set(present_cols) <= set(grid[1]):
+-            rows, cols = grid
+-        else:
+-            rows, cols = present_rows, present_cols
+-        row_of = {r: i for i, r in enumerate(rows)}   # plate order: A=0,B=1,...,Z=25,AA=26,...
+-        col_of = {c: i for i, c in enumerate(cols)}
+-
+-        def _rc(region):
+-            rr, cc = parse_well_id(region)
+-            return (row_of[rr], col_of[cc])
+-        order = sorted(meta["regions"], key=_rc)
+-        wells = {}
++        rows, cols, wells, order = plate.viewer_grid()
+         for idx, region in enumerate(order):
+-            rc = _rc(region)
+-            self._fov_index[region] = {"idx": idx, "well_id": region, "rc": rc}
+-            wells[rc] = region
++            self._fov_index[region] = {"idx": idx, "well_id": region, "rc": plate.cell_index(region)}
+ 
+         self._order = order                          # well order = the detail's FOV-slider order
+         self._overview = PlateOverview(rows, cols, wells)
+@@ -3141,8 +3112,10 @@ class PlateWindow(QMainWindow):
+                     except (KeyError, IndexError, OSError, RuntimeError):
+                         continue   # a genuinely-missing plane / closed viewer shouldn't block the rest
+             self._pushed.add(well_id)
+-        row, col = parse_well_id(well_id)
+         try:
++            # Region ids are not necessarily well ids (a slide carrier's are freeform), and this
++            # is only a label for the detail viewer's well/FOV combo -- never worth raising over.
++            row, col = parse_well_id(well_id)
+             self._detail.go_to_well_fov(f"{row}{col}", fov_index)
+         except Exception:
+             pass
