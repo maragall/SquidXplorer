@@ -43,6 +43,14 @@ so a future session doesn't rediscover it from zero.
 - **Context:** ndviewer_light discovers plates by directory walk and reads array `0` + `omero` only (`ndviewer_light/core.py:1149`, `:1070`). IMA-184's cross commit already proves the plate opens under strict `ome-zarr-py`, so the metadata is spec-valid regardless.
 - **Depends on / blocked by:** IMA-193 design.
 
+## Tile render loop + async fetch executor are unowned → IMA-218 scope check
+- **What:** Before/during IMA-218, confirm its scope includes (a) rewriting `PlateOverview.paintEvent`/pan/zoom to consume tiles from `TileCache.resolve()` instead of the single full-plate QPixmap blit, and (b) the async fetch executor (thread/queue) that drives `mark_pending`/`insert`/`fetch_failed` on the cache.
+- **Why:** IMA-216's eng review (outside voice #2, 2026-07-20) found the ticket graph has no owner for either: 216 is a pure library, 217 is a synchronous `read_tile`, and 218's spec says "place FOVs at stage coords" — not "rewrite the render loop". Without an owner, 216 lands as a library with no caller.
+- **Pros:** Catches an unscoped rewrite before 218 is estimated; the executor design decides whether keep-parent-until-child-ready ever actually fires.
+- **Cons:** Likely grows 218 or forces a new ticket; can't be closed until 218 is picked up.
+- **Context:** `_tiling.py` deliberately owns NO concurrency (caller-driven lifecycle, eng review decision). Today's render path: `_viewer.py` paintEvent blits one cached scaled QPixmap; wheel/pan call `update()` per event. The tile path replaces that blit for the mosaic case; N=1 FOV fallback stays.
+- **Depends on / blocked by:** IMA-216 (contract), IMA-217 (TileSource impl); belongs to IMA-218.
+
 ## Fix upstream squid2minerva/colors.py display_color nesting → external repo
 - **What:** `squid2minerva/colors.py:load_yaml_colors` reads `channel["display_color"]`, but real `acquisition_channels.yaml` nests it under `channel.camera_settings.<cam>.display_color`. Its Minerva OME-TIFF exports only get right colors via the wavelength-fallback map — a custom yaml color is silently ignored.
 - **Why:** Confirmed against a real dataset yaml. It's correct-by-luck today because the fallback palette matches the standard 4 channels; any non-default color drops silently.
