@@ -40,8 +40,24 @@ so a future session doesn't rediscover it from zero.
 - **Why:** IMA-184 writes a ≥2-level pyramid + spec plate/well metadata. ndviewer_light (today's only reader) ignores both — it directory-walks and reads only `field/0` + `omero`. So the pyramid is currently invisible; IMA-193 is the consumer that justifies it. If IMA-193 also reads only level 0, that extra output delivered nothing.
 - **Pros:** Validates the load-bearing assumption behind IMA-184's canonical/multiscale scope before more work rides on it.
 - **Cons:** Can't be closed until IMA-193 is designed; until then the pyramid is written on faith.
-- **Context:** ndviewer_light discovers plates by directory walk and reads array `0` + `omero` only (`ndviewer_light/core.py:1149`, `:1070`). IMA-184's cross commit already proves the plate opens under strict `ome-zarr-py`, so the metadata is spec-valid regardless.
+- **Context:** ndviewer_light discovers plates by directory walk and reads array `0` + `omero` only (`ndviewer_light/core.py:1149`, `:1070`). IMA-184's cross commit already proves the plate opens under strict `ome-zarr-py`, so the metadata is spec-valid regardless. **Update (2026-07-20, IMA-217 eng review):** IMA-217's `PyramidSource` is now the first in-repo consumer of the pyramid levels (the tiler IMA-216 reads through it), so the "written on faith" concern is substantially resolved; this TODO narrows to confirming IMA-193 specifically routes through PyramidSource/the tiler rather than re-reading array `0`.
 - **Depends on / blocked by:** IMA-193 design.
+
+## NGFF translation transforms per FOV → after IMA-215 lands
+- **What:** Write per-FOV `translation` coordinateTransformations (stage position from `fov_positions`) into `_multiscales` datasets, so the plate is self-placing in any NGFF viewer (Viv, napari).
+- **Why:** IMA-217's review dropped the coords-reader dep — per-FOV tile reads never touch stage coords, and IMA-215 is unbuilt. But once 215 lands, the written zarr should carry placement so external viewers don't need our tiler.
+- **Pros:** Output becomes self-describing beyond our own stack; cheap edit to `_multiscales` (_output.py:165).
+- **Cons:** Blocked on IMA-215; needs care that scale+translation compose per NGFF v0.5.
+- **Context:** Surfaced as premise 5 of the IMA-217 design doc (2026-07-20). The tiler gets positions directly from 215 in the meantime.
+- **Depends on / blocked by:** IMA-215 (coords-reader).
+
+## Hot-well full-res RAM retention → pending IMA-218 evidence
+- **What:** Keep the entire pyramid (incl. level 0) of the N most-recently-written FOVs in RAM for instant mid-run deep-zoom (design doc Approach C).
+- **Why:** During a live run, the well just acquired is the one a user may inspect; serving level 0 from RAM avoids a disk round-trip at the moment of peak attention.
+- **Pros:** Instant deep-zoom demo moment on live runs.
+- **Cons:** ~139 MB per hot FOV (4168²×4ch uint16 + tail); speculative — no evidence yet that users deep-zoom mid-run.
+- **Context:** Rejected from IMA-217 scope in the eng review (2026-07-20); `ingest` already receives the full levels list, so the extension point exists.
+- **Depends on / blocked by:** IMA-218 shipping and showing real mid-run deep-zoom usage.
 
 ## Fix upstream squid2minerva/colors.py display_color nesting → external repo
 - **What:** `squid2minerva/colors.py:load_yaml_colors` reads `channel["display_color"]`, but real `acquisition_channels.yaml` nests it under `channel.camera_settings.<cam>.display_color`. Its Minerva OME-TIFF exports only get right colors via the wavelength-fallback map — a custom yaml color is silently ignored.
