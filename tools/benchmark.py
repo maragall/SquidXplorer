@@ -59,11 +59,38 @@ def main() -> int:
                          "mosaic is ~0.9 GB resident and measures memory, not stitching)")
     ap.add_argument("--workers", type=int, default=1)
     ap.add_argument("--no-quality", action="store_true")
+    ap.add_argument("--warmup", action="store_true",
+                    help="run the whole operator list once and DISCARD it, then measure. "
+                         "Needed for any comparison involving 'stitch'/'coordinate': "
+                         "tilefusion's fusion kernels are numba-JIT'd, so whichever of "
+                         "them runs first is charged ~7 s of compilation that belongs to "
+                         "neither stitcher. Measured on the 10x well: 'fuse' 8203 ms cold "
+                         "vs 974 ms warm, same operator, same data. ashlar shows no such "
+                         "effect (scipy FFT, no JIT), so without this the first row is "
+                         "penalised and the ranking is an artefact of ordering.")
+    ap.add_argument("--stitchers", action="store_true",
+                    help="head-to-head stitcher comparison (IMA-211): register every "
+                         "importable third-party stitcher as a region operator and run "
+                         "coordinate,stitch,<challengers>. Prints an availability report "
+                         "for the ones that could not run. Overrides --operators unless "
+                         "--operators was given explicitly.")
     ap.add_argument("--csv", default=None)
     ap.add_argument("--json", default=None)
     args = ap.parse_args()
 
     operators = [o.strip() for o in args.operators.split(",") if o.strip()]
+    if args.stitchers:
+        # Same harness, same seam, same fixtures — the challengers are just region
+        # operators. That is the point: a separate stitcher suite would measure a
+        # different thing and has already produced wrong numbers on this project once.
+        from squidmip._bench_stitchers import availability_report, register_challengers
+
+        added = register_challengers()
+        if args.operators == ",".join(DEFAULT_OPERATORS):
+            operators = ["coordinate", "stitch", *added]
+        print("stitchers : " + ", ".join(["tilefusion (stitch)", *added]))
+        print(availability_report())
+        print("", flush=True)
     regions = [r.strip() for r in args.regions.split(",")] if args.regions else None
     channels = [int(c) for c in args.region_channels.split(",") if c.strip() != ""] or None
 
@@ -75,6 +102,17 @@ def main() -> int:
 
     def _on_error(op, exc):
         print(f"  ! {op}: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+
+    if args.warmup:
+        print("warm-up pass (discarded) ...", flush=True)
+        benchmark_dataset(
+            args.dataset, operators,
+            regions=regions, n_fovs=args.n_fovs,
+            region_n_fovs=args.region_n_fovs, region_channels=channels,
+            workers=args.workers, quality=False,
+            on_error=lambda op, exc: None,
+        )
+        print("", flush=True)
 
     t0 = time.perf_counter()
     results = benchmark_dataset(
