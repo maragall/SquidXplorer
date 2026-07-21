@@ -90,9 +90,10 @@ _VIEWER_WORKERS = min(6, _default_workers())   # adapt to the machine, but CAP a
 _BG = "#070a0f"
 _GRID, _RED, _MUTED, _ACCENT = QColor(0, 0, 0), QColor("#ff2d2d"), QColor("#8b98ad"), QColor("#58a6ff")
 _SEL_FILL = QColor(88, 166, 255, 90)   # translucent accent wash over a SELECTED well (IMA-221)
-_ART_ALPHA = 0.45          # carrier-art opacity (IMA-220): enough to read the holder's shape, dim
-#                            enough that the acquired pixels, not the stock photo, are the subject
-_CLICK_SLOP = 3                        # px of travel below which a Shift-drag counts as a click
+_MIN_PREVIEW_BOX_PX = 4    # smallest FOV box (of _CELL) the RAW preview will bother mosaicking
+#                            (IMA-253): below this a field is a speck, and reading one plane per
+#                            field to draw specks is pure cost. The operator path is unaffected.
+_CLICK_SLOP = 3                       # px of travel below which a Shift-drag counts as a click
 #                                        (matches the pan threshold, so the two gestures agree)
 
 # Processing-status hue coding, adopted from Hongquan Li's record-zstack-viewer plate navigator.
@@ -1342,11 +1343,21 @@ class PlateOverview(QWidget):
                                            # at a time and deliberately does NOT fire it — otherwise
                                            # every corrective click spawns another tab.
 
-    def __init__(self, rows, cols, wells: dict):
+    def __init__(self, rows, cols, wells: dict, layout: Optional[dict] = None):
         """``wells``: (row_index, col_index) -> well_id for every acquired well (drawn grey until
-        processed). Tiles/status arrive as an operator runs."""
+        processed). Tiles/status arrive as an operator runs.
+
+        ``layout`` (IMA-253) is ``{(row_index, col_index): (x, y, w, h)}`` in GRID UNITS for a
+        holder whose cells are placed by real geometry rather than by a uniform pitch -- a freeform
+        tissue slide, where each region's cell is its own mosaic's bounding box. ``None`` is the
+        uniform grid every well plate is, and keeps the single-blit fast path a 1536-well plate
+        needs. Cells absent from the map fall back to their nominal ``(c, r, 1, 1)`` square, which
+        is what an EMPTY slot (no stage coordinates to place it by) can honestly be drawn as.
+        """
         super().__init__()
         self._rows, self._cols = list(rows), list(cols)
+        self._layout: Optional[dict] = ({tuple(k): tuple(float(v) for v in val)
+                                         for k, val in layout.items()} if layout else None)
         self._nr, self._nc = len(self._rows), len(self._cols)
         self._by_rc: dict[tuple, str] = dict(wells)            # every acquired well (for status + hit-test)
         self._status: dict[tuple, str] = {rc: "empty" for rc in wells}
@@ -1394,10 +1405,10 @@ class PlateOverview(QWidget):
         self._panning = False
         self._user_view = False       # True once the user wheel-zooms/pans (stop auto-fitting)
         self._boxes: dict = {}        # (region, fov) -> (top, left, h, w) in cell px; {} = single-FOV
-        # -- carrier background art (IMA-220) --
-        self._art = None              # _plate.CarrierArt for the RESOLVED format, or None (draw nothing)
-        self._art_img = None          # its QImage, loaded ONCE (never per repaint)
-        self._art_geom = None         # the PlateGeometry the art is aligned against (a1 + pitch, um)
+        self._boxed_regions: set = set()   # regions whose cell holds a LETTERBOXED mosaic, not one tile
+        # -- carrier geometry (IMA-220, redrawn for IMA-253: geometry, not a photograph) --
+        self._carrier = None          # the _plate.PlateGeometry to draw the holder outline from
+        self._carrier_slide = False   # slot-shaped cells (a slide carrier) vs round wells
         self._tile_rgn = None         # cached QRegion of cells that HAVE an image, at pan origin
         self._tile_rgn_key = None     # (cd, active layer, n tiled cells) the cached region was built for
         # -- loupe (IMA-208) --
@@ -1889,11 +1900,40 @@ class PlateOverview(QWidget):
     #        the second press re-arms; without the cancel you would open the detail viewer AND
     #        raise a loupe from one gesture.
     def _cell(self, x, y):
+        if self._layout is not None:
+            return self._freeform_cell(x, y)
         px, py = x - (self._ox + _HDR), y - (self._oy + _COLH)
         return well_at(self._rows, self._cols, self._by_rc, px, py, self._cd)
 
+    def _freeform_cell(self, x, y):
+        """Hit-test a geometrically placed holder: the first cell whose own rect contains (x, y).
+
+        Placed cells are tested FIRST and in reverse paint order, so a click in the small area
+        where two regions' bounding boxes overlap resolves to the one drawn on top — the same
+        last-one-wins rule ``_fov_at`` uses inside a mosaic. Nominal (empty-slot) rects are only
+        consulted when no real region claims the point, so an empty slot can never shadow a region
+        that overlaps it. Freeform holders have a handful of cells, so a linear scan is free.
+        """
+        placed = [rc for rc in self._by_rc if rc in self._layout]
+        for rc in list(reversed(placed)) + [rc for rc in self._by_rc if rc not in self._layout]:
+            rx, ry, rw, rh = self._cell_rect(*rc)
+            if rx <= x < rx + rw and ry <= y < ry + rh:
+                ri, ci = rc
+                return {"row_index": ri, "col_index": ci, "row": self._rows[ri],
+                        "col": self._cols[ci], "well_id": self._by_rc.get(rc)}
+        return None
+
     def _cells_in(self, x0, y0, x1, y1) -> list:
         """Widget px -> acquired cells, via the pure helper (same margin removal as _cell)."""
+        if self._layout is not None:
+            lo_x, hi_x = min(x0, x1), max(x0, x1)
+            lo_y, hi_y = min(y0, y1), max(y0, y1)
+            hits = []
+            for rc in self._by_rc:
+                rx, ry, rw, rh = self._cell_rect(*rc)
+                if rx < hi_x and rx + rw > lo_x and ry < hi_y and ry + rh > lo_y:
+                    hits.append(rc)
+            return sorted(hits)
         ox, oy = self._ox + _HDR, self._oy + _COLH
         return cells_in_rect(self._rows, self._cols, self._by_rc,
                              x0 - ox, y0 - oy, x1 - ox, y1 - oy, self._cd)
@@ -2024,69 +2064,85 @@ class PlateOverview(QWidget):
         self.update()
 
     def set_mosaic_boxes(self, boxes: dict):
-        """Adopt the per-FOV cell boxes so a double-click can resolve WHICH FOV was hit."""
-        self._boxes = dict(boxes or {})
+        """Adopt the per-FOV cell boxes so a double-click can resolve WHICH FOV was hit.
 
-    # -- carrier background art (IMA-220) --
-    def set_carrier(self, plate, images_dir=None):
-        """Adopt *plate*'s carrier PNG as the background behind the cells, Squid-navigator style.
-
-        THE ART MUST COME FROM THE PLATE'S **RESOLVED** FORMAT, never its declared one. The 2x2
-        fixture declares "384 well plate" but its stage coordinates measure a 9.000 mm pitch, which
-        is physically 96-well; ``build_plate`` (IMA-214) resolves that to 96 and warns. Drawing the
-        384 art over a 96 grid would render the background at exactly 2x the true scale — a
-        plausible-looking picture that is simply wrong. Passing the ``Plate`` (rather than a format
-        string) is what makes that unrepresentable here: ``plate.art()`` can only ever return the
-        art for the format the plate actually resolved to.
-
-        Degrades to no background rather than failing: a format with no entry in the registry, a
-        machine with no Squid checkout, or a missing PNG all yield ``None`` from ``plate.art()``
-        and the plate simply draws its own grid, as it always did. A glass slide reaches this the
-        same way a 96wp does — it just gets slide art, or none.
+        Also tells the paint path WHICH cells hold a letterboxed mosaic rather than a
+        cell-filling single tile (see :meth:`_cell_source`), so the two can never disagree about
+        the same cell: they read one dict.
         """
-        self._art = self._art_img = self._art_geom = None
-        if plate is None:
-            self.update()
-            return
-        try:
-            art = plate.art(images_dir=images_dir)
-        except Exception:      # a registry/geometry surprise must never stop the plate drawing
-            art = None
-        if art is None:
-            self.update()
-            return
-        img = QImage(str(art.path))
-        if img.isNull():       # on disk but unreadable (truncated/hostile PNG) -> no background
-            self.update()
-            return
-        self._art, self._art_img, self._art_geom = art, img, plate.geometry
+        self._boxes = dict(boxes or {})
+        self._boxed_regions = {r for r, _f in self._boxes}
         self.update()
 
-    def _art_target(self, ax: float, ay: float) -> Optional[tuple]:
-        """Where the whole carrier PNG goes in widget px: ``(x, y, w, h)``, or None.
+    # -- carrier geometry (IMA-220 -> IMA-253: DRAWN, not blitted) --
+    def set_carrier(self, plate, images_dir=None):
+        """Adopt *plate*'s geometry so the holder can be DRAWN behind the cells.
 
-        The art and the cell grid are two views of the same physical plate, so they are aligned by
-        the one thing both know: the stage position of a cell centre. Cell (r, c)'s centre sits at
-        widget ``(ax + (c+0.5)*cd, ...)`` and at art px ``art.um_to_px(a1 + c*pitch)`` — equating
-        them makes the per-cell terms cancel, leaving a single scale + offset for the whole image::
+        This used to blit Squid's carrier PHOTOGRAPH. It no longer does, and the reason is
+        registration, not taste. A PNG lives in its own pixel space and has to be brought into the
+        cell grid's space through three calibration constants (``a1_x_pixel``, ``a1_x_mm``,
+        ``mm_per_pixel``) that must agree with the geometry the cells are laid out from. When they
+        disagree, nothing raises — you get a plausible picture with the wells in the wrong places,
+        which is exactly what shipped, and it is unfixable in general for a FREEFORM holder because
+        there is no photograph of "two tissues wherever the operator happened to put them".
 
-            scale_x  = cd / (pitch_x_um / um_per_px)      # widget px per art px
-            offset_x = ax + cd/2 - scale_x * art_px_of_a1_centre_x
+        Drawing the outline, the slot/well boundaries and the empty-vs-occupied state from
+        :class:`~squidmip._plate.PlateGeometry` puts the holder in the SAME coordinate system as
+        the cells, so it cannot misalign, it cannot vanish on pan or zoom (there is no separately
+        positioned blit to drift), and an acquisition with no artwork on disk renders identically
+        to one with artwork. ``plate.art()`` and the whole PNG registry stay in ``_plate.py`` for
+        an optional skin; they are simply not on this path.
 
-        So the art is drawn once, as one scaled blit, and every well of the artwork lands under its
-        own cell at every zoom and pan — no per-cell placement, nothing to drift.
+        *images_dir* is accepted and ignored, so callers that passed one still work.
         """
-        if self._art is None or self._art_img is None or self._art_geom is None:
-            return None
-        g, art, cd = self._art_geom, self._art, self._cd
-        px_per_cell_x = g.pitch_x_um / art.um_per_px       # art px between neighbouring centres
-        px_per_cell_y = g.pitch_y_um / art.um_per_px
-        if not (px_per_cell_x > 0 and px_per_cell_y > 0):  # a degenerate geometry: draw no art
-            return None
-        sx, sy = cd / px_per_cell_x, cd / px_per_cell_y
-        a1x, a1y = art.um_to_px(g.a1_x_um, g.a1_y_um)      # art px of A1's CENTRE
-        return (ax + cd / 2.0 - sx * a1x, ay + cd / 2.0 - sy * a1y,
-                self._art_img.width() * sx, self._art_img.height() * sy)
+        self._carrier = getattr(plate, "geometry", None) if plate is not None else None
+        try:
+            from squidmip._plate import SlideCarrier
+            self._carrier_slide = isinstance(plate, SlideCarrier)
+        except Exception:
+            self._carrier_slide = False
+        self.update()
+
+    # -- cell rectangles: the ONE place a (row, col) becomes widget pixels (IMA-253) --
+    def _cell_rect(self, ri: int, ci: int) -> tuple:
+        """Widget-pixel ``(x, y, w, h)`` of cell (ri, ci) at the current zoom/pan.
+
+        Uniform plates return the historical ``(ax + ci*cd, ay + ri*cd, cd, cd)`` exactly. A
+        freeform holder returns the region's own rectangle: its mosaic's bounding box, scaled by
+        the same single transform for every region, so relative offset and relative scale are
+        preserved and two regions of different size get different-sized cells.
+        """
+        cd = self._cd
+        ax, ay = self._ox + _HDR, self._oy + _COLH
+        if self._layout is not None:
+            r = self._layout.get((ri, ci))
+            if r is not None:
+                return (ax + r[0] * cd, ay + r[1] * cd, r[2] * cd, r[3] * cd)
+        return (ax + ci * cd, ay + ri * cd, cd, cd)
+
+    def _cell_source(self, ri: int, ci: int) -> tuple:
+        """The sub-rectangle of the montage canvas that ``_cell_rect(ri, ci)`` shows.
+
+        The store keeps every cell as one ``_CELL`` x ``_CELL`` square. A MOSAIC is LETTERBOXED into
+        it (``_placement.cell_boxes`` centres it, preserving aspect), so the bars must be excluded
+        or the mosaic would be stretched back into them. A single tile — one FOV, or a region
+        operator's already-fused result — FILLS the block, so the whole block is the source. Which
+        of the two a cell holds is read from ``self._boxes``, the same dict the tiles were placed
+        by, so the blit and the pixels cannot disagree.
+
+        Since the cell rect and the letterbox come from the SAME aspect ratio, the inner box is
+        recoverable from the rect alone: no second bookkeeping table to fall out of sync.
+        """
+        full = (ci * _CELL, ri * _CELL, _CELL, _CELL)
+        if self._layout is None or self._by_rc.get((ri, ci)) not in self._boxed_regions:
+            return full
+        r = self._layout.get((ri, ci))
+        if r is None or not (r[2] > 0 and r[3] > 0):
+            return full
+        a = r[2] / r[3]                                    # target aspect == mosaic aspect
+        iw = _CELL * min(1.0, a)
+        ih = _CELL * min(1.0, 1.0 / a)
+        return (ci * _CELL + (_CELL - iw) / 2.0, ri * _CELL + (_CELL - ih) / 2.0, iw, ih)
 
     def _tiled_region(self) -> "QRegion":
         """The cells that HAVE an image on the active layer, as a QRegion at pan origin (0, 0).
@@ -2120,10 +2176,16 @@ class PlateOverview(QWidget):
         region = c["well_id"]
         if not region or not self._boxes:
             return 0
-        ax, ay = self._ox + _HDR, self._oy + _COLH
-        # position within the cell, normalised to the _CELL-px space the boxes live in
-        fx = (e.x() - ax - c["col_index"] * self._cd) / self._cd * _CELL
-        fy = (e.y() - ay - c["row_index"] * self._cd) / self._cd * _CELL
+        ri, ci = c["row_index"], c["col_index"]
+        rx, ry, rw, rh = self._cell_rect(ri, ci)
+        sx, sy, sw, sh = self._cell_source(ri, ci)
+        if not (rw > 0 and rh > 0):
+            return 0
+        # position within the cell, normalised to the _CELL-px space the boxes live in. Going via
+        # the cell's SOURCE rect is what keeps the hit-test agreeing with the blit on a freeform
+        # holder, where the drawn rect is the mosaic's box and not the whole square block.
+        fx = (e.x() - rx) / rw * sw + (sx - ci * _CELL)
+        fy = (e.y() - ry) / rh * sh + (sy - ri * _CELL)
         hit = 0
         for (r, fov), (top, left, h, w) in self._boxes.items():
             if r == region and top <= fy < top + h and left <= fx < left + w:
@@ -2157,31 +2219,39 @@ class PlateOverview(QWidget):
         cd, nr, nc = self._cd, self._nr, self._nc
         ax, ay = self._ox + _HDR, self._oy + _COLH   # plate top-left (after label margins)
         W, H = nc * cd, nr * cd
-        # Blit the montage from a cached pixmap scaled to the current zoom. The expensive smooth
-        # resample runs ONCE per zoom/source-change (not every repaint) — pan/hover just re-blit.
-        w, h = max(1, int(W)), max(1, int(H))
-        if self._scaled is None or self._scaled_cd != cd or self._scaled.width() != w or self._scaled.height() != h:
-            self._scaled = QPixmap.fromImage(self._active_source()).scaled(
-                w, h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
-            self._scaled_cd = cd
-        # CARRIER ART (IMA-220), behind everything: the wellplate/slide-holder photograph, scaled
-        # and offset so its wells sit under our cells (see _art_target). Only worth drawing while
-        # some cell is still empty — a fully tiled plate would cover it completely anyway, and then
-        # the single unclipped blit below is both cheaper and pixel-identical to what shipped.
         tiled = self._tiles_by_layer.get(self._active, set())
-        art_rect = self._art_target(ax, ay) if len(tiled) < nr * nc else None
-        if art_rect is not None:
-            p.setOpacity(_ART_ALPHA)     # a BACKGROUND: the acquired pixels must stay dominant
-            p.drawImage(QRectF(*art_rect), self._art_img)
-            p.setOpacity(1.0)
-            # ...then let the montage cover only the cells that actually have pixels, so the art
-            # shows through the empty ones instead of being painted out by opaque _BG.
-            p.save()
-            p.setClipRegion(self._tiled_region().translated(int(ax), int(ay)))
-            p.drawPixmap(int(ax), int(ay), self._scaled)
-            p.restore()
+        # THE HOLDER (IMA-253), behind everything: drawn from the plate's own geometry, in the
+        # cells' own coordinate system. No photograph, so nothing to calibrate and nothing to
+        # drift on pan/zoom; see set_carrier.
+        self._paint_carrier(p, tiled)
+        if self._layout is not None:
+            # FREEFORM: each region's cell is its own rectangle, so the montage is blitted per
+            # cell rather than as one grid-aligned image. A handful of regions, one drawImage each.
+            src = self._active_source()
+            p.setRenderHint(QPainter.SmoothPixmapTransform, True)
+            for rc in sorted(tiled):
+                if rc not in self._by_rc:
+                    continue
+                p.drawImage(QRectF(*self._cell_rect(*rc)), src, QRectF(*self._cell_source(*rc)))
         else:
-            p.drawPixmap(int(ax), int(ay), self._scaled)
+            # Blit the montage from a cached pixmap scaled to the current zoom. The expensive
+            # smooth resample runs ONCE per zoom/source-change (not every repaint) — pan/hover
+            # just re-blit.
+            w, h = max(1, int(W)), max(1, int(H))
+            if (self._scaled is None or self._scaled_cd != cd
+                    or self._scaled.width() != w or self._scaled.height() != h):
+                self._scaled = QPixmap.fromImage(self._active_source()).scaled(
+                    w, h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+                self._scaled_cd = cd
+            if len(tiled) < nr * nc:
+                # The montage canvas is opaque _BG wherever no tile landed, so let it cover only
+                # the cells that actually have pixels — otherwise it paints the holder out.
+                p.save()
+                p.setClipRegion(self._tiled_region().translated(int(ax), int(ay)))
+                p.drawPixmap(int(ax), int(ay), self._scaled)
+                p.restore()
+            else:
+                p.drawPixmap(int(ax), int(ay), self._scaled)
 
         # per-cell DOT over the WHOLE plate grid (so a sparse acquisition still shows the full plate
         # shape — e.g. 32x48 for 1536, 16x24 for 384 — with grey dots on the un-acquired wells):
@@ -2193,8 +2263,8 @@ class PlateOverview(QWidget):
             for ci in range(nc):
                 state = self._status.get((ri, ci), "empty")
                 has_img = (ri, ci) in active_tiles
-                x0, y0 = ax + ci * cd, ay + ri * cd
-                ex, ey = int(x0 + (cd - d) / 2), int(y0 + (cd - d) / 2)
+                x0, y0, cw, ch = self._cell_rect(ri, ci)
+                ex, ey = int(x0 + (cw - d) / 2), int(y0 + (ch - d) / 2)
                 if state == "processing":                   # amber dot
                     p.setPen(Qt.NoPen)
                     p.setBrush(_STATUS["processing"])
@@ -2214,14 +2284,18 @@ class PlateOverview(QWidget):
             p.setPen(Qt.NoPen)         # under the grid/labels so it reads as a highlight, and kept
             p.setBrush(_SEL_FILL)      # visually distinct from _sel's red BOX and _hover's red DOT.
             for ri, ci in self._selection:
-                p.drawRect(int(ax + ci * cd), int(ay + ri * cd), int(cd), int(cd))
+                rx, ry, rw, rh = self._cell_rect(ri, ci)
+                p.drawRect(int(rx), int(ry), int(rw), int(rh))
             p.setBrush(Qt.NoBrush)
 
-        p.setPen(QPen(_GRID, 3))       # black grid lines between wells (multi-FOV mosaics sit INSIDE a cell)
-        for c in range(nc + 1):
-            p.drawLine(int(ax + c * cd), int(ay), int(ax + c * cd), int(ay + H))
-        for r in range(nr + 1):
-            p.drawLine(int(ax), int(ay + r * cd), int(ax + W), int(ay + r * cd))
+        if self._layout is None:
+            p.setPen(QPen(_GRID, 3))   # black grid lines between wells (multi-FOV mosaics sit INSIDE a cell)
+            for c in range(nc + 1):
+                p.drawLine(int(ax + c * cd), int(ay), int(ax + c * cd), int(ay + H))
+            for r in range(nr + 1):
+                p.drawLine(int(ax), int(ay + r * cd), int(ax + W), int(ay + r * cd))
+        # (a freeform holder has no shared grid lines to draw — its cells are individually placed
+        #  rectangles, and _paint_carrier already outlined each one.)
         # Column/row labels THIN OUT as cells shrink so they never overlap (a 48-col 1536wp would
         # otherwise cram "1..48" into a few px). Always draw the hovered row/col so hover still reads.
         p.setFont(QFont("Helvetica Neue", 11, QFont.DemiBold))
@@ -2240,14 +2314,14 @@ class PlateOverview(QWidget):
             p.setPen(_ACCENT if hov else _MUTED)
             p.drawText(int(self._ox), int(ay + r * cd), _HDR, int(cd), Qt.AlignCenter, str(self._rows[r]))
         if self._sel is not None:          # the CURRENT well in the detail viewer = a red BOX
-            ri, ci = self._sel
             p.setPen(QPen(_RED, 2))
             p.setBrush(Qt.NoBrush)
-            p.drawRect(int(ax + ci * cd), int(ay + ri * cd), int(cd), int(cd))
+            sx, sy, sw, sh = self._cell_rect(*self._sel)
+            p.drawRect(int(sx), int(sy), int(sw), int(sh))
         if self._hover is not None:        # where the cursor is, moving around the plate = a red DOT
             ri, ci = self._hover           # SAME geometry as the status dots -> overlays them exactly
-            x0, y0 = ax + ci * cd, ay + ri * cd
-            ex, ey = int(x0 + (cd - d) / 2), int(y0 + (cd - d) / 2)
+            x0, y0, hw, hh = self._cell_rect(ri, ci)
+            ex, ey = int(x0 + (hw - d) / 2), int(y0 + (hh - d) / 2)
             p.setPen(Qt.NoPen)
             p.setBrush(_RED)
             p.drawEllipse(ex, ey, int(d), int(d))
@@ -2281,6 +2355,73 @@ class PlateOverview(QWidget):
         p.setBrush(Qt.NoBrush)
         p.drawRect(0, 0, self.width() - 1, self.height() - 1)
         p.end()
+
+    def _paint_carrier(self, p: QPainter, tiled: set):
+        """Draw the sample holder: body outline, per-cell boundary, empty vs occupied (IMA-253).
+
+        Everything here comes out of the geometry the cells themselves are placed from, so there is
+        exactly one coordinate system and the holder cannot drift out of register with the wells —
+        which is the failure a separately-positioned photograph kept producing, and could not
+        avoid. It also means an acquisition with no artwork on disk renders IDENTICALLY to one with
+        artwork, because artwork is no longer consulted.
+
+        Three states, deliberately distinct, because "which slots are empty" was the exact question
+        the photograph answered badly:
+
+            occupied, imaged   the pixels themselves (drawn over this)
+            occupied, waiting  a solid accent-tinted boundary + fill
+            empty slot         a DASHED, dim boundary and no fill
+
+        Skipped entirely below a few px per cell: at 1536-well zoom the boundaries are smaller than
+        the status dots, so drawing 1536 of them would cost a repaint and show nothing.
+        """
+        if self._carrier is None:
+            return
+        cd = self._cd
+        ax, ay = self._ox + _HDR, self._oy + _COLH
+        # The holder BODY: the union of every cell rectangle, padded by the margin the geometry
+        # implies (half a pitch beyond the outer cell centres on a well plate).
+        rects = [self._cell_rect(r, c) for r in range(self._nr) for c in range(self._nc)]
+        if not rects:
+            return
+        bx0 = min(r[0] for r in rects)
+        by0 = min(r[1] for r in rects)
+        bx1 = max(r[0] + r[2] for r in rects)
+        by1 = max(r[1] + r[3] for r in rects)
+        pad = max(4.0, cd * 0.18)
+        body = QRectF(bx0 - pad, by0 - pad, (bx1 - bx0) + 2 * pad, (by1 - by0) + 2 * pad)
+        p.setBrush(QColor(28, 32, 40))
+        p.setPen(QPen(QColor(90, 100, 116), 2))
+        p.drawRoundedRect(body, min(10.0, pad), min(10.0, pad))
+        # An orientation cue instead of a picture of one: the A1 / first-slot corner is chamfered,
+        # the way a real plate's notched corner reads.
+        p.setPen(QPen(QColor(120, 132, 150), 2))
+        ch = min(14.0, pad * 2.0)
+        p.drawLine(int(body.left()), int(body.top() + ch), int(body.left() + ch), int(body.top()))
+        if cd < 6.0:                     # boundaries smaller than the status dots: not worth it
+            return
+        for ri in range(self._nr):
+            for ci in range(self._nc):
+                rx, ry, rw, rh = self._cell_rect(ri, ci)
+                occupied = (ri, ci) in self._by_rc
+                if occupied and (ri, ci) in tiled:
+                    continue             # the acquired pixels will cover it; do not tint them
+                if occupied:
+                    p.setPen(QPen(_ACCENT, max(1.0, min(cd * 0.03, 2.0))))
+                    p.setBrush(QColor(56, 139, 253, 40))
+                else:
+                    p.setPen(QPen(QColor(74, 84, 100), 1, Qt.DashLine))
+                    p.setBrush(Qt.NoBrush)
+                if self._carrier_slide:  # a slide slot is a rectangle; a well is round
+                    p.drawRect(QRectF(rx, ry, rw, rh))
+                else:
+                    # Well diameter relative to pitch, straight from sample_formats.csv, so a 96wp
+                    # reads as fat wells and a 1536wp as pinpricks — the real difference between them.
+                    g = self._carrier
+                    f = (g.cell_size_um / g.pitch_x_um) if g.pitch_x_um else 0.8
+                    f = float(min(max(f, 0.15), 1.0))
+                    p.drawEllipse(QRectF(rx + rw * (1 - f) / 2, ry + rh * (1 - f) / 2, rw * f, rh * f))
+        p.setBrush(Qt.NoBrush)
 
     def _paint_loupe(self, p: QPainter):
         """The inset: real pixels, a µm scale bar when the pixel size is known, or the reason
@@ -2804,23 +2945,72 @@ class _MinervaWorker(QThread):
 class _PreviewWorker(QThread):
     """Fast RAW preview so the plate shows imagery the moment it opens — before any operator runs
     (the "downsample the plate before opening" step). Reads ONE representative z-plane per channel
-    per well (not the whole stack), area-downsamples, and hands the per-channel tile to the plate.
-    Cheap relative to a full projection; parallel reads; one well's planes at a time. Status stays
-    'empty' (grey frame) — this is a preview, not a processed result. A later operator overwrites
-    each tile. Like the other producers it keeps the CHANNEL AXIS intact all the way to the widget,
-    so the channel toggle works on a freshly-opened acquisition, before any operator has run.
+    per FOV (not the whole stack), area-downsamples, and hands the per-channel tile to the plate.
+    Cheap relative to a full projection; parallel reads. Status stays 'empty' (grey frame) — this is
+    a preview, not a processed result. A later operator overwrites each tile. Like the other
+    producers it keeps the CHANNEL AXIS intact all the way to the widget, so the channel toggle
+    works on a freshly-opened acquisition, before any operator has run.
+
+    A REGION IS A MOSAIC, NOT A FOV (IMA-253/IMA-249). This used to read exactly one representative
+    FOV per region and stretch it over the region's whole cell, so the real 10x tissue acquisition
+    showed two lone frames pretending to be two 27- and 28-FOV mosaics, and the mosaic only ever
+    appeared *after* an operator run. It now composites every FOV of a region into that region's
+    cell at its coordinate-derived box (``_placement.cell_boxes`` — the same geometry the operator
+    path uses, so preview and result describe one layout).
+
+    The cost is driven by the REAL FOV COUNT PER REGION, which is the only way both datasets stay
+    fast: the 1536-well fixture is 1536 regions x 1 FOV, so it reads 1536 planes per channel exactly
+    as before, takes the identical single-tile code path (``box=None``), and cannot get slower. The
+    tissue slide is 2 regions x ~27 FOVs, so it reads 55. Work is emitted per FOV as it lands, so
+    cells fill progressively and the UI never blocks on a whole mosaic.
     """
 
-    tileReady = pyqtSignal(int, int, str, object)   # (ri, ci, well_id, (C, cell, cell) native tile)
+    tileReady = pyqtSignal(int, int, str, object, object)   # (ri, ci, well_id, tile, box|None)
     streamEnded = pyqtSignal()                      # preview complete -> recomposite the whole plate
 
-    def __init__(self, reader, meta, fov_index: dict, order: list):
+    def __init__(self, reader, meta, fov_index: dict, order: list, mosaic: bool = True):
         super().__init__()
         self._reader, self._meta = reader, meta
         self._fov_index, self._order = fov_index, order
         self._channels = [c["name"] for c in meta["channels"]]
         self._dtype = np.dtype(meta["dtype"])
+        self._mosaic = bool(mosaic)
         self._stop = threading.Event()
+
+    def _plan(self) -> list:
+        """``[(region, fov, box|None), ...]`` — the read list, in plate order, FOVs in stage order.
+
+        ``box=None`` means "this FOV fills its cell": a single-FOV region, or an acquisition with no
+        stage coordinates / no pixel size, where a mosaic is not derivable and guessing one would
+        draw a wrong picture. That is the historical path, and it stays byte-identical for it.
+
+        A region whose FOVs are so widely spread that each one lands in fewer than
+        ``_MIN_PREVIEW_BOX_PX`` cell pixels also previews single-tile. Reading N planes to paint N
+        specks is all cost and no picture — and at that scale the "mosaic" and the single tile are
+        visually the same thing anyway. The operator path still mosaics it; this is a PREVIEW
+        budget, not a change to the geometry.
+        """
+        from squidmip._placement import cell_boxes, fov_offsets_px
+
+        positions = self._meta.get("fov_positions_um") or {}
+        px = self._meta.get("pixel_size_um")
+        plan: list = []
+        for region in self._order:
+            fovs = list(self._meta["fovs_per_region"][region])
+            boxes: dict = {}
+            if self._mosaic and len(fovs) > 1 and positions and px not in (None, 0):
+                try:
+                    boxes = cell_boxes(fov_offsets_px(positions, region, fovs, px),
+                                       self._meta["frame_shape"], _CELL)
+                except (KeyError, ValueError):
+                    boxes = {}       # this region previews single-tile; the rest still mosaic
+                if any(min(b[2], b[3]) < _MIN_PREVIEW_BOX_PX for b in boxes.values()):
+                    boxes = {}
+            if boxes:
+                plan.extend((region, f, boxes[f]) for f in fovs if f in boxes)
+            else:
+                plan.append((region, fovs[0], None))
+        return plan
 
     def stop(self):
         self._stop.set()
@@ -2830,18 +3020,22 @@ class _PreviewWorker(QThread):
             from concurrent.futures import ThreadPoolExecutor
             zs = self._meta["z_levels"]
             z_mid = zs[len(zs) // 2]      # a mid-stack plane is a fair single-plane preview
+            plan = self._plan()
 
-            def load(region):
-                fov = self._meta["fovs_per_region"][region][0]
-                return region, [_fit_cell(self._reader.read(region, fov, ch, z_mid).astype(np.float32))
-                                for ch in self._channels]
+            def load(item):
+                region, fov, box = item
+                h, w = (_CELL, _CELL) if box is None else (box[2], box[3])
+                fit = _fit_cell if box is None else (lambda a: _fit_box(a, h, w))
+                return region, box, [fit(self._reader.read(region, fov, ch, z_mid)
+                                         .astype(np.float32)) for ch in self._channels]
 
             with ThreadPoolExecutor(max_workers=_VIEWER_WORKERS) as ex:
-                for region, tiles in ex.map(load, self._order):   # row-major order preserved
+                for region, box, tiles in ex.map(load, plan):   # plate order preserved
                     if self._stop.is_set():
                         return
                     ri, ci = self._fov_index[region]["rc"]
-                    self.tileReady.emit(ri, ci, region, np.stack(tiles).astype(self._dtype))
+                    self.tileReady.emit(ri, ci, region,
+                                        np.stack(tiles).astype(self._dtype), box)
             if not self._stop.is_set():
                 self.streamEnded.emit()   # the running window is mature now -> one clean recomposite
         except Exception:
@@ -4304,7 +4498,12 @@ class PlateWindow(QMainWindow):
             self._fov_index[region] = {"idx": idx, "well_id": region, "rc": plate.cell_index(region)}
 
         self._order = order                          # well order = the detail's FOV-slider order
-        self._overview = PlateOverview(rows, cols, wells)
+        # A freeform holder places its cells by GEOMETRY (IMA-253): the plate hands over one
+        # rectangle per region, in grid units, and the overview draws exactly those. A well plate
+        # returns None here and keeps the uniform grid it has always had.
+        cl = plate.cell_layout() if hasattr(plate, "cell_layout") else None
+        layout = ({plate.cell_index(cid): rect for cid, rect in cl.items()} if cl else None)
+        self._overview = PlateOverview(rows, cols, wells, layout=layout)
         # Carrier art behind the cells (IMA-220). Hand over the PLATE, not its name: `plate` is what
         # build_plate RESOLVED (measured pitch beat the 2x2's mis-declared "384 well plate"), so the
         # background can only ever be drawn at the same scale the grid is laid out at.
@@ -4337,6 +4536,13 @@ class PlateWindow(QMainWindow):
             reader, meta, lambda w: _fov_of_well(w, meta.get("fovs_per_region")))}
         self._update_loupe_source()
 
+        # The mosaic geometry is known the moment the acquisition opens — it is pure arithmetic on
+        # coordinates.csv — so hand it to the plate NOW rather than waiting for an operator run
+        # (IMA-249: it was only ever set from run_operator, which is why the plate looked like a
+        # grid of lone frames until something was run). The preview below composites into exactly
+        # these boxes.
+        self._overview.set_mosaic_boxes(_mosaic_boxes(meta))
+
         # fast RAW preview: fill the plate with downsampled thumbnails immediately (grey dots),
         # in the SAME row-major order the operator will later process them in.
         self._preview = _PreviewWorker(reader, meta, self._fov_index, order)
@@ -4349,7 +4555,7 @@ class PlateWindow(QMainWindow):
         # the well's cell by stage coordinate. The raw preview above is still one FOV per well (it
         # reads a single plane per well precisely to stay fast), so say which one you're looking at.
         multi = sum(1 for r in order if len(meta["fovs_per_region"][r]) > 1)
-        note = (f" · {multi} multi-FOV well(s): preview shows 1 FOV/well, MIP mosaics all" if multi else "")
+        note = (f" · {multi} multi-FOV region(s), previewing as mosaics" if multi else "")
         self._readout.setText(f"live · {len(self._fov_index)} wells · double-click to open{note}")
 
     def _setup_raw_detail(self, order: Optional[list] = None):
@@ -4422,7 +4628,10 @@ class PlateWindow(QMainWindow):
         self._plate_mode = "raw"
         self._plate_title.setText(f"{self._acq_name}   ·   raw")
         self._overview.set_active_layer("raw")
-        self._overview.set_mosaic_boxes({})   # raw preview is one thumbnail/well -> no mosaic to hit-test
+        # The raw preview is itself a MOSAIC now (IMA-253), so returning to it restores the
+        # acquisition's own boxes rather than clearing them — clearing them broke both the paint
+        # (a mosaic redrawn as if it filled its cell) and the double-click FOV hit-test.
+        self._overview.set_mosaic_boxes(_mosaic_boxes(self._meta))
         self._update_loupe_source()                          # back to the acquisition's own pixels
         for rc in list(self._overview._status):
             self._overview.set_status(*rc, "empty")
@@ -4829,9 +5038,11 @@ class PlateWindow(QMainWindow):
         """The operator finished persisting: remember the written plate (re-openable artifact)."""
         self._processed_plate = plate_path
 
-    def _on_preview_tile(self, ri, ci, well_id, tile):
+    def _on_preview_tile(self, ri, ci, well_id, tile, box=None):
+        """One preview FIELD landed. ``box`` slots it into the region's mosaic (IMA-253); ``None``
+        is the single-tile path, where the field fills the cell."""
         if self._overview is not None:                       # raw preview fills the base ("raw") layer
-            self._overview.add_tile(ri, ci, well_id, tile, layer="raw")
+            self._overview.add_tile(ri, ci, well_id, tile, layer="raw", box=box)
 
     def _on_tile(self, ri, ci, well_id, tile, box=None):
         """A field landed. ``box`` is None for the single-tile producers (_ComputedPlateWorker emits

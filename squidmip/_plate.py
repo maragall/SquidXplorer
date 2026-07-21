@@ -21,6 +21,27 @@ Micrometres everywhere, every value ending ``_um``, per ``_placement.py``'s cont
 at the producer -- the same discipline the reader applies to coordinates.csv. A bare mm value must
 never travel in a geometry attribute; that is the silent-1000x defect class.
 
+NAMED CELLS vs POSITIONED CELLS (IMA-253)
+-----------------------------------------
+A well id ENCODES ITS POSITION: "B3" *is* row 1, column 2, and no stage coordinate is needed to
+lay a well plate out. A freeform region id does not: ``manual0`` and ``manual1`` say nothing
+about where on the glass those tissues sat. Assigning them cells by ENUMERATION ORDER -- which is
+what a "1 x N carrier, left to right, in the order the acquisition reports them" rule does -- is
+therefore inventing a layout, and it is why the real 10x tissue acquisition rendered as two
+squares side by side when the two regions are in fact separated in Y and overlapping in X.
+
+So the choice of layout is driven by WHETHER THE IDS CARRY POSITION, never by the format string::
+
+    well_span(regions) is not None   ->  WellPlate: ids are the layout. Unchanged, forever.
+    well_span(regions) is None       ->  freeform: the layout comes from fov_positions_um.
+
+For the freeform case each region gets a cell that is ITS OWN MOSAIC'S BOUNDING BOX in stage
+micrometres (:func:`region_stage_boxes_um`), so regions of different size and geometry -- which is
+the normal case for tissue -- get different-sized cells instead of being stretched or cropped into
+a uniform grid. :func:`freeform_grid` then derives (row, col) by CLUSTERING those boxes rather
+than by enumerating names, and :func:`freeform_layout` emits the exact rectangles, normalised into
+the grid's own units, that the viewer draws. Shuffling the region names changes nothing.
+
 DECLARED vs MEASURED
 --------------------
 ``~/Downloads/synthetic_2x2_wellplate`` declares ``384 well plate`` in its yaml but its stage
@@ -105,8 +126,11 @@ __all__ = [
     "build_plate",
     "carrier_art",
     "format_from_pitch_um",
+    "freeform_grid",
+    "freeform_layout",
     "load_sample_formats",
     "measure_region_pitch_um",
+    "region_stage_boxes_um",
     "squid_images_dir",
 ]
 
@@ -445,8 +469,24 @@ class Plate(ABC):
                 (self.rows - 1) * self.geometry.pitch_y_um + self.geometry.cell_size_um)
 
     def art(self, images_dir=None) -> Optional[CarrierArt]:
-        """This plate's carrier PNG, or None when the artwork is not available."""
+        """This plate's carrier PNG, or None when the artwork is not available.
+
+        NOT part of the default render path any more (IMA-253): the viewer draws the holder from
+        :meth:`cell_layout` + :class:`PlateGeometry` instead, in the one coordinate system the
+        cells already live in, so it cannot mis-register. Kept because it is small, tested, and
+        the obvious implementation of an optional photographic "skin".
+        """
         return carrier_art(self.format_name, images_dir=images_dir, geometry=self.geometry)
+
+    def cell_layout(self) -> Optional[dict[str, tuple[float, float, float, float]]]:
+        """``{cell_id: (x, y, w, h)}`` in GRID UNITS (1.0 = one nominal cell), or None.
+
+        ``None`` means "uniform": cell (r, c) occupies exactly ``(c, r, 1, 1)`` -- the only thing a
+        well plate can mean, and the fast path the viewer keeps for it. A non-None layout is a
+        FREEFORM holder whose cells are sized and positioned by real geometry; see the module
+        docstring. Rectangles are guaranteed to lie inside ``(0, 0, cols, rows)``.
+        """
+        return None
 
     # -- occupancy ------------------------------------------------------------------------
     @property
@@ -548,7 +588,17 @@ class SlideCarrier(Plate):
     region keep a synthetic ``slot{n}`` id so the grid stays rectangular and drawable.
     """
 
-    def __init__(self, geometry, occupancy=None, cell_ids: Optional[Iterable[str]] = None, **kw):
+    def __init__(self, geometry, occupancy=None, cell_ids: Optional[Iterable[str]] = None,
+                 placement: Optional[Mapping[str, tuple]] = None,
+                 layout: Optional[Mapping[str, tuple]] = None, **kw):
+        """*placement* / *layout* carry the GEOMETRIC assignment (IMA-253).
+
+        ``placement`` is ``{region: (row, col)}`` derived from stage coordinates by
+        :func:`freeform_grid`; ``layout`` is the matching ``{region: (x, y, w, h)}`` in grid units
+        from :func:`freeform_layout`. Both absent is the legacy POSITIONAL carrier -- regions left
+        to right in report order -- which is still exactly right when the acquisition has no stage
+        coordinates at all, and is the only thing that can be done then.
+        """
         names = list(cell_ids) if cell_ids is not None else []
         n_slots = geometry.rows * geometry.cols
         if len(names) > n_slots:
@@ -556,24 +606,46 @@ class SlideCarrier(Plate):
                 f"{len(names)} regions {names[:6]} do not fit a {geometry.name} "
                 f"({n_slots} slot(s)). Force a larger carrier, or check the region ids."
             )
-        # Positional assignment, left to right, in the order the acquisition reports them.
-        self._ids = names + [f"slot{i + 1}" for i in range(len(names), n_slots)]
+        if placement:
+            slots: list[Optional[str]] = [None] * n_slots
+            for cid, (r, c) in placement.items():
+                slots[int(r) * geometry.cols + int(c)] = str(cid)
+            self._ids = [s if s is not None else f"slot{i + 1}" for i, s in enumerate(slots)]
+        else:
+            # Positional assignment, left to right, in the order the acquisition reports them.
+            self._ids = names + [f"slot{i + 1}" for i in range(len(names), n_slots)]
         self._pos = {cid: i for i, cid in enumerate(self._ids)}
+        self._layout = {str(k): tuple(float(v) for v in val)
+                        for k, val in (layout or {}).items()} or None
         super().__init__(geometry, occupancy, **kw)
 
     @classmethod
     def from_format(cls, format_name, occupancy=None, cell_ids=None, **kw) -> "SlideCarrier":
         return cls(PlateGeometry.vendored(format_name), occupancy, cell_ids=cell_ids, **kw)
 
+    def cell_layout(self):
+        return dict(self._layout) if self._layout else None
+
+    def _sole(self, axis: int, i: int) -> Optional[str]:
+        """The id of the ONLY real region on row/column *i*, or None when it is not unique."""
+        hits = [cid for cid in self._pos
+                if not cid.startswith("slot") and self.cell_index(cid)[axis] == i]
+        return hits[0] if len(hits) == 1 else None
+
     @property
     def row_labels(self) -> list[str]:
-        # One row, and it needs no name: the columns carry the region ids.
-        return [""] * self.rows
+        # A 1 x N carrier keeps its blank row label (the columns carry the ids, as they always
+        # have). A geometrically stacked carrier has one region PER ROW, so the row is where the
+        # name belongs -- and an ambiguous row is left blank rather than labelled with a guess.
+        if self.rows == 1:
+            return [""]
+        return [self._sole(0, r) or "" for r in range(self.rows)]
 
     @property
     def col_labels(self) -> list[str]:
-        # The region ids themselves ARE the useful column labels on a carrier.
-        return [self._ids[c] for c in range(self.cols)]
+        # The region ids themselves ARE the useful column labels on a carrier -- when a column
+        # holds exactly one of them. Otherwise fall back to the slot number.
+        return [self._sole(1, c) or str(c + 1) for c in range(self.cols)]
 
     def cell_id(self, row: int, col: int) -> str:
         if not (0 <= row < self.rows and 0 <= col < self.cols):
@@ -585,6 +657,107 @@ class SlideCarrier(Plate):
         if i is None:
             raise KeyError(cell_id)
         return divmod(i, self.cols)
+
+
+# --------------------------------------------------------------------------- freeform geometry
+
+def region_stage_boxes_um(metadata: Mapping, regions: Optional[Iterable[str]] = None
+                          ) -> dict[str, tuple[float, float, float, float]]:
+    """``{region: (x_um, y_um, w_um, h_um)}`` -- each region's MOSAIC bounding box on the stage.
+
+    The box is the union of every FOV's footprint, so it is the region's real extent: FOV top-left
+    positions span ``max - min``, and one frame's width/height is added because a position marks a
+    corner, not a point. That makes it exactly ``_placement.mosaic_extent_px`` expressed in
+    micrometres instead of pixels -- the same geometry the mosaic itself is composited from, which
+    is what lets the viewer draw a region's cell and its FOVs in one coordinate system.
+
+    Regions with no recorded position are OMITTED rather than given a zero box; a caller that
+    cannot place every region must fall back to a positional layout instead of dropping one.
+    """
+    positions = metadata.get("fov_positions_um") or {}
+    fovs_per_region = metadata.get("fovs_per_region") or {}
+    scoped = list(metadata.get("regions") or []) if regions is None else list(regions)
+    # A stage position marks the frame's corner, so the region spans one extra frame past the
+    # last one. No pixel size / frame shape -> add nothing: the RELATIVE placement is still right,
+    # only the pad is missing, and that beats refusing to lay the acquisition out at all.
+    frame = metadata.get("frame_shape") or (0, 0)
+    p = metadata.get("pixel_size_um") or 0.0
+    fh_um, fw_um = float(frame[0]) * float(p), float(frame[1]) * float(p)
+
+    out: dict[str, tuple[float, float, float, float]] = {}
+    for region in scoped:
+        pts = [positions[(region, f)] for f in (fovs_per_region.get(region) or ())
+               if (region, f) in positions]
+        if not pts:
+            continue
+        xs = [float(q[0]) for q in pts]
+        ys = [float(q[1]) for q in pts]
+        out[region] = (min(xs), min(ys),
+                       max(xs) - min(xs) + fw_um, max(ys) - min(ys) + fh_um)
+    return out
+
+
+def freeform_grid(boxes_um: Mapping[str, tuple]) -> tuple[int, int, dict[str, tuple[int, int]]]:
+    """``(rows, cols, {region: (row, col)})`` clustered from stage boxes -- never from names.
+
+    Regions whose y-intervals overlap share a ROW; within a row they are ordered by x. That is the
+    minimum structure the grid-shaped parts of the viewer (labels, ``(row, col)`` keys, marquee)
+    still need, and it is derived entirely from geometry, so re-ordering or renaming the regions
+    produces the identical grid. Exact rectangles -- the part that actually matters visually --
+    come from :func:`freeform_layout`; this only decides which cell KEY each region gets.
+
+    Two regions overlap in y when their intervals share more than half of the shorter one, so a
+    sliver of overlap between two clearly-stacked tissues does not fuse them into one row.
+    """
+    order = sorted(boxes_um, key=lambda r: (boxes_um[r][1], boxes_um[r][0], r))
+    rows: list[list[str]] = []
+    spans: list[tuple[float, float]] = []
+    for region in order:
+        _x, y, _w, h = boxes_um[region]
+        y0, y1 = y, y + h
+        for i, (s0, s1) in enumerate(spans):
+            overlap = min(y1, s1) - max(y0, s0)
+            shorter = min(y1 - y0, s1 - s0)
+            if overlap > 0 and (shorter <= 0 or overlap > 0.5 * shorter):
+                rows[i].append(region)
+                spans[i] = (min(s0, y0), max(s1, y1))
+                break
+        else:
+            rows.append([region])
+            spans.append((y0, y1))
+    placement: dict[str, tuple[int, int]] = {}
+    for ri, members in enumerate(rows):
+        for ci, region in enumerate(sorted(members, key=lambda r: (boxes_um[r][0], r))):
+            placement[region] = (ri, ci)
+    n_rows = max(1, len(rows))
+    n_cols = max(1, max((len(m) for m in rows), default=1))
+    return n_rows, n_cols, placement
+
+
+def freeform_layout(boxes_um: Mapping[str, tuple], rows: int, cols: int
+                    ) -> dict[str, tuple[float, float, float, float]]:
+    """Stage boxes -> ``{region: (x, y, w, h)}`` in GRID UNITS, aspect preserved and centred.
+
+    ONE similarity transform is applied to every box, so relative offset AND relative scale
+    survive: a region twice the size of its neighbour gets a cell twice the size, and two regions
+    5 mm apart stay 5 mm apart in proportion. Fitting the union into the ``cols x rows`` box the
+    grid already declares means the result drops straight into the viewer's existing
+    cell-units-times-zoom arithmetic, with no second coordinate system to keep in sync.
+    """
+    if not boxes_um:
+        return {}
+    x0 = min(b[0] for b in boxes_um.values())
+    y0 = min(b[1] for b in boxes_um.values())
+    x1 = max(b[0] + b[2] for b in boxes_um.values())
+    y1 = max(b[1] + b[3] for b in boxes_um.values())
+    uw, uh = x1 - x0, y1 - y0
+    if not (uw > 0 and uh > 0):
+        return {}          # degenerate (points, or a single axis): no scale to preserve, so the
+        #                    caller keeps the nominal grid rather than dividing by ~zero
+    s = min(cols / uw, rows / uh)
+    ox, oy = (cols - uw * s) / 2.0, (rows - uh * s) / 2.0
+    return {r: (ox + (b[0] - x0) * s, oy + (b[1] - y0) * s, b[2] * s, b[3] * s)
+            for r, b in boxes_um.items()}
 
 
 # --------------------------------------------------------------------------- measurement
@@ -675,13 +848,19 @@ def build_plate(metadata: Mapping, override=None, images_dir=None) -> Plate:
     positions_um = metadata.get("fov_positions_um") or {}
     declared_raw = metadata.get("wellplate_format")
 
+    # Stage boxes for the freeform path (IMA-253). Computed once, here, because it is the only
+    # place that still holds the metadata; every _make below is handed the same measurement.
+    stage_boxes = region_stage_boxes_um(metadata, regions) if regions else {}
+    if len(stage_boxes) != len(regions):
+        stage_boxes = {}                   # cannot place EVERY region -> place none by geometry
+
     forced = normalize_plate_format(
         override if override is not None else os.environ.get("SQUIDMIP_WELLPLATE_FORMAT"),
         strict=False,
     )
     if override is not None or forced:
         name = _canonical_format(override if override is not None else forced)
-        return _make(name, regions, fovs_per_region,
+        return _make(name, regions, fovs_per_region, stage_boxes,
                      format_source="override", declared_format=_safe_canonical(declared_raw))
 
     declared = _safe_canonical(declared_raw)
@@ -710,19 +889,19 @@ def build_plate(metadata: Mapping, override=None, images_dir=None) -> Plate:
                 f"{PlateGeometry.vendored(declared).pitch_x_um / PlateGeometry.vendored(measured).pitch_x_um:.3g}x "
                 f"the true scale. Override with SQUIDMIP_WELLPLATE_FORMAT if the yaml is right."
             )
-            return _make(measured, regions, fovs_per_region, format_source="measured",
+            return _make(measured, regions, fovs_per_region, stage_boxes, format_source="measured",
                          declared_format=declared, measured_pitch_um=measured_pitch)
         else:
-            return _make(measured, regions, fovs_per_region, format_source="measured",
+            return _make(measured, regions, fovs_per_region, stage_boxes, format_source="measured",
                          declared_format=None, measured_pitch_um=measured_pitch)
 
     if declared:
-        return _make(declared, regions, fovs_per_region, format_source="declared",
+        return _make(declared, regions, fovs_per_region, stage_boxes, format_source="declared",
                      declared_format=declared, measured_pitch_um=measured_pitch)
     if measured:
-        return _make(measured, regions, fovs_per_region, format_source="measured",
+        return _make(measured, regions, fovs_per_region, stage_boxes, format_source="measured",
                      declared_format=None, measured_pitch_um=measured_pitch)
-    return _make(infer_plate_format(regions), regions, fovs_per_region,
+    return _make(infer_plate_format(regions), regions, fovs_per_region, stage_boxes,
                  format_source="inferred", declared_format=None)
 
 
@@ -733,7 +912,7 @@ def _safe_canonical(name) -> Optional[str]:
         return None
 
 
-def _make(name, regions, fovs_per_region, **kw) -> Plate:
+def _make(name, regions, fovs_per_region, stage_boxes=None, **kw) -> Plate:
     """Instantiate the right subclass for *name*, sizing a slide carrier to the regions present."""
     occupancy = {r: list(fovs_per_region.get(r, ())) for r in regions}
     if name in _SLIDE_FORMATS or well_span(regions) is None:
@@ -747,10 +926,21 @@ def _make(name, regions, fovs_per_region, **kw) -> Plate:
         if n > 1 and name == GLASS_SLIDE:
             name = FOUR_SLIDE_CARRIER
         geom = PlateGeometry.vendored(name)
-        if n > geom.rows * geom.cols:
+        # GEOMETRIC layout (IMA-253) when the stage placed every region: the grid SHAPE comes from
+        # where the regions physically are, not from the vendored holder's slot count, because the
+        # slot count is exactly the thing that was inventing "side by side in columns 0 and 1".
+        placement = layout = None
+        if stage_boxes and len(stage_boxes) == n:
+            rows, cols, placement = freeform_grid(stage_boxes)
+            layout = freeform_layout(stage_boxes, rows, cols)
+            if not layout:                          # degenerate geometry -> keep the nominal grid
+                placement = None
+            else:
+                geom = PlateGeometry(**{**vars(geom), "rows": rows, "cols": cols})
+        if placement is None and n > geom.rows * geom.cols:
             # More slides than any standard carrier: widen rather than refuse. There is no art for
             # this, and carrier_art() will correctly return None instead of a wrong-scale PNG.
             geom = PlateGeometry(**{**vars(geom), "cols": n})
-        return SlideCarrier(geom, occupancy, cell_ids=list(regions),
-                            format_name=geom.name, **kw)
+        return SlideCarrier(geom, occupancy, cell_ids=list(regions), placement=placement,
+                            layout=layout, format_name=geom.name, **kw)
     return WellPlate(PlateGeometry.vendored(name), occupancy, format_name=name, **kw)
