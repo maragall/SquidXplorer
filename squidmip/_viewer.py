@@ -58,8 +58,10 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-from PyQt5.QtCore import Qt, QProcess, QProcessEnvironment, QSocketNotifier, QThread, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor, QFont, QImage, QPainter, QPalette, QPen, QPixmap
+from PyQt5.QtCore import (
+    Qt, QProcess, QProcessEnvironment, QRectF, QSocketNotifier, QThread, QTimer, pyqtSignal,
+)
+from PyQt5.QtGui import QColor, QFont, QImage, QPainter, QPalette, QPen, QPixmap, QRegion
 from PyQt5.QtWidgets import (
     QAction, QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel,
     QLineEdit, QMainWindow, QPlainTextEdit, QPushButton, QScrollArea, QSlider, QSpinBox, QSplitter,
@@ -72,10 +74,12 @@ from squidmip._minerva import MINERVA_HOME_ENV as _MINERVA_HOME_ENV
 from squidmip._montage import _area_downsample, _hex_to_rgb01, _window, composite
 from squidmip._output import parse_well_id
 from squidmip._plate import PlateBuildError, build_plate
-from squidmip._plate_shape import PlateShapeError, resolve_plate_format
+from squidmip._plate_shape import PlateShapeError
 
-_SUPPORTED_PLATES = ("384", "1536")   # well-plate formats the tool currently accepts (no stitching yet)
-_CELL = 88                 # per-well px in the low-res overview (1536wp -> ~4224x2816)
+# (`_SUPPORTED_PLATES` and `resolve_plate_format` used to live here. `build_plate` (IMA-214) is now
+#  the single format-resolution path — override > measured > declared > inferred — so both were dead
+#  leftovers that could only ever disagree with it. Deleted rather than left as a second opinion.)
+_CELL = 88                # per-well px in the low-res overview (1536wp -> ~4224x2816)
 _PUSH_PX = 512             # per-well px pushed to the ndviewer scan-slider (downsampled -> bounded RAM)
 _HDR, _COLH = 46, 30       # left / top label margins (px)
 _PAD = 16                  # breathing room around the plate
@@ -86,6 +90,8 @@ _VIEWER_WORKERS = min(6, _default_workers())   # adapt to the machine, but CAP a
 _BG = "#070a0f"
 _GRID, _RED, _MUTED, _ACCENT = QColor(0, 0, 0), QColor("#ff2d2d"), QColor("#8b98ad"), QColor("#58a6ff")
 _SEL_FILL = QColor(88, 166, 255, 90)   # translucent accent wash over a SELECTED well (IMA-221)
+_ART_ALPHA = 0.45          # carrier-art opacity (IMA-220): enough to read the holder's shape, dim
+#                            enough that the acquired pixels, not the stock photo, are the subject
 _CLICK_SLOP = 3                        # px of travel below which a Shift-drag counts as a click
 #                                        (matches the pan threshold, so the two gestures agree)
 
@@ -1294,6 +1300,12 @@ class PlateOverview(QWidget):
         self._panning = False
         self._user_view = False       # True once the user wheel-zooms/pans (stop auto-fitting)
         self._boxes: dict = {}        # (region, fov) -> (top, left, h, w) in cell px; {} = single-FOV
+        # -- carrier background art (IMA-220) --
+        self._art = None              # _plate.CarrierArt for the RESOLVED format, or None (draw nothing)
+        self._art_img = None          # its QImage, loaded ONCE (never per repaint)
+        self._art_geom = None         # the PlateGeometry the art is aligned against (a1 + pitch, um)
+        self._tile_rgn = None         # cached QRegion of cells that HAVE an image, at pan origin
+        self._tile_rgn_key = None     # (cd, active layer, n tiled cells) the cached region was built for
         # -- loupe (IMA-208) --
         self._loupe_src = None        # _LoupeSource for the ACTIVE layer, or None (loupe disabled)
         self._loupe_worker = None
@@ -1853,6 +1865,87 @@ class PlateOverview(QWidget):
         """Adopt the per-FOV cell boxes so a double-click can resolve WHICH FOV was hit."""
         self._boxes = dict(boxes or {})
 
+    # -- carrier background art (IMA-220) --
+    def set_carrier(self, plate, images_dir=None):
+        """Adopt *plate*'s carrier PNG as the background behind the cells, Squid-navigator style.
+
+        THE ART MUST COME FROM THE PLATE'S **RESOLVED** FORMAT, never its declared one. The 2x2
+        fixture declares "384 well plate" but its stage coordinates measure a 9.000 mm pitch, which
+        is physically 96-well; ``build_plate`` (IMA-214) resolves that to 96 and warns. Drawing the
+        384 art over a 96 grid would render the background at exactly 2x the true scale — a
+        plausible-looking picture that is simply wrong. Passing the ``Plate`` (rather than a format
+        string) is what makes that unrepresentable here: ``plate.art()`` can only ever return the
+        art for the format the plate actually resolved to.
+
+        Degrades to no background rather than failing: a format with no entry in the registry, a
+        machine with no Squid checkout, or a missing PNG all yield ``None`` from ``plate.art()``
+        and the plate simply draws its own grid, as it always did. A glass slide reaches this the
+        same way a 96wp does — it just gets slide art, or none.
+        """
+        self._art = self._art_img = self._art_geom = None
+        if plate is None:
+            self.update()
+            return
+        try:
+            art = plate.art(images_dir=images_dir)
+        except Exception:      # a registry/geometry surprise must never stop the plate drawing
+            art = None
+        if art is None:
+            self.update()
+            return
+        img = QImage(str(art.path))
+        if img.isNull():       # on disk but unreadable (truncated/hostile PNG) -> no background
+            self.update()
+            return
+        self._art, self._art_img, self._art_geom = art, img, plate.geometry
+        self.update()
+
+    def _art_target(self, ax: float, ay: float) -> Optional[tuple]:
+        """Where the whole carrier PNG goes in widget px: ``(x, y, w, h)``, or None.
+
+        The art and the cell grid are two views of the same physical plate, so they are aligned by
+        the one thing both know: the stage position of a cell centre. Cell (r, c)'s centre sits at
+        widget ``(ax + (c+0.5)*cd, ...)`` and at art px ``art.um_to_px(a1 + c*pitch)`` — equating
+        them makes the per-cell terms cancel, leaving a single scale + offset for the whole image::
+
+            scale_x  = cd / (pitch_x_um / um_per_px)      # widget px per art px
+            offset_x = ax + cd/2 - scale_x * art_px_of_a1_centre_x
+
+        So the art is drawn once, as one scaled blit, and every well of the artwork lands under its
+        own cell at every zoom and pan — no per-cell placement, nothing to drift.
+        """
+        if self._art is None or self._art_img is None or self._art_geom is None:
+            return None
+        g, art, cd = self._art_geom, self._art, self._cd
+        px_per_cell_x = g.pitch_x_um / art.um_per_px       # art px between neighbouring centres
+        px_per_cell_y = g.pitch_y_um / art.um_per_px
+        if not (px_per_cell_x > 0 and px_per_cell_y > 0):  # a degenerate geometry: draw no art
+            return None
+        sx, sy = cd / px_per_cell_x, cd / px_per_cell_y
+        a1x, a1y = art.um_to_px(g.a1_x_um, g.a1_y_um)      # art px of A1's CENTRE
+        return (ax + cd / 2.0 - sx * a1x, ay + cd / 2.0 - sy * a1y,
+                self._art_img.width() * sx, self._art_img.height() * sy)
+
+    def _tiled_region(self) -> "QRegion":
+        """The cells that HAVE an image on the active layer, as a QRegion at pan origin (0, 0).
+
+        The montage canvas is opaque _BG wherever no tile landed, so blitting it whole would paint
+        the carrier art out. Clipping the blit to this region is what lets the background show
+        through the empty wells. Cached and only translated on pan: a full 1536wp is 1536 rects,
+        and rebuilding that union on every hover repaint would be the one thing that makes the
+        plate feel slow.
+        """
+        cells = self._tiles_by_layer.get(self._active, set())
+        key = (self._cd, self._active, len(cells))
+        if self._tile_rgn is None or self._tile_rgn_key != key:
+            cd = self._cd
+            rgn = QRegion()
+            for ri, ci in cells:
+                rgn = rgn.united(QRegion(int(ci * cd), int(ri * cd),
+                                         int(cd) + 1, int(cd) + 1))   # +1: no hairline seams
+            self._tile_rgn, self._tile_rgn_key = rgn, key
+        return self._tile_rgn
+
     def _fov_at(self, c: dict, e) -> int:
         """FOV index under the cursor within cell *c*, or 0 when there is no mosaic to resolve.
 
@@ -1909,7 +2002,24 @@ class PlateOverview(QWidget):
             self._scaled = QPixmap.fromImage(self._active_source()).scaled(
                 w, h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
             self._scaled_cd = cd
-        p.drawPixmap(int(ax), int(ay), self._scaled)
+        # CARRIER ART (IMA-220), behind everything: the wellplate/slide-holder photograph, scaled
+        # and offset so its wells sit under our cells (see _art_target). Only worth drawing while
+        # some cell is still empty — a fully tiled plate would cover it completely anyway, and then
+        # the single unclipped blit below is both cheaper and pixel-identical to what shipped.
+        tiled = self._tiles_by_layer.get(self._active, set())
+        art_rect = self._art_target(ax, ay) if len(tiled) < nr * nc else None
+        if art_rect is not None:
+            p.setOpacity(_ART_ALPHA)     # a BACKGROUND: the acquired pixels must stay dominant
+            p.drawImage(QRectF(*art_rect), self._art_img)
+            p.setOpacity(1.0)
+            # ...then let the montage cover only the cells that actually have pixels, so the art
+            # shows through the empty ones instead of being painted out by opaque _BG.
+            p.save()
+            p.setClipRegion(self._tiled_region().translated(int(ax), int(ay)))
+            p.drawPixmap(int(ax), int(ay), self._scaled)
+            p.restore()
+        else:
+            p.drawPixmap(int(ax), int(ay), self._scaled)
 
         # per-cell DOT over the WHOLE plate grid (so a sparse acquisition still shows the full plate
         # shape — e.g. 32x48 for 1536, 16x24 for 384 — with grey dots on the un-acquired wells):
@@ -3773,6 +3883,10 @@ class PlateWindow(QMainWindow):
 
         self._order = order                          # well order = the detail's FOV-slider order
         self._overview = PlateOverview(rows, cols, wells)
+        # Carrier art behind the cells (IMA-220). Hand over the PLATE, not its name: `plate` is what
+        # build_plate RESOLVED (measured pitch beat the 2x2's mis-declared "384 well plate"), so the
+        # background can only ever be drawn at the same scale the grid is laid out at.
+        self._overview.set_carrier(plate)
         self._selected_regions = []                  # a new acquisition starts with nothing picked
         self._overview.hovered.connect(self._on_hover)
         self._overview.wellActivated.connect(self.activate_well)
@@ -3974,6 +4088,15 @@ class PlateWindow(QMainWindow):
         if self._overview is not None:
             self._overview.setParent(None); self._overview.deleteLater()
         self._overview = PlateOverview(rows, cols, wells_rc)
+        # A written plate carries no stage coordinates and no declared format, so build_plate falls
+        # through to inferring the format from the well ids — which is the right and only evidence
+        # here. It can fail (a plate whose wells fit no standard format); carrier art is decoration,
+        # so a failure means "no background", never "cannot open the plate".
+        try:
+            self._plate = build_plate(self._meta, override=self._plate_format_override)
+        except (PlateShapeError, PlateBuildError):
+            self._plate = None
+        self._overview.set_carrier(self._plate)
         self._overview.hovered.connect(self._on_hover)
         self._overview.wellActivated.connect(self.activate_well)
         self._active_op_key = "computed"
