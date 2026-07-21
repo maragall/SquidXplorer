@@ -373,7 +373,11 @@ def stitch_region(
     positions = _positions_yx_um(meta, region, fovs)
     dtype = np.dtype(meta["dtype"])
     n_t = int(meta["n_t"])
-    reduce = _resolve_projector(projector)
+    # IMA-210 turned _PROJECTORS values into Operator(fn, consumes) records, so the
+    # registry no longer hands back a bare callable. Unpack it the same way
+    # _engine.project_plate does; passing the Operator itself raises
+    # 'Operator object is not callable' deep inside project_well.
+    _op = _resolve_projector(projector)
 
     reg_c_global = _resolve_registration_channel(meta, registration_channel)
     # Index of the registration channel WITHIN the selected subset. If the operator selected
@@ -386,7 +390,8 @@ def stitch_region(
         # of its (T, C, 1, Y, X) is the plane stack we place.
         tiles = np.empty((len(fovs), n_t, len(channels), *tile_shape), dtype=dtype)
         for i, fov in enumerate(fovs):
-            tiles[i] = project_well(reader, region, fov, reduce=reduce)[:, channels, 0]
+            tiles[i] = project_well(reader, region, fov, reduce=_op.fn,
+                                    consumes=_op.consumes)[:, channels, 0]
 
     offsets = np.zeros((len(fovs), 2), dtype=np.float64)
     if register:
