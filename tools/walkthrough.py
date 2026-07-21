@@ -597,6 +597,84 @@ def run_all():
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
+    @check("IMA-255", "A z-stack switches to 3D volume rendering with the right geometry")
+    def _():
+        """Drives ndv's OWN 2D/3D button on a real tissue z-stack and reads back what
+        reached the renderer. Everything here is checkable without a GPU: which axis
+        became the third visible one, that the channel axis survived, that Volume
+        visuals replaced Images, and the voxel scale the vertices were built with.
+
+        NOT checked here: that pixels actually appear on screen. Vispy volume rendering
+        needs a real OpenGL context, and under QT_QPA_PLATFORM=offscreen there is none
+        ("QOpenGLWidget is not supported on this platform"). "The volume was built with
+        the right geometry" and "the volume is visible" are different claims.
+        """
+        try:
+            import ndviewer_light.core as nvc
+            from ndv.views._vispy._array_canvas import VispyArrayCanvas
+            from vispy.visuals.volume import VolumeVisual
+        except ImportError as e:
+            raise SkipCheck(f"ndviewer_light/ndv/vispy unavailable: {e}")
+        if not os.path.isdir(TISSUE):
+            raise SkipCheck("tissue z-stack not present")
+
+        assert nvc.VOLUME_PATCH_ERROR is None, nvc.VOLUME_PATCH_ERROR
+        assert VispyArrayCanvas.add_volume.__name__ == "_patched_add_volume", \
+            "the volume monkey-patch is not bound — 3D would silently render isotropic"
+
+        app = _app()
+        meta = open_reader(TISSUE).metadata
+        px, dz = meta["pixel_size_um"], meta["dz_um"]
+
+        seen = []
+        orig = VispyArrayCanvas.add_volume
+        VispyArrayCanvas.add_volume = (
+            lambda self, data=None: (
+                seen.append((getattr(data, "shape", None), nvc._effective_voxel_scale())),
+                orig(self, data))[1])
+        try:
+            v = nvc.LightweightViewer()
+            v.show()
+            settle(500)
+            # A small canvas: this check is about geometry, not throughput.
+            v.start_acquisition([c["name"] for c in meta["channels"]], meta["n_z"],
+                                256, 256, ["manual0:0"], pixel_size_um=px, dz_um=dz)
+            settle(1500)
+            nv = v.ndv_viewer
+            wrapper = nv._data_model.data_wrapper
+            z_axis, ch_axis = wrapper.guess_z_axis(), wrapper.guess_channel_axis()
+            assert z_axis != ch_axis, \
+                f"3D would stack CHANNELS, not z (both axis {z_axis})"
+
+            nv._view._qwidget.ndims_btn.click()     # the user-reachable control
+            settle(3000)
+
+            axes = tuple(nv.display_model.visible_axes)
+            vols = [e for e in nv._canvas._elements if isinstance(e, VolumeVisual)]
+            assert len(axes) == 3, axes
+            assert axes[0] == z_axis, f"third visible axis is {axes[0]}, not z ({z_axis})"
+            assert nv.display_model.channel_axis == ch_axis, \
+                "channel_axis was dropped — composite colours would be lost"
+            assert vols, "no Volume visual was created"
+            assert seen, "add_volume never fired"
+
+            want = dz / px
+            scales = {round(getattr(x, "_voxel_scale", (0, 0, 0))[2], 6) for x in vols}
+            assert scales == {round(want, 6)}, f"voxel z-scale {scales}, expected {want}"
+            assert type(nv._canvas._view.camera).__name__ == "ArcballCamera"
+
+            nv._view._qwidget.ndims_btn.click()     # and back to 2D
+            settle(2000)
+            assert len(nv.display_model.visible_axes) == 2, nv.display_model.visible_axes
+
+            shape = seen[-1][0]
+            return (f"3D button -> visible_axes {axes} (z={z_axis}, channel {ch_axis} "
+                    f"kept), {len(vols)} Volume visuals of shape {shape}, ArcballCamera, "
+                    f"voxel z-scale {want:.5f} (dz {dz} um / pixel {px} um); toggled back "
+                    f"to 2D. On-screen pixels NOT verified: offscreen has no GL context.")
+        finally:
+            VispyArrayCanvas.add_volume = orig
+
     # ---------- the one real write, disk-guarded and cleaned up -----------------------
     @check("IMA-222", "A stitched well SAVES end to end (then is deleted)")
     def _():
