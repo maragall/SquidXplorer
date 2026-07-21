@@ -15,11 +15,18 @@ The public surface is intentionally tiny::
 
     write_plate(reader, "/path/out")          # canonical multiscale OME-zarr plate (tiff=True adds TIFFs)
     build_montage("/path/out")                # static plate montage PNG + region-jump sidecar + hover viewer
+
+    ladder = plate_ladder(meta)                          # the µm tile ladder, from metadata alone
+    src = ZarrPyramidSource("/path/out/plate.ome.zarr")   # TileSource over the written plate
+    preview = InMemoryMultiscale(ladder, channels)        # TileSource for a live run (byte-budgeted)
+    tiles = select_tiles(bbox_um, um_per_px, src.ladder.geometry)   # O(viewport), see _tiling.py
 """
 
 from squidmip._engine import add_projector, available_projectors, project_plate
 from squidmip._montage import build_montage
 from squidmip._output import write_plate
+from squidmip._tiling import Geometry, TileCache, TileDescriptor, select_tiles
+from squidmip._tilesource import InMemoryMultiscale, PlateLadder, ZarrPyramidSource, plate_ladder
 from squidmip.projection import project, project_well, select_fovs
 from squidmip.reader import SquidReader, open_reader
 
@@ -34,5 +41,14 @@ __all__ = [
     "available_projectors",
     "write_plate",
     "build_montage",
+    # IMA-216 tiler + IMA-217 sources
+    "select_tiles",
+    "Geometry",
+    "TileCache",
+    "TileDescriptor",
+    "plate_ladder",
+    "PlateLadder",
+    "ZarrPyramidSource",
+    "InMemoryMultiscale",
 ]
 __version__ = "0.1.0"

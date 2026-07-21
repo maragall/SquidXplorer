@@ -33,6 +33,16 @@ Flow::
                                        ├─► field group: array 0 (full-res) + multiscales + omero
                                        └─► individual TIFFs (one per channel, per timepoint)
 
+IMA-217 adds ONE thing to the metadata: each dataset also carries an NGFF ``translation``
+transform — the field's top-left corner in stage MICROMETRES, derived from
+``metadata["fov_positions_um"]`` (which records FOV *centres*, so half a frame is subtracted;
+see :func:`field_origin_um`). Per the NGFF v0.4/v0.5 spec a dataset MUST have exactly one
+``scale`` and MAY have one ``translation`` listed *after* it, each with one entry per axis —
+which is exactly what is written, so stock readers (ome-zarr-py, napari-ome-zarr) are unaffected
+while the plate becomes self-describing in world space. ``squidmip._tilesource`` rebuilds the
+whole plate layout from it without ever re-reading coordinates.csv. Acquisitions with no stage
+positions get no translation and are byte-identical to the pre-IMA-217 output.
+
 Colors come from ``metadata.channels[].display_color`` (IMA-189 already resolves them, mapped
 by name, raising on an unrecognised channel) — the writer never re-parses the acquisition YAML.
 Channel order in ``omero`` and in the TIFF filenames follows ``metadata.channels`` order, which
@@ -152,23 +162,60 @@ def _downsample_yx(image: np.ndarray) -> np.ndarray:
     return ds.astype(image.dtype)
 
 
-def _pyramid(image: np.ndarray) -> list[np.ndarray]:
-    """Level list ``[full-res, /2, /4, ...]`` — halving until the coarsest fits _PYRAMID_MIN_YX
-    (or _PYRAMID_MAX_LEVELS). A field already <= the floor yields just ``[image]`` (level 0)."""
+def _pyramid(image: np.ndarray, *, min_yx: int = _PYRAMID_MIN_YX,
+             max_levels: int = _PYRAMID_MAX_LEVELS) -> list[np.ndarray]:
+    """Level list ``[full-res, /2, /4, ...]`` — halving until the coarsest fits *min_yx*
+    (or *max_levels*). A field already <= the floor yields just ``[image]`` (level 0).
+
+    The stopping rule is duplicated, shape-only, in :func:`pyramid_shapes`; the two are pinned
+    together by a test, because IMA-217 needs the level ladder BEFORE any pixels exist (it builds
+    the viewer's :class:`~squidmip._tiling.Geometry` from metadata alone).
+    """
     levels = [image]
-    while (max(levels[-1].shape[-2:]) > _PYRAMID_MIN_YX
-           and len(levels) < _PYRAMID_MAX_LEVELS):
+    while (max(levels[-1].shape[-2:]) > int(min_yx) and len(levels) < int(max_levels)):
         levels.append(_downsample_yx(levels[-1]))
     return levels
 
 
-def _multiscales(level_shapes: list[tuple], pixel_size_um: Optional[float], dz_um: Optional[float] = None) -> dict:
+def pyramid_shapes(frame_shape, *, min_yx: int = _PYRAMID_MIN_YX,
+                   max_levels: int = _PYRAMID_MAX_LEVELS) -> list[tuple[int, int]]:
+    """The ``(Y, X)`` of every pyramid level :func:`_pyramid` would write, from the shape alone.
+
+    Pure arithmetic — no array, no I/O — so a viewer can build its level ladder from acquisition
+    metadata before a single field has been projected. Mirrors ``_downsample_yx``: an axis with
+    < 2 px is left intact, an odd axis is cropped by one before halving (so 521 -> 260, not 261).
+    """
+    y, x = int(frame_shape[0]), int(frame_shape[1])
+    if y < 1 or x < 1:
+        raise ValueError(f"frame_shape must be positive, got {frame_shape!r}")
+    shapes = [(y, x)]
+    while max(shapes[-1]) > int(min_yx) and len(shapes) < int(max_levels):
+        y, x = shapes[-1]
+        fy, fx = (2 if y >= 2 else 1), (2 if x >= 2 else 1)
+        shapes.append((y // fy, x // fx))
+    return shapes
+
+
+def _multiscales(level_shapes: list[tuple], pixel_size_um: Optional[float], dz_um: Optional[float] = None,
+                 position_um: Optional[tuple] = None) -> dict:
     """multiscales metadata for a per-FOV pyramid: one ``datasets`` entry per level, its scale the
     real downsample factor (level 0's Y,X over this level's Y,X) so physical coordinates stay true.
 
     ``level_shapes`` is the (Y, X) of each written level, level 0 first. A single-element list gives
     the canonical single-dataset ``0`` output (unchanged for small fields). Axes mirror Squid's
     zarr_writer.
+
+    ``position_um`` is the field's TOP-LEFT corner in stage MICROMETRES — the world coordinate of
+    pixel (0, 0). Given it, each dataset also carries an NGFF ``translation`` transform (after the
+    scale, as the spec requires: scale then translation, one entry per axis), which is what makes
+    the plate self-describing in world space: a pyramid-aware reader (IMA-217's tile source, napari,
+    ome-zarr-py) can place every field on the plate WITHOUT re-reading coordinates.csv. Omitted when
+    the acquisition has no stage positions, keeping the canonical output byte-identical for those.
+
+    Corner convention: every level's translation is the same corner. Area-averaged downsampling
+    nudges the sample *centre* by half a coarse pixel; carrying that half-pixel here would make the
+    levels of one field disagree with each other by less than one coarse pixel while breaking the
+    "levels share an origin" assumption every mosaic compositor makes. Corner it is, documented.
     """
     p = float(pixel_size_um) if pixel_size_um else 1.0
     dz = float(dz_um) if dz_um else 1.0
@@ -176,11 +223,18 @@ def _multiscales(level_shapes: list[tuple], pixel_size_um: Optional[float], dz_u
     datasets = []
     for i, (y, x) in enumerate(level_shapes):
         sy, sx = p * (y0 / y), p * (x0 / x)   # coarse levels have a larger physical pixel
-        datasets.append({"path": str(i),
-                         "coordinateTransformations": [{"type": "scale", "scale": [1.0, 1.0, dz, sy, sx]}]})
-    return {
+        xforms: list[dict] = [{"type": "scale", "scale": [1.0, 1.0, dz, sy, sx]}]
+        if position_um is not None:
+            xforms.append({"type": "translation",
+                           "translation": [0.0, 0.0, 0.0, float(position_um[1]), float(position_um[0])]})
+        datasets.append({"path": str(i), "coordinateTransformations": xforms})
+    doc = {
         "version": _NGFF_VERSION,
         "name": "0",
+        # NGFF SHOULDs: name the downscaling method and record its provenance, so a consumer knows
+        # the coarse levels are area means (not decimation) without reverse-engineering the pixels.
+        "type": "mean",
+        "metadata": {"method": "squidmip._output._downsample_yx", "description": "2x2 block mean"},
         "axes": [
             {"name": "t", "type": "time", "unit": "second"},
             {"name": "c", "type": "channel"},
@@ -190,6 +244,7 @@ def _multiscales(level_shapes: list[tuple], pixel_size_um: Optional[float], dz_u
         ],
         "datasets": datasets,
     }
+    return doc
 
 
 def _wavelength_nm(channel: dict) -> Optional[int]:
@@ -232,8 +287,29 @@ def _validate_image(image: np.ndarray, channels: list[dict]) -> None:
         )
 
 
-def _write_field(field_dir: Path, image: np.ndarray, channels: list[dict], pixel_size_um, dz_um=None) -> int:
+def field_origin_um(centre_um, frame_shape, pixel_size_um) -> Optional[tuple[float, float]]:
+    """Stage-µm ``(x, y)`` of a field's TOP-LEFT pixel, from its recorded CENTRE position.
+
+    ``metadata["fov_positions_um"]`` records where the stage was, i.e. the middle of the frame;
+    NGFF ``translation`` places pixel (0, 0). Half a frame apart — 388 µm on a 2084 px 20x field,
+    which is half an FOV of mosaic shear if it is skipped. Returns None when the position or the
+    pixel size is unknown, so the writer simply omits the translation instead of guessing an origin.
+    """
+    if centre_um is None or not pixel_size_um or frame_shape is None:
+        return None
+    p = float(pixel_size_um)
+    if not p > 0:
+        return None
+    h, w = int(frame_shape[0]), int(frame_shape[1])
+    return (float(centre_um[0]) - w * p / 2.0, float(centre_um[1]) - h * p / 2.0)
+
+
+def _write_field(field_dir: Path, image: np.ndarray, channels: list[dict], pixel_size_um, dz_um=None,
+                 position_um: Optional[tuple] = None) -> int:
     """Write one field: pyramid levels ``0..L`` (0 = full-res, pixel-exact) + multiscales + omero.
+
+    ``position_um`` is the field's top-left corner in stage µm (see :func:`field_origin_um`); it
+    becomes the NGFF ``translation`` on every dataset, so the plate carries its own world layout.
 
     Returns the number of levels written (1 for a small field with no pyramid)."""
     _validate_image(image, channels)
@@ -246,7 +322,7 @@ def _write_field(field_dir: Path, image: np.ndarray, channels: list[dict], pixel
         field_dir,
         {
             "version": _NGFF_VERSION,
-            "multiscales": [_multiscales(level_shapes, pixel_size_um, dz_um)],
+            "multiscales": [_multiscales(level_shapes, pixel_size_um, dz_um, position_um)],
             "omero": _omero(channels, image.dtype),
         },
     )
@@ -327,11 +403,16 @@ def write_from_stream(
     channel_names = [c["name"] for c in channels]
     pixel_size_um = metadata.get("pixel_size_um")
     dz_um = metadata.get("dz_um")
+    positions_um = metadata.get("fov_positions_um") or {}   # {} when there is no coordinates.csv
 
     def _write_one(region, fov, image):
         row, col = parse_well_id(region)
+        # Stage µm of the field's top-left pixel -> the NGFF translation. Frame shape comes from the
+        # IMAGE, not the metadata, so a cropped/binned field is placed at its true extent.
+        origin_um = field_origin_um(positions_um.get((region, fov)), image.shape[-2:], pixel_size_um)
         # field directory is the RAW fov id (Squid convention), digit-named for ndviewer.
-        levels = _write_field(plate_dir / row / col / str(fov), image, channels, pixel_size_um, dz_um)
+        levels = _write_field(plate_dir / row / col / str(fov), image, channels, pixel_size_um, dz_um,
+                              position_um=origin_um)
         if tiff:
             _write_tiffs(tiff_root, region, fov, image, channel_names)
         if on_well is not None:  # live consumer (plate viewer): render tile + push to ndviewer
