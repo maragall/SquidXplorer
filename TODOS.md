@@ -3,6 +3,30 @@
 Deferred work captured during plan-eng-reviews. Each item records the reasoning
 so a future session doesn't rediscover it from zero.
 
+## Deselect-all gesture (Esc) → fast-follow after IMA-221
+- **What:** Esc (or click-on-empty-space) clears the whole plate selection and emits the cleared state.
+- **Why:** After IMA-221, Shift+click toggle is the only removal gesture, so clearing a 200-well selection means 200 clicks or a throwaway marquee over an empty corner. There is no defined way back to nothing.
+- **Pros:** Removes a real interaction dead end; one small handler on state that already exists.
+- **Cons:** Adds a keyboard path to a currently mouse-only widget.
+- **Context:** `PlateOverview` has **no `keyPressEvent` and never sets a focus policy** — this is the non-obvious part. Esc needs `setFocusPolicy(Qt.StrongFocus)` plus a handler, or the key silently does nothing and looks like a broken feature. Held out of IMA-221 so the AFK iteration stayed one concern.
+- **Depends on / blocked by:** IMA-221's `_selection` state.
+
+## Selection count readout → fast-follow after IMA-221
+- **What:** Show "N wells / M FOVs selected" in the existing status readout while a selection is active.
+- **Why:** IMA-221 emits on release, so the operator gets tinted cells but no number. On a 1536-well plate a selection is not countable by eye, which keeps Accept-gate verification qualitative.
+- **Pros:** Turns visual impression into a checkable number; reuses the existing `_readout`.
+- **Cons:** Needs a precedence rule or it fights the other writers.
+- **Context:** `self._readout.setText(...)` already has **three writers** — hover, ingest status, and operator progress (`_viewer.py:1589`, `:1786`). A fourth writer without an ordering rule produces flicker. That contention question is the real work here, not the string formatting. Was option C on the IMA-221 Accept-gate decision; not chosen.
+- **Depends on / blocked by:** IMA-221's `selectionChanged` signal.
+
+## Per-FOV sub-cell selection → blocked on FOV geometry
+- **What:** True per-FOV marquee: subdivide each well cell into its FOV sub-grid and hit-test within it.
+- **Why:** This is the half of IMA-221's original acceptance ("marquee selects a set of FOVs") that was **de-scoped as unimplementable**. Recording it so the de-scope does not silently become permanent.
+- **Pros:** Delivers the original spec intent. IMA-221's payload was deliberately shaped as `(region, fov)` pairs so **no consumer changes** when this lands.
+- **Cons:** Genuinely blocked, and it invalidates `cells_in_rect`'s one-cell-per-well model once cells subdivide.
+- **Context:** `reader.py:197` builds `fovs_per_region` from parsed filenames as **ids only — no x/y positions**. The learning `fov-axis-needs-geometry` (8/10, cross-model, 2026-07-04) already flagged per-FOV position + overlap as the load-bearing missing piece. Sibling of the FOV-composition/stitch TODO — they should land together.
+- **Depends on / blocked by:** per-FOV geometry (position + overlap) reaching reader metadata, i.e. the deferred stitch work.
+
 ## Scale-test fixture generator → IMA-188
 - **What:** A generator that fans the 48 real hongquan FOVs across a 1536-well plate via **symlinks** (Squid layout), synthesizing 20 z (cycling the real 3) × 4 channels. On-disk ≈ source (~19 GB); logical read ≈ 1536×20×4×33 MB ≈ **4 TB** (served from OS cache — proves scale/parse/decode/memory, NOT raw disk bandwidth; that needs Nick's real storage).
 - **Why:** It's the harness for the IMA-188 high-throughput scale test, not ingest. Building it in 189 bloats the keystone and risks CI breakage.

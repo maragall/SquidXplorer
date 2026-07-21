@@ -95,6 +95,50 @@ def test_well_at_maps_and_bounds():
     assert V.well_at(["A"], ["1"], {}, 9e9, 9e9, 20.0) is None                       # off-plate
 
 
+def test_cells_in_rect_basic():
+    by_rc = {(r, c): f"{'AB'[r]}{c + 1}" for r in range(2) for c in range(2)}
+    rows, cols = ["A", "B"], ["1", "2"]
+    assert V.cells_in_rect(rows, cols, by_rc, 0, 0, 39, 39, 20.0) == [(0, 0), (0, 1), (1, 0), (1, 1)]
+    assert V.cells_in_rect(rows, cols, by_rc, 0, 0, 5, 5, 20.0) == [(0, 0)]          # one cell
+    assert V.cells_in_rect(rows, cols, by_rc, 25, 0, 35, 35, 20.0) == [(0, 1), (1, 1)]  # one column
+
+
+def test_cells_in_rect_inverted_drag():
+    """Dragging up-left must select the SAME cells as the equivalent down-right drag."""
+    by_rc = {(r, c): f"{'AB'[r]}{c + 1}" for r in range(2) for c in range(2)}
+    rows, cols = ["A", "B"], ["1", "2"]
+    fwd = V.cells_in_rect(rows, cols, by_rc, 0, 0, 39, 39, 20.0)
+    assert V.cells_in_rect(rows, cols, by_rc, 39, 39, 0, 0, 20.0) == fwd
+    assert V.cells_in_rect(rows, cols, by_rc, 39, 0, 0, 39, 20.0) == fwd   # mixed inversion
+
+
+def test_cells_in_rect_clamps_to_plate():
+    by_rc = {(r, c): f"{'AB'[r]}{c + 1}" for r in range(2) for c in range(2)}
+    rows, cols = ["A", "B"], ["1", "2"]
+    # a rect running far past the last row/col clamps instead of inventing cells
+    assert V.cells_in_rect(rows, cols, by_rc, 0, 0, 9999, 9999, 20.0) == [(0, 0), (0, 1), (1, 0), (1, 1)]
+    # ...and a rect starting at negative coords clamps at 0
+    assert V.cells_in_rect(rows, cols, by_rc, -500, -500, 5, 5, 20.0) == [(0, 0)]
+
+
+def test_cells_in_rect_off_plate_returns_empty():
+    by_rc = {(0, 0): "A1"}
+    rows, cols = ["A"], ["1"]
+    assert V.cells_in_rect(rows, cols, by_rc, -900, -900, -100, -100, 20.0) == []   # above-left
+    assert V.cells_in_rect(rows, cols, by_rc, 5000, 5000, 9000, 9000, 20.0) == []   # beyond extent
+
+
+def test_cells_in_rect_zero_area_is_single_cell():
+    by_rc = {(r, c): f"{'AB'[r]}{c + 1}" for r in range(2) for c in range(2)}
+    assert V.cells_in_rect(["A", "B"], ["1", "2"], by_rc, 25, 25, 25, 25, 20.0) == [(1, 1)]
+
+
+def test_cells_in_rect_excludes_unacquired():
+    """A sparse plate: the marquee sweeps every position but only ACQUIRED wells are selected."""
+    by_rc = {(0, 0): "A1", (1, 1): "B2"}          # A2 and B1 were never acquired
+    assert V.cells_in_rect(["A", "B"], ["1", "2"], by_rc, 0, 0, 39, 39, 20.0) == [(0, 0), (1, 1)]
+
+
 def test_fit_cell_always_returns_cell_shape():
     assert V._fit_cell(np.zeros((768, 768), np.float32)).shape == (V._CELL, V._CELL)
     assert V._fit_cell(np.zeros((V._CELL, V._CELL), np.float32)).shape == (V._CELL, V._CELL)
@@ -239,6 +283,245 @@ def test_fov_slider_moves_red_box(qapp, stub_detail, squid_dataset):
     qapp.processEvents()
     assert win._overview._sel == win._fov_index["B3"]["rc"]
     win.close()
+
+
+# --- selection: marquee + click (IMA-221) ---------------------------------------------------
+#
+# Gesture matrix under test. Shift owns EVERY selection gesture, so plain drag/double-click
+# (the landed navigator behavior) are untouched, and Qt's press->release->doubleclick ordering
+# can never toggle a well as a side effect of opening it.
+#
+#   Shift+drag       -> marquee, REPLACES the selection
+#   Shift+Alt+drag   -> marquee, UNIONS into the selection
+#   Shift+click      -> toggles one well
+#   plain drag       -> pans (unchanged)      plain double-click -> opens the well (unchanged)
+
+def _sel_overview(cd=20.0):
+    """A 2x2 plate with a sparse corner (B1 never acquired) and a FROZEN view.
+
+    Freezing (_user_view + explicit _cd/_ox/_oy) keeps widget pixels deterministic — otherwise
+    paintEvent's auto-fit would move the plate under the synthetic coordinates.
+    """
+    wells = {(0, 0): "A1", (0, 1): "A2", (1, 1): "B2"}     # (1,0) = B1 absent
+    ov = V.PlateOverview(["A", "B"], ["1", "2"], wells)
+    ov._user_view = True
+    ov._cd, ov._ox, ov._oy = cd, 0.0, 0.0
+    return ov
+
+
+def _pt(ri, ci, cd=20.0):
+    """Widget-space center of cell (ri, ci) — mirrors PlateOverview._cell's margin offsets."""
+    from PyQt5.QtCore import QPointF
+    return QPointF(V._HDR + ci * cd + cd / 2, V._COLH + ri * cd + cd / 2)
+
+
+def _within(ri, ci, cd=20.0):
+    """Two points INSIDE one cell, far enough apart to read as a drag (not a Shift+click)."""
+    from PyQt5.QtCore import QPointF
+    return (QPointF(V._HDR + ci * cd + 2, V._COLH + ri * cd + 2),
+            QPointF(V._HDR + ci * cd + cd - 2, V._COLH + ri * cd + cd - 2))
+
+
+def _mouse(kind, pos, mods=Qt.NoModifier, buttons=Qt.LeftButton, btn=Qt.LeftButton):
+    from PyQt5.QtCore import QEvent
+    from PyQt5.QtGui import QMouseEvent
+    ev = {"press": QEvent.MouseButtonPress, "move": QEvent.MouseMove,
+          "release": QEvent.MouseButtonRelease, "dblclick": QEvent.MouseButtonDblClick}[kind]
+    return QMouseEvent(ev, pos, btn, buttons, mods)
+
+
+def _drag(ov, a, b, mods):
+    ov.mousePressEvent(_mouse("press", a, mods))
+    ov.mouseMoveEvent(_mouse("move", b, mods))
+    ov.mouseReleaseEvent(_mouse("release", b, mods, buttons=Qt.NoButton))
+
+
+def test_marquee_replaces_selection(qapp):
+    ov = _sel_overview()
+    _drag(ov, _pt(0, 0), _pt(1, 1), Qt.ShiftModifier)          # sweep the whole 2x2
+    assert ov.selected_wells() == ["A1", "A2", "B2"]           # B1 never acquired -> excluded
+    _drag(ov, *_within(0, 0), Qt.ShiftModifier)                # a fresh marquee over A1 only...
+    assert ov.selected_wells() == ["A1"]                        # ...REPLACES, not unions
+
+
+def test_additive_marquee_unions(qapp):
+    ov = _sel_overview()
+    _drag(ov, *_within(0, 0), Qt.ShiftModifier)                          # A1
+    _drag(ov, *_within(1, 1), Qt.ShiftModifier | Qt.AltModifier)         # + B2
+    assert ov.selected_wells() == ["A1", "B2"]
+
+
+def test_shift_click_toggles_well(qapp):
+    ov = _sel_overview()
+    ov.mousePressEvent(_mouse("press", _pt(0, 1), Qt.ShiftModifier))
+    ov.mouseReleaseEvent(_mouse("release", _pt(0, 1), Qt.ShiftModifier, buttons=Qt.NoButton))
+    assert ov.selected_wells() == ["A2"]
+    ov.mousePressEvent(_mouse("press", _pt(0, 1), Qt.ShiftModifier))     # click again -> off
+    ov.mouseReleaseEvent(_mouse("release", _pt(0, 1), Qt.ShiftModifier, buttons=Qt.NoButton))
+    assert ov.selected_wells() == []
+
+
+def test_selection_emits_once_on_release(qapp):
+    """The rubber band is the live feedback; the SIGNAL fires once per gesture, on release.
+    A 1536-well plate would otherwise rebuild + emit a 1536-item list per mouse-move."""
+    ov = _sel_overview()
+    seen = []
+    ov.selectionChanged.connect(lambda wells: seen.append(list(wells)))
+    ov.mousePressEvent(_mouse("press", _pt(0, 0), Qt.ShiftModifier))
+    for _ in range(5):                                          # five moves mid-drag...
+        ov.mouseMoveEvent(_mouse("move", _pt(1, 1), Qt.ShiftModifier))
+    assert seen == []                                           # ...emit NOTHING
+    ov.mouseReleaseEvent(_mouse("release", _pt(1, 1), Qt.ShiftModifier, buttons=Qt.NoButton))
+    assert seen == [["A1", "A2", "B2"]]                         # exactly one emission
+
+
+def test_selection_excludes_empty_wells(qapp):
+    ov = _sel_overview()
+    _drag(ov, *_within(1, 0), Qt.ShiftModifier)                 # B1: a plate position, never acquired
+    assert ov.selected_wells() == []
+
+
+def test_wheel_ignored_during_marquee(qapp):
+    """Zooming mid-marquee would move the plate under the drag, so the wheel is ignored."""
+    from PyQt5.QtCore import QPoint
+    from PyQt5.QtGui import QWheelEvent
+    ov = _sel_overview()
+    ov.mousePressEvent(_mouse("press", _pt(0, 0), Qt.ShiftModifier))
+    cd_before = ov._cd
+    ov.wheelEvent(QWheelEvent(QPoint(60, 60), QPoint(60, 60), QPoint(0, 0), QPoint(0, 120),
+                              Qt.NoButton, Qt.NoModifier, Qt.NoScrollPhase, False))
+    assert ov._cd == cd_before                                  # zoom did NOT happen
+
+
+def test_right_button_release_does_not_commit_a_selection(qapp):
+    """A RIGHT release must not commit the gesture. Qt delivers a release for whichever button
+    went up, so without an e.button() check a right-click during a Shift-drag silently toggled
+    a well (and dropped the in-flight marquee) with no left release ever having happened."""
+    ov = _sel_overview()
+    seen = []
+    ov.selectionChanged.connect(lambda wells: seen.append(list(wells)))
+    ov.mousePressEvent(_mouse("press", _pt(0, 1), Qt.ShiftModifier))          # Shift-press on A2
+    ov.mouseReleaseEvent(_mouse("release", _pt(0, 1), Qt.ShiftModifier,
+                                buttons=Qt.NoButton, btn=Qt.RightButton))
+    assert ov.selected_wells() == []                            # nothing selected
+    assert seen == []                                           # and nothing emitted
+    assert ov._marquee is not None                              # the gesture is still in flight
+    ov.mouseReleaseEvent(_mouse("release", _pt(0, 1), Qt.ShiftModifier,       # the LEFT release...
+                                buttons=Qt.NoButton))
+    assert ov.selected_wells() == ["A2"]                        # ...is what commits it
+
+
+def test_leave_clears_the_marquee_so_zoom_survives(qapp):
+    """Losing the grab mid-drag (modal dialog, alt-tab) delivers a leave and NO release. A
+    stranded _marquee would paint a dashed rect forever and trip wheelEvent's guard, disabling
+    zoom permanently."""
+    from PyQt5.QtCore import QEvent, QPoint
+    from PyQt5.QtGui import QWheelEvent
+    ov = _sel_overview()
+    ov.mousePressEvent(_mouse("press", _pt(0, 0), Qt.ShiftModifier))
+    assert ov._marquee is not None
+    ov.leaveEvent(QEvent(QEvent.Leave))                         # grab lost; no release ever arrives
+    assert ov._marquee is None
+    cd_before = ov._cd
+    ov.wheelEvent(QWheelEvent(QPoint(60, 60), QPoint(60, 60), QPoint(0, 0), QPoint(0, 120),
+                              Qt.NoButton, Qt.NoModifier, Qt.NoScrollPhase, False))
+    assert ov._cd != cd_before                                  # zoom works again
+
+
+# --- selection regressions: the landed navigator gestures must be untouched -----------------
+
+def test_plain_drag_still_pans(qapp):
+    ov = _sel_overview()
+    ox0, oy0 = ov._ox, ov._oy
+    _drag(ov, _pt(0, 0), _pt(1, 1), Qt.NoModifier)              # NO Shift
+    assert (ov._ox, ov._oy) != (ox0, oy0), "plain drag no longer pans"
+    assert ov.selected_wells() == [], "plain drag must not select"
+
+
+def test_double_click_does_not_toggle_selection(qapp):
+    """Qt delivers press+release BEFORE mouseDoubleClickEvent — opening a well must not select it."""
+    ov = _sel_overview()
+    opened = []
+    ov.wellActivated.connect(lambda wid, fov: opened.append((wid, fov)))
+    p = _pt(0, 0)
+    ov.mousePressEvent(_mouse("press", p))
+    ov.mouseReleaseEvent(_mouse("release", p, buttons=Qt.NoButton))
+    ov.mouseDoubleClickEvent(_mouse("dblclick", p))
+    assert opened == [("A1", 0)]                                # still opens the well
+    assert ov.selected_wells() == []                            # ...and selects nothing
+
+
+def test_selection_does_not_disturb_red_box(qapp):
+    """_sel (ndviewer current well, red box) and _selection (operator's pick) stay independent."""
+    ov = _sel_overview()
+    ov.select(1, 1)
+    _drag(ov, *_within(0, 0), Qt.ShiftModifier)
+    assert ov._sel == (1, 1)                                    # red box unmoved
+    assert ov.selected_wells() == ["A1"]
+
+
+def test_clear_selection_emits_empty(qapp):
+    ov = _sel_overview()
+    seen = []
+    _drag(ov, _pt(0, 0), _pt(1, 1), Qt.ShiftModifier)
+    ov.selectionChanged.connect(lambda wells: seen.append(list(wells)))
+    ov.clear_selection()
+    assert ov.selected_wells() == [] and seen == [[]]
+
+
+# --- window level: expansion to (region, fov) + run-on-selection ----------------------------
+
+def test_selection_expands_to_region_fov_pairs(qapp, stub_detail, squid_dataset):
+    """PlateOverview is display-only (it has no metadata), so PlateWindow does the expansion."""
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    win._overview.selectionChanged.emit(["B3"])
+    qapp.processEvents()
+    assert win._selected_regions == ["B3"]
+    fovs = win._meta["fovs_per_region"]["B3"]
+    assert win.selected_region_fovs() == [("B3", f) for f in fovs]
+    win.close()
+
+
+def test_run_operator_on_selection_only_processes_selected(qapp, stub_detail, squid_dataset,
+                                                           monkeypatch, tmp_path):
+    """The Accept gate: a selection SCOPES the operator run to just those wells."""
+    import squidmip
+    captured = {}
+
+    def fake_write_plate(reader, out_dir, **kw):
+        captured.update(regions=kw.get("regions"))
+        return {"plate": str(out_dir), "levels": 1}
+    monkeypatch.setattr(squidmip, "write_plate", fake_write_plate)
+
+    root, _ = squid_dataset                       # B2, B3
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    win._overview.selectionChanged.emit(["B3"])   # select ONE of the two wells
+    qapp.processEvents()
+    win.run_operator("mip", out_parent=str(tmp_path))
+    _drain_until(qapp, lambda: "regions" in captured)
+    assert captured["regions"] == ["B3"], "the run was not scoped to the selection"
+    # ...and only the selected well went amber
+    assert win._overview._status[win._fov_index["B3"]["rc"]] == "processing"
+    assert win._overview._status[win._fov_index["B2"]["rc"]] == "empty"
+    win._stop_worker(); win.close()
+
+
+def test_selection_clears_on_second_ingest(qapp, stub_detail, squid_dataset):
+    """A stale selection must never point at wells from the previous acquisition."""
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    win._overview.selectionChanged.emit(["B3"])
+    qapp.processEvents()
+    assert win._selected_regions == ["B3"]
+    win.ingest(str(root))                          # re-open
+    qapp.processEvents()
+    assert win._selected_regions == []
+    assert win._overview.selected_wells() == []
+    win._stop_worker(); win.close()
 
 
 def test_second_ingest_resets_state(qapp, stub_detail, squid_dataset, tmp_path):

@@ -75,6 +75,9 @@ _VIEWER_WORKERS = min(6, _default_workers())   # adapt to the machine, but CAP a
                            # little speed for linearly more memory. 6 balances both, leaves GUI cores.
 _BG = "#070a0f"
 _GRID, _RED, _MUTED, _ACCENT = QColor(0, 0, 0), QColor("#ff2d2d"), QColor("#8b98ad"), QColor("#58a6ff")
+_SEL_FILL = QColor(88, 166, 255, 90)   # translucent accent wash over a SELECTED well (IMA-221)
+_CLICK_SLOP = 3                        # px of travel below which a Shift-drag counts as a click
+#                                        (matches the pan threshold, so the two gestures agree)
 
 # Processing-status hue coding, adopted from Hongquan Li's record-zstack-viewer plate navigator.
 # Deliberately colorblind-safe (blue/amber, never red/green) with a shape cue for failure (the x).
@@ -439,6 +442,34 @@ def well_at(rows, cols, by_rc, px: float, py: float, cell_disp: float) -> Option
             "well_id": by_rc.get((ri, ci))}
 
 
+def cells_in_rect(rows, cols, by_rc, x0: float, y0: float, x1: float, y1: float,
+                  cell_disp: float) -> list:
+    """Every ACQUIRED cell whose square meets the drag rect (x0,y0)-(x1,y1), row-major sorted.
+
+    Same plate-pixel space as ``well_at`` (label margins already removed by the caller). The rect
+    is NORMALIZED first, so an up-left drag selects exactly what the equivalent down-right drag
+    does. Out-of-grid edges clamp instead of inventing cells, and a cell is returned only when
+    ``by_rc`` holds a well there — a marquee over a sparse plate never selects the un-acquired
+    positions the grey dots mark.
+
+        by_rc = {(0,0):A1, (1,1):B2}          drag (0,0)->(39,39) at 20px/cell
+        +-------+-------+
+        |  A1   |  A2   |   -> [(0,0), (1,1)]   A2/B1 are plate positions, not acquisitions
+        |  (B1) |  B2   |
+        +-------+-------+
+    """
+    if cell_disp <= 0:
+        return []
+    lo_x, hi_x = (x0, x1) if x0 <= x1 else (x1, x0)      # normalize: any drag direction is equal
+    lo_y, hi_y = (y0, y1) if y0 <= y1 else (y1, y0)
+    if hi_x < 0 or hi_y < 0:                             # entirely above/left of the plate
+        return []
+    c0, c1 = int(max(0.0, lo_x) // cell_disp), int(max(0.0, hi_x) // cell_disp)
+    r0, r1 = int(max(0.0, lo_y) // cell_disp), int(max(0.0, hi_y) // cell_disp)
+    c1, r1 = min(c1, len(cols) - 1), min(r1, len(rows) - 1)   # clamp at the far edge
+    return [(ri, ci) for ri in range(r0, r1 + 1) for ci in range(c0, c1 + 1) if (ri, ci) in by_rc]
+
+
 def _fit_cell(a: np.ndarray) -> np.ndarray:
     """Resize a 2D plane to EXACTLY (_CELL, _CELL) for the montage tile.
 
@@ -520,6 +551,7 @@ class PlateOverview(QWidget):
 
     hovered = pyqtSignal(str)              # region id (or "" off-plate), for the window's readout
     wellActivated = pyqtSignal(str, int)   # (well_id, fov_index) double-clicked -> load in ndviewer
+    selectionChanged = pyqtSignal(list)    # acquired well ids the operator picked (row-major)
 
     def __init__(self, rows, cols, wells: dict):
         """``wells``: (row_index, col_index) -> well_id for every acquired well (drawn grey until
@@ -547,6 +579,14 @@ class PlateOverview(QWidget):
         self._ox = self._oy = _PAD    # top-left of the plate within the widget (pan-able)
         self._hover = None
         self._sel = None              # well selected from the ndviewer FOV slider
+        # SELECTION (IMA-221) is a DIFFERENT concept from _sel above: _sel is "the one well the
+        # detail viewer is showing" (red box, driven by the FOV slider); _selection is "the set the
+        # operator picked" (tint, driven by Shift-gestures). Never merge them — the red box must
+        # survive selecting, and selecting must survive scrubbing.
+        self._selection: set = set()  # acquired (row_index, col_index) the user picked. A SET:
+        #                               paintEvent membership-tests it once per cell, 1536x on a 1536wp.
+        self._marquee = None          # (x0, y0, x1, y1) widget px while a Shift-drag is in flight
+        self._marquee_add = False     # this drag unions (Shift+Alt) rather than replaces
         self._press = None            # (x, y, ox, oy) at left-press, for drag-to-pan
         self._panning = False
         self._user_view = False       # True once the user wheel-zooms/pans (stop auto-fitting)
@@ -634,7 +674,27 @@ class PlateOverview(QWidget):
         px, py = x - (self._ox + _HDR), y - (self._oy + _COLH)
         return well_at(self._rows, self._cols, self._by_rc, px, py, self._cd)
 
+    def _cells_in(self, x0, y0, x1, y1) -> list:
+        """Widget px -> acquired cells, via the pure helper (same margin removal as _cell)."""
+        ox, oy = self._ox + _HDR, self._oy + _COLH
+        return cells_in_rect(self._rows, self._cols, self._by_rc,
+                             x0 - ox, y0 - oy, x1 - ox, y1 - oy, self._cd)
+
+    # -- selection API (IMA-221) --
+    def selected_wells(self) -> list:
+        """The selection as acquired well ids, in plate row-major order."""
+        return [self._by_rc[rc] for rc in sorted(self._selection)]
+
+    def clear_selection(self):
+        """Drop the whole selection and tell listeners (used on re-ingest)."""
+        if self._selection:
+            self._selection = set()
+            self.selectionChanged.emit([])
+            self.update()
+
     def wheelEvent(self, e):
+        if self._marquee is not None:
+            return          # a marquee owns the drag; zooming would slide the plate under the rect
         mx, my = e.x() - (self._ox + _HDR), e.y() - (self._oy + _COLH)    # cursor in plate px
         new_cd = self._cd * (1.0015 ** e.angleDelta().y())
         new_cd = max(self._fit_cd(), min(self._fit_cd() * 40, new_cd))    # never zoom out past fit
@@ -646,11 +706,28 @@ class PlateOverview(QWidget):
         self.update()
 
     def mousePressEvent(self, e):
-        if e.button() == Qt.LeftButton:
-            self._press = (e.x(), e.y(), self._ox, self._oy)
+        if e.button() != Qt.LeftButton:
+            return
+        # SHIFT owns every selection gesture (IMA-221). Keeping selection off the plain click is
+        # what makes double-click safe: Qt delivers press+release BEFORE mouseDoubleClickEvent, so
+        # a plain-click toggle would silently flip a well every time you opened one. (Ctrl is out:
+        # on macOS Ctrl+click is right-click and Qt maps Cmd -> ControlModifier.)
+        if e.modifiers() & Qt.ShiftModifier:
+            self._marquee = (e.x(), e.y(), e.x(), e.y())
+            self._marquee_add = bool(e.modifiers() & Qt.AltModifier)   # Shift+Alt = union
+            self._press = None                                          # ...so this drag never pans
             self._panning = False
+            self.update()
+            return
+        self._press = (e.x(), e.y(), self._ox, self._oy)
+        self._panning = False
 
     def mouseMoveEvent(self, e):
+        if self._marquee is not None and (e.buttons() & Qt.LeftButton):
+            x0, y0, _, _ = self._marquee          # grow the rubber band; emit NOTHING until release
+            self._marquee = (x0, y0, e.x(), e.y())
+            self.update()
+            return
         if self._press is not None and (e.buttons() & Qt.LeftButton):
             dx, dy = e.x() - self._press[0], e.y() - self._press[1]
             if abs(dx) + abs(dy) > 3:
@@ -669,18 +746,41 @@ class PlateOverview(QWidget):
         self.update()
 
     def mouseReleaseEvent(self, e):
+        # Only the LEFT release commits a selection. The gesture is opened by a left press, but Qt
+        # delivers a release for whichever button went up — so a right-click while a Shift-drag is
+        # in flight would otherwise silently toggle/replace the selection.
+        if self._marquee is not None and e.button() == Qt.LeftButton:
+            x0, y0, x1, y1 = self._marquee
+            add, self._marquee, self._marquee_add = self._marquee_add, None, False
+            if abs(x1 - x0) + abs(y1 - y0) <= _CLICK_SLOP:      # Shift+CLICK -> toggle ONE well
+                hit = self._cell(x1, y1)
+                if hit and hit["well_id"]:
+                    self._selection ^= {(hit["row_index"], hit["col_index"])}
+            elif add:
+                self._selection |= set(self._cells_in(x0, y0, x1, y1))
+            else:
+                self._selection = set(self._cells_in(x0, y0, x1, y1))
+            # ONE emission per gesture. A live emit would rebuild a 1536-item list per mouse-move
+            # on a 1536wp; the rubber band already gave the user live feedback.
+            self.selectionChanged.emit(self.selected_wells())
+            self.update()
         self._press = None
         self._panning = False
 
     def leaveEvent(self, e):
         self._hover = None
+        # Drop any in-flight marquee too. If the grab is lost mid-drag (modal dialog, alt-tab) no
+        # release ever arrives, and a stranded _marquee both paints a dashed rect forever and makes
+        # wheelEvent's mid-marquee guard disable zoom permanently.
+        self._marquee = None
+        self._marquee_add = False
         self.hovered.emit("")
         self.update()
 
     def mouseDoubleClickEvent(self, e):
         c = self._cell(e.x(), e.y())
         if c and c["well_id"]:
-            self.wellActivated.emit(c["well_id"], 0)   # 1 FOV/well (IMA-183); IMA-187 will pick the FOV
+            self.wellActivated.emit(c["well_id"], 0)   # FOV 0: the viewer samples one FOV/well (IMA-183)
 
     # -- paint --
     def paintEvent(self, _):
@@ -728,6 +828,13 @@ class PlateOverview(QWidget):
                 # else: has an image on the active layer -> no dot
         p.setBrush(Qt.NoBrush)
 
+        if self._selection:            # SELECTED wells = translucent accent wash (IMA-221). Drawn
+            p.setPen(Qt.NoPen)         # under the grid/labels so it reads as a highlight, and kept
+            p.setBrush(_SEL_FILL)      # visually distinct from _sel's red BOX and _hover's red DOT.
+            for ri, ci in self._selection:
+                p.drawRect(int(ax + ci * cd), int(ay + ri * cd), int(cd), int(cd))
+            p.setBrush(Qt.NoBrush)
+
         p.setPen(QPen(_GRID, 3))       # black grid lines between wells (room for multi-FOV, IMA-187)
         for c in range(nc + 1):
             p.drawLine(int(ax + c * cd), int(ay), int(ax + c * cd), int(ay + H))
@@ -762,6 +869,12 @@ class PlateOverview(QWidget):
             p.setPen(Qt.NoPen)
             p.setBrush(_RED)
             p.drawEllipse(ex, ey, int(d), int(d))
+        if self._marquee is not None:      # live drag rectangle while Shift-dragging
+            mx0, my0, mx1, my1 = self._marquee
+            p.setPen(QPen(_ACCENT, 1, Qt.DashLine))
+            p.setBrush(Qt.NoBrush)
+            p.drawRect(int(min(mx0, mx1)), int(min(my0, my1)),
+                       int(abs(mx1 - mx0)), int(abs(my1 - my0)))
         # a fine outer white frame around the whole plate view
         p.setPen(QPen(QColor("#c9d1d9"), 1))
         p.setBrush(Qt.NoBrush)
@@ -848,11 +961,12 @@ class _OperatorWorker(QThread):
 
     def run(self):
         try:
+            projector = self._operator
             if self._save:
                 from squidmip import write_plate  # persist + project in one bounded, streaming pass
 
                 write_plate(self._reader, self._out_dir, n_fovs=1, workers=_VIEWER_WORKERS,
-                            projector=self._operator, tiff=False, on_well=self._on_well,
+                            projector=projector, tiff=False, on_well=self._on_well,
                             stop=self._stop.is_set, on_error=self._on_error, regions=self._regions)
                 if self._stop.is_set():
                     return  # window closing / re-opening; drop out cleanly (no final/written emit)
@@ -864,7 +978,7 @@ class _OperatorWorker(QThread):
                 # the subset's compute). Same math as the saved run — a faithful preview.
                 from squidmip import project_plate
 
-                stream = project_plate(self._reader, workers=_VIEWER_WORKERS, projector=self._operator,
+                stream = project_plate(self._reader, workers=_VIEWER_WORKERS, projector=projector,
                                        on_error=self._on_error, regions=self._regions)
                 try:
                     for region, fov, image in stream:
@@ -1013,6 +1127,7 @@ class PlateWindow(QMainWindow):
         self._reader = None
         self._meta = None
         self._fov_index = {}
+        self._selected_regions = []   # wells picked on the plate (IMA-221); scopes an operator run
         self._pushed = set()          # wells whose raw z-stack is already registered in the detail viewer
         self._final_arr = None        # keep the final montage array alive for its QImage
 
@@ -1295,6 +1410,8 @@ class PlateWindow(QMainWindow):
 
         pick_btn = QPushButton("Choose output folder…"); pick_btn.setStyleSheet(_BTN_QSS)
         pick_btn.clicked.connect(pick)
+
+        v.addWidget(_hline())
         run.clicked.connect(lambda: self.run_operator(op.key, out_parent=state["dir"]))
         v.addWidget(pick_btn); v.addWidget(dir_lbl); v.addWidget(run)
 
@@ -1498,6 +1615,7 @@ class PlateWindow(QMainWindow):
         self._stop_preview()
         self._reader = self._meta = None
         self._fov_index = {}
+        self._selected_regions = []   # wells picked on the plate (IMA-221); scopes an operator run
         self._pushed = set()
         self._current_well = None
         self._final_arr = None
@@ -1571,8 +1689,10 @@ class PlateWindow(QMainWindow):
 
         self._order = order                          # well order = the detail's FOV-slider order
         self._overview = PlateOverview(rows, cols, wells)
+        self._selected_regions = []                  # a new acquisition starts with nothing picked
         self._overview.hovered.connect(self._on_hover)
         self._overview.wellActivated.connect(self.activate_well)
+        self._overview.selectionChanged.connect(self._on_selection_changed)
         self._plate_mode = "raw"                     # a freshly-opened plate shows raw previews
         self._plate_title.setText(f"{self._acq_name}   ·   raw")   # bottom-left plate-pane title
         self._op_stack.reset()                       # fresh layer stack (base only)
@@ -1754,8 +1874,17 @@ class PlateWindow(QMainWindow):
             self._readout.setText("already processing — let the current run finish first")
             return
         label = _OPERATIONS_BY_KEY[key].label
-        regions = self._order[:preview_limit] if preview_limit is not None else None
-        scope = f"first {len(regions)} wells" if regions is not None else "the whole plate"
+        # Scope the run: an explicit preview_limit wins, else a plate SELECTION scopes it (IMA-221),
+        # else the whole plate. regions=None keeps the existing whole-plate path byte-for-byte.
+        if preview_limit is not None:
+            regions = self._order[:preview_limit]
+            scope = f"first {len(regions)} wells"
+        elif self._selected_regions:
+            regions = list(self._selected_regions)
+            scope = f"{len(regions)} selected well(s)"
+        else:
+            regions = None
+            scope = "the whole plate"
         out_dir = est_gb = None
         if save:
             # Ask WHERE to persist: output can be hundreds of GB, so let the user aim it at a roomy
@@ -1872,6 +2001,26 @@ class PlateWindow(QMainWindow):
                                  layer=self._active_op_key or "raw")
 
     # -- navigation links --
+    # -- selection (IMA-221): the widget picks wells, THIS window knows what a well contains ----
+    def _on_selection_changed(self, wells: list):
+        """PlateOverview is display-only — it maps grid cells to well ids and nothing more. The
+        metadata lives here, so the expansion to (region, fov) happens here too.
+
+            PlateOverview            PlateWindow
+            [cells] --wells--> [_order sort] --fovs_per_region--> [(region, fov), ...]
+
+        Today every well yields one FOV (the viewer is 1-FOV: write_plate(n_fovs=1)), so the pairs
+        read [(B3, 0)]. The PAIR shape is the point: when per-FOV selection becomes possible (it
+        needs FOV geometry that metadata doesn't carry yet) consumers don't change.
+        """
+        picked = set(wells)
+        self._selected_regions = [w for w in self._order if w in picked]   # plate row-major
+
+    def selected_region_fovs(self) -> list:
+        """The current selection as (region, fov) pairs — the payload IMA-205 will consume."""
+        per = (self._meta or {}).get("fovs_per_region", {})
+        return [(r, f) for r in self._selected_regions for f in (per.get(r) or [0])]
+
     def _on_hover(self, text: str):
         # BOTTOM-LEFT plate title bar: "<acq>  ·  <mode>" (mode = raw / the operator that processed it),
         # plus the hovered well when the cursor is over the plate.
