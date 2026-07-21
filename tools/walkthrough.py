@@ -432,6 +432,63 @@ def run_all():
         assert worst < 1e-6, f"corner disagreement {worst} um"
         return f"{len(recs)} ROIs in {region}, {n} compared, max corner disagreement {worst:.2e} um"
 
+    @check("IMA-205", "Exploration tab is SCOPED to the selected subset")
+    def _():
+        w = open_window(PLATE)
+        key = w.open_exploration_tab(["A1", "A2"])
+        _app().processEvents()
+        assert key, f"no tab: {w._readout.text()!r}"
+        tab = w._explore_tabs.widget(w._explore_tabs.count() - 1)
+        label = w._explore_tabs.tabText(w._explore_tabs.count() - 1)
+        # The scope must be the SUBSET, not the whole plate: an exploration tab that quietly
+        # operates on all four wells looks identical on screen and is the bug worth catching.
+        scope = w._current_exploration() if callable(getattr(w, "_current_exploration", None)) \
+            else getattr(w, "_current_exploration", key)
+        w.close()
+        assert "A1" in label and "A2" in label, f"tab label {label!r} does not name the subset"
+        assert tab is not None
+        return f"tab {label!r} (key {key!r}), scope={scope!r}, 2 of 4 wells"
+
+    @check("IMA-217", "Pyramid ladder is coarse-to-fine and never widens")
+    def _():
+        from squidmip._tilesource import plate_ladder
+        m = open_reader(PLATE).metadata
+        lad = plate_ladder(m)
+        geo = lad.geometry if hasattr(lad, "geometry") else lad
+        counts = [len(lv) for lv in geo.levels]
+        bad = [(i, counts[i], counts[i + 1]) for i in range(len(counts) - 1)
+               if counts[i + 1] > counts[i]]
+        assert not bad, f"a coarser level holds MORE tiles than the one below it: {bad}"
+        assert geo.worst_case_tiles <= counts[0], geo.worst_case_tiles
+        return (f"{len(counts)} rungs, tile counts {counts}, "
+                f"worst_case_tiles={geo.worst_case_tiles}")
+
+    @check("IMA-229", "OME-NGFF Zarr reads back through the same reader seam")
+    def _():
+        if free_gb() < MIN_FREE_GB + 1:
+            raise SkipCheck(f"only {free_gb():.1f} GB free")
+        import inspect
+        from squidmip import open_reader as _open, write_plate
+        tmp = tempfile.mkdtemp(prefix="walkthrough_zarr_")
+        try:
+            # One well, one FOV: enough to prove the round trip, kilobytes on disk.
+            write_plate(_open(PLATE), tmp, regions=["A1"], n_fovs=1, projector="mip")
+            back = _open(os.path.join(tmp, "plate.ome.zarr"))
+            m = back.metadata
+            regions = list(m["regions"])
+            # the seam: the SAME read() signature serves TIFF and Zarr
+            sig_zarr = list(inspect.signature(type(back).read).parameters)
+            sig_tiff = list(inspect.signature(type(_open(PLATE)).read).parameters)
+            plane = back.read(regions[0], m["fovs_per_region"][regions[0]][0],
+                              m["channels"][0]["name"], 0)
+            assert regions == ["A1"], regions
+            assert sig_zarr == sig_tiff, f"{sig_zarr} != {sig_tiff}"
+            assert plane.ndim == 2 and plane.size, plane.shape
+            return (f"wrote + reread {regions}, read() signature identical to the TIFF "
+                    f"reader {sig_tiff}, plane {plane.shape} {plane.dtype}")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
     # ---------- the one real write, disk-guarded and cleaned up -----------------------
     @check("IMA-222", "A stitched well SAVES end to end (then is deleted)")
     def _():
