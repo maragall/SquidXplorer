@@ -4248,6 +4248,7 @@ class PlateWindow(QMainWindow):
         # fast RAW preview: fill the plate with downsampled thumbnails immediately (grey dots),
         # in the SAME row-major order the operator will later process them in.
         self._preview = _PreviewWorker(reader, meta, self._fov_index, order)
+        self._preview_order = list(order)
         self._preview.tileReady.connect(self._on_preview_tile)
         self._preview.streamEnded.connect(lambda: self._recomposite("raw"))
         self._preview.start()   # (the detail already landed on order[0] via _setup_raw_detail)
@@ -4273,8 +4274,30 @@ class PlateWindow(QMainWindow):
         h, w = meta["frame_shape"]
         channels = [c["name"] for c in meta["channels"]]
         self._detail.start_acquisition(channels, meta["n_z"], h, w, [f"{r}:0" for r in order])
+        # Re-scope the RAW preview to the same wells the slider now lists. Without this the
+        # producer (a full-plate _PreviewWorker) and the consumer (_push_index, built from
+        # `order`) describe different well lists, and every push outside the subset is discarded.
+        # That is the bug that made the FOV slider stop advancing after an exploration tab was
+        # opened: the slider showed only the well that had already loaded.
+        if getattr(self, "_preview", None) is not None and order != getattr(self, "_preview_order", None):
+            self._stop_preview()
+            self._preview = _PreviewWorker(reader, meta, self._fov_index, order)
+            self._preview_order = list(order)
+            self._preview.tileReady.connect(self._on_preview_tile)
+            self._preview.streamEnded.connect(lambda: self._recomposite("raw"))
+            self._preview.start()
         self._pushed = set()
-        # the raw slider is 1:1 with `order`, so pushes must map into THAT, not the plate index
+        # The raw slider is 1:1 with `order`, so pushes must map into THAT, not the plate index.
+        # Identity when the slider IS the whole plate; a subset map otherwise.
+        #
+        # REGRESSION GUARD (found on the live GUI): this map is consumed by _on_push, which DROPS
+        # any push it cannot translate. That is correct for a stale run, but it silently de-scoped
+        # the main view: opening an exploration tab on one well left _push_index == {0: 0} while
+        # the full-plate preview kept emitting global indices 1..N-1, so every other well was
+        # discarded and the FOV slider stopped advancing past the well that was clicked. The map
+        # and the producer must describe the SAME well list, so record it and re-scope the raw
+        # preview to match rather than leaving the two to disagree.
+        self._push_order = list(order)
         self._push_index = (None if order == self._order
                             else {self._fov_index[r]["idx"]: pos for pos, r in enumerate(order)})
         if hasattr(self._detail, "register_images_bulk"):
@@ -4315,6 +4338,7 @@ class PlateWindow(QMainWindow):
         # finish downsampling every well's raw tile (idempotent: it just re-renders the raw layer).
         self._stop_preview()
         self._preview = _PreviewWorker(self._reader, self._meta, self._fov_index, self._order)
+        self._preview_order = list(self._order)
         self._preview.tileReady.connect(self._on_preview_tile)
         self._preview.streamEnded.connect(lambda: self._recomposite("raw"))
         self._preview.start()
@@ -4722,6 +4746,9 @@ class PlateWindow(QMainWindow):
             return
         pos = fov_idx if self._push_index is None else self._push_index.get(fov_idx)
         if pos is None:
+            # Deliberate drop, but COUNT it: a silent discard here is what made a broken FOV
+            # slider look like a viewer that "only shows the plane you clicked".
+            self._dropped_pushes = getattr(self, "_dropped_pushes", 0) + 1
             return
         channels = [c["name"] for c in self._meta["channels"]]
         for c_i, plane in enumerate(planes):
