@@ -50,3 +50,12 @@ so a future session doesn't rediscover it from zero.
 - **Cons:** Different repo, different owner; not on any SquidMIP critical path.
 - **Context:** SquidMIP does **not** carry this bug — IMA-189's `squidmip/_channels.py` already resolves `display_color` correctly (top-level v1.0+ *and* nested `camera_settings`, mapped by name, raises on unresolved), and IMA-184 consumes `metadata.channels[].display_color` rather than re-parsing the yaml. This TODO is purely a flag for whoever owns `~/CEPHLA/projects/explorer/squid2minerva`.
 - **Depends on / blocked by:** squid2minerva maintainer.
+- **Update (IMA-228 eng review, 2026-07-20):** this matters more than it looked. `squid2minerva/story.py`'s own docstring confirms Minerva Author ignores OME-TIFF channel colours and takes colour **only** from the `.story.json` groups — which are built from `colors.load_yaml_colors`. So this bug is the *entire* colour path for the salesperson tool's exports, not a secondary one. IMA-228 sidesteps it by feeding `metadata.channels[].display_color` straight into the story groups.
+
+## Parallel export for large Minerva selections → deferred until IMA-205/187
+- **What:** `squidmip/_minerva.py` exports FOVs in a plain sequential loop over `project_well`. When real multi-FOV selection lands, large selections should use `project_plate`'s existing worker pool.
+- **Why:** `project_plate` (`_engine.py:131-139`) already parallelises and accepts `regions=`, so the machinery exists. A 50-FOV selection exported serially would be a visibly slow button.
+- **Pros:** Reuses a tested parallel path instead of hand-rolling threads; large selections stop being a wait.
+- **Cons:** `project_plate` picks FOVs through `select_fovs(metadata, n_fovs)`, which cannot express an arbitrary `(region, fov)` list — the semantics genuinely do not match a user selection today, so adopting it needs a new entry point, not a swap.
+- **Context:** IMA-228 deliberately chose the sequential loop: selections are 1 FOV today (`n_fovs=1`, `_viewer.py:853`), each FOV is a few hundred ms, and explicit beat clever. Revisit when IMA-205's exploration pane makes multi-FOV selections real and someone can measure an actual slow export. Do not pre-optimise this on speculation.
+- **Depends on / blocked by:** IMA-187 (multi-FOV), IMA-205 (exploration pane).
