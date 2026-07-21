@@ -160,7 +160,8 @@ def plate_pyramid_factor(frame_shape, **kw) -> float:
 
 
 def estimate_write_bytes(metadata: dict, *, n_fovs: Optional[int] = 1, regions=None,
-                         tiff: bool = False, n_z: int = 1) -> int:
+                         tiff: bool = False, n_z: int = 1,
+                         region_operator: bool = False) -> int:
     """Bytes :func:`write_from_stream` will need for this acquisition, from the real numbers.
 
     ``n_regions x n_fovs x n_channels x n_z x frame_bytes``, times the pyramid factor, times the
@@ -186,16 +187,55 @@ def estimate_write_bytes(metadata: dict, *, n_fovs: Optional[int] = 1, regions=N
     fovs_per_region = metadata.get("fovs_per_region") or {}
 
     scoped = list(fovs_per_region) if regions is None else [r for r in regions if r in fovs_per_region]
-    if n_fovs is None:
-        n_fields = sum(len(fovs_per_region[r]) for r in scoped)
-    else:                                   # select_fovs takes at most n_fovs per region
-        n_fields = sum(min(int(n_fovs), len(fovs_per_region[r])) for r in scoped)
+    if region_operator:
+        # A REGION operator (stitch) emits ONE fused mosaic per region, sized to the bounding box
+        # of that region's placed FOVs -- not one frame per FOV. Counting frames here would
+        # under-estimate by roughly the overlap factor and let a stitched plate overrun the disk,
+        # which is the exact failure this guard exists to prevent.
+        px_per_field = _region_mosaic_pixels(metadata, scoped, (ny, nx))
+    else:
+        if n_fovs is None:
+            n_fields = sum(len(fovs_per_region[r]) for r in scoped)
+        else:                               # select_fovs takes at most n_fovs per region
+            n_fields = sum(min(int(n_fovs), len(fovs_per_region[r])) for r in scoped)
+        px_per_field = n_fields * ny * nx
 
-    frame_bytes = n_fields * int(metadata.get("n_t", 1) or 1) * len(channels) * int(n_z) * ny * nx * itemsize
+    frame_bytes = px_per_field * int(metadata.get("n_t", 1) or 1) * len(channels) * int(n_z) * itemsize
     total = frame_bytes * plate_pyramid_factor((ny, nx))
     if tiff:
         total += frame_bytes                # a second, uncompressed, pyramid-free copy
     return int(total * _DISK_SAFETY_FACTOR) + _DISK_NON_IMAGE_BYTES
+
+
+def _region_mosaic_pixels(metadata: dict, scoped, frame_shape) -> int:
+    """Total pixels a region operator writes: the summed area of each region's fused mosaic.
+
+    Uses the real stage positions, so overlap is accounted for -- a 27-FOV well at ~10% overlap
+    is meaningfully smaller than 27 whole frames, and meaningfully larger than one. Falls back to
+    frames-as-a-dense-grid when positions are missing, because over-estimating a disk requirement
+    is safe and under-estimating is what fills the disk.
+    """
+    ny, nx = int(frame_shape[0]), int(frame_shape[1])
+    positions_um = metadata.get("fov_positions_um") or {}
+    px_um = metadata.get("pixel_size_um")
+    fovs_per_region = metadata.get("fovs_per_region") or {}
+    if not positions_um or not px_um:
+        return sum(len(fovs_per_region.get(r, ())) for r in scoped) * ny * nx
+
+    from squidmip._placement import fov_offsets_px, mosaic_extent_px
+
+    total = 0
+    for region in scoped:
+        fovs = list(fovs_per_region.get(region, ()))
+        if not fovs:
+            continue
+        try:
+            offsets = fov_offsets_px(positions_um, region, fovs, float(px_um))
+            h, w = mosaic_extent_px(offsets, (ny, nx))
+        except (KeyError, ValueError):
+            h, w = ny * len(fovs), nx        # positions unusable for this region: over-estimate
+        total += int(h) * int(w)
+    return total
 
 
 def free_bytes(path) -> int:
@@ -787,6 +827,7 @@ def write_from_stream(
     disk_headroom: Optional[float] = None,
     min_free_bytes: Optional[int] = None,
     roi_table: bool = True,
+    region_operator: bool = False,
 ) -> dict:
     """Write the plate + (optionally) TIFFs from a ``(region, fov, image)`` stream and *metadata*.
 
@@ -821,7 +862,8 @@ def write_from_stream(
     tiff_root = out_dir / "tiff"
 
     if check_disk:
-        need = estimate_write_bytes(metadata, n_fovs=n_fovs, regions=regions, tiff=tiff)
+        need = estimate_write_bytes(metadata, n_fovs=n_fovs, regions=regions, tiff=tiff,
+                                    region_operator=region_operator)
         scope = "this plate write" if regions is None else f"this {len(list(regions))}-well write"
         check_disk_space(out_dir, need, headroom=disk_headroom, min_free_bytes=min_free_bytes,
                          what=scope)
@@ -985,10 +1027,22 @@ def write_plate(
     dict
         Manifest: output paths, well/field counts, pyramid level count.
     """
+    from squidmip._stitch import available_region_operators, stitch_plate
+
     metadata = reader.metadata
-    stream = project_plate(reader, n_fovs=n_fovs, workers=workers, projector=projector,
-                           on_error=on_error, regions=regions)
+    # The operator decides the stream, and both twins yield the SAME (region, fov, (T,C,1,Y,X))
+    # contract, so the writer below is identical for either. A region operator's unit of work is
+    # the WELL, so n_fovs does not apply to it and workers stays at 1: peak memory is one fused
+    # mosaic (~0.9 GB on a 27-FOV 10x well) rather than one projected FOV (~139 MB).
+    region_operator = projector in available_region_operators()
+    if region_operator:
+        stream = stitch_plate(reader, n_fovs=None, workers=1, operator=projector,
+                              on_error=on_error, regions=regions)
+    else:
+        stream = project_plate(reader, n_fovs=n_fovs, workers=workers, projector=projector,
+                               on_error=on_error, regions=regions)
     return write_from_stream(metadata, stream, out_dir, n_fovs=n_fovs, tiff=tiff, on_well=on_well,
                              write_workers=write_workers, stop=stop, regions=regions,
                              check_disk=check_disk, disk_headroom=disk_headroom,
-                             min_free_bytes=min_free_bytes, roi_table=roi_table)
+                             min_free_bytes=min_free_bytes, roi_table=roi_table,
+                             region_operator=region_operator)
