@@ -47,10 +47,8 @@ Design notes:
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
-import re
 import sys
 import threading
 from dataclasses import dataclass
@@ -59,23 +57,27 @@ from typing import Optional
 
 import numpy as np
 from PyQt5.QtCore import (
-    Qt, QProcess, QProcessEnvironment, QRectF, QSocketNotifier, QThread, QTimer, pyqtSignal,
+    Qt, QRectF, QThread, QTimer, pyqtSignal,
 )
-from PyQt5.QtGui import QColor, QFont, QImage, QPainter, QPalette, QPen, QPixmap, QRegion
+from PyQt5.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap, QRegion
 from PyQt5.QtWidgets import (
     QAction, QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel,
-    QLineEdit, QMainWindow, QMenu, QPlainTextEdit, QPushButton, QScrollArea, QSlider, QSpinBox,
-    QSplitter, QStackedWidget, QStyleFactory, QTabBar, QTabWidget, QVBoxLayout, QWidget,
+    QMainWindow, QMenu, QPlainTextEdit, QPushButton, QScrollArea, QSlider, QSpinBox,
+    QSplitter, QStackedWidget, QStyleFactory, QTabBar, QVBoxLayout, QWidget,
 )
 
-from squidmip import _explore
+from squidmip import _explore, _qtstyle
 from squidmip._engine import _default_workers, available_projectors
 from squidmip._layers import OperationStack
 from squidmip._minerva import MINERVA_HOME_ENV as _MINERVA_HOME_ENV
-from squidmip._montage import _area_downsample, _hex_to_rgb01, _window, composite
+from squidmip._montage import _area_downsample, _hex_to_rgb01, composite
 from squidmip._output import parse_well_id
 from squidmip._plate import PlateBuildError, build_plate
 from squidmip._plate_shape import PlateShapeError
+from squidmip._qt_tabs import _DetachTabBar, _DetachTabs, _FloatWindow  # noqa: F401 (re-export)
+from squidmip._qtstyle import dark_palette as _dark_palette
+from squidmip._qtstyle import hline as _hline
+from squidmip._terminal import _CmdEdit, _ProcTerminal, _Terminal  # noqa: F401 (re-export)
 from squidmip._region_nav import RegionCursor, RegionSlider
 
 # (`_SUPPORTED_PLATES` and `resolve_plate_format` used to live here. `build_plate` (IMA-214) is now
@@ -89,29 +91,21 @@ _VIEWER_WORKERS = min(6, _default_workers())   # adapt to the machine, but CAP a
                            # peak RAM is ~workers x one-well (~139 MB each on a 1536wp), and projection
                            # throughput scales only sublinearly past ~6 threads — so more workers buys
                            # little speed for linearly more memory. 6 balances both, leaves GUI cores.
-_BG = "#070a0f"
-_GRID, _RED, _MUTED, _ACCENT = QColor(0, 0, 0), QColor("#ff2d2d"), QColor("#8b98ad"), QColor("#58a6ff")
-_SEL_FILL = QColor(88, 166, 255, 90)   # translucent accent wash over a SELECTED well (IMA-221)
+# Chrome (colours, stylesheets, palette) is defined ONCE in `squidmip._qtstyle` and aliased here
+# so existing call sites keep their short private names. These are NOT second definitions: change
+# a colour in _qtstyle and every widget in the window moves with it.
+_BG = _qtstyle.BG
+_GRID, _RED, _MUTED, _ACCENT = _qtstyle.GRID, _qtstyle.RED, _qtstyle.MUTED, _qtstyle.ACCENT
+_SEL_FILL = _qtstyle.SEL_FILL
 _MIN_PREVIEW_BOX_PX = 4    # smallest FOV box (of _CELL) the RAW preview will bother mosaicking
 #                            (IMA-253): below this a field is a speck, and reading one plane per
 #                            field to draw specks is pure cost. The operator path is unaffected.
 _CLICK_SLOP = 3                       # px of travel below which a Shift-drag counts as a click
 #                                        (matches the pan threshold, so the two gestures agree)
-_CONTROL_BLUE = QColor("#7fd4ff")     # the CONTROL WELL's persistent frame (IMA-248/IMA-260).
-#                                       Light blue, and deliberately NOT _RED: the red box is the
-#                                       transient current-FOV, the blue frame is a pinned reference.
+_CONTROL_BLUE = _qtstyle.CONTROL_BLUE
 
-# --- Legibility floor for read-at-a-distance copy (project-wide constraint) --------------------
-# The spec is angular, not typographic: 16 arcmin MINIMUM, 20 arcmin optimal, which this project
-# has already converted to 17.3 px at 60 cm and 28.8 px at 1 m. Scaling the floor to 1 m gives
-# 28.8 * 16/20 = 23.0 px, so 24 px clears the 16-arcmin minimum at BOTH seating distances, and
-# 30 px clears the 20-arcmin optimum at 1 m. Empty-state copy is exactly the text a user reads
-# while leaning back from the big monitor, so it is sized for the far case, not the near one.
-_EMPTY_BODY_PX = 15                   # 16 arcmin at ~40 cm. The old 24 px assumed a 1 m viewing
-#                                       distance on a large monitor; Julio is on a SMALL one and
-#                                       called it "huge text". A pane read at desk distance does
-#                                       not need the across-the-room size.
-_EMPTY_HEAD_PX = 19                   # heading, one step up from body
+_EMPTY_BODY_PX = _qtstyle.EMPTY_BODY_PX   # the legibility floor; see squidmip/_qtstyle.py
+_EMPTY_HEAD_PX = _qtstyle.EMPTY_HEAD_PX
 
 # The empty exploration pane's copy (IMA-260). Framed as an EXAMPLE of what you might do, never as
 # an instruction: Julio asked for "example usage", so the pane shows one concrete path and then
@@ -147,58 +141,16 @@ _EMPTY_EXPLORE_CODA = (
     "Use it for 3D volume rendering, deconvolution previews, and fields worth keeping in view.")
 _EXPLORE_W = 380                      # pane 3's width on open, in px (see PlateWindow.__init__)
 
-# Processing-status hue coding, adopted from Hongquan Li's record-zstack-viewer plate navigator.
-# Deliberately colorblind-safe (blue/amber, never red/green) with a shape cue for failure (the x).
-_STATUS = {
-    "empty":      QColor("#b7bcc4"),   # not yet processed
-    "processing": QColor("#f59e0b"),   # amber — running now
-    "done":       QColor("#3b82f6"),   # blue — MIP computed
-    "failed":     QColor("#ef4444"),   # red outline + x cross
-}
-_NDV_DARK = (  # ndviewer defaults to light; theme its Qt chrome dark (bg AND text) to match
-    "QWidget{background:#0b0e14;color:#e6edf3;}"
-    "QLabel{color:#e6edf3;background:transparent;}"
-    "QSlider::groove:horizontal{background:#232b3a;height:4px;border-radius:2px;}"
-    "QSlider::handle:horizontal{background:#58a6ff;width:12px;margin:-5px 0;border-radius:6px;}"
-    "QPushButton{background:#131824;color:#e6edf3;border:1px solid #232b3a;border-radius:6px;padding:3px 8px;}"
-)
-
-# Tab bar for the top-left pane ONLY (its bar sits at the top of that pane, like the plate pane's
-# title bar — NOT a global strip across the window). Home tab = the operator list; operators open
-# their own UI tab beside it.
-_TABS_DARK = (
-    "QTabWidget{background:#070a0f;}"
-    "QTabWidget::pane{border:1px solid #c9d1d9;background:#070a0f;top:-1px;}"  # thin white outline
-    "QTabBar{background:#070a0f;}"                                            # black strip, not white
-    "QTabBar::tab{background:#0b0e14;color:#8b98ad;padding:6px 13px;border:1px solid #232b3a;"
-    "border-bottom:none;margin-right:2px;font-weight:700;font-size:12px;}"
-    "QTabBar::tab:selected{background:#131b2b;color:#e6edf3;}"
-)
-_CARD_QSS = (   # an operator "card" in the Process pane (Cellpose-style pick-an-operation)
-    "QPushButton{background:#0d1420;color:#e6edf3;border:1px solid #232b3a;border-radius:10px;"
-    "text-align:left;padding:9px 13px;font-size:13px;}"
-    "QPushButton:hover{border-color:#58a6ff;background:#111a2b;}"
-    "QPushButton:disabled{color:#57606a;border-color:#1a2130;}"
-)
-_BTN_QSS = (
-    "QPushButton{background:#131824;color:#e6edf3;border:1px solid #232b3a;border-radius:8px;"
-    "padding:7px 12px;font-weight:700;} QPushButton:hover{border-color:#58a6ff;}"
-    "QPushButton:disabled{color:#57606a;}"
-)
-_COMBO_QSS = "QComboBox{background:#0d1420;color:#e6edf3;border:1px solid #232b3a;border-radius:6px;padding:5px 8px;}"
-_CHECK_QSS = (   # checkbox with a visible white outline on the box
-    "QCheckBox{color:#e6edf3;spacing:7px;}"
-    "QCheckBox::indicator{width:14px;height:14px;border:1px solid #c9d1d9;border-radius:3px;background:#0d1420;}"
-    "QCheckBox::indicator:checked{background:#58a6ff;border:1px solid #c9d1d9;}"
-)
-_TERM_QSS = ("QPlainTextEdit{background:#05070b;color:#8bffd0;border:none;"
-             "font-family:'SF Mono','Menlo',monospace;font-size:12px;padding:10px;}")
-# The plate's right-click dropdown (IMA-260). Sized at 16 px — a menu is read at a glance with the
-# cursor already on it, so it does not carry the empty-state copy's read-from-your-chair floor.
-_MENU_QSS = ("QMenu{background:#0d1420;color:#e6edf3;border:1px solid #232b3a;font-size:16px;}"
-             "QMenu::item{padding:7px 18px;}"
-             "QMenu::item:selected{background:#1c2b44;}"
-             "QMenu::item:disabled{color:#57606a;}")
+_STATUS = _qtstyle.STATUS   # processing-status hue coding; see squidmip/_qtstyle.py
+_NDV_DARK = _qtstyle.NDV_DARK
+_TABS_DARK = _qtstyle.TABS_DARK
+_CARD_QSS = _qtstyle.CARD_QSS
+_BTN_QSS = _qtstyle.BTN_QSS
+_COMBO_QSS = _qtstyle.COMBO_QSS
+_CHECK_QSS = _qtstyle.CHECK_QSS
+_TERM_QSS = _qtstyle.TERM_QSS
+_MENU_QSS = _qtstyle.MENU_QSS
+_ANSI_RE = _qtstyle.ANSI_RE
 
 
 def _signal_names(cls) -> tuple:
@@ -218,387 +170,6 @@ def _signal_names(cls) -> tuple:
                 seen.add(name)
                 out.append(name)
     return tuple(out)
-
-
-def _hline():
-    """A thin horizontal divider (a 1px framed line) for separating sections in a pane."""
-    from PyQt5.QtWidgets import QFrame as _QFrame
-    ln = _QFrame()
-    ln.setFrameShape(_QFrame.HLine)
-    ln.setStyleSheet("color:#232b3a;background:#232b3a;max-height:1px;")
-    return ln
-# Strip ANSI CSI/OSC escapes + stray control bytes so shell output renders clean in the QPlainTextEdit
-# (we run the shell with TERM=dumb to minimise these, but zsh still emits a few).
-_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|[\x00-\x08\x0e-\x1f]")
-
-
-class _CmdEdit(QLineEdit):
-    """A command input with up/down history recall (so re-running a `squidmip …` line is one key)."""
-
-    def __init__(self, terminal):
-        super().__init__()
-        self._term = terminal
-
-    def keyPressEvent(self, e):
-        h = self._term._history
-        if e.key() == Qt.Key_Up and h:
-            self._term._hpos = max(0, self._term._hpos - 1)
-            self.setText(h[self._term._hpos])
-        elif e.key() == Qt.Key_Down and h:
-            self._term._hpos = min(len(h), self._term._hpos + 1)
-            self.setText(h[self._term._hpos] if self._term._hpos < len(h) else "")
-        else:
-            super().keyPressEvent(e)
-
-
-class _Terminal(QWidget):
-    """A real, interactive shell embedded in the Process-wells pane — IMA-186's `squidmip` CLI, live.
-
-    A login shell on a pseudo-terminal (so it echoes input and behaves like a real terminal): type a
-    command, press Enter, see its output. `squidmip` is aliased to THIS app's interpreter, so the batch
-    MIP command runs here even though the console script isn't pip-installed. Pre-seeded with a how-to
-    banner (MIP every well; `--tiff` writes FIJI-openable TIFFs). Scrollback is capped (bounded RAM),
-    and the shell is killed when the tab or the window closes (no orphan process).
-
-    PTY-backed, so it needs a Unix-y OS; ``build`` falls back to a static command preview elsewhere.
-    """
-
-    def __init__(self, cwd: Optional[str], banner: list, setup_cmds: Optional[list] = None, parent=None):
-        super().__init__(parent)
-        self._pid = None
-        self._fd = None
-        self._notifier = None
-        self._history: list[str] = []
-        self._hpos = 0
-        v = QVBoxLayout(self)
-        v.setContentsMargins(0, 0, 0, 0)
-        v.setSpacing(0)
-        self._out = QPlainTextEdit()
-        self._out.setReadOnly(True)
-        self._out.setMaximumBlockCount(4000)   # capped scrollback — output can never grow unbounded
-        self._out.setStyleSheet(_TERM_QSS)
-        v.addWidget(self._out, 1)
-        row = QWidget()
-        rl = QHBoxLayout(row)
-        rl.setContentsMargins(8, 6, 8, 8)
-        rl.setSpacing(6)
-        tag = QLabel("$")
-        tag.setStyleSheet("color:#58a6ff;font-weight:800;font-family:'SF Mono','Menlo',monospace;")
-        self._in = _CmdEdit(self)
-        self._in.setStyleSheet(
-            "QLineEdit{background:#05070b;color:#e6edf3;border:1px solid #232b3a;border-radius:6px;"
-            "padding:6px 8px;font-family:'SF Mono','Menlo',monospace;font-size:12px;}")
-        self._in.setPlaceholderText("type a command and press Enter  (e.g. squidmip … --tiff)")
-        self._in.returnPressed.connect(self._send)
-        rl.addWidget(tag)
-        rl.addWidget(self._in, 1)
-        v.addWidget(row)
-        self._start(cwd, banner, setup_cmds or [])
-
-    def _start(self, cwd, banner, setup_cmds):
-        import pty
-        shell = os.environ.get("SHELL", "/bin/zsh")
-        env = dict(os.environ)
-        env["TERM"] = "dumb"        # minimise escape sequences; still a real interactive shell
-        env["PS1"] = "$ "
-        # put the venv's Scripts/bin on PATH so the `squidmip` console script resolves directly.
-        env["PATH"] = os.path.dirname(sys.executable) + os.pathsep + env.get("PATH", "")
-        try:
-            self._pid, self._fd = pty.fork()
-        except Exception as e:      # no PTY (e.g. Windows) — degrade to a disabled, informative pane
-            self._out.setPlainText(f"(embedded terminal unavailable on this platform: {e})")
-            self._in.setEnabled(False)
-            return
-        if self._pid == 0:          # CHILD → becomes the shell (only chdir/exec between fork and exec)
-            try:
-                if cwd and os.path.isdir(cwd):
-                    os.chdir(cwd)
-                os.execvpe(shell, [shell, "-i"], env)
-            except Exception:
-                os._exit(127)
-        import fcntl                # PARENT: read the master fd non-blocking, driven by Qt's event loop
-        import struct
-        import termios
-        try:                        # a wide PTY so long commands don't wrap into garbled cursor escapes
-            fcntl.ioctl(self._fd, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 400, 0, 0))
-        except Exception:
-            pass
-        fl = fcntl.fcntl(self._fd, fcntl.F_GETFL)
-        fcntl.fcntl(self._fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
-        self._notifier = QSocketNotifier(self._fd, QSocketNotifier.Read, self)
-        self._notifier.activated.connect(self._read)
-        # Banner is DISPLAY text — print it straight into the pane (NOT echo'd through the shell, which
-        # duplicates + line-wraps it). setup_cmds (e.g. the squidmip alias) run silently in the shell.
-        self._append("\n".join(banner) + "\n")
-        for cmd in setup_cmds:
-            self._write(cmd + "\n")
-
-    def _read(self):
-        try:
-            data = os.read(self._fd, 8192)
-        except BlockingIOError:
-            return                       # notifier fired but no data ready yet — keep listening
-        except (OSError, TypeError):
-            data = b""                   # EIO / fd closed -> the child shell is gone
-        if not data:
-            if self._notifier is not None:
-                self._notifier.setEnabled(False)
-            return
-        self._append(data.decode(errors="replace"))
-
-    def _append(self, text: str):
-        """Append text to the output pane (ANSI escapes + carriage returns stripped), scrolled to end."""
-        text = _ANSI_RE.sub("", text).replace("\r", "")
-        cur = self._out.textCursor()
-        cur.movePosition(cur.End)
-        cur.insertText(text)
-        self._out.setTextCursor(cur)
-        self._out.ensureCursorVisible()
-
-    def _write(self, s: str):
-        if self._fd is not None:
-            try:
-                os.write(self._fd, s.encode())
-            except OSError:
-                pass
-
-    def _send(self):
-        cmd = self._in.text()
-        self._in.clear()
-        if cmd.strip():
-            self._history.append(cmd)
-        self._hpos = len(self._history)
-        self._write(cmd + "\n")     # the PTY echoes it back, so it appears after the shell prompt
-
-    def shutdown(self):
-        """Kill the shell (and its group) and release the fd. Idempotent; safe to call on tab/window close."""
-        if self._notifier is not None:
-            self._notifier.setEnabled(False)
-            self._notifier = None
-        if self._pid:
-            import signal
-            for killer in (lambda: os.killpg(os.getpgid(self._pid), signal.SIGTERM),
-                           lambda: os.kill(self._pid, signal.SIGTERM)):
-                try:
-                    killer()
-                    break
-                except OSError:
-                    continue
-            try:
-                os.waitpid(self._pid, os.WNOHANG)
-            except OSError:
-                pass
-            self._pid = None
-        if self._fd is not None:
-            try:
-                os.close(self._fd)
-            except OSError:
-                pass
-            self._fd = None
-
-    def closeEvent(self, e):
-        self.shutdown()
-        super().closeEvent(e)
-
-
-class _ProcTerminal(QWidget):
-    """An interactive shell in the pane via QProcess — works on Windows (cmd.exe) AND Unix ($SHELL),
-    no PTY needed. Type a command, it runs, output streams back. Not a full VT100 (pipes don't echo,
-    so we echo the typed line ourselves), but `squidmip …` and any command work. `squidmip` is aliased
-    to this app's interpreter. Used where a PTY is unavailable (i.e. on Windows)."""
-
-    def __init__(self, cwd, banner: list, setup_cmds: list, parent=None):
-        super().__init__(parent)
-        self._nl = "\r\n" if sys.platform == "win32" else "\n"
-        self._history: list[str] = []
-        self._hpos = 0
-        v = QVBoxLayout(self)
-        v.setContentsMargins(0, 0, 0, 0)
-        v.setSpacing(0)
-        self._out = QPlainTextEdit()
-        self._out.setReadOnly(True)
-        self._out.setMaximumBlockCount(4000)
-        self._out.setStyleSheet(_TERM_QSS)
-        v.addWidget(self._out, 1)
-        row = QWidget()
-        rl = QHBoxLayout(row)
-        rl.setContentsMargins(8, 6, 8, 8)
-        rl.setSpacing(6)
-        tag = QLabel("$")
-        tag.setStyleSheet("color:#58a6ff;font-weight:800;font-family:'SF Mono','Menlo',monospace;")
-        self._in = _CmdEdit(self)
-        self._in.setStyleSheet(
-            "QLineEdit{background:#05070b;color:#e6edf3;border:1px solid #232b3a;border-radius:6px;"
-            "padding:6px 8px;font-family:'SF Mono','Menlo',monospace;font-size:12px;}")
-        self._in.setPlaceholderText("type a command and press Enter  (e.g. squidmip … --tiff)")
-        self._in.returnPressed.connect(self._send)
-        rl.addWidget(tag)
-        rl.addWidget(self._in, 1)
-        v.addWidget(row)
-
-        self._proc = QProcess(self)
-        self._proc.setProcessChannelMode(QProcess.MergedChannels)
-        self._proc.readyRead.connect(self._read)
-        self._proc.finished.connect(lambda *a: self._append("\n[shell exited]\n"))
-        # put the venv's Scripts/bin on PATH so the `squidmip` console script resolves directly.
-        env = QProcessEnvironment.systemEnvironment()
-        env.insert("PATH", os.path.dirname(sys.executable) + os.pathsep + env.value("PATH"))
-        self._proc.setProcessEnvironment(env)
-        if cwd and os.path.isdir(cwd):
-            self._proc.setWorkingDirectory(cwd)
-        shell = "cmd.exe" if sys.platform == "win32" else os.environ.get("SHELL", "/bin/sh")
-        self._proc.start(shell, [])
-        self._proc.waitForStarted(3000)
-        self._append("\n".join(banner) + "\n")
-        for c in setup_cmds:            # e.g. the squidmip alias/doskey — run silently
-            self._write(c)
-
-    def running(self) -> bool:
-        return self._proc.state() != QProcess.NotRunning
-
-    def _read(self):
-        data = bytes(self._proc.readAll())
-        self._append(_ANSI_RE.sub("", data.decode(errors="replace")).replace("\r", ""))
-
-    def _append(self, text: str):
-        cur = self._out.textCursor()
-        cur.movePosition(cur.End)
-        cur.insertText(text)
-        self._out.setTextCursor(cur)
-        self._out.ensureCursorVisible()
-
-    def _write(self, s: str):
-        if self.running():
-            self._proc.write((s + self._nl).encode())
-
-    def _send(self):
-        cmd = self._in.text()
-        self._in.clear()
-        if cmd.strip():
-            self._history.append(cmd)
-        self._hpos = len(self._history)
-        self._append("> " + cmd + "\n")   # pipes don't echo input, so show it ourselves
-        self._write(cmd)
-
-    def shutdown(self):
-        if self.running():
-            self._proc.kill()
-            self._proc.waitForFinished(1500)
-
-    def closeEvent(self, e):
-        self.shutdown()
-        super().closeEvent(e)
-
-
-class _DetachTabBar(QTabBar):
-    """Tab bar that detaches a tab when it's dragged OUT of the bar (ImageJ-style float-out,
-    IMA-209). Gesture only — all detach logic lives in PlateWindow._detach_tab (the seam the
-    offscreen tests drive directly). A drag that stays inside the bar keeps Qt's normal tab
-    behavior.
-
-    ``first_detachable`` is where the detachable range starts: 1 in the process console, whose
-    index 0 is the permanent 'Process wells' home tab, but 0 in IMA-237's exploration pane, where
-    every tab is a user-opened subset and the first one is no more special than the fifth."""
-
-    def __init__(self, on_detach, parent=None, first_detachable: int = 1):
-        super().__init__(parent)
-        self._on_detach = on_detach
-        self._first_detachable = first_detachable
-        self._press_pos = None
-        self._press_index = -1
-
-    def mousePressEvent(self, e):
-        if e.button() == Qt.LeftButton:
-            self._press_pos = e.pos()
-            self._press_index = self.tabAt(e.pos())
-        super().mousePressEvent(e)
-
-    def mouseMoveEvent(self, e):
-        if (self._press_pos is not None and self._press_index >= self._first_detachable
-                and (e.pos() - self._press_pos).manhattanLength() >= QApplication.startDragDistance()
-                and not self.rect().contains(e.pos())):
-            idx = self._press_index
-            self._press_pos, self._press_index = None, -1      # fire once per press
-            # Defer: _detach_tab calls removeTab, and mutating the bar from inside its own
-            # mouseMoveEvent (mid-drag, pressed-index state live) is re-entrant — crash bait.
-            QTimer.singleShot(0, lambda: self._on_detach(idx))
-            return
-        super().mouseMoveEvent(e)
-
-    def mouseReleaseEvent(self, e):
-        self._press_pos, self._press_index = None, -1
-        super().mouseReleaseEvent(e)
-
-
-class _DetachTabs(QTabWidget):
-    """QTabWidget with a detachable tab bar. Qt requires setTabBar BEFORE any tab is added,
-    so the custom bar is installed here in __init__ rather than at the call site.
-
-    IMA-237 put a SECOND bar in the window (the exploration pane). Rather than fork a copy of
-    IMA-209's detach machinery — this codebase already paid for that once, with three parallel
-    _plate.py files — the bar tells the handler WHICH tab widget fired, so one _detach_tab serves
-    both. ``on_detach(index, tabs)``."""
-
-    def __init__(self, on_detach, first_detachable: int = 1):
-        super().__init__()
-        self.setTabBar(_DetachTabBar(lambda i: on_detach(i, self), self,
-                                     first_detachable=first_detachable))
-
-
-class _FloatWindow(QWidget):
-    """A detached operator tab as a free-floating top-level window (IMA-209).
-
-    Owns no logic: PlateWindow hands it the live tab widget and two callbacks. 'Re-dock'
-    returns the widget to the tab bar (the SAME object — a live CLI keeps its shell and
-    history); closing the window disposes the widget through the same cleanup path as
-    closing its tab (PlateWindow._dispose_tab_widget)."""
-
-    def __init__(self, title, content, on_close, on_redock):
-        super().__init__()
-        self._tab_title = title            # verbatim, for re-dock (never parsed back out)
-        self.setWindowTitle(f"{title} — SquidMIP")
-        self._content = content
-        self._on_close = on_close
-        # Scoped dark chrome — palette + stylesheet only, never app-wide (see _dark_palette).
-        # NO per-widget Fusion style here: _left_tabs needs it for its TAB STRIP rendering, but a
-        # float has no strip, and a Python-owned QStyle on a deleteLater'd widget can be GC'd
-        # first — ~QWidget then unpolishes a dangling style (segfault, found by the test suite).
-        self.setPalette(_dark_palette())
-        self.setAutoFillBackground(True)
-        self.setStyleSheet(f"background:{_BG};color:#e6edf3;")
-        v = QVBoxLayout(self)
-        v.setContentsMargins(0, 0, 0, 0)
-        v.setSpacing(0)
-        bar = QWidget()
-        h = QHBoxLayout(bar)
-        h.setContentsMargins(8, 5, 8, 5)
-        h.addStretch(1)
-        dock = QPushButton("Re-dock")
-        dock.setStyleSheet(_BTN_QSS)
-        dock.setToolTip("Return this view to the main window's tab bar")
-        dock.clicked.connect(on_redock)
-        h.addWidget(dock)
-        v.addWidget(bar)
-        v.addWidget(content, 1)
-        self.resize(560, 480)
-
-    def content(self):
-        """The widget this window is holding (None once taken) — lets the window ask WHAT floated
-        without reaching into a private attribute."""
-        return self._content
-
-    def take_content(self):
-        """Detach and return the live widget (re-dock / app-exit); the window becomes an empty
-        shell whose close is then a plain close (see closeEvent's guard)."""
-        w, self._content = self._content, None
-        if w is not None:
-            w.setParent(None)
-        return w
-
-    def closeEvent(self, e):
-        if self._content is not None:      # re-dock/app-exit already emptied us otherwise
-            self._on_close()
-        super().closeEvent(e)
 
 
 @dataclass(frozen=True)
@@ -5418,7 +4989,6 @@ class PlateWindow(QMainWindow):
     # -- open an acquisition (no processing yet — that's the Process menu) --
     def ingest(self, path: str):
         from squidmip import open_reader
-        from squidmip._output import plate_metadata
 
         p, is_plate = resolve_plate_root(path)
         if is_plate:
@@ -7034,34 +6604,6 @@ class PlateWindow(QMainWindow):
         for w in list(self._retired):
             w.wait()                 # join before exit — never leave a QThread running at teardown
         super().closeEvent(e)
-
-
-def _dark_palette() -> QPalette:
-    """A dark palette for the Process pane's tab widget ONLY (see PlateWindow.__init__).
-
-    The tab strip's empty area (behind/beside the tabs) is painted by the STYLE from the palette, not
-    by our stylesheets, so in macOS LIGHT mode it rendered white. We fix it by giving the TAB WIDGET a
-    Fusion style + this dark palette — scoped to that widget subtree, NOT the whole app. Applying it
-    app-wide bled into the embedded ndviewer and hid its per-channel colour swatches (the cmap combo
-    indicators), which is why this is deliberately not global."""
-    dark, base, text, mut = QColor(7, 10, 20), QColor(11, 14, 20), QColor(230, 237, 243), QColor(87, 96, 109)
-    pal = QPalette()
-    pal.setColor(QPalette.Window, dark)
-    pal.setColor(QPalette.WindowText, text)
-    pal.setColor(QPalette.Base, base)
-    pal.setColor(QPalette.AlternateBase, dark)
-    pal.setColor(QPalette.Text, text)
-    pal.setColor(QPalette.Button, QColor(19, 24, 36))
-    pal.setColor(QPalette.ButtonText, text)
-    pal.setColor(QPalette.ToolTipBase, base)
-    pal.setColor(QPalette.ToolTipText, text)
-    pal.setColor(QPalette.Highlight, QColor(88, 166, 255))
-    pal.setColor(QPalette.HighlightedText, dark)
-    for grp in (QPalette.Disabled,):
-        pal.setColor(grp, QPalette.Text, mut)
-        pal.setColor(grp, QPalette.ButtonText, mut)
-        pal.setColor(grp, QPalette.WindowText, mut)
-    return pal
 
 
 def _rss_mb() -> tuple:
