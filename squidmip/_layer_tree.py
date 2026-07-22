@@ -62,8 +62,8 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from PyQt5.QtCore import QAbstractItemModel, QModelIndex, Qt
-from PyQt5.QtWidgets import QTreeView
+from qtpy.QtCore import QAbstractItemModel, QModelIndex, Qt
+from qtpy.QtWidgets import QTreeView
 
 from squidmip._napari_view import MosaicLayers, key_of
 
@@ -136,9 +136,9 @@ class MosaicTreeModel(QAbstractItemModel):
                 continue
             parent = self.index(op_row, 0)
             child = self.index(channels.index(key.channel), 0, parent)
-            self.dataChanged.emit(child, child, [Qt.CheckStateRole])
+            self.dataChanged.emit(child, child, [Qt.ItemDataRole.CheckStateRole])
             # The group's own check state is derived from this layer, so it changed too.
-            self.dataChanged.emit(parent, parent, [Qt.CheckStateRole])
+            self.dataChanged.emit(parent, parent, [Qt.ItemDataRole.CheckStateRole])
 
     # -- QAbstractItemModel -------------------------------------------------------------
     def index(self, row: int, column: int, parent=QModelIndex()) -> QModelIndex:
@@ -167,11 +167,11 @@ class MosaicTreeModel(QAbstractItemModel):
 
     def flags(self, index=QModelIndex()):
         if not index.isValid():
-            return Qt.NoItemFlags
+            return Qt.ItemFlag.NoItemFlags
         # ItemIsUserCheckable is load-bearing: a model that answers CheckStateRole without it
         # renders a tree with no checkboxes -- readable, unclickable, and green under any test
         # that only calls setData directly.
-        return Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable
+        return Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsUserCheckable
 
     def _key_at(self, index: QModelIndex) -> Optional[tuple[str, str]]:
         """``(op, channel)`` for a leaf, ``None`` for a processing-layer row."""
@@ -185,19 +185,19 @@ class MosaicTreeModel(QAbstractItemModel):
             return None
         return op, channels[index.row()]
 
-    def data(self, index=QModelIndex(), role=Qt.DisplayRole):
+    def data(self, index=QModelIndex(), role=Qt.ItemDataRole.DisplayRole):
         if not index.isValid():
             return None
         key = self._key_at(index)
 
-        if role in (Qt.DisplayRole, Qt.ToolTipRole):
+        if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.ToolTipRole):
             if key is None:
                 if index.row() >= len(self._rows):
                     return None
                 return self._rows[index.row()][0]
             return key[1]
 
-        if role == Qt.CheckStateRole:
+        if role == Qt.ItemDataRole.CheckStateRole:
             if key is None:
                 if index.row() >= len(self._rows):
                     return None
@@ -205,7 +205,7 @@ class MosaicTreeModel(QAbstractItemModel):
             layer = self._mosaic.find(*key)
             if layer is None:
                 return None
-            return Qt.Checked if layer.visible else Qt.Unchecked
+            return Qt.CheckState.Checked if layer.visible else Qt.CheckState.Unchecked
 
         return None
 
@@ -213,18 +213,18 @@ class MosaicTreeModel(QAbstractItemModel):
         """DERIVED, never stored. See the module docstring on ``GroupLayer._visible``."""
         group = self._mosaic.group(op)
         if not group:
-            return Qt.Unchecked
+            return Qt.CheckState.Unchecked
         visible = [bool(ly.visible) for ly in group]
         if all(visible):
-            return Qt.Checked
+            return Qt.CheckState.Checked
         if not any(visible):
-            return Qt.Unchecked
-        return Qt.PartiallyChecked
+            return Qt.CheckState.Unchecked
+        return Qt.CheckState.PartiallyChecked
 
-    def setData(self, index=QModelIndex(), value=None, role=Qt.EditRole) -> bool:
-        if not index.isValid() or role != Qt.CheckStateRole:
+    def setData(self, index=QModelIndex(), value=None, role=Qt.ItemDataRole.EditRole) -> bool:
+        if not index.isValid() or role != Qt.ItemDataRole.CheckStateRole:
             return False
-        want = Qt.CheckState(value) == Qt.Checked
+        want = Qt.CheckState(value) == Qt.CheckState.Checked
         key = self._key_at(index)
 
         if key is not None:

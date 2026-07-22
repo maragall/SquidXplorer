@@ -29,7 +29,7 @@ def _selftest(dataset: str) -> int:
     # windowed bundle would otherwise abort before reaching a single line of our code.
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-    from PyQt5.QtWidgets import QApplication
+    from qtpy.QtWidgets import QApplication
 
     from squidmip._viewer import PlateWindow
 

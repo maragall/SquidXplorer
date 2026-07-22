@@ -49,7 +49,7 @@ _APP = None
 
 
 def check(label, path, want_regions, want_positions):
-    from PyQt5.QtWidgets import QApplication
+    from qtpy.QtWidgets import QApplication
     import squidmip._viewer as V
 
     # Keep a module-level reference: a QApplication with no Python owner is garbage
@@ -178,7 +178,7 @@ def check_one_writer(label, root, reader_cls):
             break
 
     # Then the widget, which is the whole reason this file is not a pytest module.
-    from PyQt5.QtWidgets import QApplication
+    from qtpy.QtWidgets import QApplication
     import squidmip._viewer as V
 
     global _APP

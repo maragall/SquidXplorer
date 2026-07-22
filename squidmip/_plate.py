@@ -527,7 +527,7 @@ class Plate(ABC):
 # --------------------------------------------------------------------------- WellPlate
 
 def _row_letter(i: int) -> str:
-    """0->A, 25->Z, 26->AA. Local copy: the viewer's lives behind a PyQt5 import."""
+    """0->A, 25->Z, 26->AA. Local copy: the viewer's lives behind a Qt import."""
     s, i = "", i + 1
     while i:
         i, r = divmod(i - 1, 26)

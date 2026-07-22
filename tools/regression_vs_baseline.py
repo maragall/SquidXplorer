@@ -68,14 +68,14 @@ def probe() -> dict:
         except Exception as e:
             out[key] = f"<{type(e).__name__}: {e}>"
 
-    from PyQt5.QtCore import QEventLoop, QTimer
-    from PyQt5.QtWidgets import QApplication
+    from qtpy.QtCore import QEventLoop, QTimer
+    from qtpy.QtWidgets import QApplication
     import squidmip._viewer as V
 
     app = QApplication.instance() or QApplication([])
 
     def settle(ms=6000):
-        loop = QEventLoop(); QTimer.singleShot(ms, loop.quit); loop.exec_()
+        loop = QEventLoop(); QTimer.singleShot(ms, loop.quit); loop.exec()
 
     def open_win(path):
         w = V.PlateWindow(None); w.resize(1600, 900); w.show()

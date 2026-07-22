@@ -25,6 +25,18 @@ The public surface is intentionally tiny::
     launch_minerva()                          # best-effort; returns False if it isn't installed
 """
 
+# --- Qt binding selection (IMA / Qt6 migration) ------------------------------------------------
+# The GUI is written against `qtpy`, which picks its binding from QT_API and otherwise walks a
+# preference list that still starts at PyQt5 — and PyQt5, PyQt6 and PySide6 are all installed on
+# this machine. Two Qt majors in one process abort the interpreter, so the binding must be pinned
+# BEFORE anything imports qtpy (napari imports it the moment it loads). This costs an environ
+# write and imports no Qt at all, so the headless pipeline stays Qt-free as documented.
+# `setdefault`, not assignment: an explicit QT_API from the caller still wins.
+import os as _os
+
+_os.environ.setdefault("QT_API", "pyqt6")
+del _os
+
 from squidmip._engine import (
     Operator,
     add_projector,

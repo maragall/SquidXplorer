@@ -29,8 +29,13 @@ post-processing: MIP is operator #1, and more operators stack behind the same me
 second operator lands this is a general HCS viewer, not just a MIP tool).
 
 Design notes:
-- ndviewer_light is the embedded detail viewer (its LightweightViewer QWidget + push API); PyQt5 to
-  match its stack. PyQt5 is imported here, never in squidmip/__init__, so the pipeline stays Qt-free.
+- The GUI is written against ``qtpy``; ``squidmip/__init__`` pins QT_API=pyqt6, which is the ONE
+  place the binding is chosen (Qt6 because AGAVE, the volume renderer we want to embed, is Qt 6.9
+  and two Qt majors cannot share a process). Qt itself is imported here, never in
+  ``squidmip/__init__``, so the headless pipeline stays Qt-free.
+- napari is the embedded detail viewer. ndviewer_light remains the named fallback but its ``core``
+  imports PyQt5 at module scope, so it cannot be loaded into this Qt6 process; see
+  ``PlateWindow._make_detail_viewer``, which refuses with a message instead of aborting.
 - Nothing is written to the user's disk: the detail view reads the acquisition's own read-only
   TIFFs. Memory is NOT one-well-at-a-time on the plate side: PlateOverview retains the whole plate
   with its CHANNEL AXIS intact — one (C, nr*88, nc*88) NATIVE-DTYPE store per displayed layer — so
@@ -58,11 +63,11 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-from PyQt5.QtCore import (
-    Qt, QProcess, QProcessEnvironment, QRectF, QSocketNotifier, QThread, QTimer, pyqtSignal,
+from qtpy.QtCore import (
+    Qt, QProcess, QProcessEnvironment, QRectF, QSocketNotifier, QThread, QTimer, Signal,
 )
-from PyQt5.QtGui import QColor, QFont, QImage, QPainter, QPalette, QPen, QPixmap, QRegion
-from PyQt5.QtWidgets import (
+from qtpy.QtGui import QColor, QFont, QImage, QPainter, QPalette, QPen, QPixmap, QRegion
+from qtpy.QtWidgets import (
     QAction, QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel,
     QLineEdit, QMainWindow, QMenu, QPlainTextEdit, QPushButton, QScrollArea, QSlider, QSpinBox,
     QSplitter, QStackedWidget, QStyleFactory, QTabBar, QTabWidget, QVBoxLayout, QWidget,
@@ -181,19 +186,24 @@ _MENU_QSS = ("QMenu{background:#0d1420;color:#e6edf3;border:1px solid #232b3a;fo
 
 
 def _signal_names(cls) -> tuple:
-    """Every pyqtSignal declared on *cls* or its bases, by attribute name.
+    """Every Signal declared on *cls* or its bases, by attribute name.
 
-    ``pyqtSignal`` is a class attribute until Qt binds it per-instance, so the class object is
+    ``Signal`` is a class attribute until Qt binds it per-instance, so the class object is
     where the declarations are discoverable. Excludes ``finished``/``started`` — QThread's own,
     which the retire path connects deliberately and must not tear down.
     """
-    from PyQt5.QtCore import pyqtSignal as _sig
+    from qtpy.QtCore import Signal as _sig
     seen, out = set(), []
     for klass in cls.__mro__:
         for name, value in vars(klass).items():
             if name in seen or name in ("finished", "started"):
                 continue
-            if isinstance(value, _sig) or type(value).__name__ in ("pyqtSignal", "unbound_signal"):
+            # The name fallback covers bindings where the declaration object is not an instance
+            # of the imported factory. PyQt names its class `pyqtSignal` in every major version
+            # (qtpy only aliases it to `Signal`); PySide names it `Signal`.
+            if isinstance(value, _sig) or type(value).__name__ in (
+                "pyqtSignal", "Signal", "unbound_signal"
+            ):
                 seen.add(name)
                 out.append(name)
     return tuple(out)
@@ -201,9 +211,9 @@ def _signal_names(cls) -> tuple:
 
 def _hline():
     """A thin horizontal divider (a 1px framed line) for separating sections in a pane."""
-    from PyQt5.QtWidgets import QFrame as _QFrame
+    from qtpy.QtWidgets import QFrame as _QFrame
     ln = _QFrame()
-    ln.setFrameShape(_QFrame.HLine)
+    ln.setFrameShape(_QFrame.Shape.HLine)
     ln.setStyleSheet("color:#232b3a;background:#232b3a;max-height:1px;")
     return ln
 # Strip ANSI CSI/OSC escapes + stray control bytes so shell output renders clean in the QPlainTextEdit
@@ -220,10 +230,10 @@ class _CmdEdit(QLineEdit):
 
     def keyPressEvent(self, e):
         h = self._term._history
-        if e.key() == Qt.Key_Up and h:
+        if e.key() == Qt.Key.Key_Up and h:
             self._term._hpos = max(0, self._term._hpos - 1)
             self.setText(h[self._term._hpos])
-        elif e.key() == Qt.Key_Down and h:
+        elif e.key() == Qt.Key.Key_Down and h:
             self._term._hpos = min(len(h), self._term._hpos + 1)
             self.setText(h[self._term._hpos] if self._term._hpos < len(h) else "")
         else:
@@ -304,7 +314,7 @@ class _Terminal(QWidget):
             pass
         fl = fcntl.fcntl(self._fd, fcntl.F_GETFL)
         fcntl.fcntl(self._fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
-        self._notifier = QSocketNotifier(self._fd, QSocketNotifier.Read, self)
+        self._notifier = QSocketNotifier(self._fd, QSocketNotifier.Type.Read, self)
         self._notifier.activated.connect(self._read)
         # Banner is DISPLAY text — print it straight into the pane (NOT echo'd through the shell, which
         # duplicates + line-wraps it). setup_cmds (e.g. the squidmip alias) run silently in the shell.
@@ -416,7 +426,7 @@ class _ProcTerminal(QWidget):
         v.addWidget(row)
 
         self._proc = QProcess(self)
-        self._proc.setProcessChannelMode(QProcess.MergedChannels)
+        self._proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
         self._proc.readyRead.connect(self._read)
         self._proc.finished.connect(lambda *a: self._append("\n[shell exited]\n"))
         # put the venv's Scripts/bin on PATH so the `squidmip` console script resolves directly.
@@ -433,7 +443,7 @@ class _ProcTerminal(QWidget):
             self._write(c)
 
     def running(self) -> bool:
-        return self._proc.state() != QProcess.NotRunning
+        return self._proc.state() != QProcess.ProcessState.NotRunning
 
     def _read(self):
         data = bytes(self._proc.readAll())
@@ -487,15 +497,17 @@ class _DetachTabBar(QTabBar):
         self._press_index = -1
 
     def mousePressEvent(self, e):
-        if e.button() == Qt.LeftButton:
-            self._press_pos = e.pos()
-            self._press_index = self.tabAt(e.pos())
+        if e.button() == Qt.MouseButton.LeftButton:
+            # position(), not the Qt5-era pos(): pos() is deprecated in Qt6 and gone in Qt7.
+            self._press_pos = e.position().toPoint()
+            self._press_index = self.tabAt(self._press_pos)
         super().mousePressEvent(e)
 
     def mouseMoveEvent(self, e):
         if (self._press_pos is not None and self._press_index >= self._first_detachable
-                and (e.pos() - self._press_pos).manhattanLength() >= QApplication.startDragDistance()
-                and not self.rect().contains(e.pos())):
+                and (e.position().toPoint() - self._press_pos).manhattanLength()
+                    >= QApplication.startDragDistance()
+                and not self.rect().contains(e.position().toPoint())):
             idx = self._press_index
             self._press_pos, self._press_index = None, -1      # fire once per press
             # Defer: _detach_tab calls removeTab, and mutating the bar from inside its own
@@ -1350,7 +1362,7 @@ class _LoupeWorker(QThread):
     each new request) IS the coalescing. Results carry the generation they were asked for, so a
     late arrival for a stale position is dropped by the widget rather than flashing."""
 
-    ready = pyqtSignal(int, str, object, object, object)  # (gen, well, crop|None, window|None, err)
+    ready = Signal(int, str, object, object, object)  # (gen, well, crop|None, window|None, err)
 
     def __init__(self, source: _LoupeSource):
         super().__init__()
@@ -1424,14 +1436,14 @@ class PlateOverview(QWidget):
     contrast re-composites from the retained pixels: no reader I/O, no re-projection, ever.
     """
 
-    hovered = pyqtSignal(str)              # region id (or "" off-plate), for the window's readout
-    wellActivated = pyqtSignal(str, int)   # (well_id, fov_index) double-clicked -> load in ndviewer
-    selectionChanged = pyqtSignal(list)    # acquired well ids the operator picked (row-major)
-    controlRequested = pyqtSignal(str)     # right-click menu: set this region as the CONTROL WELL
+    hovered = Signal(str)              # region id (or "" off-plate), for the window's readout
+    wellActivated = Signal(str, int)   # (well_id, fov_index) double-clicked -> load in ndviewer
+    selectionChanged = Signal(list)    # acquired well ids the operator picked (row-major)
+    controlRequested = Signal(str)     # right-click menu: set this region as the CONTROL WELL
                                            # ("" = clear it). The plate ASKS; the window owns the
                                            # answer and hands it back via set_control — the widget
                                            # never sets its own frame (IMA-248's one-owner rule).
-    marqueeSelected = pyqtSignal(list)     # ...and specifically by a Shift-DRAG: opens an exploration
+    marqueeSelected = Signal(list)     # ...and specifically by a Shift-DRAG: opens an exploration
                                            # tab (IMA-205). Shift+CLICK refines the selection one well
                                            # at a time and deliberately does NOT fire it — otherwise
                                            # every corrective click spawns another tab.
@@ -1456,7 +1468,7 @@ class PlateOverview(QWidget):
         self._status: dict[tuple, str] = {rc: "empty" for rc in wells}
         self._tiles: set[tuple] = set()                        # cells that have a tile painted (any layer)
         self._tiles_by_layer: dict[str, set] = {}              # layer -> cells with an image there
-        self._canvas = QImage(self._nc * _CELL, self._nr * _CELL, QImage.Format_RGB888)
+        self._canvas = QImage(self._nc * _CELL, self._nr * _CELL, QImage.Format.Format_RGB888)
         self._canvas.fill(QColor(_BG))
         self._final = None            # global-contrast recomposite of the ACTIVE layer (or None)
         # Layer stack render: the base ("raw") is self._canvas; each operator draws into its own
@@ -1531,7 +1543,7 @@ class PlateOverview(QWidget):
         self._hold.setInterval(_LOUPE_HOLD_MS)
         self._hold.timeout.connect(self._arm_loupe)
         self.setMouseTracking(True)
-        self.setFocusPolicy(Qt.ClickFocus)   # so focusOutEvent can actually fire (see below)
+        self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)   # so focusOutEvent can actually fire (see below)
         self.setMinimumSize(240, 200)
 
     # -- loupe wiring --
@@ -1653,7 +1665,7 @@ class PlateOverview(QWidget):
         rgb = composite(planes, colors, win, mask)
         rgb = np.ascontiguousarray(rgb)
         h, w = rgb.shape[:2]
-        img = QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888).copy()   # copy: rgb is transient
+        img = QImage(rgb.data, w, h, 3 * w, QImage.Format.Format_RGB888).copy()   # copy: rgb is transient
         self._loupe_img, self._loupe_note = img, ""
         self.update()
 
@@ -1675,7 +1687,7 @@ class PlateOverview(QWidget):
             return self._canvas
         cv = self._op_canvas.get(layer)
         if cv is None:
-            cv = QImage(self._nc * _CELL, self._nr * _CELL, QImage.Format_RGB888)
+            cv = QImage(self._nc * _CELL, self._nr * _CELL, QImage.Format.Format_RGB888)
             cv.fill(QColor(_BG))
             self._op_canvas[layer] = cv
         return cv
@@ -1947,7 +1959,7 @@ class PlateOverview(QWidget):
                             self.channel_windows(), self._mask)
         self._final_arr[layer] = rgb          # hold the buffer: the QImage below only wraps it
         h, w, _ = rgb.shape
-        self.set_final(QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888), layer)
+        self.set_final(QImage(rgb.data, w, h, 3 * w, QImage.Format.Format_RGB888), layer)
 
     def hideEvent(self, e):
         self._full.stop()   # a plate on its way out must not repaint from a queued timer
@@ -2008,7 +2020,7 @@ class PlateOverview(QWidget):
         wins = (self._cell_windows(store, ri, ci, layer) if self._scope == SCOPE_PER_REGION
                 else self.channel_windows())      # per-region windows THIS cell, not the plate
         cell = composite(store[:, y0:y0 + _CELL, x0:x0 + _CELL], self._colors, wins, self._mask)
-        img = QImage(cell.data, _CELL, _CELL, 3 * _CELL, QImage.Format_RGB888)
+        img = QImage(cell.data, _CELL, _CELL, 3 * _CELL, QImage.Format.Format_RGB888)
         p = QPainter(self._canvas_for(layer))
         p.drawImage(x0, y0, img)           # drawImage COPIES, so `cell` may die after p.end()
         p.end()
@@ -2186,26 +2198,28 @@ class PlateOverview(QWidget):
             return          # a marquee owns the drag; zooming would slide the plate under the rect
         if self._loupe is not None:      # zooming the plate under a live loupe would fight it
             return
-        mx, my = e.x() - (self._ox + _HDR), e.y() - (self._oy + _COLH)    # cursor in plate px
+        # Qt6 dropped QWheelEvent.x()/y(); position() is the float-precision replacement.
+        ex, ey = e.position().x(), e.position().y()
+        mx, my = ex - (self._ox + _HDR), ey - (self._oy + _COLH)          # cursor in plate px
         new_cd = self._cd * (1.0015 ** e.angleDelta().y())
         new_cd = max(self._fit_cd(), min(self._fit_cd() * 40, new_cd))    # never zoom out past fit
         scale = new_cd / self._cd
-        self._ox = e.x() - _HDR - mx * scale         # keep the point under the cursor fixed
-        self._oy = e.y() - _COLH - my * scale
+        self._ox = ex - _HDR - mx * scale            # keep the point under the cursor fixed
+        self._oy = ey - _COLH - my * scale
         self._cd = new_cd
         self._user_view = True
         self.update()
 
     def mousePressEvent(self, e):
-        if e.button() != Qt.LeftButton:
+        if e.button() != Qt.MouseButton.LeftButton:
             return
         # SHIFT owns every selection gesture (IMA-221). Keeping selection off the plain click is
         # what makes double-click safe: Qt delivers press+release BEFORE mouseDoubleClickEvent, so
         # a plain-click toggle would silently flip a well every time you opened one. (Ctrl is out:
         # on macOS Ctrl+click is right-click and Qt maps Cmd -> ControlModifier.)
-        if e.modifiers() & Qt.ShiftModifier:
+        if e.modifiers() & Qt.KeyboardModifier.ShiftModifier:
             self._marquee = (e.x(), e.y(), e.x(), e.y())
-            self._marquee_add = bool(e.modifiers() & Qt.AltModifier)   # Shift+Alt = union
+            self._marquee_add = bool(e.modifiers() & Qt.KeyboardModifier.AltModifier)   # Shift+Alt = union
             self._press = None                                          # ...so this drag never pans
             self._panning = False
             self.update()
@@ -2231,12 +2245,12 @@ class PlateOverview(QWidget):
             self._request_loupe(e.x(), e.y())
             self.update()
             return
-        if self._marquee is not None and (e.buttons() & Qt.LeftButton):
+        if self._marquee is not None and (e.buttons() & Qt.MouseButton.LeftButton):
             x0, y0, _, _ = self._marquee          # grow the rubber band; emit NOTHING until release
             self._marquee = (x0, y0, e.x(), e.y())
             self.update()
             return
-        if self._press is not None and (e.buttons() & Qt.LeftButton):
+        if self._press is not None and (e.buttons() & Qt.MouseButton.LeftButton):
             dx, dy = e.x() - self._press[0], e.y() - self._press[1]
             if abs(dx) + abs(dy) > 3:
                 self._panning = True
@@ -2259,7 +2273,7 @@ class PlateOverview(QWidget):
         # Only the LEFT release commits a selection. The gesture is opened by a left press, but Qt
         # delivers a release for whichever button went up — so a right-click while a Shift-drag is
         # in flight would otherwise silently toggle/replace the selection.
-        if self._marquee is not None and e.button() == Qt.LeftButton:
+        if self._marquee is not None and e.button() == Qt.MouseButton.LeftButton:
             x0, y0, x1, y1 = self._marquee
             add, self._marquee, self._marquee_add = self._marquee_add, None, False
             dragged = abs(x1 - x0) + abs(y1 - y0) > _CLICK_SLOP
@@ -2490,7 +2504,7 @@ class PlateOverview(QWidget):
         if not self._user_view:          # auto-fit until the user first zooms/pans
             self._fit()
         p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing, True)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         p.fillRect(self.rect(), QColor(_BG))
         cd, nr, nc = self._cd, self._nr, self._nc
         ax, ay = self._ox + _HDR, self._oy + _COLH   # plate top-left (after label margins)
@@ -2504,7 +2518,7 @@ class PlateOverview(QWidget):
             # FREEFORM: each region's cell is its own rectangle, so the montage is blitted per
             # cell rather than as one grid-aligned image. A handful of regions, one drawImage each.
             src = self._active_source()
-            p.setRenderHint(QPainter.SmoothPixmapTransform, True)
+            p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
             for rc in sorted(tiled):
                 if rc not in self._by_rc:
                     continue
@@ -2517,7 +2531,7 @@ class PlateOverview(QWidget):
             if (self._scaled is None or self._scaled_cd != cd
                     or self._scaled.width() != w or self._scaled.height() != h):
                 self._scaled = QPixmap.fromImage(self._active_source()).scaled(
-                    w, h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+                    w, h, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
                 self._scaled_cd = cd
             if len(tiled) < nr * nc:
                 # The montage canvas is opaque _BG wherever no tile landed, so let it cover only
@@ -2542,7 +2556,7 @@ class PlateOverview(QWidget):
                 x0, y0, cw, ch = self._cell_rect(ri, ci)
                 ex, ey = int(x0 + (cw - d) / 2), int(y0 + (ch - d) / 2)
                 if state == "processing":                   # amber dot
-                    p.setPen(Qt.NoPen)
+                    p.setPen(Qt.PenStyle.NoPen)
                     p.setBrush(_STATUS["processing"])
                     p.drawEllipse(ex, ey, int(d), int(d))
                 elif state == "failed":                     # red x within the dot box
@@ -2550,19 +2564,19 @@ class PlateOverview(QWidget):
                     p.drawLine(ex, ey, ex + int(d), ey + int(d))
                     p.drawLine(ex + int(d), ey, ex, ey + int(d))
                 elif not has_img:                           # grey dot: an empty plate position
-                    p.setPen(Qt.NoPen)
+                    p.setPen(Qt.PenStyle.NoPen)
                     p.setBrush(_STATUS["empty"])
                     p.drawEllipse(ex, ey, int(d), int(d))
                 # else: has an image on the active layer -> no dot
-        p.setBrush(Qt.NoBrush)
+        p.setBrush(Qt.BrushStyle.NoBrush)
 
         if self._selection:            # SELECTED wells = translucent accent wash (IMA-221). Drawn
-            p.setPen(Qt.NoPen)         # under the grid/labels so it reads as a highlight, and kept
+            p.setPen(Qt.PenStyle.NoPen)         # under the grid/labels so it reads as a highlight, and kept
             p.setBrush(_SEL_FILL)      # visually distinct from _sel's red BOX and _hover's red DOT.
             for ri, ci in self._selection:
                 rx, ry, rw, rh = self._cell_rect(ri, ci)
                 p.drawRect(int(rx), int(ry), int(rw), int(rh))
-            p.setBrush(Qt.NoBrush)
+            p.setBrush(Qt.BrushStyle.NoBrush)
 
         if self._layout is None:
             p.setPen(QPen(_GRID, 3))   # black grid lines between wells (multi-FOV mosaics sit INSIDE a cell)
@@ -2572,7 +2586,7 @@ class PlateOverview(QWidget):
                 p.drawLine(int(ax), int(ay + r * cd), int(ax + W), int(ay + r * cd))
         # (a freeform holder has no shared grid lines to draw — its cells are individually placed
         #  rectangles, and _paint_carrier already outlined each one.)
-        p.setFont(QFont("Helvetica Neue", 11, QFont.DemiBold))
+        p.setFont(QFont("Helvetica Neue", 11, QFont.Weight.DemiBold))
         if self._layout is not None:
             # A freeform region is named, not numbered, and the gutter is sized for "A".."AF" —
             # "manual0" gets sliced in half there. Its own cell is the only place wide enough and
@@ -2581,7 +2595,7 @@ class PlateOverview(QWidget):
                 rx, ry, rw, _rh = self._cell_rect(*rc)
                 p.setPen(_ACCENT if self._hover == rc else _MUTED)
                 p.drawText(QRectF(rx, ry - _COLH, max(rw, 60.0), _COLH),
-                           int(Qt.AlignCenter), str(region))
+                           int(Qt.AlignmentFlag.AlignCenter), str(region))
         # Column/row labels THIN OUT as cells shrink so they never overlap (a 48-col 1536wp would
         # otherwise cram "1..48" into a few px). Always draw the hovered row/col so hover still
         # reads. Skipped entirely for a freeform holder: its rows and columns are an internal
@@ -2593,40 +2607,40 @@ class PlateOverview(QWidget):
             if c % cstep and not hov:
                 continue
             p.setPen(_ACCENT if hov else _MUTED)
-            p.drawText(int(ax + c * cd), int(self._oy), int(cd), _COLH, Qt.AlignCenter, str(self._cols[c]))
+            p.drawText(int(ax + c * cd), int(self._oy), int(cd), _COLH, Qt.AlignmentFlag.AlignCenter, str(self._cols[c]))
         for r in range(nr if self._layout is None else 0):
             hov = bool(self._hover and self._hover[0] == r)
             if r % rstep and not hov:
                 continue
             p.setPen(_ACCENT if hov else _MUTED)
-            p.drawText(int(self._ox), int(ay + r * cd), _HDR, int(cd), Qt.AlignCenter, str(self._rows[r]))
+            p.drawText(int(self._ox), int(ay + r * cd), _HDR, int(cd), Qt.AlignmentFlag.AlignCenter, str(self._rows[r]))
         if self._control is not None and self._control in self._by_rc:
             # THE CONTROL WELL: a PERSISTENT light-blue frame, labelled, drawn UNDER the red box so
             # the transient current-FOV marker still reads when the two land on the same cell. The
             # label is what stops "a blue box" from being a mystery a week later.
             cx, cy, cw, ch = self._cell_rect(*self._control)
             p.setPen(QPen(_CONTROL_BLUE, 3))
-            p.setBrush(Qt.NoBrush)
+            p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawRect(int(cx) + 1, int(cy) + 1, int(cw) - 2, int(ch) - 2)
-            p.setFont(QFont("Helvetica Neue", 10, QFont.Bold))
-            p.drawText(QRectF(cx, cy + 2, max(cw, 50.0), 16.0), int(Qt.AlignCenter), "Control")
-            p.setFont(QFont("Helvetica Neue", 11, QFont.DemiBold))
+            p.setFont(QFont("Helvetica Neue", 10, QFont.Weight.Bold))
+            p.drawText(QRectF(cx, cy + 2, max(cw, 50.0), 16.0), int(Qt.AlignmentFlag.AlignCenter), "Control")
+            p.setFont(QFont("Helvetica Neue", 11, QFont.Weight.DemiBold))
         if self._sel is not None:          # the CURRENT well in the detail viewer = a red BOX
             p.setPen(QPen(_RED, 2))
-            p.setBrush(Qt.NoBrush)
+            p.setBrush(Qt.BrushStyle.NoBrush)
             sx, sy, sw, sh = self._cell_rect(*self._sel)
             p.drawRect(int(sx), int(sy), int(sw), int(sh))
         if self._hover is not None:        # where the cursor is, moving around the plate = a red DOT
             ri, ci = self._hover           # SAME geometry as the status dots -> overlays them exactly
             x0, y0, hw, hh = self._cell_rect(ri, ci)
             ex, ey = int(x0 + (hw - d) / 2), int(y0 + (hh - d) / 2)
-            p.setPen(Qt.NoPen)
+            p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(_RED)
             p.drawEllipse(ex, ey, int(d), int(d))
         if self._marquee is not None:      # live drag rectangle while Shift-dragging
             mx0, my0, mx1, my1 = self._marquee
-            p.setPen(QPen(_ACCENT, 1, Qt.DashLine))
-            p.setBrush(Qt.NoBrush)
+            p.setPen(QPen(_ACCENT, 1, Qt.PenStyle.DashLine))
+            p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawRect(int(min(mx0, mx1)), int(min(my0, my1)),
                        int(abs(mx1 - mx0)), int(abs(my1 - my0)))
         if self._loupe is not None:        # press-and-hold magnifier, over everything else
@@ -2638,19 +2652,19 @@ class PlateOverview(QWidget):
         # there is no caveat to give when the wells are comparable.
         if self._scope != SCOPE_GLOBAL:
             label = f"contrast: {self._scope}  ·  wells NOT comparable"
-            p.setFont(QFont("Helvetica Neue", 10, QFont.Bold))
+            p.setFont(QFont("Helvetica Neue", 10, QFont.Weight.Bold))
             fm = p.fontMetrics()
             tw = fm.horizontalAdvance(label) if hasattr(fm, "horizontalAdvance") else fm.width(label)
             bw, bh = tw + 18, 24
             bx, by = self.width() - bw - 10, self.height() - bh - 10
-            p.setPen(Qt.NoPen)
+            p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(QColor(255, 176, 0, 235))            # amber: a caveat, not an error
             p.drawRoundedRect(bx, by, bw, bh, 6, 6)
             p.setPen(QPen(QColor("#1b1300")))
             p.drawText(bx + 9, by + bh - 7, label)
         # a fine outer white frame around the whole plate view
         p.setPen(QPen(QColor("#c9d1d9"), 1))
-        p.setBrush(Qt.NoBrush)
+        p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawRect(0, 0, self.width() - 1, self.height() - 1)
         p.end()
 
@@ -2708,8 +2722,8 @@ class PlateOverview(QWidget):
                     p.setPen(QPen(_ACCENT, max(1.0, min(cd * 0.03, 2.0))))
                     p.setBrush(QColor(56, 139, 253, 40))
                 else:
-                    p.setPen(QPen(QColor(74, 84, 100), 1, Qt.DashLine))
-                    p.setBrush(Qt.NoBrush)
+                    p.setPen(QPen(QColor(74, 84, 100), 1, Qt.PenStyle.DashLine))
+                    p.setBrush(Qt.BrushStyle.NoBrush)
                 if self._carrier_slide:  # a slide slot is a rectangle; a well is round
                     p.drawRect(QRectF(rx, ry, rw, rh))
                 else:
@@ -2719,7 +2733,7 @@ class PlateOverview(QWidget):
                     f = (g.cell_size_um / g.pitch_x_um) if g.pitch_x_um else 0.8
                     f = float(min(max(f, 0.15), 1.0))
                     p.drawEllipse(QRectF(rx + rw * (1 - f) / 2, ry + rh * (1 - f) / 2, rw * f, rh * f))
-        p.setBrush(Qt.NoBrush)
+        p.setBrush(Qt.BrushStyle.NoBrush)
 
     def _paint_loupe(self, p: QPainter):
         """The inset: real pixels, a µm scale bar when the pixel size is known, or the reason
@@ -2736,18 +2750,18 @@ class PlateOverview(QWidget):
             p.save()
             p.setClipRect(bx, by, s, s)
             p.drawPixmap(bx, by, QPixmap.fromImage(self._loupe_img).scaled(
-                s, s, Qt.KeepAspectRatioByExpanding, Qt.FastTransformation))   # 1:1-ish: no smoothing
+                s, s, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.FastTransformation))   # 1:1-ish: no smoothing
             p.restore()
         else:
             p.setPen(_MUTED)
             p.setFont(QFont("Helvetica Neue", 11))
-            p.drawText(bx, by, s, s, Qt.AlignCenter | Qt.TextWordWrap,
+            p.drawText(bx, by, s, s, Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap,
                        self._loupe_note or "reading …")
         geo = self._loupe_geometry(x, y)
         if geo is not None and self._loupe_img is not None:
             _w, _l, _r, s_loupe, mag = geo
             um_px = loupe_um_per_screen_px(getattr(self._loupe_src, "pixel_size_um", None), s_loupe)
-            p.setFont(QFont("Helvetica Neue", 10, QFont.DemiBold))
+            p.setFont(QFont("Helvetica Neue", 10, QFont.Weight.DemiBold))
             if um_px is None:
                 # No trustworthy pixel size: say so rather than draw a bar that would be fiction.
                 p.setPen(_MUTED)
@@ -2764,7 +2778,7 @@ class PlateOverview(QWidget):
                     f"{self._loupe['well']}  ·  native"
             p.drawText(bx + 8, by + 16, label)
         p.setPen(QPen(QColor("#c9d1d9"), 1))
-        p.setBrush(Qt.NoBrush)
+        p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawRect(bx, by, s, s)
 
 
@@ -2947,15 +2961,15 @@ class _OperatorWorker(QThread):
     write workers) wells in flight. The written ``plate.ome.zarr`` is the durable, re-openable artifact.
     """
 
-    tileReady = pyqtSignal(int, int, str, object, object)   # (ri, ci, well_id, (C,h,w) native tile,
+    tileReady = Signal(int, int, str, object, object)   # (ri, ci, well_id, (C,h,w) native tile,
     #                                                          box=(top,left,h,w) in cell px | None)
-    progress = pyqtSignal(int, int)                 # (done, total)
-    streamEnded = pyqtSignal()                      # every well landed -> recomposite the whole plate
-    writtenReady = pyqtSignal(str)                  # path of the written plate.ome.zarr
-    wellFailed = pyqtSignal(int, int)               # (ri, ci) of a well SKIPPED on a read error
-    pushReady = pyqtSignal(int, object)             # (fov_idx, [per-channel ~512px plane]) for the slider
-    failed = pyqtSignal(str)                        # whole-run failure (not a per-well skip)
-    finished_ok = pyqtSignal()
+    progress = Signal(int, int)                 # (done, total)
+    streamEnded = Signal()                      # every well landed -> recomposite the whole plate
+    writtenReady = Signal(str)                  # path of the written plate.ome.zarr
+    wellFailed = Signal(int, int)               # (ri, ci) of a well SKIPPED on a read error
+    pushReady = Signal(int, object)             # (fov_idx, [per-channel ~512px plane]) for the slider
+    failed = Signal(str)                        # whole-run failure (not a per-well skip)
+    finished_ok = Signal()
 
     def __init__(self, operator: str, reader, meta, fov_index: dict, out_dir: str,
                  regions=None, save: bool = True, n_fovs=1):
@@ -3171,11 +3185,11 @@ class _MinervaWorker(QThread):
     The user always gets the story path either way, because Minerva has no deep link — the
     file is picked by hand in its "Select File" dialog.
     """
-    progress = pyqtSignal(int, int)          # (done, total) FOVs exported
-    exported = pyqtSignal(object)            # [(ome_path, story_path), ...]
-    launched = pyqtSignal(bool)              # did a Minerva server end up answering?
-    failed = pyqtSignal(str)
-    finished_ok = pyqtSignal()
+    progress = Signal(int, int)          # (done, total) FOVs exported
+    exported = Signal(object)            # [(ome_path, story_path), ...]
+    launched = Signal(bool)              # did a Minerva server end up answering?
+    failed = Signal(str)
+    finished_ok = Signal()
 
     def __init__(self, reader, selection, out_dir, projector: str, t: int = 0, launch: bool = True):
         super().__init__()
@@ -3231,9 +3245,9 @@ class _MosaicWorker(QThread):
     Results arrive per channel so the first channel paints while the rest are still being read.
     """
 
-    ready = pyqtSignal(str, str, object, object)   # region, channel, plane, bbox_um|None
-    problem = pyqtSignal(str)
-    finished_count = pyqtSignal(int)
+    ready = Signal(str, str, object, object)   # region, channel, plane, bbox_um|None
+    problem = Signal(str)
+    finished_count = Signal(int)
 
     def __init__(self, reader, meta, region, channels, parent=None):
         super().__init__(parent)
@@ -3300,8 +3314,8 @@ class _PreviewWorker(QThread):
     cells fill progressively and the UI never blocks on a whole mosaic.
     """
 
-    tileReady = pyqtSignal(int, int, str, object, object)   # (ri, ci, well_id, tile, box|None)
-    streamEnded = pyqtSignal()                      # preview complete -> recomposite the whole plate
+    tileReady = Signal(int, int, str, object, object)   # (ri, ci, well_id, tile, box|None)
+    streamEnded = Signal()                      # preview complete -> recomposite the whole plate
 
     def __init__(self, reader, meta, fov_index: dict, order: list, mosaic: bool = True):
         super().__init__()
@@ -3387,12 +3401,12 @@ class _ComputedPlateWorker(QThread):
     it used to take percentiles per well, which made a dim well and a bright well look identical and
     silently broke the one thing a plate overview is for (comparing wells at a glance)."""
 
-    tileReady = pyqtSignal(int, int, str, object)   # (ri, ci, well_id, (C, cell, cell) native tile)
-    pushReady = pyqtSignal(int, object)             # (fov_idx, [per-channel ~512px plane])
-    progress = pyqtSignal(int, int)
-    streamEnded = pyqtSignal()                      # plate fully loaded -> recomposite globally
-    finished_ok = pyqtSignal()
-    failed = pyqtSignal(str)
+    tileReady = Signal(int, int, str, object)   # (ri, ci, well_id, (C, cell, cell) native tile)
+    pushReady = Signal(int, object)             # (fov_idx, [per-channel ~512px plane])
+    progress = Signal(int, int)
+    streamEnded = Signal()                      # plate fully loaded -> recomposite globally
+    finished_ok = Signal()
+    failed = Signal(str)
 
     def __init__(self, base, wells, coarse_lvl, push_lvl, dtype):
         super().__init__()
@@ -3600,7 +3614,7 @@ class PlateWindow(QMainWindow):
         self._left_tabs.tabCloseRequested.connect(self._close_op_tab)
         self._left_tabs.currentChanged.connect(self._on_tab_changed)
         self._left_tabs.addTab(self._build_process_pane(), "Process wells")
-        self._left_tabs.tabBar().setTabButton(0, QTabBar.RightSide, None)  # home tab isn't closable
+        self._left_tabs.tabBar().setTabButton(0, QTabBar.ButtonPosition.RightSide, None)  # home tab isn't closable
 
         # PANE 3: the exploration pane. Same _DetachTabs class as the console (one detach seam, not
         # two), but every tab is detachable — it has no permanent home tab to protect.
@@ -3674,7 +3688,7 @@ class PlateWindow(QMainWindow):
                 (viewer_msg + "\n" if viewer_msg else "")
                 + "ndviewer_light unavailable — pip install ndviewer_light"
             )
-            ph.setAlignment(Qt.AlignCenter)
+            ph.setAlignment(Qt.AlignmentFlag.AlignCenter)
             ph.setWordWrap(True)
             ph.setStyleSheet("color:#8b98ad;")
             self._right_widget = ph
@@ -3707,7 +3721,7 @@ class PlateWindow(QMainWindow):
         _tb.addWidget(self._scope_combo)
         self._drop = QLabel("Drop a Squid acquisition folder here\n\n"
                             "then pick an operator in  Process wells")
-        self._drop.setAlignment(Qt.AlignCenter)
+        self._drop.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._drop.setStyleSheet("color:#8b98ad;font-size:16px;border:2px dashed #232b3a;border-radius:12px;margin:24px;")
         plate_host = QWidget()
         plate_host.setStyleSheet(f"background:{_BG};")
@@ -3717,7 +3731,7 @@ class PlateWindow(QMainWindow):
         self._left_l.addWidget(plate_title_bar)
         self._left_l.addWidget(self._drop, 1)    # the plate overview replaces this on ingest
 
-        left_col = QSplitter(Qt.Vertical)
+        left_col = QSplitter(Qt.Orientation.Vertical)
         left_col.setStyleSheet("QSplitter::handle{background:#232b3a;height:1px;}")
         left_col.setChildrenCollapsible(False)
         left_col.addWidget(self._left_tabs)
@@ -3750,7 +3764,7 @@ class PlateWindow(QMainWindow):
         dbl.addStretch(1)
         rfl.addWidget(detail_bar)
 
-        outer = QSplitter(Qt.Horizontal)
+        outer = QSplitter(Qt.Orientation.Horizontal)
         outer.setStyleSheet("QSplitter::handle{background:#232b3a;width:1px;}")
         outer.setChildrenCollapsible(False)
         outer.addWidget(left_col)                  # pane 1: plate + controls with the tabs
@@ -3813,7 +3827,7 @@ class PlateWindow(QMainWindow):
         for op in _OPERATIONS:
             card = QPushButton(f"{op.label}\n{op.blurb}")
             card.setEnabled(False)                         # enabled once an acquisition loads
-            card.setCursor(Qt.PointingHandCursor)
+            card.setCursor(Qt.CursorShape.PointingHandCursor)
             card.setStyleSheet(_CARD_QSS)
             card.setMinimumHeight(54)
             card.clicked.connect(lambda _=False, k=op.key: self._activate_operator(k))
@@ -3830,7 +3844,7 @@ class PlateWindow(QMainWindow):
         sv.addStretch(1)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setStyleSheet("QScrollArea{border:none;background:transparent;}")
         scroll.setWidget(stack)
         v.addWidget(scroll, 1)
@@ -4188,7 +4202,7 @@ class PlateWindow(QMainWindow):
         idx = self._explore_tabs.indexOf(self._op_tabs[self.CONTROL_KEY])
         if idx > 0:
             self._explore_tabs.tabBar().moveTab(idx, 0)  # pinned FIRST, ahead of every subset tab
-        self._explore_tabs.tabBar().setTabButton(0, QTabBar.RightSide, None)   # ...and not closable
+        self._explore_tabs.tabBar().setTabButton(0, QTabBar.ButtonPosition.RightSide, None)   # ...and not closable
         self._sync_explore_pane()
         self._explore_tabs.setCurrentIndex(0)
 
@@ -4486,7 +4500,7 @@ class PlateWindow(QMainWindow):
         listing.setStyleSheet("color:#57606a;font-size:11px;")
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setStyleSheet("QScrollArea{border:none;background:transparent;}")
         scroll.setWidget(listing)
         scroll.setMaximumHeight(90)
@@ -4514,7 +4528,7 @@ class PlateWindow(QMainWindow):
         for k in runnable_operators():
             btn = QPushButton(f"{operator_label(k)} (preview)")
             btn.setStyleSheet(_BTN_QSS)
-            btn.setCursor(Qt.PointingHandCursor)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.clicked.connect(
                 lambda _=False, k=k: self.run_operator(k, regions=regions, save=False,
                                                        tab_key=tab_key))
@@ -4572,7 +4586,7 @@ class PlateWindow(QMainWindow):
 
         path_lbl = QLabel("")
         path_lbl.setWordWrap(True)
-        path_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        path_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         path_lbl.setStyleSheet("color:#8b98ad;font-size:11px;")
         copy_btn = QPushButton("Copy story path"); copy_btn.setStyleSheet(_BTN_QSS); copy_btn.hide()
         reveal_btn = QPushButton("Show in folder"); reveal_btn.setStyleSheet(_BTN_QSS); reveal_btn.hide()
@@ -4892,6 +4906,18 @@ class PlateWindow(QMainWindow):
             c.setEnabled(flag)
 
     def _make_detail_viewer(self):
+        # ndviewer_light.core still imports PyQt5 at module scope. This process is PyQt6, and
+        # importing a second Qt major does NOT raise — it aborts the interpreter, so the
+        # `except Exception` below cannot catch it. Refuse before the import, and say why.
+        # Delete this block the moment ndviewer_light moves to qtpy.
+        import qtpy
+        if qtpy.API_NAME != "PyQt5":
+            self._readout.setText(
+                f"ndviewer_light unavailable: it requires PyQt5 and this process is "
+                f"{qtpy.API_NAME}. Loading both would abort the process, so the fallback "
+                f"viewer is disabled until ndviewer_light moves to qtpy."
+            )
+            return None
         try:
             from ndviewer_light.core import LightweightViewer
             v = LightweightViewer(None)   # empty -> push mode (we register raw z-planes on demand)
@@ -6052,21 +6078,21 @@ def _dark_palette() -> QPalette:
     indicators), which is why this is deliberately not global."""
     dark, base, text, mut = QColor(7, 10, 20), QColor(11, 14, 20), QColor(230, 237, 243), QColor(87, 96, 109)
     pal = QPalette()
-    pal.setColor(QPalette.Window, dark)
-    pal.setColor(QPalette.WindowText, text)
-    pal.setColor(QPalette.Base, base)
-    pal.setColor(QPalette.AlternateBase, dark)
-    pal.setColor(QPalette.Text, text)
-    pal.setColor(QPalette.Button, QColor(19, 24, 36))
-    pal.setColor(QPalette.ButtonText, text)
-    pal.setColor(QPalette.ToolTipBase, base)
-    pal.setColor(QPalette.ToolTipText, text)
-    pal.setColor(QPalette.Highlight, QColor(88, 166, 255))
-    pal.setColor(QPalette.HighlightedText, dark)
-    for grp in (QPalette.Disabled,):
-        pal.setColor(grp, QPalette.Text, mut)
-        pal.setColor(grp, QPalette.ButtonText, mut)
-        pal.setColor(grp, QPalette.WindowText, mut)
+    pal.setColor(QPalette.ColorRole.Window, dark)
+    pal.setColor(QPalette.ColorRole.WindowText, text)
+    pal.setColor(QPalette.ColorRole.Base, base)
+    pal.setColor(QPalette.ColorRole.AlternateBase, dark)
+    pal.setColor(QPalette.ColorRole.Text, text)
+    pal.setColor(QPalette.ColorRole.Button, QColor(19, 24, 36))
+    pal.setColor(QPalette.ColorRole.ButtonText, text)
+    pal.setColor(QPalette.ColorRole.ToolTipBase, base)
+    pal.setColor(QPalette.ColorRole.ToolTipText, text)
+    pal.setColor(QPalette.ColorRole.Highlight, QColor(88, 166, 255))
+    pal.setColor(QPalette.ColorRole.HighlightedText, dark)
+    for grp in (QPalette.ColorGroup.Disabled,):
+        pal.setColor(grp, QPalette.ColorRole.Text, mut)
+        pal.setColor(grp, QPalette.ColorRole.ButtonText, mut)
+        pal.setColor(grp, QPalette.ColorRole.WindowText, mut)
     return pal
 
 
@@ -6138,7 +6164,7 @@ def main(dataset_path: str = None):
     _install_footprint_monitor(app, win)
     win.show()
     if not app.property("_squidmip_test"):
-        sys.exit(app.exec_())
+        sys.exit(app.exec())
     return win
 
 

@@ -311,12 +311,12 @@ import json, os, sys, traceback
 # display this runs for real; on a headless box it fails cleanly and the test skips with the
 # reason attached rather than pretending to have verified something.
 import numpy as np
-# PyQt5 explicitly, and QT_API pinned before any qtpy import. squidmip imports PyQt5 directly,
-# while qtpy defaults to PySide6 here; loading both aborts the process with "Class QMacAutoRelease
-# PoolTracker is implemented in both ... QtCore" long before any assertion runs. Test the binding
-# production actually uses.
-os.environ.setdefault("QT_API", "pyqt5")
-from PyQt5.QtWidgets import QApplication, QHBoxLayout, QWidget
+# QT_API pinned before any qtpy import, to the SAME binding squidmip pins (pyqt6). PyQt5 and
+# PySide6 are also installed here; loading two Qt majors in one process aborts it with "Class
+# QMacAutoReleasePoolTracker is implemented in both ... QtCore" long before any assertion runs.
+# Test the binding production actually uses.
+os.environ.setdefault("QT_API", "pyqt6")
+from qtpy.QtWidgets import QApplication, QHBoxLayout, QWidget
 app = QApplication.instance() or QApplication([])
 
 # Report OUR OWN errors as EMBEDFAIL, distinct from "this box has no GL". The previous version
@@ -408,9 +408,9 @@ def test_the_canvas_stays_inside_the_embedded_napari_window(tmp_path):
     # let Qt pick the real platform: on a machine with a display this actually verifies, and on
     # a headless one it fails cleanly into the skip below with the reason attached.
     env.pop("QT_QPA_PLATFORM", None)
-    # Both PyQt5 and PySide6 are installed here. squidmip imports PyQt5, so qtpy (and napari
+    # PyQt5, PyQt6 and PySide6 are all installed here. squidmip pins PyQt6, so qtpy (and napari
     # through it) must resolve to the same binding or the process aborts before asserting.
-    env["QT_API"] = "pyqt5"
+    env["QT_API"] = "pyqt6"
 
     proc = subprocess.run(
         [sys.executable, str(script)],

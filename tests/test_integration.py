@@ -298,7 +298,10 @@ def _ref_projected(reader, regions):
 # --- real Squid acquisition: full plate written + opens in ndviewer_light + pixel-exact ---
 @pytest.mark.integration
 def test_ima184_real_plate_roundtrip(real_dataset, tmp_path):
-    core = pytest.importorskip("ndviewer_light.core")
+    # ndviewer_light.data, not .core: the discovery function lives in the Qt-free data layer
+    # and core imports PyQt5 at module scope, which would load a second Qt major into this
+    # PyQt6 process and abort it. Same function object, same assertion, no Qt.
+    core = pytest.importorskip("ndviewer_light.data")
     reader = open_reader(real_dataset)
     meta = reader.metadata
 
@@ -380,7 +383,10 @@ def test_ima184_sim1536_plate_metadata_scales(sim_1536wp):
 @pytest.mark.integration
 @pytest.mark.filterwarnings("ignore:Recorded Nz")
 def test_ima184_sim1536_streamed_subset(sim_1536wp, tmp_path):
-    core = pytest.importorskip("ndviewer_light.core")
+    # ndviewer_light.data, not .core: the discovery function lives in the Qt-free data layer
+    # and core imports PyQt5 at module scope, which would load a second Qt major into this
+    # PyQt6 process and abort it. Same function object, same assertion, no Qt.
+    core = pytest.importorskip("ndviewer_light.data")
     reader = open_reader(sim_1536wp)
 
     picked = list(islice(project_plate(reader, n_fovs=1, workers=4), 4))  # 4 wells, real seam

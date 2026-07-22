@@ -30,11 +30,11 @@ import sys  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("qtpy.QtWidgets")
 if "PySide6" in sys.modules or "PySide2" in sys.modules:
     pytest.skip(
         "PySide already loaded (napari/pytest-qt) — Qt binding conflict; run with "
-        "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 to run the PyQt5 GUI tests.",
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 to run the PyQt6 GUI tests.",
         allow_module_level=True,
     )
 

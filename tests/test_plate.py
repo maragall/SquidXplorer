@@ -2,7 +2,7 @@
 
 Non-Qt on purpose (same reasoning as tests/test_plate_shape.py): the plate model is the thing the
 mosaic/selection/loupe code will share, so its contract is pinned here where it always runs, not
-behind ``pytest.importorskip("PyQt5")``.
+behind ``pytest.importorskip("qtpy.QtWidgets")``.
 
 UNITS: everything micrometres, every key ends ``_um`` (see _placement.py). sample_formats.csv is
 millimetres and is converted exactly once, at the loader.

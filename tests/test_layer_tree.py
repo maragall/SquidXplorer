@@ -41,9 +41,9 @@ def _run_qt(script_body: str, tmp_path, marker: str):
     # The gate exports offscreen for the whole suite and offscreen has no GL, so inheriting it
     # guarantees a segfault and a permanent skip. Let Qt pick the real platform.
     env.pop("QT_QPA_PLATFORM", None)
-    # squidmip imports PyQt5; qtpy defaults to PySide6 here and loading both aborts the process
-    # long before any assertion runs.
-    env["QT_API"] = "pyqt5"
+    # squidmip pins QT_API=pyqt6; PyQt5 and PySide6 are also installed here and loading two Qt
+    # majors in one process aborts it long before any assertion runs.
+    env["QT_API"] = "pyqt6"
 
     proc = subprocess.run(
         [sys.executable, str(script)],
@@ -63,9 +63,9 @@ def _run_qt(script_body: str, tmp_path, marker: str):
 
 _PREAMBLE = r"""
 import json, os, sys, traceback
-os.environ.setdefault("QT_API", "pyqt5")
+os.environ.setdefault("QT_API", "pyqt6")
 import numpy as np
-from PyQt5.QtWidgets import QApplication, QVBoxLayout, QWidget
+from qtpy.QtWidgets import QApplication, QVBoxLayout, QWidget
 app = QApplication.instance() or QApplication([])
 out = {}
 try:
@@ -165,8 +165,8 @@ def test_the_3d_button_is_naparis_own_and_sits_where_a_short_pane_shows_it(tmp_p
 # napari-experimental and PartSeg -- answer this by REPLACING THE LAYER-LIST UI, not by capping
 # the layer count. This is that: a two-level view over the same layers.
 
-from PyQt5.QtCore import Qt                                          # noqa: E402
-from PyQt5.QtWidgets import QApplication                             # noqa: E402
+from qtpy.QtCore import Qt                                          # noqa: E402
+from qtpy.QtWidgets import QApplication                             # noqa: E402
 
 import numpy as np                                                   # noqa: E402
 
@@ -211,12 +211,12 @@ def test_the_tree_is_two_levels_processing_layer_then_channels(tree, mosaic):
     """24 flat rows become 5 collapsible ones. That is the whole point."""
     m = tree.model()
     assert m.rowCount() == 2, "processing layers are the top level"
-    assert [m.data(_op_index(tree, r), Qt.DisplayRole) for r in range(2)] == ["raw", "stitched"]
+    assert [m.data(_op_index(tree, r), Qt.ItemDataRole.DisplayRole) for r in range(2)] == ["raw", "stitched"]
     for r in range(2):
         op = mosaic.ops()[r]
         assert m.rowCount(_op_index(tree, r)) == 4
         assert [
-            m.data(_ch_index(tree, r, c), Qt.DisplayRole) for c in range(4)
+            m.data(_ch_index(tree, r, c), Qt.ItemDataRole.DisplayRole) for c in range(4)
         ] == mosaic.channels(op)
 
 
@@ -225,11 +225,11 @@ def test_the_tree_reads_visibility_off_the_layer_and_keeps_no_copy(tree, mosaic)
     dominant defect shape (4+ confirmed, most recently the contrast sync silently killed by
     layer recreation). The tree is a VIEW: napari's Image layer owns ``visible``."""
     m = tree.model()
-    assert m.data(_ch_index(tree, 0, 0), Qt.CheckStateRole) == Qt.Checked
+    assert m.data(_ch_index(tree, 0, 0), Qt.ItemDataRole.CheckStateRole) == Qt.CheckState.Checked
 
     # Change it BEHIND the tree's back, the way napari's own layer list does.
     mosaic.find("raw", "405").visible = False
-    assert m.data(_ch_index(tree, 0, 0), Qt.CheckStateRole) == Qt.Unchecked, (
+    assert m.data(_ch_index(tree, 0, 0), Qt.ItemDataRole.CheckStateRole) == Qt.CheckState.Unchecked, (
         "the tree is holding its own copy of visibility instead of reading the layer"
     )
 
@@ -248,11 +248,11 @@ def test_an_external_visibility_change_repaints_the_row(tree, mosaic, qapp):
 def test_toggling_a_processing_layer_toggles_its_four_channels(tree, mosaic):
     """The before/after-stitching gesture, at group level."""
     m = tree.model()
-    assert m.setData(_op_index(tree, 1), Qt.Unchecked, Qt.CheckStateRole) is True
+    assert m.setData(_op_index(tree, 1), Qt.CheckState.Unchecked, Qt.ItemDataRole.CheckStateRole) is True
     assert [ly.visible for ly in mosaic.group("stitched")] == [False] * 4
     assert [ly.visible for ly in mosaic.group("raw")] == [True] * 4, "it toggled the wrong group"
 
-    m.setData(_op_index(tree, 1), Qt.Checked, Qt.CheckStateRole)
+    m.setData(_op_index(tree, 1), Qt.CheckState.Checked, Qt.ItemDataRole.CheckStateRole)
     assert [ly.visible for ly in mosaic.group("stitched")] == [True] * 4
 
 
@@ -261,20 +261,20 @@ def test_a_group_check_state_is_derived_from_its_channels_not_stored(tree, mosai
     syncs it upward, so a group checkbox drifts out of step with its own contents. We derive it
     instead -- there is no group state to drift."""
     m = tree.model()
-    assert m.data(_op_index(tree, 0), Qt.CheckStateRole) == Qt.Checked
+    assert m.data(_op_index(tree, 0), Qt.ItemDataRole.CheckStateRole) == Qt.CheckState.Checked
 
     mosaic.find("raw", "561").visible = False
-    assert m.data(_op_index(tree, 0), Qt.CheckStateRole) == Qt.PartiallyChecked, (
+    assert m.data(_op_index(tree, 0), Qt.ItemDataRole.CheckStateRole) == Qt.CheckState.PartiallyChecked, (
         "one hidden channel out of four is neither on nor off"
     )
     for ly in mosaic.group("raw"):
         ly.visible = False
-    assert m.data(_op_index(tree, 0), Qt.CheckStateRole) == Qt.Unchecked
+    assert m.data(_op_index(tree, 0), Qt.ItemDataRole.CheckStateRole) == Qt.CheckState.Unchecked
 
 
 def test_toggling_one_channel_writes_that_layer_only(tree, mosaic):
     m = tree.model()
-    m.setData(_ch_index(tree, 0, 2), Qt.Unchecked, Qt.CheckStateRole)
+    m.setData(_ch_index(tree, 0, 2), Qt.CheckState.Unchecked, Qt.ItemDataRole.CheckStateRole)
     assert [ly.visible for ly in mosaic.group("raw")] == [True, True, False, True]
 
 
@@ -296,7 +296,7 @@ def test_the_tree_survives_layers_being_destroyed_and_recreated(tree, mosaic, qa
 
     assert m.rowCount() == 2
     assert m.rowCount(_op_index(tree, 0)) == 4
-    m.setData(_ch_index(tree, 0, 0), Qt.Unchecked, Qt.CheckStateRole)
+    m.setData(_ch_index(tree, 0, 0), Qt.CheckState.Unchecked, Qt.ItemDataRole.CheckStateRole)
     assert mosaic.find("raw", "405").visible is False, (
         "the tree is still driving the DESTROYED layer object -- the contrast-sync bug again"
     )
@@ -321,7 +321,7 @@ def test_foreign_layers_never_appear_in_the_tree(tree, mosaic, qapp):
     mosaic.model.add_image(_img(7), name="somebody else's layer")
     qapp.processEvents()
     assert m.rowCount() == 2
-    assert [m.data(_op_index(tree, r), Qt.DisplayRole) for r in range(2)] == ["raw", "stitched"]
+    assert [m.data(_op_index(tree, r), Qt.ItemDataRole.DisplayRole) for r in range(2)] == ["raw", "stitched"]
 
 
 def test_checkboxes_are_actually_offered_to_the_user(tree):
@@ -329,8 +329,8 @@ def test_checkboxes_are_actually_offered_to_the_user(tree):
     with no checkboxes at all -- readable, unclickable, and green under every test above."""
     m = tree.model()
     for idx in (_op_index(tree, 0), _ch_index(tree, 0, 0)):
-        assert m.flags(idx) & Qt.ItemIsUserCheckable
-        assert m.flags(idx) & Qt.ItemIsEnabled
+        assert m.flags(idx) & Qt.ItemFlag.ItemIsUserCheckable
+        assert m.flags(idx) & Qt.ItemFlag.ItemIsEnabled
 
 
 # ------------------------------------------------- the tree, mounted in the real pane
@@ -356,7 +356,7 @@ _MOUNT_SCRIPT = r"""
             pane.mosaic.add_mosaic(op, ch, np.zeros((16, 16), dtype="uint16"))
     app.processEvents()
 
-    from PyQt5.QtCore import Qt as _Qt
+    from qtpy.QtCore import Qt as _Qt
     tree = pane.layer_tree
 
     def descends_from(child, ancestor):
@@ -383,7 +383,7 @@ _MOUNT_SCRIPT = r"""
 
     # The gesture: hide a whole processing layer from the tree.
     idx = tree.model().index(1, 0)
-    tree.model().setData(idx, _Qt.Unchecked, _Qt.CheckStateRole)
+    tree.model().setData(idx, _Qt.CheckState.Unchecked, _Qt.ItemDataRole.CheckStateRole)
     app.processEvents()
     out["group_hidden"] = [bool(l.visible) for l in pane.mosaic.group("stitched")]
     out["other_group_untouched"] = [bool(l.visible) for l in pane.mosaic.group("raw")]
@@ -391,12 +391,15 @@ _MOUNT_SCRIPT = r"""
     # ... and the reverse direction: napari's own list is still an owner, and the tree follows.
     pane.mosaic.find("raw", "405").visible = False
     app.processEvents()
-    out["leaf_state_after_external_change"] = int(
-        tree.model().data(tree.model().index(0, 0, tree.model().index(0, 0)), _Qt.CheckStateRole)
+    # PyQt6 hands back the Qt.CheckState ENUM (a plain enum.Enum), not the int PyQt5 returned,
+    # and int() does not accept it. Round-tripping through the enum normalises both bindings.
+    def _check_state(index):
+        return _Qt.CheckState(tree.model().data(index, _Qt.ItemDataRole.CheckStateRole)).value
+
+    out["leaf_state_after_external_change"] = _check_state(
+        tree.model().index(0, 0, tree.model().index(0, 0))
     )
-    out["group_state_after_external_change"] = int(
-        tree.model().data(tree.model().index(0, 0), _Qt.CheckStateRole)
-    )
+    out["group_state_after_external_change"] = _check_state(tree.model().index(0, 0))
 """
 
 
@@ -418,5 +421,5 @@ def test_the_tree_is_mounted_beside_naparis_own_controls(tmp_path):
     assert got["canvas_still_inside_napari_window"] is True
     assert got["group_hidden"] == [False] * 4
     assert got["other_group_untouched"] == [True] * 4
-    assert got["leaf_state_after_external_change"] == 0        # Qt.Unchecked
-    assert got["group_state_after_external_change"] == 1       # Qt.PartiallyChecked
+    assert got["leaf_state_after_external_change"] == 0        # Qt.CheckState.Unchecked
+    assert got["group_state_after_external_change"] == 1       # Qt.CheckState.PartiallyChecked

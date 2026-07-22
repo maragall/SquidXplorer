@@ -16,7 +16,6 @@ Two guards live here:
 
 from __future__ import annotations
 
-import inspect
 import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")  # headless Qt; must precede PyQt import
@@ -25,11 +24,11 @@ import sys  # noqa: E402
 
 import pytest  # noqa: E402
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("qtpy.QtWidgets")
 if "PySide6" in sys.modules or "PySide2" in sys.modules:
     pytest.skip(
         "PySide already loaded (napari/pytest-qt) — Qt binding conflict; run with "
-        "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 to run the PyQt5 GUI tests.",
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 to run the PyQt6 GUI tests.",
         allow_module_level=True,
     )
 
@@ -38,15 +37,42 @@ from squidmip import _viewer as V  # noqa: E402
 from .test_viewer import qapp, stub_detail  # noqa: E402,F401  (fixtures)
 
 
+# ndviewer_light.core imports PyQt5 at MODULE scope. This process is PyQt6 (squidmip pins it),
+# and two Qt majors in one process abort the interpreter — so the installed seam is inspected in
+# a child process that is allowed to be PyQt5. The assertion is unchanged: it is still the LIVE
+# installed signature, not a stub. If ndviewer_light ever moves to qtpy this helper collapses to
+# a plain import.
+def _installed_start_acquisition_params():
+    """Parameter names of the INSTALLED ndviewer_light LightweightViewer.start_acquisition."""
+    import json
+    import subprocess
+
+    src = (
+        "import inspect, json, os\n"
+        "os.environ['QT_API'] = 'pyqt5'\n"
+        "os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')\n"
+        "from ndviewer_light.core import LightweightViewer\n"
+        "print(json.dumps(list("
+        "inspect.signature(LightweightViewer.start_acquisition).parameters)))"
+    )
+    env = dict(os.environ)
+    env["QT_API"] = "pyqt5"
+    proc = subprocess.run([sys.executable, "-c", src], capture_output=True, text=True,
+                          timeout=300, env=env)
+    if proc.returncode != 0:
+        pytest.fail(
+            "could not inspect the installed ndviewer_light.core seam "
+            f"(rc={proc.returncode}):\n{proc.stderr[-2000:]}"
+        )
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
 class TestInstalledViewerAcceptsVoxelSize:
     """The seam contract, checked against whatever ndviewer_light is actually installed."""
 
     def test_start_acquisition_takes_um_keywords(self):
-        ndviewer_core = pytest.importorskip("ndviewer_light.core")
+        params = _installed_start_acquisition_params()
 
-        params = inspect.signature(
-            ndviewer_core.LightweightViewer.start_acquisition
-        ).parameters
         missing = {"pixel_size_um", "dz_um"} - set(params)
         assert not missing, (
             f"installed ndviewer_light.start_acquisition is missing {sorted(missing)} — "
@@ -56,11 +82,8 @@ class TestInstalledViewerAcceptsVoxelSize:
 
     def test_the_um_naming_invariant_holds(self):
         """Everything in this project is micrometres and every key ends in _um."""
-        ndviewer_core = pytest.importorskip("ndviewer_light.core")
+        params = _installed_start_acquisition_params()
 
-        params = inspect.signature(
-            ndviewer_core.LightweightViewer.start_acquisition
-        ).parameters
         physical = [p for p in params if "size" in p or p.startswith("dz")]
         assert physical, "expected physical-size parameters on the seam"
         assert all(p.endswith("_um") for p in physical), physical

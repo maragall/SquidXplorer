@@ -41,10 +41,21 @@ dependencies = [
 # ome-zarr-models: official OME-NGFF v0.5 pydantic schema — validates written plate metadata
 # in tests (test-time only; the runtime writer stays lean, no extra runtime dep).
 test = ["pytest>=7.0", "ome-zarr-models>=1.7"]
-# gui: the MIP tool desktop app. PyQt5 + ndviewer_light (the embedded detail viewer). The headless
-# pipeline (reader/projection/engine/output) never imports these, so the CLI installs without them.
+# gui: the MIP tool desktop app. Qt6 via qtpy + ndviewer_light (the legacy detail viewer). The
+# headless pipeline (reader/projection/engine/output) never imports these, so the CLI installs
+# without them.
+#
+# Qt6, not Qt5: AGAVE (the path-traced volume renderer we want embedded) is built against Qt 6.9,
+# and two Qt majors cannot share a process. The GUI is written against `qtpy` and `squidmip/
+# __init__.py` pins QT_API=pyqt6, so the binding is chosen in exactly one place.
+#
+# ndviewer_light is still listed because it is the declared fallback viewer (SQUIDMIP_VIEWER=ndv),
+# but its `core` module imports PyQt5 at module scope, so under Qt6 it CANNOT be loaded in-process:
+# `PlateWindow._make_detail_viewer` refuses and says so rather than aborting the interpreter. The
+# fallback comes back the moment ndviewer_light moves to qtpy.
 gui = [
-    "PyQt5>=5.15",
+    "qtpy>=2.4",
+    "PyQt6>=6.6",
     "ndviewer_light @ git+https://github.com/maragall/ndviewer_light@main",
 ]
 

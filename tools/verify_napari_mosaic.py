@@ -23,7 +23,7 @@ os.environ.pop("QT_QPA_PLATFORM", None)          # we need a real GL context
 os.environ.setdefault("SQUIDMIP_VIEWER", "napari")
 
 import numpy as np
-from PyQt5.QtWidgets import QApplication
+from qtpy.QtWidgets import QApplication
 
 from squidmip._viewer import PlateWindow
 
@@ -93,7 +93,7 @@ out["colormaps"] = [str(l.colormap.name) for l in pane.mosaic.ours()]
 out["all_channels_visible"] = all(l.visible for l in pane.mosaic.ours())
 # Count REAL widgets, not row-tuple slots: the row's second element is now the read-only
 # window readout, so a truthiness check on it reports a control that no longer exists.
-from PyQt5.QtWidgets import QPushButton, QSlider, QWidget
+from qtpy.QtWidgets import QPushButton, QSlider, QWidget
 _bar = win._channel_bar
 out["plate_contrast_sliders"] = len(_bar.findChildren(QSlider)) if _bar is not None else 0
 out["plate_auto_buttons"] = len(

@@ -3,9 +3,9 @@
 Gates the viewer contract: pure hit-testing + fit-cell shape guard, ingest that LOADS a grey plate
 without processing, the Process-well-plates operator that fills tiles + drives the hue status, the
 raw-z-stack push into the embedded ndviewer on double-click (pointing at the acquisition's own
-TIFFs — nothing copied), the FOV-slider -> red-box link, and second-open state reset. PyQt5 is
-optional (the GUI is an extra), so this whole module skips when it isn't installed — the headless
-pipeline never depends on Qt.
+TIFFs — nothing copied), the FOV-slider -> red-box link, and second-open state reset. The Qt
+binding is optional (the GUI is an extra), so this whole module skips when none is installed — the
+headless pipeline never depends on Qt.
 """
 
 from __future__ import annotations
@@ -20,19 +20,19 @@ import time
 import numpy as np
 import pytest
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("qtpy.QtWidgets")
 # Guard the two-Qt-bindings segfault: if PySide is already in the process (napari / pytest-qt
-# autoload it), importing PyQt5 GUI widgets on top crashes. Clean CI has neither. Locally, run
-# `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest tests/test_viewer.py` to load only PyQt5.
+# autoload it), importing PyQt6 GUI widgets on top crashes. Clean CI has neither. Locally, run
+# `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest tests/test_viewer.py` to load only PyQt6.
 if "PySide6" in sys.modules or "PySide2" in sys.modules:
     pytest.skip(
         "PySide already loaded (napari/pytest-qt) — Qt binding conflict; run with "
-        "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 to run the PyQt5 GUI tests.",
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 to run the PyQt6 GUI tests.",
         allow_module_level=True,
     )
-from PyQt5.QtCore import QEvent, QPointF, Qt, pyqtSignal  # noqa: E402
-from PyQt5.QtGui import QImage, QMouseEvent  # noqa: E402
-from PyQt5.QtWidgets import (  # noqa: E402
+from qtpy.QtCore import QEvent, QPointF, Qt, Signal  # noqa: E402
+from qtpy.QtGui import QImage, QMouseEvent  # noqa: E402
+from qtpy.QtWidgets import (  # noqa: E402
     QApplication, QCheckBox, QPushButton, QSlider, QSpinBox, QWidget,
 )
 
@@ -53,12 +53,12 @@ class _StubDetail(QWidget):
     # signal because the real ndviewer_light does: a stub that omits it would let the plate's
     # `contrastChanged` connection rot unobserved, which is precisely the class of dead wiring
     # this file exists to catch.
-    contrastChanged = pyqtSignal(int, float, float)
+    contrastChanged = Signal(int, float, float)
 
     def __init__(self):
         super().__init__()
         self._fov_labels = []
-        self._fov_slider = QSlider(Qt.Horizontal, self)
+        self._fov_slider = QSlider(Qt.Orientation.Horizontal, self)
         self._windows = {}        # ch -> (lo, hi), exactly as ndv would have resolved them
         self.registered = []
         # (t, idx, z, ch, (h, w)) of every register_array push. The SHAPE is recorded because
@@ -145,13 +145,13 @@ def _close_exploration_pane(win):
         win._close_op_tab(i, win._explore_tabs)
 
 
-def _press(x, y, button=Qt.LeftButton):
+def _press(x, y, button=Qt.MouseButton.LeftButton):
     """A synthetic left-press/release at (x, y) — the handlers only read button/pos."""
-    return QMouseEvent(QEvent.MouseButtonPress, QPointF(x, y), button, button, Qt.NoModifier)
+    return QMouseEvent(QEvent.Type.MouseButtonPress, QPointF(x, y), button, button, Qt.KeyboardModifier.NoModifier)
 
 
-def _move(x, y, buttons=Qt.NoButton):
-    return QMouseEvent(QEvent.MouseMove, QPointF(x, y), Qt.NoButton, buttons, Qt.NoModifier)
+def _move(x, y, buttons=Qt.MouseButton.NoButton):
+    return QMouseEvent(QEvent.Type.MouseMove, QPointF(x, y), Qt.MouseButton.NoButton, buttons, Qt.KeyboardModifier.NoModifier)
 
 
 # --- pure helpers (no Qt display needed) ----------------------------------------------------
@@ -271,7 +271,7 @@ def _rgb(ov) -> np.ndarray:
     """Whatever the plate is currently showing, as an (H, W, 3) uint8 array."""
     img = ov._active_source()
     ptr = img.bits()
-    ptr.setsize(img.byteCount())
+    ptr.setsize(img.sizeInBytes())
     row = np.frombuffer(ptr, np.uint8).reshape(img.height(), img.bytesPerLine())
     return row[:, : img.width() * 3].reshape(img.height(), img.width(), 3)
 
@@ -630,53 +630,53 @@ def _sel_overview(cd=20.0):
 
 def _pt(ri, ci, cd=20.0):
     """Widget-space center of cell (ri, ci) — mirrors PlateOverview._cell's margin offsets."""
-    from PyQt5.QtCore import QPointF
+    from qtpy.QtCore import QPointF
     return QPointF(V._HDR + ci * cd + cd / 2, V._COLH + ri * cd + cd / 2)
 
 
 def _within(ri, ci, cd=20.0):
     """Two points INSIDE one cell, far enough apart to read as a drag (not a Shift+click)."""
-    from PyQt5.QtCore import QPointF
+    from qtpy.QtCore import QPointF
     return (QPointF(V._HDR + ci * cd + 2, V._COLH + ri * cd + 2),
             QPointF(V._HDR + ci * cd + cd - 2, V._COLH + ri * cd + cd - 2))
 
 
-def _mouse(kind, pos, mods=Qt.NoModifier, buttons=Qt.LeftButton, btn=Qt.LeftButton):
-    from PyQt5.QtCore import QEvent
-    from PyQt5.QtGui import QMouseEvent
-    ev = {"press": QEvent.MouseButtonPress, "move": QEvent.MouseMove,
-          "release": QEvent.MouseButtonRelease, "dblclick": QEvent.MouseButtonDblClick}[kind]
+def _mouse(kind, pos, mods=Qt.KeyboardModifier.NoModifier, buttons=Qt.MouseButton.LeftButton, btn=Qt.MouseButton.LeftButton):
+    from qtpy.QtCore import QEvent
+    from qtpy.QtGui import QMouseEvent
+    ev = {"press": QEvent.Type.MouseButtonPress, "move": QEvent.Type.MouseMove,
+          "release": QEvent.Type.MouseButtonRelease, "dblclick": QEvent.Type.MouseButtonDblClick}[kind]
     return QMouseEvent(ev, pos, btn, buttons, mods)
 
 
 def _drag(ov, a, b, mods):
     ov.mousePressEvent(_mouse("press", a, mods))
     ov.mouseMoveEvent(_mouse("move", b, mods))
-    ov.mouseReleaseEvent(_mouse("release", b, mods, buttons=Qt.NoButton))
+    ov.mouseReleaseEvent(_mouse("release", b, mods, buttons=Qt.MouseButton.NoButton))
 
 
 def test_marquee_replaces_selection(qapp):
     ov = _sel_overview()
-    _drag(ov, _pt(0, 0), _pt(1, 1), Qt.ShiftModifier)          # sweep the whole 2x2
+    _drag(ov, _pt(0, 0), _pt(1, 1), Qt.KeyboardModifier.ShiftModifier)          # sweep the whole 2x2
     assert ov.selected_wells() == ["A1", "A2", "B2"]           # B1 never acquired -> excluded
-    _drag(ov, *_within(0, 0), Qt.ShiftModifier)                # a fresh marquee over A1 only...
+    _drag(ov, *_within(0, 0), Qt.KeyboardModifier.ShiftModifier)                # a fresh marquee over A1 only...
     assert ov.selected_wells() == ["A1"]                        # ...REPLACES, not unions
 
 
 def test_additive_marquee_unions(qapp):
     ov = _sel_overview()
-    _drag(ov, *_within(0, 0), Qt.ShiftModifier)                          # A1
-    _drag(ov, *_within(1, 1), Qt.ShiftModifier | Qt.AltModifier)         # + B2
+    _drag(ov, *_within(0, 0), Qt.KeyboardModifier.ShiftModifier)                          # A1
+    _drag(ov, *_within(1, 1), Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.AltModifier)         # + B2
     assert ov.selected_wells() == ["A1", "B2"]
 
 
 def test_shift_click_toggles_well(qapp):
     ov = _sel_overview()
-    ov.mousePressEvent(_mouse("press", _pt(0, 1), Qt.ShiftModifier))
-    ov.mouseReleaseEvent(_mouse("release", _pt(0, 1), Qt.ShiftModifier, buttons=Qt.NoButton))
+    ov.mousePressEvent(_mouse("press", _pt(0, 1), Qt.KeyboardModifier.ShiftModifier))
+    ov.mouseReleaseEvent(_mouse("release", _pt(0, 1), Qt.KeyboardModifier.ShiftModifier, buttons=Qt.MouseButton.NoButton))
     assert ov.selected_wells() == ["A2"]
-    ov.mousePressEvent(_mouse("press", _pt(0, 1), Qt.ShiftModifier))     # click again -> off
-    ov.mouseReleaseEvent(_mouse("release", _pt(0, 1), Qt.ShiftModifier, buttons=Qt.NoButton))
+    ov.mousePressEvent(_mouse("press", _pt(0, 1), Qt.KeyboardModifier.ShiftModifier))     # click again -> off
+    ov.mouseReleaseEvent(_mouse("release", _pt(0, 1), Qt.KeyboardModifier.ShiftModifier, buttons=Qt.MouseButton.NoButton))
     assert ov.selected_wells() == []
 
 
@@ -686,29 +686,29 @@ def test_selection_emits_once_on_release(qapp):
     ov = _sel_overview()
     seen = []
     ov.selectionChanged.connect(lambda wells: seen.append(list(wells)))
-    ov.mousePressEvent(_mouse("press", _pt(0, 0), Qt.ShiftModifier))
+    ov.mousePressEvent(_mouse("press", _pt(0, 0), Qt.KeyboardModifier.ShiftModifier))
     for _ in range(5):                                          # five moves mid-drag...
-        ov.mouseMoveEvent(_mouse("move", _pt(1, 1), Qt.ShiftModifier))
+        ov.mouseMoveEvent(_mouse("move", _pt(1, 1), Qt.KeyboardModifier.ShiftModifier))
     assert seen == []                                           # ...emit NOTHING
-    ov.mouseReleaseEvent(_mouse("release", _pt(1, 1), Qt.ShiftModifier, buttons=Qt.NoButton))
+    ov.mouseReleaseEvent(_mouse("release", _pt(1, 1), Qt.KeyboardModifier.ShiftModifier, buttons=Qt.MouseButton.NoButton))
     assert seen == [["A1", "A2", "B2"]]                         # exactly one emission
 
 
 def test_selection_excludes_empty_wells(qapp):
     ov = _sel_overview()
-    _drag(ov, *_within(1, 0), Qt.ShiftModifier)                 # B1: a plate position, never acquired
+    _drag(ov, *_within(1, 0), Qt.KeyboardModifier.ShiftModifier)                 # B1: a plate position, never acquired
     assert ov.selected_wells() == []
 
 
 def test_wheel_ignored_during_marquee(qapp):
     """Zooming mid-marquee would move the plate under the drag, so the wheel is ignored."""
-    from PyQt5.QtCore import QPoint
-    from PyQt5.QtGui import QWheelEvent
+    from qtpy.QtCore import QPoint, QPointF
+    from qtpy.QtGui import QWheelEvent
     ov = _sel_overview()
-    ov.mousePressEvent(_mouse("press", _pt(0, 0), Qt.ShiftModifier))
+    ov.mousePressEvent(_mouse("press", _pt(0, 0), Qt.KeyboardModifier.ShiftModifier))
     cd_before = ov._cd
-    ov.wheelEvent(QWheelEvent(QPoint(60, 60), QPoint(60, 60), QPoint(0, 0), QPoint(0, 120),
-                              Qt.NoButton, Qt.NoModifier, Qt.NoScrollPhase, False))
+    ov.wheelEvent(QWheelEvent(QPointF(60, 60), QPointF(60, 60), QPoint(0, 0), QPoint(0, 120),
+                              Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier, Qt.ScrollPhase.NoScrollPhase, False))
     assert ov._cd == cd_before                                  # zoom did NOT happen
 
 
@@ -719,14 +719,14 @@ def test_right_button_release_does_not_commit_a_selection(qapp):
     ov = _sel_overview()
     seen = []
     ov.selectionChanged.connect(lambda wells: seen.append(list(wells)))
-    ov.mousePressEvent(_mouse("press", _pt(0, 1), Qt.ShiftModifier))          # Shift-press on A2
-    ov.mouseReleaseEvent(_mouse("release", _pt(0, 1), Qt.ShiftModifier,
-                                buttons=Qt.NoButton, btn=Qt.RightButton))
+    ov.mousePressEvent(_mouse("press", _pt(0, 1), Qt.KeyboardModifier.ShiftModifier))          # Shift-press on A2
+    ov.mouseReleaseEvent(_mouse("release", _pt(0, 1), Qt.KeyboardModifier.ShiftModifier,
+                                buttons=Qt.MouseButton.NoButton, btn=Qt.MouseButton.RightButton))
     assert ov.selected_wells() == []                            # nothing selected
     assert seen == []                                           # and nothing emitted
     assert ov._marquee is not None                              # the gesture is still in flight
-    ov.mouseReleaseEvent(_mouse("release", _pt(0, 1), Qt.ShiftModifier,       # the LEFT release...
-                                buttons=Qt.NoButton))
+    ov.mouseReleaseEvent(_mouse("release", _pt(0, 1), Qt.KeyboardModifier.ShiftModifier,       # the LEFT release...
+                                buttons=Qt.MouseButton.NoButton))
     assert ov.selected_wells() == ["A2"]                        # ...is what commits it
 
 
@@ -734,16 +734,16 @@ def test_leave_clears_the_marquee_so_zoom_survives(qapp):
     """Losing the grab mid-drag (modal dialog, alt-tab) delivers a leave and NO release. A
     stranded _marquee would paint a dashed rect forever and trip wheelEvent's guard, disabling
     zoom permanently."""
-    from PyQt5.QtCore import QEvent, QPoint
-    from PyQt5.QtGui import QWheelEvent
+    from qtpy.QtCore import QEvent, QPoint, QPointF
+    from qtpy.QtGui import QWheelEvent
     ov = _sel_overview()
-    ov.mousePressEvent(_mouse("press", _pt(0, 0), Qt.ShiftModifier))
+    ov.mousePressEvent(_mouse("press", _pt(0, 0), Qt.KeyboardModifier.ShiftModifier))
     assert ov._marquee is not None
-    ov.leaveEvent(QEvent(QEvent.Leave))                         # grab lost; no release ever arrives
+    ov.leaveEvent(QEvent(QEvent.Type.Leave))                         # grab lost; no release ever arrives
     assert ov._marquee is None
     cd_before = ov._cd
-    ov.wheelEvent(QWheelEvent(QPoint(60, 60), QPoint(60, 60), QPoint(0, 0), QPoint(0, 120),
-                              Qt.NoButton, Qt.NoModifier, Qt.NoScrollPhase, False))
+    ov.wheelEvent(QWheelEvent(QPointF(60, 60), QPointF(60, 60), QPoint(0, 0), QPoint(0, 120),
+                              Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier, Qt.ScrollPhase.NoScrollPhase, False))
     assert ov._cd != cd_before                                  # zoom works again
 
 
@@ -752,7 +752,7 @@ def test_leave_clears_the_marquee_so_zoom_survives(qapp):
 def test_plain_drag_still_pans(qapp):
     ov = _sel_overview()
     ox0, oy0 = ov._ox, ov._oy
-    _drag(ov, _pt(0, 0), _pt(1, 1), Qt.NoModifier)              # NO Shift
+    _drag(ov, _pt(0, 0), _pt(1, 1), Qt.KeyboardModifier.NoModifier)              # NO Shift
     assert (ov._ox, ov._oy) != (ox0, oy0), "plain drag no longer pans"
     assert ov.selected_wells() == [], "plain drag must not select"
 
@@ -764,7 +764,7 @@ def test_double_click_does_not_toggle_selection(qapp):
     ov.wellActivated.connect(lambda wid, fov: opened.append((wid, fov)))
     p = _pt(0, 0)
     ov.mousePressEvent(_mouse("press", p))
-    ov.mouseReleaseEvent(_mouse("release", p, buttons=Qt.NoButton))
+    ov.mouseReleaseEvent(_mouse("release", p, buttons=Qt.MouseButton.NoButton))
     ov.mouseDoubleClickEvent(_mouse("dblclick", p))
     assert opened == [("A1", 0)]                                # still opens the well
     assert ov.selected_wells() == []                            # ...and selects nothing
@@ -774,7 +774,7 @@ def test_selection_does_not_disturb_red_box(qapp):
     """_sel (ndviewer current well, red box) and _selection (operator's pick) stay independent."""
     ov = _sel_overview()
     ov.select(1, 1)
-    _drag(ov, *_within(0, 0), Qt.ShiftModifier)
+    _drag(ov, *_within(0, 0), Qt.KeyboardModifier.ShiftModifier)
     assert ov._sel == (1, 1)                                    # red box unmoved
     assert ov.selected_wells() == ["A1"]
 
@@ -782,7 +782,7 @@ def test_selection_does_not_disturb_red_box(qapp):
 def test_clear_selection_emits_empty(qapp):
     ov = _sel_overview()
     seen = []
-    _drag(ov, _pt(0, 0), _pt(1, 1), Qt.ShiftModifier)
+    _drag(ov, _pt(0, 0), _pt(1, 1), Qt.KeyboardModifier.ShiftModifier)
     ov.selectionChanged.connect(lambda wells: seen.append(list(wells)))
     ov.clear_selection()
     assert ov.selected_wells() == [] and seen == [[]]
@@ -1013,7 +1013,7 @@ def test_channel_bar_has_no_contrast_control_at_all(qapp, stub_detail, squid_dat
     `_push` is still a second writer whatever the widget looks like. So this walks the real widget
     tree of the bar AND checks that no contrast-setting method survives on the class.
     """
-    from PyQt5.QtWidgets import QAbstractSlider
+    from qtpy.QtWidgets import QAbstractSlider
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
@@ -1805,7 +1805,7 @@ def test_mosaic_places_each_fov_at_its_own_stage_offset(qapp, stub_detail, squid
 
 def _cell_of(img, ri, ci):
     """Crop cell (ri, ci) out of the plate's composited montage (exactly _CELL px per cell)."""
-    buf = img.constBits().asstring(img.byteCount())
+    buf = img.constBits().asstring(img.sizeInBytes())
     a = np.frombuffer(buf, np.uint8).reshape(img.height(), img.bytesPerLine() // 3, 3)
     a = a[:, :img.width(), :]
     return a[ri * V._CELL:(ri + 1) * V._CELL, ci * V._CELL:(ci + 1) * V._CELL].astype(int)
@@ -1900,7 +1900,7 @@ def test_mosaic_cell_composites_real_structured_pixels(qapp, stub_detail, squid_
 def _plate_rgb(ov):
     """The overview's composited montage as (H, W, 3) uint8 — the pixels, not the chrome."""
     img = ov._active_source()
-    buf = img.constBits().asstring(img.byteCount())
+    buf = img.constBits().asstring(img.sizeInBytes())
     a = np.frombuffer(buf, np.uint8).reshape(img.height(), img.bytesPerLine() // 3, 3)
     return a[:, :img.width(), :]
 
@@ -1992,7 +1992,7 @@ def test_non_global_scope_burns_a_badge_into_the_plate(qapp):
     def amber_px():
         qapp.processEvents()
         im = ov.grab().toImage()
-        a = np.frombuffer(im.constBits().asstring(im.byteCount()), np.uint8)
+        a = np.frombuffer(im.constBits().asstring(im.sizeInBytes()), np.uint8)
         a = a.reshape(im.height(), im.bytesPerLine() // 4, 4)[:, :im.width(), :3]
         # QImage from grab() is BGRA, so channel 2 is RED: amber = high R, mid G, low B
         return int(((a[:, :, 2] > 200) & (a[:, :, 1] > 130) & (a[:, :, 0] < 90)).sum())
@@ -2121,7 +2121,7 @@ def _shift_drag_over(win, wells, cd=20.0):
         a, b = _within(r0, c0, cd)
     else:
         a, b = _pt(r0, c0, cd), _pt(r1, c1, cd)
-    _drag(ov, a, b, Qt.ShiftModifier)
+    _drag(ov, a, b, Qt.KeyboardModifier.ShiftModifier)
 
 
 def test_shift_drag_opens_an_exploration_tab_scoped_to_the_selected_wells(
@@ -2185,8 +2185,8 @@ def test_shift_click_refines_the_selection_without_opening_a_tab(qapp, stub_deta
     win.ingest(str(root))
     ov = _freeze(win._overview)
     rc = win._fov_index["B3"]["rc"]
-    ov.mousePressEvent(_mouse("press", _pt(*rc), Qt.ShiftModifier))
-    ov.mouseReleaseEvent(_mouse("release", _pt(*rc), Qt.ShiftModifier, buttons=Qt.NoButton))
+    ov.mousePressEvent(_mouse("press", _pt(*rc), Qt.KeyboardModifier.ShiftModifier))
+    ov.mouseReleaseEvent(_mouse("release", _pt(*rc), Qt.KeyboardModifier.ShiftModifier, buttons=Qt.MouseButton.NoButton))
     qapp.processEvents()
     assert ov.selected_wells() == ["B3"]                       # selection still happens...
     assert win._explore_tabs.count() == 0 and win._explore_tabs.isHidden()   # ...no tab
@@ -2201,7 +2201,7 @@ def test_shift_drag_over_empty_plate_opens_nothing_and_says_nothing(
     win.ingest(str(root))
     before = win._readout.text()
     ov = _freeze(win._overview)
-    _drag(ov, _pt(0, 0), _pt(0, 0.5), Qt.ShiftModifier)        # row A: no acquired wells
+    _drag(ov, _pt(0, 0), _pt(0, 0.5), Qt.KeyboardModifier.ShiftModifier)        # row A: no acquired wells
     qapp.processEvents()
     assert win._explore_tabs.count() == 0 and win._explore_tabs.isHidden()
     assert win._readout.text() == before
@@ -2217,15 +2217,15 @@ def test_shift_drag_over_empty_plate_opens_nothing_and_says_nothing(
 
 class _BlockingWorker(V.QThread):
     """An _OperatorWorker stand-in that stays RUNNING until stop() (or the test) releases it."""
-    tileReady = V.pyqtSignal(int, int, str, object)
-    pushReady = V.pyqtSignal(int, object)
-    progress = V.pyqtSignal(int, int)
-    finalReady = V.pyqtSignal(object)
-    writtenReady = V.pyqtSignal(str)
-    wellFailed = V.pyqtSignal(int, int)
-    failed = V.pyqtSignal(str)
-    finished_ok = V.pyqtSignal()
-    streamEnded = V.pyqtSignal()
+    tileReady = V.Signal(int, int, str, object)
+    pushReady = V.Signal(int, object)
+    progress = V.Signal(int, int)
+    finalReady = V.Signal(object)
+    writtenReady = V.Signal(str)
+    wellFailed = V.Signal(int, int)
+    failed = V.Signal(str)
+    finished_ok = V.Signal()
+    streamEnded = V.Signal()
 
     def __init__(self, *a, **kw):
         super().__init__()
@@ -2616,7 +2616,7 @@ def test_moving_before_the_dwell_pans_and_never_loupes(qapp, stub_detail, squid_
     x, y = _cell_center(ov, *rc)
     ox0 = ov._ox
     ov.mousePressEvent(_press(x, y))
-    ov.mouseMoveEvent(_move(x + 40, y, buttons=Qt.LeftButton))
+    ov.mouseMoveEvent(_move(x + 40, y, buttons=Qt.MouseButton.LeftButton))
     assert ov._panning is True
     assert ov._ox == pytest.approx(ox0 + 40)       # the plate actually panned
     assert not ov._hold.isActive()                 # ...and the hold timer was killed
@@ -2646,7 +2646,7 @@ def test_slow_pan_stays_a_pan(qapp, stub_detail, squid_dataset):
     assert ov._loupe is None
     ox0 = ov._ox                                   # ...and the next drag pans normally
     ov.mousePressEvent(_press(x, y))
-    ov.mouseMoveEvent(_move(x + 25, y, buttons=Qt.LeftButton))
+    ov.mouseMoveEvent(_move(x + 25, y, buttons=Qt.MouseButton.LeftButton))
     assert ov._panning is True and ov._ox == pytest.approx(ox0 + 25)
     ov.mouseReleaseEvent(_press(x + 25, y))
     ov.set_loupe_source(None)
@@ -3062,7 +3062,7 @@ def test_minerva_is_a_registered_operation():
 def test_minerva_tab_builds_and_lists_projectors(qapp, stub_detail, squid_dataset):
     """The projector choice must be real: squid2minerva's convert.py offers --mip/--z, so a
     hardcoded projection here would be a capability regression."""
-    from PyQt5.QtWidgets import QComboBox
+    from qtpy.QtWidgets import QComboBox
     from squidmip import available_projectors
 
     root, _ = squid_dataset
@@ -3163,8 +3163,8 @@ def test_real_shift_drag_selection_is_what_minerva_exports(qapp, stub_detail, sq
     reach the same answer by accident via ``selected_wells``. This drives a genuine Shift-drag
     marquee and pins that the export scope IS the dragged wells — not the detail well.
     """
-    from PyQt5.QtCore import QEvent, QPoint
-    from PyQt5.QtGui import QMouseEvent
+    from qtpy.QtCore import QEvent, QPoint, QPointF
+    from qtpy.QtGui import QMouseEvent
 
     root, _ = squid_dataset
     win = V.PlateWindow(None)
@@ -3182,12 +3182,12 @@ def test_real_shift_drag_selection_is_what_minerva_exports(qapp, stub_detail, sq
     box = ov._cd * 0.3
 
     def send(kind, x, y, buttons):
-        qapp.sendEvent(ov, QMouseEvent(kind, QPoint(int(x), int(y)), Qt.LeftButton,
-                                       buttons, Qt.ShiftModifier))
+        qapp.sendEvent(ov, QMouseEvent(kind, QPointF(float(x), float(y)), Qt.MouseButton.LeftButton,
+                                       buttons, Qt.KeyboardModifier.ShiftModifier))
 
-    send(QEvent.MouseButtonPress, cx - box, cy - box, Qt.LeftButton)
-    send(QEvent.MouseMove, cx, cy, Qt.LeftButton)
-    send(QEvent.MouseButtonRelease, cx + box, cy + box, Qt.NoButton)
+    send(QEvent.Type.MouseButtonPress, cx - box, cy - box, Qt.MouseButton.LeftButton)
+    send(QEvent.Type.MouseMove, cx, cy, Qt.MouseButton.LeftButton)
+    send(QEvent.Type.MouseButtonRelease, cx + box, cy + box, Qt.MouseButton.NoButton)
     qapp.processEvents()
 
     assert ov.selected_wells() == [target], "the Shift-drag itself did not select the well"
@@ -3673,7 +3673,7 @@ def _montage_px(qapp, ov):
     stays 'different' (or 'identical') for reasons that have nothing to do with layers."""
     ov.recomposite(ov._active); qapp.processEvents()
     img = ov._active_source()
-    a = np.frombuffer(img.constBits().asstring(img.byteCount()), np.uint8)
+    a = np.frombuffer(img.constBits().asstring(img.sizeInBytes()), np.uint8)
     a = a.reshape(img.height(), img.bytesPerLine() // (img.depth() // 8), -1)
     return a[:, :img.width(), :].copy()
 
@@ -4108,8 +4108,8 @@ def _region_crop(ov, region):
     """The rendered pixels of ONE region's cell -- its own rectangle, not a grid square."""
     rc = next(k for k, v in ov._by_rc.items() if v == region)
     x, y, w, h = ov._cell_rect(*rc)
-    img = ov.grab().toImage().convertToFormat(QImage.Format_RGB32)
-    a = np.frombuffer(img.constBits().asstring(img.byteCount()), np.uint8)
+    img = ov.grab().toImage().convertToFormat(QImage.Format.Format_RGB32)
+    a = np.frombuffer(img.constBits().asstring(img.sizeInBytes()), np.uint8)
     a = a.reshape(img.height(), img.bytesPerLine() // 4, 4)[:, :img.width(), :3]
     return a[max(0, int(y)):int(y + h), max(0, int(x)):int(x + w)]
 
@@ -4241,8 +4241,8 @@ def test_ima253_empty_slots_are_visibly_distinct_from_occupied_ones(qapp, stub_d
     ov = V.PlateOverview(plate.row_labels, plate.col_labels, plate.occupied_map)
     ov.set_carrier(plate)
     ov.resize(600, 240)
-    img = ov.grab().toImage().convertToFormat(QImage.Format_RGB32)
-    a = np.frombuffer(img.constBits().asstring(img.byteCount()), np.uint8)
+    img = ov.grab().toImage().convertToFormat(QImage.Format.Format_RGB32)
+    a = np.frombuffer(img.constBits().asstring(img.sizeInBytes()), np.uint8)
     a = a.reshape(img.height(), img.bytesPerLine() // 4, 4)[:, :img.width(), :3]
 
     def _cell_px(ci):
@@ -4292,9 +4292,9 @@ def _shown(qapp, path=None, size=(1600, 900)):
 
 def _right_click(qapp, ov, pos):
     """A REAL right-click: a QContextMenuEvent through Qt's dispatch, not a direct handler call."""
-    from PyQt5.QtGui import QContextMenuEvent
+    from qtpy.QtGui import QContextMenuEvent
     p = pos.toPoint() if hasattr(pos, "toPoint") else pos
-    ev = QContextMenuEvent(QContextMenuEvent.Mouse, p, ov.mapToGlobal(p))
+    ev = QContextMenuEvent(QContextMenuEvent.Reason.Mouse, p, ov.mapToGlobal(p))
     qapp.sendEvent(ov, ev)
     qapp.processEvents()
     return ov._context_menu
@@ -4351,7 +4351,7 @@ def test_ima260_empty_state_copy_meets_the_legibility_floor(qapp, stub_detail, s
     Copy sized for the near case only is unreadable from the chair the big monitor is viewed
     from, which is the entire reason this pane carries text at all.
     """
-    from PyQt5.QtWidgets import QLabel
+    from qtpy.QtWidgets import QLabel
     root, _ = squid_dataset
     win = _shown(qapp, root)
     labels = [w for w in win._explore_empty.findChildren(QLabel) if w.text().strip()]
@@ -4417,8 +4417,8 @@ def test_ima260_right_click_offers_control_well_and_setting_it_pins_the_referenc
     assert win._explore_tabs.widget(0) is win._op_tabs[V.PlateWindow.CONTROL_KEY]
     assert win._explore_tabs.widget(0).regions == ["B3"]
     assert "B3" in win._explore_tabs.tabText(0)
-    from PyQt5.QtWidgets import QTabBar
-    assert win._explore_tabs.tabBar().tabButton(0, QTabBar.RightSide) is None
+    from qtpy.QtWidgets import QTabBar
+    assert win._explore_tabs.tabBar().tabButton(0, QTabBar.ButtonPosition.RightSide) is None
     assert win._detach_tab(0, win._explore_tabs) is None, "the pinned control tab floated away"
     # ...and the pane now holds content, so the example stands down.
     assert win.explore_empty_text() == ""
@@ -4471,7 +4471,7 @@ def test_ima260_clearing_the_control_drops_the_frame_the_tab_and_restores_the_ex
 def test_ima260_the_control_frame_is_really_painted_and_is_not_the_red_box(qapp, stub_detail,
                                                                           squid_dataset):
     """Pixels, not state: a control the user cannot see on the plate is not a control."""
-    from PyQt5.QtGui import QImage
+    from qtpy.QtGui import QImage
     root, _ = squid_dataset
     win = _shown(qapp, root)
     ov = _freeze(win._overview, cd=60.0)
@@ -4479,8 +4479,8 @@ def test_ima260_the_control_frame_is_really_painted_and_is_not_the_red_box(qapp,
     qapp.processEvents()
 
     def _grab():
-        img = ov.grab().toImage().convertToFormat(QImage.Format_RGB32)
-        a = np.frombuffer(img.constBits().asstring(img.byteCount()), np.uint8)
+        img = ov.grab().toImage().convertToFormat(QImage.Format.Format_RGB32)
+        a = np.frombuffer(img.constBits().asstring(img.sizeInBytes()), np.uint8)
         return a.reshape(img.height(), img.bytesPerLine() // 4, 4)[:, :img.width(), :3]
 
     before = _grab()

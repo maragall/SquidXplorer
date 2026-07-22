@@ -1,7 +1,7 @@
 """The plate's channel bar carries NO contrast control surface.
 
 Deliberately imports NO napari. Constructing a napari canvas in the same process loads a second
-Qt binding on top of _viewer's PyQt5, and the resulting clash ABORTS the interpreter rather than
+Qt binding on top of _viewer's PyQt6, and the resulting clash ABORTS the interpreter rather than
 failing a test.
 """
 
@@ -14,7 +14,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("qtpy.QtWidgets")
 if "PySide6" in sys.modules or "PySide2" in sys.modules:
     pytest.skip("PySide already loaded - Qt binding conflict", allow_module_level=True)
 
@@ -38,7 +38,7 @@ _APP = None
 
 def _bar():
     import numpy as np
-    from PyQt5.QtWidgets import QApplication
+    from qtpy.QtWidgets import QApplication
 
     from squidmip._viewer import _ChannelBar
 
@@ -60,7 +60,7 @@ def test_the_plate_carries_no_contrast_slider_or_auto_button():
     Measured with that gate on a real window: origin/main carried 8 sliders + 4 auto buttons in
     the plate view; here it reports 'contrast: 0 sliders, 0 auto buttons in the plate view'.
     """
-    from PyQt5.QtWidgets import QPushButton, QSlider
+    from qtpy.QtWidgets import QPushButton, QSlider
 
     bar = _bar()
     assert bar.findChildren(QSlider) == []
@@ -79,7 +79,7 @@ def test_the_bar_still_REPORTS_the_window_the_owner_resolved():
 def test_the_channel_visibility_checkbox_survives():
     """Visibility masks a channel out of the PLATE composite — a different value from napari's
     per-layer visibility, which hides the layer in pane 2. Two controls, two values."""
-    from PyQt5.QtWidgets import QCheckBox
+    from qtpy.QtWidgets import QCheckBox
 
     assert len(_bar().findChildren(QCheckBox)) == 3
 

@@ -17,8 +17,8 @@ import os
 import time
 from typing import Any, Callable, Optional
 
-from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtWidgets import QLabel, QSizePolicy, QHBoxLayout, QVBoxLayout, QWidget
+from qtpy.QtCore import Qt, QTimer
+from qtpy.QtWidgets import QLabel, QSizePolicy, QHBoxLayout, QVBoxLayout, QWidget
 
 from squidmip._napari_view import MosaicLayers, resolve_viewer
 
@@ -119,7 +119,7 @@ class MosaicPane(QWidget):
         lay.setSpacing(0)
 
         self._banner = QLabel("")
-        self._banner.setAlignment(Qt.AlignCenter)
+        self._banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._banner.setWordWrap(True)
         self._banner.setStyleSheet(
             "background:#5a2d2d;color:#ffd7d7;padding:6px 10px;font-size:12px;"
@@ -169,7 +169,7 @@ class MosaicPane(QWidget):
                 "napari viewer unavailable — falling back to ndviewer_light.\n"
                 f"{self.failure}"
             )
-            msg.setAlignment(Qt.AlignCenter)
+            msg.setAlignment(Qt.AlignmentFlag.AlignCenter)
             msg.setWordWrap(True)
             msg.setStyleSheet("color:#ffd7d7;background:#3a2020;padding:12px;")
             lay.addWidget(msg, 1)
@@ -219,7 +219,7 @@ class MosaicPane(QWidget):
             row.setStyleSheet(get_current_stylesheet())
         except Exception:                        # noqa: BLE001 - cosmetic only
             pass
-        row.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        row.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         lay.addWidget(row)
         self.ndisplay_button = btn
 
@@ -280,8 +280,8 @@ class MosaicPane(QWidget):
                 lay.addWidget(self.canvas, 1)
             return
         qt_window.setParent(self)
-        qt_window.setWindowFlags(Qt.Widget)      # a child widget, not a top-level window
-        qt_window.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        qt_window.setWindowFlags(Qt.WindowType.Widget)      # a child widget, not a top-level window
+        qt_window.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         mb = getattr(qt_window, "menuBar", None)
         if callable(mb):
             # Keep napari's docks and controls; drop only the menu bar, which duplicates our own
@@ -298,7 +298,7 @@ class MosaicPane(QWidget):
         central = qt_window.centralWidget() if hasattr(qt_window, "centralWidget") else None
         if central is not None:
             central.setMinimumSize(360, 360)
-            central.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            central.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         qt_window.setMinimumHeight(560)
         lay.addWidget(qt_window, 1)
         self._native_window = qt_window

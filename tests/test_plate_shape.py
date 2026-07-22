@@ -1,6 +1,6 @@
 """Tests for wellplate-format inference from well ids (IMA-219).
 
-Deliberately NON-Qt: tests/test_viewer.py is behind ``pytest.importorskip("PyQt5")`` and would
+Deliberately NON-Qt: tests/test_viewer.py is behind ``pytest.importorskip("qtpy.QtWidgets")`` and would
 silently not run headless, so the inference contract is pinned here instead.
 """
 
@@ -18,7 +18,7 @@ from squidmip._plate_shape import (
 
 
 def _row_letter(i: int) -> str:
-    """0->A, 25->Z, 26->AA (a local copy — _viewer's is behind a PyQt5 import)."""
+    """0->A, 25->Z, 26->AA (a local copy — _viewer's is behind a Qt import)."""
     s, i = "", i + 1
     while i:
         i, r = divmod(i - 1, 26)

@@ -5,9 +5,9 @@ import importlib, sys
 MODULES = [
     "squidmip", "squidmip.reader", "squidmip._engine", "squidmip.projection",
     "squidmip._output", "squidmip._zarr_store", "squidmip._montage", "squidmip._cli",
-    "squidmip._video", "squidmip._viewer",           # _viewer needs PyQt5 (gui extra)
+    "squidmip._video", "squidmip._viewer",           # _viewer needs a Qt binding (gui extra)
     "numpy", "tifffile", "tensorstore", "pydantic_settings", "imageio", "imageio_ffmpeg",
-    "PyQt5.QtWidgets", "ndviewer_light.core",
+    "qtpy.QtWidgets", "ndviewer_light.core",
 ]
 failed = []
 for m in MODULES:

@@ -64,7 +64,7 @@ _MISSING = object()      # "this attribute was inherited, not the class's own" â
 
 def _app():
     global _APP
-    from PyQt5.QtWidgets import QApplication
+    from qtpy.QtWidgets import QApplication
     _APP = QApplication.instance() or QApplication([])
     return _APP
 
@@ -208,7 +208,7 @@ def _where(wdg) -> str:
 
 def interactive_widgets(root):
     """Every widget in the tree a user can act on, in a stable order."""
-    from PyQt5.QtWidgets import (
+    from qtpy.QtWidgets import (
         QAbstractButton, QAbstractSlider, QAbstractSpinBox, QComboBox,
     )
     kinds = (QAbstractSlider, QAbstractSpinBox, QComboBox, QAbstractButton)
@@ -232,7 +232,7 @@ def _actuate(wdg):
     and cannot be un-clicked, which is why the baseline is re-read before every widget rather than
     once at the start.
     """
-    from PyQt5.QtWidgets import (
+    from qtpy.QtWidgets import (
         QAbstractButton, QAbstractSlider, QAbstractSpinBox, QComboBox,
     )
     if not (wdg.isEnabled() and wdg.isVisible()):
@@ -275,7 +275,7 @@ def _neutralise(win, monkey):
     no-op first. This is a safety harness, NOT an exemption: the neutralised calls are still
     observed, they simply do not run.
     """
-    from PyQt5.QtWidgets import QFileDialog, QMessageBox
+    from qtpy.QtWidgets import QFileDialog, QMessageBox
     import squidmip._viewer as V
 
     called = []
@@ -288,10 +288,12 @@ def _neutralise(win, monkey):
 
     monkey(QFileDialog, "getExistingDirectory", staticmethod(rec("getExistingDirectory", "")))
     monkey(QFileDialog, "getOpenFileName", staticmethod(rec("getOpenFileName", ("", ""))))
-    monkey(QFileDialog, "exec_", rec("QFileDialog.exec_", 0))
+    for _e in ("exec", "exec_"):          # Qt6 spells it exec(); qtpy keeps exec_ as a shim
+        monkey(QFileDialog, _e, rec("QFileDialog.exec", 0))
     for m in ("warning", "information", "critical", "question", "about"):
         monkey(QMessageBox, m, staticmethod(rec(f"QMessageBox.{m}", 0)))
-    monkey(QMessageBox, "exec_", rec("QMessageBox.exec_", 0))
+    for _e in ("exec", "exec_"):
+        monkey(QMessageBox, _e, rec("QMessageBox.exec", 0))
     for m in ("run_operator", "run_minerva_export", "ingest", "close", "_open_acquisition_dialog"):
         if hasattr(V.PlateWindow, m):
             monkey(V.PlateWindow, m, rec(f"PlateWindow.{m}"))
@@ -332,7 +334,7 @@ def find_duplicate_controls(win, verbose=False):
 
 
 def _is_button(wdg):
-    from PyQt5.QtWidgets import QAbstractButton
+    from qtpy.QtWidgets import QAbstractButton
     return isinstance(wdg, QAbstractButton)
 
 
@@ -346,7 +348,7 @@ def contrast_surfaces(win):
     hide()-den control is a second owner waiting to be un-hidden, and the sweep only actuates what
     a user could actuate today.
     """
-    from PyQt5.QtWidgets import QAbstractSlider, QPushButton
+    from qtpy.QtWidgets import QAbstractSlider, QPushButton
     bar = getattr(win, "_channel_bar", None)
     if bar is None:
         return [], []
@@ -446,8 +448,8 @@ def gate_no_duplicated_controllers(dataset=PLATE, verbose=False):
 def self_test(dataset=PLATE):
     """Reintroduce the duplicate, require the gate to bite, remove it, require the gate to pass."""
     import squidmip._viewer as V
-    from PyQt5.QtCore import Qt
-    from PyQt5.QtWidgets import QSlider
+    from qtpy.QtCore import Qt
+    from qtpy.QtWidgets import QSlider
 
     print("=" * 100)
     print("SELF-TEST 1/2: the gate must PASS on the tree as it stands")
@@ -468,7 +470,7 @@ def self_test(dataset=PLATE):
         # exactly the duplicate IMA-261 deleted: a second, independently draggable owner of the
         # contrast window, sitting on the plate next to the array viewer's own.
         for c_i in range(len(self._rows)):
-            s = QSlider(Qt.Horizontal, self)
+            s = QSlider(Qt.Orientation.Horizontal, self)
             s.setRange(0, 65535)
             s.setValue(30000)
             s.valueChanged.connect(
@@ -502,7 +504,7 @@ def self_test(dataset=PLATE):
     print("=" * 100)
     print("SELF-TEST 3/3: duplicating a control in a DIFFERENT concern (channel visibility) â€”")
     print("               the gate must generalise, not just know about contrast.")
-    from PyQt5.QtWidgets import QCheckBox
+    from qtpy.QtWidgets import QCheckBox
 
     def mutant_vis_init(self, labels, colors, overview):
         original(self, labels, colors, overview)

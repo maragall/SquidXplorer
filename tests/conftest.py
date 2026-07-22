@@ -9,7 +9,14 @@ plus the acquisition parameters.json scalars. Returns (root_path, {(region,fov,z
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+
+# Pin the Qt binding before any test module imports qtpy (or napari, which imports it for you).
+# PyQt5, PyQt6 and PySide6 are all installed here and qtpy's default preference order still starts
+# at PyQt5; loading two Qt majors in one process aborts the interpreter. conftest is imported
+# before every test module, so this is the earliest hook that covers the whole session.
+os.environ.setdefault("QT_API", "pyqt6")
 
 import numpy as np
 import pytest
