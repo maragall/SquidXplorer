@@ -3285,6 +3285,7 @@ class PlateWindow(QMainWindow):
 
         self._acq_name = ""           # acquisition folder name, shown as the Process-pane title
         self._current_well = None     # the well currently shown in the detail viewer (for Record)
+        self._current_fov = 0         # the FOV of that region on screen (IMA-250: autofocus ranks IT)
         self._acq_path = None         # the opened acquisition dir (persist writes next to it)
         self._processed_plate = None  # path of the written plate.ome.zarr once an operator persists it
         self._plate_mode = "raw"      # what the plate view is showing — shown in the plate-pane title
@@ -4663,6 +4664,7 @@ class PlateWindow(QMainWindow):
         self._selected_regions = []   # wells picked on the plate (IMA-221); scopes an operator run
         self._pushed = set()
         self._current_well = None
+        self._current_fov = 0
         self._enable_operators(False)
         if self._overview is not None:
             self._release_loupe_sources()   # join the read thread BEFORE dropping its owner
@@ -5464,14 +5466,11 @@ class PlateWindow(QMainWindow):
                 f"{well_id} is not in this tab's subset — switch to 'Process wells' to open it")
             return
         self._current_well = well_id
+        self._current_fov = fov_index                  # the FOV ON SCREEN (IMA-250 (b))
         if self._overview is not None:                 # current well at view = the red BOX
             self._overview.select(*self._fov_index[well_id]["rc"])
         if self._active_op_key is not None or self._reader is None:   # processed/computed: already pushed
-            try:
-                row, col = parse_well_id(well_id)
-                self._detail.go_to_well_fov(f"{row}{col}", fov_index)
-            except Exception:
-                pass
+            self._detail.go_to_well_fov(well_id, fov_index)
             return
         if well_id not in self._pushed:
             fov = self._meta["fovs_per_region"][well_id][0]
@@ -5483,13 +5482,12 @@ class PlateWindow(QMainWindow):
                     except (KeyError, IndexError, OSError, RuntimeError):
                         continue   # a genuinely-missing plane / closed viewer shouldn't block the rest
             self._pushed.add(well_id)
-        try:
-            # Region ids are not necessarily well ids (a slide carrier's are freeform), and this
-            # is only a label for the detail viewer's well/FOV combo -- never worth raising over.
-            row, col = parse_well_id(well_id)
-            self._detail.go_to_well_fov(f"{row}{col}", fov_index)
-        except Exception:
-            pass
+        # Region ids are not necessarily well ids: a slide carrier's are freeform ("R2C3",
+        # "region_A", "tissue-1"). This used to rebuild the id as f"{row}{col}" from
+        # parse_well_id, which RAISES on all of those, inside a bare except that swallowed it -
+        # so a double-click moved the red box and never navigated, silently. The id is only a
+        # label for the detail viewer's well/FOV combo, so it is passed through untouched.
+        self._detail.go_to_well_fov(well_id, fov_index)
 
     def _on_fov_slider(self, flat_idx: int):
         """ndviewer FOV slider moved -> move the red box on the plate to that well."""
@@ -5514,7 +5512,12 @@ class PlateWindow(QMainWindow):
             return
         from squidmip.projection import _tenengrad
         well = self._current_well
-        fov = self._meta["fovs_per_region"][well][0]
+        # The FOV IN VIEW, not the region's first one (IMA-250). This is a per-FOV autofocus, so
+        # ranking field 0 while the viewer shows field 12 reports the sharpest plane of pixels the
+        # user is not looking at. Falls back to the region's first FOV when the one on screen is
+        # not one of its own (a freshly-scoped detail, or a region with a single field).
+        fovs = self._meta["fovs_per_region"][well]
+        fov = self._current_fov if self._current_fov in fovs else fovs[0]
         chan = self._meta["channels"][0]["name"]        # rank on one representative channel
         best_z_i, best_f = 0, -1.0
         for z_i, z in enumerate(self._meta["z_levels"]):
@@ -5529,7 +5532,7 @@ class PlateWindow(QMainWindow):
             self._detail.set_current_index("z_level", best_z_i)
         except Exception:
             pass
-        self._readout.setText(f"{well}: focused on reference plane z={best_z_i} (sharpest)")
+        self._readout.setText(f"{well}:{fov} focused on reference plane z={best_z_i} (sharpest)")
 
     def _retire(self, w):
         """Retire a worker thread WITHOUT ever destroying a running QThread (that aborts the app).
