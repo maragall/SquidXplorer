@@ -4772,7 +4772,12 @@ def test_on_mosaic_plane_tells_napari_the_data_is_multiscale(qapp):
 
     win = V.PlateWindow.__new__(V.PlateWindow)
     win._mosaic_pane = _Pane()
-    win._mosaic_region = "A1"
+    # _mosaic_region is a read-only PROPERTY over the cursor now (one owner, no second copy to
+    # drift), so the region is set by moving the cursor -- which is what production does too.
+    from squidmip._region_nav import RegionCursor
+    win._cursor = RegionCursor()
+    win._cursor.set_order(["A1"])
+    win._cursor.activate("A1")
     win._meta = _pyr_meta()
 
     levels = [np.zeros((4, 64, 48), "uint16"), np.zeros((4, 32, 24), "uint16")]

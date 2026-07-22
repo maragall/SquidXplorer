@@ -85,7 +85,6 @@ VIEWER_ENV = "SQUIDMIP_VIEWER"
 _NAPARI = "napari"
 META_KEY = "squidmip"
 
-
 #: Spellings of the ndviewer_light fallback accepted in SQUIDMIP_VIEWER.
 _NDV_NAMES = ("ndv", "ndviewer", "ndviewer_light")
 
@@ -454,6 +453,8 @@ class MosaicLayers:
             peers.remove(layer)
             if len(peers) > 1:
                 self._model.layers.link_layers(peers, ("contrast_limits",))
+            # No re-tap needed: the tap lives on EVERY layer of the channel, not on a lead, so
+            # removing one cannot leave the channel untapped.
         self._model.layers.remove(layer)
         return True
 

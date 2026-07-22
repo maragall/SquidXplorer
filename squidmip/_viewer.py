@@ -76,6 +76,7 @@ from squidmip._montage import _area_downsample, _hex_to_rgb01, _window, composit
 from squidmip._output import parse_well_id
 from squidmip._plate import PlateBuildError, build_plate
 from squidmip._plate_shape import PlateShapeError
+from squidmip._region_nav import RegionCursor, RegionSlider
 
 # (`_SUPPORTED_PLATES` and `resolve_plate_format` used to live here. `build_plate` (IMA-214) is now
 #  the single format-resolution path — override > measured > declared > inferred — so both were dead
@@ -3230,15 +3231,17 @@ class _MosaicWorker(QThread):
     Results arrive per channel so the first channel paints while the rest are still being read.
     """
 
-    ready = pyqtSignal(str, str, object, object)   # region, channel, plane, bbox_um|None
+    ready = pyqtSignal(str, str, object, object)   # region, channel, LEVELS (pyramid), bbox_um|None
+    #                                                (no contrast window: napari owns contrast)
     problem = pyqtSignal(str)
     finished_count = pyqtSignal(int)
 
-    def __init__(self, reader, meta, region, channels, parent=None):
+    def __init__(self, reader, meta, region, channels, z_index=0, parent=None):
         super().__init__(parent)
         self._reader, self._meta = reader, meta
         self._region = region
         self._channels = list(channels)
+        self._z_index = int(z_index)
         self._stop = threading.Event()
 
     def stop(self):
@@ -3276,10 +3279,67 @@ class _MosaicWorker(QThread):
                     f"{self._region}: no stage positions / pixel size — mosaic not derivable."
                 )
                 continue
+            # NO contrast window on the wire. ima-nav-controls added one here, computing
+            # napari's own calc_data_range off-thread because it cost ~940 ms/channel on the GUI
+            # thread. That measurement was taken against a FLAT level-0 stack; with the multiscale
+            # pyramid napari autoscales from the small level it actually renders, so the cost it
+            # was routing around is gone. Passing a window again would put a second contrast
+            # decision on the wire for no measured gain.
             levels, _step, _nz = res
             self.ready.emit(self._region, ch, levels, bbox)
             n += 1
         self.finished_count.emit(n)
+
+class _FocusWorker(QThread):
+    """Rank one FOV's z planes by Tenengrad sharpness, OFF the GUI thread.
+
+    The reference-plane scan reads every z plane of one FOV — ~40-50 TIFFs on the tissue set.
+    It used to run inside the button's ``clicked`` slot, which froze the window solid for the
+    whole scan with no progress and no cancel; it was the only long operation in the app without
+    a QThread. Planes are area-downsampled to 512 px before scoring, so the cost is dominated by
+    the reads rather than the metric.
+    """
+
+    ready = pyqtSignal(int, str)          # (z index of the sharpest plane, a note or "")
+    problem = pyqtSignal(str)
+
+    def __init__(self, reader, meta, region, fov, channel, parent=None):
+        super().__init__(parent)
+        self._reader, self._meta = reader, meta
+        self._region, self._fov, self._channel = region, fov, channel
+        self._stop = threading.Event()
+
+    def stop(self):
+        self._stop.set()
+
+    def run(self):
+        from squidmip.projection import _tenengrad
+
+        best_z_i, best_f, read = 0, -1.0, 0
+        failures = []
+        for z_i, z in enumerate(self._meta["z_levels"]):
+            if self._stop.is_set():
+                return
+            try:
+                plane = self._reader.read(self._region, self._fov, self._channel, z)
+            except Exception as exc:              # noqa: BLE001 - counted and REPORTED below
+                failures.append(f"z={z}: {type(exc).__name__}")
+                continue
+            read += 1
+            f = _tenengrad(_area_downsample(plane, 512, 512).astype(np.float32))
+            if f > best_f:
+                best_f, best_z_i = f, z_i
+        if read == 0:
+            # NEVER return a default. Reporting "focused on z=0" when nothing could be read is
+            # the log-and-continue failure this project has six confirmed instances of.
+            self.problem.emit(
+                f"{self._region}:{self._fov} — not one z plane of {self._channel} could be "
+                f"read, so there is no sharpest plane. ({'; '.join(failures[:3])})")
+            return
+        note = ("" if not failures else
+                f" ({len(failures)} of {len(self._meta['z_levels'])} planes were unreadable "
+                f"and were skipped)")
+        self.ready.emit(int(best_z_i), note)
 
 
 class _PreviewWorker(QThread):
@@ -3540,7 +3600,14 @@ class PlateWindow(QMainWindow):
         self._reader = None
         self._meta = None
         self._mosaic_worker = None    # fuses a region's FOVs for pane 2, off the GUI thread
-        self._mosaic_region = None    # region currently shown in the napari mosaic pane
+        # THE SINGLE OWNER of "which region is current". The red ROI frame on the plate, the
+        # region slider, and the mosaic in pane 2 are all VIEWS of this one value — none of them
+        # keeps a copy. Before it there were three copies, hand-synced: PlateOverview._sel,
+        # _mosaic_region and _current_well. Both `_mosaic_region` and `_current_well` are now
+        # PROPERTIES that read the cursor, so an assignment cannot create a fourth.
+        self._cursor = RegionCursor()
+        self._cursor.subscribe(self._on_region_changed)
+        self._cursor.on_problem(lambda msg: self._readout.setText(msg))
         self._fov_index = {}
         self._selected_regions = []   # wells picked on the plate (IMA-221); scopes an operator run
         self._pushed = set()          # wells whose raw z-stack is already registered in the detail viewer
@@ -3567,7 +3634,8 @@ class PlateWindow(QMainWindow):
             self._op_actions[op.key] = act
 
         self._acq_name = ""           # acquisition folder name, shown as the Process-pane title
-        self._current_well = None     # the well currently shown in the detail viewer (for Record)
+        self._current_well = None     # a PROPERTY over self._cursor — see below. Kept as an
+        #                               assignment so every existing call site still reads.
         self._current_fov = 0         # the FOV of that region on screen (IMA-250: autofocus ranks IT)
         self._acq_path = None         # the opened acquisition dir (persist writes next to it)
         self._processed_plate = None  # path of the written plate.ome.zarr once an operator persists it
@@ -3765,6 +3833,15 @@ class PlateWindow(QMainWindow):
         self._left_l.setSpacing(0)
         self._left_l.addWidget(plate_title_bar)
         self._left_l.addWidget(self._drop, 1)    # the plate overview replaces this on ingest
+
+        # THE REGION SLIDER — the navigation control, replacing the FOV slider. It lives in the
+        # PLATE pane, directly under the plate, because the thing it moves is the red ROI frame
+        # drawn on that plate. Under napari there was previously no navigation control on screen
+        # at all: the FOV slider belonged to ndviewer_light, which is not constructed when napari
+        # is the viewer.
+        self._region_slider = self._make_region_slider()
+        if self._region_slider is not None:
+            self._left_l.addWidget(self._region_slider)
 
         left_col = QSplitter(Qt.Vertical)
         left_col.setStyleSheet("QSplitter::handle{background:#232b3a;height:1px;}")
@@ -5412,7 +5489,15 @@ class PlateWindow(QMainWindow):
         self._install_channel_bar(meta["channels"], meta["dtype"])
 
         self._setup_raw_detail()
-        self._load_mosaic()          # pane 2 shows the region MOSAIC from the moment it opens
+        # Hand the plate's region order to the SINGLE OWNER. Announcing it is what puts the red
+        # ROI frame on region 0, sizes the region slider, and loads pane 2's mosaic — one move,
+        # not three calls that could each be forgotten on some path.
+        #
+        # Cleared first so the announce always happens: re-opening an acquisition whose region
+        # ids match the previous one would otherwise be a no-op move and pane 2 would keep the
+        # OLD plate's mosaic on screen.
+        self._cursor.set_order([])
+        self._cursor.set_order(order)
 
         self._enable_operators(True)
 
@@ -5437,7 +5522,10 @@ class PlateWindow(QMainWindow):
         self._preview.tileReady.connect(self._on_preview_tile)
         self._preview.streamEnded.connect(lambda: self._recomposite("raw"))
         self._preview.start()   # (the detail already landed on order[0] via _setup_raw_detail)
-        # top-left = LIVE STATUS (what's happening / what's shown); the plate name is the pane title
+        # top-left = STATUS (what's happening / what's shown); the plate name is the pane title.
+        # "live" is retired from user-facing copy: this is POST-ACQUISITION review, and calling
+        # a loaded plate "live" reads as a running scope. The phrasing is operator/stitcher
+        # iteration.
         # Multi-FOV policy (IMA-187): an operator run processes EVERY FOV and composites them into
         # the well's cell by stage coordinate. The raw preview above is still one FOV per well (it
         # reads a single plane per well precisely to stay fast), so say which one you're looking at.
@@ -5445,9 +5533,74 @@ class PlateWindow(QMainWindow):
         note = (f" · {multi} multi-FOV region(s), previewing as mosaics" if multi else "")
         # NOT "live". This is a POST-ACQUISITION tool: nothing here is streaming off a scope --
         # the acquisition is finished and on disk, and calling it live invited exactly the wrong
-        # mental model of what the operators below are doing. What the line has to say is what
-        # is loaded and what you can do with it.
-        self._readout.setText(f"{len(self._fov_index)} wells loaded · double-click to open{note}")
+        # mental model of what the operators below are doing. What the line has to say is what is
+        # loaded and how to open it -- including the region slider, which is new and otherwise
+        # undiscoverable.
+        self._readout.setText(
+            f"{len(self._fov_index)} wells loaded · slide the region slider or double-click to "
+            f"open one{note}")
+
+    def _make_region_slider(self):
+        """Build the region slider, or say why there is none. NEVER a silent absence.
+
+        It is napari's own dims slider (play button, fps popup, loop modes and an animation
+        thread), driven from a napari ``Dims`` model that carries only the region axis — see
+        ``_region_nav`` for why the region is not an axis of the image array instead.
+        """
+        try:
+            slider = RegionSlider(self)
+        except Exception as exc:                     # noqa: BLE001 - reported, never swallowed
+            self._region_slider_failure = f"{type(exc).__name__}: {exc}"
+            return None
+        self._region_slider_failure = None
+        slider.bind(self._cursor)
+        slider.on_problem(lambda msg: self._readout.setText(msg))
+        return slider
+
+    # -- the current region: ONE value, three views ------------------------------------------
+    #
+    # `_mosaic_region` and `_current_well` are properties over `self._cursor` rather than fields.
+    # That is the whole point: an assignment to either cannot create a second copy that drifts
+    # out of step with the red frame. Every one of this project's 4+ confirmed instances of that
+    # defect was a field somebody forgot to update on one path out of five.
+
+    @property
+    def _mosaic_region(self) -> Optional[str]:
+        """The region pane 2 is showing. Read-only: the cursor decides, this reports."""
+        return self._cursor.region
+
+    @property
+    def _current_well(self) -> Optional[str]:
+        """The region the USER opened, or None if they have only ever been shown one.
+
+        Not the same question as ``_mosaic_region``: ``_selection_regions`` scopes an operator
+        run to this, so "a plate was loaded and something had to be on screen" must not count.
+        """
+        return self._cursor.region if self._cursor.activated else None
+
+    @_current_well.setter
+    def _current_well(self, value: Optional[str]) -> None:
+        if value is None:
+            self._cursor.deactivate()          # nothing open; the frame does NOT move
+        else:
+            self._cursor.activate(value)
+
+    def _on_region_changed(self, index: int, region: str):
+        """THE current region moved. Everything that shows it follows from here, and nowhere else.
+
+        Order matters. The red ROI frame moves FIRST so the plate never lags the slider by the
+        length of a mosaic load — the frame and the slider must never disagree, and a mosaic that
+        takes a second to arrive would otherwise leave them disagreeing for that second.
+        """
+        if self._overview is not None:
+            info = self._fov_index.get(region)
+            if info is not None:
+                self._overview.select(*info["rc"])          # THE RED FRAME
+        if self._region_slider is not None:
+            self._region_slider.setToolTip(
+                f"region {index + 1} of {self._cursor.count}: {region}\n"
+                "Press play to walk the regions; right-click play for frames per second.")
+        self._load_mosaic(region=region)
 
     def _load_mosaic(self, region: Optional[str] = None, op: str = "raw"):
         """Show one region's fused MOSAIC in pane 2, one napari layer per channel.
@@ -5463,7 +5616,7 @@ class PlateWindow(QMainWindow):
             return
         if self._reader is None or self._meta is None:
             return
-        region = region or (self._order[0] if getattr(self, "_order", None) else None)
+        region = region or self._cursor.region
         if region is None:
             return
 
@@ -5472,11 +5625,19 @@ class PlateWindow(QMainWindow):
             prior.stop()
             prior.wait(2000)
 
-        self._mosaic_region = region
+        # THE Z SLIDER IS GLOBAL ACROSS THE PLATE. Replacing the layers resets napari's dims to
+        # step 0, so the z you were inspecting silently snapped back to the bottom of the stack
+        # every time you moved to another region — which is the opposite of "the plate composites
+        # with the z and t sliders". Remember it here and restore it once the new layers are in.
+        self._pending_dims_step = self._napari_dims_step()
         pane.mosaic.remove_op(op)
         channels = [c["name"] for c in self._meta["channels"]]
-        w = _MosaicWorker(self._reader, self._meta, region, channels, parent=self)
-        w.ready.connect(lambda r, ch, plane, bbox: self._on_mosaic_plane(op, r, ch, plane, bbox))
+        z_now = 0
+        if self._pending_dims_step and self._napari_z_axis() is not None:
+            z_now = int(self._pending_dims_step[self._napari_z_axis()])
+        w = _MosaicWorker(self._reader, self._meta, region, channels, z_index=z_now, parent=self)
+        w.ready.connect(lambda r, ch, plane, bbox, win:
+                        self._on_mosaic_plane(op, r, ch, plane, bbox, win))
         w.problem.connect(lambda msg: pane.say(msg))
         w.finished_count.connect(lambda n: self._on_mosaic_done(op, region, n))
         self._mosaic_worker = w
@@ -5498,7 +5659,7 @@ class PlateWindow(QMainWindow):
 
         # NO contrast_limits: napari autoscales, and napari OWNS contrast.
         #
-        # We used to pass _pct_window's percentile window. Two things were wrong with that.
+        # What must NOT come back is _pct_window's percentile window. Two things were wrong with it.
         # First it duplicated napari's job — napari computes its own percentile autoscale and
         # exposes it on the layer, so passing ours meant two percentile rules over one quantity,
         # which is this project's most-repeated defect shape. Second it made the composite
@@ -5508,9 +5669,9 @@ class PlateWindow(QMainWindow):
         #
         # Julio: "Napari has so many pre-built features that you're not leveraging." This is one.
         # napari autoscales on add and the user retunes with the layer's own contrast slider,
-        # which is also the single owner the plate now follows. A LAZY z-stack makes this doubly
-        # right: computing our own window would have to reduce over z, materialising the stack on
-        # the GUI thread; napari autoscales from the visible plane instead.
+        # which is also the single owner the plate now follows. ima-nav-controls measured that
+        # autoscale at ~940 ms/channel and moved it off-thread; against the PYRAMID napari
+        # autoscales from the small level it renders, so the cost is gone rather than relocated.
         # multiscale=True is what makes the pyramid a pyramid. Without it napari treats the list
         # as one array to stack, or takes level 0 and renders exactly as slowly as before — the
         # levels would exist and buy nothing.
@@ -5522,12 +5683,55 @@ class PlateWindow(QMainWindow):
             z_scale_um=(self._meta or {}).get("dz_um"),
         )
 
+    # -- napari's own z / t dimension sliders, which are GLOBAL across the plate ---------------
+    def _napari_dims(self):
+        """napari's ``Dims`` model, or None when napari is not the viewer.
+
+        This is THE z slider — the one commit 19cd491 made real by handing napari a lazy
+        ``(z, y, x)`` stack. Nothing here builds a second one.
+        """
+        pane = getattr(self, "_mosaic_pane", None)
+        if pane is None or not getattr(pane, "ok", False):
+            return None
+        return getattr(pane.mosaic.model, "dims", None)
+
+    def _napari_z_axis(self) -> Optional[int]:
+        """Index of the z axis in napari's dims, or None when the data has no z axis.
+
+        napari puts the displayed axes LAST, so with a ``(z, y, x)`` layer z is ``ndim - 3``.
+        Derived rather than hard-coded to 0: adding a t axis would shift it, and a hard-coded
+        index would then quietly drive the wrong slider.
+        """
+        dims = self._napari_dims()
+        if dims is None or int(getattr(dims, "ndim", 0)) < 3:
+            return None
+        return int(dims.ndim) - 3
+
+    def _napari_dims_step(self):
+        dims = self._napari_dims()
+        return tuple(dims.current_step) if dims is not None else None
+
+    def _restore_dims_step(self):
+        """Put the global z (and t) back where the user left it after a region change."""
+        want = getattr(self, "_pending_dims_step", None)
+        self._pending_dims_step = None
+        dims = self._napari_dims()
+        if dims is None or not want:
+            return
+        for axis, step in enumerate(want[: int(dims.ndim)]):
+            top = int(dims.nsteps[axis]) - 1
+            if 0 <= int(step) <= top and int(dims.current_step[axis]) != int(step):
+                dims.set_current_step(axis, int(step))
+
     def _on_mosaic_done(self, op: str, region: str, n: int):
         pane = getattr(self, "_mosaic_pane", None)
         if pane is None or not getattr(pane, "ok", False):
             return
         if n == 0:
             pane.say(f"{region}: no mosaic could be built (see the message above).")
+            # The frame gate must open even on failure, or playback stops dead on the first
+            # region that cannot be fused and the play button just looks stuck.
+            self._region_frame_done()
             return
         pane.say("")
         try:
@@ -5535,7 +5739,18 @@ class PlateWindow(QMainWindow):
             pane.mosaic.model.reset_view()
         except Exception:                            # noqa: BLE001 - view framing is cosmetic
             pass
+        self._restore_dims_step()
         self._bind_napari_contrast()
+        self._region_frame_done()
+
+    def _region_frame_done(self):
+        """Tell the region slider this region is on screen, so playback may request the next.
+
+        napari's playback is debounced on the render for exactly this reason; wiring our load
+        into that gate is what stops a 10 fps timer queueing ten mosaic loads per completed one.
+        """
+        if self._region_slider is not None:
+            self._region_slider.frame_done()
 
     def _bind_napari_contrast(self):
         """Point the EXISTING contrast sink (IMA-261) at napari instead of ndviewer_light.
@@ -6361,26 +6576,27 @@ class PlateWindow(QMainWindow):
         has run, the slider already holds the results) just navigate the slider to that well."""
         if well_id not in self._fov_index:
             return
-        # Re-point pane 2's mosaic FIRST, and independently of the detail viewer: with napari as
-        # the viewer ndviewer_light may not be installed at all, and an early return on
-        # `_detail is None` would silently make double-click do nothing.
-        if well_id != getattr(self, "_mosaic_region", None):
-            self._load_mosaic(region=well_id)
-        if self._detail is None:
-            return
-        # Resolve the slider position BEFORE moving the red box. The box says "this is the well you
-        # are looking at"; if the detail's slider does not contain the well (an exploration tab
-        # scopes it to a subset) we cannot show it, and moving the box anyway is how you get a red
-        # box on one well and another well's pixels beside it — silently.
-        idx = self._slider_pos(well_id)
-        if idx is None:
+        # Resolve the slider position BEFORE moving anything. The red frame says "this is the well
+        # you are looking at"; if the detail's slider does not contain the well (an exploration tab
+        # scopes it to a subset) we cannot show it, and moving the frame anyway is how you get a red
+        # frame on one well and another well's pixels beside it — silently.
+        idx = self._slider_pos(well_id) if self._detail is not None else None
+        if self._detail is not None and idx is None:
             self._readout.setText(
                 f"{well_id} is not in this tab's subset — switch to 'Process wells' to open it")
             return
-        self._current_well = well_id
         self._current_fov = fov_index                  # the FOV ON SCREEN (IMA-250 (b))
-        if self._overview is not None:                 # current well at view = the red BOX
-            self._overview.select(*self._fov_index[well_id]["rc"])
+        # ONE move. The cursor drives the red frame, the region slider and pane 2's mosaic
+        # together, so they cannot disagree. This used to be three statements on three different
+        # code paths, and under napari (`_detail is None`) it returned before ANY of them ran:
+        # a double-click loaded the mosaic and left the red frame on the previous region.
+        try:
+            self._cursor.activate(well_id)
+        except KeyError:
+            self._readout.setText(f"{well_id} is not in the current region order")
+            return
+        if self._detail is None:
+            return
         if self._active_op_key is not None or self._reader is None:   # processed/computed: already pushed
             self._detail.go_to_well_fov(well_id, fov_index)
             return
@@ -6402,15 +6618,23 @@ class PlateWindow(QMainWindow):
         self._detail.go_to_well_fov(well_id, fov_index)
 
     def _on_fov_slider(self, flat_idx: int):
-        """ndviewer FOV slider moved -> move the red box on the plate to that well."""
+        """ndviewer_light's own slider moved -> move the CURSOR (which moves the red frame).
+
+        This is the FALLBACK viewer's slider; under napari the navigation control is
+        ``_region_slider``. Both land in the same cursor, so there is still exactly one owner.
+
+        The labels are ``f"{region}:0"`` in raw mode (IMA-270's ``r:0``), so the region id is
+        everything before the colon. The label is a DISPLAY string and this is the only place it
+        is read back; nothing downstream parses it.
+        """
         if self._detail is None or self._overview is None:
             return
         labels = getattr(self._detail, "_fov_labels", None)
         if not labels or not (0 <= flat_idx < len(labels)):
             return
-        info = self._fov_index.get(labels[flat_idx].split(":")[0])
-        if info:
-            self._overview.select(*info["rc"])
+        region = labels[flat_idx].split(":")[0]
+        if self._cursor.position_of(region) is not None:
+            self._cursor.set_region(region)
 
     def _on_detail_contrast(self, ch: int, lo: float, hi: float):
         """The CENTRAL ARRAY VIEWER re-windowed channel *ch*. Make the plate show that window.
@@ -6439,17 +6663,41 @@ class PlateWindow(QMainWindow):
             self._channel_bar.set_window(ch, float(lo), float(hi))
 
     def _focus_reference_plane(self):
-        """Jump the detail viewer's z-slider to the CURRENT FOV's sharpest plane (Tenengrad autofocus).
+        """Jump THE z SLIDER to the current FOV's sharpest plane (Tenengrad autofocus).
 
-        Per-FOV, on demand — nothing is saved. Ranks focus on downsampled planes so it stays snappy.
-        This is the reference-plane feature in the viewer (not a plate-wide save operator)."""
-        if self._reader is None or self._current_well is None or self._detail is None:
-            self._readout.setText("double-click a well first, then focus its reference plane")
+        A BUTTON, not a plate operator: it is per-FOV, on demand, and nothing is saved.
+
+        Two things were wrong with the previous version and both are fixed here.
+
+        1. IT WAS PERMANENTLY DEAD under napari. It required ``self._detail``, which is ``None``
+           whenever napari is the viewer (dc0f288), so the click returned immediately and told
+           the user to "double-click a well first" — a well they had just double-clicked. A
+           visible button with zero function is worse than no button. The z slider it must move
+           is NAPARI'S OWN, the one 19cd491 made real behind a lazy ``(z, y, x)`` stack.
+        2. IT RANKED EVERY PLANE ON THE GUI THREAD. ~40-50 TIFF reads inside a ``clicked`` slot,
+           with no worker, no progress and no cancel: the window froze solid for the duration.
+           It was the only long operation in the app without a QThread. Now it is one.
+
+        The region comes from the CURSOR, so "which region" is the same value the red frame and
+        the region slider show — there is no separate notion of "the well the detail viewer has".
+        """
+        if self._reader is None or self._meta is None:
+            self._readout.setText("open an acquisition before focusing a reference plane")
             return
-        if not hasattr(self._detail, "set_current_index"):
+        well = self._cursor.region
+        if well is None:
+            self._readout.setText("no region is selected — nothing to focus")
             return
-        from squidmip.projection import _tenengrad
-        well = self._current_well
+        z_levels = list(self._meta.get("z_levels") or [])
+        if len(z_levels) <= 1:
+            self._readout.setText(
+                f"{well}: this acquisition has a single z plane, so there is no reference "
+                "plane to find.")
+            return
+        prior = getattr(self, "_focus_worker", None)
+        if prior is not None and prior.isRunning():
+            self._readout.setText("still ranking planes for the last request — one at a time.")
+            return
         # The FOV IN VIEW, not the region's first one (IMA-250). This is a per-FOV autofocus, so
         # ranking field 0 while the viewer shows field 12 reports the sharpest plane of pixels the
         # user is not looking at. Falls back to the region's first FOV when the one on screen is
@@ -6457,20 +6705,51 @@ class PlateWindow(QMainWindow):
         fovs = self._meta["fovs_per_region"][well]
         fov = self._current_fov if self._current_fov in fovs else fovs[0]
         chan = self._meta["channels"][0]["name"]        # rank on one representative channel
-        best_z_i, best_f = 0, -1.0
-        for z_i, z in enumerate(self._meta["z_levels"]):
-            try:
-                plane = self._reader.read(well, fov, chan, z)
-            except Exception:
-                continue
-            f = _tenengrad(_area_downsample(plane, 512, 512).astype(np.float32))  # downsample = fast
-            if f > best_f:
-                best_f, best_z_i = f, z_i
-        try:
-            self._detail.set_current_index("z_level", best_z_i)
-        except Exception:
-            pass
-        self._readout.setText(f"{well}:{fov} focused on reference plane z={best_z_i} (sharpest)")
+        self._focus_btn.setEnabled(False)
+        self._readout.setText(f"{well}:{fov} — ranking {len(z_levels)} planes for focus …")
+        w = _FocusWorker(self._reader, self._meta, well, fov, chan, parent=self)
+        w.ready.connect(lambda z_i, note, r=well, f=fov: self._on_reference_plane(r, f, z_i, note))
+        w.problem.connect(self._on_focus_problem)
+        self._focus_worker = w
+        w.start()
+
+    def _on_focus_problem(self, msg: str):
+        self._focus_btn.setEnabled(True)
+        self._readout.setText(f"focus reference plane: {msg}")
+
+    def _on_reference_plane(self, well: str, fov: int, z_index: int, note: str = ""):
+        """The sharpest plane is known. MOVE THE Z SLIDER to it."""
+        self._focus_btn.setEnabled(True)
+        moved = self._set_z_index(z_index)
+        if not moved:
+            self._readout.setText(
+                f"{well}:{fov} sharpest plane is z={z_index}, but no z slider could be moved — "
+                "the viewer is showing a single plane.")
+            return
+        self._readout.setText(
+            f"{well}:{fov} focused on reference plane z={z_index} (sharpest){note}")
+
+    def _set_z_index(self, z_index: int) -> bool:
+        """Drive THE z slider to *z_index*. Returns whether a slider actually moved.
+
+        There is one z control per viewer and this finds it rather than owning a second one:
+        napari's ``dims`` when napari is the viewer, ndviewer_light's ``set_current_index`` in
+        the fallback. The boolean is the point — a "focused" message printed over a slider that
+        never moved is exactly the silent failure this method exists to end.
+        """
+        axis = self._napari_z_axis()
+        if axis is not None:
+            dims = self._napari_dims()
+            top = int(dims.nsteps[axis]) - 1
+            if top < 1:
+                return False
+            dims.set_current_step(axis, max(0, min(int(z_index), top)))
+            return int(dims.current_step[axis]) == max(0, min(int(z_index), top))
+        setter = getattr(self._detail, "set_current_index", None) if self._detail else None
+        if setter is None:
+            return False
+        setter("z_level", int(z_index))
+        return True
 
     def _retire(self, w):
         """Retire a worker thread WITHOUT ever destroying a running QThread (that aborts the app).
