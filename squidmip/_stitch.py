@@ -352,6 +352,23 @@ def stitch_region(
     KeyError
         If a FOV has no stage position (see :func:`_positions_yx_um`).
     """
+    # Refuse a plane-op BEFORE reading anything. This pipeline fuses with z=1 by construction
+    # (`out` is allocated with z extent 1, write_block writes [t, :, 0, ...], fuse_plane gets
+    # z_level=0), which is correct for a z-reducer whose project_well output is (T, C, 1, Y, X).
+    # A plane-op's output is (T, C, Nz, Y, X), so the old `[:, channels, 0]` silently kept plane 0
+    # and discarded the rest of the stack -- on exported science data, for bgsub/decon/flatfield,
+    # i.e. three of the six registered projectors. On the 10x tissue set that is 9 of 10 planes
+    # gone with nothing said. Per-plane fusion is the real fix and needs a z-outer streaming loop
+    # (holding every z for 27 FOVs x 4 ch x 2084^2 uint16 is ~9.4 GB), so refuse until then.
+    _guard_op = _resolve_projector(projector)
+    if not _guard_op.consumes:
+        raise NotImplementedError(
+            f"operator {getattr(_guard_op, 'name', _guard_op)!r} is a plane-op (consumes=set()), "
+            f"and stitching does not yet fuse per z-plane. Stitching it would keep only z-plane 0 "
+            f"and silently discard the rest of the stack. Reduce z first (e.g. mip), or use a "
+            f"z-reducing operator such as decon3d."
+        )
+
     from tilefusion.fusion import fuse_plane
     from tilefusion.utils import make_1d_profile
 
@@ -386,9 +403,27 @@ def stitch_region(
     # out of bounds (a silent wrong-channel registration is worse than an explicit fallback).
     reg_c = channels.index(reg_c_global) if reg_c_global in channels else 0
 
+    # (guard for plane-ops lives just after _resolve_projector, so nothing is read first)
+    # This whole pipeline is z=1 BY CONSTRUCTION: `out` below is allocated with a z extent of 1,
+    # write_block writes [_t, :, 0, ...], and fuse_plane is called with z_level=0. That is correct
+    # for a z-REDUCER, whose project_well output is (T, C, 1, Y, X).
+    #
+    # It is NOT correct for a PLANE-OP. project_well's contract (see its docstring) is:
+    #     consumes=frozenset({"z"})  ->  (T, C, 1,  Y, X)   z collapsed
+    #     consumes=frozenset()       ->  (T, C, Nz, Y, X)   FULL DEPTH
+    # so `[:, channels, 0]` on a plane-op silently kept z-plane 0 and discarded every other plane
+    # — on exported science data. bgsub, decon and flatfield are all plane-ops, i.e. three of the
+    # six registered projectors, and on the 10x tissue set that threw away 9 planes out of 10
+    # with nothing said. Refuse instead: a loud refusal is recoverable, a silently truncated
+    # export is not, and this project has six confirmed silent failures already.
+    #
+    # The real fix is per-plane fusion (IMA-277). It is not a one-liner because memory is the
+    # reason this shortcut existed: holding every z for 27 FOVs x 4 channels x 2084^2 uint16 is
+    # ~9.4 GB, so it needs a z-outer streaming loop, not a bigger allocation.
+
     with timer.stage("project"):
-        # (n_tiles, T, C, Y, X) native dtype. project_well reduces z only, so [..., 0, :, :]
-        # of its (T, C, 1, Y, X) is the plane stack we place.
+        # (n_tiles, T, C, Y, X) native dtype. Guarded above: only z-reducers reach here, so
+        # project_well's output is (T, C, 1, Y, X) and index 0 is the whole reduced plane.
         tiles = np.empty((len(fovs), n_t, len(channels), *tile_shape), dtype=dtype)
         for i, fov in enumerate(fovs):
             tiles[i] = project_well(reader, region, fov, reduce=_op.fn,

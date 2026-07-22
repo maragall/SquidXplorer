@@ -416,3 +416,33 @@ def test_window_is_bounded_by_workers(master):
     finally:
         _REGION_OPERATORS.pop(name, None)
     assert peak <= 2, f"in-flight window ran to {peak}, expected <= 2"
+
+
+def test_stitching_a_plane_op_refuses_instead_of_keeping_only_z0():
+    """A plane-op must not be stitched until per-plane fusion exists (IMA-277).
+
+    `stitch_region` fuses with z=1 by construction: `out` is allocated with a z extent of 1,
+    write_block writes [t, :, 0, ...] and fuse_plane gets z_level=0. That is right for a
+    z-reducer, whose project_well output is (T, C, 1, Y, X). For a plane-op the output is
+    (T, C, Nz, Y, X), so the old `[:, channels, 0]` silently kept plane 0 and discarded the
+    rest — on exported science data, on three of the six registered projectors.
+    """
+    import pytest
+    from squidmip._stitch import _resolve_projector, stitch_region
+
+    plane_ops = [n for n in ("bgsub", "decon", "flatfield")
+                 if not _resolve_projector(n).consumes]
+    assert plane_ops, "expected bgsub/decon/flatfield to be plane-ops (consumes == frozenset())"
+
+    for name in plane_ops:
+        with pytest.raises(NotImplementedError, match="plane-op"):
+            stitch_region(_DummyReader(), "A1", [0, 1], projector=name, register=False)
+
+
+class _DummyReader:
+    """Refusal must happen before any pixel is read, so the reader is never touched."""
+
+    metadata = {"regions": ["A1"], "channels": ["c0"], "fov_positions_um": {}}
+
+    def __getattr__(self, name):  # pragma: no cover - must not be reached
+        raise AssertionError(f"reader touched ({name}) before the plane-op guard refused")
