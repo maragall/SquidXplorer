@@ -644,3 +644,99 @@ def test_xy_placement_is_unaffected_by_the_extra_z_axis(layers):
 
     assert tuple(flat.scale) == pytest.approx((10.0, 10.0))
     assert tuple(stack.scale)[1:] == pytest.approx(tuple(flat.scale))
+
+
+# ---------------------------- Defect 5: subscriptions must outlive the layers they watch
+#
+# on_user_contrast subscribed to layer OBJECTS that existed at the moment of subscription.
+# _load_mosaic destroys and recreates every layer on each region change, so the sync had a
+# half-life of exactly one region change and then went quiet -- silently, which is the worst
+# way for a sync to stop. Subscriptions key on CHANNEL identity instead, so they survive layer
+# recreation. The same shape would bite channel visibility and Z/T sync.
+
+
+def test_a_channel_added_AFTER_subscribing_still_reaches_the_sink(layers):
+    """THE BUG. The subscription is to a channel, not to whichever layers existed at the time."""
+    seen = []
+    layers.on_user_contrast(lambda ch, lo, hi: seen.append((ch, lo, hi)))
+
+    layers.add_mosaic("raw", "488", _img())            # channel arrives after the subscribe
+    layers.find("raw", "488").contrast_limits = (12.0, 345.0)
+
+    assert seen == [("488", 12.0, 345.0)], (
+        f"a channel added after subscribing never reached the sink: {seen}"
+    )
+
+
+def test_the_sync_survives_a_region_change_that_recreates_every_layer(layers):
+    """_load_mosaic's actual lifecycle: subscribe, then destroy and recreate the layers.
+
+    Before the fix the recreated layer had no connection, so the second drag produced nothing
+    and nothing said so.
+    """
+    layers.add_mosaic("raw", "488", _img())
+    seen = []
+    layers.on_user_contrast(lambda ch, lo, hi: seen.append((ch, lo, hi)))
+    layers.find("raw", "488").contrast_limits = (10.0, 100.0)
+    assert len(seen) == 1, "baseline drag did not arrive"
+
+    layers.remove_op_channel("raw", "488")             # region change: layers destroyed ...
+    layers.add_mosaic("raw", "488", _img())            # ... and recreated
+    layers.find("raw", "488").contrast_limits = (20.0, 200.0)
+
+    assert seen[-1] == ("488", 20.0, 200.0), (
+        f"contrast sync died when the layer was recreated: {seen}"
+    )
+
+
+def test_a_user_drag_fires_ONCE_even_though_the_channel_has_several_linked_layers(layers):
+    """Linked layers propagate the write to their peers. If every peer fired, one drag would
+    deliver N callbacks and a sink that counts or accumulates would be wrong."""
+    layers.add_mosaic("raw", "488", _img())
+    layers.add_mosaic("stitched", "488", _img())
+    layers.add_mosaic("decon", "488", _img())
+    seen = []
+    layers.on_user_contrast(lambda ch, lo, hi: seen.append((ch, lo, hi)))
+
+    layers.find("raw", "488").contrast_limits = (44.0, 555.0)
+
+    assert seen == [("488", 44.0, 555.0)], f"expected exactly one delivery, got {seen}"
+
+
+def test_our_own_writes_still_do_not_look_like_the_user_after_the_rewiring(layers):
+    """The programmatic guard is the safety property of this design; keying on channel must
+    not have quietly cost it (add_mosaic writes contrast, and that is OUR write)."""
+    seen = []
+    layers.on_user_contrast(lambda ch, lo, hi: seen.append((ch, lo, hi)))
+    layers.add_mosaic("raw", "488", _img(), contrast_limits=(10.0, 900.0))
+    layers.add_mosaic("stitched", "488", _img(), contrast_limits=(20.0, 800.0))
+    assert seen == [], f"programmatic write leaked to the sink: {seen}"
+
+
+def test_two_subscribers_both_receive_a_channel_added_later(layers):
+    a, b = [], []
+    layers.on_user_contrast(lambda ch, lo, hi: a.append(ch))
+    layers.on_user_contrast(lambda ch, lo, hi: b.append(ch))
+    layers.add_mosaic("raw", "561", _img())
+    layers.find("raw", "561").contrast_limits = (5.0, 50.0)
+    assert a == ["561"] and b == ["561"]
+
+
+def test_dragging_BACK_to_a_previously_delivered_value_is_not_swallowed(layers):
+    """The trap in deduping link echoes by value.
+
+    Echoes are collapsed by comparing against the last value SEEN. If our own programmatic
+    writes did not also update that record, this sequence would silently drop the final drag:
+    the user returns the window to a value delivered earlier, and the sink never hears about
+    it. Programmatic writes update _last_seen precisely so this stays live.
+    """
+    layers.add_mosaic("raw", "488", _img())
+    seen = []
+    layers.on_user_contrast(lambda ch, lo, hi: seen.append((lo, hi)))
+
+    layers.find("raw", "488").contrast_limits = (10.0, 100.0)     # user
+    with layers.programmatic():                                    # us (a re-add / autoscale)
+        layers.set_contrast("488", 30.0, 300.0)
+    layers.find("raw", "488").contrast_limits = (10.0, 100.0)     # user, BACK to the first
+
+    assert seen == [(10.0, 100.0), (10.0, 100.0)], f"a real drag was swallowed: {seen}"

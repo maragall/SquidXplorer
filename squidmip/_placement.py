@@ -1,9 +1,14 @@
 """Coordinate placement: stage micrometres -> pixel offsets (IMA-187).
 
 The pure, GUI-free half of the multi-FOV mosaic. Everything here is arithmetic on
-``fov_positions_um`` (from the reader) plus one scalar, ``pixel_size_um`` — no Qt, no I/O, no
-numpy dependency on image content — so placement correctness is asserted numerically in
-tests rather than eyeballed on a rendered plate.
+``fov_positions_um`` (from the reader) plus one scalar, ``pixel_size_um`` — no Qt, no I/O, and
+no inspection of image CONTENT — so placement correctness is asserted numerically in tests
+rather than eyeballed on a rendered plate.
+
+(numpy is imported, for :class:`PlacedArray`'s ndarray subclass only. The property this module
+actually depends on is that nothing here reads pixels or touches a GUI; an earlier version of
+this note said "no numpy dependency" flat, which stopped being true the moment Placement
+needed to travel attached to an array.)
 
 Why that matters: placement bugs do not raise. They draw a plausible-but-wrong picture.
 The three that actually happen::
@@ -46,7 +51,11 @@ cell) is exactly the "wrong origin" bug above.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from typing import Iterable, Mapping, Optional
+
+import numpy as np
 
 # Stage +y maps to image +row (downward). See the module docstring.
 _Y_SIGN = 1
@@ -183,3 +192,133 @@ def cell_boxes(
         w = min(w, cell_px - left)
         boxes[fov] = (top, left, h, w)
     return boxes
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════════
+# Placement: ONE source of truth for "where are these pixels" (Defect 3).
+#
+# Everything above answers that question for the PLATE VIEW, from stage coordinates alone.
+# What follows answers it for a FUSED MOSAIC, and carries the solved transform that produced
+# it.
+#
+# The problem this replaces. `stitch_region` solved its transform once, at t=0, and then
+# discarded it unless the caller happened to pass a `geometry` out-dict — an OPTIONAL side
+# channel. So by default the answer to "where did this mosaic land, and what solved it"
+# did not exist at all. Meanwhile the viewer re-derived placement independently from a stage
+# bounding box. Two mechanisms, two answers, and nothing that could ever notice they had
+# diverged.
+#
+# A value object fixes the "optional" half: placement is now produced unconditionally. The
+# `PlacedArray` below fixes the "side channel" half by making it ride WITH the pixels, so a
+# consumer cannot receive the array and miss the geometry.
+#
+# `reg_channel` / `reg_t` are the point, not decoration. They record WHICH channel and
+# timepoint solved the transform, so the data carries its own provenance. That is the other
+# half of the registration fix in `_stitch`: once registration is guaranteed to run on the
+# requested channel, the output should be able to SAY so rather than leaving it to be
+# inferred from the arguments the caller believes it passed.
+# ══════════════════════════════════════════════════════════════════════════════════════════
+
+
+
+@dataclass(frozen=True)
+class Placement:
+    """Where a fused mosaic's pixels are, and what put them there.
+
+    A frozen dataclass of plain tuples rather than a pydantic model or a numpy-holding record:
+    this is a small immutable value that travels attached to an array, it needs to be cheap to
+    construct once per region, and tuples make it comparable and safely shareable across the
+    worker threads that produce it. (``Acquisition`` is pydantic because it validates messy
+    external input; this is built internally from values already checked.)
+    """
+
+    origin_um: tuple[float, float]
+    """``(y_um, x_um)`` stage position of the mosaic's top-left corner — the frame origin."""
+
+    pixel_size_um: float
+    """Object-space pixel size used to convert micrometres to pixels. Always > 0."""
+
+    z_step_um: "float | None"
+    """Z step, carried so a consumer rendering this in 3-D does not have to re-ask the
+    reader (and thereby become a second source of truth). ``None`` when unknown."""
+
+    shape: tuple[int, int]
+    """``(height, width)`` of the fused mosaic in pixels."""
+
+    tile_shape: tuple[int, int]
+    """``(height, width)`` of one FOV."""
+
+    fovs: tuple[int, ...]
+    """The FOVs composing the mosaic, in the order the offsets/origins are given."""
+
+    offsets_px: tuple[tuple[float, float], ...]
+    """Per-FOV ``(dy, dx)`` correction the solve ADDED to the stage position. All-zero for
+    pure coordinate placement — and legitimately all-zero for a real solve that found no
+    usable overlap, which is why ``registered`` is not inferred from these."""
+
+    origins_px: tuple[tuple[float, float], ...]
+    """Per-FOV fractional ``(y, x)`` top-left within the mosaic, after correction."""
+
+    reg_channel: "str | None"
+    """NAME of the channel registration solved on; ``None`` if nothing was registered.
+
+    A name, never an index: an index re-breaks the moment the channel selection or the
+    reader's axis order changes, which is exactly the bug this data is meant to make
+    impossible to hide."""
+
+    reg_t: "int | None"
+    """Timepoint the transform was solved at; ``None`` if nothing was registered."""
+
+    def __post_init__(self):
+        if not self.pixel_size_um > 0:
+            raise ValueError(f"pixel_size_um must be > 0, got {self.pixel_size_um!r}")
+        n = len(self.fovs)
+        if len(self.offsets_px) != n or len(self.origins_px) != n:
+            raise ValueError(
+                f"fovs has {n} entries but offsets_px has {len(self.offsets_px)} and "
+                f"origins_px has {len(self.origins_px)}; they describe the same tiles, so a "
+                "disagreement means one of them is for a different mosaic."
+            )
+
+    @property
+    def registered(self) -> bool:
+        """Whether a solve ran — read off ``reg_channel``, NOT off the offsets.
+
+        A genuine solve can return all-zero offsets (no overlap, or every pair rejected) and
+        that is still a registered placement. Inferring this from the numbers would silently
+        relabel those as coordinate placement.
+        """
+        return self.reg_channel is not None
+
+
+class PlacedArray(np.ndarray):
+    """An ``ndarray`` that carries its :class:`Placement`.
+
+    A numpy subclass rather than a ``(array, placement)`` tuple, and that is a deliberate
+    trade. A tuple return would be more explicit, but it changes the arity of the region
+    operator contract, and ``stitch_plate`` yields these straight into the viewer's worker and
+    the OME-Zarr writer. This repo has already shipped a test that silently died by
+    destructuring a 2-tuple after the function grew a third return value, so widening that
+    contract while other work is in flight in the viewer is the expensive way to be right.
+
+    A ``PlacedArray`` IS an ndarray, so every existing consumer is untouched, and the geometry
+    can no longer be dropped on the floor. Consumers that want it ask for ``.placement``; a
+    consumer that asks a plain ndarray gets an ``AttributeError``, which is loud, rather than
+    a ``None`` that would be silent.
+    """
+
+    def __new__(cls, array, placement: Placement):
+        if not isinstance(placement, Placement):
+            raise TypeError(
+                f"placement must be a Placement, got {type(placement).__name__}. The whole "
+                "point is that the geometry travelling with the pixels is a checked value, "
+                "not another loose dict."
+            )
+        obj = np.asarray(array).view(cls)
+        obj.placement = placement
+        return obj
+
+    def __array_finalize__(self, obj):
+        # Views and slices are still THOSE pixels in that frame, so the placement follows.
+        if obj is not None:
+            self.placement = getattr(obj, "placement", None)

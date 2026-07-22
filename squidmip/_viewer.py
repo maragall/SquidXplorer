@@ -598,6 +598,13 @@ class Operation:
     label: str
     blurb: str
     build_tab: str        # name of the PlateWindow method that builds this operator's UI tab
+    runnable: bool = True
+    """Whether the ENGINE can run this key (`runnable_operators()`), as opposed to the card
+    merely existing. The two registries are deliberately not the same set - a card is
+    presentation, an engine entry is capability - but that was written in a comment and
+    enforced nowhere, so a card whose key the engine does not know produced a button that
+    silently did nothing. Declaring it here makes the divergence checkable, and
+    test_every_card_declares_whether_it_is_a_runnable_operator checks it."""
 
 # The operator registry. MIP is operator #1; append an Operation + write its `_build_*_tab` and both
 # the console cards and the Process-well-plates menu grow automatically.
@@ -609,9 +616,11 @@ _OPERATIONS = (
               "Register every FOV of a well against its neighbours and fuse one seamless mosaic "
               "per well, instead of trusting the stage coordinates alone.",
               "_build_stitch_tab"),
+    # NOT an operator: an export hand-off. Handing "minerva" to the engine dies with a raw
+    # KeyError: unknown projector 'minerva'. Declared, rather than left to be rediscovered.
     Operation("minerva", "Open in Minerva Author",
               "Export the selected FOVs to Minerva-ingestable OME-TIFFs and open Minerva Author on them.",
-              "_build_minerva_tab"),
+              "_build_minerva_tab", runnable=False),
     # IMA-223/224/225 -- the PLANE-OPS. Unlike mip/stitch these keep z at full depth, so they get
     # _build_plane_op_tab (preview only) rather than _build_run_tab: write_plate's _validate_image
     # accepts Z == 1 only and would fail LOUD on save. Loud is correct; offering the button is not.
@@ -635,6 +644,11 @@ _OPERATIONS = (
               "_build_flatfield_tab"),
 )
 _OPERATIONS_BY_KEY = {op.key: op for op in _OPERATIONS}
+
+# The operator "Save this subset to disk…" runs. This used to be spelled `_OPERATIONS[0].key`,
+# which made a PRESENTATION edit (reordering the cards) silently change which operator the save
+# button RUNS. Named, so the two cannot be confused.
+_SAVE_OPERATOR = "mip"
 
 # Roadmap cards shown under "TO BE ADDED", as (label, blurb). Empty: everything currently on the
 # roadmap that we're willing to advertise has shipped as a real Operation above. Add an entry when
@@ -4849,6 +4863,11 @@ class PlateWindow(QMainWindow):
         w.slider.setStyleSheet(_NDV_DARK)
         w.slider.valueChanged.connect(lambda i, t=w: self._on_explore_slider(t, i))
         v.addWidget(w.slider)
+        save_btn = QPushButton("Save this subset to disk…")
+        save_btn.setStyleSheet(_BTN_QSS)
+        save_btn.clicked.connect(
+            lambda: self.run_operator(_SAVE_OPERATOR, regions=regions, save=True, tab_key=tab_key))
+        v.addWidget(save_btn)
 
         # -- what a preview run scoped to this tab has computed so far.
         w.progress = QLabel("")

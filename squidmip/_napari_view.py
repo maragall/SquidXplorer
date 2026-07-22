@@ -268,11 +268,13 @@ class MosaicLayers:
         # Depth of "this write came from US, not the user". See `programmatic()`.
         self._programmatic = 0
         self._user_contrast_cbs: list[Any] = []
-        # id(layer) of every layer already wired to the sink — see _connect_user_contrast.
-        self._contrast_connected: set[int] = set()
-        # channel -> the last window REPORTED to subscribers. Linked peers all fire on one drag;
-        # this is what turns that fan-in back into one report per real change.
-        self._last_user_contrast: dict[str, tuple[float, float]] = {}
+        # Last contrast value SEEN per channel, updated on every event including our own
+        # programmatic writes. Linked layers propagate a write to their peers and each peer
+        # then emits its own event, so one user drag arrives here once per layer showing the
+        # channel. Those echoes carry an identical value, which is what distinguishes them
+        # from a real gesture. Tracking programmatic writes here too matters: without it, a
+        # user dragging BACK to a previously delivered value would be suppressed as an echo.
+        self._last_seen: dict[str, tuple[float, float]] = {}
 
     # -- who moved the contrast: us, or the user? ---------------------------------------
     @contextmanager
@@ -426,14 +428,14 @@ class MosaicLayers:
     def _register_channel(self, channel: str, layer: Any) -> None:
         peers = self._by_channel.setdefault(channel, [])
         peers.append(layer)
-        # Wire the sink HERE, not in on_user_contrast. The plate binds once, on the first
-        # mosaic; every op run after that adds more layers. Connecting only what existed at
-        # subscribe time left those later layers driving napari and nothing else, so the
-        # plate's contrast silently diverged from the picture on screen.
-        # Every layer here is destroyed and rebuilt on a region change, so a subscription made
-        # once at startup was connected to objects that no longer exist by the second region —
-        # the plate followed napari's contrast exactly until the user looked at a second well,
-        # and then stopped, silently. Arming at REGISTRATION is what outlives the layers.
+        # Subscribe THIS layer to the channel's user-contrast fan-out.
+        #
+        # This is the Defect 5 fix. on_user_contrast used to walk _by_channel once, at
+        # subscribe time, and connect to the layer objects it found. _load_mosaic destroys and
+        # recreates every layer on a region change, so the recreated layers had no connection
+        # and the sync silently stopped after exactly one region change. Connecting HERE means
+        # the subscription is keyed on the CHANNEL and any layer that ever shows it is wired
+        # up, whenever it is created.
         self._connect_user_contrast(channel, layer)
         # Link contrast across every processing layer showing this channel, so the
         # before->after toggle preserves the window and there is only ever one value.
@@ -515,37 +517,31 @@ class MosaicLayers:
         peers[0].contrast_limits = (float(lo), float(hi))
 
     def _connect_user_contrast(self, channel: str, layer: Any) -> None:
-        """Make *layer* report a USER contrast drag to every sink, now and in the future.
+        """Wire one layer into *channel*'s user-contrast fan-out.
 
-        Every layer of a channel is wired, not just the first, because "the first" is a moving
-        target: layers are removed and re-added on every region change. Two guards keep that
-        from turning one gesture into a storm of reports:
+        Every layer of the channel is connected, not just the first, because "the first" is a
+        layer object and layer objects do not survive a region change.
 
-        - ``_contrast_connected`` is keyed on layer identity, so a re-add or a second subscribe
-          cannot connect the same layer twice.
-        - ``_last_user_contrast`` collapses the linked-peer fan-in — all peers of a channel fire
-          on one drag — back to ONE report per actual change. A plate that recomposites once per
-          peer does N times the work for one gesture, and a subscriber cannot tell the
-          duplicates apart.
-
-        The handler reads the callback list at emit time, so a layer added before anyone
-        subscribed is still wired correctly.
+        Linked layers propagate a write to their peers, and each peer then emits its own
+        event, so one user drag arrives here once per layer showing the channel. The echoes
+        are collapsed by VALUE, not by a re-entrancy flag: napari emits the peers' events
+        after this handler has already returned, so a flag set and cleared around the delivery
+        catches none of them (measured -- three linked layers delivered three callbacks).
         """
-        if id(layer) in self._contrast_connected:
-            return
-
-        def _fire(event=None, _ch=channel, _layer=layer):
-            if self.is_programmatic:
+        def _fire(event=None, _ch=channel):
+            peers = self._by_channel.get(_ch) or []
+            if not peers:
                 return
-            lo, hi = (float(v) for v in _layer.contrast_limits)
-            if self._last_user_contrast.get(_ch) == (lo, hi):
-                return                       # a linked peer echoing the same change
-            self._last_user_contrast[_ch] = (lo, hi)
+            lo, hi = float(peers[0].contrast_limits[0]), float(peers[0].contrast_limits[1])
+            if self._last_seen.get(_ch) == (lo, hi):
+                return                      # a link echo of a value already accounted for
+            self._last_seen[_ch] = (lo, hi)
+            if self.is_programmatic:
+                return                      # OUR write: recorded, never reported as a gesture
             for cb in list(self._user_contrast_cbs):
                 cb(_ch, lo, hi)
 
         layer.events.contrast_limits.connect(_fire)
-        self._contrast_connected.add(id(layer))
 
     def on_user_contrast(self, callback) -> None:
         """Subscribe to contrast changes the USER made. Programmatic writes never arrive here.
@@ -553,15 +549,11 @@ class MosaicLayers:
         ``callback(channel, lo, hi)``. This is the seam that lets the plate be a pure sink: it
         is told what the owner resolved, and it never writes back.
 
-        The connection itself is made in ``_register_channel``, per layer, so a subscriber keeps
-        hearing changes after the layers it originally watched have been rebuilt; it never has
-        to re-subscribe. The backfill below covers only the layers that already existed when
-        this callback arrived, and is idempotent.
+        The subscription is per CHANNEL and outlives the layers: channels added after this
+        call are covered too, because the connection is made in ``_register_channel`` rather
+        than swept up here. Only the callback is recorded here.
         """
         self._user_contrast_cbs.append(callback)
-        for channel, peers in self._by_channel.items():
-            for layer in peers:
-                self._connect_user_contrast(channel, layer)
 
     def on_contrast_changed(self, callback) -> None:
         """Subscribe to contrast changes via napari's PUBLIC event.

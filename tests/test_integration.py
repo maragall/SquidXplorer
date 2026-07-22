@@ -217,18 +217,33 @@ def test_ima188_sim1536_scaling_measured_no_regression(sim_1536wp, capsys):
     # is robust here: threading must not make the plate materially SLOWER than single-thread (a
     # real regression like accidental serialization / lock contention). Pixel-identity and bounded
     # memory — the guarantees that ARE unconditional — are gated by the other two cross tests.
+    # BEST-OF-N, not a single sample. A single wall-clock pair measures the MACHINE as much as
+    # the code: on a box running several agents at once this test failed intermittently on an
+    # UNTOUCHED tree (load average ~14 flipped it; in isolation it reports a healthy 1.8x). A
+    # gate that goes red because something else was busy teaches everyone to re-run it, which
+    # is how a real regression eventually gets waved through as "the flaky one".
+    #
+    # `min` over repeats is the standard way to read a timing under interference: contention
+    # can only ever make a sample SLOWER, so the minimum is the least-interrupted observation
+    # of the code itself. This does not weaken the gate - a genuine serialization regression
+    # makes EVERY sample slower, including the minimum - it only removes the machine's noise.
+    _REPEATS = 3
+
+    def _best(workers):
+        best, produced = float("inf"), None
+        for _ in range(_REPEATS):
+            t0 = time.perf_counter()
+            produced = _first_n_projected(reader, _SUBSET, workers=workers)
+            best = min(best, time.perf_counter() - t0)
+        return best, produced
+
     reader = open_reader(sim_1536wp)
     regions = reader.metadata["regions"]
     project_well(reader, regions[50], 0)                       # warm cache / steady state
     base = benchmark_single_well(reader, regions[0], 0)        # §10 single-thread per-well
 
-    t0 = time.perf_counter()
-    got1 = _first_n_projected(reader, _SUBSET, workers=1)
-    t_1 = time.perf_counter() - t0
-
-    t0 = time.perf_counter()
-    got8 = _first_n_projected(reader, _SUBSET, workers=8)
-    t_8 = time.perf_counter() - t0
+    t_1, got1 = _best(1)
+    t_8, got8 = _best(8)
 
     with capsys.disabled():
         print(
