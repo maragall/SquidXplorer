@@ -207,17 +207,41 @@ def _ch_index(tree, op_row, ch_row):
     return tree.model().index(ch_row, 0, _op_index(tree, op_row))
 
 
+def _op_index_of(tree, op):
+    """The group row for *op*, found BY NAME.
+
+    Positional lookup couples every test to the display order, and the display order is napari's
+    to choose (topmost layer first), not ours. Asking by name is what these tests actually mean.
+    """
+    m = tree.model()
+    for r in range(m.rowCount()):
+        if m.data(m.index(r, 0), Qt.DisplayRole) == op:
+            return m.index(r, 0)
+    raise AssertionError(f"no group row for {op!r}")
+
+
+def _ch_index_of(tree, op, channel):
+    """The channel row for (*op*, *channel*), found by name."""
+    m = tree.model()
+    parent = _op_index_of(tree, op)
+    for r in range(m.rowCount(parent)):
+        if m.data(m.index(r, 0, parent), Qt.DisplayRole) == channel:
+            return m.index(r, 0, parent)
+    raise AssertionError(f"no channel row for {op!r}/{channel!r}")
+
+
 def test_the_tree_is_two_levels_processing_layer_then_channels(tree, mosaic):
     """24 flat rows become 5 collapsible ones. That is the whole point."""
     m = tree.model()
     assert m.rowCount() == 2, "processing layers are the top level"
-    assert [m.data(_op_index(tree, r), Qt.DisplayRole) for r in range(2)] == ["raw", "stitched"]
-    for r in range(2):
-        op = mosaic.ops()[r]
+    # TOPMOST FIRST -- napari's own layer-list convention, which this tree now mirrors rather
+    # than inventing a second order. The fixture adds raw then stitched, so stitched is on top.
+    assert [m.data(_op_index(tree, r), Qt.DisplayRole) for r in range(2)] == ["stitched", "raw"]
+    for r, op in enumerate(["stitched", "raw"]):
         assert m.rowCount(_op_index(tree, r)) == 4
         assert [
             m.data(_ch_index(tree, r, c), Qt.DisplayRole) for c in range(4)
-        ] == mosaic.channels(op)
+        ] == list(reversed(mosaic.channels(op)))
 
 
 def test_the_tree_reads_visibility_off_the_layer_and_keeps_no_copy(tree, mosaic):
@@ -225,11 +249,11 @@ def test_the_tree_reads_visibility_off_the_layer_and_keeps_no_copy(tree, mosaic)
     dominant defect shape (4+ confirmed, most recently the contrast sync silently killed by
     layer recreation). The tree is a VIEW: napari's Image layer owns ``visible``."""
     m = tree.model()
-    assert m.data(_ch_index(tree, 0, 0), Qt.CheckStateRole) == Qt.Checked
+    assert m.data(_ch_index_of(tree, "raw", "405"), Qt.CheckStateRole) == Qt.Checked
 
     # Change it BEHIND the tree's back, the way napari's own layer list does.
     mosaic.find("raw", "405").visible = False
-    assert m.data(_ch_index(tree, 0, 0), Qt.CheckStateRole) == Qt.Unchecked, (
+    assert m.data(_ch_index_of(tree, "raw", "405"), Qt.CheckStateRole) == Qt.Unchecked, (
         "the tree is holding its own copy of visibility instead of reading the layer"
     )
 
@@ -248,11 +272,11 @@ def test_an_external_visibility_change_repaints_the_row(tree, mosaic, qapp):
 def test_toggling_a_processing_layer_toggles_its_four_channels(tree, mosaic):
     """The before/after-stitching gesture, at group level."""
     m = tree.model()
-    assert m.setData(_op_index(tree, 1), Qt.Unchecked, Qt.CheckStateRole) is True
+    assert m.setData(_op_index_of(tree, "stitched"), Qt.Unchecked, Qt.CheckStateRole) is True
     assert [ly.visible for ly in mosaic.group("stitched")] == [False] * 4
     assert [ly.visible for ly in mosaic.group("raw")] == [True] * 4, "it toggled the wrong group"
 
-    m.setData(_op_index(tree, 1), Qt.Checked, Qt.CheckStateRole)
+    m.setData(_op_index_of(tree, "stitched"), Qt.Checked, Qt.CheckStateRole)
     assert [ly.visible for ly in mosaic.group("stitched")] == [True] * 4
 
 
@@ -261,20 +285,20 @@ def test_a_group_check_state_is_derived_from_its_channels_not_stored(tree, mosai
     syncs it upward, so a group checkbox drifts out of step with its own contents. We derive it
     instead -- there is no group state to drift."""
     m = tree.model()
-    assert m.data(_op_index(tree, 0), Qt.CheckStateRole) == Qt.Checked
+    assert m.data(_op_index_of(tree, "raw"), Qt.CheckStateRole) == Qt.Checked
 
     mosaic.find("raw", "561").visible = False
-    assert m.data(_op_index(tree, 0), Qt.CheckStateRole) == Qt.PartiallyChecked, (
+    assert m.data(_op_index_of(tree, "raw"), Qt.CheckStateRole) == Qt.PartiallyChecked, (
         "one hidden channel out of four is neither on nor off"
     )
     for ly in mosaic.group("raw"):
         ly.visible = False
-    assert m.data(_op_index(tree, 0), Qt.CheckStateRole) == Qt.Unchecked
+    assert m.data(_op_index_of(tree, "raw"), Qt.CheckStateRole) == Qt.Unchecked
 
 
 def test_toggling_one_channel_writes_that_layer_only(tree, mosaic):
     m = tree.model()
-    m.setData(_ch_index(tree, 0, 2), Qt.Unchecked, Qt.CheckStateRole)
+    m.setData(_ch_index_of(tree, "raw", "561"), Qt.Unchecked, Qt.CheckStateRole)
     assert [ly.visible for ly in mosaic.group("raw")] == [True, True, False, True]
 
 
@@ -295,8 +319,8 @@ def test_the_tree_survives_layers_being_destroyed_and_recreated(tree, mosaic, qa
     qapp.processEvents()
 
     assert m.rowCount() == 2
-    assert m.rowCount(_op_index(tree, 0)) == 4
-    m.setData(_ch_index(tree, 0, 0), Qt.Unchecked, Qt.CheckStateRole)
+    assert m.rowCount(_op_index_of(tree, "raw")) == 4
+    m.setData(_ch_index_of(tree, "raw", "405"), Qt.Unchecked, Qt.CheckStateRole)
     assert mosaic.find("raw", "405").visible is False, (
         "the tree is still driving the DESTROYED layer object -- the contrast-sync bug again"
     )
@@ -321,7 +345,7 @@ def test_foreign_layers_never_appear_in_the_tree(tree, mosaic, qapp):
     mosaic.model.add_image(_img(7), name="somebody else's layer")
     qapp.processEvents()
     assert m.rowCount() == 2
-    assert [m.data(_op_index(tree, r), Qt.DisplayRole) for r in range(2)] == ["raw", "stitched"]
+    assert [m.data(_op_index(tree, r), Qt.DisplayRole) for r in range(2)] == ["stitched", "raw"]
 
 
 def test_checkboxes_are_actually_offered_to_the_user(tree):
@@ -381,8 +405,12 @@ _MOUNT_SCRIPT = r"""
     ]) if win is not None else 0
     out["canvas_still_inside_napari_window"] = descends_from(pane.canvas, win)
 
-    # The gesture: hide a whole processing layer from the tree.
-    idx = tree.model().index(1, 0)
+    # The gesture: hide a whole processing layer from the tree. Found BY NAME: the tree lists
+    # topmost-first (napari's own convention), so a row index is not a stable way to say
+    # "the stitched group".
+    _m = tree.model()
+    idx = next(_m.index(r, 0) for r in range(_m.rowCount())
+               if _m.data(_m.index(r, 0), _Qt.DisplayRole) == "stitched")
     tree.model().setData(idx, _Qt.Unchecked, _Qt.CheckStateRole)
     app.processEvents()
     out["group_hidden"] = [bool(l.visible) for l in pane.mosaic.group("stitched")]
@@ -391,11 +419,13 @@ _MOUNT_SCRIPT = r"""
     # ... and the reverse direction: napari's own list is still an owner, and the tree follows.
     pane.mosaic.find("raw", "405").visible = False
     app.processEvents()
-    out["leaf_state_after_external_change"] = int(
-        tree.model().data(tree.model().index(0, 0, tree.model().index(0, 0)), _Qt.CheckStateRole)
-    )
+    _raw = next(_m.index(r, 0) for r in range(_m.rowCount())
+                if _m.data(_m.index(r, 0), _Qt.DisplayRole) == "raw")
+    _405 = next(_m.index(r, 0, _raw) for r in range(_m.rowCount(_raw))
+                if _m.data(_m.index(r, 0, _raw), _Qt.DisplayRole).endswith("405"))
+    out["leaf_state_after_external_change"] = int(_m.data(_405, _Qt.CheckStateRole))
     out["group_state_after_external_change"] = int(
-        tree.model().data(tree.model().index(0, 0), _Qt.CheckStateRole)
+        _m.data(_raw, _Qt.CheckStateRole)
     )
 """
 
@@ -451,15 +481,14 @@ def test_the_model_serves_every_role_that_delegate_paints_from(qapp, mosaic):
     assert LT._NAPARI_ROLES, "napari's delegate roles did not resolve; rows cannot be painted"
     view = LT.MosaicTree(mosaic)        # held: the model is parented to it and dies with it
     model = view.model()
-    group = model.index(0, 0)
-    channel = model.index(0, 0, group)
+    group = _op_index_of(view, "raw")
+    channel = _ch_index_of(view, "raw", "405")
 
     # a PROCESSING LAYER is a group -> napari paints a folder, open when expanded
     item = model.data(group, LT._NAPARI_ROLES["item"])
     assert item is not None and item.is_group() is True
 
-    # a CHANNEL is the real napari layer -> it gets the image icon and its own thumbnail.
-    # Row 0 of the raw group is 405: the fixture adds 405/488/561/638 in that order.
+    # a CHANNEL is the real napari layer -> it gets the image icon and its own thumbnail
     assert model.data(channel, LT._NAPARI_ROLES["item"]) is mosaic.find("raw", "405")
     thumb = model.data(channel, LT._NAPARI_ROLES["thumbnail"])
     assert thumb is not None and thumb.width() > 0, "no thumbnail: the row will paint empty"
@@ -503,3 +532,71 @@ def test_the_rows_actually_PAINT_without_raising(qapp, mosaic):
         sys.excepthook = original
 
     assert not caught, f"painting a row raised: {caught[0][1] if caught else ''}"
+
+
+# ------------------------------- selecting a row here selects the LAYER, so contrast follows
+#
+# Julio: "when I click on the mosaic layers I cannot adjust contrast, I would have to go from
+# the processing layers." napari's contrast/gamma/colormap panel renders whatever is in
+# viewer.layers.selection. Our tree had its own Qt selection and never touched napari's, so
+# clicking a channel highlighted a row and changed nothing the controls could see.
+
+def test_selecting_a_channel_row_selects_that_layer_in_napari(qapp, mosaic):
+    """MUTATION: drop the currentChanged connection and this goes red."""
+    from squidmip import _layer_tree as LT
+
+    tree = LT.MosaicTree(mosaic)
+    tree.setCurrentIndex(_ch_index_of(tree, "raw", "488"))
+
+    selection = mosaic.model.layers.selection
+    assert [ly.name for ly in selection] == ["raw · 488"]
+    assert selection.active is mosaic.find("raw", "488"), (
+        "no ACTIVE layer, so napari's contrast panel has nothing to show"
+    )
+
+
+def test_selecting_a_processing_layer_selects_all_of_its_channels(qapp, mosaic):
+    """A group means its channels, so selecting it selects them -- and napari then shows the
+    shared controls for the set.
+
+    MUTATION: set `selection.active` for the group case and this goes red. napari's `active`
+    setter calls select_only(), which silently collapses a four-channel selection to one; that
+    is what it did before this test existed.
+    """
+    from squidmip import _layer_tree as LT
+
+    tree = LT.MosaicTree(mosaic)
+    tree.setCurrentIndex(_op_index_of(tree, "raw"))
+
+    assert sorted(ly.name for ly in mosaic.model.layers.selection) == [
+        "raw · 405", "raw · 488", "raw · 561", "raw · 638",
+    ]
+
+
+def test_the_tree_lists_topmost_first_like_naparis_own_layer_list(qapp, mosaic):
+    """Julio: "stack order is inverted -> that points to a bad data model on channels."
+
+    One list, two display rules: napari renders its LayerList reversed (last added on top), and
+    our tree rendered it in insertion order. Whichever is "right", having two is the defect.
+    napari owns the order; we mirror it.
+
+    MUTATION: drop either `reversed(...)` in `refresh` and this goes red.
+    """
+    from squidmip import _layer_tree as LT
+
+    tree = LT.MosaicTree(mosaic)
+    model = tree.model()
+    ours = [model.data(model.index(r, 0), Qt.DisplayRole) for r in range(model.rowCount())]
+
+    # napari's own order, as its list widget shows it: last added first.
+    napari_order = []
+    for layer in reversed(list(mosaic.model.layers)):
+        op = layer.metadata["squidmip"]["op"]
+        if op not in napari_order:
+            napari_order.append(op)
+    assert ours == napari_order, f"tree shows {ours}, napari shows {napari_order}"
+
+    raw = _op_index_of(tree, "raw")
+    channels = [model.data(model.index(r, 0, raw), Qt.DisplayRole)
+                for r in range(model.rowCount(raw))]
+    assert channels == list(reversed(mosaic.channels("raw"))), "channels are not topmost-first"

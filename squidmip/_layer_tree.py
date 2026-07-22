@@ -161,7 +161,17 @@ class MosaicTreeModel(QAbstractItemModel):
     def refresh(self) -> None:
         """Rebuild the hierarchy from the layers that exist RIGHT NOW."""
         self.beginResetModel()
-        self._rows = [(op, list(self._mosaic.channels(op))) for op in self._mosaic.ops()]
+        # TOPMOST FIRST, which is napari's own convention for a layer list: napari renders its
+        # LayerList reversed, so the last-added layer sits at the TOP of the widget. Ours listed
+        # the same list in insertion order, so the two panes showed one list under two different
+        # rules and disagreed about which channel was on top. Julio: "stack order is inverted ->
+        # that points to a bad data model on channels."
+        #
+        # He is right that it is a data-model problem, and the fix is the same rule as everywhere
+        # else here: there is ONE order, napari owns it, and we render the owner's order rather
+        # than a second one derived from when we happened to add things.
+        ops = list(reversed(self._mosaic.ops()))
+        self._rows = [(op, list(reversed(self._mosaic.channels(op)))) for op in ops]
         self._rewatch()
         self.endResetModel()
 
@@ -446,6 +456,51 @@ class MosaicTree(QTreeView):
         self._restyling = False                 # see changeEvent: setStyleSheet re-enters
         self.setStyleSheet(_napari_stylesheet())
         _install_napari_delegate(self)
+        self.selectionModel().currentChanged.connect(self._select_in_napari)
+
+    def _select_in_napari(self, current, _previous=None) -> None:
+        """Selecting a row here SELECTS THE LAYER in napari, so its controls follow.
+
+        Julio: "when I click on the mosaic layers I cannot adjust contrast, I would have to go
+        from the processing layers."
+
+        Exactly right, and it is the one-owner rule again read from the other side. napari's
+        contrast/gamma/colormap panel renders whatever is in ``viewer.layers.selection``; our
+        tree had its own Qt selection and never touched napari's, so clicking a channel here
+        highlighted a row and changed nothing the controls could see. The tree was a viewer of
+        layers that could not DRIVE them.
+
+        Selecting a PROCESSING LAYER selects all of its channels, which is what the group means
+        -- and napari's controls then show the shared properties for that set.
+
+        Nothing is stored: the selection lives in napari's LayerList, as it already did.
+        """
+        model = self.model()
+        if model is None or not current.isValid():
+            return
+        key = model._key_at(current)
+        layers = ([model._mosaic.find(*key)] if key is not None
+                  else model._mosaic.group(model._rows[current.row()][0])
+                  if current.row() < len(model._rows) else [])
+        layers = [ly for ly in layers if ly is not None]
+        if not layers:
+            return
+        try:
+            selection = model._mosaic.model.layers.selection
+            if len(layers) == 1:
+                # `active` is the right seam for ONE layer: napari's setter does select_only()
+                # plus current, which is exactly "show this layer's controls".
+                selection.active = layers[0]
+            else:
+                # ...and exactly the WRONG one for a group: that same setter makes its argument
+                # the ONLY selected item, so setting it after a multi-select silently collapsed
+                # the group's four channels down to one (measured: selecting the raw group
+                # selected 638 alone). napari leaves `active` None for a multi-selection and
+                # shows the shared controls; do the same.
+                selection.clear()
+                selection.update(layers)
+        except Exception:                      # noqa: BLE001 - selection is a convenience
+            pass
 
     def changeEvent(self, e):
         """Follow a napari THEME switch. The stylesheet is a snapshot of the theme at build time;
