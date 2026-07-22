@@ -3646,20 +3646,34 @@ def test_run_operator_refuses_a_non_operator_by_name(qapp, stub_detail, squid_da
     win.close()
 
 
-def test_exploration_tab_offers_exactly_the_runnable_operators(qapp, stub_detail, squid_dataset):
-    """The subset tab's preview buttons come off the ENGINE registry, so a registered operator
-    with no card (reference) is reachable and a card that is not an operator (minerva) is not."""
+def test_the_subset_tab_is_not_a_second_operator_launcher(qapp, stub_detail, squid_dataset):
+    """There is ONE operator catalogue and ONE control panel, and they are in pane 1.
+
+    This test used to assert the opposite: that the subset tab offered a preview button per
+    entry of the ENGINE registry, while pane 1 offered a card per entry of ``_OPERATIONS``. Two
+    registries, two control surfaces, one job — and they drifted, which is what the comment on
+    the loop that built these buttons recorded. Julio: "we have the controls for the whole
+    dataset on the left, but those controls are repeated for the subset on the right pane. Maybe
+    it's not a good idea for there to be repetition of knowledge in our user interface."
+
+    Running an operator on the subset is now a SCOPE on the one panel, so what is asserted here
+    is the absence of the second surface and the presence of the scope that replaced it.
+    """
+    from squidmip import _explore as _E
+
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
     key = win.open_exploration_tab(["B3"])
     tab = win._op_tabs[key]
-    previews = [b.text()[:-len(" (preview)")]
-                for b in tab.findChildren(QPushButton) if b.text().endswith(" (preview)")]
-    expected = [V.operator_label(k) for k in V.runnable_operators()]
-    assert previews == expected, f"{previews} != {expected}"
-    assert "reference" in previews, "a registered projector with no card is unreachable"
-    assert not [p for p in previews if "Minerva" in p], "Minerva is not an operator"
+    texts = [b.text() for b in tab.findChildren(QPushButton)]
+    assert not [t for t in texts if t.endswith(" (preview)")], \
+        f"the subset tab still launches operators: {texts}"
+    for op in V.runnable_operators():
+        assert not [t for t in texts if V.operator_label(op).lower() in t.lower()], \
+            f"the subset tab still launches {op!r}"
+    # ...and the capability did not vanish with the buttons: it is a scope on pane 1.
+    assert _E.SCOPE_SUBSET in [win._scope_run.itemText(i) for i in range(win._scope_run.count())]
     win.close()
 
 

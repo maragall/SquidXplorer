@@ -68,6 +68,7 @@ from PyQt5.QtWidgets import (
     QSplitter, QStackedWidget, QStyleFactory, QTabBar, QTabWidget, QVBoxLayout, QWidget,
 )
 
+from squidmip import _explore
 from squidmip._engine import _default_workers, available_projectors
 from squidmip._layers import OperationStack
 from squidmip._minerva import MINERVA_HOME_ENV as _MINERVA_HOME_ENV
@@ -116,14 +117,19 @@ _EMPTY_HEAD_PX = 19                   # heading, one step up from body
 # says out loud that it is only an example. Primary line first (right-click -> Control Well),
 # secondary second (Shift-drag). Plain sentences, no UI jargon.
 _EMPTY_EXPLORE_HEAD = "Exploration pane"
-_EMPTY_EXPLORE_LEDE = "Nothing here yet. Here is an example of how you might use this pane."
+_EMPTY_EXPLORE_LEDE = (
+    "Nothing here yet. It is a second viewer on a few wells at a time, and results you preview "
+    "show up here while they compute. Here is an example of how you might use it.")
 _EMPTY_EXPLORE_PRIMARY = (
     "For example, you can right-click a well on the plate and choose Control Well from the menu. "
-    "That well opens here and stays, so you can compare the other wells against it.")
+    "That well opens here with its own viewer and stays, so you can compare the other wells "
+    "against it.")
 _EMPTY_EXPLORE_SECONDARY = (
     "You can also hold Shift and drag across the plate to pick a few wells. They open here in "
-    "their own tab.")
-_EMPTY_EXPLORE_CODA = "These are only examples. Whatever you open lands in this pane."
+    "their own tab, with a slider to step through them.")
+_EMPTY_EXPLORE_CODA = (
+    "These are only examples. Operators run from the panel on the left \u2014 set \u201crun on\u201d "
+    "to the side pane subset and their results land here.")
 _EXPLORE_W = 380                      # pane 3's width on open, in px (see PlateWindow.__init__)
 
 # Processing-status hue coding, adopted from Hongquan Li's record-zstack-viewer plate navigator.
@@ -744,33 +750,12 @@ def resolve_plate_root(path) -> tuple[Path, bool]:
     return p, False
 
 
-def exploration_tab_key(acq_id: str, regions) -> str:
-    """Stable, CONTENT-ADDRESSED id for an exploration tab (IMA-205).
-
-    Same acquisition + same SET of regions -> the same key, whichever order the user selected
-    them in. That gives dedupe for free: re-selecting the same wells focuses the tab that is
-    already open instead of piling up duplicates on every stray drag.
-
-    ``acq_id`` is hashed in deliberately. Well ids repeat across plates ("B2" exists on every
-    one), so a key built from regions alone would let a selection on a NEW acquisition dedupe
-    onto a stale tab left over from the old one. ``ingest`` also closes exploration tabs, but
-    the key has to be safe on its own rather than relying on that.
-    """
-    uniq = sorted(set(regions))
-    if not uniq:
-        raise ValueError("an exploration tab needs at least one region")
-    digest = hashlib.sha1("\x1f".join([acq_id, *uniq]).encode("utf-8")).hexdigest()[:10]
-    return f"exp:{digest}"
-
-
-def exploration_tab_label(regions) -> str:
-    """Human-readable tab title — 'B2–B5 (4)'. The hash is the internal key, never the label."""
-    uniq = sorted(set(regions))
-    if not uniq:
-        return "exploration"
-    if len(uniq) == 1:
-        return uniq[0]
-    return f"{uniq[0]}–{uniq[-1]} ({len(uniq)})"
+# Pane 3's identity and label rules live in ``_explore`` (no Qt, no napari), and are re-exported
+# here under their historical names so every existing caller and test is unchanged. They MOVED
+# rather than being copied: two spellings of "what is this tab called" is the same
+# two-representations-of-one-truth defect this file already carries scars from.
+exploration_tab_key = _explore.exploration_tab_key
+exploration_tab_label = _explore.exploration_tab_label
 
 
 def operator_layer_key(op_key: str, tab_key: Optional[str]) -> str:
@@ -3301,6 +3286,10 @@ class _PreviewWorker(QThread):
     """
 
     tileReady = pyqtSignal(int, int, str, object, object)   # (ri, ci, well_id, tile, box|None)
+    #: This is the raw fill, not an operator run. ``_explore.operator_busy`` reads it so a retired
+    #: preview still draining cannot make the next operator run refuse itself.
+    IS_PREVIEW = True
+
     streamEnded = pyqtSignal()                      # preview complete -> recomposite the whole plate
 
     def __init__(self, reader, meta, fov_index: dict, order: list, mosaic: bool = True):
@@ -3454,11 +3443,40 @@ class _ExplorationTab(QWidget):
 
     def __init__(self, regions: list, tab_key: str, parent=None):
         super().__init__(parent)
-        self.regions = list(regions)
+        self.cursor = _explore.SubsetCursor(regions)
+        self.regions = self.cursor.regions
         self.tab_key = tab_key
         self.status: dict = {}      # this tab's plate dots, restored when it becomes active
         self.sync_note = None       # set by _build_exploration_tab; the "not synced yet" banner
         self.sync_pending = False   # True while this tab is in front but the view still shows a run
+        # THE TAB'S OWN VIEWER — built by pane 2's constructor, embedded in this widget. "The
+        # right pane is essentially a copy of the central pane, but it occurs on a subset."
+        self.viewer = None          # the MosaicPane, or None with the reason said on screen
+        self.slider = None          # the slider UNDER the viewer: one stop per region
+        self.region_label = None    # "region 1 of 3 · B2"
+        self.progress = None        # what a preview run scoped to this tab has computed so far
+        self.minerva_btn = None
+        self.mosaic_worker = None   # the fuse-this-region thread currently feeding self.viewer
+        self.tiles: dict = {}       # region -> the cell canvas a multi-FOV run is filling in
+        self.plate_layer = None     # the PLATE layer the run displayed here writes into
+
+    def dispose(self):
+        """Free the tab's viewer and stop its mosaic read.
+
+        A napari viewer is a GL context and tens of MB; leaking one per Shift-drag kills a
+        session after twenty selections. Called from ``_discard_exploration`` — the ONE teardown
+        path — so a tab close, a float close and app exit all free it identically.
+        """
+        w = self.mosaic_worker
+        self.mosaic_worker = None
+        if w is not None and w.isRunning():
+            w.stop()
+            w.wait(2000)
+        pane = self.viewer
+        self.viewer = None
+        if pane is not None:
+            pane.setParent(None)
+            pane.deleteLater()
 
     def set_sync_pending(self, pending: bool):
         """Say out loud that this tab is in FRONT but the plate/detail beside it still belong to a
@@ -3556,7 +3574,10 @@ class PlateWindow(QMainWindow):
         #                               here, mirrored onto the plate frame and pane 3's pinned tab
         self._tabs_muted = False      # suppress _on_tab_changed during bulk teardown (ingest)
         self._run_out_dir = None      # output dir of the in-flight SAVE run (for partial cleanup)
-        self._run_tab_key = None      # exploration tab that owns the in-flight run, if any
+        self._run_tab_key = None      # exploration tab that owns the in-flight run's LAYER, if any
+        self._run_view_tab_key = None # side-pane tab the in-flight run is DISPLAYED in, if any
+        self._run_label = ""          # the in-flight run's operator label, and where it is going —
+        self._run_dest = ""           # one source for the status line AND the side-pane tab
         self._pending_resync = False  # a tab switch was deferred because a run was live (IMA-205 bugs)
         self._loupe_sources = {}      # layer key -> _LoupeSource backing that layer's pixels (IMA-208)
 
@@ -3804,6 +3825,28 @@ class PlateWindow(QMainWindow):
             lab.setStyleSheet("color:#57606a;font-size:10px;font-weight:800;letter-spacing:1.5px;padding-top:8px;")
             return lab
 
+        # RUN SCOPE — the one place a run is aimed. Julio: "we have the controls for the whole
+        # dataset on the left, but those controls are repeated for the subset on the right pane.
+        # Maybe it's not a good idea for there to be repetition of knowledge in our user
+        # interface." So "run it on the subset" is a value HERE, not a second button set over
+        # there: one operator catalogue, one control panel, several scopes. The side pane owns
+        # the subset and this reads it (``parked_subset``).
+        scope_row = QHBoxLayout(); scope_row.setSpacing(6)
+        _run_scope_lbl = QLabel("run on")
+        _run_scope_lbl.setStyleSheet("color:#8b98ad;font-size:12px;")
+        self._scope_run = QComboBox()
+        self._scope_run.setStyleSheet(_COMBO_QSS)
+        self._scope_run.addItems(list(_explore.RUN_SCOPES))
+        self._scope_run.setToolTip(
+            "What the next operator run covers.\n"
+            f"{_explore.SCOPE_SELECTION} — the wells picked on the plate (all of them if none is).\n"
+            f"{_explore.SCOPE_PLATE} — every region of the acquisition.\n"
+            f"{_explore.SCOPE_REGION} — the region open in the viewer.\n"
+            f"{_explore.SCOPE_SUBSET} — the subset parked in the side pane.")
+        scope_row.addWidget(_run_scope_lbl)
+        scope_row.addWidget(self._scope_run, 1)
+        v.addLayout(scope_row)
+
         stack = QWidget()
         sv = QVBoxLayout(stack)
         sv.setContentsMargins(0, 0, 0, 0)
@@ -4040,10 +4083,10 @@ class PlateWindow(QMainWindow):
         layer keeps a full plate-sized RGB canvas resident (tens of MB on a 1536wp) — silent
         growth on the app's headline gesture, with no error anywhere."""
         stopped = False
-        if self._run_tab_key == tab.tab_key and self._busy():
+        if tab.tab_key in (self._run_tab_key, self._run_view_tab_key) and self._busy():
             self._stop_worker()          # _retire: disconnects signals, then lets the thread drain
             self._note_partial_output()  # a stopped SAVE run leaves a half-written .hcs on disk
-            self._run_tab_key = None
+            self._run_tab_key = self._run_view_tab_key = None
             stopped = True
         if self._active_exploration is tab:
             # BUG 1: the tab in front is being deleted. Leaving _active_exploration pointing at it
@@ -4064,6 +4107,7 @@ class PlateWindow(QMainWindow):
             if self._acq_name:
                 self._plate_title.setText(f"{self._acq_name}   ·   raw")
         self._refresh_layers_tab()
+        tab.dispose()                    # free the tab's OWN viewer + stop its mosaic read
         if stopped:
             self._readout.setText(f"stopped {exploration_tab_label(tab.regions)} — tab closed mid-run")
 
@@ -4132,6 +4176,84 @@ class PlateWindow(QMainWindow):
                           lambda: self._build_exploration_tab(regions, key),
                           tabs=self._explore_tabs)
         return key
+
+    def _open_preview_tab(self, op_key: str, op_label: str, regions) -> Optional[str]:
+        """Open (or focus) the side-pane tab a preview run of ``op_key`` streams its results into.
+
+        Identity is content-addressed on acquisition + OPERATOR + region set, so two preview runs
+        over one selection are two tabs side by side — which is the point: "preview runs can open
+        a tab on the exploration pane so that they look at how it is behaving." Re-running the
+        SAME operator on the SAME wells reuses its tab rather than accumulating duplicates.
+        """
+        key = _explore.preview_tab_key(self._acq_name, op_key, regions)
+        self._open_op_tab(key, _explore.preview_tab_label(op_label, regions),
+                          lambda: self._build_exploration_tab(regions, key),
+                          tabs=self._explore_tabs)
+        return key
+
+    def _run_tab(self) -> Optional["_ExplorationTab"]:
+        """The side-pane tab the in-flight run is streaming into, if any."""
+        if not self._run_view_tab_key:
+            return None
+        w = self._op_tabs.get(self._run_view_tab_key)
+        return w if isinstance(w, _ExplorationTab) else None
+
+    def _on_progress(self, done: int, total: int):
+        """A run advanced. Says so in pane 1's status line AND, when the run belongs to a side-pane
+        tab, in that tab — where the user is actually watching the result appear."""
+        self._run_readout(f"● {self._run_label} · {done}/{total} wells{self._run_dest}")
+        tab = self._run_tab()
+        if tab is not None and tab.progress is not None:
+            tab.progress.setText(_explore.progress_sentence(self._run_label, done, total))
+
+    def _on_run_tile(self, ri, ci, well_id, tile, box=None):
+        """One computed FIELD landed — put it on the run's side-pane tab as a REAL LAYER.
+
+        Julio: "layers don't update in the napari mosaic... you instantiate an actual layer to be
+        in the napari interface." So each region of the run becomes its own layer group the moment
+        its first field arrives, and later fields of that region update it — rather than the tab
+        sitting empty until the run ends and then being handed finished data.
+
+        A field for a region this tab is not scoped to is DROPPED: the tab claims a subset, and
+        painting a foreign region on it would make that claim false. (It cannot normally happen —
+        the run and the tab have the same region list — but the tab's claim is not left to luck.)
+        """
+        tab = self._run_tab()
+        if tab is None or tab.viewer is None or self._meta is None:
+            return
+        region = next((r for r in tab.regions
+                       if tuple(self._fov_index[r]["rc"]) == (ri, ci)), None)
+        if region is None:
+            return
+        from squidmip._mosaic_source import mosaic_bbox_um
+        from squidmip._napari_pane import _colormap_for
+
+        arr = np.asarray(tile)
+        if box is not None:
+            # A multi-FOV region arrives field by field, each with its box inside the region's
+            # cell. Accumulate into ONE canvas per region so the layer fills in as the run walks
+            # the region, instead of one layer per field (36 FOVs x 4 channels = 144 layers).
+            canvas = tab.tiles.get(region)
+            if canvas is None or canvas.shape[0] != arr.shape[0]:
+                canvas = np.zeros((arr.shape[0], _CELL, _CELL), arr.dtype)
+                tab.tiles[region] = canvas
+            top, left, bh, bw = box
+            canvas[:, top:top + bh, left:left + bw] = arr[:, :bh, :bw]
+            arr = canvas
+        try:
+            bbox = mosaic_bbox_um(self._meta, region)
+        except Exception as exc:                     # noqa: BLE001 - said, never swallowed
+            tab.viewer.say(f"{region}: could not place the result ({exc}); showing it unplaced.")
+            bbox = None
+        op = _explore.subset_layer_op(self._run_label, region)
+        for c_i, channel in enumerate(c["name"] for c in self._meta["channels"]):
+            if c_i >= arr.shape[0]:
+                break
+            tab.viewer.mosaic.add_mosaic(
+                op, channel, arr[c_i],
+                colormap=_colormap_for(channel),
+                bbox_um=bbox,
+            )
 
     # -- CONTROL WELL (IMA-248's unit, corrected from FOV to WELL; reachable because IMA-260's
     # -- empty-state example points at it) ---------------------------------------------------------
@@ -4241,7 +4363,15 @@ class PlateWindow(QMainWindow):
             self._overview.set_status_map(w.status)
             top = next((ly.key for ly in reversed(self._op_stack.layers())
                         if ly.key.endswith(f"@{w.tab_key}")), None)
-            self._overview.set_active_layer(top or "raw")
+            # A PREVIEW tab owns no plate layer keyed to itself — its run's results are filed
+            # under the plate-wide key on purpose (see run_operator), because the tab shows them
+            # in its OWN viewer. Falling straight to "raw" for it would flip the plate back to
+            # the raw preview the instant a preview run opened its tab: running an operator would
+            # visibly UNDO itself on the plate. ``plate_layer`` is the layer a run displayed in
+            # THIS tab wrote into, so the tab can name it instead of the window having to
+            # remember which run is whose. A tab that never hosted a run has None and keeps the
+            # historical `top or "raw"`.
+            self._overview.set_active_layer(top or w.plate_layer or "raw")
             w.set_sync_pending(False)
             # NB: do NOT reset _push_index here — _setup_raw_detail just built the subset map for
             # this tab's slider, and clearing it would send register_image straight back to global
@@ -4275,7 +4405,7 @@ class PlateWindow(QMainWindow):
         done, and ``_busy()`` stays True for all of that window."""
         if self._busy():
             return                       # another (retired) worker is still draining — wait for it
-        self._run_tab_key = None
+        self._run_tab_key = self._run_view_tab_key = None
         if not self._pending_resync:
             return
         self._pending_resync = False
@@ -4464,78 +4594,213 @@ class PlateWindow(QMainWindow):
             b.setEnabled(self._reader is not None)
         return w
 
+    def _make_explore_viewer(self):
+        """Build a viewer for ONE side-pane tab. Returns ``(pane_or_None, mode, message)``.
+
+        DELEGATES to pane 2's constructor. The right pane is "a copy of the central pane, but it
+        occurs on a subset", so a second viewer implementation here would be exactly the
+        duplication this project keeps failing on — and it would also be a second embedding
+        path, which is how the control well ended up in a floating window: ``napari.Viewer``
+        builds a real QMainWindow, and one that nobody reparents IS a top-level window the
+        moment anything shows it. ``MosaicPane._embed_native_window`` is the one place that
+        knows to reparent the WINDOW (never the canvas, which is that window's central widget).
+
+        It exists as a named method purely so tests can swap in a recording stub: napari's
+        canvas needs OpenGL and the headless gate has none.
+        """
+        return _make_mosaic_pane()
+
     def _build_exploration_tab(self, regions: list, tab_key: str) -> QWidget:
-        """The exploration tab body: the selection, an operator menu scoped to it, and the Minerva
-        hook. Operators run in PREVIEW (save=False) by default — exploring a subset should cost
-        compute, not disk. 'Save this subset' persists just these wells."""
+        """One side-pane tab: A VIEWER ON THIS SUBSET, a slider under it, and the Minerva hand-off.
+
+        This tab is a RESULT SURFACE, not a control surface. Julio: "we have the controls for the
+        whole dataset on the left, but those controls are repeated for the subset on the right
+        pane. Maybe it's not a good idea for there to be repetition of knowledge in our user
+        interface" — and "this is just a supplementary pane that augments the processing by
+        showing preview results and how that reflects on our viewer."
+
+        So the per-operator preview buttons that used to live here are GONE. They were a second
+        operator catalogue (``runnable_operators()``) beside pane 1's (``_OPERATIONS``), with
+        different labels and a different ``save`` default, and the comment they carried recorded
+        that the two had already drifted in production. Running an operator on this subset is now
+        a SCOPE on pane 1's one control panel (``_explore.SCOPE_SUBSET``), which reads the subset
+        this pane owns.
+
+        Minerva stays, because it is not an operator: it is an export of WHAT IS DISPLAYED HERE.
+        """
         w = _ExplorationTab(regions, tab_key)
+        regions = w.regions
         w.setStyleSheet(f"background:{_BG};color:#e6edf3;")
         v = QVBoxLayout(w)
-        v.setContentsMargins(16, 14, 16, 14)
-        v.setSpacing(9)
-        t = QLabel(f"Exploration · {exploration_tab_label(regions)}")
-        t.setStyleSheet("font-size:16px;font-weight:800;")
-        v.addWidget(t)
-        b = QLabel(f"{len(regions)} region(s) selected. Operators here run on this subset only.")
-        b.setWordWrap(True)
-        b.setStyleSheet("color:#8b98ad;font-size:12px;")
-        v.addWidget(b)
+        v.setContentsMargins(10, 8, 10, 8)
+        v.setSpacing(6)
 
+        # -- what this tab is scoped to. One compact line: the pane is a fifth of a SMALL monitor,
+        # and chrome that eclipses the viewer is the complaint this layout is answering.
         listing = QLabel(", ".join(regions))       # the tab must LIST exactly what it is scoped to
         listing.setWordWrap(True)
-        listing.setStyleSheet("color:#57606a;font-size:11px;")
+        listing.setStyleSheet(f"color:#c3ccd9;font-size:{_EMPTY_BODY_PX - 1}px;")
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setStyleSheet("QScrollArea{border:none;background:transparent;}")
         scroll.setWidget(listing)
-        scroll.setMaximumHeight(90)
+        scroll.setMaximumHeight(46)
         v.addWidget(scroll)
         w.listing = listing                        # tests assert the tab lists exactly its regions
 
         note = QLabel("A run is still finishing — the plate and viewer beside this tab still show "
                       "it. They will switch to this subset when it is done.")
         note.setWordWrap(True)
-        note.setStyleSheet("color:#d29922;font-size:11px;")
+        note.setStyleSheet(f"color:#d29922;font-size:{_EMPTY_BODY_PX - 1}px;")
         note.setVisible(False)
         v.addWidget(note)
         w.sync_note = note
         w.set_sync_pending(w.sync_pending)
 
-        v.addWidget(_hline())
-        lab = QLabel("RUN ON THIS SUBSET")
-        lab.setStyleSheet("color:#57606a;font-size:10px;font-weight:800;letter-spacing:1.5px;padding-top:4px;")
-        v.addWidget(lab)
-        # IMA-226: one live-preview button per RUNNABLE operator, off the engine registry rather
-        # than off _OPERATIONS. That is the same edit in both directions: `reference` gains a
-        # button it never had (it has no card, so the card loop skipped it), and `minerva` loses
-        # one it should never have had (it is an export hand-off, not an operator — clicking it
-        # handed "minerva" to the engine and the run died with a raw KeyError in the status line).
-        for k in runnable_operators():
-            btn = QPushButton(f"{operator_label(k)} (preview)")
-            btn.setStyleSheet(_BTN_QSS)
-            btn.setCursor(Qt.PointingHandCursor)
-            btn.clicked.connect(
-                lambda _=False, k=k: self.run_operator(k, regions=regions, save=False,
-                                                       tab_key=tab_key))
-            v.addWidget(btn)
+        # -- THE VIEWER. Same constructor as pane 2, embedded here, never a separate window.
+        pane, _mode, msg = self._make_explore_viewer()
+        if pane is not None:
+            w.viewer = pane
+            pane.setParent(w)
+            v.addWidget(pane, 1)
+        else:
+            # NO SILENT FAILURE. A tab with no viewer is not "a tab with fewer features", it is a
+            # pane that cannot do its job, and the user has to be told which and why.
+            dead = QLabel(msg or "no viewer could be built for this subset.")
+            dead.setWordWrap(True)
+            dead.setAlignment(Qt.AlignCenter)
+            dead.setStyleSheet(
+                f"color:#ffd7d7;background:#3a2020;padding:10px;font-size:{_EMPTY_BODY_PX}px;")
+            v.addWidget(dead, 1)
 
-        save_btn = QPushButton("Save this subset to disk…")
-        save_btn.setStyleSheet(_BTN_QSS)
-        save_btn.clicked.connect(
-            lambda: self.run_operator(_OPERATIONS[0].key, regions=regions, save=True, tab_key=tab_key))
-        v.addWidget(save_btn)
+        # -- THE SLIDER UNDER IT. "There should be a slider under." One stop per region of the
+        # subset: the unit this pane shows is a REGION (a mosaic of FOVs), never a single field.
+        w.region_label = QLabel("")
+        w.region_label.setStyleSheet(f"color:#c3ccd9;font-size:{_EMPTY_BODY_PX - 1}px;")
+        v.addWidget(w.region_label)
+        w.slider = QSlider(Qt.Horizontal)
+        w.slider.setMinimum(0)
+        w.slider.setMaximum(max(0, len(regions) - 1))
+        w.slider.setEnabled(len(regions) > 1)
+        w.slider.setStyleSheet(_NDV_DARK)
+        w.slider.valueChanged.connect(lambda i, t=w: self._on_explore_slider(t, i))
+        v.addWidget(w.slider)
 
-        v.addWidget(_hline())
-        minerva = QPushButton("Open in Minerva")
-        minerva.setStyleSheet(_BTN_QSS + "QPushButton:disabled{color:#57606a;border-style:dashed;}")
-        minerva.setEnabled(False)     # IMA-228 owns the squid2minerva bridge; this is its mount point
-        minerva.setToolTip("Coming with IMA-228 — exports the selection as OME-TIFF and launches "
-                           "minerva-author")
+        # -- what a preview run scoped to this tab has computed so far.
+        w.progress = QLabel("")
+        w.progress.setWordWrap(True)
+        w.progress.setStyleSheet(f"color:#8b98ad;font-size:{_EMPTY_BODY_PX - 1}px;")
+        v.addWidget(w.progress)
+
+        minerva = QPushButton("Open in Minerva Author")
+        minerva.setStyleSheet(_BTN_QSS)
+        minerva.setCursor(Qt.PointingHandCursor)
+        minerva.setToolTip(
+            "Fuse each region of this subset into one mosaic, write it as an OME-TIFF plus a "
+            "Minerva story, and start Minerva Author on it.")
+        minerva.clicked.connect(lambda _=False, t=w: self._export_subset_to_minerva(t))
         v.addWidget(minerva)
         w.minerva_btn = minerva
-        v.addStretch(1)
+
+        self._sync_explore_region(w)
+        self._load_explore_region(w)
         return w
+
+    # -- the side pane's viewer: aim it at one region of its subset --------------------------------
+    def _sync_explore_region(self, tab: "_ExplorationTab"):
+        """Make the tab's label agree with its cursor. The cursor is the only owner of 'which
+        region is in front'; the label and the slider are both told from it."""
+        if tab.region_label is None:
+            return
+        n = len(tab.cursor)
+        tab.region_label.setText(
+            f"region {tab.cursor.index + 1} of {n} · {tab.cursor.region}")
+
+    def _on_explore_slider(self, tab: "_ExplorationTab", index: int):
+        """The slider under a side-pane viewer moved."""
+        if not tab.cursor.set_index(index):
+            return                       # no move: do not restart a mosaic read on a stray event
+        self._sync_explore_region(tab)
+        self._load_explore_region(tab)
+
+    def _load_explore_region(self, tab: "_ExplorationTab"):
+        """Fuse the cursor's region and put it on THIS TAB's viewer, one layer per channel.
+
+        The same ``_MosaicWorker`` pane 2 uses — a region is a mosaic of FOVs and there is one
+        implementation of assembling it. Already-loaded regions stay on the canvas: the tab
+        accumulates its subset as layers, so scrubbing back is instant and the pane keeps
+        showing what was selected rather than emptying itself.
+        """
+        if tab.viewer is None or self._reader is None or self._meta is None:
+            return
+        region = tab.cursor.region
+        if tab.cursor.is_loaded(region):
+            return
+        prior = tab.mosaic_worker
+        if prior is not None and prior.isRunning():
+            prior.stop()
+            prior.wait(2000)
+        tab.viewer.say(f"loading {region} …")
+        channels = [c["name"] for c in self._meta["channels"]]
+        op = _explore.subset_layer_op("raw", region)
+        wk = _MosaicWorker(self._reader, self._meta, region, channels, parent=self)
+        wk.ready.connect(
+            lambda r, ch, plane, bbox, t=tab, o=op: self._on_explore_plane(t, o, r, ch, plane, bbox))
+        wk.problem.connect(lambda m, t=tab: t.viewer.say(m) if t.viewer is not None else None)
+        wk.finished_count.connect(
+            lambda n, t=tab, r=region: self._on_explore_region_done(t, r, n))
+        tab.mosaic_worker = wk
+        wk.start()
+
+    def _on_explore_plane(self, tab, op, region, channel, plane, bbox_um):
+        if tab.viewer is None:
+            return
+        from squidmip._napari_pane import _colormap_for
+
+        tab.viewer.mosaic.add_mosaic(
+            op, channel, plane,
+            colormap=_colormap_for(channel),
+            bbox_um=bbox_um,
+            z_scale_um=(self._meta or {}).get("dz_um"),
+        )
+
+    def _on_explore_region_done(self, tab, region, n):
+        if tab.viewer is None:
+            return
+        if n == 0:
+            tab.viewer.say(f"{region}: no mosaic could be built (see the message above).")
+            return
+        tab.cursor.mark_loaded(region)
+        tab.viewer.say("")
+
+    # -- the subset this pane owns, read by pane 1's scope selector -------------------------------
+    def parked_subset(self) -> list:
+        """The regions parked in the side pane — its FRONT tab's subset, or ``[]``.
+
+        ONE owner, ONE reader. The side pane owns the subset (it is what the user put there);
+        pane 1's scope selector reads it here when a run is aimed at ``SCOPE_SUBSET``. Neither
+        keeps its own copy, which is the whole point of deleting pane 3's operator buttons.
+        """
+        tab = self._current_exploration()
+        return list(tab.regions) if tab is not None else []
+
+    def _export_subset_to_minerva(self, tab: "_ExplorationTab"):
+        """Minerva Author on THIS TAB's subset — one fused mosaic per region.
+
+        The export contract is ``_minerva.export_selection``'s and is not touched here: a region
+        is fused into ONE OME-TIFF (Minerva lays out exactly one image and reads only
+        ``series[0]``), and a FOV subset of a region is the crop of that region's mosaic, still
+        one file. All this decides is WHAT is exported, and the answer is what this pane is
+        showing — not whatever happens to be highlighted on the plate.
+        """
+        try:
+            selection = _explore.subset_selection(
+                tab.regions, (self._meta or {}).get("fovs_per_region"))
+        except ValueError as exc:                     # named, in the status line, nothing exported
+            self._readout.setText(f"cannot export to Minerva: {exc}")
+            return
+        self.run_minerva_export(selection=selection)
 
     def _build_minerva_tab(self) -> QWidget:
         """Minerva Author hand-off (IMA-228): export the SELECTION, then open Author on it.
@@ -4952,7 +5217,7 @@ class PlateWindow(QMainWindow):
         self._control_well = None     # a control is a region OF THIS acquisition; the next plate
         #                               has no reference until the user picks one on it
         self._push_index = None
-        self._run_tab_key = None
+        self._run_tab_key = self._run_view_tab_key = None
         self._reader = self._meta = None
         self._fov_index = {}
         self._selected_regions = []   # wells picked on the plate (IMA-221); scopes an operator run
@@ -5356,7 +5621,7 @@ class PlateWindow(QMainWindow):
         self._active_exploration = None
         self._control_well = None                 # ...including the control (a raw-plate region)
         self._push_index = None
-        self._run_tab_key = None
+        self._run_tab_key = self._run_view_tab_key = None
         wells_rc, self._fov_index, self._order, worker_wells = {}, {}, [], []
         well_paths, well_fovs = {}, {}
         for idx, w in enumerate(wells_meta):
@@ -5462,7 +5727,10 @@ class PlateWindow(QMainWindow):
         """
         if self._reader is None or self._overview is None:
             return
-        if self._busy():
+        if _explore.operator_busy(self._worker, self._retired):
+            # NOT ``_busy()``: that also counts a retired RAW PREVIEW, and opening a side-pane tab
+            # restarts the preview, so the very next operator run refused itself over a thread the
+            # user never started. See _explore.operator_busy.
             self._readout.setText("already processing — let the current run finish first")
             return
         # IMA-226: gate on the ENGINE registry, not on the card table. `_OPERATIONS_BY_KEY[key]`
@@ -5475,12 +5743,28 @@ class PlateWindow(QMainWindow):
                 f"{', '.join(runnable_operators())}")
             return
         label = operator_label(key)
-        # Scope the run: an explicit `regions` list wins (an exploration tab and the preview spinner
-        # both build one), else a plate SELECTION scopes it (IMA-221), else the whole plate.
-        # regions=None keeps the existing whole-plate path byte-for-byte.
-        from_selection = regions is None and bool(self._selected_regions)
-        if from_selection:
-            regions = list(self._selected_regions)
+        # Scope the run. An explicit `regions` list still wins (the preview spinner builds one, and
+        # so do tests). Otherwise the SCOPE SELECTOR on this pane decides — one control panel, one
+        # place a run is aimed. Its default value is "selected wells", which resolves to the plate
+        # selection and, with nothing selected, to the whole plate: byte-for-byte the behaviour
+        # that existed before the selector, so nothing silently changes under an existing user.
+        from_selection = False
+        if regions is None:
+            scope_value = (self._scope_run.currentText()
+                           if getattr(self, "_scope_run", None) is not None
+                           else _explore.SCOPE_SELECTION)
+            regions, problem = _explore.resolve_run_scope(
+                scope_value,
+                selection=self._selected_regions,
+                current_region=self._current_well,
+                parked_subset=self.parked_subset(),
+            )
+            if problem:
+                # A scope the user CHOSE but that has nothing behind it. Say it and stop; widening
+                # it to the whole plate would be hours of compute nobody asked for.
+                self._readout.setText(problem)
+                return
+            from_selection = (regions is not None and scope_value == _explore.SCOPE_SELECTION)
         if regions is not None:
             regions = list(regions)
             if not regions:
@@ -5497,6 +5781,25 @@ class PlateWindow(QMainWindow):
             scope = f"{len(regions)} selected well(s)"
         else:
             scope = f"{len(regions)} well" + ("s" if len(regions) != 1 else "")
+        # A PREVIEW RUN OPENS A TAB IN THE SIDE PANE. Julio: "the exploration pane can obviously
+        # visualize preliminary results as the user processes... preview runs can open a TAB on
+        # the exploration pane so that they look at how it is behaving, a.k.a. look at the
+        # results." Keyed by operator as well as by region set, so a second preview run opens a
+        # SECOND tab and the two can be compared instead of one stealing the other's canvas.
+        #
+        # A saved run does not (it is not a preview), and neither does a plate-wide one: the side
+        # pane shows a SUBSET, and the whole dataset is what pane 2 is already looking at.
+        #
+        # NOTE the tab this opens is where the run is DISPLAYED, which is a different question
+        # from ``tab_key`` — the tab whose LAYER the results are filed under on the plate. They
+        # are kept apart deliberately: folding them together would silently re-key every
+        # pane-1 preview's plate layer from "mip" to "mip@preview:…", changing what the layer
+        # stack and the before/after toggle show for a feature that is only about the side pane.
+        self._run_view_tab_key = None
+        if not save and regions is not None and tab_key is None:
+            self._run_view_tab_key = self._open_preview_tab(key, label, regions)
+        elif tab_key is not None:
+            self._run_view_tab_key = tab_key
         out_dir = est_gb = None
         if save:
             # Ask WHERE to persist: output can be hundreds of GB, so let the user aim it at a roomy
@@ -5524,6 +5827,9 @@ class PlateWindow(QMainWindow):
                                  + (f"   ·   {exploration_tab_label(regions)}" if tab_key else ""))
         layer_key = operator_layer_key(key, tab_key)
         self._active_op_key = layer_key                      # tiles stream into this layer
+        _view_tab = self._run_tab()
+        if _view_tab is not None:      # ...and the tab showing this run can name that layer later
+            _view_tab.plate_layer = layer_key
         if getattr(self, "_raw_btn", None):
             self._raw_btn.show()                             # now there's a processed view to return from
         stack_label = label if not tab_key else f"{label} · {exploration_tab_label(regions)}"
@@ -5591,10 +5897,13 @@ class PlateWindow(QMainWindow):
         # plate-wide layer instead of the tab's own.
         self._overview.reset_layer(layer_key)
         dest = f" → {out_dir.name}" if save else " (preview — not saved)"
+        # This run's identity, read back by _on_progress and _on_run_tile. Held as state rather
+        # than captured in a lambda because the side-pane tab has to be told the same two things
+        # the status line is, and one source is how they stay in agreement.
+        self._run_label, self._run_dest = label, dest
         self._worker.tileReady.connect(self._on_tile)
         self._worker.pushReady.connect(self._on_push)
-        self._worker.progress.connect(
-            lambda d, t: self._run_readout(f"● {label} · {d}/{t} wells{dest}"))
+        self._worker.progress.connect(self._on_progress)
         self._worker.streamEnded.connect(lambda k=layer_key: self._recomposite(k))
         self._worker.writtenReady.connect(self._on_written)
         self._worker.wellFailed.connect(                     # a skipped well -> red x, run continues
@@ -5678,6 +5987,7 @@ class PlateWindow(QMainWindow):
             return
         layer = self._active_op_key or "raw"
         self._overview.add_tile(ri, ci, well_id, tile, layer=layer, box=box)
+        self._on_run_tile(ri, ci, well_id, tile, box)       # ...and onto the run's side-pane tab
         self._overview.set_status(ri, ci, "done")           # blue
         src = self._loupe_sources.get(layer)                 # this well is now on disk -> loupe-able
         if isinstance(src, _ZarrLoupeSource):
