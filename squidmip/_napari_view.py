@@ -385,8 +385,19 @@ class MosaicLayers:
     ) -> Any:
         """Add (or replace) the mosaic for one processing layer / channel pair.
 
-        ``contrast_limits`` is supplied by the caller on purpose — ``_viewer._pct_window`` owns
-        the percentile rule and this module must not grow a second copy of it.
+        ``contrast_limits=None`` means "derive one", and what it derives is
+        ``_contrast.auto_contrast`` — the FLUORESCENCE rule ported from maragall/stitcher:
+        background peak to black, 99.9th percentile on top.
+
+        This is a SEED, not a second owner. napari still owns contrast from the moment the layer
+        exists: the user drags napari's slider, the plate follows napari, and nothing recomputes
+        this behind them. What it replaces is napari's own autoscale, which for fluorescence puts
+        the low end inside the background distribution — so the background lifts off black, the
+        tissue saturates, and four additive channels sum to white. Julio, on screen: "the channels
+        are not well contrast-adjusted (background looks colored)."
+
+        Derived from the COARSEST pyramid level (~36x fewer pixels on the 10x set, and the level
+        napari already fetches for the thumbnail), so seeding costs nothing.
         """
         key = MosaicKey(str(op), str(channel))
         existing = self.find(key.op, key.channel)
@@ -408,8 +419,11 @@ class MosaicLayers:
             # "why is the mosaic only displaying a channel?".
             "blending": blending,
         }
-        if contrast_limits is not None:
-            lo, hi = float(contrast_limits[0]), float(contrast_limits[1])
+        window = contrast_limits
+        if window is None:
+            window = _auto_window_for(data, bool(multiscale))
+        if window is not None:
+            lo, hi = float(window[0]), float(window[1])
             # A degenerate window is passed through, NOT widened. _pct_window returns hi <= lo
             # for a blank channel deliberately, because widening it to (lo, lo+1) renders a
             # blank channel as full white, i.e. as signal.
@@ -424,6 +438,22 @@ class MosaicLayers:
         # difference or the plate latches manual on open and kills per-region contrast.
         with self.programmatic():
             layer = self._model.add_image(data, **kwargs)
+
+            # The slider must span the DTYPE, not the window we seeded. napari sizes
+            # contrast_limits_range from the data it sampled, so a tight seed leaves the user
+            # unable to open the window back up past it -- the control silently bounds them to
+            # our choice. The stitcher sets this immediately after every add for the same reason.
+            try:
+                from squidmip._contrast import dtype_range
+
+                dt = getattr(_first_level(data, bool(multiscale)), "dtype", None)
+                if dt is not None and "contrast_limits" in kwargs:
+                    lo_r, hi_r = dtype_range(dt)
+                    lo_w, hi_w = kwargs["contrast_limits"]
+                    # Never narrower than what is displayed, or napari clamps the window itself.
+                    layer.contrast_limits_range = (min(lo_r, lo_w), max(hi_r, hi_w))
+            except Exception:               # noqa: BLE001 - cosmetic; the layer is already good
+                pass
 
             if bbox_um is not None:
                 # Trailing two axes are (y, x); a z-stack's leading axis is not placed by bbox_um.
@@ -680,11 +710,32 @@ class MosaicLayers:
                 peers[0].events.contrast_limits.connect(callback)
 
 
+def _auto_window_for(data: Any, multiscale: bool) -> Optional[tuple[float, float]]:
+    """The seed contrast window for *data*, or None to let napari autoscale.
+
+    None is returned for a blank or unreadable plane rather than a guess, so a channel with no
+    signal is not handed a window that renders its noise as tissue. Any failure here is
+    cosmetic -- a wrong window is a bad picture, a raised exception inside add_image is no
+    picture at all -- so it degrades to napari's own autoscale instead of propagating.
+    """
+    from squidmip._contrast import auto_contrast, sample_plane
+
+    try:
+        levels = data if multiscale else [data]
+        plane = sample_plane(levels)
+        return None if plane is None else auto_contrast(plane)
+    except Exception:                       # noqa: BLE001 - seeding is cosmetic, never fatal
+        return None
+
+
+def _first_level(data: Any, multiscale: bool) -> Any:
+    """The full-resolution array, whether or not ``data`` is a pyramid."""
+    return data[0] if multiscale else data
+
+
 def _first_level_shape(data: Any, multiscale: bool) -> Sequence[int]:
     """Shape of the full-resolution plane, whether or not ``data`` is a pyramid."""
-    if multiscale:
-        return data[0].shape
-    return data.shape
+    return _first_level(data, multiscale).shape
 
 
 # --------------------------------------------------------------------------------------
