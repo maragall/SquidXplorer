@@ -73,6 +73,7 @@ authoritative palette and is resolved through ``_channels`` rather than restated
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional, Sequence
 
@@ -127,6 +128,18 @@ REQUIRED_NAPARI_BINDINGS: tuple[tuple[str, str], ...] = (
     ("napari.qt", "QtViewer"),
 )
 
+#: PRIVATE napari symbols we depend on, checked separately because they carry no ``__all__``
+#: promise at all. There is exactly one, and it is deliberate: ``QtLayerControlsContainer`` is
+#: napari's REAL per-channel contrast surface (range slider, auto-scale buttons, colormap combo).
+#: Julio's instruction is to use napari's own controls rather than rebuild them, and rebuilding
+#: them is what produced the duplicated sliders in the first place. napari does not export this
+#: widget publicly, so the choice is: use the private symbol behind a guard that fails loudly on
+#: upgrade, or reimplement the control surface and reintroduce the duplication. The guard is the
+#: lesser evil, and it is mutation-tested.
+REQUIRED_PRIVATE_BINDINGS: tuple[tuple[str, str], ...] = (
+    ("napari._qt.layer_controls", "QtLayerControlsContainer"),
+)
+
 # Attributes we drive on a layer / model. Same reasoning.
 REQUIRED_LAYER_ATTRS: tuple[str, ...] = ("metadata", "visible", "contrast_limits", "scale",
                                          "translate", "name", "events")
@@ -158,6 +171,17 @@ def verify_napari_bindings(modules: Optional[dict] = None) -> None:
         exported = getattr(mod, "__all__", None)
         if exported is not None and attr not in exported:
             missing.append(f"{dotted}.{attr} (present but no longer in __all__)")
+
+    # Private symbols: existence only. There is no __all__ to check, which is precisely why
+    # these are listed separately rather than quietly mixed in with the supported ones.
+    for dotted, attr in REQUIRED_PRIVATE_BINDINGS:
+        try:
+            mod = modules[dotted] if modules and dotted in modules else importlib.import_module(dotted)
+        except Exception as exc:  # pragma: no cover
+            missing.append(f"{dotted} (PRIVATE; import failed: {exc!r})")
+            continue
+        if not hasattr(mod, attr):
+            missing.append(f"{dotted}.{attr} (PRIVATE)")
 
     if missing:
         raise NapariBindingError(
@@ -242,6 +266,35 @@ class MosaicLayers:
         self._model = model
         # channel -> the layers showing that channel, across every processing layer. Linked.
         self._by_channel: dict[str, list[Any]] = {}
+        # Depth of "this write came from US, not the user". See `programmatic()`.
+        self._programmatic = 0
+        self._user_contrast_cbs: list[Any] = []
+
+    # -- who moved the contrast: us, or the user? ---------------------------------------
+    @contextmanager
+    def programmatic(self):
+        """Mark contrast writes made BY US, so subscribers can ignore them.
+
+        This distinction is the whole safety property of the contrast design, and it is not
+        theoretical: the plate is a SINK, and when it wrote a viewer-originated autoscale back
+        into its own policy state it latched all four channels to MANUAL on open. That killed
+        per-region contrast dead from frame one while the plate still drew an amber "wells NOT
+        comparable" badge — a badge that was therefore lying. A sink must never write back to
+        the owner, and it can only obey that rule if it can tell who moved the value.
+
+        Everything this class sets itself (the initial percentile window from ``_pct_window``,
+        a re-add, a link propagation) happens inside this block. Only a genuine user drag on
+        napari's slider arrives outside it.
+        """
+        self._programmatic += 1
+        try:
+            yield
+        finally:
+            self._programmatic -= 1
+
+    @property
+    def is_programmatic(self) -> bool:
+        return self._programmatic > 0
 
     # -- introspection ------------------------------------------------------------------
     @property
@@ -292,6 +345,8 @@ class MosaicLayers:
         multiscale: Optional[bool] = None,
         bbox_um: Optional[Sequence[float]] = None,
         visible: bool = True,
+        blending: str = "additive",
+        z_scale_um: Optional[float] = None,
     ) -> Any:
         """Add (or replace) the mosaic for one processing layer / channel pair.
 
@@ -307,14 +362,16 @@ class MosaicLayers:
             "name": key.label(),
             "metadata": key.as_metadata(),
             "visible": visible,
-            # ADDITIVE, not napari's default 'translucent'. Fluorescence channels are a COMPOSITE:
-            # each carries independent signal and they must sum, exactly as _montage.py already
-            # does in the browser ("screen blending, which is the same additive composite").
-            # With the default, the last-added layer simply OCCLUDES the rest — on the 10x tissue
-            # set the channel order ends 638 nm, whose palette colour is #FF0000, so the whole
-            # mosaic rendered flat RED and looked like a single-channel bug. Reported from the
-            # live GUI as "mosaic showing red, so like single collor".
-            "blending": "additive",
+            # ADDITIVE, not napari's default 'translucent_no_depth'. Fluorescence channels are
+            # a COMPOSITE: each carries independent signal and they must sum, exactly as
+            # _montage.py already does in the browser ("screen blending, which is the same
+            # additive composite"). With the default, the last-added layer simply OCCLUDES the
+            # rest — four layers exist, all four visible, each with its own correct colormap, and
+            # the user still sees one channel. On the 10x tissue set the order ends 638 nm
+            # (#FF0000), so the mosaic rendered flat RED and read as a single-channel bug.
+            # Reported twice from the live GUI: "mosaic showing red, so like single collor" and
+            # "why is the mosaic only displaying a channel?".
+            "blending": blending,
         }
         if contrast_limits is not None:
             lo, hi = float(contrast_limits[0]), float(contrast_limits[1])
@@ -328,26 +385,38 @@ class MosaicLayers:
         if multiscale is not None:
             kwargs["multiscale"] = multiscale
 
-        layer = self._model.add_image(data, **kwargs)
+        # Everything here is OUR write, not the user's. Subscribers must be able to tell the
+        # difference or the plate latches manual on open and kills per-region contrast.
+        with self.programmatic():
+            layer = self._model.add_image(data, **kwargs)
 
-        if bbox_um is not None:
-            shape = _first_level_shape(data, bool(multiscale))
-            scale, translate = scale_translate_from_bbox_um(bbox_um, shape)
-            layer.scale = scale
-            layer.translate = translate
+            if bbox_um is not None:
+                # Trailing two axes are (y, x); a z-stack's leading axis is not placed by bbox_um.
+                shape = tuple(_first_level_shape(data, bool(multiscale)))[-2:]
+                scale, translate = scale_translate_from_bbox_um(bbox_um, shape)
+                # A z axis (from a lazy z-stack) is not placed by bbox_um, which describes the XY
+                # footprint only. Pad so scale/translate line up with the trailing spatial axes.
+                extra = max(0, int(getattr(layer, "ndim", len(shape))) - 2)
+                # The z axis carries the STEP in micrometres, not 1.0. With a unit z scale the
+                # 2-D slider still steps correctly but the 3-D toggle renders an isotropic block
+                # out of anisotropic data — IMA-255 exists precisely because dz/pixel has to
+                # reach the renderer. Same world units as x/y, so the ratio comes out right.
+                lead = (float(z_scale_um) if (extra and z_scale_um) else 1.0,) * extra
+                layer.scale = lead + tuple(scale)
+                layer.translate = (0.0,) * extra + tuple(translate)
 
-        self._register_channel(key.channel, layer)
-        # Point the camera at the data. add_image does NOT move the camera, so the first
-        # mosaic landed outside the view and the canvas stayed black while all four layers sat
-        # correctly in the layer list -- Julio: "all I see are the controls... it just looks like
-        # an empty gray canvas". Reset only while this is the FIRST layer, so a later channel
-        # does not yank the view back while the user is panning.
-        try:
-            if len(self.ours()) <= 1:
-                self._model.reset_view()
-        except Exception:                        # noqa: BLE001 - view convenience, never fatal
-            pass
-
+            self._register_channel(key.channel, layer)
+            # Point the camera at the data. add_image does NOT move the camera, so the first
+            # mosaic landed outside the view and the canvas stayed black while all four layers
+            # sat correctly in the layer list -- Julio: "all I see are the controls... it just
+            # looks like an empty gray canvas". Reset only while this is the FIRST layer, so a
+            # later channel does not yank the view back while the user is panning. Inside the
+            # programmatic() block: reset_view is OUR camera move, not a user gesture.
+            try:
+                if len(self.ours()) <= 1:
+                    self._model.reset_view()
+            except Exception:                    # noqa: BLE001 - view convenience, never fatal
+                pass
         return layer
 
     def _register_channel(self, channel: str, layer: Any) -> None:
@@ -429,6 +498,26 @@ class MosaicLayers:
             raise KeyError(f"no layer for channel {channel!r}")
         # Linked, so writing one writes them all; write the first and let napari propagate.
         peers[0].contrast_limits = (float(lo), float(hi))
+
+    def on_user_contrast(self, callback) -> None:
+        """Subscribe to contrast changes the USER made. Programmatic writes never arrive here.
+
+        ``callback(channel, lo, hi)``. This is the seam that lets the plate be a pure sink: it
+        is told what the owner resolved, and it never writes back.
+        """
+        self._user_contrast_cbs.append(callback)
+        for channel, peers in self._by_channel.items():
+            if not peers:
+                continue
+
+            def _fire(event=None, _ch=channel, _peers=peers):
+                if self.is_programmatic:
+                    return
+                lo, hi = _peers[0].contrast_limits
+                for cb in self._user_contrast_cbs:
+                    cb(_ch, float(lo), float(hi))
+
+            peers[0].events.contrast_limits.connect(_fire)
 
     def on_contrast_changed(self, callback) -> None:
         """Subscribe to contrast changes via napari's PUBLIC event.

@@ -170,3 +170,80 @@ def test_a_group_without_multiscales_is_a_loud_error(tmp_path):
         {"zarr_format": 3, "node_type": "group", "attributes": {}}))
     with pytest.raises(ValueError, match="multiscales"):
         level_paths(root)
+
+
+# ------------------------------------------------------------ lazy z stacks
+
+
+class _CountingReader(_Reader):
+    """Counts reads so laziness is provable rather than asserted."""
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.reads = 0
+
+    def read(self, region, fov, channel, z, t=0):
+        self.reads += 1
+        return np.full(self.frame, z + 1, dtype=np.uint16)
+
+
+def test_a_zstack_becomes_a_lazy_z_y_x_array():
+    from squidmip._mosaic_source import fuse_region_stack
+
+    meta = _meta({("A1", 0): (0.0, 0.0), ("A1", 1): (12.0, 0.0)}, [0, 1])
+    meta["n_z"] = 5
+    data, step, nz = fuse_region_stack(_Reader(), meta, "A1", "488")
+
+    assert nz == 5
+    assert data.shape == (5, 4, 12)
+    assert hasattr(data, "compute"), "the stack must stay lazy"
+
+
+def test_only_the_requested_plane_is_ever_materialised():
+    """The architecture taken from record-zstack-viewer: requests cost only what is visible.
+    Eagerly fusing every z would turn a 10-plane 28-FOV region into ~10x the reads on open."""
+    from squidmip._mosaic_source import fuse_region_stack
+
+    meta = _meta({("A1", 0): (0.0, 0.0), ("A1", 1): (12.0, 0.0)}, [0, 1])
+    meta["n_z"] = 8
+    reader = _CountingReader()
+    data, _step, _nz = fuse_region_stack(reader, meta, "A1", "488")
+
+    after_probe = reader.reads          # one plane is probed for shape/dtype
+    plane = np.asarray(data[3])         # ask for exactly one z
+
+    assert plane.shape == (4, 12)
+    assert np.all(plane == 4)           # z=3 -> value 4, so the right plane was fused
+    assert reader.reads - after_probe == 2, "materialising one z must read one z, once per FOV"
+
+
+def test_a_single_plane_acquisition_gets_no_singleton_z_axis():
+    """A one-position slider is clutter; record-zstack-viewer relies on the viewer hiding
+    singleton sliders and napari does the same when the axis simply is not there."""
+    from squidmip._mosaic_source import fuse_region_stack
+
+    meta = _meta({("A1", 0): (0.0, 0.0), ("A1", 1): (12.0, 0.0)}, [0, 1])
+    meta["n_z"] = 1
+    data, _step, nz = fuse_region_stack(_Reader(), meta, "A1", "488")
+
+    assert nz == 1
+    assert data.ndim == 2
+
+
+def test_an_oversized_plane_is_refused_loudly_rather_than_paging_the_machine():
+    from squidmip._mosaic_source import fuse_region_stack
+
+    # A genuinely huge extent, with decimation effectively disabled.
+    meta = _meta({("A1", 0): (0.0, 0.0), ("A1", 1): (40000.0, 0.0)}, [0, 1],
+                 frame=(40000, 40000), px=1.0)
+    meta["n_z"] = 4
+    with pytest.raises(MemoryError, match="plane budget"):
+        fuse_region_stack(_Reader(), meta, "A1", "488", max_px=10_000_000)
+
+
+def test_a_stack_with_no_positions_is_still_not_derivable():
+    from squidmip._mosaic_source import fuse_region_stack
+
+    meta = _meta({}, [0, 1])
+    meta["n_z"] = 4
+    assert fuse_region_stack(_Reader(), meta, "A1", "488") is None

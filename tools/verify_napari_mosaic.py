@@ -83,6 +83,30 @@ for ly in pane.mosaic.ours():
     })
 out["layers"] = layers
 
+# Report 2/3 evidence: z navigable, and all channels composited rather than occluded.
+out["dims_ndim"] = int(pane.mosaic.model.dims.ndim)
+out["dims_not_displayed"] = [int(a) for a in pane.mosaic.model.dims.not_displayed]
+out["z_slider_present"] = out["dims_ndim"] > 2
+out["n_z_in_meta"] = int((win._meta or {}).get("n_z") or 1)
+out["blending"] = sorted({str(l.blending) for l in pane.mosaic.ours()})
+out["colormaps"] = [str(l.colormap.name) for l in pane.mosaic.ours()]
+out["all_channels_visible"] = all(l.visible for l in pane.mosaic.ours())
+# Count REAL widgets, not row-tuple slots: the row's second element is now the read-only
+# window readout, so a truthiness check on it reports a control that no longer exists.
+from PyQt5.QtWidgets import QPushButton, QSlider, QWidget
+_bar = win._channel_bar
+out["plate_contrast_sliders"] = len(_bar.findChildren(QSlider)) if _bar is not None else 0
+out["plate_auto_buttons"] = len(
+    [b for b in _bar.findChildren(QPushButton) if b.text() == "auto"]) if _bar is not None else 0
+# Look for the real widgets in the tree rather than a pane attribute, so this keeps
+# reporting the truth regardless of how the control column is stored.
+_names = {type(c).__name__ for c in pane.findChildren(QWidget)}
+out["napari_layer_controls_mounted"] = "QtLayerControlsContainer" in _names
+out["napari_dims_slider_mounted"] = any("QtDim" in n for n in _names)
+# 3D is reachable via napari's OWN ndisplay button now that the real Window is embedded.
+out["napari_viewer_buttons_present"] = any(
+    "ViewerButtons" in type(c).__name__ for c in pane.findChildren(QWidget))
+
 if layers:
     h, w = layers[0]["shape"]
     out["is_a_mosaic_not_one_fov"] = bool(frame and (h > frame[0] or w > frame[1]))

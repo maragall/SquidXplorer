@@ -173,6 +173,125 @@ def fuse_region_mosaic(
     return mosaic, float(step)
 
 
+#: Refuse to materialise more than this in one slice request. Mirrors the plane budget in
+#: hongquanli/record-zstack-viewer, which raises rather than quietly dragging a machine into swap.
+_PLANE_BUDGET_BYTES = 2 * 1024 ** 3
+
+
+def _planned_plane(meta: dict, region: str, max_px: int):
+    """``(out_h, out_w, step, dtype)`` a fused plane WOULD have. Pure geometry, reads nothing.
+
+    Exists so the plane budget can be enforced before any allocation, and so the lazy stack can
+    declare its shape without fusing a plane to find out.
+    """
+    from squidmip._placement import fov_offsets_px, mosaic_extent_px
+
+    positions = meta.get("fov_positions_um") or {}
+    pixel_size = meta.get("pixel_size_um")
+    if not positions or pixel_size in (None, 0):
+        return None
+    fovs = list((meta.get("fovs_per_region") or {}).get(region) or [])
+    if not fovs:
+        return None
+    try:
+        offsets = fov_offsets_px(positions, region, fovs, pixel_size)
+        full_h, full_w = mosaic_extent_px(offsets, tuple(int(v) for v in meta["frame_shape"]))
+    except (KeyError, ValueError):
+        return None
+
+    step = max(1, int(np.ceil(max(full_h, full_w) / float(max_px))))
+    return (int(np.ceil(full_h / step)), int(np.ceil(full_w / step)),
+            float(step), np.dtype(meta.get("dtype", "uint16")))
+
+
+def fuse_region_stack(
+    reader: Any,
+    meta: dict,
+    region: str,
+    channel: str,
+    *,
+    t: int = 0,
+    max_px: int = _MAX_FUSED_PX,
+):
+    """A LAZY ``(z, y, x)`` mosaic stack — one fused plane materialised per visible z.
+
+    This is what makes z navigable. napari puts a native dimension slider on every axis it is
+    not displaying, so handing it a 3-D array is all that is required; handing it a 2-D array
+    (which is what fusing at a fixed ``z`` produces) leaves no axis to put a slider on, which is
+    exactly why z was not controllable.
+
+    ARCHITECTURE TAKEN FROM ``hongquanli/record-zstack-viewer`` (Squid's own author), which
+    solves this problem for the same data. Its ``FovDataWrapper`` exposes the source's NAMED
+    axes to the viewer and materialises ONE plane per visible slice via ``read_plane`` — "requests
+    only cost what is visible" — with an explicit budget that raises rather than swapping, and it
+    relies on the viewer hiding singleton sliders so the z selector appears exactly when
+    ``n_planes > 1``.
+
+    WHERE WE DIVERGE, and why: that viewer is built on **ndv**, whose sliders are driven by a
+    ``DataWrapper``. napari has no such hook — its dimension sliders are driven by the ARRAY's
+    shape. So the same architecture is expressed as a dask array whose per-z blocks are computed
+    on demand: one fused plane per slider position, nothing eager, and napari's own slider is the
+    control surface rather than one we build. Choosing napari's native slider over porting the
+    DataWrapper is deliberate: a ported wrapper would be a second control surface to keep in sync,
+    which is the defect shape this whole effort is trying to remove.
+
+    NOT taken from it: ``_auto_clims`` widens a collapsed window "minimally so the LUT" works.
+    ``_pct_window`` deliberately REFUSES that widening — IMA-269 found the loupe's separate
+    compositor doing exactly this and rendering a sparse channel WHITE where the plate renders it
+    BLACK. Julio's repos are prior art to read critically, not to copy wholesale.
+    """
+    import dask.array as da
+
+    nz = int(meta.get("n_z") or 1)
+
+    # Size the plane from GEOMETRY, before anything is allocated. The budget check has to come
+    # before the allocation it guards; probing first would allocate the very plane we are trying
+    # to refuse.
+    planned = _planned_plane(meta, region, max_px)
+    if planned is None:
+        return None
+    h, w, step, dtype = planned
+
+    # The budget is PER PLANE, not for the stack: the stack is lazy, so only the visible z is
+    # ever in RAM. A single plane over budget is refused loudly — that is a real condition
+    # (max_px raised, or a huge region) and discovering it as a swap storm is worse.
+    per_plane = h * w * dtype.itemsize
+    if per_plane > _PLANE_BUDGET_BYTES:
+        raise MemoryError(
+            f"{region}/{channel}: one fused plane is {per_plane / 1e9:.1f} GB "
+            f"({h}x{w} {dtype}), over the {_PLANE_BUDGET_BYTES / 1e9:.1f} GB plane budget. "
+            "Lower max_px rather than letting this page the machine."
+        )
+
+    if nz <= 1:
+        # A singleton z axis would give napari a slider with one position. Return the plane so
+        # the axis does not exist at all, matching the "hide singleton sliders" behaviour.
+        probe = fuse_region_mosaic(reader, meta, region, channel, z=0, t=t, max_px=max_px)
+        if probe is None:
+            return None
+        return probe[0], probe[1], 1
+
+    def _plane(z: int):
+        got = fuse_region_mosaic(reader, meta, region, channel, z=int(z), t=t, max_px=max_px)
+        if got is None:
+            return np.zeros((h, w), dtype=dtype)
+        arr = got[0]
+        if arr.shape != (h, w):        # a ragged z would silently misalign the stack
+            out = np.zeros((h, w), dtype=dtype)
+            out[: min(h, arr.shape[0]), : min(w, arr.shape[1])] = \
+                arr[: min(h, arr.shape[0]), : min(w, arr.shape[1])]
+            return out
+        return arr
+
+    from dask import delayed
+
+    blocks = [
+        da.from_delayed(delayed(_plane)(z), shape=(h, w), dtype=dtype)[None, ...]
+        for z in range(nz)
+    ]
+    return da.concatenate(blocks, axis=0), step, nz
+
+
 def mosaic_bbox_um(meta: dict, region: str) -> Optional[tuple[float, float, float, float]]:
     """``(x0, y0, x1, y1)`` stage micrometres covered by a region's mosaic.
 

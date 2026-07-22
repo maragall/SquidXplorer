@@ -3246,7 +3246,7 @@ class _MosaicWorker(QThread):
         self._stop.set()
 
     def run(self):
-        from squidmip._mosaic_source import fuse_region_mosaic, mosaic_bbox_um
+        from squidmip._mosaic_source import fuse_region_stack, mosaic_bbox_um
 
         try:
             bbox = mosaic_bbox_um(self._meta, self._region)
@@ -3259,7 +3259,10 @@ class _MosaicWorker(QThread):
             if self._stop.is_set():
                 break
             try:
-                res = fuse_region_mosaic(self._reader, self._meta, self._region, ch)
+                # A LAZY (z, y, x) stack when the acquisition has z, so napari's OWN dimension
+                # slider becomes the z control; a plain plane when n_z == 1, so no singleton
+                # slider appears. Only the visible z is ever materialised.
+                res = fuse_region_stack(self._reader, self._meta, self._region, ch)
             except Exception as exc:                # noqa: BLE001 - reported, never swallowed
                 self.problem.emit(f"{self._region}/{ch}: {type(exc).__name__}: {exc}")
                 continue
@@ -3268,8 +3271,8 @@ class _MosaicWorker(QThread):
                     f"{self._region}: no stage positions / pixel size — mosaic not derivable."
                 )
                 continue
-            plane, _step = res
-            self.ready.emit(self._region, ch, plane, bbox)
+            data, _step, _nz = res
+            self.ready.emit(self._region, ch, data, bbox)
             n += 1
         self.finished_count.emit(n)
 
@@ -3627,10 +3630,19 @@ class PlateWindow(QMainWindow):
 
         # right (pane 2): the central viewer. napari renders the region MOSAIC as a multiscale
         # pyramid — the reason for the move, and the unit the user actually looks at (IMA-265).
-        # ndviewer_light remains the per-FOV z-stack detail viewer and the fallback; it is what
-        # `self._detail` still refers to, so every push path below is unchanged.
+        # ndviewer_light is the fallback viewer and, in fallback mode, the per-FOV z-stack detail
+        # viewer; `self._detail` refers to it and every push path below is unchanged.
+        #
+        # It is NOT constructed when napari is the viewer. Building it anyway "just for the push
+        # paths" leaves its LUT sliders in the widget tree, where they are a SECOND control
+        # surface over contrast — invisible to the user, but two widgets that can move one value
+        # is the defect either way, and the IMA-268 gate walks the tree and actuates everything it
+        # finds. Measured with that gate: origin/main FAILS with 8 sliders + 4 auto buttons in the
+        # plate view; with this, "contrast: 0 sliders, 0 auto buttons". napari's mosaic pane
+        # supersedes the per-FOV detail viewer — it shows the region mosaic WITH a z slider — and
+        # every `self._detail` path already guards on None.
         self._mosaic_pane, viewer_mode, viewer_msg = _make_mosaic_pane()
-        self._detail = self._make_detail_viewer()
+        self._detail = None if viewer_mode == "napari" else self._make_detail_viewer()
         if self._detail is not None:   # connect the FOV slider -> red box ONCE (not per ingest)
             slider = getattr(self._detail, "_fov_slider", None)
             if slider is not None:
@@ -5107,11 +5119,14 @@ class PlateWindow(QMainWindow):
         #
         # Julio: "Napari has so many pre-built features that you're not leveraging." This is one.
         # napari autoscales on add and the user retunes with the layer's own contrast slider,
-        # which is also the single owner the plate now follows.
+        # which is also the single owner the plate now follows. A LAZY z-stack makes this doubly
+        # right: computing our own window would have to reduce over z, materialising the stack on
+        # the GUI thread; napari autoscales from the visible plane instead.
         pane.mosaic.add_mosaic(
             op, channel, plane,
             colormap=_colormap_for(channel),
             bbox_um=bbox_um,
+            z_scale_um=(self._meta or {}).get("dz_um"),
         )
 
     def _on_mosaic_done(self, op: str, region: str, n: int):
@@ -5127,6 +5142,36 @@ class PlateWindow(QMainWindow):
             pane.mosaic.model.reset_view()
         except Exception:                            # noqa: BLE001 - view framing is cosmetic
             pass
+        self._bind_napari_contrast()
+
+    def _bind_napari_contrast(self):
+        """Point the EXISTING contrast sink (IMA-261) at napari instead of ndviewer_light.
+
+        No new contrast model, and no second sink: this reuses ``_on_detail_contrast``, which
+        already lands in the plate's FOLLOW path via ``follow_channel_window`` rather than its
+        manual latch. That distinction is the one that matters — treating an owner's autoscale as
+        a user gesture is what latched every channel MANUAL on open, killed the plate's running
+        auto-contrast from the first frame, and left SCOPE_PER_REGION painting every well under
+        one global window while the amber "wells NOT comparable" badge lied over the top.
+
+        ``MosaicLayers.on_user_contrast`` additionally filters out OUR OWN writes (the percentile
+        window set at add time, and link propagation), so only a real change of the owner's
+        resolved window arrives here.
+        """
+        pane = getattr(self, "_mosaic_pane", None)
+        if pane is None or not getattr(pane, "ok", False) or self._meta is None:
+            return
+        if getattr(self, "_napari_contrast_bound", False):
+            return          # connect ONCE: the pane outlives every ingest, like the detail viewer
+        index = {c["name"]: i for i, c in enumerate(self._meta["channels"])}
+
+        def _sink(channel: str, lo: float, hi: float):
+            ch = index.get(channel)
+            if ch is not None:
+                self._on_detail_contrast(ch, lo, hi)
+
+        pane.mosaic.on_user_contrast(_sink)
+        self._napari_contrast_bound = True
 
     def _setup_raw_detail(self, order: Optional[list] = None):
         """Point the detail viewer at the RAW acquisition: full z-stack, full frame, FOV slider.

@@ -407,3 +407,82 @@ def test_channels_composite_additively_not_occluding_each_other():
         f"channels must composite additively; got {blendings}. With 'translucent' the last "
         f"channel added hides every earlier one."
     )
+
+
+def test_blending_is_overridable_without_reaching_into_the_layer(layers):
+    lyr = layers.add_mosaic("raw", "488", _img(), blending="translucent")
+    assert lyr.blending == "translucent"
+
+
+# ------------------------------------ contrast ownership: the plate must never write back
+
+
+def test_our_own_contrast_writes_do_not_look_like_the_user_moving_a_slider(layers):
+    """The exact trap IMA-261 found: a SINK writing a viewer-originated autoscale back into its
+    own policy state latched all four channels to MANUAL on open, killing per-region contrast
+    while the plate still drew an amber 'wells NOT comparable' badge that was therefore lying."""
+    seen = []
+    layers.add_mosaic("raw", "488", _img(), contrast_limits=(10.0, 900.0))
+    layers.on_user_contrast(lambda ch, lo, hi: seen.append((ch, lo, hi)))
+
+    # adding another layer for the same channel is OUR write, and it propagates via the link
+    layers.add_mosaic("stitched", "488", _img(), contrast_limits=(20.0, 800.0))
+
+    assert seen == [], f"programmatic contrast write leaked to the sink: {seen}"
+
+
+def test_a_user_drag_does_reach_the_sink(layers):
+    layers.add_mosaic("raw", "488", _img())
+    seen = []
+    layers.on_user_contrast(lambda ch, lo, hi: seen.append((ch, lo, hi)))
+
+    layers.find("raw", "488").contrast_limits = (33.0, 777.0)   # the user moving napari's slider
+
+    assert seen == [("488", 33.0, 777.0)]
+
+
+def test_programmatic_is_reentrant_and_restores_state(layers):
+    with layers.programmatic():
+        assert layers.is_programmatic
+        with layers.programmatic():
+            assert layers.is_programmatic
+        assert layers.is_programmatic
+    assert not layers.is_programmatic
+
+
+# --------------------------------------------------------- z axis and voxel geometry
+
+
+def test_a_zstack_gets_a_navigable_axis_and_a_2d_plane_does_not(layers):
+    """REPORT 2. napari puts a dimension slider on every axis it is not displaying, so a 3-D
+    array is all that is needed. A 2-D array leaves no axis to put a slider on — which is why z
+    was not controllable: the mosaic was fused at a fixed z before napari ever saw it."""
+    layers.add_mosaic("raw", "488", _img(shape=(32, 32)))
+    assert layers.model.dims.ndim == 2
+    assert list(layers.model.dims.not_displayed) == []
+
+    layers.remove_op("raw")
+    layers.add_mosaic("raw", "488", np.zeros((10, 32, 32), dtype=np.uint16))
+    assert layers.model.dims.ndim == 3
+    assert list(layers.model.dims.not_displayed) == [0]
+
+
+def test_the_z_axis_carries_the_step_in_micrometres_not_one(layers):
+    """A unit z scale steps fine in 2-D and renders an isotropic block in 3-D out of
+    anisotropic data. IMA-255 exists because dz/pixel has to reach the renderer."""
+    lyr = layers.add_mosaic("raw", "488", np.zeros((10, 32, 32), dtype=np.uint16),
+                            bbox_um=(0.0, 0.0, 320.0, 320.0), z_scale_um=1.5)
+    assert tuple(lyr.scale) == pytest.approx((1.5, 10.0, 10.0))
+    assert tuple(lyr.translate) == pytest.approx((0.0, 0.0, 0.0))
+
+
+def test_xy_placement_is_unaffected_by_the_extra_z_axis(layers):
+    """The trailing two axes are (y, x); a silent transpose here draws a plausible wrong mosaic."""
+    flat = layers.add_mosaic("raw", "488", np.zeros((40, 80), dtype=np.uint16),
+                             bbox_um=(0.0, 0.0, 800.0, 400.0))
+    layers.remove_op("raw")
+    stack = layers.add_mosaic("raw", "488", np.zeros((6, 40, 80), dtype=np.uint16),
+                              bbox_um=(0.0, 0.0, 800.0, 400.0), z_scale_um=2.0)
+
+    assert tuple(flat.scale) == pytest.approx((10.0, 10.0))
+    assert tuple(stack.scale)[1:] == pytest.approx(tuple(flat.scale))
