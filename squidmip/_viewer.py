@@ -4839,14 +4839,22 @@ class PlateWindow(QMainWindow):
         tab.mosaic_worker = wk
         wk.start()
 
-    def _on_explore_plane(self, tab, op, region, channel, plane, bbox_um):
+    def _on_explore_plane(self, tab, op, region, channel, levels, bbox_um):
+        """Same contract as ``_on_mosaic_plane``: ``_MosaicWorker`` emits a LAZY PYRAMID.
+
+        ``levels`` is the list napari's ``multiscale=True`` wants, highest resolution first. The
+        side pane is a copy of pane 2 on a subset, so it gets the same pyramid on the same terms —
+        a tab that took level 0 would put the full 5731x4793 mosaic on screen per region and undo
+        the memory win exactly where the user opens the most viewers.
+        """
         if tab.viewer is None:
             return
         from squidmip._napari_pane import _colormap_for
 
         tab.viewer.mosaic.add_mosaic(
-            op, channel, plane,
+            op, channel, levels,
             colormap=_colormap_for(channel),
+            multiscale=True,
             bbox_um=bbox_um,
             z_scale_um=(self._meta or {}).get("dz_um"),
         )
@@ -5316,6 +5324,7 @@ class PlateWindow(QMainWindow):
         self._stop_worker()
         self._stop_preview()
         self._stop_minerva()
+        self._stop_mosaic_worker()   # it holds the OLD reader, and it is joined, not drained
         # Exploration tabs belong to the acquisition they were opened from: their region sets and
         # layer keys point at a _fov_index that is about to be rebuilt for a different plate.
         self._close_exploration_tabs()
@@ -6504,6 +6513,57 @@ class PlateWindow(QMainWindow):
         self._retire(self._minerva)
         self._minerva = None
 
+    def _join_retired(self, msec: int = 3000) -> None:
+        """WAIT for every deferred worker, at the one moment deferring is not allowed: teardown.
+
+        ``_retire`` is right for the normal case — it disconnects the signals and lets the thread
+        drain in the background so the GUI never blocks on a stop. But every worker is parented to
+        this window, so once the window is destroyed Qt destroys a QThread that is still running
+        and the PROCESS ABORTS. Deferring is only safe while the parent outlives the thread.
+
+        So closing joins instead. Bounded: ``stop()`` returns after the current item, and a thread
+        that misses the deadline is detached from this window so its destruction is no longer tied
+        to ours — a slow worker must not hang the close, and it must not abort the app either.
+        """
+        for w in list(self._retired):
+            try:
+                if w.isRunning():
+                    w.stop()
+                    if not w.wait(msec):
+                        w.setParent(None)     # outlived us: cut it loose rather than abort
+            except RuntimeError:              # already destroyed by Qt
+                pass
+        self._retired.clear()
+
+    def _stop_mosaic_worker(self):
+        """Stop the pane-2 fuse and WAIT for it, before the window that owns it is destroyed.
+
+        This one is not like the others: ``_retire`` lets a thread drain in the background, which
+        is right for a worker whose owner outlives it. ``_MosaicWorker`` is parented to this
+        window, so when Qt destroys the window it destroys a QThread that is still running and
+        the process ABORTS. Only the replace path in ``_load_mosaic`` ever stopped it, so a close
+        (or a second ingest) mid-fuse killed the app. It went unnoticed while a fuse was fast;
+        the multiscale pyramid made the fuse long enough to still be running on close.
+        """
+        workers = [getattr(self, "_mosaic_worker", None)]
+        # ...and one per EXPLORATION TAB. Each tab fuses its own subset with its own worker, and
+        # like pane 2's it was only ever stopped when REPLACED. They accumulate: one per tab per
+        # region visited, all parented to this window, all still running when it is destroyed.
+        for tab in list(getattr(self, "_op_tabs", {}).values()):
+            workers.append(getattr(tab, "mosaic_worker", None))
+        for w in workers:
+            if w is None:
+                continue
+            try:
+                w.stop()
+                w.wait(2000)
+            except RuntimeError:      # already destroyed by Qt; nothing left to join
+                pass
+        self._mosaic_worker = None
+        for tab in list(getattr(self, "_op_tabs", {}).values()):
+            if getattr(tab, "mosaic_worker", None) is not None:
+                tab.mosaic_worker = None
+
     def showEvent(self, e):
         """Take a GUI slot the moment this window becomes VISIBLE.
 
@@ -6529,6 +6589,8 @@ class PlateWindow(QMainWindow):
         self._gui_slot = None
         self._stop_worker()          # stop the run cleanly; nothing on disk to clean up (no cache)
         self._stop_preview()
+        self._stop_mosaic_worker()   # JOINED, not drained: it is parented to this window
+        self._join_retired()         # ...and so is everything _retire deferred
         self._stop_minerva()         # files already written stay; only the launch poll is abandoned
         for key in list(self._floating):   # floated tabs are top-levels of their own — Qt won't
             win = self._floating.pop(key)  # close them for us, and each may hold a live shell

@@ -237,7 +237,15 @@ def test_ima188_sim1536_scaling_measured_no_regression(sim_1536wp, capsys):
             f"single-thread {base['full_ms']:.0f}ms. Warm cache is bandwidth-bound — the real "
             f"speedup needs cold/real storage (Decision C)."
         )
-    assert set(got8) == set(got1), "worker count changed which wells were produced"
+    # NOT `set(got8) == set(got1)`. Both sides are the first _SUBSET wells to FINISH, and with 8
+    # workers that set is completion-ordered — on a loaded machine well A26 lands before A24 and
+    # the assertion fails without anything being wrong. It was a race dressed as a correctness
+    # gate. What the engine actually promises is that every well it yields is a real well of this
+    # plate and that it yields as many as asked; PIXEL identity is gated unconditionally by
+    # test_ima188_sim1536_parallel_pixel_identical, which does not depend on order.
+    plate = {(r, f) for r in regions for f in reader.metadata["fovs_per_region"][r]}
+    assert len(got8) == len(got1) == _SUBSET, "the engine yielded fewer wells than asked"
+    assert set(got8) <= plate and set(got1) <= plate, "the engine yielded a well not on the plate"
     # Non-regression gate (robust): parallel must not be materially slower than single-thread.
     assert t_8 <= t_1 * 1.2, f"parallel materially slower than single-thread ({t_8:.1f}s vs {t_1:.1f}s)"
 

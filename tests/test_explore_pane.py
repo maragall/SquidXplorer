@@ -62,7 +62,16 @@ class _StubMosaic:
         self._programmatic = 0
 
     def add_mosaic(self, op, channel, data, **kw):
-        self.added.append((op, channel, np.asarray(data).shape, kw.get("bbox_um")))
+        # multiscale=True means `data` is a LIST OF LEVELS, highest resolution first — not one
+        # array. A stub that ran np.asarray() over the list built a ragged array and raised
+        # inside a Qt slot, which PyQt turns into a process ABORT: the real defect (a caller
+        # still passing a single plane) arrived as a segfault with no test name attached.
+        if kw.get("multiscale"):
+            assert isinstance(data, (list, tuple)) and data, "multiscale=True needs a level list"
+            shape = np.asarray(data[0]).shape
+        else:
+            shape = np.asarray(data).shape
+        self.added.append((op, channel, shape, kw.get("bbox_um")))
         return object()
 
     def remove_op(self, op):
@@ -439,7 +448,9 @@ def test_minerva_from_the_tab_ignores_the_plate_selection(win, monkeypatch):
 def test_minerva_refuses_a_region_it_cannot_expand_and_says_so(win, monkeypatch):
     key = win.open_exploration_tab(["B3"])
     tab = win._op_tabs[key]
-    monkeypatch.setitem(win._meta, "fovs_per_region", {"B3": []})
+    # _meta is a FROZEN Acquisition since the reader-boundary validation landed, so this can no
+    # longer be an item assignment. model_copy is the supported way to make the variant.
+    monkeypatch.setattr(win, "_meta", win._meta.model_copy(update={"fovs_per_region": {"B3": []}}))
     tab.minerva_btn.click()
     assert "B3" in win._readout.text()
     assert win._minerva is None            # nothing was started
