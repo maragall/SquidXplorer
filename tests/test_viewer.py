@@ -1000,9 +1000,6 @@ def test_napari_visibility_drives_the_plate_and_the_strip_only_reports_it(qapp, 
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
-    bar = win._channel_bar
-    assert bar is not None and len(bar._rows) == len(win._meta["channels"])
-
     # what napari reports when the user clicks an eye icon off, and back on
     win._overview.set_channel_visible(0, False)
     assert win._overview._mask[0] == False        # noqa: E712 — numpy bool, not python bool
@@ -1021,46 +1018,6 @@ def test_napari_visibility_drives_the_plate_and_the_strip_only_reports_it(qapp, 
 # These tests pin the resolution in both directions — the duplicate control is GONE, and the plate
 # genuinely FOLLOWS the surviving owner.
 
-def test_channel_bar_has_no_contrast_control_at_all(qapp, stub_detail, squid_dataset):
-    """Absent, not hidden and not disabled.
-
-    A `hide()`-den slider is still a second owner waiting to be un-hidden, and a still-connected
-    `_push` is still a second writer whatever the widget looks like. So this walks the real widget
-    tree of the bar AND checks that no contrast-setting method survives on the class.
-    """
-    from PyQt5.QtWidgets import QAbstractSlider
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    bar = win._channel_bar
-
-    assert bar.findChildren(QAbstractSlider) == [], "a contrast slider is back on the plate"
-    autos = [b for b in bar.findChildren(QPushButton) if "auto" in b.text().lower()]
-    assert autos == [], "an 'auto' contrast button is back on the plate"
-    for gone in ("_push", "_auto", "_slider", "_STEPS"):
-        assert not hasattr(bar, gone), f"_ChannelBar still carries the contrast setter {gone!r}"
-    win.close()
-
-
-def test_channel_bar_reports_the_window_but_cannot_set_it(qapp, stub_detail, squid_dataset):
-    """`set_window` is a READOUT: it changes the text and touches nothing else.
-
-    The distinction that matters is not "is there a widget" but "can it write". A readout that
-    quietly latched the plate manual would be a second owner wearing a label's clothes.
-    """
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    bar, ov = win._channel_bar, win._overview
-    before = ov.channel_windows()[0]
-
-    bar.set_window(0, 123.0, 456.0)
-    assert "123" in bar._rows[0][1].text() and "456" in bar._rows[0][1].text()
-    assert not ov._contrast.is_manual(0), "the readout latched the plate — it is a control"
-    assert ov.channel_windows()[0] == before, "the readout moved the plate's window"
-    win.close()
-
-
 def test_array_viewer_contrast_drag_repaints_the_plate(qapp, stub_detail, squid_dataset):
     """The user's actual complaint, at the seam: ndv re-windows, the plate must follow.
 
@@ -1076,7 +1033,6 @@ def test_array_viewer_contrast_drag_repaints_the_plate(qapp, stub_detail, squid_
     win._detail.drag_contrast(0, 700.0, 5000.0)
     qapp.processEvents()
     assert ov.channel_windows()[0] == (700.0, 5000.0), "the plate ignored the array viewer"
-    assert win._channel_bar._rows[0][1].text() != "—", "the readout did not follow either"
     win.close()
 
 
@@ -1161,11 +1117,10 @@ def test_a_fresh_plate_adopts_the_viewers_current_windows(qapp, stub_detail, squ
     win._detail.drag_contrast(0, 42.0, 4242.0)
     qapp.processEvents()
 
-    win.ingest(str(root))                            # re-open: a brand-new channel bar and store
+    win.ingest(str(root))                            # re-open: a brand-new plate store
     qapp.processEvents()
     assert win._overview.channel_windows()[0] == (42.0, 4242.0), (
         "the re-opened plate did not adopt the window the array viewer is still showing")
-    assert "42" in win._channel_bar._rows[0][1].text()
     win.close()
 
 

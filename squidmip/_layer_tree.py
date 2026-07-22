@@ -60,10 +60,11 @@ identity comes from ``layer.metadata`` via ``key_of``. Names are labels; ian-sti
 
 from __future__ import annotations
 
+import re
 from typing import Any, Optional
 
-from PyQt5.QtCore import QAbstractItemModel, QModelIndex, Qt
-from PyQt5.QtWidgets import QTreeView
+from PyQt5.QtCore import QAbstractItemModel, QEvent, QModelIndex, Qt
+from PyQt5.QtWidgets import QFrame, QTreeView
 
 from squidmip._napari_view import MosaicLayers, key_of
 
@@ -253,6 +254,34 @@ class MosaicTreeModel(QAbstractItemModel):
         return True
 
 
+def _napari_stylesheet() -> str:
+    """napari's OWN stylesheet, with its list rules extended to cover a tree.
+
+    Julio: "I like the layer nesting, but the widgets look ugly, napari's original ones were way
+    nicer." They were, and the reason is that this tree had no stylesheet at all: it rendered in
+    the default Qt style inside a napari-themed dock, so it looked like a widget from another
+    application -- which it was.
+
+    The fix is NOT to hand-pick colours to match. That would be a second theme, drifting from
+    napari's the moment the user switches theme. `napari.qt.get_current_stylesheet` is public and
+    returns the real thing; the only gap is that napari styles ``QListView`` (its layer list) and
+    never ``QTreeView``, so every list rule is DUPLICATED onto the tree selector. The values stay
+    napari's -- nothing here invents a colour.
+
+    Falls back to an empty stylesheet if napari changes the API: an unstyled tree is ugly, a
+    crash on building the pane costs the whole viewer.
+    """
+    try:
+        from napari.qt import get_current_stylesheet
+        sheet = get_current_stylesheet()
+    except Exception:                       # noqa: BLE001 - cosmetic; never fatal to the pane
+        return ""
+    extra = re.sub(r"QListView", "QTreeView",
+                   "\n".join(m.group(0) for m in re.finditer(
+                       r"[^{}]*QListView[^{}]*\{[^{}]*\}", sheet)))
+    return sheet + "\n" + extra
+
+
 class MosaicTree(QTreeView):
     """The grouped layer view: processing layers, each expanding into its channels.
 
@@ -270,3 +299,27 @@ class MosaicTree(QTreeView):
         self.setExpandsOnDoubleClick(True)
         self.expandAll()
         self.model().modelReset.connect(self.expandAll)
+        self.setIndentation(14)
+        self.setRootIsDecorated(True)
+        self.setAlternatingRowColors(False)
+        self.setFrameShape(QFrame.NoFrame)      # napari's docks carry the frame, not the widget
+        self._restyling = False                 # see changeEvent: setStyleSheet re-enters
+        self.setStyleSheet(_napari_stylesheet())
+
+    def changeEvent(self, e):
+        """Follow a napari THEME switch. The stylesheet is a snapshot of the theme at build time;
+        napari repaints its own widgets on a palette change and ours would otherwise stay the old
+        theme's colours, which is the "two answers to one question" shape again.
+
+        The reentrancy guard is load-bearing: ``setStyleSheet`` itself posts a StyleChange, so
+        restyling from inside changeEvent without it recurses until the process dies -- which it
+        did, immediately, the first time this was written.
+        """
+        super().changeEvent(e)
+        if e.type() != QEvent.PaletteChange or self._restyling:
+            return
+        self._restyling = True
+        try:
+            self.setStyleSheet(_napari_stylesheet())
+        finally:
+            self._restyling = False

@@ -740,3 +740,58 @@ def test_dragging_BACK_to_a_previously_delivered_value_is_not_swallowed(layers):
     layers.find("raw", "488").contrast_limits = (10.0, 100.0)     # user, BACK to the first
 
     assert seen == [(10.0, 100.0), (10.0, 100.0)], f"a real drag was swallowed: {seen}"
+
+
+# ---------------------------------------- the plate follows napari's COLORMAP, not just contrast
+#
+# Julio: "I change channel colormap in napari and plate view doesn't react." The plate composites
+# with its own (C, 3) RGB table resolved once from the acquisition's display_color -- a second
+# answer to "what colour is this channel", settled at open and never revised. Same defect shape
+# as the contrast that would not follow, so it gets the same shape of fix: napari owns it, the
+# plate subscribes.
+
+def test_changing_a_colormap_reports_the_new_rgb(layers):
+    layers.add_mosaic("raw", "488", _img())
+    seen = []
+    layers.on_user_colormap(lambda ch, rgb: seen.append((ch, rgb)))
+
+    layers.find("raw", "488").colormap = "red"
+
+    assert seen, "the plate was never told the channel changed colour"
+    ch, rgb = seen[-1]
+    assert ch == "488"
+    assert rgb[0] > 0.9 and rgb[1] < 0.1 and rgb[2] < 0.1, f"expected red at full intensity, got {rgb}"
+
+
+def test_the_colormap_sink_survives_the_layers_being_rebuilt(layers):
+    """Same half-life bug the contrast tap had: subscribe once, then a region change destroys and
+    recreates every layer. Armed in _register_channel, so a rebuilt layer is still wired.
+
+    MUTATION: move the _connect_user_colormap call out of _register_channel and this goes red.
+    """
+    layers.add_mosaic("raw", "488", _img())
+    seen = []
+    layers.on_user_colormap(lambda ch, rgb: seen.append(ch))
+
+    layers.remove_op("raw")                        # exactly what a region change does
+    layers.add_mosaic("raw", "488", _img())        # ...and then rebuilds
+    layers.find("raw", "488").colormap = "green"
+
+    assert seen == ["488"], f"the colour sink went deaf after a rebuild: {seen}"
+
+
+def test_our_own_colormap_writes_are_not_reported_as_user_gestures(layers):
+    """add_mosaic sets the channel's colormap itself. If that echoed back as a gesture the plate
+    would re-tint from its own defaults on every region change."""
+    seen = []
+    layers.on_user_colormap(lambda ch, rgb: seen.append(ch))
+    with layers.programmatic():
+        layers.add_mosaic("raw", "561", _img(), colormap="magenta")
+    assert seen == []
+
+
+def test_channel_rgb_reports_what_the_canvas_is_tinting_with(layers):
+    layers.add_mosaic("raw", "638", _img(), colormap="blue")
+    rgb = layers.channel_rgb("638")
+    assert rgb is not None and rgb[2] > 0.9
+    assert layers.channel_rgb("no-such-channel") is None

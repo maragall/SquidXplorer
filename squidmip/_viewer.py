@@ -1768,6 +1768,24 @@ class PlateOverview(QWidget):
     # reach the plate: per-region DELIBERATELY ignored the owning viewer's window. There is now
     # one window per channel, owned by napari, and the plate follows it. One owner, one value.
 
+    def set_channel_color(self, ch: int, rgb) -> bool:
+        """Re-tint one channel to the colour the CENTRE VIEWER is using, and repaint.
+
+        The plate keeps a ``(C, 3)`` LUT table resolved once from the acquisition's
+        ``display_color``. Left alone it is a second, stale answer to "what colour is this
+        channel", and recolouring a layer in napari made the two panes disagree about the same
+        channel. This is the sink half: napari decides, the plate follows, and nothing is re-read
+        -- the composite is rebuilt from the native-dtype tiles already retained.
+        """
+        if self._colors is None or not (0 <= ch < len(self._colors)):
+            return False
+        new_rgb = np.asarray(rgb, dtype=np.float32)
+        if np.allclose(self._colors[ch], new_rgb):
+            return False
+        self._colors[ch] = new_rgb
+        self._refresh()
+        return True
+
     def set_channel_visible(self, ch: int, on: bool):
         """Toggle a channel in/out of the plate composite. Recomposites from the RETAINED store —
         no reader I/O, no re-projection (that is the whole point of keeping the channel axis)."""
@@ -3515,7 +3533,6 @@ class PlateWindow(QMainWindow):
         self._fov_index = {}
         self._selected_regions = []   # wells picked on the plate (IMA-221); scopes an operator run
         self._pushed = set()          # wells whose raw z-stack is already registered in the detail viewer
-        self._channel_bar = None      # per-channel toggle + contrast strip under the plate (IMA-206)
 
         # File menu: a reliable "Open acquisition folder" (drag-drop can be blocked on Windows by the
         # GL child pane or an elevation mismatch, so this is the always-works path).
@@ -5319,10 +5336,6 @@ class PlateWindow(QMainWindow):
             self._overview.setParent(None)
             self._overview.deleteLater()
             self._overview = None
-        if self._channel_bar is not None:     # its channels belong to the plate we just dropped
-            self._channel_bar.setParent(None)
-            self._channel_bar.deleteLater()
-            self._channel_bar = None
         self._readout.setText("scanning acquisition …")
         QApplication.processEvents()
         try:
@@ -5382,7 +5395,7 @@ class PlateWindow(QMainWindow):
         self._refresh_layers_tab()
         self._drop.hide()
         self._left_l.addWidget(self._overview, 1)   # fills the pane and self-fits — no scrollbars
-        self._install_channel_bar(meta["channels"], meta["dtype"])
+        self._declare_channel_axis(meta["channels"], meta["dtype"])
 
         self._setup_raw_detail()
         # Hand the plate's region order to the SINGLE OWNER. Announcing it is what puts the red
@@ -5685,10 +5698,17 @@ class PlateWindow(QMainWindow):
             if ch is None:
                 return
             self._overview.set_channel_visible(ch, on)
-            if self._channel_bar is not None:
-                self._channel_bar.set_visible_state(ch, on)
 
         pane.mosaic.on_user_visibility(_vis_sink)
+
+        # ...and the LUT. Julio: "I change channel colormap in napari and plate view doesn't
+        # react." Same sink shape: napari owns the colour, the plate follows it.
+        def _cmap_sink(channel: str, rgb):
+            ch = index.get(channel)
+            if ch is not None:
+                self._overview.set_channel_color(ch, rgb)
+
+        pane.mosaic.on_user_colormap(_cmap_sink)
         self._napari_contrast_bound = True
 
     def _centre_contrast(self) -> dict:
@@ -5963,7 +5983,7 @@ class PlateWindow(QMainWindow):
         self._refresh_layers_tab()
         self._drop.hide()
         self._left_l.addWidget(self._overview, 1)
-        self._install_channel_bar(channels, np.uint16)
+        self._declare_channel_axis(channels, np.uint16)
         self._enable_operators(False)             # no raw data -> operators stay disabled
 
         if self._detail is not None:
@@ -6377,8 +6397,8 @@ class PlateWindow(QMainWindow):
         if self._overview is not None:
             self._overview.recomposite(layer)
 
-    def _install_channel_bar(self, channels, dtype):
-        """Declare the plate's channel axis and (re)build the per-channel toggle/contrast strip.
+    def _declare_channel_axis(self, channels, dtype):
+        """Declare the plate's channel axis: labels, LUT colours and dtype.
 
         Colors are the RESOLVED ``display_color`` — resolve_channels already applied the precedence
         (the acquisition's YAML first, the wavelength fallback map second), so the plate is tinted
@@ -6389,11 +6409,12 @@ class PlateWindow(QMainWindow):
         colors = np.stack([_hex_to_rgb01(c["display_color"]) for c in channels])
         self._overview.set_channels([c.get("display_name") or c["name"] for c in channels],
                                     colors, dtype)
-        if self._channel_bar is not None:
-            self._channel_bar.setParent(None)
-            self._channel_bar.deleteLater()
-        self._channel_bar = _ChannelBar(self._overview._labels, colors, self._overview)
-        self._left_l.addWidget(self._channel_bar)   # sits UNDER the plate, in the same pane
+        # NO STRIP UNDER THE PLATE. Julio: "Take out the window below plate view, it's
+        # unnecessary." It had already lost its controls (napari owns visibility and contrast),
+        # which left a row of labels restating what napari's own layer list shows two panes away.
+        # A readout that duplicates a control surface is still duplication; it just cannot be
+        # clicked. The channel axis is still declared above -- that is the plate's data, not a
+        # widget.
         # A fresh plate must ALREADY agree with the array viewer, not merely agree from the next
         # gesture on: the viewer keeps whatever window it had, and a plate that waited for the
         # user to touch the slider would open showing a different window from the one on screen.
@@ -6551,8 +6572,6 @@ class PlateWindow(QMainWindow):
         if not (0 <= ch < n_ch):
             return          # ndv drew a channel the plate does not have (RGB mode, or a re-ingest)
         self._overview.follow_channel_window(ch, float(lo), float(hi))
-        if self._channel_bar is not None:
-            self._channel_bar.set_window(ch, float(lo), float(hi))
 
     def _focus_reference_plane(self):
         """Jump THE z SLIDER to the current FOV's sharpest plane (Tenengrad autofocus).

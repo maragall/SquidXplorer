@@ -253,6 +253,26 @@ def scale_translate_from_bbox_um(
     return scale, translate
 
 
+def _colormap_rgb(layer: Any) -> Optional[tuple]:
+    """The RGB a napari layer tints with, as three floats in 0..1.
+
+    Read at FULL INTENSITY (the last stop of the colormap's lookup table), because that is the
+    colour the canvas shows for a saturated pixel and therefore the tint the plate has to match.
+    A colormap with no usable table (a napari version that reshapes it, a custom object) returns
+    None and the caller leaves the plate's colour alone -- guessing a tint would silently
+    recolour the plate to something that is on no screen.
+    """
+    cm = getattr(layer, "colormap", None)
+    colors = getattr(cm, "colors", None)
+    if colors is None:
+        return None
+    try:
+        row = colors[-1]
+        return (float(row[0]), float(row[1]), float(row[2]))
+    except Exception:                       # noqa: BLE001 - unknown colormap shape; say nothing
+        return None
+
+
 class MosaicLayers:
     """The two-level hierarchy over a napari ``ViewerModel``.
 
@@ -273,6 +293,10 @@ class MosaicLayers:
         #: channel -> last visibility REPORTED, so a peer flip that does not change the answer
         #: ("is this channel on screen at all") is not delivered as a user gesture.
         self._last_visible: dict[str, bool] = {}
+        #: Subscribers to the LUT, so the plate tints a channel the way the canvas does.
+        self._user_colormap_cbs: list[Any] = []
+        #: channel -> last RGB reported, collapsing link/peer echoes the same way.
+        self._last_colormap: dict[str, tuple] = {}
         # Last contrast value SEEN per channel, updated on every event including our own
         # programmatic writes. Linked layers propagate a write to their peers and each peer
         # then emits its own event, so one user drag arrives here once per layer showing the
@@ -443,6 +467,7 @@ class MosaicLayers:
         # up, whenever it is created.
         self._connect_user_contrast(channel, layer)
         self._connect_user_visibility(channel, layer)
+        self._connect_user_colormap(channel, layer)
         # Link contrast across every processing layer showing this channel, so the
         # before->after toggle preserves the window and there is only ever one value.
         if len(peers) > 1:
@@ -548,6 +573,45 @@ class MosaicLayers:
                 cb(_ch, lo, hi)
 
         layer.events.contrast_limits.connect(_fire)
+
+    def _connect_user_colormap(self, channel: str, layer: Any) -> None:
+        """Wire one layer's COLORMAP into *channel*'s colour fan-out.
+
+        Julio: "I change channel colormap in napari and plate view doesn't react." The plate
+        composites with its own ``(C, 3)`` RGB table, resolved once from the acquisition's
+        ``display_color``. That table was a SECOND answer to "what colour is this channel",
+        settled at open and never revised -- so recolouring a layer in napari left the two panes
+        tinting the same channel differently, which is the same defect shape as the contrast that
+        would not follow.
+
+        What travels is an RGB TRIPLE, not napari's colormap object: the plate composites with
+        floats and must not learn what a napari ``Colormap`` is. The triple is the colormap's
+        value at full intensity, which is exactly the tint the canvas shows.
+        """
+        def _fire(event=None, _ch=channel):
+            peers = self._by_channel.get(_ch) or []
+            if not peers:
+                return
+            rgb = _colormap_rgb(peers[0])
+            if rgb is None or self._last_colormap.get(_ch) == rgb:
+                return
+            self._last_colormap[_ch] = rgb
+            if self.is_programmatic:
+                return                      # OUR write: recorded, never reported as a gesture
+            for cb in list(self._user_colormap_cbs):
+                cb(_ch, rgb)
+
+        layer.events.colormap.connect(_fire)
+
+    def on_user_colormap(self, callback) -> None:
+        """Subscribe to colormap changes the USER made. ``callback(channel, (r, g, b))``, floats
+        in 0..1 -- the colour the canvas is actually tinting that channel."""
+        self._user_colormap_cbs.append(callback)
+
+    def channel_rgb(self, channel: str) -> Optional[tuple]:
+        """The RGB the canvas is tinting *channel* with right now, or None if it has no layers."""
+        peers = self._by_channel.get(channel) or []
+        return _colormap_rgb(peers[0]) if peers else None
 
     def _connect_user_visibility(self, channel: str, layer: Any) -> None:
         """Wire one layer's eye icon into *channel*'s visibility fan-out.
