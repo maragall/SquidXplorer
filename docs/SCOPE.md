@@ -73,6 +73,108 @@ orchestrate well-known libraries and add the interface; these are the named ones
 
 ---
 
+## Core iv — tracking, and why it brings recording back
+
+Julio: "cell tracking, following object of interest per frame justifies adding downstream video
+generation to the GUI."
+
+That is the correct justification, and it is worth stating why, because "add video export" on its
+own has been proposed and shelved before.
+
+A screen recording is a screenshot that moves: it captures the UI, and nothing in it survives the
+recording. **A track is a RESULT.** Detect the object of interest per frame, link the detections
+across time, and the output is data — trajectories, counts, speeds — that can be measured,
+exported and argued with. Video is then how that result is *presented*, not what it is. That is
+what makes downstream video generation worth building rather than a demo trick.
+
+### The implementation, precisely
+
+Julio's own correction, kept because the distinction matters:
+
+> "cell segmentation is what we need a good model, maybe not even transfer learning, but smt like
+> cellpose. I don't know if transfer learning is the precise implementation here."
+
+He is right. The terms are not interchangeable:
+
+* **Transfer learning** = fine-tuning a pretrained model on YOUR labelled data. It requires
+  ground-truth masks from us — exactly the quantification effort the customer said they want to
+  defer until after they have looked at the data.
+* **A pretrained GENERALIST model, run zero-shot** = what we actually want. Cellpose's design
+  claim is that it works on data it has never seen, with no training step and no labels from us
+  (`nuclei`, `cyto3`; StarDist's `2D_versatile_fluo` for star-convex nuclei; SAM-based models for
+  the promptable case).
+
+Order of attack: **pretrained generalist first; fine-tune only if it demonstrably fails on real
+Cephla samples**, using Cellpose's own human-in-the-loop retraining. Transfer learning is the
+fallback, not the plan.
+
+### How it lands in this architecture
+
+| Piece | Where it goes |
+|---|---|
+| Detection | A named SEGMENTER behind `fn(plane, params) -> labels`, a peer of `otsu-watershed`. The operator stays named for what it produces, never for the algorithm. |
+| Linking | `trackpy` or `btrack` (Bayesian, and it ships a napari plugin). We orchestrate; we do not write a tracker. |
+| Display | napari's built-in `Tracks` layer type. Free. |
+| The operator shape | `consumes={"t"}` — a TIME reducer, a peer of the z-reducers the engine already streams. The registry has no time axis yet; this is the first one. |
+| Video | A downstream export of the tracked result, sharing the recording work already in the commit history and the prior art in `hongquanli/record-zstack-viewer` and Squid's `feat/multi-plane-recording`. |
+
+### Consequences to plan for, not discover
+
+* A generalist model is **seconds to minutes** per mosaic and may want a GPU — against 6.4 s for
+  Otsu-watershed on one 10x region. The worker must be cancellable with real progress, and the
+  logger must show it: a two-minute run with no output is indistinguishable from a hang.
+* Cellpose pulls **PyTorch**. It must be an OPTIONAL extra, never imported at `import squidmip`,
+  and a missing install must be a NAMED refusal rather than a silently absent menu entry.
+
+---
+
+## Core v — the operator surface, and the three things agents drive it through
+
+Julio: "The logger and the API and the CLI are amazing to design really well and deeply so that
+the agent can program our tool cosmically!" And: "make sure that our GUI has an amazing API so
+that AI can interact with it." And on the data model: "we need great designed layers for our data
+model so that agents can work smoothly with API and plug and play different algos."
+
+These are ONE requirement wearing three hats. A tool an agent can drive is a tool with a single
+named command surface, where every command is observable and every algorithm is a registry entry.
+
+| # | Item | Status |
+|---|---|---|
+| v.1 | **Logger**, bottom-right, below the exploration pane. "shows them that the GUI is actually doing something rather than staying idle." | **CORE LANDED**, not yet mounted. `squidmip/_logpane.py` + 9 tests. Attaches to the stdlib ROOT logger, so tilefusion/petakit/bgsub/Cellpose appear WITHOUT being wired up - the same plug-and-play property v.3 asks for. Bounded at `MAX_LINES`. Widget not yet placed in the window. |
+| v.2 | **API an agent can drive** | **NOT STARTED.** One command surface shared by the GUI, the CLI and a script - not three. |
+| v.3 | **Layers/data model that accept new algorithms** | **PARTIAL.** `add_segmenter(name, fn, requires=...)` exists on the spot-detect branch and is the right shape. The gap is the RESULT type - see ii.5 and the bgsub hole. |
+| v.4 | **CLI** | Exists and shares the engine. Not yet aligned with v.2 as one surface. |
+
+### The rule these share
+
+Every algorithm is a NAMED REGISTRY ENTRY behind a fixed signature; the operator is named for
+WHAT IT PRODUCES, never for the algorithm (`spot`, not `otsu` or `cellpose`). Heavy dependencies
+resolve LAZILY and a missing one is a NAMED REFUSAL, never a silently absent menu entry. Every
+long action reports progress and is cancellable. An agent cannot use a tool whose failures are
+silent, and neither can a scientist.
+
+---
+
+## Open items, so they stop slipping
+
+Julio: "Make sure that nothing is slipping from conversation like the coarse slider and the
+logger."
+
+| Item | Where it stands |
+|---|---|
+| **Coarse slider / fast region cycling** | **LANDED.** Diagnosed by measurement: the data path was never the cost (a coarse plane is 30-390 ms cold, **1 ms warm**; the pyramid graph is 10 ms). The cost was LAYER CHURN - remove four layers, add four back, every region change. `add_mosaic` now REUSES the layer. Region switch is **9 ms and flat**, and the user's contrast/colormap/visibility survive the switch. |
+| **Logger** | Core landed (v.1). **Widget not yet mounted in the window.** |
+| **napari 3D is coarse-only** | napari drops to the COARSEST pyramid level whenever `ndisplay == 3` (`napari/layers/_scalar_field/_slice.py`: `if ndisplay == 3: level = len(self.data) - 1`). On the 10x set that is 128x107 - the "super ugly" 3D. Not fixable inside napari; AGAVE is the answer, which is why AGAVE stopped being optional. |
+| **RGB / colour acquisitions** | **REFUSED BY NAME** today (`reader.py:113`, "color/RGB (brightfield) channels are not supported"). Julio: "I see no problem in integrating RGB." Plan: ONE napari layer with `rgb=True`, a direct RGB paint path on the plate that bypasses the LUT compositor, and operators refused by name where per-channel contrast is meaningless. |
+| **Windows** | **BROKEN, confirmed.** `acquire_gui_slot` does a bare `import fcntl` (`_viewer.py:7010`), which does not exist on Windows and is called from `showEvent` - every window would fail to open. Also `/usr/bin/odon` and `/usr/bin/time` hardcoded. No CI on Windows. |
+| **Duplicate scope control** | Two: `_op_panels.py:350` (`scope_combo`, per panel) and `_viewer.py:3851` (`_scope_run`, pane 1). Scope belongs to the RUN, so pane 1 owns it. Julio also reports the stitcher offers only "whole dataset". |
+| **Stitcher UI vs maragall/stitcher** | Missing: lens distortion toggle, flatfield sub-panel (+darkfield, calculate/save/view/clear), registration Z-level and timepoint, downsample, blend Auto. The Z/T gap is a soundness bug of the same class as the registration-channel substitution. |
+| **Plane-ops invisible in napari** | bgsub/flatfield route through `_on_push` -> `register_array` and never reach `add_mosaic`, so there is no layer and no before/after toggle. Same missing result type as gallery view. |
+| **ndviewer_light fallback** | Still wired - 62 references to `_detail` in `_viewer.py`. A half-alive second viewer stack. Delete, do not maintain. |
+| **`_viewer.py` is 7,074 lines** | A god object: plate, operators, workers, tabs, terminal, export, GUI slot, napari bridge. Most bugs found this session were seams inside it that nothing forced apart. |
+
+---
+
 ## The architecture, as settled by the owner — do not relitigate
 
 > "our GUI, napari, is nested into our GUI. It's not that our GUI is nested into napari."
