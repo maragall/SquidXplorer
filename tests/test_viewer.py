@@ -4356,7 +4356,12 @@ def test_ima260_empty_state_copy_meets_the_legibility_floor(qapp, stub_detail, s
     win = _shown(qapp, root)
     labels = [w for w in win._explore_empty.findChildren(QLabel) if w.text().strip()]
     assert labels, "no copy to measure"
-    floor = 23.0                       # px = 16 arcmin at 1 m
+    # 14.0 px = 16 arcmin at ~40 cm, i.e. desk distance on a SMALL monitor.
+    # The old 23.0 px floor scaled 16 arcmin to a 1 m viewing distance on a large monitor.
+    # Julio is on a small monitor and called the result "huge text" -- the spec changed, so the
+    # test changes with it rather than being deleted. The constraint still exists and still bites:
+    # anything under 14 px is genuinely unreadable at the desk and fails here.
+    floor = 14.0
     for lab in labels:
         px = lab.font().pixelSize()
         if px <= 0:                    # a point-sized font: convert through the screen's DPI

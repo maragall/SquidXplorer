@@ -164,14 +164,14 @@ class MosaicPane(QWidget):
             # that is why the canvas looked bare. Mount the four widgets DIRECTLY: they are the
             # real napari controls, not a reimplementation, and they carry for free the three
             # things he asked for -- per-channel contrast, the z slider, and the 2D/3D toggle.
-            row = QHBoxLayout()
-            row.setContentsMargins(0, 0, 0, 0)
-            row.setSpacing(0)
-            row.addWidget(canvas, 1)
+            # BELOW the canvas, not beside it. Pane 2 is roughly a third of the window, so a
+            # side column left the canvas a ~140 px sliver -- Julio: "I cannot see whether my
+            # image registers, stitches, and refines correctly". Stacking vertically gives the
+            # canvas the FULL pane width, which is the axis that matters for a wide mosaic.
+            lay.addWidget(canvas, 1)
             side = self._build_controls(mosaic.model)
             if side is not None:
-                row.addWidget(side, 0)
-            lay.addLayout(row, 1)
+                lay.addWidget(side, 0)
 
             self._install_camera_settle()
         except Exception as exc:                 # noqa: BLE001 - reported, never swallowed
@@ -198,8 +198,12 @@ class MosaicPane(QWidget):
         # 260, not 320: pane 2 is one third of a three-pane window, and at 320 the control
         # column left the canvas a ~130 px sliver -- seen in a screenshot of the running GUI,
         # which is the only way that was ever going to be caught.
-        col.setMaximumWidth(260)
-        col.setMinimumWidth(230)
+        # Scrollable, and tall enough to lay out. At a fixed 300 px the napari layer-controls
+        # container overlapped its own rows (opacity on top of blending on top of contrast
+        # limits) and the contrast slider could not be grabbed -- seen in a screenshot of the
+        # running GUI. A scroll area means the strip never dominates the canvas AND never
+        # squashes its contents; the user drags the splitter for more.
+        col.setMinimumHeight(240)
         v = QVBoxLayout(col)
         v.setContentsMargins(4, 4, 4, 4)
         v.setSpacing(4)
@@ -227,9 +231,26 @@ class MosaicPane(QWidget):
 
         if failed:
             self.say("some napari controls could not be built: " + "; ".join(failed))
+        # napari's DARK THEME. Its stylesheet is applied by the napari Window, which we do not
+        # construct (that is what keeps napari's menus/docks out). So the real napari widgets
+        # rendered with default Qt styling -- Julio: "The controls are so weird, and they have a
+        # light gray color. It looks like you're not calling the napari." They ARE napari's
+        # widgets; they were simply unstyled. Apply the theme ourselves.
+        try:
+            from napari._qt.qt_resources import get_stylesheet
+            col.setStyleSheet(get_stylesheet("dark"))
+        except Exception as exc:                 # noqa: BLE001 - reported, never swallowed
+            failed.append(f"napari theme: {type(exc).__name__}: {exc}")
+
         if not added:
             return None
-        return col
+        from PyQt5.QtWidgets import QScrollArea
+        scroll = QScrollArea(self)
+        scroll.setWidget(col)
+        scroll.setWidgetResizable(True)
+        scroll.setMinimumHeight(240)
+        scroll.setMaximumHeight(360)
+        return scroll
 
     # -- camera settle ------------------------------------------------------------------
     def _install_camera_settle(self) -> None:

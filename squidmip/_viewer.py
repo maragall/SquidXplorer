@@ -105,8 +105,11 @@ _CONTROL_BLUE = QColor("#7fd4ff")     # the CONTROL WELL's persistent frame (IMA
 # 28.8 * 16/20 = 23.0 px, so 24 px clears the 16-arcmin minimum at BOTH seating distances, and
 # 30 px clears the 20-arcmin optimum at 1 m. Empty-state copy is exactly the text a user reads
 # while leaning back from the big monitor, so it is sized for the far case, not the near one.
-_EMPTY_BODY_PX = 24                   # >= 23.0 px = 16 arcmin at 1 m (20.3 arcmin at 60 cm)
-_EMPTY_HEAD_PX = 30                   # >= 28.8 px = 20 arcmin at 1 m (the optimum, not the floor)
+_EMPTY_BODY_PX = 15                   # 16 arcmin at ~40 cm. The old 24 px assumed a 1 m viewing
+#                                       distance on a large monitor; Julio is on a SMALL one and
+#                                       called it "huge text". A pane read at desk distance does
+#                                       not need the across-the-room size.
+_EMPTY_HEAD_PX = 19                   # heading, one step up from body
 
 # The empty exploration pane's copy (IMA-260). Framed as an EXAMPLE of what you might do, never as
 # an instruction: Julio asked for "example usage", so the pane shows one concrete path and then
@@ -3710,6 +3713,8 @@ class PlateWindow(QMainWindow):
         left_col.setStretchFactor(0, 0)
         left_col.setStretchFactor(1, 1)
         left_col.setSizes([340, 610])
+        left_col.setChildrenCollapsible(True)
+        left_col.setHandleWidth(6)
 
         # the right (array viewer) pane gets a thin white outline via a 1px-margin frame
         right_frame = QFrame()
@@ -3740,6 +3745,15 @@ class PlateWindow(QMainWindow):
         outer.addWidget(right_frame)               # pane 2: the initial viewer
         outer.addWidget(self._explore_pane)        # pane 3: exploration — VISIBLE from open
         outer.setSizes([600, 620, _EXPLORE_W])     # three real panes on a 1600 px window
+        # Draggable and COLLAPSIBLE. Julio: "Since the GUI is so large, I need to be able to
+        # collapse windows and be able to drag the splitters." A fixed pane on a large monitor
+        # is dead space he cannot reclaim; a collapsible one lets him give the canvas the whole
+        # window when he is inspecting a mosaic.
+        outer.setChildrenCollapsible(True)
+        outer.setHandleWidth(6)
+        for _i in range(outer.count()):
+            outer.setCollapsible(_i, True)
+            outer.setStretchFactor(_i, 1 if _i == 1 else 0)
         # Stretch: panes 1 and 2 share the window; pane 3 gets 0 so a window RESIZE grows the plate
         # and the viewer, never the exploration strip. Requirement 5 — pane 3 must not squash the
         # plate view — is why its width is a CONSTANT taken once at construction rather than a
@@ -3846,8 +3860,8 @@ class PlateWindow(QMainWindow):
         w = QWidget()
         w.setStyleSheet(f"background:{_BG};color:#e6edf3;")
         v = QVBoxLayout(w)
-        v.setContentsMargins(22, 26, 22, 26)
-        v.setSpacing(18)
+        v.setContentsMargins(14, 14, 14, 14)
+        v.setSpacing(10)
 
         head = QLabel(_EMPTY_EXPLORE_HEAD)
         head.setWordWrap(True)
@@ -5081,13 +5095,21 @@ class PlateWindow(QMainWindow):
             return                                  # a later region won the race; drop this one
         from squidmip._napari_pane import _colormap_for
 
-        # _pct_window is the ONE percentile rule (it deliberately does not widen a degenerate
-        # window — that refusal is why a blank channel does not clip to full white and read as
-        # signal). No second contrast model is created here.
-        lo, hi = _pct_window(plane)
+        # NO contrast_limits: napari autoscales, and napari OWNS contrast.
+        #
+        # We used to pass _pct_window's percentile window. Two things were wrong with that.
+        # First it duplicated napari's job — napari computes its own percentile autoscale and
+        # exposes it on the layer, so passing ours meant two percentile rules over one quantity,
+        # which is this project's most-repeated defect shape. Second it made the composite
+        # unreadable: a window like 561 -> 576..4032 sends every mid-tone tissue pixel to full
+        # intensity in THAT channel, and with additive blending four saturated channels sum to
+        # white. Julio, repeatedly: "Channel blending still sucks."
+        #
+        # Julio: "Napari has so many pre-built features that you're not leveraging." This is one.
+        # napari autoscales on add and the user retunes with the layer's own contrast slider,
+        # which is also the single owner the plate now follows.
         pane.mosaic.add_mosaic(
             op, channel, plane,
-            contrast_limits=(lo, hi),
             colormap=_colormap_for(channel),
             bbox_um=bbox_um,
         )
