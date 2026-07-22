@@ -179,6 +179,8 @@ def solve_offsets_px(
     *,
     registration_channel: int = 0,
     max_workers: Optional[int] = None,
+    rel_thresh: float = _REL_THRESH,
+    abs_thresh: float = _ABS_THRESH,
     timer=None,
 ) -> np.ndarray:
     """Register the tiles against each other and return each tile's residual shift in PIXELS.
@@ -206,6 +208,19 @@ def solve_offsets_px(
     registration_channel:
         Channel index driving the geometry (all channels are then placed with this one
         solution — see :func:`_resolve_registration_channel`).
+    rel_thresh, abs_thresh:
+        BLUNDER REJECTION, handed straight to ``two_round_optimization``. After the first
+        least-squares solve, a link whose residual exceeds BOTH ``rel_thresh`` x the median
+        residual AND ``abs_thresh`` pixels is dropped, and the pose graph is re-solved
+        without it. Both conditions must hold, which is why two numbers rather than one:
+        the relative term adapts to how well this acquisition registers overall, and the
+        absolute term stops a very clean plate (tiny median) from rejecting links that were
+        only ever off by a fraction of a pixel.
+
+        Defaults are ``TileFusion.run()``'s own 0.5 / 2.0, so an unset call is byte-for-byte
+        what this module has always done. They are parameters rather than constants because
+        maragall/stitcher exposes exactly these two as operator controls ("Outlier rel: N%"
+        and "abs: N px") and the stitcher panel had nothing to bind to.
     timer:
         Optional ``profiling.stages.StageTimer``; spans ``register`` and ``optimize``.
 
@@ -223,6 +238,16 @@ def solve_offsets_px(
         register_pairs_batched,
         rotation_aware_max_shift,
     )
+
+    # Refuse a degenerate threshold BEFORE any correlation runs. rel<=0 or abs<=0 makes the
+    # rejection test vacuously true for every link, so the second round solves on an empty
+    # edge set and hands back all-zero offsets -- which is indistinguishable from "the stage
+    # was already perfect". A silently un-registered mosaic that reports success is the
+    # failure mode this project has six confirmed instances of.
+    if not (np.isfinite(rel_thresh) and rel_thresh > 0):
+        raise ValueError(f"rel_thresh must be a positive finite number, got {rel_thresh!r}")
+    if not (np.isfinite(abs_thresh) and abs_thresh > 0):
+        raise ValueError(f"abs_thresh must be a positive finite number, got {abs_thresh!r}")
 
     timer = timer or _NullTimer()
     n_tiles = len(positions_yx_um)
@@ -260,7 +285,7 @@ def solve_offsets_px(
         # Anchor tile 0 at the origin, exactly as TileFusion.optimize_shifts does; the solve
         # is translation-only and otherwise gauge-free.
         return two_round_optimization(
-            edges, n_tiles, [0], _REL_THRESH, _ABS_THRESH, True
+            edges, n_tiles, [0], rel_thresh, abs_thresh, True
         )
 
 
@@ -298,6 +323,8 @@ def stitch_region(
     blend_px: int = _BLEND_PX,
     block_px: int = _BLOCK_PX,
     max_workers: Optional[int] = None,
+    rel_thresh: float = _REL_THRESH,
+    abs_thresh: float = _ABS_THRESH,
     geometry: Optional[dict] = None,
     timer=None,
 ) -> np.ndarray:
@@ -332,6 +359,9 @@ def stitch_region(
         well. Registration always runs on *registration_channel*, whatever this selects.
     blend_px:
         Hann feather ramp width. Must fit inside the real overlap; see :data:`_BLEND_PX`.
+    rel_thresh, abs_thresh:
+        Blunder rejection, forwarded to :func:`solve_offsets_px` — see its docstring.
+        Ignored when ``register=False`` (there is no pose graph to reject links from).
     geometry:
         Optional out-dict for **provenance** (the ``picked_z`` pattern from
         :func:`project_well`): filled with ``offsets_px`` (the solved per-tile correction,
@@ -438,6 +468,8 @@ def stitch_region(
             tile_shape,
             registration_channel=reg_c,
             max_workers=max_workers,
+            rel_thresh=rel_thresh,
+            abs_thresh=abs_thresh,
             timer=timer,
         )
         # Apply the solved correction in micrometres, exactly as TileFusion.run does:

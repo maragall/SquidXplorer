@@ -608,9 +608,15 @@ _OPERATIONS = (
     # IMA-223/224/225 -- the PLANE-OPS. Unlike mip/stitch these keep z at full depth, so they get
     # _build_plane_op_tab (preview only) rather than _build_run_tab: write_plate's _validate_image
     # accepts Z == 1 only and would fail LOUD on save. Loud is correct; offering the button is not.
+    # The blurb said "the microscope's Gaussian PSF ... no explicit kernel". Both halves were
+    # false and had been since IMA-247 deleted the reimplementation: the kernel is a VECTORIAL
+    # PSF computed from the acquisition's own optics (NA 0.3 on this scope), and it is very much
+    # explicit. A card that describes the wrong algorithm is how a user picks the wrong operator.
     Operation("decon", "Deconvolution (Richardson-Lucy)",
-              "Sharpen every plane against the microscope's Gaussian PSF -- iterative Richardson-Lucy, "
-              "no explicit kernel. Keeps the z-stack at full depth.",
+              "Sharpen against a vectorial PSF computed from this acquisition's own optics (NA, "
+              "emission wavelength, pixel size, z-step) -- not an assumed Gaussian. Richardson-Lucy "
+              "is semi-convergent, so the iteration count is chosen by eye against a turbo x-z / "
+              "y-z view rather than defaulted.",
               "_build_decon_tab"),
     Operation("bgsub", "Background subtraction",
               "Remove the smooth out-of-focus haze from every plane with a rolling ball (ImageJ's "
@@ -2958,7 +2964,7 @@ class _OperatorWorker(QThread):
     finished_ok = pyqtSignal()
 
     def __init__(self, operator: str, reader, meta, fov_index: dict, out_dir: str,
-                 regions=None, save: bool = True, n_fovs=1):
+                 regions=None, save: bool = True, n_fovs=1, operator_kwargs=None):
         # No nr/nc: the worker no longer builds a plate-sized montage of its own (IMA-206 moved the
         # canvas into PlateOverview), so it has no use for the plate's shape.
         super().__init__()
@@ -2969,6 +2975,13 @@ class _OperatorWorker(QThread):
         self._regions = regions          # None = whole plate; a list = subset preview (those wells only)
         self._save = save                # False = PREVIEW: compute + push to the viewer, write NOTHING
         self._n_fovs = n_fovs            # None = every FOV per well -> coordinate-placed mosaic tiles
+        # Per-run parameters for a REGION operator (registration on/off, registration channel,
+        # feather width, blunder thresholds, channel subset) -- the stitcher panel in pane 1
+        # sets these. Carried on BOTH branches of run(): a setting tuned on a preview and then
+        # dropped on the save would be thrown away at exactly the moment it is written to disk.
+        # A projector has no equivalent seam (its parameters are baked in at registration), and
+        # write_plate refuses these for one by name rather than accepting and dropping them.
+        self._operator_kwargs = dict(operator_kwargs or {})
         # Per-region FOV boxes inside the _CELL thumbnail (IMA-187). Computed ONCE up front from
         # the reader's stage positions, because every arriving FOV needs its box and the geometry
         # never changes mid-run. Empty dict => no positions => the historical single-tile path.
@@ -3111,7 +3124,8 @@ class _OperatorWorker(QThread):
 
                 write_plate(self._reader, self._out_dir, n_fovs=self._n_fovs, workers=_VIEWER_WORKERS,
                             projector=projector, tiff=False, on_well=self._on_well,
-                            stop=self._stop.is_set, on_error=self._on_error, regions=self._regions)
+                            stop=self._stop.is_set, on_error=self._on_error, regions=self._regions,
+                            operator_kwargs=self._operator_kwargs or None)
                 if self._stop.is_set():
                     return  # window closing / re-opening; drop out cleanly (no final/written emit)
                 self.streamEnded.emit()
@@ -3132,7 +3146,7 @@ class _OperatorWorker(QThread):
 
                     stream = stitch_plate(self._reader, workers=1, operator=projector,
                                           n_fovs=None, on_error=self._on_error,
-                                          regions=self._regions)
+                                          regions=self._regions, **self._operator_kwargs)
                 else:
                     from squidmip import project_plate
 
@@ -4314,13 +4328,71 @@ class PlateWindow(QMainWindow):
         return self._build_run_tab(_OPERATIONS_BY_KEY["mip"])
 
     def _build_stitch_tab(self) -> QWidget:
-        # IMA-222. Same generic run tab: a region operator differs in WHAT it computes, not in how
-        # the user aims it at a plate or a subset. (The "Save" half is a no-op until write_plate
-        # accepts a region operator -- see _OperatorWorker.run.)
-        return self._build_run_tab(_OPERATIONS_BY_KEY["stitch"])
+        """maragall/stitcher's control surface, in pane 1 (IMA-decon-stitch-ui).
+
+        This used to be `_build_run_tab` -- a destination picker and a "first N wells"
+        spinner, with NO stitcher controls at all. Julio: "Right now I'm blocked in testing
+        the post-processing because Stitcher doesn't have that maragall/Stitcher interface
+        embedded in our top-left subpane." What a user tunes on a registration/fusion run
+        (registration on/off, registration channel, feather width, blunder thresholds,
+        which channels to fuse) now lives in `_op_panels.StitcherPanel` and travels to both
+        the preview and the saved run through `operator_kwargs`.
+        """
+        from squidmip._op_panels import StitcherPanel
+
+        return StitcherPanel(self)
 
     def _build_decon_tab(self) -> QWidget:
-        return self._build_plane_op_tab(_OPERATIONS_BY_KEY["decon"])
+        """The RL semi-convergence loop's controls (IMA-252 + IMA-decon-stitch-ui).
+
+        The controls are here in pane 1; the picture they produce -- the deconvolved 2-D
+        image in turbo with the x-z and y-z strips concatenated -- opens as a tab in PANE 3
+        via :meth:`publish_qc_result`. It was `_build_plane_op_tab` (a preview button and
+        nothing else), which gave no way to choose an iteration count at all.
+        """
+        from squidmip._op_panels import DeconQCPanel
+
+        return DeconQCPanel(self)
+
+    # -- the host surface the pane-1 operator panels use -----------------------------------
+    #
+    # Deliberately three small methods rather than handing a panel the whole window: if a
+    # panel starts needing more than this, that is a coupling worth seeing in a diff.
+
+    def say(self, text: str) -> None:
+        """Put an operator panel's sentence in the window's status line."""
+        if text:
+            self._run_readout(text)
+
+    def explore_scopes(self) -> list:
+        """``[(label, regions), ...]`` for every subset currently parked in pane 3.
+
+        These become SCOPE VALUES on the pane-1 panels, not buttons over in pane 3. A UI
+        audit found two operator registries launching the same operators from panes 1 and 3
+        with different labels and different `save` defaults, and they had already diverged
+        in production; a third caller would have made that worse rather than better.
+        """
+        scopes = []
+        for i in range(self._explore_tabs.count()):
+            w = self._explore_tabs.widget(i)
+            if isinstance(w, _ExplorationTab):
+                scopes.append((exploration_tab_label(w.regions), list(w.regions)))
+        for win in self._floating.values():                # detached tabs count too
+            w = win.content()
+            if isinstance(w, _ExplorationTab):
+                scopes.append((exploration_tab_label(w.regions), list(w.regions)))
+        return scopes
+
+    def publish_qc_result(self, widget: QWidget, title: str) -> None:
+        """Show *widget* as a result tab in PANE 3.
+
+        THE seam between the pane-1 controls and pane 3. It is deliberately one method wide
+        and it introduces no new tab machinery: `_open_op_tab` with `tabs=self._explore_tabs`
+        is exactly how exploration tabs already get there, so the pane-3 owner has nothing
+        to merge. Keyed by title so re-running the same subject reuses its tab instead of
+        stacking a new one per iteration.
+        """
+        self._open_op_tab(f"qc:{title}", title, lambda w=widget: w, tabs=self._explore_tabs)
 
     def _build_bgsub_tab(self) -> QWidget:
         return self._build_plane_op_tab(_OPERATIONS_BY_KEY["bgsub"])
@@ -5069,7 +5141,10 @@ class PlateWindow(QMainWindow):
         # reads a single plane per well precisely to stay fast), so say which one you're looking at.
         multi = sum(1 for r in order if len(meta["fovs_per_region"][r]) > 1)
         note = (f" · {multi} multi-FOV region(s), previewing as mosaics" if multi else "")
-        self._readout.setText(f"live · {len(self._fov_index)} wells · double-click to open{note}")
+        # "live" retired: this is a POST-ACQUISITION viewer. Nothing here is streaming off a
+        # scope -- the acquisition is finished and on disk, and calling it live invited exactly
+        # the wrong mental model of what the operators below are doing.
+        self._readout.setText(f"loaded · {len(self._fov_index)} wells · double-click to open{note}")
 
     def _load_mosaic(self, region: Optional[str] = None, op: str = "raw"):
         """Show one region's fused MOSAIC in pane 2, one napari layer per channel.
@@ -5461,7 +5536,7 @@ class PlateWindow(QMainWindow):
 
     def run_operator(self, key: str, out_parent: Optional[str] = None,
                      regions: Optional[list] = None, save: bool = True,
-                     tab_key: Optional[str] = None):
+                     tab_key: Optional[str] = None, operator_kwargs: Optional[dict] = None):
         """Run a projector operator (MIP / reference) over the plate, or over a subset of it.
 
         ``regions=None`` runs the whole plate. A list runs exactly those regions, in that order —
@@ -5579,7 +5654,7 @@ class PlateWindow(QMainWindow):
         # viewer's canvas is declared from it, so there is one rectangle, not two that agree by luck.
         self._worker = _OperatorWorker(key, self._reader, self._meta, self._fov_index,
                                        str(out_dir) if out_dir else "", regions=regions, save=save,
-                                       n_fovs=None)
+                                       n_fovs=None, operator_kwargs=operator_kwargs)
         self._overview.set_mosaic_boxes(self._worker.mosaic_boxes)
         # IMA-245: size the array viewer to what this run actually pushes. A REGION operator
         # (stitch, coordinate) pushes one FUSED MOSAIC per region, so the canvas is the mosaic

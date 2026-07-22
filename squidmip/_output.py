@@ -1010,6 +1010,7 @@ def write_plate(
     disk_headroom: Optional[float] = None,
     min_free_bytes: Optional[int] = None,
     roi_table: bool = True,
+    operator_kwargs: Optional[dict] = None,
 ) -> dict:
     """Project a plate (IMA-188) and write the canonical OME-zarr + individual TIFFs.
 
@@ -1043,9 +1044,25 @@ def write_plate(
     # the WELL, so n_fovs does not apply to it and workers stays at 1: peak memory is one fused
     # mosaic (~0.9 GB on a 27-FOV 10x well) rather than one projected FOV (~139 MB).
     region_operator = projector in available_region_operators()
+    # A REGION operator is parameterised at CALL time (registration on/off, registration
+    # channel, feather width, blunder thresholds, channel subset), and the stitcher panel in
+    # pane 1 is where a user sets those. They have to survive the save path too: without this
+    # seam "Run on the whole plate" would quietly fuse with the pipeline defaults while the
+    # panel still showed the settings that were tuned on the preview, and nothing would say so.
+    #
+    # A PROJECTOR has no equivalent seam -- its parameters are baked in when it is registered
+    # (`add_projector("decon_sharp", decon_op(iterations=25))`), so project_plate has nowhere
+    # to put them. Refuse by name rather than accept-and-drop.
+    if operator_kwargs and not region_operator:
+        raise ValueError(
+            f"operator_kwargs={sorted(operator_kwargs)} was passed for projector {projector!r}, "
+            "which is not a region operator. project_plate takes no per-run operator "
+            "parameters -- a projector is parameterised when it is REGISTERED "
+            "(add_projector(name, decon_op(iterations=...))). Register a named variant instead."
+        )
     if region_operator:
         stream = stitch_plate(reader, n_fovs=None, workers=1, operator=projector,
-                              on_error=on_error, regions=regions)
+                              on_error=on_error, regions=regions, **(operator_kwargs or {}))
     else:
         stream = project_plate(reader, n_fovs=n_fovs, workers=workers, projector=projector,
                                on_error=on_error, regions=regions)
