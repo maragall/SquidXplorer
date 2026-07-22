@@ -4969,3 +4969,34 @@ def test_no_napari_pane_means_the_ndviewer_path_still_stands(qapp):
     win = _result_win("bgsub")
     win._mosaic_pane = None
     V.PlateWindow._on_result(win, "A1", 0, np.zeros((2, 8, 8), "uint16"))
+def test_the_empty_pane_does_not_name_CONTROL_WELL_on_a_slide(qapp, stub_detail, squid_dataset,
+                                                              monkeypatch):
+    """Julio: "You say control well, but that feature is only for our well plate acquisition.
+    For tissue acquisition we could print the user 'open in exploration pane'."
+
+    A control well is a PLATE concept. On a glass slide with hand-drawn regions there is nothing
+    to control against, and naming a gesture the user cannot perform is worse than saying nothing.
+    The 10x tissue set he actually drives is exactly this case: its regions are manual0/manual1.
+
+    MUTATION: use _EMPTY_EXPLORE_PRIMARY unconditionally and this goes red.
+    """
+    from PyQt5.QtWidgets import QLabel
+
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+
+    # A SLIDE: no wellplate format resolves, which is what a hand-drawn tissue run looks like.
+    monkeypatch.setattr(V.PlateWindow, "is_slide_acquisition", lambda self: True)
+    slide_copy = win._build_explore_empty()
+    labels = "\n".join(lab.text() for lab in slide_copy.findChildren(QLabel)).lower()
+
+    assert "control well" not in labels, "a slide acquisition was told to use Control Well"
+    assert "exploration pane" in labels, "the slide copy names no way to open a region"
+
+    # ...and a real PLATE still gets the Control Well line.
+    monkeypatch.setattr(V.PlateWindow, "is_slide_acquisition", lambda self: False)
+    plate_copy = win._build_explore_empty()
+    plate_labels = "\n".join(lab.text() for lab in plate_copy.findChildren(QLabel)).lower()
+    assert "control well" in plate_labels, "the plate copy lost its primary gesture"
+    win.close()

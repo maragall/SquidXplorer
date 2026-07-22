@@ -232,13 +232,21 @@ class MosaicPane(QWidget):
         groups to fix it with. ``squidmip._layer_tree`` explains that in full; this is only the
         mounting.
 
-        ALONGSIDE napari's controls, not instead of them. PartSeg deletes napari's docks
-        outright (``dockLayerList.deleteLater()``) and rebuilds the surface; we do not, because
-        dc0f288 embeds the real napari window precisely after hand-rebuilt controls were
-        rejected as "not napari". The two surfaces cannot conflict: both write ``layer.visible``,
-        so toggling either repaints the other. napari-experimental's ethos ("the main layer list
-        should only be used to add/remove layers") is guidance for a plugin that owns ordering
-        too; ours does not.
+        IT REPLACES NAPARI'S FLAT LAYER LIST, which is hidden below.
+
+        The earlier version mounted this ALONGSIDE the flat list, arguing the two could not
+        conflict because both write ``layer.visible``. Julio killed that argument in one line:
+        "Why do we have the layer list tab in our napari variant if we don't want the number of
+        layers to explode precisely?"
+
+        He is right and the old reasoning missed the point. The problem was never that the two
+        surfaces disagree - it is that the flat list SHOWS THE EXPLOSION. Five operators x four
+        channels is 24 rows, and keeping a tab that displays all 24 defeats the entire reason the
+        grouped tree exists. Both shipped precedents do the same thing: PartSeg deletes the dock
+        outright, and napari-experimental replaces the layer-list UI rather than adding to it.
+
+        napari's LAYER CONTROLS dock stays - that is the contrast/gamma/colormap panel, it is a
+        different surface from the list, and it is the one that must keep owning contrast.
 
         Mounted through ``Window.add_dock_widget``, napari's own public API, so the tree is a
         napari dock in napari's dock area with napari's styling -- rather than a panel of mine
@@ -254,6 +262,7 @@ class MosaicPane(QWidget):
             self._viewer.window.add_dock_widget(
                 tree, name="mosaic layers", area="left", tabify=True,
             )
+            self._hide_flat_layer_list()
         except Exception as exc:                 # noqa: BLE001 - said out loud, never swallowed
             self.say(
                 f"the grouped layer tree could not be mounted ({type(exc).__name__}: {exc}); "
@@ -261,6 +270,28 @@ class MosaicPane(QWidget):
             )
             return
         self.layer_tree = tree
+
+    def _hide_flat_layer_list(self) -> None:
+        """Hide napari's own flat layer list, leaving the grouped tree as the layer surface.
+
+        HIDDEN, not deleted. PartSeg calls ``deleteLater()``; hiding is reversible, survives a
+        napari version that reorganises its docks, and leaves the widget alive so napari's own
+        code can still reference it. Deleting a dock napari believes it owns is a good way to
+        find out which of its actions assumed otherwise.
+
+        ``dockLayerList`` is PRIVATE napari surface, so a failure here is reported and the tree
+        still mounts: an extra tab is untidy, an unmounted tree is a regression.
+        """
+        try:
+            qt_viewer = getattr(self._viewer.window, "_qt_viewer", None)
+            dock = getattr(qt_viewer, "dockLayerList", None) if qt_viewer is not None else None
+            if dock is None:
+                self.say("napari's flat layer list could not be found, so it is still showing.")
+                return
+            dock.setVisible(False)
+            self.flat_layer_list_hidden = True
+        except Exception as exc:                 # noqa: BLE001 - cosmetic; never lose the tree
+            self.say(f"napari's flat layer list could not be hidden ({type(exc).__name__}: {exc}).")
 
     # -- the native napari window -------------------------------------------------------
     def _embed_native_window(self, lay) -> None:

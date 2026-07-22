@@ -127,12 +127,22 @@ _EMPTY_EXPLORE_HEAD = "Exploration"
 _EMPTY_EXPLORE_LEDE = (
     "A second viewer, for a subset of the plate. Operator results appear as layers in the plate "
     "and the centre viewer \u2014 not here.")
+#: PRIMARY line, WELL PLATE only. Julio: "You say control well, but that feature is only for our
+#: well plate acquisition. For tissue acquisition we could print the user 'open in exploration
+#: pane'." A control well is a plate concept -- on a glass slide with hand-drawn regions there is
+#: nothing to control against, and naming a gesture the user cannot perform is worse than silence.
 _EMPTY_EXPLORE_PRIMARY = (
     "Right-click a well and choose Control Well to pin it here, so you can compare the rest "
     "against it.")
+#: PRIMARY line for a SLIDE / tissue acquisition, where the unit is a region, not a well.
+_EMPTY_EXPLORE_PRIMARY_SLIDE = (
+    "Double-click a region on the slide and choose Open in exploration pane to bring it here.")
 _EMPTY_EXPLORE_SECONDARY = (
     "Hold Shift and drag across the plate to open a subset in its own tab, with a slider to "
     "step through it.")
+_EMPTY_EXPLORE_SECONDARY_SLIDE = (
+    "Hold Shift and drag to open several regions in one tab, with a slider to step through "
+    "them.")
 _EMPTY_EXPLORE_CODA = (
     "Use it for 3D volume rendering, deconvolution previews, and fields worth keeping in view.")
 _EXPLORE_W = 380                      # pane 3's width on open, in px (see PlateWindow.__init__)
@@ -3955,9 +3965,15 @@ class PlateWindow(QMainWindow):
         head.setStyleSheet(f"color:#e6edf3;font-size:{_EMPTY_HEAD_PX}px;font-weight:800;")
         v.addWidget(head)
 
+        # The gestures DIFFER by acquisition kind, so the copy does too: "Control Well" is a
+        # plate concept and does not exist on a glass slide. Naming a gesture the user cannot
+        # perform is worse than saying nothing.
+        slide = self.is_slide_acquisition()
+        primary = _EMPTY_EXPLORE_PRIMARY_SLIDE if slide else _EMPTY_EXPLORE_PRIMARY
+        secondary = _EMPTY_EXPLORE_SECONDARY_SLIDE if slide else _EMPTY_EXPLORE_SECONDARY
         for text, color in ((_EMPTY_EXPLORE_LEDE, "#c3ccd9"),
-                            (_EMPTY_EXPLORE_PRIMARY, "#e6edf3"),      # PRIMARY: Control Well
-                            (_EMPTY_EXPLORE_SECONDARY, "#c3ccd9"),    # secondary: Shift-drag
+                            (primary, "#e6edf3"),
+                            (secondary, "#c3ccd9"),
                             (_EMPTY_EXPLORE_CODA, "#8b98ad")):
             lab = QLabel(text)
             lab.setWordWrap(True)
@@ -3965,6 +3981,22 @@ class PlateWindow(QMainWindow):
             v.addWidget(lab)
         v.addStretch(1)
         return w
+
+    def is_slide_acquisition(self) -> bool:
+        """Is this a glass slide / hand-drawn tissue acquisition rather than a well plate?
+
+        Read from the RESOLVED plate format, not guessed from region names: `_plate_shape`
+        already owns that inference (and its manual override), and a second rule here would be
+        another two-answers-to-one-question. Unknown counts as a slide, because the copy it
+        selects names no gesture the user might not have.
+        """
+        from squidmip._plate_shape import GLASS_SLIDE, normalize_plate_format
+
+        meta = self._meta
+        if meta is None:
+            return False
+        fmt = normalize_plate_format(meta.get("wellplate_format"), strict=False)
+        return fmt is None or fmt == GLASS_SLIDE
 
     def explore_empty_text(self) -> str:
         """Everything pane 3 is currently SAYING while empty — '' once it holds content.

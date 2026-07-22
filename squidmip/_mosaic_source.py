@@ -39,6 +39,8 @@ from typing import Any, Optional, Sequence
 
 import numpy as np
 
+from squidmip._budget import cache_budget
+
 # Level 0 of a full plate mosaic can be far larger than RAM, so the zarr path stays lazy and the
 # raw path is bounded by _MAX_FUSED_PX below.
 
@@ -337,7 +339,13 @@ def fuse_region_stack(
 #: z of all four channels fits at once — level 2 is 3.4 MB, so 10 z x 4 ch = 137 MB — which is
 #: precisely the working set napari touches at fit-to-window zoom. Level-0 planes are 54.9 MB and
 #: evict each other, which is correct: at full zoom napari only ever wants the current one.
-PYRAMID_CACHE_BYTES = 256 << 20
+#: MEASURED, not hardcoded. Julio: "we have to maximize performance and that doesn't happen by
+#: hardcoding guards... There are so many variations of desktop configuration." A fixed 256 MiB
+#: is ~5% of available on a 16 GB laptop and ~0.5% on a 96 GB demo machine: too timid to use the
+#: big one, too blunt to protect the small one. `_budget.cache_budget` derives it from AVAILABLE
+#: memory (not total -- the user's other windows are not ours to spend), with a floor so the
+#: cache cannot thrash and a ceiling so "derived" never means "unlimited".
+PYRAMID_CACHE_BYTES = cache_budget()
 
 #: Runaway guard on level count, not a tuning: each level halves ``max_px``, so 12 spans a 4096x
 #: zoom range. Levels stop earlier anyway once a level stops shrinking.

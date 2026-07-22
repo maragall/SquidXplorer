@@ -397,11 +397,15 @@ _MOUNT_SCRIPT = r"""
     out["rows"] = tree.model().rowCount()
     out["children_of_first"] = tree.model().rowCount(tree.model().index(0, 0))
 
-    # napari's own layer list must SURVIVE, and its canvas must still be its window's central
-    # widget -- adding a dock must not repeat 506c813.
+    # napari's FLAT LAYER LIST must be HIDDEN (the tree replaces it), while its LAYER CONTROLS
+    # -- the contrast/gamma/colormap panel, a different surface -- must survive. And the canvas
+    # must still be its window's central widget: adding a dock must not repeat 506c813.
     win = pane._native_window
-    out["napari_layer_list_still_there"] = len([
-        w for w in win.findChildren(QWidget) if "QtLayerList" in type(w).__name__
+    _qtv = getattr(pane._viewer.window, "_qt_viewer", None)
+    _dock = getattr(_qtv, "dockLayerList", None) if _qtv is not None else None
+    out["flat_layer_list_visible"] = bool(_dock.isVisible()) if _dock is not None else None
+    out["layer_controls_still_there"] = len([
+        w for w in win.findChildren(QWidget) if "QtLayerControls" in type(w).__name__
     ]) if win is not None else 0
     out["canvas_still_inside_napari_window"] = descends_from(pane.canvas, win)
 
@@ -439,10 +443,15 @@ def test_the_tree_is_mounted_beside_naparis_own_controls(tmp_path):
     assert got["tree_is_in_our_pane"] is True, "the tree was mounted somewhere the user cannot see"
     assert got["rows"] == 2
     assert got["children_of_first"] == 4
-    # NOT PartSeg: napari's docks stay. Rebuilding them by hand is what Julio rejected.
-    assert got["napari_layer_list_still_there"] >= 1, (
-        "napari's own layer list disappeared -- we replaced napari's controls instead of "
-        "adding to them"
+    # The grouped tree REPLACES the flat list. Julio: "Why do we have the layer list tab in our
+    # napari variant if we don't want the number of layers to explode precisely?" Keeping a tab
+    # that shows all 24 rows defeats the reason the tree exists.
+    assert got["flat_layer_list_visible"] is False, (
+        "napari's flat layer list is still showing, so the layer explosion is still on screen"
+    )
+    # ...but napari's LAYER CONTROLS are a different surface and must stay: they own contrast.
+    assert got["layer_controls_still_there"] >= 1, (
+        "napari's layer controls disappeared -- contrast has no owner on screen"
     )
     # 506c813, again: adding a dock must never move the canvas out of napari's window.
     assert got["canvas_still_inside_napari_window"] is True

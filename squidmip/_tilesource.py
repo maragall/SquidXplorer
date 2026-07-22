@@ -75,6 +75,8 @@ from typing import Hashable, Mapping, Optional, Sequence
 
 import numpy as np
 
+from squidmip._budget import cache_budget
+
 from squidmip._montage import _area_downsample
 from squidmip._output import _PYRAMID_MAX_LEVELS, _PYRAMID_MIN_YX, pyramid_shapes
 from squidmip._tiling import Geometry, Level, TileDescriptor
@@ -87,7 +89,12 @@ DEFAULT_TILE_PX = 512
 # Default byte budget for the in-RAM preview multiscale. 256 MiB is ~3% of a 8 GB workstation and
 # holds the top five rungs of a 1536wp plate at 2 channels; it is a DEFAULT, never a silent cap —
 # the constructor reports ``capacity_bytes`` and raises when the coarsest rung alone overflows.
-DEFAULT_PREVIEW_BUDGET_BYTES = 256 << 20
+# MEASURED, not hardcoded -- see squidmip._budget. The old comment said "256 MiB is ~3% of an
+# 8 GB workstation", which is exactly the problem: it encodes an assumption about a machine it
+# has never seen. Derived from AVAILABLE memory, floored so the cache cannot thrash and capped so
+# it stays bounded. Still a DEFAULT, never a silent cap: the constructor reports capacity_bytes
+# and raises when the coarsest rung alone overflows.
+DEFAULT_PREVIEW_BUDGET_BYTES = cache_budget()
 
 # How many plate rungs to stack above the per-FOV ones. Each is 2x coarser and ~1/4 the tiles, so
 # 12 spans a 4096x zoom range — far more than any plate needs; it is a runaway guard, not a tuning.
