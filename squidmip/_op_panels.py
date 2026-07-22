@@ -114,6 +114,9 @@ STITCH_DEFAULTS = {
     "blend_px": _BLEND_PX,
     "outlier_rel_pct": int(round(_REL_THRESH * 100)),
     "outlier_abs_px": int(round(_ABS_THRESH)),
+    "auto_blend": False,
+    "correct_distortion": False,
+    "registration_t": 0,
 }
 
 
@@ -123,6 +126,9 @@ STITCH_DEFAULTS = {
 
 def stitch_operator_kwargs(*, register, registration_channel, channels, blend_px,
                            outlier_rel_pct, outlier_abs_px,
+                           auto_blend: bool = False,
+                           correct_distortion: bool = False,
+                           registration_t: int = 0,
                            n_channels: Optional[int] = None,
                            tile_px: Optional[int] = None) -> dict:
     """Turn the panel's widget values into ``stitch_region`` keyword arguments.
@@ -149,8 +155,14 @@ def stitch_operator_kwargs(*, register, registration_channel, channels, blend_px
                 "smaller result, it is no result.")
         if n_channels is not None and len(channels) == int(n_channels):
             channels = None
-    blend_px = int(blend_px)
-    if tile_px is not None and blend_px >= int(tile_px):
+    # "Auto" is spelled blend_px=None all the way down to stitch_region, which measures the
+    # acquisition's real overlap (auto_blend_px). The spin's value is IGNORED, not clamped:
+    # showing a number that had no effect is the accepted-and-ignored shape.
+    if auto_blend:
+        blend_px = None
+    else:
+        blend_px = int(blend_px)
+    if blend_px is not None and tile_px is not None and blend_px >= int(tile_px):
         raise ValueError(
             f"blend width {blend_px} px is not smaller than the {int(tile_px)} px tile. The "
             "Hann feather has to fit INSIDE the real overlap; a ramp that never reaches full "
@@ -162,6 +174,12 @@ def stitch_operator_kwargs(*, register, registration_channel, channels, blend_px
         kwargs["registration_channel"] = registration_channel
         kwargs["rel_thresh"] = float(outlier_rel_pct) / 100.0
         kwargs["abs_thresh"] = float(outlier_abs_px)
+        kwargs["registration_t"] = int(registration_t)
+        # Distortion correction fits the residual left AFTER the global solve, so it is
+        # registration-only; stitch_region refuses the combination outright. Dropping it here
+        # rather than forwarding a False keeps "what the panel sends" equal to "what the run
+        # does" for the disabled case too.
+        kwargs["correct_distortion"] = bool(correct_distortion)
     return kwargs
 
 
@@ -372,6 +390,22 @@ class StitcherPanel(_Panel):
             "placements.")
         self.v.addLayout(_row(QLabel("Registration channel:"), self.reg_channel_combo))
 
+        # maragall/stitcher's Timepoint spin (app.py:1428). Not cosmetics: the geometry is
+        # solved at ONE timepoint, and that timepoint used to be a hardcoded 0 with no way to
+        # see or set it -- the same defect CLASS as the registration-channel substitution bug
+        # (a solve running somewhere the user cannot name). Hidden on a single-timepoint
+        # acquisition, where the only legal value is 0 and a spin would be furniture.
+        n_t = int(((getattr(host, "_meta", None) or {}).get("n_t")) or 1)
+        self.reg_t_spin = QSpinBox()
+        self.reg_t_spin.setRange(0, max(n_t - 1, 0))
+        self.reg_t_spin.setToolTip(
+            "Which timepoint the pose graph is solved on. Every timepoint is then fused with "
+            "that ONE solution, so a drifting stage does not give t=0 and t=9 different "
+            "placements.")
+        self.reg_t_row = _row(QLabel("Registration timepoint:"), self.reg_t_spin)
+        if n_t > 1:
+            self.v.addLayout(self.reg_t_row)
+
         self.rel_spin = QSpinBox()
         self.rel_spin.setRange(1, 200)
         self.rel_spin.setValue(STITCH_DEFAULTS["outlier_rel_pct"])
@@ -390,6 +424,22 @@ class StitcherPanel(_Panel):
         self.v.addLayout(_row(QLabel("Outlier rel:"), self.rel_spin,
                               QLabel("abs:"), self.abs_spin))
 
+        # "Correct lens distortion (per-seam elastic)" -- maragall/stitcher app.py:1472, the
+        # control Julio asked about by name.
+        #
+        # In the reference tool this checkbox is DEAD: `distortion_checkbox` is created and
+        # never read, so FusionWorker's enable_distortion default (True) always wins and
+        # unchecking it changes nothing. Here it decides, and tests pin both directions.
+        self.distortion_cb = QCheckBox("Correct lens distortion (per-seam elastic)")
+        self.distortion_cb.setChecked(STITCH_DEFAULTS["correct_distortion"])
+        self.distortion_cb.setToolTip(
+            "Fit a per-tile elastic warp from the REGISTERED seams and apply it during fusion "
+            "(tilefusion.distortion). It corrects what a rigid solve cannot: field curvature "
+            "and lens distortion bending each tile, which shows up as seams that are sharp in "
+            "the middle and doubled at the ends.\n\n"
+            "Needs registration -- it corrects the residual left after the global solve.")
+        self.v.addWidget(self.distortion_cb)
+
         # -- fusion --------------------------------------------------------------------
         self.v.addWidget(_head("FUSION"))
         self.blend_spin = QSpinBox()
@@ -401,7 +451,14 @@ class StitcherPanel(_Panel):
             "set the measured overlap is ~208 px, which is what the 128 px default was sized "
             "against. A ramp wider than the overlap never reaches full weight and dims the "
             "seam.")
-        self.v.addLayout(_row(QLabel("Blend width:"), self.blend_spin))
+        self.blend_auto_cb = QCheckBox("Auto (measure the real overlap)")
+        self.blend_auto_cb.setChecked(STITCH_DEFAULTS["auto_blend"])
+        self.blend_auto_cb.setToolTip(
+            "Measure this acquisition's actual seam overlap and size the ramp to it (median "
+            "overlap x 2), instead of the fixed default -- which is sized to ONE acquisition "
+            "(~208 px on the 10x tissue set) and is wrong on a denser grid.")
+        self.blend_auto_cb.toggled.connect(lambda on: self.blend_spin.setEnabled(not on))
+        self.v.addLayout(_row(QLabel("Blend width:"), self.blend_spin, self.blend_auto_cb))
 
         self.channel_boxes = []
         if names:
@@ -450,7 +507,8 @@ class StitcherPanel(_Panel):
     # -- behaviour ---------------------------------------------------------------------
     def _on_register_toggled(self, on: bool) -> None:
         """Grey out the knobs that provably do nothing with registration off."""
-        for w in (self.reg_channel_combo, self.rel_spin, self.abs_spin):
+        for w in (self.reg_channel_combo, self.rel_spin, self.abs_spin,
+                  self.reg_t_spin, self.distortion_cb):
             w.setEnabled(bool(on))
 
     def _check_projector(self, name: str) -> None:
@@ -469,6 +527,9 @@ class StitcherPanel(_Panel):
                                   if self.register_cb.isChecked() else None),
             channels=selected if self.channel_boxes else None,
             blend_px=self.blend_spin.value(),
+            auto_blend=self.blend_auto_cb.isChecked(),
+            correct_distortion=self.distortion_cb.isChecked(),
+            registration_t=self.reg_t_spin.value(),
             outlier_rel_pct=self.rel_spin.value(),
             outlier_abs_px=self.abs_spin.value(),
             n_channels=len(self.channel_boxes) or None,

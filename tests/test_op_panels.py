@@ -359,3 +359,87 @@ def test_the_result_view_keeps_every_iteration_so_they_can_be_compared(qapp):
     view.show_iteration(2, c, 0.40, "first", "")
     view.show_iteration(3, c, 0.31, "improving", "")
     assert [k for k, _ in view.history] == [2, 3]
+
+
+# ---------------------------------------------------------------------------------------
+# Defect 1: the controls ported from maragall/stitcher, and their kwargs
+# ---------------------------------------------------------------------------------------
+
+def test_every_kwarg_the_panel_emits_is_a_real_stitch_region_parameter():
+    """The existing guard, re-run over the NEW keys. A typo'd key raises TypeError inside a
+    worker thread, where the only symptom is a status line that stops updating."""
+    import inspect
+
+    from squidmip._stitch import stitch_region
+
+    kw = stitch_operator_kwargs(
+        register=True, registration_channel=0, channels=None, blend_px=64,
+        outlier_rel_pct=50, outlier_abs_px=2, correct_distortion=True, registration_t=3)
+    allowed = set(inspect.signature(stitch_region).parameters)
+    assert set(kw) <= allowed, set(kw) - allowed
+
+
+def test_auto_blend_is_spelled_None_all_the_way_down():
+    """stitch_region measures the overlap when blend_px is None. Sending the spin's stale
+    number instead would look identical in the UI and silently ignore the checkbox."""
+    kw = stitch_operator_kwargs(
+        register=True, registration_channel=0, channels=None, blend_px=999,
+        outlier_rel_pct=50, outlier_abs_px=2, auto_blend=True)
+    assert kw["blend_px"] is None
+
+
+def test_auto_blend_skips_the_ramp_vs_tile_refusal():
+    """The 'ramp must fit inside the tile' check is about a number the USER typed. With Auto
+    on there is no such number yet -- refusing here would block the control that exists to
+    compute a safe one."""
+    kw = stitch_operator_kwargs(
+        register=True, registration_channel=0, channels=None, blend_px=5000,
+        outlier_rel_pct=50, outlier_abs_px=2, auto_blend=True, tile_px=2084)
+    assert kw["blend_px"] is None
+
+
+def test_distortion_and_timepoint_are_dropped_when_registration_is_off():
+    """Both are registration-only. Forwarding correct_distortion=True with register=False
+    would make stitch_region refuse a run the user could not see they had configured."""
+    kw = stitch_operator_kwargs(
+        register=False, registration_channel=None, channels=None, blend_px=64,
+        outlier_rel_pct=50, outlier_abs_px=2, correct_distortion=True, registration_t=2)
+    assert "correct_distortion" not in kw
+    assert "registration_t" not in kw
+
+
+def test_the_panel_offers_the_distortion_and_auto_blend_controls(qapp):
+    p = StitcherPanel(_Host())
+    assert p.distortion_cb is not None
+    assert p.blend_auto_cb is not None
+    assert not p.distortion_cb.isChecked()           # opt-in: it costs a per-seam elastic fit
+
+
+def test_auto_blend_disables_the_manual_width_so_no_dead_number_is_shown(qapp):
+    p = StitcherPanel(_Host())
+    p.blend_auto_cb.setChecked(True)
+    assert not p.blend_spin.isEnabled()
+    p.blend_auto_cb.setChecked(False)
+    assert p.blend_spin.isEnabled()
+
+
+def test_the_distortion_checkbox_is_greyed_out_with_registration_off(qapp):
+    """maragall/stitcher's own version of this checkbox is never read at all (app.py:1472).
+    Ours must at least not look adjustable when it provably does nothing."""
+    p = StitcherPanel(_Host())
+    p.register_cb.setChecked(False)
+    assert not p.distortion_cb.isEnabled()
+
+
+def test_the_panel_s_distortion_choice_travels_to_the_operator(qapp):
+    host = _Host()
+    p = StitcherPanel(host)
+    p.distortion_cb.setChecked(True)
+    p.run_btn.click()
+    assert host.calls[0][1]["operator_kwargs"]["correct_distortion"] is True
+
+
+def test_the_timepoint_spin_is_hidden_on_a_single_timepoint_acquisition(qapp):
+    """A spin whose only legal value is 0 is furniture."""
+    p = StitcherPanel(_Host())
+    assert p.reg_t_spin.maximum() == 0

@@ -176,6 +176,68 @@ def _resolve_registration_channel(metadata: dict, registration_channel) -> int:
     return idx
 
 
+def auto_blend_px(
+    positions_yx_um: Sequence[tuple[float, float]],
+    pixel_size: tuple[float, float],
+    tile_shape: tuple[int, int],
+) -> int:
+    """Feather ramp width MEASURED from the acquisition's real overlap.
+
+    maragall/stitcher's "Auto" checkbox (app.py:1454), same formula: take each adjacent pair's
+    SMALLER overlap (the true seam depth -- a pair that overlaps 200 px vertically and 2000 px
+    horizontally has a 200 px seam), the median across pairs, doubled, floored at 10.
+
+    This is the control that removes a guess rather than adding a knob. The fixed default is
+    sized to ONE acquisition: 128 px against the 10x tissue set's measured ~208 px overlap. A
+    ramp wider than the overlap never reaches full weight and dims the seam, so on a denser
+    grid the default is actively wrong -- and the user has no way to know without measuring the
+    overlap themselves, which is exactly what this does for them.
+
+    Falls back to the module default when nothing overlaps: a sparse/freeform acquisition
+    legitimately has isolated FOVs (the same case :func:`solve_offsets_px` degrades to stage
+    placement for), and a median over an empty set is not an answer.
+    """
+    from tilefusion.registration import find_adjacent_pairs
+
+    pairs = find_adjacent_pairs(list(positions_yx_um), pixel_size, tile_shape,
+                                min_overlap=_MIN_OVERLAP_PX)
+    # find_adjacent_pairs yields (i, j, dy, dx, overlap_y, overlap_x).
+    seams = [min(p[4], p[5]) for p in pairs if min(p[4], p[5]) > 0]
+    if not seams:
+        return _BLEND_PX
+    return max(int(np.median(seams)) * 2, 10)
+
+
+class _SeamSource:
+    """The six members ``tilefusion.distortion`` reads off a ``TileFusion``.
+
+    squidmip runs tilefusion's pieces on IN-MEMORY arrays (see the module docstring), so there
+    is no ``TileFusion`` instance to hand ``build_seam_corrections``. It does not need one:
+    across ``distortion.py`` the entire surface it touches is ``_pixel_size``,
+    ``_tile_positions``, ``Y``, ``X``, ``pairwise_metrics`` and ``_read_tile_region`` -- so
+    this adapter IS the orchestration, and the elastic fit itself stays Julio's code.
+
+    Positions are the REGISTERED ones. build_seam_corrections' own docstring is explicit that
+    it corrects the residual left AFTER the global solve; fitting it on raw stage positions
+    would re-measure the error registration had just removed.
+    """
+
+    def __init__(self, tiles, positions_yx_um, pixel_size, tile_shape, metrics,
+                 registration_channel, max_workers):
+        self._tiles = tiles
+        self._pixel_size = np.asarray(pixel_size, float)
+        self._tile_positions = np.asarray(positions_yx_um, float)
+        self.Y, self.X = int(tile_shape[0]), int(tile_shape[1])
+        self.pairwise_metrics = metrics
+        self._c = registration_channel
+        self.max_workers = max_workers or (os.cpu_count() or 8)
+
+    def _read_tile_region(self, i: int, y_slice: slice, x_slice: slice) -> np.ndarray:
+        # The overlap STRIP only, exactly like solve_offsets_px's own reader: the elastic fit
+        # block-registers along a seam and never wants a whole tile.
+        return self._tiles[i][self._c][y_slice, x_slice]
+
+
 def solve_offsets_px(
     tiles: np.ndarray,
     positions_yx_um: Sequence[tuple[float, float]],
@@ -186,6 +248,7 @@ def solve_offsets_px(
     max_workers: Optional[int] = None,
     rel_thresh: float = _REL_THRESH,
     abs_thresh: float = _ABS_THRESH,
+    metrics_out: Optional[dict] = None,
     timer=None,
 ) -> np.ndarray:
     """Register the tiles against each other and return each tile's residual shift in PIXELS.
@@ -283,6 +346,13 @@ def solve_offsets_px(
             max_workers,
         )
 
+    # The pairwise metrics are what tilefusion's distortion fit keys off (it reads
+    # tf.pairwise_metrics to know which seams exist). They were computed and dropped; handing
+    # them back through an out-dict follows the `geometry` provenance pattern already used
+    # here, and avoids re-running phase correlation just to re-derive the pair list.
+    if metrics_out is not None:
+        metrics_out.update(metrics)
+
     with timer.stage("optimize"):
         edges = _edges_from_pairwise_metrics(metrics)
         if not edges:
@@ -325,7 +395,9 @@ def stitch_region(
     register: bool = True,
     registration_channel=None,
     channels: Optional[Sequence[int]] = None,
-    blend_px: int = _BLEND_PX,
+    blend_px: Optional[int] = _BLEND_PX,
+    correct_distortion: bool = False,
+    registration_t: int = _REG_T,
     block_px: int = _BLOCK_PX,
     max_workers: Optional[int] = None,
     rel_thresh: float = _REL_THRESH,
@@ -429,6 +501,21 @@ def stitch_region(
     positions = _positions_yx_um(meta, region, fovs)
     dtype = np.dtype(meta["dtype"])
     n_t = int(meta["n_t"])
+
+    # The registration TIMEPOINT is now the caller's (Defect 1). It used to be the module
+    # constant _REG_T = 0, so on a multi-timepoint acquisition the geometry silently solved at
+    # t=0 and the user had no way to see or set it. That is the same defect CLASS as the
+    # registration-channel substitution bug fixed above -- a solve running somewhere the user
+    # cannot name -- so it is refused rather than clamped: clamping would put a number in the
+    # Placement that did not solve anything.
+    registration_t = int(registration_t)
+    if not 0 <= registration_t < n_t:
+        raise ValueError(
+            f"registration_t={registration_t} is outside this acquisition's {n_t} timepoint(s)")
+
+    # blend_px=None is maragall/stitcher's "Auto": measure the overlap instead of guessing.
+    if blend_px is None:
+        blend_px = auto_blend_px(positions, pixel_size, tile_shape)
     # IMA-210 turned _PROJECTORS values into Operator(fn, consumes) records, so the
     # registry no longer hands back a bare callable. Unpack it the same way
     # _engine.project_plate does; passing the Operator itself raises
@@ -487,9 +574,10 @@ def stitch_region(
                                     consumes=_op.consumes)[:, proj_channels, 0]
 
     offsets = np.zeros((len(fovs), 2), dtype=np.float64)
+    metrics: dict = {}
     if register:
         offsets = solve_offsets_px(
-            tiles[:, _REG_T],  # geometry is solved once, at ONE timepoint (see _REG_T)
+            tiles[:, registration_t],   # geometry is solved once, at ONE timepoint
             positions,
             pixel_size,
             tile_shape,
@@ -497,6 +585,7 @@ def stitch_region(
             max_workers=max_workers,
             rel_thresh=rel_thresh,
             abs_thresh=abs_thresh,
+            metrics_out=metrics,
             timer=timer,
         )
         # Apply the solved correction in micrometres, exactly as TileFusion.run does:
@@ -527,7 +616,7 @@ def stitch_region(
         # two are only the same when the selection happens to contain it, which is precisely
         # the assumption that made the old registration bug invisible.
         reg_channel=all_channels[reg_c_global] if register else None,
-        reg_t=_REG_T if register else None,
+        reg_t=registration_t if register else None,
     )
 
     # `geometry` is the legacy out-dict, kept so existing callers (tools/stitch_demo.py) keep
@@ -538,6 +627,35 @@ def stitch_region(
             fovs=list(fovs), offsets_px=offsets, origins_px=origins, shape=(h, w),
             pixel_size_um=pixel_size[0], tile_shape=tile_shape, placement=placement,
         )
+
+    # PER-SEAM ELASTIC LENS DISTORTION (Defect 1). Julio asked for this control by name.
+    #
+    # Worth knowing: in maragall/stitcher the checkbox is DEAD -- app.py:1472 builds
+    # `distortion_checkbox` and nothing ever reads it, so FusionWorker's enable_distortion
+    # default (True) always wins and unchecking it does nothing. So this is not a port of a
+    # working control; it is the first place the control actually decides anything, which is
+    # why both directions are pinned by tests.
+    #
+    # Needs the pose graph, so it is registration-only: with register=False there are no
+    # pairwise metrics, and a seam fit without a global solve would be measuring the stage
+    # error rather than the lens.
+    get_field = None
+    if correct_distortion:
+        if not register:
+            raise ValueError(
+                "correct_distortion needs registration: the per-seam elastic fit corrects the "
+                "residual left AFTER the global solve, and with register=False there is no "
+                "solve and no seam correspondence to fit. Enable registration, or turn "
+                "distortion correction off.")
+        from tilefusion.distortion import TileWarper, build_seam_corrections
+
+        with timer.stage("distortion"):
+            source = _SeamSource(tiles[:, registration_t], positions, pixel_size, tile_shape,
+                                 metrics, reg_c, max_workers)
+            corrections = build_seam_corrections(source)
+            # A tile with no correction gets None from .field() = identity, so an unfittable
+            # seam degrades to plain fusion rather than failing the run.
+            get_field = TileWarper(corrections, tile_shape[0], tile_shape[1]).field
 
     with timer.stage("fuse"):
         y_profile = make_1d_profile(tile_shape[0], blend_px)
@@ -574,6 +692,7 @@ def stitch_region(
                 block_size=block_px,
                 z_level=0,
                 time_idx=t,
+                get_field=get_field,
             )
 
     return PlacedArray(out, placement)

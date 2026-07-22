@@ -68,9 +68,14 @@ class _FakeReader:
     """
 
     def __init__(self, master: np.ndarray, error_px: dict[int, tuple[float, float]] | None = None,
-                 regions=("A1",), step: int = STEP):
+                 regions=("A1",), step: int = STEP, n_t: int = 1, good_t: int = 0):
         self._master = master
         self._step = step
+        # Only ONE timepoint carries registrable structure; the others are noise. That makes
+        # "the solve actually read the timepoint it was told to" an assertion about NUMBERS
+        # rather than about provenance -- a mutation that hardcodes t=0 survives any test that
+        # only checks what the Placement claims.
+        self._good_t = good_t
         self._true = [
             ((i // GRID) * step, (i % GRID) * step) for i in range(GRID * GRID)
         ]  # (y, x) top-left of each tile in the master, in pixels
@@ -88,7 +93,7 @@ class _FakeReader:
             "channels": [{"name": c} for c in CHANNELS],
             "z_levels": [0],
             "n_z": 1,
-            "n_t": 1,
+            "n_t": n_t,
             "frame_shape": (TILE, TILE),
             "dtype": np.dtype(np.uint16),
             "pixel_size_um": PIXEL_UM,
@@ -98,6 +103,10 @@ class _FakeReader:
     def read(self, region, fov, channel, z=0, t=0):
         self.reads += 1
         y, x = self._true[fov]
+        if t != self._good_t:
+            # Unregistrable by construction: white noise aliases under any sub-pixel shift.
+            return np.random.default_rng(1000 + fov).integers(
+                0, 65535, size=(TILE, TILE), dtype=np.uint16)
         tile = self._master[y : y + TILE, x : x + TILE]
         # Second channel is a scaled copy: distinct data, same geometry, so a channel mix-up
         # in the fuse is visible while registration stays well-posed on channel 0.
@@ -749,3 +758,212 @@ def test_the_mosaic_is_still_an_ordinary_array_for_every_existing_consumer(maste
     assert isinstance(out, np.ndarray)
     assert out.ndim == 5 and out.dtype == np.uint16
     np.testing.assert_array_equal(np.asarray(out) * 0, np.zeros_like(np.asarray(out)))
+
+
+# ---------------------------------------------------------------------------------------
+# Defect 1: controls ported from maragall/stitcher, each pinned to its ENGINE CALL
+# ---------------------------------------------------------------------------------------
+#
+# "A parameter that is accepted and then ignored" is a defect shape this repo has shipped
+# before -- and it is shipped in the REFERENCE tool too: app.py:1472 builds a "Correct lens
+# distortion" checkbox that nothing ever reads, so unchecking it does nothing and distortion
+# correction always runs. So every control below is pinned to the tilefusion call it drives,
+# in both directions (on -> called, off -> NOT called).
+
+def test_lens_distortion_correction_reaches_tilefusion(master, monkeypatch):
+    """The control the owner asked about BY NAME. It must drive
+    tilefusion.distortion.build_seam_corrections, not merely be accepted."""
+    import tilefusion.distortion as dist
+
+    seen = {}
+
+    def _fake(tf, **kw):
+        seen["tf"] = tf
+        return {}
+
+    monkeypatch.setattr(dist, "build_seam_corrections", _fake)
+    reader = _FakeReader(master, error_px={3: (6.0, -4.0)})
+    stitch_region(reader, "A1", list(range(GRID * GRID)), channels=[0],
+                  correct_distortion=True, max_workers=2)
+    assert "tf" in seen
+
+
+def test_distortion_off_does_not_call_the_engine_at_all(master, monkeypatch):
+    """The reference tool's own checkbox fails exactly this."""
+    import tilefusion.distortion as dist
+
+    called = []
+    monkeypatch.setattr(dist, "build_seam_corrections", lambda tf, **kw: called.append(1) or {})
+    reader = _FakeReader(master, error_px={3: (6.0, -4.0)})
+    stitch_region(reader, "A1", list(range(GRID * GRID)), channels=[0],
+                  correct_distortion=False, max_workers=2)
+    assert called == []
+
+
+def test_the_distortion_adapter_exposes_everything_tilefusion_reads_off_a_TileFusion(
+        master, monkeypatch):
+    """squidmip runs tilefusion's pieces on IN-MEMORY arrays, so there is no TileFusion
+    instance to hand build_seam_corrections. It is duck-typed on exactly six members; this
+    pins the adapter against that surface, so a tilefusion upgrade that reaches for a seventh
+    fails HERE rather than at a user's plate."""
+    import tilefusion.distortion as dist
+
+    seen = {}
+    monkeypatch.setattr(dist, "build_seam_corrections",
+                        lambda tf, **kw: seen.update(tf=tf) or {})
+    reader = _FakeReader(master, error_px={3: (6.0, -4.0)})
+    stitch_region(reader, "A1", list(range(GRID * GRID)), channels=[0],
+                  correct_distortion=True, max_workers=2)
+    tf = seen["tf"]
+    for attr in ("_pixel_size", "_tile_positions", "Y", "X", "pairwise_metrics",
+                 "_read_tile_region"):
+        assert hasattr(tf, attr), attr
+    assert (tf.Y, tf.X) == (TILE, TILE)
+    assert len(tf._tile_positions) == GRID * GRID
+    # The overlap strip of a real pair, read back through the adapter.
+    assert np.asarray(tf._read_tile_region(0, slice(0, 8), slice(0, 8))).shape == (8, 8)
+
+
+def test_distortion_is_fit_on_the_REGISTERED_positions_not_the_stage_ones(master, monkeypatch):
+    """build_seam_corrections' own docstring: it corrects the residual AFTER the global solve.
+    Fitting it on raw stage positions would re-measure the error registration just removed."""
+    import tilefusion.distortion as dist
+
+    seen = {}
+    monkeypatch.setattr(dist, "build_seam_corrections",
+                        lambda tf, **kw: seen.update(pos=np.array(tf._tile_positions)) or {})
+    reader = _FakeReader(master, error_px={3: (6.0, -4.0)})
+    stitch_region(reader, "A1", list(range(GRID * GRID)), channels=[0],
+                  correct_distortion=True, max_workers=2)
+    stage = np.array(_positions_yx_um(reader.metadata, "A1", list(range(GRID * GRID))))
+    assert not np.allclose(seen["pos"], stage)
+
+
+def test_the_warp_field_reaches_the_fuser(master, monkeypatch):
+    """fuse_plane takes get_field=. Building the corrections and then not passing them would
+    compute the whole elastic fit and throw it away -- the accepted-and-ignored shape again."""
+    import tilefusion.fusion as fusion
+
+    real = fusion.fuse_plane
+    seen = {}
+
+    def _spy(**kw):
+        seen["get_field"] = kw.get("get_field")
+        return real(**kw)
+
+    monkeypatch.setattr(fusion, "fuse_plane", _spy)
+    reader = _FakeReader(master, error_px={3: (6.0, -4.0)})
+    stitch_region(reader, "A1", list(range(GRID * GRID)), channels=[0],
+                  correct_distortion=True, max_workers=2)
+    assert callable(seen["get_field"])
+
+
+def test_without_distortion_the_fuser_gets_no_field(master, monkeypatch):
+    import tilefusion.fusion as fusion
+
+    real = fusion.fuse_plane
+    seen = {}
+    monkeypatch.setattr(fusion, "fuse_plane",
+                        lambda **kw: seen.update(get_field=kw.get("get_field")) or real(**kw))
+    reader = _FakeReader(master)
+    stitch_region(reader, "A1", list(range(GRID * GRID)), channels=[0], max_workers=2)
+    assert seen["get_field"] is None
+
+
+# -- registration timepoint -------------------------------------------------------------
+
+def test_the_registration_timepoint_actually_drives_which_PIXELS_are_solved_on(master):
+    """_REG_T was a hardcoded 0: on a multi-timepoint acquisition the geometry silently solved
+    at t=0 with no way to see or set it. Same defect CLASS as the registration-channel
+    substitution bug -- a solve running somewhere the user cannot name.
+
+    This asserts on the SOLVED OFFSETS, not on what the Placement claims. Only t=2 carries
+    registrable structure in this fixture, so a stitch_region that accepted registration_t and
+    then read t=0 anyway recovers nothing -- which is exactly the accepted-and-ignored shape,
+    and it survives any test that only checks provenance."""
+    reader = _FakeReader(master, error_px={3: (6.0, -4.0)}, n_t=3, good_t=2)
+    right, wrong = {}, {}
+    stitch_region(reader, "A1", list(range(GRID * GRID)), channels=[0],
+                  registration_t=2, max_workers=2, geometry=right)
+    stitch_region(reader, "A1", list(range(GRID * GRID)), channels=[0],
+                  registration_t=0, max_workers=2, geometry=wrong)
+    # FOV 3 was displaced by a known (6, -4) px. Solving on the real structure recovers it.
+    assert np.allclose(right["offsets_px"][3], (-6.0, 4.0), atol=1.0), right["offsets_px"][3]
+    assert not np.allclose(wrong["offsets_px"][3], (-6.0, 4.0), atol=1.0)
+
+
+def test_a_registration_timepoint_outside_the_acquisition_is_refused(master):
+    reader = _FakeReader(master)
+    reader.metadata["n_t"] = 2
+    with pytest.raises(ValueError, match="registration_t"):
+        stitch_region(reader, "A1", list(range(GRID * GRID)), channels=[0],
+                      registration_t=5, max_workers=2)
+
+
+def test_the_placement_reports_the_timepoint_that_actually_solved(master):
+    """Provenance that lies is worse than none: a Placement claiming reg_t=0 while the solve
+    moved elsewhere is exactly what the _REG_T comment warned about."""
+    reader = _FakeReader(master)
+    reader.metadata["n_t"] = 4
+    out = stitch_region(reader, "A1", list(range(GRID * GRID)), channels=[0],
+                        registration_t=3, max_workers=2)
+    assert out.placement.reg_t == 3
+
+
+# -- automatic blend width --------------------------------------------------------------
+
+def test_auto_blend_width_is_measured_from_the_real_overlap(master):
+    """maragall/stitcher's Auto checkbox. The panel's own tooltip explains why a fixed default
+    is dangerous -- a ramp wider than the overlap never reaches full weight and dims the seam
+    -- and this is the control that removes the guess. Formula is the reference tool's:
+    median seam overlap x 2, floored at 10."""
+    from squidmip._stitch import _BLEND_PX, auto_blend_px
+
+    # Spacing chosen so the ANSWER IS NOT THE DEFAULT: a 100 px overlap -> 200 px ramp, while
+    # _BLEND_PX is 128. With the module fixture's 64 px overlap the measurement happens to
+    # equal the default, and a mutant that ignores the measurement entirely stays green.
+    step = TILE - 100
+    positions = [((i // GRID) * float(step), (i % GRID) * float(step))
+                 for i in range(GRID * GRID)]
+    b = auto_blend_px(positions, (PIXEL_UM, PIXEL_UM), (TILE, TILE))
+    assert b == 200
+    assert b != _BLEND_PX
+
+
+def test_auto_blend_reaches_the_feather_profile(master, monkeypatch):
+    import tilefusion.utils as utils
+
+    real = utils.make_1d_profile
+    seen = []
+    monkeypatch.setattr(utils, "make_1d_profile",
+                        lambda n, b, *a, **kw: seen.append(b) or real(n, b, *a, **kw))
+    from squidmip._stitch import auto_blend_px
+
+    reader = _FakeReader(master)
+    positions = _positions_yx_um(reader.metadata, "A1", list(range(GRID * GRID)))
+    expected = auto_blend_px(positions, (PIXEL_UM, PIXEL_UM), (TILE, TILE))
+    stitch_region(reader, "A1", list(range(GRID * GRID)), channels=[0],
+                  blend_px=None, max_workers=2)          # None = Auto
+    assert seen and seen[0] == expected
+
+
+def test_an_explicit_blend_width_still_wins_over_auto(master, monkeypatch):
+    import tilefusion.utils as utils
+
+    real = utils.make_1d_profile
+    seen = []
+    monkeypatch.setattr(utils, "make_1d_profile",
+                        lambda n, b, *a, **kw: seen.append(b) or real(n, b, *a, **kw))
+    reader = _FakeReader(master)
+    stitch_region(reader, "A1", list(range(GRID * GRID)), channels=[0],
+                  blend_px=37, max_workers=2)
+    assert seen and seen[0] == 37
+
+
+def test_auto_blend_falls_back_when_nothing_overlaps(master):
+    """A sparse/freeform acquisition legitimately has isolated FOVs -- the same case
+    solve_offsets_px degrades to stage placement for. Auto must not divide by an empty set."""
+    from squidmip._stitch import auto_blend_px
+
+    far = [(0.0, 0.0), (10000.0, 0.0), (0.0, 10000.0), (10000.0, 10000.0)]
+    assert auto_blend_px(far, (PIXEL_UM, PIXEL_UM), (TILE, TILE)) > 0

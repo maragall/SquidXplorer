@@ -4873,8 +4873,12 @@ def _result_win(op="bgsub", region="A1", channels=("405", "488")):
     win._readout = type("R", (), {"setText": lambda self, t: setattr(self, "t", t),
                                   "text": lambda self: getattr(self, "t", "")})()
     win._meta = {
-        "fovs_per_region": {region: [0, 1]},
-        "fov_positions_um": {(region, 0): (0.0, 0.0), (region, 1): (6.0, 0.0)},
+        # B7 is a REAL region here, with real positions. Without it the off-screen-drop test
+        # would pass for the wrong reason: an unknown region cannot complete anyway, so the
+        # guard it means to pin could be deleted and the test would stay green.
+        "fovs_per_region": {region: [0, 1], "B7": [0, 1]},
+        "fov_positions_um": {(region, 0): (0.0, 0.0), (region, 1): (6.0, 0.0),
+                             ("B7", 0): (0.0, 0.0), ("B7", 1): (6.0, 0.0)},
         "pixel_size_um": 1.0,
         "frame_shape": (8, 8),
         "dtype": "uint16",
