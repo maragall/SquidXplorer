@@ -12,16 +12,14 @@ they run in milliseconds.
 
 from __future__ import annotations
 
-import importlib.util
-from pathlib import Path
-
 import numpy as np
 import pytest
 
-_SPEC = importlib.util.spec_from_file_location(
-    "decon_qc", Path(__file__).resolve().parent.parent / "tools" / "decon_qc.py")
-decon_qc = importlib.util.module_from_spec(_SPEC)
-_SPEC.loader.exec_module(decon_qc)
+# The QC measurement and the turbo rendering live in the PACKAGE now, not in the script, so
+# the GUI's deconvolution panel and tools/decon_qc.py call the same functions. These tests
+# were written against the script and are deliberately UNCHANGED apart from this import:
+# if the move altered any behaviour they go red.
+from squidmip import _decon_qc as decon_qc
 
 
 DXY, DZ = 0.752, 1.5
@@ -153,3 +151,97 @@ def test_the_montage_has_one_row_per_iteration_and_two_columns(tmp_path):
     out = tmp_path / "montage.png"
     decon_qc.write_montage(out, rows, centre, DXY, DZ, "test", view_half=8)
     assert out.exists() and out.stat().st_size > 0
+
+
+# --- the ORTHOGONAL COMPOSITE (the GUI panel's picture) ---------------------------------
+#
+# Julio asked for "the deconvolved 2-D image rendered in turbo, with the x-z and y-z
+# orthogonal strips CONCATENATED to it". That is one array, not three pictures, so it is
+# built and tested here rather than assembled by the Qt panel -- a panel that pasted three
+# pixmaps together would be a second renderer to keep in step with write_montage.
+
+def test_the_composite_is_the_xy_plane_with_the_two_strips_attached():
+    """Shape, exactly: x-y (Y,X) with y-z (Y,Z) to its RIGHT and x-z (Z,X) BELOW it.
+
+    Getting this wrong is not a cosmetic bug: a transposed y-z strip shows the halo along
+    the wrong axis, and the whole point of the panel is judging that halo.
+    """
+    volume = np.zeros((5, 40, 60), dtype=np.float32)
+    volume[2, 20, 30] = 1.0
+    m = decon_qc.qc_composite(volume, (2, 20, 30), gap=2)
+    # (Y + gap + Z, X + gap + Z) = (40 + 2 + 5, 60 + 2 + 5)
+    assert m.shape == (47, 67)
+
+
+def test_the_composite_is_cropped_around_the_structure_like_the_montage():
+    volume = np.zeros((5, 80, 80), dtype=np.float32)
+    volume[2, 40, 40] = 1.0
+    m = decon_qc.qc_composite(volume, (2, 40, 40), view_half=8, gap=2)
+    assert m.shape == (16 + 2 + 5, 16 + 2 + 5)
+
+
+def test_the_three_views_share_ONE_intensity_scale():
+    """Per-panel normalisation would be a LIE here.
+
+    write_montage normalises each panel to its own peak on purpose -- it compares one
+    iteration against another. The composite compares three sections of the SAME volume at
+    the SAME iteration, so a dim x-z strip must LOOK dim. Normalising it to its own maximum
+    would paint an out-of-focus section as bright as the in-focus one and hide exactly the
+    axial halo the panel exists to show.
+    """
+    volume = np.zeros((5, 40, 40), dtype=np.float32)
+    volume[2, 20, 20] = 1000.0        # the structure the composite is centred on
+    # A 5x BRIGHTER structure elsewhere in the same plane. It is deliberately off row y=20
+    # and off column x=20, so it lands in the x-y panel but in NEITHER strip: the volume's
+    # peak (5000) and each strip's own peak (1000) are therefore different numbers, which is
+    # the only way this test can tell a shared scale from a per-panel one. (An earlier
+    # version of this test put the peak inside the strips, where both policies give the same
+    # answer -- it passed against per-panel normalisation and proved nothing.)
+    volume[2, 10, 10] = 5000.0
+    # ...and the volume's true peak on a DIFFERENT z, so it is in no panel at all. Without
+    # this the x-y panel's own peak equals the volume's and per-panel normalisation of that
+    # panel is indistinguishable from a shared scale.
+    volume[0, 30, 30] = 8000.0
+    m = decon_qc.qc_composite(volume, (2, 20, 20), gap=2, gamma=1.0)
+    # One scale, set by the volume's 8000 peak. Per-panel normalisation would put a 1.0
+    # somewhere in each of the three panels instead.
+    assert m[40 + 2 + 2, 20] == pytest.approx(0.125, abs=1e-6)  # x-z strip, z=2, at x=20
+    assert m[20, 40 + 2 + 2] == pytest.approx(0.125, abs=1e-6)  # y-z strip, z=2, at y=20
+    assert m[10, 10] == pytest.approx(0.625, abs=1e-6)          # x-y panel, its own peak
+    assert m[:40, :40].max() == pytest.approx(0.625, abs=1e-6)  # nothing reaches 1.0
+
+
+def test_the_gaps_are_nan_so_a_separator_is_never_mistaken_for_signal():
+    """A gap filled with 0.0 renders as turbo's dark blue -- indistinguishable from
+    background, which is precisely the intensity range the halo lives in."""
+    volume = np.zeros((5, 40, 40), dtype=np.float32)
+    volume[2, 20, 20] = 1.0
+    m = decon_qc.qc_composite(volume, (2, 20, 20), gap=2)
+    assert np.isnan(m[40:42, :]).all()          # the horizontal separator row band
+    assert np.isnan(m[:, 40:42]).all()          # the vertical separator column band
+    assert not np.isnan(m[:40, :40]).any()      # the x-y panel itself carries no NaN
+
+
+def test_the_corner_that_no_section_covers_is_blank():
+    """Bottom-right is (z vs z): there is no such section, so it must not show pixels."""
+    volume = np.zeros((5, 40, 40), dtype=np.float32)
+    volume[2, 20, 20] = 1.0
+    m = decon_qc.qc_composite(volume, (2, 20, 20), gap=2)
+    assert np.isnan(m[42:, 42:]).all()
+
+
+def test_turbo_rgb_is_turbo_and_paints_the_gaps_neutral():
+    """The colormap is matplotlib's turbo, not a hand-rolled ramp, and NaN is NOT mapped
+    into the ramp -- otherwise the separator reads as a real intensity."""
+    pytest.importorskip("matplotlib")
+    panel = np.array([[0.0, 1.0], [np.nan, 0.5]], dtype=np.float64)
+    rgb = decon_qc.turbo_rgb(panel)
+    assert rgb.shape == (2, 2, 3) and rgb.dtype == np.uint8
+    import matplotlib.cm
+    lo = (np.array(matplotlib.colormaps["turbo"](0.0)[:3]) * 255).round().astype(np.uint8)
+    hi = (np.array(matplotlib.colormaps["turbo"](1.0)[:3]) * 255).round().astype(np.uint8)
+    assert tuple(rgb[0, 0]) == tuple(lo)
+    assert tuple(rgb[0, 1]) == tuple(hi)
+    gap = tuple(int(v) for v in rgb[1, 0])
+    assert gap == decon_qc.GAP_RGB
+    assert gap != tuple(lo) and gap != tuple(hi)

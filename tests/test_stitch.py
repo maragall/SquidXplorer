@@ -446,3 +446,123 @@ class _DummyReader:
 
     def __getattr__(self, name):  # pragma: no cover - must not be reached
         raise AssertionError(f"reader touched ({name}) before the plane-op guard refused")
+
+
+# ---------------------------------------------------------------------------------------
+# blunder rejection: the operator's two knobs (ported from maragall/stitcher's GUI)
+# ---------------------------------------------------------------------------------------
+#
+# maragall/stitcher exposes "Outlier rel: N%" and "abs: N px" as the two controls over
+# two_round_optimization's blunder rejection. They were module constants here, so the
+# stitcher panel had nothing to bind to. These tests pin that the values actually REACH
+# the solver -- a parameter that is accepted and then ignored is the exact defect shape
+# this repo has shipped before (a test that read green while the function it called had
+# grown a third return value).
+
+
+def _spy_two_round(monkeypatch):
+    """Record the args tilefusion's two_round_optimization is called with, and short-circuit
+    it. Patched on the tilefusion module because _solve imports it at CALL time."""
+    import tilefusion.optimization as opt
+
+    seen = {}
+
+    def _fake(edges, n_tiles, anchors, rel, abs_, flag):
+        seen.update(rel=rel, abs=abs_, n_tiles=n_tiles, anchors=anchors)
+        return np.zeros((n_tiles, 2), dtype=np.float64)
+
+    monkeypatch.setattr(opt, "two_round_optimization", _fake)
+    return seen
+
+
+def _tiles_and_positions(master):
+    reader = _FakeReader(master, error_px={3: (6.0, -4.0)})
+    fovs = list(range(GRID * GRID))
+    tiles = np.stack([np.stack([reader.read("A1", f, CHANNELS[0])]) for f in fovs])
+    return tiles, _positions_yx_um(reader.metadata, "A1", fovs)
+
+
+def test_solve_defaults_are_tilefusion_run_s_own_thresholds(master, monkeypatch):
+    """Unset, the solve must behave EXACTLY as it did: TileFusion.run()'s 0.5 / 2.0."""
+    from squidmip._stitch import _ABS_THRESH, _REL_THRESH
+
+    seen = _spy_two_round(monkeypatch)
+    tiles, positions = _tiles_and_positions(master)
+    solve_offsets_px(tiles, positions, (1.0, 1.0), (TILE, TILE), max_workers=2)
+    assert (seen["rel"], seen["abs"]) == (_REL_THRESH, _ABS_THRESH)
+
+
+def test_solve_forwards_the_operator_s_thresholds(master, monkeypatch):
+    seen = _spy_two_round(monkeypatch)
+    tiles, positions = _tiles_and_positions(master)
+    solve_offsets_px(tiles, positions, (1.0, 1.0), (TILE, TILE), max_workers=2,
+                     rel_thresh=0.25, abs_thresh=7.5)
+    assert (seen["rel"], seen["abs"]) == (0.25, 7.5)
+
+
+def test_stitch_region_forwards_the_thresholds_all_the_way_down(master, monkeypatch):
+    """The one that matters for the panel: the kwargs a user sets in the LEFT pane travel
+    stitch_plate -> stitch_region -> solve_offsets_px -> two_round_optimization. Accepting
+    them at the top and dropping them one layer down would leave the controls inert while
+    looking like they worked."""
+    seen = _spy_two_round(monkeypatch)
+    reader = _FakeReader(master, error_px={3: (6.0, -4.0)})
+    stitch_region(reader, "A1", list(range(GRID * GRID)), channels=[0], blend_px=24,
+                  block_px=512, max_workers=2, rel_thresh=0.33, abs_thresh=9.0)
+    assert (seen["rel"], seen["abs"]) == (0.33, 9.0)
+
+
+def test_thresholds_must_be_positive(master):
+    """A zero/negative threshold rejects every link or none; refuse by name rather than
+    silently solving on an empty edge set and returning zeros that look like 'no error'."""
+    tiles, positions = _tiles_and_positions(master)
+    with pytest.raises(ValueError, match="rel_thresh"):
+        solve_offsets_px(tiles, positions, (1.0, 1.0), (TILE, TILE), rel_thresh=0.0)
+    with pytest.raises(ValueError, match="abs_thresh"):
+        solve_offsets_px(tiles, positions, (1.0, 1.0), (TILE, TILE), abs_thresh=-1.0)
+
+
+# ---------------------------------------------------------------------------------------
+# write_plate: the SAVE path has to carry the operator's settings too
+# ---------------------------------------------------------------------------------------
+#
+# The panel's controls reach the preview through stitch_plate(**operator_kwargs). Without
+# the same seam on write_plate, "Run on the whole plate" would quietly use the pipeline
+# defaults while the panel showed the user's settings -- a tuned registration thrown away
+# at exactly the moment it is written to disk, with nothing said.
+
+
+class _MetaOnlyReader:
+    metadata = {"regions": ["A1"], "fovs_per_region": {"A1": [0]},
+                "channels": [{"name": "c0"}], "pixel_size_um": 1.0,
+                "frame_shape": (8, 8), "dtype": "uint16", "n_t": 1}
+
+
+def test_write_plate_forwards_operator_kwargs_to_stitch_plate(monkeypatch):
+    import squidmip._output as out_mod
+    import squidmip._stitch as st
+
+    seen = {}
+
+    def _fake_stitch_plate(reader, **kw):
+        seen.update(kw)
+        return iter(())
+
+    monkeypatch.setattr(st, "stitch_plate", _fake_stitch_plate)
+    monkeypatch.setattr(out_mod, "write_from_stream", lambda *a, **k: {"written": 0})
+    out_mod.write_plate(_MetaOnlyReader(), "/tmp/does-not-matter", projector="stitch",
+                        operator_kwargs={"blend_px": 64, "rel_thresh": 0.25, "register": False})
+    assert seen["blend_px"] == 64
+    assert seen["rel_thresh"] == 0.25
+    assert seen["register"] is False
+
+
+def test_write_plate_refuses_operator_kwargs_for_a_non_region_operator():
+    """project_plate has no such seam -- a projector's parameters are baked in at
+    registration. Accepting them here and dropping them is the silent failure this whole
+    change exists to avoid, so refuse BY NAME instead."""
+    import squidmip._output as out_mod
+
+    with pytest.raises(ValueError, match="operator_kwargs"):
+        out_mod.write_plate(_MetaOnlyReader(), "/tmp/does-not-matter", projector="mip",
+                            operator_kwargs={"blend_px": 64})

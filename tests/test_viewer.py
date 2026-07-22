@@ -534,8 +534,14 @@ def test_run_operator_persists_via_write_plate(qapp, stub_detail, squid_dataset,
 
     def fake_write_plate(reader, out_dir, *, n_fovs=1, workers=None, projector="mip",
                          tiff=True, on_well=None, write_workers=4, stop=None, on_error=None,
-                         regions=None):
-        captured.update(projector=projector, tiff=tiff, out_dir=str(out_dir), regions=regions)
+                         regions=None, operator_kwargs=None):
+        # operator_kwargs is real_write_plate's IMA-decon-stitch-ui parameter: a REGION
+        # operator's per-run settings (registration, feather, thresholds) have to reach the
+        # SAVE path too, not just the preview. A stub whose signature drifts from the real
+        # function does not fail here by luck -- run_operator calls it with the keyword, so
+        # omitting it raises TypeError and this test goes red, which is how it was found.
+        captured.update(projector=projector, tiff=tiff, out_dir=str(out_dir), regions=regions,
+                        operator_kwargs=operator_kwargs)
         return {"plate": str(out_dir), "levels": 1}      # no wells — we only assert the dispatch
     monkeypatch.setattr(squidmip, "write_plate", fake_write_plate)
 
@@ -545,6 +551,7 @@ def test_run_operator_persists_via_write_plate(qapp, stub_detail, squid_dataset,
     win.run_operator("mip", out_parent=str(tmp_path))
     _drain_until(qapp, lambda: "projector" in captured)
     assert captured["projector"] == "mip"
+    assert captured["operator_kwargs"] is None      # a projector takes no per-run parameters
     assert captured["tiff"] is False                     # never the uncompressed TIFF duplicate
     assert captured["out_dir"].endswith(".hcs")          # persisted next to the acquisition
     win._stop_worker(); win.close()
@@ -3506,15 +3513,21 @@ def test_the_redock_BUTTON_works_not_just_the_method(qapp, stub_detail):
 
 # --- IMA-223/224/225: the three plane-op cards -------------------------------------------------
 
-def test_the_three_plane_op_cards_build_and_are_preview_only(qapp, stub_detail, squid_dataset):
+def test_the_plane_op_cards_build_and_are_preview_only(qapp, stub_detail, squid_dataset):
     """DRIVEN, not read: open each plane-op tab through the real _open_op_tab path and inspect
     the widgets it actually produced. A plane-op keeps z at full depth and _validate_image accepts
-    Z == 1 only, so the card must offer Preview and NO Save/destination half."""
+    Z == 1 only, so the card must offer Preview and NO Save/destination half.
+
+    DECON IS NO LONGER IN THIS LIST. It is still a plane-op in the engine, but its card is now
+    the RL semi-convergence QC panel (iteration count, +1, turbo x-z / y-z view in pane 3), not
+    the generic preview button -- the generic tab gave no way to choose an iteration count at
+    all, which is what Julio was blocked on. See the decon-specific test below.
+    """
     from squidmip import available_projectors
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
-    for key in ("decon", "bgsub", "flatfield"):
+    for key in ("bgsub", "flatfield"):
         assert key in available_projectors(), f"{key} is not registered in the engine"
         op = V._OPERATIONS_BY_KEY[key]
         win._open_op_tab(op.key, op.label, getattr(win, op.build_tab))
@@ -3537,18 +3550,118 @@ def test_flatfield_card_gates_preview_on_a_profile(qapp, stub_detail, squid_data
     win = V.PlateWindow(None)
     win.ingest(str(root))
     prev = {}
-    for key in ("decon", "bgsub", "flatfield"):
+    for key in ("bgsub", "flatfield"):
         op = V._OPERATIONS_BY_KEY[key]
         win._open_op_tab(op.key, op.label, getattr(win, op.build_tab))
         tab = win._op_tabs[key]
         prev[key] = next(b for b in tab.findChildren(QPushButton) if b.text() == "Preview")
-    assert prev["decon"].isEnabled() and prev["bgsub"].isEnabled()
+    assert prev["bgsub"].isEnabled()
     assert not prev["flatfield"].isEnabled(), "flat-field ran without an illumination profile"
     ff = win._op_tabs["flatfield"]
     assert [b for b in ff.findChildren(QPushButton) if "illumination profile" in b.text()], \
         "flat-field card has no profile chooser"
-    assert not [b for b in win._op_tabs["decon"].findChildren(QPushButton)
+    win.close()
+
+
+# --- IMA-decon-stitch-ui: the two operator INTERFACES in pane 1 --------------------------
+
+def test_the_decon_card_is_the_iteration_qc_panel_not_a_bare_preview(qapp, stub_detail,
+                                                                    squid_dataset):
+    """Julio: "The deconvolution is not showing the XZ/YZ strips on the turbo colormap ... so
+    that we can choose the iterations." The card must therefore carry an iteration count and a
+    way to add one, and must NOT have grown a profile chooser or a second contrast control."""
+    from squidmip._decon import QC_START_ITERATIONS
+    from squidmip._op_panels import DeconQCPanel
+
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    op = V._OPERATIONS_BY_KEY["decon"]
+    win._open_op_tab(op.key, op.label, getattr(win, op.build_tab))
+    qapp.processEvents()
+    tab = win._op_tabs["decon"]
+    assert isinstance(tab, DeconQCPanel)
+    assert tab.iter_spin.value() == QC_START_ITERATIONS
+    assert [b for b in tab.findChildren(QPushButton) if b.text() == "+1 iteration"]
+    assert not [b for b in tab.findChildren(QPushButton)
                 if "illumination profile" in b.text()], "decon grew a profile chooser"
+    win.close()
+
+
+def test_the_stitch_card_is_the_stitcher_control_surface(qapp, stub_detail, squid_dataset):
+    """The blocking item: maragall/stitcher's Settings group, in the top-left subpane."""
+    from squidmip._op_panels import StitcherPanel
+
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    op = V._OPERATIONS_BY_KEY["stitch"]
+    win._open_op_tab(op.key, op.label, getattr(win, op.build_tab))
+    qapp.processEvents()
+    tab = win._op_tabs["stitch"]
+    assert isinstance(tab, StitcherPanel)
+    assert tab.register_cb.isChecked()
+    assert tab.reg_channel_combo.count() == len(win._meta["channels"])
+    assert tab.scope_combo.count() >= 1
+    win.close()
+
+
+def test_the_stitcher_panel_kwargs_reach_the_worker(qapp, stub_detail, squid_dataset):
+    """End to end through the REAL run_operator: a setting made in pane 1 has to survive into
+    the object that actually runs the fuse. This is the seam a typo would break silently."""
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    op = V._OPERATIONS_BY_KEY["stitch"]
+    win._open_op_tab(op.key, op.label, getattr(win, op.build_tab))
+    tab = win._op_tabs["stitch"]
+    # The fixture's frames are tiny, so pick a feather that fits inside them -- the panel
+    # REFUSES a ramp as wide as the tile, and that refusal is asserted separately below.
+    tab.blend_spin.setValue(2)
+    tab.rel_spin.setValue(25)
+    tab.run_btn.click()
+    qapp.processEvents()
+    assert win._worker is not None, f"the run did not start: {win._readout.text()}"
+    assert win._worker._operator_kwargs["blend_px"] == 2
+    assert win._worker._operator_kwargs["rel_thresh"] == 0.25
+    win._stop_worker(); win.close()
+
+
+def test_an_impossible_feather_is_refused_in_the_readout_not_at_the_end_of_a_fuse(
+        qapp, stub_detail, squid_dataset):
+    """No silent failure and no half-run: a ramp wider than the tile stops the run BEFORE it
+    starts, with the reason in the status line."""
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    op = V._OPERATIONS_BY_KEY["stitch"]
+    win._open_op_tab(op.key, op.label, getattr(win, op.build_tab))
+    tab = win._op_tabs["stitch"]
+    tab.blend_spin.setValue(999)
+    tab.run_btn.click()
+    qapp.processEvents()
+    assert win._worker is None, "the run started with an impossible feather width"
+    assert "blend" in win._readout.text().lower()
+    win.close()
+
+
+def test_a_decon_qc_result_opens_as_a_tab_in_pane_3(qapp, stub_detail, squid_dataset):
+    """The seam with pane 3, driven: publish_qc_result must put the widget in the EXPLORE tab
+    bar (pane 3), not in the pane-1 console, and re-publishing the same title must reuse it."""
+    from squidmip._op_panels import DeconQCResultView
+
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    view = DeconQCResultView("B2/0/c0")
+    win.publish_qc_result(view, "Decon QC · B2/0/c0")
+    qapp.processEvents()
+    assert win._explore_tabs.indexOf(view) >= 0, "the QC result did not land in pane 3"
+    assert win._left_tabs.indexOf(view) < 0, "the QC result landed in pane 1"
+    before = win._explore_tabs.count()
+    win.publish_qc_result(view, "Decon QC · B2/0/c0")
+    qapp.processEvents()
+    assert win._explore_tabs.count() == before, "a second tab was stacked for the same subject"
     win.close()
 
 
