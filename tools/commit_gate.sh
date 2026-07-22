@@ -36,11 +36,30 @@ fi
 ROOT=$(git rev-parse --show-toplevel)
 cd "$ROOT"
 
+# PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 is required (without it the PyQt5 tests silently skip against
+# PySide) but it also stops pytest-timeout loading, so `--timeout=` becomes an UNRECOGNISED
+# ARGUMENT and pytest dies in 0.115s having collected nothing. That is how this gate shipped: it
+# never ran a single test, and every agent learned to reach for -wip. Load the plugin explicitly.
+#
+# No -x either. -x stops at the first failure, so the failure list handed to the flake re-run below
+# was truncated to one name; a real `assert False` sharing a run with a known flake could exit 0.
+# The whole suite runs, and every failure is re-checked.
 echo "commit-gate: running the suite before allowing this commit ..."
 if ! QT_QPA_PLATFORM=offscreen PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
-     python -m pytest -q -x --timeout=600 >/tmp/squidhcs_gate.$$ 2>&1; then
+     python -m pytest -q -p pytest_timeout --timeout=900 >/tmp/squidhcs_gate.$$ 2>&1; then
   # The four known-flaky tests (IMA-258) are races that pass in isolation. A flake must not
   # block a commit, but it must not silently pass one either - so re-run just the failures.
+  # If pytest never collected anything, this is a BROKEN GATE, not a green tree. Refuse loudly.
+  # The gate shipped in exactly this state and silently gated nothing for five worktrees.
+  if ! grep -qE "^[0-9]+ (passed|failed)|passed|failed" /tmp/squidhcs_gate.$$; then
+    echo ""
+    tail -20 /tmp/squidhcs_gate.$$
+    rm -f /tmp/squidhcs_gate.$$
+    echo ""
+    echo "commit-gate: REFUSED - pytest did not run (no pass/fail summary)."
+    echo "  the gate is broken, not the tree. fix the gate before committing."
+    exit 1
+  fi
   FAILED=$(grep -E "^FAILED " /tmp/squidhcs_gate.$$ | sed 's/^FAILED //; s/ .*//' || true)
   if [ -n "$FAILED" ]; then
     echo "commit-gate: re-running failures in isolation to separate flakes from breakage ..."
