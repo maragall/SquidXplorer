@@ -6131,14 +6131,119 @@ def _install_footprint_monitor(app, win):
     sys.excepthook = _hook
 
 
+# --- how many GUI windows may be open AT ONCE, across processes (Julio, IMA-window-cap) -----
+#
+# Every agent proof run opened another PlateWindow and left it there, until the screen was full
+# and swap was at 5.8 GB of 7. Nothing in the app said no, so the cap has to live HERE, at the
+# one place a real instance starts -- not in whatever script happened to launch it.
+#
+# flock on a slot file, deliberately NOT a pidfile. A pidfile must be cleaned up, and a GUI that
+# is killed or crashes never cleans up; that is precisely how these runs ended, so a pidfile
+# would have wedged the app permanently shut. The kernel drops an flock when the holder dies
+# however it dies, so a crashed window frees its slot with no recovery path to get wrong.
+
+DEFAULT_MAX_GUI = 1
+
+
+class GuiAlreadyOpen(RuntimeError):
+    """Refusing to open another GUI window: the cap is already used up."""
+
+
+class _GuiSlot:
+    """A held slot. Keep the reference alive: closing ``fd`` releases the lock."""
+
+    __slots__ = ("fd", "path")
+
+    def __init__(self, fd: int, path: Path) -> None:
+        self.fd = fd
+        self.path = path
+
+
+def gui_slot_limit() -> int:
+    """How many GUI windows may be open at once. ``SQUIDMIP_MAX_GUI`` overrides."""
+    raw = os.environ.get("SQUIDMIP_MAX_GUI")
+    if not raw:
+        return DEFAULT_MAX_GUI
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return DEFAULT_MAX_GUI
+
+
+def _gui_lock_dir() -> Path:
+    d = Path(os.environ.get("SQUIDMIP_GUI_LOCK_DIR")
+             or (Path.home() / ".cache" / "squidmip"))
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def acquire_gui_slot() -> _GuiSlot:
+    """Take one of the ``gui_slot_limit()`` slots, or raise :class:`GuiAlreadyOpen`.
+
+    Returns a handle whose lifetime IS the reservation -- hold it for as long as the window
+    lives. Never blocks: a GUI that hangs waiting for another GUI to exit is a worse bug than
+    the one this prevents.
+    """
+    import fcntl
+
+    limit = gui_slot_limit()
+    lock_dir = _gui_lock_dir()
+    for slot in range(limit):
+        path = lock_dir / f"gui-{slot}.lock"
+        fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(fd)          # somebody else holds this slot; try the next one
+            continue
+        os.ftruncate(fd, 0)
+        os.write(fd, f"{os.getpid()}\n".encode())
+        return _GuiSlot(fd, path)
+
+    raise GuiAlreadyOpen(
+        f"a SquidMIP window is already open ({limit} allowed at once). Close it first, or "
+        f"raise the cap with SQUIDMIP_MAX_GUI=<n>. Lock dir: {lock_dir}"
+    )
+
+
+def release_gui_slot(handle: Optional[_GuiSlot]) -> None:
+    """Give the slot back. Idempotent, and safe on an already-closed handle."""
+    if handle is None:
+        return
+    try:
+        os.close(handle.fd)       # closing the fd releases the flock
+    except OSError:
+        pass                      # already closed (or the holder died) -- the lock is gone either way
+
+
+def _gui_cap_applies() -> bool:
+    """The cap guards REAL windows only.
+
+    Offscreen runs (the test suite, and every automated proof) never put anything on Julio's
+    screen, and capping them would serialise the suite for no benefit.
+    """
+    return os.environ.get("QT_QPA_PLATFORM") != "offscreen"
+
+
 def main(dataset_path: str = None):
     path = dataset_path or (sys.argv[1] if len(sys.argv) > 1 else None)
+    slot = None
+    if _gui_cap_applies():
+        try:
+            slot = acquire_gui_slot()
+        except GuiAlreadyOpen as e:
+            print(f"squidmip-view: {e}", file=sys.stderr)
+            sys.exit(1)
     app = QApplication.instance() or QApplication(sys.argv)
     win = PlateWindow(path)
     _install_footprint_monitor(app, win)
+    win._gui_slot = slot                  # the reservation lives as long as the window
     win.show()
     if not app.property("_squidmip_test"):
-        sys.exit(app.exec_())
+        try:
+            sys.exit(app.exec_())
+        finally:
+            release_gui_slot(slot)
     return win
 
 
