@@ -4499,3 +4499,55 @@ def test_ima260_the_control_frame_is_really_painted_and_is_not_the_red_box(qapp,
     # ...and it is NOT the transient red current-FOV box wearing a different name.
     assert blue.red() < blue.blue(), "the control frame must be blue, not red"
     win.close()
+
+
+# ---------------------------------------------- Defect 4: ONE contract across the two registries
+#
+# _OPERATIONS (the card table) and runnable_operators() (the engine registry) are two lists that
+# launch the same operators, and the comment at the exploration tab already recorded them
+# diverging in production. They are not the same SET on purpose -- a card is presentation, an
+# engine entry is capability -- but "not the same set on purpose" was written in a comment and
+# enforced nowhere, so a card whose key is not runnable produced a dead button and said nothing.
+#
+# These pin the contract instead of restating it in prose.
+
+
+def test_every_card_declares_whether_it_is_a_runnable_operator():
+    """A card key that is not in the engine registry must be DECLARED non-runnable.
+
+    `minerva` is the honest case: an export hand-off, not an operator - handing its key to the
+    engine dies with a raw KeyError. That is fine, but it has to be said out loud, because the
+    same shape produced by a typo'd key is a button that silently does nothing.
+    """
+    runnable = set(V.runnable_operators())
+    for op in V._OPERATIONS:
+        if op.runnable:
+            assert op.key in runnable, (
+                f"card {op.key!r} declares runnable=True but the engine cannot run it "
+                f"(engine has: {sorted(runnable)}). Either it is not an operator - set "
+                "runnable=False - or its key is a typo."
+            )
+        else:
+            assert op.key not in runnable, (
+                f"card {op.key!r} declares runnable=False but the engine CAN run it; "
+                "the declaration is stale."
+            )
+
+
+def test_the_save_button_names_its_operator_instead_of_taking_the_first_card():
+    """`_OPERATIONS[0].key` made 'Save this subset to disk' mean whatever happened to be first.
+
+    Reordering the card table - a presentation edit - would then silently change which
+    operator the save button RUNS. The operator is now named.
+    """
+    assert V._SAVE_OPERATOR == "mip"
+    assert V._SAVE_OPERATOR in V.runnable_operators()
+    # and it must not be a positional accident: reordering the cards must not change it
+    assert V._SAVE_OPERATOR in V._OPERATIONS_BY_KEY
+
+
+def test_operator_label_falls_back_to_the_key_for_a_cardless_operator():
+    # `reference` is a registered projector with no card. It must still name itself rather
+    # than raising a bare KeyError out of the event loop.
+    assert V.operator_label("reference") == "reference"
+    assert V.operator_label("mip") == V._OPERATIONS_BY_KEY["mip"].label
