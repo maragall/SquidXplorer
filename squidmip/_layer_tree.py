@@ -63,7 +63,8 @@ from __future__ import annotations
 import re
 from typing import Any, Optional
 
-from PyQt5.QtCore import QAbstractItemModel, QEvent, QModelIndex, Qt
+from PyQt5.QtCore import QAbstractItemModel, QEvent, QModelIndex, QSize, Qt
+from PyQt5.QtGui import QImage
 from PyQt5.QtWidgets import QFrame, QTreeView
 
 from squidmip._napari_view import MosaicLayers, key_of
@@ -71,6 +72,55 @@ from squidmip._napari_view import MosaicLayers, key_of
 #: internalId marking a top-level (processing-layer) row. Qt hands the id back on parent()
 #: lookups, so a child stores its OP ROW there and a top-level row stores this sentinel.
 _TOP = 0xFFFFFFFF
+
+
+#: napari's own delegate roles, resolved ONCE and by name. They live in
+#: ``napari._qt.containers`` -- private, like ``QtLayerControlsContainer`` already is, and for the
+#: same reason: the alternative is reimplementing napari's layer row and reintroducing exactly the
+#: duplication this project keeps deleting. Resolved defensively so a napari upgrade that moves
+#: them costs the PRETTY rendering and not the pane.
+def _resolve_napari_roles() -> dict:
+    try:
+        from napari._qt.containers._base_item_model import ItemRole
+        from napari._qt.containers.qt_layer_model import LoadedRole, ThumbnailRole
+    except Exception:                       # noqa: BLE001 - cosmetic; the tree still works
+        return {}
+    return {"item": ItemRole, "thumbnail": ThumbnailRole, "loaded": LoadedRole}
+
+
+_NAPARI_ROLES: dict = _resolve_napari_roles()
+
+
+class _GroupItem:
+    """What a PROCESSING-LAYER row reports itself to be.
+
+    napari's delegate asks the item ``is_group()`` -- a branch it already carries for layer trees
+    -- and paints a folder (open when expanded) instead of an image icon. So a group row gets
+    napari's own folder treatment without us drawing anything.
+    """
+
+    def is_group(self) -> bool:
+        return True
+
+
+_GROUP_ITEM = _GroupItem()
+
+
+def _thumbnail_image(layer) -> Optional[Any]:
+    """The layer's own thumbnail as a QImage, or None.
+
+    napari keeps ``layer.thumbnail`` as an RGBA array and repaints it as the data changes, so
+    this is the SAME picture napari's own layer list shows -- read, never generated here.
+    """
+    if layer is None:
+        return None
+    thumb = getattr(layer, "thumbnail", None)
+    if thumb is None:
+        return None
+    try:
+        return QImage(thumb, thumb.shape[1], thumb.shape[0], QImage.Format_RGBA8888)
+    except Exception:                       # noqa: BLE001 - an odd thumbnail shape is not fatal
+        return None
 
 
 class MosaicTreeModel(QAbstractItemModel):
@@ -208,6 +258,36 @@ class MosaicTreeModel(QAbstractItemModel):
                 return None
             return Qt.Checked if layer.visible else Qt.Unchecked
 
+        # --- the roles napari's own LayerDelegate paints from -------------------------------
+        #
+        # Julio: "I still don't like these napari layer UX. The original napari layer widgets
+        # were way more beautiful." They were: napari does not draw a checkbox and a name, it
+        # draws an EYE, a type icon and the layer's THUMBNAIL, through `LayerDelegate`. Serving
+        # the delegate's roles here means we use napari's actual renderer instead of imitating
+        # it -- the same choice as embedding napari's window rather than rebuilding its controls.
+        if role == _NAPARI_ROLES.get("item"):
+            # The delegate asks the item what it IS: a group gets a folder icon (it checks
+            # `is_group()`, which exists for exactly this case), a channel gets the image icon
+            # for its layer type.
+            if key is None:
+                return _GROUP_ITEM
+            return self._mosaic.find(*key)
+
+        if role == _NAPARI_ROLES.get("thumbnail"):
+            if key is None:
+                return None                      # a group has no pixels of its own
+            layer = self._mosaic.find(*key)
+            return _thumbnail_image(layer)
+
+        if role == _NAPARI_ROLES.get("loaded"):
+            # Always loaded. The alternative starts napari's loading GIF, which animates forever
+            # unless something later says otherwise -- a spinner that outlives its cause is the
+            # same lie as an indicator that cannot turn off.
+            return True
+
+        if role == Qt.SizeHintRole:
+            return QSize(200, 34)                # napari's own row height; the thumbnail needs it
+
         return None
 
     def _group_state(self, op: str):
@@ -252,6 +332,33 @@ class MosaicTreeModel(QAbstractItemModel):
             child = self.index(child_row, 0, index)
             self.dataChanged.emit(child, child, [role])
         return True
+
+
+def _install_napari_delegate(view) -> bool:
+    """Paint the rows with napari's OWN ``LayerDelegate``, not with Qt's default.
+
+    Julio: "I still don't like these napari layer UX. The original napari layer widgets were way
+    more beautiful."
+
+    He is right, and the gap was never styling. A default Qt item view draws a native checkbox
+    and a string. napari draws an EYE (its stylesheet paints the check indicator as an eye icon),
+    a per-type icon, and the layer's live THUMBNAIL -- all in `LayerDelegate.paint`. Imitating
+    that would be a second renderer to keep in step with napari's, which is the duplication this
+    project keeps deleting; so the model serves the delegate's roles instead and napari paints.
+
+    Returns whether it took, so the caller/tests can tell "napari painted this" from "we fell
+    back". Failure is cosmetic and never fatal: an unstyled tree is ugly, an exception while
+    building pane 2 costs the viewer.
+    """
+    if not _NAPARI_ROLES:
+        return False
+    try:
+        from napari._qt.containers._layer_delegate import LayerDelegate
+
+        view.setItemDelegate(LayerDelegate())
+        return True
+    except Exception:                       # noqa: BLE001 - cosmetic; keep Qt's default delegate
+        return False
 
 
 def _napari_stylesheet() -> str:
@@ -305,6 +412,7 @@ class MosaicTree(QTreeView):
         self.setFrameShape(QFrame.NoFrame)      # napari's docks carry the frame, not the widget
         self._restyling = False                 # see changeEvent: setStyleSheet re-enters
         self.setStyleSheet(_napari_stylesheet())
+        _install_napari_delegate(self)
 
     def changeEvent(self, e):
         """Follow a napari THEME switch. The stylesheet is a snapshot of the theme at build time;

@@ -420,3 +420,51 @@ def test_the_tree_is_mounted_beside_naparis_own_controls(tmp_path):
     assert got["other_group_untouched"] == [True] * 4
     assert got["leaf_state_after_external_change"] == 0        # Qt.Unchecked
     assert got["group_state_after_external_change"] == 1       # Qt.PartiallyChecked
+
+
+# ------------------------------------- napari PAINTS these rows; we do not imitate its look
+#
+# Julio: "I still don't like these napari layer UX. The original napari layer widgets were way
+# more beautiful." The gap was never styling. Qt's default item view draws a native checkbox and
+# a string; napari's LayerDelegate draws an eye, a per-type icon and the layer's live thumbnail.
+# Imitating that would be a second renderer to keep in step with napari's own.
+
+def test_the_rows_are_painted_by_naparis_own_delegate(qapp, mosaic):
+    """Not "a delegate is set" -- napari's, by class. A fallback that silently kept Qt's default
+    would leave the ugly rows on screen with every test still green."""
+    from squidmip import _layer_tree as LT
+
+    tree = LT.MosaicTree(mosaic)
+    delegate = tree.itemDelegate()
+    assert type(delegate).__module__.startswith("napari."), (
+        f"rows are painted by {type(delegate).__module__}.{type(delegate).__name__}, "
+        "not by napari -- the tree fell back to Qt's default look"
+    )
+    assert type(delegate).__name__ == "LayerDelegate"
+
+
+def test_the_model_serves_every_role_that_delegate_paints_from(qapp, mosaic):
+    """The delegate is only as good as the roles behind it. Miss one and the row degrades
+    silently: no thumbnail, or a folder icon on a channel, with nothing raised."""
+    from squidmip import _layer_tree as LT
+
+    assert LT._NAPARI_ROLES, "napari's delegate roles did not resolve; rows cannot be painted"
+    view = LT.MosaicTree(mosaic)        # held: the model is parented to it and dies with it
+    model = view.model()
+    group = model.index(0, 0)
+    channel = model.index(0, 0, group)
+
+    # a PROCESSING LAYER is a group -> napari paints a folder, open when expanded
+    item = model.data(group, LT._NAPARI_ROLES["item"])
+    assert item is not None and item.is_group() is True
+
+    # a CHANNEL is the real napari layer -> it gets the image icon and its own thumbnail.
+    # Row 0 of the raw group is 405: the fixture adds 405/488/561/638 in that order.
+    assert model.data(channel, LT._NAPARI_ROLES["item"]) is mosaic.find("raw", "405")
+    thumb = model.data(channel, LT._NAPARI_ROLES["thumbnail"])
+    assert thumb is not None and thumb.width() > 0, "no thumbnail: the row will paint empty"
+
+    # loaded, or napari starts a loading GIF that never stops
+    assert model.data(channel, LT._NAPARI_ROLES["loaded"]) is True
+    # and the row must be tall enough for the thumbnail napari draws into it
+    assert model.data(channel, Qt.SizeHintRole).height() >= 30
