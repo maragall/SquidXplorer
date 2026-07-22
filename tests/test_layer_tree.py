@@ -468,3 +468,38 @@ def test_the_model_serves_every_role_that_delegate_paints_from(qapp, mosaic):
     assert model.data(channel, LT._NAPARI_ROLES["loaded"]) is True
     # and the row must be tall enough for the thumbnail napari draws into it
     assert model.data(channel, Qt.SizeHintRole).height() >= 30
+
+
+def test_the_rows_actually_PAINT_without_raising(qapp, mosaic):
+    """Render the view for real, into a pixmap.
+
+    THE test that was missing. Serving the delegate's roles is not the same as surviving its
+    paint: `LayerDelegate._paint_thumbnail` calls `index.model().sourceModel().all_loaded()`,
+    because in napari the view always sits behind a QSortFilterProxyModel. Ours does not, so
+    every repaint raised AttributeError -- 54 tracebacks in a single launch -- while the
+    role-level tests stayed green, because reading a role never paints a row.
+
+    Qt swallows exceptions raised inside paint(), so this installs an excepthook to catch them.
+
+    MUTATION: remove `sourceModel` or `all_loaded` from the model and this goes red.
+    """
+    import sys
+
+    from PyQt5.QtGui import QPixmap
+
+    from squidmip import _layer_tree as LT
+
+    view = LT.MosaicTree(mosaic)
+    view.resize(300, 400)
+    view.expandAll()
+
+    caught = []
+    original = sys.excepthook
+    sys.excepthook = lambda *a: caught.append(a)
+    try:
+        pixmap = QPixmap(view.size())
+        view.render(pixmap)          # drives delegate.paint() over every visible row
+    finally:
+        sys.excepthook = original
+
+    assert not caught, f"painting a row raised: {caught[0][1] if caught else ''}"

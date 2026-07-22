@@ -106,6 +106,16 @@ class _GroupItem:
 _GROUP_ITEM = _GroupItem()
 
 
+def _empty_thumbnail() -> Any:
+    """A fully transparent tile, for rows that have no pixels of their own."""
+    img = QImage(32, 32, QImage.Format_RGBA8888)
+    img.fill(0)
+    return img
+
+
+_EMPTY_THUMBNAIL = _empty_thumbnail()
+
+
 def _thumbnail_image(layer) -> Optional[Any]:
     """The layer's own thumbnail as a QImage, or None.
 
@@ -274,10 +284,15 @@ class MosaicTreeModel(QAbstractItemModel):
             return self._mosaic.find(*key)
 
         if role == _NAPARI_ROLES.get("thumbnail"):
+            # NEVER None. The delegate does QPixmap.fromImage(index.data(ThumbnailRole)) with no
+            # guard, so a missing thumbnail is a TypeError on every repaint. A group has no
+            # pixels of its own, so it gets a TRANSPARENT tile: nothing is drawn, and nothing is
+            # invented either (borrowing a channel's thumbnail would label the group with one
+            # arbitrary channel's picture).
             if key is None:
-                return None                      # a group has no pixels of its own
+                return _EMPTY_THUMBNAIL
             layer = self._mosaic.find(*key)
-            return _thumbnail_image(layer)
+            return _thumbnail_image(layer) or _EMPTY_THUMBNAIL
 
         if role == _NAPARI_ROLES.get("loaded"):
             # Always loaded. The alternative starts napari's loading GIF, which animates forever
@@ -289,6 +304,24 @@ class MosaicTreeModel(QAbstractItemModel):
             return QSize(200, 34)                # napari's own row height; the thumbnail needs it
 
         return None
+
+    # -- the contract napari's LayerDelegate expects of the model behind a view ------------
+    #
+    # `_paint_thumbnail` calls `index.model().sourceModel().all_loaded()`, because in napari the
+    # view always sits behind a QSortFilterProxyModel. Ours does not, so painting raised
+    # AttributeError on EVERY repaint -- 54 tracebacks in one launch, while the headless tests
+    # stayed green because they read roles and never actually painted a row.
+    #
+    # Implementing the two methods is the smaller lie than inserting a proxy we do not otherwise
+    # need. They are here, next to the delegate roles they serve, and named as what they are.
+
+    def sourceModel(self):
+        """This model IS the source; there is no proxy in front of it."""
+        return self
+
+    def all_loaded(self) -> bool:
+        """Every row is loaded. See ``LoadedRole`` in ``data`` for why that is unconditional."""
+        return True
 
     def _group_state(self, op: str):
         """DERIVED, never stored. See the module docstring on ``GroupLayer._visible``."""
