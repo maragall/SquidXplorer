@@ -4499,3 +4499,105 @@ def test_ima260_the_control_frame_is_really_painted_and_is_not_the_red_box(qapp,
     # ...and it is NOT the transient red current-FOV box wearing a different name.
     assert blue.red() < blue.blue(), "the control frame must be blue, not red"
     win.close()
+
+
+# ------------------------------------------------- the raw mosaic preview hands over a PYRAMID
+#
+# The written-OME-Zarr path has always given napari a multiscale pyramid. The raw preview path
+# gave it full-resolution fused planes: 54.9 MB per channel per z on the real 10x region, four
+# channels composited, re-fused on every z step. These pin the wiring that closes that gap.
+
+
+class _PyrReader:
+    #: The plane cache keys on the acquisition a reader reads, so every reader must name it.
+    def __init__(self, frame=(256, 256), path="/fake/acquisition/viewer"):
+        self.frame = frame
+        self._path = path
+
+    def read(self, region, fov, channel, z, t=0):
+        return np.full(self.frame, z + 1, dtype=np.uint16)
+
+
+def _pyr_meta(nz=4, n=16, frame=(256, 256), px=1.0):
+    return {
+        "regions": ["A1"],
+        "fovs_per_region": {"A1": list(range(n))},
+        "fov_positions_um": {("A1", i): (i * frame[1] * px, 0.0) for i in range(n)},
+        "pixel_size_um": px,
+        "frame_shape": frame,
+        "dtype": "uint16",
+        "n_z": nz,
+        "dz_um": 1.5,
+        "channels": [{"name": "488"}, {"name": "561"}],
+    }
+
+
+def test_the_mosaic_worker_emits_a_pyramid_not_a_single_resolution_stack(qapp):
+    """``_MosaicWorker`` is what feeds pane 2 on OPEN, before any operator runs."""
+    meta = _pyr_meta()
+    got, problems = [], []
+    w = V._MosaicWorker(_PyrReader(), meta, "A1", ["488", "561"])
+    w.ready.connect(lambda r, ch, data, bbox: got.append((ch, data)))
+    w.problem.connect(problems.append)         # or a failure reads as a silent empty list
+    w.run()                                    # synchronous; no thread, no event loop
+
+    assert problems == [], f"the worker reported: {problems}"
+    assert [ch for ch, _ in got] == ["488", "561"]
+    for ch, data in got:
+        assert isinstance(data, list), f"{ch}: napari's multiscale contract is a LIST of levels"
+        assert len(data) > 1, f"{ch}: a 256x4096 mosaic has room for a pyramid; got one level"
+        for above, below in zip(data, data[1:]):
+            assert below.shape[-2] < above.shape[-2] and below.shape[-1] < above.shape[-1]
+        assert all(lv.shape[0] == 4 for lv in data), "every level keeps the z axis"
+
+
+def test_the_mosaic_worker_builds_the_pyramid_without_reading_anything(qapp):
+    """Opening a region must not cost a fuse. Four channels x 10 z x 54.9 MB is 2.2 GB."""
+    reads = []
+
+    class _Counting(_PyrReader):
+        def read(self, *a, **kw):
+            reads.append(a)
+            return super().read(*a, **kw)
+
+    problems = []
+    w = V._MosaicWorker(_Counting(), _pyr_meta(), "A1", ["488", "561"])
+    w.ready.connect(lambda *a: None)
+    w.problem.connect(problems.append)
+    w.run()
+    assert problems == [], f"the worker reported: {problems}"
+    assert reads == [], f"building the pyramids read {len(reads)} frames; it must read none"
+
+
+def test_on_mosaic_plane_tells_napari_the_data_is_multiscale(qapp):
+    """A pyramid passed WITHOUT ``multiscale=True`` is just a list napari cannot use — it would
+    either error or take level 0 and render exactly as slowly as before."""
+    calls = []
+
+    class _Mosaic:
+        def add_mosaic(self, op, channel, data, **kw):
+            calls.append((op, channel, data, kw))
+
+    class _Pane:
+        ok = True
+        mosaic = _Mosaic()
+
+        def say(self, msg):
+            pass
+
+    win = V.PlateWindow.__new__(V.PlateWindow)
+    win._mosaic_pane = _Pane()
+    win._mosaic_region = "A1"
+    win._meta = _pyr_meta()
+
+    levels = [np.zeros((4, 64, 48), "uint16"), np.zeros((4, 32, 24), "uint16")]
+    V.PlateWindow._on_mosaic_plane(win, "raw", "A1", "488", levels, (0.0, 0.0, 10.0, 8.0))
+
+    assert len(calls) == 1
+    op, ch, data, kw = calls[0]
+    assert kw.get("multiscale") is True, "napari must be told the data is a pyramid"
+    assert data is levels
+    # napari OWNS contrast: still no contrast_limits, pyramid or not.
+    assert "contrast_limits" not in kw
+    # the z scale commit 19cd491 established must survive the pyramid
+    assert kw.get("z_scale_um") == 1.5

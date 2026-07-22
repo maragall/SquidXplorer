@@ -3246,7 +3246,7 @@ class _MosaicWorker(QThread):
         self._stop.set()
 
     def run(self):
-        from squidmip._mosaic_source import fuse_region_stack, mosaic_bbox_um
+        from squidmip._mosaic_source import fuse_region_pyramid, mosaic_bbox_um
 
         try:
             bbox = mosaic_bbox_um(self._meta, self._region)
@@ -3259,10 +3259,16 @@ class _MosaicWorker(QThread):
             if self._stop.is_set():
                 break
             try:
-                # A LAZY (z, y, x) stack when the acquisition has z, so napari's OWN dimension
-                # slider becomes the z control; a plain plane when n_z == 1, so no singleton
-                # slider appears. Only the visible z is ever materialised.
-                res = fuse_region_stack(self._reader, self._meta, self._region, ch)
+                # A LAZY MULTISCALE PYRAMID of (z, y, x) levels — the same shape of data the
+                # written-OME-Zarr path has always handed napari via open_pyramid. napari fetches
+                # only the clipped visible region of the level matching the current zoom, so a
+                # fit-to-window view costs a coarse level (~0.9 MB) instead of a full-resolution
+                # fused plane (54.9 MB on the real 10x region), per channel, per z step.
+                #
+                # napari's own dimension slider is still the z control: every level keeps the z
+                # axis at full length and only y/x are coarsened. Only the visible (level, z) is
+                # ever materialised, and _mosaic_source's bounded cache keeps a revisited one.
+                res = fuse_region_pyramid(self._reader, self._meta, self._region, ch)
             except Exception as exc:                # noqa: BLE001 - reported, never swallowed
                 self.problem.emit(f"{self._region}/{ch}: {type(exc).__name__}: {exc}")
                 continue
@@ -3271,8 +3277,8 @@ class _MosaicWorker(QThread):
                     f"{self._region}: no stage positions / pixel size — mosaic not derivable."
                 )
                 continue
-            data, _step, _nz = res
-            self.ready.emit(self._region, ch, data, bbox)
+            levels, _step, _nz = res
+            self.ready.emit(self._region, ch, levels, bbox)
             n += 1
         self.finished_count.emit(n)
 
@@ -5098,8 +5104,13 @@ class PlateWindow(QMainWindow):
         self._mosaic_worker = w
         w.start()
 
-    def _on_mosaic_plane(self, op: str, region: str, channel: str, plane, bbox_um):
-        """One channel of the mosaic arrived. Add it as a layer in the napari pane."""
+    def _on_mosaic_plane(self, op: str, region: str, channel: str, levels, bbox_um):
+        """One channel of the mosaic arrived, as a LAZY PYRAMID. Add it as a napari layer.
+
+        ``levels`` is always the list napari's ``multiscale=True`` contract wants — highest
+        resolution first — even when the mosaic is too small to have a second rung, so there is
+        one code path here and no sniffing of what arrived.
+        """
         pane = getattr(self, "_mosaic_pane", None)
         if pane is None or not getattr(pane, "ok", False):
             return
@@ -5122,9 +5133,13 @@ class PlateWindow(QMainWindow):
         # which is also the single owner the plate now follows. A LAZY z-stack makes this doubly
         # right: computing our own window would have to reduce over z, materialising the stack on
         # the GUI thread; napari autoscales from the visible plane instead.
+        # multiscale=True is what makes the pyramid a pyramid. Without it napari treats the list
+        # as one array to stack, or takes level 0 and renders exactly as slowly as before — the
+        # levels would exist and buy nothing.
         pane.mosaic.add_mosaic(
-            op, channel, plane,
+            op, channel, levels,
             colormap=_colormap_for(channel),
+            multiscale=True,
             bbox_um=bbox_um,
             z_scale_um=(self._meta or {}).get("dz_um"),
         )
