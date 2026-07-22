@@ -40,7 +40,7 @@ if "PySide6" in sys.modules or "PySide2" in sys.modules:
 
 from squidmip import _viewer as V  # noqa: E402
 
-from .test_viewer import qapp, stub_detail  # noqa: E402,F401  (fixtures)
+from .test_viewer import _drain_until, qapp, stub_detail  # noqa: E402,F401  (fixtures)
 
 
 def _slide_acquisition(root, region: str):
@@ -104,6 +104,12 @@ def test_focus_reference_plane_ranks_the_fov_in_view_not_the_regions_first(
     assert win._current_fov == 1, "the FOV on screen was not recorded"
 
     win._focus_reference_plane()
+    # The scan runs on a WORKER now (it used to do ~40-50 TIFF reads inside the clicked slot and
+    # froze the window solid), so the result arrives through the event loop.
+    assert win._focus_btn.isEnabled() is False, (
+        "the button stayed clickable during the scan — a second click would start a second scan")
+    assert _drain_until(qapp, lambda: bool(z_moves) or win._focus_btn.isEnabled()), (
+        "the focus worker never came back")
 
     # The readout names the FOV that was actually ranked. Asserting it rather than spying on
     # reader.read is deliberate: a background worker does its own reads on FOV 0 from another
@@ -111,4 +117,42 @@ def test_focus_reference_plane_ranks_the_fov_in_view_not_the_regions_first(
     assert z_moves, "autofocus never moved the z-slider"
     assert win._readout.text().startswith("B3:1 "), (
         f"autofocus reported {win._readout.text()!r}; it ranked the wrong FOV")
+    assert win._focus_btn.isEnabled(), "the button was left disabled after the scan finished"
+    win.close()
+
+
+def test_focus_reference_plane_works_without_a_double_click(qapp, stub_detail, squid_dataset):
+    """The button must act on the region the plate is SHOWING.
+
+    It used to demand ``_current_well``, which is only set by a double-click, and under napari
+    ``_detail`` is None so the handler returned before doing anything at all — a visible button
+    with zero function, telling the user to double-click a well they had already opened.
+    """
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    z_moves = []
+    win._detail.set_current_index = lambda axis, i: z_moves.append((axis, i))
+    assert win._current_well is None, "fixture invalid: something already activated a region"
+    assert win._cursor.region is not None, "opening a plate must put a region on screen"
+
+    win._focus_reference_plane()
+    assert _drain_until(qapp, lambda: bool(z_moves) or win._focus_btn.isEnabled())
+
+    assert z_moves, "the button did nothing without a prior double-click"
+    assert "double-click" not in win._readout.text()
+    win.close()
+
+
+def test_focus_reference_plane_on_a_single_plane_acquisition_says_so(
+        qapp, stub_detail, squid_dataset, monkeypatch):
+    """A refusal must be a sentence. Silently doing nothing is the failure being removed."""
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    win._meta["z_levels"] = [win._meta["z_levels"][0]]
+
+    win._focus_reference_plane()
+
+    assert "single z plane" in win._readout.text(), win._readout.text()
     win.close()

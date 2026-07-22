@@ -271,17 +271,35 @@ def fuse_region_stack(
             return None
         return probe[0], probe[1], 1
 
+    # ONE-PLANE CACHE, and only one. Fusing a plane of the 10x tissue set costs ~150 ms, and it
+    # was being paid TWICE for the same z on every region change: once by whoever samples the
+    # stack to decide a contrast window, and again by napari when it slices the same z to draw
+    # it. The cache holds the LAST plane only, so it is bounded at one plane per channel stack
+    # (~55 MB on that set) and dies with the stack when the region changes. It is not a general
+    # z cache: scrubbing z still costs one fuse per plane, which is the "requests only cost what
+    # is visible" rule this design is built on.
+    _cache: dict = {"z": None, "plane": None}
+    _cache_lock = __import__("threading").Lock()
+
     def _plane(z: int):
+        z = int(z)
+        with _cache_lock:
+            if _cache["z"] == z and _cache["plane"] is not None:
+                return _cache["plane"]
         got = fuse_region_mosaic(reader, meta, region, channel, z=int(z), t=t, max_px=max_px)
         if got is None:
-            return np.zeros((h, w), dtype=dtype)
-        arr = got[0]
-        if arr.shape != (h, w):        # a ragged z would silently misalign the stack
             out = np.zeros((h, w), dtype=dtype)
-            out[: min(h, arr.shape[0]), : min(w, arr.shape[1])] = \
-                arr[: min(h, arr.shape[0]), : min(w, arr.shape[1])]
-            return out
-        return arr
+        else:
+            arr = got[0]
+            if arr.shape != (h, w):    # a ragged z would silently misalign the stack
+                out = np.zeros((h, w), dtype=dtype)
+                out[: min(h, arr.shape[0]), : min(w, arr.shape[1])] = \
+                    arr[: min(h, arr.shape[0]), : min(w, arr.shape[1])]
+            else:
+                out = arr
+        with _cache_lock:
+            _cache["z"], _cache["plane"] = z, out
+        return out
 
     from dask import delayed
 

@@ -85,6 +85,10 @@ VIEWER_ENV = "SQUIDMIP_VIEWER"
 _NAPARI = "napari"
 META_KEY = "squidmip"
 
+#: Marks a layer whose contrast events are already tapped, so a re-registration cannot connect
+#: the same handler twice and fire the plate's sink N times for one user drag.
+_USER_TAP_KEY = "squidmip_user_contrast_tapped"
+
 
 #: Spellings of the ndviewer_light fallback accepted in SQUIDMIP_VIEWER.
 _NDV_NAMES = ("ndv", "ndviewer", "ndviewer_light")
@@ -426,6 +430,8 @@ class MosaicLayers:
         # before->after toggle preserves the window and there is only ever one value.
         if len(peers) > 1:
             self._model.layers.link_layers(peers, ("contrast_limits",))
+        # Re-tap: the LEAD layer for this channel may have just been replaced.
+        self._connect_user_contrast(channel)
 
     def remove_op_channel(self, op: str, channel: str) -> bool:
         layer = self.find(op, channel)
@@ -440,6 +446,8 @@ class MosaicLayers:
             peers.remove(layer)
             if len(peers) > 1:
                 self._model.layers.link_layers(peers, ("contrast_limits",))
+            # Removing the LEAD promotes a peer, and the tap lives on the lead.
+            self._connect_user_contrast(channel)
         self._model.layers.remove(layer)
         return True
 
@@ -506,18 +514,36 @@ class MosaicLayers:
         is told what the owner resolved, and it never writes back.
         """
         self._user_contrast_cbs.append(callback)
-        for channel, peers in self._by_channel.items():
-            if not peers:
-                continue
+        for channel in list(self._by_channel):
+            self._connect_user_contrast(channel)
 
-            def _fire(event=None, _ch=channel, _peers=peers):
-                if self.is_programmatic:
-                    return
-                lo, hi = _peers[0].contrast_limits
-                for cb in self._user_contrast_cbs:
-                    cb(_ch, float(lo), float(hi))
+    def _connect_user_contrast(self, channel: str) -> None:
+        """Attach the user-contrast tap to the layer that currently leads *channel*.
 
-            peers[0].events.contrast_limits.connect(_fire)
+        Called on every registration, not once at subscribe time. The subscription HAS to follow
+        the layer lifetime: ``_load_mosaic`` destroys and recreates every layer on each region
+        change, so a tap connected once at open was pointing at dead layers from the second
+        region onward and the plate's channel bar silently kept displaying the first region's
+        window. That is the same "subscribed to an object that got replaced" shape as the
+        selection copies this module's callers just removed, so it is fixed here rather than
+        papered over with a re-subscribe call at the far end.
+        """
+        peers = self._by_channel.get(channel) or []
+        if not peers or not self._user_contrast_cbs:
+            return
+        lead = peers[0]
+        if getattr(lead, "metadata", {}).get(_USER_TAP_KEY):
+            return                                  # already tapped; never connect twice
+        lead.metadata[_USER_TAP_KEY] = True
+
+        def _fire(event=None, _ch=channel, _layer=lead):
+            if self.is_programmatic:
+                return
+            lo, hi = _layer.contrast_limits
+            for cb in self._user_contrast_cbs:
+                cb(_ch, float(lo), float(hi))
+
+        lead.events.contrast_limits.connect(_fire)
 
     def on_contrast_changed(self, callback) -> None:
         """Subscribe to contrast changes via napari's PUBLIC event.
