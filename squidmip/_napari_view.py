@@ -337,6 +337,17 @@ class MosaicLayers:
             layer.translate = translate
 
         self._register_channel(key.channel, layer)
+        # Point the camera at the data. add_image does NOT move the camera, so the first
+        # mosaic landed outside the view and the canvas stayed black while all four layers sat
+        # correctly in the layer list -- Julio: "all I see are the controls... it just looks like
+        # an empty gray canvas". Reset only while this is the FIRST layer, so a later channel
+        # does not yank the view back while the user is panning.
+        try:
+            if len(self.ours()) <= 1:
+                self._model.reset_view()
+        except Exception:                        # noqa: BLE001 - view convenience, never fatal
+            pass
+
         return layer
 
     def _register_channel(self, channel: str, layer: Any) -> None:
@@ -443,20 +454,27 @@ def _first_level_shape(data: Any, multiscale: bool) -> Sequence[int]:
 # --------------------------------------------------------------------------------------
 
 
-def build_pane(parent: Any = None) -> tuple[Any, MosaicLayers]:
-    """Build a napari canvas as a plain QWidget component, with no napari Window.
+def build_pane(parent: Any = None) -> tuple[Any, MosaicLayers, Any]:
+    """Build a REAL napari Viewer and hand back its window, canvas and layer facade.
 
-    Returns ``(widget, MosaicLayers)``. The widget is an ordinary QWidget: parent it into our
-    three-pane layout like any other. No menu bar, no docks, no plugin surface, no
-    ``napari.run()`` and no second event loop — the host application's QApplication drives it.
+    Returns ``(qt_viewer, MosaicLayers, viewer)``.
+
+    This used to construct a bare ``QtViewer(ViewerModel())`` with no napari Window, to keep
+    napari's chrome out. That was the wrong trade. The Window is where napari's layer controls,
+    dims sliders (the z control), ndisplay 2D/3D button, contrast behaviour and stylesheet all
+    live -- strip it and you must rebuild all of that by hand, badly. Julio, looking at the
+    result: "You're not showing me a napari window... I don't understand why you're inventing the
+    wheel when napari literally has an API."
+
+    ``show=False`` so no top-level window appears and no second event loop starts; the host
+    QApplication drives it, and the caller reparents ``viewer.window._qt_window`` into our pane.
     """
     verify_napari_bindings()
 
-    from napari.components import ViewerModel
-    from napari.qt import QtViewer
+    import napari
 
-    model = ViewerModel()
-    qt_viewer = QtViewer(model)
-    if parent is not None:
+    viewer = napari.Viewer(show=False)
+    qt_viewer = getattr(viewer.window, "_qt_viewer", None)
+    if parent is not None and qt_viewer is not None:
         qt_viewer.setParent(parent)
-    return qt_viewer, MosaicLayers(model)
+    return qt_viewer, MosaicLayers(viewer), viewer
