@@ -396,6 +396,34 @@ def test_the_minerva_button_is_live_and_scoped_to_the_tabs_subset(win, monkeypat
     assert seen["selection"] == E.subset_selection(["B3"], win._meta["fovs_per_region"])
 
 
+def test_the_story_path_lands_in_the_tab_the_user_is_looking_at(win, monkeypatch):
+    """Minerva Author has NO local deep link — its bundle reads only ?story= and ?image=, and
+    both go to Minerva Cloud. Verified against the vendored front end, not assumed. So the user
+    always picks the file by hand, and the least we can do is put its name where they are
+    looking rather than only in a status line that the next message overwrites."""
+    captured = {}
+    monkeypatch.setattr(V.PlateWindow, "run_minerva_export",
+                        lambda self, **kw: captured.update(kw))
+    key = win.open_exploration_tab(["B3"])
+    tab = win._op_tabs[key]
+    tab.minerva_btn.click()
+
+    captured["on_exported"]([("/tmp/x.ome.tiff", "/tmp/x.story.json")])
+    assert "/tmp/x.story.json" in tab.progress.text()
+    assert "Select File" in tab.progress.text()
+
+
+def test_an_export_that_produced_nothing_says_so_in_the_tab(win, monkeypatch):
+    captured = {}
+    monkeypatch.setattr(V.PlateWindow, "run_minerva_export",
+                        lambda self, **kw: captured.update(kw))
+    key = win.open_exploration_tab(["B3"])
+    tab = win._op_tabs[key]
+    tab.minerva_btn.click()
+    captured["on_exported"]([])
+    assert "nothing was exported" in tab.progress.text()
+
+
 def test_minerva_from_the_tab_ignores_the_plate_selection(win, monkeypatch):
     """'Controls that we can run on the subsets of FOVs that we're PASSING INTO the exploration
     pane' — the tab's own subset, not whatever is highlighted on the plate."""

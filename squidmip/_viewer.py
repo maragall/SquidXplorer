@@ -4809,7 +4809,26 @@ class PlateWindow(QMainWindow):
         except ValueError as exc:                     # named, in the status line, nothing exported
             self._readout.setText(f"cannot export to Minerva: {exc}")
             return
-        self.run_minerva_export(selection=selection)
+
+        def _landed(pairs, t=tab):
+            """Put the story paths IN THE TAB, next to the mosaics they were made from.
+
+            Minerva Author has no local deep link — verified, not assumed: its own front-end
+            bundle reads only ``?story=`` and ``?image=``, and both route to Minerva CLOUD
+            (loadCloudStory / openMinervaImage), never to a path on this machine. So the user
+            always has to pick the file by hand in Author's "Select File" browser, which opens at
+            $HOME — and ~/minerva_export is one click from there. The one thing we can do is make
+            sure they are never hunting for the name, so it is written where they are looking."""
+            if t.progress is None:
+                return
+            if not pairs:
+                t.progress.setText("nothing was exported.")
+                return
+            t.progress.setText(
+                "exported. In Minerva Author choose Select File and pick:\n"
+                + "\n".join(str(story) for _ome, story in pairs))
+
+        self.run_minerva_export(selection=selection, on_exported=_landed)
 
     def _build_minerva_tab(self) -> QWidget:
         """Minerva Author hand-off (IMA-228): export the SELECTION, then open Author on it.
