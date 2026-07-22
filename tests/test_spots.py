@@ -80,13 +80,56 @@ def test_a_blank_plane_counts_zero_instead_of_raising():
     assert int(res.labels.max()) == 0
 
 
-def test_specks_below_min_area_are_not_counted_as_nuclei():
-    """Single hot pixels are noise, not cells — this is what ``min_area_px`` is for."""
+def test_single_hot_pixels_are_not_counted_as_nuclei():
+    """Sensor specks are noise, not cells."""
     img = _plane_with_disks(_FOUR)
     for cy, cx in [(10, 60), (60, 10), (118, 60)]:
         img[cy, cx] = 4000                                    # 1-px specks
     res = detect_spots(img)
     assert res.count == 4, f"specks leaked into the count: {res.count}"
+
+
+def _squares(sizes, shape=(128, 128)):
+    """Bright squares of EXACT pixel areas, laid out so none of them touch.
+
+    ``sigma_px=0.5`` is small enough that Otsu recovers each square's area exactly (measured:
+    a 4x4 thresholds to 16 px, 6x6 to 36 px), which is what makes an area-boundary test
+    meaningful instead of approximate.
+    """
+    img = np.zeros(shape, dtype=np.uint16)
+    for i, s in enumerate(sizes):
+        y, x = 10 + (i // 4) * 30, 10 + (i % 4) * 30
+        img[y: y + s, x: x + s] = 3000
+    return img
+
+
+_AREA_PARAMS = SpotParams(sigma_px=0.5, min_area_px=36, split_touching=False)
+
+
+def test_objects_smaller_than_min_area_are_dropped_and_larger_ones_are_kept():
+    """The actual job of ``remove_small_objects``, pinned on exact areas.
+
+    Written this way after a mutation check: the 1-px-speck test above passes even with the
+    ``remove_small_objects`` call DELETED, because the gaussian denoise erases a lone pixel
+    before the threshold ever sees it. It was testing the smoothing, not the filter.
+    """
+    img = _squares([4, 5, 6, 7, 8])                            # areas 16, 25, 36, 49, 64
+    res = detect_spots(img, _AREA_PARAMS)                      # min_area_px = 36
+    assert res.count == 3, f"expected the 36/49/64 px objects only, got {res.count}"
+
+
+def test_an_object_of_EXACTLY_min_area_is_kept_not_dropped():
+    """``min_area_px`` means "smaller than this is noise", so exactly-this-size is a cell.
+
+    skimage 0.26 renamed ``min_size`` -> ``max_size`` AND flipped the comparison to "smaller
+    than or equal", so passing ``max_size=min_area_px`` instead of ``min_area_px - 1`` silently
+    deletes every cell of exactly the minimum size. This is the test that catches that.
+    """
+    img = _squares([6])                                        # area 36 == min_area_px
+    assert detect_spots(img, _AREA_PARAMS).count == 1
+
+    img = _squares([5])                                        # area 25 < min_area_px
+    assert detect_spots(img, _AREA_PARAMS).count == 0
 
 
 def test_min_area_is_honoured_so_the_parameter_is_not_decorative():
