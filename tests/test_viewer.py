@@ -3238,7 +3238,12 @@ def test_outer_split_has_three_panes_and_pane3_opens_with_width(qapp, stub_detai
     win = V.PlateWindow(None)
     outer = win._split
     assert outer.count() == 3, "the window is not a three-pane layout"
-    assert outer.widget(2) is win._explore_pane, "pane 3 is not the exploration pane"
+    # Pane 3 is now a vertical COLUMN: the exploration pane on top, the log panel below it
+    # (Julio: "the logger... below the exploration pane"). The column is what sits in the outer
+    # splitter; the exploration pane is still its top child, unchanged.
+    assert outer.widget(2) is win._explore_col, "pane 3 is not the exploration column"
+    assert win._explore_col.widget(0) is win._explore_pane, "the exploration pane is not on top"
+    assert win._explore_col.widget(1) is win._log_panel, "the log panel is not below the pane"
     assert outer.sizes()[2] > 0, "pane 3 opened collapsed"
     assert win._explore_pane.currentWidget() is win._explore_empty
     assert win._explore_tabs.count() == 0
@@ -4369,7 +4374,10 @@ def test_ima260_all_three_panes_have_real_width_on_open(qapp, stub_detail, squid
     root, _ = squid_dataset
     win = _shown(qapp, root)
     assert win._split.count() == 3
-    assert win._split.widget(2) is win._explore_pane, "pane 3 is not the exploration pane"
+    # Pane 3 is the exploration COLUMN (exploration pane + log panel under it); the exploration
+    # pane is its top child and must still be a real, visible pane.
+    assert win._split.widget(2) is win._explore_col, "pane 3 is not the exploration column"
+    assert win._explore_col.widget(0) is win._explore_pane, "the exploration pane is not on top"
 
     plate, viewer, explore = win._split.sizes()
     assert explore > 0, "the exploration pane opened collapsed — IMA-237's undiscoverable state"

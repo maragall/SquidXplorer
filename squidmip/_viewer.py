@@ -72,12 +72,19 @@ from squidmip._layers import OperationStack
 from squidmip._minerva import MINERVA_HOME_ENV as _MINERVA_HOME_ENV
 from squidmip._montage import _area_downsample, _hex_to_rgb01, composite
 from squidmip._output import parse_well_id
+from squidmip._activity import ActivityLog
+from squidmip._logpane import LogBus
+from squidmip._logpanel import LogPanel
 from squidmip._plate import PlateBuildError, build_plate
 from squidmip._plate_shape import PlateShapeError
 from squidmip._qt_tabs import _DetachTabBar, _DetachTabs, _FloatWindow  # noqa: F401 (re-export)
 from squidmip._qtstyle import dark_palette as _dark_palette
 from squidmip._qtstyle import hline as _hline
 from squidmip._terminal import _CmdEdit, _ProcTerminal, _Terminal  # noqa: F401 (re-export)
+from squidmip._measure import (
+    FAILED as _MEASURE_FAILED, OK as _MEASURE_OK, PARTIAL as _MEASURE_PARTIAL,
+    STOPPED as _MEASURE_STOPPED, measure_run,
+)
 from squidmip._region_nav import RegionCursor, RegionSlider
 
 # (`_SUPPORTED_PLATES` and `resolve_plate_format` used to live here. `build_plate` (IMA-214) is now
@@ -2620,6 +2627,16 @@ class _OperatorWorker(QThread):
             self.wellFailed.emit(*info["rc"])
 
     def run(self):
+        # TIME AND MEASURE THIS RUN. The same measurement the CLI's EngineExecutor makes, at the
+        # GUI's own operator-run path, into the same METRICS log — so the comparison table sees
+        # both surfaces' runs and the one line per run reaches the log panel (measure_run logs at
+        # INFO to the root logger, which the panel is a sink of). One measurement, three consumers.
+        target = _explore.describe_run_target(self._regions, total=self._total) or self._operator
+        with measure_run(self._operator, target, n_targets=self._total) as _run_metrics:
+            _run_metrics.note(surface="gui", save=self._save)
+            self._run_body(_run_metrics)
+
+    def _run_body(self, _run_metrics):
         try:
             projector = self._operator
             if self._save:
@@ -2633,6 +2650,7 @@ class _OperatorWorker(QThread):
                             stop=self._stop.is_set, on_error=self._on_error, regions=self._regions,
                             operator_kwargs=self._operator_kwargs or None)
                 if self._stop.is_set():
+                    _run_metrics.finish(_MEASURE_STOPPED, "stopped by the window")
                     return  # window closing / re-opening; drop out cleanly (no final/written emit)
                 self.streamEnded.emit()
                 self.writtenReady.emit(str(Path(self._out_dir) / "plate.ome.zarr"))
@@ -2662,6 +2680,7 @@ class _OperatorWorker(QThread):
                 try:
                     for region, fov, image in stream:
                         if self._stop.is_set():
+                            _run_metrics.finish(_MEASURE_STOPPED, "stopped by the window")
                             return
                         self._on_well(region, fov, image)
                 finally:
@@ -2669,10 +2688,24 @@ class _OperatorWorker(QThread):
                     if callable(close):
                         close()
                 if self._stop.is_set():
+                    _run_metrics.finish(_MEASURE_STOPPED, "stopped by the window")
                     return
                 self.streamEnded.emit()
+            # Name the OUTCOME for the record, the same rule the status line follows: landed==0 is
+            # a partial result however politely we got here (per-well fault isolation keeps one bad
+            # file from aborting a plate), and a skip on any well is partial too.
+            if self.landed == 0 and self._total:
+                _run_metrics.finish(_MEASURE_PARTIAL,
+                                    f"produced nothing — all {self._total} target(s) skipped")
+            elif self.skipped:
+                _run_metrics.finish(_MEASURE_PARTIAL, f"{self.skipped} well(s) skipped")
+            else:
+                _run_metrics.finish(_MEASURE_OK)
             self.finished_ok.emit()
         except Exception as e:
+            # measure_run records this as failed with the exception name and re-raises; catch it
+            # here so the QThread still ends via `failed` rather than an unhandled thread exception.
+            _run_metrics.finish(_MEASURE_FAILED, f"{type(e).__name__}: {e}")
             self.failed.emit(f"{type(e).__name__}: {e}")
 
 
@@ -3149,6 +3182,17 @@ class PlateWindow(QMainWindow):
         self._cursor = RegionCursor()
         self._cursor.subscribe(self._on_region_changed)
         self._cursor.on_problem(lambda msg: self._readout.setText(msg))
+        # THE communication backbone, built once and owned here.
+        # * _log_bus attaches to the stdlib ROOT logger, so every orchestrated library (tilefusion,
+        #   petakit, bgsub, and the per-run measurement line) appears in the panel with no wiring.
+        # * _activity is the single registry of in-flight work the panel's header reads.
+        # * commands is the ONE command surface (squidmip._command) — the GUI is now a CALLER of the
+        #   same layer the CLI drives, so an agent/test/script says one command to both.
+        self._log_bus = LogBus()
+        self._log_bus.install()
+        self._activity = ActivityLog()
+        from squidmip._gui_commands import install_command_bus
+        self.commands = install_command_bus(self)
         self._fov_index = {}
         self._selected_regions = []   # wells picked on the plate (IMA-221); scopes an operator run
         self._pushed = set()          # wells whose raw z-stack is already registered in the detail viewer
@@ -3411,12 +3455,31 @@ class PlateWindow(QMainWindow):
         dbl.addStretch(1)
         rfl.addWidget(detail_bar)
 
+        # PANE 3 COLUMN: the exploration pane, and UNDER it the log panel. Julio: "the logger... on
+        # the bottom right of the GUI, below the exploration pane." Squid's gui_hcs puts RAM +
+        # throughput + errors in a persistent bottom status bar; this is that shape, docked under
+        # the exploration pane rather than spanning the whole window, because that is where he asked
+        # for it. A vertical splitter so the user can drag it, and it starts small so it never
+        # steals the exploration pane's space; collapsed it shrinks to its one-line header.
+        self._log_panel = LogPanel(self._log_bus, self._activity)
+        self._log_panel.start()
+        self._explore_col = QSplitter(Qt.Vertical)
+        self._explore_col.setStyleSheet("QSplitter::handle{background:#232b3a;height:1px;}")
+        self._explore_col.addWidget(self._explore_pane)
+        self._explore_col.addWidget(self._log_panel)
+        self._explore_col.setStretchFactor(0, 1)   # the exploration pane grows on resize
+        self._explore_col.setStretchFactor(1, 0)   # the log keeps its height, never eats the pane
+        self._explore_col.setCollapsible(0, False)
+        self._explore_col.setCollapsible(1, True)  # the log can be dragged fully shut
+        self._explore_col.setHandleWidth(6)
+        self._explore_col.setSizes([760, 150])
+
         outer = QSplitter(Qt.Horizontal)
         outer.setStyleSheet("QSplitter::handle{background:#232b3a;width:1px;}")
         outer.setChildrenCollapsible(False)
         outer.addWidget(left_col)                  # pane 1: plate + controls with the tabs
         outer.addWidget(right_frame)               # pane 2: the initial viewer
-        outer.addWidget(self._explore_pane)        # pane 3: exploration — VISIBLE from open
+        outer.addWidget(self._explore_col)         # pane 3: exploration + log panel under it
         outer.setSizes([600, 620, _EXPLORE_W])     # three real panes on a 1600 px window
         # Draggable and COLLAPSIBLE. Julio: "Since the GUI is so large, I need to be able to
         # collapse windows and be able to drag the splitters." A fixed pane on a large monitor
@@ -3893,6 +3956,10 @@ class PlateWindow(QMainWindow):
         """A run advanced. Says so in pane 1's status line AND, when the run belongs to a side-pane
         tab, in that tab — where the user is actually watching the result appear."""
         self._run_readout(f"● {self._run_label} · {done}/{total} wells{self._run_dest}")
+        # Feed the activity registry the log panel's header reads — this is what turns "the GUI is
+        # doing something" into a visible line. Advanced from THIS slot (the GUI thread), never
+        # from the worker: the panel writes a QLabel and a worker thread must not.
+        self._activity.advance("operator-run", done, total)
         tab = self._run_tab()
         if tab is not None and tab.progress is not None:
             tab.progress.setText(_explore.progress_sentence(self._run_label, done, total))
@@ -4128,6 +4195,9 @@ class PlateWindow(QMainWindow):
         done, and ``_busy()`` stays True for all of that window."""
         if _explore.operator_busy(self._worker, self._retired):
             return                       # another operator run is still draining — wait for it
+        # No operator run is in flight now — clear the activity header. end() is a no-op if it was
+        # already cleared, so a failed/stopped run that never reached here does not leave it stuck.
+        self._activity.end("operator-run")
         self._run_tab_key = self._run_view_tab_key = None
         # A genuine drain: every worker has exited AND (finished being FIFO-queued after this
         # worker's tileReady/streamEnded) their terminal slots have already run on this thread.
@@ -6035,6 +6105,11 @@ class PlateWindow(QMainWindow):
         # switch deferred during any of those still has to be delivered. _retire only disconnects
         # the worker's own signals, so this survives a stop.
         self._worker.finished.connect(self._on_run_drained)
+        # Announce the run to the activity registry the log panel's header reads. Keyed
+        # "operator-run" (re-entrant by key: a new run replaces the old entry rather than stacking).
+        # Ended in _on_run_drained, which fires on ok/failed/stopped alike — so the header cannot be
+        # left showing a run that is over.
+        self._activity.start("operator-run", f"{label} · {scope}", total=len(run_order))
         self._run_readout(f"● {label} · {scope}{dest} …")
         self._worker.start()
 
@@ -6654,6 +6729,12 @@ class PlateWindow(QMainWindow):
                 w.shutdown()         # kill any live embedded terminal's shell
         for w in list(self._retired):
             w.wait()                 # join before exit — never leave a QThread running at teardown
+        panel = getattr(self, "_log_panel", None)
+        if panel is not None:
+            panel.stop()             # stop the memory-poll timer before the widget is torn down
+        bus = getattr(self, "_log_bus", None)
+        if bus is not None:
+            bus.uninstall()          # detach from the root logger so a closed window stops logging
         super().closeEvent(e)
 
 

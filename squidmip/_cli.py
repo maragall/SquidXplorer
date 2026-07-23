@@ -109,8 +109,17 @@ class ProcessParameters(BaseModel, use_attribute_docstrings=True):
 
 
 def run(params: ProcessParameters) -> dict:
-    """Open the acquisition and write the operator's OME-Zarr plate; return write_plate's manifest."""
-    from squidmip import open_reader, write_plate
+    """Open the acquisition and write the operator's OME-Zarr plate; return write_plate's manifest.
+
+    The operator run itself goes through the SHARED command layer (``squidmip._command``) — the
+    exact surface the GUI drives — so "it works from the CLI" and "the button works" stop being
+    two separate questions. This function keeps only what is genuinely CLI-shaped around that one
+    command: the wellplate-format scope guard, the multi-FOV warning, the ``--limit`` plate slice
+    (expressed as the command's explicit ``regions`` list), and the Odon hand-off, which is a
+    post-write launch of a separate program and not an operator at all.
+    """
+    from squidmip import open_reader
+    from squidmip._command import CommandBus, EngineExecutor, RunOperator
 
     reader = open_reader(params.input_folder)
     # Scope guard: 1536-well plates only for now (not a general product yet). Fail loud, before any write.
@@ -133,7 +142,8 @@ def run(params: ProcessParameters) -> dict:
                   else Path(params.input_folder).parent)
     out_dir = out_parent / f"{name}.hcs"
     # Optional plate slice: process only the first N wells (a subset preview that won't cost the
-    # whole plate). Order = the reader's region order (deterministic).
+    # whole plate). Order = the reader's region order (deterministic). This is the command layer's
+    # explicit-``regions`` path — the ONE way a subset is expressed on either surface.
     regions = None
     if params.limit is not None:
         all_regions = list(reader.metadata["regions"])
@@ -142,18 +152,19 @@ def run(params: ProcessParameters) -> dict:
                     ", ".join(regions[:8]), " …" if len(regions) > 8 else "")
     logger.info("running '%s' over %s -> %s", params.projector, name, out_dir)
 
-    # Resilient batch: a single corrupt/missing plane should NOT abort a multi-hour plate run. Log
-    # and SKIP the offending well (fault isolation, opt-in via on_error), then report the count.
-    skipped: list[str] = []
-
-    def on_error(region, fov, exc):
-        skipped.append(region)
-        logger.warning("SKIP well %s (fov %s): %s: %s", region, fov, type(exc).__name__, exc)
-
-    manifest = write_plate(
-        reader, out_dir, projector=params.projector, workers=params.workers,
-        tiff=params.tiff, on_error=on_error, regions=regions, n_fovs=n_fovs,
-    )
+    # Drive the SHARED command surface. The reader is already open, so hand it to the executor
+    # rather than making it re-open the folder. A refusal comes back as a value with a code — the
+    # CLI turns it into a clean SystemExit instead of a traceback, the same failure the GUI shows
+    # as a status-line sentence.
+    bus = CommandBus(EngineExecutor(params.input_folder, reader=reader))
+    result = bus.execute(RunOperator(
+        operator=params.projector, regions=regions, save=True,
+        output_folder=str(out_parent), n_fovs=n_fovs, workers=params.workers, tiff=params.tiff,
+    ))
+    if not result.ok:
+        raise SystemExit(f"{params.projector}: {result.message}")
+    manifest = dict(result.data["manifest"])
+    skipped = list(result.data.get("skipped") or [])
     logger.info(
         "done: %s (%d/%d wells written, %d pyramid level(s))%s",
         manifest["plate"], manifest["n_fields_written"], manifest["n_wells"], manifest["levels"],
