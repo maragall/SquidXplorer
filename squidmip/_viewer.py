@@ -3475,6 +3475,13 @@ class PlateWindow(QMainWindow):
         # shares this one stateless reader/meta — nothing reopens the dataset. See _region_viewer.
         from squidmip._region_viewer import ViewerManager
         self._viewer_manager = ViewerManager(parent=self)
+        # Every spawned window's "Operators for this window" panel is the SAME operator registry and
+        # the SAME run_operator (the CLI engine), scoped to that window — so the controls are truly
+        # reinstantiated per window, not dead re-draws. Only runnable operators get a per-window chip
+        # (minerva is an export hand-off, not an engine key, so it stays on the root's terminal set).
+        self._viewer_manager.operator_specs = [
+            (op.key, op.label, op.blurb) for op in _OPERATIONS if op.runnable]
+        self._viewer_manager.run_operator = self.run_operator
         # Clicking an open view (or opening one) moves the plate's blue wash onto that view's
         # regions, so the plate always shows which regions the focused window holds.
         self._viewer_manager.viewFocused.connect(self._highlight_view_regions)

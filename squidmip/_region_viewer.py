@@ -22,14 +22,18 @@ from __future__ import annotations
 import logging
 from typing import Any, Optional, Sequence
 
+import numpy as np
 from PyQt5.QtCore import QObject, Qt, QTimer, pyqtSignal
 from PyQt5.QtWidgets import (
+    QButtonGroup,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QProgressBar,
     QPushButton,
-    QToolBar,
+    QScrollArea,
+    QSizePolicy,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -37,6 +41,12 @@ from PyQt5.QtWidgets import (
 )
 
 log = logging.getLogger("squidmip.regionviewer")
+
+#: Cross-window LUT clipboard for Julio's "sync windows = copy/paste LUTs": one window's per-channel
+#: (contrast_limits, colormap) is stashed here by "Copy LUTs" and applied by "Paste LUTs" in any
+#: other window (or the plate). A parameter file on the desktop is the same idea; this is the
+#: in-session GUI form of it. Keyed by channel name -> {"clim": (lo, hi), "cmap": <name>}.
+_LUT_CLIPBOARD: "dict[str, dict]" = {}
 
 #: Debounce before a settled region is fused, matching the central pane's 140 ms. The red frame /
 #: slider move instantly; only the expensive fuse waits for the slider to stop, so a drag across
@@ -67,6 +77,10 @@ class RegionViewer(QMainWindow):
         window_id: int,
         title: Optional[str] = None,
         parent: Optional[QWidget] = None,
+        manager: Optional["ViewerManager"] = None,
+        operator_specs: Optional[Sequence] = None,
+        run_operator: Optional[Any] = None,
+        roi_bbox: Optional[tuple] = None,
     ) -> None:
         super().__init__(parent)
         self._reader = reader
@@ -80,11 +94,23 @@ class RegionViewer(QMainWindow):
         self._slider = None
         self._cursor = None
         self._native3d = None      # keeps a spawned 3D popout viewer alive
+        # Per-window operator wiring (deck: "Operators for THIS window"). The manager hands us the
+        # plate's operator registry + its run_operator so the window's operator blocks are the SAME
+        # controls, scoped to this window's regions -- not a dead re-draw. None => run reports it.
+        self._manager = manager
+        self._operator_specs = list(operator_specs or [])
+        self._run_operator = run_operator
+        # An ROI child carries the parent's ROI box (deck: "ROI -> child window"). Cropping the load
+        # to it lands with the loader work; today it scopes the title + is recorded for that step.
+        self._roi_bbox = roi_bbox
+        self._roi_layer = None     # the napari Shapes layer this window draws ROI rectangles on
 
         # Name the window by the regions it holds (the deck shows the slider as "<> A1, B6, C3"),
         # not "N regions" — Julio: "'2 regions' is a bad name". Truncate a long list so the title
         # bar stays readable, keeping the count only as an overflow tail.
         label = title or self._region_label(self._regions)
+        if self._roi_bbox is not None:
+            label = f"ROI · {label}"
         self.setWindowTitle(f"[{self.window_id}] {label}")
         self.setAttribute(Qt.WA_DeleteOnClose, True)
 
@@ -126,17 +152,11 @@ class RegionViewer(QMainWindow):
             return
         self._pane = pane
 
-        # PER-WINDOW TOOLBAR. 3D is a per-window action (the deck's "2D 3D" per window): pull THIS
-        # window's current region into a native-resolution napari 3D popout (gallery-view recipe),
-        # carrying the contrast/colormap on screen. Operators live here later (deferred per Spencer).
-        tb = QToolBar("view", self)
-        tb.setMovable(False)
-        act3d = tb.addAction("3D (native)")
-        act3d.triggered.connect(self._open_3d)
-        act3d.setToolTip("Open a native-resolution napari 3D view of this region's centre FOV "
-                         "(fits the GPU texture), carrying the contrast on screen.")
-        self.addToolBar(Qt.TopToolBarArea, tb)
-
+        # DECK LAYOUT for a child window (2026-07-23 deck, per-window slide): a TOP ROW of two
+        # panels — [2D / 3D + ROI tools] on the left, [Operators for THIS window] on the right —
+        # over the mosaic viewer (full well), with the region slider at the bottom. The ROI
+        # rectangles are drawn INSIDE the mosaic and open child windows (the next level of the tree).
+        lay.addWidget(self._build_top_row(), 0)
         lay.addWidget(pane, 1)
 
         # THE REGION SLIDER — napari's own dims slider driven by our region cursor. One owner of
@@ -155,6 +175,252 @@ class RegionViewer(QMainWindow):
         self._cursor.set_order(self._regions)
         if self._cursor.index is None and self._regions:
             self._cursor.set_index(0)
+
+    # -- the deck's per-window top row --------------------------------------------------
+    _BOX_QSS = "QFrame{background:#0d1117;border:1px solid #232b3a;border-radius:5px;}"
+    _TITLE_QSS = "color:#8b949e;font-size:10px;font-weight:700;border:none;"
+    _CHIP_QSS = (
+        "QPushButton{background:#161b22;color:#c9d1d9;border:1px solid #30363d;"
+        "border-radius:4px;padding:3px 9px;font-size:11px;}"
+        "QPushButton:hover{background:#21262d;}"
+        "QPushButton:checked{background:#1f6feb;color:#ffffff;border-color:#1f6feb;}"
+        "QPushButton:disabled{color:#586069;border-color:#20262e;}"
+    )
+
+    def _titled_box(self, title: str) -> "tuple[QFrame, QVBoxLayout]":
+        box = QFrame(self)
+        box.setStyleSheet(self._BOX_QSS)
+        v = QVBoxLayout(box)
+        v.setContentsMargins(8, 5, 8, 6)
+        v.setSpacing(4)
+        lab = QLabel(title)
+        lab.setStyleSheet(self._TITLE_QSS)
+        v.addWidget(lab)
+        return box, v
+
+    def _chip(self, text: str, tip: str, slot, *, checkable: bool = False) -> QPushButton:
+        b = QPushButton(text)
+        b.setToolTip(tip)
+        b.setCheckable(checkable)
+        b.setCursor(Qt.PointingHandCursor)
+        b.setStyleSheet(self._CHIP_QSS)
+        b.clicked.connect(lambda _=False: slot())
+        return b
+
+    def _build_top_row(self) -> QWidget:
+        """[ 2D / 3D + ROI ]   [ Operators for this window ] — the deck's per-window header."""
+        row = QWidget(self)
+        row.setStyleSheet("background:#0b0e14;")
+        h = QHBoxLayout(row)
+        h.setContentsMargins(6, 6, 6, 2)
+        h.setSpacing(6)
+
+        # LEFT: the "2D 3D'" toggle + native-3D popout + ROI tools. The toggle drives the embedded
+        # pane's ndisplay (which already renders 3D at max texture res, contrast preserved); the
+        # popout is the single-FOV native volume for when the fused mosaic exceeds the GPU texture.
+        view_box, vv = self._titled_box("2D / 3D · ROI")
+        r1 = QHBoxLayout(); r1.setSpacing(4)
+        self._btn_2d = self._chip("2D", "Show the mosaic in 2D.", lambda: self._set_ndisplay(2),
+                                  checkable=True)
+        self._btn_3d = self._chip("3D", "Render the mosaic volume in 3D (max texture resolution).",
+                                  lambda: self._set_ndisplay(3), checkable=True)
+        self._btn_2d.setChecked(True)
+        grp = QButtonGroup(self)
+        grp.setExclusive(True)
+        grp.addButton(self._btn_2d)
+        grp.addButton(self._btn_3d)
+        self._nd_group = grp
+        pop = self._chip("⛶ native", "Open this region's centre FOV as a native-resolution napari "
+                         "3D popout (gallery-view recipe).", self._open_3d)
+        r1.addWidget(self._btn_2d); r1.addWidget(self._btn_3d); r1.addWidget(pop)
+        r1.addStretch(1)
+        vv.addLayout(r1)
+        r2 = QHBoxLayout(); r2.setSpacing(4)
+        r2.addWidget(self._chip("▭ ROI", "Draw an ROI rectangle inside the mosaic.", self._new_roi))
+        r2.addWidget(self._chip("ROI → window", "Open the drawn ROI(s) as child window(s) — the "
+                                "next level of the view tree.", self._open_roi_children))
+        r2.addStretch(1)
+        vv.addLayout(r2)
+        view_box.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
+        h.addWidget(view_box, 0)
+
+        # RIGHT: "Operators for this window" — the SAME operator registry as the root, reinstantiated
+        # here and scoped to this window (Julio: "I don't see the reinstantiation of the controls").
+        # Plus Copy/Paste LUTs, the GUI form of "sync windows by copy-pasting a parameter file".
+        op_box, ov = self._titled_box("Operators for this window")
+        strip = QWidget()
+        sh = QHBoxLayout(strip)
+        sh.setContentsMargins(0, 0, 0, 0)
+        sh.setSpacing(4)
+        if self._operator_specs:
+            for spec in self._operator_specs:
+                key, label = spec[0], spec[1]
+                blurb = spec[2] if len(spec) > 2 else ""
+                sh.addWidget(self._chip(
+                    label.split("(")[0].strip() or key, blurb or label,
+                    lambda k=key, la=label: self._run_op(k, la)))
+        else:
+            none = QLabel("no operators registered")
+            none.setStyleSheet("color:#586069;font-size:11px;border:none;")
+            sh.addWidget(none)
+        gap = QLabel("·")
+        gap.setStyleSheet("color:#30363d;border:none;padding:0 3px;")
+        sh.addWidget(gap)
+        sh.addWidget(self._chip("⧉ Copy LUTs", "Copy this window's per-channel contrast + colormap.",
+                                self._copy_luts))
+        sh.addWidget(self._chip("⤓ Paste LUTs", "Apply the copied LUTs to this window's channels.",
+                                self._paste_luts))
+        sh.addStretch(1)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("QScrollArea{border:none;background:transparent;}")
+        scroll.setWidget(strip)
+        scroll.setFixedHeight(34)
+        ov.addWidget(scroll)
+        h.addWidget(op_box, 1)
+
+        row.setMaximumHeight(92)
+        return row
+
+    def _napari_viewer(self):
+        """The live napari ``Viewer`` behind this window's pane, or None if unavailable."""
+        pane = self._pane
+        if pane is None or not getattr(pane, "ok", False):
+            return None
+        mosaic = getattr(pane, "mosaic", None)
+        v = getattr(mosaic, "model", None) if mosaic is not None else None
+        return v if v is not None else getattr(pane, "_viewer", None)
+
+    def _set_ndisplay(self, n: int) -> None:
+        v = self._napari_viewer()
+        if v is None:
+            self._say(f"cannot switch to {n}D — the napari viewer isn't available here.")
+            return
+        try:
+            v.dims.ndisplay = int(n)
+        except Exception as exc:                         # noqa: BLE001 - named, never silent
+            self._say(f"could not switch to {n}D: {exc}")
+
+    # -- ROI -> child window (the next level of the tree) --------------------------------
+    def _new_roi(self) -> None:
+        """Start drawing an ROI rectangle inside the mosaic (deck: boxes inside the well view)."""
+        v = self._napari_viewer()
+        if v is None:
+            self._say("ROI needs the napari viewer, which isn't available here.")
+            return
+        try:
+            layer = self._roi_layer
+            if layer is None or layer not in list(v.layers):
+                layer = v.add_shapes(name="ROIs", edge_color="#58a6ff",
+                                     face_color="transparent", edge_width=6)
+                self._roi_layer = layer
+            v.layers.selection.active = layer
+            layer.mode = "add_rectangle"
+            self._say("Draw an ROI rectangle, then 'ROI → window' to open it as a child window.")
+        except Exception as exc:                         # noqa: BLE001
+            self._say(f"could not start an ROI: {exc}")
+
+    def _open_roi_children(self) -> None:
+        """Open the drawn ROI(s) as child window(s) — "first dev step: one ROI, one child window"."""
+        v = self._napari_viewer()
+        layer = self._roi_layer
+        rects = list(getattr(layer, "data", []) or []) if layer is not None else []
+        if v is None or layer is None or layer not in list(v.layers) or not rects:
+            self._say("no ROI to open — draw one with '▭ ROI' first.")
+            return
+        if self._manager is None:
+            self._say(f"{len(rects)} ROI(s) drawn, but this window has no manager to open children.")
+            return
+        opened = 0
+        for rect in rects:
+            bbox = None
+            try:
+                arr = np.asarray(rect)
+                ys, xs = arr[:, -2], arr[:, -1]        # world coords are (..., y, x)
+                bbox = (float(xs.min()), float(ys.min()), float(xs.max()), float(ys.max()))
+            except Exception:                            # noqa: BLE001 - a shapeless ROI still opens
+                pass
+            child = self._manager.open_child(
+                self._regions, roi_bbox=bbox, parent_id=self.window_id)
+            if child is not None:
+                opened += 1
+        self._say(f"opened {opened} ROI child window(s).")
+
+    # -- operators for THIS window ------------------------------------------------------
+    def _run_op(self, key: str, label: str) -> None:
+        """Run the plate's operator ``key`` scoped to what THIS window is showing (its current
+        region). Uses the app's real run_operator (the CLI engine), so it is never a dead control;
+        per-window result rendering lands with the operator phase. Preview only (save=False)."""
+        if self._run_operator is None:
+            self._say(f"{label}: the operator engine isn't connected to this window yet.")
+            return
+        region = self._cursor.region if self._cursor is not None else None
+        regions = [region] if region else list(self._regions)
+        try:
+            self._run_operator(key, regions=regions, save=False)
+            self._say(f"{label}: previewing on {self._region_label(regions)}.")
+        except Exception as exc:                         # noqa: BLE001 - named to the window
+            self._say(f"{label} could not start: {exc}")
+
+    # -- copy/paste LUTs: sync windows without a parameter file --------------------------
+    def _per_channel_luts(self) -> "dict[str, dict]":
+        out: "dict[str, dict]" = {}
+        pane = self._pane
+        mosaic = getattr(pane, "mosaic", None) if pane is not None else None
+        if mosaic is None:
+            return out
+        for c in (self._meta or {}).get("channels", []):
+            name = c["name"]
+            layer = mosaic.find(_RAW_OP, name)
+            if layer is None:
+                continue
+            lut: dict = {}
+            try:
+                lut["clim"] = tuple(layer.contrast_limits)
+            except Exception:                            # noqa: BLE001
+                lut["clim"] = None
+            try:
+                cmap = layer.colormap
+                lut["cmap"] = getattr(cmap, "name", cmap)
+            except Exception:                            # noqa: BLE001
+                lut["cmap"] = None
+            out[name] = lut
+        return out
+
+    def _copy_luts(self) -> None:
+        caught = self._per_channel_luts()
+        if not caught:
+            self._say("no channels on screen to copy LUTs from.")
+            return
+        _LUT_CLIPBOARD.clear()
+        _LUT_CLIPBOARD.update(caught)
+        self._say(f"copied LUTs for {len(caught)} channel(s) — paste them into another window.")
+
+    def _paste_luts(self) -> None:
+        if not _LUT_CLIPBOARD:
+            self._say("no copied LUTs yet — use '⧉ Copy LUTs' in another window first.")
+            return
+        pane = self._pane
+        mosaic = getattr(pane, "mosaic", None) if pane is not None else None
+        if mosaic is None:
+            self._say("no mosaic here to paste LUTs onto.")
+            return
+        applied = 0
+        for ch, lut in _LUT_CLIPBOARD.items():
+            layer = mosaic.find(_RAW_OP, ch)
+            if layer is None:
+                continue
+            try:
+                if lut.get("clim") is not None:
+                    layer.contrast_limits = tuple(lut["clim"])
+                if lut.get("cmap") is not None:
+                    layer.colormap = lut["cmap"]
+                applied += 1
+            except Exception:                            # noqa: BLE001 - a missing channel is skipped
+                pass
+        self._say(f"pasted LUTs onto {applied} channel(s).")
 
     # -- navigation ---------------------------------------------------------------------
     def _on_region_changed(self, index: int, region: str) -> None:
@@ -333,6 +599,10 @@ class ViewerManager(QObject):
         self._meta = meta
         self._windows: "dict[int, RegionViewer]" = {}
         self._next_id = 1
+        # Set by the root PlateWindow so every spawned window's "Operators for this window" panel is
+        # the SAME operator registry + the SAME run_operator (the CLI engine), scoped to the window.
+        self.operator_specs: "list" = []
+        self.run_operator: Optional[Any] = None
 
         self._mem_timer = QTimer(self)
         self._mem_timer.setInterval(2000)
@@ -354,9 +624,33 @@ class ViewerManager(QObject):
         regions = [str(r) for r in regions if r]
         if not regions:
             return None
+        return self._spawn(regions, title=title)
+
+    def open_child(self, regions: Sequence[str], *, roi_bbox: Optional[tuple] = None,
+                   parent_id: Optional[int] = None) -> Optional[RegionViewer]:
+        """Open a CHILD window from an ROI drawn in a parent window (the next level of the tree).
+
+        Structurally the child is a window over the same regions carrying the ROI box; cropping the
+        load to the box lands with the loader work. Titled so the Open View list shows the nesting."""
+        regions = [str(r) for r in regions if r]
+        if not regions:
+            return None
+        base = RegionViewer._region_label(regions)
+        title = f"{base}  ◂ view {parent_id}" if parent_id is not None else base
+        return self._spawn(regions, title=title, roi_bbox=roi_bbox)
+
+    def _spawn(self, regions: "list[str]", *, title: Optional[str] = None,
+               roi_bbox: Optional[tuple] = None) -> Optional[RegionViewer]:
+        if self._reader is None or self._meta is None:
+            log.warning("open() called before a dataset was loaded; ignoring.")
+            return None
         wid = self._next_id
         self._next_id += 1
-        win = RegionViewer(self._reader, self._meta, regions, window_id=wid, title=title)
+        win = RegionViewer(
+            self._reader, self._meta, regions, window_id=wid, title=title,
+            manager=self, operator_specs=self.operator_specs,
+            run_operator=self.run_operator, roi_bbox=roi_bbox,
+        )
         win.closed.connect(self._on_window_closed)
         self._windows[wid] = win
         win.show()
