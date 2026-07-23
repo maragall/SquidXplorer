@@ -78,8 +78,6 @@ class RegionViewer(QMainWindow):
         title: Optional[str] = None,
         parent: Optional[QWidget] = None,
         manager: Optional["ViewerManager"] = None,
-        operator_specs: Optional[Sequence] = None,
-        run_operator: Optional[Any] = None,
         roi_bbox: Optional[tuple] = None,
     ) -> None:
         super().__init__(parent)
@@ -94,12 +92,11 @@ class RegionViewer(QMainWindow):
         self._slider = None
         self._cursor = None
         self._native3d = None      # keeps a spawned 3D popout viewer alive
-        # Per-window operator wiring (deck: "Operators for THIS window"). The manager hands us the
-        # plate's operator registry + its run_operator so the window's operator blocks are the SAME
-        # controls, scoped to this window's regions -- not a dead re-draw. None => run reports it.
+        # A window is a SEPARATE INSTANCE to freely explore data (Spencer, 2026-07-23). Operators do
+        # NOT live in the window: "operators should really only work on Views", picked centrally and
+        # aimed at the selected view(s). The window keeps the manager only so an ROI can open a CHILD
+        # window (the view tree). Operate-on-views UX is Spencer's lane; the engine stays view-ready.
         self._manager = manager
-        self._operator_specs = list(operator_specs or [])
-        self._run_operator = run_operator
         # An ROI child carries the parent's ROI box (deck: "ROI -> child window"). Cropping the load
         # to it lands with the loader work; today it scopes the title + is recorded for that step.
         self._roi_bbox = roi_bbox
@@ -244,28 +241,16 @@ class RegionViewer(QMainWindow):
         view_box.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
         h.addWidget(view_box, 0)
 
-        # RIGHT: "Operators for this window" — the SAME operator registry as the root, reinstantiated
-        # here and scoped to this window (Julio: "I don't see the reinstantiation of the controls").
-        # Plus Copy/Paste LUTs, the GUI form of "sync windows by copy-pasting a parameter file".
-        op_box, ov = self._titled_box("Operators for this window")
+        # RIGHT: contrast sync. Operators DELIBERATELY do NOT live in the window (Spencer, 2026-07-23:
+        # "operators should really only work on Views", picked centrally, not per window). What the
+        # window carries is LUT sync — the GUI form of "sync windows by copy-pasting a parameter
+        # file", and Spencer scoped sync to LUTs specifically (FF correction is an operation, not a
+        # LUT). Annotation (Julio's lane) lands beside these next.
+        lut_box, ov = self._titled_box("Contrast sync (LUTs)")
         strip = QWidget()
         sh = QHBoxLayout(strip)
         sh.setContentsMargins(0, 0, 0, 0)
         sh.setSpacing(4)
-        if self._operator_specs:
-            for spec in self._operator_specs:
-                key, label = spec[0], spec[1]
-                blurb = spec[2] if len(spec) > 2 else ""
-                sh.addWidget(self._chip(
-                    label.split("(")[0].strip() or key, blurb or label,
-                    lambda k=key, la=label: self._run_op(k, la)))
-        else:
-            none = QLabel("no operators registered")
-            none.setStyleSheet("color:#586069;font-size:11px;border:none;")
-            sh.addWidget(none)
-        gap = QLabel("·")
-        gap.setStyleSheet("color:#30363d;border:none;padding:0 3px;")
-        sh.addWidget(gap)
         sh.addWidget(self._chip("⧉ Copy LUTs", "Copy this window's per-channel contrast + colormap.",
                                 self._copy_luts))
         sh.addWidget(self._chip("⤓ Paste LUTs", "Apply the copied LUTs to this window's channels.",
@@ -279,7 +264,7 @@ class RegionViewer(QMainWindow):
         scroll.setWidget(strip)
         scroll.setFixedHeight(34)
         ov.addWidget(scroll)
-        h.addWidget(op_box, 1)
+        h.addWidget(lut_box, 1)
 
         row.setMaximumHeight(92)
         return row
@@ -347,22 +332,6 @@ class RegionViewer(QMainWindow):
             if child is not None:
                 opened += 1
         self._say(f"opened {opened} ROI child window(s).")
-
-    # -- operators for THIS window ------------------------------------------------------
-    def _run_op(self, key: str, label: str) -> None:
-        """Run the plate's operator ``key`` scoped to what THIS window is showing (its current
-        region). Uses the app's real run_operator (the CLI engine), so it is never a dead control;
-        per-window result rendering lands with the operator phase. Preview only (save=False)."""
-        if self._run_operator is None:
-            self._say(f"{label}: the operator engine isn't connected to this window yet.")
-            return
-        region = self._cursor.region if self._cursor is not None else None
-        regions = [region] if region else list(self._regions)
-        try:
-            self._run_operator(key, regions=regions, save=False)
-            self._say(f"{label}: previewing on {self._region_label(regions)}.")
-        except Exception as exc:                         # noqa: BLE001 - named to the window
-            self._say(f"{label} could not start: {exc}")
 
     # -- copy/paste LUTs: sync windows without a parameter file --------------------------
     def _per_channel_luts(self) -> "dict[str, dict]":
@@ -599,10 +568,6 @@ class ViewerManager(QObject):
         self._meta = meta
         self._windows: "dict[int, RegionViewer]" = {}
         self._next_id = 1
-        # Set by the root PlateWindow so every spawned window's "Operators for this window" panel is
-        # the SAME operator registry + the SAME run_operator (the CLI engine), scoped to the window.
-        self.operator_specs: "list" = []
-        self.run_operator: Optional[Any] = None
 
         self._mem_timer = QTimer(self)
         self._mem_timer.setInterval(2000)
@@ -648,8 +613,7 @@ class ViewerManager(QObject):
         self._next_id += 1
         win = RegionViewer(
             self._reader, self._meta, regions, window_id=wid, title=title,
-            manager=self, operator_specs=self.operator_specs,
-            run_operator=self.run_operator, roi_bbox=roi_bbox,
+            manager=self, roi_bbox=roi_bbox,
         )
         win.closed.connect(self._on_window_closed)
         self._windows[wid] = win
@@ -717,7 +681,9 @@ class OpenViewList(QWidget):
         lay.setContentsMargins(8, 8, 8, 8)
         lay.setSpacing(6)
 
-        header = QLabel("Open views")
+        # "Window navigator", not "Open views": Julio + Spencer (2026-07-23) decoupled the window
+        # list from operators — it navigates windows (click to raise), it does not run anything.
+        header = QLabel("Window navigator")
         header.setStyleSheet("color:#c9d1d9;font-size:13px;font-weight:600;border:none;")
         lay.addWidget(header)
 
