@@ -173,6 +173,7 @@ class RegionViewer(QMainWindow):
         operator_specs: Optional[Sequence] = None,
         run_operator: Optional[Any] = None,
         parent_id: Optional[int] = None,
+        initial_luts: Optional[dict] = None,
     ) -> None:
         super().__init__(parent)
         self._reader = reader
@@ -197,6 +198,8 @@ class RegionViewer(QMainWindow):
         self._operator_specs = list(operator_specs or [])
         self._run_operator = run_operator
         self.parent_id = parent_id      # the view this was spawned from (ROI child) -> tree nesting
+        self._initial_luts = dict(initial_luts) if initial_luts else None   # inherit parent contrast
+        self._luts_seeded = False
         # An ROI child carries the parent's ROI box (deck: "ROI -> child window"). Cropping the load
         # to it lands with the loader work; today it scopes the title + is recorded for that step.
         self._roi_bbox = roi_bbox
@@ -742,8 +745,11 @@ class RegionViewer(QMainWindow):
             region = self._region_for_roi(bbox)
             if region is None:
                 continue
+            # Inherit THIS window's contrast/colormap so the ROI child looks like its parent
+            # (Julio: "the contrast for the ROIs is not the same as the parent window's").
             child = self._manager.open_child(
-                [region], roi_bbox=bbox, parent_id=self.window_id)
+                [region], roi_bbox=bbox, parent_id=self.window_id,
+                luts=self._per_channel_luts())
             if child is not None:
                 opened += 1
         self._say(f"opened {opened} ROI child window(s) on the selected ROI"
@@ -882,6 +888,23 @@ class RegionViewer(QMainWindow):
             pane.mosaic.model.reset_view()
         except Exception:                            # noqa: BLE001 - view framing is cosmetic
             pass
+        # Seed the inherited parent contrast ONCE, now that the layers exist (an ROI child should
+        # look like its parent). After this the window owns its own contrast, so a later region
+        # change does not re-stomp a window the user has since adjusted.
+        if self._initial_luts and not self._luts_seeded:
+            mosaic = getattr(pane, "mosaic", None)
+            for name, lut in self._initial_luts.items():
+                layer = mosaic.find(_RAW_OP, name) if mosaic is not None else None
+                if layer is None:
+                    continue
+                try:
+                    if lut.get("clim") is not None:
+                        layer.contrast_limits = tuple(lut["clim"])
+                    if lut.get("cmap") is not None:
+                        layer.colormap = lut["cmap"]
+                except Exception:                    # noqa: BLE001 - a missing channel is skipped
+                    pass
+            self._luts_seeded = True
         self._frame_done()
 
     def _frame_done(self) -> None:
@@ -1192,21 +1215,22 @@ class ViewerManager(QObject):
         return self._spawn(regions, title=title)
 
     def open_child(self, regions: Sequence[str], *, roi_bbox: Optional[tuple] = None,
-                   parent_id: Optional[int] = None) -> Optional[RegionViewer]:
+                   parent_id: Optional[int] = None, luts: Optional[dict] = None) -> Optional[RegionViewer]:
         """Open a CHILD window from an ROI drawn in a parent window (the next level of the tree).
 
         Structurally the child is a window over the same regions carrying the ROI box; cropping the
-        load to the box lands with the loader work. Titled so the Open View list shows the nesting."""
+        load to the box lands with the loader work. ``luts`` seeds the child's per-channel contrast
+        from the parent so it looks the same. Titled so the Open View list shows the nesting."""
         regions = [str(r) for r in regions if r]
         if not regions:
             return None
         base = RegionViewer._region_label(regions)
         title = f"{base}  ◂ view {parent_id}" if parent_id is not None else base
-        return self._spawn(regions, title=title, roi_bbox=roi_bbox, parent_id=parent_id)
+        return self._spawn(regions, title=title, roi_bbox=roi_bbox, parent_id=parent_id, luts=luts)
 
     def _spawn(self, regions: "list[str]", *, title: Optional[str] = None,
                roi_bbox: Optional[tuple] = None,
-               parent_id: Optional[int] = None) -> Optional[RegionViewer]:
+               parent_id: Optional[int] = None, luts: Optional[dict] = None) -> Optional[RegionViewer]:
         if self._reader is None or self._meta is None:
             log.warning("open() called before a dataset was loaded; ignoring.")
             return None
@@ -1216,7 +1240,7 @@ class ViewerManager(QObject):
             self._reader, self._meta, regions, window_id=wid, title=title,
             manager=self, roi_bbox=roi_bbox,
             operator_specs=self.operator_specs, run_operator=self.run_operator,
-            parent_id=parent_id,
+            parent_id=parent_id, initial_luts=luts,
         )
         win.closed.connect(self._on_window_closed)
         self._windows[wid] = win
