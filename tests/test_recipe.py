@@ -44,6 +44,19 @@ def test_cache_shares_by_content_not_window():
     assert cache.get("B7", RecipeChain.of(Recipe.operator("mip"))) is None
 
 
+def test_cache_version_separates_stale_from_fresh():
+    # Time baked into the key: a new acquisition version is a MISS, so a live scope recomputes
+    # instead of serving a stale result, with no explicit invalidation pass. Static folders stay v0.
+    ch = RecipeChain.of(Recipe.operator("decon3d"))
+    cache = ResultCache()
+    cache.put("B7", ch, "old", version=0)
+    assert cache.get("B7", ch, version=0) == "old"
+    assert cache.get("B7", ch, version=1) is None      # new frames -> miss -> recompute
+    cache.put("B7", ch, "fresh", version=1)
+    assert cache.get("B7", ch, version=1) == "fresh"
+    assert cache.get("B7", ch) == "old"                # default version 0 still resolves
+
+
 def test_cache_is_bounded_lru():
     ch = RecipeChain.of(Recipe.operator("decon3d"))
     cache = ResultCache(max_entries=2)

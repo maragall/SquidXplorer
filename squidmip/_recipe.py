@@ -100,12 +100,19 @@ class RecipeChain:
 
 
 class ResultCache:
-    """Flat, content-addressed result store: the key is ``(scope, chain.key())`` where ``scope`` is
-    the data identity (e.g. a region id, or ``region/fov`` for an ROI) and the chain is the op-chain.
+    """Flat, content-addressed result store: the key is ``(scope, version, chain.key())``.
 
-    Because the key is content, two windows over the same well running the same chain hit the SAME
-    entry: results cross-propagate for free, lazily, with no window-to-window signalling. Bounded
-    LRU so a long session never blows memory: the least-recently-used entry is dropped past the cap.
+    ``scope`` is the data node's identity (the integer RRCCOOOO id, see ``_plate.cache_scope``);
+    ``chain`` is the op-chain; ``version`` is the ACQUISITION VERSION, baked in now so re-parenting
+    to the live Squid source is trivial later. For a static folder ``version`` stays ``0`` and the
+    key is a forever-key. For a live scope the reader bumps ``version`` as a node's frames arrive, so
+    a stale result (yesterday's decon of a well still being imaged) simply misses and recomputes,
+    without any explicit invalidation pass. The temporal dimension is thus part of identity, not a
+    side channel.
+
+    Because the key is content, two windows over the same node running the same chain at the same
+    version hit the SAME entry: results cross-propagate for free, lazily, with no window-to-window
+    signalling. Bounded LRU so a long session never blows memory.
     """
 
     def __init__(self, max_entries: int = 64) -> None:
@@ -113,25 +120,25 @@ class ResultCache:
         self._max = max(1, int(max_entries))
 
     @staticmethod
-    def _k(scope: str, chain: RecipeChain) -> tuple:
-        return (str(scope), chain.key())
+    def _k(scope: str, chain: RecipeChain, version: Any) -> tuple:
+        return (str(scope), str(version), chain.key())
 
-    def get(self, scope: str, chain: RecipeChain) -> Optional[Any]:
-        k = self._k(scope, chain)
+    def get(self, scope: str, chain: RecipeChain, version: Any = 0) -> Optional[Any]:
+        k = self._k(scope, chain, version)
         if k in self._d:
             self._d.move_to_end(k)          # most-recently used
             return self._d[k]
         return None
 
-    def put(self, scope: str, chain: RecipeChain, value: Any) -> None:
-        k = self._k(scope, chain)
+    def put(self, scope: str, chain: RecipeChain, value: Any, version: Any = 0) -> None:
+        k = self._k(scope, chain, version)
         self._d[k] = value
         self._d.move_to_end(k)
         while len(self._d) > self._max:
             self._d.popitem(last=False)      # evict least-recently used
 
-    def has(self, scope: str, chain: RecipeChain) -> bool:
-        return self._k(scope, chain) in self._d
+    def has(self, scope: str, chain: RecipeChain, version: Any = 0) -> bool:
+        return self._k(scope, chain, version) in self._d
 
     def clear(self) -> None:
         self._d.clear()
