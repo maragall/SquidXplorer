@@ -817,6 +817,12 @@ class ViewerManager(QObject):
         """The window id of the active view (its plate hue reads brighter), or None."""
         return self._focused_id
 
+    def clear_focus(self) -> None:
+        """No view is selected -> clear the plate wash. Emitting empty regions makes the plate's hue
+        refresh find no focused view and paint nothing."""
+        self._focused_id = None
+        self.viewFocused.emit([])
+
     def focus(self, window_id: int) -> None:
         win = self._windows.get(int(window_id))
         if win is not None:
@@ -887,8 +893,12 @@ class OpenViewList(QWidget):
         self._tree = QTreeWidget(self)
         self._tree.setHeaderHidden(True)
         self._tree.setRootIsDecorated(False)
+        # The plate wash STRICTLY follows the navigator selection: select a row -> wash that view;
+        # deselect (or nothing selected) -> no wash. Julio: "nothing is selected, and I still see a
+        # region purple washed." itemActivated (double-click) also raises the window.
         self._tree.itemActivated.connect(self._on_activated)
-        self._tree.itemClicked.connect(self._on_activated)
+        self._tree.itemSelectionChanged.connect(self._on_selection_changed)
+        self._syncing = False   # guards refresh()'s programmatic selection from re-emitting
         lay.addWidget(self._tree, 1)
 
         row = QHBoxLayout()
@@ -913,11 +923,36 @@ class OpenViewList(QWidget):
         self.refresh()
 
     def refresh(self) -> None:
-        self._tree.clear()
-        for win in self._manager.windows:
-            item = QTreeWidgetItem([win.windowTitle()])
-            item.setData(0, Qt.UserRole, int(win.window_id))
-            self._tree.addTopLevelItem(item)
+        # Rebuild the rows, then sync the row selection to the manager's focused view (guarded so the
+        # programmatic selection does not re-fire _on_selection_changed). No focused view => nothing
+        # selected => no wash, which is exactly the state Julio saw violated.
+        self._syncing = True
+        try:
+            self._tree.clear()
+            focused = self._manager.focused_id
+            for win in self._manager.windows:
+                item = QTreeWidgetItem([win.windowTitle()])
+                item.setData(0, Qt.UserRole, int(win.window_id))
+                self._tree.addTopLevelItem(item)
+                if focused is not None and int(win.window_id) == int(focused):
+                    item.setSelected(True)
+                    self._tree.setCurrentItem(item)
+            if focused is None:
+                self._tree.clearSelection()
+        finally:
+            self._syncing = False
+
+    def _on_selection_changed(self) -> None:
+        """Row selection IS the wash: selected -> wash that view; none -> clear the wash."""
+        if self._syncing:
+            return
+        items = self._tree.selectedItems()
+        if items:
+            wid = items[0].data(0, Qt.UserRole)
+            if wid is not None:
+                self._manager.focus(int(wid))
+        else:
+            self._manager.clear_focus()
 
     def _on_activated(self, item: QTreeWidgetItem, _column: int = 0) -> None:
         wid = item.data(0, Qt.UserRole)
