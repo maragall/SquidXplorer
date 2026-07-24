@@ -187,6 +187,7 @@ class RegionViewer(QMainWindow):
         self._cursor = None
         self._native3d = None      # keeps a spawned 3D popout viewer alive
         self._spot_worker = None   # nuclei detection (Cellpose) on this view's MIP, off-thread
+        self._focus_worker = None  # Tenengrad reference-plane autofocus, off-thread
         # OPERATOR CONTROLS AT EACH LEVEL (the deck: "Operators for this window"; Julio, 2026-07-23:
         # "I don't see operator controls like the powerpoint specified at each level"). This is not a
         # contradiction of "operators work on Views" -- it IS that: the window's operator control runs
@@ -348,7 +349,13 @@ class RegionViewer(QMainWindow):
         self._btn_3d = self._chip("3D", "Open this view in 3D at NATIVE resolution (the region if it "
                                   "fits the GPU texture, else draw an ROI to pick the spot).",
                                   self._open_3d)
-        r1.addWidget(self._btn_2d); r1.addWidget(self._btn_3d)
+        # Tenengrad autofocus, back on the slider (Julio): jump this window's z-slider to the
+        # sharpest plane of the current region's centre FOV. The worker lived under the removed
+        # central viewer; here it drives the window's own napari z dims.
+        self._btn_focus = self._chip("⌖ focus", "Jump the z-slider to the sharpest plane "
+                                     "(Tenengrad autofocus) of this region's centre FOV.",
+                                     self._focus_reference_plane)
+        r1.addWidget(self._btn_2d); r1.addWidget(self._btn_3d); r1.addWidget(self._btn_focus)
         r1.addStretch(1)
         vv.addLayout(r1)
         r2 = QHBoxLayout(); r2.setSpacing(4)
@@ -534,6 +541,47 @@ class RegionViewer(QMainWindow):
             v.dims.ndisplay = int(n)
         except Exception as exc:                         # noqa: BLE001 - named, never silent
             self._say(f"could not switch to {n}D: {exc}")
+
+    def _focus_reference_plane(self) -> None:
+        """Jump this window's z-slider to the sharpest plane (Tenengrad) of the current region's
+        centre FOV. Reuses the app's _FocusWorker; the result moves napari's own z dims."""
+        v = self._napari_viewer()
+        region = self._cursor.region if self._cursor is not None else (
+            self._regions[0] if self._regions else None)
+        if v is None or region is None or self._reader is None or self._meta is None:
+            self._say("open a region first, then focus the reference plane.")
+            return
+        if self._focus_worker is not None and self._focus_worker.isRunning():
+            self._say("already finding the reference plane…")
+            return
+        from squidmip._napari3d import _center_fov
+        fov = _center_fov(self._meta, region)
+        if fov is None:
+            fovs = (self._meta.get("fovs_per_region") or {}).get(region) or [0]
+            fov = int(fovs[0])
+        chan = self._meta["channels"][0]["name"]
+        from squidmip._viewer import _FocusWorker
+
+        w = _FocusWorker(self._reader, self._meta, region, int(fov), chan, parent=self)
+        w.ready.connect(lambda z_i, note: self._on_reference_plane(int(z_i), note))
+        if hasattr(w, "problem"):
+            w.problem.connect(self._say)
+        self._focus_worker = w
+        self._say("finding the sharpest z (Tenengrad autofocus)…")
+        w.start()
+
+    def _on_reference_plane(self, z_index: int, note: str) -> None:
+        v = self._napari_viewer()
+        if v is None:
+            return
+        try:
+            step = list(v.dims.current_step)
+            if step:                                     # z is the leading axis of a (z, y, x) layer
+                step[0] = int(z_index)
+                v.dims.current_step = tuple(step)
+            self._say(f"reference plane: z={z_index}. {note}".strip())
+        except Exception as exc:                         # noqa: BLE001 - named, never silent
+            self._say(f"could not move the z-slider: {exc}")
 
     def _view_roi_2d(self) -> None:
         """2D view of the SELECTED ROI: open it as a child window (same annotation the 3D button
@@ -1057,6 +1105,12 @@ class RegionViewer(QMainWindow):
             if self._spot_worker is not None and self._spot_worker.isRunning():
                 self._spot_worker.stop()
                 self._spot_worker.wait(2000)
+        except Exception:                            # noqa: BLE001
+            pass
+        try:
+            if self._focus_worker is not None and self._focus_worker.isRunning():
+                self._focus_worker.stop()
+                self._focus_worker.wait(2000)
         except Exception:                            # noqa: BLE001
             pass
         try:
