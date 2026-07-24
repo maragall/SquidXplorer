@@ -10,14 +10,7 @@ The **plate is the root**. Selecting wells opens an independent napari window ov
 ROI inside a window opens a **child window** over that region. Every window gets an integer id, and
 they are all collected in the **Window navigator** on the left.
 
-```mermaid
-flowchart TD
-  ROOT["Wellplate view<br/>Window navigator (selectable)  +  Operators (bulk)  +  Selection"]
-  W["Window &middot; a well or a set of wells<br/>2D / 3D  &middot;  Operators for this window<br/>napari mosaic (full well) + ROI boxes<br/>slider: &lt;&gt; A1, B6, C3 ..."]
-  R["ROI child window<br/>2D / 3D  &middot;  Operators for this window<br/>slider: &lt;&gt; ROI1, ROI2, ROI3 ..."]
-  ROOT -- "select wells" --> W
-  W -- "box an ROI" --> R
-```
+![SquidXplorer layout: the wellplate root with the Window navigator and bulk Operators, each selection opening a window with its own 2D/3D and Operators panel over a napari mosaic, and ROI child windows.](docs/viewer-layout.png)
 
 **Layout (from the design deck):**
 
