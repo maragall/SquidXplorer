@@ -6444,6 +6444,33 @@ class PlateWindow(QMainWindow):
                 f"'{key}' is not a runnable operator — this viewer can run: "
                 f"{', '.join(runnable_operators())}")
             return
+        # FLAT-FIELD needs an illumination profile. Without one, _correct_with_active raises per
+        # field and the plate fills with red x's (Julio: "flatfield shows as x's"). If none is
+        # active, AUTO-ESTIMATE one from a spread sample of plate tiles (tilefusion BaSiC, off-thread)
+        # and re-run once it lands. The estimate uses the first channel; the flat-field tab lets the
+        # user pick a different channel and re-estimate.
+        if key == "flatfield":
+            import squidmip._flatfield as _ff
+            if _ff.active_profile() is None:
+                if getattr(self, "_ff_est_worker", None) is not None and self._ff_est_worker.isRunning():
+                    self._readout.setText("flat-field: estimating an illumination profile…")
+                    return
+                chan = self._meta["channels"][0]["name"]
+                w = _FlatfieldWorker(self._reader, self._meta, chan, parent=self)
+                w.stage.connect(self._readout.setText)
+                w.problem.connect(lambda m: self._readout.setText(f"flat-field estimate failed: {m}"))
+
+                def _profile_ready(profile, k=key, regs=regions, sv=save, op=out_parent, tk=tab_key):
+                    _ff.set_profile(profile)
+                    self._readout.setText("flat-field: profile ready — running.")
+                    self.run_operator(k, out_parent=op, regions=regs, save=sv, tab_key=tk)
+
+                w.done.connect(_profile_ready)
+                self._ff_est_worker = w
+                self._readout.setText(f"flat-field: estimating an illumination profile from {chan} "
+                                      "(tilefusion BaSiC)…")
+                w.start()
+                return
         label = operator_label(key)
         # Scope the run. An explicit `regions` list still wins (the preview spinner builds one, and
         # so do tests). Otherwise the SCOPE SELECTOR on this pane decides — one control panel, one
