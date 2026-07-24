@@ -27,6 +27,7 @@ import numpy as np
 from PyQt5.QtCore import QObject, Qt, QTimer, pyqtSignal
 from PyQt5.QtWidgets import (
     QButtonGroup,
+    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -161,6 +162,8 @@ class RegionViewer(QMainWindow):
         parent: Optional[QWidget] = None,
         manager: Optional["ViewerManager"] = None,
         roi_bbox: Optional[tuple] = None,
+        operator_specs: Optional[Sequence] = None,
+        run_operator: Optional[Any] = None,
     ) -> None:
         super().__init__(parent)
         self._reader = reader
@@ -174,11 +177,14 @@ class RegionViewer(QMainWindow):
         self._slider = None
         self._cursor = None
         self._native3d = None      # keeps a spawned 3D popout viewer alive
-        # A window is a SEPARATE INSTANCE to freely explore data (Spencer, 2026-07-23). Operators do
-        # NOT live in the window: "operators should really only work on Views", picked centrally and
-        # aimed at the selected view(s). The window keeps the manager only so an ROI can open a CHILD
-        # window (the view tree). Operate-on-views UX is Spencer's lane; the engine stays view-ready.
+        # OPERATOR CONTROLS AT EACH LEVEL (the deck: "Operators for this window"; Julio, 2026-07-23:
+        # "I don't see operator controls like the powerpoint specified at each level"). This is not a
+        # contradiction of "operators work on Views" -- it IS that: the window's operator control runs
+        # the SAME registry on THIS view's regions. Selecting where to run stitching = pick the view,
+        # run it here. The manager also lets an ROI open a CHILD window (the view tree).
         self._manager = manager
+        self._operator_specs = list(operator_specs or [])
+        self._run_operator = run_operator
         # An ROI child carries the parent's ROI box (deck: "ROI -> child window"). Cropping the load
         # to it lands with the loader work; today it scopes the title + is recorded for that step.
         self._roi_bbox = roi_bbox
@@ -326,28 +332,50 @@ class RegionViewer(QMainWindow):
         # window carries is LUT sync — the GUI form of "sync windows by copy-pasting a parameter
         # file", and Spencer scoped sync to LUTs specifically (FF correction is an operation, not a
         # LUT). Annotation (Julio's lane) lands beside these next.
-        lut_box, ov = self._titled_box("Contrast sync (LUTs)")
-        strip = QWidget()
-        sh = QHBoxLayout(strip)
-        sh.setContentsMargins(0, 0, 0, 0)
-        sh.setSpacing(4)
-        sh.addWidget(self._chip("⧉ Copy LUTs", "Copy this window's per-channel contrast + colormap.",
-                                self._copy_luts))
-        sh.addWidget(self._chip("⤓ Paste LUTs", "Apply the copied LUTs to this window's channels.",
-                                self._paste_luts))
-        sh.addStretch(1)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        scroll.setStyleSheet("QScrollArea{border:none;background:transparent;}")
-        scroll.setWidget(strip)
-        scroll.setFixedHeight(34)
-        ov.addWidget(scroll)
-        h.addWidget(lut_box, 1)
+        op_box, ov = self._titled_box("Operators for this window")
+        # Row 1: pick an operator, Run it on THIS view (a dropdown, per Julio's "hierarchies should be
+        # drop-down menus"). Runs the same registry the plate uses, scoped to this window's regions.
+        opr = QHBoxLayout(); opr.setSpacing(4)
+        self._op_combo = QComboBox()
+        self._op_combo.setStyleSheet(self._CHIP_QSS + "QComboBox{min-width:120px;}")
+        for spec in self._operator_specs:
+            self._op_combo.addItem(str(spec[1]), spec[0])   # label shown, key as data
+        if self._op_combo.count() == 0:
+            self._op_combo.addItem("no operators", None)
+            self._op_combo.setEnabled(False)
+        opr.addWidget(self._op_combo, 1)
+        opr.addWidget(self._chip("Run", "Run the selected operator on THIS view's regions.",
+                                 self._run_view_operator))
+        ov.addLayout(opr)
+        # Row 2: contrast sync (copy/paste LUTs) — window <-> window <-> plate.
+        sync = QHBoxLayout(); sync.setSpacing(4)
+        sync.addWidget(self._chip("⧉ Copy LUTs", "Copy this window's per-channel contrast + colormap.",
+                                  self._copy_luts))
+        sync.addWidget(self._chip("⤓ Paste LUTs", "Apply the copied LUTs to this window's channels.",
+                                  self._paste_luts))
+        sync.addStretch(1)
+        ov.addLayout(sync)
+        h.addWidget(op_box, 1)
 
-        row.setMaximumHeight(92)
+        row.setMaximumHeight(108)
         return row
+
+    def _run_view_operator(self) -> None:
+        """Run the operator picked in this window's dropdown on THIS view's regions — "select where to
+        run stitching" = pick this view, Run. Uses the app's real engine (no reimplementation)."""
+        if self._run_operator is None:
+            self._say("the operator engine isn't connected to this window.")
+            return
+        key = self._op_combo.currentData() if getattr(self, "_op_combo", None) is not None else None
+        if not key:
+            self._say("no operator selected.")
+            return
+        regions = list(self._regions)
+        try:
+            self._run_operator(key, regions=regions)
+            self._say(f"running {self._op_combo.currentText()} on {self._region_label(regions)}.")
+        except Exception as exc:                          # noqa: BLE001 - named to the window
+            self._say(f"could not start {self._op_combo.currentText()}: {exc}")
 
     def _napari_viewer(self):
         """The live napari ``Viewer`` behind this window's pane, or None if unavailable."""
@@ -734,6 +762,10 @@ class ViewerManager(QObject):
         self._windows: "dict[int, RegionViewer]" = {}
         self._next_id = 1
         self._focused_id: Optional[int] = None    # which view is active (its plate hue reads brighter)
+        # Set by the root PlateWindow so every window's "Operators for this window" dropdown is the
+        # SAME registry + the SAME run_operator (the CLI engine), scoped to that view.
+        self.operator_specs: "list" = []
+        self.run_operator: Optional[Any] = None
 
         self._mem_timer = QTimer(self)
         self._mem_timer.setInterval(2000)
@@ -801,6 +833,7 @@ class ViewerManager(QObject):
         win = RegionViewer(
             self._reader, self._meta, regions, window_id=wid, title=title,
             manager=self, roi_bbox=roi_bbox,
+            operator_specs=self.operator_specs, run_operator=self.run_operator,
         )
         win.closed.connect(self._on_window_closed)
         self._windows[wid] = win

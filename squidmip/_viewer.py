@@ -3507,9 +3507,14 @@ class PlateWindow(QMainWindow):
         # shares this one stateless reader/meta — nothing reopens the dataset. See _region_viewer.
         from squidmip._region_viewer import ViewerManager
         self._viewer_manager = ViewerManager(parent=self)
-        # Operators DELIBERATELY do not live in the spawned windows (Spencer, 2026-07-23: "operators
-        # should really only work on Views", picked centrally and aimed at the selected view(s)).
-        # The manager only instantiates/raises windows; operate-on-views is the root's job.
+        # Operator controls appear AT EACH LEVEL (the deck; Julio 2026-07-23: "I don't see operator
+        # controls like the powerpoint specified at each level"). Every window's "Operators for this
+        # window" dropdown is the SAME registry + run_operator (the CLI engine), scoped to that view,
+        # so "select where to run stitching" = pick the view, Run. Only runnable operators appear
+        # (minerva/Gallery View are terminals that stay on the root's stack).
+        self._viewer_manager.operator_specs = [
+            (op.key, op.label) for op in _OPERATIONS if op.runnable]
+        self._viewer_manager.run_operator = self.run_operator
         # The plate wash shows ONLY the view you CLICK (Julio), coloured by that view's own hue so
         # different view threads are told apart. Not all views at once — that clutters the plate.
         # viewFocused fires on open/raise; windowsChanged clears it when the focused view closes.
@@ -3725,8 +3730,26 @@ class PlateWindow(QMainWindow):
             "border-radius:4px;padding:3px 10px;font-size:12px;}"
             "QPushButton:hover{background:#388bfd;}")
         self._open_sel_btn.clicked.connect(self._open_selected_view)
+        # Copy/paste LUTs TO THE PLATE (Julio: "we have to be able to copy and paste luts to the
+        # plate"). Shares the one _LUT_CLIPBOARD windows use, so a window's contrast pastes onto the
+        # plate and vice versa — the plate is a View with controls like any window.
+        _lut_qss = ("QPushButton{background:#161b22;color:#c9d1d9;border:1px solid #30363d;"
+                    "border-radius:4px;padding:3px 10px;font-size:12px;}"
+                    "QPushButton:hover{background:#21262d;}")
+        self._plate_copy_lut_btn = QPushButton("⧉ LUTs")
+        self._plate_copy_lut_btn.setToolTip("Copy the plate's per-channel contrast.")
+        self._plate_copy_lut_btn.setCursor(Qt.PointingHandCursor)
+        self._plate_copy_lut_btn.setStyleSheet(_lut_qss)
+        self._plate_copy_lut_btn.clicked.connect(self._plate_copy_luts)
+        self._plate_paste_lut_btn = QPushButton("⤓ LUTs")
+        self._plate_paste_lut_btn.setToolTip("Apply the copied LUTs to the plate.")
+        self._plate_paste_lut_btn.setCursor(Qt.PointingHandCursor)
+        self._plate_paste_lut_btn.setStyleSheet(_lut_qss)
+        self._plate_paste_lut_btn.clicked.connect(self._plate_paste_luts)
         _sb.addWidget(_sel_cap)
         _sb.addWidget(self._selection_label, 1)
+        _sb.addWidget(self._plate_copy_lut_btn)
+        _sb.addWidget(self._plate_paste_lut_btn)
         _sb.addWidget(self._select_all_btn)
         _sb.addWidget(self._open_sel_btn)
         self._left_l.addWidget(sel_bar)
@@ -3874,16 +3897,10 @@ class PlateWindow(QMainWindow):
         sv.setContentsMargins(0, 0, 0, 0)
         sv.setSpacing(8)
         self._op_cards = {}
-        for op in _OPERATIONS:
-            card = QPushButton(f"{op.label}\n{op.blurb}")
-            card.setEnabled(False)                         # enabled once an acquisition loads
-            card.setCursor(Qt.PointingHandCursor)
-            card.setStyleSheet(_CARD_QSS)
-            card.setMinimumHeight(54)
-            card.clicked.connect(lambda _=False, k=op.key: self._activate_operator(k))
-            sv.addWidget(card)
-            self._op_cards[op.key] = card
-        # Gallery View (slide 2 terminal operator): assemble a gallery from the OPEN windows.
+        # TERMINAL operators on TOP of the stack (Julio, 2026-07-23: "I need minerva author and the
+        # gallery view to be on the top of the stack"). Gallery View first, then Minerva Author, then
+        # the processing operators. Gallery View is a button (gathers windows), Minerva is an
+        # Operation card; the rest follow in registry order, minus minerva (already placed).
         gv = QPushButton("Gallery View\nArrange the open viewer windows into a gallery")
         gv.setEnabled(False)
         gv.setCursor(Qt.PointingHandCursor)
@@ -3892,6 +3909,18 @@ class PlateWindow(QMainWindow):
         gv.clicked.connect(self._open_gallery_view)
         sv.addWidget(gv)
         self._op_cards["galleryview"] = gv
+
+        _minerva = [op for op in _OPERATIONS if op.key == "minerva"]
+        ordered = _minerva + [op for op in _OPERATIONS if op.key != "minerva"]
+        for op in ordered:
+            card = QPushButton(f"{op.label}\n{op.blurb}")
+            card.setEnabled(False)                         # enabled once an acquisition loads
+            card.setCursor(Qt.PointingHandCursor)
+            card.setStyleSheet(_CARD_QSS)
+            card.setMinimumHeight(54)
+            card.clicked.connect(lambda _=False, k=op.key: self._activate_operator(k))
+            sv.addWidget(card)
+            self._op_cards[op.key] = card
         sv.addStretch(1)
 
         scroll = QScrollArea()
@@ -6899,6 +6928,46 @@ class PlateWindow(QMainWindow):
             return
         if self._viewer_manager.open(regions) is None:
             self._readout.setText("Open an acquisition before opening a view.")
+
+    def _plate_channels(self) -> list:
+        return [c["name"] for c in (self._meta or {}).get("channels", [])]
+
+    def _plate_copy_luts(self):
+        """Copy the plate's per-channel contrast into the shared LUT clipboard (window <-> plate)."""
+        from squidmip._region_viewer import _LUT_CLIPBOARD
+        ov = self._overview
+        names = self._plate_channels()
+        wins = ov.channel_windows() if ov is not None else []
+        if not names or not wins:
+            self._readout.setText("no plate channels to copy LUTs from.")
+            return
+        _LUT_CLIPBOARD.clear()
+        for i, name in enumerate(names):
+            if i < len(wins) and wins[i] is not None:
+                lo, hi = float(wins[i][0]), float(wins[i][1])
+                _LUT_CLIPBOARD[name] = {"clim": (lo, hi), "cmap": None}
+        self._readout.setText(f"copied plate LUTs for {len(_LUT_CLIPBOARD)} channel(s).")
+
+    def _plate_paste_luts(self):
+        """Apply the shared LUT clipboard to the plate's per-channel contrast."""
+        from squidmip._region_viewer import _LUT_CLIPBOARD
+        ov = self._overview
+        if not _LUT_CLIPBOARD:
+            self._readout.setText("no copied LUTs yet — copy from a window or the plate first.")
+            return
+        if ov is None:
+            return
+        applied = 0
+        for i, name in enumerate(self._plate_channels()):
+            lut = _LUT_CLIPBOARD.get(name)
+            if lut and lut.get("clim") is not None:
+                lo, hi = lut["clim"]
+                try:
+                    ov.set_channel_window(i, float(lo), float(hi))
+                    applied += 1
+                except Exception:                        # noqa: BLE001 - one bad channel is skipped
+                    pass
+        self._readout.setText(f"pasted LUTs onto {applied} plate channel(s).")
 
     def _highlight_view_regions(self, regions):
         """A view was clicked/opened — move the plate's blue wash onto its regions."""
