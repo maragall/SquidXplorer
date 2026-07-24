@@ -200,6 +200,14 @@ class RegionViewer(QMainWindow):
         self.setWindowTitle(f"[{self.window_id}] {label}")
         self.setAttribute(Qt.WA_DeleteOnClose, True)
 
+        # EXPRESSIVE path-ID for the logger (Julio: "better id generation so the logger is more
+        # expressible"). A window reads as "V3:A1,B6"; an ROI child as "V5:ROI@A1" — the id plus WHAT
+        # it holds, so a log line names the view instead of a bare number. This is the first rung of
+        # the tree path-id (plate ▸ well ▸ ROI ▸ object); deeper nodes extend it the same way.
+        _base = self._region_label(self._regions)
+        self.view_tag = (f"V{self.window_id}:ROI@{_base}" if self._roi_bbox is not None
+                         else f"V{self.window_id}:{_base}")
+
         # A modest, cascaded window — the deck's windows are small tiles, not full-screen slabs.
         # Cascade by ID so several opened in a row do not land exactly on top of one another.
         self.resize(860, 720)
@@ -788,7 +796,7 @@ class RegionViewer(QMainWindow):
         # I'm blind to it." The pane status bar is the in-window echo; the log window is the record
         # of what every open view did, which is what "the logger deals with all open windows" needs.
         if text:
-            log.info("[view %s] %s", self.window_id, text)
+            log.info("[%s] %s", getattr(self, "view_tag", f"V{self.window_id}"), text)
         if self._pane is not None and getattr(self._pane, "ok", False):
             self._pane.say(text)
 
