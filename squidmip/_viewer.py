@@ -50,6 +50,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sys
 import threading
 from dataclasses import dataclass
@@ -179,6 +180,26 @@ _CHECK_QSS = _qtstyle.CHECK_QSS
 _TERM_QSS = _qtstyle.TERM_QSS
 _MENU_QSS = _qtstyle.MENU_QSS
 _ANSI_RE = _qtstyle.ANSI_RE
+
+#: ``font-size: 12px`` in a stylesheet, with the number as group 1. Only ``px`` — a ``pt`` size
+#: is already device-independent and must NOT be scaled a second time.
+_QSS_FONT_PX_RE = re.compile(r"(?<=font-size:)\s*(\d+(?:\.\d+)?)\s*px", re.IGNORECASE)
+
+
+def _scale_qss_fonts(qss: str, scale: float) -> str:
+    """Multiply every ``font-size:Npx`` in *qss* by *scale*, leaving the rest untouched.
+
+    Only the font size moves. Scaling paddings and borders too was tried and looked wrong: the
+    dark cards are drawn with 1 px hairlines that turn into muddy 2-3 px rules the moment they
+    are multiplied, and Qt already scales the whole sheet by the device pixel ratio.
+
+    Sizes floor at 8 px so shrinking the window toward the minimum cannot produce type nobody
+    can read.
+    """
+    def _sub(m):
+        return f"{max(8, round(float(m.group(1)) * scale))}px"
+
+    return _QSS_FONT_PX_RE.sub(_sub, qss)
 
 
 def _signal_names(cls) -> tuple:
@@ -3868,10 +3889,21 @@ class PlateWindow(QMainWindow):
 
         self._sync_explore_pane()                  # keeps the (now-hidden) op-tab stack coherent
 
-        # FIXED SIZE on any display (Julio): 596 wide x 850 tall. A hard setFixedSize so the compact
-        # portrait shape is identical on every monitor and never balloons — the plate dominates
-        # below the capped top strip.
-        self.setFixedSize(596, 850)
+        # 596 x 850 stays the DEFAULT portrait shape (Julio): the plate dominates below the
+        # capped top strip, and the window opens identically on every monitor. It is no longer
+        # a setFixedSize, for two reasons.
+        #
+        # 1. Spencer: the root has to be resizable, and the type has to come up with it.
+        # 2. A hard 850 stopped fitting the moment enable_hidpi() landed. Those are LOGICAL
+        #    pixels, so on a 200%-scaled display 850 is 1700 physical -- taller than a 1080p
+        #    screen. A fixed size that cannot fit on the monitor is not a compact shape, it is
+        #    a window with its lower half off the bottom of the display.
+        #
+        # So: open at the design size, clamped to what the screen can actually show, and let
+        # the user take it from there. The minimum keeps the top strip's controls from
+        # collapsing into each other.
+        self.setMinimumSize(420, 520)
+        self.resize(*self._default_root_size())
 
         # The log window opens alongside the root and is toggled from the View menu.
         view_menu = self.menuBar().addMenu("&View")
@@ -3885,6 +3917,66 @@ class PlateWindow(QMainWindow):
         self.setAcceptDrops(True)
         if initial_path:
             self.ingest(initial_path)
+
+    # -- root window sizing + type that follows it -------------------------------------------------
+
+    #: The portrait shape the layout was designed against. Also the denominator for the UI scale:
+    #: at exactly this width the type is the size the stylesheets literally say.
+    _DESIGN_W, _DESIGN_H = 596, 850
+
+    def _default_root_size(self) -> tuple:
+        """The design size, shrunk to fit the screen it will actually open on.
+
+        In LOGICAL pixels, so this compares like with like under ``enable_hidpi()``. Leaves a
+        margin for the taskbar and title bar rather than filling the work area exactly.
+        """
+        w, h = self._DESIGN_W, self._DESIGN_H
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            avail = screen.availableGeometry()
+            w = min(w, max(self.minimumWidth(), avail.width() - 40))
+            h = min(h, max(self.minimumHeight(), avail.height() - 80))
+        return w, h
+
+    def _ui_scale(self) -> float:
+        """How much bigger the window is than the shape the type was written for.
+
+        Width-driven: the portrait root grows mostly sideways, and tying type to height would
+        make a tall thin window shout. Clamped so a very wide window does not produce absurd
+        type and a minimum-size one stays legible.
+        """
+        return max(0.85, min(2.0, self.width() / float(self._DESIGN_W)))
+
+    def _rescale_fonts(self) -> None:
+        """Re-apply every descendant stylesheet with its ``font-size`` multiplied by the scale.
+
+        Done by rewriting the stylesheets rather than by setting a widget font, because a QSS
+        ``font-size`` on a child beats any font inherited from a parent -- and this GUI sets one
+        inline at 79 call sites. Each widget's ORIGINAL stylesheet is cached the first time it
+        is seen, so scaling is always computed from the authored value and never compounds.
+        """
+        scale = self._ui_scale()
+        if abs(scale - getattr(self, "_applied_ui_scale", 0.0)) < 0.02:
+            return                              # sub-pixel churn; not worth restyling the tree
+        self._applied_ui_scale = scale
+
+        cache = self.__dict__.setdefault("_qss_original", {})
+        for w in [self] + self.findChildren(QWidget):
+            key = id(w)
+            if key not in cache:
+                qss = w.styleSheet()
+                if "font-size:" not in qss:
+                    cache[key] = None           # nothing to scale here; remember and skip it
+                    continue
+                cache[key] = qss
+            base = cache[key]
+            if base is None:
+                continue
+            w.setStyleSheet(_scale_qss_fonts(base, scale))
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._rescale_fonts()
 
     # -- the Operators panel (top-right): a scrollable list of operator blocks ----------------------
     def _build_process_pane(self) -> QWidget:
@@ -7648,6 +7740,26 @@ def _gui_cap_applies() -> bool:
     return os.environ.get("QT_QPA_PLATFORM") != "offscreen"
 
 
+def enable_hidpi() -> None:
+    """Draw at the display's scale factor. MUST run before the QApplication exists.
+
+    Qt5 does not scale unless asked. On a 200%-scaled display (Spencer's workstation:
+    system DPI 192) the app is DPI-*aware* but not DPI-*scaling*, so the window occupies its
+    logical pixel count in PHYSICAL pixels -- it renders at half the size of every other
+    application on the screen, which is the "everything is too small" report. Every ``px`` in
+    the stylesheets is a logical pixel once this is on, so fonts, icons and paddings all come
+    up together instead of needing 79 call sites edited.
+
+    Setting these after a QApplication has been constructed is a silent no-op, which is why
+    this is a named function called at the one point that owns startup rather than a line
+    buried in ``main``.
+    """
+    for attr in ("AA_EnableHighDpiScaling", "AA_UseHighDpiPixmaps"):
+        flag = getattr(Qt, attr, None)
+        if flag is not None:                # Qt6 always scales and drops both attributes
+            QApplication.setAttribute(flag, True)
+
+
 def main(dataset_path: str = None):
     path = dataset_path or (sys.argv[1] if len(sys.argv) > 1 else None)
     slot = None
@@ -7657,6 +7769,8 @@ def main(dataset_path: str = None):
         except GuiAlreadyOpen as e:
             print(f"squidmip-view: {e}", file=sys.stderr)
             sys.exit(1)
+    if QApplication.instance() is None:     # only the process that CREATES the app may set these
+        enable_hidpi()
     app = QApplication.instance() or QApplication(sys.argv)
     win = PlateWindow(path)
     _install_footprint_monitor(app, win)
