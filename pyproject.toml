@@ -55,9 +55,18 @@ test = ["pytest>=7.0", "ome-zarr-models>=1.7"]
 # psutil is what _rss_mb() and _region_viewer's memory bar actually want. Without it they fall
 # back to `resource`, which does not exist on Windows, so the footprint readout sat at 0 MB
 # forever -- the memory warning the README promises could never fire on Windows.
+# The napari range matches the one Cephla validated in the Squid HCS GUI
+# (jsschwrz/Squid 757d571, "Migrate GUI from PyQt5 to PyQt6 for napari 0.7 / Python 3.14"),
+# so the two apps that embed napari do not drift onto different majors.
+#
+# CAVEAT, and it is the reason the upper bound is worth having: napari >=0.7 targets Qt6, and
+# that commit found napari 0.7 + vispy 0.16 under PyQt5 renders the mosaic glitchily. This
+# package is still PyQt5, so the pin aligns versions for the Qt6 migration rather than making
+# Qt5 correct. Bindings verified against the pinned range via verify_napari_bindings(); the
+# rendering caveat is a Qt-binding problem, tracked separately.
 gui = [
     "PyQt5>=5.15",
-    "napari>=0.5",
+    "napari>=0.7,<0.8",
     "psutil>=5.9",
     "ndviewer_light @ git+https://github.com/maragall/ndviewer_light@main",
 ]
