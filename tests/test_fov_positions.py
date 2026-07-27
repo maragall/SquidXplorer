@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from squidmip.reader import load_fov_positions_um, open_reader
+from squidmip.reader import _fov_positions_um_or_empty, load_fov_positions_um, open_reader
 
 
 def _csv(rows, header="region,x (mm),y (mm),z (mm)"):
@@ -255,14 +255,90 @@ def test_malformed_coordinates_csv_header_still_yields_metadata(squid_dataset):
     assert meta["fov_positions_um"] == {}
 
 
+# --- one truncated well must not cost the whole plate its mosaic ----------------------------
+#
+# Shape taken from a real 9-well acquisition (WELLPLATE 2026-07-23): A1..C2 each wrote 9 FOVs
+# and list 9 positions; C3 was cut short at 4 FOVs while its 9 planned rows stayed in the CSV.
+# Every well lost its mosaic, because the first mismatch raised and collapsed the whole mapping.
+
+def _plate_csv(good_regions, short_region=None, planned=3, written=1):
+    """A CSV where every *good_regions* entry cross-checks and *short_region* is truncated."""
+    rows = [f"{r},{1.0 + i * 0.5},2.0," for r in good_regions for i in range(planned)]
+    if short_region:
+        rows += [f"{short_region},{10.0 + i * 0.5},20.0," for i in range(planned)]
+    return _csv(rows)
+
+
+def test_one_short_region_does_not_strip_positions_from_the_good_ones(tmp_path):
+    """The regression. C3 is unknowable; A1 and B2 are not, and they keep their positions."""
+    (tmp_path / "coordinates.csv").write_text(
+        _plate_csv(["A1", "B2"], short_region="C3", planned=3)
+    )
+    fovs = {"A1": [0, 1, 2], "B2": [0, 1, 2], "C3": [0]}   # C3: 3 rows, 1 FOV written
+
+    with pytest.warns(UserWarning, match="unusable"):
+        pos = _fov_positions_um_or_empty(tmp_path, fovs)
+
+    assert pos[("A1", 0)] == (1000, 2000), "A1 cross-checks; it must keep its positions"
+    assert pos[("A1", 2)] == (2000, 2000)
+    assert pos[("B2", 1)] == (1500, 2000)
+    assert not any(region == "C3" for region, _ in pos), \
+        "C3's mapping is unknowable — it must contribute nothing rather than guess"
+
+
+def test_the_warning_names_both_what_was_dropped_and_what_survived(tmp_path):
+    """A message that says only 'unusable' reads as a whole-plate failure. Name both halves."""
+    (tmp_path / "coordinates.csv").write_text(
+        _plate_csv(["A1", "B2"], short_region="C3", planned=3)
+    )
+    fovs = {"A1": [0, 1, 2], "B2": [0, 1, 2], "C3": [0]}
+
+    with pytest.warns(UserWarning) as rec:
+        _fov_positions_um_or_empty(tmp_path, fovs)
+
+    msg = "\n".join(str(w.message) for w in rec)
+    assert "C3" in msg, "the refusal must name the region at fault"
+    assert "A1" in msg and "B2" in msg, "it must also say which regions kept their positions"
+
+
+def test_strict_loader_still_refuses_the_whole_mapping(tmp_path):
+    """load_fov_positions_um keeps its all-or-nothing contract; only the wrapper degrades."""
+    (tmp_path / "coordinates.csv").write_text(
+        _plate_csv(["A1", "B2"], short_region="C3", planned=3)
+    )
+    fovs = {"A1": [0, 1, 2], "B2": [0, 1, 2], "C3": [0]}
+    with pytest.raises(ValueError, match="distinct stage position"):
+        load_fov_positions_um(tmp_path, fovs)
+
+
+def test_every_region_short_still_degrades_to_empty(tmp_path):
+    """Nothing salvageable is still {} — the previous behaviour, when it is the right one."""
+    (tmp_path / "coordinates.csv").write_text(_csv(["A1,1.0,2.0,", "B2,5.0,6.0,"]))
+    with pytest.warns(UserWarning, match="unusable"):
+        pos = _fov_positions_um_or_empty(tmp_path, {"A1": [0, 1], "B2": [0, 1]})
+    assert pos == {}
+
+
+def test_a_malformed_file_is_still_all_or_nothing(tmp_path):
+    """Per-REGION salvage, not per-row. A header with no x/y columns cannot judge any region."""
+    (tmp_path / "coordinates.csv").write_text("region,foo,bar\nA1,1,2\nB2,3,4\n")
+    with pytest.warns(UserWarning, match="unusable"):
+        assert _fov_positions_um_or_empty(tmp_path, {"A1": [0], "B2": [0]}) == {}
+
+
 def test_degradation_does_not_swallow_unexpected_errors(squid_dataset, monkeypatch):
-    """Only the deliberate ValueErrors degrade; a genuine bug must still surface."""
+    """Only the deliberate ValueErrors degrade; a genuine bug must still surface.
+
+    Patches ``_parse_fov_positions_um`` because that is the seam the degrading wrapper now
+    calls: the per-region cross-check moved into it so one truncated well stops costing the
+    whole plate its mosaic. The property under test is unchanged.
+    """
     import squidmip.reader as reader_mod
 
     def boom(*_a, **_k):
         raise RuntimeError("disk on fire")
 
-    monkeypatch.setattr(reader_mod, "load_fov_positions_um", boom)
+    monkeypatch.setattr(reader_mod, "_parse_fov_positions_um", boom)
     root, _ = squid_dataset
     with pytest.raises(RuntimeError, match="disk on fire"):
         open_reader(root).metadata
