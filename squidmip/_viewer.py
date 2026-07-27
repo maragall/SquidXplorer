@@ -7601,7 +7601,13 @@ def acquire_gui_slot() -> _GuiSlot:
     lives. Never blocks: a GUI that hangs waiting for another GUI to exit is a worse bug than
     the one this prevents.
     """
-    import fcntl
+    try:
+        import fcntl
+    except ModuleNotFoundError:
+        # Windows has no fcntl: skip the single-instance lock and launch anyway. The cap is a
+        # nicety (it stops a second window on Unix), not core behaviour, and crashing the whole
+        # GUI over a missing lock primitive would be a worse bug. release_gui_slot tolerates fd=-1.
+        return _GuiSlot(-1, None)
 
     limit = gui_slot_limit()
     lock_dir = _gui_lock_dir()
