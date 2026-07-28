@@ -76,6 +76,8 @@ from PyQt5.QtWidgets import (
 log = logging.getLogger("squidmip.viewer")
 
 from squidmip import _explore, _qtstyle
+from squidmip._budget import cache_budget
+from squidmip._tiling import TileDescriptor
 from squidmip._engine import _default_workers, available_projectors
 from squidmip._layers import OperationStack
 from squidmip._minerva import MINERVA_HOME_ENV as _MINERVA_HOME_ENV
@@ -127,6 +129,11 @@ def _view_hue(view_id: int, *, focused: bool = False) -> QColor:
     c = QColor.fromHsvF(h, 0.62, 1.0, 0.34 if focused else 0.20)
     return c
 _MIN_PREVIEW_BOX_PX = 4    # smallest FOV box (of _CELL) the RAW preview will bother mosaicking
+
+# Byte budget for the deep-zoom tile cache. A quarter of the measured cache budget: the plate
+# overlay is one of several consumers (the mosaic pyramid and the reader's own plane cache are the
+# others), so it must not claim the whole allowance. TileCache enforces it by eviction.
+_TILE_CACHE_BYTES = max(64 << 20, cache_budget() // 4)
 #                            (IMA-253): below this a field is a speck, and reading one plane per
 #                            field to draw specks is pure cost. The operator path is unaffected.
 _CLICK_SLOP = 3                       # px of travel below which a Shift-drag counts as a click
@@ -1071,6 +1078,80 @@ class _LoupeWorker(QThread):
 
 # --- plate overview widget (one cell per well; hue-coded status; fit-to-view) ---------------
 
+#: Deep zoom off-switch. On by default; ``SQUIDMIP_DEEP_ZOOM=0`` restores the pure-montage plate
+#: without a revert, which is what makes this safe to ship before it has run on many datasets.
+def _deep_zoom_enabled() -> bool:
+    return os.environ.get("SQUIDMIP_DEEP_ZOOM", "1") != "0"
+
+
+#: Most tiles to have in flight at once. The queue is drained newest-first, so a pan that outruns
+#: the disk discards stale requests rather than rendering the route the cursor took.
+_TILE_QUEUE_MAX = 24
+
+
+class _TileFetcher(QThread):
+    """Decode tiles OFF the GUI thread and hand them back one at a time.
+
+    The piece TODOS.md records as unowned ("Tile render loop + async fetch executor are unowned").
+    It has to be a thread: a single per-FOV tile is a full-frame decode per z-plane -- measured at
+    ~350 ms on the 10-deep WELLPLATE dataset -- so doing this in ``paintEvent`` would freeze the
+    window for seconds per repaint.
+
+    Newest-first (a LIFO) on purpose. A user who pans across the plate generates requests faster
+    than they can be served, and the tiles worth decoding are the ones under the cursor NOW, not
+    the ones it passed over a second ago. FIFO would render the journey; LIFO renders the
+    destination.
+    """
+
+    ready = pyqtSignal(object, object)        # (TileDescriptor, np.ndarray)
+
+    def __init__(self, source, parent=None):
+        super().__init__(parent)
+        self._source = source
+        self._pending: list = []              # treated as a stack
+        self._lock = threading.Lock()
+        self._wake = threading.Event()
+        self._stop = threading.Event()
+
+    def request(self, descs) -> None:
+        """Queue *descs*, newest last. Already-queued descriptors are not duplicated."""
+        with self._lock:
+            have = set(self._pending)
+            for d in descs:
+                if d not in have:
+                    self._pending.append(d)
+            del self._pending[:-_TILE_QUEUE_MAX]     # drop the stalest, keep the cap honest
+        self._wake.set()
+
+    def drop_all(self) -> None:
+        with self._lock:
+            self._pending.clear()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._wake.set()
+
+    def run(self) -> None:
+        while not self._stop.is_set():
+            with self._lock:
+                desc = self._pending.pop() if self._pending else None
+            if desc is None:
+                self._wake.wait(0.25)
+                self._wake.clear()
+                continue
+            try:
+                arr = self._source.read_tile(desc)
+            except Exception as exc:
+                # A tile that will not decode is a hole and the montage still shows — but a hole
+                # that says nothing is how "deep zoom quietly does nothing" ships. Name it once
+                # per descriptor; the viewport stays alive either way.
+                log.warning("tile %s/%s failed to decode: %s: %s",
+                            desc.level, desc.key, type(exc).__name__, exc)
+                continue
+            if not self._stop.is_set():
+                self.ready.emit(desc, arr)
+
+
 class PlateOverview(QWidget):
     """The low-res plate: an RGB canvas of MIP tiles, a per-well status hue, a red box, and a
     press-and-hold LOUPE that overlays real acquisition pixels for the well under the cursor
@@ -1165,6 +1246,13 @@ class PlateOverview(QWidget):
         self._user_view = False       # True once the user wheel-zooms/pans (stop auto-fitting)
         self._boxes: dict = {}        # (region, fov) -> (top, left, h, w) in cell px; {} = single-FOV
         self._boxed_regions: set = set()   # regions whose cell holds a LETTERBOXED mosaic, not one tile
+        # DEEP ZOOM (below). All None until set_tile_source() succeeds; every path checks _tile_src
+        # so an acquisition without stage positions simply keeps the montage and costs nothing.
+        self._ladder = None
+        self._tile_src = None
+        self._tile_cache = None
+        self._tile_fetch = None
+        self._tile_level = None       # last rung picked, for pick_level's hysteresis
         # -- carrier geometry (IMA-220, redrawn for IMA-253: geometry, not a photograph) --
         self._carrier = None          # the _plate.PlateGeometry to draw the holder outline from
         self._carrier_slide = False   # slot-shaped cells (a slide carrier) vs round wells
@@ -1189,6 +1277,165 @@ class PlateOverview(QWidget):
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.ClickFocus)   # so focusOutEvent can actually fire (see below)
         self.setMinimumSize(240, 200)
+
+    # -- deep zoom (tile overlay) ---------------------------------------------------------------
+    def set_tile_source(self, reader, meta) -> bool:
+        """Arm deep zoom for this acquisition. Returns whether it armed.
+
+        Deliberately fail-quiet: an acquisition with no usable stage positions cannot be placed in
+        world µm, ``plate_ladder`` says so by raising, and the honest response is to keep the
+        montage rather than draw a pile of FOVs at one spot. That is the SAME condition the
+        per-region coordinates salvage leaves behind, so a plate with one truncated well arms
+        normally and only that well stays coarse.
+        """
+        self.clear_tile_source()
+        if not _deep_zoom_enabled() or reader is None or not meta:
+            return False
+        try:
+            from squidmip._tiling import TileCache
+            from squidmip._tilesource import ReaderTileSource, plate_ladder
+
+            self._ladder = plate_ladder(meta)
+            self._tile_src = ReaderTileSource(reader, meta, self._ladder)
+        except Exception:
+            self._ladder = self._tile_src = None
+            return False
+        self._tile_cache = TileCache(budget_bytes=_TILE_CACHE_BYTES)
+        self._tile_fetch = _TileFetcher(self._tile_src, self)
+        self._tile_fetch.ready.connect(self._on_tile_ready)
+        self._tile_fetch.start()
+        return True
+
+    def clear_tile_source(self) -> None:
+        """Stop and forget the tile machinery. Idempotent; safe on a half-built state."""
+        if self._tile_fetch is not None:
+            self._tile_fetch.stop()
+            self._tile_fetch.wait(1500)
+            self._tile_fetch = None
+        self._ladder = self._tile_src = self._tile_cache = None
+        self._tile_level = None
+
+    def _on_tile_ready(self, desc, arr) -> None:
+        if self._tile_cache is None:
+            return                      # the source was swapped while this tile was in flight
+        self._tile_cache.insert(desc, arr)
+        self.update()
+
+    def _visible_fov_tiles(self) -> list:
+        """``[(TileDescriptor, QRectF), ...]`` for the FOVs on screen, or ``[]`` to stay coarse.
+
+        The engage rule is one comparison: ``cd > _CELL``. Below it the montage is being shown at
+        or under its native 88 px per cell and is exactly the right image — serving tiles there
+        would cost a full-plate decode (measured: 25 s) to reproduce a picture that is already on
+        screen. Above it the montage is an upscale, which is the blur this feature exists to fix.
+
+        Tiles are placed by reusing ``_placement.cell_boxes`` at the CURRENT cell size, the same
+        function the montage itself is composited with. That is what makes the overlay land
+        pixel-aligned on the thumbnail underneath instead of merely near it.
+        """
+        if (self._tile_src is None or self._ladder is None or self._cd <= _CELL
+                or self._layout is not None):     # freeform cells are not a uniform grid
+            return []
+        meta = getattr(self._tile_src, "meta", {})
+        positions = meta.get("fov_positions_um") or {}
+        px = meta.get("pixel_size_um")
+        frame = meta.get("frame_shape")
+        if not positions or not px or frame is None:
+            return []
+
+        from squidmip._placement import cell_boxes, fov_offsets_px
+
+        cd = int(round(self._cd))
+        vis = self.rect().adjusted(-cd, -cd, cd, cd)         # one cell of slack, so panning
+        out: list = []                                       # pre-warms the edge
+        for rc, region in self._by_rc.items():
+            x0, y0, cw, chh = self._cell_rect(*rc)
+            if not vis.intersects(QRectF(x0, y0, cw, chh).toRect()):
+                continue
+            fovs = list((meta.get("fovs_per_region") or {}).get(region) or [])
+            if not fovs:
+                continue
+            try:
+                boxes = cell_boxes(fov_offsets_px(positions, region, fovs, px), frame, cd)
+            except (KeyError, ValueError):
+                continue                 # this region has no derivable mosaic; montage stands
+            for fov, (top, left, bh, bw) in boxes.items():
+                key = (region, fov)
+                if key not in self._ladder.fov_bboxes or bh < 2 or bw < 2:
+                    continue
+                rect = QRectF(x0 + left, y0 + top, bw, bh)
+                if not vis.intersects(rect.toRect()):
+                    continue
+                # The rung is chosen from what this FOV occupies ON SCREEN, not from the plate
+                # zoom: a letterboxed mosaic gives each FOV a fraction of the cell, so the plate's
+                # µm/px would over-fetch every one of them.
+                um_per_px = (float(frame[1]) * float(px)) / max(float(bw), 1.0)
+                lvl = self._ladder.geometry.pick_level(um_per_px, self._tile_level)
+                if not self._ladder.is_fov_level(lvl):
+                    continue             # coarser than the crossover: the montage already wins
+                self._tile_level = lvl
+                out.append((TileDescriptor(level=lvl, key=key, channel=self._tile_channel(),
+                                           bbox_um=self._ladder.fov_bboxes[key]), rect))
+        return out
+
+    def _tile_channel(self) -> str:
+        """Which channel the overlay reads. One channel for now — the montage stays the composite."""
+        chans = (getattr(self._tile_src, "meta", {}) or {}).get("channels") or []
+        return str(chans[0]["name"]) if chans else "0"
+
+    def _paint_tiles(self, p) -> None:
+        """Draw whatever the cache can serve, and queue the rest. Never blocks on a decode."""
+        wanted = self._visible_fov_tiles()
+        if not wanted:
+            return
+        by_desc = {d: r for d, r in wanted}
+        for desc, arr in self._tile_cache.resolve(list(by_desc)):
+            rect = by_desc.get(desc)
+            if rect is None:
+                continue                 # resolve() substituted an ancestor we did not ask to place
+            img = self._tile_qimage(desc, arr)
+            if img is not None:
+                p.drawImage(rect, img)
+        missing = [d for d in by_desc if self._tile_cache.get(d) is None]
+        if missing and self._tile_fetch is not None:
+            self._tile_fetch.request(missing)
+
+    def _tile_qimage(self, desc, arr):
+        """One cached tile as an 8-bit greyscale QImage, windowed by the plate's own contrast.
+
+        Reusing ``_RunningContrast`` is the point: a tile that windowed itself would jump in
+        brightness the instant it replaced the thumbnail under it, which reads as a rendering bug
+        even though every pixel is right.
+        """
+        cache = self.__dict__.setdefault("_tile_qimages", {})
+        hit = cache.get(desc)
+        if hit is not None:
+            return hit
+        lo, hi = self._tile_window()
+        a = np.clip((arr.astype(np.float32) - lo) * (255.0 / max(hi - lo, 1e-6)), 0, 255)
+        a = np.ascontiguousarray(a.astype(np.uint8))
+        img = QImage(a.data, a.shape[1], a.shape[0], a.shape[1], QImage.Format_Grayscale8).copy()
+        if len(cache) > 256:
+            cache.clear()                # bounded; the pixel cache underneath is the real one
+        cache[desc] = img
+        return img
+
+    def _tile_window(self) -> tuple:
+        """The active channel's display window, from the plate's running contrast when it has one.
+
+        ``_RunningContrast.window(ch)`` already resolves the user latch, the followed pane and the
+        running histogram in that order — so a tile lands with exactly the contrast the thumbnail
+        under it was drawn with, and replacing one with the other is invisible.
+        """
+        c = self._contrast
+        if c is not None:
+            try:
+                lo, hi = c.window(0)
+                if hi > lo:
+                    return float(lo), float(hi)
+            except Exception:
+                pass                # no histogram yet (nothing streamed): fall through to full range
+        return 0.0, 65535.0
 
     # -- loupe wiring --
     def set_loupe_source(self, source, colors=None):
@@ -2158,6 +2405,13 @@ class PlateOverview(QWidget):
                 p.restore()
             else:
                 p.drawPixmap(int(ax), int(ay), self._scaled)
+
+        # DEEP ZOOM, on top of the montage and under every annotation. Ordering is the whole
+        # design: the thumbnail has already painted, so a tile that has not arrived yet leaves the
+        # coarse pixels showing rather than a hole, and the view sharpens in place as tiles land.
+        # Nothing here blocks -- misses are queued for the fetcher and the next repaint draws them.
+        if self._tile_cache is not None:
+            self._paint_tiles(p)
 
         # per-cell DOT over the WHOLE plate grid (so a sparse acquisition still shows the full plate
         # shape — e.g. 32x48 for 1536, 16x24 for 384 — with grey dots on the un-acquired wells):
@@ -5646,6 +5900,15 @@ class PlateWindow(QMainWindow):
         # build_plate RESOLVED (measured pitch beat the 2x2's mis-declared "384 well plate"), so the
         # background can only ever be drawn at the same scale the grid is laid out at.
         self._overview.set_carrier(plate)
+        # DEEP ZOOM: arm the tile overlay for this acquisition. Fail-quiet by contract — an
+        # acquisition with no usable stage positions keeps the montage and nothing else changes.
+        if self._overview.set_tile_source(reader, meta):
+            g = self._overview._ladder.geometry
+            log.info("deep zoom armed: %d rungs, %.3f-%.1f um/px, %d tiles at fit",
+                     len(g), g.levels[0].scale_um_per_px, g.levels[-1].scale_um_per_px,
+                     g.worst_case_tiles)
+        else:
+            log.info("deep zoom not armed (no usable stage positions) — montage only")
         self._selected_regions = []                  # a new acquisition starts with nothing picked
         self._overview.hovered.connect(self._on_hover)
         self._overview.wellActivated.connect(self.activate_well)
@@ -7558,6 +7821,9 @@ class PlateWindow(QMainWindow):
         self._join_retired()         # ...and so is everything _retire deferred
         self._stop_spots()           # never leave the segmentation thread running at teardown
         self._stop_minerva()         # files already written stay; only the launch poll is abandoned
+        ov = getattr(self, "_overview", None)
+        if ov is not None:
+            ov.clear_tile_source()   # joins the tile fetcher; a live QThread blocks a clean exit
         for key in list(self._floating):   # floated tabs are top-levels of their own — Qt won't
             win = self._floating.pop(key)  # close them for us, and each may hold a live shell
             w = win.take_content()
