@@ -105,6 +105,38 @@ so a future session doesn't rediscover it from zero.
 - **Cons:** Ahead of demand; the MIP tool projects over z, not t.
 - **Context:** The `t=0` param + time-folder discovery already exist, so the extension is small.
 - **Depends on / blocked by:** A real Nt>1 acquisition.
+- **Update (2026-07-27):** "the extension is small" is true of the READ path and false of the
+  IDENTITY path. Split the item in three before estimating it.
+  - **Navigation (cheap).** napari is natively ND and already puts z on its dims slider; handing
+    it `(T, Z, Y, X)` plus axis labels gets a time slider with no new widget. `_mosaic_source`
+    already threads `t` through `fuse_region_mosaic`/`_fuse_levels`, and its plane cache key is
+    already `(token, region, channel, int(t), step, z)` — **`t` is in that key today**. `_agave.py`
+    is further along still (`n_timepoints()`, `set_time(t)`, `volume_key(..., t=)`), and
+    `_minerva` already labels exports `(t=N of M)` when `n_t > 1`.
+  - **Reduction (free).** IMA-210's model generalises to time without a change: `consumes` is a
+    frozenset, the output shape is already `(T, C, Z, Y, X)`, and a collapsed axis deliberately
+    stays at size 1 rather than being dropped. So `consumes={"t"}` — max/mean over time — is
+    expressible as written. Two caveats before trusting it: `add_projector` defaults to
+    `consumes={"z"}`, and `_engine.py:219` documents the return as "`frozenset()` or `{"z"}`",
+    so sweep for branches that compare `== {"z"}` instead of testing membership the way
+    `_benchmark.py:524` does.
+  - **Identity (the actual work, and a trap).** `ResultCache`'s key is
+    `(scope, version, chain.key())`. `scope` comes from `_plate.cache_scope` and is the integer
+    `RRCCOOOO` node id — row, column, ROI, **no `t`**. `version` is the ACQUISITION version,
+    bumped as a live node's frames arrive. Its docstring calls that "the temporal dimension",
+    which is a DIFFERENT temporal axis from experiment `t`: one is how much data has arrived,
+    the other is which timepoint you are looking at. Folding `t` into `version` therefore looks
+    natural and is a category error — `t=1` would read as "a newer version of `t=0`", so
+    switching timepoints would silently evict and recompute forever, and two windows on
+    different timepoints would contend for one entry. `t` belongs in `scope` (a fifth field in
+    the node id) or as a fourth key component. Decide this BEFORE any Nt>1 work, because the
+    node-id format is load-bearing for the cache, the logger ids and the window tree.
+  - **Product question that gates the rest:** one window per timepoint (fits the window tree,
+    but the navigator explodes at N timepoints x M wells), or one window with `t` on a slider
+    (matches napari and the z precedent)? Reduction-over-time is orthogonal to both.
+  - **Already time-safe, do not re-litigate:** the `coordinates.csv` de-duplication on
+    `(region, x, y)` was written for exactly this — its docstring names "a multi-z or
+    multi-timepoint acquisition" as the reason raw row counts cannot be trusted.
 
 ## Confirm IMA-193 navigator reads the pyramid + plate/well metadata → IMA-193
 - **What:** Before/during IMA-193, verify its plate-view navigator actually reads multi-level pyramids and OME-NGFF plate/well group metadata — not just full-res array `0` the way ndviewer_light does.
