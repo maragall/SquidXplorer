@@ -68,6 +68,64 @@ from PyQt5.QtWidgets import (
     QSplitter, QStackedWidget, QStyleFactory, QTabBar, QVBoxLayout, QWidget,
 )
 
+#: The one Fusion QStyle for this process, created on first use. It must NOT be per-window.
+#:
+#: ``QWidget.setStyle()`` does not take ownership: the widget keeps a bare pointer and Qt never
+#: tells it when the style dies. Holding the only reference on the window meant the style was
+#: freed with the window's ``__dict__``, before ``~QWidget`` ran -- and every widget destructor
+#: calls ``style()->unpolish(this)``. Building and dropping windows therefore corrupted the heap
+#: and segfaulted the process, which is what killed whole pytest runs (macOS SIGSEGV here, Windows
+#: 0xC0000005) and took the summary line with them. Measured 2026-07-28: the interpreter died on
+#: the 6th window; with the style kept alive, 40 survived. Pinned by tests/test_window_lifetime.py.
+#:
+#: A style is stateless chrome and Qt shares one app-wide by default, so one per process is also
+#: simply the right object count. ``None`` if this Qt build has no Fusion, which callers guard for.
+_FUSION_STYLE = None
+_FUSION_STYLE_MADE = False
+
+#: The one QApplication for this process, PINNED here for the life of the process.
+#:
+#: Same class of bug as the style above, one level up. A QApplication is a process singleton that
+#: every widget, every QStyle and every posted event points back at, and PyQt gives its ownership
+#: to PYTHON: the last Python reference dying deletes it, whatever is still standing. Callers keep
+#: that reference in a place with a much shorter life than the process. ``main()`` held it in a
+#: local and then handed the WINDOW back to its caller, and every test module holds it in a
+#: module-scoped pytest fixture, whose cache pytest clears at the last test's teardown -- which is
+#: exactly where whole suites died, after the last test passed and before the summary printed.
+#: ``tests/test_channel_bar.py`` had already hit this and pinned its own copy in a global.
+#:
+#: Measured 2026-07-28 on a parametrised window fixture, 60 build/destroy cycles per run, 12 runs
+#: per configuration: unpinned, the summary line printed 0 times out of 12; with the QApplication
+#: pinned and NOTHING else changed, 12 out of 12. Pinned by tests/test_window_lifetime.py.
+#:
+#: One per process is also simply the right object count: ``QApplication.instance()`` is Qt saying
+#: so. Nothing here creates a second one.
+_APP = None
+
+
+def qt_app(argv=None):
+    """The process's QApplication, created if needed, and held so Python cannot free it early.
+
+    Every entry point should go through this instead of ``QApplication.instance() or
+    QApplication([])``, which binds the app to whatever local or fixture cache happens to be at
+    hand. Returns the existing instance untouched when Qt already has one, so a host application
+    that made its own is adopted rather than duplicated.
+    """
+    global _APP
+    if _APP is None:
+        _APP = QApplication.instance() or QApplication(list(argv) if argv is not None else [])
+    return _APP
+
+
+def _fusion_style():
+    """The shared Fusion style, or None. Created lazily: a QStyle needs a live QApplication."""
+    global _FUSION_STYLE, _FUSION_STYLE_MADE
+    if not _FUSION_STYLE_MADE:
+        _FUSION_STYLE = QStyleFactory.create("Fusion")
+        _FUSION_STYLE_MADE = True
+    return _FUSION_STYLE
+
+
 #: The main window's logger. The log panel taps the stdlib ROOT logger, so anything logged here
 #: appears in the bottom-right panel for free — the reason a failure the user triggers (a spot
 #: detection that raised, a region that would not fuse) MUST go through this and not only into an
@@ -290,11 +348,6 @@ _OPERATIONS_BY_KEY = {op.key: op for op in _OPERATIONS}
 # which made a PRESENTATION edit (reordering the cards) silently change which operator the save
 # button RUNS. Named, so the two cannot be confused.
 _SAVE_OPERATOR = "mip"
-
-#: Registry key of the AGAVE 3D tab. Deliberately NOT an Operation key: the 3D view produces no
-#: plate result, so it is never offered in the "Process well plates" menu and never routes a
-#: result into pane 3 (results belong in the plate view and the centre viewer, as layers).
-AGAVE_KEY = "agave3d"
 
 # Roadmap cards shown under "TO BE ADDED", as (label, blurb). Empty: everything currently on the
 # roadmap that we're willing to advertise has shipped as a real Operation above. Add an entry when
@@ -3325,14 +3378,27 @@ class _SpotWorker(QThread):
 
         where = f"{self._region}/{self._channel}"
         algorithm = preferred_segmenter()
+        # THE DENOMINATOR IS WHATEVER THE RUNNING ALGORITHM REPORTS. `_spots.STAGES` is the
+        # otsu-watershed recipe's 7 stages, and it used to be emitted as the final total no matter
+        # which segmenter ran. Cellpose is the preferred nuclei segmenter now and reports a total of
+        # 1 ("running cellpose", 0/1 then 1/1), so the closing emit of 7/7 changed the denominator
+        # mid-run: a progress bar completed at 1/1 and then jumped backwards to 7/7. `_spots`:
+        # "the list is the progress DENOMINATOR ... there is no second hardcoded total to keep in
+        # sync". This records the total the algorithm actually reported so there is no second one.
+        reported_total = [0]
+
+        def _stage(name, done, total):
+            reported_total[0] = int(total)
+            self.stageChanged.emit(name)
+            self.progress.emit(int(done), int(total))
+
         try:
             plane = _full_res_mip(self._data)          # segment the MIP over z, not one z-plane
             log.info("%s: detecting nuclei with %s on a %s MIP", where, algorithm, plane.shape)
 
             res = detect_spots(
                 plane, self._params, algorithm=algorithm,
-                on_stage=lambda name, done, total: (self.stageChanged.emit(name),
-                                                    self.progress.emit(done, total)),
+                on_stage=_stage,
                 should_stop=self._stop.is_set,
             )
         except SpotDetectionCancelled:
@@ -3346,7 +3412,11 @@ class _SpotWorker(QThread):
             self.problem.emit(f"{where}: spot detection failed — {type(exc).__name__}: {exc}")
             return
 
-        self.progress.emit(len(_spot_stages()), len(_spot_stages()))
+        # Close on the SAME denominator the run reported. A segmenter that reported no stage at all
+        # (none is registered without one, but the seam permits it) falls back to the stage list, so
+        # the bar still reaches its total rather than never being filled.
+        total = reported_total[0] or len(_spot_stages())
+        self.progress.emit(total, total)
         self.stageChanged.emit("done")
         # Success goes to the LOG too, not only the napari readout — the user saw the count in the
         # viewer but nothing in the panel. A run that produced a number the user can act on should
@@ -3766,6 +3836,11 @@ class PlateWindow(QMainWindow):
 
     def __init__(self, initial_path: Optional[str] = None):
         super().__init__()
+        # PIN THE QAPPLICATION, whoever created it. A window cannot outlive its application, and
+        # the application is routinely held only by a caller's local or a pytest fixture cache.
+        # This is the one call every window makes, however it was constructed -- the same argument
+        # showEvent makes for the GUI slot cap. See the _APP comment at the top of this module.
+        qt_app()
         self.setWindowTitle("SquidXplorer")
         self.resize(1600, 950)
         self._worker = None           # the operator (MIP) run
@@ -3912,7 +3987,7 @@ class PlateWindow(QMainWindow):
         # Dark the tab widget's own canvas (the strip behind/beside the tabs rendered white in macOS
         # light mode). Scope a Fusion style + dark palette to THIS widget subtree only — NOT the app,
         # which would bleed into the embedded ndviewer and hide its per-channel colour swatches.
-        self._fusion_style = QStyleFactory.create("Fusion")   # keep a ref: setStyle doesn't own it
+        self._fusion_style = _fusion_style()   # process-wide: setStyle does NOT take ownership
         if self._fusion_style is not None:
             self._left_tabs.setStyle(self._fusion_style)
         # LIGHT-BLUE tab-scroll arrows on BLACK boxes (Julio). The ‹ › scroller buttons draw their
@@ -6047,10 +6122,23 @@ class PlateWindow(QMainWindow):
         if getattr(self, "_region_load_timer", None) is None:
             self._region_load_timer = QTimer(self)
             self._region_load_timer.setSingleShot(True)
-            self._region_load_timer.timeout.connect(
-                lambda: self._load_mosaic(region=self._pending_region))
+            # A BOUND METHOD, never a lambda closing over ``self``. PyQt keeps a lambda alive in a
+            # slot proxy parented to the timer, and the timer is parented to this window: the
+            # closure's ``self`` closes the loop window -> timer -> proxy -> lambda -> window. That
+            # cycle means dropping the last reference to a window does NOT destroy it; the cyclic
+            # collector does, later, from arbitrary code, with a debounce still pending. A bound
+            # method of a QObject is connected by reference to the receiver instead, so this cycle
+            # does not form. Measured on its own it was enough to stop the segfault (40 windows
+            # survived, against a crash by window 21 without it); it is kept alongside the
+            # ``stop()`` in closeEvent because the two remove different halves of the hazard, the
+            # zombie window and the armed callback. See tests/test_window_lifetime.py.
+            self._region_load_timer.timeout.connect(self._fire_region_load)
         self._pending_region = region
         self._region_load_timer.start(140)
+
+    def _fire_region_load(self):
+        """The debounce elapsed: fuse the region the slider actually settled on."""
+        self._load_mosaic(region=self._pending_region)
 
     def _load_mosaic(self, region: Optional[str] = None, op: str = "raw"):
         """Show one region's fused MOSAIC in pane 2, one napari layer per channel.
@@ -7815,6 +7903,16 @@ class PlateWindow(QMainWindow):
     def closeEvent(self, e):
         release_gui_slot(getattr(self, "_gui_slot", None))   # let the next window open
         self._gui_slot = None
+        timer = getattr(self, "_region_load_timer", None)
+        if timer is not None:
+            # A PENDING SINGLE-SHOT MUST NOT OUTLIVE THE CLOSE. The region-slider debounce is armed
+            # for 140 ms and nothing disarmed it, so a window closed within that window kept a live
+            # timer whose timeout called back into a torn-down window -- measured directly: with
+            # windows built, opened, closed and dropped in a loop, ``_load_mosaic`` was observed
+            # running on an already-closed window, and the process segfaulted a window later.
+            # ``PlateOverview.hideEvent`` already stops its own coalescing timer for exactly this
+            # reason; this one was simply missed.
+            timer.stop()
         self._stop_worker()          # stop the run cleanly; nothing on disk to clean up (no cache)
         self._stop_preview()
         self._stop_mosaic_worker()   # JOINED, not drained: it is parented to this window
@@ -8037,7 +8135,7 @@ def main(dataset_path: str = None):
             sys.exit(1)
     if QApplication.instance() is None:     # only the process that CREATES the app may set these
         enable_hidpi()
-    app = QApplication.instance() or QApplication(sys.argv)
+    app = qt_app(sys.argv)       # pinned process-wide: main() returns the WINDOW, not the app
     win = PlateWindow(path)
     _install_footprint_monitor(app, win)
     win._gui_slot = slot                  # the reservation lives as long as the window

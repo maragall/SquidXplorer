@@ -138,7 +138,16 @@ def test_the_count_in_ready_and_in_finished_count_are_the_same_number(qapp):
 
 def test_progress_counts_stages_and_ends_at_the_total(qapp):
     """The busy indicator binds to progress(done, total). It must reach total, or a progress bar
-    wired to it sits at 90% forever after a successful run."""
+    wired to it sits at 90% forever after a successful run.
+
+    The denominator must also be ONE number for the whole run. It was not: the closing emit was
+    hardcoded to ``len(_spot_stages())`` (the 7-stage otsu-watershed recipe) whatever algorithm had
+    actually run, so under Cellpose (the preferred segmenter, which reports a total of 1) the bar
+    filled at 1/1 and then jumped backwards to 7/7. Fixed in ``_SpotWorker.run``, which now closes
+    on the total the running algorithm reported.
+
+    MUTATION: emit ``len(_spot_stages())`` as the final total again -> two totals -> red.
+    """
     w = V._SpotWorker("B3", "405", _plane(), None, None)
     rec = _run(w)
 
@@ -151,13 +160,27 @@ def test_progress_counts_stages_and_ends_at_the_total(qapp):
 
 def test_the_stage_TEXT_goes_out_on_its_own_signal_because_progress_has_no_text_channel(qapp):
     """progress is pyqtSignal(int, int) — it cannot carry a label, and overloading an int with
-    an enum would be a second representation of the stage list."""
-    from squidmip._spots import STAGES
+    an enum would be a second representation of the stage list.
 
+    This asserts the CHANNEL, not the labels. It used to assert the emitted text equalled
+    ``_spots.STAGES`` verbatim, which pinned the otsu-watershed recipe rather than the mechanism
+    the test is named for: with Cellpose preferred, ``['running cellpose', 'done']`` arrived on
+    ``stageChanged`` exactly as designed and the test still went red. The labels belong to whichever
+    segmenter ran; what must hold for every one of them is that the text has its own signal, that
+    every progress tick is accompanied by one, and that the run closes with "done".
+
+    MUTATION: smuggle the label into progress and drop stageChanged -> red.
+    """
     w = V._SpotWorker("B3", "405", _plane(), None, None)
     rec = _run(w)
 
-    assert rec["stage"][: len(STAGES)] == list(STAGES)
+    assert "QString" not in w.progress.signal, (
+        f"progress grew a text channel: {w.progress.signal}")
+    assert "QString" in w.stageChanged.signal, w.stageChanged.signal
+    assert rec["stage"], "no stage text was emitted at all"
+    assert all(isinstance(s, str) and s for s in rec["stage"]), rec["stage"]
+    assert len(rec["stage"]) == len(rec["progress"]), (
+        f"a progress tick went out with no label: {rec['stage']} vs {rec['progress']}")
     assert rec["stage"][-1] == "done"
 
 

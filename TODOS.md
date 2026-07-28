@@ -3,6 +3,24 @@
 Deferred work captured during plan-eng-reviews. Each item records the reasoning
 so a future session doesn't rediscover it from zero.
 
+## Delete the incomplete-input tests → requested by Julio on `main-window-review`
+- **What:** Remove SquidXplorer's tests that assert behaviour for malformed or incomplete
+  acquisition input. Julio's call, 2026-07-28, on Spencer's `main-window-review` PR; Spencer
+  asked for it to be written down here rather than only in Slack.
+- **Why:** `Cephla-Lab/Squid` is the producer and already validates what it writes. Asserting the
+  same guarantees on the consumer side duplicates a contract we do not own, and it means a
+  change to Squid's validation silently makes our tests wrong rather than red.
+- **Pros:** Drops a duplicated contract; the tests that remain are about *our* behaviour.
+- **Cons:** If a malformed acquisition ever reaches us anyway (hand-edited folder, interrupted
+  copy, a dangling symlink farm like the 1536wp case), nothing pins how we degrade. Decide
+  deliberately whether "we refuse loudly" is itself a guarantee worth one test.
+- **Context:** Scope is not yet enumerated. Identify which tests assert *producer* guarantees
+  (missing `acquisition.yaml`, malformed `coordinates.csv`, absent channels) versus which assert
+  *our* refusal behaviour, e.g. `reader.py:329-336`, which deliberately raises rather than
+  placing FOVs at plausible-but-wrong positions. The second kind is ours and stays.
+- **Depends on / blocked by:** Nothing. Do it on `main-window-review` before it merges, since
+  that PR is the one under review.
+
 ## Deselect-all gesture (Esc) → fast-follow after IMA-221
 - **What:** Esc (or click-on-empty-space) clears the whole plate selection and emits the cleared state.
 - **Why:** After IMA-221, Shift+click toggle is the only removal gesture, so clearing a 200-well selection means 200 clicks or a throwaway marquee over an empty corner. There is no defined way back to nothing.

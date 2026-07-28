@@ -20,14 +20,11 @@ import pytest
 
 from squidmip import open_reader, project_well
 
-SIM_1536WP = Path("/Users/julioamaragall/CEPHLA/Data/sim_1536wp")
-
-
-@pytest.fixture
-def sim_1536wp():
-    if not SIM_1536WP.is_dir():
-        pytest.skip(f"sim_1536wp not present at {SIM_1536WP}")
-    return SIM_1536WP
+# The `sim_1536wp` fixture lives in tests/conftest.py and is auto-discovered. The local copy that
+# used to sit here checked only that the directory EXISTS, which is not the same as it being
+# readable: `sim_1536wp/0` is 6144 SYMLINKS into a `synthetic_2x2_wellplate` that no longer exists
+# on this machine, so every link dangles, `open_reader` correctly refuses, and this test FAILED
+# rather than skipping. The shared fixture follows the links and tells absent from hollow.
 
 
 def benchmark_single_well(reader, region, fov) -> dict:

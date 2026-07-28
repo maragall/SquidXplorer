@@ -176,12 +176,23 @@ def test_the_run_scope_is_resolved_by_the_shared_resolver_from_window_state(open
     assert seen["regions"] == regions, "the GUI did not resolve 'selected wells' from its selection"
 
 
-# --- the log panel is mounted below the exploration pane ----------------------------------------
+# --- the log panel is mounted, and it is its own top-level window -------------------------------
 
-def test_the_log_panel_is_mounted_below_the_exploration_pane(win):
-    col = win._explore_col
-    assert col.widget(0) is win._explore_pane
-    assert col.widget(1) is win._log_panel
+def test_the_log_panel_is_mounted_in_its_own_top_level_window(win):
+    """Rewritten 2026-07-28. This asserted ``win._explore_col`` held the pane above the log panel,
+    an exploration COLUMN that the decentralization removed; the attribute no longer exists, so the
+    test could only ever AttributeError. It never reported that, because the QStyle lifetime bug
+    (tests/test_window_lifetime.py) segfaulted this file five tests earlier and took the summary
+    line with it -- so a test that was broken and a test that never ran looked the same.
+
+    The current contract: the log is a separate top-level QMainWindow kept alive on the window and
+    toggled from the View menu, deliberately not a dock, because a dock would widen the compact
+    root. Asserted here so a future move of the log (Julio wants it as a tab in the Operators
+    subpane, draggable out) fails loudly instead of silently."""
+    log_window = win._log_window
+    assert log_window.centralWidget() is win._log_panel, "the log panel is not in the log window"
+    assert log_window.isWindow(), "the log window is not a top-level"
+    assert log_window.parent() is win, "the log window is not kept alive by the plate window"
 
 
 def test_a_run_shows_up_as_activity_in_the_log_panel_header(open_win, qapp, monkeypatch):

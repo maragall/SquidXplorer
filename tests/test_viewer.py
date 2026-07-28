@@ -135,14 +135,12 @@ def _drain_until(app, pred, timeout=60):
     return pred()
 
 
-def _close_exploration_pane(win):
-    """Empty pane 3 through the REAL tab-close path, restoring a whole-plate detail slider.
-
-    An exploration tab scopes the slider to its subset (IMA-205), and since IMA-237 that scope is
-    owned by pane 3 alone — so "give me the whole plate back" means closing its tabs, not switching
-    pane 1. Never pokes _push_index directly: the point is to drive what the user drives."""
-    for i in range(win._explore_tabs.count() - 1, -1, -1):
-        win._close_op_tab(i, win._explore_tabs)
+# REMOVED alongside commit 2b8fbc5's obsolete tests: the `_close_exploration_pane` helper, which
+# emptied pane 3 through the real tab-close path so the shared detail slider went back to the whole
+# plate. Every caller was a test that a Shift-drag fills pane 3 (the gesture now opens an
+# independent window instead) or a control-well test (the feature was removed). The tab-close path
+# it wrapped is still driven directly by test_closing_idle_exploration_tab_is_clean and
+# test_closing_tab_mid_run_stops_worker_and_frees_canvas.
 
 
 def _press(x, y, button=Qt.LeftButton):
@@ -578,49 +576,68 @@ def test_run_operator_fills_tiles_and_hue_status(qapp, stub_detail, squid_datase
     win.close()
 
 
-def test_double_click_pushes_raw_zstack(qapp, stub_detail, squid_dataset):
+def test_double_click_opens_an_independent_window_on_that_region(qapp, stub_detail, squid_dataset):
+    """RE-POINTED by commit 2b8fbc5 (was test_double_click_pushes_raw_zstack).
+
+    A double-click used to push the well's raw z-stack into the EMBEDDED ndviewer
+    (`_detail.register_image` per z-level, then `go_to_well_fov`). There is no embedded viewer any
+    more: `PlateWindow._detail` is unconditionally None, so `activate_well` takes its
+    decentralized branch instead — "double-click opens ONE independent window on this region (the
+    single-region case of the shift-drag gesture)".
+
+    So what a double-click has to do now is: move the cursor (which moves the red frame) and ask
+    the ViewerManager for exactly one window over exactly that region. Both are asserted; the
+    z-stack push half has no destination left and is not re-asserted anywhere.
+    """
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
-    win._detail.registered.clear()   # ignore the first well auto-opened on ingest
-    win.activate_well("B3", 0)       # double-click B3 -> register its raw z-planes + navigate
-    regs = win._detail.registered
-    assert regs, "no raw planes registered"
-    # every registration points at a real on-disk TIFF at B3's plate index, across both z-levels
-    idx = win._fov_index["B3"]["idx"]
-    assert {r[1] for r in regs} == {idx}
-    assert {r[2] for r in regs} == {0, 1}                        # z-stack: both z-levels pushed
-    assert all(r[4].endswith(".tiff") and os.path.exists(r[4]) for r in regs)
-    assert win._detail.nav[-1] == ("B3", 0)                      # navigated to the well
-    # second double-click doesn't re-register (idempotent push)
-    n = len(regs)
-    win.activate_well("B3", 0)
-    assert len(win._detail.registered) == n
+    asked = []
+    win._viewer_manager.open = lambda regions, **kw: asked.append(list(regions)) or object()
+
+    win.activate_well("B3", 0)                    # double-click B3
+    assert asked == [["B3"]], f"a double-click opened {asked}, not one window on B3"
+    assert win._current_well == "B3"
+    assert win._overview._sel == win._fov_index["B3"]["rc"], "the red frame did not follow"
+
+    win.activate_well("B2", 0)                    # a second region -> its own window
+    assert asked == [["B3"], ["B2"]]
+    assert win._current_well == "B2"
     win.close()
 
 
-def test_fov_slider_moves_red_box(qapp, stub_detail, squid_dataset):
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    # drive the ndviewer FOV slider -> the plate's red box should select that well
-    idx = win._detail._fov_labels.index("B3:0")
-    win._detail._fov_slider.setValue(idx)
-    qapp.processEvents()
-    assert win._overview._sel == win._fov_index["B3"]["rc"]
-    win.close()
+# REMOVED BY commit 2b8fbc5 ("Decentralize GUI"): test_fov_slider_moves_red_box.
+# It drove ndviewer_light's own FOV slider (`_detail._fov_slider`) and asserted the plate's red box
+# followed. The embedded viewer and its slider are gone (`_detail` is unconditionally None), and
+# `_on_fov_slider` documents itself as "the FALLBACK viewer's slider; under napari the navigation
+# control is `_region_slider`". The surviving contract — moving the navigation slider moves what is
+# shown, and the red frame follows the current region — is asserted against the controls that still
+# exist in tests/test_nav_wiring.py (test_moving_a_windows_region_slider_reloads_that_windows_mosaic
+# and test_double_clicking_the_plate_opens_a_window_on_that_region_and_moves_the_red_frame).
 
 
-# --- selection: marquee + click (IMA-221) ---------------------------------------------------
+# --- selection: marquee + click (IMA-221, rebound by commit 2b8fbc5) -------------------------
 #
-# Gesture matrix under test. Shift owns EVERY selection gesture, so plain drag/double-click
-# (the landed navigator behavior) are untouched, and Qt's press->release->doubleclick ordering
-# can never toggle a well as a side effect of opening it.
+# Gesture matrix under test, as commit 2b8fbc5 ("Decentralize GUI") left it:
 #
-#   Shift+drag       -> marquee, REPLACES the selection
-#   Shift+Alt+drag   -> marquee, UNIONS into the selection
-#   Shift+click      -> toggles one well
+#   Shift+drag       -> emits `marqueeSelected` (open an INDEPENDENT window over the box) and
+#                       CLEARS any lingering batch wash. It no longer leaves a selection behind:
+#                       the boxed set is visible in the new window's region slider, so a
+#                       persistent highlight was just the "stays selected forever" clutter.
+#   Shift+Alt+drag   -> marquee, UNIONS into the batch selection (unchanged)
+#   Shift+click      -> toggles one well (unchanged)
+#   Cmd/Ctrl+click   -> toggles one well (Linux-file-manager add/remove)
+#   plain click      -> selects ONLY that well, or clears on an empty position (a REPLACE)
 #   plain drag       -> pans (unchanged)      plain double-click -> opens the well (unchanged)
+
+
+def _boxed(ov):
+    """Record what a Shift-drag asks to be OPENED (`marqueeSelected`), plus every selection
+    emission alongside it — the two halves the rebinding split apart."""
+    opened, selected = [], []
+    ov.marqueeSelected.connect(lambda wells: opened.append(list(wells)))
+    ov.selectionChanged.connect(lambda wells: selected.append(list(wells)))
+    return opened, selected
 
 def _sel_overview(cd=20.0):
     """A 2x2 plate with a sparse corner (B1 never acquired) and a FROZEN view.
@@ -662,19 +679,35 @@ def _drag(ov, a, b, mods):
     ov.mouseReleaseEvent(_mouse("release", b, mods, buttons=Qt.NoButton))
 
 
-def test_marquee_replaces_selection(qapp):
+def test_marquee_asks_for_a_window_over_exactly_the_boxed_wells(qapp):
+    """REWRITTEN for commit 2b8fbc5. A Shift-drag used to REPLACE the batch selection; it now
+    emits `marqueeSelected` so the window opens an independent viewer over the box instead.
+
+    The surviving contract is the same one the old test guarded: the payload is exactly the
+    acquired wells the box covers, and a second drag reports its own box rather than accumulating.
+    """
     ov = _sel_overview()
+    opened, _sel = _boxed(ov)
     _drag(ov, _pt(0, 0), _pt(1, 1), Qt.ShiftModifier)          # sweep the whole 2x2
-    assert ov.selected_wells() == ["A1", "A2", "B2"]           # B1 never acquired -> excluded
+    assert opened == [["A1", "A2", "B2"]]                      # B1 never acquired -> excluded
+    assert ov.selected_wells() == [], "the drag left a lingering selection wash on the plate"
     _drag(ov, *_within(0, 0), Qt.ShiftModifier)                # a fresh marquee over A1 only...
-    assert ov.selected_wells() == ["A1"]                        # ...REPLACES, not unions
+    assert opened == [["A1", "A2", "B2"], ["A1"]]              # ...its own box, not a union
 
 
 def test_additive_marquee_unions(qapp):
+    """Shift+Alt is still the UNION into the batch selection, and still selects rather than opens.
+
+    Seeded with a Shift+Alt drag rather than a plain Shift drag: since 2b8fbc5 a plain Shift drag
+    opens a window and leaves no selection to union into, so seeding with one would have been
+    testing the union against an empty set.
+    """
     ov = _sel_overview()
-    _drag(ov, *_within(0, 0), Qt.ShiftModifier)                          # A1
+    opened, _sel = _boxed(ov)
+    _drag(ov, *_within(0, 0), Qt.ShiftModifier | Qt.AltModifier)         # A1
     _drag(ov, *_within(1, 1), Qt.ShiftModifier | Qt.AltModifier)         # + B2
     assert ov.selected_wells() == ["A1", "B2"]
+    assert opened == [], "Shift+Alt opened a window instead of unioning into the selection"
 
 
 def test_shift_click_toggles_well(qapp):
@@ -687,18 +720,23 @@ def test_shift_click_toggles_well(qapp):
     assert ov.selected_wells() == []
 
 
-def test_selection_emits_once_on_release(qapp):
+def test_marquee_emits_once_on_release(qapp):
     """The rubber band is the live feedback; the SIGNAL fires once per gesture, on release.
-    A 1536-well plate would otherwise rebuild + emit a 1536-item list per mouse-move."""
+    A 1536-well plate would otherwise rebuild + emit a 1536-item list per mouse-move.
+
+    Re-pointed by 2b8fbc5 from `selectionChanged` to `marqueeSelected` — the signal a Shift-drag
+    now carries. The cost argument is unchanged, and so is the once-per-gesture guarantee: a
+    per-move emission here would open a window per mouse-move.
+    """
     ov = _sel_overview()
-    seen = []
-    ov.selectionChanged.connect(lambda wells: seen.append(list(wells)))
+    opened, seen = _boxed(ov)
     ov.mousePressEvent(_mouse("press", _pt(0, 0), Qt.ShiftModifier))
     for _ in range(5):                                          # five moves mid-drag...
         ov.mouseMoveEvent(_mouse("move", _pt(1, 1), Qt.ShiftModifier))
-    assert seen == []                                           # ...emit NOTHING
+    assert opened == [] and seen == []                          # ...emit NOTHING
     ov.mouseReleaseEvent(_mouse("release", _pt(1, 1), Qt.ShiftModifier, buttons=Qt.NoButton))
-    assert seen == [["A1", "A2", "B2"]]                         # exactly one emission
+    assert opened == [["A1", "A2", "B2"]]                       # exactly one emission
+    assert seen == [], "an empty batch selection was cleared it never had"
 
 
 def test_selection_excludes_empty_wells(qapp):
@@ -764,8 +802,18 @@ def test_plain_drag_still_pans(qapp):
     assert ov.selected_wells() == [], "plain drag must not select"
 
 
-def test_double_click_does_not_toggle_selection(qapp):
-    """Qt delivers press+release BEFORE mouseDoubleClickEvent — opening a well must not select it."""
+def test_double_click_selects_only_the_well_it_opens(qapp):
+    """INVERTED by commit 2b8fbc5 (Linux-file-manager selection).
+
+    This used to assert that opening a well selected NOTHING: selection was a Shift-only gesture,
+    so a plain click had to stay inert or Qt's press->release->doubleclick ordering would toggle a
+    well as a side effect of opening it. A plain left click is now a REPLACE (`mouseReleaseEvent`:
+    "select ONLY this well, or clear on empty"), which is idempotent — so press+release+dblclick on
+    A1 leaves exactly {A1} selected however many times it repeats, and there is no toggle to flip.
+
+    Both halves of the original intent are still pinned: the well still OPENS, and the selection
+    that results is deterministic rather than a function of how many clicks Qt delivered.
+    """
     ov = _sel_overview()
     opened = []
     ov.wellActivated.connect(lambda wid, fov: opened.append((wid, fov)))
@@ -774,22 +822,41 @@ def test_double_click_does_not_toggle_selection(qapp):
     ov.mouseReleaseEvent(_mouse("release", p, buttons=Qt.NoButton))
     ov.mouseDoubleClickEvent(_mouse("dblclick", p))
     assert opened == [("A1", 0)]                                # still opens the well
-    assert ov.selected_wells() == []                            # ...and selects nothing
+    assert ov.selected_wells() == ["A1"]                        # ...and selects exactly it
+    # REPLACE, not toggle: repeating the gesture must not deselect the well you just opened.
+    ov.mousePressEvent(_mouse("press", p))
+    ov.mouseReleaseEvent(_mouse("release", p, buttons=Qt.NoButton))
+    ov.mouseDoubleClickEvent(_mouse("dblclick", p))
+    assert ov.selected_wells() == ["A1"], "a second plain click toggled the well off"
+    # ...and a plain click on an EMPTY plate position clears, rather than leaving a stale pick.
+    q = _pt(1, 0)                                               # B1: never acquired
+    ov.mousePressEvent(_mouse("press", q))
+    ov.mouseReleaseEvent(_mouse("release", q, buttons=Qt.NoButton))
+    assert ov.selected_wells() == []
 
 
-def test_selection_does_not_disturb_red_box(qapp):
-    """_sel (ndviewer current well, red box) and _selection (operator's pick) stay independent."""
+def test_marquee_does_not_disturb_red_box(qapp):
+    """_sel (the current-region red box) and the marquee stay independent.
+
+    Re-pointed by 2b8fbc5: the drag now reports its box through `marqueeSelected` instead of
+    leaving a selection, but the claim under test is the same one — boxing wells must not move
+    the frame that says "this is the region you are looking at".
+    """
     ov = _sel_overview()
+    opened, _sel = _boxed(ov)
     ov.select(1, 1)
     _drag(ov, *_within(0, 0), Qt.ShiftModifier)
     assert ov._sel == (1, 1)                                    # red box unmoved
-    assert ov.selected_wells() == ["A1"]
+    assert opened == [["A1"]]
 
 
 def test_clear_selection_emits_empty(qapp):
+    """Seeded through Shift+Alt, the gesture that still SELECTS since 2b8fbc5 (a plain Shift-drag
+    opens a window and clears the wash, so it would leave nothing here to clear)."""
     ov = _sel_overview()
     seen = []
-    _drag(ov, _pt(0, 0), _pt(1, 1), Qt.ShiftModifier)
+    _drag(ov, _pt(0, 0), _pt(1, 1), Qt.ShiftModifier | Qt.AltModifier)
+    assert ov.selected_wells() == ["A1", "A2", "B2"]            # there is really something to clear
     ov.selectionChanged.connect(lambda wells: seen.append(list(wells)))
     ov.clear_selection()
     assert ov.selected_wells() == [] and seen == [[]]
@@ -1018,35 +1085,49 @@ def test_napari_visibility_drives_the_plate_and_the_strip_only_reports_it(qapp, 
 # These tests pin the resolution in both directions — the duplicate control is GONE, and the plate
 # genuinely FOLLOWS the surviving owner.
 
-def test_array_viewer_contrast_drag_repaints_the_plate(qapp, stub_detail, squid_dataset):
-    """The user's actual complaint, at the seam: ndv re-windows, the plate must follow.
+# REMOVED BY commit 2b8fbc5 ("Decentralize GUI"), three tests from this section:
+#
+#   test_array_viewer_contrast_drag_repaints_the_plate
+#       — it existed to prove the SIGNAL/SLOT CONNECTION `_detail.contrastChanged ->
+#         PlateWindow._on_detail_contrast` was live, by emitting the real signal. There is no
+#         `_detail` to emit from any more (it is unconditionally None) and nothing connects to
+#         that signal, so the connection under test does not exist. The behaviour it proved
+#         through that connection — the plate re-windows a channel it is TOLD about — is asserted
+#         directly against the surviving sink, `PlateOverview.follow_channel_window`, by the two
+#         re-pointed tests below.
+#
+#   test_a_fresh_plate_adopts_the_viewers_current_windows
+#       — a re-ingest used to pull `self._detail.channel_windows()` so the new plate opened
+#         agreeing with the picture already on screen. That pull is `if self._detail is not None`
+#         guarded and can never run; there is no single central viewer left holding "the" window
+#         to adopt, because each independent RegionViewer carries its own.
+#
+#   test_contrast_is_connected_once_not_once_per_ingest
+#       — it counted duplicate slots stacked on a per-ingest `connect` to `_detail.contrastChanged`.
+#         Neither the singleton viewer nor the connection exists, so there is no slot to stack.
+#
+# The plate's contrast PRECEDENCE rule (`_RunningContrast.resolve`: user latch > followed window >
+# the auto window) is untouched and is still fully covered — by the three tests below, which are
+# re-pointed onto the seam a napari window actually uses, and by
+# test_the_plate_adopts_napari_s_window_the_moment_a_region_lands, which drives
+# `follow_channel_window` from `_on_mosaic_done`.
 
-    Emits the REAL `contrastChanged` signal rather than calling `_on_detail_contrast`, so the
-    signal/slot connection itself is under test — a handler-level test passes with dead wiring,
-    which is how the Re-dock button shipped broken.
-    """
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    ov = win._overview
 
-    win._detail.drag_contrast(0, 700.0, 5000.0)
-    qapp.processEvents()
-    assert ov.channel_windows()[0] == (700.0, 5000.0), "the plate ignored the array viewer"
-    win.close()
-
-
-def test_the_array_viewer_never_latches_the_plate_manual(qapp, stub_detail, squid_dataset):
+def test_following_a_viewer_window_never_latches_the_plate_manual(qapp, stub_detail, squid_dataset):
     """THE regression this nearly shipped with.
 
-    ndv autoscales on its own — at open, and again on every data change — so the first version of
-    this sync, which recorded each broadcast with `set_manual`, came up with EVERY channel latched
-    manual before the user had touched anything. That killed the plate's running auto-contrast
-    from the first frame and, because a manual latch outranks everything, made SCOPE_PER_REGION
-    paint every well under one global window while the plate still drew the amber "wells NOT
-    comparable" badge over the top.
+    A viewer autoscales on its own — at open, and again on every data change — so the first
+    version of this sync, which recorded each broadcast with `set_manual`, came up with EVERY
+    channel latched manual before the user had touched anything. That killed the plate's running
+    auto-contrast from the first frame and, because a manual latch outranks everything, made
+    SCOPE_PER_REGION paint every well under one global window while the plate still drew the
+    amber "wells NOT comparable" badge over the top.
 
     A sink records what the owner resolved. Only the user sets policy.
+
+    RE-POINTED by 2b8fbc5 from `_detail.drag_contrast` (the deleted central ndviewer's broadcast)
+    onto `PlateOverview.follow_channel_window`, which is the same sink and is what a napari
+    RegionViewer's window arrives through today (see `_on_mosaic_done`).
     """
     root, _ = squid_dataset
     win = V.PlateWindow(None)
@@ -1057,11 +1138,11 @@ def test_the_array_viewer_never_latches_the_plate_manual(qapp, stub_detail, squi
     assert not any(ov._contrast.is_manual(c) for c in range(n)), (
         "a channel was latched MANUAL on open, before any user gesture")
 
-    win._detail.drag_contrast(0, 700.0, 5000.0)     # ndv autoscaling, or the user in ndv's pane
+    ov.follow_channel_window(0, 700.0, 5000.0)      # a viewer autoscaling, or the user inside it
     qapp.processEvents()
     assert ov.channel_windows()[0] == (700.0, 5000.0), "the plate did not follow the viewer"
     assert not ov._contrast.is_manual(0), (
-        "following the array viewer latched the channel MANUAL — the sink wrote policy back")
+        "following a viewer latched the channel MANUAL — the sink wrote policy back")
     assert ov._contrast.is_followed(0), "the window was not recorded as followed either"
     win.close()
 
@@ -1070,13 +1151,15 @@ def test_a_user_latch_still_outranks_the_viewer(qapp, stub_detail, squid_dataset
     """`resolve` is still ONE precedence rule, now over three inputs:
 
         user latch  >  the owning viewer's window  >  whatever the caller computed.
+
+    RE-POINTED by 2b8fbc5 onto `follow_channel_window`; the precedence rule itself is unchanged.
     """
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
     ov = win._overview
 
-    win._detail.drag_contrast(0, 111.0, 9999.0)
+    ov.follow_channel_window(0, 111.0, 9999.0)
     qapp.processEvents()
     assert ov._contrast.resolve(0, (0.0, 1.0)) == (111.0, 9999.0)   # viewer beats the auto window
 
@@ -1091,36 +1174,22 @@ def test_a_user_latch_still_outranks_the_viewer(qapp, stub_detail, squid_dataset
 
 
 def test_a_channel_the_plate_does_not_have_is_ignored_not_a_crash(qapp, stub_detail, squid_dataset):
-    """ndv draws RGB mode and re-ingests; it can broadcast a channel index the plate lacks."""
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    n = len(win._overview._labels)
+    """A viewer drawing RGB mode, or re-ingesting, can report a channel index the plate lacks.
 
-    win._detail.drag_contrast(n + 3, 1.0, 2.0)      # out of range: must be dropped silently
-    qapp.processEvents()
-    win._detail.drag_contrast(-1, 1.0, 2.0)
-    qapp.processEvents()
-    assert not win._overview._contrast.is_manual(0)
-    win.close()
-
-
-def test_a_fresh_plate_adopts_the_viewers_current_windows(qapp, stub_detail, squid_dataset):
-    """Opening a second acquisition must not show a window the array viewer is not showing.
-
-    The viewer keeps whatever contrast it had; a plate that only synced from the NEXT gesture
-    onward would open disagreeing with the picture already on screen.
+    RE-POINTED by 2b8fbc5 onto `follow_channel_window`, which carries the same range guard.
     """
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
-    win._detail.drag_contrast(0, 42.0, 4242.0)
-    qapp.processEvents()
+    ov = win._overview
+    n = len(ov._labels)
 
-    win.ingest(str(root))                            # re-open: a brand-new plate store
+    ov.follow_channel_window(n + 3, 1.0, 2.0)       # out of range: must be dropped silently
     qapp.processEvents()
-    assert win._overview.channel_windows()[0] == (42.0, 4242.0), (
-        "the re-opened plate did not adopt the window the array viewer is still showing")
+    ov.follow_channel_window(-1, 1.0, 2.0)
+    qapp.processEvents()
+    assert not ov._contrast.is_manual(0)
+    assert not ov._contrast.is_followed(0), "an out-of-range channel was recorded anyway"
     win.close()
 
 
@@ -1156,30 +1225,6 @@ def test_a_contrast_change_keeps_the_thumbnail_but_new_pixels_drop_it(qapp):
     shown = _rgb(ov)
     assert shown[shown.shape[0] // 2:, shown.shape[1] // 2:].any(), (
         "the newly added well never appeared — the plate composited a stale thumbnail")
-
-
-def test_contrast_is_connected_once_not_once_per_ingest(qapp, stub_detail, squid_dataset):
-    """The detail viewer is a singleton that outlives every ingest.
-
-    A per-ingest `connect` stacks duplicate slots, so the Nth ingest re-runs the handler N times
-    per drag. Counted through the plate's own setter, because the visible symptom of a stacked
-    slot is work done N times, not a wrong final value.
-    """
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    for _ in range(3):
-        win.ingest(str(root))
-    qapp.processEvents()
-
-    calls = []
-    real = win._overview.follow_channel_window
-    win._overview.follow_channel_window = lambda ch, lo, hi: (calls.append((ch, lo, hi)),
-                                                              real(ch, lo, hi))
-    win._detail.drag_contrast(0, 5.0, 500.0)
-    qapp.processEvents()
-    assert len(calls) == 1, f"one drag reached the plate {len(calls)} times — slots have stacked"
-    win.close()
 
 
 def test_channel_store_survives_an_operator_run(qapp, stub_detail, squid_dataset, tmp_path):
@@ -1304,36 +1349,17 @@ def test_run_operator_rejects_empty_and_unknown_regions(qapp, stub_detail, squid
     win.close()
 
 
-def test_subset_run_scopes_slider_and_remaps_push_index(qapp, stub_detail, squid_dataset):
-    """The regression that decision 3 would have introduced without the remap.
-
-    B3 is plate index 1, but in a ['B3'] subset its slider position is 0. The worker emits the
-    GLOBAL index, so an unremapped push would address slot 1 of a 1-entry slider."""
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    assert win._fov_index["B3"]["idx"] == 1                     # global index is 1
-    win._detail.arrays.clear()
-    win.run_operator("mip", regions=["B3"], save=False)
-    assert win._detail._fov_labels == ["B3:0"]                  # slider is the SUBSET, not the plate
-    assert _drain_until(qapp, lambda: len(win._detail.arrays) > 0)
-    pushed = {a[1] for a in win._detail.arrays}
-    assert pushed == {0}, f"push landed at {pushed}, expected subset position 0"
-    assert max(pushed) < len(win._detail._fov_labels)           # never out of range
-    win._stop_worker(); win.close()
-
-
-def test_whole_plate_run_keeps_identity_indexing(qapp, stub_detail, squid_dataset, tmp_path):
-    """Regression guard: the remap must not disturb the shipped whole-plate path."""
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    win._detail.arrays.clear()
-    win.run_operator("mip", out_parent=str(tmp_path))
-    assert win._push_index is None                              # identity for a full plate
-    assert _drain_until(qapp, lambda: len(win._detail.arrays) >= 2)
-    assert {a[1] for a in win._detail.arrays} == {0, 1}         # both plate indices, unchanged
-    win._stop_worker(); win.close()
+# REMOVED BY commit 2b8fbc5 ("Decentralize GUI"), two tests:
+#   test_subset_run_scopes_slider_and_remaps_push_index
+#   test_whole_plate_run_keeps_identity_indexing
+#
+# Both assert the GLOBAL-plate-index -> subset-slider-position remap by reading back what landed in
+# the embedded ndviewer (`_detail.arrays`, i.e. `register_array` pushes) and how its FOV slider was
+# scoped (`_detail._fov_labels`). There is no embedded viewer: `_detail` is unconditionally None,
+# `_setup_raw_detail` early-returns before it can scope anything, and `_on_push` drops every push
+# at `if self._detail is None` before the remap is ever consulted. The remap therefore has no
+# observable effect left to assert. `run_operator` still builds `_push_index` (it is cheap and
+# inert), which is why a stale map is not itself a defect.
 
 
 def test_preview_spinner_still_runs_first_n_wells(qapp, stub_detail, squid_dataset, monkeypatch):
@@ -1475,43 +1501,38 @@ def test_busy_guard_covers_retired_workers(qapp, stub_detail, squid_dataset, tmp
     win.close()
 
 
-def test_tab_switch_repoints_detail_and_closing_it_restores_plate(qapp, stub_detail, squid_dataset):
+def test_a_pane1_tab_switch_does_not_steal_the_exploration_scope(qapp, stub_detail, squid_dataset):
     """IMA-237 moved exploration into PANE 3, so scope is owned by pane 3's front tab, not by
     whatever is in front of the process console. Switching pane 1 back to 'Process wells' must
-    therefore NOT un-scope the viewer (pane 3 is still right there, still showing the subset);
-    closing the exploration tab is what restores the whole plate."""
+    therefore NOT un-scope the view (pane 3 is still right there, still showing the subset);
+    closing the exploration tab is what hands scope back.
+
+    RE-POINTED by commit 2b8fbc5: the `_detail._fov_labels` half is gone with the embedded viewer
+    (`_setup_raw_detail` early-returns on `_detail is None`), so scope is read off its OWNER,
+    `_active_exploration`, which `_on_tab_changed` still maintains. That owner is the thing the
+    test was really about; the slider was only where it used to be visible.
+    """
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
     key = win.open_exploration_tab(["B3"])
     qapp.processEvents()
-    assert win._detail._fov_labels == ["B3:0"]                  # follows the exploration tab
-    assert win._active_exploration is win._op_tabs[key]
+    assert win._active_exploration is win._op_tabs[key]         # pane 3's front tab owns scope
     win._left_tabs.setCurrentIndex(0)                           # pane 1 back to "Process wells"
     qapp.processEvents()
-    assert win._detail._fov_labels == ["B3:0"]                  # pane 3 still owns the scope
-    assert win._active_exploration is win._op_tabs[key]
+    assert win._active_exploration is win._op_tabs[key], "a pane 1 switch stole the scope"
     win._close_op_tab(win._explore_tabs.indexOf(win._op_tabs[key]), win._explore_tabs)
     qapp.processEvents()
-    assert win._detail._fov_labels == ["B2:0", "B3:0"]          # whole plate restored
-    assert win._active_exploration is None
+    assert win._active_exploration is None                      # whole plate restored
     win.close()
 
 
-def test_subset_tab_registers_raw_paths_at_subset_positions(qapp, stub_detail, squid_dataset):
-    """The raw bulk-register path indexes the slider too — it must use subset positions, not the
-    global plate index, or B3 (plate idx 1) would register past the end of a 1-entry slider."""
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    win._detail.registered.clear()
-    win.open_exploration_tab(["B3"])
-    qapp.processEvents()
-    if win._detail.registered:
-        assert {r[1] for r in win._detail.registered} == {0}
-    win.activate_well("B3", 0)
-    assert all(r[1] < len(win._detail._fov_labels) for r in win._detail.registered)
-    win.close()
+# REMOVED BY commit 2b8fbc5 ("Decentralize GUI"):
+# test_subset_tab_registers_raw_paths_at_subset_positions. It asserted that the raw bulk-register
+# path indexed the embedded ndviewer's slider by SUBSET position rather than global plate index.
+# `_setup_raw_detail` (the only caller of `register_images_bulk`) returns at
+# `if self._detail is None` before registering anything, so there is no slider to index and no
+# registration to observe.
 
 
 def test_ingest_closes_exploration_tabs(qapp, stub_detail, squid_dataset):
@@ -1834,27 +1855,51 @@ def test_mosaic_cell_composites_real_structured_pixels(qapp, stub_detail, squid_
         img = ov._active_source()
         tiled = sorted(ov._tiles_by_layer.get(ov._active, set()))
         assert tiled, "no cell has an image on the active layer"
-        got = _cell_of(img, *tiled[0])
+        ri, ci = win._fov_index["B2"]["rc"]
+        assert (ri, ci) in tiled, "B2 never landed on the active layer"
+        got = _cell_of(img, ri, ci)
         assert got.size, "the acquired cell fell outside the montage"
-        assert int(got.max()) - int(got.min()) > 30, (
-            f"acquired-cell dynamic range is only {int(got.max()) - int(got.min())}: the cell is "
-            "effectively blank (tiles never composited, or contrast collapsed the window).")
-        # NOTE: no std-over-the-whole-cell assertion. This fixture's frames are 4x4 px, so their
-        # boxes cover a few percent of the 88px cell and the rest is legitimate zero padding --
-        # whole-cell std is ~0.4 even when the mosaic is perfect. Coverage of the cell is the
-        # mosaic's business (asserted by box below), brightness is the tile's.
-        # ...and it must differ from an UNACQUIRED cell, or "structure" could just be background.
+
+        # THE `> 30` DYNAMIC-RANGE NUMBER IS GONE, ON PURPOSE (commit 2b8fbc5).
+        #
+        # It was derived from the OLD plate auto-window, a plain (1st, 99.8th) percentile stretch.
+        # The plate now windows with the stitcher's fluorescence rule instead: low end at
+        # `mode + 2*bg_std` (background peak pushed to black), high end at the 99.9th percentile
+        # (`_RunningContrast._auto_window`). On THIS fixture the frames are 4x4 px inside an 88px
+        # cell, so ~99.9% of the montage is legitimate zero padding — which means the 99.9th
+        # percentile itself lands in the padding and all but the brightest handful of pixels are
+        # correctly rendered black. Measured here: the acquired cell renders max 26 / min 0 with
+        # 2 non-zero pixels, against an unacquired cell that is uniformly 0. Re-deriving a
+        # threshold from the rule would just be re-recording those two numbers, and they are an
+        # artefact of a 4x4 fixture, not of the contract.
+        #
+        # So this asserts the PROPERTY the number was standing in for: signal is present, it is
+        # brighter than background, and it is where the mosaic geometry says it should be. That
+        # kills the same mutants the old number did (a blank montage, or a contrast window that
+        # collapses the cell to black, both render `got.max() == ref.max()`) and adds one it
+        # never could: signal drawn in the wrong place inside the cell.
         empty = [(r, c) for r in range(ov._nr) for c in range(ov._nc) if (r, c) not in tiled]
-        if empty:
-            ref = _cell_of(img, *empty[-1])
-            # MAX, not mean: this fixture's fields cover a few percent of the cell, so a mean over
-            # all 88x88 px is ~0.004 even for a perfectly drawn mosaic. Mean would only be asking
-            # "does the tile fill the cell", which is not this assertion's question.
-            assert int(np.abs(got - ref).max()) > 30, (
-                "an acquired cell is indistinguishable from an empty one: nothing was drawn.")
-        # ...and the mosaic must reach BOTH fields' sub-boxes, not just fov 0's.
+        assert empty, "the fixture has no unacquired cell to compare against"
+        ref = _cell_of(img, *empty[-1])
+        assert int(ref.max()) == int(ref.min()), (
+            f"the unacquired reference cell is not uniform background ({ref.min()}..{ref.max()}); "
+            "it cannot be used as the background level.")
+        assert int(got.max()) > int(ref.max()), (
+            f"acquired cell max {int(got.max())} does not exceed the unacquired background "
+            f"{int(ref.max())}: the cell is effectively blank (tiles never composited, or "
+            "contrast collapsed the window).")
+        # ...and every rendered pixel above background sits INSIDE one of B2's FOV boxes, so a
+        # mosaic drawn at the wrong offset cannot pass by lighting up chrome or padding.
+        boxes = [ov._boxes[("B2", f)] for f in (0, 1)]
+        bright = np.argwhere(got.max(axis=2) > int(ref.max()))
+        assert len(bright), "no pixel above background at all"
+        assert all(any(t <= y < t + h and l <= x < l + w for t, l, h, w in boxes)
+                   for y, x in bright), (
+            f"signal rendered outside B2's FOV boxes {boxes}: the mosaic is misplaced.")
+        # ...and the mosaic must reach BOTH fields' sub-boxes, not just fov 0's. Measured on the
+        # STORE (native-dtype composited pixels, before any contrast window) so that a rule change
+        # like the one above can never make this half of the test unaskable.
         if ov._boxes:
-            ri, ci = win._fov_index["B2"]["rc"]
             cell = ov._store_for(ov._active)[:, ri * V._CELL:(ri + 1) * V._CELL,
                                              ci * V._CELL:(ci + 1) * V._CELL]
             for fov in (0, 1):
@@ -1975,11 +2020,30 @@ def test_reopened_plate_windows_globally_like_the_run_that_wrote_it(qapp):
         "a worker that needs colours is compositing; the widget owns compositing (IMA-206).")
 
 
-# --- IMA-205 + IMA-221: the SHIFT GESTURE opens the exploration tab ---------------------------
+# --- IMA-205 + IMA-221: what the SHIFT GESTURE opens -------------------------------------------
 #
-# This is the user's verbatim sentence, end to end: "hold shift to open an 'exploration' tab with
-# the selected FOV subset". IMA-221 landed the marquee; before this wiring `open_exploration_tab`
+# This was the user's verbatim sentence, end to end: "hold shift to open an 'exploration' tab with
+# the selected FOV subset". IMA-221 landed the marquee; before that wiring `open_exploration_tab`
 # had no UI entry point at all and was reachable only programmatically.
+#
+# REMOVED BY commit 2b8fbc5 ("Decentralize GUI"), three tests:
+#   test_shift_drag_opens_an_exploration_tab_scoped_to_the_selected_wells
+#   test_shift_drag_over_several_wells_scopes_the_tab_to_all_of_them
+#   test_repeating_the_same_shift_drag_focuses_the_same_tab
+# ...along with the `_shift_drag_over` helper, whose every caller was one of the tests removed
+# here or in the pane-3 section below.
+#
+# The gesture was REBOUND, not dropped: a Shift-drag now emits `marqueeSelected`, and
+# `PlateWindow._on_marquee_selected` turns that into `ViewerManager.open(ordered)` — ONE
+# independent napari window with a region slider over the boxed set, instead of a tab in a
+# central pane that no longer exists. So there is no exploration tab to be scoped, brought to the
+# front, or content-addressed any more.
+#
+# The surviving contract (the drag names exactly the boxed acquired wells, once, on release, and
+# that set is what gets opened) is asserted at widget level by
+# `test_marquee_asks_for_a_window_over_exactly_the_boxed_wells` and
+# `test_marquee_emits_once_on_release`, and end-to-end through `ViewerManager.open` by
+# `test_a_real_plate_gesture_is_what_minerva_exports`.
 
 def _freeze(ov, cd=20.0):
     """Freeze the plate view so synthetic widget coordinates hit the cells we mean (paintEvent's
@@ -1987,72 +2051,6 @@ def _freeze(ov, cd=20.0):
     ov._user_view = True
     ov._cd, ov._ox, ov._oy = cd, 0.0, 0.0
     return ov
-
-
-def _shift_drag_over(win, wells, cd=20.0):
-    """Shift-drag a marquee across exactly `wells` on the window's own plate."""
-    ov = _freeze(win._overview, cd)
-    rcs = [win._fov_index[w]["rc"] for w in wells]
-    r0, c0 = min(r for r, _ in rcs), min(c for _, c in rcs)
-    r1, c1 = max(r for r, _ in rcs), max(c for _, c in rcs)
-    if (r0, c0) == (r1, c1):                      # one cell: still a DRAG, not a Shift+click
-        a, b = _within(r0, c0, cd)
-    else:
-        a, b = _pt(r0, c0, cd), _pt(r1, c1, cd)
-    _drag(ov, a, b, Qt.ShiftModifier)
-
-
-def test_shift_drag_opens_an_exploration_tab_scoped_to_the_selected_wells(
-        qapp, stub_detail, squid_dataset):
-    root, _ = squid_dataset                            # B2, B3
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    _shift_drag_over(win, ["B3"])                      # marquee over ONE of the two wells
-    qapp.processEvents()
-
-    tabs = [win._explore_tabs.widget(i) for i in range(win._explore_tabs.count())
-            if isinstance(win._explore_tabs.widget(i), V._ExplorationTab)]
-    assert len(tabs) == 1, "the shift-drag gesture did not open an exploration tab"
-    tab = tabs[0]
-    assert tab.regions == ["B3"]                       # scoped to EXACTLY the selected wells
-    assert tab.listing.text() == "B3"
-    assert win._explore_tabs.currentWidget() is tab    # ...brought to the front of PANE 3
-    assert not win._explore_tabs.isHidden(), "the shift-drag did not reveal pane 3"
-    assert win._active_exploration is tab
-    assert win._detail._fov_labels == ["B3:0"]         # the viewer follows the subset
-    assert win._selected_regions == ["B3"]             # IMA-221 scoping is untouched
-    win.close()
-
-
-def test_shift_drag_over_several_wells_scopes_the_tab_to_all_of_them(
-        qapp, stub_detail, squid_dataset):
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    _shift_drag_over(win, ["B2", "B3"])
-    qapp.processEvents()
-    tab = win._explore_tabs.currentWidget()
-    assert isinstance(tab, V._ExplorationTab)
-    assert tab.regions == ["B2", "B3"]
-    assert win._detail._fov_labels == ["B2:0", "B3:0"]
-    win.close()
-
-
-def test_repeating_the_same_shift_drag_focuses_the_same_tab(qapp, stub_detail, squid_dataset):
-    """Content-addressed identity, driven through the GESTURE: dragging the same wells again must
-    focus the open tab, not pile up duplicates on every stray drag."""
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    _shift_drag_over(win, ["B3"])
-    qapp.processEvents()
-    first = win._explore_tabs.currentWidget()
-    _shift_drag_over(win, ["B3"])
-    qapp.processEvents()
-    tabs = [win._explore_tabs.widget(i) for i in range(win._explore_tabs.count())
-            if isinstance(win._explore_tabs.widget(i), V._ExplorationTab)]
-    assert tabs == [first]
-    win.close()
 
 
 def test_shift_click_refines_the_selection_without_opening_a_tab(qapp, stub_detail, squid_dataset):
@@ -2144,11 +2142,13 @@ def test_closing_the_front_tab_mid_run_restores_a_coherent_plate_view(
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
+    asked = []
+    win._viewer_manager.open = lambda regions, **kw: asked.append(list(regions)) or object()
     key = win.open_exploration_tab(["B3"])
     qapp.processEvents()
     win.run_operator("mip", regions=["B3"], save=False, tab_key=key)
     assert win._busy()                                        # the run is live and blocked
-    assert win._push_index == {win._fov_index["B3"]["idx"]: 0}
+    assert win._active_exploration is win._op_tabs[key]
 
     idx = win._explore_tabs.indexOf(win._op_tabs[key])
     win._close_op_tab(idx, win._explore_tabs)                 # close it MID-RUN
@@ -2156,32 +2156,24 @@ def test_closing_the_front_tab_mid_run_restores_a_coherent_plate_view(
     qapp.processEvents()
 
     assert win._active_exploration is None                    # no dangling deleted widget
-    assert win._push_index is None                            # back to identity plate indexing
-    assert win._detail._fov_labels == ["B2:0", "B3:0"]        # slider is the whole plate again
-    # ...and the double-click path is coherent again: the red box and the pixels agree.
-    win._detail.nav.clear()
+    assert not win._pending_resync, "the deferred switch was never delivered"
+    assert key not in win._op_tabs
+    # ...and the open path is coherent again: opening another region moves the red frame with it.
     win.activate_well("B2", 0)
     assert win._overview._sel == win._fov_index["B2"]["rc"]
-    assert win._detail.nav[-1][0] == "B2"
+    assert win._current_well == "B2"
+    assert asked[-1] == ["B2"]
     win.close()
 
 
-def test_double_click_never_moves_the_box_to_a_well_the_viewer_cannot_show(
-        qapp, stub_detail, squid_dataset):
-    """The other half of BUG 1's symptom, on its own: while a subset tab scopes the slider, a well
-    outside it cannot be shown — so the red box must NOT claim it is being shown."""
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    win.open_exploration_tab(["B3"])
-    qapp.processEvents()
-    win.activate_well("B3", 0)
-    box = win._overview._sel
-    win.activate_well("B2", 0)                                 # B2 is NOT in this tab's slider
-    assert win._overview._sel == box, "the red box moved to a well the viewer isn't showing"
-    assert win._current_well == "B3"
-    assert "not in this tab" in win._readout.text()            # and it says so, instead of silence
-    win.close()
+# REMOVED BY commit 2b8fbc5 ("Decentralize GUI"):
+# test_double_click_never_moves_the_box_to_a_well_the_viewer_cannot_show.
+# Its premise no longer exists. It asserted that while a subset exploration tab SCOPED the shared
+# central slider, double-clicking a well outside that subset must refuse: leave the red box where
+# it was and say "not in this tab's subset". A double-click now opens an INDEPENDENT window on the
+# region (`activate_well`'s `_detail is None` branch), so there is no shared slider to be outside
+# of and no well the viewer cannot show — every region is openable, always. The refusal path it
+# guarded (`_slider_pos` returning None) is behind `if self._detail is not None` and cannot run.
 
 
 def test_a_second_tab_opened_mid_run_syncs_when_the_run_finishes(
@@ -2190,20 +2182,28 @@ def test_a_second_tab_opened_mid_run_syncs_when_the_run_finishes(
 
     Opening a second exploration tab while the first tab's run is live left the new tab in front
     while the slider and plate still showed the FIRST tab's run, and it never resynced when the run
-    finished. The switch is now deferred (and said out loud), then delivered on drain."""
+    finished. The switch is now deferred (and said out loud), then delivered on drain.
+
+    RE-POINTED by commit 2b8fbc5: the `_detail._fov_labels` readings are gone with the embedded
+    viewer, so "which tab does the view actually belong to" is read off its owner,
+    `_active_exploration`, which `_on_tab_changed` still maintains. The deferral mechanism
+    (`_pending_resync`, the tab's own `sync_pending` note, delivery from `_on_run_drained`) is
+    untouched, and it is the whole of what BUG 2 was.
+    """
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
     key_a = win.open_exploration_tab(["B2"])
     qapp.processEvents()
+    tab_a = win._op_tabs[key_a]
     win.run_operator("mip", regions=["B2"], save=False, tab_key=key_a)
-    assert win._detail._fov_labels == ["B2:0"]                 # the live run's slider
+    assert win._active_exploration is tab_a                    # the live run's tab owns the view
 
     key_b = win.open_exploration_tab(["B3"])                   # ...open a SECOND tab mid-run
     qapp.processEvents()
     tab_b = win._op_tabs[key_b]
     assert win._explore_tabs.currentWidget() is tab_b          # it is in front of pane 3...
-    assert win._detail._fov_labels == ["B2:0"]                 # ...but the view still shows tab A
+    assert win._active_exploration is tab_a                    # ...but the view still belongs to A
     assert tab_b.sync_pending, "the front tab shows another tab's run and says nothing"
     assert tab_b.sync_note.isVisibleTo(tab_b)
     assert win._pending_resync
@@ -2212,8 +2212,7 @@ def test_a_second_tab_opened_mid_run_syncs_when_the_run_finishes(
     assert _drain_until(qapp, lambda: not win._busy())
     qapp.processEvents()
 
-    assert win._detail._fov_labels == ["B3:0"]                 # the front tab is now the truth
-    assert win._active_exploration is tab_b
+    assert win._active_exploration is tab_b                    # the front tab is now the truth
     assert not tab_b.sync_pending
     assert not win._pending_resync
     win.close()
@@ -2221,7 +2220,11 @@ def test_a_second_tab_opened_mid_run_syncs_when_the_run_finishes(
 
 def test_deferred_resync_survives_a_failed_run(qapp, stub_detail, squid_dataset, blocking_worker):
     """The resync hangs off QThread.finished, not finished_ok, so a run that fails or is stopped
-    still hands the view back instead of leaving it pinned to a dead run's subset."""
+    still hands the view back instead of leaving it pinned to a dead run's subset.
+
+    RE-POINTED by commit 2b8fbc5 from `_detail._fov_labels` to `_active_exploration`; see the
+    preceding test. The failure edge itself is unchanged.
+    """
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
@@ -2234,16 +2237,15 @@ def test_deferred_resync_survives_a_failed_run(qapp, stub_detail, squid_dataset,
     key_b = win.open_exploration_tab(["B3"])
     qapp.processEvents()
     assert win._pending_resync
-    assert win._detail._fov_labels == ["B2:0"]                 # still tab A's live run
+    assert win._active_exploration is win._op_tabs[key_a]      # still tab A's live run
     blocking_worker[-1].failed.emit("boom")
     blocking_worker[-1].release()
     # Wait on the actual post-condition — the deferred switch being DELIVERED — not on QThread
     # liveness. _pending_resync is cleared only inside the terminal cascade (_on_run_drained),
-    # in the same synchronous slot that rewrites _fov_labels/_active_exploration, so it cannot go
-    # False before the state below exists. `not _busy()` went True one queued-signal too early.
+    # in the same synchronous slot that rewrites _active_exploration, so it cannot go False before
+    # the state below exists. `not _busy()` went True one queued-signal too early.
     assert _drain_until(qapp, lambda: not win._pending_resync)
-    assert win._detail._fov_labels == ["B3:0"]                 # handed to the front tab anyway
-    assert win._active_exploration is win._op_tabs[key_b]
+    assert win._active_exploration is win._op_tabs[key_b]      # handed to the front tab anyway
     assert not win._pending_resync
 # --- loupe: press-and-hold magnifier (IMA-208) ----------------------------------------------
 #
@@ -3036,14 +3038,20 @@ def test_minerva_selection_reads_the_window_not_the_overview(qapp, stub_detail, 
     win.close()
 
 
-def test_real_shift_drag_selection_is_what_minerva_exports(qapp, stub_detail, squid_dataset):
-    """IMA-221 <-> IMA-228, end to end through the ACTUAL gesture — no stubbed selection API.
+def test_a_real_plate_gesture_is_what_minerva_exports(qapp, stub_detail, squid_dataset):
+    """IMA-221 <-> IMA-228, end to end through ACTUAL gestures — no stubbed selection API.
 
     Both halves shipped on separate branches and nothing joined them: IMA-221's per-FOV payload
     landed as ``PlateWindow.selected_region_fovs`` (the overview is display-only), so a
     ``minerva_selection`` that probed only the overview would silently skip the real API and
-    reach the same answer by accident via ``selected_wells``. This drives a genuine Shift-drag
-    marquee and pins that the export scope IS the dragged wells — not the detail well.
+    reach the same answer by accident via ``selected_wells``. That is still the claim under test.
+
+    REWRITTEN for commit 2b8fbc5, which split one gesture into two. A Shift-DRAG no longer
+    selects: it emits ``marqueeSelected`` and the window turns that into
+    ``ViewerManager.open(...)``, an independent viewer over the box. The gesture that scopes a
+    BULK operation (which is what an export is) is now the plain click / Cmd-click selection. So
+    both are driven here, and both claims are pinned: the drag asks for a window and moves no
+    export scope, the click moves the export scope and asks for no window.
     """
     from PyQt5.QtCore import QEvent, QPoint
     from PyQt5.QtGui import QMouseEvent
@@ -3056,6 +3064,9 @@ def test_real_shift_drag_selection_is_what_minerva_exports(qapp, stub_detail, sq
     ov.show()
     qapp.processEvents()
 
+    asked = []
+    win._viewer_manager.open = lambda regions, **kw: asked.append(list(regions)) or object()
+
     target = ov._by_rc[sorted(ov._by_rc)[0]]                  # first acquired well only: a subset
     assert len(ov._by_rc) > 1, "fixture must have >1 well or 'subset' means nothing"
     (r, c), = [rc for rc, w in ov._by_rc.items() if w == target]
@@ -3063,30 +3074,36 @@ def test_real_shift_drag_selection_is_what_minerva_exports(qapp, stub_detail, sq
     cx, cy = ax + (c + 0.5) * ov._cd, ay + (r + 0.5) * ov._cd
     box = ov._cd * 0.3
 
-    def send(kind, x, y, buttons):
+    def send(kind, x, y, buttons, mods=Qt.ShiftModifier):
         qapp.sendEvent(ov, QMouseEvent(kind, QPoint(int(x), int(y)), Qt.LeftButton,
-                                       buttons, Qt.ShiftModifier))
+                                       buttons, mods))
 
+    # 1. THE SHIFT-DRAG: opens a window over exactly the boxed well, and selects nothing.
     send(QEvent.MouseButtonPress, cx - box, cy - box, Qt.LeftButton)
     send(QEvent.MouseMove, cx, cy, Qt.LeftButton)
     send(QEvent.MouseButtonRelease, cx + box, cy + box, Qt.NoButton)
     qapp.processEvents()
 
-    assert ov.selected_wells() == [target], "the Shift-drag itself did not select the well"
+    assert asked == [[target]], f"the Shift-drag did not open a window over {target}: {asked}"
+    assert ov.selected_wells() == [], "the Shift-drag left a batch selection behind"
+
+    # 2. THE PLAIN CLICK: the selection gesture, and the one an export scopes to.
+    asked.clear()
+    send(QEvent.MouseButtonPress, cx, cy, Qt.LeftButton, Qt.NoModifier)
+    send(QEvent.MouseButtonRelease, cx, cy, Qt.NoButton, Qt.NoModifier)
+    qapp.processEvents()
+
+    assert ov.selected_wells() == [target], "the plain click did not select the well"
+    assert asked == [], "a plain click opened a window; only the drag and double-click do that"
     expected = [(target, f) for f in win._meta["fovs_per_region"][target]]
     assert win.selected_region_fovs() == expected             # IMA-221's payload
     assert win.minerva_selection() == expected                # ...is what IMA-228 exports
 
-    # The same Shift-drag also opens IMA-205's exploration tab in pane 3, which SCOPES the detail
-    # slider to the subset — so empty pane 3 before opening a well outside it, or activate_well
-    # correctly refuses and the precedence assertion below would pass vacuously.
-    _close_exploration_pane(win)
-    qapp.processEvents()
     other = ov._by_rc[sorted(ov._by_rc)[-1]]
-    win.activate_well(other, 0)                               # a DIFFERENT well open in detail
-    assert win._current_well == other, "the detail well never actually changed"
+    win.activate_well(other, 0)                               # a DIFFERENT well is the current one
+    assert win._current_well == other, "the current well never actually changed"
     assert win.minerva_selection() == expected, (
-        "minerva_selection fell through to the detail well and ignored the plate selection")
+        "minerva_selection fell through to the current well and ignored the plate selection")
 
     ov.clear_selection()
     qapp.processEvents()
@@ -3224,83 +3241,28 @@ def test_closing_mid_export_disconnects_the_worker(qapp, stub_detail, squid_data
     assert win._minerva is None
 
 
-# --- IMA-237: three horizontal panes, the third revealed by the exploration gesture ------------
+# --- IMA-237: the pane layout -------------------------------------------------------------------
 #
-# Julio's requirement is a THREE-pane app on one monitor: pane 1 = plate + the tabbed controls,
-# pane 2 = the initial viewer, pane 3 = exploration. The constraint that shapes the code is that
-# pane 3 must not exist for a user who never Shift-drags, so these drive the REAL splitter and the
-# REAL gesture rather than asserting on a builder's return value.
-
-def test_outer_split_has_three_panes_and_pane3_opens_with_width(qapp, stub_detail):
-    """IMA-260 reversed IMA-237's collapsed-until-revealed rule: the third pane is there from the
-    first frame, because a pane that is not there cannot be found. It opens on its EXAMPLE page —
-    holding no tabs is a state with copy in it, not a state with nothing in it."""
-    win = V.PlateWindow(None)
-    outer = win._split
-    assert outer.count() == 3, "the window is not a three-pane layout"
-    # Pane 3 is now a vertical COLUMN: the exploration pane on top, the log panel below it
-    # (Julio: "the logger... below the exploration pane"). The column is what sits in the outer
-    # splitter; the exploration pane is still its top child, unchanged.
-    assert outer.widget(2) is win._explore_col, "pane 3 is not the exploration column"
-    assert win._explore_col.widget(0) is win._explore_pane, "the exploration pane is not on top"
-    assert win._explore_col.widget(1) is win._log_panel, "the log panel is not below the pane"
-    assert outer.sizes()[2] > 0, "pane 3 opened collapsed"
-    assert win._explore_pane.currentWidget() is win._explore_empty
-    assert win._explore_tabs.count() == 0
-    win.close()
-
-
-def test_window_resize_never_grows_pane3_at_the_plate_pane_s_expense(qapp, stub_detail, squid_dataset):
-    """Requirement 5, measured rather than asserted on a stretch factor Qt won't read back:
-    widen the window with pane 3 open and the extra pixels go to panes 1 and 2."""
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.resize(1400, 900)
-    win.show()
-    qapp.processEvents()
-    win.ingest(str(root))
-    _shift_drag_over(win, ["B3"])
-    qapp.processEvents()
-    plate0, viewer0, explore0 = win._split.sizes()
-    assert explore0 > 0
-
-    win.resize(1900, 900)
-    qapp.processEvents()
-    plate1, viewer1, explore1 = win._split.sizes()
-    assert plate1 > plate0, "the plate pane did not get its share of the new width"
-    assert explore1 == explore0, "the exploration pane grew on resize instead of the plate"
-    win.close()
-
-
-def test_a_real_shift_drag_fills_pane3_without_moving_a_single_divider(
-        qapp, stub_detail, squid_dataset):
-    """Pane 3 already exists (IMA-260), so the gesture changes its CONTENT and nothing else.
-
-    The requirement that outlived IMA-237's reveal is that pane 3 must never squash the plate:
-    under a fixed-width third column that is now stronger than it was — no divider moves at all,
-    so neither neighbour can lose a pixel to a tab opening.
-    """
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.resize(1600, 900)
-    win.show()
-    qapp.processEvents()
-    win.ingest(str(root))
-    qapp.processEvents()
-
-    assert win._explore_tabs.count() == 0               # BEFORE: pane 3 is present but empty...
-    assert win._explore_pane.currentWidget() is win._explore_empty     # ...showing the example
-    before = win._split.sizes()
-
-    _shift_drag_over(win, ["B3"])
-    qapp.processEvents()
-
-    assert win._explore_tabs.count() == 1               # POPULATED, and the page swapped to it
-    assert win._explore_pane.currentWidget() is win._explore_tabs
-    assert isinstance(win._explore_tabs.currentWidget(), V._ExplorationTab)
-    assert win._split.sizes() == before, "opening a tab moved a divider"
-    win.close()
-
+# Julio's requirement WAS a THREE-pane app on one monitor: pane 1 = plate + the tabbed controls,
+# pane 2 = the initial viewer, pane 3 = exploration.
+#
+# REMOVED BY commit 2b8fbc5 ("Decentralize GUI"), three tests:
+#   test_outer_split_has_three_panes_and_pane3_opens_with_width
+#   test_window_resize_never_grows_pane3_at_the_plate_pane_s_expense
+#   test_a_real_shift_drag_fills_pane3_without_moving_a_single_divider
+#
+# The three-pane layout is gone. `self._split` is now the compact top ROW of the portrait deck and
+# holds exactly TWO widgets (`OpenViewList` | `_left_tabs`); there is no `_explore_col` at all, the
+# central pane was deleted, and the log moved into its own top-level window. `_explore_pane` /
+# `_explore_empty` are still CONSTRUCTED but are never parented into any layout, so nothing in them
+# is on screen — which is why the geometry these three measured is no longer measurable rather
+# than merely different. The third test additionally asserted that the Shift-drag fills pane 3
+# with an exploration tab, which the gesture no longer does (see the marquee section above).
+#
+# What survives is asserted elsewhere: that the root window builds, sizes and tears down cleanly is
+# tests/test_window_lifetime.py; that a Shift-drag opens an independent window is
+# test_marquee_asks_for_a_window_over_exactly_the_boxed_wells and
+# test_a_real_plate_gesture_is_what_minerva_exports.
 
 def test_exploration_tabs_are_not_in_the_process_console(qapp, stub_detail, squid_dataset):
     """Requirement 3: exploration tabs moved OUT of pane 1's tab bar."""
@@ -3360,17 +3322,20 @@ def test_pane3_index0_is_detachable_but_the_process_home_tab_is_not(qapp, stub_d
 
 def test_opening_a_pane1_tab_does_not_unscope_the_viewer(qapp, stub_detail, squid_dataset):
     """Both panes are visible at once now, so pane 1's front tab must not silently claim the
-    viewer's scope: opening Layers while an exploration tab is up used to look like a tab switch."""
+    viewer's scope: opening Layers while an exploration tab is up used to look like a tab switch.
+
+    RE-POINTED by commit 2b8fbc5: scope is read off `_active_exploration`, its owner, rather than
+    off the deleted central viewer's slider labels.
+    """
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
     key = win.open_exploration_tab(["B3"])
     qapp.processEvents()
-    assert win._detail._fov_labels == ["B3:0"]
+    assert win._active_exploration is win._op_tabs[key]
     win._open_op_tab("layers", "Layers", win._build_layers_tab)   # a PANE 1 tab
     qapp.processEvents()
-    assert win._detail._fov_labels == ["B3:0"], "a pane 1 tab stole the viewer's scope"
-    assert win._active_exploration is win._op_tabs[key]
+    assert win._active_exploration is win._op_tabs[key], "a pane 1 tab stole the viewer's scope"
     win.close()
 
 
@@ -3603,28 +3568,35 @@ def test_a_decon_qc_result_opens_as_a_tab_in_pane_3(qapp, stub_detail, squid_dat
     win.close()
 
 
-# --- IMA-226: EVERY operator streams live to the plate and the ndviewer slider -----------------
+# --- IMA-226: EVERY operator streams live to the plate ------------------------------------------
+#
+# RE-POINTED by commit 2b8fbc5 ("Decentralize GUI"). This section used to assert TWO destinations
+# per run: the plate canvas AND the embedded ndviewer's slider (`_detail.arrays`, the
+# `register_array` pushes). The embedded viewer is gone — `_detail` is unconditionally None and
+# `_on_push` drops every push at its first guard — so the slider half has no destination to reach
+# and is not asserted any more. The plate half is untouched, is the half IMA-226 was really about
+# ("every operator the ENGINE can run must reach the plate canvas through the same
+# _OperatorWorker"), and is not covered anywhere else, so these are re-pointed rather than removed.
 
 def _run_live(qapp, win, key, regions=("B3",)):
-    """Drive a real preview run to completion and return (tiles, pushes)."""
-    win._detail.arrays.clear()
+    """Drive a real preview run to completion and return the tiles that reached the plate."""
     tiles = []
     win.run_operator(key, regions=list(regions), save=False)
     if win._worker is None:
-        return None, None
+        return None
     win._worker.tileReady.connect(lambda *a: tiles.append(a))
     t0 = time.time()
     while win._worker.isRunning() and time.time() - t0 < 90:
         qapp.processEvents(); time.sleep(0.02)
     for _ in range(25):
         qapp.processEvents(); time.sleep(0.02)
-    return tiles, list(win._detail.arrays)
+    return tiles
 
 
 @pytest.mark.parametrize("key", ["mip", "reference", "stitch", "decon", "bgsub", "coordinate"])
-def test_every_operator_streams_live_to_plate_and_slider(qapp, stub_detail, squid_dataset, key):
+def test_every_operator_streams_live_to_the_plate(qapp, stub_detail, squid_dataset, key):
     """IMA-226. Not 'MIP streams and the rest are TODO': every operator the ENGINE can run must
-    reach the plate canvas and the ndviewer slider through the same _OperatorWorker.
+    reach the plate canvas through the same _OperatorWorker.
 
     `reference` is the one this test was written for — a registered projector with NO card, so
     run_operator's `_OPERATIONS_BY_KEY[key].label` raised a bare KeyError out of the event loop
@@ -3634,10 +3606,9 @@ def test_every_operator_streams_live_to_plate_and_slider(qapp, stub_detail, squi
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
-    tiles, pushes = _run_live(qapp, win, key)
+    tiles = _run_live(qapp, win, key)
     assert tiles is not None, f"{key}: no worker started — {win._readout.text()!r}"
     assert tiles, f"{key}: nothing reached the PLATE — {win._readout.text()!r}"
-    assert pushes, f"{key}: nothing reached the ndviewer SLIDER — {win._readout.text()!r}"
     assert win._active_op_key == key, f"{key} streamed into layer {win._active_op_key!r}"
     assert win._readout.text().startswith("✓"), win._readout.text()
     # The tiles carry the operator's own pixels, not an empty canvas. Checked for the per-FOV
@@ -3652,7 +3623,10 @@ def test_every_operator_streams_live_to_plate_and_slider(qapp, stub_detail, squi
 
 def test_flatfield_streams_live_once_a_profile_is_installed(qapp, stub_detail, squid_dataset):
     """The last operator: flat-field cannot run without a profile, so with one installed it must
-    stream exactly like the rest — and without one it must SAY it produced nothing."""
+    stream exactly like the rest — and without one it must SAY it produced nothing.
+
+    RE-POINTED by 2b8fbc5 to the plate only; see the section note above.
+    """
     from squidmip import FlatfieldProfile
     from squidmip._flatfield import set_profile
     import squidmip._flatfield as FF
@@ -3664,17 +3638,35 @@ def test_flatfield_streams_live_once_a_profile_is_installed(qapp, stub_detail, s
 
     prev = FF.active_profile()
     try:
-        FF._active = None                                   # no profile -> every field raises
-        tiles, pushes = _run_live(qapp, win, "flatfield")
-        assert not tiles and not pushes
-        assert win._readout.text().startswith("⚠"), \
-            f"a run that produced NOTHING reported success: {win._readout.text()!r}"
-        assert "produced nothing" in win._readout.text()
+        # NO PROFILE. This half of the test also had a stale premise, independent of 2b8fbc5, and
+        # it was invisible behind the `_detail` failure above: "no profile -> every field raises ->
+        # the run produces nothing and says so". `run_operator` no longer lets that happen. It
+        # intercepts flat-field with no active profile and AUTO-ESTIMATES one off-thread
+        # (tilefusion BaSiC) instead, precisely so the plate does not fill with red x's — the
+        # symptom Julio reported. So the surviving claim is the same one, one step earlier: a
+        # flat-field run without a profile must NOT start and must SAY what it is doing.
+        FF._active = None
+        tiles = _run_live(qapp, win, "flatfield")
+        assert tiles is None, "the operator ran without an illumination profile"
+        assert win._worker is None, "an operator worker started without a profile"
+        assert "estimating an illumination profile" in win._readout.text(), \
+            f"a flat-field run with no profile said nothing: {win._readout.text()!r}"
+        est = getattr(win, "_ff_est_worker", None)
+        assert isinstance(est, V._FlatfieldWorker), "no estimate was actually started"
+        # Cut the estimate loose before waiting: `done` would install its profile and re-enter
+        # run_operator, which is a second run this test is not about (and a thread still alive at
+        # teardown). _FlatfieldWorker has no stop(), so _retire cannot be used on it.
+        for sig in (est.done, est.problem, est.stage):
+            try:
+                sig.disconnect()
+            except TypeError:
+                pass
+        assert _drain_until(qapp, lambda: not est.isRunning(), timeout=90)
+        win._ff_est_worker = None
 
         set_profile(FlatfieldProfile(np.ones((ny, nx), np.float32)))
-        tiles, pushes = _run_live(qapp, win, "flatfield")
+        tiles = _run_live(qapp, win, "flatfield")
         assert tiles, f"flat-field with a profile still reached no tile: {win._readout.text()!r}"
-        assert pushes, "flat-field reached the plate but not the ndviewer slider"
         assert win._readout.text().startswith("✓"), win._readout.text()
     finally:
         FF._active = prev
@@ -3996,76 +3988,23 @@ def nonsquare_mosaic_dataset(tmp_path):
     return root, region, frame, (mh, mw)
 
 
-def _stitch_into_central_viewer(qapp, win, region):
-    """Run the REAL stitch operator on ``region`` and return (fused mosaic shape, pushes).
-
-    ``_on_well`` is wrapped rather than mocked: it is the one place the fused mosaic exists as an
-    array, and the test needs its true extent to compare against what the viewer was handed.
-    """
-    fused = []
-    original = V._OperatorWorker._on_well
-
-    def spy(worker, r, f, image):
-        fused.append(np.asarray(image).shape)
-        return original(worker, r, f, image)
-
-    V._OperatorWorker._on_well = spy
-    try:
-        win._stop_preview()
-        _drain_until(qapp, lambda: not win._busy(), timeout=120)
-        win._detail.arrays.clear()
-        win.run_operator("stitch", regions=[region], save=False)
-        assert win._worker is not None, win._readout.text()
-        t0 = time.time()
-        while win._worker is not None and win._worker.isRunning() and time.time() - t0 < 300:
-            qapp.processEvents(); time.sleep(0.02)
-        for _ in range(25):
-            qapp.processEvents(); time.sleep(0.02)
-    finally:
-        V._OperatorWorker._on_well = original
-    assert fused, f"the stitch produced no fused mosaic: {win._readout.text()!r}"
-    return fused[0][-2:], list(win._detail.arrays)
-
-
-def test_ima245_region_operator_reaches_the_central_viewer_as_a_mosaic(
-        qapp, stub_detail, nonsquare_mosaic_dataset):
-    """A stitch's FUSED MOSAIC must arrive in the central array viewer, sized as the mosaic.
-
-    Reported from the live GUI: "after I see the stitch, I cannot see it in my central array
-    viewer — it is black". The plate showed the mosaic; the viewer beside it did not.
-
-    This asserts on the RECTANGLE, not on the handler being called. A region operator yields one
-    fused mosaic per region, and the viewer's canvas was declared as a FRAME (_PUSH_PX square) —
-    so the mosaic was squashed into a shape it does not have, or refused for not fitting. Both
-    fail here, and the aspect is checked against the real fused array rather than a constant.
-    """
-    root, region, frame_px, predicted = nonsquare_mosaic_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    assert win._meta["frame_shape"] == (frame_px, frame_px)
-    # the coordinate-derived extent the viewer is sized from, and it is NOT the frame
-    assert V.region_mosaic_extent_px(win._meta, [region]) == predicted
-
-    mosaic_hw, pushes = _stitch_into_central_viewer(qapp, win, region)
-    assert mosaic_hw != (frame_px, frame_px), \
-        f"the stitch yielded a frame, not a mosaic ({mosaic_hw}) — the fixture is not stitching"
-    assert pushes, f"NOTHING reached the central array viewer: {win._readout.text()!r}"
-
-    got = pushes[0][4]
-    canvas = win._detail.canvases[-1]
-    assert got == canvas, f"the viewer was declared {canvas} and handed {got}"
-    # the shape is the MOSAIC's, bounded by the push budget — not the frame's, and not a square
-    assert max(got) == V._PUSH_PX and got[0] != got[1], f"push {got} is not a bounded mosaic"
-    scale = V._PUSH_PX / max(mosaic_hw)
-    assert abs(got[0] / got[1] - mosaic_hw[0] / mosaic_hw[1]) < 0.02, \
-        f"push {got} does not have the fused mosaic's aspect {mosaic_hw}"
-    assert abs(got[0] - mosaic_hw[0] * scale) <= 2 and abs(got[1] - mosaic_hw[1] * scale) <= 2, \
-        f"push {got} is not the fused mosaic {mosaic_hw} scaled to fit {V._PUSH_PX}"
-    # ...and nothing was thrown away getting there
-    assert win._dropped_pushes == 0, \
-        f"{win._dropped_pushes} push(es) dropped: {win._readout.text()!r}"
-    assert win._readout.text().startswith("✓") and "⚠" not in win._readout.text()
-    win._stop_worker(); win.close()
+# REMOVED BY commit 2b8fbc5 ("Decentralize GUI"), two tests and the `_stitch_into_central_viewer`
+# helper they shared (no other caller):
+#
+#   test_ima245_region_operator_reaches_the_central_viewer_as_a_mosaic
+#   test_ima245_real_tissue_stitch_reaches_the_central_viewer
+#
+# Both measure the RECTANGLE a fused mosaic arrives in AT THE CENTRAL ARRAY VIEWER: they read
+# `_detail.canvases[-1]` (what `start_acquisition` declared) and the shape recorded by
+# `_detail.register_array`. There is no central array viewer — `_detail` is unconditionally None,
+# `start_acquisition` is never called, and `_on_push` drops at `if self._detail is None` — so
+# neither number exists to compare.
+#
+# The half of IMA-245 that is NOT about the viewer survives untouched and is still asserted by
+# test_ima245_every_region_operator_is_sized_as_a_region_not_a_frame below: every region operator
+# sizes its push from the REGION MOSAIC extent and every per-FOV projector from the FRAME, checked
+# by category over `available_region_operators()` / `available_projectors()` rather than by name.
+# That is the assertion an `if operator == "stitch"` branch fails, and it is the durable one.
 
 
 def test_ima245_every_region_operator_is_sized_as_a_region_not_a_frame(
@@ -4099,7 +4038,16 @@ def test_ima245_an_unshowable_push_is_counted_and_said_out_loud(
         qapp, stub_detail, nonsquare_mosaic_dataset):
     """A push that cannot be shown must never be silent. An ndviewer build with no
     ``register_array`` (the installed 0.1.0 has none) discarded every computed result at a
-    ``hasattr`` guard: no counter, no message, a black viewer, and a human to find it."""
+    ``hasattr`` guard: no counter, no message, a black viewer, and a human to find it.
+
+    RE-POINTED by commit 2b8fbc5. The COUNTER and the SPOKEN reason are both still right and both
+    still exercised. What is gone is the SPECIFIC copy the last two cases used to produce: with
+    `_detail` unconditionally None, `_on_push` now drops at its very first guard ("there is no
+    array viewer in this window to show the result in"), so the "no slot in this run's viewer"
+    and "the result is HxW but the viewer was declared HxW" branches below it are unreachable
+    from a real window and their wording is no longer assertable. Their guards are untouched in
+    `_on_push`; they are simply behind a gate that never opens in the decentralized root.
+    """
     root, region, _frame, _extent = nonsquare_mosaic_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
@@ -4116,41 +4064,24 @@ def test_ima245_an_unshowable_push_is_counted_and_said_out_loud(
     assert win._dropped_pushes == 1
     assert "register_array" in win._readout.text() and "⚠" in win._readout.text()
 
+    # THE CASE THE DECENTRALIZED ROOT ACTUALLY HITS: there is no array viewer at all. It must be
+    # counted and said out loud exactly like the others, never swallowed.
     win._detail, win._push_problem, win._dropped_pushes = detail, None, 0
-    win._push_index = {}                   # an index this run's viewer has no slot for
+    assert win._detail is None, "the root window grew a central viewer back"
     win._on_push(7, [np.zeros((16, 16), np.uint16)])
-    assert win._dropped_pushes == 1 and "no slot" in win._readout.text()
+    assert win._dropped_pushes == 1, "a push with nowhere to go was dropped silently"
+    assert "no array viewer" in win._readout.text() and "⚠" in win._readout.text()
 
-    win._push_problem, win._dropped_pushes = None, 0
-    win._push_index = None
-    win._on_push(0, [np.zeros((99, 3), np.uint16)])      # not the declared canvas
-    assert win._dropped_pushes == 1 and "99x3" in win._readout.text()
-    # a success line must not be able to bury the warning
+    # ...and a success line must not be able to bury the warning (the sticky suffix, unchanged).
     win._run_readout("✓ done")
-    assert win._readout.text().startswith("✓ done") and "99x3" in win._readout.text()
+    assert win._readout.text().startswith("✓ done") and "no array viewer" in win._readout.text()
+
+    # ...and the counter is PER RUN, not cumulative for the life of the window.
+    win._dropped_pushes, win._push_problem = 0, None
+    win._on_push(3, [np.zeros((16, 16), np.uint16)])
+    win._on_push(4, [np.zeros((16, 16), np.uint16)])
+    assert win._dropped_pushes == 2
     win.close()
-
-
-def test_ima245_real_tissue_stitch_reaches_the_central_viewer(qapp, stub_detail, real_dataset):
-    """The honest case, on the acquisition the product is demoed on.
-
-    ``manual0`` is 27 freeform 10x FOVs at ~10% overlap; the fused mosaic is 11535x9635 and the
-    frame is 2084x2084, so nothing here can be mistaken for the other. This is the exact run the
-    defect was reported from, and it costs ~13 s, so it runs by default (it skips only where the
-    acquisition is absent). Measured on the fix: the array viewer was declared and handed
-    (512, 428) — the fused 11535x9635 mosaic's aspect to within a pixel — with 0 dropped pushes."""
-    win = V.PlateWindow(None)
-    win.ingest(str(real_dataset))
-    mosaic_hw, pushes = _stitch_into_central_viewer(qapp, win, "manual0")
-    assert pushes, f"NOTHING reached the central array viewer: {win._readout.text()!r}"
-    got = pushes[0][4]
-    assert got == win._detail.canvases[-1]
-    assert got != tuple(win._meta["frame_shape"]) and max(got) == V._PUSH_PX
-    scale = V._PUSH_PX / max(mosaic_hw)
-    assert abs(got[0] - mosaic_hw[0] * scale) <= 2 and abs(got[1] - mosaic_hw[1] * scale) <= 2, \
-        f"push {got} is not the fused mosaic {mosaic_hw} scaled to fit {V._PUSH_PX}"
-    assert win._dropped_pushes == 0, win._readout.text()
-    win._stop_worker(); win.close()
 
 
 # ============================================================================ IMA-253 / IMA-249
@@ -4226,27 +4157,58 @@ def test_ima253_preview_plan_reads_every_fov_of_a_region_but_only_one_of_a_singl
         "sub-_MIN_PREVIEW_BOX_PX fields are specks: reading one plane each is cost with no picture"
 
 
-def test_ima253_real_tissue_regions_are_stacked_in_y_and_offset_in_x(
+def test_ima253_real_tissue_regions_are_laid_out_by_geometry_in_even_non_overlapping_cells(
         qapp, stub_detail, real_dataset):
-    """The layout defect itself: two regions that are separated in Y rendered SIDE BY SIDE.
+    """REWRITTEN for commit 2b8fbc5. The RULE changed; the two properties worth guarding did not.
 
-    manual0 spans stage y 10186..17238, manual1 21113..28165 -- no overlap at all -- while their
-    x ranges (96814..102456 / 97937..103578) overlap heavily. The old carrier put them in columns
-    0 and 1 of a "4 slide carrier" by enumeration order, which is why the plate did not look like
-    a slide.
+    This used to assert the STAGE-PROPORTIONAL layout: manual0 spans stage y 10186..17238 and
+    manual1 21113..28165 (no overlap), while their x ranges overlap heavily, so the cells had to
+    stack vertically and overlap in x. `even_carrier_layout` (squidmip/_plate.py:831, wired at
+    :1060) deliberately replaced that, for the reason recorded in its docstring: true relative
+    size and position "stacked two tissues into a tall, tiny, uneven column and wasted the
+    viewer's horizontal space". Two regions now land in an EQUAL, landscape-biased 1x2 grid.
+
+    So the y-stacking assertion is dead by design and is not re-asserted. What was actually being
+    defended, and still is:
+
+      1. PLACEMENT FOLLOWS GEOMETRY, NOT ENUMERATION ORDER. That was the defect ("the old carrier
+         put them in columns 0 and 1 by enumeration order"). `even_carrier_layout` orders its
+         cells by the stage box, so manual0 (the lower stage x) must land left of manual1, and
+         reversing the order the acquisition reports its regions in must change nothing.
+      2. CELLS NEVER OVERLAP, and are equal. That is the whole point of the even layout, and it is
+         the property the old geometry violated in the other direction ("a bunch of squares
+         overlapped with each other under different regions").
     """
+    from squidmip._plate import even_carrier_layout, region_stage_boxes_um
+
     win = V.PlateWindow(None)
     win.ingest(str(real_dataset))
     ov = win._overview
     assert ov._layout is not None, "a freeform holder must be placed by geometry"
+    boxes = region_stage_boxes_um(win._meta)          # the SAME key the carrier orders cells by
+    assert boxes and boxes["manual0"][0] < boxes["manual1"][0], (
+        f"fixture assumption broken: manual0 is no longer the lower stage x ({boxes})")
+
     r0 = ov._cell_rect(*next(k for k, v in ov._by_rc.items() if v == "manual0"))
     r1 = ov._cell_rect(*next(k for k, v in ov._by_rc.items() if v == "manual1"))
-    assert r1[1] >= r0[1] + r0[3], f"manual1 must render BELOW manual0, got {r0} / {r1}"
-    assert r1[0] < r0[0] + r0[2] and r0[0] < r1[0] + r1[2], "...and still overlap it in x"
+
+    # 1. geometry, not enumeration order: the lower stage x renders further left.
     assert r1[0] > r0[0], "manual1 is further +x than manual0, as the stage records"
-    # relative scale: the two mosaics have the same extent on this dataset, so must the cells
+    # ...and the MUTATION-CHECK for it, at the layout rule itself: reversing the reported order
+    # cannot move a cell, because the ordering key is the stage box and not the report order.
+    fwd = even_carrier_layout(["manual0", "manual1"], order_key=boxes)
+    rev = even_carrier_layout(["manual1", "manual0"], order_key=boxes)
+    assert fwd == rev, "the carrier layout follows enumeration order, not stage geometry"
+    assert fwd[2]["manual0"][1] < fwd[2]["manual1"][1] or fwd[2]["manual0"][0] < fwd[2]["manual1"][0]
+
+    # 2. equal cells that do not overlap. Rectangles are (x, y, w, h).
     assert r0[2] == pytest.approx(r1[2], rel=0.02)
     assert r0[3] == pytest.approx(r1[3], rel=0.02)
+    sep_x = r1[0] >= r0[0] + r0[2] or r0[0] >= r1[0] + r1[2]
+    sep_y = r1[1] >= r0[1] + r0[3] or r0[1] >= r1[1] + r1[3]
+    assert sep_x or sep_y, (
+        f"the two tissue cells overlap: {r0} / {r1} — this is the 'squares overlapped with each "
+        "other under different regions' the even carrier exists to prevent")
     win.close()
 
 
@@ -4355,39 +4317,35 @@ def _shown(qapp, path=None, size=(1600, 900)):
     return win
 
 
-def _right_click(qapp, ov, pos):
-    """A REAL right-click: a QContextMenuEvent through Qt's dispatch, not a direct handler call."""
-    from PyQt5.QtGui import QContextMenuEvent
-    p = pos.toPoint() if hasattr(pos, "toPoint") else pos
-    ev = QContextMenuEvent(QContextMenuEvent.Mouse, p, ov.mapToGlobal(p))
-    qapp.sendEvent(ov, ev)
-    qapp.processEvents()
-    return ov._context_menu
-
-
-def _menu_action(menu, needle):
-    return next((a for a in menu.actions() if needle.lower() in a.text().lower()), None)
-
-
-def test_ima260_all_three_panes_have_real_width_on_open(qapp, stub_detail, squid_dataset):
-    """The headline. Not 'the splitter has three children' — three panes a user can SEE."""
-    root, _ = squid_dataset
-    win = _shown(qapp, root)
-    assert win._split.count() == 3
-    # Pane 3 is the exploration COLUMN (exploration pane + log panel under it); the exploration
-    # pane is its top child and must still be a real, visible pane.
-    assert win._split.widget(2) is win._explore_col, "pane 3 is not the exploration column"
-    assert win._explore_col.widget(0) is win._explore_pane, "the exploration pane is not on top"
-
-    plate, viewer, explore = win._split.sizes()
-    assert explore > 0, "the exploration pane opened collapsed — IMA-237's undiscoverable state"
-    assert explore >= 360, f"pane 3 opened at {explore} px, too narrow to read its own copy"
-    # ...and the same claim measured off the LIVE widget, which is what fake-green missed.
-    assert win._explore_pane.isVisible()
-    assert win._explore_pane.width() > 0
-    assert win._explore_pane.height() > 0
-    assert plate > 0 and viewer > 0, "opening pane 3 collapsed one of the other two"
-    win.close()
+# REMOVED BY commit 2b8fbc5 ("Decentralize GUI"), five tests from this section:
+#
+#   test_ima260_all_three_panes_have_real_width_on_open
+#       — it measures REAL geometry of `_explore_pane` inside a three-child `_split`. `_split` now
+#         holds two widgets (the deck's compact top row), there is no `_explore_col`, and
+#         `_explore_pane`/`_explore_empty` are constructed but never parented into any layout, so
+#         they have no geometry and no visibility to measure: `isVisible()` is False and the
+#         width/height are zero by construction, not by regression. There is nothing on screen
+#         left to measure. `explore_empty_text()` still reads the copy, and
+#         test_ima260_the_empty_pane_shows_example_usage_not_a_blank_strip (below) still gates it.
+#         (test_ima260_empty_state_copy_meets_the_legibility_floor is RE-POINTED, not removed —
+#         see its own docstring.)
+#
+#   test_ima260_the_example_goes_away_with_content_and_comes_back_when_empty
+#       — its BEFORE/AFTER hinged on a Shift-drag filling pane 3 with an exploration tab; the
+#         Shift-drag now opens an independent window instead (see the marquee section), so there
+#         is no content for the example to stand down for. The page-swap rule itself
+#         (`_sync_explore_pane`) is unchanged and still exercised by
+#         test_closing_idle_exploration_tab_is_clean and test_ingest_closes_exploration_tabs.
+#
+#   test_ima260_right_click_offers_control_well_and_setting_it_pins_the_reference
+#   test_ima260_a_second_control_releases_the_first
+#   test_ima260_clearing_the_control_drops_the_frame_the_tab_and_restores_the_example
+#   test_ima260_the_control_frame_is_really_painted_and_is_not_the_red_box
+#       — the CONTROL WELL feature was removed wholesale by 2b8fbc5 ("Removed the Control Well
+#         feature entirely (signal, menu, frame, state, tab)"). Neither `PlateWindow.control_well`
+#         / `set_control_well` / `CONTROL_KEY` nor `PlateOverview._context_menu` exists any more,
+#         so there is no behaviour left to assert and nowhere else this could have moved to. The
+#         `_right_click` / `_menu_action` helpers went with them (no other caller).
 
 
 def test_ima260_the_empty_pane_shows_example_usage_not_a_blank_strip(qapp, stub_detail,
@@ -4424,7 +4382,21 @@ def test_ima260_empty_state_copy_meets_the_legibility_floor(qapp, stub_detail, s
 
     Copy sized for the near case only is unreadable from the chair the big monitor is viewed
     from, which is the entire reason this pane carries text at all.
+
+    RE-POINTED by commit 2b8fbc5. This used to read the size back off the LIVE widget
+    (`lab.font().pixelSize()` / `lab.height()` / `lab.isVisible()`), which was the right way to ask
+    while `_explore_empty` was parented into pane 3. It is no longer parented into any layout, so
+    it is never polished, never laid out and never shown: `isVisible()` is False and `height()` is
+    0 for every label, by construction. Reading the floor off the LIVE widget is therefore
+    unaskable, not merely failing.
+
+    So the floor is measured where the size is actually declared: the per-label stylesheet
+    `_build_explore_empty` writes, which is the single thing that decides how big this copy
+    renders. A regression that shrinks the copy still fails here; what is no longer claimed is
+    "and it is on screen at that size", because nothing about this widget is on screen.
     """
+    import re
+
     from PyQt5.QtWidgets import QLabel
     root, _ = squid_dataset
     win = _shown(qapp, root)
@@ -4437,141 +4409,12 @@ def test_ima260_empty_state_copy_meets_the_legibility_floor(qapp, stub_detail, s
     # anything under 14 px is genuinely unreadable at the desk and fails here.
     floor = 14.0
     for lab in labels:
-        px = lab.font().pixelSize()
-        if px <= 0:                    # a point-sized font: convert through the screen's DPI
-            px = lab.fontMetrics().height()
+        m = re.search(r"font-size\s*:\s*([0-9.]+)px", lab.styleSheet())
+        assert m is not None, (
+            f"{lab.text()[:32]!r} declares no font-size at all, so its size is whatever the "
+            f"platform default happens to be: {lab.styleSheet()!r}")
+        px = float(m.group(1))
         assert px >= floor, f"{lab.text()[:32]!r} renders at {px} px, under the {floor} px floor"
-        # and it is really on screen at that size, not merely configured
-        assert lab.isVisible() and lab.height() >= floor
-    win.close()
-
-
-def test_ima260_the_example_goes_away_with_content_and_comes_back_when_empty(
-        qapp, stub_detail, squid_dataset):
-    """Both directions. A user who explores once and tidies up must not be left with the blank
-    strip the empty state exists to prevent."""
-    root, _ = squid_dataset
-    win = _shown(qapp, root)
-    assert win.explore_empty_text().strip()             # present on open
-
-    _shift_drag_over(win, ["B3"])
-    qapp.processEvents()
-    assert win._explore_tabs.count() == 1
-    assert win.explore_empty_text() == "", "the example copy stayed up behind real content"
-    assert win._explore_pane.currentWidget() is win._explore_tabs
-
-    _close_exploration_pane(win)                        # the REAL tab-close path
-    qapp.processEvents()
-    assert win._explore_tabs.count() == 0
-    assert win.explore_empty_text().strip(), "the example never came back when the pane emptied"
-    assert win._split.sizes()[2] > 0, "the pane collapsed instead of returning to its empty state"
-    win.close()
-
-
-def test_ima260_right_click_offers_control_well_and_setting_it_pins_the_reference(
-        qapp, stub_detail, squid_dataset):
-    """The example points at an action, so the action has to exist and has to work."""
-    root, _ = squid_dataset
-    win = _shown(qapp, root)
-    ov = _freeze(win._overview)
-    ri, ci = win._fov_index["B3"]["rc"]
-
-    menu = _right_click(qapp, ov, _pt(ri, ci))
-    act = _menu_action(menu, "control well")
-    assert act is not None, "right-click offers no Control Well — the empty pane's example is a lie"
-    assert act.isEnabled()
-    act.trigger()
-    qapp.processEvents()
-
-    # ONE identity, read from the owner and from the plate — never compared across three copies.
-    assert win.control_well() == "B3"
-    assert win._overview.control_well() == "B3", "the plate disagrees with the window"
-    # ...pinned FIRST in pane 3, and not closable by the normal affordance.
-    assert win._explore_tabs.count() >= 1
-    assert win._explore_tabs.widget(0) is win._op_tabs[V.PlateWindow.CONTROL_KEY]
-    assert win._explore_tabs.widget(0).regions == ["B3"]
-    assert "B3" in win._explore_tabs.tabText(0)
-    from PyQt5.QtWidgets import QTabBar
-    assert win._explore_tabs.tabBar().tabButton(0, QTabBar.RightSide) is None
-    assert win._detach_tab(0, win._explore_tabs) is None, "the pinned control tab floated away"
-    # ...and the pane now holds content, so the example stands down.
-    assert win.explore_empty_text() == ""
-    menu.close()
-    win.close()
-
-
-def test_ima260_a_second_control_releases_the_first(qapp, stub_detail, squid_dataset):
-    """One control at a time. The release is implicit in there being one variable — this asserts
-    there is no stale second tab and no stale second frame."""
-    root, _ = squid_dataset
-    win = _shown(qapp, root)
-    win.set_control_well("B2")
-    qapp.processEvents()
-    win.set_control_well("B3")
-    qapp.processEvents()
-
-    assert win.control_well() == "B3"
-    assert win._overview.control_well() == "B3"
-    controls = [i for i in range(win._explore_tabs.count())
-                if win._explore_tabs.tabText(i).startswith("Control")]
-    assert controls == [0], f"expected exactly one pinned control tab, got {controls}"
-    assert win._explore_tabs.widget(0).regions == ["B3"]
-    win.close()
-
-
-def test_ima260_clearing_the_control_drops_the_frame_the_tab_and_restores_the_example(
-        qapp, stub_detail, squid_dataset):
-    root, _ = squid_dataset
-    win = _shown(qapp, root)
-    ov = _freeze(win._overview)
-    ri, ci = win._fov_index["B3"]["rc"]
-    win.set_control_well("B3")
-    qapp.processEvents()
-
-    menu = _right_click(qapp, ov, _pt(ri, ci))          # right-click the control itself
-    clear = _menu_action(menu, "clear control well")
-    assert clear is not None, "no way to release a control from the plate that set it"
-    clear.trigger()
-    qapp.processEvents()
-
-    assert win.control_well() is None
-    assert win._overview.control_well() is None, "a stale blue frame survived the clear"
-    assert win._explore_tabs.count() == 0
-    assert win.explore_empty_text().strip(), "the empty pane went blank instead of back to example"
-    menu.close()
-    win.close()
-
-
-def test_ima260_the_control_frame_is_really_painted_and_is_not_the_red_box(qapp, stub_detail,
-                                                                          squid_dataset):
-    """Pixels, not state: a control the user cannot see on the plate is not a control."""
-    from PyQt5.QtGui import QImage
-    root, _ = squid_dataset
-    win = _shown(qapp, root)
-    ov = _freeze(win._overview, cd=60.0)
-    ov.resize(500, 400)
-    qapp.processEvents()
-
-    def _grab():
-        img = ov.grab().toImage().convertToFormat(QImage.Format_RGB32)
-        a = np.frombuffer(img.constBits().asstring(img.byteCount()), np.uint8)
-        return a.reshape(img.height(), img.bytesPerLine() // 4, 4)[:, :img.width(), :3]
-
-    before = _grab()
-    win.set_control_well("B3")
-    qapp.processEvents()
-    after = _grab()
-    assert not np.array_equal(before, after), "setting the control changed no pixels at all"
-
-    ri, ci = win._fov_index["B3"]["rc"]
-    x, y, w, h = ov._cell_rect(ri, ci)
-    cell = after[int(y):int(y + h), int(x):int(x + w)].astype(int)
-    blue = V._CONTROL_BLUE
-    hit = (np.abs(cell[..., 2] - blue.red()) <= 24) & (np.abs(cell[..., 1] - blue.green()) <= 24) \
-        & (np.abs(cell[..., 0] - blue.blue()) <= 24)
-    assert hit.sum() > 20, "no light-blue control frame on the control well's cell"
-    # ...and it is NOT the transient red current-FOV box wearing a different name.
-    assert blue.red() < blue.blue(), "the control frame must be blue, not red"
     win.close()
 
 
@@ -4785,6 +4628,12 @@ def test_the_mosaic_workers_signal_actually_reaches_on_mosaic_plane(qapp, monkey
     win._meta = _pyr_meta()
     win._mosaic_worker = None
     win._pending_dims_step = None
+    # `_load_mosaic` grew a `self._stop_spots()` call, and `_stop_spots` reads `_spot_worker`
+    # through `getattr(self, ..., None)`. On a `__new__` shell whose C++ half was never built,
+    # PyQt raises RuntimeError("super-class __init__() ... was never called") out of that lookup
+    # instead of returning the default — so the shell has to carry every attribute the path
+    # touches. Seeding it None is also what a real window has before any segmentation run.
+    win._spot_worker = None
     from squidmip._region_nav import RegionCursor
     win._cursor = RegionCursor()
     win._cursor.set_order(["A1"])
@@ -4891,13 +4740,20 @@ def test_closing_a_tab_restores_the_plate_even_while_the_raw_preview_streams(qap
     and restarts the preview itself, so a streaming preview is never a reason to postpone.
 
     MUTATION: change any of the three gates back to `self._busy()` and this goes red.
+
+    RE-POINTED by commit 2b8fbc5. The old symptom was read off the deleted central viewer's
+    slider ("came back as ['B3:0'] instead of ['B2:0', 'B3:0'], one well silently missing"); the
+    GATES are unchanged, and what they gate is the restore of `_active_exploration` to None. If a
+    gate goes back to `_busy()`, the close defers, `_pending_resync` stays set and
+    `_active_exploration` still points at the closed tab's successor state — all three of which
+    are asserted here, so the mutation still goes red.
     """
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
     key = win.open_exploration_tab(["B3"])
     qapp.processEvents()
-    assert win._detail._fov_labels == ["B3:0"]
+    assert win._active_exploration is win._op_tabs[key]
 
     # Force the condition the flake depended on: a live raw preview at the moment of the close.
     class _StillStreaming:
@@ -4912,11 +4768,11 @@ def test_closing_a_tab_restores_the_plate_even_while_the_raw_preview_streams(qap
     win._close_op_tab(win._explore_tabs.indexOf(win._op_tabs[key]), win._explore_tabs)
     qapp.processEvents()
 
-    assert win._detail._fov_labels == ["B2:0", "B3:0"], (
+    assert win._active_exploration is None, (
         "the plate was not restored while the raw preview was streaming — the restore is waiting "
         "on a thread that has nothing to do with it"
     )
-    assert win._active_exploration is None
+    assert not win._pending_resync, "the restore was deferred on a thread it does not depend on"
     win._retired.clear()
     win.close()
 

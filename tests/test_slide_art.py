@@ -298,14 +298,31 @@ def _slide_overview(qapp):
     return ov, plate
 
 
-def test_set_carrier_adopts_the_slide_layout(qapp):
-    """set_carrier turns a real tissue SlideCarrier into slide art: _slides is populated and the
-    tissue cells are re-placed onto the slide.
+def test_set_carrier_draws_NO_true_scale_slide_art_and_keeps_the_even_layout(qapp):
+    """The inverse of the test that lived here (`test_set_carrier_adopts_the_slide_layout`).
 
-    MUTATION: skip the overview_slide_layout call in set_carrier -> _slides stays None -> red.
+    That test asserted `set_carrier` populated `_slides` from `overview_slide_layout`, drawing the
+    glass slides at true micron scale and placing the mosaics at their real stage positions. Commit
+    2b8fbc5 (Julio, 2026-07-23) dropped that: a 25 mm slide dwarfed an 8 mm tissue and the pair
+    stacked into a tall, tiny column. `_viewer.set_carrier` now sets `self._slides = None`
+    unconditionally and leaves the plate's EVEN carrier layout (`even_carrier_layout`) alone.
+
+    So this pins the decision instead of the retired feature: no slide bodies, and the layout the
+    carrier was constructed with survives `set_carrier` untouched. `_slide_art`'s own functions are
+    unchanged and still covered by every test above; only the viewer wiring went.
+
+    MUTATION: re-adopt the slide layout in set_carrier -> `_slides` is populated -> red.
     """
-    ov, _ = _slide_overview(qapp)
-    assert ov._slides is not None and len(ov._slides) == 1     # both tissues share one slide
+    ov, plate = _slide_overview(qapp)
+    assert ov._slides is None, "true-scale slide art came back; 2b8fbc5 removed it deliberately"
+    assert ov._carrier_slide is True, "the holder is still known to be a slide carrier"
+    # The even layout is intact: equal cells, side by side, none on top of another.
+    cells = [ov._layout[plate.cell_index(r)] for r in ("manual0", "manual1")]
+    assert cells[0][2:] == cells[1][2:], "the two tissue cells are not equal any more"
+    ax, ay, aw, ah = cells[0]
+    bx, by, bw, bh = cells[1]
+    assert (min(ax + aw, bx + bw) - max(ax, bx)) <= 1e-9 or (
+        min(ay + ah, by + bh) - max(ay, by)) <= 1e-9, "the two tissue cells overlap"
 
 
 def test_every_gesture_still_resolves_a_cell_on_the_slide_layout(qapp):

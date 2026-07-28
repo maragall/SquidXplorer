@@ -128,7 +128,15 @@ def _thumbnail_image(layer) -> Optional[Any]:
     if thumb is None:
         return None
     try:
-        return QImage(thumb, thumb.shape[1], thumb.shape[0], QImage.Format_RGBA8888)
+        # .copy() is LOAD-BEARING, not defensive. QImage does NOT copy a buffer it is handed: it
+        # wraps it and keeps a bare pointer, and PyQt does not keep the numpy array alive for us.
+        # napari repaints `layer.thumbnail` into a NEW array whenever the layer's data changes, so
+        # the array wrapped here is dropped and freed while Qt still paints through the pointer.
+        # Measured 2026-07-28: without the copy, `pytest tests/test_layer_tree.py` segfaulted 3 of
+        # 3 runs (rc 139); pinning every wrapped buffer alive made it 0 of 3, which is what
+        # identified this line. Pinned by tests/test_layer_tree_thumbnail.py.
+        img = QImage(thumb, thumb.shape[1], thumb.shape[0], QImage.Format_RGBA8888)
+        return img.copy()                   # deep copy: the returned QImage owns its own pixels
     except Exception:                       # noqa: BLE001 - an odd thumbnail shape is not fatal
         return None
 

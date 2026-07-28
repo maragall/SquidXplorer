@@ -416,13 +416,29 @@ def test_real_synthetic_dataset_resolves_to_96_not_the_declared_384():
     assert p.pitch_x_um == pytest.approx(9000.0, abs=1.0)
 
 
-# ------------------------------------------------- freeform layout by GEOMETRY (IMA-253)
+# ------------------------------------------------- freeform carrier layout (IMA-253, then 2b8fbc5)
 #
-# The defect these pin: a freeform region id carries NO position, so a carrier that assigns
-# cells "left to right, in the order the acquisition reports them" is inventing the layout.
-# On the real 10x tissue that put two regions -- which are separated in Y and overlapping in
-# X -- side by side in columns 0 and 1. Every assertion below is therefore about geometry
-# beating enumeration, and the shuffle test is the mutation-check for exactly that.
+# TWO RULES HAVE LIVED HERE, and the second one is the product.
+#
+# IMA-253's rule was stage-proportional: `freeform_grid` + `freeform_layout` reproduced each
+# region's true relative size and position, because a freeform region id carries no position and
+# assigning cells "left to right, in the order the acquisition reports them" invents the layout.
+#
+# Commit 2b8fbc5 (Julio, 2026-07-23) replaced that ON THE `build_plate` PATH with
+# `even_carrier_layout`: a landscape-biased grid of EQUAL, inset cells. The stage-proportional rule
+# stacked the two tissues of the real 10x acquisition into a tall, tiny, uneven column and wasted
+# the viewer's horizontal space; for a BROWSE view, even readable cells beat geometric fidelity.
+# Stage boxes survive in the new rule as the ORDER key, so spatially-left tissue still lands left.
+#
+# So these no longer assert proportionality. What they still guard is everything that was never
+# about proportionality and is still true, and still worth a mutation-check:
+#
+#   * GEOMETRY orders the cells (the stage boxes decide who is first, not the report order);
+#   * cells NEVER OVERLAP, whatever the regions' native geometries;
+#   * the layout depends on neither the region NAME nor the enumeration order.
+#
+# `freeform_grid` itself is unchanged and still has its own direct unit tests further down; they
+# pass and are deliberately left alone.
 
 def _freeform_meta(boxes, pixel_size_um=1.0, frame=(100, 100)):
     """An acquisition of freeform regions, each a grid of FOVs covering ``(x0, y0, w, h)`` um."""
@@ -447,17 +463,35 @@ def test_region_stage_boxes_um_is_the_mosaic_extent_not_the_first_fov():
     assert h == pytest.approx(400.0 + 50 * 2.0)
 
 
-def test_freeform_regions_separated_in_y_get_stacked_cells_not_side_by_side():
-    # The real 10x tissue shape: overlapping in x, cleanly separated in y.
+def _overlap(a, b) -> bool:
+    """Do two ``(x, y, w, h)`` cells share any area? Cells that do are cells drawn on top of
+    each other, which is the failure `even_carrier_layout` exists to make impossible."""
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    return (min(ax + aw, bx + bw) - max(ax, bx)) > 1e-9 and (
+        min(ay + ah, by + bh) - max(ay, by)) > 1e-9
+
+
+def test_two_tissue_regions_get_an_even_landscape_row_not_a_tall_thin_column():
+    """The real 10x tissue shape: overlapping in x, cleanly separated in y.
+
+    Under IMA-253 this produced a 2x1 grid -- two tall, tiny cells stacked in one column, which is
+    the picture 2b8fbc5 was opened to remove. The carrier is LANDSCAPE-biased now (the physical
+    4-slide holder is a horizontal row of slides), so two regions are one row of two equal cells
+    however they sit on the stage.
+
+    MUTATION: put `freeform_grid`/`freeform_layout` back on the `build_plate` path -> (2, 1) -> red.
+    """
     meta = _freeform_meta({"manual0": (96814.0, 10185.0, 5642.0, 7052.0),
                            "manual1": (97937.0, 21113.0, 5642.0, 7052.0)})
     p = build_plate(meta)
-    assert (p.rows, p.cols) == (2, 1), "two regions separated in y are two ROWS, not two columns"
-    assert p.cell_index("manual0") == (0, 0)
-    assert p.cell_index("manual1") == (1, 0)
+    assert (p.rows, p.cols) == (1, 2), "a tissue carrier is a landscape ROW, not a stacked column"
+    assert p.cell_index("manual0") == (0, 0), "manual0 is left on the stage, so it is left here"
+    assert p.cell_index("manual1") == (0, 1)
     lay = p.cell_layout()
-    assert lay["manual1"][1] > lay["manual0"][1], "manual1 is below manual0 on the stage"
-    assert lay["manual1"][0] > lay["manual0"][0], "...and offset in x, as the stage records"
+    assert lay["manual1"][0] > lay["manual0"][0], "the cells are laid out left to right"
+    assert lay["manual0"][2:] == lay["manual1"][2:], "the cells are EQUAL; that is the whole rule"
+    assert not _overlap(lay["manual0"], lay["manual1"]), "the two cells overlap"
 
 
 def test_freeform_layout_does_not_depend_on_the_ORDER_OR_NAMES_of_the_regions():
@@ -479,35 +513,58 @@ def test_freeform_layout_does_not_depend_on_the_ORDER_OR_NAMES_of_the_regions():
 
     renamed = {"zebra": boxes["manual0"], "alpha": boxes["manual1"]}   # alphabetical == reversed
     r = build_plate(_freeform_meta(renamed))
-    assert r.cell_index("zebra") == (0, 0) and r.cell_index("alpha") == (1, 0)
+    # The cells still follow the STAGE BOXES: zebra carries manual0's box, which is the leftmost,
+    # so zebra is cell 0 even though "alpha" sorts before it. (The indices moved from (0,0)/(1,0)
+    # to (0,0)/(0,1) with 2b8fbc5's landscape carrier; the property under test did not.)
+    assert r.cell_index("zebra") == (0, 0) and r.cell_index("alpha") == (0, 1)
     assert r.cell_layout()["zebra"] == pytest.approx(ref["manual0"])
     assert r.cell_layout()["alpha"] == pytest.approx(ref["manual1"])
 
 
-def test_regions_with_different_extents_get_differently_sized_cells():
+def test_regions_with_wildly_different_extents_still_get_EQUAL_cells():
     """Julio: "regions have different sizes and different geometries when it comes to tissues".
 
-    A uniform grid would stretch the small one and crop the large one. The cell IS the region's
-    own mosaic box, so the ratio of cell areas has to equal the ratio of stage areas.
+    IMA-253 answered that by making the cell the region's own mosaic box, so a 24x-larger region
+    got a 24x-larger cell -- and the small one became unreadable. 2b8fbc5 reversed it: every region
+    gets the SAME cell, so a browse view of a carrier is legible whatever each tissue's extent. The
+    native geometry is not lost, it is where it belongs, inside the region's own window.
+
+    The ORDER is still geometric: same x, so the upper region (smaller y) takes the first cell.
+
+    MUTATION: scale the cells by the stage box again -> unequal cells -> red.
     """
     meta = _freeform_meta({"small": (0.0, 0.0, 2000.0, 1000.0),
                            "big": (0.0, 20000.0, 8000.0, 6000.0)}, frame=(0, 0))
-    lay = build_plate(meta).cell_layout()
-    sw, sh = lay["small"][2], lay["small"][3]
-    bw, bh = lay["big"][2], lay["big"][3]
-    assert bw > sw and bh > sh
-    assert bw / sw == pytest.approx(8000.0 / 2000.0)      # relative SCALE is preserved,
-    assert bh / sh == pytest.approx(6000.0 / 1000.0)      # independently per axis
-    assert sw / sh == pytest.approx(2.0)                  # ...and so is each region's own aspect
+    p = build_plate(meta)
+    lay = p.cell_layout()
+    assert p.cell_index("small") == (0, 0) and p.cell_index("big") == (0, 1), (
+        "the stage boxes, not the names, decide which cell each region gets")
+    assert lay["small"][2:] == lay["big"][2:], "a 24x bigger region must not get a bigger cell"
+    assert lay["small"][2] > 0 and lay["small"][3] > 0
+    assert not _overlap(lay["small"], lay["big"])
 
 
-def test_freeform_layout_preserves_relative_offset_not_just_order():
-    """Two regions 3x further apart than they are wide must RENDER 3x further apart."""
-    meta = _freeform_meta({"a": (0.0, 0.0, 1000.0, 1000.0),
-                           "b": (0.0, 4000.0, 1000.0, 1000.0)}, frame=(0, 0))
-    lay = build_plate(meta).cell_layout()
-    gap = lay["b"][1] - (lay["a"][1] + lay["a"][3])
-    assert gap / lay["a"][3] == pytest.approx(3.0)
+def test_cell_spacing_is_EVEN_and_does_not_follow_the_stage_separation():
+    """Two acquisitions whose regions sit 4 mm and 40 mm apart must draw IDENTICALLY.
+
+    This is the inverse of the retired `..._preserves_relative_offset_not_just_order`: proportional
+    spacing is exactly what put two tissues at opposite ends of a tall empty column. The gap between
+    neighbouring cells is now the fixed inset, twice `even_carrier_layout`'s `gap`.
+
+    MUTATION: make the layout a function of the stage boxes' spacing again -> the two differ -> red.
+    """
+    near = build_plate(_freeform_meta({"a": (0.0, 0.0, 1000.0, 1000.0),
+                                       "b": (0.0, 4000.0, 1000.0, 1000.0)}, frame=(0, 0)))
+    far = build_plate(_freeform_meta({"a": (0.0, 0.0, 1000.0, 1000.0),
+                                      "b": (0.0, 40000.0, 1000.0, 1000.0)}, frame=(0, 0)))
+    assert near.cell_layout() == far.cell_layout()
+    assert (near.rows, near.cols) == (far.rows, far.cols) == (1, 2)
+
+    lay = near.cell_layout()
+    gap = lay["b"][0] - (lay["a"][0] + lay["a"][2])
+    assert gap > 0, "the cells touch or overlap"
+    assert gap == pytest.approx(2 * 0.14), "the gap is the fixed inset, not a stage distance"
+    assert not _overlap(lay["a"], lay["b"])
 
 
 def test_well_plates_keep_the_uniform_grid_and_have_no_layout():
@@ -518,14 +575,22 @@ def test_well_plates_keep_the_uniform_grid_and_have_no_layout():
     assert p.cell_index("B2") == (1, 1)
 
 
-def test_freeform_without_stage_coordinates_still_falls_back_to_positional():
-    """No coordinates -> nothing to place BY, so the old left-to-right rule is the honest answer."""
+def test_freeform_without_stage_coordinates_falls_back_to_report_order():
+    """No coordinates -> nothing to ORDER by, so the report order is the honest answer.
+
+    The cells themselves are unaffected: `even_carrier_layout` does not need stage boxes to place
+    them, only to sort them, so an acquisition with no coordinates still gets the same even grid
+    rather than the `None` layout (and the uniform-grid fallback) it used to get.
+    """
     regions = ["manual0", "manual1"]
     p = build_plate(_meta(regions=regions, fovs_per_region={r: [0] for r in regions},
                           fov_positions_um={}, wellplate_format=None))
-    assert p.cell_layout() is None
     assert p.cell_index("manual0") == (0, 0)
     assert p.cell_index("manual1") == (0, 1)
+    lay = p.cell_layout()
+    assert lay is not None, "the even carrier layout does not depend on having coordinates"
+    assert lay["manual0"][2:] == lay["manual1"][2:]
+    assert not _overlap(lay["manual0"], lay["manual1"])
 
 
 def test_freeform_grid_does_not_fuse_two_regions_over_a_sliver_of_y_overlap():
@@ -552,8 +617,13 @@ def test_cell_layout_rectangles_stay_inside_the_grid():
 @pytest.mark.skipif(not (Path.home() / "Downloads" /
                          "test_10x_laser_af_z_stack_2025-10-28_13-40-43.939945 yy").is_dir(),
                     reason="real tissue acquisition not present")
-def test_real_tissue_regions_are_stacked_in_y_and_overlap_in_x():
-    """The acquisition this ticket was opened about, measured rather than eyeballed."""
+def test_real_tissue_regions_stacked_on_the_stage_are_drawn_as_an_even_row():
+    """The acquisition this ticket was opened about, measured rather than eyeballed.
+
+    The stage facts are unchanged and still asserted. What changed with 2b8fbc5 is the PICTURE the
+    plate draws from them: a stacked pair on the stage is still a one-row carrier on screen, because
+    stacking them on screen too is what "looked like shite" and wasted the horizontal space.
+    """
     from squidmip.reader import open_reader
 
     md = open_reader(Path.home() / "Downloads" /
@@ -563,5 +633,8 @@ def test_real_tissue_regions_are_stacked_in_y_and_overlap_in_x():
     assert m1[1] > m0[1] + m0[3] * 0.9, "manual1 sits below manual0 on the stage"
     assert m1[0] < m0[0] + m0[2], "...while still overlapping it in x"
     p = build_plate(md)
-    assert (p.rows, p.cols) == (2, 1)
-    assert p.cell_index("manual0") == (0, 0) and p.cell_index("manual1") == (1, 0)
+    assert (p.rows, p.cols) == (1, 2)
+    assert p.cell_index("manual0") == (0, 0) and p.cell_index("manual1") == (0, 1)
+    lay = p.cell_layout()
+    assert lay["manual0"][2:] == lay["manual1"][2:], "the two tissues get equal cells"
+    assert not _overlap(lay["manual0"], lay["manual1"])
