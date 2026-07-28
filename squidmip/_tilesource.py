@@ -706,6 +706,11 @@ class ReaderTileSource:
     for both, so a per-FOV rung and a plate rung differ only in how many FOVs the loop visits
     (usually one, sometimes many). There is no second code path to keep in step.
 
+    Tiles are **maximum-intensity projections** by default. The projection reuses the registered
+    ``mip`` operator (``_engine._PROJECTORS`` → ``projection.project``) rather than folding a max
+    here, so ``reference`` — the Tenengrad best-focus plane — is a one-word change, and anything
+    registered later with ``add_projector`` works with no edit to this class.
+
     **Why no pyramid level selection here.** ``PlateLadder.fov_source_level`` exists to pick a
     written pyramid level to composite from, which is what makes a coarse plate tile cheap on the
     zarr path. A raw acquisition has no written pyramid — there is exactly one resolution on disk
@@ -714,6 +719,12 @@ class ReaderTileSource:
     every rung that touches it. It is NOT worked around by inventing a pyramid, because writing
     one is the writer's job (IMA-184) and doing it here would duplicate it badly.
 
+    **The montage disagrees, for now.** ``_PreviewWorker`` fills the 88 px plate montage from a
+    single MID-STACK plane, because a projection there would multiply the first-paint cost by the
+    stack depth. So the coarse montage and these tiles are not the same image on a raw
+    acquisition. That is a real seam and it is recorded in ``NEXT_STEPS.md``; the projected tile
+    is the one the product wants, so the montage is what should move.
+
     Empty world reads as ZEROS, never an error — the same convention
     :meth:`InMemoryMultiscale.read_tile` documents. A plate is part-acquired for most of a run and
     a viewport routinely covers stage area no FOV was ever placed on; raising there would make the
@@ -721,20 +732,37 @@ class ReaderTileSource:
     """
 
     def __init__(self, reader, metadata: Mapping, ladder: PlateLadder, *,
-                 z: Optional[int] = None, t: int = 0,
+                 projector: Optional[str] = "mip", z: Optional[int] = None, t: int = 0,
                  cache_bytes: Optional[int] = None) -> None:
         self.reader = reader
         self.meta = dict(metadata)
         self.ladder = ladder
         self.t = int(t)
         self.dtype = np.dtype(self.meta.get("dtype") or np.uint16)
+        self.z_levels = list(self.meta.get("z_levels") or [0])
 
-        # Match what the plate montage already shows: _PreviewWorker previews a MID-STACK plane
-        # (`zs[len(zs) // 2]`), not a projection. Deep zoom must resolve THE SAME image more
-        # finely, not quietly swap in a different one -- a zoom that changes what you are looking
-        # at is a worse bug than a blurry zoom. An explicit `z` overrides.
-        zs = list(self.meta.get("z_levels") or [0])
-        self.z = int(zs[len(zs) // 2] if z is None else z)
+        # PROJECTED by default (Spencer: "I do want an MIP for this application"), reusing the
+        # registered operator rather than folding a max here -- so `reference` (the Tenengrad
+        # best-focus plane) is the same one-word change, and a projector added with
+        # ``add_projector`` works with no edit to this class.
+        #
+        # Refuse a projector that does NOT consume z: this collapses a stack to one plane, and a
+        # plane-op (consumes=frozenset(), e.g. decon or bgsub) has no z to collapse. Silently
+        # running one per z and keeping the last would be a picture that looks plausible and is
+        # not what was asked for.
+        self.projector = projector
+        self.z = None if z is None else int(z)
+        if projector is not None and self.z is None:
+            from squidmip._engine import projector_consumes
+
+            if "z" not in projector_consumes(projector):
+                raise ValueError(
+                    f"projector {projector!r} does not consume z, so it cannot reduce a stack to "
+                    "a tile. Pass a z-reducer (mip, reference) or an explicit z=.")
+        elif projector is None and self.z is None:
+            # Neither a projector nor a plane: fall back to the mid-stack plane _PreviewWorker
+            # uses, so this degrades to the montage's own image rather than to z=0.
+            self.z = int(self.z_levels[len(self.z_levels) // 2])
 
         self._planes = MemoryBoundedLRUCache(
             DEFAULT_PREVIEW_BUDGET_BYTES if cache_bytes is None else int(cache_bytes))
@@ -759,23 +787,37 @@ class ReaderTileSource:
 
     # ---- pixels ------------------------------------------------------------------------
     def _plane(self, key, channel: str):
-        """The decoded frame for one (region, fov, channel), cached by bytes across tiles.
+        """The FOV's image for one channel — projected over z, or one plane if ``z`` was given.
 
-        The cache is the whole performance story: a coarse plate tile touches many FOVs, and
-        adjacent tiles touch the same FOVs again, so without it a pan would re-decode the same
-        frames continuously.
+        Cached by BYTES, and this is the whole performance story. A coarse plate tile touches many
+        FOVs, adjacent tiles touch the same FOVs again, and every rung above revisits them, so
+        without the cache a pan would re-project continuously. Note what is cached: the RESULT,
+        one plane per FOV, not the stack — so a 10-deep projection costs 10 reads ONCE and then
+        occupies exactly what a single-plane preview would.
         """
         region, fov = key
-        ck = (str(region), int(fov), str(channel), int(self.z), int(self.t))
+        ck = (str(region), int(fov), str(channel),
+              "z%d" % self.z if self.z is not None else "p:%s" % self.projector, int(self.t))
         hit = self._planes.get(ck)
         if hit is not None:
             return hit
         try:
-            plane = self.reader.read(region, int(fov), str(channel), int(self.z), t=int(self.t))
-        except TypeError:
-            plane = self.reader.read(region, int(fov), str(channel), int(self.z))
+            if self.z is not None:
+                plane = np.asarray(self._read(region, fov, channel, self.z))
+            else:
+                from squidmip._engine import _resolve_projector
+
+                reduce = _resolve_projector(self.projector).fn
+                plane = np.asarray(reduce(
+                    np.asarray(self._read(region, fov, channel, z)) for z in self.z_levels))
         except Exception:
             return None             # decode failure: leave the hole, keep the viewport alive
-        plane = np.asarray(plane)
         self._planes.put(ck, plane)
         return plane
+
+    def _read(self, region, fov, channel: str, z: int):
+        """One plane from the reader, tolerating readers whose ``read`` has no ``t``."""
+        try:
+            return self.reader.read(region, int(fov), str(channel), int(z), t=int(self.t))
+        except TypeError:
+            return self.reader.read(region, int(fov), str(channel), int(z))

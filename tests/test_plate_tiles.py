@@ -125,15 +125,43 @@ def test_the_same_field_is_decoded_once_across_tiles():
     assert len(reader.reads) == first, "second read of the same tile must come from the cache"
 
 
-def test_the_preview_plane_is_the_mid_stack_one_by_default():
-    """Deep zoom must resolve the SAME image the montage shows, not silently swap in another.
-    _PreviewWorker previews zs[len(zs)//2]; this must match it."""
+def test_tiles_are_maximum_intensity_projections_by_default():
+    """Spencer: "I do want an MIP for this application." The default must project the stack, and
+    it must go through the registered operator so `reference` and any add_projector op work too."""
     meta = _meta()
-    src, _ = _src(meta)
-    assert src.z == meta["z_levels"][len(meta["z_levels"]) // 2]
+    reader = FakeReader()
+    src, ladder = _src(meta, reader=reader)
+    assert src.projector == "mip" and src.z is None
 
-    explicit, _ = _src(meta, z=0)
-    assert explicit.z == 0
+    key = ("A1", 0)
+    desc = type("D", (), {"level": 0, "key": key, "channel": "488",
+                          "bbox_um": ladder.fov_bboxes[key]})()
+    src.read_tile(desc)
+    zs_read = sorted(r[3] for r in reader.reads)
+    assert zs_read == sorted(meta["z_levels"]), "a MIP must read every z, not one"
+
+
+def test_an_explicit_z_reads_exactly_that_plane():
+    """The escape hatch: one plane, no projection, for a fast path or a single-z acquisition."""
+    meta = _meta()
+    reader = FakeReader()
+    src, ladder = _src(meta, reader=reader, z=1)
+    key = ("A1", 0)
+    desc = type("D", (), {"level": 0, "key": key, "channel": "488",
+                          "bbox_um": ladder.fov_bboxes[key]})()
+    src.read_tile(desc)
+    assert [r[3] for r in reader.reads] == [1]
+
+
+def test_a_projector_that_does_not_consume_z_is_refused():
+    """This collapses a stack to one plane. A plane-op has no z to collapse, and running it per z
+    and keeping the last would look plausible and be wrong."""
+    meta = _meta()
+    from squidmip._engine import add_projector
+
+    add_projector("_tiletest_planeop", lambda planes: next(iter(planes)), consumes=frozenset())
+    with pytest.raises(ValueError, match="does not consume z"):
+        _src(meta, projector="_tiletest_planeop")
 
 
 # --- the O(viewport) promise ------------------------------------------------------------------
