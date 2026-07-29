@@ -1278,14 +1278,17 @@ def _group_attrs(path: Path) -> dict:
 
 
 def _open_zarr_array(path: Path):
-    """Open one zarr array (v2 or v3) as a lazy tensorstore handle — no data is read here."""
-    import tensorstore as ts
+    """Open one zarr array (v2 or v3) as a lazy tensorstore handle: no data is read here.
+
+    Goes through the process-wide pool (``_tsctx``) rather than opening directly, so every reader
+    binds to ONE bounded ``cache_pool`` and the number of live handles is capped. This used to
+    fill ``SquidZarrReader._arrays``, an unbounded per-reader dict with no eviction.
+    """
+    from squidmip._tsctx import HANDLES
 
     path = Path(path)
     driver = "zarr" if (path / _ZARR_V2_ARRAY).exists() else "zarr3"
-    return ts.open(
-        {"driver": driver, "kvstore": {"driver": "file", "path": str(path)}}, open=True
-    ).result()
+    return HANDLES.get(path, driver=driver, open_only=True)
 
 
 def _unit_to_um(unit) -> float:

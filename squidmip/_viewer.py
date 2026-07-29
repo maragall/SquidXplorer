@@ -149,6 +149,7 @@ from squidmip._plate_shape import PlateShapeError
 from squidmip._qt_tabs import _DetachTabBar, _DetachTabs, _FloatWindow  # noqa: F401 (re-export)
 from squidmip._qtstyle import dark_palette as _dark_palette
 from squidmip._qtstyle import hline as _hline
+from squidmip._tsctx import HANDLES
 from squidmip._terminal import _CmdEdit, _ProcTerminal, _Terminal  # noqa: F401 (re-export)
 from squidmip._measure import (
     FAILED as _MEASURE_FAILED, OK as _MEASURE_OK, PARTIAL as _MEASURE_PARTIAL,
@@ -3718,9 +3719,11 @@ class _ComputedPlateWorker(QThread):
         self._stop.set()
 
     def _read(self, wellpath, fov, level):
-        import tensorstore as ts
-        path = f"{self._base}/{wellpath}/{fov}/{level}"
-        arr = ts.open({"driver": "zarr3", "kvstore": {"driver": "file", "path": path}}).result()
+        # Through the shared pool, NOT a bare ts.open. This line opened a brand new store per well
+        # per level, twice per well, with no reuse and no declared memory budget: 3072 fresh opens
+        # on a 1536-well plate, each allocating its own private cache. The pool bounds both halves,
+        # decoded bytes via one shared cache_pool and live handles via an LRU of 32. See _tsctx.
+        arr = HANDLES.get(f"{self._base}/{wellpath}/{fov}/{level}")
         return np.asarray(arr[0, :, 0].read().result())   # (C, y, x) at t=0, z=0
 
     def run(self):

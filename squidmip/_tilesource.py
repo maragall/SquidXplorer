@@ -453,14 +453,12 @@ class ZarrPyramidSource:
         raise KeyError(f"unknown channel {channel!r}; plate has {self.channels}")
 
     def _store(self, fov_key, level: int):
-        cached = self._stores.get((fov_key, level))
-        if cached is None:
-            import tensorstore as ts
-            path = self._field_dirs[fov_key] / str(level)
-            cached = ts.open({"driver": "zarr3", "kvstore": {"driver": "file", "path": str(path)}},
-                             open=True).result()
-            self._stores[(fov_key, level)] = cached
-        return cached
+        # Through the process-wide pool (_tsctx): this used to be a per-instance dict with no
+        # bound and no lock, mutated from the tile fetcher's thread while the GUI read the same
+        # stores. The pool bounds live handles at 32 and binds every reader to one cache_pool, so
+        # a deep-zoom scrub over a big plate cannot grow the footprint without limit.
+        from squidmip._tsctx import HANDLES
+        return HANDLES.get(self._field_dirs[fov_key] / str(level))
 
     def _read_fov_plane(self, fov_key, level: int, c: int) -> np.ndarray:
         store = self._store(fov_key, level)
