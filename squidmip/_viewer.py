@@ -357,6 +357,18 @@ _OPERATIONS_BY_KEY = {op.key: op for op in _OPERATIONS}
 # The operator "Save this subset to disk…" runs. This used to be spelled `_OPERATIONS[0].key`,
 # which made a PRESENTATION edit (reordering the cards) silently change which operator the save
 # button RUNS. Named, so the two cannot be confused.
+#: Height of the top strip when you are working the plate: the plate is the star, and a fixed cap
+#: stops the operator cards' size hint ballooning it into the "super thick" top that squashed the
+#: plate (Julio).
+_TOP_ROW_COMPACT_PX = 240
+
+#: ...and its height while the Log tab is in front. A console you cannot read is not a console: 240
+#: px is about ten lines, which is a status light rather than a log. When you deliberately select
+#: the Log tab you are reading it, not watching the plate, so the strip earns more room and gives it
+#: straight back when you leave. This is the layout half of the same fix as `format_console`, which
+#: shortened the LINE; this shortens the number of lines you have to scroll.
+_TOP_ROW_READING_PX = 520
+
 _SAVE_OPERATOR = "mip"
 
 # Roadmap cards shown under "TO BE ADDED", as (label, blurb). Empty: everything currently on the
@@ -4342,8 +4354,9 @@ class PlateWindow(QMainWindow):
         # The top row is a COMPACT strip — the plate is the star, not these two small panels. A
         # fixed max height stops the operator cards' size hint from ballooning it into the "super
         # thick" top that squashed the plate. Its OWN panels scroll inside this height.
-        top_row.setMaximumHeight(240)
+        top_row.setMaximumHeight(_TOP_ROW_COMPACT_PX)
         top_row.setMinimumHeight(150)
+        self._top_row = top_row     # _on_tab_changed grows it while the console is being read
 
         root = QWidget()
         root.setStyleSheet(f"background:{_BG};")
@@ -4988,6 +5001,26 @@ class PlateWindow(QMainWindow):
         w = self._explore_tabs.currentWidget()
         return w if isinstance(w, _ExplorationTab) else None
 
+    def _sync_top_row_height(self) -> None:
+        """Give the top strip room while the Log tab is in front, and take it back afterwards.
+
+        The strip is capped at ``_TOP_ROW_COMPACT_PX`` because the plate is the star. But the one
+        global console lives in that strip now, and 240 px is roughly ten lines, which is a status
+        light rather than a log. Selecting the Log tab is the user saying they are reading it, so it
+        earns ``_TOP_ROW_READING_PX`` for as long as that is true.
+
+        Deliberately not a remembered setting and not a drag handle. It follows the tab, so there is
+        no state to get stuck in a shape the user did not ask for, which is the failure mode the
+        placement-mode indicator elsewhere guards against for the same reason.
+        """
+        row = getattr(self, "_top_row", None)
+        tabs = getattr(self, "_left_tabs", None)
+        panel = getattr(self, "_log_panel", None)
+        if row is None or tabs is None or panel is None:
+            return
+        reading_log = tabs.currentWidget() is panel
+        row.setMaximumHeight(_TOP_ROW_READING_PX if reading_log else _TOP_ROW_COMPACT_PX)
+
     def _on_tab_changed(self, index: int = -1, force: bool = False):
         """The plate + detail follow the ACTIVE tab (IMA-205).
 
@@ -5000,6 +5033,9 @@ class PlateWindow(QMainWindow):
         dropping it is what left the front tab lying about what the viewer shows (BUG 2), because
         nothing re-emits ``currentChanged`` when the run later drains.
 
+        It also sizes the top strip: see ``_sync_top_row_height``. Reading the console and working
+        the plate want different amounts of room, and the tab you selected says which you are doing.
+
         ``force=True`` re-runs the sync from ``_on_run_drained`` even when there is no outgoing
         exploration tab to park — after a mid-run tab close there ISN'T one, and that is precisely
         the case that has to fall back to the whole plate (BUG 1).
@@ -5008,6 +5044,7 @@ class PlateWindow(QMainWindow):
         viewer. Computed frames pushed via register_array are in-memory and do not survive the
         switch; we re-register the subset's RAW plane paths (cheap — paths only) so the pane shows
         real imagery rather than black. Re-run the operator in the tab to recompute its frames."""
+        self._sync_top_row_height()
         if self._reader is None or self._overview is None or self._tabs_muted:
             return
         if _explore.operator_busy(self._worker, self._retired):

@@ -151,6 +151,41 @@ def _address_prefix(view_id: Any = None, address: Any = None) -> str:
     return (" ".join(parts) + "  ") if parts else ""
 
 
+#: Squid's layout is about 110 characters wide once the timestamp, thread id, dotted logger name,
+#: level, message and `(file:line)` are all present. The root window is 596 logical pixels and its
+#: top row is capped at 240, so a full Squid line does not come close to fitting: it wraps two or
+#: three times and the console becomes unreadable exactly when you need it.
+#:
+#: So the CONSOLE gets a compact layout and `format_record` above keeps Squid's byte for byte. That
+#: is not a compromise, it is the normal split: the console is for watching, and the full line is
+#: what goes to a file and into a bug report, which is where Squid-format compatibility actually
+#: matters (one file, both streams, correctly interleaved, when SquidXplorer runs inside Squid).
+#:
+#: What is dropped and why it is safe to drop ON SCREEN: the date (you are watching now), the
+#: thread id (an implementation detail while watching), the `squid.xplorer.` prefix (every line in
+#: this console has it), and `(file:line)` (a code pointer, not a user fact). What is KEPT: the
+#: time, the level, the view id and address prefix, and the full message. The logger's leaf name is
+#: kept because it is what tells you a line came from tilefusion rather than from us, and an
+#: unattributed log line is a rumour.
+def format_console(record: logging.LogRecord) -> str:
+    """One SHORT line for one record, for the on-screen console. See the note above."""
+    when = time.strftime("%H:%M:%S", time.localtime(record.created))
+    # Strip OUR prefix, never take the leaf. A first attempt took `name.rsplit(".")[-1]`, which
+    # turned `squid.xplorer.viewer` into `viewer` (right) and `tilefusion.optimization` into
+    # `optimization` (wrong: it dropped the library name, which is the only reason attribution is
+    # here at all). test_logpanel.py caught it. The rule is that `squid.xplorer.` is redundant
+    # because every line in this console carries it; any OTHER name is news and stays whole.
+    name = record.name or "?"
+    # XPLORER_ROOT, not ROOT: ROOT is the stdlib root "" on purpose, which is what makes a
+    # third-party library appear without being wired, so stripping ROOT would strip nothing.
+    leaf = name[len(XPLORER_ROOT) + 1:] if name.startswith(XPLORER_ROOT + ".") else name
+    try:
+        message = record.getMessage()
+    except Exception as exc:                # noqa: BLE001 - a bad format string must not kill the log
+        message = f"<unformattable log message: {exc!r}>"
+    return f"{when} {record.levelname[:4]:<4} {leaf}: {message}"
+
+
 def format_record(record: logging.LogRecord) -> str:
     """One line for one record, in Squid's layout, byte for byte.
 
@@ -285,12 +320,19 @@ class LogBus:
     def emit_record(self, record: logging.LogRecord) -> None:
         if record.levelno < self.level:
             return
-        line = format_record(record)
+        # The console gets the compact layout; format_record's full Squid line is what a file
+        # handler and a bug report want. Subscribers receive BOTH, so a sink that wants the long
+        # form is not forced to re-derive it.
+        line = format_console(record)
+        full = format_record(record)
         for cb in list(self._subscribers):
             # One broken sink must not silence the panel for the others. Caught by a test: a
             # single raising subscriber swallowed every subsequent line.
             try:
-                cb(record.levelname, line)
+                try:
+                    cb(record.levelname, line, full)
+                except TypeError:
+                    cb(record.levelname, line)      # older two-argument sinks still work
             except Exception:               # noqa: BLE001 - a sink's bug is not the log's problem
                 pass
 
