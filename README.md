@@ -57,6 +57,12 @@ Results are OME-Zarr layers you toggle on and off; the raw data on disk is never
 - **File, then Open acquisition folder**, and pick the acquisition (the folder holding the `0`
   folder and/or the `ome_tiff` folder).
 - It reads both Squid formats (individual TIFFs and OME-TIFF), on 384 and 1536 plates.
+- The first open downsamples every well to build the plate view; **opening the same acquisition
+  again is a cache read** (measured: 15.2 s to 0.08 s on a 1536-well plate). Those thumbnails go
+  in your own cache folder, never into the acquisition: `~/Library/Caches/squidmip` on macOS,
+  `%LOCALAPPDATA%\cephla\squidmip\Cache` on Windows, `~/.cache/squidmip` on Linux. Delete that
+  folder any time to reclaim the space (one 91 MB file per 1536-well plate); it rebuilds itself.
+  `SQUIDMIP_CACHE_DIR` moves it, and `SQUIDMIP_PLATE_CACHE=0` turns it off.
 
 ## Explore
 

@@ -196,3 +196,20 @@ committed to, scheduled, or estimated.
   `_PreviewWorker` pass for plate rungs, `ReaderTileSource` for FOV rungs — which would also
   close the seam where the montage shows a mid-stack plane while tiles show a MIP.
   <sub>added 2026-07-28 · Spencer</sub>
+
+  *Update, 2026-07-29 — the COST half of that is done.* The composite source is built
+  (`_tilesource.CompositePlateSource`) and is what `set_tile_source` now arms, fed by the
+  persisted plate cells (`_platecache`, gap 1 of the three-viewers review — the two turned out to
+  be one piece of work). One fit-to-plate tile, measured: 2.387 s → 65 ms first / under 0.01 ms
+  steady on the 55-FOV tissue set, and 8.448 s → 1.44 s first / 0.14 ms steady on the 1536-FOV
+  `sim_1536wp`. Reopening the plate itself went 15.2 s → 0.075 s there, surviving a restart. The
+  cache follows `ndviewer_hcs/plate_stack.py`, the tool in the reference video: per-well cells
+  while the preview streams, compacted into one memory-mapped plate page when the pass finishes.
+
+  **What is still open is the FEEL half, and it is a rendering question, not a cost one.** Two
+  things remain: (a) a world-space enumerator, because `_visible_fov_tiles` is keyed by
+  `(region, fov)` and a plate rung is keyed by a world grid cell — the montage's uniform cell
+  grid and the ladder's stage micrometres agree only inside one cell, so placing plate-rung tiles
+  on the montage needs a viewport in µm rather than in cells; and (b) the mid-stack-plane versus
+  MIP seam, which is unchanged: the plate rungs now reproduce what the montage draws, so closing
+  the seam means moving the montage to a projection, exactly as the note above says.

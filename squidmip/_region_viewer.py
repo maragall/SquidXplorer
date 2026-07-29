@@ -46,6 +46,17 @@ from PyQt5.QtWidgets import (
 
 log = logging.getLogger("squidmip.regionviewer")
 
+#: PyQt's C++-object-liveness oracle. The ONLY way to ask "has Qt already destroyed this widget",
+#: which a slot connected to a longer-lived object has to ask before it touches its own children.
+#: Optional so a binding without it degrades to today's behaviour rather than failing to import.
+try:                                                     # pragma: no cover - binding detail
+    from PyQt5 import sip as _sip
+except ImportError:                                      # pragma: no cover
+    try:
+        import sip as _sip                               # older PyQt5 packagings
+    except ImportError:
+        _sip = None
+
 #: Cross-window LUT clipboard for Julio's "sync windows = copy/paste LUTs": one window's per-channel
 #: (contrast_limits, colormap) is stashed here by "Copy LUTs" and applied by "Paste LUTs" in any
 #: other window (or the plate). A parameter file on the desktop is the same idea; this is the
@@ -1413,6 +1424,20 @@ class OpenViewList(QWidget):
         self.refresh()
 
     def refresh(self) -> None:
+        # A DESTROYED navigator must not rebuild itself. `manager.windowsChanged` is connected to
+        # this bound method, and the ViewerManager outlives any one navigator, so a window closing
+        # AFTER this widget's C++ side was destroyed re-enters here and touches `self._tree`. That
+        # is a use-after-free, and it does not raise: it segfaults, with the crash landing in
+        # `expandAll()` and blaming whichever test happened to run last. Measured that way during
+        # the gap 1 work: every test passed, then the process died at 100% inside
+        # `conftest.pytest_sessionfinish`'s close loop, so pytest never printed a summary and a
+        # fully green suite could not be committed.
+        #
+        # sip.isdeleted is the only reliable question here. `try/except RuntimeError` does not
+        # help, because PyQt raises that only when it KNOWS the object is gone; a widget torn down
+        # by its parent's C++ destructor leaves a wrapper that still looks alive.
+        if _sip is not None and _sip.isdeleted(self):
+            return
         # Rebuild as a NESTED tree (ROI children under their parent window), then restore the multi-
         # selection from the manager (guarded so the programmatic selection does not re-fire
         # _on_selection_changed). No selection => no wash.

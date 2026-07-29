@@ -36,6 +36,10 @@ import tifffile
 #: releases, which is the exact hazard.
 _QT_APP = None
 
+#: The session's plate cell cache directory, created in ``pytest_configure`` and removed at the
+#: end. See there for why the suite must never write into the real one.
+_CACHE_DIR = None
+
 
 def pytest_sessionfinish(session, exitstatus):
     """Tear Qt down while Qt is still alive, so the process does not abort at interpreter exit.
@@ -55,6 +59,10 @@ def pytest_sessionfinish(session, exitstatus):
     Deleting the widgets is the real fix; the leak itself (the lambda cycles) is a production
     defect that outlives this hook and is recorded in TODOS.md.
     """
+    if _CACHE_DIR:
+        import shutil
+
+        shutil.rmtree(_CACHE_DIR, ignore_errors=True)
     try:
         from PyQt5.QtWidgets import QApplication
     except ImportError:
@@ -74,9 +82,25 @@ def pytest_sessionfinish(session, exitstatus):
 
 
 def pytest_configure(config):
-    """Pin the QApplication before any test runs. No-op where PyQt5 is not installed."""
-    global _QT_APP
+    """Pin the QApplication before any test runs. No-op where PyQt5 is not installed.
+
+    Also redirects the plate cell cache (``squidmip._platecache``) into a temporary directory for
+    the whole session. Two reasons, and both are about the suite being honest rather than tidy:
+    a test that opens a fixture acquisition would otherwise write real cells into the developer's
+    ``user_cache_dir``, and a cell left there by one run would be read by the next, so a caching
+    bug could pass on a warm machine and fail on a cold one. The directory is deliberately NOT
+    cleaned up per test: within a session the cache is supposed to persist, and a test that wants
+    a cold cache says so with its own ``root=``.
+    """
+    global _QT_APP, _CACHE_DIR
     import sys
+    import tempfile
+
+    from squidmip import _platecache
+
+    if not os.environ.get(_platecache.ENV_DIR):
+        _CACHE_DIR = tempfile.mkdtemp(prefix="squidmip-test-cache-")
+        os.environ[_platecache.ENV_DIR] = _CACHE_DIR
     # Do NOT force PyQt5 in. The GUI modules skip themselves when PySide is already loaded
     # (pytest-qt autoload pulls it in, and two Qt bindings in one process break GL rendering);
     # importing PyQt5 here first would defeat that guard and run those modules under a mixed
@@ -110,6 +134,29 @@ _REGISTRIES = (
     ("squidmip._spots", "_SEGMENTERS"),
     ("squidmip._stitch", "_REGION_OPERATORS"),
 )
+
+
+@pytest.fixture(autouse=True)
+def _cold_plate_cell_cache(tmp_path, monkeypatch):
+    """Every test starts with a COLD plate cell cache (``squidmip._platecache``).
+
+    Two failures this prevents, and the second is the one that bites. A test that opens a fixture
+    acquisition would otherwise write real cells into the developer's ``user_cache_dir``; and,
+    worse, ``real_dataset`` and ``sim_1536wp`` live at FIXED paths, so a cell written by one test
+    would be read by every later test that opens the same acquisition. The second test would then
+    see one replayed tile per well where the producer emits one per FOV -- an order-dependent
+    failure landing in a file that did nothing wrong, which is exactly the shape of the registry
+    leak documented above.
+
+    A test that wants a WARM cache builds one explicitly with ``root=``; that is what
+    ``tests/test_platecache.py`` does, and it is the honest way to test persistence.
+    """
+    from squidmip import _platecache
+
+    monkeypatch.setenv(_platecache.ENV_DIR, str(tmp_path / "plate-cells"))
+    _platecache.clear_memory_tier()
+    yield
+    _platecache.clear_memory_tier()
 
 
 @pytest.fixture(autouse=True)

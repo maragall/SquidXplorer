@@ -439,6 +439,28 @@ def _fit_box(a: np.ndarray, h: int, w: int) -> np.ndarray:
     return a[yi][:, xi].astype(np.float32)
 
 
+#: "build the cache yourself from the reader" as a DEFAULT that ``None`` can override. A plain
+#: ``None`` default would make "no cache" unsayable, which is exactly what the uncached-path tests
+#: and ``SQUIDMIP_PLATE_CACHE=0`` need to be able to say.
+_CACHE_AUTO = object()
+
+
+def _box_union(a, b):
+    """Union of two ``(top, left, h, w)`` boxes; ``a`` may be None (nothing accumulated yet).
+
+    The union of a region's FOV boxes is the rectangle the mosaic actually occupies inside its
+    cell, and that is what gets cached and replayed. It is the same rectangle
+    ``_placement.cell_boxes`` centred there in the first place.
+    """
+    if a is None:
+        return tuple(int(v) for v in b)
+    top = min(a[0], b[0])
+    left = min(a[1], b[1])
+    bottom = max(a[0] + a[2], b[0] + b[2])
+    right = max(a[1] + a[3], b[1] + b[3])
+    return (int(top), int(left), int(bottom - top), int(right - left))
+
+
 # The Squid well-plate formats we fit a plate to (well count -> (rows, cols)). An acquisition whose
 # format isn't one of these falls back to a present-only grid (see _plate_grid).
 _PLATE_DIMS = {4: (2, 2), 6: (2, 3), 12: (3, 4), 24: (4, 6), 96: (8, 12),
@@ -1353,11 +1375,20 @@ class PlateOverview(QWidget):
         if not _deep_zoom_enabled() or reader is None or not meta:
             return False
         try:
+            from squidmip._platecache import PlateCellCache
             from squidmip._tiling import TileCache
-            from squidmip._tilesource import ReaderTileSource, plate_ladder
+            from squidmip._tilesource import CompositePlateSource, plate_ladder
 
             self._ladder = plate_ladder(meta)
-            self._tile_src = ReaderTileSource(reader, meta, self._ladder)
+            # COMPOSITE, not a bare ReaderTileSource: plate rungs come from the persisted preview
+            # cells and FOV rungs from the reader, which is the source NEXT_STEPS.md scoped and
+            # did not build. FOV-rung behaviour is byte-identical (it delegates); what changes is
+            # that a coarse rung can be served at all, at a dict lookup rather than the 25 s
+            # full-plate decode Spencer measured. Seeding is lazy: nothing is read until a coarse
+            # tile is actually asked for.
+            self._tile_src = CompositePlateSource(
+                reader, meta, self._ladder,
+                cache=PlateCellCache.for_reader(reader, meta, cell_px=_CELL))
         except Exception:
             self._ladder = self._tile_src = None
             return False
@@ -1433,7 +1464,14 @@ class PlateOverview(QWidget):
                 um_per_px = (float(frame[1]) * float(px)) / max(float(bw), 1.0)
                 lvl = self._ladder.geometry.pick_level(um_per_px, self._tile_level)
                 if not self._ladder.is_fov_level(lvl):
-                    continue             # coarser than the crossover: the montage already wins
+                    # Coarser than the crossover. The montage already wins HERE because this
+                    # enumerator is per FOV and a plate rung is keyed by a world grid cell, not by
+                    # (region, fov) -- the montage's uniform cell grid and the ladder's stage
+                    # micrometres agree only inside a cell. The rung itself is no longer
+                    # unservable: CompositePlateSource answers it from the cached preview cells.
+                    # What is still missing is a world-space enumerator to place those tiles, and
+                    # that is the continuous zoom-out in NEXT_STEPS.md's MIP-on-plateview item.
+                    continue
                 self._tile_level = lvl
                 out.append((TileDescriptor(level=lvl, key=key, channel=self._tile_channel(),
                                            bbox_um=self._ladder.fov_bboxes[key]), rect))
@@ -3613,7 +3651,8 @@ class _PreviewWorker(QThread):
     #                                                 a bare `except: pass` left the plate frozen
     #                                                 half-grey, indistinguishable from "loading".
 
-    def __init__(self, reader, meta, fov_index: dict, order: list, mosaic: bool = True):
+    def __init__(self, reader, meta, fov_index: dict, order: list, mosaic: bool = True,
+                 cache=_CACHE_AUTO):
         super().__init__()
         self._reader, self._meta = reader, meta
         self._fov_index, self._order = fov_index, order
@@ -3621,6 +3660,18 @@ class _PreviewWorker(QThread):
         self._dtype = np.dtype(meta["dtype"])
         self._mosaic = bool(mosaic)
         self._stop = threading.Event()
+        # The persisted plate cells (_platecache). A sentinel default rather than None so a caller
+        # can say "no cache" explicitly and mean it, which is what the uncached-path tests need.
+        # `for_reader` returns None, logging why, for anything it cannot cache -- a reader with no
+        # `_path`, an unwritable cache dir, SQUIDMIP_PLATE_CACHE=0 -- so this worker never has to
+        # care whether caching is available.
+        from squidmip._platecache import PlateCellCache
+
+        self._cache = (PlateCellCache.for_reader(reader, meta, cell_px=_CELL)
+                       if cache is _CACHE_AUTO else cache)
+        self._pending: dict = {}      # region -> the cell being accumulated for the cache
+        self.cache_hits = 0           # regions served from the cache, for the status line and tests
+        self.cache_reads = 0          # regions actually read from the acquisition
 
     def _plan(self) -> list:
         """``[(region, fov, box|None), ...]`` — the read list, in plate order, FOVs in stage order.
@@ -3660,12 +3711,71 @@ class _PreviewWorker(QThread):
     def stop(self):
         self._stop.set()
 
+    def _replay_cached(self, plan: list) -> list:
+        """Emit every region the cache can serve; return the plan entries still to be read.
+
+        This is the whole reopen win, and it is one cell per WELL rather than one per FOV: a
+        cached 27-FOV mosaic replays as a single tile, so the reopen does not merely skip the
+        reads, it skips 26 of every 27 signal round trips too.
+
+        The tile is emitted with its CONTENT BOX, never as a full 88x88 cell. ``add_tile`` feeds
+        the running histogram whatever it is handed, and a mosaic cell is zero-padded wherever no
+        FOV lands; replaying the padding would pin the 1st percentile at 0 and wash the plate out
+        on every reopen while the first open looked right. See ``_platecache.CellTile``.
+        """
+        if self._cache is None:
+            return plan
+        by_region: dict = {}
+        for item in plan:
+            by_region.setdefault(item[0], []).append(item)
+        remaining: list = []
+        for region, items in by_region.items():
+            hit = None if self._stop.is_set() else self._cache.get(region)
+            if hit is None:
+                remaining.extend(items)
+                continue
+            ri, ci = self._fov_index[region]["rc"]
+            self.tileReady.emit(ri, ci, region, np.asarray(hit).astype(self._dtype), hit.box)
+            self.cache_hits += 1
+        self.cache_reads = len(by_region) - self.cache_hits
+        # Said out loud, because a cache nobody can see is indistinguishable from a fast disk.
+        log.info("plate preview: %d of %d wells served from the cell cache (%s)",
+                 self.cache_hits, len(by_region), self._cache)
+        return remaining
+
+    def _remember(self, region: str, box, tile: np.ndarray, expected: int) -> None:
+        """Accumulate one FOV into the region's cell, and publish the cell once it is whole.
+
+        Published per REGION as it completes rather than once at the end, so a preview that is
+        stopped half way (the user opens something else) still leaves the wells it finished
+        cached. A region whose read RAISED never completes and is therefore never published: a
+        half-read cell must not be persisted as though it were the well.
+        """
+        if self._cache is None:
+            return
+        st = self._pending.get(region)
+        if st is None:
+            st = self._pending[region] = {
+                "cell": np.zeros((len(self._channels), _CELL, _CELL), dtype=self._dtype),
+                "left": int(expected), "box": None}
+        top, left = (int(box[0]), int(box[1])) if box is not None else (0, 0)
+        h, w = tile.shape[1], tile.shape[2]      # by ACTUAL shape, as add_tile places it
+        st["cell"][:, top:top + h, left:left + w] = tile
+        st["box"] = _box_union(st["box"], (top, left, h, w))
+        st["left"] -= 1
+        if st["left"] <= 0:
+            self._pending.pop(region, None)
+            top0, left0, bh, bw = st["box"]
+            self._cache.put(region, st["cell"][:, top0:top0 + bh, left0:left0 + bw], st["box"])
+
     def run(self):
         try:
+            from collections import Counter
             from concurrent.futures import ThreadPoolExecutor
             zs = self._meta["z_levels"]
             z_mid = zs[len(zs) // 2]      # a mid-stack plane is a fair single-plane preview
-            plan = self._plan()
+            plan = self._replay_cached(self._plan())
+            per_region = Counter(item[0] for item in plan)
 
             def load(item):
                 region, fov, box = item
@@ -3679,10 +3789,18 @@ class _PreviewWorker(QThread):
                     if self._stop.is_set():
                         return
                     ri, ci = self._fov_index[region]["rc"]
-                    self.tileReady.emit(ri, ci, region,
-                                        np.stack(tiles).astype(self._dtype), box)
+                    tile = np.stack(tiles).astype(self._dtype)
+                    self.tileReady.emit(ri, ci, region, tile, box)
+                    self._remember(region, box, tile, per_region[region])
             if not self._stop.is_set():
                 self.streamEnded.emit()   # the running window is mature now -> one clean recomposite
+                # The pass finished, so this generation is complete: compact the per-well cells
+                # into one memory-mapped page. AFTER streamEnded, never before -- the recomposite
+                # is what the user is waiting on, and compaction is housekeeping. A stopped or
+                # failed pass never reaches here, which is the point: a partial plate must not be
+                # compacted into a page that claims to be the plate.
+                if self._cache is not None and not self._cache.packed:
+                    self._cache.pack(self._order)
         except Exception as exc:
             # Preview is best-effort, but best-effort is not SILENT. Finalise the tiles that did
             # land (so a partial mosaic still paints) and then name the failure — the old bare

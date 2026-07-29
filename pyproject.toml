@@ -22,6 +22,11 @@ dependencies = [
     #                             anndata itself is NOT a dependency — the encoding is a documented
     #                             on-disk contract and the table is nine columns wide.
     "pillow>=10.0",
+    "platformdirs>=3.0",        # Gap 1: the persistent plate-cell cache (squidmip/_platecache.py)
+    #                             needs the per-OS user cache directory. It is a hard dependency
+    #                             and not a lazy import, because the alternative to knowing where
+    #                             the cache belongs is writing beside the acquisition, and this
+    #                             tool promises it never writes into your data folder.
     "pydantic-settings>=2.3",   # declarative CLI (IMA-186), same pattern as the stitcher
     "scipy>=1.10",              # IMA-223/224/225 plane-ops: ndimage gaussian_filter (the
     #                             kernel-free Richardson-Lucy) and zoom (the flat-field /

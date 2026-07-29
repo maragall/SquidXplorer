@@ -43,7 +43,14 @@ from squidmip._stitch import (
     stitch_region,
 )
 from squidmip._tiling import Geometry, TileCache, TileDescriptor, select_tiles
-from squidmip._tilesource import InMemoryMultiscale, PlateLadder, ZarrPyramidSource, plate_ladder
+from squidmip._platecache import PlateCellCache
+from squidmip._tilesource import (
+    CompositePlateSource,
+    InMemoryMultiscale,
+    PlateLadder,
+    ZarrPyramidSource,
+    plate_ladder,
+)
 from squidmip.projection import (
     PLANE_OP,
     Z_REDUCER,
@@ -123,6 +130,9 @@ __all__ = [
     "PlateLadder",
     "ZarrPyramidSource",
     "InMemoryMultiscale",
+    # Gap 1: the persistent plate cells, and the composite source they feed
+    "CompositePlateSource",
+    "PlateCellCache",
     # IMA-228 Minerva export
     "export_selection",
     "launch_minerva",
