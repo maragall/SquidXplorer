@@ -103,10 +103,24 @@ committed to, scheduled, or estimated.
   into SquidXplorer. **Reference: https://www.youtube.com/watch?v=c-TdJDUP734** — a demo of the
   tool. A MIP "map" of the wellplate on the left that updates as the cursor moves, with
   OpenSeadragon / Google-Maps controls: left-click-hold to pan, wheel to zoom.
-  **Correction (2026-07-28):** this entry first guessed the tool was this repo's own predecessor
-  (`scripts/mip-tool.bat`, the `squidmip` package name). It is NOT — Spencer confirmed that, and
-  the tool is not on this workstation at all under any name matching `mip` or `navigator`. The
-  video is the only reference we have. Do not go looking locally.
+  **Correction (2026-07-29, Julio):** both earlier notes here were wrong and this entry is now
+  UNBLOCKED. The video is a recording of
+  **https://github.com/maragall/ndviewer/tree/main/ndviewer_hcs** with everything preloaded, so the
+  source is readable rather than only watchable. And the old MIP tool IS this repo, at commit
+  **1504c05**, which is in our own history: `git show 1504c05:<path>` works. The previous note said
+  the tool "is not on this workstation at all" and "do not go looking locally". Both false.
+
+  **The feel is a technique, not a taste.** `ndviewer_hcs/plate_stack.py` holds a
+  `PlateStackManager`: "Pre-computed Z x T plate assemblies stored as multi-page TIFF ... shape
+  (t, z, channels, height, width), each page is a full assembled plate for one (t, z) combination.
+  Memory-mapped for efficient random access." `get_page(t, z)` is a memmap index, so scrubbing z or
+  t is a page read and not a fuse. The cache key is the DOWNSAMPLE FACTOR
+  (`plate_stack_ds{f:.4f}.tiff` plus a metadata sidecar): one file per zoom rung for the whole
+  plate, not per well and not per FOV. `PlateAssembler` derives the factor from a target pixel size
+  and skips downsampling above 0.98.
+
+  That is the direct answer to the 25 second fit-to-plate rung in the entry below: precompute the
+  rung once and the slider is free. Handed to the agent building the persistent plate cache.
   <sub>added 2026-07-27 · Spencer</sub>
 
 - [ ] **Show the app is loading, not crashed** — startup needs some indication that work is
