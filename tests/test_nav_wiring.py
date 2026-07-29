@@ -7,7 +7,8 @@ silently did nothing in the configuration the user actually runs.
 
 These run against the ndviewer_light stub because napari cannot build a GL context under
 ``QT_QPA_PLATFORM=offscreen``, which is what the whole suite runs under. The napari-specific
-seams (``_napari_dims``, ``_napari_z_axis``, ``_set_z_index``, ``_restore_dims_step``) are
+seams (``_napari_dims``, ``_napari_z_axis``, ``_restore_dims_step``, and the windows' own
+``_on_reference_plane``) are
 therefore driven through a FAKE dims model that has napari's shape. That is a real limitation
 and it is stated rather than hidden: the napari path was additionally verified on a real GL
 window, and the numbers and screenshots from that run are in the branch report.
@@ -242,36 +243,88 @@ def test_restoring_z_refuses_a_step_the_new_region_does_not_have(qapp, stub_deta
 
 
 # --------------------------------------------------------------------------------------
-# Focus reference plane: a BUTTON that moves THE z slider, and says so when it cannot
+# Focus reference plane: a control that moves THE z slider, and says so when it cannot
 # --------------------------------------------------------------------------------------
+#
+# THE REFERENCE PLANE MOVED OFF THE ROOT PLATE TOO (d07db43, and the orphan removed 2026-07-29).
+# `PlateWindow._set_z_index` and `PlateWindow._on_reference_plane` are gone: their only entry point
+# was a parentless `QPushButton` that Qt therefore treated as a top-level window, which is the stray
+# window Julio kept seeing (tests/test_no_orphan_windows.py has the measurement). The control lives
+# on each window's own z-slider now.
+#
+# The two tests below are the two that pinned those methods, re-pointed at the window. They were
+# NOT deleted, because both properties they pinned are still properties of the product and the
+# second one is a SILENT failure: a "focused" message printed over a slider that never moved. Both
+# had to be built on `RegionViewer`, which had neither guard, so the guards moved with the button
+# rather than being dropped along with the dead code.
 
-def test_focus_moves_napari_s_z_slider_when_napari_is_the_viewer(qapp, stub_detail,
-                                                                 squid_dataset, monkeypatch):
+def test_focus_moves_the_windows_own_z_slider(qapp, stub_detail, napari_pane_stub, squid_dataset):
+    """The answer must land on THIS window's napari dims, z being the leading axis of (z, y, x)."""
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
-    dims = _FakeDims((10, 512, 512))
-    monkeypatch.setattr(win, "_napari_dims", lambda: dims)
+    w = _open_window(win, ["B3"])
+    w._napari_viewer().dims = _FakeDims((10, 512, 512))
 
-    assert win._set_z_index(4) is True
-    assert dims.current_step[0] == 4, "napari's own z slider was not moved"
-    win.close()
+    w._on_reference_plane(4, "")
+
+    assert w._napari_viewer().dims.current_step[0] == 4, "the window's z slider was not moved"
+    assert any("reference plane: z=4" in s for s in w._pane.said), w._pane.said
+    shutdown_plate_window(qapp, win)
 
 
-def test_focus_reports_when_no_z_slider_could_be_moved(qapp, stub_detail, squid_dataset,
-                                                       monkeypatch):
-    """A 'focused' message printed over a slider that never moved is the silent failure."""
+def test_focus_reports_when_no_z_slider_could_be_moved(qapp, stub_detail, napari_pane_stub,
+                                                       squid_dataset):
+    """A 'focused' message printed over a slider that never moved is the silent failure.
+
+    A 2D layer has no leading z axis at all, so the old body's ``step[0] = z_index`` moved Y and
+    then announced a reference plane. MUTATION: drop the ndim guard -> the message becomes
+    "reference plane: z=4" over a Y axis -> red.
+    """
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
-    monkeypatch.setattr(win, "_napari_dims", lambda: _FakeDims((512, 512)))
-    win._detail = None                                 # napari mode: no ndv fallback either
+    w = _open_window(win, ["B3"])
+    w._napari_viewer().dims = _FakeDims((512, 512))     # (y, x): no z axis to move
 
-    assert win._set_z_index(4) is False
+    w._on_reference_plane(4, "")
 
-    win._on_reference_plane("B3", 0, 4)
-    assert "no z slider could be moved" in win._readout.text(), win._readout.text()
-    win.close()
+    said = " ".join(w._pane.said)
+    assert "no z slider could be moved" in said, w._pane.said
+    assert w._napari_viewer().dims.current_step == (0, 0), "y was driven instead of z"
+    shutdown_plate_window(qapp, win)
+
+
+def test_a_single_plane_stack_is_also_no_z_slider(qapp, stub_detail, napari_pane_stub,
+                                                  squid_dataset):
+    """One step on the leading axis is a z axis that cannot move. Reporting a plane over it is the
+    same lie as reporting one over a 2D layer, so it takes the same refusal."""
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    w = _open_window(win, ["B3"])
+    w._napari_viewer().dims = _FakeDims((1, 512, 512))
+
+    w._on_reference_plane(4, "")
+
+    assert "no z slider could be moved" in " ".join(w._pane.said), w._pane.said
+    shutdown_plate_window(qapp, win)
+
+
+def test_the_answer_is_clamped_to_the_stack_this_window_is_showing(
+        qapp, stub_detail, napari_pane_stub, squid_dataset):
+    """A z index past the end of the layer is a crash or a no-op depending on the napari version.
+    Clamp it, so the slider lands on the last plane and the window still says what it did."""
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    w = _open_window(win, ["B3"])
+    w._napari_viewer().dims = _FakeDims((5, 512, 512))
+
+    w._on_reference_plane(99, "")
+
+    assert w._napari_viewer().dims.current_step[0] == 4
+    shutdown_plate_window(qapp, win)
 
 
 def test_focus_never_reports_a_plane_when_nothing_could_be_read(qapp, stub_detail,

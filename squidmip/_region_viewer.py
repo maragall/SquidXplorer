@@ -589,6 +589,15 @@ class RegionViewer(QMainWindow):
         if v is None or region is None or self._reader is None or self._meta is None:
             self._say("open a region first, then focus the reference plane.")
             return
+        # A stack of one plane has no reference plane to find, and ranking it would report a
+        # "sharpest plane" for the only plane there is. A refusal has to be a SENTENCE: this guard
+        # came off `PlateWindow` with the orphan button (2026-07-29) rather than being dropped with
+        # the rest of that dead chain, because it is the message the user needs on a 2D acquisition.
+        z_levels = list((self._meta.get("z_levels") or []))
+        if len(z_levels) <= 1:
+            self._say(f"{region}: this acquisition has a single z plane, so there is no "
+                      "reference plane to find.")
+            return
         if self._focus_worker is not None and self._focus_worker.isRunning():
             self._say("already finding the reference plane…")
             return
@@ -609,14 +618,29 @@ class RegionViewer(QMainWindow):
         w.start()
 
     def _on_reference_plane(self, z_index: int, note: str) -> None:
+        """The sharpest plane is known. MOVE THIS WINDOW'S z SLIDER to it, or say why not.
+
+        Announcing a reference plane over a slider that never moved is the silent failure the
+        control exists to avoid, so the axis is checked before it is written rather than after.
+        ``if step:`` was not that check: on a 2D ``(y, x)`` layer it is true, and ``step[0] = z``
+        then drove Y and reported a reference plane anyway. This guard came off ``PlateWindow`` with
+        the orphan focus button (2026-07-29) instead of being deleted along with it.
+        """
         v = self._napari_viewer()
         if v is None:
             return
         try:
-            step = list(v.dims.current_step)
-            if step:                                     # z is the leading axis of a (z, y, x) layer
-                step[0] = int(z_index)
-                v.dims.current_step = tuple(step)
+            dims = v.dims
+            nsteps = tuple(int(n) for n in (getattr(dims, "nsteps", ()) or ()))
+            # z is the LEADING axis of a (z, y, x) layer. Two ways there is no z slider to move:
+            # fewer than three axes (a plain 2D image), or a leading axis with a single step.
+            if len(nsteps) < 3 or nsteps[0] < 2:
+                self._say(f"sharpest plane is z={z_index}, but no z slider could be moved — "
+                          "this view is showing a single plane.")
+                return
+            step = list(dims.current_step)
+            step[0] = max(0, min(int(z_index), nsteps[0] - 1))   # clamp: never index past the stack
+            dims.current_step = tuple(step)
             self._say(f"reference plane: z={z_index}. {note}".strip())
         except Exception as exc:                         # noqa: BLE001 - named, never silent
             self._say(f"could not move the z-slider: {exc}")

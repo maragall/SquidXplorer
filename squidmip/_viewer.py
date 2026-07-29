@@ -817,13 +817,15 @@ class PlateWindow(QMainWindow):
         # guard on None, so leaving it unbuilt is safe.
         self._region_slider = None
 
-        # "Focus reference plane" was a control UNDER the old central viewer. It has no central
-        # viewer to drive now (per-FOV autofocus belongs on a window, Phase C), but its setEnabled
-        # callers still exist, so keep the button as a hidden orphan rather than chase every call
-        # site. _sync_focus_button leaves it hidden.
-        self._focus_btn = QPushButton("Focus reference plane")
-        self._focus_btn.clicked.connect(self._focus_reference_plane)
-        self._focus_btn.hide()
+        # NO "Focus reference plane" button here. It was a control UNDER the old central viewer,
+        # kept on as a "hidden orphan" so its setEnabled callers would still resolve — and a
+        # QPushButton built with no parent is a TOP-LEVEL WINDOW, so `_sync_focus_button`'s
+        # setVisible(z_levels > 1) un-hid it as a bare 178x30 titleless window beside the root on
+        # every multi-z acquisition. That is the stray window Julio kept seeing. The reference plane
+        # is per-window now, on each window's own z-slider (d07db43,
+        # `RegionViewer._focus_reference_plane`), so the whole chain here was dead but for the
+        # orphan's own clicked signal. Deleted rather than re-hidden; pinned by
+        # tests/test_no_orphan_windows.py.
 
         # THE ROOT IS JUST THE PLATE (decentralized, 2026-07-23). The central viewer and the
         # exploration pane are gone from the layout; the plate column IS the window. Selections
@@ -2671,7 +2673,6 @@ class PlateWindow(QMainWindow):
         self._acq_name = Path(p).name
         self._acq_path = Path(p)
         self._processed_plate = None
-        self._sync_focus_button()                    # 2D acquisition -> no reference-plane button
         self._populate_detect_channels()             # channel-aware cellpose picker
         self._viewer_manager.set_dataset(reader, meta)   # every spawned window shares this reader
         rows, cols, wells, order = plate.viewer_grid()
@@ -4396,14 +4397,6 @@ class PlateWindow(QMainWindow):
             return          # ndv drew a channel the plate does not have (RGB mode, or a re-ingest)
         self._overview.follow_channel_window(ch, float(lo), float(hi))
 
-    def _sync_focus_button(self):
-        """Show the reference-plane button only for a z-stack. A 2D acquisition (one z level) has
-        nothing to focus, so the button would jump the slider to the plane it is already on."""
-        btn = getattr(self, "_focus_btn", None)
-        if btn is None:
-            return
-        btn.setVisible(len((self._meta or {}).get("z_levels", [])) > 1)
-
     def _populate_detect_channels(self):
         """Fill the 'Detect on' dropdown with this acquisition's channels, defaulting to the one
         most likely to carry nuclei. Channel-aware cellpose: the user segments the channel that has
@@ -4425,94 +4418,11 @@ class PlateWindow(QMainWindow):
             combo.setCurrentText(pick)
         combo.blockSignals(False)
 
-    def _focus_reference_plane(self):
-        """Jump THE z SLIDER to the current FOV's sharpest plane (Tenengrad autofocus).
-
-        A BUTTON, not a plate operator: it is per-FOV, on demand, and nothing is saved.
-
-        Two things were wrong with the previous version and both are fixed here.
-
-        1. IT WAS PERMANENTLY DEAD under napari. It required ``self._detail``, which is ``None``
-           whenever napari is the viewer (dc0f288), so the click returned immediately and told
-           the user to "double-click a well first" — a well they had just double-clicked. A
-           visible button with zero function is worse than no button. The z slider it must move
-           is NAPARI'S OWN, the one 19cd491 made real behind a lazy ``(z, y, x)`` stack.
-        2. IT RANKED EVERY PLANE ON THE GUI THREAD. ~40-50 TIFF reads inside a ``clicked`` slot,
-           with no worker, no progress and no cancel: the window froze solid for the duration.
-           It was the only long operation in the app without a QThread. Now it is one.
-
-        The region comes from the CURSOR, so "which region" is the same value the red frame and
-        the region slider show — there is no separate notion of "the well the detail viewer has".
-        """
-        if self._reader is None or self._meta is None:
-            self._readout.setText("open an acquisition before focusing a reference plane")
-            return
-        well = self._cursor.region
-        if well is None:
-            self._readout.setText("no region is selected — nothing to focus")
-            return
-        z_levels = list(self._meta.get("z_levels") or [])
-        if len(z_levels) <= 1:
-            self._readout.setText(
-                f"{well}: this acquisition has a single z plane, so there is no reference "
-                "plane to find.")
-            return
-        prior = getattr(self, "_focus_worker", None)
-        if prior is not None and prior.isRunning():
-            self._readout.setText("still ranking planes for the last request — one at a time.")
-            return
-        # The FOV IN VIEW, not the region's first one (IMA-250). This is a per-FOV autofocus, so
-        # ranking field 0 while the viewer shows field 12 reports the sharpest plane of pixels the
-        # user is not looking at. Falls back to the region's first FOV when the one on screen is
-        # not one of its own (a freshly-scoped detail, or a region with a single field).
-        fovs = self._meta["fovs_per_region"][well]
-        fov = self._current_fov if self._current_fov in fovs else fovs[0]
-        chan = self._meta["channels"][0]["name"]        # rank on one representative channel
-        self._focus_btn.setEnabled(False)
-        self._readout.setText(f"{well}:{fov} — ranking {len(z_levels)} planes for focus …")
-        w = _FocusWorker(self._reader, self._meta, well, fov, chan, parent=self)
-        w.ready.connect(lambda z_i, note, r=well, f=fov: self._on_reference_plane(r, f, z_i, note))
-        w.problem.connect(self._on_focus_problem)
-        self._focus_worker = w
-        w.start()
-
-    def _on_focus_problem(self, msg: str):
-        self._focus_btn.setEnabled(True)
-        self._readout.setText(f"focus reference plane: {msg}")
-
-    def _on_reference_plane(self, well: str, fov: int, z_index: int, note: str = ""):
-        """The sharpest plane is known. MOVE THE Z SLIDER to it."""
-        self._focus_btn.setEnabled(True)
-        moved = self._set_z_index(z_index)
-        if not moved:
-            self._readout.setText(
-                f"{well}:{fov} sharpest plane is z={z_index}, but no z slider could be moved — "
-                "the viewer is showing a single plane.")
-            return
-        self._readout.setText(
-            f"{well}:{fov} focused on reference plane z={z_index} (sharpest){note}")
-
-    def _set_z_index(self, z_index: int) -> bool:
-        """Drive THE z slider to *z_index*. Returns whether a slider actually moved.
-
-        There is one z control per viewer and this finds it rather than owning a second one:
-        napari's ``dims`` when napari is the viewer, ndviewer_light's ``set_current_index`` in
-        the fallback. The boolean is the point — a "focused" message printed over a slider that
-        never moved is exactly the silent failure this method exists to end.
-        """
-        axis = self._napari_z_axis()
-        if axis is not None:
-            dims = self._napari_dims()
-            top = int(dims.nsteps[axis]) - 1
-            if top < 1:
-                return False
-            dims.set_current_step(axis, max(0, min(int(z_index), top)))
-            return int(dims.current_step[axis]) == max(0, min(int(z_index), top))
-        setter = getattr(self._detail, "set_current_index", None) if self._detail else None
-        if setter is None:
-            return False
-        setter("z_level", int(z_index))
-        return True
+    # NO reference-plane chain here. `_focus_reference_plane`, `_on_focus_problem`,
+    # `_on_reference_plane` and `_set_z_index` were removed on 2026-07-29: the only entry
+    # point into all four was the orphan `_focus_btn`'s clicked signal (see __init__), and
+    # the reference plane moved onto each window's own z-slider in d07db43. `_FocusWorker`
+    # itself STAYS: `RegionViewer._focus_reference_plane` imports it by name.
 
     def _retire(self, w):
         """Retire a worker thread WITHOUT ever destroying a running QThread (that aborts the app).
