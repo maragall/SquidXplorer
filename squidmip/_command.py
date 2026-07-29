@@ -75,7 +75,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from squidmip import _explore
 
-logger = logging.getLogger("squidmip.command")
+from squidmip._logpane import get_logger
+
+logger = get_logger("command")
 
 __all__ = [
     "Command",

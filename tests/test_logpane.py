@@ -36,12 +36,17 @@ def bus():
 
 def test_a_line_says_when_what_and_WHO(bus):
     """The logger NAME is kept deliberately: it is what tells the user a line came from
-    tilefusion rather than from us. An unattributed log line is a rumour."""
+    tilefusion rather than from us. An unattributed log line is a rumour.
+
+    Updated 2026-07-29: the timestamp is now Squid's ``YYYY-MM-DD HH:MM:SS.mmm`` rather than a
+    bare ``HH:MM:SS``, because the console renders in Squid's layout. The exact layout is pinned
+    against ``logging.Formatter(LOG_FORMAT)`` in ``tests/test_address.py``; this test only asks
+    that the four facts a line owes the reader are still in it."""
     line = format_record(_record("fusing region manual0", name="tilefusion.optimization"))
     assert "tilefusion" in line
     assert "INFO" in line
     assert "fusing region manual0" in line
-    assert line[:2].isdigit() and line[2] == ":", f"no timestamp: {line!r}"
+    assert line[:4].isdigit() and line[4] == "-", f"no timestamp: {line!r}"
 
 
 def test_a_THIRD_PARTY_library_appears_without_being_told_about_us(bus):

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from PyQt5.QtWidgets import QApplication
+from PyQt5.QtWidgets import QApplication, QTabBar
 
 import squidmip._viewer as V
 from squidmip import _explore
@@ -176,12 +176,83 @@ def test_the_run_scope_is_resolved_by_the_shared_resolver_from_window_state(open
     assert seen["regions"] == regions, "the GUI did not resolve 'selected wells' from its selection"
 
 
-# --- the log panel is mounted below the exploration pane ----------------------------------------
+# --- the log panel is THE one global console, and it is a fixed tab -----------------------------
 
-def test_the_log_panel_is_mounted_below_the_exploration_pane(win):
-    col = win._explore_col
-    assert col.widget(0) is win._explore_pane
-    assert col.widget(1) is win._log_panel
+def test_the_log_panel_is_a_fixed_tab_in_the_operators_tab_space(win):
+    """Rewritten twice, and the history is the point.
+
+    2026-07-28: this asserted ``win._explore_col`` held the pane above the log panel, an
+    exploration COLUMN that the decentralization removed; the attribute no longer existed, so the
+    test could only ever AttributeError. It never reported that, because the QStyle lifetime bug
+    (tests/test_window_lifetime.py) segfaulted this file five tests earlier and took the summary
+    line with it, so a test that was broken and a test that never ran looked the same. It was then
+    rewritten to pin the log as a separate top-level QMainWindow, with a note saying a future move
+    to a tab should fail loudly instead of silently. This is that failure, collected.
+
+    2026-07-29, Task 1: the log is ONE GLOBAL CONSOLE and a FIXED TAB in the operators tab space.
+    Julio: "making the logger global will force you to abstract the data layers cleanly." A
+    floating window per app is not what makes a console global; one console printing every
+    window's actions with an address is. Being a tab also retires Spencer's NEXT_STEPS item that
+    the Log window "opens over the main window" on every launch, because the fix for a window that
+    lands in the wrong place is not to position it, it is to stop it being a window.
+
+    Fixed means it cannot be closed and cannot be detached. A console the user can lose is a
+    console that is missing at the moment worth reading."""
+    tabs = win._left_tabs
+    index = tabs.indexOf(win._log_panel)
+    assert index >= 0, "the log panel is not in the operators tab space at all"
+    assert index < win._FIXED_TABS, "the log tab is not one of the fixed head tabs"
+    assert tabs.tabText(index) == "Log"
+    assert not hasattr(win, "_log_window"), "the log is a top-level window again"
+
+    # not closable: no close button, and the close path refuses even when driven directly
+    assert tabs.tabBar().tabButton(index, QTabBar.RightSide) is None
+    win._close_op_tab(index)
+    assert tabs.indexOf(win._log_panel) == index, "the console was closed"
+
+    # not detachable: it must not float away from the window it reports on
+    assert win._detach_tab(index) is None
+    assert tabs.indexOf(win._log_panel) == index, "the console detached"
+
+    # and the View menu raises it rather than toggling a window that no longer exists
+    win._left_tabs.setCurrentIndex(0)
+    win.show_log()
+    assert tabs.currentWidget() is win._log_panel
+
+
+def test_a_plate_run_opens_AND_closes_a_started_done_pair_in_the_console(open_win, qapp, caplog):
+    """The root plate is a window too, so its actions carry a view id and an address.
+
+    The pair matters more than either line: an action that starts and then says nothing is
+    indistinguishable from one still running, which is why the "done" is closed from the drain
+    (fires on ok, failed and stopped alike) rather than from finished_ok.
+
+    Asserted through the RECORDS. A run over exactly one region HAS an address; a plate-wide run
+    is a set of extents that one Extent cannot say, so it carries the view id alone -- that gap is
+    deliberate and is Task 2's to close."""
+    import logging
+
+    from squidmip._address import Extent
+    from squidmip._logpane import ADDRESS_FIELD, VIEW_FIELD
+
+    regions = open_win.commands.execute(Describe()).data["regions"][:1]
+    with caplog.at_level(logging.INFO):
+        open_win.run_operator("mip", regions=list(regions), save=False)
+        for _ in range(2000):
+            qapp.processEvents()
+            if not _explore.operator_busy(open_win._worker, open_win._retired):
+                break
+        for _ in range(50):
+            qapp.processEvents()          # let the queued finished slot land
+
+    lines = [r for r in caplog.records if hasattr(r, VIEW_FIELD)]
+    started = [r for r in lines if r.getMessage().endswith("started")]
+    done = [r for r in lines if "done in" in r.getMessage()]
+    assert started, f"the run never announced itself: {[r.getMessage() for r in lines]}"
+    assert done, f"the run started and then went quiet: {[r.getMessage() for r in lines]}"
+    assert getattr(started[-1], VIEW_FIELD) == 0, "the root plate is view 0"
+    assert getattr(started[-1], ADDRESS_FIELD) == Extent(region_id=regions[0])
+    assert started[-1].getMessage().startswith(f"[0] {regions[0]} ")
 
 
 def test_a_run_shows_up_as_activity_in_the_log_panel_header(open_win, qapp, monkeypatch):

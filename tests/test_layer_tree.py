@@ -156,14 +156,19 @@ def test_the_3d_button_is_naparis_own_and_sits_where_a_short_pane_shows_it(tmp_p
     assert got["follows_model_write"] is True
     assert got["unchecks_on_model_write"] is False
     # ...and it is SIGNPOSTED, not aliased. Julio: "let's not alias the button, that's bad
-    # design. Let's give the user a tooltip to open in agave for qa higher quality rendering."
-    # napari does not support multiscale in 3D (_scalar_field/_slice.py drops to the coarsest
-    # level whenever ndisplay == 3), so this button is honest about its own limit and names the
-    # separate control that does better. It still does napari 3D — asserted three lines up.
+    # design." napari does not support multiscale in 3D (_scalar_field/_slice.py drops to the
+    # coarsest level whenever ndisplay == 3), so this button must be honest about its own limit
+    # and name the way around it. It still does napari 3D, asserted three lines up.
+    #
+    # Updated 2026-07-28: this asserted the tooltip named AGAVE. AGAVE is cancelled
+    # (docs/VERSIONS.md), so that assertion pinned a green test to a control the user does not
+    # have, which is the same defect the tooltip itself was written to avoid. The escape hatch is
+    # now the ROI crop, which is real, so that is what we pin.
     from squidmip._napari_pane import NDISPLAY_TOOLTIP
 
     assert got["tooltip"] == NDISPLAY_TOOLTIP
-    assert "AGAVE" in got["tooltip"]
+    assert "ROI" in got["tooltip"], "the tooltip must name a real way to reach full resolution"
+    assert "AGAVE" not in got["tooltip"], "AGAVE is cancelled; do not advertise it"
 
 
 # ---------------------------------------------------------------- the grouped tree

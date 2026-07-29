@@ -11,6 +11,16 @@ declares one hole: a :class:`~squidmip._tiling.TileSource` that turns a
 Both hand out the SAME ``Geometry``, so the viewer can start on the RAM preview mid-run and
 switch to the zarr source when the write finishes without re-deriving a single coordinate.
 
+Two more have been added since, for the case the viewer actually spends its time in — a raw
+acquisition folder with no written plate::
+
+    a raw acquisition, via the reader    ─►  ReaderTileSource       (projected, cached by bytes)
+    raw + the persisted preview cells    ─►  CompositePlateSource   (plate rungs from _platecache,
+                                                                     FOV rungs from the reader)
+
+``CompositePlateSource`` is what closes the coarse-rung gap ``NEXT_STEPS.md`` measured at 25 s;
+see its docstring.
+
 World space is stage MICROMETRES throughout; every key ends ``_um``. Positions come from
 ``metadata["fov_positions_um"]`` (the reader already converted coordinates.csv's mm), and are
 FOV **centres** — :func:`fov_bboxes_um` expands each to the frame's extent. Feeding millimetres
@@ -78,6 +88,7 @@ import numpy as np
 from squidmip._budget import cache_budget
 
 from squidmip._montage import _area_downsample
+from squidmip._mosaic_source import MemoryBoundedLRUCache
 from squidmip._output import _PYRAMID_MAX_LEVELS, _PYRAMID_MIN_YX, pyramid_shapes
 from squidmip._tiling import Geometry, Level, TileDescriptor
 
@@ -452,14 +463,12 @@ class ZarrPyramidSource:
         raise KeyError(f"unknown channel {channel!r}; plate has {self.channels}")
 
     def _store(self, fov_key, level: int):
-        cached = self._stores.get((fov_key, level))
-        if cached is None:
-            import tensorstore as ts
-            path = self._field_dirs[fov_key] / str(level)
-            cached = ts.open({"driver": "zarr3", "kvstore": {"driver": "file", "path": str(path)}},
-                             open=True).result()
-            self._stores[(fov_key, level)] = cached
-        return cached
+        # Through the process-wide pool (_tsctx): this used to be a per-instance dict with no
+        # bound and no lock, mutated from the tile fetcher's thread while the GUI read the same
+        # stores. The pool bounds live handles at 32 and binds every reader to one cache_pool, so
+        # a deep-zoom scrub over a big plate cannot grow the footprint without limit.
+        from squidmip._tsctx import HANDLES
+        return HANDLES.get(self._field_dirs[fov_key] / str(level))
 
     def _read_fov_plane(self, fov_key, level: int, c: int) -> np.ndarray:
         store = self._store(fov_key, level)
@@ -644,17 +653,32 @@ class InMemoryMultiscale:
         bbox = self.ladder.fov_bboxes.get(key)
         if bbox is None:
             raise KeyError(f"{key} has no recorded stage position; it is not on this ladder.")
+        return self.add_patch(bbox, image)
+
+    def add_patch(self, bbox_um: tuple, image: np.ndarray) -> list[TileDescriptor]:
+        """Fold ONE world-placed patch of pixels into every resident rung.
+
+        The general form of :meth:`add_field`, which is now the special case "this patch is one
+        FOV, at that FOV's recorded frame extent". Splitting them costs nothing and buys the other
+        producer this class needs: :class:`CompositePlateSource` folds in whole PLATE CELLS from
+        ``_platecache`` — one per well, already composited from every FOV of that well by the
+        preview pass — and a cell is a patch with no fov id to look up.
+
+        *bbox_um* is where these pixels are in stage micrometres. *image* is ``(C, h, w)`` or the
+        writer's ``(T, C, 1, Y, X)``; ``h`` and ``w`` need bear no relation to ``tile_px`` or to a
+        frame, because :func:`_paste_field` maps world to pixels at both ends.
+        """
         planes = self._planes(image)
         dirty: list[TileDescriptor] = []
         for lvl in self.levels:
             level = self.ladder.geometry.levels[lvl]
             scale = level.scale_um_per_px
-            for cell in self._cells_for(lvl, bbox):
+            for cell in self._cells_for(lvl, bbox_um):
                 cell_bbox = self.ladder.cell_bbox_um(lvl, cell)
                 tile = self._tile(lvl, cell)
                 touched = False
                 for c in range(len(self.channels)):
-                    touched |= _paste_field(tile[c], cell_bbox, scale, planes[c], bbox)
+                    touched |= _paste_field(tile[c], cell_bbox, scale, planes[c], bbox_um)
                 if touched:
                     dirty.extend(TileDescriptor(lvl, cell, ch, cell_bbox) for ch in self.channels)
         return dirty
@@ -685,3 +709,306 @@ class InMemoryMultiscale:
                                dtype=self.dtype)
                 self._tiles[(level, cell)] = arr
             return arr
+
+
+# --- source 3: a RAW acquisition, straight off the microscope ----------------------------------
+
+class ReaderTileSource:
+    """``TileSource`` over a RAW acquisition, via the reader — no written plate required.
+
+    The two sources above both need a plate that has already been WRITTEN: ``ZarrPyramidSource``
+    reads ``plate.ome.zarr`` off disk, and ``InMemoryMultiscale`` is fed by the writer as fields
+    land. That leaves the case the viewer spends most of its time in — an acquisition folder
+    straight off the microscope, opened for a look — with no tile source at all, and therefore no
+    deep zoom: the plate overview falls back to smooth-scaling one 88 px-per-well montage, so
+    zooming in blurs instead of resolving.
+
+    This closes that. It is deliberately the *simplest* thing that satisfies the protocol: every
+    tile, at every rung, is composited the same way — take the FOVs whose frame overlaps the
+    tile's world box and paste each one in. :func:`_paste_field` does the world-to-pixel mapping
+    for both, so a per-FOV rung and a plate rung differ only in how many FOVs the loop visits
+    (usually one, sometimes many). There is no second code path to keep in step.
+
+    Tiles are **maximum-intensity projections** by default. The projection reuses the registered
+    ``mip`` operator (``_engine._PROJECTORS`` → ``projection.project``) rather than folding a max
+    here, so ``reference`` — the Tenengrad best-focus plane — is a one-word change, and anything
+    registered later with ``add_projector`` works with no edit to this class.
+
+    **Why no pyramid level selection here.** ``PlateLadder.fov_source_level`` exists to pick a
+    written pyramid level to composite from, which is what makes a coarse plate tile cheap on the
+    zarr path. A raw acquisition has no written pyramid — there is exactly one resolution on disk
+    — so a coarse tile necessarily decodes a full frame and area-averages it down. That cost is
+    real and is why ``planes`` is cached by bytes: the same frame is reused across every tile and
+    every rung that touches it. It is NOT worked around by inventing a pyramid, because writing
+    one is the writer's job (IMA-184) and doing it here would duplicate it badly.
+
+    **The montage disagrees, for now.** ``_PreviewWorker`` fills the 88 px plate montage from a
+    single MID-STACK plane, because a projection there would multiply the first-paint cost by the
+    stack depth. So the coarse montage and these tiles are not the same image on a raw
+    acquisition. That is a real seam and it is recorded in ``NEXT_STEPS.md``; the projected tile
+    is the one the product wants, so the montage is what should move.
+
+    Empty world reads as ZEROS, never an error — the same convention
+    :meth:`InMemoryMultiscale.read_tile` documents. A plate is part-acquired for most of a run and
+    a viewport routinely covers stage area no FOV was ever placed on; raising there would make the
+    fetch path throw once per empty tile per frame.
+    """
+
+    def __init__(self, reader, metadata: Mapping, ladder: PlateLadder, *,
+                 projector: Optional[str] = "mip", z: Optional[int] = None, t: int = 0,
+                 cache_bytes: Optional[int] = None) -> None:
+        self.reader = reader
+        self.meta = dict(metadata)
+        self.ladder = ladder
+        self.t = int(t)
+        self.dtype = np.dtype(self.meta.get("dtype") or np.uint16)
+        self.z_levels = list(self.meta.get("z_levels") or [0])
+
+        # PROJECTED by default (Spencer: "I do want an MIP for this application"), reusing the
+        # registered operator rather than folding a max here -- so `reference` (the Tenengrad
+        # best-focus plane) is the same one-word change, and a projector added with
+        # ``add_projector`` works with no edit to this class.
+        #
+        # Refuse a projector that does NOT consume z: this collapses a stack to one plane, and a
+        # plane-op (consumes=frozenset(), e.g. decon or bgsub) has no z to collapse. Silently
+        # running one per z and keeping the last would be a picture that looks plausible and is
+        # not what was asked for.
+        self.projector = projector
+        self.z = None if z is None else int(z)
+        if projector is not None and self.z is None:
+            from squidmip._engine import projector_consumes
+
+            if "z" not in projector_consumes(projector):
+                raise ValueError(
+                    f"projector {projector!r} does not consume z, so it cannot reduce a stack to "
+                    "a tile. Pass a z-reducer (mip, reference) or an explicit z=.")
+        elif projector is None and self.z is None:
+            # Neither a projector nor a plane: fall back to the mid-stack plane _PreviewWorker
+            # uses, so this degrades to the montage's own image rather than to z=0.
+            self.z = int(self.z_levels[len(self.z_levels) // 2])
+
+        self._planes = MemoryBoundedLRUCache(
+            DEFAULT_PREVIEW_BUDGET_BYTES if cache_bytes is None else int(cache_bytes))
+
+    # ---- TileSource --------------------------------------------------------------------
+    def read_tile(self, desc: TileDescriptor) -> np.ndarray:
+        """One channel of one tile, ``(tile_px, tile_px)`` in the acquisition's native dtype."""
+        tile_px = self.ladder.tile_px
+        bbox = tuple(float(v) for v in desc.bbox_um)
+        # The tile's own resolution, derived from its box rather than from the level's nominal
+        # scale: a plate rung's cells are square and uniform, but an FOV rung's tile IS the frame,
+        # whose aspect need not match tile_px. Deriving it here keeps _paste_field exact for both.
+        scale = (bbox[2] - bbox[0]) / float(tile_px)
+        out = np.zeros((tile_px, tile_px), dtype=self.dtype)
+
+        for key in self.ladder.fovs_overlapping(bbox):
+            plane = self._plane(key, desc.channel)
+            if plane is None:
+                continue            # an unreadable field is a hole, not a dead viewport
+            _paste_field(out, bbox, scale, plane, self.ladder.fov_bboxes[key])
+        return out
+
+    # ---- pixels ------------------------------------------------------------------------
+    def _plane(self, key, channel: str):
+        """The FOV's image for one channel — projected over z, or one plane if ``z`` was given.
+
+        Cached by BYTES, and this is the whole performance story. A coarse plate tile touches many
+        FOVs, adjacent tiles touch the same FOVs again, and every rung above revisits them, so
+        without the cache a pan would re-project continuously. Note what is cached: the RESULT,
+        one plane per FOV, not the stack — so a 10-deep projection costs 10 reads ONCE and then
+        occupies exactly what a single-plane preview would.
+        """
+        region, fov = key
+        ck = (str(region), int(fov), str(channel),
+              "z%d" % self.z if self.z is not None else "p:%s" % self.projector, int(self.t))
+        hit = self._planes.get(ck)
+        if hit is not None:
+            return hit
+        try:
+            if self.z is not None:
+                plane = np.asarray(self._read(region, fov, channel, self.z))
+            else:
+                from squidmip._engine import _resolve_projector
+
+                reduce = _resolve_projector(self.projector).fn
+                plane = np.asarray(reduce(
+                    np.asarray(self._read(region, fov, channel, z)) for z in self.z_levels))
+        except Exception:
+            return None             # decode failure: leave the hole, keep the viewport alive
+        self._planes.put(ck, plane)
+        return plane
+
+    def _read(self, region, fov, channel: str, z: int):
+        """One plane from the reader, tolerating readers whose ``read`` has no ``t``."""
+        try:
+            return self.reader.read(region, int(fov), str(channel), int(z), t=int(self.t))
+        except TypeError:
+            return self.reader.read(region, int(fov), str(channel), int(z))
+
+
+# --- source 4: the composite. Plate rungs from the cache, FOV rungs from the reader ------------
+
+def region_bbox_um(ladder: PlateLadder, region: str) -> Optional[tuple]:
+    """World bbox of a whole REGION: the union of its FOV frames, or ``None`` if it has none.
+
+    This is the world extent a plate CELL covers, and it is the same rectangle
+    ``_placement.mosaic_extent_px`` scales into the 88 px cell — both are the bounding box of the
+    region's placed frames, one in micrometres and one in pixels. That equality is what lets a
+    cached cell be pasted back into world space without a second geometry to keep in step.
+    """
+    boxes = [b for k, b in ladder.fov_bboxes.items() if str(k[0]) == str(region)]
+    if not boxes:
+        return None
+    return (min(b[0] for b in boxes), min(b[1] for b in boxes),
+            max(b[2] for b in boxes), max(b[3] for b in boxes))
+
+
+class CompositePlateSource:
+    """``TileSource`` that serves PLATE rungs from the persisted preview cells and FOV rungs from
+    the reader. This is the composite source ``NEXT_STEPS.md`` scoped and did not build.
+
+    The blocker, in Spencer's words:
+
+        Coarse rungs cannot be served by ``ReaderTileSource`` as it stands: a fit-to-plate tile
+        overlaps all 72 FOVs and measured **25 s** to build.
+
+    The 25 s is not a slow loop, it is the arithmetic of the read: a fit-to-plate tile covers the
+    whole sample, so every FOV in the acquisition overlaps it, and a raw acquisition has no
+    written pyramid to read a coarse version from — each of those FOVs decodes a full frame and
+    is area-averaged down to a handful of pixels. On this repo's 1536-well fixture the same tile
+    would touch 1536 fields, not 72.
+
+    The fix is to stop deriving that picture at read time, because we ALREADY DERIVED IT: the
+    preview pass composites every well into an 88 px cell on open, and ``_platecache`` now keeps
+    those cells across restarts. A plate rung is those cells pasted into world micrometres, which
+    is what :meth:`InMemoryMultiscale.add_patch` does, so a fit-to-plate tile becomes a dict
+    lookup in RAM.
+
+    **What the plate rungs are, honestly.** They are montage resolution: 88 px per well, the same
+    picture the plate overview already draws, now placed in stage micrometres and addressable as
+    tiles. They are not a second, finer downsample chain, because building one would duplicate the
+    writer's job (IMA-184) and would put the 25 s straight back. The FOV rungs below the crossover
+    are where real resolution comes from, and they are unchanged: ``ReaderTileSource``, pixel for
+    pixel.
+
+    **A cell that is not cached is not silently black.** That tile is composited by
+    ``ReaderTileSource``, at its real cost, and counted in :attr:`coarse_from_reader`. Serving
+    zeros would be a picture that looks acquired and is not, and falling back quietly would hide
+    the one number that says whether this is working.
+
+    MEASURED, one fit-to-plate tile, this machine, page cache warm (so these are the conservative
+    numbers)::
+
+        dataset                          ReaderTileSource   composite, first   composite, steady
+        real 10x tissue, 55 FOVs             2.387 s            65 ms             < 0.01 ms
+        sim_1536wp, 1536 FOVs                8.448 s          1 439 ms               0.14 ms
+
+    "first" includes seeding: reading the cells and pasting every well into every resident rung.
+    "steady" is the lookup a pan or a zoom actually pays. The FOV counts are the point: the
+    reader's cost grows with the SAMPLE, and the composite's steady cost does not.
+
+    Note where the seeding cost went. After ``_platecache`` compacted its cells into one
+    memory-mapped page the seed only improved from 1 591 ms to 1 439 ms, because seeding is not
+    I/O bound: it is 1536 ``_paste_field`` calls into the resident rungs. Making it cheaper means
+    pasting fewer, larger patches (the page IS one array; a rung could be resampled from it whole),
+    and that is worth doing when someone measures a coarse-rung stall, not before.
+    """
+
+    def __init__(self, reader, metadata: Mapping, ladder: PlateLadder, *,
+                 cache=None, cells: Optional[Mapping] = None,
+                 budget_bytes: Optional[int] = None, **fov_kwargs) -> None:
+        self.reader = reader
+        self.meta = dict(metadata)
+        self.ladder = ladder
+        self.cache = cache
+        self.fov_source = ReaderTileSource(reader, metadata, ladder, **fov_kwargs)
+        self.channels = [str(c["name"]) for c in (self.meta.get("channels") or [])] or ["0"]
+        self.dtype = np.dtype(self.meta.get("dtype") or np.uint16)
+        self.seeded: set = set()
+        self.coarse_from_cells = 0
+        self.coarse_from_reader = 0
+        try:
+            self.plate_source = InMemoryMultiscale(
+                ladder, self.channels, self.dtype,
+                budget_bytes=(DEFAULT_PREVIEW_BUDGET_BYTES if budget_bytes is None
+                              else int(budget_bytes)),
+                t=int(fov_kwargs.get("t", 0)))
+        except ValueError:
+            # No plate rungs on this ladder (a single-FOV acquisition, or a tile_px larger than
+            # the whole sample). Then every rung is an FOV rung and there is nothing to compose;
+            # this degrades to exactly ReaderTileSource rather than pretending otherwise.
+            self.plate_source = None
+        self._seed_pending = cells is not None or cache is not None
+        self._cells = dict(cells) if cells else None
+
+    # ---- seeding ------------------------------------------------------------------------
+    def seed(self, cells: Mapping) -> int:
+        """Fold ``{region: (C, h, w) cell}`` into the plate rungs. Returns regions folded in.
+
+        A cell may be a ``_platecache.CellTile``, in which case only the sub-rectangle it says it
+        covers is used — the letterbox padding around a mosaic is not acquired pixels and must not
+        be pasted into the world as though it were.
+        """
+        if self.plate_source is None:
+            return 0
+        n = 0
+        for region, cell in cells.items():
+            if self._add_cell(str(region), cell):
+                n += 1
+        return n
+
+    def _add_cell(self, region: str, cell) -> bool:
+        bbox = region_bbox_um(self.ladder, region)
+        if bbox is None:
+            return False                    # a well with no stage position is not on this ladder
+        arr = np.asarray(cell)
+        box = getattr(cell, "box", None)
+        if box is not None:
+            top, left, h, w = (int(v) for v in box)
+            arr = arr[:, top:top + h, left:left + w]
+        if arr.ndim != 3 or arr.shape[0] != len(self.channels) or min(arr.shape[1:]) < 1:
+            return False
+        self.plate_source.add_patch(bbox, arr)
+        self.seeded.add(region)
+        return True
+
+    def _ensure_seeded(self) -> None:
+        """Load the cells the first time a coarse tile is actually asked for, never at open.
+
+        Lazy on purpose. Seeding reads one small file per well, and a session that never zooms out
+        past the crossover should not pay for a rung it will not look at. The plate overview's own
+        preview pass is what populates the cache in the first place, so this costs nothing on a
+        first open and is a warm read on every one after.
+        """
+        if not self._seed_pending:
+            return
+        self._seed_pending = False
+        if self._cells:
+            self.seed(self._cells)
+            self._cells = None
+        if self.cache is not None:
+            regions = sorted({str(k[0]) for k in self.ladder.fov_bboxes})
+            self.seed(self.cache.load_all(regions))
+
+    # ---- TileSource ---------------------------------------------------------------------
+    def read_tile(self, desc: TileDescriptor) -> np.ndarray:
+        """One channel of one tile. Satisfies ``_tiling.TileSource``, like the three above."""
+        if self.ladder.is_fov_level(desc.level) or self.plate_source is None:
+            return self.fov_source.read_tile(desc)
+        self._ensure_seeded()
+        if desc.level not in self.plate_source.levels or not self._covered(desc):
+            self.coarse_from_reader += 1
+            return self.fov_source.read_tile(desc)
+        self.coarse_from_cells += 1
+        return self.plate_source.read_tile(desc)
+
+    def _covered(self, desc: TileDescriptor) -> bool:
+        """Whether every region overlapping this tile was seeded from a cell.
+
+        Partial coverage goes to the reader whole rather than being drawn half from cells and
+        half from black. A tile assembled from two sources at two resolutions is the seam this
+        source exists to remove.
+        """
+        bbox = tuple(float(v) for v in desc.bbox_um)
+        regions = {str(k[0]) for k in self.ladder.fovs_overlapping(bbox)}
+        return bool(regions) and regions <= self.seeded

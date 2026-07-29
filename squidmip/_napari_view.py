@@ -80,7 +80,9 @@ from typing import Any, Iterable, Optional, Sequence
 
 import numpy as np
 
-log = logging.getLogger("squidmip.napari")
+from squidmip._logpane import get_logger
+
+log = get_logger("napari")
 
 #: Fallback GPU 3D texture cap (Apple GPUs report GL_MAX_3D_TEXTURE_SIZE = 2048). The live value
 #: is read off the canvas at runtime; this is only used until that is known.
@@ -389,8 +391,8 @@ class MosaicLayers:
         napari does not support multiscale in 3D: the instant ``ndisplay`` flips to 3 it drops a
         multiscale layer to the COARSEST level unconditionally (``_scalar_field/_slice.py``), which
         is the blocky volume Julio screenshotted. We do not want that. When 3D is on we hand each
-        layer its level-0 ``(Z, Y, X)`` array so napari renders the volume at max resolution ("max
-        res in napari first, then AGAVE"); when it goes back to 2D we restore the pyramid so
+        layer its level-0 ``(Z, Y, X)`` array so napari renders the volume at the highest resolution it
+        can hold; when it goes back to 2D we restore the pyramid so
         navigation stays fast. napari 0.6.6 allows the in-place swap (verified). Idempotent: a
         layer already in the requested form is skipped, so re-applying on a region change is safe.
         """
@@ -419,8 +421,9 @@ class MosaicLayers:
                 # GL_MAX_3D_TEXTURE_SIZE (~2048 on Apple GPUs); handed a bigger volume it does its
                 # OWN crude stride-downsample. So target the FINEST pyramid level that still fits
                 # the texture: that fills the GPU budget = the max resolution napari can physically
-                # show for the whole region. Native full res needs a CROP or AGAVE (one texture
-                # cannot hold 5731 px). Levels are finest-first; take the first that fits, else the
+                # show for the whole region. Native full res needs a CROP (one texture cannot
+                # hold 5731 px), which is what an ROI child window is for. AGAVE is cancelled, see
+                # docs/VERSIONS.md. Levels are finest-first; take the first that fits, else the
                 # coarsest as a floor.
                 chosen = data[-1]
                 for lvl in data:
@@ -430,7 +433,7 @@ class MosaicLayers:
                 ly.multiscale = False
                 ly.data = chosen
                 log.info("napari 3D: rendering %s at %s (fills the %d px GPU texture budget; "
-                         "full native res needs a crop or AGAVE)",
+                         "full native res needs a crop: draw an ROI and open it)",
                          getattr(ly, "name", "layer"), tuple(getattr(chosen, "shape", ())), limit)
             else:
                 pyr = meta.get("_pyramid")

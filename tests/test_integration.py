@@ -46,14 +46,12 @@ def _read_zarr_array(path) -> np.ndarray:
     ).result()
     return np.asarray(store[...].read().result())
 
-SIM_1536WP = Path("/Users/julioamaragall/CEPHLA/Data/sim_1536wp")
-
-
-@pytest.fixture
-def sim_1536wp():
-    if not SIM_1536WP.is_dir():
-        pytest.skip(f"sim_1536wp not present at {SIM_1536WP}")
-    return SIM_1536WP
+# The `sim_1536wp` fixture and its guard now live in tests/conftest.py (`sim_1536wp_problem`), so
+# every module that wants the plate-scale dataset asks the same question and gets the same sentence.
+# The guard that lived here checked only ``SIM_1536WP.is_dir()``, which is why a fixture whose 6144
+# planes are DANGLING SYMLINKS (its source, ~/Downloads/synthetic_2x2_wellplate, was deleted) sailed
+# past it and failed nine tests inside open_reader instead of skipping with the reason.
+from tests.conftest import SIM_1536WP  # noqa: E402,F401  (path constant; fixture is auto-discovered)
 
 
 def _assert_well_matches_np_max(reader, region, fov):

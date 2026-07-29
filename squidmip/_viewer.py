@@ -50,8 +50,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -67,27 +69,92 @@ from PyQt5.QtWidgets import (
     QSplitter, QStackedWidget, QStyleFactory, QTabBar, QVBoxLayout, QWidget,
 )
 
+#: The one Fusion QStyle for this process, created on first use. It must NOT be per-window.
+#:
+#: ``QWidget.setStyle()`` does not take ownership: the widget keeps a bare pointer and Qt never
+#: tells it when the style dies. Holding the only reference on the window meant the style was
+#: freed with the window's ``__dict__``, before ``~QWidget`` ran -- and every widget destructor
+#: calls ``style()->unpolish(this)``. Building and dropping windows therefore corrupted the heap
+#: and segfaulted the process, which is what killed whole pytest runs (macOS SIGSEGV here, Windows
+#: 0xC0000005) and took the summary line with them. Measured 2026-07-28: the interpreter died on
+#: the 6th window; with the style kept alive, 40 survived. Pinned by tests/test_window_lifetime.py.
+#:
+#: A style is stateless chrome and Qt shares one app-wide by default, so one per process is also
+#: simply the right object count. ``None`` if this Qt build has no Fusion, which callers guard for.
+_FUSION_STYLE = None
+_FUSION_STYLE_MADE = False
+
+#: The one QApplication for this process, PINNED here for the life of the process.
+#:
+#: Same class of bug as the style above, one level up. A QApplication is a process singleton that
+#: every widget, every QStyle and every posted event points back at, and PyQt gives its ownership
+#: to PYTHON: the last Python reference dying deletes it, whatever is still standing. Callers keep
+#: that reference in a place with a much shorter life than the process. ``main()`` held it in a
+#: local and then handed the WINDOW back to its caller, and every test module holds it in a
+#: module-scoped pytest fixture, whose cache pytest clears at the last test's teardown -- which is
+#: exactly where whole suites died, after the last test passed and before the summary printed.
+#: ``tests/test_channel_bar.py`` had already hit this and pinned its own copy in a global.
+#:
+#: Measured 2026-07-28 on a parametrised window fixture, 60 build/destroy cycles per run, 12 runs
+#: per configuration: unpinned, the summary line printed 0 times out of 12; with the QApplication
+#: pinned and NOTHING else changed, 12 out of 12. Pinned by tests/test_window_lifetime.py.
+#:
+#: One per process is also simply the right object count: ``QApplication.instance()`` is Qt saying
+#: so. Nothing here creates a second one.
+_APP = None
+
+
+def qt_app(argv=None):
+    """The process's QApplication, created if needed, and held so Python cannot free it early.
+
+    Every entry point should go through this instead of ``QApplication.instance() or
+    QApplication([])``, which binds the app to whatever local or fixture cache happens to be at
+    hand. Returns the existing instance untouched when Qt already has one, so a host application
+    that made its own is adopted rather than duplicated.
+    """
+    global _APP
+    if _APP is None:
+        _APP = QApplication.instance() or QApplication(list(argv) if argv is not None else [])
+    return _APP
+
+
+def _fusion_style():
+    """The shared Fusion style, or None. Created lazily: a QStyle needs a live QApplication."""
+    global _FUSION_STYLE, _FUSION_STYLE_MADE
+    if not _FUSION_STYLE_MADE:
+        _FUSION_STYLE = QStyleFactory.create("Fusion")
+        _FUSION_STYLE_MADE = True
+    return _FUSION_STYLE
+
+
 #: The main window's logger. The log panel taps the stdlib ROOT logger, so anything logged here
 #: appears in the bottom-right panel for free — the reason a failure the user triggers (a spot
 #: detection that raised, a region that would not fuse) MUST go through this and not only into an
 #: in-widget banner: a banner the user has already clicked past leaves no trace, and "the logger
 #: didn't show it" is the exact gap this closes.
-log = logging.getLogger("squidmip.viewer")
+from squidmip._logpane import get_logger
+
+log = get_logger("viewer")
 
 from squidmip import _explore, _qtstyle
+from squidmip._budget import cache_budget
+from squidmip.contract import field_levels, field_path
+from squidmip._tiling import TileDescriptor
 from squidmip._engine import _default_workers, available_projectors
 from squidmip._layers import OperationStack
 from squidmip._minerva import MINERVA_HOME_ENV as _MINERVA_HOME_ENV
 from squidmip._montage import _area_downsample, _hex_to_rgb01, composite
 from squidmip._output import parse_well_id
 from squidmip._activity import ActivityLog
-from squidmip._logpane import LogBus
+from squidmip._address import Extent
+from squidmip._logpane import LogBus, ViewLog
 from squidmip._logpanel import LogPanel
 from squidmip._plate import PlateBuildError, build_plate, display_well_id
 from squidmip._plate_shape import PlateShapeError
 from squidmip._qt_tabs import _DetachTabBar, _DetachTabs, _FloatWindow  # noqa: F401 (re-export)
 from squidmip._qtstyle import dark_palette as _dark_palette
 from squidmip._qtstyle import hline as _hline
+from squidmip._tsctx import HANDLES
 from squidmip._terminal import _CmdEdit, _ProcTerminal, _Terminal  # noqa: F401 (re-export)
 from squidmip._measure import (
     FAILED as _MEASURE_FAILED, OK as _MEASURE_OK, PARTIAL as _MEASURE_PARTIAL,
@@ -126,6 +193,11 @@ def _view_hue(view_id: int, *, focused: bool = False) -> QColor:
     c = QColor.fromHsvF(h, 0.62, 1.0, 0.34 if focused else 0.20)
     return c
 _MIN_PREVIEW_BOX_PX = 4    # smallest FOV box (of _CELL) the RAW preview will bother mosaicking
+
+# Byte budget for the deep-zoom tile cache. A quarter of the measured cache budget: the plate
+# overlay is one of several consumers (the mosaic pyramid and the reader's own plane cache are the
+# others), so it must not claim the whole allowance. TileCache enforces it by eviction.
+_TILE_CACHE_BYTES = max(64 << 20, cache_budget() // 4)
 #                            (IMA-253): below this a field is a speck, and reading one plane per
 #                            field to draw specks is pure cost. The operator path is unaffected.
 _CLICK_SLOP = 3                       # px of travel below which a Shift-drag counts as a click
@@ -153,9 +225,13 @@ _EMPTY_EXPLORE_LEDE = (
 #: well plate acquisition. For tissue acquisition we could print the user 'open in exploration
 #: pane'." A control well is a plate concept -- on a glass slide with hand-drawn regions there is
 #: nothing to control against, and naming a gesture the user cannot perform is worse than silence.
+# The line below used to name "Right-click a well and choose Control Well". `set_control_well`
+# and `PlateOverview._context_menu` were deleted wholesale in 2b8fbc5 (Decentralize GUI), so it
+# taught a gesture the user cannot perform, which the comment below calls worse than silence.
+# Corrected 2026-07-28 to name Shift-drag, which is the gesture that actually exists.
 _EMPTY_EXPLORE_PRIMARY = (
-    "Right-click a well and choose Control Well to pin it here, so you can compare the rest "
-    "against it.")
+    "Shift-drag across the plate to open the wells you select in their own window, so you can "
+    "compare them side by side.")
 #: PRIMARY line for a SLIDE / tissue acquisition, where the unit is a region, not a well.
 _EMPTY_EXPLORE_PRIMARY_SLIDE = (
     "Double-click a region on the slide and choose Open in exploration pane to bring it here.")
@@ -179,6 +255,26 @@ _CHECK_QSS = _qtstyle.CHECK_QSS
 _TERM_QSS = _qtstyle.TERM_QSS
 _MENU_QSS = _qtstyle.MENU_QSS
 _ANSI_RE = _qtstyle.ANSI_RE
+
+#: ``font-size: 12px`` in a stylesheet, with the number as group 1. Only ``px`` — a ``pt`` size
+#: is already device-independent and must NOT be scaled a second time.
+_QSS_FONT_PX_RE = re.compile(r"(?<=font-size:)\s*(\d+(?:\.\d+)?)\s*px", re.IGNORECASE)
+
+
+def _scale_qss_fonts(qss: str, scale: float) -> str:
+    """Multiply every ``font-size:Npx`` in *qss* by *scale*, leaving the rest untouched.
+
+    Only the font size moves. Scaling paddings and borders too was tried and looked wrong: the
+    dark cards are drawn with 1 px hairlines that turn into muddy 2-3 px rules the moment they
+    are multiplied, and Qt already scales the whole sheet by the device pixel ratio.
+
+    Sizes floor at 8 px so shrinking the window toward the minimum cannot produce type nobody
+    can read.
+    """
+    def _sub(m):
+        return f"{max(8, round(float(m.group(1)) * scale))}px"
+
+    return _QSS_FONT_PX_RE.sub(_sub, qss)
 
 
 def _signal_names(cls) -> tuple:
@@ -262,11 +358,6 @@ _OPERATIONS_BY_KEY = {op.key: op for op in _OPERATIONS}
 # which made a PRESENTATION edit (reordering the cards) silently change which operator the save
 # button RUNS. Named, so the two cannot be confused.
 _SAVE_OPERATOR = "mip"
-
-#: Registry key of the AGAVE 3D tab. Deliberately NOT an Operation key: the 3D view produces no
-#: plate result, so it is never offered in the "Process well plates" menu and never routes a
-#: result into pane 3 (results belong in the plate view and the centre viewer, as layers).
-AGAVE_KEY = "agave3d"
 
 # Roadmap cards shown under "TO BE ADDED", as (label, blurb). Empty: everything currently on the
 # roadmap that we're willing to advertise has shipped as a real Operation above. Add an entry when
@@ -352,6 +443,28 @@ def _fit_box(a: np.ndarray, h: int, w: int) -> np.ndarray:
     return a[yi][:, xi].astype(np.float32)
 
 
+#: "build the cache yourself from the reader" as a DEFAULT that ``None`` can override. A plain
+#: ``None`` default would make "no cache" unsayable, which is exactly what the uncached-path tests
+#: and ``SQUIDMIP_PLATE_CACHE=0`` need to be able to say.
+_CACHE_AUTO = object()
+
+
+def _box_union(a, b):
+    """Union of two ``(top, left, h, w)`` boxes; ``a`` may be None (nothing accumulated yet).
+
+    The union of a region's FOV boxes is the rectangle the mosaic actually occupies inside its
+    cell, and that is what gets cached and replayed. It is the same rectangle
+    ``_placement.cell_boxes`` centred there in the first place.
+    """
+    if a is None:
+        return tuple(int(v) for v in b)
+    top = min(a[0], b[0])
+    left = min(a[1], b[1])
+    bottom = max(a[0] + a[2], b[0] + b[2])
+    right = max(a[1] + a[3], b[1] + b[3])
+    return (int(top), int(left), int(bottom - top), int(right - left))
+
+
 # The Squid well-plate formats we fit a plate to (well count -> (rows, cols)). An acquisition whose
 # format isn't one of these falls back to a present-only grid (see _plate_grid).
 _PLATE_DIMS = {4: (2, 2), 6: (2, 3), 12: (3, 4), 24: (4, 6), 96: (8, 12),
@@ -434,6 +547,20 @@ def operator_label(key: str) -> str:
     runnable and must still name itself in the status line and the layer stack."""
     op = _OPERATIONS_BY_KEY.get(key)
     return op.label if op is not None else key
+
+
+def _action_label(key: str, operator_kwargs: Optional[dict] = None) -> str:
+    """What the console calls one action: ``decon(sigma=2.0)``, or bare ``mip`` with no parameters.
+
+    The REGISTRY key, not the card's human label, and the parameters spelled out. A console line
+    has to be enough to reproduce the run from, and "Deconvolution" is not: two runs at different
+    sigmas would print identically, which is precisely the mixed-recipe plate Task 3 is about.
+    Sorted so the same call always renders the same string, i.e. so it can be compared by eye.
+    """
+    if not operator_kwargs:
+        return str(key)
+    args = ", ".join(f"{k}={operator_kwargs[k]}" for k in sorted(operator_kwargs))
+    return f"{key}({args})"
 
 
 class _RunningContrast:
@@ -941,12 +1068,13 @@ class _ZarrLoupeSource(_LoupeSource):
         single level, which is exactly what the test fixtures hit)."""
         if self._levels is not None:
             return self._levels
-        field = f"{self._base}/{self._path_of(well_id)}/{self._fov_of(well_id)}"
-        try:
-            ome = json.loads((Path(field) / "zarr.json").read_text())["attributes"]["ome"]
-            self._levels = [ds["path"] for ds in ome["multiscales"][0]["datasets"]]
-        except Exception:
-            self._levels = ["0"]               # a field always has a full-res array 0
+        # Through the contract, not a hand-parse. This block used to reconstruct the field path by
+        # f-string and read multiscales -> datasets[*].path itself behind a bare `except
+        # Exception`, i.e. a private copy of the layout plus an unwritten fallback. Both now have
+        # one home: squidmip/contract, and docs/plate-contract.md says the pyramid is OPTIONAL and
+        # that level "0" is what its absence falls back to.
+        self._levels = field_levels(
+            field_path(self._base, self._path_of(well_id), self._fov_of(well_id)))
         self.n_levels = max(1, len(self._levels))
         return self._levels
 
@@ -956,7 +1084,8 @@ class _ZarrLoupeSource(_LoupeSource):
         key = (well_id, level)
         if key not in self._handles:
             import tensorstore as ts
-            path = f"{self._base}/{self._path_of(well_id)}/{self._fov_of(well_id)}/{levels[level]}"
+            path = field_path(self._base, self._path_of(well_id), self._fov_of(well_id),
+                              levels[level])
             self._handles[key] = ts.open(
                 {"driver": "zarr3", "kvstore": {"driver": "file", "path": path}}).result()
         return self._handles[key]
@@ -1049,6 +1178,80 @@ class _LoupeWorker(QThread):
 
 
 # --- plate overview widget (one cell per well; hue-coded status; fit-to-view) ---------------
+
+#: Deep zoom off-switch. On by default; ``SQUIDMIP_DEEP_ZOOM=0`` restores the pure-montage plate
+#: without a revert, which is what makes this safe to ship before it has run on many datasets.
+def _deep_zoom_enabled() -> bool:
+    return os.environ.get("SQUIDMIP_DEEP_ZOOM", "1") != "0"
+
+
+#: Most tiles to have in flight at once. The queue is drained newest-first, so a pan that outruns
+#: the disk discards stale requests rather than rendering the route the cursor took.
+_TILE_QUEUE_MAX = 24
+
+
+class _TileFetcher(QThread):
+    """Decode tiles OFF the GUI thread and hand them back one at a time.
+
+    The piece TODOS.md records as unowned ("Tile render loop + async fetch executor are unowned").
+    It has to be a thread: a single per-FOV tile is a full-frame decode per z-plane -- measured at
+    ~350 ms on the 10-deep WELLPLATE dataset -- so doing this in ``paintEvent`` would freeze the
+    window for seconds per repaint.
+
+    Newest-first (a LIFO) on purpose. A user who pans across the plate generates requests faster
+    than they can be served, and the tiles worth decoding are the ones under the cursor NOW, not
+    the ones it passed over a second ago. FIFO would render the journey; LIFO renders the
+    destination.
+    """
+
+    ready = pyqtSignal(object, object)        # (TileDescriptor, np.ndarray)
+
+    def __init__(self, source, parent=None):
+        super().__init__(parent)
+        self._source = source
+        self._pending: list = []              # treated as a stack
+        self._lock = threading.Lock()
+        self._wake = threading.Event()
+        self._stop = threading.Event()
+
+    def request(self, descs) -> None:
+        """Queue *descs*, newest last. Already-queued descriptors are not duplicated."""
+        with self._lock:
+            have = set(self._pending)
+            for d in descs:
+                if d not in have:
+                    self._pending.append(d)
+            del self._pending[:-_TILE_QUEUE_MAX]     # drop the stalest, keep the cap honest
+        self._wake.set()
+
+    def drop_all(self) -> None:
+        with self._lock:
+            self._pending.clear()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._wake.set()
+
+    def run(self) -> None:
+        while not self._stop.is_set():
+            with self._lock:
+                desc = self._pending.pop() if self._pending else None
+            if desc is None:
+                self._wake.wait(0.25)
+                self._wake.clear()
+                continue
+            try:
+                arr = self._source.read_tile(desc)
+            except Exception as exc:
+                # A tile that will not decode is a hole and the montage still shows — but a hole
+                # that says nothing is how "deep zoom quietly does nothing" ships. Name it once
+                # per descriptor; the viewport stays alive either way.
+                log.warning("tile %s/%s failed to decode: %s: %s",
+                            desc.level, desc.key, type(exc).__name__, exc)
+                continue
+            if not self._stop.is_set():
+                self.ready.emit(desc, arr)
+
 
 class PlateOverview(QWidget):
     """The low-res plate: an RGB canvas of MIP tiles, a per-well status hue, a red box, and a
@@ -1144,6 +1347,13 @@ class PlateOverview(QWidget):
         self._user_view = False       # True once the user wheel-zooms/pans (stop auto-fitting)
         self._boxes: dict = {}        # (region, fov) -> (top, left, h, w) in cell px; {} = single-FOV
         self._boxed_regions: set = set()   # regions whose cell holds a LETTERBOXED mosaic, not one tile
+        # DEEP ZOOM (below). All None until set_tile_source() succeeds; every path checks _tile_src
+        # so an acquisition without stage positions simply keeps the montage and costs nothing.
+        self._ladder = None
+        self._tile_src = None
+        self._tile_cache = None
+        self._tile_fetch = None
+        self._tile_level = None       # last rung picked, for pick_level's hysteresis
         # -- carrier geometry (IMA-220, redrawn for IMA-253: geometry, not a photograph) --
         self._carrier = None          # the _plate.PlateGeometry to draw the holder outline from
         self._carrier_slide = False   # slot-shaped cells (a slide carrier) vs round wells
@@ -1168,6 +1378,181 @@ class PlateOverview(QWidget):
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.ClickFocus)   # so focusOutEvent can actually fire (see below)
         self.setMinimumSize(240, 200)
+
+    # -- deep zoom (tile overlay) ---------------------------------------------------------------
+    def set_tile_source(self, reader, meta) -> bool:
+        """Arm deep zoom for this acquisition. Returns whether it armed.
+
+        Deliberately fail-quiet: an acquisition with no usable stage positions cannot be placed in
+        world µm, ``plate_ladder`` says so by raising, and the honest response is to keep the
+        montage rather than draw a pile of FOVs at one spot. That is the SAME condition the
+        per-region coordinates salvage leaves behind, so a plate with one truncated well arms
+        normally and only that well stays coarse.
+        """
+        self.clear_tile_source()
+        if not _deep_zoom_enabled() or reader is None or not meta:
+            return False
+        try:
+            from squidmip._platecache import PlateCellCache
+            from squidmip._tiling import TileCache
+            from squidmip._tilesource import CompositePlateSource, plate_ladder
+
+            self._ladder = plate_ladder(meta)
+            # COMPOSITE, not a bare ReaderTileSource: plate rungs come from the persisted preview
+            # cells and FOV rungs from the reader, which is the source NEXT_STEPS.md scoped and
+            # did not build. FOV-rung behaviour is byte-identical (it delegates); what changes is
+            # that a coarse rung can be served at all, at a dict lookup rather than the 25 s
+            # full-plate decode Spencer measured. Seeding is lazy: nothing is read until a coarse
+            # tile is actually asked for.
+            self._tile_src = CompositePlateSource(
+                reader, meta, self._ladder,
+                cache=PlateCellCache.for_reader(reader, meta, cell_px=_CELL))
+        except Exception:
+            self._ladder = self._tile_src = None
+            return False
+        self._tile_cache = TileCache(budget_bytes=_TILE_CACHE_BYTES)
+        self._tile_fetch = _TileFetcher(self._tile_src, self)
+        self._tile_fetch.ready.connect(self._on_tile_ready)
+        self._tile_fetch.start()
+        return True
+
+    def clear_tile_source(self) -> None:
+        """Stop and forget the tile machinery. Idempotent; safe on a half-built state."""
+        if self._tile_fetch is not None:
+            self._tile_fetch.stop()
+            self._tile_fetch.wait(1500)
+            self._tile_fetch = None
+        self._ladder = self._tile_src = self._tile_cache = None
+        self._tile_level = None
+
+    def _on_tile_ready(self, desc, arr) -> None:
+        if self._tile_cache is None:
+            return                      # the source was swapped while this tile was in flight
+        self._tile_cache.insert(desc, arr)
+        self.update()
+
+    def _visible_fov_tiles(self) -> list:
+        """``[(TileDescriptor, QRectF), ...]`` for the FOVs on screen, or ``[]`` to stay coarse.
+
+        The engage rule is one comparison: ``cd > _CELL``. Below it the montage is being shown at
+        or under its native 88 px per cell and is exactly the right image — serving tiles there
+        would cost a full-plate decode (measured: 25 s) to reproduce a picture that is already on
+        screen. Above it the montage is an upscale, which is the blur this feature exists to fix.
+
+        Tiles are placed by reusing ``_placement.cell_boxes`` at the CURRENT cell size, the same
+        function the montage itself is composited with. That is what makes the overlay land
+        pixel-aligned on the thumbnail underneath instead of merely near it.
+        """
+        if (self._tile_src is None or self._ladder is None or self._cd <= _CELL
+                or self._layout is not None):     # freeform cells are not a uniform grid
+            return []
+        meta = getattr(self._tile_src, "meta", {})
+        positions = meta.get("fov_positions_um") or {}
+        px = meta.get("pixel_size_um")
+        frame = meta.get("frame_shape")
+        if not positions or not px or frame is None:
+            return []
+
+        from squidmip._placement import cell_boxes, fov_offsets_px
+
+        cd = int(round(self._cd))
+        vis = self.rect().adjusted(-cd, -cd, cd, cd)         # one cell of slack, so panning
+        out: list = []                                       # pre-warms the edge
+        for rc, region in self._by_rc.items():
+            x0, y0, cw, chh = self._cell_rect(*rc)
+            if not vis.intersects(QRectF(x0, y0, cw, chh).toRect()):
+                continue
+            fovs = list((meta.get("fovs_per_region") or {}).get(region) or [])
+            if not fovs:
+                continue
+            try:
+                boxes = cell_boxes(fov_offsets_px(positions, region, fovs, px), frame, cd)
+            except (KeyError, ValueError):
+                continue                 # this region has no derivable mosaic; montage stands
+            for fov, (top, left, bh, bw) in boxes.items():
+                key = (region, fov)
+                if key not in self._ladder.fov_bboxes or bh < 2 or bw < 2:
+                    continue
+                rect = QRectF(x0 + left, y0 + top, bw, bh)
+                if not vis.intersects(rect.toRect()):
+                    continue
+                # The rung is chosen from what this FOV occupies ON SCREEN, not from the plate
+                # zoom: a letterboxed mosaic gives each FOV a fraction of the cell, so the plate's
+                # µm/px would over-fetch every one of them.
+                um_per_px = (float(frame[1]) * float(px)) / max(float(bw), 1.0)
+                lvl = self._ladder.geometry.pick_level(um_per_px, self._tile_level)
+                if not self._ladder.is_fov_level(lvl):
+                    # Coarser than the crossover. The montage already wins HERE because this
+                    # enumerator is per FOV and a plate rung is keyed by a world grid cell, not by
+                    # (region, fov) -- the montage's uniform cell grid and the ladder's stage
+                    # micrometres agree only inside a cell. The rung itself is no longer
+                    # unservable: CompositePlateSource answers it from the cached preview cells.
+                    # What is still missing is a world-space enumerator to place those tiles, and
+                    # that is the continuous zoom-out in NEXT_STEPS.md's MIP-on-plateview item.
+                    continue
+                self._tile_level = lvl
+                out.append((TileDescriptor(level=lvl, key=key, channel=self._tile_channel(),
+                                           bbox_um=self._ladder.fov_bboxes[key]), rect))
+        return out
+
+    def _tile_channel(self) -> str:
+        """Which channel the overlay reads. One channel for now — the montage stays the composite."""
+        chans = (getattr(self._tile_src, "meta", {}) or {}).get("channels") or []
+        return str(chans[0]["name"]) if chans else "0"
+
+    def _paint_tiles(self, p) -> None:
+        """Draw whatever the cache can serve, and queue the rest. Never blocks on a decode."""
+        wanted = self._visible_fov_tiles()
+        if not wanted:
+            return
+        by_desc = {d: r for d, r in wanted}
+        for desc, arr in self._tile_cache.resolve(list(by_desc)):
+            rect = by_desc.get(desc)
+            if rect is None:
+                continue                 # resolve() substituted an ancestor we did not ask to place
+            img = self._tile_qimage(desc, arr)
+            if img is not None:
+                p.drawImage(rect, img)
+        missing = [d for d in by_desc if self._tile_cache.get(d) is None]
+        if missing and self._tile_fetch is not None:
+            self._tile_fetch.request(missing)
+
+    def _tile_qimage(self, desc, arr):
+        """One cached tile as an 8-bit greyscale QImage, windowed by the plate's own contrast.
+
+        Reusing ``_RunningContrast`` is the point: a tile that windowed itself would jump in
+        brightness the instant it replaced the thumbnail under it, which reads as a rendering bug
+        even though every pixel is right.
+        """
+        cache = self.__dict__.setdefault("_tile_qimages", {})
+        hit = cache.get(desc)
+        if hit is not None:
+            return hit
+        lo, hi = self._tile_window()
+        a = np.clip((arr.astype(np.float32) - lo) * (255.0 / max(hi - lo, 1e-6)), 0, 255)
+        a = np.ascontiguousarray(a.astype(np.uint8))
+        img = QImage(a.data, a.shape[1], a.shape[0], a.shape[1], QImage.Format_Grayscale8).copy()
+        if len(cache) > 256:
+            cache.clear()                # bounded; the pixel cache underneath is the real one
+        cache[desc] = img
+        return img
+
+    def _tile_window(self) -> tuple:
+        """The active channel's display window, from the plate's running contrast when it has one.
+
+        ``_RunningContrast.window(ch)`` already resolves the user latch, the followed pane and the
+        running histogram in that order — so a tile lands with exactly the contrast the thumbnail
+        under it was drawn with, and replacing one with the other is invisible.
+        """
+        c = self._contrast
+        if c is not None:
+            try:
+                lo, hi = c.window(0)
+                if hi > lo:
+                    return float(lo), float(hi)
+            except Exception:
+                pass                # no histogram yet (nothing streamed): fall through to full range
+        return 0.0, 65535.0
 
     # -- loupe wiring --
     def set_loupe_source(self, source, colors=None):
@@ -1783,10 +2168,15 @@ class PlateOverview(QWidget):
     def mousePressEvent(self, e):
         if e.button() != Qt.LeftButton:
             return
-        # SHIFT owns every selection gesture (IMA-221). Keeping selection off the plain click is
-        # what makes double-click safe: Qt delivers press+release BEFORE mouseDoubleClickEvent, so
-        # a plain-click toggle would silently flip a well every time you opened one. (Ctrl is out:
-        # on macOS Ctrl+click is right-click and Qt maps Cmd -> ControlModifier.)
+        # Shift owns MULTI-well selection (IMA-221): Shift-drag opens the wells you box, Shift+Alt
+        # unions, Cmd/Ctrl-click toggles one. A plain click also selects, but it REPLACES rather
+        # than toggles (file-manager semantics, added in 2b8fbc5), which is what keeps double-click
+        # safe: Qt delivers press+release BEFORE mouseDoubleClickEvent, so a plain-click TOGGLE
+        # would silently flip a well every time you opened one. Replace is idempotent, toggle is
+        # not, and that difference is the whole reason this is safe.
+        # Corrected 2026-07-28: this comment still said "keeping selection off the plain click",
+        # which the plain-click replace at the bottom of mouseReleaseEvent had already contradicted.
+        # (Ctrl is out: on macOS Ctrl+click is right-click and Qt maps Cmd -> ControlModifier.)
         if e.modifiers() & Qt.ShiftModifier:
             self._marquee = (e.x(), e.y(), e.x(), e.y())
             self._marquee_add = bool(e.modifiers() & Qt.AltModifier)   # Shift+Alt = union
@@ -2137,6 +2527,13 @@ class PlateOverview(QWidget):
                 p.restore()
             else:
                 p.drawPixmap(int(ax), int(ay), self._scaled)
+
+        # DEEP ZOOM, on top of the montage and under every annotation. Ordering is the whole
+        # design: the thumbnail has already painted, so a tile that has not arrived yet leaves the
+        # coarse pixels showing rather than a hole, and the view sharpens in place as tiles land.
+        # Nothing here blocks -- misses are queued for the fetcher and the next repaint draws them.
+        if self._tile_cache is not None:
+            self._paint_tiles(p)
 
         # per-cell DOT over the WHOLE plate grid (so a sparse acquisition still shows the full plate
         # shape — e.g. 32x48 for 1536, 16x24 for 384 — with grey dots on the un-acquired wells):
@@ -3050,14 +3447,27 @@ class _SpotWorker(QThread):
 
         where = f"{self._region}/{self._channel}"
         algorithm = preferred_segmenter()
+        # THE DENOMINATOR IS WHATEVER THE RUNNING ALGORITHM REPORTS. `_spots.STAGES` is the
+        # otsu-watershed recipe's 7 stages, and it used to be emitted as the final total no matter
+        # which segmenter ran. Cellpose is the preferred nuclei segmenter now and reports a total of
+        # 1 ("running cellpose", 0/1 then 1/1), so the closing emit of 7/7 changed the denominator
+        # mid-run: a progress bar completed at 1/1 and then jumped backwards to 7/7. `_spots`:
+        # "the list is the progress DENOMINATOR ... there is no second hardcoded total to keep in
+        # sync". This records the total the algorithm actually reported so there is no second one.
+        reported_total = [0]
+
+        def _stage(name, done, total):
+            reported_total[0] = int(total)
+            self.stageChanged.emit(name)
+            self.progress.emit(int(done), int(total))
+
         try:
             plane = _full_res_mip(self._data)          # segment the MIP over z, not one z-plane
             log.info("%s: detecting nuclei with %s on a %s MIP", where, algorithm, plane.shape)
 
             res = detect_spots(
                 plane, self._params, algorithm=algorithm,
-                on_stage=lambda name, done, total: (self.stageChanged.emit(name),
-                                                    self.progress.emit(done, total)),
+                on_stage=_stage,
                 should_stop=self._stop.is_set,
             )
         except SpotDetectionCancelled:
@@ -3071,7 +3481,11 @@ class _SpotWorker(QThread):
             self.problem.emit(f"{where}: spot detection failed — {type(exc).__name__}: {exc}")
             return
 
-        self.progress.emit(len(_spot_stages()), len(_spot_stages()))
+        # Close on the SAME denominator the run reported. A segmenter that reported no stage at all
+        # (none is registered without one, but the seam permits it) falls back to the stage list, so
+        # the bar still reaches its total rather than never being filled.
+        total = reported_total[0] or len(_spot_stages())
+        self.progress.emit(total, total)
         self.stageChanged.emit("done")
         # Success goes to the LOG too, not only the napari readout — the user saw the count in the
         # viewer but nothing in the panel. A run that produced a number the user can act on should
@@ -3255,7 +3669,8 @@ class _PreviewWorker(QThread):
     #                                                 a bare `except: pass` left the plate frozen
     #                                                 half-grey, indistinguishable from "loading".
 
-    def __init__(self, reader, meta, fov_index: dict, order: list, mosaic: bool = True):
+    def __init__(self, reader, meta, fov_index: dict, order: list, mosaic: bool = True,
+                 cache=_CACHE_AUTO):
         super().__init__()
         self._reader, self._meta = reader, meta
         self._fov_index, self._order = fov_index, order
@@ -3263,6 +3678,18 @@ class _PreviewWorker(QThread):
         self._dtype = np.dtype(meta["dtype"])
         self._mosaic = bool(mosaic)
         self._stop = threading.Event()
+        # The persisted plate cells (_platecache). A sentinel default rather than None so a caller
+        # can say "no cache" explicitly and mean it, which is what the uncached-path tests need.
+        # `for_reader` returns None, logging why, for anything it cannot cache -- a reader with no
+        # `_path`, an unwritable cache dir, SQUIDMIP_PLATE_CACHE=0 -- so this worker never has to
+        # care whether caching is available.
+        from squidmip._platecache import PlateCellCache
+
+        self._cache = (PlateCellCache.for_reader(reader, meta, cell_px=_CELL)
+                       if cache is _CACHE_AUTO else cache)
+        self._pending: dict = {}      # region -> the cell being accumulated for the cache
+        self.cache_hits = 0           # regions served from the cache, for the status line and tests
+        self.cache_reads = 0          # regions actually read from the acquisition
 
     def _plan(self) -> list:
         """``[(region, fov, box|None), ...]`` — the read list, in plate order, FOVs in stage order.
@@ -3302,12 +3729,71 @@ class _PreviewWorker(QThread):
     def stop(self):
         self._stop.set()
 
+    def _replay_cached(self, plan: list) -> list:
+        """Emit every region the cache can serve; return the plan entries still to be read.
+
+        This is the whole reopen win, and it is one cell per WELL rather than one per FOV: a
+        cached 27-FOV mosaic replays as a single tile, so the reopen does not merely skip the
+        reads, it skips 26 of every 27 signal round trips too.
+
+        The tile is emitted with its CONTENT BOX, never as a full 88x88 cell. ``add_tile`` feeds
+        the running histogram whatever it is handed, and a mosaic cell is zero-padded wherever no
+        FOV lands; replaying the padding would pin the 1st percentile at 0 and wash the plate out
+        on every reopen while the first open looked right. See ``_platecache.CellTile``.
+        """
+        if self._cache is None:
+            return plan
+        by_region: dict = {}
+        for item in plan:
+            by_region.setdefault(item[0], []).append(item)
+        remaining: list = []
+        for region, items in by_region.items():
+            hit = None if self._stop.is_set() else self._cache.get(region)
+            if hit is None:
+                remaining.extend(items)
+                continue
+            ri, ci = self._fov_index[region]["rc"]
+            self.tileReady.emit(ri, ci, region, np.asarray(hit).astype(self._dtype), hit.box)
+            self.cache_hits += 1
+        self.cache_reads = len(by_region) - self.cache_hits
+        # Said out loud, because a cache nobody can see is indistinguishable from a fast disk.
+        log.info("plate preview: %d of %d wells served from the cell cache (%s)",
+                 self.cache_hits, len(by_region), self._cache)
+        return remaining
+
+    def _remember(self, region: str, box, tile: np.ndarray, expected: int) -> None:
+        """Accumulate one FOV into the region's cell, and publish the cell once it is whole.
+
+        Published per REGION as it completes rather than once at the end, so a preview that is
+        stopped half way (the user opens something else) still leaves the wells it finished
+        cached. A region whose read RAISED never completes and is therefore never published: a
+        half-read cell must not be persisted as though it were the well.
+        """
+        if self._cache is None:
+            return
+        st = self._pending.get(region)
+        if st is None:
+            st = self._pending[region] = {
+                "cell": np.zeros((len(self._channels), _CELL, _CELL), dtype=self._dtype),
+                "left": int(expected), "box": None}
+        top, left = (int(box[0]), int(box[1])) if box is not None else (0, 0)
+        h, w = tile.shape[1], tile.shape[2]      # by ACTUAL shape, as add_tile places it
+        st["cell"][:, top:top + h, left:left + w] = tile
+        st["box"] = _box_union(st["box"], (top, left, h, w))
+        st["left"] -= 1
+        if st["left"] <= 0:
+            self._pending.pop(region, None)
+            top0, left0, bh, bw = st["box"]
+            self._cache.put(region, st["cell"][:, top0:top0 + bh, left0:left0 + bw], st["box"])
+
     def run(self):
         try:
+            from collections import Counter
             from concurrent.futures import ThreadPoolExecutor
             zs = self._meta["z_levels"]
             z_mid = zs[len(zs) // 2]      # a mid-stack plane is a fair single-plane preview
-            plan = self._plan()
+            plan = self._replay_cached(self._plan())
+            per_region = Counter(item[0] for item in plan)
 
             def load(item):
                 region, fov, box = item
@@ -3321,10 +3807,18 @@ class _PreviewWorker(QThread):
                     if self._stop.is_set():
                         return
                     ri, ci = self._fov_index[region]["rc"]
-                    self.tileReady.emit(ri, ci, region,
-                                        np.stack(tiles).astype(self._dtype), box)
+                    tile = np.stack(tiles).astype(self._dtype)
+                    self.tileReady.emit(ri, ci, region, tile, box)
+                    self._remember(region, box, tile, per_region[region])
             if not self._stop.is_set():
                 self.streamEnded.emit()   # the running window is mature now -> one clean recomposite
+                # The pass finished, so this generation is complete: compact the per-well cells
+                # into one memory-mapped page. AFTER streamEnded, never before -- the recomposite
+                # is what the user is waiting on, and compaction is housekeeping. A stopped or
+                # failed pass never reaches here, which is the point: a partial plate must not be
+                # compacted into a page that claims to be the plate.
+                if self._cache is not None and not self._cache.packed:
+                    self._cache.pack(self._order)
         except Exception as exc:
             # Preview is best-effort, but best-effort is not SILENT. Finalise the tiles that did
             # land (so a partial mosaic still paints) and then name the failure — the old bare
@@ -3364,9 +3858,11 @@ class _ComputedPlateWorker(QThread):
         self._stop.set()
 
     def _read(self, wellpath, fov, level):
-        import tensorstore as ts
-        path = f"{self._base}/{wellpath}/{fov}/{level}"
-        arr = ts.open({"driver": "zarr3", "kvstore": {"driver": "file", "path": path}}).result()
+        # Through the shared pool, NOT a bare ts.open. This line opened a brand new store per well
+        # per level, twice per well, with no reuse and no declared memory budget: 3072 fresh opens
+        # on a 1536-well plate, each allocating its own private cache. The pool bounds both halves,
+        # decoded bytes via one shared cache_pool and live handles via an LRU of 32. See _tsctx.
+        arr = HANDLES.get(field_path(self._base, wellpath, fov, level))
         return np.asarray(arr[0, :, 0].read().result())   # (C, y, x) at t=0, z=0
 
     def run(self):
@@ -3491,6 +3987,11 @@ class PlateWindow(QMainWindow):
 
     def __init__(self, initial_path: Optional[str] = None):
         super().__init__()
+        # PIN THE QAPPLICATION, whoever created it. A window cannot outlive its application, and
+        # the application is routinely held only by a caller's local or a pytest fixture cache.
+        # This is the one call every window makes, however it was constructed -- the same argument
+        # showEvent makes for the GUI slot cap. See the _APP comment at the top of this module.
+        qt_app()
         self.setWindowTitle("SquidXplorer")
         self.resize(1600, 950)
         self._worker = None           # the operator (MIP) run
@@ -3517,6 +4018,11 @@ class PlateWindow(QMainWindow):
         #   same layer the CLI drives, so an agent/test/script says one command to both.
         self._log_bus = LogBus()
         self._log_bus.install()
+        # THIS WINDOW'S LOGGER (Task 1). The root plate is VIEW 0: it is the root of the view tree,
+        # and ViewerManager hands out 1 upward, so the two numberings cannot collide. Every action
+        # it logs carries that id and, where it has one, an address.
+        self.view_id = 0
+        self.log = ViewLog(log, self.view_id)
         self._activity = ActivityLog()
         from squidmip._gui_commands import install_command_bus
         self.commands = install_command_bus(self)
@@ -3637,7 +4143,7 @@ class PlateWindow(QMainWindow):
         # Dark the tab widget's own canvas (the strip behind/beside the tabs rendered white in macOS
         # light mode). Scope a Fusion style + dark palette to THIS widget subtree only — NOT the app,
         # which would bleed into the embedded ndviewer and hide its per-channel colour swatches.
-        self._fusion_style = QStyleFactory.create("Fusion")   # keep a ref: setStyle doesn't own it
+        self._fusion_style = _fusion_style()   # process-wide: setStyle does NOT take ownership
         if self._fusion_style is not None:
             self._left_tabs.setStyle(self._fusion_style)
         # LIGHT-BLUE tab-scroll arrows on BLACK boxes (Julio). The ‹ › scroller buttons draw their
@@ -3656,6 +4162,19 @@ class PlateWindow(QMainWindow):
         self._left_tabs.currentChanged.connect(self._on_tab_changed)
         self._left_tabs.addTab(self._build_process_pane(), "Operators")
         self._left_tabs.tabBar().setTabButton(0, QTabBar.RightSide, None)  # home tab isn't closable
+
+        # THE ONE GLOBAL CONSOLE, AS A FIXED TAB (Task 1, 2026-07-29). It was a separate top-level
+        # QMainWindow; Spencer logged that it "opens over the main window" on every launch, and the
+        # fix is not to position it but to stop it being a window. Julio: "making the logger global
+        # will force you to abstract the data layers cleanly" — a floating window per app is not
+        # what makes it global, ONE console printing every window's actions with an address is, and
+        # a fixed tab beside the operators is where the user already is. Fixed = never closable and
+        # never detachable: a console you can lose is not a console, and _FIXED_TABS below is what
+        # the close/detach paths check.
+        self._log_panel = LogPanel(self._log_bus, self._activity)
+        self._log_panel.start()
+        self._left_tabs.addTab(self._log_panel, "Log")
+        self._left_tabs.tabBar().setTabButton(1, QTabBar.RightSide, None)
 
         # PANE 3: the exploration pane. Same _DetachTabs class as the console (one detach seam, not
         # two), but every tab is detachable — it has no permanent home tab to protect.
@@ -3803,11 +4322,9 @@ class PlateWindow(QMainWindow):
 
         # THE ROOT IS JUST THE PLATE (decentralized, 2026-07-23). The central viewer and the
         # exploration pane are gone from the layout; the plate column IS the window. Selections
-        # open independent napari windows (the Views dock, added below), and the log lives in a
-        # bottom dock — Julio: "the logger on the bottom of the GUI". This replaces the locked
-        # 3-pane grid that Spencer asked us to dismantle.
-        self._log_panel = LogPanel(self._log_bus, self._activity)
-        self._log_panel.start()
+        # open independent napari windows (the Views dock, added below), and the log is the fixed
+        # "Log" tab built with _left_tabs above — Julio: "the logger on the bottom of the GUI".
+        # This replaces the locked 3-pane grid that Spencer asked us to dismantle.
 
         # THE DECK LAYOUT (2026-07-23 image): ONE COMPACT PORTRAIT (h>w) window — a top row of two
         # small panels [Open View list | Operators (bulk)] over a big Wellplate view below. NOT OS
@@ -3853,38 +4370,95 @@ class PlateWindow(QMainWindow):
             "QMenuBar{background:#0b0e14;color:#c9d1d9;} "
             "QMenuBar::item:selected{background:#1f6feb;}")
 
-        # THE LOG IS ITS OWN SMALL WINDOW (Julio: "logger on a small separate window, so we can
-        # follow this compact h>w layout"). A top-level QMainWindow kept alive on self; toggle it
-        # from the View menu. Not a dock — a dock would widen the compact root.
-        self._log_window = QMainWindow(self)
-        self._log_window.setWindowFlag(Qt.Window, True)
-        self._log_window.setWindowTitle("Log")
-        self._log_window.setCentralWidget(self._log_panel)
-        if self._fusion_style is not None:
-            self._log_window.setStyle(self._fusion_style)
-        self._log_window.setPalette(_dark_palette())
-        self._log_window.setStyleSheet("QMainWindow{background:#0b0e14;}")
-        self._log_window.resize(760, 240)
-
         self._sync_explore_pane()                  # keeps the (now-hidden) op-tab stack coherent
 
-        # FIXED SIZE on any display (Julio): 596 wide x 850 tall. A hard setFixedSize so the compact
-        # portrait shape is identical on every monitor and never balloons — the plate dominates
-        # below the capped top strip.
-        self.setFixedSize(596, 850)
+        # 596 x 850 stays the DEFAULT portrait shape (Julio): the plate dominates below the
+        # capped top strip, and the window opens identically on every monitor. It is no longer
+        # a setFixedSize, for two reasons.
+        #
+        # 1. Spencer: the root has to be resizable, and the type has to come up with it.
+        # 2. A hard 850 stopped fitting the moment enable_hidpi() landed. Those are LOGICAL
+        #    pixels, so on a 200%-scaled display 850 is 1700 physical -- taller than a 1080p
+        #    screen. A fixed size that cannot fit on the monitor is not a compact shape, it is
+        #    a window with its lower half off the bottom of the display.
+        #
+        # So: open at the design size, clamped to what the screen can actually show, and let
+        # the user take it from there. The minimum keeps the top strip's controls from
+        # collapsing into each other.
+        self.setMinimumSize(420, 520)
+        self.resize(*self._default_root_size())
 
-        # The log window opens alongside the root and is toggled from the View menu.
+        # The console is a tab now, so the View menu RAISES it rather than toggling a window. Not
+        # checkable: there is no state to toggle, and a menu item that can hide the one global
+        # console would put the app back where Spencer found it.
         view_menu = self.menuBar().addMenu("&View")
-        self._log_act = QAction("&Log window", self)
-        self._log_act.setCheckable(True)
-        self._log_act.setChecked(True)
-        self._log_act.toggled.connect(self._log_window.setVisible)
+        self._log_act = QAction("&Log", self)
+        self._log_act.triggered.connect(self.show_log)
         view_menu.addAction(self._log_act)
-        self._log_window.show()
 
         self.setAcceptDrops(True)
         if initial_path:
             self.ingest(initial_path)
+
+    # -- root window sizing + type that follows it -------------------------------------------------
+
+    #: The portrait shape the layout was designed against. Also the denominator for the UI scale:
+    #: at exactly this width the type is the size the stylesheets literally say.
+    _DESIGN_W, _DESIGN_H = 596, 850
+
+    def _default_root_size(self) -> tuple:
+        """The design size, shrunk to fit the screen it will actually open on.
+
+        In LOGICAL pixels, so this compares like with like under ``enable_hidpi()``. Leaves a
+        margin for the taskbar and title bar rather than filling the work area exactly.
+        """
+        w, h = self._DESIGN_W, self._DESIGN_H
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            avail = screen.availableGeometry()
+            w = min(w, max(self.minimumWidth(), avail.width() - 40))
+            h = min(h, max(self.minimumHeight(), avail.height() - 80))
+        return w, h
+
+    def _ui_scale(self) -> float:
+        """How much bigger the window is than the shape the type was written for.
+
+        Width-driven: the portrait root grows mostly sideways, and tying type to height would
+        make a tall thin window shout. Clamped so a very wide window does not produce absurd
+        type and a minimum-size one stays legible.
+        """
+        return max(0.85, min(2.0, self.width() / float(self._DESIGN_W)))
+
+    def _rescale_fonts(self) -> None:
+        """Re-apply every descendant stylesheet with its ``font-size`` multiplied by the scale.
+
+        Done by rewriting the stylesheets rather than by setting a widget font, because a QSS
+        ``font-size`` on a child beats any font inherited from a parent -- and this GUI sets one
+        inline at 79 call sites. Each widget's ORIGINAL stylesheet is cached the first time it
+        is seen, so scaling is always computed from the authored value and never compounds.
+        """
+        scale = self._ui_scale()
+        if abs(scale - getattr(self, "_applied_ui_scale", 0.0)) < 0.02:
+            return                              # sub-pixel churn; not worth restyling the tree
+        self._applied_ui_scale = scale
+
+        cache = self.__dict__.setdefault("_qss_original", {})
+        for w in [self] + self.findChildren(QWidget):
+            key = id(w)
+            if key not in cache:
+                qss = w.styleSheet()
+                if "font-size:" not in qss:
+                    cache[key] = None           # nothing to scale here; remember and skip it
+                    continue
+                cache[key] = qss
+            base = cache[key]
+            if base is None:
+                continue
+            w.setStyleSheet(_scale_qss_fonts(base, scale))
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._rescale_fonts()
 
     # -- the Operators panel (top-right): a scrollable list of operator blocks ----------------------
     def _build_process_pane(self) -> QWidget:
@@ -4104,9 +4678,25 @@ class PlateWindow(QMainWindow):
             self._sync_explore_pane()
         tabs.setCurrentWidget(w)
 
+    #: How many tabs at the head of the process console are FIXED: [0] Operators, [1] Log. They
+    #: cannot close and cannot detach, so their indices never move and a plain `index < _FIXED_TABS`
+    #: is a sound test. The log is fixed because it is THE one global console (Task 1): a console
+    #: the user can close is a console that is missing when the thing worth reading happens.
+    _FIXED_TABS = 2
+
+    def show_log(self) -> None:
+        """Bring the one global console to the front. The View menu's action, and the call any
+        code should make instead of reaching for a window that no longer exists."""
+        panel = getattr(self, "_log_panel", None)
+        if panel is None:
+            return
+        if panel.collapsed:
+            panel.set_collapsed(False)
+        self._left_tabs.setCurrentWidget(panel)
+
     def _close_op_tab(self, index: int, tabs=None):
         tabs = self._left_tabs if tabs is None else tabs
-        if index == 0 and tabs is self._left_tabs:         # 'Process wells' home tab — never closable
+        if index < self._FIXED_TABS and tabs is self._left_tabs:   # Operators + Log: never closable
             return
         w = tabs.widget(index)
         tabs.removeTab(index)
@@ -4142,8 +4732,8 @@ class PlateWindow(QMainWindow):
         path, and re-dock to the bar they came from. *tabs* defaults to the process console, so
         IMA-209's callers and tests are unchanged."""
         tabs = self._left_tabs if tabs is None else tabs
-        if index <= 0 and tabs is self._left_tabs:   # the process console's home tab never detaches
-            return None
+        if index < self._FIXED_TABS and tabs is self._left_tabs:
+            return None                      # Operators + Log are fixed: neither detaches
         if index < 0:
             return None
         w = tabs.widget(index)
@@ -4511,6 +5101,21 @@ class PlateWindow(QMainWindow):
         # No operator run is in flight now — clear the activity header. end() is a no-op if it was
         # already cleared, so a failed/stopped run that never reached here does not leave it stuck.
         self._activity.end("operator-run")
+        # ...and close the console's started/done pair. This fires on ok, failed and STOPPED alike,
+        # which is why the pair is closed here and not on finished_ok: an action that starts and
+        # then says nothing is indistinguishable from one still running, and a stopped run is
+        # exactly the case that would have gone quiet. A run that landed nothing is reported as a
+        # failure however politely the engine returned.
+        action = getattr(self, "_run_action", None)
+        if action is not None:
+            self._run_action = None
+            elapsed = time.monotonic() - getattr(self, "_run_began", time.monotonic())
+            landed = getattr(self._worker, "landed", None)
+            if landed == 0:
+                self.log.failed(action, f"produced nothing after {elapsed:.1f} s",
+                                address=self._run_address)
+            else:
+                self.log.done(action, elapsed, address=self._run_address)
         self._run_tab_key = self._run_view_tab_key = None
         # A genuine drain: every worker has exited AND (finished being FIFO-queued after this
         # worker's tileReady/streamEnded) their terminal slots have already run on this thread.
@@ -5554,6 +6159,15 @@ class PlateWindow(QMainWindow):
         # build_plate RESOLVED (measured pitch beat the 2x2's mis-declared "384 well plate"), so the
         # background can only ever be drawn at the same scale the grid is laid out at.
         self._overview.set_carrier(plate)
+        # DEEP ZOOM: arm the tile overlay for this acquisition. Fail-quiet by contract — an
+        # acquisition with no usable stage positions keeps the montage and nothing else changes.
+        if self._overview.set_tile_source(reader, meta):
+            g = self._overview._ladder.geometry
+            log.info("deep zoom armed: %d rungs, %.3f-%.1f um/px, %d tiles at fit",
+                     len(g), g.levels[0].scale_um_per_px, g.levels[-1].scale_um_per_px,
+                     g.worst_case_tiles)
+        else:
+            log.info("deep zoom not armed (no usable stage positions) — montage only")
         self._selected_regions = []                  # a new acquisition starts with nothing picked
         self._overview.hovered.connect(self._on_hover)
         self._overview.wellActivated.connect(self.activate_well)
@@ -5620,8 +6234,10 @@ class PlateWindow(QMainWindow):
         # loaded and how to open it -- including the region slider, which is new and otherwise
         # undiscoverable.
         self._readout.setText(
-            f"{len(self._fov_index)} wells loaded · slide the region slider or double-click to "
-            f"open one{note}")
+            # No region slider on the root any more (2b8fbc5 moved it into each spawned window),
+            # so naming it here sent users looking for a control that is not on screen.
+            f"{len(self._fov_index)} wells loaded · double-click a well, or Shift-drag to open "
+            f"several{note}")
 
     def _make_region_slider(self):
         """Build the region slider, or say why there is none. NEVER a silent absence.
@@ -5692,10 +6308,23 @@ class PlateWindow(QMainWindow):
         if getattr(self, "_region_load_timer", None) is None:
             self._region_load_timer = QTimer(self)
             self._region_load_timer.setSingleShot(True)
-            self._region_load_timer.timeout.connect(
-                lambda: self._load_mosaic(region=self._pending_region))
+            # A BOUND METHOD, never a lambda closing over ``self``. PyQt keeps a lambda alive in a
+            # slot proxy parented to the timer, and the timer is parented to this window: the
+            # closure's ``self`` closes the loop window -> timer -> proxy -> lambda -> window. That
+            # cycle means dropping the last reference to a window does NOT destroy it; the cyclic
+            # collector does, later, from arbitrary code, with a debounce still pending. A bound
+            # method of a QObject is connected by reference to the receiver instead, so this cycle
+            # does not form. Measured on its own it was enough to stop the segfault (40 windows
+            # survived, against a crash by window 21 without it); it is kept alongside the
+            # ``stop()`` in closeEvent because the two remove different halves of the hazard, the
+            # zombie window and the armed callback. See tests/test_window_lifetime.py.
+            self._region_load_timer.timeout.connect(self._fire_region_load)
         self._pending_region = region
         self._region_load_timer.start(140)
+
+    def _fire_region_load(self):
+        """The debounce elapsed: fuse the region the slider actually settled on."""
+        self._load_mosaic(region=self._pending_region)
 
     def _load_mosaic(self, region: Optional[str] = None, op: str = "raw"):
         """Show one region's fused MOSAIC in pane 2, one napari layer per channel.
@@ -6375,7 +7004,7 @@ class PlateWindow(QMainWindow):
         try:
             import tensorstore as _ts
             _a = _ts.open({"driver": "zarr3", "kvstore": {"driver": "file",
-                          "path": f"{zroot}/{w0}/{fov0}/{levels[0]}"}}).result()
+                          "path": field_path(zroot, w0, fov0, levels[0])}}).result()
             _well_px = int(min(_a.shape[-2], _a.shape[-1]))
         except Exception:
             _well_px = _PUSH_PX
@@ -6680,6 +7309,19 @@ class PlateWindow(QMainWindow):
         # Ended in _on_run_drained, which fires on ok/failed/stopped alike — so the header cannot be
         # left showing a run that is over.
         self._activity.start("operator-run", f"{label} · {scope}", total=len(run_order))
+        # ...and to the ONE GLOBAL CONSOLE, as a started/done pair carrying this view's id:
+        #     [0] A1  decon(sigma=2.0) · 1 well  started
+        #     [0] A1  decon(sigma=2.0) · 1 well  done in 1.4 s
+        # A run over exactly ONE region has an address. A run over many is a SET of extents, which
+        # a single Extent cannot say (region_id is one region, deliberately — see _address.py), so
+        # rather than invent a sentinel region_id the plural case names its count and carries the
+        # view id alone. Task 2, where a cached result carries its OWN extent, is where the set
+        # belongs: the run's answer is one extent per cell, not one extent for the run.
+        self._run_action = f"{_action_label(key, operator_kwargs)} · {scope}"
+        self._run_address = (Extent(region_id=regions[0])
+                             if regions is not None and len(regions) == 1 else None)
+        self._run_began = time.monotonic()
+        self.log.started(self._run_action, address=self._run_address)
         self._run_readout(f"● {label} · {scope}{dest} …")
         self._worker.start()
 
@@ -7460,12 +8102,25 @@ class PlateWindow(QMainWindow):
     def closeEvent(self, e):
         release_gui_slot(getattr(self, "_gui_slot", None))   # let the next window open
         self._gui_slot = None
+        timer = getattr(self, "_region_load_timer", None)
+        if timer is not None:
+            # A PENDING SINGLE-SHOT MUST NOT OUTLIVE THE CLOSE. The region-slider debounce is armed
+            # for 140 ms and nothing disarmed it, so a window closed within that window kept a live
+            # timer whose timeout called back into a torn-down window -- measured directly: with
+            # windows built, opened, closed and dropped in a loop, ``_load_mosaic`` was observed
+            # running on an already-closed window, and the process segfaulted a window later.
+            # ``PlateOverview.hideEvent`` already stops its own coalescing timer for exactly this
+            # reason; this one was simply missed.
+            timer.stop()
         self._stop_worker()          # stop the run cleanly; nothing on disk to clean up (no cache)
         self._stop_preview()
         self._stop_mosaic_worker()   # JOINED, not drained: it is parented to this window
         self._join_retired()         # ...and so is everything _retire deferred
         self._stop_spots()           # never leave the segmentation thread running at teardown
         self._stop_minerva()         # files already written stay; only the launch poll is abandoned
+        ov = getattr(self, "_overview", None)
+        if ov is not None:
+            ov.clear_tile_source()   # joins the tile fetcher; a live QThread blocks a clean exit
         for key in list(self._floating):   # floated tabs are top-levels of their own — Qt won't
             win = self._floating.pop(key)  # close them for us, and each may hold a live shell
             w = win.take_content()
@@ -7601,7 +8256,13 @@ def acquire_gui_slot() -> _GuiSlot:
     lives. Never blocks: a GUI that hangs waiting for another GUI to exit is a worse bug than
     the one this prevents.
     """
-    import fcntl
+    try:
+        import fcntl
+    except ModuleNotFoundError:
+        # Windows has no fcntl: skip the single-instance lock and launch anyway. The cap is a
+        # nicety (it stops a second window on Unix), not core behaviour, and crashing the whole
+        # GUI over a missing lock primitive would be a worse bug. release_gui_slot tolerates fd=-1.
+        return _GuiSlot(-1, None)
 
     limit = gui_slot_limit()
     lock_dir = _gui_lock_dir()
@@ -7642,6 +8303,26 @@ def _gui_cap_applies() -> bool:
     return os.environ.get("QT_QPA_PLATFORM") != "offscreen"
 
 
+def enable_hidpi() -> None:
+    """Draw at the display's scale factor. MUST run before the QApplication exists.
+
+    Qt5 does not scale unless asked. On a 200%-scaled display (Spencer's workstation:
+    system DPI 192) the app is DPI-*aware* but not DPI-*scaling*, so the window occupies its
+    logical pixel count in PHYSICAL pixels -- it renders at half the size of every other
+    application on the screen, which is the "everything is too small" report. Every ``px`` in
+    the stylesheets is a logical pixel once this is on, so fonts, icons and paddings all come
+    up together instead of needing 79 call sites edited.
+
+    Setting these after a QApplication has been constructed is a silent no-op, which is why
+    this is a named function called at the one point that owns startup rather than a line
+    buried in ``main``.
+    """
+    for attr in ("AA_EnableHighDpiScaling", "AA_UseHighDpiPixmaps"):
+        flag = getattr(Qt, attr, None)
+        if flag is not None:                # Qt6 always scales and drops both attributes
+            QApplication.setAttribute(flag, True)
+
+
 def main(dataset_path: str = None):
     path = dataset_path or (sys.argv[1] if len(sys.argv) > 1 else None)
     slot = None
@@ -7651,7 +8332,9 @@ def main(dataset_path: str = None):
         except GuiAlreadyOpen as e:
             print(f"squidmip-view: {e}", file=sys.stderr)
             sys.exit(1)
-    app = QApplication.instance() or QApplication(sys.argv)
+    if QApplication.instance() is None:     # only the process that CREATES the app may set these
+        enable_hidpi()
+    app = qt_app(sys.argv)       # pinned process-wide: main() returns the WINDOW, not the app
     win = PlateWindow(path)
     _install_footprint_monitor(app, win)
     win._gui_slot = slot                  # the reservation lives as long as the window

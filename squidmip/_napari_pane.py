@@ -115,14 +115,17 @@ def _colormap_for(channel_name: str):
 #: The moment ndisplay flips to 3 the layer drops to the LAST pyramid level regardless of zoom.
 #: On the owner's 10x set that is a ~128x107 thumbnail — the blocky render he screenshotted. The
 #: very pyramid that makes 2D navigation fast is what makes 3D ugly; they fight inside one layer.
-#: That is why AGAVE is a separate renderer and not a nice-to-have, and it is why ALIASING this
-#: button to AGAVE would be the wrong fix: it would hide a real limit behind a relabelled control.
+#: The escape hatch used to be AGAVE, a separate path-traced renderer. AGAVE is CANCELLED
+#: (Julio, 2026-07-28, see docs/VERSIONS.md), so the honest answer is the one below: the limit is
+#: the GL texture, and a crop is how you get under it. Julio's original rule still holds and is
+#: why this is signposted rather than aliased: "let's not alias the button, that's bad design."
+#: Naming a control the user does not have would be the same mistake in a new costume.
 NDISPLAY_TOOLTIP = (
     "3D view (napari).\n"
-    "Renders this region's z-stack at FULL resolution (we hand napari the level-0 volume in 3D "
-    "and restore the fast pyramid in 2D).\n"
-    "For a path-traced, publication-quality render, open it in AGAVE — the "
-    "\"3D view (AGAVE)…\" button, which opens in the exploration pane."
+    "Renders this region's z-stack at the finest resolution that fits the GPU's single 3D "
+    "texture (about 2048 px per axis).\n"
+    "For FULL native resolution, draw an ROI and open it in its own window: a crop fits in the "
+    "texture where the whole region cannot."
 )
 
 
@@ -554,8 +557,8 @@ class MosaicPane(QWidget):
             try:
                 viewer.close()                        # napari: closes the window + drops the registry entry
             except Exception as exc:                  # a teardown error must not mask the dispose,
-                import logging                        # but it is NOT swallowed — it is named
-                logging.getLogger(__name__).warning(
+                from squidmip._logpane import get_logger   # but it is NOT swallowed — it is named
+                get_logger("napari_pane").warning(
                     "napari viewer close failed during pane shutdown: %s", exc)
 
 

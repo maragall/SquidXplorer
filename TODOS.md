@@ -3,6 +3,40 @@
 Deferred work captured during plan-eng-reviews. Each item records the reasoning
 so a future session doesn't rediscover it from zero.
 
+## Delete the incomplete-input tests → requested by Julio on `main-window-review`
+- **What:** Remove SquidXplorer's tests that assert behaviour for malformed or incomplete
+  acquisition input. Julio's call, 2026-07-28, on Spencer's `main-window-review` PR; Spencer
+  asked for it to be written down here rather than only in Slack.
+- **Why:** `Cephla-Lab/Squid` is the producer and already validates what it writes. Asserting the
+  same guarantees on the consumer side duplicates a contract we do not own, and it means a
+  change to Squid's validation silently makes our tests wrong rather than red.
+- **Pros:** Drops a duplicated contract; the tests that remain are about *our* behaviour.
+- **Cons:** If a malformed acquisition ever reaches us anyway (hand-edited folder, interrupted
+  copy, a dangling symlink farm like the 1536wp case), nothing pins how we degrade. Decide
+  deliberately whether "we refuse loudly" is itself a guarantee worth one test.
+- **Context:** Scope is not yet enumerated. Identify which tests assert *producer* guarantees
+  (missing `acquisition.yaml`, malformed `coordinates.csv`, absent channels) versus which assert
+  *our* refusal behaviour, e.g. `reader.py:329-336`, which deliberately raises rather than
+  placing FOVs at plausible-but-wrong positions. The second kind is ours and stays.
+- **Depends on / blocked by:** Nothing.
+- **SCOPED 2026-07-29, and the answer is that there is almost nothing to delete.** Enumerated
+  every candidate: `test_the_reader_boundary_refuses_a_malformed_acquisition`
+  (`tests/test_acquisition_model.py:200`), `test_a_malformed_file_is_still_all_or_nothing`
+  (`tests/test_fov_positions.py:322`), `test_malformed_coordinates_csv_header_still_yields_metadata`,
+  `test_monkey_malformed_csv_still_yields_metadata`, `test_an_incomplete_region_refuses_to_produce_a_result`,
+  `test_a_failed_field_publishes_nothing_and_marks_the_plate_incomplete`,
+  `test_open_computed_refuses_an_incomplete_plate`. Every one asserts OUR degradation or refusal
+  behaviour, not a producer guarantee: that a bad field dies AT the reader naming the field
+  rather than downstream "pointing at the victim rather than the cause", that salvage is
+  per-region and all-or-nothing, that our own writer marks a partial plate. Those are the second
+  kind named above, the kind that stays.
+- **Evidence they earn their keep:** on 2026-07-28 `sim_1536wp` turned out to be 6144 dangling
+  symlinks, and ten failing tests were classified in minutes precisely because `open_reader`
+  refuses loudly instead of half-reading. That is the behaviour these tests pin.
+- **Remaining question for Spencer:** if there is a specific test he had in mind that asserts a
+  guarantee `Cephla-Lab/Squid` owns, name it and it goes. The blanket deletion would cost more
+  than it saves.
+
 ## Deselect-all gesture (Esc) → fast-follow after IMA-221
 - **What:** Esc (or click-on-empty-space) clears the whole plate selection and emits the cleared state.
 - **Why:** After IMA-221, Shift+click toggle is the only removal gesture, so clearing a 200-well selection means 200 clicks or a throwaway marquee over an empty corner. There is no defined way back to nothing.
@@ -105,6 +139,38 @@ so a future session doesn't rediscover it from zero.
 - **Cons:** Ahead of demand; the MIP tool projects over z, not t.
 - **Context:** The `t=0` param + time-folder discovery already exist, so the extension is small.
 - **Depends on / blocked by:** A real Nt>1 acquisition.
+- **Update (2026-07-27):** "the extension is small" is true of the READ path and false of the
+  IDENTITY path. Split the item in three before estimating it.
+  - **Navigation (cheap).** napari is natively ND and already puts z on its dims slider; handing
+    it `(T, Z, Y, X)` plus axis labels gets a time slider with no new widget. `_mosaic_source`
+    already threads `t` through `fuse_region_mosaic`/`_fuse_levels`, and its plane cache key is
+    already `(token, region, channel, int(t), step, z)` — **`t` is in that key today**. `_agave.py`
+    is further along still (`n_timepoints()`, `set_time(t)`, `volume_key(..., t=)`), and
+    `_minerva` already labels exports `(t=N of M)` when `n_t > 1`.
+  - **Reduction (free).** IMA-210's model generalises to time without a change: `consumes` is a
+    frozenset, the output shape is already `(T, C, Z, Y, X)`, and a collapsed axis deliberately
+    stays at size 1 rather than being dropped. So `consumes={"t"}` — max/mean over time — is
+    expressible as written. Two caveats before trusting it: `add_projector` defaults to
+    `consumes={"z"}`, and `_engine.py:219` documents the return as "`frozenset()` or `{"z"}`",
+    so sweep for branches that compare `== {"z"}` instead of testing membership the way
+    `_benchmark.py:524` does.
+  - **Identity (the actual work, and a trap).** `ResultCache`'s key is
+    `(scope, version, chain.key())`. `scope` comes from `_plate.cache_scope` and is the integer
+    `RRCCOOOO` node id — row, column, ROI, **no `t`**. `version` is the ACQUISITION version,
+    bumped as a live node's frames arrive. Its docstring calls that "the temporal dimension",
+    which is a DIFFERENT temporal axis from experiment `t`: one is how much data has arrived,
+    the other is which timepoint you are looking at. Folding `t` into `version` therefore looks
+    natural and is a category error — `t=1` would read as "a newer version of `t=0`", so
+    switching timepoints would silently evict and recompute forever, and two windows on
+    different timepoints would contend for one entry. `t` belongs in `scope` (a fifth field in
+    the node id) or as a fourth key component. Decide this BEFORE any Nt>1 work, because the
+    node-id format is load-bearing for the cache, the logger ids and the window tree.
+  - **Product question that gates the rest:** one window per timepoint (fits the window tree,
+    but the navigator explodes at N timepoints x M wells), or one window with `t` on a slider
+    (matches napari and the z precedent)? Reduction-over-time is orthogonal to both.
+  - **Already time-safe, do not re-litigate:** the `coordinates.csv` de-duplication on
+    `(region, x, y)` was written for exactly this — its docstring names "a multi-z or
+    multi-timepoint acquisition" as the reason raw row counts cannot be trusted.
 
 ## Confirm IMA-193 navigator reads the pyramid + plate/well metadata → IMA-193
 - **What:** Before/during IMA-193, verify its plate-view navigator actually reads multi-level pyramids and OME-NGFF plate/well group metadata — not just full-res array `0` the way ndviewer_light does.

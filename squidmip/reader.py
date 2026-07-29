@@ -83,6 +83,7 @@ import tifffile
 
 from squidmip._acquisition import Acquisition, load_acquisition_metadata
 from squidmip._channels import fallback_color, load_channel_yaml, resolve_channels
+from squidmip.contract import check_plate_contract
 
 # region has no underscore; fov and z are ints; channel is the remainder (may contain _ and -).
 _STEM_RE = re.compile(r"^(?P<region>[^_]+)_(?P<fov>\d+)_(?P<z>\d+)_(?P<channel>.+)$")
@@ -259,8 +260,15 @@ def _positions_from_fov_column(reader, fovs_per_region: dict, fov_col, x_col, y_
     return positions
 
 
-def load_fov_positions_um(root, fovs_per_region: dict) -> dict:
-    """Parse ``coordinates.csv`` into ``{(region, fov): (x_um, y_um)}`` — MICROMETRES.
+def _parse_fov_positions_um(root, fovs_per_region: dict) -> tuple:
+    """Parse ``coordinates.csv`` into ``({(region, fov): (x_um, y_um)}, mismatched)`` — MICROMETRES.
+
+    Returns BOTH halves of the cross-check: the positions of every region that passed, and
+    ``mismatched`` mapping ``region -> (n_positions, n_fovs)`` for every region that did not.
+    Splitting it this way is what lets one truncated well cost only its own mosaic:
+    :func:`load_fov_positions_um` raises if ``mismatched`` is non-empty (the strict contract),
+    while :func:`_fov_positions_um_or_empty` keeps the regions that passed and warns about the
+    rest. Neither can place a FOV at an unverified position, which is the invariant that matters.
 
     The file records millimetres; world space in this package is micrometres (``_tiling.py``),
     and the units invariant is that every world-space value is µm and every key carrying one
@@ -293,14 +301,16 @@ def load_fov_positions_um(root, fovs_per_region: dict) -> dict:
 
     path = Path(root) / _COORDS_NAME
     if not path.exists():
-        return {}
+        return {}, {}
 
     with path.open(newline="") as fh:
         reader = csv.DictReader(fh)
         x_col, y_col = _coord_columns(reader.fieldnames)
         fov_col = _fov_column(reader.fieldnames)
         if fov_col is not None:
-            return _positions_from_fov_column(reader, fovs_per_region, fov_col, x_col, y_col)
+            # An explicit 'fov' column names each position outright, so there is no row-order
+            # inference to cross-check and no mismatch to report.
+            return _positions_from_fov_column(reader, fovs_per_region, fov_col, x_col, y_col), {}
         ordered: dict[str, list] = {}
         seen: dict[str, set] = {}
         for line_no, row in enumerate(reader, start=2):
@@ -321,23 +331,50 @@ def load_fov_positions_um(root, fovs_per_region: dict) -> dict:
             ordered.setdefault(region, []).append((x * _MM_TO_UM, y * _MM_TO_UM))
 
     positions: dict = {}
+    mismatched: dict = {}
     for region, coords in ordered.items():
         fovs = list(fovs_per_region[region])
         if len(coords) != len(fovs):
-            raise ValueError(
-                f"{_COORDS_NAME}: region {region!r} lists {len(coords)} distinct stage "
-                f"position(s) but {len(fovs)} FOV(s) were found in the filenames. "
-                "Without a 'fov' column the Nth position must be the Nth FOV, so a count "
-                "mismatch means the mapping is unknowable — refusing to place FOVs at "
-                "positions that would look plausible but be wrong."
-            )
+            # Record and skip rather than abort the loop. The cross-check is per region --
+            # one truncated well says nothing about the others -- and a caller that wants the
+            # strict all-or-nothing contract raises on this dict (see load_fov_positions_um).
+            mismatched[region] = (len(coords), len(fovs))
+            continue
         for fov, xy in zip(fovs, coords):
             positions[(region, fov)] = xy
+    return positions, mismatched
+
+
+def _mismatch_message(mismatched: dict) -> str:
+    """The refusal text for regions whose position count disagrees with their FOV count."""
+    parts = ", ".join(
+        f"region {region!r} lists {n_pos} distinct stage position(s) but {n_fov} FOV(s) "
+        "were found in the filenames"
+        for region, (n_pos, n_fov) in sorted(mismatched.items())
+    )
+    return (
+        f"{_COORDS_NAME}: {parts}. "
+        "Without a 'fov' column the Nth position must be the Nth FOV, so a count "
+        "mismatch means the mapping is unknowable — refusing to place FOVs at "
+        "positions that would look plausible but be wrong."
+    )
+
+
+def load_fov_positions_um(root, fovs_per_region: dict) -> dict:
+    """Strict parse: every region cross-checks, or nothing is returned.
+
+    Raises :class:`ValueError` naming every region whose de-duplicated position count
+    disagrees with its FOV count. See :func:`_parse_fov_positions_um` for the parsing rules
+    and :func:`_fov_positions_um_or_empty` for the degrading variant the viewer uses.
+    """
+    positions, mismatched = _parse_fov_positions_um(root, fovs_per_region)
+    if mismatched:
+        raise ValueError(_mismatch_message(mismatched))
     return positions
 
 
 def _fov_positions_um_or_empty(root, fovs_per_region: dict) -> dict:
-    """``load_fov_positions_um`` degraded to ``{}`` on an unusable coordinates.csv.
+    """``load_fov_positions_um`` degraded PER REGION on an unusable coordinates.csv.
 
     ``metadata`` is the acquisition's whole identity: regions, channels, dtype, frame shape.
     Those come from the FILENAMES and one decoded frame and are readable whatever the CSV says.
@@ -346,14 +383,25 @@ def _fov_positions_um_or_empty(root, fovs_per_region: dict) -> dict:
     reported "not a readable Squid acquisition" for an acquisition it could render perfectly
     well minus the multi-FOV mosaic (IMA-187).
 
-    Degrading to ``{}`` is safe precisely because ``{}`` already means "no stage positions" —
-    consumers fall back to single-tile rendering. It does NOT weaken the cross-check: an
-    ambiguous CSV still never produces a scrambled mosaic, it produces no mosaic, loudly
-    (``UserWarning``). Only :class:`ValueError` (the parse/cross-check failures this module
-    raises deliberately) is absorbed; anything else still propagates.
+    Degrading is safe precisely because a region absent from the mapping already means "no
+    stage positions for that region" — consumers fall back to single-tile rendering, and
+    ``_placement.fov_offsets_px`` raises a KeyError naming the missing FOVs rather than
+    guessing. It does NOT weaken the cross-check: an ambiguous region still never produces a
+    scrambled mosaic, it produces no mosaic, loudly (``UserWarning``).
+
+    The degradation is per REGION, not per file. A plate where one well was cut short mid-run
+    (its CSV rows outnumber its written FOVs) used to cost every OTHER well its mosaic too,
+    because the first mismatch raised and the whole mapping collapsed to ``{}``. One truncated
+    well says nothing about the wells that cross-check perfectly, so only the well that failed
+    loses its positions now.
+
+    A malformed FILE — unparseable coordinates, no recognisable x/y columns, conflicting
+    duplicate rows — is still all-or-nothing: those :class:`ValueError`\\ s come from the parse
+    itself, before any region can be judged, and there is nothing partial to salvage. Anything
+    that is not a :class:`ValueError` still propagates.
     """
     try:
-        return load_fov_positions_um(root, fovs_per_region)
+        positions, mismatched = _parse_fov_positions_um(root, fovs_per_region)
     except ValueError as e:
         warnings.warn(
             f"{_COORDS_NAME} is unusable ({e}) — continuing WITHOUT stage positions: the "
@@ -361,6 +409,18 @@ def _fov_positions_um_or_empty(root, fovs_per_region: dict) -> dict:
             "a coordinate-placed mosaic."
         )
         return {}
+
+    if mismatched:
+        kept = sorted({region for region, _ in positions})
+        # Name both halves. The old message said only that something was unusable, which read
+        # as a whole-plate failure even when a single well was at fault.
+        warnings.warn(
+            f"{_COORDS_NAME} is unusable for {len(mismatched)} of "
+            f"{len(mismatched) + len(kept)} region(s) ({_mismatch_message(mismatched)}) — "
+            f"those regions render as a single tile instead of a coordinate-placed mosaic. "
+            f"Kept stage positions for: {', '.join(kept) if kept else '(none)'}."
+        )
+    return positions
 
 
 def _plate_key(region: str):
@@ -1122,12 +1182,19 @@ def _ome_channel_names(tif) -> list:
 # IMA-229: Zarr input (OME-NGFF)
 # ==================================================================================================
 #
+# THE CONTRACT NOW LIVES IN ``docs/plate-contract.md``, split into a STABLE half (depend on it; a
+# major version bump refuses to open) and an OPTIONAL half where every entry names its fallback.
+# The machine-checkable part is ``squidmip/contract/``: the stamped-and-compared
+# ``PLATE_CONTRACT_VERSION``, the single ``field_path`` seam, and a validator you can run on a
+# plate you were handed (``python -m squidmip.contract.validate <plate.ome.zarr>``). The block
+# below is kept because it cites the spec sources; the document is the contract.
+#
 # PRIOR ART, and what was adopted. The layout below is not invented; it is read straight from the
 # OME-NGFF specification sources (github.com/ome/ngff-spec, branches 0.4 and 0.5 — index.bs, the
 # JSON schemas and the published examples) and cross-checked against what SquidMIP's OWN writer
 # (``squidmip/_output.py``, already validated against the official ``ome-zarr-models`` pydantic
-# schema in ``tests/ngff_check.py``) emits. Anything a real NGFF reader (ome-zarr-py, ngio, napari)
-# cannot open would be a bug here.
+# schema in ``squidmip/contract/validate.py``) emits. Anything a real NGFF reader (ome-zarr-py,
+# ngio, napari) cannot open would be a bug here.
 #
 #   HCS plate      ``plate.ome.zarr/{row}/{col}/{fov}/{level}``
 #     plate group   ``plate`` -> ``rows``/``columns``/``wells``; each well entry has ``path``
@@ -1159,8 +1226,13 @@ def _ome_channel_names(tif) -> list:
 #   POSITIONS      The dataset-level ``translation`` (applied AFTER ``scale``, so it is already in
 #                  physical units) is the ONLY position mechanism the spec defines — there is no
 #                  well-level or plate-level stage metadata in either version. SquidMIP's writer
-#                  emits no translation, so a sibling ``coordinates.csv`` is the documented
-#                  fallback, and either way the result lands in ``fov_positions_um``.
+#                  DOES emit it (``_output.field_origin_um`` -> ``_output._multiscales``, IMA-217),
+#                  so a round-tripped store places its own FOVs; a sibling ``coordinates.csv`` is
+#                  the documented fallback for a store that carries none, and either way the
+#                  result lands in ``fov_positions_um``. [From IMA-217 until 2026-07-29 this block
+#                  asserted the opposite, i.e. it called the LIVE primary placement mechanism dead
+#                  inside the reader's own contract prose. That is the defect that pulled the plate
+#                  contract into v1 scope; see docs/plate-contract.md.]
 #
 #   UNITS          ``axes[].unit`` is a UDUNITS-2 string and is only a SHOULD, so it can be absent.
 #                  Every physical value taken out of a store (pixel size, dz, translation) is
@@ -1219,14 +1291,17 @@ def _group_attrs(path: Path) -> dict:
 
 
 def _open_zarr_array(path: Path):
-    """Open one zarr array (v2 or v3) as a lazy tensorstore handle — no data is read here."""
-    import tensorstore as ts
+    """Open one zarr array (v2 or v3) as a lazy tensorstore handle: no data is read here.
+
+    Goes through the process-wide pool (``_tsctx``) rather than opening directly, so every reader
+    binds to ONE bounded ``cache_pool`` and the number of live handles is capped. This used to
+    fill ``SquidZarrReader._arrays``, an unbounded per-reader dict with no eviction.
+    """
+    from squidmip._tsctx import HANDLES
 
     path = Path(path)
     driver = "zarr" if (path / _ZARR_V2_ARRAY).exists() else "zarr3"
-    return ts.open(
-        {"driver": driver, "kvstore": {"driver": "file", "path": str(path)}}, open=True
-    ).result()
+    return HANDLES.get(path, driver=driver, open_only=True)
 
 
 def _unit_to_um(unit) -> float:
@@ -1351,11 +1426,19 @@ class SquidZarrReader:
         self._ms: dict = {}                      # image group Path -> _Multiscale (cached)
         self._arrays: dict = {}                  # image group Path -> open tensorstore (cached)
         self._meta: Optional[dict] = None
+        self._contract_version = None            # set by _discover: what the store declares, or None
 
     # -- discovery ---------------------------------------------------------
     def _discover(self) -> dict:
         if self._fields is not None:
             return self._fields
+        # The plate contract stamp is COMPARED here, before a single path is reconstructed from
+        # it. A major mismatch raises: a store whose stable layout moved would still discover
+        # wells and still render, just at the wrong positions or the wrong resolution, which is
+        # this reader's stated worst outcome. An unstamped store proceeds -- every plate written
+        # before the stamp landed, and every third-party NGFF store, has none. Policy and its
+        # reasoning live in squidmip/contract/version.py; this is its one reader-side call site.
+        self._contract_version = check_plate_contract(self._path)
         attrs = _group_attrs(self._path)
         fields = (
             self._discover_hcs(attrs["plate"]) if isinstance(attrs.get("plate"), dict)
@@ -1507,11 +1590,16 @@ class SquidZarrReader:
     def _positions_um(self, fields: dict, fovs_per_region: dict) -> dict:
         """Stage positions in MICROMETRES: dataset ``translation`` first, coordinates.csv second.
 
-        The NGFF spec defines no other position mechanism, and SquidMIP's own writer emits no
-        translation — so a store round-tripped through this package legitimately has none, and the
-        sibling ``coordinates.csv`` (both schemas, IMA-215) is the documented fallback. When
-        neither exists the value is ``{}``: present but empty, exactly as on the TIFF readers, so
-        consumers degrade to single-tile rendering instead of hitting a KeyError.
+        The NGFF spec defines no other position mechanism. SquidMIP's own writer DOES emit a
+        translation (IMA-217), so a store round-tripped through this package normally places its
+        own FOVs from the store alone. Three cases legitimately carry none: an acquisition with no
+        stage positions to record, a store written before IMA-217, and the 6D layout below. For
+        those the sibling ``coordinates.csv`` (both schemas, IMA-215) is the documented fallback.
+        When neither exists the value is ``{}``: present but empty, exactly as on the TIFF readers,
+        so consumers degrade to single-tile rendering instead of hitting a KeyError.
+
+        [Until 2026-07-29 this docstring asserted the opposite, which had been wrong since
+        IMA-217. See docs/plate-contract.md.]
         """
         from_store = {}
         for key, group in fields.items():

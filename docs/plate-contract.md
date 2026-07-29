@@ -1,0 +1,233 @@
+# The plate contract: what SquidXplorer writes, and what it promises about it
+
+`plate.ome.zarr` is written by `squidmip/_output.py` and read by `squidmip/reader.py`,
+`squidmip/_tilesource.py` and `squidmip/_viewer.py`. We are both producer and consumer, which is
+exactly why this document exists: an internal convention that nobody wrote down drifts, and the
+drift is not visible until something renders wrong.
+
+It drifted. From IMA-217 until 2026-07-29 the reader's own contract prose said, in two places,
+that "SquidMIP's writer emits no translation". The writer had been emitting one for months, and
+`translation` is the PRIMARY mechanism that places every FOV on the plate. A maintainer reading
+those lines would have concluded the live mechanism was dead. That is the defect that pulled this
+document into v1 scope (Julio, 2026-07-28), rather than leaving it until a second implementation
+reads our output.
+
+The document is split in two, and the split is the useful part:
+
+- **Stable.** Depend on it. It changes only with a MAJOR bump of `PLATE_CONTRACT_VERSION`, and a
+  reader that meets a different major **refuses to open the store**.
+- **Optional.** Each entry names its fallback INLINE. Every one of these fallbacks already existed
+  in code before this document; none was written down as a guarantee, which is how one of them
+  ended up implemented as a bare `except Exception` in `_viewer.py`.
+
+Machine-checkable half: `squidmip/contract/`. Validate any plate with
+
+    python -m squidmip.contract.validate /path/to/plate.ome.zarr
+
+If this document and that code ever disagree, this document is the contract and the code is the
+bug.
+
+## The version
+
+`squidmip/contract/version.py` holds `PLATE_CONTRACT_VERSION`. It is stamped ONCE, on the plate
+group, at `zarr.json -> attributes -> squidmip -> plate_contract_version`, deliberately outside
+OME's `attributes.ome` namespace (that namespace belongs to the spec and is what
+`ome-zarr-models` validates).
+
+It is not the same thing as `_output._NGFF_VERSION` ("0.5"), which is the OME-NGFF **spec**
+version and belongs to OME. Two stores can both be valid NGFF v0.5 and disagree on everything
+below.
+
+| Bump | Means | An older reader |
+| --- | --- | --- |
+| MAJOR | something in **Stable** moved | **refuses**, naming both versions |
+| MINOR | **Optional** gained an entry | warns, reads correctly, reads less |
+
+What a reader does on mismatch, and the reasoning in one line each:
+
+| Declared | Action |
+| --- | --- |
+| absent | **proceed.** Every plate written before 2026-07-29, and every third-party NGFF store, is unstamped. Refusing them would reject the installed base to enforce a rule invented after it. |
+| same major, same or older minor | proceed |
+| same major, newer minor | **warn**, then proceed. Optional content we were not built to use is ignored: a lossy read, not a wrong one, and the loss is announced. |
+| different major | **refuse, loudly.** A stable guarantee moved, so the store would still open, still find its wells, and place them wrongly. |
+| unparseable | **refuse.** Something deliberately made a promise and we cannot tell which one. |
+
+This mirrors `reader._parse_fov_positions_um`, which already refuses "to place FOVs at positions
+that would look plausible but be wrong" rather than guessing. Same judgement, one level up.
+
+## Stable
+
+### The group hierarchy
+
+    plate.ome.zarr/                     plate group: rows / columns / wells
+      {row}/                            row group (bare, structural)
+        {col}/                          well group: well.images -> field paths
+          {fov}/                        image group: multiscales (+ omero)
+            0/                          array, full resolution
+            1/ 2/ ...                   optional coarser levels
+
+`{row}` and `{col}` are the row NAME and the column NAME, never zero-padded: `B2` is written
+`B/2`, never `B/02`, so the region id is the plain concatenation of the two
+(`_output.parse_well_id` and its exact inverse in `reader._discover_hcs`).
+
+`{fov}` is the RAW acquisition FOV id, taken verbatim from `well.images[].path`. It is not a
+re-indexed 0..n-1 field number, so a non-contiguous FOV set stays faithful. The spec permits any
+alphanumeric field path; use the listed paths, do not assume a range.
+
+**There are exactly two legitimate ways to get to a field, and inventing the path is neither.**
+
+1. **Descend the metadata.** `plate.wells[].path` -> `well.images[].path` ->
+   `multiscales[0].datasets[].path`. Every name is read, none is assumed. `_montage._PlateLayout`
+   and `_tilesource.plate_layout_from_store` do this, and it is why they cope with FOV ids and
+   level names they have never seen.
+2. **Call `squidmip.contract.field_path(base, wellpath, fov, level)`** when you already hold the
+   parts, which is the case on every read path in the viewer.
+
+Before 2026-07-29 the path was reconstructed by f-string at four sites in `_viewer.py`, three of
+which handed the result straight to a store open and never went near `reader.py`. Four copies of
+one rule is four chances for it to change in three places, and folding them into one seam is what
+makes the version gate above enforceable rather than decorative.
+
+One shortcut survives and is worth knowing about: `_montage` and `_tilesource` open a level by
+`field_dir / str(level_index)` rather than by the recorded `datasets[].path`. That is correct for
+every store SquidMIP writes (it names levels `"0"`, `"1"`, ...) and would break on a conforming
+store that names them otherwise. It is a NAME per the spec, not an index.
+
+### Axis order: TCZYX
+
+Every array is 5-D `(t, c, z, y, x)`, and `multiscales[0].axes` says so in that order. Squid's
+canonical order, `_zarr_store.create_array`'s `dimension_names`, and what every read path in this
+package assumes.
+
+The non-HCS Squid layout `zarr/{region}/acquisition.zarr` is 6-D `(fov, t, c, z, y, x)`. That is
+Squid's shape, not ours: we read it, we never write it. See `reader._discover_flat`.
+
+### Time: the format carries it, and most of this implementation reads `t = 0`
+
+This section states a gap rather than a guarantee. It is here because users will drop
+multi-timepoint acquisitions on this tool, and today that produces a plate that looks fine and is
+showing one frame.
+
+**What is guaranteed.** `t` is the leading axis. The writer writes EVERY timepoint: `project_well`
+is called with `t=None` (`_engine.project_plate`), which yields `(T, C, 1, Y, X)` with `T = n_t`,
+and `_output._write_field` writes that array whole. The individual-TIFF export writes one file per
+timepoint (`tiff/{t}/...`). Nothing on disk is lost, and `reader.metadata["n_t"]` reports the true
+count.
+
+**What actually reads it, at 2026-07-29.**
+
+| Consumer | Timepoint |
+| --- | --- |
+| `reader.read(region, fov, channel, z, t)` | takes `t`, **defaults to 0** |
+| `_montage.render` | takes `t`, clamped to the store's extent |
+| `_tilesource` (`ZarrPyramidSource`, `InMemoryMultiscale`) | takes `t`, clamped |
+| `_viewer._ComputedPlateWorker._read` | **hardcoded `arr[0, :, 0]`** |
+| `_viewer._ZarrLoupeSource.coarse` | **hardcoded `arr[0, :, 0]`** |
+| `_viewer._on_well` | **hardcoded `image[0, :, 0]`** |
+
+So the plate overview and the loupe show the FIRST timepoint of a multi-timepoint plate, silently.
+There is no error, no warning in the UI, and no test that would catch it: **every fixture in the
+suite is `Nt = 1`**, which is why this survived. `python -m squidmip.contract.validate` warns when
+a plate carries more than one timepoint, which is the only place that currently says so out loud.
+
+This is a statement of fact, not a promise. Do not treat "the viewer shows t=0" as contractual: it
+is the thing to fix, and a `t` selector on the plate view is what fixes it. Until then, do not add
+a fixture with `Nt = 1` and conclude that timepoints work.
+
+### Level 0 is full resolution, and a MIP never comes from a coarser level
+
+`datasets` is ordered highest resolution first. `datasets[0]` is the full-resolution,
+pixel-exact array. Coarser levels are 2x2 block means (`_output._downsample_yx`) and exist for
+NAVIGATION only.
+
+`SquidZarrReader` serves level 0 and only level 0. A projection computed from a downsampled level
+would be silently wrong, so the coarse levels are never read on the compute path.
+
+Array SHAPES come from the arrays themselves, never from a scale factor: the 2x2 block mean crops
+odd axes, so level shapes are `floor(prev/2)` and a scale factor would disagree.
+
+### Micrometres, and the `_um` suffix means it
+
+Every physical value this package exposes is in micrometres, and every key carrying one is
+suffixed `_um` (`pixel_size_um`, `dz_um`, `fov_positions_um`).
+
+On disk, `axes[].unit` is a UDUNITS-2 string. Conversion to micrometres happens at exactly one
+producer, `reader._unit_to_um`, using the axis's own declared unit. No consumer compensates. A
+store written in millimetres must never reach a `_um` key as millimetres; that is the 1000x class
+of bug, and it has been fixed here once already.
+
+### Corners, not centres
+
+A dataset `translation` places pixel (0, 0): the field's TOP-LEFT corner in stage micrometres.
+`fov_positions_um` records where the stage was, i.e. the frame CENTRE, so the writer subtracts
+half a frame (`_output.field_origin_um`). Half a frame is 388 um on a 2084 px 20x field, which is
+half an FOV of mosaic shear if it is skipped.
+
+Every level of a field carries the SAME corner. Area-averaged downsampling nudges the sample
+centre by half a coarse pixel; carrying that here would make one field's levels disagree with each
+other while breaking the "levels share an origin" assumption every mosaic compositor makes.
+
+## Optional, each with its fallback
+
+### Dataset `translation` falls back to a sibling `coordinates.csv`
+
+`translation` is the only position mechanism the NGFF spec defines, and SquidMIP's writer **does**
+emit it (IMA-217). Three cases legitimately carry none: an acquisition with no recorded stage
+positions, a store written before IMA-217, and Squid's 6-D layout, where one translation covers a
+whole region and therefore cannot be a per-FOV position.
+
+**Fallback:** `coordinates.csv` beside the store, both Squid schemas (IMA-215). Either way the
+result lands in `reader.metadata["fov_positions_um"]`.
+
+**When both are absent:** the value is `{}`, present but empty, exactly as on the TIFF readers, so
+consumers degrade to single-tile rendering instead of hitting a `KeyError`. Note what does NOT
+happen: positions are never inferred from a scan-order index map. That trades a measurement for an
+assumption, cannot express stage drift or autofocus jitter, and breaks freeform tissue
+acquisitions. `reader.py` raises instead.
+
+### `omero` falls back to auto-contrast
+
+`omero.channels` carries the label, hex colour and display window per channel. A legal NGFF image
+need not have it.
+
+**Fallback:** a sibling `acquisition_channels.yaml`, then generic `C{i}` labels with the shared
+wavelength/brightfield colour resolution, and display windows from auto-contrast. The store still
+opens; the colours are then a best effort, and `reader._channels` announces that rather than
+passing it off as acquisition truth.
+
+### A multi-level pyramid falls back to level `"0"`
+
+Fields at or below 256 px in Y and X are written single-level on purpose
+(`_output._PYRAMID_MIN_YX`), and a foreign store may carry one level for any reason.
+
+**Fallback:** level `"0"`, which a field always has. `squidmip.contract.field_levels` is the one
+place that reads `multiscales[0].datasets[*].path` and applies this fallback. Consequence, not a
+defect: navigation pays full resolution for a thumbnail, and the loupe's level selection cannot
+bound the read, so it strides in TensorStore instead.
+
+### `.squidmip-incomplete` marks a store mid-write
+
+Written from a plate write's first byte to its last (IMA-230) and removed as the write's last act.
+Its presence means the run did not finish and wells the plate metadata promises may be absent.
+`_output.is_incomplete` reads it. A store without the marker was either finished or written by
+something that is not us.
+
+### `tables/FOV_ROI_table` is a convenience, not a source of truth
+
+An AnnData-encoded Fractal/ngio ROI table giving every FOV's box in micrometres (IMA-231), written
+per well on the persist path only. Its corners are `field_origin_um`, the same corner as the NGFF
+`translation`. Nothing in this package reads it back; it exists so an external tool can recover
+FOV boundaries after a region is fused.
+
+**Fallback:** none needed. If it is missing, use `translation`, which is where its numbers came
+from.
+
+## What is deliberately NOT in this contract
+
+`record-zstack-viewer`'s contract also covers `events.jsonl`, a `thumbnails/` directory and a
+`recording/` section. Those describe a LIVE producer. v1 is post-acquisition only: SquidXplorer is
+launched after the acquisition finishes, so there is no growing store, no event log to tail and no
+partial-write state machine. See `docs/VERSIONS.md`, which states the version arc and the rule that
+unbuilt things carry a TRIGGER, not a version number. The trigger for the live half of a contract
+is the first time SquidXplorer is pointed at a folder that is still being written.

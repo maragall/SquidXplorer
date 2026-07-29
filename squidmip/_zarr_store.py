@@ -79,15 +79,22 @@ def write_array(store: ts.TensorStore, data: np.ndarray) -> None:
     store[...].write(np.ascontiguousarray(data)).result()
 
 
-def write_group(path, ome: Optional[dict] = None) -> None:
+def write_group(path, ome: Optional[dict] = None, *, attributes: Optional[dict] = None) -> None:
     """Write a zarr v3 group ``zarr.json`` at *path*, with optional ``attributes.ome``.
 
     A bare group (``ome=None``) is a structural node (plate row); an ``ome`` payload carries
     the plate / well / multiscales+omero metadata that ndviewer and ome-zarr readers consume.
+
+    ``attributes`` is merged in BESIDE ``ome``, not inside it. The one caller is the plate
+    contract stamp (``squidmip.contract.contract_stamp``): ``attributes.ome`` is OME's namespace
+    and is what ``ome-zarr-models`` validates, so a private SquidMIP key goes next to it rather
+    than in it. Zarr attributes are free-form, so a reader that does not know the key ignores it.
     """
     path = Path(path)
     path.mkdir(parents=True, exist_ok=True)
     doc: dict[str, Any] = {"zarr_format": 3, "node_type": "group", "attributes": {}}
     if ome is not None:
         doc["attributes"]["ome"] = ome
+    if attributes:
+        doc["attributes"].update(attributes)
     (path / "zarr.json").write_text(json.dumps(doc, indent=2))

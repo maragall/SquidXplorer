@@ -8,12 +8,179 @@ plus the acquisition parameters.json scalars. Returns (root_path, {(region,fov,z
 
 from __future__ import annotations
 
+import gc
 import json
+import os
 from pathlib import Path
 
 import numpy as np
 import pytest
 import tifffile
+
+#: The process's QApplication, held for the whole session so no fixture teardown can free it.
+#:
+#: PyQt gives the QApplication to PYTHON to own. Every GUI test module reaches it as
+#: ``QApplication.instance() or QApplication([])`` inside a module-scoped fixture, which made a
+#: PYTEST FIXTURE CACHE the only reference in the process. At the last teardown of such a module
+#: pytest ran ``item.funcargs = None`` (``_pytest/runner.py:147``) and deleted the QApplication
+#: while widgets, the shared QStyle and posted events still pointed at it, segfaulting the run and
+#: taking the summary line with it, so a run that crashed and a run that passed looked identical.
+#:
+#: ``squidmip._viewer.qt_app()`` fixes this for anything that builds a PlateWindow, but modules
+#: like ``tests/test_layer_tree.py`` never build one, so nothing pinned the app for them: measured
+#: 2026-07-28, ``pytest tests/test_layer_tree.py`` returned 139 on 3 of 3 runs, and 0 on 3 of 3
+#: with a reference held. Holding it here covers every GUI module at once, which is the right
+#: layer because the ownership problem is created by the fixture cache, not by the library.
+#:
+#: Deliberately a module global rather than a session fixture: a fixture is still something pytest
+#: releases, which is the exact hazard.
+_QT_APP = None
+
+#: The session's plate cell cache directory, created in ``pytest_configure`` and removed at the
+#: end. See there for why the suite must never write into the real one.
+_CACHE_DIR = None
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Tear Qt down while Qt is still alive, so the process does not abort at interpreter exit.
+
+    A PlateWindow is never freed. Its widgets connect dozens of ``self``-capturing lambdas, and
+    PyQt keeps each lambda alive in a slot proxy parented to the sender, so the closure's ``self``
+    closes a window -> child -> proxy -> lambda -> window cycle whose links live in C++ where
+    Python's cyclic collector cannot see them. ``gc.collect()`` frees nothing; measured, twelve
+    build-and-close cycles leave 88 top-level widgets alive.
+
+    Left alone they are destroyed during interpreter finalisation, against a Qt that is itself
+    half torn down, and the process aborts with 134 or 139 AFTER pytest has printed a green
+    summary. That is not cosmetic: the commit gate reads the exit status, so a perfectly green
+    suite could not be committed, and "tests failed" was reported when none had.
+
+    So we destroy them HERE, at a controlled point where the QApplication is still fully alive.
+    Deleting the widgets is the real fix; the leak itself (the lambda cycles) is a production
+    defect that outlives this hook and is recorded in TODOS.md.
+    """
+    if _CACHE_DIR:
+        import shutil
+
+        shutil.rmtree(_CACHE_DIR, ignore_errors=True)
+    try:
+        from PyQt5.QtWidgets import QApplication
+    except ImportError:
+        return
+    app = QApplication.instance()
+    if app is None:
+        return
+    for w in list(app.topLevelWidgets()):
+        try:
+            w.close()
+            w.deleteLater()
+        except RuntimeError:
+            pass            # already destroyed on the C++ side; nothing owed
+    app.processEvents()     # run the deferred deletions while the app can still service them
+    import gc
+    gc.collect()
+
+
+def pytest_configure(config):
+    """Pin the QApplication before any test runs. No-op where PyQt5 is not installed.
+
+    Also redirects the plate cell cache (``squidmip._platecache``) into a temporary directory for
+    the whole session. Two reasons, and both are about the suite being honest rather than tidy:
+    a test that opens a fixture acquisition would otherwise write real cells into the developer's
+    ``user_cache_dir``, and a cell left there by one run would be read by the next, so a caching
+    bug could pass on a warm machine and fail on a cold one. The directory is deliberately NOT
+    cleaned up per test: within a session the cache is supposed to persist, and a test that wants
+    a cold cache says so with its own ``root=``.
+    """
+    global _QT_APP, _CACHE_DIR
+    import sys
+    import tempfile
+
+    from squidmip import _platecache
+
+    if not os.environ.get(_platecache.ENV_DIR):
+        _CACHE_DIR = tempfile.mkdtemp(prefix="squidmip-test-cache-")
+        os.environ[_platecache.ENV_DIR] = _CACHE_DIR
+    # Do NOT force PyQt5 in. The GUI modules skip themselves when PySide is already loaded
+    # (pytest-qt autoload pulls it in, and two Qt bindings in one process break GL rendering);
+    # importing PyQt5 here first would defeat that guard and run those modules under a mixed
+    # binding, which is a different bug, not a fix. Under PYTEST_DISABLE_PLUGIN_AUTOLOAD=1, the
+    # way the commit gate runs, PySide is absent and this pins as intended.
+    if any(m.startswith("PySide") for m in sys.modules):
+        return
+    try:
+        from PyQt5.QtWidgets import QApplication
+    except ImportError:
+        return                      # headless CI without the [gui] extra: nothing to pin
+    _QT_APP = QApplication.instance() or QApplication([])
+
+
+# --- process-global operator registries: snapshot + restore around every test ----------------
+#
+# ``add_projector`` / ``add_segmenter`` / ``add_region_operator`` write into module-level dicts that
+# live for the whole pytest process. A test that registers one and does not remove it leaks into
+# every test that runs after it, and the failure lands somewhere else entirely:
+# ``tests/test_decon.py::test_decon_op_factory_produces_a_plane_op_and_is_registrable`` registered
+# ``decon_test_factory`` with no teardown, which made
+# ``tests/test_operator_integration.py::test_available_projectors_exact_list`` pass on its own and
+# fail in the full suite -- an order-dependent failure that reads as a bug in the second file.
+#
+# AUTOUSE is safe here because this only SAVES and RESTORES: it registers nothing, removes nothing
+# during a test, and every registration in this suite happens inside a test function (nothing is
+# registered at module import or in a session/module fixture, which this would otherwise undo).
+# Being autouse is the point -- it covers registry-mutating tests nobody has written yet.
+_REGISTRIES = (
+    ("squidmip._engine", "_PROJECTORS"),
+    ("squidmip._spots", "_SEGMENTERS"),
+    ("squidmip._stitch", "_REGION_OPERATORS"),
+)
+
+
+@pytest.fixture(autouse=True)
+def _cold_plate_cell_cache(tmp_path, monkeypatch):
+    """Every test starts with a COLD plate cell cache (``squidmip._platecache``).
+
+    Two failures this prevents, and the second is the one that bites. A test that opens a fixture
+    acquisition would otherwise write real cells into the developer's ``user_cache_dir``; and,
+    worse, ``real_dataset`` and ``sim_1536wp`` live at FIXED paths, so a cell written by one test
+    would be read by every later test that opens the same acquisition. The second test would then
+    see one replayed tile per well where the producer emits one per FOV -- an order-dependent
+    failure landing in a file that did nothing wrong, which is exactly the shape of the registry
+    leak documented above.
+
+    A test that wants a WARM cache builds one explicitly with ``root=``; that is what
+    ``tests/test_platecache.py`` does, and it is the honest way to test persistence.
+    """
+    from squidmip import _platecache
+
+    monkeypatch.setenv(_platecache.ENV_DIR, str(tmp_path / "plate-cells"))
+    _platecache.clear_memory_tier()
+    yield
+    _platecache.clear_memory_tier()
+
+
+@pytest.fixture(autouse=True)
+def _restore_operator_registries():
+    import importlib
+
+    saved = []
+    for module_name, attr in _REGISTRIES:
+        try:
+            registry = getattr(importlib.import_module(module_name), attr)
+        except (ImportError, AttributeError):
+            # NAMED, not silent: a renamed registry must be visible, not quietly unguarded.
+            raise AssertionError(
+                f"{module_name}.{attr} no longer exists; tests/conftest.py restores it between "
+                "tests and must be updated to the new name, or a leaked registration will again "
+                "fail a different test file than the one that caused it."
+            ) from None
+        saved.append((registry, dict(registry)))
+    yield
+    for registry, snapshot in saved:
+        if registry != snapshot:
+            registry.clear()
+            registry.update(snapshot)
+
 
 REGIONS = ["B2", "B3"]
 FOVS = [0, 1]
@@ -207,3 +374,191 @@ def real_dataset():
     if not path.is_dir():
         pytest.skip(f"real tissue acquisition not present at {path}")
     return path
+
+
+# --- sim_1536wp: the plate-scale fixture, and a guard that can tell HOLLOW from ABSENT ---------
+
+SIM_1536WP = Path("/Users/julioamaragall/CEPHLA/Data/sim_1536wp")
+
+#: Every plane of sim_1536wp is a symlink into this folder. Nothing in this repo generates it.
+SIM_1536WP_SOURCE = Path("/Users/julioamaragall/Downloads/synthetic_2x2_wellplate")
+
+
+def sim_1536wp_problem():
+    """Why ``sim_1536wp`` is unusable, as a sentence naming the fix, or None when it is fine.
+
+    The old guard was ``if not SIM_1536WP.is_dir(): skip``, which only asks whether the FOLDER is
+    there. sim_1536wp's ``0/`` holds 6144 SYMLINKS into ``~/Downloads/synthetic_2x2_wellplate``,
+    and that folder was deleted, so the directory check passed, every link dangled, and
+    ``open_reader`` correctly refused with "contains no {region}_{fov}_{z}_{channel}.tiff": nine
+    integration tests failing on a MISSING DATASET while reading as a reader bug. A fixture that is
+    present but hollow has to be diagnosed as such, here, once, rather than in nine tracebacks.
+    """
+    if not SIM_1536WP.is_dir():
+        return f"sim_1536wp not present at {SIM_1536WP}"
+    planes = SIM_1536WP / "0"
+    if not planes.is_dir():
+        return f"sim_1536wp is present at {SIM_1536WP} but has no timepoint folder {planes}"
+    entries = sorted(planes.glob("*.tif*"))[:8]        # cheap: a hollow fixture is hollow throughout
+    if not entries:
+        return f"sim_1536wp is present at {SIM_1536WP} but {planes} holds no TIFF entries"
+    # `exists()` FOLLOWS symlinks, so a dangling link reads as absent, which is the point.
+    dead = [p for p in entries if not p.exists()]
+    if dead:
+        target = None
+        for p in dead:
+            if p.is_symlink():
+                target = Path(os.readlink(p))
+                break
+        return (
+            f"sim_1536wp at {SIM_1536WP} is HOLLOW: its planes are symlinks whose target is gone "
+            f"({target if target is not None else 'unreadable'}; e.g. {dead[0].name}). "
+            f"To restore it, put the source acquisition back at {SIM_1536WP_SOURCE}: the 1536 "
+            "wells are symlinks onto that one 2x2 plate's four planes, so restoring the source "
+            "revives every link with no regeneration step. This repo contains no generator for "
+            f"{SIM_1536WP_SOURCE.name}; tools/gates.py, tools/walkthrough.py, tools/acceptance.py, "
+            "tools/odon_benchmark.py, tools/viewer_benchmark.py and "
+            "tools/regression_vs_baseline.py all read it from that path and none of them create it."
+        )
+    return None
+
+
+@pytest.fixture
+def sim_1536wp():
+    """The 1536-well plate-scale acquisition, or a skip that says exactly what is wrong.
+
+    THE ONLY skip this suite is allowed to add: the data is genuinely not on this machine, and no
+    code change can conjure it. It is deliberately loud about which of "absent" and "hollow" it is.
+    """
+    problem = sim_1536wp_problem()
+    if problem:
+        pytest.skip(problem)
+    return SIM_1536WP
+
+
+# --- the decentralized WINDOW (squidmip/_region_viewer.RegionViewer) under offscreen Qt ---------
+#
+# Since the decentralization (2026-07-23) the root PlateWindow has no central viewer: `_detail` is
+# permanently None and viewing happens in independent `RegionViewer` windows, each with its OWN
+# napari pane, region cursor + slider, and autofocus. Those windows are where the region slider and
+# the focus/z-slider paths went, so the tests that used to drive them through `_detail` have to
+# drive them through a real window instead.
+#
+# The obstacle is napari, not the window: `make_pane` calls `gl_available()`, which is false under
+# `QT_QPA_PLATFORM=offscreen` (what the whole suite runs under), so `_build` takes its "napari
+# viewer unavailable" branch and never constructs the slider at all. `napari_pane_stub` replaces the
+# ONE seam that needs a GL context with a recording stand-in, so everything downstream of it -- the
+# real RegionViewer, the real RegionCursor/RegionSlider, the real `_MosaicWorker`, the real
+# `_FocusWorker` -- is the production code. That is a real limitation and it is stated rather than
+# hidden: napari's own rendering is not exercised here, and never was under offscreen.
+def _stub_pane_classes():
+    """Build the stub classes lazily: conftest must import without the [gui] extra."""
+    from PyQt5.QtWidgets import QWidget
+
+    class StubLayer:
+        """A napari image layer as RegionViewer reads it back: `.data` is the level list."""
+
+        def __init__(self, data, kw):
+            self.data = data
+            self.scale = kw.get("scale")
+            self.translate = kw.get("translate")
+            self.contrast_limits = None
+            self.colormap = kw.get("colormap")
+
+    class StubMosaic:
+        """The `MosaicPane.mosaic` surface RegionViewer drives, recording what it was handed."""
+
+        def __init__(self):
+            self.model = None                 # napari Viewer; None -> `_napari_viewer` uses _viewer
+            self.added = []                   # (op, channel, levels, kwargs) per add_mosaic
+            self.removed = []
+            self.shown = []
+            self._layers = {}
+
+        def remove_op(self, op):
+            self.removed.append(op)
+            for key in [k for k in self._layers if k[0] == op]:
+                del self._layers[key]
+
+        def add_mosaic(self, op, channel, levels, **kw):
+            self.added.append((op, channel, levels, kw))
+            self._layers[(op, channel)] = StubLayer(levels, kw)
+
+        def show_op(self, op):
+            self.shown.append(op)
+
+        def find(self, op, channel):
+            return self._layers.get((op, channel))
+
+    class StubDims:
+        """napari `Dims`, only the parts a window's autofocus drives."""
+
+        def __init__(self, nsteps=(2, 8, 8)):
+            self.nsteps = tuple(nsteps)
+            self.ndim = len(self.nsteps)
+            self.ndisplay = 2
+            self.current_step = tuple(0 for _ in self.nsteps)
+
+    class StubViewer:
+        def __init__(self):
+            self.dims = StubDims()
+            self.layers = []
+
+    class StubPane(QWidget):
+        ok = True
+
+        def __init__(self):
+            super().__init__()
+            self.mosaic = StubMosaic()
+            self._viewer = StubViewer()
+            self.detect_channel = None
+            self.detect_button = None
+            self.said = []
+
+        def say(self, text):
+            self.said.append(text)
+
+    return StubPane
+
+
+def shutdown_plate_window(app, win):
+    """Close a PlateWindow AND every window it spawned, then let Qt actually delete them.
+
+    `RegionViewer` sets `WA_DeleteOnClose`, so `close()` only SCHEDULES the deletion; the widget,
+    its napari QtDims and its worker threads stay alive until the event loop runs. A test that
+    closes only the plate leaves its windows behind, and enough of them accumulated in one process
+    segfault a later test -- an order-dependent crash that takes pytest's summary with it, which is
+    exactly the failure mode that hid this suite's real failures for weeks. Draining here is the
+    difference between "the window was closed" and "the window is gone".
+    """
+    manager = getattr(win, "_viewer_manager", None)
+    if manager is not None:
+        manager.close_all()
+    win.close()
+    for _ in range(20):
+        app.processEvents()
+    # Collect HERE, at a controlled point with the app still alive, rather than letting the cycle
+    # collector fire in the middle of an unrelated later test: a Qt wrapper whose C++ half Qt has
+    # already destroyed segfaults on collection, and a segfault takes pytest's summary with it.
+    gc.collect()
+    app.processEvents()
+
+
+@pytest.fixture
+def napari_pane_stub(monkeypatch):
+    """Make `RegionViewer` buildable headlessly. Returns the list of panes handed out.
+
+    Every window opened while this fixture is active gets its own recording pane, in open order.
+    """
+    import squidmip._napari_pane as napari_pane
+
+    stub_pane_cls = _stub_pane_classes()
+    panes = []
+
+    def _make_pane(*_args, **_kw):
+        pane = stub_pane_cls()
+        panes.append(pane)
+        return pane, "napari", ""
+
+    monkeypatch.setattr(napari_pane, "make_pane", _make_pane)
+    return panes

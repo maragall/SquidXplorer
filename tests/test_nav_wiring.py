@@ -11,6 +11,10 @@ seams (``_napari_dims``, ``_napari_z_axis``, ``_set_z_index``, ``_restore_dims_s
 therefore driven through a FAKE dims model that has napari's shape. That is a real limitation
 and it is stated rather than hidden: the napari path was additionally verified on a real GL
 window, and the numbers and screenshots from that run are in the branch report.
+
+The region slider itself has since moved OFF the root plate and onto each spawned window
+(2026-07-23); the first three tests are re-pointed there and use ``napari_pane_stub``, which
+replaces the one seam that needs a GL context so a real ``RegionViewer`` can be built headlessly.
 """
 
 from __future__ import annotations
@@ -33,6 +37,7 @@ if "PySide6" in sys.modules or "PySide2" in sys.modules:
 
 from squidmip import _viewer as V  # noqa: E402
 
+from .conftest import shutdown_plate_window  # noqa: E402
 from .test_viewer import _drain_until, qapp, stub_detail  # noqa: E402,F401  (fixtures)
 
 
@@ -51,64 +56,105 @@ class _FakeDims:
 
 
 # --------------------------------------------------------------------------------------
-# One owner: the slider, the red frame and pane 2 cannot disagree
+# One owner: the slider, the red frame and the window's mosaic cannot disagree
 # --------------------------------------------------------------------------------------
+#
+# THE REGION SLIDER MOVED OFF THE ROOT PLATE (decentralization, 2026-07-23). `_viewer.py`:
+# "NO region slider on the root plate. The deck puts the region slider in each spawned WINDOW."
+# `PlateWindow._region_slider` is now permanently None and `_make_region_slider` has no call
+# sites; the real slider is built in `squidmip/_region_viewer.py` (`RegionViewer._build`) from the
+# same `RegionCursor` / `RegionSlider` pair, one per window.
+#
+# The three tests below are those three, re-pointed at the window. They were NOT deleted, because
+# every property they pinned still exists: a slider the length of what it navigates, bound to a
+# cursor; a user drag that reloads the mosaic (spying the LOAD, never the cursor, which is the
+# mutation the original run caught); and the plate and the navigation agreeing in both directions.
+# What changed is only which object owns them.
 
-def test_the_window_builds_a_region_slider_bound_to_its_cursor(qapp, stub_detail, squid_dataset):
+
+def _open_window(win, regions):
+    """Open one RegionViewer over *regions* the way the plate does, and return it."""
+    w = win._viewer_manager.open(list(regions))
+    assert w is not None, "no window was opened"
+    return w
+
+
+def test_a_spawned_window_builds_a_region_slider_bound_to_its_own_cursor(
+        qapp, stub_detail, napari_pane_stub, squid_dataset):
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
-    assert win._region_slider is not None, (
-        f"no region slider was built: {win._region_slider_failure}")
-    assert win._region_slider.count == len(win._order), (
-        "the slider is not the length of the plate")
-    assert win._region_slider.index == win._cursor.index
-    win.close()
+
+    assert win._region_slider is None, (
+        "the root plate grew a region slider again; navigation is per WINDOW now")
+
+    w = _open_window(win, win._order)
+    assert w._slider is not None, "the window built no region slider"
+    assert w._cursor is not None
+    assert w._slider.count == len(win._order), "the slider is not the length of what it navigates"
+    assert w._slider.index == w._cursor.index == 0, "the slider and the cursor start disagreeing"
+    assert w._cursor.regions == list(win._order)
+    shutdown_plate_window(qapp, win)
 
 
-def test_moving_the_region_slider_moves_the_red_frame(qapp, stub_detail, squid_dataset):
-    """Requirement 2, end to end. The frame and the slider must never disagree."""
+def test_moving_a_windows_region_slider_reloads_that_windows_mosaic(
+        qapp, stub_detail, napari_pane_stub, squid_dataset):
+    """Requirement 2, end to end, on the window that now owns the slider."""
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
-    regions = win._cursor.regions
+    regions = list(win._order)
     assert len(regions) > 1, "fixture needs >1 region or this asserts nothing"
 
-    # Spy on the LOAD, not on `_mosaic_region`. `_mosaic_region` is a property over the cursor,
-    # so asserting it here would only prove the cursor moved — it would stay green with pane 2
-    # never reloaded at all. The mutation run caught exactly that.
+    w = _open_window(win, regions)
+    pane = napari_pane_stub[-1]
+
+    # Spy on the LOAD, not on the cursor. The cursor is the thing the slider drives directly, so
+    # asserting it would stay green with the mosaic never reloaded at all, the mutation the
+    # original run of this test caught. `_load_mosaic` is debounced by a QTimer, so drain for it.
     loads = []
-    real = win._load_mosaic
-    win._load_mosaic = lambda region=None, op="raw": (loads.append(region), real(region, op))[1]
+    real = w._load_mosaic
+    w._load_mosaic = lambda region=None: (loads.append(region), real(region))[1]
 
-    first_frame = win._overview._sel
-    win._region_slider.set_index_from_user(1)          # the user drags the slider
+    w._slider.set_index_from_user(1)                   # the user drags the window's slider
 
-    assert win._cursor.region == regions[1]
-    assert win._overview._sel != first_frame, "the red frame did not move with the slider"
-    assert win._overview._sel == tuple(win._fov_index[regions[1]]["rc"]), (
-        "the red frame is on a different region from the slider")
-    assert loads == [regions[1]], (
-        f"pane 2 was not reloaded for the region the slider moved to: {loads}")
-    win.close()
+    assert w._cursor.region == regions[1]
+    assert w._slider.index == 1
+    assert _drain_until(qapp, lambda: bool(loads), timeout=10), (
+        "the window's mosaic was never reloaded for the region the slider moved to")
+    assert loads == [regions[1]], f"the wrong region was loaded: {loads}"
+    assert _drain_until(qapp, lambda: bool(pane.mosaic.added), timeout=30), (
+        "no layer reached the window's viewer")
+    shutdown_plate_window(qapp, win)
 
 
-def test_double_clicking_the_plate_moves_the_region_slider(qapp, stub_detail, squid_dataset):
-    """The other direction. Two controls over one value must move together BOTH ways."""
+def test_double_clicking_the_plate_opens_a_window_on_that_region_and_moves_the_red_frame(
+        qapp, stub_detail, napari_pane_stub, squid_dataset):
+    """The other direction. The plate and the navigation must move together BOTH ways.
+
+    A double-click used to move the root's own region slider. It now opens (or is answered by) an
+    independent window on that region, and the red frame on the plate follows the same cursor,
+    so the two still cannot disagree, they are just in two windows.
+    """
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
-    regions = win._cursor.regions
+    regions = list(win._order)
 
     win.activate_well(regions[1], 0)
 
-    assert win._region_slider.index == 1, "the slider did not follow the double-click"
-    assert win._overview._sel == tuple(win._fov_index[regions[1]]["rc"])
+    windows = win._viewer_manager.windows
+    assert len(windows) == 1, f"a double-click opened {len(windows)} windows"
+    w = windows[0]
+    assert w._regions == [regions[1]], "the window opened on the wrong region"
+    assert w._cursor.region == regions[1], "the window's own cursor is not on that region"
+    assert win._overview._sel == tuple(win._fov_index[regions[1]]["rc"]), (
+        "the red frame did not follow the double-click")
     # `_current_well` must be the SAME value, not a field kept in step by hand.
     assert win._current_well == regions[1], "the opened region was not recorded"
     assert win._current_well == win._cursor.region, (
         "_current_well and the cursor are two copies of one fact again")
-    win.close()
+    shutdown_plate_window(qapp, win)
 
 
 def test_there_is_no_second_copy_of_the_current_region(qapp, stub_detail, squid_dataset):

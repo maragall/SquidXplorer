@@ -20,6 +20,7 @@ window SHARES the one reader/meta the root opened. No window reopens the dataset
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any, Optional, Sequence
 
@@ -44,7 +45,21 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-log = logging.getLogger("squidmip.regionviewer")
+from squidmip._address import Address, Extent
+from squidmip._logpane import ViewLog, get_logger
+
+log = get_logger("regionviewer")
+
+#: PyQt's C++-object-liveness oracle. The ONLY way to ask "has Qt already destroyed this widget",
+#: which a slot connected to a longer-lived object has to ask before it touches its own children.
+#: Optional so a binding without it degrades to today's behaviour rather than failing to import.
+try:                                                     # pragma: no cover - binding detail
+    from PyQt5 import sip as _sip
+except ImportError:                                      # pragma: no cover
+    try:
+        import sip as _sip                               # older PyQt5 packagings
+    except ImportError:
+        _sip = None
 
 #: Cross-window LUT clipboard for Julio's "sync windows = copy/paste LUTs": one window's per-channel
 #: (contrast_limits, colormap) is stashed here by "Copy LUTs" and applied by "Paste LUTs" in any
@@ -214,13 +229,16 @@ class RegionViewer(QMainWindow):
         self.setWindowTitle(f"[{self.window_id}] {label}")
         self.setAttribute(Qt.WA_DeleteOnClose, True)
 
-        # EXPRESSIVE path-ID for the logger (Julio: "better id generation so the logger is more
-        # expressible"). A window reads as "V3:A1,B6"; an ROI child as "V5:ROI@A1" — the id plus WHAT
-        # it holds, so a log line names the view instead of a bare number. This is the first rung of
-        # the tree path-id (plate ▸ well ▸ ROI ▸ object); deeper nodes extend it the same way.
-        _base = self._region_label(self._regions)
-        self.view_tag = (f"V{self.window_id}:ROI@{_base}" if self._roi_bbox is not None
-                         else f"V{self.window_id}:{_base}")
+        # THE LOGGER FOR THIS WINDOW (Task 1, 2026-07-29). Every line it emits carries two things:
+        # the VIEW id, which is this window's ordinal and ours, and the ADDRESS, which is where in
+        # the acquisition the action happened and is spelled in Squid's words. So a line reads
+        # "[3] A1 fov 2  decon(sigma=2.0)  started" and the one global console can print from every
+        # open window without any of them relying on the user knowing which window they meant.
+        #
+        # This replaces `view_tag`, a string of the form "V3:ROI@A1" that packed the view id and
+        # the place into one token. Deleted rather than kept: a second spelling of the same two
+        # facts is exactly the drift `_address.py`'s naming law exists to stop.
+        self.log = ViewLog(log, self.window_id)
 
         # A modest, cascaded window — the deck's windows are small tiles, not full-screen slabs.
         # Cascade by ID so several opened in a row do not land exactly on top of one another.
@@ -490,12 +508,29 @@ class RegionViewer(QMainWindow):
             return
         region = self._cursor.region if self._cursor is not None else (
             self._regions[0] if self._regions else "")
+        # THE STARTED / DONE PAIR, in the shape Task 1 specifies:
+        #     [3] A1  nuclei(cellpose, DAPI)  started
+        #     [3] A1  nuclei(cellpose, DAPI): 412 nuclei  done in 1.4 s
+        # The address is captured HERE and carried into the callbacks, NOT read again when they
+        # fire. The user is free to move this window's region slider while Cellpose runs, and a
+        # "done" line naming where the window is NOW rather than what was actually worked on is a
+        # lie the log would tell confidently. An address is only worth having if it is the address
+        # of the work.
+        action = f"nuclei(cellpose, {channel})"
+        where = self.address()
+        began = time.monotonic()
         w = _SpotWorker(region, channel, layer.data, None, None, SpotParams(), parent=self)
         w.ready.connect(self._on_nuclei_ready)
-        w.problem.connect(self._say)
-        w.finished_count.connect(lambda r, c, n: self._say(f"{n} nuclei detected on {c}."))
+        w.problem.connect(lambda m, a=action, d=where: self.log.failed(a, str(m), address=d))
+        w.problem.connect(self._echo)
+        w.finished_count.connect(
+            lambda r, c, n, a=action, d=where, t0=began: (
+                self.log.done(f"{a}: {n} nuclei", time.monotonic() - t0, address=d),
+                self._echo(f"{n} nuclei detected on {c}."),
+            ))
         self._spot_worker = w
-        self._say(f"detecting nuclei (Cellpose) on the {channel} MIP — first run downloads weights…")
+        self.log.started(action, address=where)
+        self._echo(f"detecting nuclei (Cellpose) on the {channel} MIP — first run downloads weights…")
         w.start()
 
     def _on_nuclei_ready(self, region, channel, labels, centroids, bbox_um, count):
@@ -1084,13 +1119,49 @@ class RegionViewer(QMainWindow):
         except Exception as exc:                         # noqa: BLE001 - named to the window
             self._say(f"ROI 3D could not open: {exc}")
 
+    # -- where this window is, in the acquisition ----------------------------------------
+    def current_region(self) -> str:
+        """The region this window is SHOWING right now. A window can hold several and steps
+        through them with its slider, so "which region" is a question about the cursor, not about
+        the list."""
+        region = self._cursor.region if self._cursor is not None else None
+        if not region:
+            region = self._regions[0] if self._regions else ""
+        return str(region)
+
+    def address(self):
+        """WHERE this window is, as :class:`~squidmip._address.Address` or ``Extent``.
+
+        An ROI child carries a box, and a box is a slab rather than a point, so it answers with an
+        :class:`~squidmip._address.Extent`. Everything else answers with an ``Address`` naming the
+        region and leaving every other dimension None, which means "all of it".
+
+        The window's ORDINAL is deliberately not in here. It is the view id, it belongs to the
+        desktop rather than to the plate, and it travels beside the address on every line.
+        """
+        region = self.current_region()
+        if self._roi_bbox is not None:
+            return Extent(region_id=region, bbox_um=self._roi_bbox)
+        return Address(region_id=region)
+
+    def view_log(self) -> ViewLog:
+        """This window's logger, addressed to wherever it is pointing at this instant."""
+        return self.log.at(self.address())
+
     def _say(self, text: str) -> None:
-        # ALWAYS log to the shared logger (the app's Log window captures the root logger), tagged
-        # with this view's id -- Julio: "the logger isn't responding to what we do in the windows...
-        # I'm blind to it." The pane status bar is the in-window echo; the log window is the record
-        # of what every open view did, which is what "the logger deals with all open windows" needs.
+        # ALWAYS log to the shared logger (the one global console is a sink of the root logger),
+        # carrying this view's id AND its address -- Julio: "the logger isn't responding to what we
+        # do in the windows... I'm blind to it." The pane status bar is the in-window echo; the
+        # console is the record of what every open view did to what, which is what "the logger
+        # deals with all open windows" needs in order to be readable with six windows open.
         if text:
-            log.info("[%s] %s", getattr(self, "view_tag", f"V{self.window_id}"), text)
+            self.view_log().info("%s", text)
+        self._echo(text)
+
+    def _echo(self, text: str) -> None:
+        """The in-window status line ONLY. Use it when the console already has a structured line
+        for this event (a started/done pair), so the console does not carry a prose duplicate of
+        something it just said in a form the user can scan."""
         if self._pane is not None and getattr(self._pane, "ok", False):
             self._pane.say(text)
 
@@ -1413,6 +1484,20 @@ class OpenViewList(QWidget):
         self.refresh()
 
     def refresh(self) -> None:
+        # A DESTROYED navigator must not rebuild itself. `manager.windowsChanged` is connected to
+        # this bound method, and the ViewerManager outlives any one navigator, so a window closing
+        # AFTER this widget's C++ side was destroyed re-enters here and touches `self._tree`. That
+        # is a use-after-free, and it does not raise: it segfaults, with the crash landing in
+        # `expandAll()` and blaming whichever test happened to run last. Measured that way during
+        # the gap 1 work: every test passed, then the process died at 100% inside
+        # `conftest.pytest_sessionfinish`'s close loop, so pytest never printed a summary and a
+        # fully green suite could not be committed.
+        #
+        # sip.isdeleted is the only reliable question here. `try/except RuntimeError` does not
+        # help, because PyQt raises that only when it KNOWS the object is gone; a widget torn down
+        # by its parent's C++ destructor leaves a wrapper that still looks alive.
+        if _sip is not None and _sip.isdeleted(self):
+            return
         # Rebuild as a NESTED tree (ROI children under their parent window), then restore the multi-
         # selection from the manager (guarded so the programmatic selection does not re-fire
         # _on_selection_changed). No selection => no wash.

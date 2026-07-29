@@ -38,7 +38,9 @@ from squidmip._spots import (
     result_from_labels,
 )
 
-log = logging.getLogger("squidmip.cellpose")
+from squidmip._logpane import get_logger
+
+log = get_logger("cellpose")
 
 #: The registered name. Its identity is the ALGORITHM, not the package — matched to the table's
 #: "otsu-watershed" sibling.

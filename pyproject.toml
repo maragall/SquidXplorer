@@ -22,6 +22,11 @@ dependencies = [
     #                             anndata itself is NOT a dependency — the encoding is a documented
     #                             on-disk contract and the table is nine columns wide.
     "pillow>=10.0",
+    "platformdirs>=3.0",        # Gap 1: the persistent plate-cell cache (squidmip/_platecache.py)
+    #                             needs the per-OS user cache directory. It is a hard dependency
+    #                             and not a lazy import, because the alternative to knowing where
+    #                             the cache belongs is writing beside the acquisition, and this
+    #                             tool promises it never writes into your data folder.
     "pydantic-settings>=2.3",   # declarative CLI (IMA-186), same pattern as the stitcher
     "scipy>=1.10",              # IMA-223/224/225 plane-ops: ndimage gaussian_filter (the
     #                             kernel-free Richardson-Lucy) and zoom (the flat-field /
@@ -41,10 +46,33 @@ dependencies = [
 # ome-zarr-models: official OME-NGFF v0.5 pydantic schema — validates written plate metadata
 # in tests (test-time only; the runtime writer stays lean, no extra runtime dep).
 test = ["pytest>=7.0", "ome-zarr-models>=1.7"]
-# gui: the MIP tool desktop app. PyQt5 + ndviewer_light (the embedded detail viewer). The headless
-# pipeline (reader/projection/engine/output) never imports these, so the CLI installs without them.
+# gui: the MIP tool desktop app. PyQt5 + napari + ndviewer_light (the embedded detail viewers).
+# The headless pipeline (reader/projection/engine/output) never imports these, so the CLI installs
+# without them.
+#
+# napari is the PRIMARY viewer, not an optional nicety: _napari_pane, _napari3d and _napari_view
+# import it, and every mosaic/window renders through it. It was undeclared here and absent from
+# CI's install lines, so a clean `.[gui]` install produced an app whose every view window showed
+# "napari viewer unavailable (NapariBindingError)" while the plate shell looked fine -- a failure
+# that reads as a platform bug and is not one. Verified against napari 0.8.0 on Windows via
+# squidmip._napari_view.verify_napari_bindings(), which is the guard that was firing.
+#
+# psutil is what _rss_mb() and _region_viewer's memory bar actually want. Without it they fall
+# back to `resource`, which does not exist on Windows, so the footprint readout sat at 0 MB
+# forever -- the memory warning the README promises could never fire on Windows.
+# The napari range matches the one Cephla validated in the Squid HCS GUI
+# (jsschwrz/Squid 757d571, "Migrate GUI from PyQt5 to PyQt6 for napari 0.7 / Python 3.14"),
+# so the two apps that embed napari do not drift onto different majors.
+#
+# CAVEAT, and it is the reason the upper bound is worth having: napari >=0.7 targets Qt6, and
+# that commit found napari 0.7 + vispy 0.16 under PyQt5 renders the mosaic glitchily. This
+# package is still PyQt5, so the pin aligns versions for the Qt6 migration rather than making
+# Qt5 correct. Bindings verified against the pinned range via verify_napari_bindings(); the
+# rendering caveat is a Qt-binding problem, tracked separately.
 gui = [
     "PyQt5>=5.15",
+    "napari>=0.7,<0.8",
+    "psutil>=5.9",
     "ndviewer_light @ git+https://github.com/maragall/ndviewer_light@main",
 ]
 

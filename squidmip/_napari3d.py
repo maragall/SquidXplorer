@@ -10,7 +10,8 @@ napari <0.6, we run 0.6.6), so this replicates its recipe: the exact add_image c
 (dz, px, px) scale, additive blending, carried-over contrast, and a micrometre scale bar.
 
 A single FOV, not the whole region, is deliberate: the region is a mosaic and cannot fit one
-texture at native resolution. This is the "max res preview" of one field; AGAVE remains the path
+texture at native resolution. With AGAVE cancelled (docs/VERSIONS.md) this is not a preview tier
+below a better renderer: it IS the full-resolution answer, and the crop is the mechanism
 for a path-traced, whole-region volume.
 """
 
@@ -21,7 +22,9 @@ from typing import Any, Optional, Sequence
 
 import numpy as np
 
-log = logging.getLogger("squidmip.napari3d")
+from squidmip._logpane import get_logger
+
+log = get_logger("napari3d")
 
 
 def _center_fov(meta: dict, region: str) -> Optional[int]:

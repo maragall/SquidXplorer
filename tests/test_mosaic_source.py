@@ -12,6 +12,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from squidmip import _mosaic_source
 from squidmip._mosaic_source import (
     fuse_region_mosaic,
     level_paths,
@@ -49,6 +50,32 @@ def _meta(positions, fovs, frame=(4, 6), px=2.0):
         "dtype": "uint16",
         "channels": [{"name": "488"}],
     }
+
+
+def test_a_region_absent_from_a_partial_positions_map_degrades_to_none():
+    """A PARTIAL positions map must degrade per region, not raise.
+
+    New state as of the per-region coordinates.csv salvage: one truncated well loses its
+    positions while the rest of the plate keeps theirs, so ``fov_positions_um`` is now
+    non-empty *and* missing a region at the same time. The ``if not positions`` early return
+    does not fire here -- the dict is truthy -- so the placement KeyError is what actually
+    guards the absent region, and it must be caught rather than reach the Qt event loop.
+    """
+    meta = {
+        "regions": ["A1", "C3"],
+        "fovs_per_region": {"A1": [0, 1], "C3": [0, 1]},
+        "fov_positions_um": {("A1", 0): (0.0, 0.0), ("A1", 1): (12.0, 0.0)},   # C3 absent
+        "pixel_size_um": 2.0,
+        "frame_shape": (4, 6),
+        "dtype": "uint16",
+        "channels": [{"name": "488"}],
+    }
+
+    assert _mosaic_source._planned_plane(meta, "A1", 2048) is not None, \
+        "the well that cross-checked must still build"
+    assert _mosaic_source._planned_plane(meta, "C3", 2048) is None, \
+        "the well with no positions must degrade to None, not raise"
+    assert _mosaic_source.mosaic_bbox_um(meta, "C3") is None
 
 
 # ------------------------------------------------------------------ fusing

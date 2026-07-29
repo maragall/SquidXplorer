@@ -38,9 +38,54 @@ if "PySide6" in sys.modules or "PySide2" in sys.modules:
         allow_module_level=True,
     )
 
+from PyQt5.QtCore import QObject, pyqtSignal  # noqa: E402
+
 from squidmip import _viewer as V  # noqa: E402
 
-from .test_viewer import _drain_until, qapp, stub_detail  # noqa: E402,F401  (fixtures)
+from .conftest import shutdown_plate_window  # noqa: E402
+from .test_viewer import qapp, stub_detail  # noqa: E402,F401  (fixtures)
+
+# WHERE THESE NOW POINT (decentralization, 2026-07-23).
+#
+# `PlateWindow._detail` is permanently None: there is no central viewer any more, and
+# `_make_detail_viewer` (which the `stub_detail` fixture patches) has zero production call sites, so
+# the stub records a viewer nobody builds. Both defects below outlived that change, they just moved:
+#
+#   (a) the region id is still passed through verbatim, now to `ViewerManager.open`, which spawns an
+#       independent window over exactly that id;
+#   (b) the autofocus is now `_region_viewer.RegionViewer._focus_reference_plane`, which picks the
+#       region's CENTRE FOV (`_napari3d._center_fov`) rather than `fovs_per_region[region][0]`, and
+#       moves THAT window's napari z slider.
+#
+# `stub_detail` is kept on the signatures because `PlateWindow` still builds against the seam and a
+# real ndviewer under offscreen GL segfaults; nothing here reads the stub any more.
+
+
+def _spy_focus_worker(monkeypatch, answer_z=1, note=""):
+    """Replace `_FocusWorker` with a recorder. Returns the list of ``(region, fov, channel)``.
+
+    Spying on the WORKER's arguments, not on reader.read, is deliberate: the plate's raw preview
+    does its own reads of FOV 0 from another thread, so a read-spy pins the scheduler rather than
+    the autofocus. Emitting `ready` from `start()` keeps the whole test on one thread.
+    """
+    calls = []
+
+    class _SpyFocusWorker(QObject):
+        ready = pyqtSignal(int, str)
+        problem = pyqtSignal(str)
+
+        def __init__(self, reader, meta, region, fov, channel, parent=None):
+            super().__init__(parent)
+            calls.append((region, int(fov), channel))
+
+        def isRunning(self):
+            return False
+
+        def start(self):
+            self.ready.emit(int(answer_z), note)
+
+    monkeypatch.setattr(V, "_FocusWorker", _SpyFocusWorker)
+    return calls
 
 
 def _slide_acquisition(root, region: str):
@@ -67,81 +112,102 @@ def _slide_acquisition(root, region: str):
 # but it is a filename-grammar defect a long way upstream of this one - not something
 # activate_well can fix, and not what this test is pinning.
 @pytest.mark.parametrize("region", ["R2C3", "tissue-1", "scan 3"])
-def test_activate_well_navigates_to_a_freeform_region_id_verbatim(
-        qapp, stub_detail, tmp_path, region):
-    """(a) A region id that is not <letters><digits> must still navigate the detail viewer.
+def test_activate_well_opens_a_window_on_a_freeform_region_id_verbatim(
+        qapp, stub_detail, napari_pane_stub, tmp_path, region):
+    """(a) A region id that is not <letters><digits> must still open its view.
 
     The id is passed through UNCHANGED. Rebuilding it from parse_well_id raised on every one
-    of these, and the raise was swallowed, so the double-click silently did nothing.
+    of these, and the raise was swallowed, so the double-click silently did nothing. The
+    destination moved from the central detail viewer to `ViewerManager.open`; the defect and its
+    mutation-check did not, so this is the same test aimed at where the id now goes.
+
+    MUTATION: rebuild the id as f"{row}{col}" via parse_well_id again -> a raise (swallowed) or a
+    mangled id on the window -> red.
     """
     root = _slide_acquisition(tmp_path / "slide_acq", region)
     win = V.PlateWindow(None)
     win.ingest(str(root))
-    win._detail.nav.clear()          # ignore whatever the open-on-ingest navigated to
+    for w in list(win._viewer_manager.windows):        # ignore anything opened on ingest
+        w.close()
 
     win.activate_well(region, 0)
 
-    assert win._detail.nav, f"{region!r}: double-click did not navigate at all"
-    assert win._detail.nav[-1] == (region, 0), (
-        f"{region!r} was not passed through verbatim: got {win._detail.nav[-1]!r}")
-    win.close()
+    windows = win._viewer_manager.windows
+    assert windows, f"{region!r}: double-click opened no view at all"
+    assert windows[-1]._regions == [region], (
+        f"{region!r} was not passed through verbatim: got {windows[-1]._regions!r}")
+    assert windows[-1]._cursor.region == region
+    assert win._cursor.region == region, "the plate's own cursor did not follow the double-click"
+    shutdown_plate_window(qapp, win)
 
 
-def test_focus_reference_plane_ranks_the_fov_in_view_not_the_regions_first(
-        qapp, stub_detail, squid_dataset):
-    """(b) Autofocus must rank the FOV ON SCREEN, not fovs_per_region[well][0]."""
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    assert win._meta["fovs_per_region"]["B3"][:2] == [0, 1], "fixture needs 2 FOVs to tell these apart"
+def test_window_autofocus_ranks_a_representative_fov_not_the_regions_first(
+        qapp, stub_detail, napari_pane_stub, squid_dataset, monkeypatch):
+    """(b) Autofocus must rank a REPRESENTATIVE field, not `fovs_per_region[region][0]`.
 
-    # The real detail viewer can move its z-slider; the recording stub deliberately cannot, and
-    # _focus_reference_plane bails out early without it. Give it the one method it checks for.
-    z_moves = []
-    win._detail.set_current_index = lambda axis, i: z_moves.append((axis, i))
+    It is a per-FOV autofocus, so ranking field 0 while the user is looking elsewhere reports the
+    sharpest plane of pixels they are not looking at. On the root plate "representative" meant the
+    FOV on screen (`_current_fov`); a window shows a whole fused region and has no FOV cursor, so it
+    means the field nearest the region's stage centroid (`_napari3d._center_fov`).
 
-    win.activate_well("B3", 1)       # the user is looking at FOV 1
-    assert win._current_fov == 1, "the FOV on screen was not recorded"
+    The positions are rigged so the centre field is 1 and the region's first is 0 -- without that,
+    "centre" and "first" are the same number on this fixture and nothing is being tested.
 
-    win._focus_reference_plane()
-    # The scan runs on a WORKER now (it used to do ~40-50 TIFF reads inside the clicked slot and
-    # froze the window solid), so the result arrives through the event loop.
-    assert win._focus_btn.isEnabled() is False, (
-        "the button stayed clickable during the scan — a second click would start a second scan")
-    assert _drain_until(qapp, lambda: bool(z_moves) or win._focus_btn.isEnabled()), (
-        "the focus worker never came back")
-
-    # The readout names the FOV that was actually ranked. Asserting it rather than spying on
-    # reader.read is deliberate: a background worker does its own reads on FOV 0 from another
-    # thread, so a read-spy pins the scheduler, not the autofocus.
-    assert z_moves, "autofocus never moved the z-slider"
-    assert win._readout.text().startswith("B3:1 "), (
-        f"autofocus reported {win._readout.text()!r}; it ranked the wrong FOV")
-    assert win._focus_btn.isEnabled(), "the button was left disabled after the scan finished"
-    win.close()
-
-
-def test_focus_reference_plane_works_without_a_double_click(qapp, stub_detail, squid_dataset):
-    """The button must act on the region the plate is SHOWING.
-
-    It used to demand ``_current_well``, which is only set by a double-click, and under napari
-    ``_detail`` is None so the handler returned before doing anything at all — a visible button
-    with zero function, telling the user to double-click a well they had already opened.
+    MUTATION: rank `fovs_per_region[region][0]` -> fov 0 -> red.
     """
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
-    z_moves = []
-    win._detail.set_current_index = lambda axis, i: z_moves.append((axis, i))
+    assert win._meta["fovs_per_region"]["B3"][:2] == [0, 1], "fixture needs 2 FOVs"
+
+    w = win._viewer_manager.open(["B3"])
+    # Three fields, clustered so the centroid sits nearest field 1: first != centre.
+    w._meta = w._meta.model_copy(update={
+        "fovs_per_region": {**dict(win._meta["fovs_per_region"]), "B3": [0, 1, 2]},
+        "fov_positions_um": {("B3", 0): (0.0, 0.0), ("B3", 1): (100.0, 0.0),
+                             ("B3", 2): (110.0, 0.0)},
+    })
+    calls = _spy_focus_worker(monkeypatch, answer_z=1)
+
+    w._focus_reference_plane()
+
+    assert calls, "the window's autofocus never started a scan"
+    region, fov, channel = calls[-1]
+    assert (region, fov) == ("B3", 1), (
+        f"autofocus ranked {region}:{fov}; it ranked the wrong FOV")
+    assert channel == w._meta["channels"][0]["name"], "autofocus ranked the wrong channel"
+    # The answer must MOVE this window's z slider: a "focused" message over a slider that never
+    # moved is the silent failure the reference-plane button exists to avoid.
+    assert w._napari_viewer().dims.current_step[0] == 1, "the window's z slider never moved"
+    assert any("reference plane: z=1" in s for s in w._pane.said), w._pane.said
+    shutdown_plate_window(qapp, win)
+
+
+def test_window_autofocus_works_without_a_double_click(
+        qapp, stub_detail, napari_pane_stub, squid_dataset, monkeypatch):
+    """The button must act on the region the window is SHOWING.
+
+    It used to demand ``_current_well``, which is only set by a double-click, and under napari
+    ``_detail`` was None so the handler returned before doing anything at all, a visible button
+    with zero function, telling the user to double-click a well they had already opened. A window
+    takes its region from its own cursor, which is seeded on open, so it never needs one.
+    """
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    regions = list(win._order)
+    w = win._viewer_manager.open(regions)
     assert win._current_well is None, "fixture invalid: something already activated a region"
-    assert win._cursor.region is not None, "opening a plate must put a region on screen"
+    assert w._cursor.region == regions[0], "opening a window must put a region on screen"
+    calls = _spy_focus_worker(monkeypatch, answer_z=1)
 
-    win._focus_reference_plane()
-    assert _drain_until(qapp, lambda: bool(z_moves) or win._focus_btn.isEnabled())
+    w._focus_reference_plane()                        # no prior double-click, no prior activation
 
-    assert z_moves, "the button did nothing without a prior double-click"
-    assert "double-click" not in win._readout.text()
-    win.close()
+    assert calls, "the button did nothing without a prior double-click"
+    assert calls[-1][0] == regions[0], "it focused a region the window is not showing"
+    assert not any("double-click" in s for s in w._pane.said), w._pane.said
+    assert not any("open a region first" in s for s in w._pane.said), w._pane.said
+    shutdown_plate_window(qapp, win)
 
 
 def test_focus_reference_plane_on_a_single_plane_acquisition_says_so(
