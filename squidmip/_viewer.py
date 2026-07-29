@@ -53,6 +53,7 @@ import os
 import re
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -145,7 +146,8 @@ from squidmip._minerva import MINERVA_HOME_ENV as _MINERVA_HOME_ENV
 from squidmip._montage import _area_downsample, _hex_to_rgb01, composite
 from squidmip._output import parse_well_id
 from squidmip._activity import ActivityLog
-from squidmip._logpane import LogBus
+from squidmip._address import Extent
+from squidmip._logpane import LogBus, ViewLog
 from squidmip._logpanel import LogPanel
 from squidmip._plate import PlateBuildError, build_plate, display_well_id
 from squidmip._plate_shape import PlateShapeError
@@ -545,6 +547,20 @@ def operator_label(key: str) -> str:
     runnable and must still name itself in the status line and the layer stack."""
     op = _OPERATIONS_BY_KEY.get(key)
     return op.label if op is not None else key
+
+
+def _action_label(key: str, operator_kwargs: Optional[dict] = None) -> str:
+    """What the console calls one action: ``decon(sigma=2.0)``, or bare ``mip`` with no parameters.
+
+    The REGISTRY key, not the card's human label, and the parameters spelled out. A console line
+    has to be enough to reproduce the run from, and "Deconvolution" is not: two runs at different
+    sigmas would print identically, which is precisely the mixed-recipe plate Task 3 is about.
+    Sorted so the same call always renders the same string, i.e. so it can be compared by eye.
+    """
+    if not operator_kwargs:
+        return str(key)
+    args = ", ".join(f"{k}={operator_kwargs[k]}" for k in sorted(operator_kwargs))
+    return f"{key}({args})"
 
 
 class _RunningContrast:
@@ -4002,6 +4018,11 @@ class PlateWindow(QMainWindow):
         #   same layer the CLI drives, so an agent/test/script says one command to both.
         self._log_bus = LogBus()
         self._log_bus.install()
+        # THIS WINDOW'S LOGGER (Task 1). The root plate is VIEW 0: it is the root of the view tree,
+        # and ViewerManager hands out 1 upward, so the two numberings cannot collide. Every action
+        # it logs carries that id and, where it has one, an address.
+        self.view_id = 0
+        self.log = ViewLog(log, self.view_id)
         self._activity = ActivityLog()
         from squidmip._gui_commands import install_command_bus
         self.commands = install_command_bus(self)
@@ -5080,6 +5101,21 @@ class PlateWindow(QMainWindow):
         # No operator run is in flight now — clear the activity header. end() is a no-op if it was
         # already cleared, so a failed/stopped run that never reached here does not leave it stuck.
         self._activity.end("operator-run")
+        # ...and close the console's started/done pair. This fires on ok, failed and STOPPED alike,
+        # which is why the pair is closed here and not on finished_ok: an action that starts and
+        # then says nothing is indistinguishable from one still running, and a stopped run is
+        # exactly the case that would have gone quiet. A run that landed nothing is reported as a
+        # failure however politely the engine returned.
+        action = getattr(self, "_run_action", None)
+        if action is not None:
+            self._run_action = None
+            elapsed = time.monotonic() - getattr(self, "_run_began", time.monotonic())
+            landed = getattr(self._worker, "landed", None)
+            if landed == 0:
+                self.log.failed(action, f"produced nothing after {elapsed:.1f} s",
+                                address=self._run_address)
+            else:
+                self.log.done(action, elapsed, address=self._run_address)
         self._run_tab_key = self._run_view_tab_key = None
         # A genuine drain: every worker has exited AND (finished being FIFO-queued after this
         # worker's tileReady/streamEnded) their terminal slots have already run on this thread.
@@ -7273,6 +7309,19 @@ class PlateWindow(QMainWindow):
         # Ended in _on_run_drained, which fires on ok/failed/stopped alike — so the header cannot be
         # left showing a run that is over.
         self._activity.start("operator-run", f"{label} · {scope}", total=len(run_order))
+        # ...and to the ONE GLOBAL CONSOLE, as a started/done pair carrying this view's id:
+        #     [0] A1  decon(sigma=2.0) · 1 well  started
+        #     [0] A1  decon(sigma=2.0) · 1 well  done in 1.4 s
+        # A run over exactly ONE region has an address. A run over many is a SET of extents, which
+        # a single Extent cannot say (region_id is one region, deliberately — see _address.py), so
+        # rather than invent a sentinel region_id the plural case names its count and carries the
+        # view id alone. Task 2, where a cached result carries its OWN extent, is where the set
+        # belongs: the run's answer is one extent per cell, not one extent for the run.
+        self._run_action = f"{_action_label(key, operator_kwargs)} · {scope}"
+        self._run_address = (Extent(region_id=regions[0])
+                             if regions is not None and len(regions) == 1 else None)
+        self._run_began = time.monotonic()
+        self.log.started(self._run_action, address=self._run_address)
         self._run_readout(f"● {label} · {scope}{dest} …")
         self._worker.start()
 

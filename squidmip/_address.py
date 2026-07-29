@@ -81,6 +81,17 @@ see :func:`squidmip._napari_view.scale_translate_from_bbox_um`, which raises unl
 a shortening printed a thousand times a run is how a second name for one thing starts. The common
 case is a region alone, so the lines stay short anyway.
 
+KNOWN GAP, FOUND BY THE FIRST CONSUMER, AND IT IS TASK 2's TO CLOSE
+--------------------------------------------------------------------
+``region_id`` is ONE region, on both types, deliberately. So a run over the whole plate has no
+single extent: it is a SET of them, one per cell. The plate window's console lines show it — a run
+over one region logs its extent, a run over many logs its count and no address. Resisted here: a
+sentinel ``region_id`` (``"*"``, ``None``, ``"<plate>"``) would make the type able to say
+"everywhere", and every consumer would then have to branch on whether the region field is a region.
+The right answer is the one Task 2 already reaches for, where a cached RESULT carries its own
+extent: the run's answer is one extent per cell, not one extent for the run, and Task 3's plate
+census is already specified as ``{chain: [address]}`` — a list.
+
 SCOPE (deliberate, 2026-07-29)
 ------------------------------
 This module is ADDED ALONGSIDE the packed integer id, which keeps every one of its callers.

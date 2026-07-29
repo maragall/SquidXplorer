@@ -220,6 +220,41 @@ def test_the_log_panel_is_a_fixed_tab_in_the_operators_tab_space(win):
     assert tabs.currentWidget() is win._log_panel
 
 
+def test_a_plate_run_opens_AND_closes_a_started_done_pair_in_the_console(open_win, qapp, caplog):
+    """The root plate is a window too, so its actions carry a view id and an address.
+
+    The pair matters more than either line: an action that starts and then says nothing is
+    indistinguishable from one still running, which is why the "done" is closed from the drain
+    (fires on ok, failed and stopped alike) rather than from finished_ok.
+
+    Asserted through the RECORDS. A run over exactly one region HAS an address; a plate-wide run
+    is a set of extents that one Extent cannot say, so it carries the view id alone -- that gap is
+    deliberate and is Task 2's to close."""
+    import logging
+
+    from squidmip._address import Extent
+    from squidmip._logpane import ADDRESS_FIELD, VIEW_FIELD
+
+    regions = open_win.commands.execute(Describe()).data["regions"][:1]
+    with caplog.at_level(logging.INFO):
+        open_win.run_operator("mip", regions=list(regions), save=False)
+        for _ in range(2000):
+            qapp.processEvents()
+            if not _explore.operator_busy(open_win._worker, open_win._retired):
+                break
+        for _ in range(50):
+            qapp.processEvents()          # let the queued finished slot land
+
+    lines = [r for r in caplog.records if hasattr(r, VIEW_FIELD)]
+    started = [r for r in lines if r.getMessage().endswith("started")]
+    done = [r for r in lines if "done in" in r.getMessage()]
+    assert started, f"the run never announced itself: {[r.getMessage() for r in lines]}"
+    assert done, f"the run started and then went quiet: {[r.getMessage() for r in lines]}"
+    assert getattr(started[-1], VIEW_FIELD) == 0, "the root plate is view 0"
+    assert getattr(started[-1], ADDRESS_FIELD) == Extent(region_id=regions[0])
+    assert started[-1].getMessage().startswith(f"[0] {regions[0]} ")
+
+
 def test_a_run_shows_up_as_activity_in_the_log_panel_header(open_win, qapp, monkeypatch):
     """The activity registry the panel's header reads is fed by the run — this is what makes 'the
     GUI is doing something' visible. Freeze the run as busy and check the header lit up."""
