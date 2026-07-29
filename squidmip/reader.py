@@ -83,6 +83,7 @@ import tifffile
 
 from squidmip._acquisition import Acquisition, load_acquisition_metadata
 from squidmip._channels import fallback_color, load_channel_yaml, resolve_channels
+from squidmip.contract import check_plate_contract
 
 # region has no underscore; fov and z are ints; channel is the remainder (may contain _ and -).
 _STEM_RE = re.compile(r"^(?P<region>[^_]+)_(?P<fov>\d+)_(?P<z>\d+)_(?P<channel>.+)$")
@@ -1181,12 +1182,19 @@ def _ome_channel_names(tif) -> list:
 # IMA-229: Zarr input (OME-NGFF)
 # ==================================================================================================
 #
+# THE CONTRACT NOW LIVES IN ``docs/plate-contract.md``, split into a STABLE half (depend on it; a
+# major version bump refuses to open) and an OPTIONAL half where every entry names its fallback.
+# The machine-checkable part is ``squidmip/contract/``: the stamped-and-compared
+# ``PLATE_CONTRACT_VERSION``, the single ``field_path`` seam, and a validator you can run on a
+# plate you were handed (``python -m squidmip.contract.validate <plate.ome.zarr>``). The block
+# below is kept because it cites the spec sources; the document is the contract.
+#
 # PRIOR ART, and what was adopted. The layout below is not invented; it is read straight from the
 # OME-NGFF specification sources (github.com/ome/ngff-spec, branches 0.4 and 0.5 — index.bs, the
 # JSON schemas and the published examples) and cross-checked against what SquidMIP's OWN writer
 # (``squidmip/_output.py``, already validated against the official ``ome-zarr-models`` pydantic
-# schema in ``tests/ngff_check.py``) emits. Anything a real NGFF reader (ome-zarr-py, ngio, napari)
-# cannot open would be a bug here.
+# schema in ``squidmip/contract/validate.py``) emits. Anything a real NGFF reader (ome-zarr-py,
+# ngio, napari) cannot open would be a bug here.
 #
 #   HCS plate      ``plate.ome.zarr/{row}/{col}/{fov}/{level}``
 #     plate group   ``plate`` -> ``rows``/``columns``/``wells``; each well entry has ``path``
@@ -1218,8 +1226,13 @@ def _ome_channel_names(tif) -> list:
 #   POSITIONS      The dataset-level ``translation`` (applied AFTER ``scale``, so it is already in
 #                  physical units) is the ONLY position mechanism the spec defines — there is no
 #                  well-level or plate-level stage metadata in either version. SquidMIP's writer
-#                  emits no translation, so a sibling ``coordinates.csv`` is the documented
-#                  fallback, and either way the result lands in ``fov_positions_um``.
+#                  DOES emit it (``_output.field_origin_um`` -> ``_output._multiscales``, IMA-217),
+#                  so a round-tripped store places its own FOVs; a sibling ``coordinates.csv`` is
+#                  the documented fallback for a store that carries none, and either way the
+#                  result lands in ``fov_positions_um``. [From IMA-217 until 2026-07-29 this block
+#                  asserted the opposite, i.e. it called the LIVE primary placement mechanism dead
+#                  inside the reader's own contract prose. That is the defect that pulled the plate
+#                  contract into v1 scope; see docs/plate-contract.md.]
 #
 #   UNITS          ``axes[].unit`` is a UDUNITS-2 string and is only a SHOULD, so it can be absent.
 #                  Every physical value taken out of a store (pixel size, dz, translation) is
@@ -1413,11 +1426,19 @@ class SquidZarrReader:
         self._ms: dict = {}                      # image group Path -> _Multiscale (cached)
         self._arrays: dict = {}                  # image group Path -> open tensorstore (cached)
         self._meta: Optional[dict] = None
+        self._contract_version = None            # set by _discover: what the store declares, or None
 
     # -- discovery ---------------------------------------------------------
     def _discover(self) -> dict:
         if self._fields is not None:
             return self._fields
+        # The plate contract stamp is COMPARED here, before a single path is reconstructed from
+        # it. A major mismatch raises: a store whose stable layout moved would still discover
+        # wells and still render, just at the wrong positions or the wrong resolution, which is
+        # this reader's stated worst outcome. An unstamped store proceeds -- every plate written
+        # before the stamp landed, and every third-party NGFF store, has none. Policy and its
+        # reasoning live in squidmip/contract/version.py; this is its one reader-side call site.
+        self._contract_version = check_plate_contract(self._path)
         attrs = _group_attrs(self._path)
         fields = (
             self._discover_hcs(attrs["plate"]) if isinstance(attrs.get("plate"), dict)
@@ -1569,11 +1590,16 @@ class SquidZarrReader:
     def _positions_um(self, fields: dict, fovs_per_region: dict) -> dict:
         """Stage positions in MICROMETRES: dataset ``translation`` first, coordinates.csv second.
 
-        The NGFF spec defines no other position mechanism, and SquidMIP's own writer emits no
-        translation — so a store round-tripped through this package legitimately has none, and the
-        sibling ``coordinates.csv`` (both schemas, IMA-215) is the documented fallback. When
-        neither exists the value is ``{}``: present but empty, exactly as on the TIFF readers, so
-        consumers degrade to single-tile rendering instead of hitting a KeyError.
+        The NGFF spec defines no other position mechanism. SquidMIP's own writer DOES emit a
+        translation (IMA-217), so a store round-tripped through this package normally places its
+        own FOVs from the store alone. Three cases legitimately carry none: an acquisition with no
+        stage positions to record, a store written before IMA-217, and the 6D layout below. For
+        those the sibling ``coordinates.csv`` (both schemas, IMA-215) is the documented fallback.
+        When neither exists the value is ``{}``: present but empty, exactly as on the TIFF readers,
+        so consumers degrade to single-tile rendering instead of hitting a KeyError.
+
+        [Until 2026-07-29 this docstring asserted the opposite, which had been wrong since
+        IMA-217. See docs/plate-contract.md.]
         """
         from_store = {}
         for key, group in fields.items():

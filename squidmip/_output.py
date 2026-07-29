@@ -76,8 +76,14 @@ import tifffile
 
 from squidmip._engine import _default_workers, project_plate
 from squidmip._zarr_store import create_array, write_array, write_group
+from squidmip.contract import contract_stamp
 from squidmip.projection import resolve_n_fovs, select_fovs
 
+# The OME-NGFF SPEC version of the metadata payload. It says which published schema the
+# ``attributes.ome`` blocks conform to, and it belongs to OME. It is NOT a statement about
+# SquidMIP's own layout promises (the hierarchy, TCZYX, what level 0 means, micrometre units) --
+# that is ``contract.PLATE_CONTRACT_VERSION``, stamped once on the plate group below and compared
+# by ``reader``. Two stores can be valid NGFF 0.5 and disagree on everything this package assumes.
 _NGFF_VERSION = "0.5"
 _WAVELENGTH_RE = re.compile(r"(?<!\d)(\d{3,4})(?!\d)")  # a standalone 3-4 digit nm in a channel name
 
@@ -887,7 +893,11 @@ def write_from_stream(
         wells = {r: wells[r] for r in keep if r in wells}
 
     # Full plate/row/well group metadata written UP FRONT (layout is fully known from metadata).
-    write_group(plate_dir, plate_metadata(wells.keys(), field_count=field_count))
+    # The plate contract stamp rides along, ONCE, on the plate group: it describes the whole store,
+    # and ``_NGFF_VERSION``'s history (written at four sites, read at zero) is the argument against
+    # scattering a version. ``reader`` compares it on open; see squidmip/contract/version.py.
+    write_group(plate_dir, plate_metadata(wells.keys(), field_count=field_count),
+                attributes=contract_stamp())
     # ...and the store declares itself unfinished from its first byte until its last (IMA-230), so
     # a run killed mid-write leaves something a reader can TELL is incomplete.
     _mark_incomplete(plate_dir, {"wells": list(wells), "fields": sum(len(f) for f in wells.values())})

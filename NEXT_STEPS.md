@@ -140,6 +140,18 @@ committed to, scheduled, or estimated.
   projection". Open product question: one window per timepoint, or one window with a slider?
   <sub>added 2026-07-27 · Spencer</sub>
 
+  **Measured while writing the plate contract (2026-07-29).** The store is not the problem: the
+  writer writes every timepoint (`project_plate` calls `project_well` with `t=None`, so the array
+  is `(n_t, C, 1, Y, X)`), and the individual-TIFF export writes `tiff/{t}/...`. The read side is
+  where it collapses, and unevenly: `reader.read` and `_montage` and `_tilesource` all take a `t`,
+  while `_viewer._ComputedPlateWorker._read`, `_ZarrLoupeSource.coarse` and `_on_well` hardcode
+  `[0, :, 0]`. So a multi-timepoint plate renders as its FIRST frame with no error anywhere, and
+  no test catches it because every fixture in the suite is `Nt = 1`. Written up honestly in the
+  Time section of `docs/plate-contract.md`; `python -m squidmip.contract.validate` now warns when
+  a plate carries more than one timepoint, and `tests/test_plate_contract.py` pins the three
+  hardcoded sites so the doc cannot rot. Julio: users WILL drop multi-timepoint datasets on this.
+  <sub>added 2026-07-29 · Julio</sub>
+
 - [ ] **"Close view" should close selected views** — rename it *Close selected views* and have it
   accept a multi-select. `1073999` already gave the Window navigator multi-select (nested
   hierarchy, Blender arrows, Linux multi-select), so the selection model may already carry what

@@ -135,6 +135,7 @@ log = logging.getLogger("squidmip.viewer")
 
 from squidmip import _explore, _qtstyle
 from squidmip._budget import cache_budget
+from squidmip.contract import field_levels, field_path
 from squidmip._tiling import TileDescriptor
 from squidmip._engine import _default_workers, available_projectors
 from squidmip._layers import OperationStack
@@ -1027,12 +1028,13 @@ class _ZarrLoupeSource(_LoupeSource):
         single level, which is exactly what the test fixtures hit)."""
         if self._levels is not None:
             return self._levels
-        field = f"{self._base}/{self._path_of(well_id)}/{self._fov_of(well_id)}"
-        try:
-            ome = json.loads((Path(field) / "zarr.json").read_text())["attributes"]["ome"]
-            self._levels = [ds["path"] for ds in ome["multiscales"][0]["datasets"]]
-        except Exception:
-            self._levels = ["0"]               # a field always has a full-res array 0
+        # Through the contract, not a hand-parse. This block used to reconstruct the field path by
+        # f-string and read multiscales -> datasets[*].path itself behind a bare `except
+        # Exception`, i.e. a private copy of the layout plus an unwritten fallback. Both now have
+        # one home: squidmip/contract, and docs/plate-contract.md says the pyramid is OPTIONAL and
+        # that level "0" is what its absence falls back to.
+        self._levels = field_levels(
+            field_path(self._base, self._path_of(well_id), self._fov_of(well_id)))
         self.n_levels = max(1, len(self._levels))
         return self._levels
 
@@ -1042,7 +1044,8 @@ class _ZarrLoupeSource(_LoupeSource):
         key = (well_id, level)
         if key not in self._handles:
             import tensorstore as ts
-            path = f"{self._base}/{self._path_of(well_id)}/{self._fov_of(well_id)}/{levels[level]}"
+            path = field_path(self._base, self._path_of(well_id), self._fov_of(well_id),
+                              levels[level])
             self._handles[key] = ts.open(
                 {"driver": "zarr3", "kvstore": {"driver": "file", "path": path}}).result()
         return self._handles[key]
@@ -3723,7 +3726,7 @@ class _ComputedPlateWorker(QThread):
         # per level, twice per well, with no reuse and no declared memory budget: 3072 fresh opens
         # on a 1536-well plate, each allocating its own private cache. The pool bounds both halves,
         # decoded bytes via one shared cache_pool and live handles via an LRU of 32. See _tsctx.
-        arr = HANDLES.get(f"{self._base}/{wellpath}/{fov}/{level}")
+        arr = HANDLES.get(field_path(self._base, wellpath, fov, level))
         return np.asarray(arr[0, :, 0].read().result())   # (C, y, x) at t=0, z=0
 
     def run(self):
@@ -6832,7 +6835,7 @@ class PlateWindow(QMainWindow):
         try:
             import tensorstore as _ts
             _a = _ts.open({"driver": "zarr3", "kvstore": {"driver": "file",
-                          "path": f"{zroot}/{w0}/{fov0}/{levels[0]}"}}).result()
+                          "path": field_path(zroot, w0, fov0, levels[0])}}).result()
             _well_px = int(min(_a.shape[-2], _a.shape[-1]))
         except Exception:
             _well_px = _PUSH_PX
