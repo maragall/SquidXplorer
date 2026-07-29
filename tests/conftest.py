@@ -4,6 +4,10 @@
 (2 regions x 2 fov x 2 z x 2 channels, 4x4 uint16 frames) with a legacy-schema
 coordinates.csv and a pre-v1.0 (camera_settings-nested color) acquisition_channels.yaml,
 plus the acquisition parameters.json scalars. Returns (root_path, {(region,fov,z,ch): array}).
+
+`multi_time_point_dataset` is the same writer's layout with `Nt=3`: the ONLY multi-timepoint
+acquisition anywhere in this suite. See the block comment above it for the layout and for why a
+corpus that was 100% single-timepoint could not catch a whole class of bug.
 """
 
 from __future__ import annotations
@@ -300,6 +304,149 @@ def pyramid_dataset(tmp_path):
     (root / "acquisition.yaml").write_text(_ACQ_YAML)
     (root / "acquisition parameters.json").write_text(json.dumps(_PARAMS))
     return root, region, size
+
+
+# --- the multi-timepoint acquisition -----------------------------------------------------------
+#
+# WHY IT EXISTS. Every other fixture in this file is Nt=1, and so is every real acquisition on
+# this machine: the 10x laser-AF tissue set, the 20x scan and sim_1536wp all record ``Nt: 1`` in
+# ``acquisition parameters.json`` and ``nt: 1`` in ``acquisition.yaml``. The entire test corpus is
+# single-timepoint, so the time axis has never been exercised by anything, which is precisely why
+# nothing catches the bug that ``tests/test_time_point.py`` documents.
+#
+# LAYOUT FIDELITY, MINIMAL CONTENT. The shape below is Squid's writer, read from its source and
+# cross-checked against a real acquisition on disk; the content is as small as it can be and still
+# mean something (1 region, 1 fov, 2 z, 2 channels, 4x4 uint16, 3 timepoints).
+#
+#   {root}/
+#     acquisition.yaml                 time_series.nt        (multi_point_controller.py:882 ->
+#                                                             _save_acquisition_yaml, :93)
+#     acquisition parameters.json      Nt, dt(s)
+#     acquisition_channels.yaml
+#     coordinates.csv                  PLANNED positions, written BEFORE the run, columns
+#                                      region,x (mm),y (mm),z (mm)
+#                                      (multi_point_controller.py:735-744)
+#     0/ 1/ 2/                         ONE FOLDER PER TIMEPOINT, named
+#                                      f"{time_point:0{FILE_ID_PADDING}}"
+#                                      (multi_point_worker.py:744). FILE_ID_PADDING is 0 in
+#                                      control/_def.py:720, so the names carry NO padding at all.
+#       {region}_{fov}_{z_level}_{channel}.tiff   (multi_point_worker.py:1108)
+#       coordinates.csv                EXECUTED positions, one row per (fov, z_level), written
+#                                      when the timepoint finishes, columns
+#                                      region,fov,z_level,x (mm),y (mm),z (um),time
+#                                      (multi_point_worker.py:802-805 build it, :757 writes it)
+#       .done                          empty marker (multi_point_worker.py:785 ->
+#                                      control/utils.py:193)
+#
+# THE TRAP, and the reason the two files are written separately here. There are TWO files named
+# coordinates.csv with DIFFERENT columns and different meanings: the root one is the PLAN (where
+# the scope intended to go), each timepoint one is the RECORD (where the stage actually was, with
+# a wall-clock stamp per plane). ``reader.py`` calls them "schema (a)" and "schema (b)" and reads
+# only the ROOT file, which hides that they are not two dialects of one thing. A fixture that
+# wrote one and called it both would encode that confusion into the test corpus.
+#
+# DISTINGUISHABLE FRAMES. Every plane is a CONSTANT fill, ``time_point * 100 + z * 10 + channel``,
+# so a test can say which timepoint it is holding by reading one pixel. A fixture whose timepoints
+# looked alike would pass while the bug was still live, which is the exact failure mode being
+# fixed here.
+TIME_SERIES_REGION = "A1"
+TIME_SERIES_FOV = 0
+TIME_SERIES_NZ = 2
+N_TIME_POINTS = 3
+
+#: The same two channels as `squid_dataset`, in the order the READER resolves them
+#: (``reader.metadata`` builds its channel list from ``sorted(channels)``). The fixture's pixel
+#: values encode a channel INDEX, so they have to be indexed in the reader's order or every
+#: assertion silently compares the wrong channel.
+TIME_SERIES_CHANNELS = sorted(CHANNELS)
+
+_TIME_SERIES_XY_MM = (12.0, 24.0)
+
+#: Executed positions: Squid's per-timepoint schema, with the fov column and a wall-clock stamp.
+_EXECUTED_COORDS_HEADER = "region,fov,z_level,x (mm),y (mm),z (um),time"
+#: Planned positions: Squid's root schema, no fov column, no time.
+_PLANNED_COORDS_HEADER = "region,x (mm),y (mm),z (mm)"
+
+_TIME_SERIES_PARAMS = {
+    "Nz": TIME_SERIES_NZ,
+    "Nt": N_TIME_POINTS,
+    "dt(s)": 60.0,
+    "dz(um)": 1.5,
+    "objective": {"magnification": 20.0},
+    "sensor_pixel_size_um": 3.76,
+}
+
+_TIME_SERIES_ACQ_YAML = f"""\
+objective:
+  pixel_size_um: 0.325
+  magnification: 20.0
+  sensor_pixel_size_um: 3.76
+sample:
+  wellplate_format: 1536 well plate
+z_stack:
+  nz: {TIME_SERIES_NZ}
+  delta_z_mm: 0.0015
+time_series:
+  nt: {N_TIME_POINTS}
+  delta_t_s: 60.0
+"""
+
+
+def time_series_pixel_value(time_point: int, z_level: int, channel_index: int) -> int:
+    """The constant every plane of the multi-timepoint fixture is filled with.
+
+    Carries the timepoint in its hundreds digit on purpose: a consumer that silently serves t=0
+    for every t produces values that differ from the truth by a visible multiple of 100.
+    """
+    return time_point * 100 + z_level * 10 + channel_index
+
+
+def _executed_coordinates_csv() -> str:
+    """One timepoint's coordinates.csv: what the stage DID, one row per (fov, z_level)."""
+    x_mm, y_mm = _TIME_SERIES_XY_MM
+    lines = [_EXECUTED_COORDS_HEADER]
+    for z_level in range(TIME_SERIES_NZ):
+        lines.append(
+            f"{TIME_SERIES_REGION},{TIME_SERIES_FOV},{z_level},{x_mm},{y_mm},"
+            f"{3930.0 + z_level * 1.5},2026-07-29_10-00-0{z_level}.000000"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _planned_coordinates_csv() -> str:
+    """The root coordinates.csv: what the scan PLANNED, one row per FOV, no z repeats."""
+    x_mm, y_mm = _TIME_SERIES_XY_MM
+    return f"{_PLANNED_COORDS_HEADER}\n{TIME_SERIES_REGION},{x_mm},{y_mm},\n"
+
+
+@pytest.fixture
+def multi_time_point_dataset(tmp_path):
+    """A Squid individual-TIFF acquisition with ``Nt=3``, in Squid's own on-disk layout.
+
+    Returns ``(root, planes)`` where ``planes`` is ``{(time_point, z_level, channel): array}``:
+    region and fov are singletons, so keying on them would only add noise to every assertion.
+    """
+    root = tmp_path / "acq_time_series"
+    planes: dict = {}
+    for time_point in range(N_TIME_POINTS):
+        # FILE_ID_PADDING is 0, so this is str(time_point) with nothing added. Written the long
+        # way so the fixture still tracks Squid if a deployment ever raises the padding.
+        folder = root / f"{time_point:0{0}}"
+        folder.mkdir(parents=True, exist_ok=True)
+        for z_level in range(TIME_SERIES_NZ):
+            for channel_index, channel in enumerate(TIME_SERIES_CHANNELS):
+                value = time_series_pixel_value(time_point, z_level, channel_index)
+                arr = np.full((4, 4), value, dtype=np.uint16)
+                name = f"{TIME_SERIES_REGION}_{TIME_SERIES_FOV}_{z_level}_{channel}.tiff"
+                tifffile.imwrite(folder / name, arr)
+                planes[(time_point, z_level, channel)] = arr
+        (folder / "coordinates.csv").write_text(_executed_coordinates_csv())
+        (folder / ".done").write_text("")
+    (root / "acquisition_channels.yaml").write_text(_YAML)
+    (root / "acquisition.yaml").write_text(_TIME_SERIES_ACQ_YAML)
+    (root / "acquisition parameters.json").write_text(json.dumps(_TIME_SERIES_PARAMS))
+    (root / "coordinates.csv").write_text(_planned_coordinates_csv())
+    return root, planes
 
 
 # --- IMA-254: one fixture per Squid output writer --------------------------------------------
