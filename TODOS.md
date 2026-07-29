@@ -18,8 +18,24 @@ so a future session doesn't rediscover it from zero.
   (missing `acquisition.yaml`, malformed `coordinates.csv`, absent channels) versus which assert
   *our* refusal behaviour, e.g. `reader.py:329-336`, which deliberately raises rather than
   placing FOVs at plausible-but-wrong positions. The second kind is ours and stays.
-- **Depends on / blocked by:** Nothing. Do it on `main-window-review` before it merges, since
-  that PR is the one under review.
+- **Depends on / blocked by:** Nothing.
+- **SCOPED 2026-07-29, and the answer is that there is almost nothing to delete.** Enumerated
+  every candidate: `test_the_reader_boundary_refuses_a_malformed_acquisition`
+  (`tests/test_acquisition_model.py:200`), `test_a_malformed_file_is_still_all_or_nothing`
+  (`tests/test_fov_positions.py:322`), `test_malformed_coordinates_csv_header_still_yields_metadata`,
+  `test_monkey_malformed_csv_still_yields_metadata`, `test_an_incomplete_region_refuses_to_produce_a_result`,
+  `test_a_failed_field_publishes_nothing_and_marks_the_plate_incomplete`,
+  `test_open_computed_refuses_an_incomplete_plate`. Every one asserts OUR degradation or refusal
+  behaviour, not a producer guarantee: that a bad field dies AT the reader naming the field
+  rather than downstream "pointing at the victim rather than the cause", that salvage is
+  per-region and all-or-nothing, that our own writer marks a partial plate. Those are the second
+  kind named above, the kind that stays.
+- **Evidence they earn their keep:** on 2026-07-28 `sim_1536wp` turned out to be 6144 dangling
+  symlinks, and ten failing tests were classified in minutes precisely because `open_reader`
+  refuses loudly instead of half-reading. That is the behaviour these tests pin.
+- **Remaining question for Spencer:** if there is a specific test he had in mind that asserts a
+  guarantee `Cephla-Lab/Squid` owns, name it and it goes. The blanket deletion would cost more
+  than it saves.
 
 ## Deselect-all gesture (Esc) → fast-follow after IMA-221
 - **What:** Esc (or click-on-empty-space) clears the whole plate selection and emits the cleared state.

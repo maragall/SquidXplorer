@@ -219,9 +219,13 @@ _EMPTY_EXPLORE_LEDE = (
 #: well plate acquisition. For tissue acquisition we could print the user 'open in exploration
 #: pane'." A control well is a plate concept -- on a glass slide with hand-drawn regions there is
 #: nothing to control against, and naming a gesture the user cannot perform is worse than silence.
+# The line below used to name "Right-click a well and choose Control Well". `set_control_well`
+# and `PlateOverview._context_menu` were deleted wholesale in 2b8fbc5 (Decentralize GUI), so it
+# taught a gesture the user cannot perform, which the comment below calls worse than silence.
+# Corrected 2026-07-28 to name Shift-drag, which is the gesture that actually exists.
 _EMPTY_EXPLORE_PRIMARY = (
-    "Right-click a well and choose Control Well to pin it here, so you can compare the rest "
-    "against it.")
+    "Shift-drag across the plate to open the wells you select in their own window, so you can "
+    "compare them side by side.")
 #: PRIMARY line for a SLIDE / tissue acquisition, where the unit is a region, not a well.
 _EMPTY_EXPLORE_PRIMARY_SLIDE = (
     "Double-click a region on the slide and choose Open in exploration pane to bring it here.")
@@ -2104,10 +2108,15 @@ class PlateOverview(QWidget):
     def mousePressEvent(self, e):
         if e.button() != Qt.LeftButton:
             return
-        # SHIFT owns every selection gesture (IMA-221). Keeping selection off the plain click is
-        # what makes double-click safe: Qt delivers press+release BEFORE mouseDoubleClickEvent, so
-        # a plain-click toggle would silently flip a well every time you opened one. (Ctrl is out:
-        # on macOS Ctrl+click is right-click and Qt maps Cmd -> ControlModifier.)
+        # Shift owns MULTI-well selection (IMA-221): Shift-drag opens the wells you box, Shift+Alt
+        # unions, Cmd/Ctrl-click toggles one. A plain click also selects, but it REPLACES rather
+        # than toggles (file-manager semantics, added in 2b8fbc5), which is what keeps double-click
+        # safe: Qt delivers press+release BEFORE mouseDoubleClickEvent, so a plain-click TOGGLE
+        # would silently flip a well every time you opened one. Replace is idempotent, toggle is
+        # not, and that difference is the whole reason this is safe.
+        # Corrected 2026-07-28: this comment still said "keeping selection off the plain click",
+        # which the plain-click replace at the bottom of mouseReleaseEvent had already contradicted.
+        # (Ctrl is out: on macOS Ctrl+click is right-click and Qt maps Cmd -> ControlModifier.)
         if e.modifiers() & Qt.ShiftModifier:
             self._marquee = (e.x(), e.y(), e.x(), e.y())
             self._marquee_add = bool(e.modifiers() & Qt.AltModifier)   # Shift+Alt = union
@@ -6050,8 +6059,10 @@ class PlateWindow(QMainWindow):
         # loaded and how to open it -- including the region slider, which is new and otherwise
         # undiscoverable.
         self._readout.setText(
-            f"{len(self._fov_index)} wells loaded · slide the region slider or double-click to "
-            f"open one{note}")
+            # No region slider on the root any more (2b8fbc5 moved it into each spawned window),
+            # so naming it here sent users looking for a control that is not on screen.
+            f"{len(self._fov_index)} wells loaded · double-click a well, or Shift-drag to open "
+            f"several{note}")
 
     def _make_region_slider(self):
         """Build the region slider, or say why there is none. NEVER a silent absence.

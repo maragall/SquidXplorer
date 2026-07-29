@@ -4356,14 +4356,15 @@ def test_ima260_the_empty_pane_shows_example_usage_not_a_blank_strip(qapp, stub_
     assert text.strip(), "the empty exploration pane is blank"
 
     low = text.lower()
-    # PRIMARY: right-click -> Control Well, in that order (Julio's priority, and his correction:
-    # the unit is the WELL, never the FOV).
-    assert "right-click" in low and "control well" in low
-    assert low.index("right-click") < low.index("hold shift"), \
-        "the Shift line came before the right-click line — the primary message is right-click"
-    assert "control fov" not in low, "the action is Control Well, not Control FOV"
-    # SECONDARY: hold Shift to view a subset here.
-    assert "hold shift" in low
+    # PRIMARY: the gesture that actually exists. Until 2026-07-28 this asserted "right-click ->
+    # Control Well", and that assertion stayed GREEN for weeks after 2b8fbc5 deleted the Control
+    # Well feature outright, because it pinned the COPY rather than the behaviour. A passing test
+    # was holding an instruction for a control the user does not have. The rule the copy states
+    # four lines below, that naming a gesture the user cannot perform is worse than silence,
+    # applies to this test too.
+    assert "shift-drag" in low or "shift" in low, "the copy names no way to open anything"
+    assert "control well" not in low, "the copy still teaches the deleted Control Well gesture"
+    assert "control fov" not in low, "the unit is the well, and neither gesture exists"
     # ...and it does NOT hedge. The copy said "here is an example", "for example" and "these are
     # only examples" in four consecutive paragraphs, which reads as apologetic rather than
     # instructive. Julio: "The exploration pane message is really unprofessional and unlike AI."
@@ -4937,9 +4938,13 @@ def test_the_empty_pane_does_not_name_CONTROL_WELL_on_a_slide(qapp, stub_detail,
     assert "control well" not in labels, "a slide acquisition was told to use Control Well"
     assert "exploration pane" in labels, "the slide copy names no way to open a region"
 
-    # ...and a real PLATE still gets the Control Well line.
+    # ...and a real PLATE gets its own primary gesture. This asserted "control well" until
+    # 2026-07-28; 2b8fbc5 had already deleted that feature, so the assertion was pinning a
+    # phantom. The plate copy must still differ from the slide copy, which is the real contract
+    # here: the unit is a WELL on a plate and a REGION on a slide.
     monkeypatch.setattr(V.PlateWindow, "is_slide_acquisition", lambda self: False)
     plate_copy = win._build_explore_empty()
     plate_labels = "\n".join(lab.text() for lab in plate_copy.findChildren(QLabel)).lower()
-    assert "control well" in plate_labels, "the plate copy lost its primary gesture"
+    assert "control well" not in plate_labels, "the plate copy teaches a deleted gesture"
+    assert plate_labels != labels, "the plate and slide copy are identical; the unit differs"
     win.close()
