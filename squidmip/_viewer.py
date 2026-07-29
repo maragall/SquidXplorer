@@ -4673,24 +4673,14 @@ class PlateWindow(QMainWindow):
 
 
 def _rss_mb() -> tuple:
-    """(peak_MB, current_MB_or_None). Peak = the OS high-water mark (ru_maxrss), so it is exact even
-    without sampling. Current RSS needs psutil (optional). Returns (0, None) where resource is absent."""
-    peak = 0.0
-    try:
-        import resource
-        m = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-        peak = m / (1024 * 1024) if sys.platform == "darwin" else m / 1024   # darwin: bytes, linux: KB
-    except Exception:
-        pass
-    cur = None
-    try:
-        import os as _os
+    """(peak_MB, current_MB_or_None). See squidmip._footprint, which owns the platform branches.
 
-        import psutil
-        cur = psutil.Process(_os.getpid()).memory_info().rss / (1024 * 1024)
-    except Exception:
-        pass
-    return peak, cur
+    This used to read the peak from ``resource`` alone, which is POSIX-only, so the footprint line
+    printed ``peak 0 MB`` forever on Windows -- the platform v1 ships to. The peak now comes from
+    whichever high-water mark the platform keeps (``ru_maxrss`` or ``PeakWorkingSetSize``)."""
+    from squidmip._footprint import rss_mb
+
+    return rss_mb()
 
 
 def _install_footprint_monitor(app, win):
@@ -4699,7 +4689,8 @@ def _install_footprint_monitor(app, win):
     A light QTimer prints a live line every few seconds so you can watch the footprint as you drive
     the GUI (open a plate, run MIP, scrub FOVs); the peak is the OS high-water mark, so the final
     number is exact regardless of sampling. Wired to app-quit (normal close), atexit, and the
-    excepthook (crash) — so a peak is always reported. Unix only (no-ops where `resource` is absent)."""
+    excepthook (crash) — so a peak is always reported. Every platform: the peak comes from
+    squidmip._footprint, which reads whichever high-water mark the OS keeps."""
     import atexit
 
     state = {"peak": 0.0, "done": False}
