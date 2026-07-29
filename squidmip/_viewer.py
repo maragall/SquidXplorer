@@ -53,7 +53,6 @@ import os
 import re
 import sys
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -188,6 +187,15 @@ from squidmip._workers import (  # noqa: F401 (re-exports)
 #  the single format-resolution path — override > measured > declared > inferred — so both were dead
 #  leftovers that could only ever disagree with it. Deleted rather than left as a second opinion.)
 
+# The operator REGISTRY moved to `squidmip._operations` (gap 6, 2026-07-29): 117 lines with no Qt in
+# them, which is why they could be lifted whole. Re-exported here under their historical names.
+# `squidmip._gui_commands` currently reaches back into this module inside a function body for
+# `operator_label` and `runnable_operators`; it can point at `_operations` directly now, and should.
+from squidmip._operations import (  # noqa: F401 (re-exports)
+    _OPERATIONS, _OPERATIONS_BY_KEY, _SAVE_OPERATOR, _TO_BE_ADDED, Operation, _action_label,
+    operator_label, operator_layer_key, runnable_operators,
+)
+
 # Chrome (colours, stylesheets, palette) is defined ONCE in `squidmip._qtstyle` and aliased here
 # so existing call sites keep their short private names. These are NOT second definitions: change
 # a colour in _qtstyle and every widget in the window moves with it.
@@ -299,67 +307,6 @@ def _signal_names(cls) -> tuple:
     return tuple(out)
 
 
-@dataclass(frozen=True)
-class Operation:
-    """One post-processing operator declared in ONE place — the 'operation template'. Adding a feature
-    is a single entry here plus one ``_build_<x>_tab`` method; the console builds a card + menu item
-    from ``label``/``blurb``, clicking it opens the tab that ``build_tab`` (a PlateWindow method name)
-    returns, and every status text (progress, done) derives from ``label``. A flat record, not a
-    subclass tree — no new operator ever edits scattered texts or the dispatch."""
-    key: str
-    label: str
-    blurb: str
-    build_tab: str        # name of the PlateWindow method that builds this operator's UI tab
-    runnable: bool = True
-    """Whether the ENGINE can run this key (`runnable_operators()`), as opposed to the card
-    merely existing. The two registries are deliberately not the same set - a card is
-    presentation, an engine entry is capability - but that was written in a comment and
-    enforced nowhere, so a card whose key the engine does not know produced a button that
-    silently did nothing. Declaring it here makes the divergence checkable, and
-    test_every_card_declares_whether_it_is_a_runnable_operator checks it."""
-
-# The operator registry. MIP is operator #1; append an Operation + write its `_build_*_tab` and both
-# the console cards and the Process-well-plates menu grow automatically.
-_OPERATIONS = (
-    Operation("mip", "Maximum Intensity Projection",
-              "Collapse each well's z-stack to one max-intensity image; save a navigable OME-Zarr plate.",
-              "_build_mip_tab"),
-    Operation("stitch", "Stitch (register + fuse)",
-              "Register every FOV of a well against its neighbours and fuse one seamless mosaic "
-              "per well, instead of trusting the stage coordinates alone.",
-              "_build_stitch_tab"),
-    # NOT an operator: an export hand-off. Handing "minerva" to the engine dies with a raw
-    # KeyError: unknown projector 'minerva'. Declared, rather than left to be rediscovered.
-    Operation("minerva", "Open in Minerva Author",
-              "Export the selected FOVs to Minerva-ingestable OME-TIFFs and open Minerva Author on them.",
-              "_build_minerva_tab", runnable=False),
-    # IMA-223/224/225 -- the PLANE-OPS. Unlike mip/stitch these keep z at full depth, so they get
-    # _build_plane_op_tab (preview only) rather than _build_run_tab: write_plate's _validate_image
-    # accepts Z == 1 only and would fail LOUD on save. Loud is correct; offering the button is not.
-    # The blurb said "the microscope's Gaussian PSF ... no explicit kernel". Both halves were
-    # false and had been since IMA-247 deleted the reimplementation: the kernel is a VECTORIAL
-    # PSF computed from the acquisition's own optics (NA 0.3 on this scope), and it is very much
-    # explicit. A card that describes the wrong algorithm is how a user picks the wrong operator.
-    Operation("decon", "Deconvolution (Richardson-Lucy)",
-              "Sharpen against a vectorial PSF computed from this acquisition's own optics (NA, "
-              "emission wavelength, pixel size, z-step) -- not an assumed Gaussian. Richardson-Lucy "
-              "is semi-convergent, so the iteration count is chosen by eye against a turbo x-z / "
-              "y-z view rather than defaulted.",
-              "_build_decon_tab"),
-    Operation("bgsub", "Background subtraction",
-              "Remove the smooth out-of-focus haze from every plane with a rolling ball (ImageJ's "
-              "algorithm). A LAYER: the raw is untouched on disk and one toggle away.",
-              "_build_bgsub_tab"),
-    Operation("flatfield", "Flat-field correction",
-              "Divide out the objective's illumination profile so the corners match the centre. "
-              "Needs an illumination profile (.npy) from the stitcher or estimated from the plate.",
-              "_build_flatfield_tab"),
-)
-_OPERATIONS_BY_KEY = {op.key: op for op in _OPERATIONS}
-
-# The operator "Save this subset to disk…" runs. This used to be spelled `_OPERATIONS[0].key`,
-# which made a PRESENTATION edit (reordering the cards) silently change which operator the save
-# button RUNS. Named, so the two cannot be confused.
 #: Height of the top strip when you are working the plate: the plate is the star, and a fixed cap
 #: stops the operator cards' size hint ballooning it into the "super thick" top that squashed the
 #: plate (Julio).
@@ -372,13 +319,6 @@ _TOP_ROW_COMPACT_PX = 240
 #: shortened the LINE; this shortens the number of lines you have to scroll.
 _TOP_ROW_READING_PX = 520
 
-_SAVE_OPERATOR = "mip"
-
-# Roadmap cards shown under "TO BE ADDED", as (label, blurb). Empty: everything currently on the
-# roadmap that we're willing to advertise has shipped as a real Operation above. Add an entry when
-# a next operator (e.g. the Nautilus agent) is close enough to promise.
-_TO_BE_ADDED: list = []
-
 
 # Pane 3's identity and label rules live in ``_explore`` (no Qt, no napari), and are re-exported
 # here under their historical names so every existing caller and test is unchanged. They MOVED
@@ -386,59 +326,6 @@ _TO_BE_ADDED: list = []
 # two-representations-of-one-truth defect this file already carries scars from.
 exploration_tab_key = _explore.exploration_tab_key
 exploration_tab_label = _explore.exploration_tab_label
-
-
-def operator_layer_key(op_key: str, tab_key: Optional[str]) -> str:
-    """Layer id an operator's results are filed under.
-
-    Plate-wide runs keep the bare operator key ("mip") so existing behaviour is byte-identical.
-    A run scoped to an exploration tab gets "<op>@<tab_key>" — without this, two tabs running
-    the same operator both write into PlateOverview._op_canvas["mip"] and silently overwrite
-    each other's tiles."""
-    return f"{op_key}@{tab_key}" if tab_key else op_key
-
-
-def runnable_operators() -> list[str]:
-    """Every operator ``run_operator`` can stream live (IMA-226) — read off the ENGINE registry,
-    never off ``_OPERATIONS``.
-
-    The two lists are not the same set and never were:
-
-    * ``reference`` is a registered projector with no card, so ``_OPERATIONS_BY_KEY[key].label``
-      raised a bare ``KeyError`` out of the event loop the moment anything asked to run it.
-    * ``minerva`` is a card that is NOT an operator — it is an export hand-off. Handing its key to
-      the engine dies with a raw ``KeyError: unknown projector 'minerva'`` in the status line.
-
-    Both are cured by asking the engine what it can run. A z-reducer and a region operator stream
-    through the SAME ``_OperatorWorker`` (it already branches ``project_plate``/``stitch_plate`` on
-    ``available_region_operators``), so both belong in one list.
-    """
-    from squidmip import available_projectors, available_region_operators
-
-    return sorted(set(available_projectors()) | set(available_region_operators()))
-
-
-def operator_label(key: str) -> str:
-    """Human label for an operator: its card's if it has one, else the registry name itself.
-
-    A card is presentation, not capability (IMA-226) — an operator with no card must still be
-    runnable and must still name itself in the status line and the layer stack."""
-    op = _OPERATIONS_BY_KEY.get(key)
-    return op.label if op is not None else key
-
-
-def _action_label(key: str, operator_kwargs: Optional[dict] = None) -> str:
-    """What the console calls one action: ``decon(sigma=2.0)``, or bare ``mip`` with no parameters.
-
-    The REGISTRY key, not the card's human label, and the parameters spelled out. A console line
-    has to be enough to reproduce the run from, and "Deconvolution" is not: two runs at different
-    sigmas would print identically, which is precisely the mixed-recipe plate Task 3 is about.
-    Sorted so the same call always renders the same string, i.e. so it can be compared by eye.
-    """
-    if not operator_kwargs:
-        return str(key)
-    args = ", ".join(f"{k}={operator_kwargs[k]}" for k in sorted(operator_kwargs))
-    return f"{key}({args})"
 
 
 # --- channel bar: one row per channel, under the plate overview -----------------------------
