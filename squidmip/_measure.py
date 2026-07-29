@@ -76,7 +76,9 @@ __all__ = [
     "SAMPLE_INTERVAL_S",
 ]
 
-logger = logging.getLogger("squidmip.measure")
+from squidmip._logpane import get_logger
+
+logger = get_logger("measure")
 
 #: How often the poller reads RSS while a run is in flight. 50 ms: two orders of magnitude below
 #: the runs it measures (seconds to minutes), so the sample count is in the hundreds rather than

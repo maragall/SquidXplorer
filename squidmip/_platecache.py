@@ -182,7 +182,9 @@ import numpy as np
 from squidmip._budget import cache_budget
 from squidmip._mosaic_source import MemoryBoundedLRUCache
 
-log = logging.getLogger("squidmip.platecache")
+from squidmip._logpane import get_logger
+
+log = get_logger("platecache")
 
 #: Bumped when the on-disk record changes shape. It is part of the TOKEN rather than a field to
 #: read back and compare, so entries from an older build are unreachable instead of misparsed --

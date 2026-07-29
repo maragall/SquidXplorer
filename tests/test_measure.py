@@ -184,7 +184,7 @@ def test_the_run_emits_exactly_one_line_to_the_root_logger(caplog):
     """One line per run is the contract with the log panel — the panel listens to the ROOT logger,
     so anything logged here appears there with no wiring."""
     metrics = MetricsLog()
-    with caplog.at_level(logging.INFO, logger="squidmip.measure"):
+    with caplog.at_level(logging.INFO, logger="squid.xplorer.measure"):
         with measure_run("mip", "2 regions", metrics=metrics):
             pass
     finals = [r for r in caplog.records if "peak" in r.getMessage()]
@@ -193,7 +193,7 @@ def test_the_run_emits_exactly_one_line_to_the_root_logger(caplog):
 
 def test_a_failed_run_is_logged_at_warning_not_info(caplog):
     metrics = MetricsLog()
-    with caplog.at_level(logging.INFO, logger="squidmip.measure"):
+    with caplog.at_level(logging.INFO, logger="squid.xplorer.measure"):
         with pytest.raises(RuntimeError):
             with measure_run("decon", "1 region", metrics=metrics):
                 raise RuntimeError("nope")

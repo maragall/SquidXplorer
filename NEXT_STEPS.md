@@ -80,10 +80,16 @@ committed to, scheduled, or estimated.
   worth re-testing once the Qt6 migration lands.
   <sub>added 2026-07-27 · Spencer</sub>
 
-- [ ] **Log window opens over the main window** — on start up the Log window lands on top of
+- [x] **Log window opens over the main window** — on start up the Log window lands on top of
   the main window. It should not. `_log_window` is sized (`resize(760, 240)`, `_viewer.py:3867`)
   but never positioned before `show()`, so Qt drops it wherever it likes — it covered the root
   on both launches this session.
+  **Done 2026-07-29 (Task 1).** Not by positioning it: `_log_window` is gone and the log is now a
+  fixed "Log" tab beside "Operators" in the process console, so there is no top-level left to land
+  anywhere. The fix came free with the one global console the address model needed — a floating
+  window per app is not what makes a console global, one console printing every window's actions
+  with an address is. Fixed means neither closable nor detachable (`PlateWindow._FIXED_TABS`): a
+  console the user can lose is a console that is missing at the moment worth reading.
   <sub>added 2026-07-27 · Spencer</sub>
 
 - [ ] **Combine two runs in one plate view** — a way to merge the results of two runs into a

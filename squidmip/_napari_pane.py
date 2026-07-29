@@ -557,8 +557,8 @@ class MosaicPane(QWidget):
             try:
                 viewer.close()                        # napari: closes the window + drops the registry entry
             except Exception as exc:                  # a teardown error must not mask the dispose,
-                import logging                        # but it is NOT swallowed — it is named
-                logging.getLogger(__name__).warning(
+                from squidmip._logpane import get_logger   # but it is NOT swallowed — it is named
+                get_logger("napari_pane").warning(
                     "napari viewer close failed during pane shutdown: %s", exc)
 
 

@@ -80,7 +80,9 @@ from typing import Any, Iterable, Optional, Sequence
 
 import numpy as np
 
-log = logging.getLogger("squidmip.napari")
+from squidmip._logpane import get_logger
+
+log = get_logger("napari")
 
 #: Fallback GPU 3D texture cap (Apple GPUs report GL_MAX_3D_TEXTURE_SIZE = 2048). The live value
 #: is read off the canvas at runtime; this is only used until that is known.

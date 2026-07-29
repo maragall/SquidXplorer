@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from PyQt5.QtWidgets import QApplication
+from PyQt5.QtWidgets import QApplication, QTabBar
 
 import squidmip._viewer as V
 from squidmip import _explore
@@ -176,23 +176,48 @@ def test_the_run_scope_is_resolved_by_the_shared_resolver_from_window_state(open
     assert seen["regions"] == regions, "the GUI did not resolve 'selected wells' from its selection"
 
 
-# --- the log panel is mounted, and it is its own top-level window -------------------------------
+# --- the log panel is THE one global console, and it is a fixed tab -----------------------------
 
-def test_the_log_panel_is_mounted_in_its_own_top_level_window(win):
-    """Rewritten 2026-07-28. This asserted ``win._explore_col`` held the pane above the log panel,
-    an exploration COLUMN that the decentralization removed; the attribute no longer exists, so the
+def test_the_log_panel_is_a_fixed_tab_in_the_operators_tab_space(win):
+    """Rewritten twice, and the history is the point.
+
+    2026-07-28: this asserted ``win._explore_col`` held the pane above the log panel, an
+    exploration COLUMN that the decentralization removed; the attribute no longer existed, so the
     test could only ever AttributeError. It never reported that, because the QStyle lifetime bug
     (tests/test_window_lifetime.py) segfaulted this file five tests earlier and took the summary
-    line with it -- so a test that was broken and a test that never ran looked the same.
+    line with it, so a test that was broken and a test that never ran looked the same. It was then
+    rewritten to pin the log as a separate top-level QMainWindow, with a note saying a future move
+    to a tab should fail loudly instead of silently. This is that failure, collected.
 
-    The current contract: the log is a separate top-level QMainWindow kept alive on the window and
-    toggled from the View menu, deliberately not a dock, because a dock would widen the compact
-    root. Asserted here so a future move of the log (Julio wants it as a tab in the Operators
-    subpane, draggable out) fails loudly instead of silently."""
-    log_window = win._log_window
-    assert log_window.centralWidget() is win._log_panel, "the log panel is not in the log window"
-    assert log_window.isWindow(), "the log window is not a top-level"
-    assert log_window.parent() is win, "the log window is not kept alive by the plate window"
+    2026-07-29, Task 1: the log is ONE GLOBAL CONSOLE and a FIXED TAB in the operators tab space.
+    Julio: "making the logger global will force you to abstract the data layers cleanly." A
+    floating window per app is not what makes a console global; one console printing every
+    window's actions with an address is. Being a tab also retires Spencer's NEXT_STEPS item that
+    the Log window "opens over the main window" on every launch, because the fix for a window that
+    lands in the wrong place is not to position it, it is to stop it being a window.
+
+    Fixed means it cannot be closed and cannot be detached. A console the user can lose is a
+    console that is missing at the moment worth reading."""
+    tabs = win._left_tabs
+    index = tabs.indexOf(win._log_panel)
+    assert index >= 0, "the log panel is not in the operators tab space at all"
+    assert index < win._FIXED_TABS, "the log tab is not one of the fixed head tabs"
+    assert tabs.tabText(index) == "Log"
+    assert not hasattr(win, "_log_window"), "the log is a top-level window again"
+
+    # not closable: no close button, and the close path refuses even when driven directly
+    assert tabs.tabBar().tabButton(index, QTabBar.RightSide) is None
+    win._close_op_tab(index)
+    assert tabs.indexOf(win._log_panel) == index, "the console was closed"
+
+    # not detachable: it must not float away from the window it reports on
+    assert win._detach_tab(index) is None
+    assert tabs.indexOf(win._log_panel) == index, "the console detached"
+
+    # and the View menu raises it rather than toggling a window that no longer exists
+    win._left_tabs.setCurrentIndex(0)
+    win.show_log()
+    assert tabs.currentWidget() is win._log_panel
 
 
 def test_a_run_shows_up_as_activity_in_the_log_panel_header(open_win, qapp, monkeypatch):

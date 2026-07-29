@@ -22,7 +22,9 @@ from typing import Any, Optional, Sequence
 
 import numpy as np
 
-log = logging.getLogger("squidmip.napari3d")
+from squidmip._logpane import get_logger
+
+log = get_logger("napari3d")
 
 
 def _center_fov(meta: dict, region: str) -> Optional[int]:

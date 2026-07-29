@@ -570,6 +570,16 @@ def display_well_id(cell_id: str) -> str:
 
 # --- fixed-width integer id: the flat-cache scope + the logger's numeric id -------------------
 #
+# SUPERSEDED, and left in place deliberately: :mod:`squidmip._address` is the successor to
+# everything below. Read its docstring for the diagnosis; the short form is that this id does three
+# jobs at once (cache key, logger id, navigator row), that two of its three fields are real
+# acquisition coordinates while the third is the order somebody drew boxes, and that the ROI slot
+# sits exactly where Squid puts a FIELD OF VIEW. Draw the same box twice and identical work is
+# cached twice; delete ROI 2 and every later id shifts under whatever pointed at it.
+#
+# The logger no longer uses it (Task 1, 2026-07-29): a window logs an ``Address``/``Extent`` plus
+# its view id. The CACHE still does, and migrating that key is Task 2/3 work. Do not add callers.
+#
 # Julio + Spencer (2026-07-24): enumerate with INTEGERS, not strings (a consultant warned string
 # keys are silently slow, and a machine may transform them). Fixed-width slots -- Row Column ROI --
 # make the id UNAMBIGUOUS and DECODABLE, unlike display_well_id's concatenated "318". Layout:

@@ -25,7 +25,9 @@ from typing import Optional
 from pydantic import BaseModel, field_validator
 from pydantic_settings import CliApp, CliPositionalArg
 
-logger = logging.getLogger("squidmip")
+from squidmip._logpane import get_logger
+
+logger = get_logger()
 
 
 class ProcessParameters(BaseModel, use_attribute_docstrings=True):

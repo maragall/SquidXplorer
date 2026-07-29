@@ -131,7 +131,9 @@ def _fusion_style():
 #: detection that raised, a region that would not fuse) MUST go through this and not only into an
 #: in-widget banner: a banner the user has already clicked past leaves no trace, and "the logger
 #: didn't show it" is the exact gap this closes.
-log = logging.getLogger("squidmip.viewer")
+from squidmip._logpane import get_logger
+
+log = get_logger("viewer")
 
 from squidmip import _explore, _qtstyle
 from squidmip._budget import cache_budget
@@ -4140,6 +4142,19 @@ class PlateWindow(QMainWindow):
         self._left_tabs.addTab(self._build_process_pane(), "Operators")
         self._left_tabs.tabBar().setTabButton(0, QTabBar.RightSide, None)  # home tab isn't closable
 
+        # THE ONE GLOBAL CONSOLE, AS A FIXED TAB (Task 1, 2026-07-29). It was a separate top-level
+        # QMainWindow; Spencer logged that it "opens over the main window" on every launch, and the
+        # fix is not to position it but to stop it being a window. Julio: "making the logger global
+        # will force you to abstract the data layers cleanly" — a floating window per app is not
+        # what makes it global, ONE console printing every window's actions with an address is, and
+        # a fixed tab beside the operators is where the user already is. Fixed = never closable and
+        # never detachable: a console you can lose is not a console, and _FIXED_TABS below is what
+        # the close/detach paths check.
+        self._log_panel = LogPanel(self._log_bus, self._activity)
+        self._log_panel.start()
+        self._left_tabs.addTab(self._log_panel, "Log")
+        self._left_tabs.tabBar().setTabButton(1, QTabBar.RightSide, None)
+
         # PANE 3: the exploration pane. Same _DetachTabs class as the console (one detach seam, not
         # two), but every tab is detachable — it has no permanent home tab to protect.
         self._explore_tabs = _DetachTabs(self._detach_tab, first_detachable=0)
@@ -4286,11 +4301,9 @@ class PlateWindow(QMainWindow):
 
         # THE ROOT IS JUST THE PLATE (decentralized, 2026-07-23). The central viewer and the
         # exploration pane are gone from the layout; the plate column IS the window. Selections
-        # open independent napari windows (the Views dock, added below), and the log lives in a
-        # bottom dock — Julio: "the logger on the bottom of the GUI". This replaces the locked
-        # 3-pane grid that Spencer asked us to dismantle.
-        self._log_panel = LogPanel(self._log_bus, self._activity)
-        self._log_panel.start()
+        # open independent napari windows (the Views dock, added below), and the log is the fixed
+        # "Log" tab built with _left_tabs above — Julio: "the logger on the bottom of the GUI".
+        # This replaces the locked 3-pane grid that Spencer asked us to dismantle.
 
         # THE DECK LAYOUT (2026-07-23 image): ONE COMPACT PORTRAIT (h>w) window — a top row of two
         # small panels [Open View list | Operators (bulk)] over a big Wellplate view below. NOT OS
@@ -4336,19 +4349,6 @@ class PlateWindow(QMainWindow):
             "QMenuBar{background:#0b0e14;color:#c9d1d9;} "
             "QMenuBar::item:selected{background:#1f6feb;}")
 
-        # THE LOG IS ITS OWN SMALL WINDOW (Julio: "logger on a small separate window, so we can
-        # follow this compact h>w layout"). A top-level QMainWindow kept alive on self; toggle it
-        # from the View menu. Not a dock — a dock would widen the compact root.
-        self._log_window = QMainWindow(self)
-        self._log_window.setWindowFlag(Qt.Window, True)
-        self._log_window.setWindowTitle("Log")
-        self._log_window.setCentralWidget(self._log_panel)
-        if self._fusion_style is not None:
-            self._log_window.setStyle(self._fusion_style)
-        self._log_window.setPalette(_dark_palette())
-        self._log_window.setStyleSheet("QMainWindow{background:#0b0e14;}")
-        self._log_window.resize(760, 240)
-
         self._sync_explore_pane()                  # keeps the (now-hidden) op-tab stack coherent
 
         # 596 x 850 stays the DEFAULT portrait shape (Julio): the plate dominates below the
@@ -4367,14 +4367,13 @@ class PlateWindow(QMainWindow):
         self.setMinimumSize(420, 520)
         self.resize(*self._default_root_size())
 
-        # The log window opens alongside the root and is toggled from the View menu.
+        # The console is a tab now, so the View menu RAISES it rather than toggling a window. Not
+        # checkable: there is no state to toggle, and a menu item that can hide the one global
+        # console would put the app back where Spencer found it.
         view_menu = self.menuBar().addMenu("&View")
-        self._log_act = QAction("&Log window", self)
-        self._log_act.setCheckable(True)
-        self._log_act.setChecked(True)
-        self._log_act.toggled.connect(self._log_window.setVisible)
+        self._log_act = QAction("&Log", self)
+        self._log_act.triggered.connect(self.show_log)
         view_menu.addAction(self._log_act)
-        self._log_window.show()
 
         self.setAcceptDrops(True)
         if initial_path:
@@ -4658,9 +4657,25 @@ class PlateWindow(QMainWindow):
             self._sync_explore_pane()
         tabs.setCurrentWidget(w)
 
+    #: How many tabs at the head of the process console are FIXED: [0] Operators, [1] Log. They
+    #: cannot close and cannot detach, so their indices never move and a plain `index < _FIXED_TABS`
+    #: is a sound test. The log is fixed because it is THE one global console (Task 1): a console
+    #: the user can close is a console that is missing when the thing worth reading happens.
+    _FIXED_TABS = 2
+
+    def show_log(self) -> None:
+        """Bring the one global console to the front. The View menu's action, and the call any
+        code should make instead of reaching for a window that no longer exists."""
+        panel = getattr(self, "_log_panel", None)
+        if panel is None:
+            return
+        if panel.collapsed:
+            panel.set_collapsed(False)
+        self._left_tabs.setCurrentWidget(panel)
+
     def _close_op_tab(self, index: int, tabs=None):
         tabs = self._left_tabs if tabs is None else tabs
-        if index == 0 and tabs is self._left_tabs:         # 'Process wells' home tab — never closable
+        if index < self._FIXED_TABS and tabs is self._left_tabs:   # Operators + Log: never closable
             return
         w = tabs.widget(index)
         tabs.removeTab(index)
@@ -4696,8 +4711,8 @@ class PlateWindow(QMainWindow):
         path, and re-dock to the bar they came from. *tabs* defaults to the process console, so
         IMA-209's callers and tests are unchanged."""
         tabs = self._left_tabs if tabs is None else tabs
-        if index <= 0 and tabs is self._left_tabs:   # the process console's home tab never detaches
-            return None
+        if index < self._FIXED_TABS and tabs is self._left_tabs:
+            return None                      # Operators + Log are fixed: neither detaches
         if index < 0:
             return None
         w = tabs.widget(index)

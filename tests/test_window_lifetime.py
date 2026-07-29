@@ -9,7 +9,8 @@ BUG 1: THE PER-WINDOW QSTYLE
 Root cause, bisected: ``QStyleFactory.create("Fusion")`` returns a QStyle that PYTHON owns, and
 ``QWidget.setStyle()`` does NOT take ownership -- the widget keeps a bare pointer and Qt never
 tells it when that style dies. The window stored the only reference on ``self``, handed it to
-four widgets (one of them ``self._log_window``, a separate TOP-LEVEL, not even a child), and
+four widgets (one of them ``self._log_window``, a separate TOP-LEVEL, not even a child -- that one
+is gone since 2026-07-29, the log is a fixed tab now, but the hazard below is unchanged), and
 then, when the last Python reference to the window went away, the attribute died with the
 ``__dict__`` while ``~QWidget`` was still to run. Every widget's destructor calls
 ``style()->unpolish(this)``, i.e. through freed memory.

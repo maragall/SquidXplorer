@@ -74,7 +74,9 @@ from typing import Optional
 
 from squidmip._output import _row_sort_key, parse_well_id
 
-logger = logging.getLogger("squidmip")
+from squidmip._logpane import get_logger
+
+logger = get_logger("odon")
 
 ODON_RELEASES_URL = "https://github.com/alexcoulton/odon/releases"
 ODON_VERIFIED_VERSION = "0.1.5"

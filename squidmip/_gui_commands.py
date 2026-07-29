@@ -55,7 +55,9 @@ from squidmip._command import (
     resolve_target,
 )
 
-logger = logging.getLogger("squidmip.command")
+from squidmip._logpane import get_logger
+
+logger = get_logger("command")
 
 
 class WindowExecutor:
