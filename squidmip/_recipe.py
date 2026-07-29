@@ -10,6 +10,11 @@ LUT (a contrast transform). Same mechanism, which is exactly why "copy LUTs" and
 are one system rather than two. A CHAIN of recipes, e.g. [stitch, decon3d] or [contrast], is BOTH
 the content-address of a result AND the script you paste onto another view or the plate.
 
+What the cache STORES is :class:`squidmip._result.Result` (Task 2, 2026-07-29): a result that
+carries its own extent and its own substance, so a plate built from several runs draws each cell
+from that cell's declaration instead of comparing cells and special-casing the disagreement. Bare
+arrays are refused. See :mod:`squidmip._result` for why comparison is the wrong shape.
+
 This module is pure Python, no Qt, no numpy: the model, testable in isolation. The GUI layer builds
 recipes from what a window shows and applies them by registering keys the cache computes lazily.
 """
@@ -21,6 +26,8 @@ import json
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Optional
+
+from squidmip._result import Result
 
 #: Recipe kinds. OPERATOR is a data transform (mip, stitch, decon, ...); LUT is a contrast transform
 #: (per-channel contrast_limits + colormap). Both are transforms, so both flow through one path.
@@ -99,6 +106,22 @@ class RecipeChain:
         return RecipeChain(tuple(recipes))
 
 
+@dataclass(frozen=True)
+class Entry:
+    """One cache entry, with everything needed to say what it is WITHOUT a second lookup.
+
+    Task 3's plate census walks these. It needs the ``chain`` OBJECT and not just the hash the key
+    carries, because the legend it builds must read ``mip + decon sigma 2.0`` and never a hash, and
+    a hash cannot be un-hashed back into recipes. So the chain is kept beside the result rather
+    than only folded into the key.
+    """
+
+    scope: str
+    version: str
+    chain: RecipeChain
+    result: Result
+
+
 class ResultCache:
     """Flat, content-addressed result store: the key is ``(scope, version, chain.key())``.
 
@@ -113,32 +136,60 @@ class ResultCache:
     Because the key is content, two windows over the same node running the same chain at the same
     version hit the SAME entry: results cross-propagate for free, lazily, with no window-to-window
     signalling. Bounded LRU so a long session never blows memory.
+
+    THE VALUE IS A :class:`squidmip._result.Result`, AND ONLY THAT (Task 2, 2026-07-29). This store
+    held bare arrays, so an entry could not say which channels it carried, how deep in z it was,
+    what dtype it was or what a pixel measured. A plate built from such entries can only be drawn
+    by assuming every cell is like every other one, and the moment two runs differ the only
+    remaining move is to COMPARE cells and special-case the disagreement, which is the thing Julio
+    banned. A result that knows itself removes the question: the plate composites what each cell
+    declares. A bare array is refused rather than accepted-and-wrapped, because a store that takes
+    both is the interim state, and the next reader of that store would have to branch on which kind
+    it got.
+
+    The KEY is deliberately untouched here: still the packed ``row*1e6 + col*1e4 + roi`` scope
+    string. Moving it onto :class:`squidmip._address.Extent` is Task 3.
     """
 
     def __init__(self, max_entries: int = 64) -> None:
-        self._d: "OrderedDict[tuple, Any]" = OrderedDict()
+        self._d: "OrderedDict[tuple, Entry]" = OrderedDict()
         self._max = max(1, int(max_entries))
 
     @staticmethod
     def _k(scope: str, chain: RecipeChain, version: Any) -> tuple:
         return (str(scope), str(version), chain.key())
 
-    def get(self, scope: str, chain: RecipeChain, version: Any = 0) -> Optional[Any]:
+    def get(self, scope: str, chain: RecipeChain, version: Any = 0) -> Optional[Result]:
         k = self._k(scope, chain, version)
         if k in self._d:
             self._d.move_to_end(k)          # most-recently used
-            return self._d[k]
+            return self._d[k].result
         return None
 
-    def put(self, scope: str, chain: RecipeChain, value: Any, version: Any = 0) -> None:
+    def put(self, scope: str, chain: RecipeChain, result: Result, version: Any = 0) -> None:
+        if not isinstance(result, Result):
+            raise TypeError(
+                "ResultCache stores squidmip._result.Result, not "
+                f"{type(result).__name__}. A cached result has to carry its own extent and its own "
+                "substance (channels, z depth, dtype, pixel size), or the plate that draws it has "
+                "no way to know what it is drawing and ends up comparing cells to find out.")
         k = self._k(scope, chain, version)
-        self._d[k] = value
+        self._d[k] = Entry(scope=str(scope), version=str(version), chain=chain, result=result)
         self._d.move_to_end(k)
         while len(self._d) > self._max:
             self._d.popitem(last=False)      # evict least-recently used
 
     def has(self, scope: str, chain: RecipeChain, version: Any = 0) -> bool:
         return self._k(scope, chain, version) in self._d
+
+    def entries(self) -> "list[Entry]":
+        """Every entry, least-recently-used first. What a plate census reads.
+
+        A snapshot list rather than a live view: a census that walked the OrderedDict directly
+        would see it reorder under it on the first ``get``, since ``get`` is what marks an entry
+        most-recently-used.
+        """
+        return list(self._d.values())
 
     def clear(self) -> None:
         self._d.clear()
