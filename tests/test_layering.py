@@ -65,6 +65,9 @@ GUI_MODULES = frozenset({
     "_region_viewer",
     "_slide_art",
     "_terminal",
+    "_time_point",       # Task 4b: the timepoint bar. A QWidget shared by the plate and every
+    #                      window, so one definition rather than two that can drift about which
+    #                      timepoint you are looking at.
     "_viewer",
     "_workers",          # gap 6 step 2: the plate window's eight background threads
 })
