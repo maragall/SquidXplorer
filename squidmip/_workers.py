@@ -1,0 +1,1026 @@
+"""The eight background threads the plate window runs its long work on.
+
+Gap 6 of the GUI backlog plan (2026-07-29), step 2 of the split of ``squidmip/_viewer.py``.
+
+WHY THIS WAS CUT, AND WHY HERE
+------------------------------
+Every class in here is the same three things and nothing else: an ``__init__`` that stores its
+arguments, a set of ``pyqtSignal`` declarations, and a ``run()`` that does the work and emits. None
+of them touches a widget, reads a layout, or knows what a dock is, because a QThread that touched a
+widget would be a bug: Qt owns widgets on the GUI thread only. That constraint had already made
+them self-contained; it just had not made them separately FILED.
+
+So the seam here is not a judgement call about cohesion. It is the Qt threading rule read as an
+architectural boundary. What is on the far side of it cannot, by construction, need the window.
+
+WHAT IS IN HERE
+---------------
+* :class:`_OperatorWorker` streams an operator over the plate (``project_plate`` for a z-reducer,
+  ``stitch_plate`` for a region operator) and persists it as a navigable OME-zarr plate.
+* :class:`_MinervaWorker`, :class:`_MosaicWorker`, :class:`_FocusWorker`, :class:`_SpotWorker`,
+  :class:`_FlatfieldWorker`: one long operation each, off the GUI thread.
+* :class:`_PreviewWorker` mosaics the RAW plate thumbnail before any operator has run.
+* :class:`_ComputedPlateWorker` re-reads an ALREADY written plate back into the overview.
+* the helpers those runs call: :func:`_spot_stages`, :func:`_full_res_plane`, :func:`_full_res_mip`,
+  and the three tuning constants ``_VIEWER_WORKERS``, ``_MIN_PREVIEW_BOX_PX``, ``_CACHE_AUTO``.
+
+WHAT IS DELIBERATELY NOT IN HERE
+--------------------------------
+``_LoupeWorker`` and ``_TileFetcher``, the plate overview's own two threads, live in
+:mod:`squidmip._plate_overview` beside their only caller. They are the reason the arrows point the
+way they do: this module IMPORTS the plate geometry (``_fit_cell``, ``_CELL``, ``push_shape_for``)
+to fill its tiles, so filing PlateOverview's threads here would have made the two modules import
+each other. A cycle is a worse outcome than two threads sitting next to their owner.
+
+``_viewer`` -> ``_workers`` -> ``_plate_overview`` -> the domain layer. One direction, no cycles.
+Nothing here imports ``_viewer``.
+
+Behaviour is unchanged by the move: every class below is byte-identical to the ``_viewer.py`` it
+came from, and ``_viewer.py`` re-exports all of them, which matters more here than it looks.
+Several tests swap a worker out with ``monkeypatch.setattr(V, "_OperatorWorker", ...)`` and
+``PlateWindow`` still resolves the name in ``_viewer``'s namespace, so those spies keep working
+exactly as before. ``squidmip._region_viewer`` also imports ``_SpotWorker``, ``_FocusWorker`` and
+``_MosaicWorker`` from ``_viewer`` inside function bodies; those keep working too.
+
+This removed 949 lines from ``_viewer.py``, which went from 5,940 lines to 4,994 (the balance is
+the re-export block and the imports the move made dead).
+"""
+
+from __future__ import annotations
+
+import threading
+from pathlib import Path
+
+import numpy as np
+from PyQt5.QtCore import QThread, pyqtSignal
+
+from squidmip import _explore
+from squidmip._engine import _default_workers
+from squidmip._logpane import get_logger
+from squidmip._measure import (
+    FAILED as _MEASURE_FAILED, OK as _MEASURE_OK, PARTIAL as _MEASURE_PARTIAL,
+    STOPPED as _MEASURE_STOPPED, measure_run,
+)
+from squidmip._montage import _area_downsample
+from squidmip._plate_overview import (
+    _CELL, _PUSH_PX, _box_union, _fit_box, _fit_cell, _fit_letterboxed, _mosaic_boxes,
+    push_shape_for, region_mosaic_extent_px,
+)
+from squidmip._tsctx import HANDLES
+from squidmip.contract import field_path
+
+#: Same logger name these runs logged under before the move, so a log line reads identically.
+log = get_logger("viewer")
+
+_VIEWER_WORKERS = min(6, _default_workers())   # adapt to the machine, but CAP at 6: the producer's
+                           # peak RAM is ~workers x one-well (~139 MB each on a 1536wp), and projection
+                           # throughput scales only sublinearly past ~6 threads — so more workers buys
+                           # little speed for linearly more memory. 6 balances both, leaves GUI cores.
+
+_MIN_PREVIEW_BOX_PX = 4    # smallest FOV box (of _CELL) the RAW preview will bother mosaicking
+#                            (IMA-253): below this a field is a speck, and reading one plane per
+#                            field to draw specks is pure cost. The operator path is unaffected.
+
+#: "build the cache yourself from the reader" as a DEFAULT that ``None`` can override. A plain
+#: ``None`` default would make "no cache" unsayable, which is exactly what the uncached-path tests
+#: and ``SQUIDMIP_PLATE_CACHE=0`` need to be able to say.
+_CACHE_AUTO = object()
+
+
+# --- operator worker: stream a projection over the plate, fill row-major -------------------
+
+class _OperatorWorker(QThread):
+    """Runs an operator (MIP) over the plate AND persists it as a navigable multiscale OME-Zarr plate
+    (``write_plate``), filling one thumbnail per well as each is written. Projection + pyramid write
+    run in write_plate's bounded producer/writer pools; our ``_on_well`` renders the plate tile and
+    is called FROM THOSE WRITER THREADS, several at once — so only the done-counter needs ``_lock``
+    (the expensive per-channel downsample happens OUTSIDE it, so downsampling still parallelises).
+    The worker is deliberately THIN: it emits one native-dtype tile per FIELD — the whole 88x88 cell
+    for a single-FOV well, or just that FOV's sub-cell box for a mosaic (IMA-187) — and keeps no
+    pixels of its own. PlateOverview owns the per-channel store, the contrast and the compositing,
+    so the channel toggle works on every entry path, not only after a run. Memory stays O(engine +
+    write workers) wells in flight. The written ``plate.ome.zarr`` is the durable, re-openable artifact.
+    """
+
+    tileReady = pyqtSignal(int, int, str, object, object)   # (ri, ci, well_id, (C,h,w) native tile,
+    #                                                          box=(top,left,h,w) in cell px | None)
+    progress = pyqtSignal(int, int)                 # (done, total)
+    streamEnded = pyqtSignal()                      # every well landed -> recomposite the whole plate
+    writtenReady = pyqtSignal(str)                  # path of the written plate.ome.zarr
+    wellFailed = pyqtSignal(int, int)               # (ri, ci) of a well SKIPPED on a read error
+    pushReady = pyqtSignal(int, object)             # (fov_idx, [per-channel ~512px plane]) for the slider
+    # FULL-RESOLUTION result pixels, per FOV, for the napari layer group (Defect 3). Separate
+    # from pushReady because that one is the ~512px ndviewer slider feed: a downsampled,
+    # letterboxed preview. A processing LAYER has to be the operator's actual output, in the
+    # raw mosaic's frame, or the before/after toggle compares a thumbnail against a pyramid.
+    resultReady = pyqtSignal(str, int, object)      # (region, fov, (C, Y, X) native dtype)
+    failed = pyqtSignal(str)                        # whole-run failure (not a per-well skip)
+    finished_ok = pyqtSignal()
+
+    def __init__(self, operator: str, reader, meta, fov_index: dict, out_dir: str,
+                 regions=None, save: bool = True, n_fovs=1, operator_kwargs=None):
+        # No nr/nc: the worker no longer builds a plate-sized montage of its own (IMA-206 moved the
+        # canvas into PlateOverview), so it has no use for the plate's shape.
+        super().__init__()
+        self._operator = operator
+        self._reader, self._meta = reader, meta
+        self._fov_index = fov_index
+        self._out_dir = out_dir
+        self._regions = regions          # None = whole plate; a list = subset preview (those wells only)
+        self._save = save                # False = PREVIEW: compute + push to the viewer, write NOTHING
+        self._n_fovs = n_fovs            # None = every FOV per well -> coordinate-placed mosaic tiles
+        # Per-run parameters for a REGION operator (registration on/off, registration channel,
+        # feather width, blunder thresholds, channel subset) -- the stitcher panel in pane 1
+        # sets these. Carried on BOTH branches of run(): a setting tuned on a preview and then
+        # dropped on the save would be thrown away at exactly the moment it is written to disk.
+        # A projector has no equivalent seam (its parameters are baked in at registration), and
+        # write_plate refuses these for one by name rather than accepting and dropping them.
+        self._operator_kwargs = dict(operator_kwargs or {})
+        # Per-region FOV boxes inside the _CELL thumbnail (IMA-187). Computed ONCE up front from
+        # the reader's stage positions, because every arriving FOV needs its box and the geometry
+        # never changes mid-run. Empty dict => no positions => the historical single-tile path.
+        # IMA-222: a REGION operator (stitch) returns ONE fused mosaic per well, not one array
+        # per FOV, so there are no per-FOV sub-boxes to composite into -- the mosaic IS the cell.
+        # A non-empty _boxes here would slot a whole-well mosaic into a single FOV's sub-rectangle.
+        from squidmip import available_region_operators
+
+        self._region_op = self._operator in available_region_operators()
+        self._boxes = {} if (self._region_op or n_fovs == 1) else _mosaic_boxes(meta)
+        # IMA-245: the shape of what this run PUSHES to the array viewer. A region operator pushes
+        # a whole-region mosaic, so the surface is the mosaic extent (aspect preserved), not the
+        # frame. Computed here, once, and read back by the window through `push_shape` — the window
+        # declares the viewer's canvas from the SAME number the worker fills, so the producer and
+        # the consumer cannot describe two different rectangles.
+        self._push_shape = push_shape_for(meta, self._region_op, regions)
+        # True when a region run wanted the mosaic extent and could not derive it (no stage
+        # positions / no pixel size), so the push falls back to the square frame surface. The
+        # window turns this into a readout line: a squashed mosaic must not look like a correct one.
+        self._push_shape_estimated = bool(self._region_op
+                                          and region_mosaic_extent_px(meta, regions) is None)
+        self._total = len(regions) if regions is not None else len(meta["regions"])
+        self._channels = [c["name"] for c in meta["channels"]]
+        self._dtype = np.dtype(meta["dtype"])
+        self._lock = threading.Lock()             # guards _done (on_well runs on writer threads)
+        self._done = 0
+        self._seen_fovs: dict[tuple, set] = {}    # (ri,ci) -> FOVs composited so far, for progress
+        self._failed_regions: set = set()         # regions whose fields raised (IMA-226: report it)
+        self._stop = threading.Event()            # set by the window to end the run cleanly
+
+    @property
+    def mosaic_boxes(self) -> dict:
+        """``{(region, fov): (top, left, h, w)}`` this run composites into ({} = single-tile path).
+
+        The plate view must hit-test against the SAME boxes the worker paints into, so it reads
+        them from here rather than recomputing — a second `_mosaic_boxes(meta)` call would be a
+        second chance to disagree, and a disagreement opens a different FOV than the one clicked.
+        """
+        return self._boxes
+
+    @property
+    def push_shape(self) -> tuple:
+        """``(h, w)`` of every plane this run pushes to the array viewer (IMA-245).
+
+        Read by the window to size ``start_acquisition``. Same reasoning as ``mosaic_boxes``:
+        recomputing it there would be a second chance to disagree, and a disagreement here is a
+        black viewer — the push is rejected for the wrong shape and the rejection is invisible.
+        """
+        return self._push_shape
+
+    @property
+    def push_shape_estimated(self) -> bool:
+        """True when a REGION run could not derive its mosaic extent and fell back to the square
+        frame surface. The window reports it; a squashed mosaic must not pass for a correct one."""
+        return self._push_shape_estimated
+
+    @property
+    def landed(self) -> int:
+        """Wells that actually produced pixels. IMA-226: a live run whose every well raised used to
+        finish "✓ · 1 well" with an empty plate behind it — flat-field with no illumination profile
+        raises per field, `_on_error` painted the dots red, and the success message printed anyway.
+        The status line must not claim a result the plate does not have."""
+        with self._lock:
+            return self._done
+
+    @property
+    def skipped(self) -> int:
+        """Regions where at least one field raised and was skipped."""
+        with self._lock:
+            return len(self._failed_regions)
+
+    def stop(self):
+        """Ask the run to stop; write_plate polls this and abandons after in-flight wells drain."""
+        self._stop.set()
+
+    def _on_well(self, region, fov, image):
+        """Called per written FIELD (on a write_plate WRITER THREAD): composite the plate thumbnail.
+
+        Single-FOV (the historical path) fills the whole _CELL tile. Multi-FOV composites this
+        FOV into its coordinate-derived box inside the SAME cell, accumulating across the calls
+        for that region — so a 36-FOV well is built from 36 arrivals rather than 36 overwrites.
+        Compositing is at THUMBNAIL scale throughout: the cell is _CELL x _CELL no matter how
+        many FOVs land in it, so a mosaic well costs the same memory as a single-FOV well.
+        """
+        info = self._fov_index[region]
+        ri, ci, well_id = *info["rc"], info["well_id"]
+        well = image[0, :, 0]  # (C, Y, X)
+        box = self._boxes.get((region, fov))
+        n_c = len(self._channels)
+
+        # Downsample OUTSIDE the lock (the expensive part stays parallel). Single-FOV fills the
+        # whole cell; a mosaic FOV is fitted to its own sub-cell box and carries that box along,
+        # so the widget can slot it in at the right offset without knowing the geometry.
+        if box is None:
+            tiles = [_fit_cell(well[c_i]) for c_i in range(n_c)]
+            bh = bw = _CELL
+        else:
+            top, left, bh, bw = box
+            tiles = [_fit_box(well[c_i], bh, bw) for c_i in range(n_c)]
+        raw = np.empty((n_c, bh, bw), self._dtype)   # native dtype (half the RAM)
+        for c_i, ds in enumerate(tiles):
+            raw[c_i] = ds
+        with self._lock:                          # shared counter -> serialize (the cheap part)
+            seen = self._seen_fovs.setdefault((ri, ci), set())
+            was_empty = not seen
+            seen.add(fov)
+            if was_empty:                          # count WELLS, not fields, so the bar still
+                self._done += 1                    # reads "n of n wells" on a 36-FOV plate
+            done = self._done
+        # per-channel + its box; the widget windows, places and composites (IMA-206 + IMA-187)
+        self.tileReady.emit(ri, ci, well_id, raw, box)
+        self.progress.emit(done, self._total)
+        # feed the ndviewer growing slider: one ~512px plane per channel, in memory (register_array),
+        # so scrubbing the processed wells is instant and z-collapsed (nz=1). Downsampled -> bounded.
+        # ...at `push_shape`: the frame square for a per-FOV operator, the aspect-preserved mosaic
+        # extent for a REGION operator (IMA-245). Squashing a region mosaic into the frame square
+        # is what put a whole-well stitch into the array viewer as an unreadable rectangle.
+        ph, pw = self._push_shape
+        push = [_fit_letterboxed(well[c_i], ph, pw, self._dtype)
+                for c_i in range(len(self._channels))]
+        self.pushReady.emit(info["idx"], push)
+        # The operator's own pixels, undownsampled. `well` is a view into `image`; the slot
+        # copies what it keeps and drops the rest, so a plate-wide run does not accumulate.
+        self.resultReady.emit(region, fov, well)
+
+    def _on_error(self, region, fov, exc):
+        """A well's projection failed (corrupt/missing plane): SKIP it, mark its dot failed, keep the
+        run alive. One bad file must not abort a whole-plate run."""
+        with self._lock:
+            self._failed_regions.add(region)
+        info = self._fov_index.get(region)
+        if info is not None:
+            self.wellFailed.emit(*info["rc"])
+
+    def run(self):
+        # TIME AND MEASURE THIS RUN. The same measurement the CLI's EngineExecutor makes, at the
+        # GUI's own operator-run path, into the same METRICS log — so the comparison table sees
+        # both surfaces' runs and the one line per run reaches the log panel (measure_run logs at
+        # INFO to the root logger, which the panel is a sink of). One measurement, three consumers.
+        target = _explore.describe_run_target(self._regions, total=self._total) or self._operator
+        with measure_run(self._operator, target, n_targets=self._total) as _run_metrics:
+            _run_metrics.note(surface="gui", save=self._save)
+            self._run_body(_run_metrics)
+
+    def _run_body(self, _run_metrics):
+        try:
+            projector = self._operator
+            if self._save:
+                # write_plate picks its own stream from the operator, so a region operator (stitch)
+                # persists through the same call: both twins yield (region, fov, (T,C,1,Y,X)), and
+                # the disk guard sizes a region write from real mosaic extents rather than frames.
+                from squidmip import write_plate  # persist + project in one bounded, streaming pass
+
+                write_plate(self._reader, self._out_dir, n_fovs=self._n_fovs, workers=_VIEWER_WORKERS,
+                            projector=projector, tiff=False, on_well=self._on_well,
+                            stop=self._stop.is_set, on_error=self._on_error, regions=self._regions,
+                            operator_kwargs=self._operator_kwargs or None)
+                if self._stop.is_set():
+                    _run_metrics.finish(_MEASURE_STOPPED, "stopped by the window")
+                    return  # window closing / re-opening; drop out cleanly (no final/written emit)
+                self.streamEnded.emit()
+                self.writtenReady.emit(str(Path(self._out_dir) / "plate.ome.zarr"))
+            else:
+                # PREVIEW: run the engine over the subset and push each result to the plate + slider,
+                # writing NOTHING to disk (so testing an operator on a few wells costs no disk + only
+                # the subset's compute). Same math as the saved run — a faithful preview.
+                if self._region_op:
+                    # IMA-222: a region operator's unit of work is the WELL, so stitch_plate yields
+                    # one fused mosaic per region. It mirrors project_plate's contract exactly
+                    # (bounded in-flight window, regions=, on_error=, and the same
+                    # (region, fov, (T, C, 1, Y, X)) yield), so the loop below is UNCHANGED.
+                    # workers=1: peak memory is workers x one fused mosaic (~0.9 GB on a 27-FOV 10x
+                    # well), not the ~139 MB of one projected FOV. Saving takes the write_plate
+                    # branch above, which dispatches to stitch_plate itself.
+                    from squidmip import stitch_plate
+
+                    stream = stitch_plate(self._reader, workers=1, operator=projector,
+                                          n_fovs=None, on_error=self._on_error,
+                                          regions=self._regions, **self._operator_kwargs)
+                else:
+                    from squidmip import project_plate
+
+                    stream = project_plate(self._reader, workers=_VIEWER_WORKERS, projector=projector,
+                                           n_fovs=self._n_fovs, on_error=self._on_error,
+                                           regions=self._regions)
+                try:
+                    for region, fov, image in stream:
+                        if self._stop.is_set():
+                            _run_metrics.finish(_MEASURE_STOPPED, "stopped by the window")
+                            return
+                        self._on_well(region, fov, image)
+                finally:
+                    close = getattr(stream, "close", None)
+                    if callable(close):
+                        close()
+                if self._stop.is_set():
+                    _run_metrics.finish(_MEASURE_STOPPED, "stopped by the window")
+                    return
+                self.streamEnded.emit()
+            # Name the OUTCOME for the record, the same rule the status line follows: landed==0 is
+            # a partial result however politely we got here (per-well fault isolation keeps one bad
+            # file from aborting a plate), and a skip on any well is partial too.
+            if self.landed == 0 and self._total:
+                _run_metrics.finish(_MEASURE_PARTIAL,
+                                    f"produced nothing — all {self._total} target(s) skipped")
+            elif self.skipped:
+                _run_metrics.finish(_MEASURE_PARTIAL, f"{self.skipped} well(s) skipped")
+            else:
+                _run_metrics.finish(_MEASURE_OK)
+            self.finished_ok.emit()
+        except Exception as e:
+            # measure_run records this as failed with the exception name and re-raises; catch it
+            # here so the QThread still ends via `failed` rather than an unhandled thread exception.
+            _run_metrics.finish(_MEASURE_FAILED, f"{type(e).__name__}: {e}")
+            self.failed.emit(f"{type(e).__name__}: {e}")
+
+
+class _MinervaWorker(QThread):
+    """Export the selection to Minerva-ingestable files, then start Minerva Author (IMA-228).
+
+    Two stages with deliberately different failure semantics::
+
+        export  ──ok──▶  launch  ──ok──▶  exported(paths) + launched(True)
+           │                │
+           │                └──fail──▶  exported(paths) + launched(False)   ← files still good
+           └──fail──▶  failed(msg)                                          ← nothing written
+
+    A launch failure must NEVER invalidate a successful export: Minerva Author lives in a
+    separate checkout that may not be installed, and the OME-TIFF on disk is the deliverable.
+    The user always gets the story path either way, because Minerva has no deep link — the
+    file is picked by hand in its "Select File" dialog.
+    """
+    progress = pyqtSignal(int, int)          # (done, total) FOVs exported
+    exported = pyqtSignal(object)            # [(ome_path, story_path), ...]
+    launched = pyqtSignal(bool)              # did a Minerva server end up answering?
+    failed = pyqtSignal(str)
+    finished_ok = pyqtSignal()
+
+    def __init__(self, reader, selection, out_dir, projector: str, t: int = 0, launch: bool = True):
+        super().__init__()
+        self._reader = reader
+        self._selection = list(selection)
+        self._out_dir = out_dir
+        self._projector = projector
+        self._t = t
+        self._launch = launch
+        self._stop = threading.Event()
+
+    def stop(self):
+        self._stop.set()
+
+    def run(self):
+        from squidmip import _minerva
+        try:
+            pairs = []
+
+            def on_progress(done, total):
+                self.progress.emit(done, total)
+
+            # Export REGION by REGION — the export unit is a fused mosaic per region, so this
+            # is also the finest granularity a stop can act on. A stop between regions takes
+            # effect promptly; every file already written stays on disk and is reported.
+            grouped = _minerva.group_selection(self._selection)
+            for i, (region, fovs) in enumerate(grouped.items()):
+                if self._stop.is_set():
+                    break
+                pairs.extend(
+                    _minerva.export_selection(
+                        self._reader, [(region, f) for f in fovs], self._out_dir,
+                        t=self._t, projector=self._projector,
+                    )
+                )
+                on_progress(i + 1, len(grouped))
+            self.exported.emit(pairs)
+            if pairs and self._launch and not self._stop.is_set():
+                # should_stop: the liveness wait is up to 90 s and closeEvent joins this thread.
+                # Without it, closing mid-poll froze the GUI for the rest of the wait (84 s).
+                self.launched.emit(
+                    _minerva.launch_minerva(pairs[0][1], should_stop=self._stop.is_set))
+            self.finished_ok.emit()
+        except Exception as e:
+            self.failed.emit(f"{type(e).__name__}: {e}")
+
+
+class _MosaicWorker(QThread):
+    """Fuse one region's FOVs into a mosaic per channel, OFF the GUI thread.
+
+    A 28-FOV tissue region is ~940 MB of TIFF to read. Doing that in ``ingest`` would freeze the
+    window for seconds on open, which is precisely the "opens instantly" property IMA-260 bought.
+    Results arrive per channel so the first channel paints while the rest are still being read.
+    """
+
+    ready = pyqtSignal(str, str, object, object)   # region, channel, LEVELS (pyramid), bbox_um|None
+    #                                                (no contrast window: napari owns contrast)
+    problem = pyqtSignal(str)
+    finished_count = pyqtSignal(int)
+
+    def __init__(self, reader, meta, region, channels, z_index=0, parent=None):
+        super().__init__(parent)
+        self._reader, self._meta = reader, meta
+        self._region = region
+        self._channels = list(channels)
+        self._z_index = int(z_index)
+        self._stop = threading.Event()
+
+    def stop(self):
+        self._stop.set()
+
+    def run(self):
+        from squidmip._mosaic_source import fuse_region_pyramid, mosaic_bbox_um
+
+        try:
+            bbox = mosaic_bbox_um(self._meta, self._region)
+        except Exception as exc:                    # noqa: BLE001
+            self.problem.emit(f"mosaic placement failed: {exc}")
+            bbox = None
+
+        n = 0
+        for ch in self._channels:
+            if self._stop.is_set():
+                break
+            try:
+                # A LAZY MULTISCALE PYRAMID of (z, y, x) levels — the same shape of data the
+                # written-OME-Zarr path has always handed napari via open_pyramid. napari fetches
+                # only the clipped visible region of the level matching the current zoom, so a
+                # fit-to-window view costs a coarse level (~0.9 MB) instead of a full-resolution
+                # fused plane (54.9 MB on the real 10x region), per channel, per z step.
+                #
+                # napari's own dimension slider is still the z control: every level keeps the z
+                # axis at full length and only y/x are coarsened. Only the visible (level, z) is
+                # ever materialised, and _mosaic_source's bounded cache keeps a revisited one.
+                res = fuse_region_pyramid(self._reader, self._meta, self._region, ch)
+            except Exception as exc:                # noqa: BLE001 - reported, never swallowed
+                self.problem.emit(f"{self._region}/{ch}: {type(exc).__name__}: {exc}")
+                continue
+            if res is None:
+                self.problem.emit(
+                    f"{self._region}: no stage positions / pixel size — mosaic not derivable."
+                )
+                continue
+            # NO contrast window on the wire. ima-nav-controls added one here, computing
+            # napari's own calc_data_range off-thread because it cost ~940 ms/channel on the GUI
+            # thread. That measurement was taken against a FLAT level-0 stack; with the multiscale
+            # pyramid napari autoscales from the small level it actually renders, so the cost it
+            # was routing around is gone. Passing a window again would put a second contrast
+            # decision on the wire for no measured gain.
+            levels, _step, _nz = res
+            self.ready.emit(self._region, ch, levels, bbox)
+            n += 1
+        self.finished_count.emit(n)
+
+class _FocusWorker(QThread):
+    """Rank one FOV's z planes by Tenengrad sharpness, OFF the GUI thread.
+
+    The reference-plane scan reads every z plane of one FOV — ~40-50 TIFFs on the tissue set.
+    It used to run inside the button's ``clicked`` slot, which froze the window solid for the
+    whole scan with no progress and no cancel; it was the only long operation in the app without
+    a QThread. Planes are area-downsampled to 512 px before scoring, so the cost is dominated by
+    the reads rather than the metric.
+    """
+
+    ready = pyqtSignal(int, str)          # (z index of the sharpest plane, a note or "")
+    problem = pyqtSignal(str)
+
+    def __init__(self, reader, meta, region, fov, channel, parent=None):
+        super().__init__(parent)
+        self._reader, self._meta = reader, meta
+        self._region, self._fov, self._channel = region, fov, channel
+        self._stop = threading.Event()
+
+    def stop(self):
+        self._stop.set()
+
+    def run(self):
+        from squidmip.projection import _tenengrad
+
+        best_z_i, best_f, read = 0, -1.0, 0
+        failures = []
+        for z_i, z in enumerate(self._meta["z_levels"]):
+            if self._stop.is_set():
+                return
+            try:
+                plane = self._reader.read(self._region, self._fov, self._channel, z)
+            except Exception as exc:              # noqa: BLE001 - counted and REPORTED below
+                failures.append(f"z={z}: {type(exc).__name__}")
+                continue
+            read += 1
+            f = _tenengrad(_area_downsample(plane, 512, 512).astype(np.float32))
+            if f > best_f:
+                best_f, best_z_i = f, z_i
+        if read == 0:
+            # NEVER return a default. Reporting "focused on z=0" when nothing could be read is
+            # the log-and-continue failure this project has six confirmed instances of.
+            self.problem.emit(
+                f"{self._region}:{self._fov} — not one z plane of {self._channel} could be "
+                f"read, so there is no sharpest plane. ({'; '.join(failures[:3])})")
+            return
+        note = ("" if not failures else
+                f" ({len(failures)} of {len(self._meta['z_levels'])} planes were unreadable "
+                f"and were skipped)")
+        self.ready.emit(int(best_z_i), note)
+
+
+class _SpotWorker(QThread):
+    """Run spot detection on the plane pane 2 is CURRENTLY showing, off the GUI thread.
+
+    Spencer: *"responsiveness is important. And an indicator when its working."* Both halves are
+    structural here rather than cosmetic:
+
+    * **Responsive.** Same ``QThread`` shape as ``_MosaicWorker``/``_PreviewWorker``. The click
+      handler builds this and calls ``start()``, which returns immediately; every pixel is
+      touched on this thread. Measured on region ``manual0`` of the 10x tissue slide
+      (5731 x 4793 fused mosaic, 405 nm): ~7.3 s total, of which the watershed is ~4.8 s.
+    * **Indicator.** ``progress(done, total)`` counts STAGES of the recipe, matching the
+      ``pyqtSignal(int, int)`` convention every other worker here uses, so an existing indicator
+      binds to it unchanged. That signal has no text channel, so the stage NAME goes out
+      separately on ``stageChanged(str)`` rather than being smuggled into an int.
+    * **Cancellable.** ``stop()`` sets an Event that ``detect_spots`` polls between stages. The
+      cancel is honoured at the next stage boundary (worst case one watershed), and a cancelled
+      run emits ``cancelled`` and NO result — never a half-finished mask presented as an answer.
+
+    The plane is taken from the layer already on the canvas, not re-read from disk, so what was
+    counted is exactly what the user is looking at.
+    """
+
+    progress = pyqtSignal(int, int)                # (stages done, stages total) — the convention
+    stageChanged = pyqtSignal(str)                 # the TEXT channel progress(int,int) cannot carry
+    ready = pyqtSignal(str, str, object, object, object, int)
+    # ^ (region, channel, labels (H,W) int32, centroids (N,2) float, bbox_um|None, count)
+    problem = pyqtSignal(str)                      # a NAMED failure: "<region>/<channel>: ..."
+    cancelled = pyqtSignal()
+    finished_count = pyqtSignal(str, str, int)     # (region, channel, count) — the run's answer
+
+    def __init__(self, region, channel, data, z_index, bbox_um, params=None, parent=None):
+        super().__init__(parent)
+        self._region, self._channel = region, channel
+        self._data, self._z = data, z_index
+        self._bbox_um = bbox_um
+        self._params = params
+        self._stop = threading.Event()
+
+    def stop(self):
+        self._stop.set()
+
+    def run(self):
+        from squidmip._spots import SpotDetectionCancelled, detect_spots, preferred_segmenter
+
+        where = f"{self._region}/{self._channel}"
+        algorithm = preferred_segmenter()
+        # THE DENOMINATOR IS WHATEVER THE RUNNING ALGORITHM REPORTS. `_spots.STAGES` is the
+        # otsu-watershed recipe's 7 stages, and it used to be emitted as the final total no matter
+        # which segmenter ran. Cellpose is the preferred nuclei segmenter now and reports a total of
+        # 1 ("running cellpose", 0/1 then 1/1), so the closing emit of 7/7 changed the denominator
+        # mid-run: a progress bar completed at 1/1 and then jumped backwards to 7/7. `_spots`:
+        # "the list is the progress DENOMINATOR ... there is no second hardcoded total to keep in
+        # sync". This records the total the algorithm actually reported so there is no second one.
+        reported_total = [0]
+
+        def _stage(name, done, total):
+            reported_total[0] = int(total)
+            self.stageChanged.emit(name)
+            self.progress.emit(int(done), int(total))
+
+        try:
+            plane = _full_res_mip(self._data)          # segment the MIP over z, not one z-plane
+            log.info("%s: detecting nuclei with %s on a %s MIP", where, algorithm, plane.shape)
+
+            res = detect_spots(
+                plane, self._params, algorithm=algorithm,
+                on_stage=_stage,
+                should_stop=self._stop.is_set,
+            )
+        except SpotDetectionCancelled:
+            self.cancelled.emit()
+            return
+        except Exception as exc:                   # noqa: BLE001 - NAMED, never swallowed
+            # Log AND banner. The banner shows it where the user is looking; the log gives it a
+            # permanent, copyable line in the panel — a user who clicked the banner away still has
+            # the record. (This is the "logger didn't show the detect-nuclei error" gap.)
+            log.error("%s: spot detection failed — %s: %s", where, type(exc).__name__, exc)
+            self.problem.emit(f"{where}: spot detection failed — {type(exc).__name__}: {exc}")
+            return
+
+        # Close on the SAME denominator the run reported. A segmenter that reported no stage at all
+        # (none is registered without one, but the seam permits it) falls back to the stage list, so
+        # the bar still reaches its total rather than never being filled.
+        total = reported_total[0] or len(_spot_stages())
+        self.progress.emit(total, total)
+        self.stageChanged.emit("done")
+        # Success goes to the LOG too, not only the napari readout — the user saw the count in the
+        # viewer but nothing in the panel. A run that produced a number the user can act on should
+        # leave a copyable line in the log like every other operator.
+        log.info("%s: %d nuclei detected (%s)", where, res.count, algorithm)
+        self.ready.emit(self._region, self._channel, res.labels, res.centroids,
+                        self._bbox_um, res.count)
+        self.finished_count.emit(self._region, self._channel, res.count)
+
+
+def _spot_stages():
+    """The stage list, imported lazily so ``_viewer`` keeps no second copy of the denominator."""
+    from squidmip._spots import STAGES
+
+    return STAGES
+
+
+class _FlatfieldWorker(QThread):
+    """Estimate an illumination profile LIVE from plate tiles, off the GUI thread.
+
+    All processing comes from maragall/: this calls ``_flatfield.estimate_profile`` which is
+    ``tilefusion.flatfield.estimate_flatfield_channel`` (the numpy BaSiC port), NOT a reimplemented
+    estimator. The BaSiC solve is seconds-to-minutes, so it must not run on the GUI thread. Reads a
+    SPREAD sample of FOVs across the plate (decorrelated content makes the low-rank/sparse split
+    better than the first N tiles of one well). Fails to the LOG by name, never silently.
+    """
+
+    done = pyqtSignal(object)     # FlatfieldProfile
+    problem = pyqtSignal(str)
+    stage = pyqtSignal(str)
+
+    def __init__(self, reader, meta, channel, *, max_tiles=48, use_darkfield=False, parent=None):
+        super().__init__(parent)
+        self._reader, self._meta, self._channel = reader, meta, channel
+        self._max_tiles = int(max_tiles)
+        self._use_dark = bool(use_darkfield)
+
+    def run(self):                                    # pragma: no cover - Qt thread
+        try:
+            from squidmip._flatfield import estimate_profile
+
+            meta = self._meta
+            z0 = (meta.get("z_levels") or [0])[0]
+            fpr = meta.get("fovs_per_region") or {}
+            pairs = [(region, int(fov))
+                     for region in (meta.get("regions") or [])
+                     for fov in (fpr.get(region) or [])]
+            if not pairs:
+                self.problem.emit("no FOVs to estimate a flat-field from.")
+                return
+            # Spread the sample across the plate, not the first N of one well.
+            step = max(1, len(pairs) // self._max_tiles)
+            sample = pairs[::step][: self._max_tiles]
+            tiles = []
+            for region, fov in sample:
+                try:
+                    tiles.append(np.asarray(self._reader.read(region, fov, self._channel, int(z0))))
+                except Exception:                     # noqa: BLE001 - one bad tile is not fatal
+                    continue
+                self.stage.emit(f"read {len(tiles)}/{len(sample)} tiles for {self._channel}…")
+            if len(tiles) < 3:
+                self.problem.emit(
+                    f"flat-field estimate needs at least 3 readable tiles for {self._channel}, "
+                    f"got {len(tiles)}.")
+                return
+            self.stage.emit(f"estimating illumination (tilefusion BaSiC) from {len(tiles)} tiles…")
+            profile = estimate_profile(np.stack(tiles), use_darkfield=self._use_dark)
+            log.info("flat-field: estimated a %s profile from %d tiles (tilefusion BaSiC)",
+                     self._channel, len(tiles))
+            self.done.emit(profile)
+        except Exception as exc:                      # noqa: BLE001 - NAMED to the log, not swallowed
+            log.error("flat-field estimate failed for %s: %s", self._channel, exc)
+            self.problem.emit(f"{type(exc).__name__}: {exc}")
+
+
+def _full_res_plane(data, z_index):
+    """The FULL-RESOLUTION 2-D plane behind a napari layer's ``data``, whatever shape it is in.
+
+    A napari layer's ``data`` is one of three things here, and counting cells on the wrong one
+    gives a wrong number that looks entirely plausible:
+
+    * a **list of pyramid levels** (a multiscale mosaic — level 0 is full resolution, and every
+      later level has fewer, larger-looking nuclei). ALWAYS level 0: counting a 4x-downsampled
+      level would merge touching nuclei and silently under-report.
+    * a **(z, y, x) stack** — take the z the user is actually looking at.
+    * a plain **(y, x)** plane.
+
+    Only the ONE plane asked for is ever materialised; a lazy pyramid stays lazy until the
+    ``np.asarray`` at the end.
+    """
+    # A pyramid arrives as a list/tuple whose ELEMENTS are arrays (level 0 is full resolution). A
+    # plain nested Python list whose elements are lists/scalars is NOT a pyramid — it merely
+    # encodes one array — so it is converted whole. `ndim` on the first element is the
+    # discriminator: >=2 means "element is an array" (pyramid); otherwise it is a nested list.
+    if isinstance(data, (list, tuple)):
+        if not data:
+            raise ValueError("the layer holds an EMPTY multiscale pyramid — nothing to count.")
+        data = data[0] if getattr(data[0], "ndim", 0) >= 2 else np.asarray(data)
+
+    # Trust ``.ndim`` when present (keeps a lazy dask/zarr level lazy until the final asarray). When
+    # it is ABSENT — a container whose ndim defaulted to 2 is exactly what let a (z, y, x) stack
+    # skip the reduction and reach the raise as a 3-D "plane" — materialise once and read the real
+    # ndim, so the shape of the container never decides whether the z reduction runs.
+    ndim = getattr(data, "ndim", None)
+    if ndim is None:
+        data = np.asarray(data)
+        ndim = data.ndim
+
+    # A 3-D (z, y, x) stack is indexed at the z the user is looking at. Anything with MORE leading
+    # axes is genuinely ambiguous — we cannot know which is z, which is channel, which is time — so
+    # it is REFUSED by name rather than silently counting the middle of the wrong axis.
+    if ndim == 3:
+        n_z = int(data.shape[0])
+        z = n_z // 2 if z_index is None else int(z_index)
+        data = data[min(max(z, 0), n_z - 1)]
+
+    plane = np.asarray(data)
+    if plane.ndim != 2:
+        raise ValueError(
+            f"expected a 2-D plane to count on, got shape {plane.shape!r}. The layer's data is "
+            "neither a pyramid level list, a (z, y, x) stack, nor a (y, x) plane."
+        )
+    return plane
+
+
+def _full_res_mip(data):
+    """The full-resolution MIP (max over z) behind a napari layer's ``data`` — what cellpose / spot
+    detection segments now (Julio: "run cellpose on a MIP instead of the current z-plane").
+
+    Level 0 always (a downsampled level merges touching nuclei). A (z, y, x) stack is reduced by
+    max over z; a plain (y, x) plane IS its own MIP. The max stays lazy on a dask level until the
+    final asarray, so only the 2-D result is materialised, not the whole stack at once."""
+    if isinstance(data, (list, tuple)):
+        if not data:
+            raise ValueError("the layer holds an EMPTY multiscale pyramid — nothing to count.")
+        data = data[0] if getattr(data[0], "ndim", 0) >= 2 else np.asarray(data)
+    ndim = getattr(data, "ndim", None)
+    if ndim is None:
+        data = np.asarray(data)
+        ndim = data.ndim
+    if ndim == 3:
+        data = data.max(axis=0)                        # MIP over z (lazy on a dask level)
+    plane = np.asarray(data)
+    if plane.ndim != 2:
+        raise ValueError(
+            f"expected a 2-D MIP to count on, got shape {plane.shape!r} after the z reduction."
+        )
+    return plane
+
+
+class _PreviewWorker(QThread):
+    """Fast RAW preview so the plate shows imagery the moment it opens — before any operator runs
+    (the "downsample the plate before opening" step). Reads ONE representative z-plane per channel
+    per FOV (not the whole stack), area-downsamples, and hands the per-channel tile to the plate.
+    Cheap relative to a full projection; parallel reads. Status stays 'empty' (grey frame) — this is
+    a preview, not a processed result. A later operator overwrites each tile. Like the other
+    producers it keeps the CHANNEL AXIS intact all the way to the widget, so the channel toggle
+    works on a freshly-opened acquisition, before any operator has run.
+
+    A REGION IS A MOSAIC, NOT A FOV (IMA-253/IMA-249). This used to read exactly one representative
+    FOV per region and stretch it over the region's whole cell, so the real 10x tissue acquisition
+    showed two lone frames pretending to be two 27- and 28-FOV mosaics, and the mosaic only ever
+    appeared *after* an operator run. It now composites every FOV of a region into that region's
+    cell at its coordinate-derived box (``_placement.cell_boxes`` — the same geometry the operator
+    path uses, so preview and result describe one layout).
+
+    The cost is driven by the REAL FOV COUNT PER REGION, which is the only way both datasets stay
+    fast: the 1536-well fixture is 1536 regions x 1 FOV, so it reads 1536 planes per channel exactly
+    as before, takes the identical single-tile code path (``box=None``), and cannot get slower. The
+    tissue slide is 2 regions x ~27 FOVs, so it reads 55. Work is emitted per FOV as it lands, so
+    cells fill progressively and the UI never blocks on a whole mosaic.
+    """
+
+    tileReady = pyqtSignal(int, int, str, object, object)   # (ri, ci, well_id, tile, box|None)
+    #: This is the raw fill, not an operator run. ``_explore.operator_busy`` reads it so a retired
+    #: preview still draining cannot make the next operator run refuse itself.
+    IS_PREVIEW = True
+
+    streamEnded = pyqtSignal()                      # preview complete -> recomposite the whole plate
+    failed = pyqtSignal(str)                         # a preview that could not finish NAMES why —
+    #                                                 a bare `except: pass` left the plate frozen
+    #                                                 half-grey, indistinguishable from "loading".
+
+    def __init__(self, reader, meta, fov_index: dict, order: list, mosaic: bool = True,
+                 cache=_CACHE_AUTO):
+        super().__init__()
+        self._reader, self._meta = reader, meta
+        self._fov_index, self._order = fov_index, order
+        self._channels = [c["name"] for c in meta["channels"]]
+        self._dtype = np.dtype(meta["dtype"])
+        self._mosaic = bool(mosaic)
+        self._stop = threading.Event()
+        # The persisted plate cells (_platecache). A sentinel default rather than None so a caller
+        # can say "no cache" explicitly and mean it, which is what the uncached-path tests need.
+        # `for_reader` returns None, logging why, for anything it cannot cache -- a reader with no
+        # `_path`, an unwritable cache dir, SQUIDMIP_PLATE_CACHE=0 -- so this worker never has to
+        # care whether caching is available.
+        from squidmip._platecache import PlateCellCache
+
+        self._cache = (PlateCellCache.for_reader(reader, meta, cell_px=_CELL)
+                       if cache is _CACHE_AUTO else cache)
+        self._pending: dict = {}      # region -> the cell being accumulated for the cache
+        self.cache_hits = 0           # regions served from the cache, for the status line and tests
+        self.cache_reads = 0          # regions actually read from the acquisition
+
+    def _plan(self) -> list:
+        """``[(region, fov, box|None), ...]`` — the read list, in plate order, FOVs in stage order.
+
+        ``box=None`` means "this FOV fills its cell": a single-FOV region, or an acquisition with no
+        stage coordinates / no pixel size, where a mosaic is not derivable and guessing one would
+        draw a wrong picture. That is the historical path, and it stays byte-identical for it.
+
+        A region whose FOVs are so widely spread that each one lands in fewer than
+        ``_MIN_PREVIEW_BOX_PX`` cell pixels also previews single-tile. Reading N planes to paint N
+        specks is all cost and no picture — and at that scale the "mosaic" and the single tile are
+        visually the same thing anyway. The operator path still mosaics it; this is a PREVIEW
+        budget, not a change to the geometry.
+        """
+        from squidmip._placement import cell_boxes, fov_offsets_px
+
+        positions = self._meta.get("fov_positions_um") or {}
+        px = self._meta.get("pixel_size_um")
+        plan: list = []
+        for region in self._order:
+            fovs = list(self._meta["fovs_per_region"][region])
+            boxes: dict = {}
+            if self._mosaic and len(fovs) > 1 and positions and px not in (None, 0):
+                try:
+                    boxes = cell_boxes(fov_offsets_px(positions, region, fovs, px),
+                                       self._meta["frame_shape"], _CELL)
+                except (KeyError, ValueError):
+                    boxes = {}       # this region previews single-tile; the rest still mosaic
+                if any(min(b[2], b[3]) < _MIN_PREVIEW_BOX_PX for b in boxes.values()):
+                    boxes = {}
+            if boxes:
+                plan.extend((region, f, boxes[f]) for f in fovs if f in boxes)
+            else:
+                plan.append((region, fovs[0], None))
+        return plan
+
+    def stop(self):
+        self._stop.set()
+
+    def _replay_cached(self, plan: list) -> list:
+        """Emit every region the cache can serve; return the plan entries still to be read.
+
+        This is the whole reopen win, and it is one cell per WELL rather than one per FOV: a
+        cached 27-FOV mosaic replays as a single tile, so the reopen does not merely skip the
+        reads, it skips 26 of every 27 signal round trips too.
+
+        The tile is emitted with its CONTENT BOX, never as a full 88x88 cell. ``add_tile`` feeds
+        the running histogram whatever it is handed, and a mosaic cell is zero-padded wherever no
+        FOV lands; replaying the padding would pin the 1st percentile at 0 and wash the plate out
+        on every reopen while the first open looked right. See ``_platecache.CellTile``.
+        """
+        if self._cache is None:
+            return plan
+        by_region: dict = {}
+        for item in plan:
+            by_region.setdefault(item[0], []).append(item)
+        remaining: list = []
+        for region, items in by_region.items():
+            hit = None if self._stop.is_set() else self._cache.get(region)
+            if hit is None:
+                remaining.extend(items)
+                continue
+            ri, ci = self._fov_index[region]["rc"]
+            self.tileReady.emit(ri, ci, region, np.asarray(hit).astype(self._dtype), hit.box)
+            self.cache_hits += 1
+        self.cache_reads = len(by_region) - self.cache_hits
+        # Said out loud, because a cache nobody can see is indistinguishable from a fast disk.
+        log.info("plate preview: %d of %d wells served from the cell cache (%s)",
+                 self.cache_hits, len(by_region), self._cache)
+        return remaining
+
+    def _remember(self, region: str, box, tile: np.ndarray, expected: int) -> None:
+        """Accumulate one FOV into the region's cell, and publish the cell once it is whole.
+
+        Published per REGION as it completes rather than once at the end, so a preview that is
+        stopped half way (the user opens something else) still leaves the wells it finished
+        cached. A region whose read RAISED never completes and is therefore never published: a
+        half-read cell must not be persisted as though it were the well.
+        """
+        if self._cache is None:
+            return
+        st = self._pending.get(region)
+        if st is None:
+            st = self._pending[region] = {
+                "cell": np.zeros((len(self._channels), _CELL, _CELL), dtype=self._dtype),
+                "left": int(expected), "box": None}
+        top, left = (int(box[0]), int(box[1])) if box is not None else (0, 0)
+        h, w = tile.shape[1], tile.shape[2]      # by ACTUAL shape, as add_tile places it
+        st["cell"][:, top:top + h, left:left + w] = tile
+        st["box"] = _box_union(st["box"], (top, left, h, w))
+        st["left"] -= 1
+        if st["left"] <= 0:
+            self._pending.pop(region, None)
+            top0, left0, bh, bw = st["box"]
+            self._cache.put(region, st["cell"][:, top0:top0 + bh, left0:left0 + bw], st["box"])
+
+    def run(self):
+        try:
+            from collections import Counter
+            from concurrent.futures import ThreadPoolExecutor
+            zs = self._meta["z_levels"]
+            z_mid = zs[len(zs) // 2]      # a mid-stack plane is a fair single-plane preview
+            plan = self._replay_cached(self._plan())
+            per_region = Counter(item[0] for item in plan)
+
+            def load(item):
+                region, fov, box = item
+                h, w = (_CELL, _CELL) if box is None else (box[2], box[3])
+                fit = _fit_cell if box is None else (lambda a: _fit_box(a, h, w))
+                return region, box, [fit(self._reader.read(region, fov, ch, z_mid)
+                                         .astype(np.float32)) for ch in self._channels]
+
+            with ThreadPoolExecutor(max_workers=_VIEWER_WORKERS) as ex:
+                for region, box, tiles in ex.map(load, plan):   # plate order preserved
+                    if self._stop.is_set():
+                        return
+                    ri, ci = self._fov_index[region]["rc"]
+                    tile = np.stack(tiles).astype(self._dtype)
+                    self.tileReady.emit(ri, ci, region, tile, box)
+                    self._remember(region, box, tile, per_region[region])
+            if not self._stop.is_set():
+                self.streamEnded.emit()   # the running window is mature now -> one clean recomposite
+                # The pass finished, so this generation is complete: compact the per-well cells
+                # into one memory-mapped page. AFTER streamEnded, never before -- the recomposite
+                # is what the user is waiting on, and compaction is housekeeping. A stopped or
+                # failed pass never reaches here, which is the point: a partial plate must not be
+                # compacted into a page that claims to be the plate.
+                if self._cache is not None and not self._cache.packed:
+                    self._cache.pack(self._order)
+        except Exception as exc:
+            # Preview is best-effort, but best-effort is not SILENT. Finalise the tiles that did
+            # land (so a partial mosaic still paints) and then name the failure — the old bare
+            # `except: pass` stranded the plate half-grey forever, and streamEnded never fired so
+            # the status line kept claiming the load was still in progress.
+            if not self._stop.is_set():
+                self.streamEnded.emit()
+            self.failed.emit(f"{type(exc).__name__}: {exc}")
+
+
+class _ComputedPlateWorker(QThread):
+    """Read a previously-written OME-Zarr plate back into the viewer (no recompute).
+
+    Streams each well from disk: a coarse pyramid level -> the plate thumbnail, and a ~512px level ->
+    the ndviewer slider (register_array). Bounded (one well in flight); reads via tensorstore off the
+    GUI thread so opening a big computed plate never freezes the window. Emits per-channel tiles, so
+    a reopened plate is windowed GLOBALLY by the widget's running contrast exactly like a live run —
+    it used to take percentiles per well, which made a dim well and a bright well look identical and
+    silently broke the one thing a plate overview is for (comparing wells at a glance)."""
+
+    tileReady = pyqtSignal(int, int, str, object)   # (ri, ci, well_id, (C, cell, cell) native tile)
+    pushReady = pyqtSignal(int, object)             # (fov_idx, [per-channel ~512px plane])
+    progress = pyqtSignal(int, int)
+    streamEnded = pyqtSignal()                      # plate fully loaded -> recomposite globally
+    finished_ok = pyqtSignal()
+    failed = pyqtSignal(str)
+
+    def __init__(self, base, wells, coarse_lvl, push_lvl, dtype):
+        super().__init__()
+        self._base = base                 # plate.ome.zarr path
+        self._wells = wells               # [(well_id, wellpath, fov, ri, ci, flat_idx)]
+        self._coarse, self._push = coarse_lvl, push_lvl
+        self._dtype = dtype
+        self._stop = threading.Event()
+
+    def stop(self):
+        self._stop.set()
+
+    def _read(self, wellpath, fov, level):
+        # Through the shared pool, NOT a bare ts.open. This line opened a brand new store per well
+        # per level, twice per well, with no reuse and no declared memory budget: 3072 fresh opens
+        # on a 1536-well plate, each allocating its own private cache. The pool bounds both halves,
+        # decoded bytes via one shared cache_pool and live handles via an LRU of 32. See _tsctx.
+        arr = HANDLES.get(field_path(self._base, wellpath, fov, level))
+        return np.asarray(arr[0, :, 0].read().result())   # (C, y, x) at t=0, z=0
+
+    def run(self):
+        try:
+            n = len(self._wells)
+            for i, (wid, wpath, fov, ri, ci, idx) in enumerate(self._wells, 1):
+                if self._stop.is_set():
+                    return
+                coarse = self._read(wpath, fov, self._coarse)             # thumbnail source (C,y,x)
+                tile = np.stack([_fit_cell(plane.astype(np.float32)) for plane in coarse])
+                self.tileReady.emit(ri, ci, wid, tile.astype(self._dtype))
+                push_src = self._read(wpath, fov, self._push)             # detail-slider source (C,Y,X)
+                # ...at the declared push canvas exactly (IMA-245): a pyramid level smaller than
+                # _PUSH_PX used to be pushed at its own size, which the viewer silently refused.
+                push = [_fit_letterboxed(push_src[c], _PUSH_PX, _PUSH_PX, self._dtype)
+                        for c in range(push_src.shape[0])]
+                self.pushReady.emit(idx, push)
+                self.progress.emit(i, n)
+            if not self._stop.is_set():
+                self.streamEnded.emit()   # every well in the store -> one global-window recomposite
+                self.finished_ok.emit()
+        except Exception as e:
+            self.failed.emit(f"{type(e).__name__}: {e}")

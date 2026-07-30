@@ -211,15 +211,27 @@ def test_window_autofocus_works_without_a_double_click(
 
 
 def test_focus_reference_plane_on_a_single_plane_acquisition_says_so(
-        qapp, stub_detail, squid_dataset, monkeypatch):
-    """A refusal must be a sentence. Silently doing nothing is the failure being removed."""
+        qapp, stub_detail, napari_pane_stub, squid_dataset, monkeypatch):
+    """A refusal must be a sentence. Silently doing nothing is the failure being removed.
+
+    Re-pointed at the WINDOW (2026-07-29). This used to live on `PlateWindow`, reachable only
+    through a parentless button Qt showed as a stray top-level window; that whole chain is deleted
+    (tests/test_no_orphan_windows.py). `RegionViewer` had no such guard, so it started a worker to
+    rank a stack of one and then announced a "sharpest plane" for the only plane there is. The
+    refusal moved with the button rather than being dropped with the dead code.
+
+    MUTATION: remove the z_levels guard -> a worker is started -> `calls` is non-empty -> red.
+    """
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
+    w = win._viewer_manager.open(["B3"])
     # _meta is a FROZEN Acquisition since the reader-boundary validation landed.
-    win._meta = win._meta.model_copy(update={"z_levels": [win._meta["z_levels"][0]]})
+    w._meta = w._meta.model_copy(update={"z_levels": [w._meta["z_levels"][0]]})
+    calls = _spy_focus_worker(monkeypatch, answer_z=0)
 
-    win._focus_reference_plane()
+    w._focus_reference_plane()
 
-    assert "single z plane" in win._readout.text(), win._readout.text()
-    win.close()
+    assert any("single z plane" in s for s in w._pane.said), w._pane.said
+    assert calls == [], "a stack of one plane was still ranked for focus"
+    shutdown_plate_window(qapp, win)

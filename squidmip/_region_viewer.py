@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Optional, Sequence
 
 import numpy as np
@@ -95,6 +95,180 @@ class View:
     window_id: Optional[int] = None
     roi_bbox: Optional[tuple] = None
     parent_id: Optional[int] = None
+
+
+#: Baseline mode: the manager's global default, whoever opened the window.
+_GLOBAL = "global"
+#: Baseline mode: the OPENER's current value, falling through to the global default when the plate
+#: opened the window, because the plate has no window of its own to inherit from.
+_INHERIT = "inherit"
+
+#: The settings that are GLOBAL DEFAULTS, and how each one picks its baseline in a new window.
+#:
+#: Julio's rule, 2026-07-29: **settings that describe HOW you look are global defaults; settings
+#: that describe WHAT you are looking at are per-window.** Only the first class appears here. 2D/3D,
+#: the region cursor and the z / time_point position are the second class, and neither
+#: :class:`ViewDefaults` nor :class:`ViewSettings` has a word for them. That silence is the design:
+#: a per-window setting is not "a default that is always overridden", it is not a default at all,
+#: and giving it a slot here would invite somebody to seed it.
+#:
+#: ``luts`` is ``_INHERIT``, and that ONE line is the whole contrast rule. The decision was written
+#: as two rules -- the global default for a window opened from the plate, the parent's LUTs for an
+#: ROI child -- but they are one rule stated twice, because a plate-opened window's opener IS the
+#: default. Collapsing them costs nothing and still gives Julio the behaviour he asked for: an ROI
+#: child looks like its parent, which is what makes a crop comparable to the source it was cut from.
+_SETTING_BASELINE = {
+    "tenengrad_focus": _GLOBAL,
+    "channel_visibility": _GLOBAL,
+    "luts": _INHERIT,
+}
+
+
+def _copy_setting(value: Any) -> Any:
+    """A private copy of one setting's value, so two windows can never share a mutable one.
+
+    Two levels deep, which is exactly what these settings are: ``channel_visibility`` is
+    ``{channel: bool}`` and ``luts`` is ``{channel: {"clim": ..., "cmap": ...}}``. Deliberately not
+    ``deepcopy``: a ``cmap`` can be a live napari colormap object when it has no name, and copying
+    that is neither wanted nor safe.
+    """
+    if isinstance(value, dict):
+        return {k: (dict(v) if isinstance(v, dict) else v) for k, v in value.items()}
+    return value
+
+
+def _unknown(name: str) -> KeyError:
+    return KeyError(
+        f"{name!r} is not a global-default setting. The global defaults are "
+        f"{sorted(_SETTING_BASELINE)}; anything describing WHAT a window is looking at "
+        "(2D/3D, the region, z, time_point) is per-window and does not belong here."
+    )
+
+
+@dataclass
+class ViewDefaults:
+    """The global defaults a NEW window opens with. Owned by :class:`ViewerManager`.
+
+    On the manager and not on the plate window because windows come and go while the manager is the
+    registry: the registry is the one object whose lifetime the defaults can safely share.
+
+    Every field's default is "no opinion", so this object existing changes nothing until somebody
+    sets something. ``tenengrad_focus`` off means a window does not autofocus unless asked;
+    ``channel_visibility`` and ``luts`` empty mean the channels come up exactly as napari made them,
+    rather than a default fighting a colormap nobody asked it to change.
+    """
+
+    tenengrad_focus: bool = False
+    channel_visibility: "dict[str, bool]" = field(default_factory=dict)
+    luts: "dict[str, dict]" = field(default_factory=dict)
+
+    def get(self, name: str) -> Any:
+        if name not in _SETTING_BASELINE:
+            raise _unknown(name)
+        return _copy_setting(getattr(self, name))
+
+    def set(self, name: str, value: Any) -> None:
+        if name not in _SETTING_BASELINE:
+            raise _unknown(name)
+        setattr(self, name, _copy_setting(value))
+
+    def snapshot(self) -> "dict[str, Any]":
+        """Every default as a private copy, ready to become one window's baseline."""
+        return {n: _copy_setting(getattr(self, n)) for n in _SETTING_BASELINE}
+
+
+class ViewSettings:
+    """ONE window's global-default settings: the BASELINE it opened with, plus the overrides the
+    user made in that window.
+
+    Divergence is tracked EXPLICITLY, as the set of names overridden here, and not computed as
+    "differs from today's default". The difference shows up twice and both cases are wrong the
+    other way round:
+
+    * Changing the default later must not light a marker on a window nobody touched, and must not
+      silently move one either. A window reads the defaults once, at construction; after that, the
+      default is a fact about the NEXT window.
+    * An ROI child that inherited a diverged parent's contrast has not itself diverged. It shows
+      what it was opened with, and that is the honest thing to offer a reset back to.
+
+    So :meth:`reset` restores what the window opened with, not today's default. Pushing the other
+    way is :meth:`ViewerManager.make_default`, an explicit act; nothing here ever reaches outward,
+    because propagating one window's change to the others fights the independence the
+    decentralization bought.
+    """
+
+    def __init__(self, baseline: "Optional[dict[str, Any]]" = None) -> None:
+        base = ViewDefaults().snapshot() if baseline is None else baseline
+        self._baseline: "dict[str, Any]" = {
+            n: _copy_setting(base.get(n, getattr(ViewDefaults(), n))) for n in _SETTING_BASELINE}
+        self._values: "dict[str, Any]" = {n: _copy_setting(v) for n, v in self._baseline.items()}
+        self._overridden: "set[str]" = set()
+
+    def get(self, name: str) -> Any:
+        """This window's current value for *name*, as a private copy."""
+        if name not in _SETTING_BASELINE:
+            raise _unknown(name)
+        return _copy_setting(self._values[name])
+
+    def baseline(self, name: str) -> Any:
+        """What this window OPENED with for *name* -- what :meth:`reset` goes back to."""
+        if name not in _SETTING_BASELINE:
+            raise _unknown(name)
+        return _copy_setting(self._baseline[name])
+
+    def set(self, name: str, value: Any) -> bool:
+        """Change *name* FOR THIS WINDOW, and report whether it is now diverged on it.
+
+        Setting a value back to the baseline clears the override rather than leaving a sticky
+        marker: the marker has to mean "you are not looking at what this window opened with", so it
+        cannot survive the value going back.
+        """
+        if name not in _SETTING_BASELINE:
+            raise _unknown(name)
+        self._values[name] = _copy_setting(value)
+        if self._values[name] == self._baseline[name]:
+            self._overridden.discard(name)
+        else:
+            self._overridden.add(name)
+        return name in self._overridden
+
+    @property
+    def diverged(self) -> "tuple[str, ...]":
+        """The settings this window has overridden, sorted, so a label reads the same every time."""
+        return tuple(sorted(self._overridden))
+
+    def is_diverged(self, name: "Optional[str]" = None) -> bool:
+        """Diverged on *name*, or on anything at all when *name* is None."""
+        if name is None:
+            return bool(self._overridden)
+        if name not in _SETTING_BASELINE:
+            raise _unknown(name)
+        return name in self._overridden
+
+    def reset(self, name: "Optional[str]" = None) -> "tuple[str, ...]":
+        """Drop the overrides, back to what this window opened with. Returns what actually moved."""
+        if name is not None and name not in _SETTING_BASELINE:
+            raise _unknown(name)
+        names = self.diverged if name is None else (
+            (name,) if name in self._overridden else ())
+        for n in names:
+            self._values[n] = _copy_setting(self._baseline[n])
+            self._overridden.discard(n)
+        return names
+
+    def adopt(self) -> None:
+        """Take the current values as the new baseline, so nothing reads as diverged any more.
+
+        Called after "make this the default": the window's settings ARE the default now, and a
+        marker still claiming otherwise would be the silent disagreement this whole affordance
+        exists to prevent.
+        """
+        self._baseline = {n: _copy_setting(v) for n, v in self._values.items()}
+        self._overridden.clear()
+
+    def snapshot(self) -> "dict[str, Any]":
+        """Every current value as a private copy."""
+        return {n: _copy_setting(v) for n, v in self._values.items()}
 
 
 def _level_shape(level: Any) -> "Optional[tuple[int, int]]":
@@ -188,7 +362,7 @@ class RegionViewer(QMainWindow):
         operator_specs: Optional[Sequence] = None,
         run_operator: Optional[Any] = None,
         parent_id: Optional[int] = None,
-        initial_luts: Optional[dict] = None,
+        settings: "Optional[ViewSettings]" = None,
     ) -> None:
         super().__init__(parent)
         self._reader = reader
@@ -213,8 +387,13 @@ class RegionViewer(QMainWindow):
         self._operator_specs = list(operator_specs or [])
         self._run_operator = run_operator
         self.parent_id = parent_id      # the view this was spawned from (ROI child) -> tree nesting
-        self._initial_luts = dict(initial_luts) if initial_luts else None   # inherit parent contrast
-        self._luts_seeded = False
+        # THE HOW-YOU-LOOK SETTINGS FOR THIS WINDOW (Task 6, 2026-07-29). Read ONCE, at
+        # construction, from whatever the manager handed down: the global defaults, except that
+        # contrast comes from the opener, so an ROI child looks like its parent. From here on the
+        # window owns them, and changing one changes THIS window and marks it diverged. A window
+        # built without a manager gets the stock defaults so it is never settings-less.
+        self.settings = settings if settings is not None else ViewSettings()
+        self._settings_applied = False
         # An ROI child carries the parent's ROI box (deck: "ROI -> child window"). Cropping the load
         # to it lands with the loader work; today it scopes the title + is recorded for that step.
         self._roi_bbox = roi_bbox
@@ -431,8 +610,129 @@ class RegionViewer(QMainWindow):
         ov.addLayout(sync)
         h.addWidget(op_box, 1)
 
+        # DEFAULTS: which global defaults THIS window has overridden, and the two ways out of it.
+        # A global default that silently disagrees with what is on screen is worse than no default
+        # at all, so divergence is stated IN THE WINDOW and not only in the model. Same principle
+        # as the compact placement mode labelling itself: never let the user not know which state
+        # they are in. "make default" is the only outward push, and it is a deliberate click.
+        def_box, dv = self._titled_box("Defaults")
+        d1 = QHBoxLayout(); d1.setSpacing(4)
+        self._focus_default_chk = QCheckBox("auto focus")
+        self._focus_default_chk.setToolTip(
+            "Jump to the sharpest plane (Tenengrad) whenever this window loads a region. A global "
+            "default; ticking it HERE changes this window only and marks it diverged.")
+        self._focus_default_chk.setStyleSheet("QCheckBox{color:#c9d1d9;font-size:11px;}")
+        self._focus_default_chk.setChecked(bool(self.settings.get("tenengrad_focus")))
+        self._focus_default_chk.toggled.connect(self._on_focus_default_toggled)
+        d1.addWidget(self._focus_default_chk)
+        d1.addStretch(1)
+        self._make_default_btn = self._chip(
+            "make default", "Make THIS window's settings the default for windows opened from now "
+            "on. Windows already open are left exactly as they are.", self._make_default)
+        d1.addWidget(self._make_default_btn)
+        dv.addLayout(d1)
+        d2 = QHBoxLayout(); d2.setSpacing(4)
+        self._diverged_label = QLabel("")
+        self._diverged_label.setStyleSheet(self._AT_DEFAULTS_QSS)
+        d2.addWidget(self._diverged_label, 1)
+        self._reset_btn = self._chip(
+            "↺ reset", "Put every setting back to what this window opened with.",
+            self._reset_settings)
+        d2.addWidget(self._reset_btn)
+        dv.addLayout(d2)
+        def_box.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
+        h.addWidget(def_box, 0)
+        self._refresh_divergence()
+
         row.setMaximumHeight(108)
         return row
+
+    # -- global default vs per-window override, made visible -----------------------------
+    _AT_DEFAULTS_QSS = "color:#8b949e;font-size:10px;border:none;"
+    _DIVERGED_QSS = "color:#e3b341;font-size:10px;font-weight:700;border:none;"
+
+    #: What each setting is CALLED in the window, so a marker reads as English rather than as a
+    #: field name. The keys are the field names, which stay the vocabulary everywhere else.
+    _SETTING_LABELS = {
+        "tenengrad_focus": "auto focus",
+        "channel_visibility": "channels",
+        "luts": "contrast",
+    }
+
+    def _refresh_divergence(self) -> None:
+        """Say which settings this window has overridden, and enable reset only when there is
+        something to reset."""
+        lab = getattr(self, "_diverged_label", None)
+        if lab is None:
+            return
+        names = self.settings.diverged
+        if names:
+            pretty = ", ".join(self._SETTING_LABELS.get(n, n) for n in names)
+            lab.setText(f"⚠ diverged: {pretty}")
+            lab.setStyleSheet(self._DIVERGED_QSS)
+        else:
+            lab.setText("at the defaults")
+            lab.setStyleSheet(self._AT_DEFAULTS_QSS)
+        lab.setToolTip(
+            "This window's settings differ from what it opened with. '↺ reset' puts them back; "
+            "'make default' pushes them to windows opened from now on."
+            if names else "This window's settings are the ones it opened with.")
+        btn = getattr(self, "_reset_btn", None)
+        if btn is not None:
+            btn.setEnabled(bool(names))
+
+    def _on_focus_default_toggled(self, on: bool) -> None:
+        """The autofocus default, changed IN THIS WINDOW. Never propagated to the others."""
+        self.settings.set("tenengrad_focus", bool(on))
+        self._refresh_divergence()
+        self._echo(f"auto focus {'on' if on else 'off'} for this window.")
+
+    def _sync_settings_widgets(self) -> None:
+        """Put the controls back in step with the settings after a programmatic change.
+
+        ``blockSignals`` because ``setChecked`` emits ``toggled``, which would write the value we
+        just read straight back through :meth:`ViewSettings.set` and re-diverge the window we are
+        in the middle of resetting.
+        """
+        chk = getattr(self, "_focus_default_chk", None)
+        if chk is None:
+            return
+        chk.blockSignals(True)
+        try:
+            chk.setChecked(bool(self.settings.get("tenengrad_focus")))
+        finally:
+            chk.blockSignals(False)
+
+    def _reset_settings(self) -> None:
+        """Back to what this window opened with: the global defaults, or, for contrast, its
+        parent's. NOT today's default, which the window may never have seen."""
+        names = self.settings.reset()
+        if not names:
+            self._say("this window is already showing the settings it opened with.")
+            return
+        self._apply_luts(self.settings.get("luts"))
+        self._apply_channel_visibility(self.settings.get("channel_visibility"))
+        self._sync_settings_widgets()
+        self._refresh_divergence()
+        pretty = ", ".join(self._SETTING_LABELS.get(n, n) for n in names)
+        self._say(f"reset {pretty} to what this window opened with.")
+
+    def _make_default(self) -> None:
+        """Make THIS window's settings the default for windows opened FROM NOW ON.
+
+        Deliberately leaves every open window alone, this one included except that it stops
+        reporting diverged (because it no longer is). Propagating a change across open windows was
+        ruled out: it fights the independence the decentralization bought, and the user asked for a
+        default, not a broadcast.
+        """
+        if self._manager is None:
+            self._say("this window has no manager, so it cannot set the global default.")
+            return
+        if not self._manager.make_default(self.window_id):
+            self._say("this window is not in the registry, so it cannot set the global default.")
+            return
+        self._say("these are now the defaults for windows opened from now on; windows already "
+                  "open are unchanged.")
 
     def _run_view_operator(self) -> None:
         """Run the operator picked in this window's dropdown on THIS view's regions — "select where to
@@ -589,6 +889,15 @@ class RegionViewer(QMainWindow):
         if v is None or region is None or self._reader is None or self._meta is None:
             self._say("open a region first, then focus the reference plane.")
             return
+        # A stack of one plane has no reference plane to find, and ranking it would report a
+        # "sharpest plane" for the only plane there is. A refusal has to be a SENTENCE: this guard
+        # came off `PlateWindow` with the orphan button (2026-07-29) rather than being dropped with
+        # the rest of that dead chain, because it is the message the user needs on a 2D acquisition.
+        z_levels = list((self._meta.get("z_levels") or []))
+        if len(z_levels) <= 1:
+            self._say(f"{region}: this acquisition has a single z plane, so there is no "
+                      "reference plane to find.")
+            return
         if self._focus_worker is not None and self._focus_worker.isRunning():
             self._say("already finding the reference plane…")
             return
@@ -609,14 +918,29 @@ class RegionViewer(QMainWindow):
         w.start()
 
     def _on_reference_plane(self, z_index: int, note: str) -> None:
+        """The sharpest plane is known. MOVE THIS WINDOW'S z SLIDER to it, or say why not.
+
+        Announcing a reference plane over a slider that never moved is the silent failure the
+        control exists to avoid, so the axis is checked before it is written rather than after.
+        ``if step:`` was not that check: on a 2D ``(y, x)`` layer it is true, and ``step[0] = z``
+        then drove Y and reported a reference plane anyway. This guard came off ``PlateWindow`` with
+        the orphan focus button (2026-07-29) instead of being deleted along with it.
+        """
         v = self._napari_viewer()
         if v is None:
             return
         try:
-            step = list(v.dims.current_step)
-            if step:                                     # z is the leading axis of a (z, y, x) layer
-                step[0] = int(z_index)
-                v.dims.current_step = tuple(step)
+            dims = v.dims
+            nsteps = tuple(int(n) for n in (getattr(dims, "nsteps", ()) or ()))
+            # z is the LEADING axis of a (z, y, x) layer. Two ways there is no z slider to move:
+            # fewer than three axes (a plain 2D image), or a leading axis with a single step.
+            if len(nsteps) < 3 or nsteps[0] < 2:
+                self._say(f"sharpest plane is z={z_index}, but no z slider could be moved — "
+                          "this view is showing a single plane.")
+                return
+            step = list(dims.current_step)
+            step[0] = max(0, min(int(z_index), nsteps[0] - 1))   # clamp: never index past the stack
+            dims.current_step = tuple(step)
             self._say(f"reference plane: z={z_index}. {note}".strip())
         except Exception as exc:                         # noqa: BLE001 - named, never silent
             self._say(f"could not move the z-slider: {exc}")
@@ -780,11 +1104,12 @@ class RegionViewer(QMainWindow):
             region = self._region_for_roi(bbox)
             if region is None:
                 continue
-            # Inherit THIS window's contrast/colormap so the ROI child looks like its parent
-            # (Julio: "the contrast for the ROIs is not the same as the parent window's").
+            # The child inherits THIS window's contrast/colormap so it looks like its parent
+            # (Julio: "the contrast for the ROIs is not the same as the parent window's"). The
+            # manager derives that from parent_id now -- one place decides what a new window opens
+            # with, rather than each opening site posting its own LUTs.
             child = self._manager.open_child(
-                [region], roi_bbox=bbox, parent_id=self.window_id,
-                luts=self._per_channel_luts())
+                [region], roi_bbox=bbox, parent_id=self.window_id)
             if child is not None:
                 opened += 1
         self._say(f"opened {opened} ROI child window(s) on the selected ROI"
@@ -815,6 +1140,99 @@ class RegionViewer(QMainWindow):
             out[name] = lut
         return out
 
+    def current_settings(self) -> "dict[str, Any]":
+        """This window's global-default settings AS THEY ARE ON SCREEN right now.
+
+        ``luts`` is read back off the napari layers rather than out of the record, because the user
+        drags contrast in napari's own controls and the layers are the only thing that knows where
+        it ended up. Everything else is exactly what the window recorded.
+        """
+        out = self.settings.snapshot()
+        live = self._per_channel_luts()
+        if live:
+            out["luts"] = live
+        return out
+
+    def _apply_luts(self, luts: "Optional[dict]") -> Optional[int]:
+        """Put per-channel contrast + colormap on this window's layers. ``None`` = no mosaic here.
+
+        The one place LUTs land on layers: the settings baseline, a paste, and a reset all go
+        through it, so there is a single answer to "what does applying a LUT do".
+        """
+        pane = self._pane
+        mosaic = getattr(pane, "mosaic", None) if pane is not None else None
+        if mosaic is None:
+            return None
+        applied = 0
+        for ch, lut in (luts or {}).items():
+            layer = mosaic.find(_RAW_OP, ch)
+            if layer is None:
+                continue
+            try:
+                if lut.get("clim") is not None:
+                    layer.contrast_limits = tuple(lut["clim"])
+                if lut.get("cmap") is not None:
+                    layer.colormap = lut["cmap"]
+                applied += 1
+            except Exception:                            # noqa: BLE001 - a missing channel is skipped
+                pass
+        return applied
+
+    def _apply_channel_visibility(self, visibility: "Optional[dict]") -> None:
+        """Show/hide channels per the setting. An EMPTY setting means no opinion, so the channels
+        stay exactly as napari made them rather than being forced on by a default."""
+        pane = self._pane
+        mosaic = getattr(pane, "mosaic", None) if pane is not None else None
+        if mosaic is None:
+            return
+        for name, on in (visibility or {}).items():
+            try:
+                mosaic.set_channel_visible(str(name), bool(on))
+            except Exception:                            # noqa: BLE001 - a missing channel is skipped
+                pass
+
+    def _apply_settings_once(self) -> None:
+        """Put this window's settings on screen, ONCE, now that its layers exist.
+
+        Once and not per region change: after the first application the window owns its own
+        contrast, so re-seeding on the next region would throw away an adjustment the user made in
+        between -- which is the whole reason the baseline is a starting point and not a rule.
+        """
+        if self._settings_applied:
+            return
+        pane = self._pane
+        mosaic = getattr(pane, "mosaic", None) if pane is not None else None
+        if mosaic is None:
+            return
+        self._settings_applied = True
+        self._apply_luts(self.settings.get("luts"))
+        self._apply_channel_visibility(self.settings.get("channel_visibility"))
+        # Subscribe AFTER applying, so seeding the baseline is not mistaken for the user diverging.
+        self._watch_user_visibility(mosaic)
+        if self.settings.get("tenengrad_focus"):
+            try:
+                self._focus_reference_plane()
+            except Exception as exc:                     # noqa: BLE001 - named, never silent
+                self._say(f"could not autofocus this window: {exc}")
+
+    def _watch_user_visibility(self, mosaic) -> None:
+        """Record channel visibility the USER changed with napari's own eye icons, so the window
+        reports diverged. Guarded: a mosaic without the seam simply never diverges on visibility,
+        which is a smaller loss than a window that will not build."""
+        hook = getattr(mosaic, "on_user_visibility", None)
+        if not callable(hook):
+            return
+        try:
+            hook(self._on_user_visibility)
+        except Exception:                                # noqa: BLE001 - the seam stays optional
+            pass
+
+    def _on_user_visibility(self, channel: str, visible: bool) -> None:
+        vis = dict(self.settings.get("channel_visibility") or {})
+        vis[str(channel)] = bool(visible)
+        self.settings.set("channel_visibility", vis)
+        self._refresh_divergence()
+
     def _copy_luts(self) -> None:
         caught = self._per_channel_luts()
         if not caught:
@@ -828,24 +1246,14 @@ class RegionViewer(QMainWindow):
         if not _LUT_CLIPBOARD:
             self._say("no copied LUTs yet — use '⧉ Copy LUTs' in another window first.")
             return
-        pane = self._pane
-        mosaic = getattr(pane, "mosaic", None) if pane is not None else None
-        if mosaic is None:
+        applied = self._apply_luts(_LUT_CLIPBOARD)
+        if applied is None:
             self._say("no mosaic here to paste LUTs onto.")
             return
-        applied = 0
-        for ch, lut in _LUT_CLIPBOARD.items():
-            layer = mosaic.find(_RAW_OP, ch)
-            if layer is None:
-                continue
-            try:
-                if lut.get("clim") is not None:
-                    layer.contrast_limits = tuple(lut["clim"])
-                if lut.get("cmap") is not None:
-                    layer.colormap = lut["cmap"]
-                applied += 1
-            except Exception:                            # noqa: BLE001 - a missing channel is skipped
-                pass
+        # A paste IS the user changing contrast in this window, so it is RECORDED: the window now
+        # differs from what it opened with, and the Defaults box has to say so.
+        self.settings.set("luts", self._per_channel_luts())
+        self._refresh_divergence()
         self._say(f"pasted LUTs onto {applied} channel(s).")
 
     # -- navigation ---------------------------------------------------------------------
@@ -923,23 +1331,9 @@ class RegionViewer(QMainWindow):
             pane.mosaic.model.reset_view()
         except Exception:                            # noqa: BLE001 - view framing is cosmetic
             pass
-        # Seed the inherited parent contrast ONCE, now that the layers exist (an ROI child should
-        # look like its parent). After this the window owns its own contrast, so a later region
-        # change does not re-stomp a window the user has since adjusted.
-        if self._initial_luts and not self._luts_seeded:
-            mosaic = getattr(pane, "mosaic", None)
-            for name, lut in self._initial_luts.items():
-                layer = mosaic.find(_RAW_OP, name) if mosaic is not None else None
-                if layer is None:
-                    continue
-                try:
-                    if lut.get("clim") is not None:
-                        layer.contrast_limits = tuple(lut["clim"])
-                    if lut.get("cmap") is not None:
-                        layer.colormap = lut["cmap"]
-                except Exception:                    # noqa: BLE001 - a missing channel is skipped
-                    pass
-            self._luts_seeded = True
+        # Seed this window's settings ONCE, now that the layers exist. For an ROI child that is the
+        # parent's contrast, so the child looks like the window it was cut out of.
+        self._apply_settings_once()
         self._frame_done()
 
     def _frame_done(self) -> None:
@@ -1221,7 +1615,9 @@ class ViewerManager(QObject):
 
     The root plate window owns one of these. It is the single source of "what windows are open",
     so the Open View list is a pure VIEW of it and can never drift from the real set of windows.
-    Memory is polled here (not per window) so one warning speaks for the whole app.
+    Memory is polled here (not per window) so one warning speaks for the whole app. It also owns
+    the :class:`ViewDefaults` every new window opens with, for the same reason: a default has to
+    outlive the windows that read it.
     """
 
     windowsChanged = pyqtSignal()          # the set of open windows changed
@@ -1241,6 +1637,11 @@ class ViewerManager(QObject):
         # SAME registry + the SAME run_operator (the CLI engine), scoped to that view.
         self.operator_specs: "list" = []
         self.run_operator: Optional[Any] = None
+        # THE GLOBAL DEFAULTS (Task 6, 2026-07-29). Here and not on PlateWindow: windows come and
+        # go, the manager is the registry, so the registry is the one lifetime the defaults can
+        # share. A new window reads these at construction; an already-open window is never touched
+        # by a later change, because a default is a fact about the NEXT window.
+        self.defaults = ViewDefaults()
 
         self._mem_timer = QTimer(self)
         self._mem_timer.setInterval(2000)
@@ -1290,14 +1691,58 @@ class ViewerManager(QObject):
         """Open a CHILD window from an ROI drawn in a parent window (the next level of the tree).
 
         Structurally the child is a window over the same regions carrying the ROI box; cropping the
-        load to the box lands with the loader work. ``luts`` seeds the child's per-channel contrast
-        from the parent so it looks the same. Titled so the Open View list shows the nesting."""
+        load to the box lands with the loader work. Titled so the Open View list shows the nesting.
+
+        The child's contrast comes from ``parent_id`` via :meth:`_baseline_for`, so the caller does
+        not have to remember to hand it over. ``luts``, if given, overrides that derivation; it is
+        for a caller that means a specific LUT set rather than "whatever my parent has"."""
         regions = [str(r) for r in regions if r]
         if not regions:
             return None
         base = RegionViewer._region_label(regions)
         title = f"{base}  ◂ view {parent_id}" if parent_id is not None else base
         return self._spawn(regions, title=title, roi_bbox=roi_bbox, parent_id=parent_id, luts=luts)
+
+    def _baseline_for(self, parent_id: Optional[int]) -> "dict[str, Any]":
+        """The settings a NEW window opens with: the global default for each one, except that an
+        ``_INHERIT`` setting takes the OPENER's current value when a window opened it.
+
+        This is where the contrast rule lives, and it lives here exactly once. A window opened from
+        the plate has no opener window, so ``_INHERIT`` falls through to the default; an ROI child
+        has one, so it looks like its parent. The parent is read LIVE (``current_settings``) because
+        contrast is dragged in napari and the layers are the only thing that knows the answer.
+        """
+        parent = self._windows.get(int(parent_id)) if parent_id is not None else None
+        live: "dict[str, Any]" = {}
+        if parent is not None:
+            try:
+                live = parent.current_settings()
+            except Exception:                            # noqa: BLE001 - fall back to the defaults
+                log.warning("could not read view %s's settings; the new window takes the defaults.",
+                            parent_id)
+        out: "dict[str, Any]" = {}
+        for name, mode in _SETTING_BASELINE.items():
+            value = self.defaults.get(name)
+            if mode == _INHERIT and name in live:
+                value = live[name]
+            out[name] = value
+        return out
+
+    def make_default(self, window_id: int) -> bool:
+        """Adopt one window's settings as the global defaults, for windows opened FROM NOW ON.
+
+        The explicit act that replaces propagation: no already-open window is touched, including
+        this one, except that it stops reporting diverged because it no longer is. Returns False
+        when the id is not in the registry, so a caller can say so rather than appear to succeed.
+        """
+        win = self._windows.get(int(window_id))
+        if win is None:
+            return False
+        for name, value in win.current_settings().items():
+            self.defaults.set(name, value)
+        win.settings.adopt()
+        win._refresh_divergence()
+        return True
 
     def _spawn(self, regions: "list[str]", *, title: Optional[str] = None,
                roi_bbox: Optional[tuple] = None,
@@ -1307,11 +1752,14 @@ class ViewerManager(QObject):
             return None
         wid = self._next_id
         self._next_id += 1
+        baseline = self._baseline_for(parent_id)
+        if luts is not None:
+            baseline["luts"] = luts          # an explicit LUT set beats the derived one
         win = RegionViewer(
             self._reader, self._meta, regions, window_id=wid, title=title,
             manager=self, roi_bbox=roi_bbox,
             operator_specs=self.operator_specs, run_operator=self.run_operator,
-            parent_id=parent_id, initial_luts=luts,
+            parent_id=parent_id, settings=ViewSettings(baseline),
         )
         win.closed.connect(self._on_window_closed)
         self._windows[wid] = win

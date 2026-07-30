@@ -51,11 +51,20 @@ committed to, scheduled, or estimated.
   `vispy.app.backends._pyqt5`.
   <sub>added 2026-07-27 · Spencer</sub>
 
-- [ ] **Fix the Windows test-suite teardown crash** — `test_viewer`, `test_gui_commands`,
+- [x] **Fix the Windows test-suite teardown crash** — `test_viewer`, `test_gui_commands`,
   `test_nav_wiring`, `test_viewer_3d` and `test_viewer_region_ids` die with `0xC0000005` at
   process exit, which eats pytest's summary line. Tests that passed look identical to tests
   that never ran, so Windows failures are effectively invisible. The suite currently has to be
   run per-file to get honest results.
+  **Done 2026-07-28 (`c557e6f`), verified 2026-07-29.** Closed by the Qt object-lifetime fixes: a
+  Python-owned Qt object handed to Qt-land and freed on someone else's schedule, six times over
+  (the per-window `QStyle`, the `QApplication` held only by a pytest fixture cache, an armed
+  debounce `QTimer`, a `QImage` over an uncopied numpy buffer, windows never freed at all).
+  `tests/test_window_lifetime.py` records them with the evidence tables that pinned each one:
+  40 windows clean with the style held alive versus dead on window 6 without it, and the summary
+  line printing 12/12 runs with the app pinned versus 0/12 as found. Evidence that the symptom is
+  gone: the five named modules now run in ONE process, `253 passed`, summary line printed, exit 0.
+  Per-file runs are no longer needed.
   <sub>added 2026-07-27 · Spencer</sub>
 
 - [ ] **Peak memory always reads 0 on Windows** — `_rss_mb()` takes its peak only from the
@@ -64,9 +73,17 @@ committed to, scheduled, or estimated.
   README promises cannot fire on Windows today.
   <sub>added 2026-07-27 · Spencer</sub>
 
-- [ ] **`test_plate.py`: 5 real failures** — including "two regions separated in y are two
+- [x] **`test_plate.py`: 5 real failures** — including "two regions separated in y are two
   ROWS, not two columns". Pre-existing and unrelated to any recent change; not dependency
   gaps. Nobody has looked at whether they are Windows-specific.
+  **Done 2026-07-28 (`c557e6f`), verified 2026-07-29.** They were STALE TESTS over a CORRECT
+  product, not failures. `even_carrier_layout` deliberately replaced the stage-proportional layout
+  on the `build_plate` path in `2b8fbc5` (Julio, 2026-07-23), because the proportional rule stacked
+  the real 10x tissue set into a tall, tiny, uneven column; for a BROWSE view even readable cells
+  beat geometric fidelity. These five tests pinned the RETIRED rule. They now assert what is still
+  true and was never about proportionality: geometry orders the cells, cells never overlap, and the
+  layout depends on neither the region name nor the enumeration order. And it answers the open
+  question: **not Windows-specific.** `tests/test_plate.py` is `88 passed, 1 skipped` on macOS.
   <sub>added 2026-07-27 · Spencer</sub>
 
 - [ ] **Decide whether `.claude/skills/run-squidxplorer` ships** — it captures the verified

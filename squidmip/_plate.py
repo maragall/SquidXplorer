@@ -42,6 +42,38 @@ a uniform grid. :func:`freeform_grid` then derives (row, col) by CLUSTERING thos
 than by enumerating names, and :func:`freeform_layout` emits the exact rectangles, normalised into
 the grid's own units, that the viewer draws. Shuffling the region names changes nothing.
 
+STAGE vs COMPACT PLACEMENT (Task 5, 2026-07-29)
+-----------------------------------------------
+``build_plate(..., placement="stage" | "compact")``. The words are defined once, in
+:mod:`squidmip._placement`, so the geometry and the label on screen cannot spell them differently.
+
+    stage    (DEFAULT) cells where the stage says. Byte-identical to what this module has always
+             built. A well id encodes its own position, so an unacquired well keeps its space and
+             the plate measures like the plate.
+    compact  the space BETWEEN regions is closed. A 3-well scan of a 384-well plate reads as three
+             large cells rather than three dots in a 16 x 24 field of nothing.
+
+Compact is :func:`even_carrier_layout`, which already did exactly this for tissue carriers,
+generalised to every format. It is a PROMOTION of a shipped layout, not a new one.
+:func:`freeform_grid` / :func:`freeform_layout` remain as the stage-proportional pair.
+
+**What compact never moves.** FOVs. Overlapping or adjacent FOVs carry the registration stitching
+solves against; sparse ones (Squid schema v2's ``grid_subset`` and ``random`` patterns) carry
+sampling geometry. Either way the space inside a region carries information, so only the space
+between regions is free. Within-region geometry lives in :mod:`squidmip._placement` and takes no
+mode argument at all, which is how that guarantee is enforced rather than merely intended.
+
+**Why the mode is reported, not remembered.** This codebase refuses to guess positions
+(``reader.py`` raises rather than placing FOVs "at positions that would look plausible but be
+wrong"). A compact view is a PRESENTATION, and a compact view mistaken for a stage view is a
+mis-measurement that ends up in a figure. So :attr:`Plate.placement_mode` is the mode the cells
+ACTUALLY have and is meant to be on screen at all times, while :attr:`Plate.placement_requested`
+is what the caller asked for. The two differ in exactly one case, and it is not hypothetical: a
+FREEFORM tissue carrier has no stage-proportional layout in the product, because Julio removed it
+on 2026-07-23 (it "stacked two tissues into a tall, tiny, uneven column"). Its cells are even in
+both modes, so it reports ``compact`` even when ``stage`` was asked for. Labelling that "stage"
+would be the lie this attribute exists to prevent.
+
 DECLARED vs MEASURED
 --------------------
 ``~/Downloads/synthetic_2x2_wellplate`` declares ``384 well plate`` in its yaml but its stage
@@ -108,6 +140,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Mapping, Optional, Sequence
 
+from ._placement import (
+    COMPACT,
+    DEFAULT_PLACEMENT_MODE,
+    PLACEMENT_MODES,
+    STAGE,
+    normalize_placement_mode,
+    placement_mode_label,
+)
 from ._plate_shape import (
     GLASS_SLIDE,
     PlateShapeError,
@@ -117,7 +157,12 @@ from ._plate_shape import (
 )
 
 __all__ = [
+    "COMPACT",
+    "DEFAULT_PLACEMENT_MODE",
+    "PLACEMENT_MODES",
+    "STAGE",
     "CarrierArt",
+    "CompactPlate",
     "Plate",
     "PlateBuildError",
     "PlateGeometry",
@@ -130,6 +175,8 @@ __all__ = [
     "freeform_layout",
     "load_sample_formats",
     "measure_region_pitch_um",
+    "normalize_placement_mode",
+    "placement_mode_label",
     "region_stage_boxes_um",
     "squid_images_dir",
 ]
@@ -391,6 +438,8 @@ class Plate(ABC):
         declared_format: Optional[str] = None,
         format_source: str = "declared",
         measured_pitch_um: Optional[tuple] = None,
+        placement_mode: str = DEFAULT_PLACEMENT_MODE,
+        placement_requested: Optional[str] = None,
     ):
         self.geometry = geometry
         self.format_name = format_name or geometry.name
@@ -398,6 +447,13 @@ class Plate(ABC):
         #: how ``format_name`` was decided: "override" | "measured" | "declared" | "inferred".
         self.format_source = format_source
         self.measured_pitch_um = measured_pitch_um
+        #: the geometry the cells ACTUALLY have: "stage" | "compact". What the label must show.
+        self.placement_mode = normalize_placement_mode(placement_mode)
+        #: the mode the caller ASKED for. Differs from ``placement_mode`` only for a freeform
+        #: tissue carrier, whose cells are even in both modes (see the module docstring).
+        self.placement_requested = normalize_placement_mode(
+            placement_mode if placement_requested is None else placement_requested
+        )
         self._occupancy = {k: list(v) for k, v in (occupancy or {}).items()}
         unknown = [c for c in self._occupancy if not self.has_cell(c)]
         if unknown:
@@ -447,6 +503,27 @@ class Plate(ABC):
             return False
         return True
 
+    #: Prefix of the SYNTHETIC ids a subclass invents to keep its grid rectangular ("slot3",
+    #: "pad5"). Empty means every cell id is a real region. Shared so :meth:`_sole_cell` can tell
+    #: a real region from a filler without each subclass re-deciding.
+    _FILLER_PREFIX = ""
+
+    def _is_filler(self, cell_id: str) -> bool:
+        """Is *cell_id* a synthetic placeholder rather than a region the acquisition named?"""
+        return bool(self._FILLER_PREFIX) and str(cell_id).startswith(self._FILLER_PREFIX)
+
+    def _sole_cell(self, axis: int, i: int) -> Optional[str]:
+        """The id of the ONLY real region on row (*axis* 0) or column (*axis* 1) *i*, else None.
+
+        The axis label of a holder whose cells are named rather than positioned: a row or column
+        holding exactly one region is unambiguously that region's, and one holding several is left
+        blank rather than labelled with a guess.
+        """
+        n = self.cols if axis == 0 else self.rows
+        hits = [cid for cid in (self.cell_id(i, j) if axis == 0 else self.cell_id(j, i)
+                                for j in range(n)) if not self._is_filler(cid)]
+        return hits[0] if len(hits) == 1 else None
+
     # -- physical -------------------------------------------------------------------------
     @property
     def pitch_x_um(self) -> float:
@@ -455,6 +532,15 @@ class Plate(ABC):
     @property
     def pitch_y_um(self) -> float:
         return self.geometry.pitch_y_um
+
+    @property
+    def placement_label(self) -> str:
+        """The persistent on-screen text for this plate's geometry: ``"stage"`` or ``"compact"``.
+
+        Always available, never empty, and read off the RESOLVED mode -- so a viewer that shows it
+        cannot show a word the cells do not deserve.
+        """
+        return placement_mode_label(self.placement_mode)
 
     def cell_center_um(self, cell_id: str) -> tuple[float, float]:
         """Stage micrometres of the cell's centre (A1's own centre for the top-left cell)."""
@@ -521,7 +607,8 @@ class Plate(ABC):
 
     def __repr__(self) -> str:
         return (f"<{type(self).__name__} {self.format_name} {self.rows}x{self.cols} "
-                f"occupied={len(self._occupancy)} source={self.format_source}>")
+                f"occupied={len(self._occupancy)} source={self.format_source} "
+                f"placement={self.placement_mode}>")
 
 
 # --------------------------------------------------------------------------- WellPlate
@@ -683,6 +770,8 @@ class SlideCarrier(Plate):
     region keep a synthetic ``slot{n}`` id so the grid stays rectangular and drawable.
     """
 
+    _FILLER_PREFIX = "slot"
+
     def __init__(self, geometry, occupancy=None, cell_ids: Optional[Iterable[str]] = None,
                  placement: Optional[Mapping[str, tuple]] = None,
                  layout: Optional[Mapping[str, tuple]] = None,
@@ -730,12 +819,6 @@ class SlideCarrier(Plate):
     def cell_layout(self):
         return dict(self._layout) if self._layout else None
 
-    def _sole(self, axis: int, i: int) -> Optional[str]:
-        """The id of the ONLY real region on row/column *i*, or None when it is not unique."""
-        hits = [cid for cid in self._pos
-                if not cid.startswith("slot") and self.cell_index(cid)[axis] == i]
-        return hits[0] if len(hits) == 1 else None
-
     @property
     def row_labels(self) -> list[str]:
         # A 1 x N carrier keeps its blank row label (the columns carry the ids, as they always
@@ -743,13 +826,13 @@ class SlideCarrier(Plate):
         # name belongs -- and an ambiguous row is left blank rather than labelled with a guess.
         if self.rows == 1:
             return [""]
-        return [self._sole(0, r) or "" for r in range(self.rows)]
+        return [self._sole_cell(0, r) or "" for r in range(self.rows)]
 
     @property
     def col_labels(self) -> list[str]:
         # The region ids themselves ARE the useful column labels on a carrier -- when a column
         # holds exactly one of them. Otherwise fall back to the slot number.
-        return [self._sole(1, c) or str(c + 1) for c in range(self.cols)]
+        return [self._sole_cell(1, c) or str(c + 1) for c in range(self.cols)]
 
     def cell_id(self, row: int, col: int) -> str:
         if not (0 <= row < self.rows and 0 <= col < self.cols):
@@ -761,6 +844,99 @@ class SlideCarrier(Plate):
         if i is None:
             raise KeyError(cell_id)
         return divmod(i, self.cols)
+
+
+# --------------------------------------------------------------------------- CompactPlate
+
+class CompactPlate(Plate):
+    """The OCCUPIED regions of any format, packed into an even grid: ``placement="compact"``.
+
+    A browse layout, and it says so. The cells are the regions the acquisition actually visited,
+    at equal size, in the reading order the STAGE gives them; the information-free space between
+    them is gone. Three wells of a 384-well plate stop being three dots in a 16 x 24 field of
+    nothing.
+
+    Not a new algorithm: the packing is :func:`even_carrier_layout`, shipped on 2026-07-23 for
+    tissue carriers, applied to every format. Not a :class:`SlideCarrier` either, however similar
+    the mechanism, because a compacted well plate is not a slide holder and the naming law forbids
+    reusing a physical word for a software concept -- ``compact`` is ours, ``slide`` is Squid's.
+
+    What is LOST, deliberately and visibly: the row/column topology. A compact grid's rows and
+    columns are packing indices, not plate rows and columns, so A1 is not guaranteed above A2. The
+    real ``cell_id`` survives on every cell, :attr:`placement_mode` reads ``compact``, and
+    :meth:`cell_center_um` refuses rather than fabricating a stage position.
+
+    Cells past the last region keep a synthetic ``pad{n}`` id so the grid stays rectangular
+    ("pad" because Squid will never call anything that; ``slot`` is the carrier's word for a real
+    physical bay and must not be borrowed for a blank).
+    """
+
+    _FILLER_PREFIX = "pad"
+
+    def __init__(self, geometry, occupancy=None, placement: Optional[Mapping[str, tuple]] = None,
+                 layout: Optional[Mapping[str, tuple]] = None,
+                 stage_boxes_um: Optional[Mapping[str, tuple]] = None, **kw):
+        n_slots = geometry.rows * geometry.cols
+        slots: list[Optional[str]] = [None] * n_slots
+        for cid, (r, c) in (placement or {}).items():
+            i = int(r) * geometry.cols + int(c)
+            if not (0 <= i < n_slots) or slots[i] is not None:
+                raise PlateBuildError(
+                    f"compact placement puts {cid!r} at cell ({r}, {c}) of a "
+                    f"{geometry.rows} x {geometry.cols} grid, which is out of range or already "
+                    f"taken by {slots[i] if 0 <= i < n_slots else '?'!r}. Two regions in one cell "
+                    "would draw one on top of the other."
+                )
+            slots[i] = str(cid)
+        self._ids = [s if s is not None else f"{self._FILLER_PREFIX}{i}"
+                     for i, s in enumerate(slots)]
+        self._pos = {cid: i for i, cid in enumerate(self._ids)}
+        self._layout = {str(k): tuple(float(v) for v in val)
+                        for k, val in (layout or {}).items()} or None
+        #: raw stage boxes of the regions, retained so a consumer that needs true micron scale can
+        #: still get it. The compact CELLS are not at these positions; that is the point of them.
+        self.stage_boxes_um = {str(k): tuple(float(v) for v in val)
+                               for k, val in (stage_boxes_um or {}).items()}
+        kw.setdefault("placement_mode", COMPACT)
+        super().__init__(geometry, occupancy, **kw)
+
+    def cell_layout(self):
+        return dict(self._layout) if self._layout else None
+
+    @property
+    def row_labels(self) -> list[str]:
+        if self.rows == 1:
+            return [""]
+        return [self._sole_cell(0, r) or "" for r in range(self.rows)]
+
+    @property
+    def col_labels(self) -> list[str]:
+        return [self._sole_cell(1, c) or "" for c in range(self.cols)]
+
+    def cell_id(self, row: int, col: int) -> str:
+        if not (0 <= row < self.rows and 0 <= col < self.cols):
+            raise KeyError((row, col))
+        return self._ids[row * self.cols + col]
+
+    def cell_index(self, cell_id: str) -> tuple[int, int]:
+        i = self._pos.get(str(cell_id))
+        if i is None:
+            raise KeyError(cell_id)
+        return divmod(i, self.cols)
+
+    def cell_center_um(self, cell_id: str) -> tuple[float, float]:
+        """Refused: a compact cell is not at a stage position.
+
+        The base implementation computes ``a1 + index * pitch``, which on this plate would be a
+        plausible-looking micrometre pair for a place the stage never was. Everything else in this
+        codebase raises rather than answer that question wrongly, so this does too, and names the
+        way out.
+        """
+        raise PlateBuildError(
+            f"{cell_id!r} is a cell of a COMPACT plate, whose cells are packed for browsing and "
+            "are not at stage positions. There is no stage centre to return. Rebuild with "
+            f"placement={STAGE!r} to ask this question."
+        )
 
 
 # --------------------------------------------------------------------------- freeform geometry
@@ -973,7 +1149,8 @@ def format_from_pitch_um(pitch_x_um: Optional[float], pitch_y_um: Optional[float
 
 # --------------------------------------------------------------------------- the builder
 
-def build_plate(metadata: Mapping, override=None, images_dir=None) -> Plate:
+def build_plate(metadata: Mapping, override=None, images_dir=None,
+                placement: str = DEFAULT_PLACEMENT_MODE) -> Plate:
     """Build the :class:`Plate` an acquisition describes. The one entry point callers need.
 
     Precedence (see the module docstring): ``override > measured > declared > inferred-from-span``.
@@ -983,7 +1160,15 @@ def build_plate(metadata: Mapping, override=None, images_dir=None) -> Plate:
 
     Freeform region ids (``manual0``) produce a :class:`SlideCarrier`, never a degenerate
     wellplate -- that is what lets a glass-slide/tissue acquisition open at all.
+
+    *placement* is ``"stage"`` (the default, and byte-identical to every plate this function has
+    ever built) or ``"compact"``, which closes the space between regions and returns a
+    :class:`CompactPlate`. Format resolution is entirely unaffected: the mode decides where cells
+    are DRAWN, never which holder the acquisition is on, so a compact plate still measures its
+    pitch and still warns about a mis-declared format. Anything other than those two strings
+    raises; see :func:`squidmip._placement.normalize_placement_mode` for why it must not default.
     """
+    placement = normalize_placement_mode(placement)
     regions = list(metadata.get("regions") or [])
     fovs_per_region = dict(metadata.get("fovs_per_region") or {})
     positions_um = metadata.get("fov_positions_um") or {}
@@ -1001,7 +1186,7 @@ def build_plate(metadata: Mapping, override=None, images_dir=None) -> Plate:
     )
     if override is not None or forced:
         name = _canonical_format(override if override is not None else forced)
-        return _make(name, regions, fovs_per_region, stage_boxes,
+        return _make(name, regions, fovs_per_region, stage_boxes, placement_mode=placement,
                      format_source="override", declared_format=_safe_canonical(declared_raw))
 
     declared = _safe_canonical(declared_raw)
@@ -1030,20 +1215,24 @@ def build_plate(metadata: Mapping, override=None, images_dir=None) -> Plate:
                 f"{PlateGeometry.vendored(declared).pitch_x_um / PlateGeometry.vendored(measured).pitch_x_um:.3g}x "
                 f"the true scale. Override with SQUIDMIP_WELLPLATE_FORMAT if the yaml is right."
             )
-            return _make(measured, regions, fovs_per_region, stage_boxes, format_source="measured",
+            return _make(measured, regions, fovs_per_region, stage_boxes, placement_mode=placement,
+                         format_source="measured",
                          declared_format=declared, measured_pitch_um=measured_pitch)
         else:
-            return _make(measured, regions, fovs_per_region, stage_boxes, format_source="measured",
+            return _make(measured, regions, fovs_per_region, stage_boxes, placement_mode=placement,
+                         format_source="measured",
                          declared_format=None, measured_pitch_um=measured_pitch)
 
     if declared:
-        return _make(declared, regions, fovs_per_region, stage_boxes, format_source="declared",
+        return _make(declared, regions, fovs_per_region, stage_boxes, placement_mode=placement,
+                     format_source="declared",
                      declared_format=declared, measured_pitch_um=measured_pitch)
     if measured:
-        return _make(measured, regions, fovs_per_region, stage_boxes, format_source="measured",
+        return _make(measured, regions, fovs_per_region, stage_boxes, placement_mode=placement,
+                     format_source="measured",
                      declared_format=None, measured_pitch_um=measured_pitch)
     return _make(infer_plate_format(regions), regions, fovs_per_region, stage_boxes,
-                 format_source="inferred", declared_format=None)
+                 placement_mode=placement, format_source="inferred", declared_format=None)
 
 
 def _safe_canonical(name) -> Optional[str]:
@@ -1053,8 +1242,46 @@ def _safe_canonical(name) -> Optional[str]:
         return None
 
 
-def _make(name, regions, fovs_per_region, stage_boxes=None, **kw) -> Plate:
-    """Instantiate the right subclass for *name*, sizing a slide carrier to the regions present."""
+def _compact_order_key(regions, stage_boxes) -> dict[str, tuple[float, float]]:
+    """``{region: (y, x)}`` -- the sort key that gives a compact grid its READING order.
+
+    ``(y, x)``, not ``(x, y)``: a compact plate is filled row-major, so the outer key has to be the
+    axis that chooses the row. That reproduces ``occupied_cells`` order (top-left first, then left
+    to right along a row), and inside a row lower stage x still renders left, which is the property
+    that makes a compact plate comparable with the stage one at a glance.
+
+    Stage boxes are the truth when they exist. When they do not -- a plate WE wrote carries no
+    coordinates.csv -- a well id encodes its own position, so ``(row, col)`` from the id IS stage
+    geometry rather than a fallback to enumeration order. A freeform region with neither is placed
+    at the origin, which is the only honest answer and leaves the id as the tie-break.
+    """
+    key: dict[str, tuple[float, float]] = {}
+    for region in regions:
+        box = (stage_boxes or {}).get(region)
+        if box is not None:
+            key[region] = (float(box[1]), float(box[0]))       # (y_um, x_um)
+            continue
+        span = well_span([region])                              # "B3" -> (2, 3), 1-based
+        key[region] = (float(span[0]), float(span[1])) if span else (0.0, 0.0)
+    return key
+
+
+def _make(name, regions, fovs_per_region, stage_boxes=None,
+          placement_mode=DEFAULT_PLACEMENT_MODE, **kw) -> Plate:
+    """Instantiate the right subclass for *name*, sizing a slide carrier to the regions present.
+
+    *placement_mode* is the REQUESTED mode. Which class results, and what mode that class ends up
+    reporting, is decided here and nowhere else:
+
+    ``compact`` on any well plate
+        a :class:`CompactPlate` of the occupied wells, packed by :func:`even_carrier_layout`.
+    ``stage`` on any well plate
+        the :class:`WellPlate` this function has always built, untouched.
+    either mode on a FREEFORM carrier
+        the same even :class:`SlideCarrier`, reporting ``compact``, because the stage-proportional
+        carrier layout was removed from the product on 2026-07-23 and no longer exists to return.
+        See the module docstring; this is the one place requested and resolved diverge.
+    """
     occupancy = {r: list(fovs_per_region.get(r, ())) for r in regions}
     if name in _SLIDE_FORMATS or well_span(regions) is None:
         # SPAN+SNAP for carriers, mirroring _plate_shape's rule for plates: pick the smallest
@@ -1081,7 +1308,26 @@ def _make(name, regions, fovs_per_region, stage_boxes=None, **kw) -> Plate:
             # More slides than any standard carrier: widen rather than refuse. There is no art for
             # this, and carrier_art() will correctly return None instead of a wrong-scale PNG.
             geom = PlateGeometry(**{**vars(geom), "cols": n})
+        # The carrier's cells are EVEN in both modes, so it reports the mode it actually has and
+        # remembers what was asked. A carrier labelled "stage" would be claiming a proportionality
+        # that 2b8fbc5 deliberately removed.
+        carrier_mode = COMPACT if placement else placement_mode
         return SlideCarrier(geom, occupancy, cell_ids=list(regions), placement=placement,
                             layout=layout, stage_boxes_um=stage_boxes,
-                            format_name=geom.name, **kw)
-    return WellPlate(PlateGeometry.vendored(name), occupancy, format_name=name, **kw)
+                            format_name=geom.name, placement_mode=carrier_mode,
+                            placement_requested=placement_mode, **kw)
+
+    if placement_mode == COMPACT and regions:
+        # COMPACT well plate: only the wells that were VISITED, packed evenly, ordered by the
+        # stage. `even_carrier_layout` is the shipped tissue-carrier packing, unchanged and
+        # unconditioned on format -- promoting it is the whole of this mode.
+        base = PlateGeometry.vendored(name)
+        rows, cols, cells, layout = even_carrier_layout(
+            list(regions), order_key=_compact_order_key(regions, stage_boxes))
+        geom = PlateGeometry(**{**vars(base), "rows": rows, "cols": cols})
+        return CompactPlate(geom, occupancy, placement=cells, layout=layout,
+                            stage_boxes_um=stage_boxes, format_name=name,
+                            placement_requested=placement_mode, **kw)
+
+    return WellPlate(PlateGeometry.vendored(name), occupancy, format_name=name,
+                     placement_mode=placement_mode, **kw)

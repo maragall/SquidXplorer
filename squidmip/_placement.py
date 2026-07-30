@@ -47,6 +47,31 @@ The origin is **per region**, not plate-wide: each well's mosaic is laid out in 
 frame, and the well's position on the plate comes from the row/column grid the plate view
 already draws. Mixing the two coordinate systems (stage-absolute FOVs inside a grid-placed
 cell) is exactly the "wrong origin" bug above.
+
+PLACEMENT MODE (Task 5, 2026-07-29)
+-----------------------------------
+Two answers to "where do the CELLS of the holder go", named here and applied in
+:mod:`squidmip._plate`:
+
+``stage``
+    Cells sit where the stage says. A well id encodes its own position, so an unacquired well
+    still takes up its space and the picture measures like the plate.
+``compact``
+    The space BETWEEN regions is closed, so a 3-well scan of a 384-well plate reads as three
+    large cells instead of three dots.
+
+**Nothing in this module changes with the mode, and that is the guarantee, not an omission.**
+:func:`fov_offsets_px` and :func:`cell_boxes` are the WITHIN-REGION geometry, and the mode is
+not an argument to either. Compact closes gaps that carry no information; a gap inside a region
+carries information in every case that exists:
+
+* overlapping or adjacent FOVs carry the registration that stitching solves against;
+* sparse FOVs carry sampling geometry -- Squid schema v2 adds ``grid_subset`` and ``random``
+  patterns that sample a well deliberately sparsely, and moving those relative to each other
+  would destroy the sampling the acquisition encoded.
+
+So a region's mosaic is identical in both modes, down to the pixel, and only the region's cell
+on the holder moves.
 """
 
 from __future__ import annotations
@@ -59,6 +84,55 @@ import numpy as np
 
 # Stage +y maps to image +row (downward). See the module docstring.
 _Y_SIGN = 1
+
+# --------------------------------------------------------------------- placement mode vocabulary
+#
+# The words live here, in the module named for the question, so the plate model, the viewer's
+# label and any export all read the SAME string. A second spelling of "compact" somewhere else is
+# how a label starts disagreeing with the geometry it describes.
+
+STAGE = "stage"
+"""Cells at the positions the stage recorded. Squid's own word for the physical thing."""
+
+COMPACT = "compact"
+"""Cells packed evenly, closing the information-free space BETWEEN regions."""
+
+PLACEMENT_MODES = (STAGE, COMPACT)
+"""Every mode there is. ``PlacementMode`` in the type sense, without a typing import."""
+
+DEFAULT_PLACEMENT_MODE = STAGE
+"""Julio, 2026-07-29: stage is the default. A viewer session may switch to compact; nothing
+persists that choice per acquisition, because silently restoring ``compact`` on reopen is the
+exact failure the always-visible label exists to prevent."""
+
+
+def normalize_placement_mode(mode) -> str:
+    """Validate a placement mode, raising on anything else. Never silently defaults.
+
+    A typo resolving to the default would mean asking for ``compact`` and getting stage geometry
+    under a label that says so, which is a wrong picture that looks right -- the failure class
+    this whole module is written against.
+    """
+    if mode is None:
+        return DEFAULT_PLACEMENT_MODE
+    m = str(mode).strip().lower()
+    if m not in PLACEMENT_MODES:
+        raise ValueError(
+            f"placement must be one of {PLACEMENT_MODES}, got {mode!r}. Refusing to fall back to "
+            f"{DEFAULT_PLACEMENT_MODE!r}: a mode label that disagrees with the geometry it "
+            "describes is a mis-measurement waiting to end up in a figure."
+        )
+    return m
+
+
+def placement_mode_label(mode) -> str:
+    """The persistent on-screen text for *mode*: ``"stage"`` or ``"compact"``.
+
+    One function so the label cannot drift from the mode. It is deliberately the bare word: it is
+    always visible, it appears in any grab of the plate pane, and a user reading a figure has to
+    be able to tell in one glance which geometry produced it.
+    """
+    return normalize_placement_mode(mode)
 
 
 def _require_pixel_size(pixel_size_um: Optional[float]) -> float:

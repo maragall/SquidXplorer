@@ -35,6 +35,15 @@ SEL_FILL = QColor(88, 166, 255, 90)
 #: The CONTROL WELL's persistent frame (IMA-248/IMA-260). Light blue, and deliberately NOT RED:
 #: the red box is the transient current-FOV, the blue frame is a pinned reference.
 CONTROL_BLUE = QColor("#7fd4ff")
+#: A cell whose RECIPE differs from the rest of the plate's (Task 3, 2026-07-29). A DASHED BORDER
+#: is drawn in this ink, and it is deliberately NOT a colour wash: the washes on this plate already
+#: mean "which view owns this well" (per-view hues) and "this well is selected", so a third colour
+#: meaning would collide with two that are already load-bearing. Near-white, because it has to read
+#: over any tile and over both washes. ``squidmip._legend`` draws the same ink beside the diverging
+#: chain's row, so the mark on the plate and the row in the legend are visibly the same statement.
+DIVERGENT = QColor("#f0f6fc")
+#: The same ink as a CSS colour, for the legend's swatch stylesheet.
+DIVERGENT_CSS = "#f0f6fc"
 
 #: Processing-status hue coding, adopted from Hongquan Li's record-zstack-viewer plate navigator.
 #: Deliberately colorblind-safe (blue/amber, never red/green) with a shape cue for failure (the x).
