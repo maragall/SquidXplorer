@@ -190,8 +190,8 @@ def paint_slides(p, rects: Iterable[Rect], label_frac: float = LABEL_FRAC,
     strictly a backdrop: every gesture the plate carries is painted after this, by the code that
     always painted it.
     """
-    from PyQt5.QtCore import QRectF, Qt
-    from PyQt5.QtGui import QColor, QFont, QPen
+    from qtpy.QtCore import QRectF, Qt
+    from qtpy.QtGui import QColor, QFont, QPen
 
     rects = list(rects)
     if not rects:

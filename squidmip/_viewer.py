@@ -57,11 +57,11 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-from PyQt5.QtCore import (  # QThread/pyqtSignal: kept for tests that build a stub worker as V.QThread
-    Qt, QThread, QTimer, pyqtSignal,  # noqa: F401 (see tests/test_viewer.py::_BlockingWorker)
+from qtpy.QtCore import (  # QThread/Signal: kept for tests that build a stub worker as V.QThread
+    Qt, QThread, QTimer, Signal,  # noqa: F401 (see tests/test_viewer.py::_BlockingWorker)
 )
-from PyQt5.QtGui import QColor, QPalette
-from PyQt5.QtWidgets import (
+from qtpy.QtGui import QColor, QPalette
+from qtpy.QtWidgets import (
     QAction, QApplication, QCheckBox, QComboBox, QDockWidget, QFileDialog, QFrame, QHBoxLayout, QLabel,
     QMainWindow, QMenu, QPlainTextEdit, QPushButton, QScrollArea, QSlider, QSpinBox,
     QSplitter, QStackedWidget, QStyleFactory, QTabBar, QVBoxLayout, QWidget,
@@ -150,6 +150,7 @@ from squidmip._plate_shape import PlateShapeError
 from squidmip._qt_tabs import _DetachTabBar, _DetachTabs, _FloatWindow  # noqa: F401 (re-export)
 from squidmip._qtstyle import dark_palette as _dark_palette
 from squidmip._qtstyle import hline as _hline
+from squidmip._time_point import TimePointBar
 from squidmip._terminal import _CmdEdit, _ProcTerminal, _Terminal  # noqa: F401 (re-export)
 from squidmip._region_nav import RegionCursor, RegionSlider
 from squidmip._spots import LAYER_KEY as _SPOTS_LAYER_KEY
@@ -289,19 +290,19 @@ def _scale_qss_fonts(qss: str, scale: float) -> str:
 
 
 def _signal_names(cls) -> tuple:
-    """Every pyqtSignal declared on *cls* or its bases, by attribute name.
+    """Every Signal declared on *cls* or its bases, by attribute name.
 
-    ``pyqtSignal`` is a class attribute until Qt binds it per-instance, so the class object is
+    ``Signal`` is a class attribute until Qt binds it per-instance, so the class object is
     where the declarations are discoverable. Excludes ``finished``/``started`` — QThread's own,
     which the retire path connects deliberately and must not tear down.
     """
-    from PyQt5.QtCore import pyqtSignal as _sig
+    from qtpy.QtCore import Signal as _sig
     seen, out = set(), []
     for klass in cls.__mro__:
         for name, value in vars(klass).items():
             if name in seen or name in ("finished", "started"):
                 continue
-            if isinstance(value, _sig) or type(value).__name__ in ("pyqtSignal", "unbound_signal"):
+            if isinstance(value, _sig) or type(value).__name__ in ("Signal", "unbound_signal"):
                 seen.add(name)
                 out.append(name)
     return tuple(out)
@@ -879,8 +880,15 @@ class PlateWindow(QMainWindow):
         rv = QVBoxLayout(root)
         rv.setContentsMargins(0, 0, 0, 0)
         rv.setSpacing(1)
+        # The timepoint bar sits UNDER the plate, next to what it navigates, and it is built
+        # unconditionally then hidden when there is one timepoint (see _time_point). Every call site
+        # therefore stays unconditional: nothing has to ask whether the control exists.
+        self._time_point_bar = TimePointBar(on_change=self._on_time_point_changed)
+        self._time_point_bar.set_count(1)
+
         rv.addWidget(top_row, 0)                # compact strip, keeps its height
         rv.addWidget(plate_host, 1)             # the Wellplate view fills the rest
+        rv.addWidget(self._time_point_bar, 0)   # hidden unless n_t > 1
         self._split = top_row
         self.setCentralWidget(root)
 
@@ -1516,6 +1524,26 @@ class PlateWindow(QMainWindow):
             return None
         w = self._explore_tabs.currentWidget()
         return w if isinstance(w, _ExplorationTab) else None
+
+    @property
+    def time_point(self) -> int:
+        """Which timepoint the plate is showing. 0 when there is nothing to navigate."""
+        bar = getattr(self, "_time_point_bar", None)
+        return bar.time_point if bar is not None else 0
+
+    def _on_time_point_changed(self, time_point: int) -> None:
+        """A user moved the plate's timepoint. Re-read the plate at that timepoint.
+
+        Only a USER gesture reaches here: TimePointBar does not echo its own programmatic moves,
+        which is what stops this looping when we set the bar from an ingest.
+        """
+        self._say(f"time_point {time_point + 1} of {self._time_point_bar.count}")
+        # The loupe caches coarse tiles per (well, timepoint), so it needs no invalidation and the
+        # next hover is already correct. The plate THUMBNAILS are a different matter: they were
+        # streamed by a worker reading at a fixed timepoint, so showing a new one means asking
+        # again rather than filtering what already arrived.
+        if self._reader is not None:
+            self._return_to_raw()
 
     def _sync_top_row_height(self) -> None:
         """Give the top strip room while the Log tab is in front, and take it back afterwards.
@@ -2763,6 +2791,11 @@ class PlateWindow(QMainWindow):
         # these boxes.
         self._overview.set_mosaic_boxes(_mosaic_boxes(meta))
 
+        # Size the timepoint bar to what was just ingested. set_count hides it at n_t == 1 and
+        # clamps the position, so re-ingesting a SHORTER acquisition cannot leave the bar pointing
+        # past the end. It does not fire the callback: an ingest is not a user gesture.
+        self._time_point_bar.set_count(int(meta.get("n_t", 1) or 1))
+
         # fast RAW preview: fill the plate with downsampled thumbnails immediately (grey dots),
         # in the SAME row-major order the operator will later process them in.
         self._preview = _PreviewWorker(reader, meta, self._fov_index, order)
@@ -3614,7 +3647,8 @@ class PlateWindow(QMainWindow):
             levels=levels, well_px=_well_px, pixel_size_um=px_um, written=None))
         coarse_lvl = levels[-1]                                   # coarsest -> tiny thumbnail
         push_lvl = levels[min(3, len(levels) - 1)]                # ~512px level for the detail slider
-        self._worker = _ComputedPlateWorker(str(zroot), worker_wells, coarse_lvl, push_lvl, np.uint16)
+        self._worker = _ComputedPlateWorker(str(zroot), worker_wells, coarse_lvl, push_lvl,
+                                           np.uint16, self.time_point)
         self._worker.tileReady.connect(self._on_tile)
         self._worker.pushReady.connect(self._on_push)
         self._worker.streamEnded.connect(lambda: self._recomposite("computed"))

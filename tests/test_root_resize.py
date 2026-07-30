@@ -76,8 +76,8 @@ def root(qapp_or_skip):
 
 @pytest.fixture
 def qapp_or_skip():
-    pytest.importorskip("PyQt5")
-    from PyQt5.QtWidgets import QApplication
+    pytest.importorskip("qtpy")
+    from qtpy.QtWidgets import QApplication
 
     app = QApplication.instance() or QApplication([])
     app.setProperty("_squidmip_test", True)
@@ -97,7 +97,7 @@ def test_the_root_keeps_a_floor_so_the_top_strip_cannot_collapse(root):
 
 def test_the_default_size_never_exceeds_the_screen(root):
     """850 logical is 1700 physical at 200%. A fixed size that cannot fit is not a shape."""
-    from PyQt5.QtWidgets import QApplication
+    from qtpy.QtWidgets import QApplication
 
     avail = QApplication.primaryScreen().availableGeometry()
     w, h = root._default_root_size()

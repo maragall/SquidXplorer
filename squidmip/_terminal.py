@@ -23,8 +23,8 @@ import os
 import sys
 from typing import Optional
 
-from PyQt5.QtCore import QProcess, QProcessEnvironment, QSocketNotifier, Qt
-from PyQt5.QtWidgets import (
+from qtpy.QtCore import QProcess, QProcessEnvironment, QSocketNotifier, Qt
+from qtpy.QtWidgets import (
     QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QVBoxLayout, QWidget,
 )
 

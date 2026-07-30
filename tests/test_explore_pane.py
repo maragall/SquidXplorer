@@ -38,7 +38,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")  # headless Qt; must prece
 import numpy as np
 import pytest
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("qtpy")
 if "PySide6" in sys.modules or "PySide2" in sys.modules:
     pytest.skip(
         "PySide already loaded (napari/pytest-qt) — Qt binding conflict; run with "
@@ -48,8 +48,8 @@ if "PySide6" in sys.modules or "PySide2" in sys.modules:
 
 import time  # noqa: E402
 
-from PyQt5.QtCore import Qt, pyqtSignal  # noqa: E402
-from PyQt5.QtWidgets import QApplication, QLabel, QSlider, QWidget  # noqa: E402
+from qtpy.QtCore import Qt, Signal  # noqa: E402
+from qtpy.QtWidgets import QApplication, QLabel, QSlider, QWidget  # noqa: E402
 
 from squidmip import _explore as E  # noqa: E402
 from squidmip import _viewer as V  # noqa: E402
@@ -128,7 +128,7 @@ class _StubPane(QWidget):
 class _StubDetail(QWidget):
     """Minimal ndviewer_light stand-in (the real one segfaults offscreen)."""
 
-    contrastChanged = pyqtSignal(int, float, float)
+    contrastChanged = Signal(int, float, float)
 
     def __init__(self):
         super().__init__()
@@ -476,7 +476,7 @@ def test_the_side_pane_has_no_operator_launcher_of_its_own(win):
 
     MUTATION: put any operator button back on the tab and this goes red.
     """
-    from PyQt5.QtWidgets import QPushButton
+    from qtpy.QtWidgets import QPushButton
 
     key = win.open_exploration_tab(["B2", "B3"])
     tab = win._op_tabs[key]

@@ -53,7 +53,7 @@ from typing import Any, Callable, Optional, Sequence
 class RegionCursor:
     """Which region is current. Pure Python — no Qt, no napari, so it is testable directly.
 
-    Deliberately NOT a QObject with a pyqtSignal. A Qt signal swallows exceptions raised in a
+    Deliberately NOT a QObject with a Signal. A Qt signal swallows exceptions raised in a
     slot (the whole reason ``launch_fast.py`` installs an excepthook), and the one thing this
     class must never do is fail to move half of the UI without saying so.
     """
@@ -274,7 +274,7 @@ def _napari_stylesheet() -> str:
 
 
 try:                                                # pragma: no cover - import shape only
-    from PyQt5.QtWidgets import QWidget as _QWidgetBase
+    from qtpy.QtWidgets import QWidget as _QWidgetBase
 except Exception:                                   # pragma: no cover
     _QWidgetBase = object                           # type: ignore[assignment,misc]
 
@@ -293,7 +293,7 @@ class RegionSlider(_QWidgetBase):                   # type: ignore[misc,valid-ty
 
         from napari.components import Dims
         from napari._qt.widgets.qt_dims import QtDims
-        from PyQt5.QtWidgets import QHBoxLayout, QLabel
+        from qtpy.QtWidgets import QHBoxLayout, QLabel
 
         super().__init__(parent)
         self._cursor: Optional[RegionCursor] = None
@@ -310,7 +310,7 @@ class RegionSlider(_QWidgetBase):                   # type: ignore[misc,valid-ty
         self._qt_dims = QtDims(self._dims)
         self._dims.events.current_step.connect(self._on_dims_step)
 
-        from PyQt5.QtCore import QTimer
+        from qtpy.QtCore import QTimer
 
         self._stall_timer = QTimer(self)
         self._stall_timer.setInterval(1000)

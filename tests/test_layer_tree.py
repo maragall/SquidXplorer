@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import json
 import os
+
+import qtpy
 import pathlib
 import subprocess
 import sys
@@ -41,9 +43,14 @@ def _run_qt(script_body: str, tmp_path, marker: str):
     # The gate exports offscreen for the whole suite and offscreen has no GL, so inheriting it
     # guarantees a segfault and a permanent skip. Let Qt pick the real platform.
     env.pop("QT_QPA_PLATFORM", None)
-    # squidmip imports PyQt5; qtpy defaults to PySide6 here and loading both aborts the process
+    # Pin the CHILD to the binding the PARENT is using. This used to hardcode "pyqt5" with the
+    # comment "squidmip imports PyQt5", which stopped being true on 2026-07-30 when every Qt import
+    # moved to qtpy: the child would then run PyQt5 while a QT_API=pyqt6 parent ran PyQt6, which is
+    # the one-binding rule broken across a process boundary and the reason PyQt5 kept appearing in
+    # a Qt6 run's module list. What the original comment was RIGHT about is why the pin exists at
+    # all: unpinned, qtpy here defaults to PySide6 and loading two bindings aborts the interpreter
     # long before any assertion runs.
-    env["QT_API"] = "pyqt5"
+    env["QT_API"] = os.environ.get("QT_API") or qtpy.API_NAME.lower()
 
     proc = subprocess.run(
         [sys.executable, str(script)],
@@ -65,7 +72,7 @@ _PREAMBLE = r"""
 import json, os, sys, traceback
 os.environ.setdefault("QT_API", "pyqt5")
 import numpy as np
-from PyQt5.QtWidgets import QApplication, QVBoxLayout, QWidget
+from qtpy.QtWidgets import QApplication, QVBoxLayout, QWidget
 app = QApplication.instance() or QApplication([])
 out = {}
 try:
@@ -180,8 +187,8 @@ def test_the_3d_button_is_naparis_own_and_sits_where_a_short_pane_shows_it(tmp_p
 # napari-experimental and PartSeg -- answer this by REPLACING THE LAYER-LIST UI, not by capping
 # the layer count. This is that: a two-level view over the same layers.
 
-from PyQt5.QtCore import Qt                                          # noqa: E402
-from PyQt5.QtWidgets import QApplication                             # noqa: E402
+from qtpy.QtCore import Qt                                          # noqa: E402
+from qtpy.QtWidgets import QApplication                             # noqa: E402
 
 import numpy as np                                                   # noqa: E402
 
@@ -395,7 +402,7 @@ _MOUNT_SCRIPT = r"""
             pane.mosaic.add_mosaic(op, ch, np.zeros((16, 16), dtype="uint16"))
     app.processEvents()
 
-    from PyQt5.QtCore import Qt as _Qt
+    from qtpy.QtCore import Qt as _Qt
     tree = pane.layer_tree
 
     def descends_from(child, ancestor):
@@ -538,7 +545,7 @@ def test_the_rows_actually_PAINT_without_raising(qapp, mosaic):
     """
     import sys
 
-    from PyQt5.QtGui import QPixmap
+    from qtpy.QtGui import QPixmap
 
     from squidmip import _layer_tree as LT
 

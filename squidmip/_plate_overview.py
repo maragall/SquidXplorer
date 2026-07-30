@@ -65,9 +65,9 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-from PyQt5.QtCore import Qt, QRectF, QThread, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap, QRegion
-from PyQt5.QtWidgets import QWidget
+from qtpy.QtCore import Qt, QRectF, QThread, QTimer, Signal
+from qtpy.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap, QRegion
+from qtpy.QtWidgets import QWidget
 
 from squidmip import _qtstyle
 from squidmip._budget import cache_budget
@@ -759,7 +759,7 @@ class _ZarrLoupeSource(_LoupeSource):
                 {"driver": "zarr3", "kvstore": {"driver": "file", "path": path}}).result()
         return self._handles[key]
 
-    def read_crop(self, well_id, level, y0, x0, h, w):
+    def read_crop(self, well_id, level, y0, x0, h, w, time_point: int = 0):
         arr = self._open(well_id, level)
         ny, nx = arr.shape[-2], arr.shape[-1]
         # Clamp the ORIGIN so the window stays whole near an edge (shift it in), rather than
@@ -768,14 +768,23 @@ class _ZarrLoupeSource(_LoupeSource):
         # A field below _PYRAMID_MIN_YX writes level 0 alone, so level selection cannot bound
         # this read; stride it in tensorstore so the I/O itself shrinks, not just the result.
         step = loupe_decimation(max(h, w))
+        # Was hardcoded to timepoint 0, which made a 40-timepoint plate look identical to a
+        # 1-timepoint one with no error anywhere. Clamped rather than trusted: a caller holding a
+        # stale slider position must not index off the end of a shorter re-ingest.
+        t_idx = max(0, min(int(time_point), arr.shape[0] - 1))
         return np.asarray(
-            arr[0, :, 0, y0:y0 + h:step, x0:x0 + w:step].read().result())
+            arr[t_idx, :, 0, y0:y0 + h:step, x0:x0 + w:step].read().result())
 
-    def coarse(self, well_id):
-        if well_id not in self._coarse:
+    def coarse(self, well_id, time_point: int = 0):
+        # Keyed by (well, timepoint): the old cache was keyed by well alone, so once a well had been
+        # read at one timepoint every later timepoint got that same picture back. A cache that
+        # answers the wrong question quickly is worse than no cache.
+        key = (well_id, int(time_point))
+        if key not in self._coarse:
             arr = self._open(well_id, self.n_levels - 1)          # coarsest level = cheapest
-            self._coarse[well_id] = np.asarray(arr[0, :, 0].read().result())
-        return self._coarse[well_id]
+            t_idx = max(0, min(int(time_point), arr.shape[0] - 1))
+            self._coarse[key] = np.asarray(arr[t_idx, :, 0].read().result())
+        return self._coarse[key]
 
 
 class _LoupeWorker(QThread):
@@ -786,7 +795,7 @@ class _LoupeWorker(QThread):
     each new request) IS the coalescing. Results carry the generation they were asked for, so a
     late arrival for a stale position is dropped by the widget rather than flashing."""
 
-    ready = pyqtSignal(int, str, object, object, object)  # (gen, well, crop|None, window|None, err)
+    ready = Signal(int, str, object, object, object)  # (gen, well, crop|None, window|None, err)
 
     def __init__(self, source: _LoupeSource):
         super().__init__()
@@ -873,7 +882,7 @@ class _TileFetcher(QThread):
     destination.
     """
 
-    ready = pyqtSignal(object, object)        # (TileDescriptor, np.ndarray)
+    ready = Signal(object, object)        # (TileDescriptor, np.ndarray)
 
     def __init__(self, source, parent=None):
         super().__init__(parent)
@@ -934,10 +943,10 @@ class PlateOverview(QWidget):
     contrast re-composites from the retained pixels: no reader I/O, no re-projection, ever.
     """
 
-    hovered = pyqtSignal(str)              # region id (or "" off-plate), for the window's readout
-    wellActivated = pyqtSignal(str, int)   # (well_id, fov_index) double-clicked -> load in ndviewer
-    selectionChanged = pyqtSignal(list)    # acquired well ids the operator picked (row-major)
-    marqueeSelected = pyqtSignal(list)     # ...and specifically by a Shift-DRAG: opens an exploration
+    hovered = Signal(str)              # region id (or "" off-plate), for the window's readout
+    wellActivated = Signal(str, int)   # (well_id, fov_index) double-clicked -> load in ndviewer
+    selectionChanged = Signal(list)    # acquired well ids the operator picked (row-major)
+    marqueeSelected = Signal(list)     # ...and specifically by a Shift-DRAG: opens an exploration
                                            # tab (IMA-205). Shift+CLICK refines the selection one well
                                            # at a time and deliberately does NOT fire it — otherwise
                                            # every corrective click spawns another tab.

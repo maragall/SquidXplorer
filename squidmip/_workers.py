@@ -5,7 +5,7 @@ Gap 6 of the GUI backlog plan (2026-07-29), step 2 of the split of ``squidmip/_v
 WHY THIS WAS CUT, AND WHY HERE
 ------------------------------
 Every class in here is the same three things and nothing else: an ``__init__`` that stores its
-arguments, a set of ``pyqtSignal`` declarations, and a ``run()`` that does the work and emits. None
+arguments, a set of ``Signal`` declarations, and a ``run()`` that does the work and emits. None
 of them touches a widget, reads a layout, or knows what a dock is, because a QThread that touched a
 widget would be a bug: Qt owns widgets on the GUI thread only. That constraint had already made
 them self-contained; it just had not made them separately FILED.
@@ -52,7 +52,7 @@ import threading
 from pathlib import Path
 
 import numpy as np
-from PyQt5.QtCore import QThread, pyqtSignal
+from qtpy.QtCore import QThread, Signal
 
 from squidmip import _explore
 from squidmip._engine import _default_workers
@@ -102,20 +102,20 @@ class _OperatorWorker(QThread):
     write workers) wells in flight. The written ``plate.ome.zarr`` is the durable, re-openable artifact.
     """
 
-    tileReady = pyqtSignal(int, int, str, object, object)   # (ri, ci, well_id, (C,h,w) native tile,
+    tileReady = Signal(int, int, str, object, object)   # (ri, ci, well_id, (C,h,w) native tile,
     #                                                          box=(top,left,h,w) in cell px | None)
-    progress = pyqtSignal(int, int)                 # (done, total)
-    streamEnded = pyqtSignal()                      # every well landed -> recomposite the whole plate
-    writtenReady = pyqtSignal(str)                  # path of the written plate.ome.zarr
-    wellFailed = pyqtSignal(int, int)               # (ri, ci) of a well SKIPPED on a read error
-    pushReady = pyqtSignal(int, object)             # (fov_idx, [per-channel ~512px plane]) for the slider
+    progress = Signal(int, int)                 # (done, total)
+    streamEnded = Signal()                      # every well landed -> recomposite the whole plate
+    writtenReady = Signal(str)                  # path of the written plate.ome.zarr
+    wellFailed = Signal(int, int)               # (ri, ci) of a well SKIPPED on a read error
+    pushReady = Signal(int, object)             # (fov_idx, [per-channel ~512px plane]) for the slider
     # FULL-RESOLUTION result pixels, per FOV, for the napari layer group (Defect 3). Separate
     # from pushReady because that one is the ~512px ndviewer slider feed: a downsampled,
     # letterboxed preview. A processing LAYER has to be the operator's actual output, in the
     # raw mosaic's frame, or the before/after toggle compares a thumbnail against a pyramid.
-    resultReady = pyqtSignal(str, int, object)      # (region, fov, (C, Y, X) native dtype)
-    failed = pyqtSignal(str)                        # whole-run failure (not a per-well skip)
-    finished_ok = pyqtSignal()
+    resultReady = Signal(str, int, object)      # (region, fov, (C, Y, X) native dtype)
+    failed = Signal(str)                        # whole-run failure (not a per-well skip)
+    finished_ok = Signal()
 
     def __init__(self, operator: str, reader, meta, fov_index: dict, out_dir: str,
                  regions=None, save: bool = True, n_fovs=1, operator_kwargs=None):
@@ -368,11 +368,11 @@ class _MinervaWorker(QThread):
     The user always gets the story path either way, because Minerva has no deep link — the
     file is picked by hand in its "Select File" dialog.
     """
-    progress = pyqtSignal(int, int)          # (done, total) FOVs exported
-    exported = pyqtSignal(object)            # [(ome_path, story_path), ...]
-    launched = pyqtSignal(bool)              # did a Minerva server end up answering?
-    failed = pyqtSignal(str)
-    finished_ok = pyqtSignal()
+    progress = Signal(int, int)          # (done, total) FOVs exported
+    exported = Signal(object)            # [(ome_path, story_path), ...]
+    launched = Signal(bool)              # did a Minerva server end up answering?
+    failed = Signal(str)
+    finished_ok = Signal()
 
     def __init__(self, reader, selection, out_dir, projector: str, t: int = 0, launch: bool = True):
         super().__init__()
@@ -428,10 +428,10 @@ class _MosaicWorker(QThread):
     Results arrive per channel so the first channel paints while the rest are still being read.
     """
 
-    ready = pyqtSignal(str, str, object, object)   # region, channel, LEVELS (pyramid), bbox_um|None
+    ready = Signal(str, str, object, object)   # region, channel, LEVELS (pyramid), bbox_um|None
     #                                                (no contrast window: napari owns contrast)
-    problem = pyqtSignal(str)
-    finished_count = pyqtSignal(int)
+    problem = Signal(str)
+    finished_count = Signal(int)
 
     def __init__(self, reader, meta, region, channels, z_index=0, parent=None):
         super().__init__(parent)
@@ -497,8 +497,8 @@ class _FocusWorker(QThread):
     the reads rather than the metric.
     """
 
-    ready = pyqtSignal(int, str)          # (z index of the sharpest plane, a note or "")
-    problem = pyqtSignal(str)
+    ready = Signal(int, str)          # (z index of the sharpest plane, a note or "")
+    problem = Signal(str)
 
     def __init__(self, reader, meta, region, fov, channel, parent=None):
         super().__init__(parent)
@@ -550,7 +550,7 @@ class _SpotWorker(QThread):
       touched on this thread. Measured on region ``manual0`` of the 10x tissue slide
       (5731 x 4793 fused mosaic, 405 nm): ~7.3 s total, of which the watershed is ~4.8 s.
     * **Indicator.** ``progress(done, total)`` counts STAGES of the recipe, matching the
-      ``pyqtSignal(int, int)`` convention every other worker here uses, so an existing indicator
+      ``Signal(int, int)`` convention every other worker here uses, so an existing indicator
       binds to it unchanged. That signal has no text channel, so the stage NAME goes out
       separately on ``stageChanged(str)`` rather than being smuggled into an int.
     * **Cancellable.** ``stop()`` sets an Event that ``detect_spots`` polls between stages. The
@@ -561,13 +561,13 @@ class _SpotWorker(QThread):
     counted is exactly what the user is looking at.
     """
 
-    progress = pyqtSignal(int, int)                # (stages done, stages total) — the convention
-    stageChanged = pyqtSignal(str)                 # the TEXT channel progress(int,int) cannot carry
-    ready = pyqtSignal(str, str, object, object, object, int)
+    progress = Signal(int, int)                # (stages done, stages total) — the convention
+    stageChanged = Signal(str)                 # the TEXT channel progress(int,int) cannot carry
+    ready = Signal(str, str, object, object, object, int)
     # ^ (region, channel, labels (H,W) int32, centroids (N,2) float, bbox_um|None, count)
-    problem = pyqtSignal(str)                      # a NAMED failure: "<region>/<channel>: ..."
-    cancelled = pyqtSignal()
-    finished_count = pyqtSignal(str, str, int)     # (region, channel, count) — the run's answer
+    problem = Signal(str)                      # a NAMED failure: "<region>/<channel>: ..."
+    cancelled = Signal()
+    finished_count = Signal(str, str, int)     # (region, channel, count) — the run's answer
 
     def __init__(self, region, channel, data, z_index, bbox_um, params=None, parent=None):
         super().__init__(parent)
@@ -651,9 +651,9 @@ class _FlatfieldWorker(QThread):
     better than the first N tiles of one well). Fails to the LOG by name, never silently.
     """
 
-    done = pyqtSignal(object)     # FlatfieldProfile
-    problem = pyqtSignal(str)
-    stage = pyqtSignal(str)
+    done = Signal(object)     # FlatfieldProfile
+    problem = Signal(str)
+    stage = Signal(str)
 
     def __init__(self, reader, meta, channel, *, max_tiles=48, use_darkfield=False, parent=None):
         super().__init__(parent)
@@ -797,13 +797,13 @@ class _PreviewWorker(QThread):
     cells fill progressively and the UI never blocks on a whole mosaic.
     """
 
-    tileReady = pyqtSignal(int, int, str, object, object)   # (ri, ci, well_id, tile, box|None)
+    tileReady = Signal(int, int, str, object, object)   # (ri, ci, well_id, tile, box|None)
     #: This is the raw fill, not an operator run. ``_explore.operator_busy`` reads it so a retired
     #: preview still draining cannot make the next operator run refuse itself.
     IS_PREVIEW = True
 
-    streamEnded = pyqtSignal()                      # preview complete -> recomposite the whole plate
-    failed = pyqtSignal(str)                         # a preview that could not finish NAMES why —
+    streamEnded = Signal()                      # preview complete -> recomposite the whole plate
+    failed = Signal(str)                         # a preview that could not finish NAMES why —
     #                                                 a bare `except: pass` left the plate frozen
     #                                                 half-grey, indistinguishable from "loading".
 
@@ -977,14 +977,15 @@ class _ComputedPlateWorker(QThread):
     it used to take percentiles per well, which made a dim well and a bright well look identical and
     silently broke the one thing a plate overview is for (comparing wells at a glance)."""
 
-    tileReady = pyqtSignal(int, int, str, object)   # (ri, ci, well_id, (C, cell, cell) native tile)
-    pushReady = pyqtSignal(int, object)             # (fov_idx, [per-channel ~512px plane])
-    progress = pyqtSignal(int, int)
-    streamEnded = pyqtSignal()                      # plate fully loaded -> recomposite globally
-    finished_ok = pyqtSignal()
-    failed = pyqtSignal(str)
+    tileReady = Signal(int, int, str, object)   # (ri, ci, well_id, (C, cell, cell) native tile)
+    pushReady = Signal(int, object)             # (fov_idx, [per-channel ~512px plane])
+    progress = Signal(int, int)
+    streamEnded = Signal()                      # plate fully loaded -> recomposite globally
+    finished_ok = Signal()
+    failed = Signal(str)
 
-    def __init__(self, base, wells, coarse_lvl, push_lvl, dtype):
+    def __init__(self, base, wells, coarse_lvl, push_lvl, dtype, time_point: int = 0):
+        self._time_point = int(time_point)   # which timepoint the plate is showing
         super().__init__()
         self._base = base                 # plate.ome.zarr path
         self._wells = wells               # [(well_id, wellpath, fov, ri, ci, flat_idx)]
@@ -995,13 +996,17 @@ class _ComputedPlateWorker(QThread):
     def stop(self):
         self._stop.set()
 
-    def _read(self, wellpath, fov, level):
+    def _read(self, wellpath, fov, level, time_point: int = 0):
         # Through the shared pool, NOT a bare ts.open. This line opened a brand new store per well
         # per level, twice per well, with no reuse and no declared memory budget: 3072 fresh opens
         # on a 1536-well plate, each allocating its own private cache. The pool bounds both halves,
         # decoded bytes via one shared cache_pool and live handles via an LRU of 32. See _tsctx.
         arr = HANDLES.get(field_path(self._base, wellpath, fov, level))
-        return np.asarray(arr[0, :, 0].read().result())   # (C, y, x) at t=0, z=0
+        # The timepoint was hardcoded to 0 here, which is what made a 40-timepoint plate
+        # indistinguishable from a 1-timepoint one, silently. Clamped rather than trusted, so a
+        # stale slider position cannot index off the end of a shorter acquisition.
+        t_idx = max(0, min(int(time_point), arr.shape[0] - 1))
+        return np.asarray(arr[t_idx, :, 0].read().result())   # (C, y, x) at this t, z=0
 
     def run(self):
         try:
@@ -1009,10 +1014,10 @@ class _ComputedPlateWorker(QThread):
             for i, (wid, wpath, fov, ri, ci, idx) in enumerate(self._wells, 1):
                 if self._stop.is_set():
                     return
-                coarse = self._read(wpath, fov, self._coarse)             # thumbnail source (C,y,x)
+                coarse = self._read(wpath, fov, self._coarse, self._time_point)   # thumbnail (C,y,x)
                 tile = np.stack([_fit_cell(plane.astype(np.float32)) for plane in coarse])
                 self.tileReady.emit(ri, ci, wid, tile.astype(self._dtype))
-                push_src = self._read(wpath, fov, self._push)             # detail-slider source (C,Y,X)
+                push_src = self._read(wpath, fov, self._push, self._time_point)   # slider src (C,Y,X)
                 # ...at the declared push canvas exactly (IMA-245): a pyramid level smaller than
                 # _PUSH_PX used to be pushed at its own size, which the viewer silently refused.
                 push = [_fit_letterboxed(push_src[c], _PUSH_PX, _PUSH_PX, self._dtype)

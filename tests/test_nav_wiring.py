@@ -28,7 +28,7 @@ import sys  # noqa: E402
 
 import pytest  # noqa: E402
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("qtpy")
 if "PySide6" in sys.modules or "PySide2" in sys.modules:
     pytest.skip(
         "PySide already loaded (napari/pytest-qt) — Qt binding conflict; run with "

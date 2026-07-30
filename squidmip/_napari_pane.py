@@ -17,8 +17,8 @@ import os
 import time
 from typing import Any, Callable, Optional
 
-from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtWidgets import (
+from qtpy.QtCore import Qt, QTimer
+from qtpy.QtWidgets import (
     QComboBox, QLabel, QPushButton, QSizePolicy, QHBoxLayout, QVBoxLayout, QWidget,
 )
 
@@ -472,7 +472,7 @@ class MosaicPane(QWidget):
             # complaint this project has already had twice.
             #
             # The layers still EXIST and are still linked; only their control widgets are hidden.
-            from PyQt5.QtWidgets import QDockWidget, QStatusBar
+            from qtpy.QtWidgets import QDockWidget, QStatusBar
 
             for dock in qt_window.findChildren(QDockWidget):
                 dock.hide()

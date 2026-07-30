@@ -30,7 +30,7 @@ import sys  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("qtpy")
 if "PySide6" in sys.modules or "PySide2" in sys.modules:
     pytest.skip(
         "PySide already loaded (napari/pytest-qt) — Qt binding conflict; run with "
@@ -38,7 +38,7 @@ if "PySide6" in sys.modules or "PySide2" in sys.modules:
         allow_module_level=True,
     )
 
-from PyQt5.QtCore import QObject, pyqtSignal  # noqa: E402
+from qtpy.QtCore import QObject, Signal  # noqa: E402
 
 from squidmip import _viewer as V  # noqa: E402
 
@@ -71,8 +71,8 @@ def _spy_focus_worker(monkeypatch, answer_z=1, note=""):
     calls = []
 
     class _SpyFocusWorker(QObject):
-        ready = pyqtSignal(int, str)
-        problem = pyqtSignal(str)
+        ready = Signal(int, str)
+        problem = Signal(str)
 
         def __init__(self, reader, meta, region, fov, channel, parent=None):
             super().__init__(parent)

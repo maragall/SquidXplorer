@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from PyQt5.QtWidgets import QApplication, QTabBar
+from qtpy.QtWidgets import QApplication, QTabBar
 
 import squidmip._viewer as V
 from squidmip import _explore

@@ -98,7 +98,7 @@ def test_the_full_line_is_still_byte_identical_to_squids_layout():
                                                         (False, "_TOP_ROW_COMPACT_PX")])
 def test_the_strip_grows_while_the_console_is_in_front(reading_log, expected_attr):
     """240 px is about ten lines, which is a status light rather than a log."""
-    pytest.importorskip("PyQt5")
+    pytest.importorskip("qtpy")
     import squidmip._viewer as V
 
     expected = getattr(V, expected_attr)

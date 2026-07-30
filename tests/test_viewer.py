@@ -20,7 +20,7 @@ import time
 import numpy as np
 import pytest
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("qtpy")
 # Guard the two-Qt-bindings segfault: if PySide is already in the process (napari / pytest-qt
 # autoload it), importing PyQt5 GUI widgets on top crashes. Clean CI has neither. Locally, run
 # `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest tests/test_viewer.py` to load only PyQt5.
@@ -30,9 +30,9 @@ if "PySide6" in sys.modules or "PySide2" in sys.modules:
         "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 to run the PyQt5 GUI tests.",
         allow_module_level=True,
     )
-from PyQt5.QtCore import QEvent, QPointF, Qt, pyqtSignal  # noqa: E402
-from PyQt5.QtGui import QImage, QMouseEvent  # noqa: E402
-from PyQt5.QtWidgets import (  # noqa: E402
+from qtpy.QtCore import QEvent, QPointF, Qt, Signal  # noqa: E402
+from qtpy.QtGui import QImage, QMouseEvent  # noqa: E402
+from qtpy.QtWidgets import (  # noqa: E402
     QApplication, QCheckBox, QPushButton, QSlider, QSpinBox, QWidget,
 )
 
@@ -53,7 +53,7 @@ class _StubDetail(QWidget):
     # signal because the real ndviewer_light does: a stub that omits it would let the plate's
     # `contrastChanged` connection rot unobserved, which is precisely the class of dead wiring
     # this file exists to catch.
-    contrastChanged = pyqtSignal(int, float, float)
+    contrastChanged = Signal(int, float, float)
 
     def __init__(self):
         super().__init__()
@@ -676,20 +676,20 @@ def _sel_overview(cd=20.0):
 
 def _pt(ri, ci, cd=20.0):
     """Widget-space center of cell (ri, ci) — mirrors PlateOverview._cell's margin offsets."""
-    from PyQt5.QtCore import QPointF
+    from qtpy.QtCore import QPointF
     return QPointF(V._HDR + ci * cd + cd / 2, V._COLH + ri * cd + cd / 2)
 
 
 def _within(ri, ci, cd=20.0):
     """Two points INSIDE one cell, far enough apart to read as a drag (not a Shift+click)."""
-    from PyQt5.QtCore import QPointF
+    from qtpy.QtCore import QPointF
     return (QPointF(V._HDR + ci * cd + 2, V._COLH + ri * cd + 2),
             QPointF(V._HDR + ci * cd + cd - 2, V._COLH + ri * cd + cd - 2))
 
 
 def _mouse(kind, pos, mods=Qt.NoModifier, buttons=Qt.LeftButton, btn=Qt.LeftButton):
-    from PyQt5.QtCore import QEvent
-    from PyQt5.QtGui import QMouseEvent
+    from qtpy.QtCore import QEvent
+    from qtpy.QtGui import QMouseEvent
     ev = {"press": QEvent.MouseButtonPress, "move": QEvent.MouseMove,
           "release": QEvent.MouseButtonRelease, "dblclick": QEvent.MouseButtonDblClick}[kind]
     return QMouseEvent(ev, pos, btn, buttons, mods)
@@ -769,8 +769,8 @@ def test_selection_excludes_empty_wells(qapp):
 
 def test_wheel_ignored_during_marquee(qapp):
     """Zooming mid-marquee would move the plate under the drag, so the wheel is ignored."""
-    from PyQt5.QtCore import QPoint
-    from PyQt5.QtGui import QWheelEvent
+    from qtpy.QtCore import QPoint
+    from qtpy.QtGui import QWheelEvent
     ov = _sel_overview()
     ov.mousePressEvent(_mouse("press", _pt(0, 0), Qt.ShiftModifier))
     cd_before = ov._cd
@@ -801,8 +801,8 @@ def test_leave_clears_the_marquee_so_zoom_survives(qapp):
     """Losing the grab mid-drag (modal dialog, alt-tab) delivers a leave and NO release. A
     stranded _marquee would paint a dashed rect forever and trip wheelEvent's guard, disabling
     zoom permanently."""
-    from PyQt5.QtCore import QEvent, QPoint
-    from PyQt5.QtGui import QWheelEvent
+    from qtpy.QtCore import QEvent, QPoint
+    from qtpy.QtGui import QWheelEvent
     ov = _sel_overview()
     ov.mousePressEvent(_mouse("press", _pt(0, 0), Qt.ShiftModifier))
     assert ov._marquee is not None
@@ -1680,7 +1680,7 @@ def test_disposing_an_exploration_tab_shuts_down_its_napari_viewer(qapp):
     """dispose() used to only deleteLater() the pane — which does NOT close the napari Viewer inside
     it (napari keeps every Viewer in its own registry), so one GL context + tens of MB leaked per
     Shift-drag. dispose() must call the pane's shutdown() first."""
-    from PyQt5.QtWidgets import QWidget
+    from qtpy.QtWidgets import QWidget
 
     closed = []
 
@@ -2115,16 +2115,16 @@ def test_shift_drag_over_empty_plate_opens_nothing_and_says_nothing(
 
 class _BlockingWorker(V.QThread):
     """An _OperatorWorker stand-in that stays RUNNING until stop() (or the test) releases it."""
-    tileReady = V.pyqtSignal(int, int, str, object)
-    pushReady = V.pyqtSignal(int, object)
-    resultReady = V.pyqtSignal(str, int, object)     # full-res result -> napari layer group
-    progress = V.pyqtSignal(int, int)
-    finalReady = V.pyqtSignal(object)
-    writtenReady = V.pyqtSignal(str)
-    wellFailed = V.pyqtSignal(int, int)
-    failed = V.pyqtSignal(str)
-    finished_ok = V.pyqtSignal()
-    streamEnded = V.pyqtSignal()
+    tileReady = V.Signal(int, int, str, object)
+    pushReady = V.Signal(int, object)
+    resultReady = V.Signal(str, int, object)     # full-res result -> napari layer group
+    progress = V.Signal(int, int)
+    finalReady = V.Signal(object)
+    writtenReady = V.Signal(str)
+    wellFailed = V.Signal(int, int)
+    failed = V.Signal(str)
+    finished_ok = V.Signal()
+    streamEnded = V.Signal()
 
     def __init__(self, *a, **kw):
         super().__init__()
@@ -2968,7 +2968,7 @@ def test_minerva_is_a_registered_operation():
 def test_minerva_tab_builds_and_lists_projectors(qapp, stub_detail, squid_dataset):
     """The projector choice must be real: squid2minerva's convert.py offers --mip/--z, so a
     hardcoded projection here would be a capability regression."""
-    from PyQt5.QtWidgets import QComboBox
+    from qtpy.QtWidgets import QComboBox
     from squidmip import available_projectors
 
     root, _ = squid_dataset
@@ -3075,8 +3075,8 @@ def test_a_real_plate_gesture_is_what_minerva_exports(qapp, stub_detail, squid_d
     both are driven here, and both claims are pinned: the drag asks for a window and moves no
     export scope, the click moves the export scope and asks for no window.
     """
-    from PyQt5.QtCore import QEvent, QPoint
-    from PyQt5.QtGui import QMouseEvent
+    from qtpy.QtCore import QEvent, QPoint
+    from qtpy.QtGui import QMouseEvent
 
     root, _ = squid_dataset
     win = V.PlateWindow(None)
@@ -4420,7 +4420,7 @@ def test_ima260_empty_state_copy_meets_the_legibility_floor(qapp, stub_detail, s
     """
     import re
 
-    from PyQt5.QtWidgets import QLabel
+    from qtpy.QtWidgets import QLabel
     root, _ = squid_dataset
     win = _shown(qapp, root)
     labels = [w for w in win._explore_empty.findChildren(QLabel) if w.text().strip()]
@@ -4946,7 +4946,7 @@ def test_the_empty_pane_does_not_name_CONTROL_WELL_on_a_slide(qapp, stub_detail,
 
     MUTATION: use _EMPTY_EXPLORE_PRIMARY unconditionally and this goes red.
     """
-    from PyQt5.QtWidgets import QLabel
+    from qtpy.QtWidgets import QLabel
 
     root, _ = squid_dataset
     win = V.PlateWindow(None)

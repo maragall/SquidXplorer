@@ -213,12 +213,12 @@ def test_a_subscriber_failure_with_no_problem_sink_is_raised_not_swallowed():
 # --------------------------------------------------------------------------------------
 
 napari = pytest.importorskip("napari", reason="the region slider is napari's own dims slider")
-pytest.importorskip("PyQt5")
+pytest.importorskip("qtpy")
 
 
 @pytest.fixture
 def qapp():
-    from PyQt5.QtWidgets import QApplication
+    from qtpy.QtWidgets import QApplication
     app = QApplication.instance() or QApplication([])
     yield app
 

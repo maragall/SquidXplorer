@@ -316,7 +316,7 @@ import numpy as np
 # PoolTracker is implemented in both ... QtCore" long before any assertion runs. Test the binding
 # production actually uses.
 os.environ.setdefault("QT_API", "pyqt5")
-from PyQt5.QtWidgets import QApplication, QHBoxLayout, QWidget
+from qtpy.QtWidgets import QApplication, QHBoxLayout, QWidget
 app = QApplication.instance() or QApplication([])
 
 # Report OUR OWN errors as EMBEDFAIL, distinct from "this box has no GL". The previous version

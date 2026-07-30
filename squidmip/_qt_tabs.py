@@ -14,8 +14,8 @@ notice the gesture and carry the widget; they were never viewer logic and are li
 
 from __future__ import annotations
 
-from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtWidgets import (
+from qtpy.QtCore import Qt, QTimer
+from qtpy.QtWidgets import (
     QApplication, QHBoxLayout, QPushButton, QTabBar, QTabWidget, QVBoxLayout, QWidget,
 )
 

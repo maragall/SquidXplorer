@@ -38,8 +38,8 @@ from __future__ import annotations
 
 from typing import Callable, Optional
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QHBoxLayout, QLabel, QSlider, QWidget
+from qtpy.QtCore import Qt
+from qtpy.QtWidgets import QHBoxLayout, QLabel, QSlider, QWidget
 
 
 class TimePointBar(QWidget):

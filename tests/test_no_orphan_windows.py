@@ -48,7 +48,7 @@ import sys  # noqa: E402
 
 import pytest  # noqa: E402
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("qtpy")
 if "PySide6" in sys.modules or "PySide2" in sys.modules:
     pytest.skip(
         "PySide already loaded (napari/pytest-qt) — Qt binding conflict; run with "
@@ -56,7 +56,7 @@ if "PySide6" in sys.modules or "PySide2" in sys.modules:
         allow_module_level=True,
     )
 
-from PyQt5.QtWidgets import QApplication  # noqa: E402
+from qtpy.QtWidgets import QApplication  # noqa: E402
 
 from squidmip import _viewer as V  # noqa: E402
 

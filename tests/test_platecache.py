@@ -419,9 +419,9 @@ def test_a_reader_with_no_path_degrades_to_uncached_rather_than_raising():
 
 # --- the property the whole module exists for: a reopen reads nothing ------------------------
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("qtpy")
 
-from PyQt5.QtWidgets import QApplication            # noqa: E402
+from qtpy.QtWidgets import QApplication            # noqa: E402
 
 import squidmip._viewer as V                        # noqa: E402
 

@@ -25,8 +25,8 @@ from dataclasses import dataclass, field
 from typing import Any, Optional, Sequence
 
 import numpy as np
-from PyQt5.QtCore import QObject, Qt, QTimer, pyqtSignal
-from PyQt5.QtWidgets import (
+from qtpy.QtCore import QObject, Qt, QTimer, Signal
+from qtpy.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
     QCheckBox,
@@ -45,6 +45,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from squidmip._time_point import TimePointBar
 from squidmip._address import Address, Extent
 from squidmip._logpane import ViewLog, get_logger
 
@@ -53,11 +54,20 @@ log = get_logger("regionviewer")
 #: PyQt's C++-object-liveness oracle. The ONLY way to ask "has Qt already destroyed this widget",
 #: which a slot connected to a longer-lived object has to ask before it touches its own children.
 #: Optional so a binding without it degrades to today's behaviour rather than failing to import.
+#: sip lives under the BINDING, not under qtpy: PyQt5.sip, PyQt6.sip, and nothing at all under
+#: PySide (which uses shiboken instead). qtpy tells us which binding is live, so ask it rather than
+#: guessing, and degrade to today's behaviour when there is no sip to ask.
+_sip = None
 try:                                                     # pragma: no cover - binding detail
-    from PyQt5 import sip as _sip
-except ImportError:                                      # pragma: no cover
+    import importlib
+
+    import qtpy as _qtpy
+
+    if _qtpy.API_NAME.startswith("PyQt"):
+        _sip = importlib.import_module(f"{_qtpy.API_NAME}.sip")
+except Exception:                                        # pragma: no cover
     try:
-        import sip as _sip                               # older PyQt5 packagings
+        import sip as _sip                               # older PyQt5 packagings, top-level sip
     except ImportError:
         _sip = None
 
@@ -346,7 +356,7 @@ class RegionViewer(QMainWindow):
     joins its slider's animation thread so a close during playback cannot abort the process.
     """
 
-    closed = pyqtSignal(object)   # emits self, so the registry can drop it
+    closed = Signal(object)   # emits self, so the registry can drop it
 
     #: The open half of this window's console pair, and the region its operator layers describe.
     #: CLASS defaults as well as ``__init__`` assignments, for the same reason
@@ -507,6 +517,14 @@ class RegionViewer(QMainWindow):
         self._slider.on_problem(self._say)
         self._slider.bind(self._cursor)
         lay.addWidget(self._slider)
+
+        # Each window navigates time INDEPENDENTLY: that is the point of the decentralization, and
+        # a shared position would mean comparing two wells at the same timepoint was impossible.
+        # Same widget CLASS as the plate's, deliberately, so the two can never disagree about what
+        # a timepoint control is. Hidden at n_t == 1, so this call site stays unconditional.
+        self._time_point_bar = TimePointBar(on_change=self._on_time_point_changed)
+        self._time_point_bar.set_count(int((self._meta or {}).get("n_t", 1) or 1))
+        lay.addWidget(self._time_point_bar)
 
         self.setCentralWidget(central)
 
@@ -1433,6 +1451,21 @@ class RegionViewer(QMainWindow):
         self._say(f"pasted LUTs onto {applied} channel(s).")
 
     # -- navigation ---------------------------------------------------------------------
+    @property
+    def time_point(self) -> int:
+        """Which timepoint THIS window is showing."""
+        bar = getattr(self, "_time_point_bar", None)
+        return bar.time_point if bar is not None else 0
+
+    def _on_time_point_changed(self, time_point: int) -> None:
+        """A user moved THIS window's timepoint. Reload its mosaic at that timepoint.
+
+        Only a user gesture arrives here; TimePointBar does not echo its own programmatic moves, so
+        sizing the bar on open cannot trigger a load.
+        """
+        self._say(f"time_point {time_point + 1} of {self._time_point_bar.count}")
+        self._load_mosaic(region=self.current_region())
+
     def _on_region_changed(self, index: int, region: str) -> None:
         """Current region moved. Debounce the fuse; the slider label already moved instantly."""
         if getattr(self, "_load_timer", None) is None:
@@ -1759,7 +1792,7 @@ class RegionViewer(QMainWindow):
             pass
 
     def changeEvent(self, event):                    # noqa: N802 - Qt naming
-        from PyQt5.QtCore import QEvent
+        from qtpy.QtCore import QEvent
 
         if event.type() == QEvent.ActivationChange:
             self.set_active(self.isActiveWindow())
@@ -1804,16 +1837,16 @@ class ViewerManager(QObject):
     outlive the windows that read it.
     """
 
-    windowsChanged = pyqtSignal()          # the set of open windows changed
-    memoryChanged = pyqtSignal(float)      # process RSS as a fraction 0..1 of total RAM
-    viewFocused = pyqtSignal(object)       # a window was opened/raised -> its regions (list[str])
+    windowsChanged = Signal()          # the set of open windows changed
+    memoryChanged = Signal(float)      # process RSS as a fraction 0..1 of total RAM
+    viewFocused = Signal(object)       # a window was opened/raised -> its regions (list[str])
     # A window was just SPAWNED, carrying the window itself. ``windowsChanged`` says the SET
     # changed and is what a list view wants; a subscriber that has to reach into the new window's
     # napari pane (the plate, which follows its contrast and its eye icons) needs the window, and
     # deriving "which one is new" by differencing a set is a second answer to a question the
     # spawn already knows. Emitted after the window is registered, so the registry is coherent by
     # the time anyone reads it.
-    windowOpened = pyqtSignal(object)      # -> the new RegionViewer
+    windowOpened = Signal(object)      # -> the new RegionViewer
 
     def __init__(self, reader: Any = None, meta: Optional[dict] = None,
                  parent: Optional[QObject] = None) -> None:

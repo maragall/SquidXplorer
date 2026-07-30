@@ -10,10 +10,10 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("qtpy")
 
-from PyQt5.QtCore import QCoreApplication                       # noqa: E402
-from PyQt5.QtWidgets import QApplication                        # noqa: E402
+from qtpy.QtCore import QCoreApplication                       # noqa: E402
+from qtpy.QtWidgets import QApplication                        # noqa: E402
 
 import squidmip._viewer as V                                    # noqa: E402
 
@@ -159,7 +159,7 @@ def test_progress_counts_stages_and_ends_at_the_total(qapp):
 
 
 def test_the_stage_TEXT_goes_out_on_its_own_signal_because_progress_has_no_text_channel(qapp):
-    """progress is pyqtSignal(int, int) — it cannot carry a label, and overloading an int with
+    """progress is Signal(int, int) — it cannot carry a label, and overloading an int with
     an enum would be a second representation of the stage list.
 
     This asserts the CHANNEL, not the labels. It used to assert the emitted text equalled

@@ -58,7 +58,7 @@ import pytest  # noqa: E402
 # is an optional extra (`.[gui]`), `squidmip._region_viewer` imports it at module scope, so without
 # it there is nothing here to test rather than something being waved past. Every GUI test file in
 # this suite gates the same way. Nothing below is conditional, marked, or xfailed.
-pytest.importorskip("PyQt5")
+pytest.importorskip("qtpy")
 if "PySide6" in sys.modules or "PySide2" in sys.modules:
     pytest.skip(
         "PySide already loaded (napari/pytest-qt) — Qt binding conflict; run with "

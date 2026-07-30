@@ -13,7 +13,7 @@ import logging
 
 import pytest
 
-from PyQt5.QtWidgets import QApplication
+from qtpy.QtWidgets import QApplication
 
 from squidmip._activity import ActivityLog
 from squidmip._logpane import LogBus, color_for
@@ -167,7 +167,7 @@ def test_the_panel_actually_PAINTS_without_raising(qapp, bus):
     Qt swallows exceptions raised inside paint()."""
     import sys
 
-    from PyQt5.QtGui import QPixmap
+    from qtpy.QtGui import QPixmap
 
     panel = LogPanel(bus, ActivityLog(), max_lines=50)
     bus.install()
