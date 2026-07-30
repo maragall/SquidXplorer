@@ -45,6 +45,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from squidmip._time_point import TimePointBar
 from squidmip._address import Address, Extent
 from squidmip._logpane import ViewLog, get_logger
 
@@ -507,6 +508,14 @@ class RegionViewer(QMainWindow):
         self._slider.on_problem(self._say)
         self._slider.bind(self._cursor)
         lay.addWidget(self._slider)
+
+        # Each window navigates time INDEPENDENTLY: that is the point of the decentralization, and
+        # a shared position would mean comparing two wells at the same timepoint was impossible.
+        # Same widget CLASS as the plate's, deliberately, so the two can never disagree about what
+        # a timepoint control is. Hidden at n_t == 1, so this call site stays unconditional.
+        self._time_point_bar = TimePointBar(on_change=self._on_time_point_changed)
+        self._time_point_bar.set_count(int((self._meta or {}).get("n_t", 1) or 1))
+        lay.addWidget(self._time_point_bar)
 
         self.setCentralWidget(central)
 
@@ -1433,6 +1442,21 @@ class RegionViewer(QMainWindow):
         self._say(f"pasted LUTs onto {applied} channel(s).")
 
     # -- navigation ---------------------------------------------------------------------
+    @property
+    def time_point(self) -> int:
+        """Which timepoint THIS window is showing."""
+        bar = getattr(self, "_time_point_bar", None)
+        return bar.time_point if bar is not None else 0
+
+    def _on_time_point_changed(self, time_point: int) -> None:
+        """A user moved THIS window's timepoint. Reload its mosaic at that timepoint.
+
+        Only a user gesture arrives here; TimePointBar does not echo its own programmatic moves, so
+        sizing the bar on open cannot trigger a load.
+        """
+        self._say(f"time_point {time_point + 1} of {self._time_point_bar.count}")
+        self._load_mosaic(region=self.current_region())
+
     def _on_region_changed(self, index: int, region: str) -> None:
         """Current region moved. Debounce the fuse; the slider label already moved instantly."""
         if getattr(self, "_load_timer", None) is None:

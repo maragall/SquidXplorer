@@ -395,24 +395,50 @@ def test_a_single_timepoint_plate_says_nothing_about_time(tmp_path):
     assert not any("timepoint" in w for w in report.warnings), report.summary()
 
 
-def test_the_documented_t_zero_read_sites_are_still_the_real_ones():
+def test_every_documented_read_site_takes_a_timepoint():
     """The doc's table is a claim about the code. Pin it, or it rots the way the reader prose did.
 
-    This test is expected to FAIL the day someone adds a timepoint selector to the plate view.
-    When it does, update the Time section of docs/plate-contract.md in the same commit: that is
-    the point of the test.
+    This test used to assert the OPPOSITE: that those sites hardcoded `[0, :, 0]`, with a message
+    telling whoever fixed it to update the contract in the same commit. On 2026-07-29 that is
+    exactly what happened, so it now pins the guarantee instead of the gap. It is kept rather than
+    deleted because the doc's Time section still describes the old bug, and a table nobody checks
+    is how the reader's own prose came to claim the writer emitted no translation for months.
     """
     import inspect
 
-    from squidmip import _viewer
+    from squidmip._plate_overview import _ZarrLoupeSource
+    from squidmip._workers import _ComputedPlateWorker
 
-    for func in (_viewer._ComputedPlateWorker._read, _viewer._ZarrLoupeSource.coarse):
-        assert "[0, :, 0]" in inspect.getsource(func), (
-            f"{func.__qualname__} no longer hardcodes t=0. Good. Update the Time section of "
-            "docs/plate-contract.md, which documents it as a known gap.")
+    for func in (_ComputedPlateWorker._read, _ZarrLoupeSource.coarse, _ZarrLoupeSource.read_crop):
+        src = inspect.getsource(func)
+        assert "time_point" in src, (
+            f"{func.__qualname__} stopped taking a timepoint. If that is deliberate, the Time "
+            "section of docs/plate-contract.md is now wrong and must change in the same commit.")
+        assert "[0, :, 0]" not in src, (
+            f"{func.__qualname__} hardcodes timepoint 0 again. That is the bug the Time section of "
+            "docs/plate-contract.md describes: a 40-timepoint plate looks like a 1-timepoint one, "
+            "silently, and no fixture with Nt = 1 can catch it.")
+
     doc = (Path(__file__).resolve().parent.parent / "docs" / "plate-contract.md").read_text()
     assert "### Time: the format carries it" in doc
-    assert "every fixture in the\nsuite is `Nt = 1`" in doc or "Nt = 1" in doc
+    # The doc must keep explaining WHY the old bug was invisible, because the reason (every fixture
+    # was Nt = 1) is the part that generalises to the next axis nobody tests.
+    assert "Nt = 1" in doc
+
+
+def test_the_timepoint_control_is_one_class_for_plate_and_windows():
+    """Two implementations would drift about which timepoint you are looking at.
+
+    That is worse than having no control: you would compare two frames and be told they were one.
+    """
+    from squidmip._region_viewer import RegionViewer
+    from squidmip._time_point import TimePointBar
+    from squidmip import _viewer
+
+    for mod in (_viewer, RegionViewer.__module__ and __import__(RegionViewer.__module__,
+                                                               fromlist=["_"])):
+        assert getattr(mod, "TimePointBar", None) is TimePointBar, (
+            f"{mod.__name__} does not use the shared TimePointBar")
 
 
 # --- the document itself ------------------------------------------------------------------------

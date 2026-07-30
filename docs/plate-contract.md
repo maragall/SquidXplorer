@@ -103,37 +103,47 @@ package assumes.
 The non-HCS Squid layout `zarr/{region}/acquisition.zarr` is 6-D `(fov, t, c, z, y, x)`. That is
 Squid's shape, not ours: we read it, we never write it. See `reader._discover_flat`.
 
-### Time: the format carries it, and most of this implementation reads `t = 0`
+### Time: the format carries it, and the viewer now reads it
 
-This section states a gap rather than a guarantee. It is here because users will drop
-multi-timepoint acquisitions on this tool, and today that produces a plate that looks fine and is
-showing one frame.
+This section used to state a GAP. As of 2026-07-29 it states a guarantee, because the gap was
+closed: it is kept in full because the shape of the old bug is worth remembering.
 
-**What is guaranteed.** `t` is the leading axis. The writer writes EVERY timepoint: `project_well`
-is called with `t=None` (`_engine.project_plate`), which yields `(T, C, 1, Y, X)` with `T = n_t`,
-and `_output._write_field` writes that array whole. The individual-TIFF export writes one file per
-timepoint (`tiff/{t}/...`). Nothing on disk is lost, and `reader.metadata["n_t"]` reports the true
-count.
+**What is guaranteed on disk.** `t` is the leading axis. The writer writes EVERY timepoint:
+`project_well` is called with `t=None` (`_engine.project_plate`), which yields `(T, C, 1, Y, X)`
+with `T = n_t`, and `_output._write_field` writes that array whole. The individual-TIFF export
+writes one file per timepoint (`tiff/{t}/...`). Nothing on disk is lost, and
+`reader.metadata["n_t"]` reports the true count.
 
-**What actually reads it, at 2026-07-29.**
+**What reads it, at 2026-07-29.** Every consumer now takes a timepoint and clamps it to the store's
+extent, so a stale slider position cannot index off the end of a shorter re-ingest:
 
 | Consumer | Timepoint |
 | --- | --- |
-| `reader.read(region, fov, channel, z, t)` | takes `t`, **defaults to 0** |
-| `_montage.render` | takes `t`, clamped to the store's extent |
+| `reader.read(region, fov, channel, z, t)` | takes `t`, defaults to 0 |
+| `_montage.render` | takes `t`, clamped |
 | `_tilesource` (`ZarrPyramidSource`, `InMemoryMultiscale`) | takes `t`, clamped |
-| `_viewer._ComputedPlateWorker._read` | **hardcoded `arr[0, :, 0]`** |
-| `_viewer._ZarrLoupeSource.coarse` | **hardcoded `arr[0, :, 0]`** |
-| `_viewer._on_well` | **hardcoded `image[0, :, 0]`** |
+| `_workers._ComputedPlateWorker._read` | takes `time_point`, clamped |
+| `_plate_overview` loupe source (`read_crop`, `coarse`) | takes `time_point`, clamped |
 
-So the plate overview and the loupe show the FIRST timepoint of a multi-timepoint plate, silently.
-There is no error, no warning in the UI, and no test that would catch it: **every fixture in the
-suite is `Nt = 1`**, which is why this survived. `python -m squidmip.contract.validate` warns when
-a plate carries more than one timepoint, which is the only place that currently says so out loud.
+`TimePointBar` (`squidmip/_time_point.py`) is the control, mounted on the plate and in every window.
+One widget CLASS for both, so the two can never disagree about what a timepoint control is, and a
+separate INSTANCE each, because a window navigates independently: a shared position would make
+comparing two wells at different timepoints impossible.
 
-This is a statement of fact, not a promise. Do not treat "the viewer shows t=0" as contractual: it
-is the thing to fix, and a `t` selector on the plate view is what fixes it. Until then, do not add
-a fixture with `Nt = 1` and conclude that timepoints work.
+**The shape of the bug that was here, worth remembering.** The plate overview and the loupe read
+`arr[0, :, 0]` unconditionally, so a 40-timepoint plate looked exactly like a 1-timepoint plate.
+No error, no warning, nothing wrong on screen. It survived because **every fixture in the suite was
+`Nt = 1`**, so the bug was invisible by construction rather than by oversight: the tests could not
+have caught it whatever they asserted. What ended it was building a multi-timepoint fixture whose
+every plane is filled with a value derived from its timepoint, so a test can name which frame it is
+holding from one pixel.
+
+The loupe's coarse cache is now keyed by `(well, timepoint)` rather than by well alone. It had been
+keyed by well, so once a well was read at one timepoint every later timepoint got that same picture
+back. A cache that answers the wrong question quickly is worse than no cache.
+
+`python -m squidmip.contract.validate` still warns when a plate carries more than one timepoint.
+That warning was the only thing saying so out loud while the gap existed; it is now belt and braces.
 
 ### Level 0 is full resolution, and a MIP never comes from a coarser level
 

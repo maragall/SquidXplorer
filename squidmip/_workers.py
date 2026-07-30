@@ -984,7 +984,8 @@ class _ComputedPlateWorker(QThread):
     finished_ok = pyqtSignal()
     failed = pyqtSignal(str)
 
-    def __init__(self, base, wells, coarse_lvl, push_lvl, dtype):
+    def __init__(self, base, wells, coarse_lvl, push_lvl, dtype, time_point: int = 0):
+        self._time_point = int(time_point)   # which timepoint the plate is showing
         super().__init__()
         self._base = base                 # plate.ome.zarr path
         self._wells = wells               # [(well_id, wellpath, fov, ri, ci, flat_idx)]
@@ -995,13 +996,17 @@ class _ComputedPlateWorker(QThread):
     def stop(self):
         self._stop.set()
 
-    def _read(self, wellpath, fov, level):
+    def _read(self, wellpath, fov, level, time_point: int = 0):
         # Through the shared pool, NOT a bare ts.open. This line opened a brand new store per well
         # per level, twice per well, with no reuse and no declared memory budget: 3072 fresh opens
         # on a 1536-well plate, each allocating its own private cache. The pool bounds both halves,
         # decoded bytes via one shared cache_pool and live handles via an LRU of 32. See _tsctx.
         arr = HANDLES.get(field_path(self._base, wellpath, fov, level))
-        return np.asarray(arr[0, :, 0].read().result())   # (C, y, x) at t=0, z=0
+        # The timepoint was hardcoded to 0 here, which is what made a 40-timepoint plate
+        # indistinguishable from a 1-timepoint one, silently. Clamped rather than trusted, so a
+        # stale slider position cannot index off the end of a shorter acquisition.
+        t_idx = max(0, min(int(time_point), arr.shape[0] - 1))
+        return np.asarray(arr[t_idx, :, 0].read().result())   # (C, y, x) at this t, z=0
 
     def run(self):
         try:
@@ -1009,10 +1014,10 @@ class _ComputedPlateWorker(QThread):
             for i, (wid, wpath, fov, ri, ci, idx) in enumerate(self._wells, 1):
                 if self._stop.is_set():
                     return
-                coarse = self._read(wpath, fov, self._coarse)             # thumbnail source (C,y,x)
+                coarse = self._read(wpath, fov, self._coarse, self._time_point)   # thumbnail (C,y,x)
                 tile = np.stack([_fit_cell(plane.astype(np.float32)) for plane in coarse])
                 self.tileReady.emit(ri, ci, wid, tile.astype(self._dtype))
-                push_src = self._read(wpath, fov, self._push)             # detail-slider source (C,Y,X)
+                push_src = self._read(wpath, fov, self._push, self._time_point)   # slider src (C,Y,X)
                 # ...at the declared push canvas exactly (IMA-245): a pyramid level smaller than
                 # _PUSH_PX used to be pushed at its own size, which the viewer silently refused.
                 push = [_fit_letterboxed(push_src[c], _PUSH_PX, _PUSH_PX, self._dtype)
