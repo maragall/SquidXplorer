@@ -133,6 +133,55 @@ _COORDS_NAME = "coordinates.csv"
 _X_COL_RE = re.compile(r"^\s*x\b.*\(\s*mm\s*\)", re.I)
 _Y_COL_RE = re.compile(r"^\s*y\b.*\(\s*mm\s*\)", re.I)
 
+#: Which file a set of FOV positions came from. This is DATA, not just a log line: a caller drawing
+#: a mosaic, or a user comparing two acquisitions, has to be able to ask which source it got.
+COORDS_EXECUTED = "executed"
+COORDS_PLANNED = "planned"
+
+
+def _coords_path(root):
+    """The best available ``coordinates.csv`` and WHICH one it is, as ``(path, source)``.
+
+    Squid writes TWO different files under this one name, and until 2026-07-29 we read only the
+    weaker of them.
+
+    * ``{root}/coordinates.csv`` is ``region, x, y, z``, written BEFORE the run
+      (`multi_point_controller.py:735-744`). Where the software INTENDED to go.
+    * ``{root}/{time_point}/coordinates.csv`` is ``region, fov, z_level, x, y, z, time``, written by
+      the worker as it goes (`multi_point_worker.py:757`, columns at `:802-805`). Where the stage
+      ACTUALLY was when each frame was captured.
+
+    Autofocus nudges, backlash and a stage that stopped short all live in the difference. Placing
+    FOVs from the plan draws the mosaic where the run was supposed to happen, so every seam is off
+    by the correction the stage really applied, and nothing says so.
+
+    **Why this returns the source rather than silently choosing.** Julio, 2026-07-29: a fallback
+    that quietly swaps one accuracy for another is confusing behaviour, and it contradicts this
+    project's standing rule, no fallbacks, fail to the logger. So the choice is reported: the caller
+    warns, naming what is missing AND what it costs.
+
+    **Why a fallback exists at all**, measured rather than assumed: both real Squid acquisitions on
+    this workstation carry the executed file. The only thing that does not is `sim_1536wp`, a
+    hand-built symlink farm Squid never wrote. Refusing without the executed file would reject
+    synthetic fixtures and nothing real, so announcing is enough and refusing would cost coverage
+    for no gain.
+
+    Timepoint 0, not a merge across timepoints: per-timepoint drift is real and averaging it would
+    invent a position no frame was taken at. When ``t`` becomes navigable this takes the CURRENT one.
+
+    Direction of travel: Squid has APPROVED making the per-FOV OME ``translation`` authoritative and
+    demoting ``coordinates.csv`` to "a derived export for the stitcher". Our zarr path already
+    prefers ``translation``; this is the raw-TIFF path catching up one step.
+    """
+    root = Path(root)
+    executed = root / "0" / _COORDS_NAME
+    if executed.exists():
+        return executed, COORDS_EXECUTED
+    planned = root / _COORDS_NAME
+    if planned.exists():
+        return planned, COORDS_PLANNED
+    return None, None
+
 
 def _coord_columns(fieldnames) -> tuple[str, str]:
     """Locate the x/y millimetre columns in a coordinates.csv header, failing loud if absent."""
@@ -299,9 +348,20 @@ def _parse_fov_positions_um(root, fovs_per_region: dict) -> tuple:
     """
     import csv
 
-    path = Path(root) / _COORDS_NAME
-    if not path.exists():
+    path, source = _coords_path(root)
+    if path is None:
         return {}, {}
+    if source == COORDS_PLANNED:
+        # warnings.warn, matching this module's idiom for a degraded-but-usable read. It names what
+        # this COSTS, not only what happened: a line reporting a degraded source without its
+        # consequence reads as noise and gets scrolled past.
+        warnings.warn(
+            f"{_COORDS_NAME}: using PLANNED positions. The per-timepoint EXECUTED file "
+            f"(0/{_COORDS_NAME}) is absent, so FOVs are placed where the run intended to go, not "
+            "where the stage actually went: seams will be off by whatever correction autofocus and "
+            "backlash applied. Every real Squid acquisition writes the executed file, so a dataset "
+            "without one is usually hand-built."
+        )
 
     with path.open(newline="") as fh:
         reader = csv.DictReader(fh)
