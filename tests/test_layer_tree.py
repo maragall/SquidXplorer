@@ -139,22 +139,35 @@ _NDISPLAY_SCRIPT = r"""
 """
 
 
-def test_the_3d_button_is_naparis_own_and_sits_where_a_short_pane_shows_it(tmp_path):
-    """A 2D/3D toggle Julio can actually see, built out of napari's own button.
+def test_the_3d_button_is_naparis_own_and_is_kept_alive_but_hidden(tmp_path):
+    """napari's own 2D/3D button, kept alive and deliberately NOT shown.
 
-    Asked for twice. napari HAS the button — bottom of the left dock column, below a layer list
-    that grows with every layer added, so on a small screen it is simply not on screen. Lifting
-    napari's own widget into a fixed row at the top of the pane fixes reachability without
-    inventing a second control: the button we show and the one napari docks drive the same
-    ``viewer.dims.ndisplay``, so they cannot disagree.
+    History, because this test asserted the opposite for its whole life. It was written when the
+    ask was "a 2D/3D toggle Julio can actually see": napari HAS the button, at the bottom of the
+    left dock column under a layer list that grows with every layer, so on a small screen it is
+    below the fold. Lifting it to the top of the pane fixed reachability.
+
+    That decision was then SUPERSEDED. 3D is the ROI native popout, not an embedded toggle (Julio:
+    "delete this, since the 3d rendering we do on the ROIs"; the huddle: "that's not how we render
+    3d"), so `_install_ndisplay_button` calls ``btn.hide()``. The button object is still built and
+    still held, for one reason worth naming: napari's check-state sync
+    (``viewer.dims.events.ndisplay`` -> ``setChecked``) is a closure owned by the button row, and
+    dropping the row silently stops the state following the viewer.
+
+    **Why this went unnoticed:** under PyQt5 this check segfaults (rc=-11) and SKIPS, so it never
+    once executed on this machine. PyQt6 is the first binding where it runs, and the first thing it
+    did was contradict the shipped decision. A test that always skips is not a passing test, it is
+    an absent one, and this file's own harness docstring says a skip and a bug must never look
+    alike. That is exactly what happened here.
+
+    So this now asserts the CURRENT contract: napari's own widget, hidden, and still tracking dims.
     """
     got = _run_qt(_NDISPLAY_SCRIPT, tmp_path, "NDISPLAY")
 
     assert got["is_napari_widget_class"] is True, "we rebuilt a button instead of reusing napari's"
-    assert got["visible"] is True
-    assert 0 <= got["y_within_pane"] <= 80, (
-        f"the 3D button is {got['y_within_pane']} px down a {got['pane_height']} px pane — "
-        "that is the same 'present but off the bottom' failure it was meant to fix"
+    assert got["visible"] is False, (
+        "the embedded 3D toggle is back on screen. 3D is the ROI native popout; an embedded "
+        "toggle is the control that was explicitly deleted"
     )
     before, after, back = got["toggle"]
     assert [before, after, back] == [2, 3, 2], "clicking it does not actually change ndisplay"
@@ -449,10 +462,14 @@ _MOUNT_SCRIPT = r"""
                 if _m.data(_m.index(r, 0), _Qt.DisplayRole) == "raw")
     _405 = next(_m.index(r, 0, _raw) for r in range(_m.rowCount(_raw))
                 if _m.data(_m.index(r, 0, _raw), _Qt.DisplayRole).endswith("405"))
-    out["leaf_state_after_external_change"] = int(_m.data(_405, _Qt.CheckStateRole))
-    out["group_state_after_external_change"] = int(
-        _m.data(_raw, _Qt.CheckStateRole)
-    )
+    # Qt5 hands back a plain int here; Qt6 hands back a Qt.CheckState enum, and int() refuses it.
+    # .value where there is one, the value itself otherwise, so this reads under either binding.
+    def _check_state(index):
+        v = _m.data(index, _Qt.CheckStateRole)
+        return int(getattr(v, "value", v))
+
+    out["leaf_state_after_external_change"] = _check_state(_405)
+    out["group_state_after_external_change"] = _check_state(_raw)
 """
 
 
