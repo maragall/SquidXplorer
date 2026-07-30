@@ -1623,6 +1623,13 @@ class ViewerManager(QObject):
     windowsChanged = pyqtSignal()          # the set of open windows changed
     memoryChanged = pyqtSignal(float)      # process RSS as a fraction 0..1 of total RAM
     viewFocused = pyqtSignal(object)       # a window was opened/raised -> its regions (list[str])
+    # A window was just SPAWNED, carrying the window itself. ``windowsChanged`` says the SET
+    # changed and is what a list view wants; a subscriber that has to reach into the new window's
+    # napari pane (the plate, which follows its contrast and its eye icons) needs the window, and
+    # deriving "which one is new" by differencing a set is a second answer to a question the
+    # spawn already knows. Emitted after the window is registered, so the registry is coherent by
+    # the time anyone reads it.
+    windowOpened = pyqtSignal(object)      # -> the new RegionViewer
 
     def __init__(self, reader: Any = None, meta: Optional[dict] = None,
                  parent: Optional[QObject] = None) -> None:
@@ -1768,6 +1775,7 @@ class ViewerManager(QObject):
         win.show()
         win.raise_()
         win.activateWindow()
+        self.windowOpened.emit(win)                     # ...so the plate can follow ITS napari
         self.windowsChanged.emit()
         self.viewFocused.emit(list(win._regions))       # highlight its regions on the plate
         return win

@@ -618,6 +618,9 @@ def _stub_pane_classes():
         def __init__(self):
             self.model = None                 # napari Viewer; None -> `_napari_viewer` uses _viewer
             self.added = []                   # (op, channel, levels, kwargs) per add_mosaic
+            self.contrast_subscribers = []     # what _bind_window_contrast subscribed
+            self.visibility_subscribers = []
+            self.colormap_subscribers = []
             self.removed = []
             self.shown = []
             self._layers = {}
@@ -626,6 +629,30 @@ def _stub_pane_classes():
             self.removed.append(op)
             for key in [k for k in self._layers if k[0] == op]:
                 del self._layers[key]
+
+        # The three sinks the plate subscribes to when it starts following a window
+        # (_bind_window_contrast). Without these the stub could only prove the plate TOLERATES a
+        # window; with them a test can fire a gesture and watch the plate react, which is the
+        # behaviour Julio asked for: "there shouldn't be any controls for the plate view, it just
+        # reacts to toggles and contrast adjustments in napari."
+        def on_user_contrast(self, cb):
+            self.contrast_subscribers.append(cb)
+
+        def on_user_visibility(self, cb):
+            self.visibility_subscribers.append(cb)
+
+        def on_user_colormap(self, cb):
+            self.colormap_subscribers.append(cb)
+
+        def gesture_contrast(self, channel, lo, hi):
+            """Pretend the user dragged contrast in napari."""
+            for cb in list(self.contrast_subscribers):
+                cb(channel, lo, hi)
+
+        def gesture_visibility(self, channel, on):
+            """Pretend the user clicked an eye icon."""
+            for cb in list(self.visibility_subscribers):
+                cb(channel, on)
 
         def add_mosaic(self, op, channel, levels, **kw):
             self.added.append((op, channel, levels, kw))

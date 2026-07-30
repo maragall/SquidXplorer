@@ -556,6 +556,13 @@ class PlateWindow(QMainWindow):
         # viewFocused fires on open/raise; windowsChanged clears it when the focused view closes.
         self._viewer_manager.viewFocused.connect(lambda _regions: self._refresh_view_hues())
         self._viewer_manager.windowsChanged.connect(self._refresh_view_hues)
+        # THE PLATE FOLLOWS THE WINDOWS' napari (Task 8.1). Julio: "there shouldn't be any controls
+        # for the plate view. It just reacts to toggles and contrast adjustments in napari." With no
+        # central pane left, the napari the plate must react to is the one inside each window, so
+        # the binding happens the moment a window is spawned. Windows whose ids are already bound
+        # are skipped, see _bind_window_contrast.
+        self._followed_windows: set = set()
+        self._viewer_manager.windowOpened.connect(self._bind_window_contrast)
 
         # File menu: a reliable "Open acquisition folder" (drag-drop can be blocked on Windows by the
         # GL child pane or an elevation mismatch, so this is the always-works path).
@@ -3149,7 +3156,23 @@ class PlateWindow(QMainWindow):
         self._readout.setText(f"{region} · {channel} · {count} nuclei detected")
 
     def _bind_napari_contrast(self):
-        """Point the EXISTING contrast sink (IMA-261) at napari instead of ndviewer_light.
+        """Bind EVERY open window's napari pane to the plate's follow path (Task 8.1).
+
+        This used to point at ``self._mosaic_pane``, the one central napari pane. The
+        decentralization deleted that pane and left this method's first guard permanently true, so
+        the plate followed nothing: contrast, eye icons and colormaps in a window changed the
+        window and nothing else, and the requirement quoted below sat inside a method that could
+        not run. The sources are now the per-region windows in ``ViewerManager``, so that is what
+        this binds to. Idempotent, so calling it again after a window opens is free.
+        """
+        mgr = getattr(self, "_viewer_manager", None)
+        if mgr is None:
+            return
+        for win in mgr.windows:
+            self._bind_window_contrast(win)
+
+    def _bind_window_contrast(self, win):
+        """Make the plate a SINK of ONE window's napari pane (contrast, eye icons, colormap).
 
         No new contrast model, and no second sink: this reuses ``_on_detail_contrast``, which
         already lands in the plate's FOLLOW path via ``follow_channel_window`` rather than its
@@ -3161,41 +3184,74 @@ class PlateWindow(QMainWindow):
         ``MosaicLayers.on_user_contrast`` additionally filters out OUR OWN writes (the percentile
         window set at add time, and link propagation), so only a real change of the owner's
         resolved window arrives here.
+
+        Many windows, one plate: whichever window the user last gestured in is the one the plate
+        shows. That is deliberate. A window IS a view of a subset of this plate, so its resolved
+        window is the honest thing to paint the plate with, and the alternative — the plate
+        following only one privileged window — reintroduces the central pane the decentralization
+        removed.
         """
-        pane = getattr(self, "_mosaic_pane", None)
-        if pane is None or not getattr(pane, "ok", False) or self._meta is None:
+        if win is None or self._meta is None:
             return
-        if getattr(self, "_napari_contrast_bound", False):
-            return          # connect ONCE: the pane outlives every ingest, like the detail viewer
-        index = {c["name"]: i for i, c in enumerate(self._meta["channels"])}
+        pane = getattr(win, "_pane", None)
+        mosaic = getattr(pane, "mosaic", None)
+        if pane is None or not getattr(pane, "ok", False) or mosaic is None:
+            return          # a window that came up without napari has nothing to follow
+        bound = getattr(self, "_followed_windows", None)
+        if bound is None:
+            bound = self._followed_windows = set()
+        wid = getattr(win, "window_id", None)
+        if wid in bound:
+            return          # subscribe ONCE per window: MosaicLayers keeps a list of callbacks
+
+        # The channel index is resolved WHEN A GESTURE ARRIVES, not captured here. A subscription
+        # outlives an ingest (nothing can unsubscribe from MosaicLayers), and a captured map would
+        # then be the previous acquisition's channel order applied to the current plate's tiles.
+        def index_of(channel: str):
+            for i, c in enumerate((self._meta or {}).get("channels", [])):
+                if c["name"] == channel:
+                    return i
+            return None
 
         def _sink(channel: str, lo: float, hi: float):
-            ch = index.get(channel)
+            ch = index_of(channel)
             if ch is not None:
                 self._on_detail_contrast(ch, lo, hi)
             self._push_contrast_to_side_pane(channel, lo, hi)
 
-        pane.mosaic.on_user_contrast(_sink)
+        # Capability-checked, and this is NOT defensive noise: an unhandled Python exception that
+        # escapes a Qt SLOT makes PyQt abort the whole process (SIGABRT, no traceback you can act
+        # on). This runs from `windowOpened`, so a pane whose mosaic lacks the callback would kill
+        # the app rather than fail to follow. Measured: it aborted the test suite at 46%.
+        subscribe = getattr(mosaic, "on_user_contrast", None)
+        if not callable(subscribe):
+            return          # a mosaic surface with nothing to subscribe to: nothing to follow
+        subscribe(_sink)
 
         # ...and the eye icons, for exactly the same reason. Julio: "there shouldn't be any
         # controls for the plate view. It just reacts to toggles and contrast adjustments in
         # napari." The plate's own checkboxes are gone; this is what replaces them.
         def _vis_sink(channel: str, on: bool):
-            ch = index.get(channel)
-            if ch is None:
+            ch = index_of(channel)
+            if ch is None or self._overview is None:
                 return
             self._overview.set_channel_visible(ch, on)
 
-        pane.mosaic.on_user_visibility(_vis_sink)
+        sub = getattr(mosaic, "on_user_visibility", None)      # same slot-abort hazard as above
+        if callable(sub):
+            sub(_vis_sink)
 
         # ...and the LUT. Julio: "I change channel colormap in napari and plate view doesn't
         # react." Same sink shape: napari owns the colour, the plate follows it.
         def _cmap_sink(channel: str, rgb):
-            ch = index.get(channel)
-            if ch is not None:
+            ch = index_of(channel)
+            if ch is not None and self._overview is not None:
                 self._overview.set_channel_color(ch, rgb)
 
-        pane.mosaic.on_user_colormap(_cmap_sink)
+        sub = getattr(mosaic, "on_user_colormap", None)      # same slot-abort hazard as above
+        if callable(sub):
+            sub(_cmap_sink)
+        bound.add(wid)
         self._napari_contrast_bound = True
 
     def _adopt_centre_view(self):
