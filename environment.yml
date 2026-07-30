@@ -19,5 +19,4 @@ dependencies:
       - tensorstore
       - pydantic-settings
       - PyQt5
-      - "git+https://github.com/maragall/ndviewer_light@main"
       - "."          # squidmip itself (run `conda env create` from the repo root)

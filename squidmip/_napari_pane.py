@@ -582,23 +582,29 @@ def gl_available(env: Optional[dict] = None) -> tuple[bool, str]:
 
 
 def make_pane(readout: Optional[Callable[[str], None]] = None, *, show_docks: bool = True):
-    """Build pane 2 honouring ``SQUIDMIP_VIEWER``.
+    """Build pane 2, the napari mosaic.
 
     Returns ``(widget_or_None, mode, message)``:
 
-    * ``mode == "napari"`` — the napari mosaic pane, and ``widget`` is it.
-    * ``mode == "ndv"``    — the caller should build ndviewer_light instead. ``message`` says
-      whether that was ASKED FOR or is a FALLBACK, and the caller must surface it.
+    * ``mode == "napari"``      — the napari mosaic pane, and ``widget`` is it.
+    * ``mode == "unavailable"`` — there is NO viewer, and ``message`` says exactly why. The
+      caller must surface that sentence; there is nothing to fall back to.
 
-    The default is napari. The fallback stays reachable with ``SQUIDMIP_VIEWER=ndv`` so a bad
-    napari path never leaves the window without a viewer during a visual-feedback round.
+    ``"unavailable"`` replaced ``"ndv"`` on 2026-07-30 when the ndviewer_light fallback was
+    deleted (see ``_napari_view.resolve_viewer`` for the two reasons). This is the NO FALLBACKS
+    rule applied to the viewer itself: when napari cannot be built the honest outcome is a named
+    failure the user can read and act on, not a different renderer wearing the same slot. A
+    silent substitution is how you end up debugging the wrong picture.
     """
-    if resolve_viewer() != "napari":
-        return None, "ndv", "ndviewer_light selected by SQUIDMIP_VIEWER."
+    # Still ASKED, though there is only one answer: resolve_viewer is where a retired
+    # SQUIDMIP_VIEWER=ndv is recognised and said out loud, and it stays the single place the
+    # viewer choice is read. Two readers of one environment variable is the knowledge
+    # duplication that produces controls disagreeing about what is on screen.
+    resolve_viewer()
 
     ok, why = gl_available()
     if not ok:
-        return None, "ndv", f"napari needs OpenGL ({why}) — using ndviewer_light."
+        return None, "unavailable", f"napari needs OpenGL, and {why}. No mosaic can be drawn here."
 
     pane = MosaicPane(show_docks=show_docks)
     if pane.ok:
@@ -606,4 +612,4 @@ def make_pane(readout: Optional[Callable[[str], None]] = None, *, show_docks: bo
 
     reason = pane.failure or "unknown error"
     pane.deleteLater()
-    return None, "ndv", f"napari viewer unavailable ({reason}) — fell back to ndviewer_light."
+    return None, "unavailable", f"napari viewer could not be built ({reason}). There is no mosaic."

@@ -43,13 +43,16 @@ committed to, scheduled, or estimated.
   a napari canvas) and the one-binding rule (PyQt5 + PyQt6 co-installed breaks GL rendering).
   <sub>added 2026-07-27 · Spencer</sub>
 
-- [ ] **Move `ndviewer_light` to qtpy** — prerequisite for the Qt6 migration: it imports PyQt5
-  at module scope, so under Qt6 the `SQUIDMIP_VIEWER=ndv` fallback cannot load in-process.
-  Scoped small — real imports are confined to `core.py`, none of the four known Qt6 breakers
-  are present, 7 unscoped enums, and one genuine rename (`pyqtSignal` → `Signal`). The fiddly
-  part is the PyInstaller spec and `environment.yml`, which hardcode `PyQt5.*` and
-  `vispy.app.backends._pyqt5`.
-  <sub>added 2026-07-27 · Spencer</sub>
+- [x] **Move `ndviewer_light` to qtpy** — CLOSED 2026-07-30 by DELETING it instead. Spencer
+  scoped the migration small and was right about the scope, but the premise did not survive the
+  measurement: `ndviewer_light` was the last thing keeping PyQt5 in a Qt6 process, and it was a
+  fallback for the renderer it could not share a process with. napari won a written gate
+  (`docs/napari-gate.md`) and `docs/SCOPE.md` already argued this ("a half-alive second viewer
+  stack. Delete, do not maintain"), so the second stack was carrying no load. Julio's call,
+  2026-07-30. `SQUIDMIP_VIEWER=ndv` now builds napari and says so in the log rather than
+  silently handing you a viewer you did not ask for. Nothing to migrate, and the PyInstaller
+  spec and `environment.yml` lose their `ndviewer_light` entries rather than gaining Qt6 ones.
+  <sub>added 2026-07-27 · Spencer · closed 2026-07-30</sub>
 
 - [x] **Fix the Windows test-suite teardown crash** — `test_viewer`, `test_gui_commands`,
   `test_nav_wiring`, `test_viewer_3d` and `test_viewer_region_ids` die with `0xC0000005` at

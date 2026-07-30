@@ -1,5 +1,12 @@
 """Odon vs ndviewer_light on ONE identical task — IMA-235.
 
+HISTORICAL AS OF 2026-07-30: ndviewer_light was deleted from this product, so the second
+side of this comparison can no longer be run. The file is kept for the METHODOLOGY below,
+which is the part with lasting value: it states the wrong benchmark explicitly so it is not
+accidentally rebuilt, and it defines one identical task before measuring anything. Do not
+expect `tools/viewer_benchmark.py` to produce numbers any more; it will not find
+ndviewer_light. Whether to keep or bin this is Julio's call, not a migration detail.
+
 Why this module exists separately from ``_odon_bench.py``
 =========================================================
 ``_odon_bench.py`` answers "local vs http-served, for Odon". It measures ONE tool.

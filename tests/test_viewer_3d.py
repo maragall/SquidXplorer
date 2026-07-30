@@ -16,7 +16,6 @@ Two guards live here:
 
 from __future__ import annotations
 
-import inspect
 import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")  # headless Qt; must precede PyQt import
@@ -62,32 +61,16 @@ def _wait_for_layers(qapp, pane, timeout=30):
     return pane.mosaic.added
 
 
-class TestInstalledViewerAcceptsVoxelSize:
-    """The seam contract, checked against whatever ndviewer_light is actually installed."""
-
-    def test_start_acquisition_takes_um_keywords(self):
-        ndviewer_core = pytest.importorskip("ndviewer_light.core")
-
-        params = inspect.signature(
-            ndviewer_core.LightweightViewer.start_acquisition
-        ).parameters
-        missing = {"pixel_size_um", "dz_um"} - set(params)
-        assert not missing, (
-            f"installed ndviewer_light.start_acquisition is missing {sorted(missing)} — "
-            "3D volumes will render isotropic (2x wrong in z on a 1.5um/0.752um stack). "
-            "Upgrade ndviewer_light; check `pip show -f ndviewer-light` for the LIVE path."
-        )
-
-    def test_the_um_naming_invariant_holds(self):
-        """Everything in this project is micrometres and every key ends in _um."""
-        ndviewer_core = pytest.importorskip("ndviewer_light.core")
-
-        params = inspect.signature(
-            ndviewer_core.LightweightViewer.start_acquisition
-        ).parameters
-        physical = [p for p in params if "size" in p or p.startswith("dz")]
-        assert physical, "expected physical-size parameters on the seam"
-        assert all(p.endswith("_um") for p in physical), physical
+# The ndviewer_light seam checks lived here: they asked the INSTALLED ndviewer_light whether
+# start_acquisition still took pixel_size_um and dz_um, so a silent upstream signature change
+# could not make 3D volumes render isotropic.
+#
+# Deleted with the fallback itself on 2026-07-30. They are worth a note rather than a silent
+# removal, because they are what FOUND the Qt6 blocker: `pytest.importorskip("ndviewer_light.core")`
+# pulled PyQt5 into a QT_API=pyqt6 process at module scope, vispy then refused to load PyQt6
+# beside it, and the file aborted in teardown. A test that imports a second Qt binding is not a
+# cheap test. The seam it guarded no longer exists: napari is the only renderer, and the voxel
+# scale it is handed is asserted directly below.
 
 
 class TestRawPushCarriesVoxelSize:

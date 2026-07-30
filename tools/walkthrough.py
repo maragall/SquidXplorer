@@ -805,7 +805,14 @@ def run_all():
             from ndv.views._vispy._array_canvas import VispyArrayCanvas
             from vispy.visuals.volume import VolumeVisual
         except ImportError as e:
-            raise SkipCheck(f"ndviewer_light/ndv/vispy unavailable: {e}")
+            # ndviewer_light was DELETED on 2026-07-30, so this check now skips permanently
+            # rather than intermittently. Named here so nobody spends an afternoon working
+            # out why a check that used to run stopped: the thing it checked is gone.
+            raise SkipCheck(
+                f"ndviewer_light was removed from this product on 2026-07-30, so its volume "
+                f"patch can no longer be checked ({e}). napari's voxel scale is asserted in "
+                "tests/test_viewer_3d.py instead."
+            )
         if not os.path.isdir(TISSUE):
             raise SkipCheck("tissue z-stack not present")
 

@@ -122,14 +122,38 @@ def test_the_interval_sits_under_the_perceptible_pause():
     assert 60 <= SETTLE_MS <= 150
 
 
-# ------------------------------------------------------------- the visible fallback
+# ------------------------------------- the visible FAILURE (there is no fallback any more)
+#
+# These asserted a working ndviewer_light fallback until 2026-07-30. The fallback is deleted:
+# napari won a written gate, and ndviewer_light imported PyQt5 at module scope, so it could not
+# share a process with the Qt6 napari it was supposed to be a safety net for. What survives is
+# the RULE the fallback existed to serve, which never depended on there being a second viewer:
+# a result that is not napari must carry a reason a human can read. Six confirmed silent
+# failures in this project say so. `mode == "unavailable"` is that rule with the second viewer
+# removed, and it is a stronger contract, not a weaker one: before, a user could be handed a
+# different renderer and only a message said so; now there is nothing to be quietly handed.
 
 
-def test_the_flag_can_select_ndviewer_and_says_it_was_asked_for(monkeypatch):
+def test_a_retired_flag_value_changes_nothing(monkeypatch):
+    """`SQUIDMIP_VIEWER=ndv` must take exactly the same path as no flag at all.
+
+    The failure this prevents is specific: someone's launcher still exports the old value, and a
+    naive removal turns that into "no viewer at all, and no explanation". Asserting the two runs
+    AGREE says that without needing to know which way they resolve here.
+
+    Note what this does NOT do: unset `QT_QPA_PLATFORM`. This file's own no-GL test explains why
+    — constructing a vispy canvas under the offscreen platform SEGFAULTS rather than raising, so
+    unsetting the guard inside an offscreen process kills the interpreter, taking pytest's
+    summary with it. I did exactly that here on the first attempt and it aborted the run.
+    """
+    monkeypatch.delenv("SQUIDMIP_VIEWER", raising=False)
+    without = make_pane()[1:]
     monkeypatch.setenv("SQUIDMIP_VIEWER", "ndv")
-    widget, mode, msg = make_pane()
-    assert (widget, mode) == (None, "ndv")
-    assert "SQUIDMIP_VIEWER" in msg
+    with_flag = make_pane()[1:]
+    assert with_flag == without, (
+        f"a retired flag value took a different path: {with_flag} vs {without}"
+    )
+    assert with_flag[0] != "ndv", "the deleted fallback is still reachable by name"
 
 
 def test_napari_is_the_default(monkeypatch):
@@ -138,7 +162,7 @@ def test_napari_is_the_default(monkeypatch):
     # Whichever way it resolves, a non-napari result must carry a REASON — never a silent
     # downgrade. Six confirmed silent failures in this project say so.
     if mode != "napari":
-        assert msg, "fell back to ndviewer_light without saying why"
+        assert msg, "reported no viewer without saying why"
     else:
         assert widget is not None and widget.ok
 
@@ -159,17 +183,19 @@ def test_a_real_platform_is_allowed():
     assert gl_available({})[0] is True
 
 
-def test_headless_falls_back_with_a_reason_rather_than_crashing(monkeypatch):
+def test_headless_says_there_is_no_viewer_rather_than_crashing(monkeypatch):
+    """No GL means no mosaic, said in a sentence. The window still opens without one."""
     monkeypatch.setenv("SQUIDMIP_VIEWER", "napari")
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     widget, mode, msg = make_pane()
-    assert (widget, mode) == (None, "ndv")
+    assert (widget, mode) == (None, "unavailable")
     assert "OpenGL" in msg
 
 
 def test_an_unknown_viewer_name_does_not_silently_disable_the_viewer(monkeypatch):
+    """A typo must cost you nothing. It resolves to napari, exactly as an empty value does."""
     monkeypatch.setenv("SQUIDMIP_VIEWER", "wat")
     _widget, mode, msg = make_pane()
-    assert mode in ("napari", "ndv")
-    if mode == "ndv":
-        assert msg
+    assert mode in ("napari", "unavailable")
+    if mode == "unavailable":
+        assert msg, "no viewer, and no reason given"
