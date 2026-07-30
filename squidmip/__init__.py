@@ -60,6 +60,7 @@ from squidmip.projection import (
     select_fovs,
 )
 from squidmip.reader import (
+    SquidAcquisitionReader,
     SquidMultiPageTiffReader,
     SquidOMEReader,
     SquidReader,
@@ -96,6 +97,8 @@ from squidmip._spots import SpotParams, SpotResult, detect_spots, spots_op
 
 __all__ = [
     "open_reader",
+    # The NAME of that interface, for a consumer in another repo (Squid) to depend on.
+    "SquidAcquisitionReader",
     # One reader per Squid writer, all behind the same interface (IMA-254).
     "SquidReader",
     "SquidMultiPageTiffReader",

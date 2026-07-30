@@ -10,7 +10,9 @@ behind ONE interface — ``metadata`` (identical key set, micrometres, ``_um``-s
     OME-NGFF Zarr      :class:`SquidZarrReader`  (IMA-229)   ``<acq>/plate.ome.zarr/…`` or ``<acq>/zarr/…``
 
 The interface IS the seam: engine, CLI and viewer consume any of them with no ``isinstance``
-check and no parallel API.
+check and no parallel API. That interface now has a NAME -- :class:`SquidAcquisitionReader`, a
+``runtime_checkable`` Protocol -- because a seam Squid is expected to depend on cannot be four
+undeclared duck types. See its docstring for why a Protocol rather than a base class.
 
 COVERAGE FOLLOWS THE SPEC, NOT THE LOCAL DISK (IMA-254). The writer list above is read out of
 ``control/core/job_processing.py`` (``SaveImageJob``, ``SaveOMETiffJob``, ``SaveZarrJob``) and
@@ -76,7 +78,7 @@ import json
 import re
 import warnings
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Protocol, runtime_checkable
 
 import numpy as np
 import tifffile
@@ -84,6 +86,75 @@ import tifffile
 from squidmip._acquisition import Acquisition, load_acquisition_metadata
 from squidmip._channels import fallback_color, load_channel_yaml, resolve_channels
 from squidmip.contract import check_plate_contract
+
+
+@runtime_checkable
+class SquidAcquisitionReader(Protocol):
+    """The NAME for what :func:`open_reader` returns: a reader over one Squid acquisition.
+
+    WHY THIS EXISTS. The four readers below already share one interface, and the module docstring
+    says so ("the interface IS the seam"). Inside this repo that is true and duck typing is
+    enough: four classes, one test suite, every consumer written against all four. Across a REPO
+    BOUNDARY it is not a contract. SquidXplorer is a child node of Squid software (v1 opens from
+    a button in Squid, v2 replaces its mosaic and multi-channel views), so Squid needs something
+    to depend on, and until now there was no name at all -- not a base class, not a Protocol, so
+    an annotation on Squid's side could only say ``SquidReader`` (one of the four, and the wrong
+    one for a Zarr acquisition) or nothing.
+
+    WHY A PROTOCOL AND NOT AN ABC. Two reasons, both about the merge being a no-op rather than a
+    translation layer:
+
+    1. **It describes the four without touching them.** An ABC would need either four ``class X(
+       SquidAcquisitionReader)`` edits (a new MRO and a new ``__init_subclass__`` surface on
+       classes whose behaviour must not change) or four ``register()`` calls, which buy no static
+       checking and no error at definition time. This Protocol is structural: it is satisfied by
+       what the classes already do, and adding it changed no reader's behaviour.
+    2. **Squid's own objects can satisfy it without inheriting from ours.** The seam Squid offers
+       is a live per-plane feed (``signal_zarr_frame_written(fov, time_point, z_index,
+       channel_name, region_idx)``) and an ``extra_job_classes`` hook, so the natural
+       Squid-side implementation is an in-process reader over the acquisition it is currently
+       writing, not a subclass of a folder-walking TIFF reader. Nominal typing would force a
+       dependency in the wrong direction.
+
+    WHAT IT PINS. Exactly what all four already implement, and nothing more:
+
+    ``metadata``    the acquisition's identity, one identical key set across the four (see
+                    :class:`squidmip._acquisition.Acquisition`), micrometres, ``_um``-suffixed.
+                    A property, computed lazily and cached on first access.
+    ``read``        one 2-D plane in the native dtype.
+    ``plane_ref``   ``(path, page_index)`` for one plane, so a viewer can register the bytes on
+                    disk without copying them.
+
+    ``plane_path`` is deliberately NOT here: only the two TIFF readers have one, because only a
+    TIFF plane is a file. A Protocol member that two of four implementations lack is a lie that
+    type-checks.
+
+    PARAMETER NAMES ARE TODAY'S, ON PURPOSE. ``read(region, fov, channel, z, t=0)`` uses ``z``
+    and ``t`` where the naming law wants Squid's ``z_level`` and ``time_point``. Renaming them
+    here would either be a lie about the four implementations or a keyword-argument break in
+    every consumer; the rename is its own item (it is on the RENAME list in the data-model
+    reference) and this Protocol is a description of what exists, not a wish. ``region`` likewise
+    stays ``region`` in the signature while every new key and doc says ``region_id``.
+
+    RUNTIME CHECKING, AND ITS ONE SHARP EDGE. ``runtime_checkable`` makes ``isinstance`` work,
+    which is what lets a test assert all four satisfy this. It checks for the ATTRIBUTES only,
+    never their signatures, so it is a smoke test and not the contract. And because ``metadata``
+    is a non-method member, ``issubclass`` is unavailable (``TypeError`` by design in ``typing``)
+    and, on Python < 3.12, ``isinstance`` reaches the attribute through ``hasattr``, which RUNS
+    the lazy ``metadata`` property: an ``isinstance`` check against an unreadable acquisition can
+    therefore answer False for a class that does implement this. Check instances you have already
+    opened, and never use ``isinstance`` in place of ``open_reader``'s own loud dispatch.
+    """
+
+    @property
+    def metadata(self) -> dict:  # pragma: no cover - protocol declaration
+        ...
+
+    def read(self, region, fov, channel, z, t=0):  # pragma: no cover - protocol declaration
+        ...
+
+    def plane_ref(self, region, fov, channel, z, t=0) -> tuple:  # pragma: no cover - protocol
+        ...
 
 # region has no underscore; fov and z are ints; channel is the remainder (may contain _ and -).
 _STEM_RE = re.compile(r"^(?P<region>[^_]+)_(?P<fov>\d+)_(?P<z>\d+)_(?P<channel>.+)$")
@@ -530,8 +601,13 @@ def _classify_tiff_folder(folder: Path) -> tuple[int, int, list]:
     return individual, stacks, other
 
 
-def open_reader(path) -> "SquidReader":
+def open_reader(path) -> SquidAcquisitionReader:
     """Detect the acquisition format at *path* and return a reader.
+
+    The return annotation is the interface, not one implementation: this returns whichever of the
+    four readers matches the layout, and every one of them satisfies
+    :class:`SquidAcquisitionReader`. (It said ``-> "SquidReader"`` until the Protocol existed,
+    which was wrong for three of the four dispatch targets.)
 
     Dispatch covers every writer in ``control/core/job_processing.py`` (IMA-254). The mapping,
     verified against that module rather than against whichever acquisitions happen to be on a
