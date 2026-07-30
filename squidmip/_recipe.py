@@ -15,6 +15,12 @@ carries its own extent and its own substance, so a plate built from several runs
 from that cell's declaration instead of comparing cells and special-casing the disagreement. Bare
 arrays are refused. See :mod:`squidmip._result` for why comparison is the wrong shape.
 
+:func:`census` (Task 3, 2026-07-29) is the read half: it groups cache entries by chain and returns
+``{chain: [address]}``, the plurality chain and the divergent cells. It is HERE and not in the
+viewer because "what is on this plate" is a question about the cache. :meth:`Recipe.label` and
+:meth:`RecipeChain.label` are the one renderer that turns a chain into words a legend can show, so
+a legend never has to show a hash.
+
 This module is pure Python, no Qt, no numpy: the model, testable in isolation. The GUI layer builds
 recipes from what a window shows and applies them by registering keys the cache computes lazily.
 """
@@ -27,7 +33,8 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from squidmip._result import Result
+from squidmip._address import Address
+from squidmip._result import Result, composite_channels
 
 #: Recipe kinds. OPERATOR is a data transform (mip, stitch, decon, ...); LUT is a contrast transform
 #: (per-channel contrast_limits + colormap). Both are transforms, so both flow through one path.
@@ -53,6 +60,32 @@ class Recipe:
             sort_keys=True, separators=(",", ":"), default=str,
         )
         return hashlib.sha1(blob.encode("utf-8")).hexdigest()[:16]
+
+    def label(self) -> str:
+        """What a HUMAN reads: ``mip``, ``decon(sigma=2.0)``, ``contrast(DAPI,GFP)``.
+
+        Never the key. Task 3's legend has to name what produced a cell, and a sha1 prefix cannot
+        be un-hashed, so the label is derived from the recipe itself.
+
+        This is the ONE renderer for a recipe in this application: ``_viewer._action_label``, which
+        writes the console's ``[3] A1 decon(sigma=2.0) started``, delegates here. Two spellings for
+        one transform is the drift the naming law (see :mod:`squidmip._address`) exists to stop, and
+        a legend and a console disagreeing about the same run is exactly where it would start.
+
+        Parameters are SORTED, so the same call always renders the same string and two runs can be
+        told apart by eye. A LUT names its channels rather than dumping their windows: a legend row
+        has to stay one line, and the per-channel limits are the contrast panel's business.
+        """
+        if self.kind == LUT:
+            per = (self.params or {}).get("per_channel") or {}
+            return f"{self.name}({','.join(sorted(str(c) for c in per))})" if per else str(self.name)
+        if not self.params:
+            return str(self.name)
+        args = ", ".join(f"{k}={self.params[k]}" for k in sorted(self.params))
+        return f"{self.name}({args})"
+
+    def __str__(self) -> str:
+        return self.label()
 
     def to_dict(self) -> dict:
         return {"kind": self.kind, "name": self.name, "params": dict(self.params)}
@@ -90,6 +123,22 @@ class RecipeChain:
 
     def is_empty(self) -> bool:
         return not self.recipes
+
+    def label(self) -> str:
+        """``mip + decon(sigma=2.0)``. The chain, in order, in words.
+
+        ``+`` and not ``->`` because the legend row is read left to right as "this, then that", and
+        an arrow in a 596 px pane reads as a control rather than as prose.
+
+        An EMPTY chain is ``raw``, which is this application's existing word for the untransformed
+        layer (``PlateOverview._active`` starts at ``"raw"``, the plate title says ``· raw``). A
+        cell that had nothing applied to it is a real thing to say in a legend, and saying it in the
+        word already on screen beats inventing a second one for the same state.
+        """
+        return " + ".join(r.label() for r in self.recipes) if self.recipes else "raw"
+
+    def __str__(self) -> str:
+        return self.label()
 
     def to_script(self) -> str:
         """A tiny, human-readable, re-loadable JSON script. "Copy an operator" yields this string;
@@ -216,3 +265,145 @@ def copy_chain(chain: RecipeChain) -> str:
 def paste_chain() -> RecipeChain:
     """The chain currently on the clipboard (empty chain if nothing was copied)."""
     return CLIPBOARD.get("chain") or RecipeChain()
+
+
+# --- the plate census: which recipes made this plate, and which cells diverge --------------------
+#
+# Task 3 (2026-07-29): combine two runs in one plate view. The workflow it serves is real and
+# ordinary -- dial parameters on A1 alone, run the other 95 with what you learned, look at the whole
+# plate -- and Julio's decision was PER-CELL IDENTITY: a mixed-recipe plate is legal.
+#
+# THIS LIVES IN THE MODEL, NOT IN THE PAINTER. "What is on this plate" is a question about the
+# CACHE: the entries are already keyed (scope, version, chain), so two runs are already two keys
+# under one node and the answer is a GROUPING of what is there. A painter asking it would have to
+# hold plate state to answer, and holding it is how the disclosure ends up bolted to the paint.
+#
+# IT GROUPS. IT DOES NOT COMPARE. Grouping asks each entry which bucket it belongs in; comparing
+# asks two entries whether they agree. An earlier draft of Task 3 proposed the second thing --
+# detect a mixed plate, warn about it -- and Julio banned it, because the next divergence (z depth,
+# pixel size, dtype) would need its own comparison, its own warning and its own test. Every channel
+# set below is read from a cell's own Substance via composite_channels; nothing here holds two
+# results at once, and tests/test_result.py asserts that over this module's AST.
+
+@dataclass(frozen=True)
+class ChainCensus:
+    """One chain's share of a plate: what it is, which cells it made, what those cells carry.
+
+    Exactly the three things the plan says a legend row must show, and no more: a HUMAN label
+    (:meth:`label`, from the recipes, never a hash), a cell count, and a channel set read from the
+    cells' declarations.
+    """
+
+    chain: RecipeChain
+    addresses: "tuple" = ()      # the cells this chain produced, first-seen order, deduplicated
+    channels: "tuple" = ()       # the UNION of what those cells declare (composite_channels)
+    diverges: bool = False       # this is NOT the plurality chain, so its cells carry the mark
+
+    @property
+    def key(self) -> str:
+        """The chain's content hash. For identity only. It must never reach a legend."""
+        return self.chain.key()
+
+    @property
+    def count(self) -> int:
+        """Cells, not entries. Two runs of one chain over one cell are one cell."""
+        return len(self.addresses)
+
+    def label(self) -> str:
+        """``mip + decon(sigma=2.0)``. See :meth:`RecipeChain.label`."""
+        return self.chain.label()
+
+    def __str__(self) -> str:
+        return f"{self.label()}  {self.count} cell(s)  {','.join(self.channels)}"
+
+
+@dataclass(frozen=True)
+class PlateCensus:
+    """What a plate is made of. The three things Task 3 asks for, in one object.
+
+    ``{chain: [address]}`` is :attr:`by_chain`, keyed by the chain's KEY rather than by the chain
+    object, for a blunt reason: ``Recipe.params`` is a dict, so a ``Recipe`` (and therefore a
+    ``RecipeChain``) is unhashable and cannot be a dict key. The chain OBJECT is not lost -- it is
+    on every :class:`ChainCensus` in :attr:`groups`, which is what lets a legend read words instead
+    of a hash.
+    """
+
+    groups: "tuple" = ()                          # ChainCensus per chain, first-seen order
+    plurality: "Optional[ChainCensus]" = None     # the chain that made the most cells
+    divergent: "tuple" = ()                       # cells a NON-plurality chain made
+
+    @property
+    def by_chain(self) -> dict:
+        """``{chain key: (address, ...)}``, the shape the plan specifies."""
+        return {g.key: g.addresses for g in self.groups}
+
+    @property
+    def is_mixed(self) -> bool:
+        """More than one chain is present, so the plate must SAY SO ON ITS FACE.
+
+        The legend's visibility is this, and nothing else. Earned expensively on 2026-07-28, when a
+        tooltip promised a "3D view (AGAVE)..." button the app did not have and a passing test held
+        that phantom in place for weeks: a plate that is showing two recipes discloses it in the
+        window, not in a hover.
+        """
+        return len(self.groups) > 1
+
+    def __str__(self) -> str:
+        return " | ".join(str(g) for g in self.groups) if self.groups else "empty"
+
+
+def census(source: "Any" = None) -> PlateCensus:
+    """Group *source*'s entries by chain: ``{chain: [address]}``, the plurality, the divergent set.
+
+    *source* is a :class:`ResultCache` or any iterable of :class:`Entry` -- a window censuses the
+    process-wide cache filtered to ITS OWN cells (``e.result.region_id in self._fov_index``), which
+    is a membership test on one entry and never a comparison of two.
+
+    An address is ``Address(region_id)``: on a plate a CELL IS A REGION, so that is the granularity
+    the legend counts and the granularity a border can be drawn around. An ROI inside a cell is a
+    ``bbox_um`` on an extent and is not a cell (see :mod:`squidmip._address`).
+
+    PLURALITY is the chain with the most cells, ties broken by which was seen first. A tie is
+    stable rather than meaningful, and that is stated rather than hidden: on a 50/50 plate the
+    marked half is the second-seen one, and the legend still lists both chains with both counts, so
+    nothing is being concealed by the choice.
+
+    DIVERGENT is every cell some non-plurality chain produced. A cell that carries BOTH the
+    plurality chain's result and another one IS divergent: it holds something the rest of the plate
+    does not, which is the whole reason a mark exists.
+    """
+    entries = source.entries() if hasattr(source, "entries") else list(source or ())
+
+    grouped: "OrderedDict[str, dict]" = OrderedDict()
+    for entry in entries:
+        bucket = grouped.setdefault(
+            entry.chain.key(), {"chain": entry.chain, "cells": OrderedDict(), "results": []})
+        bucket["cells"].setdefault(Address(entry.result.region_id), None)
+        bucket["results"].append(entry.result)
+
+    counted = tuple(
+        ChainCensus(chain=b["chain"], addresses=tuple(b["cells"]),
+                    channels=composite_channels(b["results"]))
+        for b in grouped.values())
+
+    # max() returns the FIRST maximal element, which is what makes the tie rule "first seen wins".
+    biggest = max(counted, key=lambda g: g.count, default=None)
+    plurality_key = None if biggest is None else biggest.key
+
+    # ``diverges`` is decided HERE, once, so that the legend and the plate's border read the same
+    # fact rather than each deciding what "divergent" means. A painter that re-derived it is a
+    # second definition, and two definitions of one word is how the two disagree by one cell.
+    groups = tuple(
+        ChainCensus(chain=g.chain, addresses=g.addresses, channels=g.channels,
+                    diverges=(plurality_key is not None and g.key != plurality_key))
+        for g in counted)
+    plurality = next((g for g in groups if not g.diverges), None) if groups else None
+
+    divergent: "OrderedDict[Address, None]" = OrderedDict()
+    for group in groups:
+        if not group.diverges:
+            continue
+        for address in group.addresses:
+            divergent.setdefault(address, None)
+
+    return PlateCensus(groups=groups, plurality=plurality, divergent=tuple(divergent))

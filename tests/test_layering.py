@@ -52,6 +52,9 @@ QT_BINDINGS = frozenset({"PyQt5", "PyQt6", "PySide2", "PySide6", "qtpy"})
 #: here and a line in a commit message rather than happening as a side effect of one import.
 GUI_MODULES = frozenset({
     "_layer_tree",       # the grouped layer tree (a QTreeView over napari's item model)
+    "_legend",           # Task 3: the mixed-recipe legend painted on the plate. A deliberate
+    #                      GUI addition: it exists to say on the plate's FACE that more than one
+    #                      recipe is present, so it cannot live below the Qt boundary.
     "_logpanel",         # the log PANEL (the Qt widget). `_logpane`, no 'l', is the Qt-free bus.
     "_napari_pane",
     "_op_panels",
