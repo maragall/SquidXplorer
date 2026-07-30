@@ -46,7 +46,9 @@ dependencies = [
 # ome-zarr-models: official OME-NGFF v0.5 pydantic schema — validates written plate metadata
 # in tests (test-time only; the runtime writer stays lean, no extra runtime dep).
 test = ["pytest>=7.0", "ome-zarr-models>=1.7"]
-# gui: the MIP tool desktop app. PyQt5 + napari + ndviewer_light (the embedded detail viewers).
+# gui: the MIP tool desktop app. Qt (via qtpy) + napari. ndviewer_light was removed on
+# 2026-07-30: napari is the renderer and the second stack imported PyQt5 at module scope,
+# which cannot share a process with a Qt6 napari.
 # The headless pipeline (reader/projection/engine/output) never imports these, so the CLI installs
 # without them.
 #
@@ -73,7 +75,6 @@ gui = [
     "PyQt5>=5.15",
     "napari>=0.7,<0.8",
     "psutil>=5.9",
-    "ndviewer_light @ git+https://github.com/maragall/ndviewer_light@main",
 ]
 
 [project.scripts]
@@ -81,7 +82,8 @@ squidmip = "squidmip._cli:main"           # headless CLI (IMA-186): MIP a plate 
 squidmip-view = "squidmip._viewer:main"   # the MIP tool desktop app
 
 [tool.hatch.metadata]
-allow-direct-references = true   # permit the ndviewer_light @ git+... URL in the [gui] extra
+# allow-direct-references was here ONLY for the ndviewer_light git+ URL, which is gone.
+# Every [gui] dependency is now a plain PyPI release, so a wheel build needs no exemption.
 
 [tool.hatch.build.targets.wheel]
 packages = ["squidmip"]

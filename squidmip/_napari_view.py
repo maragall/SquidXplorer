@@ -96,29 +96,49 @@ VIEWER_ENV = "SQUIDMIP_VIEWER"
 _NAPARI = "napari"
 META_KEY = "squidmip"
 
-#: Spellings of the ndviewer_light fallback accepted in SQUIDMIP_VIEWER.
-_NDV_NAMES = ("ndv", "ndviewer", "ndviewer_light")
+#: Spellings that used to select the ndviewer_light fallback. Kept ONLY to recognise them and
+#: say what happened, so an old launcher, script or shell profile that still exports one gets a
+#: sentence instead of a viewer that quietly is not the one it asked for.
+_RETIRED_NDV_NAMES = ("ndv", "ndviewer", "ndviewer_light")
 
 
 def resolve_viewer(env: Optional[dict] = None) -> str:
-    """Which viewer to build: ``"napari"`` (default) or ``"ndv"``.
+    """Which viewer to build. There is exactly one: ``"napari"``.
 
     THE single place this is decided. ``_napari_pane.make_pane`` asks this rather than parsing
     the variable itself — two readers of one environment variable is exactly the knowledge
     duplication that produces controls disagreeing about what is on screen.
 
-    napari is the default now that the gate passed (docs/napari-gate.md). The ndviewer_light
-    fallback stays reachable by name so a bad napari path never leaves the window without a
-    viewer during a visual-feedback round. An UNRECOGNISED value resolves to napari rather than
-    silently disabling the viewer: a typo must not cost you the pane.
+    **The ndviewer_light fallback is deleted** (Julio, 2026-07-30; foreshadowed in
+    ``_mosaic_source.py``: "I don't want to have an ndviewer light fall back", and in
+    ``docs/SCOPE.md``: "a half-alive second viewer stack. Delete, do not maintain."). Two
+    reasons, and the second is the one that forced it:
+
+    * napari is the renderer and won a written gate (``docs/napari-gate.md``), so the second
+      stack was carrying no load.
+    * ``ndviewer_light.core`` imports PyQt5 at module scope. Under Qt6 that drags PyQt5 into the
+      process, vispy then refuses to load PyQt6 beside it, and the process aborts. A fallback
+      that cannot coexist with the renderer it is a fallback FOR is not a safety net.
+
+    This function is kept, rather than deleted along with the branch, because it is still the one
+    place the viewer choice is named, and because callers must keep asking exactly one thing.
     """
     src = os.environ if env is None else env
     want = str(src.get(VIEWER_ENV, "")).strip().lower()
-    return "ndv" if want in _NDV_NAMES else _NAPARI
+    if want in _RETIRED_NDV_NAMES:
+        # Said out loud, never silently ignored: the user asked for a specific viewer and is not
+        # getting it. NO FALLBACKS means the substitution is announced, not hidden.
+        log.warning(
+            "%s=%s asks for the ndviewer_light fallback, which was deleted on 2026-07-30 "
+            "(it imports PyQt5 at module scope and cannot share a process with a Qt6 napari). "
+            "Building napari instead. Drop the variable to silence this.",
+            VIEWER_ENV, want,
+        )
+    return _NAPARI
 
 
 def napari_enabled(env: Optional[dict] = None) -> bool:
-    """True when the napari view is the selected viewer."""
+    """True when the napari view is the selected viewer, which is now always."""
     return resolve_viewer(env) == _NAPARI
 
 

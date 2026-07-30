@@ -288,10 +288,16 @@ def _tile(levels):
 
 
 def _rgb(ov) -> np.ndarray:
-    """Whatever the plate is currently showing, as an (H, W, 3) uint8 array."""
+    """Whatever the plate is currently showing, as an (H, W, 3) uint8 array.
+
+    ``sizeInBytes()`` rather than ``byteCount()``: byteCount was removed in Qt6, and sizeInBytes
+    exists in both bindings (Qt 5.10+), so this reads pixels under either one. This single helper
+    was 10 of the 19 Qt6 failures in this file, which is why the whole-suite count of "25" was
+    never 25 problems.
+    """
     img = ov._active_source()
     ptr = img.bits()
-    ptr.setsize(img.byteCount())
+    ptr.setsize(img.sizeInBytes())
     row = np.frombuffer(ptr, np.uint8).reshape(img.height(), img.bytesPerLine())
     return row[:, : img.width() * 3].reshape(img.height(), img.width(), 3)
 
@@ -774,7 +780,9 @@ def test_wheel_ignored_during_marquee(qapp):
     ov = _sel_overview()
     ov.mousePressEvent(_mouse("press", _pt(0, 0), Qt.ShiftModifier))
     cd_before = ov._cd
-    ov.wheelEvent(QWheelEvent(QPoint(60, 60), QPoint(60, 60), QPoint(0, 0), QPoint(0, 120),
+    # QPointF, not QPoint: Qt6 dropped the QPoint overload for event positions. QPointF is
+    # accepted by both bindings, so this stays binding-agnostic rather than becoming a cutover.
+    ov.wheelEvent(QWheelEvent(QPointF(60, 60), QPointF(60, 60), QPoint(0, 0), QPoint(0, 120),
                               Qt.NoButton, Qt.NoModifier, Qt.NoScrollPhase, False))
     assert ov._cd == cd_before                                  # zoom did NOT happen
 
@@ -809,7 +817,9 @@ def test_leave_clears_the_marquee_so_zoom_survives(qapp):
     ov.leaveEvent(QEvent(QEvent.Leave))                         # grab lost; no release ever arrives
     assert ov._marquee is None
     cd_before = ov._cd
-    ov.wheelEvent(QWheelEvent(QPoint(60, 60), QPoint(60, 60), QPoint(0, 0), QPoint(0, 120),
+    # QPointF, not QPoint: Qt6 dropped the QPoint overload for event positions. QPointF is
+    # accepted by both bindings, so this stays binding-agnostic rather than becoming a cutover.
+    ov.wheelEvent(QWheelEvent(QPointF(60, 60), QPointF(60, 60), QPoint(0, 0), QPoint(0, 120),
                               Qt.NoButton, Qt.NoModifier, Qt.NoScrollPhase, False))
     assert ov._cd != cd_before                                  # zoom works again
 
@@ -1824,7 +1834,7 @@ def test_mosaic_places_each_fov_at_its_own_stage_offset(qapp, stub_detail, squid
 
 def _cell_of(img, ri, ci):
     """Crop cell (ri, ci) out of the plate's composited montage (exactly _CELL px per cell)."""
-    buf = img.constBits().asstring(img.byteCount())
+    buf = img.constBits().asstring(img.sizeInBytes())
     a = np.frombuffer(buf, np.uint8).reshape(img.height(), img.bytesPerLine() // 3, 3)
     a = a[:, :img.width(), :]
     return a[ri * V._CELL:(ri + 1) * V._CELL, ci * V._CELL:(ci + 1) * V._CELL].astype(int)
@@ -1943,7 +1953,7 @@ def test_mosaic_cell_composites_real_structured_pixels(qapp, stub_detail, squid_
 def _plate_rgb(ov):
     """The overview's composited montage as (H, W, 3) uint8 — the pixels, not the chrome."""
     img = ov._active_source()
-    buf = img.constBits().asstring(img.byteCount())
+    buf = img.constBits().asstring(img.sizeInBytes())
     a = np.frombuffer(buf, np.uint8).reshape(img.height(), img.bytesPerLine() // 3, 3)
     return a[:, :img.width(), :]
 
@@ -3097,7 +3107,8 @@ def test_a_real_plate_gesture_is_what_minerva_exports(qapp, stub_detail, squid_d
     box = ov._cd * 0.3
 
     def send(kind, x, y, buttons, mods=Qt.ShiftModifier):
-        qapp.sendEvent(ov, QMouseEvent(kind, QPoint(int(x), int(y)), Qt.LeftButton,
+        # QPointF: see the QWheelEvent note above, same Qt6 removal.
+        qapp.sendEvent(ov, QMouseEvent(kind, QPointF(int(x), int(y)), Qt.LeftButton,
                                        buttons, mods))
 
     # 1. THE SHIFT-DRAG: opens a window over exactly the boxed well, and selects nothing.
@@ -3752,7 +3763,7 @@ def _montage_px(qapp, ov):
     stays 'different' (or 'identical') for reasons that have nothing to do with layers."""
     ov.recomposite(ov._active); qapp.processEvents()
     img = ov._active_source()
-    a = np.frombuffer(img.constBits().asstring(img.byteCount()), np.uint8)
+    a = np.frombuffer(img.constBits().asstring(img.sizeInBytes()), np.uint8)
     a = a.reshape(img.height(), img.bytesPerLine() // (img.depth() // 8), -1)
     return a[:, :img.width(), :].copy()
 
@@ -4127,7 +4138,7 @@ def _region_crop(ov, region):
     rc = next(k for k, v in ov._by_rc.items() if v == region)
     x, y, w, h = ov._cell_rect(*rc)
     img = ov.grab().toImage().convertToFormat(QImage.Format_RGB32)
-    a = np.frombuffer(img.constBits().asstring(img.byteCount()), np.uint8)
+    a = np.frombuffer(img.constBits().asstring(img.sizeInBytes()), np.uint8)
     a = a.reshape(img.height(), img.bytesPerLine() // 4, 4)[:, :img.width(), :3]
     return a[max(0, int(y)):int(y + h), max(0, int(x)):int(x + w)]
 
@@ -4291,7 +4302,7 @@ def test_ima253_empty_slots_are_visibly_distinct_from_occupied_ones(qapp, stub_d
     ov.set_carrier(plate)
     ov.resize(600, 240)
     img = ov.grab().toImage().convertToFormat(QImage.Format_RGB32)
-    a = np.frombuffer(img.constBits().asstring(img.byteCount()), np.uint8)
+    a = np.frombuffer(img.constBits().asstring(img.sizeInBytes()), np.uint8)
     a = a.reshape(img.height(), img.bytesPerLine() // 4, 4)[:, :img.width(), :3]
 
     def _cell_px(ci):

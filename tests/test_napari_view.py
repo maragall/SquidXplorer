@@ -46,11 +46,27 @@ def test_napari_is_the_default_viewer_now_that_the_gate_passed():
     assert napari_enabled({}) is True
 
 
-def test_the_ndviewer_fallback_stays_reachable_by_name():
-    """A bad napari path must never leave the window with no viewer during a feedback round."""
+def test_a_retired_ndviewer_name_still_builds_napari_and_says_so(caplog):
+    """The fallback is gone, so asking for it by name must announce the substitution.
+
+    This test asserted the opposite until 2026-07-30: that ``SQUIDMIP_VIEWER=ndv`` reached
+    ndviewer_light, so "a bad napari path never leaves the window with no viewer". That stack was
+    deleted, because napari won the written gate and because ndviewer_light imports PyQt5 at
+    module scope and so cannot share a process with a Qt6 napari.
+
+    What is pinned now is the NO FALLBACKS shape of it. A stale variable in someone's shell
+    profile or launcher must not silently hand them a different viewer than the one they named:
+    they get napari AND a sentence in the log saying why. Silence here would be the very defect
+    the original fallback was written to avoid, just pointing the other way.
+    """
+    import logging
+
     for spelling in ("ndv", "ndviewer", "ndviewer_light", "  NDV  "):
-        assert resolve_viewer({"SQUIDMIP_VIEWER": spelling}) == "ndv", spelling
-    assert napari_enabled({"SQUIDMIP_VIEWER": "ndv"}) is False
+        with caplog.at_level(logging.WARNING):
+            caplog.clear()
+            assert resolve_viewer({"SQUIDMIP_VIEWER": spelling}) == "napari", spelling
+        assert "deleted" in caplog.text, f"{spelling!r} was retired in silence"
+    assert napari_enabled({"SQUIDMIP_VIEWER": "ndv"}) is True
 
 
 def test_a_typo_does_not_silently_cost_you_the_viewer():

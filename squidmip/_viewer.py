@@ -473,15 +473,22 @@ def _make_mosaic_pane(show_docks: bool = True):
     """Build a napari mosaic viewer, or report why it could not be built.
 
     Returns ``(pane_or_None, mode, message)``. Import failures are caught here rather than at
-    module import so that a machine without napari still opens the window with ndviewer_light —
-    and with a VISIBLE sentence saying so, never a silent downgrade.
+    module import so that a machine without napari still OPENS THE WINDOW, with a visible
+    sentence saying there is no viewer and why. The window is worth having: the plate, the
+    console and the operators all still work without a mosaic.
+
+    There is no second renderer to fall back to as of 2026-07-30. ``mode`` is ``"unavailable"``
+    and the message is the whole story, which is the point: a named failure beats a silent
+    downgrade to a different picture.
     """
     try:
         from squidmip._napari_pane import make_pane
 
         return make_pane(show_docks=show_docks)
     except Exception as exc:                     # noqa: BLE001 - surfaced, not swallowed
-        return None, "ndv", f"napari viewer unavailable ({type(exc).__name__}: {exc}) — using ndviewer_light."
+        return None, "unavailable", (
+            f"napari viewer could not be imported ({type(exc).__name__}: {exc}). There is no mosaic."
+        )
 
 
 class PlateWindow(QMainWindow):

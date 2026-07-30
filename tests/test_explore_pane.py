@@ -226,7 +226,7 @@ def test_the_control_well_lands_in_pane_3_not_in_its_own_window(win):
 def test_a_viewer_that_cannot_be_built_is_stated_in_the_tab(win, monkeypatch):
     """NO SILENT FAILURE: a tab with no viewer must SAY why, in a sentence the user can read."""
     monkeypatch.setattr(V.PlateWindow, "_make_explore_viewer",
-                        lambda self: (None, "ndv", "napari needs OpenGL — no viewer here."))
+                        lambda self: (None, "unavailable", "napari needs OpenGL — no viewer here."))
     key = win.open_exploration_tab(["B3"])
     tab = win._op_tabs[key]
     assert tab.viewer is None
@@ -242,9 +242,9 @@ def test_the_default_viewer_constructor_is_pane_2s(qapp, monkeypatch):
     """
     calls = []
     monkeypatch.setattr(V, "_make_mosaic_pane",
-                        lambda **kw: (calls.append(kw), (None, "ndv", "x"))[1])
+                        lambda **kw: (calls.append(kw), (None, "unavailable", "x"))[1])
     w = V.PlateWindow.__new__(V.PlateWindow)          # no Qt window needed to test the delegation
-    assert V.PlateWindow._make_explore_viewer(w) == (None, "ndv", "x")
+    assert V.PlateWindow._make_explore_viewer(w) == (None, "unavailable", "x")
     # ...and it asks for the canvas WITHOUT napari's control docks: contrast and channel
     # visibility have one owner, the centre viewer, and a second full control surface in a 380 px
     # column both duplicates it and eclipses the mosaic it is meant to be showing.
