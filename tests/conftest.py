@@ -68,7 +68,7 @@ def pytest_sessionfinish(session, exitstatus):
 
         shutil.rmtree(_CACHE_DIR, ignore_errors=True)
     try:
-        from PyQt5.QtWidgets import QApplication
+        from qtpy.QtWidgets import QApplication
     except ImportError:
         return
     app = QApplication.instance()
@@ -113,7 +113,7 @@ def pytest_configure(config):
     if any(m.startswith("PySide") for m in sys.modules):
         return
     try:
-        from PyQt5.QtWidgets import QApplication
+        from qtpy.QtWidgets import QApplication
     except ImportError:
         return                      # headless CI without the [gui] extra: nothing to pin
     _QT_APP = QApplication.instance() or QApplication([])
@@ -600,7 +600,7 @@ def sim_1536wp():
 # hidden: napari's own rendering is not exercised here, and never was under offscreen.
 def _stub_pane_classes():
     """Build the stub classes lazily: conftest must import without the [gui] extra."""
-    from PyQt5.QtWidgets import QWidget
+    from qtpy.QtWidgets import QWidget
 
     class StubLayer:
         """A napari image layer as RegionViewer reads it back: `.data` is the level list."""

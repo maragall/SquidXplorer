@@ -43,11 +43,11 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("qtpy")
 if "PySide6" in sys.modules or "PySide2" in sys.modules:
     pytest.skip("PySide already loaded - Qt binding conflict", allow_module_level=True)
 
-from PyQt5.QtWidgets import QApplication
+from qtpy.QtWidgets import QApplication
 
 from squidmip import _viewer as V
 

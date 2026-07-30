@@ -6,7 +6,7 @@ is actually doing something rather than staying idle." And: "The logger is super
 
 WHY PYTHON'S ``logging`` IS THE SOURCE, AND NOT A SIGNAL OF OUR OWN
 ------------------------------------------------------------------
-The obvious design is a ``pyqtSignal(str)`` that our code emits into a text box. maragall/stitcher
+The obvious design is a ``Signal(str)`` that our code emits into a text box. maragall/stitcher
 does exactly that and it works — for the code that remembers to emit.
 
 But this application's whole value is ORCHESTRATING OTHER PEOPLE'S LIBRARIES: tilefusion, petakit,

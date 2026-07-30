@@ -44,9 +44,9 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from PyQt5.QtCore import QObject, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QFont
-from PyQt5.QtWidgets import (
+from qtpy.QtCore import QObject, Qt, QTimer, Signal
+from qtpy.QtGui import QFont
+from qtpy.QtWidgets import (
     QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QSizePolicy, QVBoxLayout, QWidget,
 )
 
@@ -101,7 +101,7 @@ class _LogBridge(QObject):
     """The thread hop. A worker logs, the bus calls us on the worker thread, we emit a signal that
     Qt delivers QUEUED onto the GUI thread. Nothing else touches the widget from off-thread."""
 
-    line = pyqtSignal(str, str)             # (level_name, formatted_line)
+    line = Signal(str, str)             # (level_name, formatted_line)
 
 
 class LogPanel(QWidget):

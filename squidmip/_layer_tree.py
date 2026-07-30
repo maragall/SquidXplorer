@@ -63,9 +63,9 @@ from __future__ import annotations
 import re
 from typing import Any, Optional
 
-from PyQt5.QtCore import QAbstractItemModel, QEvent, QModelIndex, QSize, Qt
-from PyQt5.QtGui import QImage
-from PyQt5.QtWidgets import QFrame, QTreeView
+from qtpy.QtCore import QAbstractItemModel, QEvent, QModelIndex, QSize, Qt
+from qtpy.QtGui import QImage
+from qtpy.QtWidgets import QFrame, QTreeView
 
 from squidmip._napari_view import MosaicLayers, key_of
 

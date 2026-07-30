@@ -6,7 +6,7 @@ the carrier art's absolute origin (which `_plate` itself documents as an approxi
 """
 
 import pytest
-from PyQt5.QtWidgets import QApplication
+from qtpy.QtWidgets import QApplication
 
 from squidmip import _slide_art as SA
 
@@ -250,7 +250,7 @@ def test_paint_slides_draws_and_does_not_raise(qapp):
 
     MUTATION: make paint_slides a no-op -> the canvas stays uniform -> red.
     """
-    from PyQt5.QtGui import QColor, QImage, QPainter
+    from qtpy.QtGui import QColor, QImage, QPainter
 
     img = QImage(300, 300, QImage.Format_RGB888)
     img.fill(QColor("#0d1117"))
@@ -263,7 +263,7 @@ def test_paint_slides_draws_and_does_not_raise(qapp):
 
 
 def test_paint_slides_with_nothing_to_draw_is_a_no_op(qapp):
-    from PyQt5.QtGui import QColor, QImage, QPainter
+    from qtpy.QtGui import QColor, QImage, QPainter
 
     img = QImage(60, 60, QImage.Format_RGB888)
     img.fill(QColor("#0d1117"))
@@ -353,7 +353,7 @@ def test_status_dots_and_frames_paint_on_a_slide_without_raising(qapp):
     dot) paints over the slide art. Qt swallows paint exceptions, so render into a pixmap and
     assert it did not blow up AND put ink down.
     """
-    from PyQt5.QtGui import QColor, QPixmap
+    from qtpy.QtGui import QColor, QPixmap
 
     ov, plate = _slide_overview(qapp)
     ov._control = plate.cell_index("manual0")

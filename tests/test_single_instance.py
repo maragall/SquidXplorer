@@ -103,8 +103,8 @@ def test_the_refusal_names_the_limit_and_how_to_override(slots):
 def test_a_window_built_directly_still_takes_a_slot(slots, monkeypatch):
     """main() is not the only door. Proof scripts and debug launchers construct a PlateWindow
     themselves, which is exactly how the screen filled up, so the slot is taken on show()."""
-    pytest.importorskip("PyQt5")
-    from PyQt5.QtWidgets import QApplication
+    pytest.importorskip("qtpy")
+    from qtpy.QtWidgets import QApplication
 
     import squidmip._viewer as V
 

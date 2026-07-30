@@ -14,7 +14,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("qtpy")
 if "PySide6" in sys.modules or "PySide2" in sys.modules:
     pytest.skip("PySide already loaded - Qt binding conflict", allow_module_level=True)
 
@@ -38,7 +38,7 @@ _APP = None
 
 def _bar():
     import numpy as np
-    from PyQt5.QtWidgets import QApplication
+    from qtpy.QtWidgets import QApplication
 
     from squidmip._viewer import _ChannelBar
 
@@ -60,7 +60,7 @@ def test_the_plate_carries_no_contrast_slider_or_auto_button():
     Measured with that gate on a real window: origin/main carried 8 sliders + 4 auto buttons in
     the plate view; here it reports 'contrast: 0 sliders, 0 auto buttons in the plate view'.
     """
-    from PyQt5.QtWidgets import QPushButton, QSlider
+    from qtpy.QtWidgets import QPushButton, QSlider
 
     bar = _bar()
     assert bar.findChildren(QSlider) == []
@@ -87,7 +87,7 @@ def test_the_plate_strip_carries_NO_CONTROLS_AT_ALL():
 
     MUTATION: put any QCheckBox / QSlider / QPushButton back on the strip and this goes red.
     """
-    from PyQt5.QtWidgets import QAbstractButton, QCheckBox, QSlider
+    from qtpy.QtWidgets import QAbstractButton, QCheckBox, QSlider
 
     bar = _bar()
     assert bar.findChildren(QCheckBox) == []

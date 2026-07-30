@@ -105,9 +105,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("qtpy")
 
-from PyQt5.QtWidgets import QApplication  # noqa: E402
+from qtpy.QtWidgets import QApplication  # noqa: E402
 
 import squidmip._viewer as V  # noqa: E402
 from squidmip._command import OpenAcquisition  # noqa: E402

@@ -25,8 +25,8 @@ from dataclasses import dataclass, field
 from typing import Any, Optional, Sequence
 
 import numpy as np
-from PyQt5.QtCore import QObject, Qt, QTimer, pyqtSignal
-from PyQt5.QtWidgets import (
+from qtpy.QtCore import QObject, Qt, QTimer, Signal
+from qtpy.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
     QCheckBox,
@@ -54,11 +54,20 @@ log = get_logger("regionviewer")
 #: PyQt's C++-object-liveness oracle. The ONLY way to ask "has Qt already destroyed this widget",
 #: which a slot connected to a longer-lived object has to ask before it touches its own children.
 #: Optional so a binding without it degrades to today's behaviour rather than failing to import.
+#: sip lives under the BINDING, not under qtpy: PyQt5.sip, PyQt6.sip, and nothing at all under
+#: PySide (which uses shiboken instead). qtpy tells us which binding is live, so ask it rather than
+#: guessing, and degrade to today's behaviour when there is no sip to ask.
+_sip = None
 try:                                                     # pragma: no cover - binding detail
-    from PyQt5 import sip as _sip
-except ImportError:                                      # pragma: no cover
+    import importlib
+
+    import qtpy as _qtpy
+
+    if _qtpy.API_NAME.startswith("PyQt"):
+        _sip = importlib.import_module(f"{_qtpy.API_NAME}.sip")
+except Exception:                                        # pragma: no cover
     try:
-        import sip as _sip                               # older PyQt5 packagings
+        import sip as _sip                               # older PyQt5 packagings, top-level sip
     except ImportError:
         _sip = None
 
@@ -347,7 +356,7 @@ class RegionViewer(QMainWindow):
     joins its slider's animation thread so a close during playback cannot abort the process.
     """
 
-    closed = pyqtSignal(object)   # emits self, so the registry can drop it
+    closed = Signal(object)   # emits self, so the registry can drop it
 
     #: The open half of this window's console pair, and the region its operator layers describe.
     #: CLASS defaults as well as ``__init__`` assignments, for the same reason
@@ -1783,7 +1792,7 @@ class RegionViewer(QMainWindow):
             pass
 
     def changeEvent(self, event):                    # noqa: N802 - Qt naming
-        from PyQt5.QtCore import QEvent
+        from qtpy.QtCore import QEvent
 
         if event.type() == QEvent.ActivationChange:
             self.set_active(self.isActiveWindow())
@@ -1828,16 +1837,16 @@ class ViewerManager(QObject):
     outlive the windows that read it.
     """
 
-    windowsChanged = pyqtSignal()          # the set of open windows changed
-    memoryChanged = pyqtSignal(float)      # process RSS as a fraction 0..1 of total RAM
-    viewFocused = pyqtSignal(object)       # a window was opened/raised -> its regions (list[str])
+    windowsChanged = Signal()          # the set of open windows changed
+    memoryChanged = Signal(float)      # process RSS as a fraction 0..1 of total RAM
+    viewFocused = Signal(object)       # a window was opened/raised -> its regions (list[str])
     # A window was just SPAWNED, carrying the window itself. ``windowsChanged`` says the SET
     # changed and is what a list view wants; a subscriber that has to reach into the new window's
     # napari pane (the plate, which follows its contrast and its eye icons) needs the window, and
     # deriving "which one is new" by differencing a set is a second answer to a question the
     # spawn already knows. Emitted after the window is registered, so the registry is coherent by
     # the time anyone reads it.
-    windowOpened = pyqtSignal(object)      # -> the new RegionViewer
+    windowOpened = Signal(object)      # -> the new RegionViewer
 
     def __init__(self, reader: Any = None, meta: Optional[dict] = None,
                  parent: Optional[QObject] = None) -> None:

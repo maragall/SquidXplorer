@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import re
 
-from PyQt5.QtGui import QColor, QPalette
+from qtpy.QtGui import QColor, QPalette
 
 # --------------------------------------------------------------------------------------
 # Palette constants
@@ -161,7 +161,7 @@ def dark_palette() -> QPalette:
 
 def hline():
     """A thin horizontal divider (a 1px framed line) for separating sections in a pane."""
-    from PyQt5.QtWidgets import QFrame
+    from qtpy.QtWidgets import QFrame
 
     ln = QFrame()
     ln.setFrameShape(QFrame.HLine)

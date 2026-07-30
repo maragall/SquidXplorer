@@ -25,9 +25,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("qtpy")
 
-from PyQt5.QtWidgets import QApplication  # noqa: E402
+from qtpy.QtWidgets import QApplication  # noqa: E402
 
 from squidmip._time_point import TimePointBar  # noqa: E402
 

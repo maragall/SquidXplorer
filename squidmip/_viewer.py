@@ -57,11 +57,11 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-from PyQt5.QtCore import (  # QThread/pyqtSignal: kept for tests that build a stub worker as V.QThread
-    Qt, QThread, QTimer, pyqtSignal,  # noqa: F401 (see tests/test_viewer.py::_BlockingWorker)
+from qtpy.QtCore import (  # QThread/Signal: kept for tests that build a stub worker as V.QThread
+    Qt, QThread, QTimer, Signal,  # noqa: F401 (see tests/test_viewer.py::_BlockingWorker)
 )
-from PyQt5.QtGui import QColor, QPalette
-from PyQt5.QtWidgets import (
+from qtpy.QtGui import QColor, QPalette
+from qtpy.QtWidgets import (
     QAction, QApplication, QCheckBox, QComboBox, QDockWidget, QFileDialog, QFrame, QHBoxLayout, QLabel,
     QMainWindow, QMenu, QPlainTextEdit, QPushButton, QScrollArea, QSlider, QSpinBox,
     QSplitter, QStackedWidget, QStyleFactory, QTabBar, QVBoxLayout, QWidget,
@@ -290,19 +290,19 @@ def _scale_qss_fonts(qss: str, scale: float) -> str:
 
 
 def _signal_names(cls) -> tuple:
-    """Every pyqtSignal declared on *cls* or its bases, by attribute name.
+    """Every Signal declared on *cls* or its bases, by attribute name.
 
-    ``pyqtSignal`` is a class attribute until Qt binds it per-instance, so the class object is
+    ``Signal`` is a class attribute until Qt binds it per-instance, so the class object is
     where the declarations are discoverable. Excludes ``finished``/``started`` — QThread's own,
     which the retire path connects deliberately and must not tear down.
     """
-    from PyQt5.QtCore import pyqtSignal as _sig
+    from qtpy.QtCore import Signal as _sig
     seen, out = set(), []
     for klass in cls.__mro__:
         for name, value in vars(klass).items():
             if name in seen or name in ("finished", "started"):
                 continue
-            if isinstance(value, _sig) or type(value).__name__ in ("pyqtSignal", "unbound_signal"):
+            if isinstance(value, _sig) or type(value).__name__ in ("Signal", "unbound_signal"):
                 seen.add(name)
                 out.append(name)
     return tuple(out)

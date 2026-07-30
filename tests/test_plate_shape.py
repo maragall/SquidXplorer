@@ -1,6 +1,6 @@
 """Tests for wellplate-format inference from well ids (IMA-219).
 
-Deliberately NON-Qt: tests/test_viewer.py is behind ``pytest.importorskip("PyQt5")`` and would
+Deliberately NON-Qt: tests/test_viewer.py is behind ``pytest.importorskip("qtpy")`` and would
 silently not run headless, so the inference contract is pinned here instead.
 """
 

@@ -85,9 +85,9 @@ from __future__ import annotations
 from typing import Optional
 
 import numpy as np
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
-from PyQt5.QtGui import QImage, QPixmap
-from PyQt5.QtWidgets import (
+from qtpy.QtCore import Qt, QThread, Signal
+from qtpy.QtGui import QImage, QPixmap
+from qtpy.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFrame,
@@ -565,8 +565,8 @@ class _DeconQCWorker(QThread):
     during a QC loop is the reason nobody runs the QC loop.
     """
 
-    done = pyqtSignal(int, object, float)        # (iterations, composite, halo/core ratio)
-    failed = pyqtSignal(str)
+    done = Signal(int, object, float)        # (iterations, composite, halo/core ratio)
+    failed = Signal(str)
 
     def __init__(self, dataset, region, fov, channel, iterations, gpu, crop_half, view_half):
         super().__init__()

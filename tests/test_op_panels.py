@@ -189,14 +189,14 @@ def test_an_empty_history_is_refused_rather_than_returning_a_confident_nothing()
 import os  # noqa: E402
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-pytest.importorskip("PyQt5")
+pytest.importorskip("qtpy")
 
 import sys  # noqa: E402
 
 if "PySide6" in sys.modules or "PySide2" in sys.modules:   # pragma: no cover
     pytest.skip("a PySide binding is already loaded", allow_module_level=True)
 
-from PyQt5.QtWidgets import QApplication  # noqa: E402
+from qtpy.QtWidgets import QApplication  # noqa: E402
 
 from squidmip._op_panels import DeconQCPanel, DeconQCResultView, StitcherPanel  # noqa: E402
 

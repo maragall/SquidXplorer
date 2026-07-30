@@ -65,9 +65,9 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-from PyQt5.QtCore import Qt, QRectF, QThread, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap, QRegion
-from PyQt5.QtWidgets import QWidget
+from qtpy.QtCore import Qt, QRectF, QThread, QTimer, Signal
+from qtpy.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap, QRegion
+from qtpy.QtWidgets import QWidget
 
 from squidmip import _qtstyle
 from squidmip._budget import cache_budget
@@ -795,7 +795,7 @@ class _LoupeWorker(QThread):
     each new request) IS the coalescing. Results carry the generation they were asked for, so a
     late arrival for a stale position is dropped by the widget rather than flashing."""
 
-    ready = pyqtSignal(int, str, object, object, object)  # (gen, well, crop|None, window|None, err)
+    ready = Signal(int, str, object, object, object)  # (gen, well, crop|None, window|None, err)
 
     def __init__(self, source: _LoupeSource):
         super().__init__()
@@ -882,7 +882,7 @@ class _TileFetcher(QThread):
     destination.
     """
 
-    ready = pyqtSignal(object, object)        # (TileDescriptor, np.ndarray)
+    ready = Signal(object, object)        # (TileDescriptor, np.ndarray)
 
     def __init__(self, source, parent=None):
         super().__init__(parent)
@@ -943,10 +943,10 @@ class PlateOverview(QWidget):
     contrast re-composites from the retained pixels: no reader I/O, no re-projection, ever.
     """
 
-    hovered = pyqtSignal(str)              # region id (or "" off-plate), for the window's readout
-    wellActivated = pyqtSignal(str, int)   # (well_id, fov_index) double-clicked -> load in ndviewer
-    selectionChanged = pyqtSignal(list)    # acquired well ids the operator picked (row-major)
-    marqueeSelected = pyqtSignal(list)     # ...and specifically by a Shift-DRAG: opens an exploration
+    hovered = Signal(str)              # region id (or "" off-plate), for the window's readout
+    wellActivated = Signal(str, int)   # (well_id, fov_index) double-clicked -> load in ndviewer
+    selectionChanged = Signal(list)    # acquired well ids the operator picked (row-major)
+    marqueeSelected = Signal(list)     # ...and specifically by a Shift-DRAG: opens an exploration
                                            # tab (IMA-205). Shift+CLICK refines the selection one well
                                            # at a time and deliberately does NOT fire it — otherwise
                                            # every corrective click spawns another tab.

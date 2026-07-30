@@ -65,7 +65,7 @@ _PREAMBLE = r"""
 import json, os, sys, traceback
 os.environ.setdefault("QT_API", "pyqt5")
 import numpy as np
-from PyQt5.QtWidgets import QApplication, QVBoxLayout, QWidget
+from qtpy.QtWidgets import QApplication, QVBoxLayout, QWidget
 app = QApplication.instance() or QApplication([])
 out = {}
 try:
@@ -180,8 +180,8 @@ def test_the_3d_button_is_naparis_own_and_sits_where_a_short_pane_shows_it(tmp_p
 # napari-experimental and PartSeg -- answer this by REPLACING THE LAYER-LIST UI, not by capping
 # the layer count. This is that: a two-level view over the same layers.
 
-from PyQt5.QtCore import Qt                                          # noqa: E402
-from PyQt5.QtWidgets import QApplication                             # noqa: E402
+from qtpy.QtCore import Qt                                          # noqa: E402
+from qtpy.QtWidgets import QApplication                             # noqa: E402
 
 import numpy as np                                                   # noqa: E402
 
@@ -395,7 +395,7 @@ _MOUNT_SCRIPT = r"""
             pane.mosaic.add_mosaic(op, ch, np.zeros((16, 16), dtype="uint16"))
     app.processEvents()
 
-    from PyQt5.QtCore import Qt as _Qt
+    from qtpy.QtCore import Qt as _Qt
     tree = pane.layer_tree
 
     def descends_from(child, ancestor):
@@ -538,7 +538,7 @@ def test_the_rows_actually_PAINT_without_raising(qapp, mosaic):
     """
     import sys
 
-    from PyQt5.QtGui import QPixmap
+    from qtpy.QtGui import QPixmap
 
     from squidmip import _layer_tree as LT
 
