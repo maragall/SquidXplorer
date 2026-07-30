@@ -130,6 +130,7 @@ def _fusion_style():
 #: detection that raised, a region that would not fuse) MUST go through this and not only into an
 #: in-widget banner: a banner the user has already clicked past leaves no trace, and "the logger
 #: didn't show it" is the exact gap this closes.
+from squidmip._fontscale import rescale_fonts, scale_qss_fonts
 from squidmip._logpane import get_logger
 
 log = get_logger("viewer")
@@ -274,17 +275,11 @@ _QSS_FONT_PX_RE = re.compile(r"(?<=font-size:)\s*(\d+(?:\.\d+)?)\s*px", re.IGNOR
 
 
 def _scale_qss_fonts(qss: str, scale: float) -> str:
-    """Multiply every ``font-size:Npx`` in *qss* by *scale*, leaving the rest untouched.
+    """Alias. The implementation moved to `_fontscale` so CHILD windows can use it too.
 
-    Only the font size moves. Scaling paddings and borders too was tried and looked wrong: the
-    dark cards are drawn with 1 px hairlines that turn into muddy 2-3 px rules the moment they
-    are multiplied, and Qt already scales the whole sheet by the device pixel ratio.
-
-    Sizes floor at 8 px so shrinking the window toward the minimum cannot produce type nobody
-    can read.
+    Kept as a name here because the root window and its tests have always called it this.
     """
-    def _sub(m):
-        return f"{max(8, round(float(m.group(1)) * scale))}px"
+    return scale_qss_fonts(qss, scale)
 
     return _QSS_FONT_PX_RE.sub(_sub, qss)
 
@@ -965,40 +960,18 @@ class PlateWindow(QMainWindow):
         return w, h
 
     def _ui_scale(self) -> float:
-        """How much bigger the window is than the shape the type was written for.
-
-        Width-driven: the portrait root grows mostly sideways, and tying type to height would
-        make a tall thin window shout. Clamped so a very wide window does not produce absurd
-        type and a minimum-size one stays legible.
-        """
-        return max(0.85, min(2.0, self.width() / float(self._DESIGN_W)))
+        """How much bigger the window is than the shape the type was written for."""
+        from squidmip._fontscale import ui_scale
+        return ui_scale(self, self._DESIGN_W)
 
     def _rescale_fonts(self) -> None:
         """Re-apply every descendant stylesheet with its ``font-size`` multiplied by the scale.
 
-        Done by rewriting the stylesheets rather than by setting a widget font, because a QSS
-        ``font-size`` on a child beats any font inherited from a parent -- and this GUI sets one
-        inline at 79 call sites. Each widget's ORIGINAL stylesheet is cached the first time it
-        is seen, so scaling is always computed from the authored value and never compounds.
+        The body moved to `_fontscale.rescale_fonts` so the CHILD windows (`RegionViewer`, the Log
+        window) get the same behaviour. They are separate TOP-LEVEL windows, so they were never in
+        this walk of `findChildren` and their type stayed put while the root's grew.
         """
-        scale = self._ui_scale()
-        if abs(scale - getattr(self, "_applied_ui_scale", 0.0)) < 0.02:
-            return                              # sub-pixel churn; not worth restyling the tree
-        self._applied_ui_scale = scale
-
-        cache = self.__dict__.setdefault("_qss_original", {})
-        for w in [self] + self.findChildren(QWidget):
-            key = id(w)
-            if key not in cache:
-                qss = w.styleSheet()
-                if "font-size:" not in qss:
-                    cache[key] = None           # nothing to scale here; remember and skip it
-                    continue
-                cache[key] = qss
-            base = cache[key]
-            if base is None:
-                continue
-            w.setStyleSheet(_scale_qss_fonts(base, scale))
+        rescale_fonts(self, self._DESIGN_W)
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
@@ -5015,6 +4988,52 @@ def enable_hidpi() -> None:
         if flag is not None:                # Qt6 always scales and drops both attributes
             QApplication.setAttribute(flag, True)
 
+    # SHARED GL CONTEXTS. Qt6 migration, step 3. Every open window owns its own napari canvas, so
+    # this process creates N OpenGL contexts rather than one. Without AA_ShareOpenGLContexts they
+    # cannot share textures, and the symptom is not a clean error: it is a canvas that renders
+    # black, or renders once and then stops, in whichever window happened to be created second.
+    # That is the decentralised-windows architecture's own failure mode, so it matters more here
+    # than it would in a single-canvas app.
+    #
+    # Set here rather than in `main` for the same reason as the two above: once a QApplication
+    # exists this is a SILENT no-op. It applies under Qt5 as well, so it is not gated on the
+    # binding and does not become dead code when PyQt5 is eventually dropped.
+    share = getattr(Qt, "AA_ShareOpenGLContexts", None)
+    if share is not None:
+        QApplication.setAttribute(share, True)
+
+
+def _startup_splash(app):
+    """A small "starting" window, shown before the slow constructor runs. None under tests.
+
+    Returns the splash so the caller can `finish(win)` it; returning None rather than a dummy
+    keeps the caller's `if splash is not None` honest about the headless case.
+
+    Deliberately plain: a QPixmap-less QSplashScreen with a styled message. No logo file, because
+    an asset that fails to load produces a blank rectangle, which looks exactly like the hang this
+    is here to rule out.
+    """
+    try:
+        if app.property("_squidmip_test") or QApplication.platformName() in ("offscreen", "minimal"):
+            return None                   # nothing to show, and nobody to see it
+
+        from qtpy.QtWidgets import QSplashScreen
+
+        splash = QSplashScreen()
+        splash.setStyleSheet("QSplashScreen{background:#0d1117;color:#c9d1d9;"
+                             "border:1px solid #30363d;font-size:13px;}")
+        splash.resize(360, 90)
+        splash.showMessage(
+            "SquidXplorer\n\nStarting up: loading the viewer and reading the acquisition.\n"
+            "The first launch takes a few seconds.",
+            Qt.AlignCenter,
+        )
+        splash.show()
+        app.processEvents()               # without this it never paints before the blocking call
+        return splash
+    except Exception:                     # noqa: BLE001 - a splash must never stop the app opening
+        return None
+
 
 def main(dataset_path: str = None):
     path = dataset_path or (sys.argv[1] if len(sys.argv) > 1 else None)
@@ -5028,10 +5047,23 @@ def main(dataset_path: str = None):
     if QApplication.instance() is None:     # only the process that CREATES the app may set these
         enable_hidpi()
     app = qt_app(sys.argv)       # pinned process-wide: main() returns the WINDOW, not the app
+
+    # SAY IT IS LOADING. Spencer, 2026-07-27: "startup needs some indication that work is
+    # happening. Right now silence is indistinguishable from a crash", corroborated by a launch
+    # that reported an empty window title and a null window handle for several seconds while
+    # napari imported.
+    #
+    # It has to come BEFORE `PlateWindow(path)`, because that call is the slow part: napari's
+    # import happens inside it, so anything hung off the window itself appears only once the wait
+    # is already over. A splash is the one thing that can be on screen during a blocking
+    # constructor.
+    splash = _startup_splash(app)
     win = PlateWindow(path)
     _install_footprint_monitor(app, win)
     win._gui_slot = slot                  # the reservation lives as long as the window
     win.show()
+    if splash is not None:
+        splash.finish(win)
     if not app.property("_squidmip_test"):
         try:
             sys.exit(app.exec_())

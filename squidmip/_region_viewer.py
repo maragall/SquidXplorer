@@ -48,6 +48,7 @@ from qtpy.QtWidgets import (
 from squidmip._time_point import TimePointBar
 from squidmip._address import Address, Extent
 from squidmip._logpane import ViewLog, get_logger
+from squidmip._fontscale import rescale_fonts
 
 log = get_logger("regionviewer")
 
@@ -1798,6 +1799,21 @@ class RegionViewer(QMainWindow):
             self.set_active(self.isActiveWindow())
         super().changeEvent(event)
 
+    def resizeEvent(self, e):                        # noqa: N802 - Qt naming
+        """Grow the type with the window, exactly as the root does.
+
+        Spencer, 2026-07-27: the root rescales its type on resize but "the `[N] <well>` view
+        windows and the Log window do not... dragging one bigger leaves the type behind."
+
+        This window was never reachable from the root's rescale: it is a separate TOP-LEVEL window,
+        so `PlateWindow.findChildren(QWidget)` never saw it. The shared helper lives in
+        `_fontscale` for that reason, and each window keeps its OWN scale, which is what the
+        decentralised design wants: two views dragged to different sizes should not be forced to
+        agree about type size.
+        """
+        super().resizeEvent(e)
+        rescale_fonts(self)
+
     # -- teardown -----------------------------------------------------------------------
     def closeEvent(self, event):                     # noqa: N802 - Qt naming
         try:
@@ -2124,6 +2140,15 @@ class OpenViewList(QWidget):
         # shift/ctrl MULTI-SELECT so operators can target several views at once.
         self._tree.setRootIsDecorated(True)
         self._tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        # ARROW-KEY NAVIGATION (Spencer, 2026-07-27): up/down step through open windows, and
+        # because selection already raises (`_on_selection_changed` -> `raise_views`), arrows
+        # drive behaviour that exists rather than needing a second code path.
+        #
+        # A QTreeWidget moves its current row on arrow keys for free, so the missing piece was
+        # never the key handling: it was FOCUS. Nothing gave this tree keyboard focus, so the
+        # arrows went to whatever had it instead, and the feature looked absent while the
+        # machinery underneath was complete.
+        self._tree.setFocusPolicy(Qt.StrongFocus)
         # The plate wash STRICTLY follows the navigator selection: select rows -> wash those views;
         # deselect (nothing selected) -> no wash. itemActivated (double-click) also raises the window.
         self._tree.itemActivated.connect(self._on_activated)
@@ -2133,7 +2158,10 @@ class OpenViewList(QWidget):
 
         row = QHBoxLayout()
         row.setSpacing(6)
-        close_btn = QPushButton("Close view")
+        # "Close selected views", not "Close view": the tree is multi-select, so the singular
+        # label promised less than the control does and read as "close the one I clicked".
+        close_btn = QPushButton("Close selected views")
+        close_btn.setToolTip("Close every view selected here (shift/ctrl-click to select several).")
         close_btn.clicked.connect(self._close_selected)
         collapse_btn = QPushButton("Collapse all")
         collapse_btn.setToolTip("Minimise every open window (click a row to bring one back).")
@@ -2155,6 +2183,23 @@ class OpenViewList(QWidget):
         manager.windowsChanged.connect(self.refresh)
         manager.memoryChanged.connect(self._on_memory)
         self.refresh()
+
+    def showEvent(self, e):
+        """Hand the tree keyboard focus, and give the arrows a row to start from.
+
+        Without a current item the first Down press selects nothing on some styles, so the feature
+        reads as broken on exactly the keystroke a user tries first.
+        """
+        super().showEvent(e)
+        self._tree.setFocus()
+        if self._tree.currentItem() is None and self._tree.topLevelItemCount():
+            # setCurrentItem WOULD select, and selecting raises a window. Guard it the same way
+            # refresh() does, so merely opening the panel does not reorder the user's windows.
+            self._syncing = True
+            try:
+                self._tree.setCurrentItem(self._tree.topLevelItem(0))
+            finally:
+                self._syncing = False
 
     def refresh(self) -> None:
         # A DESTROYED navigator must not rebuild itself. `manager.windowsChanged` is connected to
@@ -2216,11 +2261,21 @@ class OpenViewList(QWidget):
             self._manager.focus(int(wid))
 
     def _close_selected(self) -> None:
-        item = self._tree.currentItem()
-        if item is not None:
-            wid = item.data(0, Qt.UserRole)
-            if wid is not None:
-                self._manager.close(int(wid))
+        """Close EVERY selected view, not just the current one.
+
+        Spencer, 2026-07-27: "the selection model may already carry what the button needs, it is
+        the action that is singular." Exactly right. `1073999` gave this tree ExtendedSelection, so
+        a user could shift-select six views, press the button, and watch one close. The tree was
+        never the problem; `currentItem()` was.
+
+        The ids are collected FIRST and then acted on, because closing mutates the thing being
+        iterated: `manager.windowsChanged` fires `refresh()`, which rebuilds the tree and destroys
+        the very `QTreeWidgetItem`s a live `selectedItems()` loop would still be walking.
+        """
+        wids = [int(i) for i in (it.data(0, Qt.UserRole) for it in self._tree.selectedItems())
+                if i is not None]
+        for wid in wids:
+            self._manager.close(wid)
 
     def _on_memory(self, frac: float) -> None:
         pct = max(0, min(100, int(round(frac * 100))))

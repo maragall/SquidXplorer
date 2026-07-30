@@ -51,6 +51,10 @@ QT_BINDINGS = frozenset({"PyQt5", "PyQt6", "PySide2", "PySide6", "qtpy"})
 #: can never be imported by the headless pipeline; that is a decision, so it should cost an edit
 #: here and a line in a commit message rather than happening as a side effect of one import.
 GUI_MODULES = frozenset({
+    "_fontscale",        # type that grows with its window. Qt-facing by nature (it rewrites
+    #                      widget stylesheets), and shared so CHILD windows get it too: it lives
+    #                      outside `_viewer` only to avoid a circular import, not to escape this
+    #                      boundary.
     "_layer_tree",       # the grouped layer tree (a QTreeView over napari's item model)
     "_legend",           # Task 3: the mixed-recipe legend painted on the plate. A deliberate
     #                      GUI addition: it exists to say on the plate's FACE that more than one

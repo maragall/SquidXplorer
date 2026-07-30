@@ -73,7 +73,15 @@ test = ["pytest>=7.0", "ome-zarr-models>=1.7"]
 # rendering caveat is a Qt-binding problem, tracked separately.
 gui = [
     "PyQt5>=5.15",
-    "napari>=0.7,<0.8",
+    # Ceiling lifted from <0.8 to <0.9 on 2026-07-30 (Qt6 step 3). The <0.8 pin was a
+    # QT-BINDING HEDGE, not a known 0.8 defect, and the binding is no longer named in the code
+    # (everything goes through qtpy, and the suite is green under QT_API=pyqt6).
+    #
+    # UNVERIFIED, said plainly: napari 0.8 is not installed on the machine that made this change,
+    # so nothing here proves 0.8 works. This removes a hedge that no longer has a reason; it does
+    # not certify the newer version. Whoever first installs 0.8 should run the suite before
+    # trusting it.
+    "napari>=0.7,<0.9",
     "psutil>=5.9",
 ]
 
