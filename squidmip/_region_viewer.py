@@ -348,6 +348,15 @@ class RegionViewer(QMainWindow):
 
     closed = pyqtSignal(object)   # emits self, so the registry can drop it
 
+    #: The open half of this window's console pair, and the region its operator layers describe.
+    #: CLASS defaults as well as ``__init__`` assignments, for the same reason
+    #: ``PlateWindow._result_acc`` is one: a bare ``getattr`` on a QObject whose ``__init__`` has
+    #: not run raises out of Qt's own attribute machinery instead of returning the default, and
+    #: these are read from slots that fire on windows built by tests and by Qt alike.
+    _op_action: Optional[str] = None
+    _op_address: Any = None
+    _result_region: Optional[str] = None
+
     def __init__(
         self,
         reader: Any,
@@ -398,6 +407,15 @@ class RegionViewer(QMainWindow):
         # to it lands with the loader work; today it scopes the title + is recorded for that step.
         self._roi_bbox = roi_bbox
         self._roi_layer = None     # the napari Shapes layer this window draws ROI rectangles on
+        # THIS WINDOW'S OPERATOR RUN (2026-07-29). ``_op_action`` / ``_op_address`` are the open
+        # half of the console's started/done pair, captured when the run STARTS and carried into
+        # whichever line closes it -- see operator_started for why the address is never re-read.
+        # ``_result_region`` is the region the operator layers in this window describe, so a region
+        # change can drop a layer that would otherwise keep claiming to describe the region it was
+        # computed on while sitting over a different one.
+        self._op_action: Optional[str] = None
+        self._op_address: Any = None
+        self._result_region: Optional[str] = None
 
         # Name the window by the regions it holds (the deck shows the slider as "<> A1, B6, C3"),
         # not "N regions" — Julio: "'2 regions' is a bad name". Truncate a long list so the title
@@ -748,11 +766,169 @@ class RegionViewer(QMainWindow):
         # SAVE OFF by default = preview (see how it looks); ON persists an OME-Zarr (Spencer huddle).
         save = bool(self._save_chk.isChecked()) if getattr(self, "_save_chk", None) is not None else False
         try:
-            self._run_operator(key, regions=regions, save=save)
+            # ``requester=self`` IS the completion path. Without it run_operator started a QThread
+            # and returned, so this window called in and never heard back -- which is why the
+            # result rendered on the plate and 'raw' / 'flatfield' / 'stitched' were not
+            # selectable in the window that asked for them (Julio, 2026-07-29). The plate calls
+            # operator_started / operator_done / operator_failed and deliver_result on us.
+            self._run_operator(key, regions=regions, save=save, requester=self)
             mode = "saving" if save else "previewing"
-            self._say(f"{mode} {self._op_combo.currentText()} on {self._region_label(regions)}.")
+            self._echo(f"{mode} {self._op_combo.currentText()} on {self._region_label(regions)}.")
         except Exception as exc:                          # noqa: BLE001 - named to the window
             self._say(f"could not start {self._op_combo.currentText()}: {exc}")
+
+    # -- the completion path: what the plate calls back on THIS window --------------------
+    #
+    # Julio, 2026-07-29, the longest-standing report in the backlog: "the layers such as 'raw',
+    # 'flatfield', 'stitched', in the window that I decided to compute, are simply not available
+    # when I run an operator on the window. Also, even if we have a cache of operations, when it
+    # propagates to other windows, it adds a layer, but it doesn't toggle it."
+    #
+    # THE ROOT CAUSE was that nothing came back. ``PlateWindow.run_operator`` started a QThread and
+    # returned; ``_run_view_operator`` called into it and never heard another word, so the result
+    # could only render where the run was orchestrated -- the plate -- and the window that asked
+    # showed nothing new. A window cannot render a result it is never told about, so these four
+    # methods are the callback, and everything else follows from them.
+    #
+    # THE LAYER STACK IS NOT NEW, AND THAT IS THE POINT. ``MosaicLayers`` (op, channel) already IS
+    # a per-window stack -- ``raw`` plus one group per operator -- and ``squidmip._layer_tree``
+    # already mounts the grouped, checkbox-toggleable tree in EVERY ``MosaicPane``, so every window
+    # has had the presentation since it was written. What was missing on this side of the app was a
+    # PRODUCER, exactly as ``squidmip._op_result`` says it was missing on the plate's side.
+
+    def operator_started(self, action: str) -> None:
+        """A run THIS window asked for has begun. Opens the console's started/done pair.
+
+        The address is captured HERE and carried into whichever line closes the pair, never read
+        again when that line fires. The user is free to move this window's region slider while the
+        operator runs, and a "done" line naming where the window is NOW rather than what was
+        actually worked on is a lie the log would tell confidently. Same rule, and the same reason,
+        as :meth:`_detect_nuclei`.
+        """
+        self._op_action = str(action)
+        self._op_address = self.address()
+        self.log.started(self._op_action, address=self._op_address)
+
+    def operator_done(self, action: str, seconds: float) -> None:
+        """``[3] A1  mip  done in 1.4 s`` -- the half of the pair that was never emitted."""
+        self.log.done(str(action), float(seconds), address=self._closing_address())
+        self._echo(f"{action} finished in {float(seconds):.1f} s.")
+        self._op_action = self._op_address = None
+
+    def operator_failed(self, action: str, reason: str) -> None:
+        """The third outcome, and it must exist: an action that starts and then says nothing is
+        indistinguishable from one still running."""
+        self.log.failed(str(action), str(reason), address=self._closing_address())
+        self._echo(f"{action} failed: {reason}")
+        self._op_action = self._op_address = None
+
+    def _closing_address(self):
+        """The address the OPEN half of the pair was written with, so the two lines agree.
+
+        Falls back to this window's address only when no pair was opened here (a plate-wide run
+        the user never started from this window), because a line with no address at all is the one
+        thing the global console cannot afford.
+        """
+        return self._op_address if self._op_address is not None else self.address()
+
+    def deliver_result(self, op: str, result, *, visible: bool) -> int:
+        """Add one operator's :class:`~squidmip._result.Result` to THIS window's layer stack.
+
+        Returns the number of layers added, so a delivery that reached nothing is reported by the
+        caller rather than assumed to have landed.
+
+        ``visible`` is the answer to Julio's second sentence. A result reaching a window that did
+        NOT ask for it arrives with ``visible=False``: the window gains the layer, so it is there
+        to toggle, and what the user is looking at does not change under them. Adding a visible
+        layer to a window somebody is not watching is a change they did not ask for and cannot see
+        happening, and it is worse than not adding it at all, because they cannot even tell it
+        happened. The window that ASKED gets ``visible=True``, because asking is the consent.
+
+        WHAT IS RENDERED IS WHAT THE RESULT DECLARES. The channel set comes from
+        ``result.channels`` and the z scale is applied only when ``result.z_depth`` says there is a
+        z axis to scale. Nothing here infers a channel list from this window's metadata or a depth
+        from an array's ``ndim``: that is the whole point of a self-describing result, and this is
+        its first consumer that renders one.
+
+        PLACEMENT IS NOT CARRIED IN THE RESULT, deliberately. The layer is placed by
+        ``mosaic_bbox_um`` -- the SAME one rule that placed the raw mosaic in this window -- so
+        flipping between raw and the result is a comparison rather than two differently-framed
+        pictures. ``Extent.bbox_um`` means "the ROI a request was narrowed to" and putting a
+        region's own footprint in it would give that one field two meanings.
+        """
+        pane = self._pane
+        mosaic = getattr(pane, "mosaic", None) if (pane is not None
+                                                   and getattr(pane, "ok", False)) else None
+        if mosaic is None:
+            return 0
+        region = str(result.region_id)
+        if region != self.current_region():
+            # A layer must not claim to describe a region this window is not showing: it would sit
+            # at that region's stage coordinates on top of a different region's raw, and the user
+            # would read the offset as something the operator did. The same rule the raw path
+            # follows in _on_plane, for the same reason.
+            log.debug("[%s] %s result for %s not shown here: this window is on %s",
+                      self.window_id, op, region, self.current_region())
+            return 0
+        from squidmip._mosaic_source import mosaic_bbox_um
+        from squidmip._napari_pane import _colormap_for
+
+        region_bbox = mosaic_bbox_um(self._meta, region)
+        dz = (self._meta or {}).get("dz_um")
+        added = 0
+        for channel in result.channels:
+            plane, bbox = result.plane(channel), region_bbox
+            # AN ROI CHILD CROPS, through the same helper that crops its raw pyramid, so the
+            # operator layer covers exactly the boxed tissue the raw layer under it covers.
+            if self._roi_bbox is not None and region_bbox is not None:
+                cropped = _crop_levels_to_bbox([plane], region_bbox, self._roi_bbox)
+                if cropped is None:
+                    continue                     # the box does not overlap: nothing of it to draw
+                levels, bbox = cropped
+                plane = levels[0]
+            try:
+                mosaic.add_mosaic(
+                    str(op), channel, plane,
+                    colormap=_colormap_for(channel),
+                    bbox_um=bbox,
+                    # Only a result that DECLARES depth gets a z scale. _place ignores it for a
+                    # 2-D layer anyway; reading it off the declaration rather than off the array
+                    # is what keeps the renderer honest when a z-preserving operator lands.
+                    z_scale_um=(dz if int(result.z_depth) > 1 else None),
+                    visible=bool(visible),
+                )
+            except Exception as exc:             # noqa: BLE001 - named, never a missing layer
+                self._say(f"{op}: the {channel} layer could not be added: {exc}")
+                continue
+            added += 1
+        if added:
+            self._result_region = region
+        return added
+
+    def _drop_result_layers(self, why: str) -> None:
+        """Drop every operator layer in this window, keeping ``raw``.
+
+        Called on a region change. An operator layer describes ONE region; left standing while the
+        window moves to another one it sits at the old region's stage coordinates over the new
+        region's raw, which renders as a plausible picture and is the failure mode this codebase
+        refuses everywhere else. Said out loud, because a layer disappearing without explanation is
+        its own small mystery.
+        """
+        pane = self._pane
+        mosaic = getattr(pane, "mosaic", None) if (pane is not None
+                                                   and getattr(pane, "ok", False)) else None
+        if mosaic is None:
+            self._result_region = None
+            return
+        gone = [op for op in list(mosaic.ops()) if op != _RAW_OP]
+        for op in gone:
+            try:
+                mosaic.remove_op(op)
+            except Exception:                    # noqa: BLE001 - best effort per group
+                pass
+        self._result_region = None
+        if gone:
+            self._say(f"dropped the {', '.join(gone)} layer(s): {why}")
 
     # -- nuclei detection (Cellpose) on THIS view -------------------------------------
     def _spot_source(self):
@@ -1281,6 +1457,10 @@ class RegionViewer(QMainWindow):
             prior.stop()
             prior.wait(2000)
 
+        # An operator layer belongs to the region it was computed on. Moving to another region
+        # would leave it placed at the old region's stage coordinates over the new region's raw.
+        if self._result_region is not None and self._result_region != str(region):
+            self._drop_result_layers(f"this window moved from {self._result_region} to {region}")
         pane.mosaic.remove_op(_RAW_OP)
         channels = [c["name"] for c in self._meta["channels"]]
         w = _MosaicWorker(self._reader, self._meta, region, channels, z_index=0, parent=self)
@@ -1327,7 +1507,11 @@ class RegionViewer(QMainWindow):
             return
         pane.say("")
         try:
-            pane.mosaic.show_op(_RAW_OP)
+            # show_op makes EXACTLY one group visible, so calling it unconditionally would hide an
+            # operator layer this window is legitimately still showing for this same region -- the
+            # user's toggle, undone by a reload they did not ask anything of.
+            if self._result_region is None:
+                pane.mosaic.show_op(_RAW_OP)
             pane.mosaic.model.reset_view()
         except Exception:                            # noqa: BLE001 - view framing is cosmetic
             pass

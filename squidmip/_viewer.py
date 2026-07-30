@@ -484,11 +484,25 @@ def _make_mosaic_pane(show_docks: bool = True):
 
 
 class PlateWindow(QMainWindow):
-    #: The in-flight operator result for the region pane 2 is showing (Defect 3), or None.
+    #: In-flight operator results, one accumulator per REGION being accumulated, or None.
     #: A CLASS default rather than an __init__ assignment so ``_on_result`` can use plain
     #: attribute access: a bare ``getattr(self, ..., None)`` on a QObject whose __init__ has
     #: not run raises out of Qt's own attribute machinery instead of returning the default.
-    _result_acc = None
+    #:
+    #: Keyed by region rather than a single slot because there is no longer ONE surface showing
+    #: ONE region. Every open window shows a region of its own, so the set of regions somebody is
+    #: looking at is as large as the set of open windows -- and a single slot thrashed between
+    #: them, which means no region ever completed and no layer was ever drawn. The bound is the
+    #: number of open windows, which is the honest bound; see ``_result_regions``.
+    _result_accs = None
+    #: The window that asked for the in-flight run (a ``RegionViewer``), the bare action label to
+    #: report to it, and the reason the run failed if it did. The completion callback, held as
+    #: state rather than captured in a lambda for the same reason ``_run_label`` is: the same three
+    #: facts are read by ``_on_run_drained`` and by nothing else, and one source is how they stay
+    #: in agreement.
+    _run_requester = None
+    _run_op_action = None
+    _run_error = None
 
     def __init__(self, initial_path: Optional[str] = None):
         super().__init__()
@@ -3629,8 +3643,19 @@ class PlateWindow(QMainWindow):
 
     def run_operator(self, key: str, out_parent: Optional[str] = None,
                      regions: Optional[list] = None, save: bool = True,
-                     tab_key: Optional[str] = None, operator_kwargs: Optional[dict] = None):
+                     tab_key: Optional[str] = None, operator_kwargs: Optional[dict] = None,
+                     requester: Optional[Any] = None):
         """Run a projector operator (MIP / reference) over the plate, or over a subset of it.
+
+        ``requester`` IS THE COMPLETION CALLBACK, and its absence was the root fault Julio
+        reported on 2026-07-29. This method starts a QThread and returns; a ``RegionViewer``
+        calling in from its own "Operators for this window" dropdown therefore never heard back,
+        could not render the result it had asked for, and showed no ``raw`` / ``flatfield`` /
+        ``stitched`` to pick between. Given a requester, this window calls
+        ``operator_started(action)`` here, ``deliver_result(op, result, visible=...)`` as each
+        region completes, and exactly one of ``operator_done`` / ``operator_failed`` when the
+        thread drains -- on success, on failure and on a stop alike, because an action that starts
+        and then says nothing is indistinguishable from one still running.
 
         ``regions=None`` runs the whole plate. A list runs exactly those regions, in that order —
         this is the ONE way to express a subset (the old ``preview_limit=N`` was a prefix-only
@@ -3991,17 +4016,23 @@ class PlateWindow(QMainWindow):
         The accumulator is per (operator, region): a plane-op emits one result per FOV and the
         layer cannot be drawn until the region is whole, while a region operator emits the
         fused region in one go. ``_op_result`` owns that difference so this slot does not.
+
+        WHICH REGIONS ARE ACCUMULATED changed on 2026-07-29. It used to be ``_mosaic_region``
+        alone, the plate's own central pane, which is permanently ``None`` since the
+        decentralization -- so this slot returned at its first line for every result in the app
+        and no window could ever show an operator layer. It is now every region SOME surface is
+        showing, which is ``_result_regions``.
         """
-        pane = getattr(self, "_mosaic_pane", None)
-        if pane is None or not getattr(pane, "ok", False):
-            return                              # no napari in this window; ndviewer path stands
-        if region != getattr(self, "_mosaic_region", None):
-            return                              # not the region on screen -- see the docstring
         op = self._active_op_key
         if not op:
             return
-        acc = self._result_acc
-        if acc is None or (acc.op, acc.region) != (op, region):
+        if str(region) not in self._result_regions():
+            return                              # nobody is looking at it -- see the docstring
+        accs = self._result_accs
+        if accs is None:
+            accs = self._result_accs = {}
+        acc = accs.get(str(region))
+        if acc is None or acc.op != op:
             from squidmip import available_region_operators
             from squidmip._op_result import RegionResultAccumulator
 
@@ -4009,52 +4040,186 @@ class PlateWindow(QMainWindow):
                 op, region, self._meta, [c["name"] for c in self._meta["channels"]],
                 region_operator=(op in available_region_operators()),
             )
-            self._result_acc = acc
+            accs[str(region)] = acc
         try:
             acc.add(int(fov), np.asarray(planes))
         except ValueError as exc:
             # NO SILENT FAILURES: a result that cannot be placed is said out loud. It must not
             # abort the run -- the pixels are still written and still on the slider.
             self._readout.setText(f"result not shown as a layer: {exc}")
-            self._result_acc = None
+            accs.pop(str(region), None)
             return
         if not acc.complete():
             return
-        self._result_acc = None
+        accs.pop(str(region), None)
         try:
             result = acc.result()
         except ValueError as exc:
             self._readout.setText(f"result not shown as a layer: {exc}")
             return
-        self._add_result_layers(result)
+        self._deliver_operator_result(op, result)
 
-    def _add_result_layers(self, result):
-        """One layer per channel, all under the operator's group, over the raw mosaic.
+    def _result_regions(self) -> set:
+        """Every region a surface is SHOWING right now: the plate's own pane, and each open window.
 
-        ``add_mosaic`` keys the group off ``result.op`` and ``_register_channel`` links
-        contrast per CHANNEL across every group, so flipping between raw and this operator
-        preserves the window -- which is the difference between a comparison and two unrelated
-        pictures. ``bbox_um`` is the raw mosaic's own bbox, so the layers land in register.
+        This is the memory bound on ``_result_accs`` and on the layers themselves. Holding
+        full-resolution mosaics for every well of a plate run would be gigabytes of layers nobody
+        can look at, so a result for a region no surface is showing is dropped rather than
+        accumulated -- the same rule the raw path follows, for the same reason. The honest bound is
+        no longer "one region" but "one per open window", because that is how many regions the user
+        can actually be looking at.
         """
+        regions: set = set()
+        pane = getattr(self, "_mosaic_pane", None)
+        if pane is not None and getattr(pane, "ok", False):
+            here = getattr(self, "_mosaic_region", None)
+            if here:
+                regions.add(str(here))
+        mgr = getattr(self, "_viewer_manager", None)
+        for win in (mgr.windows if mgr is not None else []):
+            try:
+                here = win.current_region()
+            except Exception:                   # noqa: BLE001 - a window mid-teardown has none
+                continue
+            if here:
+                regions.add(str(here))
+        return regions
+
+    def _as_result(self, op_result):
+        """An ``OperatorResult`` as a SELF-DESCRIBING :class:`squidmip._result.Result`.
+
+        This is that type's first consumer that RENDERS one, and it is what lets a window draw
+        what the result declares -- its channels, its z depth -- instead of re-deriving both from
+        the acquisition metadata and hoping the two agree.
+
+        The pixels travel as the per-channel tuple the accumulator already fused, NOT restacked
+        into one array: ``Result.plane`` looks a channel up by NAME and then indexes axis 0, and a
+        sequence of per-channel planes is channel-major on axis 0 exactly as an array would be.
+        Restacking would copy a whole region mosaic to say something the tuple already says.
+
+        The extent is ``Extent(region_id=...)``: "all of it" on every other dimension, which is
+        what a whole-region operator run covers. The mosaic's own stage footprint is deliberately
+        NOT put in ``Extent.bbox_um`` -- that field means "the ROI a request was narrowed to", and
+        a second meaning for it is how the address model starts to drift. Placement is derived by
+        each surface from ``mosaic_bbox_um``, the one placement rule that placed raw.
+
+        Returns None, having said why in the readout, when the acquisition cannot declare a pixel
+        size: a result that cannot say its own scale is not self-describing, and inventing one is
+        exactly the plausible-and-wrong guess this codebase refuses.
+        """
+        from squidmip._result import Result
+
+        planes = list(op_result.planes)
+        if not planes:
+            self._readout.setText(f"{op_result.op}: the result carries no planes to show")
+            return None
+        pixel_size_um = (self._meta or {}).get("pixel_size_um")
+        if not pixel_size_um:
+            self._readout.setText(
+                f"{op_result.op}: this acquisition declares no pixel size, so the result cannot "
+                f"declare its scale and will not be drawn as a layer")
+            return None
+        first = planes[0]
+        # z_depth from the pixels, which is unambiguous HERE and only here: OperatorResult has
+        # already split the channel axis off, so a 3-D plane's leading axis can only be z. The
+        # general (C, Z, Y, X) / (C, Y, X) ambiguity _result.Result.of refuses to guess at does
+        # not arise once the channel axis is gone.
+        z_depth = int(first.shape[0]) if int(getattr(first, "ndim", 2)) >= 3 else 1
+        try:
+            return Result.of(
+                Extent(region_id=op_result.region), planes,
+                channels=op_result.channels, z_depth=z_depth,
+                pixel_size_um=float(pixel_size_um), dtype=first.dtype,
+            )
+        except ValueError as exc:
+            self._readout.setText(f"result not shown as a layer: {exc}")
+            return None
+
+    def _deliver_operator_result(self, op: str, op_result) -> None:
+        """THE COMPLETION PATH: one region's finished result, to the surfaces that asked for it.
+
+        Julio, 2026-07-29: "the layers such as 'raw', 'flatfield', 'stitched', in the window that I
+        decided to compute, are simply not available when I run an operator on the window." They
+        were not available because the result never left this class: it went to
+        ``_add_result_layers``, which paints the plate's own central pane, and that pane has been
+        ``None`` since the decentralization. So the run happened, the pixels were written, and the
+        window that asked for them gained nothing.
+
+        One declaration, several sinks. The ``Result`` is built once and handed to the plate's pane
+        (where one exists) and to every open window, so no sink re-derives what the result is.
+        """
+        result = self._as_result(op_result)
+        if result is None:
+            return                              # _as_result has already said why
+        added = 0
+        if getattr(self, "_mosaic_pane", None) is not None:
+            self._add_result_layers(op, result)
+            added += len(result.channels)
+        added += self._deliver_to_views(op, result)
+        if added:
+            self._readout.setText(
+                f"{op} · {result.region_id} — {added} layer(s) added; toggle it against raw in "
+                f"the mosaic layers panel")
+        else:
+            # NO SILENT FAILURES: a computed result with nowhere to land is not a success.
+            self._readout.setText(
+                f"{op} · {result.region_id}: computed, but no open view is showing "
+                f"{result.region_id}, so there was nowhere to put the layer")
+
+    def _deliver_to_views(self, op: str, result) -> int:
+        """Propagate one result to every open window, VISIBLE only in the window that ASKED.
+
+        Julio's second sentence: "even if we have a cache of operations, when it propagates to
+        other windows, it adds a layer, but it doesn't toggle it." The rule this settles on is one
+        sentence long: **the window that asked shows the result; every other window gains it dark.**
+
+        Asking is the consent, so the requester gets ``visible=True`` -- and it keeps it even if
+        the user has clicked another window since, because a feature that depends on which window
+        happens to be in front when a thread finishes is a race, not a behaviour. Every other
+        window did not ask, so it gets ``visible=False``: it gains the layer, so the layer is there
+        to toggle, and what someone is looking at does not change under them. That is strictly
+        stronger than "unfocused windows get it dark", which is the requirement.
+        """
+        mgr = getattr(self, "_viewer_manager", None)
+        if mgr is None:
+            return 0
+        requester = self._run_requester
+        added = 0
+        for win in mgr.windows:
+            deliver = getattr(win, "deliver_result", None)
+            if deliver is None:
+                continue
+            try:
+                added += int(deliver(op, result, visible=(win is requester)) or 0)
+            except Exception as exc:            # noqa: BLE001 - one window's failure is its own
+                log.warning("view %s could not take the %s result for %s: %s",
+                            getattr(win, "window_id", "?"), op, result.region_id, exc)
+        return added
+
+    def _add_result_layers(self, op: str, result):
+        """One layer per channel THE RESULT DECLARES, under the operator's group, over raw.
+
+        ``add_mosaic`` keys the group off *op* and ``_register_channel`` links contrast per CHANNEL
+        across every group, so flipping between raw and this operator preserves the window -- which
+        is the difference between a comparison and two unrelated pictures. ``bbox_um`` is the raw
+        mosaic's own bbox, from the one placement rule, so the layers land in register.
+        """
+        from squidmip._mosaic_source import mosaic_bbox_um
         from squidmip._napari_pane import _colormap_for
 
         pane = self._mosaic_pane
         if pane is None:
-            # No central viewer any more (decentralized root). Operator results will target the
-            # spawned windows in Phase C; until then, say so rather than crash on a None pane.
-            self._readout.setText(
-                f"{result.op}: result computed — per-window result display lands next.")
             return
+        bbox = mosaic_bbox_um(self._meta, result.region_id)
+        dz = (self._meta or {}).get("dz_um")
         for channel in result.channels:
             pane.mosaic.add_mosaic(
-                result.op, channel, result.plane(channel),
+                op, channel, result.plane(channel),
                 colormap=_colormap_for(channel),
-                bbox_um=result.bbox_um,
-                z_scale_um=(self._meta or {}).get("dz_um"),
+                bbox_um=bbox,
+                # Only a result that DECLARES depth gets a z scale, the same rule the windows use.
+                z_scale_um=(dz if int(result.z_depth) > 1 else None),
             )
-        self._readout.setText(
-            f"{result.op} — {len(result.channels)} layer(s) added; toggle it against raw in "
-            f"the mosaic layers panel")
 
     def _on_push(self, fov_idx, planes):
         """A computed result's bounded planes -> the array viewer (in-memory register_array, LRU

@@ -154,6 +154,28 @@ def _move(x, y, buttons=Qt.NoButton):
 
 # --- pure helpers (no Qt display needed) ----------------------------------------------------
 
+def _plate_window_shell():
+    """A PlateWindow with no super().__init__(), for testing a method in isolation.
+
+    Why a helper and not four inline `__new__` calls: on a shell like this the C++ half was never
+    constructed, so ANY attribute access that falls through to Qt raises
+    `RuntimeError: super-class __init__() of type PlateWindow was never called`, and
+    `getattr(self, name, default)` does NOT save you: the default is only used for a clean
+    AttributeError, not for that RuntimeError. So every time a production path starts reading a new
+    attribute, four tests break at once with an error that names Qt rather than the missing name.
+
+    It happened twice on 2026-07-29 (`_spot_worker`, then `_viewer_manager`). Seeding the attributes
+    here means it happens once and in one place.
+    """
+    win = V.PlateWindow.__new__(V.PlateWindow)
+    # Attributes production paths read defensively. Seeded to their "absent" values so the code
+    # under test takes its absent branch instead of dying in Qt.
+    win._viewer_manager = None
+    win._spot_worker = None
+    win._overview = None
+    return win
+
+
 def test_well_at_maps_and_bounds():
     by_rc = {(0, 0): "A1", (1, 1): "B2"}
     assert V.well_at(["A", "B"], ["1", "2"], by_rc, 5, 5, 20.0)["well_id"] == "A1"
@@ -4503,7 +4525,7 @@ def test_on_mosaic_plane_tells_napari_the_data_is_multiscale(qapp):
         def say(self, msg):
             pass
 
-    win = V.PlateWindow.__new__(V.PlateWindow)
+    win = _plate_window_shell()
     win._mosaic_pane = _Pane()
     # _mosaic_region is a read-only PROPERTY over the cursor now (one owner, no second copy to
     # drift), so the region is set by moving the cursor -- which is what production does too.
@@ -4623,7 +4645,7 @@ def test_the_mosaic_workers_signal_actually_reaches_on_mosaic_plane(qapp, monkey
 
     monkeypatch.setattr(V, "_MosaicWorker", _NoParentWorker)
 
-    win = V.PlateWindow.__new__(V.PlateWindow)
+    win = _plate_window_shell()
     win._mosaic_pane = _Pane()
     win._reader = _PyrReader()
     win._meta = _pyr_meta()
@@ -4708,7 +4730,7 @@ def test_the_plate_adopts_napari_s_window_the_moment_a_region_lands(qapp, monkey
         def set_channel_visible(self, ch, on):
             pass
 
-    win = V.PlateWindow.__new__(V.PlateWindow)
+    win = _plate_window_shell()
     win._mosaic_pane = _Pane()
     win._overview = _Overview()
     win._meta = {"channels": [{"name": "488"}, {"name": "561"}]}
@@ -4814,7 +4836,7 @@ class _RecordingPane:
 def _result_win(op="bgsub", region="A1", channels=("405", "488")):
     from squidmip._region_nav import RegionCursor
 
-    win = V.PlateWindow.__new__(V.PlateWindow)
+    win = _plate_window_shell()
     win._mosaic_pane = _RecordingPane()
     win._cursor = RegionCursor()
     win._cursor.set_order([region])
