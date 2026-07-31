@@ -11,6 +11,8 @@ CellProfiler does this." So there are two families of test here:
 
 from __future__ import annotations
 
+import importlib.util
+
 import numpy as np
 import pytest
 
@@ -28,6 +30,21 @@ from squidmip.projection import PLANE_OP
 from squidmip.reader import open_reader
 
 pytest.importorskip("scipy.ndimage")
+
+# Julio's bgsub (the 'sep' estimator, IMA-247) is an OPTIONAL package, not a dependency, so a clean
+# install has no `bgsub`. test_sep_method_is_julios_bgsub_implementation_not_a_reimplementation
+# already guards itself with importorskip("bgsub.core") -- and is the one sep test that did NOT
+# fail on CI. The sep PARAMETRISATIONS and the two dedicated sep tests below never got the same
+# guard, so on every runner they failed with ModuleNotFoundError instead of skipping. Same
+# reasoning as the tilefusion guard in tests/test_stitch.py.
+#
+# Stated plainly: THE SEP ESTIMATOR IS NOT COVERED IN CI. A skip is not a pass. rolling_ball and
+# gaussian, which are the default and the one that ships, keep running everywhere.
+_NEEDS_BGSUB = pytest.mark.skipif(
+    importlib.util.find_spec("bgsub") is None,
+    reason="bgsub (Julio's sep estimator) not installed: the sep path is UNTESTED here, not passing")
+#: Use in place of the bare "sep" string so the parametrised cases skip rather than error.
+_SEP = pytest.param("sep", marks=_NEEDS_BGSUB)
 
 
 def _foreground(size: int = 128, seed: int = 1) -> np.ndarray:
@@ -49,7 +66,7 @@ def _known_background(size: int = 128, amplitude: float = 600.0, pedestal: float
 
 # --- the core numerical property: a KNOWN added background must come off ------------------
 
-@pytest.mark.parametrize("method", ["rolling_ball", "gaussian", "sep"])
+@pytest.mark.parametrize("method", ["rolling_ball", "gaussian", _SEP])
 def test_removes_the_structure_of_a_known_added_background(method):
     """The estimate must reproduce the SHAPE of the planted dome, and subtracting it must
     flatten the empty field.
@@ -94,7 +111,7 @@ def test_rolling_ball_bias_is_conservative_and_measured():
     assert abs(bias[15]) < 0.15
 
 
-@pytest.mark.parametrize("method", ["rolling_ball", "gaussian", "sep"])
+@pytest.mark.parametrize("method", ["rolling_ball", "gaussian", _SEP])
 def test_a_gradient_background_is_flattened_across_the_field(method):
     """A single scalar offset cannot do this: with a corner-to-corner ramp, the bright corner
     and the dark corner must end up at the SAME level after subtraction."""
@@ -114,7 +131,7 @@ def test_a_gradient_background_is_flattened_across_the_field(method):
     assert abs(bright - dark) < (raw_bright - raw_dark) * 0.1
 
 
-@pytest.mark.parametrize("method", ["rolling_ball", "gaussian", "sep"])
+@pytest.mark.parametrize("method", ["rolling_ball", "gaussian", _SEP])
 def test_foreground_puncta_survive_subtraction(method):
     """Removing the background must not eat the sample: a background estimator with too large
     an effect would flatten the puncta too, which is the failure mode that matters clinically."""
@@ -145,7 +162,7 @@ def test_the_input_plane_is_never_mutated():
     assert np.array_equal(raw, before)
 
 
-@pytest.mark.parametrize("method", ["rolling_ball", "gaussian", "sep"])
+@pytest.mark.parametrize("method", ["rolling_ball", "gaussian", _SEP])
 @pytest.mark.parametrize("dtype", [np.uint16, np.uint8])
 def test_raw_is_exactly_recoverable_wherever_the_result_did_not_clip_for_every_method(dtype, method):
     """Property 3 of the layer contract, held for EVERY estimator including Julio's sep.
@@ -239,6 +256,7 @@ def test_sep_method_is_julios_bgsub_implementation_not_a_reimplementation():
     assert 0 < float(bg.mean()) < float(raw.max())
 
 
+@_NEEDS_BGSUB
 def test_sep_is_not_the_default_because_it_clips_far_more_of_the_frame():
     """The measured reason sep stays opt-in.
 
@@ -262,6 +280,7 @@ def test_sep_is_not_the_default_because_it_clips_far_more_of_the_frame():
     )
 
 
+@_NEEDS_BGSUB
 def test_sep_never_writes_to_disk_and_never_mutates_the_caller(tmp_path):
     """Property 1 of the layer contract for the sep path specifically.
 
