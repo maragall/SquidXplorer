@@ -159,31 +159,13 @@ def test_windows_share_gl_contexts():
 # ------------------------------------------------- the Window navigator
 
 
-def test_close_acts_on_every_selected_view():
-    """The tree was multi-select and the action was singular; that mismatch IS the bug.
-
-    MUTATION: restore `currentItem()` -> red. Checked on the source because building a real
-    navigator needs a ViewerManager and a dataset, and the defect is entirely in which items the
-    method reads.
-    """
-    import inspect
-
-    from squidmip._region_viewer import OpenViewList
-
-    src = inspect.getsource(OpenViewList._close_selected)
-    assert "selectedItems" in src, "close still reads one item from a multi-select tree"
-    # The CALL, not the word: the docstring explains that currentItem() was the bug, so a bare
-    # substring check fails on the explanation rather than on the code.
-    assert "self._tree.currentItem()" not in src, "close still reads only the current item"
-
-
-def test_the_close_button_says_what_it_does():
-    import inspect
-
-    from squidmip._region_viewer import OpenViewList
-
-    src = inspect.getsource(OpenViewList.__init__)
-    assert "Close selected views" in src, "the label still promises less than the control does"
+# "Close selected views" is covered by tests/test_nav_close_selected.py (Spencer, PR #10), which
+# supersedes the two source-inspection tests that were here. His CLICKS the button through a real
+# ViewerManager; mine only read the source with inspect.getsource, and a source check stays green
+# even if the button is wired to nothing at all. That is the exact failure the walkthrough records
+# ("a Re-dock button was broken from the day it shipped and no test noticed, because every test
+# called the handler directly instead of clicking"), so the weaker pair is deleted rather than kept
+# alongside: two files with an opinion about one rule is how they drift.
 
 
 def test_the_navigator_tree_can_take_keyboard_focus():

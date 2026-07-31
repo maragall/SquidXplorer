@@ -2158,8 +2158,9 @@ class OpenViewList(QWidget):
 
         row = QHBoxLayout()
         row.setSpacing(6)
-        # "Close selected views", not "Close view": the tree is multi-select, so the singular
-        # label promised less than the control does and read as "close the one I clicked".
+        # "views", plural, because the tree is ExtendedSelection and the button closes all of it.
+        # The old label said "Close view" while the handler read currentItem(), so the name and the
+        # behaviour agreed with each other and BOTH disagreed with the surface they sat on.
         close_btn = QPushButton("Close selected views")
         close_btn.setToolTip("Close every view selected here (shift/ctrl-click to select several).")
         close_btn.clicked.connect(self._close_selected)
@@ -2261,20 +2262,27 @@ class OpenViewList(QWidget):
             self._manager.focus(int(wid))
 
     def _close_selected(self) -> None:
-        """Close EVERY selected view, not just the current one.
+        """Close EVERY selected row, not just the current one.
 
-        Spencer, 2026-07-27: "the selection model may already carry what the button needs, it is
-        the action that is singular." Exactly right. `1073999` gave this tree ExtendedSelection, so
-        a user could shift-select six views, press the button, and watch one close. The tree was
-        never the problem; `currentItem()` was.
+        The tree has been ExtendedSelection since 1073999 and the wash already follows the whole
+        selection (see ``_on_selection_changed``, which reads ``selectedItems()``), so this was the
+        one singular actor on a multi-select surface: select four views, press the button, three of
+        them stay open and nothing says why.
 
-        The ids are collected FIRST and then acted on, because closing mutates the thing being
-        iterated: `manager.windowsChanged` fires `refresh()`, which rebuilds the tree and destroys
-        the very `QTreeWidgetItem`s a live `selectedItems()` loop would still be walking.
+        ``currentItem()`` was also not the same question as "what is selected". Current is the
+        focus rectangle and it survives ctrl-clicking a row OFF, so the old button could close a
+        view the user had just deselected.
+
+        The ids are collected BEFORE the first close, and that ordering is load-bearing. Closing a
+        window fires ``windowsChanged`` -> ``refresh()``, which calls ``self._tree.clear()`` and
+        destroys every ``QTreeWidgetItem`` in it; reading item data across that loop is a
+        use-after-free of exactly the kind the comment in ``refresh`` describes. ``close()`` is a
+        no-op for an id already gone, so a parent window that takes its nested ROI children with
+        it needs no special case here.
         """
-        wids = [int(i) for i in (it.data(0, Qt.UserRole) for it in self._tree.selectedItems())
-                if i is not None]
-        for wid in wids:
+        ids = [int(i) for i in (it.data(0, Qt.UserRole) for it in self._tree.selectedItems())
+               if i is not None]
+        for wid in ids:
             self._manager.close(wid)
 
     def _on_memory(self, frac: float) -> None:
