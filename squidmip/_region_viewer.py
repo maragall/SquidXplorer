@@ -2133,7 +2133,11 @@ class OpenViewList(QWidget):
 
         row = QHBoxLayout()
         row.setSpacing(6)
-        close_btn = QPushButton("Close view")
+        # "views", plural, because the tree is ExtendedSelection and the button closes all of it.
+        # The old label said "Close view" while the handler read currentItem(), so the name and the
+        # behaviour agreed with each other and BOTH disagreed with the surface they sat on.
+        close_btn = QPushButton("Close selected views")
+        close_btn.setToolTip("Close every view selected here (shift/ctrl-click to select several).")
         close_btn.clicked.connect(self._close_selected)
         collapse_btn = QPushButton("Collapse all")
         collapse_btn.setToolTip("Minimise every open window (click a row to bring one back).")
@@ -2216,11 +2220,28 @@ class OpenViewList(QWidget):
             self._manager.focus(int(wid))
 
     def _close_selected(self) -> None:
-        item = self._tree.currentItem()
-        if item is not None:
-            wid = item.data(0, Qt.UserRole)
-            if wid is not None:
-                self._manager.close(int(wid))
+        """Close EVERY selected row, not just the current one.
+
+        The tree has been ExtendedSelection since 1073999 and the wash already follows the whole
+        selection (see ``_on_selection_changed``, which reads ``selectedItems()``), so this was the
+        one singular actor on a multi-select surface: select four views, press the button, three of
+        them stay open and nothing says why.
+
+        ``currentItem()`` was also not the same question as "what is selected". Current is the
+        focus rectangle and it survives ctrl-clicking a row OFF, so the old button could close a
+        view the user had just deselected.
+
+        The ids are collected BEFORE the first close, and that ordering is load-bearing. Closing a
+        window fires ``windowsChanged`` -> ``refresh()``, which calls ``self._tree.clear()`` and
+        destroys every ``QTreeWidgetItem`` in it; reading item data across that loop is a
+        use-after-free of exactly the kind the comment in ``refresh`` describes. ``close()`` is a
+        no-op for an id already gone, so a parent window that takes its nested ROI children with
+        it needs no special case here.
+        """
+        ids = [int(i) for i in (it.data(0, Qt.UserRole) for it in self._tree.selectedItems())
+               if i is not None]
+        for wid in ids:
+            self._manager.close(wid)
 
     def _on_memory(self, frac: float) -> None:
         pct = max(0, min(100, int(round(frac * 100))))
