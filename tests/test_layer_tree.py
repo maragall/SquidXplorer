@@ -521,6 +521,43 @@ def test_the_rows_are_painted_by_naparis_own_delegate(qapp, mosaic):
     assert type(delegate).__name__ == "LayerDelegate"
 
 
+def test_the_eye_rules_reach_the_tree_and_not_only_naparis_own_list():
+    """The channel rows drew NO visibility control at all, and it was not a missing widget.
+
+    Two rules live on ``QtLayerList`` and were never copied onto ``QTreeView``: ``::indicator``,
+    which paints the checkbox as an eye, and ``::item``, whose 28 px left margin is the gutter the
+    indicator sits in. The second one is why the symptom was invisibility rather than ugliness --
+    with the item rect starting at x=0, napari's ``LayerDelegate._paint_thumbnail`` drew each
+    channel's thumbnail over its own checkbox. Only the group rows kept a visible box, because a
+    group's thumbnail is transparent.
+
+    Pure logic against a known sheet: the live theme is napari's to change, but the REWRITE is
+    ours, and it is the part that regressed silently once already.
+    """
+    from squidmip import _layer_tree as LT
+
+    sheet = (
+        'QListView { background: #000000; }\n'
+        'QtLayerList::item { margin: 2px 2px 2px 28px; }\n'
+        'QtLayerList::indicator { image: url("theme_dark:/visibility_off.svg"); }\n'
+        'QtLayerList::indicator:checked { image: url("theme_dark:/visibility.svg"); }\n'
+    )
+    out = LT._napari_stylesheet(sheet)
+
+    assert "QTreeView::indicator:checked" in out, "the eye never reaches the tree"
+    checked = out.split("QTreeView::indicator:checked")[-1]
+    assert 'url("theme_dark:/visibility.svg")' in checked, (
+        "the tree got an indicator rule with no eye image in it"
+    )
+    # The gutter is load-bearing, not cosmetic: without it the thumbnail covers the indicator.
+    assert "QTreeView::item" in out and "28px" in out.split("QTreeView::item")[-1], (
+        "no left margin on the tree's items -- the thumbnail will paint over the eye"
+    )
+    # napari's own selectors survive: this ADDS a tree's worth of rules, it does not rewrite the
+    # sheet napari's real widgets are still being styled by.
+    assert "QListView {" in out and "QtLayerList::indicator {" in out
+
+
 def test_the_model_serves_every_role_that_delegate_paints_from(qapp, mosaic):
     """The delegate is only as good as the roles behind it. Miss one and the row degrades
     silently: no thumbnail, or a folder icon on a channel, with nothing raised."""
