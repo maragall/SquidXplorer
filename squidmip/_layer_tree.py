@@ -412,7 +412,31 @@ def _install_napari_delegate(view) -> bool:
         return False
 
 
-def _napari_stylesheet() -> str:
+#: The napari selectors whose rules must also reach a ``QTreeView``.
+#:
+#: ``QListView`` is napari's GENERIC list styling -- background, selection colour. ``QtLayerList``
+#: is its LAYER list specifically, and it is the one that carries the eye: ``::indicator`` sets
+#: ``image: url(theme_*:/visibility.svg)``, and ``::item`` sets ``margin: 2px 2px 2px 28px``, the
+#: 28 px gutter the indicator is absolutely positioned into (``left: -3px``).
+#:
+#: Copying only ``QListView`` -- which is what this did until 2026-07-30 -- is why the channel
+#: rows had no eye. It is worth being precise about the failure, because it did not look like a
+#: missing stylesheet rule: it looked like a missing WIDGET.
+#:
+#: Without the ``::item`` margin the item rect starts at x=0, so Qt draws the check indicator
+#: there. napari's ``LayerDelegate._paint_thumbnail`` then draws the thumbnail at
+#: ``option.rect.translated(-2, 2)`` -- the item rect's left edge -- because in napari's own list
+#: the 28 px margin has already moved that edge clear of the indicator. Here it had not, so every
+#: channel's thumbnail was painted directly OVER its own checkbox. The processing-layer rows kept
+#: a visible checkbox only because a group's thumbnail is ``_EMPTY_THUMBNAIL``, a fully
+#: transparent tile, and a checkbox under a transparent square still reads as a checkbox.
+#:
+#: So the symptom was "the eye icons are not drawing" and the cause was two rules that never
+#: arrived, one of which was not about the eye at all.
+_TREE_SOURCE_SELECTORS = ("QListView", "QtLayerList")
+
+
+def _napari_stylesheet(sheet: Optional[str] = None) -> str:
     """napari's OWN stylesheet, with its list rules extended to cover a tree.
 
     Julio: "I like the layer nesting, but the widgets look ugly, napari's original ones were way
@@ -422,22 +446,28 @@ def _napari_stylesheet() -> str:
 
     The fix is NOT to hand-pick colours to match. That would be a second theme, drifting from
     napari's the moment the user switches theme. `napari.qt.get_current_stylesheet` is public and
-    returns the real thing; the only gap is that napari styles ``QListView`` (its layer list) and
-    never ``QTreeView``, so every list rule is DUPLICATED onto the tree selector. The values stay
-    napari's -- nothing here invents a colour.
+    returns the real thing; the only gap is that napari styles ``QListView`` and ``QtLayerList``
+    and never ``QTreeView``, so every rule from both is DUPLICATED onto the tree selector. The
+    values stay napari's -- nothing here invents a colour, a margin or an icon.
+
+    *sheet* is injectable so the rewrite can be tested against a known stylesheet without a live
+    napari theme, which is the only part of this that can regress silently.
 
     Falls back to an empty stylesheet if napari changes the API: an unstyled tree is ugly, a
     crash on building the pane costs the whole viewer.
     """
-    try:
-        from napari.qt import get_current_stylesheet
-        sheet = get_current_stylesheet()
-    except Exception:                       # noqa: BLE001 - cosmetic; never fatal to the pane
-        return ""
-    extra = re.sub(r"QListView", "QTreeView",
-                   "\n".join(m.group(0) for m in re.finditer(
-                       r"[^{}]*QListView[^{}]*\{[^{}]*\}", sheet)))
-    return sheet + "\n" + extra
+    if sheet is None:
+        try:
+            from napari.qt import get_current_stylesheet
+            sheet = get_current_stylesheet()
+        except Exception:                   # noqa: BLE001 - cosmetic; never fatal to the pane
+            return ""
+    extra = []
+    for selector in _TREE_SOURCE_SELECTORS:
+        blocks = "\n".join(m.group(0) for m in re.finditer(
+            r"[^{}]*" + selector + r"[^{}]*\{[^{}]*\}", sheet))
+        extra.append(re.sub(selector, "QTreeView", blocks))
+    return sheet + "\n" + "\n".join(extra)
 
 
 class MosaicTree(QTreeView):
