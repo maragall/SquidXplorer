@@ -17,31 +17,31 @@ committed to, scheduled, or estimated.
 
 ## Hit list
 
-- [ ] **Font scaling for child windows** — the root window rescales its type on resize
+- [x] **Font scaling for child windows** — the root window rescales its type on resize
   (`501f71e`), but the `[N] <well>` view windows and the Log window do not. They inherit the
   high-DPI fix, so they are the right size, but dragging one bigger leaves the type behind.
-  <sub>added 2026-07-27 · Spencer</sub>
+  <sub>added 2026-07-27 · Spencer · LANDED 2026-07-30 (ce5605c): the helper moved to `_fontscale` so a top-level child window can reach it.</sub>
 
-- [ ] **Confirm the fixed-size relaxation with Julio** — `501f71e` replaced
+- [x] **Confirm the fixed-size relaxation with Julio** — `501f71e` replaced
   `setFixedSize(596, 850)` with a resizable default. The old comment attributed the fixed size
   to Julio and to an explicit "identical on every monitor" invariant, which is now gone. Either
   confirm the change or gate the resize behind a setting.
-  <sub>added 2026-07-27 · Spencer</sub>
+  <sub>added 2026-07-27 · Spencer · CONFIRMED by Julio, 2026-07-30.</sub>
 
-- [ ] **See a real mosaic render** — no run in this session has produced one: the first had no
+- [x] **See a real mosaic render** — no run in this session has produced one: the first had no
   napari, the second had `C3` poisoning the whole plate. With `ece5d0b` placing 72 FOVs across
   8 wells, opening `A1` should finally draw a coordinate-placed mosaic. Until someone looks,
   "the mosaic works" is unverified.
-  <sub>added 2026-07-27 · Spencer</sub>
+  <sub>added 2026-07-27 · Spencer · DONE 2026-07-30. Julio: "Mosaic render fine." Rendered from the Phindr3D organoid z-stack at `~/CEPHLA/converted/phindr3d_organoid`.</sub>
 
-- [ ] **Migrate the GUI to PyQt6** — napari ≥0.7 targets Qt6, and Cephla's Squid HCS GUI
+- [x] **Migrate the GUI to PyQt6** — napari ≥0.7 targets Qt6, and Cephla's Squid HCS GUI
   root-caused a glitchy mosaic to running napari 0.7 + vispy 0.16 under PyQt5
   (`jsschwrz/Squid` 757d571). AGAVE is built against Qt 6.9 and two Qt majors cannot share a
   process, so the volume renderer is unreachable from a Qt5 process. Do NOT rebase
   `origin/ima-qt6` — it is 88 commits behind and its payload is in `_viewer.py`, which main has
   moved by +2706/−1184 since. Redo on main. Needs `AA_ShareOpenGLContexts` (N windows each own
   a napari canvas) and the one-binding rule (PyQt5 + PyQt6 co-installed breaks GL rendering).
-  <sub>added 2026-07-27 · Spencer</sub>
+  <sub>added 2026-07-27 · Spencer · LANDED 2026-07-30: 2062 passed under `QT_API=pyqt6`; step 3 in ce5605c.</sub>
 
 - [x] **Move `ndviewer_light` to qtpy** — CLOSED 2026-07-30 by DELETING it instead. Spencer
   scoped the migration small and was right about the scope, but the premise did not survive the
@@ -70,11 +70,11 @@ committed to, scheduled, or estimated.
   Per-file runs are no longer needed.
   <sub>added 2026-07-27 · Spencer</sub>
 
-- [ ] **Peak memory always reads 0 on Windows** — `_rss_mb()` takes its peak only from the
+- [x] **Peak memory always reads 0 on Windows** — `_rss_mb()` takes its peak only from the
   POSIX-only `resource` module, so the footprint line reads `peak 0 MB` forever. `psutil` (now
   a declared dependency) exposes `PeakWorkingSetSize` on Windows. The low-memory warning the
   README promises cannot fire on Windows today.
-  <sub>added 2026-07-27 · Spencer</sub>
+  <sub>added 2026-07-27 · Spencer · LANDED (63a4aa4).</sub>
 
 - [x] **`test_plate.py`: 5 real failures** — including "two regions separated in y are two
   ROWS, not two columns". Pre-existing and unrelated to any recent change; not dependency
@@ -89,16 +89,16 @@ committed to, scheduled, or estimated.
   question: **not Windows-specific.** `tests/test_plate.py` is `88 passed, 1 skipped` on macOS.
   <sub>added 2026-07-27 · Spencer</sub>
 
-- [ ] **Decide whether `.claude/skills/run-squidxplorer` ships** — it captures the verified
+- [x] **Decide whether `.claude/skills/run-squidxplorer` ships** — it captures the verified
   Windows launch recipe (which venv, the undeclared deps, how to screenshot without stealing
   focus, why the suite must run per-file). Useful to the team, but it hardcodes paths specific
   to one workstation. Trim before committing.
-  <sub>added 2026-07-27 · Spencer</sub>
+  <sub>added 2026-07-27 · Spencer · DECIDED 2026-07-30: it does NOT ship. Julio.</sub>
 
-- [ ] **Revisit the napari `<0.8` ceiling** — pinned to `>=0.7,<0.8` to match the range Cephla
+- [x] **Revisit the napari `<0.8` ceiling** — pinned to `>=0.7,<0.8` to match the range Cephla
   validated in the Squid HCS GUI. The bound is a Qt-binding hedge, not a known 0.8 defect;
   worth re-testing once the Qt6 migration lands.
-  <sub>added 2026-07-27 · Spencer</sub>
+  <sub>added 2026-07-27 · Spencer · LANDED 2026-07-30 (ce5605c): now `<0.9`. UNVERIFIED against 0.8, which is not installed here.</sub>
 
 - [x] **Log window opens over the main window** — on start up the Log window lands on top of
   the main window. It should not. `_log_window` is sized (`resize(760, 240)`, `_viewer.py:3867`)
@@ -112,18 +112,18 @@ committed to, scheduled, or estimated.
   console the user can lose is a console that is missing at the moment worth reading.
   <sub>added 2026-07-27 · Spencer</sub>
 
-- [ ] **Combine two runs in one plate view** — a way to merge the results of two runs into a
+- [x] **Combine two runs in one plate view** — a way to merge the results of two runs into a
   single plate view. Use case: run `A1` alone to dial in the parameters, then run all the
   other wells with those parameters — and see the whole plate together afterwards.
   The transform-recipe + content-addressed result cache (`c304432`) already keys results per
   node, which is the machinery a merged view would read from.
-  <sub>added 2026-07-27 · Spencer</sub>
+  <sub>added 2026-07-27 · Spencer · LANDED (8845005).</sub>
 
-- [ ] **Orphan "focus reference plane" window** — a stray window labelled *focus reference
+- [x] **Orphan "focus reference plane" window** — a stray window labelled *focus reference
   plane* floats with no home. Give it one. `d07db43` brought the Tenengrad reference plane back
   "onto the window's z-slider", so it likely escaped that placement; a small untitled 129x59
   top-level appeared alongside the root on both launches this session and may be it.
-  <sub>added 2026-07-27 · Spencer</sub>
+  <sub>added 2026-07-27 · Spencer · LANDED (d2ef84a).</sub>
 
 - [ ] **Pull in the original MIP Navigator** — bring the original MIP Navigator's functionality
   into SquidXplorer. **Reference: https://www.youtube.com/watch?v=c-TdJDUP734** — a demo of the
@@ -149,28 +149,28 @@ committed to, scheduled, or estimated.
   rung once and the slider is free. Handed to the agent building the persistent plate cache.
   <sub>added 2026-07-27 · Spencer</sub>
 
-- [ ] **Show the app is loading, not crashed** — startup needs some indication that work is
+- [x] **Show the app is loading, not crashed** — startup needs some indication that work is
   happening. Right now silence is indistinguishable from a crash. Corroborated this session:
   after launch the process reported an empty window title and a null window handle for several
   seconds while napari imported, and opening the 9-well plate took it from 91 MB to 419 MB with
   nothing on screen to say so.
-  <sub>added 2026-07-27 · Spencer</sub>
+  <sub>added 2026-07-27 · Spencer · LANDED 2026-07-30 (ce5605c): a splash before the PlateWindow constructor, where the silence actually is.</sub>
 
-- [ ] **Compact vs stage FOV placement** — a placement mode toggle: *stage* keeps FOVs where the
+- [x] **Compact vs stage FOV placement** — a placement mode toggle: *stage* keeps FOVs where the
   stage actually put them, *compact* selectively removes the empty space between them. Today
   offsets come solely from stage micrometres through `_placement.fov_offsets_px`, which is the
   one seam an alternative placement would slot into.
-  <sub>added 2026-07-27 · Spencer</sub>
+  <sub>added 2026-07-27 · Spencer · LANDED (5ccc2a9).</sub>
 
-- [ ] **Focus setting should persist between wells** — when reviewing data the *focus* setting
+- [x] **Focus setting should persist between wells** — when reviewing data the *focus* setting
   should carry from one well to the next. Right now the user has to click *focus* again every
   time. The `✦ focus` button lives in each window's own `2D / 3D · ROI` strip, so the state is
   per-window and starts fresh with every window opened.
   **Proposed direction:** maybe `BEST FOCUSED PLANE` should be a global setting rather than a
   per-window one.
-  <sub>added 2026-07-27 · Spencer</sub>
+  <sub>added 2026-07-27 · Spencer · LANDED (9b16364).</sub>
 
-- [ ] **Timepoint support when Nt > 1** — decide how a dataset with time interacts with the
+- [x] **Timepoint support when Nt > 1** — decide how a dataset with time interacts with the
   viewer. Three separate things: `t` as a navigation axis (a slider, like z), `t` as a
   reduction axis (max-over-time as an operator), and `t` as part of a result's identity. The
   first two are close to free — napari is natively ND, and `Operator.consumes` is a frozenset
@@ -178,7 +178,7 @@ committed to, scheduled, or estimated.
   `RRCCOOOO` node id with no `t` field, and its `version` means *acquisition* version, not
   timepoint. Detail and the failure mode are in `TODOS.md` under "Multi-timepoint iteration /
   projection". Open product question: one window per timepoint, or one window with a slider?
-  <sub>added 2026-07-27 · Spencer</sub>
+  <sub>added 2026-07-27 · Spencer · LANDED: widget, wiring, and the three preview reads that hardcoded [0,:,0].</sub>
 
   **Measured while writing the plate contract (2026-07-29).** The store is not the problem: the
   writer writes every timepoint (`project_plate` calls `project_well` with `t=None`, so the array
@@ -192,16 +192,16 @@ committed to, scheduled, or estimated.
   hardcoded sites so the doc cannot rot. Julio: users WILL drop multi-timepoint datasets on this.
   <sub>added 2026-07-29 · Julio</sub>
 
-- [ ] **"Close view" should close selected views** — rename it *Close selected views* and have it
+- [x] **"Close view" should close selected views** — rename it *Close selected views* and have it
   accept a multi-select. `1073999` already gave the Window navigator multi-select (nested
   hierarchy, Blender arrows, Linux multi-select), so the selection model may already carry what
   the button needs — it is the action that is singular.
-  <sub>added 2026-07-27 · Spencer</sub>
+  <sub>added 2026-07-27 · Spencer · LANDED 2026-07-30 (ce5605c).</sub>
 
-- [ ] **Arrow-key navigation in the Window navigator** — up/down arrows should move the
+- [x] **Arrow-key navigation in the Window navigator** — up/down arrows should move the
   selection so open windows can be stepped through by keystroke. `90e9894` already makes
   selecting a row raise its window to the front, so arrows would drive behaviour that exists.
-  <sub>added 2026-07-27 · Spencer</sub>
+  <sub>added 2026-07-27 · Spencer · LANDED 2026-07-30 (ce5605c): the gap was keyboard FOCUS, not key handling.</sub>
 
 - [ ] **Complete the MIP-on-plateview feature** — the deep-zoom work landed and is good, but it
   does not yet emulate the reference: **https://www.youtube.com/watch?v=c-TdJDUP734**. Handing
