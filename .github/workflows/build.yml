@@ -23,6 +23,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      # Qt6 links libEGL even under QT_QPA_PLATFORM=offscreen, and the ubuntu runner image does not
+      # ship it: `import qtpy.QtWidgets` died with "libEGL.so.1: cannot open shared object file".
+      # That is a MISSING SYSTEM LIBRARY, not a Python problem, so no amount of pip solves it.
+      # libgl1 and libxkbcommon-x11-0 are the other two the Qt platform plugins dlopen; installing
+      # only libegl1 moves the same error one library down the list.
+      - name: System Qt libraries (Linux only)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libegl1 libgl1 libxkbcommon-x11-0 libdbus-1-3
       # ndviewer_light was REMOVED from this install on 2026-07-31. It was deleted as a dependency
       # on 2026-07-30 (ce5605c) precisely because it imports PyQt5 at module scope, and the app now
       # pins QT_API=pyqt6 -- so this line was reinstalling PyQt5 into the environment the whole Qt6
@@ -55,6 +63,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      # Same missing system libraries as the smoke job: PyInstaller IMPORTS the app to analyse it,
+      # so a Linux freeze hits libEGL exactly where the import gate did.
+      - name: System Qt libraries (Linux only)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libegl1 libgl1 libxkbcommon-x11-0 libdbus-1-3
       # ndviewer_light removed here too, 2026-07-31, and it matters MORE in this job than in smoke:
       # a frozen bundle built with PyQt5 present ships both bindings, and `hcs-viewer.spec` now
       # excludes PyQt5 by name -- so the install and the spec were arguing with each other inside
