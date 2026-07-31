@@ -16,6 +16,20 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+# tilefusion (maragall/stitcher) is the library this module ADAPTS, and it is deliberately not a
+# dependency: pyproject says so in as many words ("No tilefusion dependency ... importing
+# tilefusion runs its heavy __init__ (numba/GPU/basicpy)"), and only the ~40-line store-config
+# wrapper is vendored. `squidmip._stitch` therefore imports it lazily, so this file COLLECTS
+# without it and only fails mid-test with ModuleNotFoundError -- which is what it did on every CI
+# runner, as hard failures for a package CI was never asked to install.
+#
+# Skip rather than install it in CI: adding a git dependency to the build is exactly what was just
+# removed for ndviewer_light, and numba/basicpy would dominate the job. The cost is real and is
+# stated here rather than hidden: THE STITCH ADAPTER IS NOT COVERED IN CI, only on a machine that
+# has tilefusion. A skip is not a pass. To gate this seam, install tilefusion deliberately.
+pytest.importorskip("tilefusion", reason="tilefusion (maragall/stitcher) not installed: the stitch "
+                                         "adapter is UNTESTED here, which is not the same as passing")
+
 from squidmip._stitch import (
     _REGION_OPERATORS,
     _mosaic_geometry,

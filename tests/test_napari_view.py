@@ -829,8 +829,19 @@ def test_enable_scale_bar_turns_it_on_in_micrometres():
     v = ViewerModel()
     enable_scale_bar(v)
     assert v.scale_bar.visible is True
-    # pint normalises "um" -> "micrometer"; either spelling is the micron, never pixels.
-    assert str(v.scale_bar.unit) in ("um", "µm", "micrometer")
+    # napari >=0.8 DEPRECATED ScaleBar.unit: the setter is a no-op and the getter always returns
+    # None, because units are now computed from the layers ("Use `Layer.units` to set units for
+    # each layer"). That is not a regression here -- `enable_scale_bar`'s own docstring already
+    # says `layer.units` is the source napari >=0.7 reads and `scale_bar.unit` is only the <0.7
+    # fallback, and `add_mosaic` sets the former. So assert the label only where the model still
+    # reports one, rather than pinning an API that now answers None on every napari the project
+    # supports. The micrometre CORRECTNESS is pinned independently, and more strongly, by
+    # test_the_bar_reads_micrometres_because_the_layer_scale_IS_micrometres below: the number the
+    # bar draws is world = data * layer.scale, which no deprecation touches.
+    unit = v.scale_bar.unit
+    if unit is not None:
+        # pint normalises "um" -> "micrometer"; either spelling is the micron, never pixels.
+        assert str(unit) in ("um", "µm", "micrometer")
 
 
 def test_the_bar_reads_micrometres_because_the_layer_scale_IS_micrometres():

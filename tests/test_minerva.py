@@ -15,6 +15,16 @@ import numpy as np
 import pytest
 import tifffile
 
+# Minerva export fuses each region through the SAME region-operator seam the stitcher uses, so it
+# reaches tilefusion at run time even though nothing here imports it directly. tilefusion is
+# deliberately not a dependency (pyproject: "No tilefusion dependency ... importing tilefusion runs
+# its heavy __init__"), so on a clean install every export test failed with ModuleNotFoundError
+# instead of skipping. See tests/test_stitch.py for the same guard and the same reasoning.
+#
+# Stated plainly: THE MINERVA EXPORT PATH IS NOT COVERED IN CI. A skip is not a pass.
+pytest.importorskip("tilefusion", reason="tilefusion (maragall/stitcher) not installed: the minerva "
+                                         "export path is UNTESTED here, not passing")
+
 from squidmip import _minerva
 from squidmip._minerva import (
     auto_groups,

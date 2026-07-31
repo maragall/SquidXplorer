@@ -10,6 +10,7 @@ pipeline never depends on Qt.
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import sys
 
@@ -39,6 +40,25 @@ from qtpy.QtWidgets import (  # noqa: E402
 from squidmip import _viewer as V  # noqa: E402
 
 from .conftest import CH_IN_YAML  # noqa: E402
+
+
+def _needs(pkg: str):
+    """Skip when an OPTIONAL operator backend is absent, instead of failing on an empty result.
+
+    stitch and coordinate call into tilefusion (maragall/stitcher), decon into petakit, and Minerva
+    export fuses through the same region-operator seam as the stitcher. None of the three is a
+    dependency, and the engine's contract is to SKIP a well whose operator cannot run rather than
+    to crash -- so a missing package arrives as "produced nothing, all 1 well(s) were skipped" and
+    these tests failed on an assertion about pixels instead of saying the backend was absent.
+
+    mip, reference and bgsub keep running everywhere: bgsub falls back to the scipy rolling_ball,
+    which is the default and does ship.
+
+    Stated plainly: THESE OPERATOR PATHS ARE NOT COVERED IN CI. A skip is not a pass.
+    """
+    return pytest.mark.skipif(
+        importlib.util.find_spec(pkg) is None,
+        reason=f"{pkg} not installed: this operator path is UNTESTED here, not passing")
 
 
 class _StubDetail(QWidget):
@@ -2995,6 +3015,7 @@ def test_minerva_tab_builds_and_lists_projectors(qapp, stub_detail, squid_datase
     win.close()
 
 
+@_needs("tilefusion")
 def test_run_minerva_export_writes_one_fused_mosaic_for_the_selected_region(
         qapp, stub_detail, squid_dataset, tmp_path):
     """Selecting a region must export ONE fused mosaic of it, not one file per FOV.
@@ -3202,6 +3223,7 @@ def test_minerva_export_failure_surfaces_in_the_readout(qapp, stub_detail, squid
     win._stop_minerva(); win.close()
 
 
+@_needs("tilefusion")
 def test_minerva_reports_when_author_is_not_installed(qapp, stub_detail, squid_dataset, monkeypatch, tmp_path):
     """The export still succeeded — a missing sibling checkout must not read as a failure."""
     from squidmip import _minerva
@@ -3626,7 +3648,14 @@ def _run_live(qapp, win, key, regions=("B3",)):
     return tiles
 
 
-@pytest.mark.parametrize("key", ["mip", "reference", "stitch", "decon", "bgsub", "coordinate"])
+@pytest.mark.parametrize("key", [
+    "mip",
+    "reference",
+    pytest.param("stitch", marks=_needs("tilefusion")),
+    pytest.param("decon", marks=_needs("petakit")),
+    "bgsub",
+    pytest.param("coordinate", marks=_needs("tilefusion")),
+])
 def test_every_operator_streams_live_to_the_plate(qapp, stub_detail, squid_dataset, key):
     """IMA-226. Not 'MIP streams and the rest are TODO': every operator the ENGINE can run must
     reach the plate canvas through the same _OperatorWorker.
