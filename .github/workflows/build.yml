@@ -23,10 +23,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install (with GUI extra + ndviewer_light)
+      # ndviewer_light was REMOVED from this install on 2026-07-31. It was deleted as a dependency
+      # on 2026-07-30 (ce5605c) precisely because it imports PyQt5 at module scope, and the app now
+      # pins QT_API=pyqt6 -- so this line was reinstalling PyQt5 into the environment the whole Qt6
+      # migration exists to keep PyQt5 out of. Two Qt majors in one process is the ONE-BINDING RULE,
+      # and here CI itself was the thing breaking it.
+      - name: Install (with GUI extra)
         run: |
           python -m pip install --upgrade pip
-          pip install "git+https://github.com/maragall/ndviewer_light"
           pip install ".[gui,test]"
       - name: Dependency-import smoke (headless)
         env:
@@ -51,10 +55,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      # ndviewer_light removed here too, 2026-07-31, and it matters MORE in this job than in smoke:
+      # a frozen bundle built with PyQt5 present ships both bindings, and `hcs-viewer.spec` now
+      # excludes PyQt5 by name -- so the install and the spec were arguing with each other inside
+      # the one artifact a biologist double-clicks.
       - name: Install (+ PyInstaller)
         run: |
           python -m pip install --upgrade pip
-          pip install "git+https://github.com/maragall/ndviewer_light"
           pip install ".[gui]" pyinstaller
       # IMA-232: the spec file, not a flag soup. The old one-liner passed --windowed AND
       # -c; -c wins, so on macOS it built a console executable and never produced a .app
