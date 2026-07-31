@@ -450,11 +450,42 @@ class RegionViewer(QMainWindow):
 
         # A modest, cascaded window — the deck's windows are small tiles, not full-screen slabs.
         # Cascade by ID so several opened in a row do not land exactly on top of one another.
-        self.resize(860, 720)
+        #
+        # 860x720 is a DESIGN size in logical pixels, and it is only the right size if the display
+        # scale is being honoured. Where it is not (Qt5 rounding a 150% display down to 100%, see
+        # `_viewer.enable_hidpi`) this window came up at 860 PHYSICAL pixels on a 4K panel, which
+        # is about three inches wide: Spencer's report. The rounding fix is the actual repair, so
+        # this floor is a SECOND line of defence rather than the fix -- a view window is never
+        # worth opening at under a third of the screen, whatever the scale factor turns out to be.
+        self.resize(*self._default_view_size())
         off = 28 * ((self.window_id - 1) % 8)
         self.move(120 + off, 90 + off)
 
         self._build()
+
+    #: The shape a view window OPENS at, in logical pixels. Deliberately not named `_DESIGN_W`:
+    #: that name already means "the width the TYPE was authored for" in `_fontscale`, and this
+    #: window scales its type against that module's 1100, not against this. Two different facts,
+    #: two different names.
+    _OPEN_W, _OPEN_H = 860, 720
+
+    def _default_view_size(self) -> tuple:
+        """The design size, floored at a third of the screen and capped to fit on it.
+
+        Read the screen through ``QGuiApplication`` rather than ``QApplication``: this module is
+        widget-side but the screen list is a GUI-layer fact, and the import stays local so the
+        headless paths that import this module for its non-Qt helpers do not pay for it.
+        """
+        from qtpy.QtGui import QGuiApplication
+
+        w, h = self._OPEN_W, self._OPEN_H
+        screen = QGuiApplication.primaryScreen()
+        if screen is None:
+            return w, h
+        avail = screen.availableGeometry()
+        w = min(max(w, avail.width() // 3), max(1, avail.width() - 40))
+        h = min(max(h, avail.height() // 3), max(1, avail.height() - 80))
+        return int(w), int(h)
 
     @staticmethod
     def _region_label(regions: "list[str]", limit: int = 3) -> str:
@@ -1676,7 +1707,7 @@ class RegionViewer(QMainWindow):
     def _open_roi_3d(self, region: str, roi_bbox: tuple, contrast_by: dict, colormap_by: dict) -> None:
         """3D of an ROI = native fusion of the FOVs it overlaps, cropped to the box (full z)."""
         names = [c["name"] for c in (self._meta or {}).get("channels", [])]
-        from squidmip._napari3d import native_roi_volume, open_native_3d_volume
+        from squidmip._napari3d import native_roi_volume, open_native_3d_volume, z_step_um
 
         try:
             volumes = native_roi_volume(self._reader, self._meta, region, roi_bbox, names)
@@ -1689,7 +1720,7 @@ class RegionViewer(QMainWindow):
             self._say("ROI 3D: no z-stack over this ROI (single z plane, or the box is off-tissue).")
             return
         px = float((self._meta or {}).get("pixel_size_um") or 1.0)
-        dz = float((self._meta or {}).get("dz_um") or px)
+        dz = z_step_um(self._meta or {}, px, where=f"3D ROI {region}")
         max_tex = 2048
         try:
             max_tex = int(self._pane._live_max_3d_texture())
@@ -1727,13 +1758,14 @@ class RegionViewer(QMainWindow):
             self._say("no channel on screen to render in 3D.")
             return
         px = float((self._meta or {}).get("pixel_size_um") or 1.0)
-        dz = float((self._meta or {}).get("dz_um") or px)
         max_tex = 2048
         try:
             max_tex = int(self._pane._live_max_3d_texture())
         except Exception:                                # noqa: BLE001 - Apple default is the floor
             pass
-        from squidmip._napari3d import open_native_3d_volume
+        from squidmip._napari3d import open_native_3d_volume, z_step_um
+
+        dz = z_step_um(self._meta or {}, px, where="3D ROI volume")
 
         try:
             self._native3d = open_native_3d_volume(

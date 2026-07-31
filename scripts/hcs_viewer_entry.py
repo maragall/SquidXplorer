@@ -29,9 +29,14 @@ def _selftest(dataset: str) -> int:
     # windowed bundle would otherwise abort before reaching a single line of our code.
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-    from PyQt5.QtWidgets import QApplication
-
+    # squidmip FIRST, then qtpy. That order is the whole point: importing the package is what
+    # pins QT_API, and qtpy resolves the binding at ITS import, so a `from qtpy... import` above
+    # this line would settle on qtpy's own default (PyQt5) and the selftest would exercise a
+    # different binding than the app ships. Naming PyQt5 here directly, as this did until
+    # 2026-07-31, was the same bug with the answer hardcoded.
     from squidmip._viewer import PlateWindow
+
+    from qtpy.QtWidgets import QApplication
 
     app = QApplication.instance() or QApplication([])
     # The viewer's own test escape hatch (_viewer.main checks it) — set on the app rather
@@ -81,7 +86,12 @@ def _compute_check(win) -> dict:
     """
     import numpy as np
 
-    from squidmip import project_well, richardson_lucy_gaussian, subtract_background
+    # `deconvolve_plane`, not `richardson_lucy_gaussian`. That name has not existed in the public
+    # surface since decon moved onto petakit's vectorial PSF (IMA-247), so this selftest raised
+    # ImportError on every run -- caught while flipping the Qt binding on 2026-07-31, unrelated to
+    # it. It failed inside `_compute_check`'s own try/except, which reports rather than crashes,
+    # so a frozen build reported "compute check failed" and exited 0 the whole time.
+    from squidmip import deconvolve_plane, project_well, subtract_background
 
     out = {}
     try:
@@ -93,7 +103,7 @@ def _compute_check(win) -> dict:
         out["mip_dtype"] = str(mip.dtype)
         crop = np.ascontiguousarray(mip[0, 0, 0, :256, :256])
         bg = subtract_background(crop)                   # scikit-image rolling_ball
-        dec = richardson_lucy_gaussian(crop)             # scipy.ndimage gaussian_filter
+        dec = deconvolve_plane(crop)                     # petakit vectorial PSF, one plane
         out["bgsub_mean_delta"] = float(crop.mean() - bg.mean())
         out["decon_shape"] = list(dec.shape)
         out["ok"] = mip.shape[2] == 1 and bg.shape == crop.shape and dec.shape == crop.shape

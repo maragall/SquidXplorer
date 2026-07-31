@@ -956,7 +956,12 @@ class PlateWindow(QMainWindow):
         if screen is not None:
             avail = screen.availableGeometry()
             w = min(w, max(self.minimumWidth(), avail.width() - 40))
-            h = min(h, max(self.minimumHeight(), avail.height() - 80))
+            # HEIGHT GROWS, WIDTH DOES NOT. The design height is a FLOOR here, not a ceiling: the
+            # plate is the tall thing in this window and every pixel of height goes to it, so on a
+            # screen with room to spare we take it. Width stays at the design number because past
+            # it the plate does not grow, only the gutters either side of it do -- which is what
+            # opening this window maximised looked like, and why that was reverted (2026-07-31).
+            h = max(self.minimumHeight(), avail.height() - 80)
         return w, h
 
     def _ui_scale(self) -> float:
@@ -5002,6 +5007,22 @@ def enable_hidpi() -> None:
     if share is not None:
         QApplication.setAttribute(share, True)
 
+    # FRACTIONAL SCALE FACTORS. AA_EnableHighDpiScaling above only says "scale"; it does not say
+    # BY WHAT. Qt5's default rounding policy is Round, so a display at 125%, 150% or 175% -- the
+    # three settings Windows actually ships and the ones a 4K laptop panel defaults to -- is
+    # snapped to 100% or 200%. At 150% snapped down to 100% every window comes up two-thirds of
+    # its intended size with the type to match, which is Spencer's "rendered at about 3x2 inches"
+    # on a 4K monitor: not a missing high-DPI fix, a rounded one. macOS never showed it because
+    # Retina is exactly 2x and rounds to itself.
+    #
+    # PassThrough honours the fraction as-is. It is the Qt6 DEFAULT, so this line only changes
+    # Qt5 behaviour and is a no-op once PyQt5 is dropped -- which is also why the Qt6 build
+    # Spencer tested looked correct without anyone fixing anything.
+    policy = getattr(Qt, "HighDpiScaleFactorRoundingPolicy", None)
+    setter = getattr(QApplication, "setHighDpiScaleFactorRoundingPolicy", None)
+    if policy is not None and setter is not None:
+        setter(policy.PassThrough)
+
 
 def _startup_splash(app):
     """A small "starting" window, shown before the slow constructor runs. None under tests.
@@ -5061,12 +5082,30 @@ def main(dataset_path: str = None):
     win = PlateWindow(path)
     _install_footprint_monitor(app, win)
     win._gui_slot = slot                  # the reservation lives as long as the window
+
+    # FULL HEIGHT, DESIGN WIDTH -- not maximised. `showMaximized()` was tried first, on Spencer's
+    # "start full screen and let me close it down", and Julio caught it immediately on a laptop:
+    # "aspect ratio is good in height, but too much width". That is the layout telling the truth.
+    # This root is a PORTRAIT window (596 x 850): a capped top strip over a plate that wants to be
+    # tall, so height is the dimension it can actually use and width past the design number just
+    # pads empty gutters around the plate. Maximising is the right default for a document window
+    # and the wrong one for this.
+    #
+    # So `_default_root_size` takes the whole usable height and leaves the width alone, which
+    # satisfies both readings of the request: it fills the screen in the direction that helps, and
+    # it is still an ordinary resizable window the user can drag to any shape from there.
     win.show()
     if splash is not None:
         splash.finish(win)
     if not app.property("_squidmip_test"):
         try:
-            sys.exit(app.exec_())
+            # `exec()`, not `exec_()`: PyQt6 removed every trailing-underscore alias, so `exec_`
+            # is an AttributeError there -- the window would paint and the process would die on
+            # the next line. PyQt5 has both, so this spelling is the one that works on either
+            # binding. The suite never caught it because tests set `_squidmip_test` and return
+            # the window instead of entering the event loop, so this line has no coverage by
+            # construction: it is the one statement only a real launch executes.
+            sys.exit(app.exec())
         finally:
             release_gui_slot(slot)
     return win

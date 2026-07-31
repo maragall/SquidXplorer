@@ -89,10 +89,20 @@ _EXCLUDES = [
     "sphinx", "docutils",
     "numba", "llvmlite",   # tilefusion pulls these; squidmip deliberately does not import tilefusion
     "torch", "tensorflow",
-    "PyQt5.QtWebEngineWidgets", "PyQt5.QtWebEngineCore", "PyQt5.QtWebEngine",
-    "PyQt5.QtBluetooth", "PyQt5.QtNfc", "PyQt5.QtQuick3D", "PyQt5.QtLocation",
-    "PyQt5.QtDesigner", "PyQt5.QtHelp", "PyQt5.QtMultimedia", "PyQt5.QtMultimediaWidgets",
-    "PyQt6", "PySide2", "PySide6",
+    # BINDING FLIPPED 2026-07-31. This list excluded PyQt6 and trimmed PyQt5's unused modules,
+    # which was correct while the app was Qt5 and is now exactly backwards: squidmip/__init__
+    # pins QT_API=pyqt6, so a bundle built from the old list ships the one binding the app
+    # refuses to use and excludes the one it requires.
+    #
+    # UNVERIFIED, and said plainly rather than implied: this spec is built by CI on Windows
+    # (.github/workflows/build.yml), and no PyInstaller build was run for this change. The
+    # module-by-module trim below is carried over by NAME from the Qt5 list, so a Qt6 submodule
+    # that PyInstaller needs and this excludes would surface as an ImportError in the frozen
+    # app, not here. Whoever runs the next build should read its warn-*.txt before trusting it.
+    "PyQt6.QtWebEngineWidgets", "PyQt6.QtWebEngineCore", "PyQt6.QtWebEngine",
+    "PyQt6.QtBluetooth", "PyQt6.QtNfc", "PyQt6.QtQuick3D", "PyQt6.QtLocation",
+    "PyQt6.QtDesigner", "PyQt6.QtHelp", "PyQt6.QtMultimedia", "PyQt6.QtMultimediaWidgets",
+    "PyQt5", "PySide2", "PySide6",
 ]
 
 a = Analysis(

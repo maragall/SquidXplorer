@@ -25,6 +25,32 @@ The public surface is intentionally tiny::
     launch_minerva()                          # best-effort; returns False if it isn't installed
 """
 
+import importlib.util as _importlib_util
+import os as _os
+
+# ---------------------------------------------------------------------------------------------
+# WHICH QT BINDING THIS PROCESS USES. Decided here, once, before anything can import qtpy.
+#
+# The GUI was migrated off PyQt5 (10b8348, f7f9b28, ce5605c: every import through qtpy, every enum
+# fully scoped, every Qt5-only API replaced, ndviewer_light deleted because it imported PyQt5 at
+# module scope). What never landed was the PIN, and without it qtpy's own preference order starts
+# at PyQt5 -- so on a machine with both installed, the tree LOOKED migrated and quietly kept
+# running on Qt5. Verified on 2026-07-31: `qtpy.API_NAME` reported PyQt5 5.15.14 on the developer
+# machine with PyQt6 6.11 sitting right next to it. Qt6 is also what makes the app honour
+# fractional display scaling by default (see `_viewer.enable_hidpi`), which is the difference
+# Spencer saw between his Qt6 build and the Qt5 one.
+#
+# Conditional on PyQt6 actually being importable, and that condition is load-bearing, not
+# defensive noise: an existing venv installed from an older `.[gui]` has PyQt5 ONLY, and this
+# package is installed editable there, so a plain `git pull` applies immediately with no reinstall.
+# An unconditional pin would turn that pull into an ImportError at launch on the demo machine.
+# `find_spec` rather than a try/import: it answers the same question without paying for the import.
+#
+# An explicit QT_API in the environment always wins, so `QT_API=pyqt5 squidmip-view` remains the
+# escape hatch if Qt6 ever misbehaves on a given machine.
+if "QT_API" not in _os.environ and _importlib_util.find_spec("PyQt6") is not None:
+    _os.environ["QT_API"] = "pyqt6"
+
 from squidmip._engine import (
     Operator,
     add_projector,

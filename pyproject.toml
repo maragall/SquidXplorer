@@ -66,13 +66,21 @@ test = ["pytest>=7.0", "ome-zarr-models>=1.7"]
 # (jsschwrz/Squid 757d571, "Migrate GUI from PyQt5 to PyQt6 for napari 0.7 / Python 3.14"),
 # so the two apps that embed napari do not drift onto different majors.
 #
-# CAVEAT, and it is the reason the upper bound is worth having: napari >=0.7 targets Qt6, and
-# that commit found napari 0.7 + vispy 0.16 under PyQt5 renders the mosaic glitchily. This
-# package is still PyQt5, so the pin aligns versions for the Qt6 migration rather than making
-# Qt5 correct. Bindings verified against the pinned range via verify_napari_bindings(); the
-# rendering caveat is a Qt-binding problem, tracked separately.
+# napari >=0.7 targets Qt6, and that commit found napari 0.7 + vispy 0.16 under PyQt5 renders the
+# mosaic glitchily. That caveat is now DISCHARGED rather than tracked: the binding below is Qt6.
 gui = [
-    "PyQt5>=5.15",
+    # PyQt6, not PyQt5, as of 2026-07-31. The code migration landed weeks ago (10b8348, f7f9b28,
+    # ce5605c) but this line still asked for Qt5, so every fresh `.[gui]` install produced a
+    # PyQt5-only environment and qtpy -- whose preference order starts at PyQt5 -- ran the
+    # "migrated" app on Qt5. The declaration and `squidmip/__init__.py`'s pin have to agree or
+    # one of them is a lie; they now do.
+    #
+    # Qt6 is not cosmetic here. It scales fractional-DPI displays correctly by default, which is
+    # the "everything renders at about 3x2 inches" report from the 4K Windows demo machine, and
+    # it is a precondition for ever embedding a Qt 6.9 renderer in-process.
+    #
+    # NOT PINNED UPWARD: verified against PyQt6 6.11 only. If a future major breaks, name it here.
+    "PyQt6>=6.5",
     # Ceiling lifted from <0.8 to <0.9 on 2026-07-30 (Qt6 step 3). The <0.8 pin was a
     # QT-BINDING HEDGE, not a known 0.8 defect, and the binding is no longer named in the code
     # (everything goes through qtpy, and the suite is green under QT_API=pyqt6).

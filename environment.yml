@@ -18,5 +18,9 @@ dependencies:
   - pip:
       - tensorstore
       - pydantic-settings
-      - PyQt5
+      # PyQt6 as of 2026-07-31, matching pyproject's [gui] extra and the QT_API pin in
+      # squidmip/__init__.py. A conda env that installs PyQt5 while the package pins pyqt6
+      # produces the exact silent split this migration exists to end: the pin falls back, the
+      # app runs Qt5, and nothing says so.
+      - PyQt6
       - "."          # squidmip itself (run `conda env create` from the repo root)

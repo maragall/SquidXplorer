@@ -43,6 +43,30 @@ def _center_fov(meta: dict, region: str) -> Optional[int]:
     return int(min(pts, key=lambda fp: (fp[1][0] - cx) ** 2 + (fp[1][1] - cy) ** 2)[0])
 
 
+def z_step_um(meta: dict, px: float, where: str = "3D") -> float:
+    """The acquisition's z step in micrometres, or the xy pixel size with a LOUD warning.
+
+    ``scale=(dz, px, px)`` is the only thing that makes a z-stack render at its true proportions,
+    so a wrong ``dz`` does not fail: it silently draws the volume at the wrong aspect. When
+    ``dz_um`` is missing or zero the fallback is the xy pixel size, which on a typical 10x
+    acquisition (dz 1.5 um, px 0.752 um) renders the stack HALF as tall as it really is, and the
+    report that comes back is "the 3D view is flattening my data".
+
+    So the fallback stays -- refusing to open a volume over a missing metadata field is worse --
+    but it is named in the log every time it is taken, with the number it substituted. Julio,
+    2026-07-31: a renderer that guesses must say so.
+    """
+    dz = meta.get("dz_um")
+    if dz:
+        return float(dz)
+    log.warning(
+        "%s: this acquisition has dz_um=%r, so the z step is UNKNOWN and the volume is being "
+        "drawn with z=%.4f um (the xy pixel size) as a stand-in. Z proportions are NOT to scale.",
+        where, dz, float(px),
+    )
+    return float(px)
+
+
 def _native_stack(reader: Any, meta: dict, region: str, fov: int, channel: str) -> np.ndarray:
     """One FOV's native (z, y, x) stack for a channel. Reads only this field's planes."""
     z_levels = list(meta.get("z_levels") or [0])
@@ -218,7 +242,7 @@ def open_native_3d(
         raise ValueError("this acquisition declares no channels to render.")
 
     px = float(meta.get("pixel_size_um") or 1.0)
-    dz = float(meta.get("dz_um") or px)                 # z step in um; fall back to xy if absent
+    dz = z_step_um(meta, px, where=f"3D native {region}/fov {fov}")
     contrast_by_channel = contrast_by_channel or {}
     colormap_by_channel = colormap_by_channel or {}
 
