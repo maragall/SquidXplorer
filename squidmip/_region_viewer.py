@@ -592,7 +592,13 @@ class RegionViewer(QMainWindow):
         self._btn_focus = self._chip("⌖ focus", "Jump the z-slider to the sharpest plane "
                                      "(Tenengrad autofocus) of this region's centre FOV.",
                                      self._focus_reference_plane)
+        # The way BACK. Every view is bigger than the plate it was opened from, so the plate ends up
+        # under the pile it spawned. This sits in r1 with 2D/3D/focus rather than in r2 with the ROI
+        # tools: it is a WINDOW action, not something you do to the mosaic.
+        self._btn_plate = self._chip("▣ plate", "Bring the plate window to the front — it ends up "
+                                     "buried under the views opened from it.", self._raise_plate)
         r1.addWidget(self._btn_2d); r1.addWidget(self._btn_3d); r1.addWidget(self._btn_focus)
+        r1.addWidget(self._btn_plate)
         r1.addStretch(1)
         vv.addLayout(r1)
         r2 = QHBoxLayout(); r2.setSpacing(4)
@@ -753,6 +759,16 @@ class RegionViewer(QMainWindow):
         self._refresh_divergence()
         pretty = ", ".join(self._SETTING_LABELS.get(n, n) for n in names)
         self._say(f"reset {pretty} to what this window opened with.")
+
+    def _raise_plate(self) -> None:
+        """Bring the plate window back to the front. See ``ViewerManager.raise_plate``.
+
+        Says so out loud when it cannot, rather than making a button that silently does nothing --
+        a window with no manager is the standalone case, and a dead button that looks alive is the
+        failure this project keeps naming.
+        """
+        if self._manager is None or not self._manager.raise_plate():
+            self._say("there is no plate window to raise from here.")
 
     def _make_default(self) -> None:
         """Make THIS window's settings the default for windows opened FROM NOW ON.
@@ -2063,6 +2079,36 @@ class ViewerManager(QObject):
                 wins[-1].activateWindow()
             except Exception:                            # noqa: BLE001
                 pass
+
+    def raise_plate(self) -> bool:
+        """Bring the ROOT plate window to the front. Returns whether there was one to raise.
+
+        Spencer, 2026-07-30: the plate "can get lost easily". It is the smallest window on the
+        desktop and every view opened from it is larger, so by the third well the thing you
+        navigate FROM is behind everything you navigated TO. Collapse all does not help -- it
+        minimises the views AND leaves the plate wherever it was.
+
+        The plate is reachable without new plumbing: ``PlateWindow`` constructs this registry as
+        ``ViewerManager(parent=self)``, so the Qt parent IS the plate. Asking for it here rather
+        than handing every ``RegionViewer`` a back-pointer keeps one object knowing the topology --
+        the same reason the registry already owns "what windows are open".
+
+        ``showNormal`` is conditional ON PURPOSE. ``focus()`` above calls it unconditionally, which
+        is right there because a collapsed view must be restored; here it would UN-MAXIMISE a plate
+        the user had maximised. Raising a window and resizing it are different requests, and this
+        button only makes the first one.
+        """
+        plate = self.parent()
+        if plate is None or not hasattr(plate, "raise_"):
+            return False
+        try:
+            if plate.isMinimized():
+                plate.showNormal()
+            plate.raise_()
+            plate.activateWindow()
+        except Exception:                            # noqa: BLE001 - a raise is never worth a crash
+            return False
+        return True
 
     def close(self, window_id: int) -> None:
         win = self._windows.get(int(window_id))
