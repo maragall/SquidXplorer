@@ -74,6 +74,8 @@ __all__ = [
     "human_seconds",
     "compare",
     "SAMPLE_INTERVAL_S",
+    "run_log_path",
+    "persist_runs",
 ]
 
 from squidmip._logpane import get_logger
@@ -160,6 +162,11 @@ class RunMetrics:
     outcome: str
     detail: str = ""
     started_at: float = 0.0
+    #: Seconds from the user starting this run to its FIRST tile being DRAWN — not emitted. The
+    #: difference between those two is queue delay, and a run that emits promptly while the user
+    #: sees nothing is the complaint this field exists to make visible. ``None`` means no tile was
+    #: ever drawn, which is a different fact from having drawn one instantly.
+    first_paint_seconds: Optional[float] = None
     #: Anything the caller wants carried alongside — the dataset id, the adapter version, the
     #: operator's parameters. The CSAT loop needs exactly this and should not need a schema change
     #: here to record it.
@@ -183,6 +190,11 @@ class RunMetrics:
         ]
         if self.peak_over_start is not None:
             parts.append(f"+{human_bytes(self.peak_over_start)}")
+        # Absent rather than zero when nothing was drawn: this line is scanned vertically, and a
+        # column reading "first paint 0.0 s" would look like the best result in the log rather
+        # than like the run that never painted at all.
+        if self.first_paint_seconds is not None:
+            parts.append(f"first paint {human_seconds(self.first_paint_seconds)}")
         parts.append(self.outcome if not self.detail else f"{self.outcome} — {self.detail}")
         return " · ".join(parts)
 
@@ -200,6 +212,7 @@ class RunMetrics:
             "outcome": self.outcome,
             "detail": self.detail,
             "started_at": self.started_at,
+            "first_paint_seconds": self.first_paint_seconds,
             **({"extra": dict(self.extra)} if self.extra else {}),
         }
 
@@ -246,6 +259,63 @@ class MetricsLog:
 
 #: THE history. One per process, because the process is what the RSS measurement is about.
 METRICS = MetricsLog()
+
+#: Marks a log that already has a JSONL sink attached. Every ``PlateWindow`` construction calls
+#: :func:`persist_runs`, and a process that opens eight plates would otherwise attach eight sinks
+#: and write eight identical lines per run.
+_PERSISTED = "_squidmip_run_log_installed"
+
+
+def run_log_path():
+    """Where finished runs are appended, one JSON object per line.
+
+    Under the per-user cache root, never in the repo and never inside an acquisition. Both of
+    those rules already exist and are already enforced by ``_platecache``, which owns the root and
+    its environment override, so this reuses that decision instead of making a second one. A
+    consequence worth having: the test suite's cache redirection covers this file for free.
+    """
+    from pathlib import Path
+
+    from squidmip._platecache import cache_root
+
+    return Path(cache_root()) / "runs.jsonl"
+
+
+def persist_runs(metrics: Optional[MetricsLog] = None, path=None):
+    """Append every finished run to ``path`` as one JSON line. Returns the path.
+
+    ``METRICS`` is a bounded in-memory deque, so without this every measurement the app takes dies
+    with the process — which is how two eng-review documents came to disagree about the per-region
+    cost with no way to settle it. Append-only, so a crash keeps what came before it, and
+    line-delimited, so two sessions can be diffed with ordinary tools.
+
+    Idempotent: calling it twice on one log attaches one sink.
+
+    A sink that cannot write is a lost copy, not a lost run. The failure is logged once and the
+    run still records in memory; ``MetricsLog.record`` already refuses to let a subscriber's bug
+    fail the work being measured, and instrumentation that takes down the work is worse than
+    instrumentation that is missing.
+    """
+    from pathlib import Path
+
+    log = metrics if metrics is not None else METRICS
+    target = Path(path) if path is not None else run_log_path()
+    if getattr(log, _PERSISTED, None) is not None:
+        return getattr(log, _PERSISTED)
+
+    def _write(m: RunMetrics) -> None:
+        import json
+
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with open(target, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(m.as_dict()) + "\n")
+        except OSError as exc:                          # noqa: BLE001 - named, not swallowed
+            logger.warning("run log unwritable at %s: %s", target, exc)
+
+    log.subscribe(_write)
+    setattr(log, _PERSISTED, target)
+    return target
 
 
 class _Sampler:
@@ -314,6 +384,26 @@ class RunRecorder:
         self.detail: str = ""
         self.extra: dict = {}
         self.metrics: Optional[RunMetrics] = None
+        self.first_paint_seconds: Optional[float] = None
+        self._closed = False
+
+    def first_paint(self, seconds: float) -> None:
+        """Report that this run's first tile has been DRAWN, ``seconds`` after the user asked for
+        it. Reported from wherever the drawing happens, because that is the only place that knows.
+
+        FIRST wins, unlike :meth:`finish`. Every tile of a run reaches the same handler, so
+        last-wins would quietly turn first paint into last paint on a long run. A negative interval
+        is refused rather than recorded: a clock that has run backwards produces one, and a
+        negative duration in a comparison table sorts as the best result in it. A report arriving
+        after the block has exited is dropped, because the record it would describe is already
+        written and frozen.
+        """
+        if self._closed or self.first_paint_seconds is not None:
+            return
+        s = float(seconds)
+        if s < 0.0:
+            return
+        self.first_paint_seconds = s
 
     def finish(self, outcome: str, detail: str = "") -> None:
         """Name how this run ended. Last call wins, so a partial result reported late is the one
@@ -378,8 +468,9 @@ class measure_run:
             operator=r.operator, target=r.target, n_targets=r.n_targets,
             seconds=seconds, peak_rss=peak, start_rss=self._sampler.start_rss,
             outcome=outcome, detail=detail, started_at=time.time() - seconds,
-            extra=dict(r.extra),
+            extra=dict(r.extra), first_paint_seconds=r.first_paint_seconds,
         )
+        r._closed = True        # a tile arriving after this cannot alter a record already written
         r.metrics = m
         self._metrics.record(m)
         level = logging.WARNING if outcome in (FAILED, PARTIAL) else logging.INFO

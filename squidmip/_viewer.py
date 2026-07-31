@@ -135,7 +135,7 @@ from squidmip._logpane import get_logger
 
 log = get_logger("viewer")
 
-from squidmip import _explore, _qtstyle
+from squidmip import _explore, _measure, _qtstyle
 from squidmip.contract import field_path
 from squidmip._engine import available_projectors
 from squidmip._layers import OperationStack
@@ -506,6 +506,10 @@ class PlateWindow(QMainWindow):
     _run_requester = None
     _run_op_action = None
     _run_error = None
+    #: When the user last asked for an operator run, on the perf_counter clock. The other end of
+    #: FIRST PAINT, whose stop is in ``_on_tile``: the wait being measured is the user's, so it
+    #: starts at the gesture and not at the moment a worker thread happens to be constructed.
+    _run_t0 = None
 
     def __init__(self, initial_path: Optional[str] = None):
         super().__init__()
@@ -747,6 +751,11 @@ class PlateWindow(QMainWindow):
         # from a menu operator no-ops instead of crashing rather than needing every call site cut
         # in one pass. Operator-result display migrates onto the windows next (Phase C).
         self._mosaic_pane = None
+        # Every finished run also goes to a file, because METRICS is a bounded in-memory deque and
+        # a measurement that dies with the process cannot answer "is this slower than last month".
+        # Idempotent, so eight windows in one process still attach one sink; and it writes under
+        # the per-user cache root, which the test suite already redirects.
+        _measure.persist_runs()
         self._detail = None
         self._right_widget = None
 
@@ -3687,6 +3696,11 @@ class PlateWindow(QMainWindow):
         ``tab_key`` scopes the run to an exploration tab: results are filed under the layer
         ``<op>@<tab_key>`` so two tabs running the same operator do not overwrite each other.
         """
+        # The user asked for a run HERE. Everything below it — scope resolution, the disk estimate,
+        # the plate statuses, worker construction — is time they spend waiting, so the clock starts
+        # before all of it rather than at ``worker.start()``. A refused run leaves this set and
+        # harmless: nothing records a measurement unless a worker actually ran.
+        self._run_t0 = time.perf_counter()
         if self._reader is None or self._overview is None:
             return
         if _explore.operator_busy(self._worker, self._retired):
@@ -4011,6 +4025,15 @@ class PlateWindow(QMainWindow):
             return
         layer = self._active_op_key or "raw"
         self._overview.add_tile(ri, ci, well_id, tile, layer=layer, box=box)
+        # FIRST PAINT stops here, one line after the tile is actually on the plate. Reported for
+        # the OPERATOR run only: this slot also serves the raw preview and the reopened-plate
+        # worker, and neither is the wait being measured. The recorder keeps the first report and
+        # drops the rest, so this needs no "have I already done this" flag of its own.
+        w = self._worker
+        if self._run_t0 is not None and w is not None and not getattr(w, "IS_PREVIEW", False):
+            report = getattr(w, "report_first_paint", None)
+            if report is not None:
+                report(time.perf_counter() - self._run_t0)
         self._on_run_tile(ri, ci, well_id, tile, box)       # ...and onto the run's side-pane tab
         self._overview.set_status(ri, ci, "done")           # blue
         src = self._loupe_sources.get(layer)                 # this well is now on disk -> loupe-able

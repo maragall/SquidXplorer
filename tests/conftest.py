@@ -563,9 +563,8 @@ def sim_1536wp_problem():
             f"To restore it, put the source acquisition back at {SIM_1536WP_SOURCE}: the 1536 "
             "wells are symlinks onto that one 2x2 plate's four planes, so restoring the source "
             "revives every link with no regeneration step. This repo contains no generator for "
-            f"{SIM_1536WP_SOURCE.name}; tools/gates.py, tools/walkthrough.py, tools/acceptance.py, "
-            "tools/odon_benchmark.py, tools/viewer_benchmark.py and "
-            "tools/regression_vs_baseline.py all read it from that path and none of them create it."
+            f"{SIM_1536WP_SOURCE.name}; tools/gates.py, tools/walkthrough.py, tools/acceptance.py "
+            "and tools/odon_benchmark.py all read it from that path and none of them create it."
         )
     return None
 
