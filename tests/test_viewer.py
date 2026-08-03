@@ -5235,6 +5235,11 @@ def test_the_mosaic_workers_signal_actually_reaches_on_mosaic_plane(qapp, monkey
     monkeypatch.setattr(V.PlateWindow, "_on_mosaic_plane",
                         lambda self, *a: landed.append(a))
     monkeypatch.setattr(V._MosaicWorker, "start", lambda self: None)   # no thread; wiring only
+    # _load_mosaic now calls self._stop_spots() (added with spot detection), which retires the
+    # segmentation worker via self._retire(...) -- a real QObject method the __new__ shell cannot
+    # service ("super-class __init__ ... was never called"). It is unrelated to the mosaic-signal
+    # wiring under test, so stub it out like the Qt-touching calls above.
+    monkeypatch.setattr(V.PlateWindow, "_stop_spots", lambda self: None)
 
     V.PlateWindow._load_mosaic(win, region="A1")
     worker = win._mosaic_worker

@@ -36,28 +36,57 @@ fi
 ROOT=$(git rev-parse --show-toplevel)
 cd "$ROOT"
 
-# PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 is required (without it the PyQt5 tests silently skip against
-# PySide) but it also stops pytest-timeout loading, so `--timeout=` becomes an UNRECOGNISED
-# ARGUMENT and pytest dies in 0.115s having collected nothing. That is how this gate shipped: it
-# never ran a single test, and every agent learned to reach for -wip. Load the plugin explicitly.
+# WHY NOT ONE `pytest -q`. A single-process run of the whole suite no longer finishes: it dies with
+# a native `Fatal Python error: Segmentation fault` (no test failure) deep in the run. It is a
+# test-HARNESS accumulation bug, not a product bug - the app runs clean and every subset passes in
+# isolation. Measured cause: the GUI test family leaks finished QThread workers (and native Qt/GL
+# state) that nothing reaps; ~150 GUI tests' worth exhausts the process and the next native
+# allocation (a numba stitch solve, or Qt teardown) crashes on it. In-process cleanup was tried in
+# three escalating forms (close all widgets, drain deleteLater, quit+wait+delete every live
+# QThread) and none of it moved the crash - the leaked state is not reachable from Python. So the
+# suite is run in bounded-size CHUNKS, each in its own process, by tools/run_suite_chunked.py.
+# Every test still runs and can still fail; they are just not all in one address space. See that
+# file for the full diagnosis.
 #
-# No -x either. -x stops at the first failure, so the failure list handed to the flake re-run below
-# was truncated to one name; a real `assert False` sharing a run with a known flake could exit 0.
-# The whole suite runs, and every failure is re-checked.
-echo "commit-gate: running the suite before allowing this commit ..."
-if ! QT_QPA_PLATFORM=offscreen PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
-     python -m pytest -q -p pytest_timeout --timeout=900 >/tmp/squidhcs_gate.$$ 2>&1; then
-  # The four known-flaky tests (IMA-258) are races that pass in isolation. A flake must not
-  # block a commit, but it must not silently pass one either - so re-run just the failures.
-  # If pytest never collected anything, this is a BROKEN GATE, not a green tree. Refuse loudly.
-  # The gate shipped in exactly this state and silently gated nothing for five worktrees.
-  if ! grep -qE "^[0-9]+ (passed|failed)|passed|failed" /tmp/squidhcs_gate.$$; then
+# PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 (set inside the runner) is required or the PyQt5 tests silently
+# skip against PySide. pytest_timeout is loaded explicitly there. No -x anywhere: the whole suite
+# runs and every failure is re-checked, so a real `assert False` can never hide behind a known flake.
+#
+# The runner distinguishes two kinds of crash. A benign TEARDOWN crash (every test in the chunk ran
+# and was recorded to a durable per-test log, then the process died on the way out) is reported and
+# tolerated - nothing was lost. An INCOMPLETE chunk (the process died mid-chunk, so some tests never
+# ran) is a HARD refusal below: never a pass, never a "flake". If chunks go INCOMPLETE, the mid-run
+# accumulation cliff moved; lower SQUIDHCS_CHUNK (default 100) rather than waving it through.
+echo "commit-gate: running the suite in chunks before allowing this commit ..."
+GATE_BASETEMP="${TMPDIR:-/tmp}/squidhcs_gate_bt.$$"
+if ! SQUIDHCS_BASETEMP="$GATE_BASETEMP" \
+     python tools/run_suite_chunked.py --chunk "${SQUIDHCS_CHUNK:-100}" --timeout 900 \
+     >/tmp/squidhcs_gate.$$ 2>&1; then
+  rm -rf "$GATE_BASETEMP" 2>/dev/null || true
+  # If the runner never produced a suite summary, the harness is broken, not the tree. Refuse loudly.
+  if ! grep -qE "^=== SUITE SUMMARY:" /tmp/squidhcs_gate.$$; then
     echo ""
     tail -20 /tmp/squidhcs_gate.$$
     rm -f /tmp/squidhcs_gate.$$
     echo ""
-    echo "commit-gate: REFUSED - pytest did not run (no pass/fail summary)."
+    echo "commit-gate: REFUSED - the chunked runner produced no SUITE SUMMARY (it did not run)."
     echo "  the gate is broken, not the tree. fix the gate before committing."
+    exit 1
+  fi
+  # An INCOMPLETE chunk means tests that never ran (the process died BEFORE reaching them - a real
+  # mid-chunk crash or timeout). That is NOT a flake and NOT a pass: refuse immediately. A benign
+  # TEARDOWN-CRASH (every test ran and was recorded, then the process crashed on the way out) is
+  # reported by the runner but is NOT a refusal - the durable per-test record already accounted for
+  # every test. Only INCOMPLETE gates the commit.
+  if ! grep -qE "^=== SUITE INCOMPLETE: none ===" /tmp/squidhcs_gate.$$; then
+    echo ""
+    grep -E "^=== SUITE (SUMMARY|INCOMPLETE|TEARDOWN-CRASHES):|is INCOMPLETE" /tmp/squidhcs_gate.$$
+    tail -20 /tmp/squidhcs_gate.$$
+    rm -f /tmp/squidhcs_gate.$$
+    echo ""
+    echo "commit-gate: REFUSED - a chunk was INCOMPLETE, so some tests never ran."
+    echo "  this is the accumulation cliff (a mid-chunk crash), not a flake. lower SQUIDHCS_CHUNK"
+    echo "  and re-run; do NOT commit until the whole suite has actually executed."
     exit 1
   fi
   FAILED=$(grep -E "^FAILED " /tmp/squidhcs_gate.$$ | sed 's/^FAILED //; s/ .*//' || true)
@@ -130,5 +159,6 @@ if ! QT_QPA_PLATFORM=offscreen PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
 fi
 
 rm -f /tmp/squidhcs_gate.$$
+rm -rf "$GATE_BASETEMP" 2>/dev/null || true
 echo "commit-gate: green."
 exit 0
