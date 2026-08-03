@@ -138,9 +138,19 @@ class LogPanel(QWidget):
         self._toggle = QPushButton()
         self._toggle.setFlat(True)
         self._toggle.setCursor(Qt.PointingHandCursor)
+        # ONE closing brace. The first line is an f-string, so its `{{` collapses to `{`; the
+        # second line is a PLAIN literal, so a `}}` there stays two braces and the sheet ends
+        # `font-size:11px;}}`. Qt's CSS parser then fails BOTH of its attempts (the sheet as
+        # written, and the sheet wrapped in `* { ... }`), leaves this button entirely unstyled,
+        # and emits "Could not parse stylesheet of object QPushButton(0x...)" on every repolish.
+        # The warning arrives labelled `WARN vispy:` because vispy installs a process-wide Qt
+        # message handler (vispy/app/backends/_qt.py:250), which is why it read as a vispy
+        # problem; vispy has nothing to do with it. It repeats in bursts because `rescale_fonts`
+        # rewrites every stylesheet carrying a `font-size:` on each window resize, which drops
+        # Qt's per-object parse cache and makes it try, and fail, again.
         self._toggle.setStyleSheet(
             f"QPushButton{{color:#c3ccd9;border:none;background:transparent;font-family:{_MONO};"
-            "font-size:11px;}}")
+            "font-size:11px;}")
         self._toggle.clicked.connect(self.toggle)
         hl.addWidget(self._toggle)
 
