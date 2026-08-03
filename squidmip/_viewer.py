@@ -2840,9 +2840,16 @@ class PlateWindow(QMainWindow):
         mgr = getattr(self, "_viewer_manager", None)
         if mgr is None:
             return None
+        # focused_id and windows are PROPERTIES on ViewerManager, not methods. They were called
+        # with parentheses here, which raised TypeError on the int/list they return; the broad
+        # except below swallowed it, so this returned None every single time and the on-screen
+        # LUTs never reached Minerva. Found 2026-08-03, an hour after the feature shipped, by an
+        # agent auditing an unrelated change. The except stays, because a window mid-teardown is
+        # genuinely not an error, but it no longer hides a call-signature mistake: the non-None
+        # path is now pinned by a test.
         try:
-            wid = mgr.focused_id()
-            win = next((w for w in mgr.windows() if getattr(w, "window_id", None) == wid), None)
+            wid = mgr.focused_id
+            win = next((w for w in mgr.windows if getattr(w, "window_id", None) == wid), None)
             if win is None:
                 return None
             luts = win._per_channel_luts()

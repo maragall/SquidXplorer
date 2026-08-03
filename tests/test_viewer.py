@@ -5601,6 +5601,46 @@ def test_on_screen_luts_is_none_when_no_view_window_is_open(qapp, stub_detail, s
     win.close()
 
 
+def test_on_screen_luts_reaches_a_focused_window(qapp, stub_detail, squid_dataset):
+    """The None path was pinned and the returns-something path was not, which is exactly where the
+    bug lived: ``focused_id`` and ``windows`` are PROPERTIES on ViewerManager and were called with
+    parentheses. The resulting TypeError was swallowed by a broad except, so this returned None
+    every single time. Every other Minerva test passed ``luts`` in by hand, so a feature that could
+    never gather them looked fully covered.
+
+    The stub declares both as @property ON PURPOSE. A stub exposing them as methods would pass
+    against the broken code and would pin nothing.
+    """
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+
+    expected = {"Fluorescence_488_nm_Ex": {"clim": (12.0, 340.0), "rgb": (0, 255, 0)}}
+
+    class _Win:
+        window_id = 7
+
+        def _per_channel_luts(self):
+            return expected
+
+    class _Mgr:
+        @property
+        def focused_id(self):
+            return 7
+
+        @property
+        def windows(self):
+            return [_Win()]
+
+        def set_run_progress(self, report):
+            """The raw preview is still running while this test builds; the plate publishes its
+            progress through the manager. Present so teardown does not raise over the assertion."""
+
+    win._viewer_manager = _Mgr()
+    assert win.on_screen_luts() == expected, "the focused window's LUTs never reached the exporter"
+    win.close()
+
+
 def test_the_render_destination_refuses_an_empty_export_instead_of_starting_a_worker(
         qapp, stub_detail, squid_dataset):
     """render.py takes minutes. Starting it on nothing would spend them and produce nothing."""
