@@ -28,10 +28,16 @@ What is reused, and from where
   CuPy is CUDA, so "GPU when present" has always meant "never, on a Mac". :mod:`squidmip._decon_gpu`
   adds Metal: the SAME Biggs-Andrews RL update, transcribed onto torch, chosen by :func:`_run`
   only when it can be shown to beat the CPU thread pool, and disabled by
-  ``SQUIDMIP_DECON_DEVICE=cpu``. Measured on an Apple M4 against the ten-thread CPU status quo:
-  **2.2x to 2.5x** at plane widths Metal's FFT likes, and 0.55x (i.e. a REGRESSION) at widths it
-  does not, which is why the choice is guarded rather than unconditional. That module's docstring
-  carries both tables and the null control that validates them.
+  ``SQUIDMIP_DECON_DEVICE=cpu``.
+
+  It also **pads the transform to a fast FFT length**, and on this instrument that is not a
+  detail, it is the whole result. Frames are 2084 = 2^2 x 521 wide, which is the slow Bluestein
+  case, and at that raw width the GPU is 0.72x, i.e. LOSES to the CPU pool. Wrap-padded to 2160
+  (+7.4% area) it is 3.41x, and the CPU alone, padded the same way, is 1.48x. Measured on a real
+  plane from the acquisition, idle Apple M4, best of nine interleaved repeats. CPU padding is
+  opt-in (``SQUIDMIP_DECON_PAD_CPU=1``) because petakit's Biggs-Andrews lambda is reduced over
+  the whole array and cannot be corrected from this layer; the GPU path corrects it and so pads
+  by default. That module's docstring carries the table and the traps.
 * **``petakit.open_acquisition`` / ``infer_immersion_index`` / ``wavelength_from_channel``** —
   how :meth:`OpticsParams.from_acquisition` turns an acquisition folder into optics. The
   metadata parse (``sensor_pixel_size_um / magnification``, ``dz(um)``, ``objective.NA``) is
@@ -286,18 +292,32 @@ def _run(volume: np.ndarray, psf: np.ndarray, iterations: int, gpu: bool) -> np.
     (or on torch-CUDA where CuPy is absent) and returns ``None`` for a device whenever it cannot
     beat the CPU thread pool, so the CPU path below stays the default and the fallback.
     ``SQUIDMIP_DECON_DEVICE`` overrides the choice in both directions.
+
+    TRANSFORM-LENGTH PADDING. Both branches run an FFT whose length is the volume's own extent
+    (``petakit/engine.py:139``), and a length with a large prime factor falls onto Bluestein and
+    is slow on BOTH backends. This instrument's frames are 2084 = 2^2 x 521 wide, which is the
+    bad case. The GPU branch therefore wrap-pads to the next 7-smooth length inside
+    :func:`squidmip._decon_gpu.rl`, where it can also restrict the Biggs-Andrews reduction to
+    the true region and so keep the answer unchanged. The CPU branch can be padded the same way
+    but NOT with that correction, since the reduction lives inside petakit, so it is opt-in via
+    ``SQUIDMIP_DECON_PAD_CPU=1`` and is off here by default.
     """
     volume = np.ascontiguousarray(volume, dtype=np.float32)
-    device = _decon_gpu.select_device(volume.shape, gpu=gpu)
-    _decon_gpu.log_choice(volume.shape, gpu=gpu)
+    device = _decon_gpu.select_device(volume.shape, gpu=gpu, psf_shape=psf.shape)
+    _decon_gpu.log_choice(volume.shape, gpu=gpu, psf_shape=psf.shape)
     if device is not None:
         out = _decon_gpu.rl(volume, psf, iterations, device)
     else:
         petakit = _petakit()
+        widths = (_decon_gpu.pad_plan(volume.shape, psf.shape)
+                  if _decon_gpu.cpu_padding_enabled() else (0, 0, 0))
+        padded = _decon_gpu._wrap_pad(volume, widths)
         out = petakit.deconvolve(
-            volume, psf,
+            np.ascontiguousarray(padded), psf,
             method=METHOD, iterations=iterations, gpu=gpu,
         )
+        if any(widths):
+            out = out[tuple(slice(w, w + n) for w, n in zip(widths, volume.shape))]
     if np.any(volume) and not np.any(out):
         raise RuntimeError(
             "petakit returned an all-zero result for a non-empty input. That is the failure "

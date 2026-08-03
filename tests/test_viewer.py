@@ -3640,7 +3640,8 @@ def test_closing_mid_export_disconnects_the_worker(qapp, stub_detail, squid_data
 #   test_a_real_shift_drag_fills_pane3_without_moving_a_single_divider
 #
 # The three-pane layout is gone. `self._split` is now the compact top ROW of the portrait deck and
-# holds exactly TWO widgets (`OpenViewList` | `_left_tabs`); there is no `_explore_col` at all, the
+# holds exactly TWO widgets (`OpenViewList` | `_right_col`, the latter a vertical splitter of
+# `_left_tabs` over the log panel since the 2026-08-03 restack); there is no `_explore_col`, the
 # central pane was deleted, and the log moved into its own top-level window. `_explore_pane` /
 # `_explore_empty` are still CONSTRUCTED but are never parented into any layout, so nothing in them
 # is on screen — which is why the geometry these three measured is no longer measurable rather
@@ -5040,6 +5041,110 @@ def test_every_card_declares_whether_it_is_a_runnable_operator():
             )
 
 
+def test_gallery_view_is_a_view_menu_command_and_not_an_operator(qapp):
+    """"I guess I don't understand how this can be treated as an operator in bulk" (Julio).
+
+    He is right. An operator here is something the engine runs over regions to produce derived
+    data, declared by a `consumes` frozenset; "arrange the open windows in a grid" consumes no
+    axis and produces no pixels. It was never in `_OPERATIONS`, but it sat in the operator card
+    stack wearing the same card, which is what made it read as one.
+
+    It is also NOT IMPLEMENTED, and this pins that it says so instead of describing a plan in the
+    present tense. Delete this half of the test when the assembly actually lands.
+    """
+    win = V.PlateWindow(None)
+    try:
+        assert "galleryview" not in win._op_cards
+        assert "galleryview" not in win._op_actions
+        assert "galleryview" not in {op.key for op in V._OPERATIONS}
+        assert "galleryview" not in V.runnable_operators()
+
+        act = win._gallery_act
+        assert act.menu() is not None or act.parent() is not None
+        assert [a for a in win.menuBar().actions()
+                if a.text() == "&View" and act in a.menu().actions()], (
+            "Gallery View is not in the View menu, so it is nowhere")
+        # window management is not gated on an acquisition; the operator cards are
+        assert act.isEnabled() is True
+
+        act.trigger()
+        assert "not implemented" in win._readout.text().lower(), (
+            "Gallery View reports a plan rather than saying it is unbuilt")
+    finally:
+        win.close()
+
+
+# The OTHER direction of the same contract, and the one nothing checked.
+#
+# `test_every_card_declares_whether_it_is_a_runnable_operator` walks the CARDS and asks the engine.
+# An operator the engine can run but that has NO card is invisible to that walk: there is no card
+# to iterate, so nothing fails. That is exactly how `reference` -- a z-reduction to the sharpest
+# plane, the capability Julio asked for twice -- stayed CLI-only for months while being in
+# `available_projectors()` the whole time. It was in no dropdown, no menu and no card, and no test
+# said a word.
+#
+# So: every runnable operator must either have a card or be DECLARED CLI-only here, with the
+# reason written down. Registering a projector is one line anywhere in the package
+# (`add_projector`), so without this the next one lands the same way: shipped, runnable, and
+# unreachable from the GUI. The allowlist lives in the test rather than in `_operations.py`
+# because "this operator has no card" is not a fact about the card table -- it is a decision, and
+# the point is that the decision has to be made out loud when the operator is added.
+
+#: Runnable operators that deliberately have no GUI card, and why. Adding an operator without
+#: adding it here (or giving it a card) fails the test below. Removing a card without moving its
+#: key here fails it too.
+CLI_ONLY_OPERATORS = {
+    "spot": "a LABELS overlay, not a plate result; it is driven from the spot-count controls "
+            "on the mosaic, not from a card that writes an OME-Zarr plate.",
+    "decon3d": "the volume-then-project variant of `decon`; the decon card's own panel is where "
+               "an iteration count gets chosen, and a second card for the same operator with a "
+               "different z contract is how a user picks the wrong one.",
+    "coordinate": "the unregistered CONTROL for `stitch` (stage coordinates, no registration). "
+                  "It exists to be the baseline a stitch is graded against in the benchmark, "
+                  "not to be offered as a thing to run.",
+}
+
+
+def test_every_runnable_operator_is_either_carded_or_declared_cli_only():
+    """An engine entry with no card is a capability the GUI cannot reach.
+
+    The reverse of the card->engine check above. `reference` is the case that proves it: the
+    engine has run it since IMA-210 and it appeared in no GUI surface at all.
+    """
+    carded = {op.key for op in V._OPERATIONS}
+    for key in V.runnable_operators():
+        assert key in carded or key in CLI_ONLY_OPERATORS, (
+            f"the engine can run {key!r} but no card offers it and it is not declared CLI-only. "
+            f"Either add an Operation for it to _OPERATIONS (plus its _build_<x>_tab), or add it "
+            f"to CLI_ONLY_OPERATORS with the reason it is deliberately not in the GUI."
+        )
+
+
+def test_the_cli_only_declaration_cannot_go_stale():
+    """A key that is no longer runnable, or that has since been given a card, must be removed.
+
+    Without this the allowlist becomes a place where names go to be forgotten, and the test above
+    would keep passing over an operator that has quietly gained a card or lost its registration.
+    """
+    runnable = set(V.runnable_operators())
+    carded = {op.key for op in V._OPERATIONS}
+    for key in CLI_ONLY_OPERATORS:
+        assert key in runnable, (
+            f"{key!r} is declared CLI-only but the engine no longer runs it; delete the entry.")
+        assert key not in carded, (
+            f"{key!r} is declared CLI-only but now HAS a card; delete the entry.")
+
+
+def test_the_reference_plane_operator_is_reachable_from_the_gui():
+    """The defect itself, pinned: `reference` has a card, and the card is wired to a real tab."""
+    op = V._OPERATIONS_BY_KEY["reference"]
+    assert op.runnable is True
+    assert "reference" in V.runnable_operators()
+    assert hasattr(V.PlateWindow, op.build_tab), (
+        f"the reference card names {op.build_tab!r} and PlateWindow has no such method; "
+        "clicking it would raise AttributeError out of the event loop.")
+
+
 def test_the_save_button_names_its_operator_instead_of_taking_the_first_card():
     """`_OPERATIONS[0].key` made 'Save this subset to disk' mean whatever happened to be first.
 
@@ -5053,10 +5158,14 @@ def test_the_save_button_names_its_operator_instead_of_taking_the_first_card():
 
 
 def test_operator_label_falls_back_to_the_key_for_a_cardless_operator():
-    # `reference` is a registered projector with no card. It must still name itself rather
-    # than raising a bare KeyError out of the event loop.
-    assert V.operator_label("reference") == "reference"
+    # `spot` is a registered projector with no card. It must still name itself rather than
+    # raising a bare KeyError out of the event loop. (`reference` was this example until it
+    # was given a card; the fallback is what makes a cardless operator survive, so it is
+    # pinned against whichever operator is currently cardless.)
+    assert V.operator_label("spot") == "spot"
     assert V.operator_label("mip") == V._OPERATIONS_BY_KEY["mip"].label
+    # and the newly carded one now answers with its card
+    assert V.operator_label("reference") == V._OPERATIONS_BY_KEY["reference"].label
 
 
 
