@@ -56,8 +56,11 @@ NOT ported, each for a reason rather than for lack of time:
   and does not report it back. Deriving a second estimate here would be an unvalidated
   second representation of the same number. The default is the measured ``_BLEND_PX`` and
   the tooltip states the real overlap it was sized against.
-* **Lens-distortion correction.** Not in the ``tilefusion`` call chain ``_stitch.py`` ports.
-  A checkbox for a stage that does not run would be a lie.
+* **Lens-distortion correction.** This bullet used to read "not in the ``tilefusion`` call
+  chain ``_stitch.py`` ports; a checkbox for a stage that does not run would be a lie". That
+  stopped being true when the stage was wired (``_stitch.py``'s ``correct_distortion`` block):
+  the checkbox is here, it decides, and as of 2026-08-03 it is ON by default, matching the
+  standalone, where ``enable_distortion`` runs unconditionally because its checkbox is dead.
 * **Preview grid (N x M), drag-and-drop, "Open in Napari", "Export OME-TIFF", "Open
   Existing", "Max Projection".** The stitcher is a standalone app that has to load a
   dataset and then hand its result to a viewer. This IS the viewer: the plate is already
@@ -115,7 +118,10 @@ STITCH_DEFAULTS = {
     "outlier_rel_pct": int(round(_REL_THRESH * 100)),
     "outlier_abs_px": int(round(_ABS_THRESH)),
     "auto_blend": False,
-    "correct_distortion": False,
+    # ON (Julio, 2026-08-03: "Correct lens distort should be defaulted to on"). Same value as
+    # stitch_region's own resolved default, which is what keeps this dict honest: an untouched
+    # panel still launches byte-for-byte what stitch_region does unaided.
+    "correct_distortion": True,
     "registration_t": 0,
 }
 
@@ -127,7 +133,7 @@ STITCH_DEFAULTS = {
 def stitch_operator_kwargs(*, register, registration_channel, channels, blend_px,
                            outlier_rel_pct, outlier_abs_px,
                            auto_blend: bool = False,
-                           correct_distortion: bool = False,
+                           correct_distortion: bool = True,
                            registration_t: int = 0,
                            n_channels: Optional[int] = None,
                            tile_px: Optional[int] = None) -> dict:
@@ -437,7 +443,9 @@ class StitcherPanel(_Panel):
             "(tilefusion.distortion). It corrects what a rigid solve cannot: field curvature "
             "and lens distortion bending each tile, which shows up as seams that are sharp in "
             "the middle and doubled at the ends.\n\n"
-            "Needs registration -- it corrects the residual left after the global solve.")
+            "Needs registration -- it corrects the residual left after the global solve.\n\n"
+            "ON by default. Untick it to fuse on the rigid solve alone, which is faster and is "
+            "the right control when you want to see what the elastic fit is actually buying.")
         self.v.addWidget(self.distortion_cb)
 
         # -- fusion --------------------------------------------------------------------

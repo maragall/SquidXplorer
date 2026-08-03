@@ -396,7 +396,7 @@ def stitch_region(
     registration_channel=None,
     channels: Optional[Sequence[int]] = None,
     blend_px: Optional[int] = _BLEND_PX,
-    correct_distortion: bool = False,
+    correct_distortion: Optional[bool] = None,
     registration_t: int = _REG_T,
     block_px: int = _BLOCK_PX,
     max_workers: Optional[int] = None,
@@ -439,6 +439,12 @@ def stitch_region(
         region. (It did not always do this; see the note at the ``reg_c`` assignment.)
     blend_px:
         Hann feather ramp width. Must fit inside the real overlap; see :data:`_BLEND_PX`.
+    correct_distortion:
+        Per-seam elastic lens-distortion correction, fitted on the REGISTERED positions and
+        applied during fusion. **On by default** (``None`` = on wherever it can run, i.e.
+        wherever ``register`` is on); ``False`` turns it off, and an explicit ``True`` with
+        ``register=False`` raises rather than quietly doing nothing. See the note at the
+        ``if correct_distortion is None`` line for why the default is not a plain ``True``.
     rel_thresh, abs_thresh:
         Blunder rejection, forwarded to :func:`solve_offsets_px` — see its docstring.
         Ignored when ``register=False`` (there is no pose graph to reject links from).
@@ -639,6 +645,20 @@ def stitch_region(
     # Needs the pose graph, so it is registration-only: with register=False there are no
     # pairwise metrics, and a seam fit without a global solve would be measuring the stage
     # error rather than the lens.
+    #
+    # ON BY DEFAULT (Julio, 2026-08-03: "Correct lens distort should be defaulted to on"). The
+    # port carried the standalone's opt-in spelling across while the standalone itself runs the
+    # stage unconditionally, so squidmip was the only one of the two NOT correcting distortion
+    # unless asked.
+    #
+    # The default is `None`, not `True`, and that is not hedging. It means ON WHEREVER IT CAN
+    # RUN, which is exactly where a pose graph exists to fit the residual of. A plain `True`
+    # would make every existing `register=False` caller -- the `coordinate` control operator
+    # (see _coordinate_region), Minerva's fusion, the A/B benchmarks -- raise the guard below on
+    # a combination none of them asked for. An EXPLICIT True with register=False still raises:
+    # that is a user asking for something impossible, and it stays loud.
+    if correct_distortion is None:
+        correct_distortion = bool(register)
     get_field = None
     if correct_distortion:
         if not register:

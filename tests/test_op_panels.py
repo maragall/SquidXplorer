@@ -443,7 +443,12 @@ def test_the_panel_offers_the_distortion_and_auto_blend_controls(qapp):
     p = StitcherPanel(_Host())
     assert p.distortion_cb is not None
     assert p.blend_auto_cb is not None
-    assert not p.distortion_cb.isChecked()           # opt-in: it costs a per-seam elastic fit
+    # ON by default, changed deliberately on 2026-08-03 (Julio: "Correct lens distort should be
+    # defaulted to on"). It used to assert the opposite. The port carried the standalone's
+    # opt-in SPELLING across without its behaviour: maragall/stitcher's checkbox is dead, so the
+    # standalone corrects distortion on every run, and squidmip was the only one of the two that
+    # did not unless asked.
+    assert p.distortion_cb.isChecked()
 
 
 def test_auto_blend_disables_the_manual_width_so_no_dead_number_is_shown(qapp):
