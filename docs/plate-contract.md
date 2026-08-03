@@ -142,6 +142,16 @@ The loupe's coarse cache is now keyed by `(well, timepoint)` rather than by well
 keyed by well, so once a well was read at one timepoint every later timepoint got that same picture
 back. A cache that answers the wrong question quickly is worse than no cache.
 
+**The second half of that, found 2026-08-03.** The table above is a claim about SIGNATURES, and
+`test_every_documented_read_site_takes_a_timepoint` checks exactly that. Every loupe read site took
+a `time_point` and NOTHING passed one: `_LoupeWorker.request` had no such parameter, so the widget
+could not have supplied it, and every source fell to its `time_point=0` default. The plate moved,
+the inset did not, and no test could see it because a parameter that exists and is never supplied
+reads as correct from either end. A signature is not a call. The widget now holds the plate's
+timepoint (`PlateOverview.set_time_point`), the worker carries it (including in its LRU key), and
+`tests/test_viewer.py::test_the_loupe_reads_the_timepoint_the_plate_is_showing` drives it through
+the widget rather than inspecting a signature.
+
 `python -m squidmip.contract.validate` still warns when a plate carries more than one timepoint.
 That warning was the only thing saying so out loud while the gap existed; it is now belt and braces.
 
