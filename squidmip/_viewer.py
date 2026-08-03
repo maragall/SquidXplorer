@@ -575,7 +575,8 @@ class PlateWindow(QMainWindow):
         # controls like the powerpoint specified at each level"). Every window's "Operators for this
         # window" dropdown is the SAME registry + run_operator (the CLI engine), scoped to that view,
         # so "select where to run stitching" = pick the view, Run. Only runnable operators appear
-        # (minerva/Gallery View are terminals that stay on the root's stack).
+        # (minerva is a terminal that stays on the root's stack; Gallery View is a View-menu
+        # window-management command and was never an operator at all).
         self._viewer_manager.operator_specs = [
             (op.key, op.label) for op in _OPERATIONS if op.runnable]
         self._viewer_manager.run_operator = self.run_operator
@@ -1005,6 +1006,12 @@ class PlateWindow(QMainWindow):
         self._log_act = QAction("&Log", self)
         self._log_act.triggered.connect(self.show_log)
         view_menu.addAction(self._log_act)
+        # Gallery View lives HERE, not in the Operators stack: it arranges WINDOWS, it does not
+        # transform pixels, so it is not gated on an acquisition either. See _open_gallery_view for
+        # what it does and does not yet do.
+        self._gallery_act = QAction("&Gallery View…", self)
+        self._gallery_act.triggered.connect(self._open_gallery_view)
+        view_menu.addAction(self._gallery_act)
 
         self.setAcceptDrops(True)
         if initial_path:
@@ -1063,10 +1070,11 @@ class PlateWindow(QMainWindow):
     def _build_process_pane(self) -> QWidget:
         """The Operators panel: JUST a scrollable list of operator blocks — no header, no footer
         (Julio, 2026-07-23). Each block opens that operator; operators apply to the plate SELECTION
-        (Cmd/Ctrl-A picks the whole plate). Minerva and Gallery View are here as the deck's terminal
-        operators. Status moved to the window status bar; the old 'run on' scope combo and the
-        raw/3D/MIP footer buttons are kept as hidden orphans so their many callers still resolve —
-        they migrate onto the operator tabs and the windows in the operator phase."""
+        (Cmd/Ctrl-A picks the whole plate). Minerva is here as the deck's terminal operator; Gallery
+        View is NOT (it arranges windows, see the View menu). Status moved to the window status bar;
+        the old 'run on' scope combo and the raw/3D/MIP footer buttons are kept as hidden orphans so
+        their many callers still resolve — they migrate onto the operator tabs and the windows in
+        the operator phase."""
         # Status line — tests and many methods read self._readout; it now lives in the status bar,
         # not as a pane header. Created here because _build_process_pane runs during __init__.
         self._readout = QLabel("Drop a Squid acquisition, then pick an operator.")
@@ -1095,20 +1103,17 @@ class PlateWindow(QMainWindow):
         sv.setContentsMargins(0, 0, 0, 0)
         sv.setSpacing(8)
         self._op_cards = {}
-        # TERMINAL operators on TOP of the stack (Julio, 2026-07-23: "I need minerva author and the
-        # gallery view to be on the top of the stack"). Gallery View first, then Minerva Author, then
-        # the processing operators. Gallery View is a button (gathers windows), Minerva is an
-        # Operation card; the rest follow in registry order, minus minerva (already placed).
-        gv = _operator_card("Gallery View",
-                            "Arrange the open viewer windows into a gallery")
-        gv.setEnabled(False)
-        gv.setCursor(Qt.PointingHandCursor)
-        gv.setStyleSheet(_CARD_QSS)
-        gv.setMinimumHeight(54)
-        gv.clicked.connect(self._open_gallery_view)
-        sv.addWidget(gv)
-        self._op_cards["galleryview"] = gv
-
+        # TERMINAL operator on TOP of the stack (Julio, 2026-07-23: "I need minerva author and the
+        # gallery view to be on the top of the stack"): Minerva Author, then the processing
+        # operators in registry order, minus minerva (already placed).
+        #
+        # GALLERY VIEW IS NOT HERE ANY MORE (Julio, 2026-08-02: "I guess I don't understand how
+        # this can be treated as an operator in bulk"). He is right, and it was a category error:
+        # an operator in this codebase is something the engine runs over regions to produce derived
+        # data, declared by a `consumes` frozenset -- and "arrange the open windows in a grid" eats
+        # no axis and produces no pixels. It was never in `_OPERATIONS`, but it sat in this stack
+        # with the same card, the same styling and the same `_enable_operators` gate, which is what
+        # made it read as one. It is a WINDOW-MANAGEMENT command, so it is a View-menu action now.
         _minerva = [op for op in _OPERATIONS if op.key == "minerva"]
         ordered = _minerva + [op for op in _OPERATIONS if op.key != "minerva"]
         for op in ordered:
@@ -1134,16 +1139,22 @@ class PlateWindow(QMainWindow):
         return pane
 
     def _open_gallery_view(self):
-        """Gallery View terminal operator (slide 2): "prepares a gallery view instance using the
-        selected Napari windows, with current views". The window-assembly lands with the operator
-        phase; for now report what it will gather so the block is never a silent dead control."""
+        """NOT IMPLEMENTED, and it says so. Slide 2 asks for "a gallery view instance using the
+        selected Napari windows, with current views"; nothing here arranges any window.
+
+        This is the whole of Gallery View: a status line. It never opened a gallery, and the old
+        copy ("N open window(s) WILL be arranged…") described a future, not this click, which is
+        how it came to be reported as a control that "doesn't open or do anything". It is also
+        ii.5's open problem (docs/SCOPE.md): the pipeline has no "result" type for a gallery to be
+        made of. Implementing it means reading hongquanli/gallery-view first, not writing a grid
+        layout here. Until then the honest thing is to name itself as unbuilt, in the console as
+        well as the status bar, rather than to report a plan in the present tense.
+        """
         n = len(self._viewer_manager.windows) if hasattr(self, "_viewer_manager") else 0
-        if n == 0:
-            self._readout.setText("Gallery View: open some viewer windows first, then gather them.")
-            return
-        self._readout.setText(
-            f"Gallery View: {n} open window(s) will be arranged into a gallery "
-            "(assembly lands with the operator phase).")
+        msg = (f"Gallery View is not implemented yet — {n} viewer window(s) are open and none of "
+               "them will be moved. Tracked as ii.5 in docs/SCOPE.md.")
+        self._readout.setText(msg)
+        self.log.info("%s", msg)
 
     def _open_native_3d(self):
         """Popout napari 3D on the current region's centre FOV at native resolution (gallery-view
@@ -1940,6 +1951,11 @@ class PlateWindow(QMainWindow):
 
     def _build_mip_tab(self) -> QWidget:
         return self._build_run_tab(_OPERATIONS_BY_KEY["mip"])
+
+    def _build_reference_tab(self) -> QWidget:
+        # The other z-reduction. `_build_run_tab` is ONE builder for every z-reducer, so the
+        # focus-reference-plane operator needs no tab code of its own -- only this hand-off.
+        return self._build_run_tab(_OPERATIONS_BY_KEY["reference"])
 
     def _build_stitch_tab(self) -> QWidget:
         """maragall/stitcher's control surface, in pane 1 (IMA-decon-stitch-ui).
@@ -3997,8 +4013,9 @@ class PlateWindow(QMainWindow):
             self._readout.setText("already processing — let the current run finish first")
             return
         # IMA-226: gate on the ENGINE registry, not on the card table. `_OPERATIONS_BY_KEY[key]`
-        # raised a bare KeyError for `reference` (a registered projector with no card) and let
-        # `minerva` (a card that is not an operator) through to die inside the engine instead.
+        # raised a bare KeyError for a registered projector with no card (`reference` then, `spot`
+        # and `decon3d` now) and let `minerva` (a card that is not an operator) through to die
+        # inside the engine instead.
         # Refuse BY NAME here, in the readout, the same way an unknown region is refused below.
         if key not in runnable_operators():
             self._readout.setText(
