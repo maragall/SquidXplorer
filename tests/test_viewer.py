@@ -2213,6 +2213,7 @@ class _BlockingWorker(V.QThread):
     pushReady = V.Signal(int, object)
     resultReady = V.Signal(str, int, object)     # full-res result -> napari layer group
     progress = V.Signal(int, int)
+    runProgress = V.Signal(object)               # the engine-unit report (squidmip._progress)
     finalReady = V.Signal(object)
     writtenReady = V.Signal(str)
     wellFailed = V.Signal(int, int)

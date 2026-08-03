@@ -367,6 +367,10 @@ class RegionViewer(QMainWindow):
     _op_action: Optional[str] = None
     _op_address: Any = None
     _result_region: Optional[str] = None
+    #: This window's operator-run bar, built in the control row. Same class-default rule: the four
+    #: ``operator_*`` callbacks are called by the plate on whatever window asked, including one a
+    #: test built without the row.
+    _op_progress: Any = None
 
     def __init__(
         self,
@@ -709,6 +713,21 @@ class RegionViewer(QMainWindow):
         self._save_chk.setStyleSheet("QCheckBox{color:#c9d1d9;font-size:11px;}")
         opr.addWidget(self._save_chk)
         ov.addLayout(opr)
+        # HOW FAR THE RUN HAS GOT, in the box the Run button is in. Julio, 2026-08-03, on a decon
+        # that took 433 s over one region: "there's nothing on the child window that tells me how
+        # much is left what's the progress, or that it is working. It only tells me that it worked
+        # after layers populated, but how long is that?" For those seven minutes the only moving
+        # thing was the footprint line in the log, which is a memory printer being read as a
+        # progress bar. This is the affordance that replaces reading the log.
+        #
+        # Hidden when idle, on purpose: a bar sitting at 0% over an idle window is indistinguishable
+        # from a wedged run, which is the failure this is meant to cure rather than reproduce.
+        self._op_progress = QProgressBar()
+        self._op_progress.setTextVisible(True)
+        self._op_progress.setFixedHeight(16)
+        self._op_progress.setStyleSheet(self._PROGRESS_QSS)
+        self._op_progress.hide()
+        ov.addWidget(self._op_progress)
         # Nuclei detection lives on the pane's own "Detect on: [channel] Detect nuclei" strip (the
         # channel-aware Cellpose picker Julio asked for) -- wired to _detect_nuclei in _build. No
         # duplicate control here.
@@ -774,6 +793,13 @@ class RegionViewer(QMainWindow):
     # -- global default vs per-window override, made visible -----------------------------
     _AT_DEFAULTS_QSS = "color:#8b949e;font-size:10px;border:none;"
     _DIVERGED_QSS = "color:#e3b341;font-size:10px;font-weight:700;border:none;"
+    #: The operator-run bar. Amber chunk to match the "working" colour the rest of the app uses for
+    #: an in-flight run, so the bar and the dot the user already reads are the same state.
+    _PROGRESS_QSS = (
+        "QProgressBar{background:#161b22;border:1px solid #30363d;border-radius:3px;"
+        "color:#c9d1d9;font-size:10px;text-align:center;}"
+        "QProgressBar::chunk{background:#e3b341;border-radius:3px;}"
+    )
 
     #: What each setting is CALLED in the window, so a marker reads as English rather than as a
     #: field name. The keys are the field names, which stay the vocabulary everywhere else.
@@ -924,12 +950,38 @@ class RegionViewer(QMainWindow):
         self._op_action = str(action)
         self._op_address = self.address()
         self.log.started(self._op_action, address=self._op_address)
+        # The bar comes up INDETERMINATE and immediately, before the worker has said anything.
+        # There is a real gap between the click and the first report (the reader's metadata warm,
+        # the pool priming, the disk guard), and a window that shows nothing across it is the state
+        # being complained about. It goes determinate on the first report, which arrives at 0 of N.
+        self._show_progress(None)
+
+    def operator_progress(self, report) -> None:
+        """The run advanced. ``report`` is a :class:`~squidmip._progress.ProgressReport`.
+
+        Determinate when the report has a total, INDETERMINATE when it does not — never a
+        fabricated percentage. The report's own ``sentence()`` is the text, so the region window
+        and the plate's status line say the same thing about the same run rather than two
+        hand-built strings that can drift.
+        """
+        bar = getattr(self, "_op_progress", None)
+        if bar is None:
+            return
+        percent = report.percent
+        if percent is None:
+            self._show_progress(None, report.sentence())
+            return
+        bar.setRange(0, 100)
+        bar.setValue(int(percent))
+        bar.setFormat(report.sentence())
+        bar.show()
 
     def operator_done(self, action: str, seconds: float) -> None:
         """``[3] A1  mip  done in 1.4 s`` -- the half of the pair that was never emitted."""
         self.log.done(str(action), float(seconds), address=self._closing_address())
         self._echo(f"{action} finished in {float(seconds):.1f} s.")
         self._op_action = self._op_address = None
+        self._hide_progress()
 
     def operator_failed(self, action: str, reason: str) -> None:
         """The third outcome, and it must exist: an action that starts and then says nothing is
@@ -937,6 +989,36 @@ class RegionViewer(QMainWindow):
         self.log.failed(str(action), str(reason), address=self._closing_address())
         self._echo(f"{action} failed: {reason}")
         self._op_action = self._op_address = None
+        self._hide_progress()
+
+    def _show_progress(self, percent, text: str = "working…") -> None:
+        """Put the bar up. ``percent=None`` = INDETERMINATE (Qt's own busy sweep, range 0..0).
+
+        Qt draws an animated sweep for a 0..0 range and no percentage, which is exactly the right
+        picture for "running, denominator unknown" — see ``squidmip._activity``: a progress bar
+        that invents a denominator is a lie that gets believed.
+        """
+        bar = getattr(self, "_op_progress", None)
+        if bar is None:
+            return
+        if percent is None:
+            bar.setRange(0, 0)
+        else:
+            bar.setRange(0, 100)
+            bar.setValue(int(percent))
+        bar.setFormat(text)
+        bar.show()
+
+    def _hide_progress(self) -> None:
+        """Take the bar down. Called from BOTH terminal callbacks, and the plate calls exactly one
+        of them on success, failure and a stopped run alike — so the bar cannot be left running
+        over a run that is over."""
+        bar = getattr(self, "_op_progress", None)
+        if bar is None:
+            return
+        bar.setRange(0, 100)                     # leave no indeterminate sweep behind
+        bar.setValue(0)
+        bar.hide()
 
     def _closing_address(self):
         """The address the OPEN half of the pair was written with, so the two lines agree.
