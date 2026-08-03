@@ -3283,8 +3283,45 @@ class PlateWindow(QMainWindow):
         sub = getattr(mosaic, "on_user_colormap", None)      # same slot-abort hazard as above
         if callable(sub):
             sub(_cmap_sink)
+
+        # ...and the PROCESSING LAYER. Julio: "after I click an operator layer in our window, the
+        # thumbnails don't update." The three sinks above are all per CHANNEL, so picking an
+        # operator in a window's layer tree changed that window and nothing else -- the plate went
+        # on showing whatever layer the last RUN left active. The op key a window files a result
+        # under IS the plate's layer key (`_on_result` passes `_active_op_key` straight through to
+        # `deliver_result` -> `add_mosaic`), so no translation is needed and none is invented.
+        def _op_sink(op: str, on: bool):
+            self._follow_window_layer(str(op), bool(on))
+
+        sub = getattr(mosaic, "on_user_op", None)            # same slot-abort hazard as above
+        if callable(sub):
+            sub(_op_sink)
         bound.add(wid)
         self._napari_contrast_bound = True
+
+    def _follow_window_layer(self, layer_key: str, on: bool) -> None:
+        """A window showed or hid a processing layer: put the plate on the same one.
+
+        Routed through the plate's OWN layer stack rather than straight to
+        ``PlateOverview.set_active_layer``, so a window's toggle and the Layers tab's checkbox are
+        one gesture with one rule -- the plate renders the topmost ENABLED layer -- instead of two
+        surfaces racing to set ``_active``. ``raw`` is the floor and cannot be disabled
+        (``OperationStack.toggle``), so hiding raw in a window is a no-op on the plate, which is
+        the existing rule stated in one place rather than a new one added here.
+
+        A key the plate has no layer for is IGNORED AND SAID SO. A window can carry operator
+        layers this plate never ran (an ROI child re-uses its parent's groups), and quietly
+        toggling nothing would be indistinguishable from a broken sink.
+        """
+        if self._overview is None:
+            return
+        if layer_key not in [ly.key for ly in self._op_stack.layers()]:
+            log.debug("window layer %r has no plate layer to follow (plate has %s)",
+                      layer_key, [ly.key for ly in self._op_stack.layers()])
+            return
+        self._op_stack.toggle(layer_key, on)
+        self._apply_layers()             # -> set_active_layer + title + loupe source
+        self._refresh_layers_tab()       # the tab's checkboxes must not lie about the stack
 
     def _adopt_centre_view(self):
         """PULL what napari resolved for every channel, and make the plate show the same.

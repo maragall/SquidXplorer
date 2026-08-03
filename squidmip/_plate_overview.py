@@ -1006,6 +1006,10 @@ class PlateOverview(QWidget):
         self._scaled = None           # cached pixmap of (final|canvas) scaled to the current zoom;
         self._scaled_cd = None        # rebuilt only when zoom (cd) or the source image changes — so
         #                               a hover/pan repaint blits 1:1 instead of re-resampling 12 MP.
+        self._scaled_base = None      # the same, for the BASE layer showing through under a partial
+        self._scaled_base_key = None  # operator layer. Keyed by (cd, w, h, base generation) because
+        self._base_gen = 0            # the base canvas is painted IN PLACE, so its identity never
+        #                               changes and only a counter can say "these pixels moved".
         self._cd = float(_CELL)       # displayed px/well (fit baseline, then wheel-zoomed)
         self._ox = self._oy = _PAD    # top-left of the plate within the widget (pan-able)
         self._hover = None
@@ -1038,8 +1042,9 @@ class PlateOverview(QWidget):
         self._slides = None           # [(x, y, w, h), ...] in GRID UNITS: real glass slides drawn
         #                               behind a tissue acquisition (IMA-265, _slide_art). None on
         #                               a well plate and on a carrier with no stage coordinates.
-        self._tile_rgn = None         # cached QRegion of cells that HAVE an image, at pan origin
-        self._tile_rgn_key = None     # (cd, active layer, n tiled cells) the cached region was built for
+        self._tile_rgn = None         # tag -> ((cd, active layer, n cells), QRegion) at pan origin.
+        #                               Two tags: "active" (cells the shown layer has) and "under"
+        #                               (cells the base shows through). Built lazily, see _cell_region.
         # -- loupe (IMA-208) --
         self._loupe_src = None        # _LoupeSource for the ACTIVE layer, or None (loupe disabled)
         self._loupe_worker = None
@@ -1381,6 +1386,47 @@ class PlateOverview(QWidget):
     def _active_source(self) -> QImage:
         return self._final or self._canvas_for(self._active)
 
+    def _base_source(self) -> QImage:
+        """The BASE ("raw") layer's montage, whatever the active layer is.
+
+        Same rule as ``_active_source`` — the recomposite if there is one, else the streamed
+        canvas — read for "raw" rather than for the active layer, because that is the picture
+        showing through wherever the active layer has nothing (see ``underlay_cells``).
+        """
+        return self._op_final.get("raw") or self._canvas
+
+    # -- WHICH CELLS SHOW A THUMBNAIL, and out of which layer (the subset-preview rule) --------
+    #
+    # An operator run scoped to a SUBSET writes tiles for that subset only. The plate used to
+    # blit the active layer and nothing else, so switching to that layer blanked every region
+    # outside the run: Julio, "when I preview an operator on a window, which contains a region
+    # subset, the plate view removes the thumbnails for all the regions rather than only those
+    # that are being processed."
+    #
+    # The layer stack already says what the answer is: a layer sits OVER the base, it does not
+    # replace it. So a cell the active layer has no pixels for shows the base layer's cell. That
+    # is per CELL, not per plate, which is exactly the granularity the complaint asks for -- the
+    # regions in the run change, the rest keep the thumbnail they had.
+
+    def underlay_cells(self) -> set:
+        """Cells the ACTIVE layer has no pixels for, but the base layer does.
+
+        Empty when the base IS the active layer: there is nothing under raw to show through.
+        """
+        if self._active == "raw":
+            return set()
+        return (self._tiles_by_layer.get("raw", set())
+                - self._tiles_by_layer.get(self._active, set()))
+
+    def shown_cells(self) -> set:
+        """Every ``(ri, ci)`` showing a thumbnail right now, from whichever layer supplies it.
+
+        This is what "does this well still have a picture on the plate" means, and it is what the
+        empty-slot dot and the carrier's occupied/waiting boundary read, so the three surfaces
+        cannot disagree about which cells are blank.
+        """
+        return set(self._tiles_by_layer.get(self._active, set())) | self.underlay_cells()
+
     # -- the channel axis: store, mask, per-channel contrast (IMA-206) --
     def set_channels(self, labels, colors: np.ndarray, dtype=np.uint16, pct=(1.0, 99.8)):
         """Declare the acquisition's channels — the per-channel store/mask/contrast start here.
@@ -1589,6 +1635,7 @@ class PlateOverview(QWidget):
         self._tiles_by_layer.pop(layer, None)
         if layer == "raw":
             self._canvas.fill(QColor(_BG))
+            self._base_gen += 1        # the underlay's pixels moved; its scaled cache is stale
         else:
             self._op_canvas.pop(layer, None)
         if layer == self._active:
@@ -1638,9 +1685,13 @@ class PlateOverview(QWidget):
                 self._final = None
         self._tiles.add((ri, ci))
         self._tiles_by_layer.setdefault(layer, set()).add((ri, ci))   # per-layer: drives the grey dots
+        if layer == "raw":
+            self._base_gen += 1           # ...and the underlay, which shows even when raw is not active
         if layer == self._active:         # only the shown layer needs a repaint / cache rebuild
             self._scaled = None
             self.update()
+        elif layer == "raw":
+            self.update()                 # the base showing through a partial operator layer moved
 
     def set_status(self, ri: int, ci: int, state: str):
         if (ri, ci) not in self._status:   # never let a foreign/stale key leak into the status map
@@ -1655,10 +1706,14 @@ class PlateOverview(QWidget):
 
     def set_final(self, img: QImage, layer: str = "raw"):
         self._op_final[layer] = img
+        if layer == "raw":
+            self._base_gen += 1       # the underlay is read from _op_final["raw"] first of all
         if layer == self._active:
             self._final = img
             self._scaled = None       # source changed -> the scaled cache is stale
             self.update()
+        elif layer == "raw":
+            self.update()             # a recomposited base still shows under a partial layer
 
     def set_active_layer(self, layer: str):
         """Show a layer (LayersTab toggle/reorder). Swaps in its montage + streamed canvas."""
@@ -2107,15 +2162,36 @@ class PlateOverview(QWidget):
         plate feel slow.
         """
         cells = self._tiles_by_layer.get(self._active, set())
-        key = (self._cd, self._active, len(cells))
-        if self._tile_rgn is None or self._tile_rgn_key != key:
+        return self._cell_region("active", cells, len(cells))
+
+    def _underlay_region(self) -> "QRegion":
+        """The cells the BASE layer shows through, as a QRegion at pan origin (0, 0).
+
+        The complement of the above within the base's own tiled set: everything the active layer
+        does not cover. Cached on the same terms, for the same reason. The key carries BOTH
+        layers' sizes rather than the difference's, because a cell can join the active layer and
+        the base in the same beat and leave the difference the same size while its membership
+        moved -- and a stale clip region shows the base through a cell the operator has since
+        painted.
+        """
+        return self._cell_region(
+            "under", self.underlay_cells(),
+            (len(self._tiles_by_layer.get("raw", ())),
+             len(self._tiles_by_layer.get(self._active, ()))))
+
+    def _cell_region(self, tag: str, cells: set, size) -> "QRegion":
+        if self._tile_rgn is None:
+            self._tile_rgn = {}
+        key = (self._cd, self._active, size)
+        hit = self._tile_rgn.get(tag)
+        if hit is None or hit[0] != key:
             cd = self._cd
             rgn = QRegion()
             for ri, ci in cells:
                 rgn = rgn.united(QRegion(int(ci * cd), int(ri * cd),
                                          int(cd) + 1, int(cd) + 1))   # +1: no hairline seams
-            self._tile_rgn, self._tile_rgn_key = rgn, key
-        return self._tile_rgn
+            hit = self._tile_rgn[tag] = (key, rgn)
+        return hit[1]
 
     def _fov_at(self, c: dict, e) -> int:
         """FOV index under the cursor within cell *c*, or 0 when there is no mosaic to resolve.
@@ -2173,19 +2249,23 @@ class PlateOverview(QWidget):
         ax, ay = self._ox + _HDR, self._oy + _COLH   # plate top-left (after label margins)
         W, H = nc * cd, nr * cd
         tiled = self._tiles_by_layer.get(self._active, set())
+        under = self.underlay_cells()      # the base showing through a partial operator layer
+        shown = tiled | under
         # THE HOLDER (IMA-253), behind everything: drawn from the plate's own geometry, in the
         # cells' own coordinate system. No photograph, so nothing to calibrate and nothing to
         # drift on pan/zoom; see set_carrier.
-        self._paint_carrier(p, tiled)
+        self._paint_carrier(p, shown)
         if self._layout is not None:
             # FREEFORM: each region's cell is its own rectangle, so the montage is blitted per
             # cell rather than as one grid-aligned image. A handful of regions, one drawImage each.
             src = self._active_source()
+            base = self._base_source()
             p.setRenderHint(QPainter.SmoothPixmapTransform, True)
-            for rc in sorted(tiled):
+            for rc in sorted(shown):
                 if rc not in self._by_rc:
                     continue
-                p.drawImage(QRectF(*self._cell_rect(*rc)), src, QRectF(*self._cell_source(*rc)))
+                img = src if rc in tiled else base
+                p.drawImage(QRectF(*self._cell_rect(*rc)), img, QRectF(*self._cell_source(*rc)))
         else:
             # Blit the montage from a cached pixmap scaled to the current zoom. The expensive
             # smooth resample runs ONCE per zoom/source-change (not every repaint) — pan/hover
@@ -2196,6 +2276,20 @@ class PlateOverview(QWidget):
                 self._scaled = QPixmap.fromImage(self._active_source()).scaled(
                     w, h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
                 self._scaled_cd = cd
+            if under:
+                # THE BASE, UNDER A PARTIAL LAYER. Clipped to the cells the active layer has
+                # nothing for, so a subset run replaces exactly its own wells and leaves every
+                # other well's thumbnail standing. Cached on the same terms as the active blit,
+                # with the base generation in the key because the base canvas is painted in place.
+                base_key = (cd, w, h, self._base_gen)
+                if self._scaled_base is None or self._scaled_base_key != base_key:
+                    self._scaled_base = QPixmap.fromImage(self._base_source()).scaled(
+                        w, h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+                    self._scaled_base_key = base_key
+                p.save()
+                p.setClipRegion(self._underlay_region().translated(int(ax), int(ay)))
+                p.drawPixmap(int(ax), int(ay), self._scaled_base)
+                p.restore()
             if len(tiled) < nr * nc:
                 # The montage canvas is opaque _BG wherever no tile landed, so let it cover only
                 # the cells that actually have pixels — otherwise it paints the holder out.
@@ -2218,11 +2312,10 @@ class PlateOverview(QWidget):
         # amber = processing, red x = failed, GREY = no image on the active layer, no dot once a cell
         # HAS an image (the image speaks for itself). Dot size is a capped absolute size.
         d = min(max(3.0, cd * 0.36), 15.0)
-        active_tiles = self._tiles_by_layer.get(self._active, set())
         for ri in range(nr):
             for ci in range(nc):
                 state = self._status.get((ri, ci), "empty")
-                has_img = (ri, ci) in active_tiles
+                has_img = (ri, ci) in shown      # the base counts: it is what the user is looking at
                 x0, y0, cw, ch = self._cell_rect(ri, ci)
                 ex, ey = int(x0 + (cw - d) / 2), int(y0 + (ch - d) / 2)
                 if state == "processing":                   # amber dot

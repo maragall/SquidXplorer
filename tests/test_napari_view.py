@@ -989,3 +989,56 @@ def test_the_count_rides_on_the_points_layer_features_keyed_by_label(layers):
                             features={"label": [1, 2, 3]})
     assert list(lyr.features["label"]) == [1, 2, 3]
     assert len(lyr.features) == 3
+
+
+# --- the PROCESSING LAYER fan-out (Julio, 2026-08-03) ------------------------------------------
+#
+# "After I click an operator layer in our window, the thumbnails don't update." The state was
+# already here -- `visible_op` could always answer -- and no signal was ever emitted for it, so
+# the plate could not follow. These pin the producer half; tests/test_plate_follows_windows.py
+# pins the sink.
+
+
+def test_showing_a_processing_layer_is_reported_once_for_the_whole_group(layers):
+    seen = []
+    layers.add_mosaic("raw", "488", _img())
+    layers.add_mosaic("raw", "561", _img(1))
+    layers.add_mosaic("mip", "488", _img(2), visible=False)
+    layers.add_mosaic("mip", "561", _img(3), visible=False)
+    layers.on_user_op(lambda op, on: seen.append((op, on)))
+
+    for ly in layers.group("mip"):        # the group checkbox, which writes every child
+        ly.visible = True
+
+    assert seen == [("mip", True)], f"one group toggle reported as {seen}"
+
+
+def test_hiding_a_processing_layer_is_reported_even_though_raw_still_shows_the_channel(layers):
+    """The exact swallow. ``on_user_visibility`` answers "is this CHANNEL on screen anywhere",
+    which is unchanged while raw is up, so it returns early and the plate hears nothing. The op
+    fan-out has to be a separate tap for that reason."""
+    channel_seen, op_seen = [], []
+    layers.add_mosaic("raw", "488", _img())
+    layers.add_mosaic("mip", "488", _img(1))
+    layers.on_user_visibility(lambda ch, on: channel_seen.append((ch, on)))
+    layers.on_user_op(lambda op, on: op_seen.append((op, on)))
+
+    layers.find("mip", "488").visible = False
+
+    assert all(on for _ch, on in channel_seen), (
+        f"the channel is still on screen via raw, so the channel tap cannot say the layer went "
+        f"off: {channel_seen}")
+    assert op_seen == [("mip", False)], f"the processing layer change was swallowed: {op_seen}"
+
+
+def test_our_own_writes_are_never_reported_as_a_user_picking_a_layer(layers):
+    """A result delivered to a window that did NOT ask arrives ``visible=False``. Reporting that
+    as a gesture would turn the plate's layer off behind the user (``_deliver_to_views``)."""
+    seen = []
+    layers.add_mosaic("raw", "488", _img())
+    layers.on_user_op(lambda op, on: seen.append((op, on)))
+
+    layers.add_mosaic("mip", "488", _img(1), visible=False)
+    layers.add_mosaic("mip", "488", _img(2), visible=True)      # a re-add, still ours
+
+    assert seen == [], f"a programmatic write was reported as a user gesture: {seen}"

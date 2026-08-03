@@ -72,6 +72,7 @@ class _FakeMosaic:
         self.contrast_cbs: list = []
         self.visibility_cbs: list = []
         self.colormap_cbs: list = []
+        self.op_cbs: list = []
 
     def on_user_contrast(self, cb) -> None:
         self.contrast_cbs.append(cb)
@@ -81,6 +82,9 @@ class _FakeMosaic:
 
     def on_user_colormap(self, cb) -> None:
         self.colormap_cbs.append(cb)
+
+    def on_user_op(self, cb) -> None:
+        self.op_cbs.append(cb)
 
     # -- what napari reports when the user actually gestures in this window ------------------
     def user_drags_contrast(self, channel: str, lo: float, hi: float) -> None:
@@ -94,6 +98,11 @@ class _FakeMosaic:
     def user_picks_colormap(self, channel: str, rgb) -> None:
         for cb in list(self.colormap_cbs):
             cb(channel, rgb)
+
+    def user_shows_layer(self, op: str, on: bool = True) -> None:
+        """The user ticked (or unticked) a PROCESSING LAYER in this window's layer tree."""
+        for cb in list(self.op_cbs):
+            cb(op, on)
 
 
 class _FakeWindow:
@@ -242,6 +251,64 @@ def test_a_colormap_change_in_a_window_re_tints_the_plate(qapp, squid_dataset):
         child = _spawn(win)
         child.mosaic.user_picks_colormap(_channels(win)[0], (0.0, 1.0, 0.0))
         assert tuple(float(v) for v in win._overview._colors[0]) == (0.0, 1.0, 0.0)
+    finally:
+        win.close()
+
+
+# ------------------------------------------------------- the processing layer, Julio 2026-08-03
+
+
+def test_picking_an_operator_layer_in_a_window_moves_the_plate_onto_it(qapp, squid_dataset):
+    """Julio: "after I click an operator layer in our window, the thumbnails don't update."
+
+    The three sinks above are all per CHANNEL, and a window's layer tree picks a PROCESSING
+    LAYER. There was no sink for that at all, so the plate went on showing whatever layer the
+    last run left active however the user drove the window's tree.
+
+    MUTATION: drop the ``on_user_op`` binding and this goes red.
+    """
+    win = _open_plate(squid_dataset)
+    try:
+        win._op_stack.add("mip", "Maximum Intensity Projection")   # as a run would
+        win._apply_layers()
+        assert win._overview._active == "mip"
+
+        child = _spawn(win)
+        child.mosaic.user_shows_layer("mip", False)
+        assert win._overview._active == "raw", (
+            "hiding the operator layer in the window left the plate on it")
+
+        child.mosaic.user_shows_layer("mip", True)
+        assert win._overview._active == "mip", (
+            "showing the operator layer in the window did not bring the plate back to it")
+    finally:
+        win.close()
+
+
+def test_the_plate_layers_tab_agrees_with_what_the_window_asked_for(qapp, squid_dataset):
+    """The tab's checkboxes are a second surface over one stack. A window toggling a layer that
+    left the tab reading the old state would be the "view disagrees with its own controls" defect
+    ``OperationStack.toggle`` was written to end."""
+    win = _open_plate(squid_dataset)
+    try:
+        win._op_stack.add("mip", "Maximum Intensity Projection")
+        win._apply_layers()
+        child = _spawn(win)
+        child.mosaic.user_shows_layer("mip", False)
+        assert [ly.enabled for ly in win._op_stack.layers() if ly.key == "mip"] == [False]
+    finally:
+        win.close()
+
+
+def test_a_window_layer_the_plate_never_ran_is_ignored_rather_than_raising(qapp, squid_dataset):
+    """A window can carry operator groups this plate has no layer for. Ignoring it must not raise
+    out of a Qt slot (an unhandled exception in one aborts the process)."""
+    win = _open_plate(squid_dataset)
+    try:
+        child = _spawn(win)
+        before = win._overview._active
+        child.mosaic.user_shows_layer("nothing-the-plate-ran", True)
+        assert win._overview._active == before
     finally:
         win.close()
 
