@@ -712,23 +712,55 @@ class RegionViewer(QMainWindow):
         # Nuclei detection lives on the pane's own "Detect on: [channel] Detect nuclei" strip (the
         # channel-aware Cellpose picker Julio asked for) -- wired to _detect_nuclei in _build. No
         # duplicate control here.
-        # Row 2: contrast sync (copy/paste LUTs) — window <-> window <-> plate.
+        # Row 2: contrast sync. THREE controls, TWO scopes, and the scopes are captioned because
+        # that is the only thing that made them look like duplicates (Julio: "if contrast are
+        # synched, the LUT copy paste should be removed", and "'Match raw contrast' seems like a
+        # strange button to have"). They are not duplicates. What is actually synced automatically
+        # is ONE scope: napari's `link_layers` keeps the operator layers of one channel together
+        # INSIDE THIS WINDOW, from the next write on. Nothing at all crosses windows -- each
+        # window builds its own napari ViewerModel (`MosaicPane.__init__` -> `build_pane`), and
+        # napari cannot link layers across viewers. So:
+        #
+        #   between windows  -> copy/paste, the ONLY path. It also carries the COLORMAP, which no
+        #                       link and no match ever touches (`link_layers(..., ("contrast_
+        #                       limits",))`). The clipboard is shared with the plate's own
+        #                       'LUTs' buttons, so plate <-> window works both ways.
+        #   in this window   -> match, the one-shot equalise. `link_layers` connects EVENTS and
+        #                       does NOT equalise at link time, so a fresh operator layer sits on
+        #                       its own auto window until somebody writes one. This writes them,
+        #                       without moving raw's window to do it.
         sync = QHBoxLayout(); sync.setSpacing(4)
-        sync.addWidget(self._chip("⧉ Copy LUTs", "Copy this window's per-channel contrast + colormap.",
+        _across = QLabel("between windows:")
+        _across.setStyleSheet(self._AT_DEFAULTS_QSS)
+        sync.addWidget(_across)
+        sync.addWidget(self._chip("⧉ Copy LUTs",
+                                  "THIS WINDOW → clipboard: its per-channel contrast + colormap. "
+                                  "The only way to move contrast to a window that is ALREADY OPEN "
+                                  "(a new window inherits, an open one does not), and the only "
+                                  "one that carries the colormap. Shared with the plate.",
                                   self._copy_luts))
-        sync.addWidget(self._chip("⤓ Paste LUTs", "Apply the copied LUTs to this window's channels.",
+        sync.addWidget(self._chip("⤓ Paste LUTs",
+                                  "clipboard → THIS WINDOW: apply the copied contrast + colormap "
+                                  "to this window's channels. Counts as you changing contrast "
+                                  "here, so this window will report itself diverged.",
                                   self._paste_luts))
-        # MATCH RAW CONTRAST. It sits HERE, in the row the operator that made those layers was run
-        # from, and not in a menu: an operator result is seeded from its OWN pixels so it arrives
-        # legible on its own terms, which means raw and the result are on two different stretches
-        # and the before->after flip compares two stretches rather than two images. This is the
-        # one click that turns it into a real comparison, and it is next to the operator Run
-        # button because that is where the user is standing when they want it.
-        sync.addWidget(self._chip("≡ Match raw contrast",
-                                  "Copy raw's contrast window onto every operator layer, so "
-                                  "flipping between raw and a result compares the same window. "
+        # MATCH. It sits HERE, in the row the operator that made those layers was run from, and
+        # not in a menu: an operator result is seeded from its OWN pixels so it arrives legible on
+        # its own terms, which means raw and the result are on two different stretches and the
+        # before->after flip compares two stretches rather than two images. This is the one click
+        # that turns it into a real comparison, and it is next to the operator Run button because
+        # that is where the user is standing when they want it. Renamed from "Match raw contrast",
+        # which named the SOURCE and not the scope and so read as a third clipboard verb.
+        _within = QLabel("│  in this window:")
+        _within.setStyleSheet(self._AT_DEFAULTS_QSS)
+        sync.addWidget(_within)
+        sync.addWidget(self._chip("≡ Match layers to raw",
+                                  "THIS WINDOW's operator layers ← THIS WINDOW's raw: put raw's "
+                                  "contrast window on every operator layer of the same channel, "
+                                  "so flipping between raw and a result compares the same window. "
                                   "Results open on their own auto window so they are legible "
-                                  "alone; this is the deliberate opt-in to raw's.",
+                                  "alone; this is the deliberate opt-in to raw's. Touches no "
+                                  "other window and does not move raw.",
                                   self._match_raw_contrast))
         sync.addStretch(1)
         ov.addLayout(sync)

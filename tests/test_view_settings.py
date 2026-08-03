@@ -468,6 +468,65 @@ def test_pasting_luts_marks_the_window_diverged(qapp, manager):
     RV._LUT_CLIPBOARD.clear()
 
 
+def test_copy_paste_luts_is_the_only_contrast_path_between_two_open_windows(qapp, manager):
+    """The scope NOTHING else reaches, pinned so deleting the chips can never look free.
+
+    Julio, 2026-07-31: "if contrast are synched, the LUT copy paste should be removed. Prove me
+    wrong if not." What is synced automatically is exactly ONE scope: napari's ``link_layers``
+    holds the operator layers of ONE channel together INSIDE ONE window
+    (``MosaicLayers._register_channel``). It cannot cross windows -- every window builds its own
+    napari ``ViewerModel`` (``MosaicPane.__init__`` -> ``build_pane``) and napari cannot link
+    layers across viewers. The two other ways contrast travels are both shut here, deliberately:
+
+    * ``_baseline_for`` (the ``_INHERIT`` rule) hands a window its opener's contrast AT OPEN, and
+      only when an opener was named -- ``open_child``/ROI. Window two is ALREADY OPEN, and was
+      opened from the plate with no parent, so nothing reaches it that way.
+    * ``make_default`` is documented and tested as "windows opened FROM NOW ON"; it leaves every
+      open window exactly as it is.
+
+    So two wells side by side sit on two different stretches until somebody copies, which is the
+    routine comparison this app exists for. And the copy is also the ONLY carrier of the
+    COLORMAP: ``link_layers`` is bound to ``("contrast_limits",)`` and ``match_contrast_to``
+    writes contrast and nothing else.
+    """
+    from squidmip import _region_viewer as RV
+
+    RV._LUT_CLIPBOARD.clear()
+    one = manager.open([REGIONS[0]])
+    two = manager.open([REGIONS[1]])
+    _loaded(qapp, one)
+    _loaded(qapp, two)
+
+    before_clims = dict(_layer_clims(two))
+    before_cmaps = {ch: two._pane.mosaic.find("raw", ch).colormap
+                    for ch in (CH_IN_YAML, CH_NOT_IN_YAML)}
+
+    # Window one is re-tuned: a new stretch AND a new colour, both by hand, as the user does.
+    for ch, lut in _LUT_B.items():
+        layer = one._pane.mosaic.find("raw", ch)
+        layer.contrast_limits = lut["clim"]
+        layer.colormap = "magenta"
+    assert before_cmaps[CH_IN_YAML] != "magenta", "the fixture already used the colour under test"
+
+    # Nothing crossed. Not the link, not the baseline...
+    assert _layer_clims(two) == before_clims, (
+        "window one's contrast reached an already-open window two on its own; if that is now real "
+        "then this test, not the chips, is what is wrong")
+    # ...and not make_default either, which is the affordance that REPLACED propagation.
+    assert manager.make_default(one.window_id) is True
+    assert _layer_clims(two) == before_clims, "make_default reached back into an open window"
+
+    # The chips are the path. Both halves of a LUT travel: the stretch and the colour.
+    one._copy_luts()
+    two._paste_luts()
+
+    assert _layer_clims(two) == {CH_IN_YAML: (33.0, 333.0), CH_NOT_IN_YAML: (44.0, 444.0)}
+    for ch in (CH_IN_YAML, CH_NOT_IN_YAML):
+        assert two._pane.mosaic.find("raw", ch).colormap == "magenta", (
+            f"{ch}: the colormap did not travel, and no other mechanism carries it at all")
+    RV._LUT_CLIPBOARD.clear()
+
+
 def test_match_raw_contrast_is_wired_to_this_window_s_mosaic_and_leaves_it_at_defaults(
         qapp, manager):
     """The window-level half of "Match raw contrast": the chip's handler reaches THIS window's
