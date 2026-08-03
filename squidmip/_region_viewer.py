@@ -2096,6 +2096,16 @@ class ViewerManager(QObject):
 
     windowsChanged = Signal()          # the set of open windows changed
     memoryChanged = Signal(float)      # process RSS as a fraction 0..1 of total RAM
+    # WHATEVER WORK IS RUNNING, as one immutable ``squidmip._progress.ProgressReport``, or None when
+    # nothing is. Julio: "Where the memory bar is, there should also be a loading bar for whichever
+    # operator we're applying in bulk or in a specific window, even if it's preview."
+    #
+    # It lives on the MANAGER for the same reason memory does (see the class docstring): the bar is
+    # ONE bar next to ONE memory bar, and the work it reports comes from several producers -- a
+    # plate-wide operator run, a run started in a region window, and the raw preview. A per-window
+    # signal would need the navigator to subscribe to windows that come and go, and to decide which
+    # of them the single bar is currently about. The manager already outlives them all.
+    runProgressChanged = Signal(object)   # ProgressReport | None
     viewFocused = Signal(object)       # a window was opened/raised -> its regions (list[str])
     # A window was just SPAWNED, carrying the window itself. ``windowsChanged`` says the SET
     # changed and is what a list view wants; a subscriber that has to reach into the new window's
@@ -2124,6 +2134,11 @@ class ViewerManager(QObject):
         # by a later change, because a default is a fact about the NEXT window.
         self.defaults = ViewDefaults()
 
+        #: The most recent report of whatever is running, or None. Held as well as emitted so a
+        #: navigator built DURING a run shows the bar immediately instead of staying blank until the
+        #: next unit lands -- which on decon, where one unit is minutes, is most of the run.
+        self._run_progress = None
+
         self._mem_timer = QTimer(self)
         self._mem_timer.setInterval(2000)
         self._mem_timer.timeout.connect(self._poll_memory)
@@ -2131,6 +2146,22 @@ class ViewerManager(QObject):
 
     def set_dataset(self, reader: Any, meta: dict) -> None:
         self._reader, self._meta = reader, meta
+
+    @property
+    def run_progress(self):
+        """The in-flight work's latest ``ProgressReport``, or None when nothing is running."""
+        return self._run_progress
+
+    def set_run_progress(self, report) -> None:
+        """Publish (or clear, with None) what is running, for the navigator's bar.
+
+        LAST WRITER WINS, on purpose. There is one bar, so there is one answer; producers do not
+        overlap in practice (``_stop_preview`` runs before an operator run starts), and if they ever
+        did, a bar that shows the most recent report is a true statement about SOMETHING running,
+        where an aggregate over two different denominators would be a true statement about nothing.
+        """
+        self._run_progress = report
+        self.runProgressChanged.emit(report)
 
     @property
     def windows(self) -> "list[RegionViewer]":
@@ -2452,8 +2483,37 @@ class OpenViewList(QWidget):
         self._mem_bar.setFixedHeight(14)
         lay.addWidget(self._mem_bar)
 
+        # THE WORK BAR, directly under the memory bar because that is where Julio asked for it:
+        # "Where the memory bar is, there should also be a loading bar for whichever operator we're
+        # applying in bulk or in a specific window, even if it's preview."
+        #
+        # HIDDEN WHEN IDLE, rather than parked empty. An always-present bar sitting at 0 % is
+        # indistinguishable from a run that has started and produced nothing, which is precisely the
+        # confusion this is meant to end. Absent means nothing is running; present means something
+        # is, and it says what.
+        self._work_label = QLabel("")
+        self._work_label.setStyleSheet("color:#8b949e;font-size:11px;border:none;")
+        self._work_label.setWordWrap(True)
+        self._work_label.hide()
+        lay.addWidget(self._work_label)
+        self._work_bar = QProgressBar(self)
+        self._work_bar.setTextVisible(False)
+        self._work_bar.setFixedHeight(14)
+        # BLUE, where memory is green/red. Two identically-coloured bars stacked on each other is
+        # one bar with a mystery second value; the colour is what says these measure different things.
+        self._work_bar.setStyleSheet(
+            "QProgressBar{background:#161b22;border:1px solid #30363d;border-radius:3px;}"
+            "QProgressBar::chunk{background:#1f6feb;border-radius:3px;}"
+        )
+        self._work_bar.hide()
+        lay.addWidget(self._work_bar)
+
         manager.windowsChanged.connect(self.refresh)
         manager.memoryChanged.connect(self._on_memory)
+        manager.runProgressChanged.connect(self._on_run_progress)
+        # A navigator built mid-run must not wait for the next unit to find out (see
+        # ViewerManager._run_progress). Ask once, now.
+        self._on_run_progress(manager.run_progress)
         self.refresh()
 
     def showEvent(self, e):
@@ -2555,6 +2615,33 @@ class OpenViewList(QWidget):
                if i is not None]
         for wid in ids:
             self._manager.close(wid)
+
+    def _on_run_progress(self, report) -> None:
+        """Draw (or take down) the work bar. ``report`` is a ``ProgressReport``, or None for idle.
+
+        DETERMINATE ONLY WHEN THE REPORT IS. An indeterminate report gets Qt's busy animation
+        (``setRange(0, 0)``) and its count without a percentage, never a fabricated one -- the same
+        rule ``_progress.ProgressReport.percent`` and ``squidmip._activity`` already follow, and for
+        the same reason: a progress bar that invents a denominator is a lie that gets believed.
+        """
+        if report is None:
+            self._work_label.hide()
+            self._work_bar.hide()
+            return
+        try:
+            sentence, percent = report.sentence(), report.percent
+        except Exception:                            # noqa: BLE001 - a bad report is not a crash
+            self._work_label.hide()
+            self._work_bar.hide()
+            return
+        self._work_label.setText(sentence)
+        if percent is None:
+            self._work_bar.setRange(0, 0)            # Qt's busy sweep: working, total unknown
+        else:
+            self._work_bar.setRange(0, 100)
+            self._work_bar.setValue(int(percent))
+        self._work_label.show()
+        self._work_bar.show()
 
     def _on_memory(self, frac: float) -> None:
         pct = max(0, min(100, int(round(frac * 100))))
