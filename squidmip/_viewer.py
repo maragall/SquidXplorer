@@ -312,22 +312,41 @@ def _signal_names(cls) -> tuple:
     return tuple(out)
 
 
-#: Height of the top strip. A fixed cap stops the operator cards' size hint ballooning it into the
-#: "super thick" top that squashed the plate (Julio).
+#: The BAND under the plate: Window Navigator on the left, Operator over Log on the right.
 #:
-#: 240 -> 520 ON 2026-08-03, because the strip now holds TWO stacked panels instead of one tab at a
-#: time. Julio: "I think that we should modify the layout of our main window", with a drawing that
-#: puts Operator above Log, both visible at once. 240 px was sized for one tab; split two ways it
-#: leaves the log about five lines, which is a status light and not a log. There used to be a second
-#: constant, `_TOP_ROW_READING_PX = 520`, that `_sync_top_row_height` swapped in while the Log TAB
-#: was in front; the reading height is now the only height, and that mechanism is gone with the tab
-#: it keyed on. See `_right_col`: the Operator/Log boundary is a QSplitter handle, so the user drags
-#: rather than the app guessing.
+#: IT WAS A TOP STRIP UNTIL 2026-08-03 (`_TOP_ROW_COMPACT_PX`, latterly 520 px). Spencer, on the v2
+#: drawing: the plate view should take roughly HALF the window's real estate, and it was at the
+#: bottom losing prominence to text-heavy panels. So the plate goes on top, full width, and the
+#: panels go below it. The names moved with the thing: there is no top row any more, and a constant
+#: called `_TOP_ROW_*` describing the bottom of the window is a comment that lies.
 #:
-#: THE COST, STATED: the plate loses 280 px of the 850 px design height. That is the trade this
-#: number is, and reversing it is this one literal. The splitter above the plate means the user can
-#: also take it back by dragging.
-_TOP_ROW_COMPACT_PX = 520
+#: TWO NUMBERS, BECAUSE THEY ANSWER TWO QUESTIONS, and the previous restack's "one height" rule was
+#: about something else (it deleted a SECOND CAP that a tab selection swapped in and out, inferring
+#: intent from a click). These are a default size and a hard ceiling:
+#:
+#: * `_BAND_DEFAULT_PX` is what the band gets at the design size. It is DERIVED, not chosen: at
+#:   596x850 the menu bar and the status bar take 25 px each and the splitter handle 6, leaving 794
+#:   for plate + band. 365 here puts the plate at 429 px, which is 50.5% of the window: the
+#:   "about half the real estate" Spencer asked for, measured offscreen rather than estimated.
+#: * `_BAND_MAX_PX` is the ceiling the operator cards' size hint cannot argue with. Unconstrained,
+#:   the band renders ~520 px (measured), which is where the old 32.8% plate came from.
+#:
+#: The band's stretch factor is 0 and the plate's is 1, so a taller window gives the extra height to
+#: the PLATE and its share only goes up (50.6% at 1280x900). The boundary is a splitter handle
+#: either way: these are the starting positions, not a constraint on the user.
+#:
+#: WHAT IT COSTS, STATED: the log opens at ~152 px in the band's right column against 199 px in the
+#: old top strip. That is the trade Spencer's "the plate should take roughly 50%" is, it is this one
+#: literal, and the handle above the band is how a user reading the console takes it back.
+_BAND_DEFAULT_PX = 365
+_BAND_MAX_PX = 520
+
+#: Operator-over-Log split inside the band's right column, in pixels, as a starting position.
+#: Measured offscreen at 596x850 it lands as Operator 203 px / Log 156 px, which is ~4 operator
+#: cards and ~11 console lines. ONE literal because two call sites need it (`__init__` and
+#: `_redock_log`): a re-dock that resized the console differently from how it opened would be a
+#: small lie about where it went.
+_RIGHT_COL_SIZES = [215, 165]
 
 
 # Pane 3's identity and label rules live in ``_explore`` (no Qt, no napari), and are re-exported
@@ -696,8 +715,8 @@ class PlateWindow(QMainWindow):
         # Exploration tabs moved OUT of the process console to get here: the console is pane 1, and
         # pane 1 is not where the user asked exploration to live.
 
-        # top-left: the process console (build the home tab first — it owns self._readout, which
-        # _make_detail_viewer writes to if ndviewer is unavailable).
+        # the band's right column: the process console (build the home tab first — it owns
+        # self._readout, which _make_detail_viewer writes to if ndviewer is unavailable).
         self._left_tabs = _DetachTabs(self._detach_tab)
         # Dark the tab widget's own canvas (the strip behind/beside the tabs rendered white in macOS
         # light mode). Scope a Fusion style + dark palette to THIS widget subtree only — NOT the app,
@@ -799,11 +818,25 @@ class PlateWindow(QMainWindow):
         self._detail = None
         self._right_widget = None
 
-        # bottom-left: plate view (drop target until an acquisition opens). Its FIXED title bar names
-        # the wellplate we're on (the acquisition) — the plate's identity lives with the plate.
-        self._plate_title = QLabel("well plate")   # plate name; shows the hovered well (large) on hover
+        # THE PLATE, on top and full width (drop target until an acquisition opens). Its FIXED
+        # title bar names the wellplate we're on (the acquisition) — the plate's identity lives
+        # with the plate.
+        self._plate_title = QLabel("well plate")   # plate name; shows the hovered well on hover
+        # SMALL, 2026-08-03. Spencer: "Test metadata label (e.g. '10x laser Z-stack') too large,
+        # taking up excess space." This is that label — it reads
+        # "test_10x_laser_af_z_stack_2025-10-28_13-40-43.939945   ·   raw" and it is the drawing's
+        # "Filename ..." strip. It was 17 px / weight 800 / 9 px padding and rendered a 38 px band
+        # across the window at the design size, 59 px at 1280 wide (`rescale_fonts` scales it with
+        # the window). At 12 px / 600 / 3 px it is a caption on the plate pane instead of a headline
+        # over it, which is the whole of the complaint: it is metadata, the plate is the content.
+        #
+        # NOT DELETED, which the drawing's missing "Filename ..." box could be read as asking for.
+        # It is the only thing on screen that says WHICH acquisition is open and what the plate is
+        # showing ("· raw" / "· computed MIP" / the operator's name), it is the hover readout for
+        # the well under the cursor, and it has four writers (`_on_hover` and three mode switches).
+        # Absorbed into the plate pane as a thin caption, not removed.
         self._plate_title.setStyleSheet(           # the BAR below now carries background + border
-            "color:#e6edf3;font-size:17px;font-weight:800;padding:9px 14px;border:none;")
+            "color:#c9d1d9;font-size:12px;font-weight:600;padding:3px 12px;border:none;")
         # NO CONTRAST CONTROL HERE. Julio: "there shouldn't be any controls for the plate
         # view. It just reacts to toggles and contrast adjustments in napari." The scope
         # dropdown that used to sit here is gone with per-region contrast itself.
@@ -920,18 +953,34 @@ class PlateWindow(QMainWindow):
         # operators in `_right_col` — Julio: "the logger on the bottom of the GUI". This replaces
         # the locked 3-pane grid that Spencer asked us to dismantle.
 
-        # THE DECK LAYOUT (2026-07-23 image): ONE COMPACT PORTRAIT (h>w) window — a top row of two
-        # small panels [Open View list | Operators over Log] over a big Wellplate view below. NOT OS
-        # docks spread across a wide window (that was wrong): the deck is a single tidy rectangle.
+        # THE V2 DECK (2026-08-03 drawing, ...-main-window-layout-v2-plate-dominant.png): the PLATE
+        # on top, full width, dominant; a BAND under it holding [Window Navigator | Operator over
+        # Log]. Spencer: the plate view should take roughly half the window's real estate, and at
+        # the bottom of the window it was losing prominence to text-heavy panels. Measured before
+        # this change, offscreen: the plate was 32.8% of a 596x850 window and 35.6% of 1280x900.
         from squidmip._region_viewer import OpenViewList
         self._open_views = OpenViewList(self._viewer_manager, self)
+
+        # THE STATUS BLOCK LEAVES THE NAVIGATOR AND GOES INTO THE LOG. Julio, verbatim: "the status
+        # bar and memory bar should be moved to inside the logger so that we save space." The v2
+        # drawing has no "Status bars" box at all. Those bars are internals of `OpenViewList`: the
+        # memory caption + bar, and the run-progress caption + bar it grew for "where the memory bar
+        # is, there should also be a loading bar" — so the move is a reparent, NOT a rebuild: the
+        # navigator keeps driving them off ViewerManager's signals and the log panel just shows
+        # them. See `OpenViewList.take_status_row` and `LogPanel.adopt_status_row`.
+        #
+        # NOT MOVED, and named so the omission is a decision rather than an oversight: the
+        # QMainWindow `statusBar()` carrying `self._readout`. It is the guidance line ("2 wells
+        # loaded · double-click a well…"), it is asserted by ~25 tests as the window's one reply
+        # channel, and neither panel of the drawing shows it. It stays where it is.
+        self._log_panel.adopt_status_row(*self._open_views.take_status_row())
 
         # THE RIGHT COLUMN IS A VERTICAL SPLIT: Operator on top, Log beneath (Julio's 2026-08-03
         # drawing). Both visible at once, which is the whole request; the tab bar that made them
         # alternate now carries only the Operators home tab and the user's detachable operator tabs.
         #
-        # A SPLITTER, not a fixed 50/50 layout, for two reasons. The plate pays 280 px for this
-        # strip (see _TOP_ROW_COMPACT_PX) and a handle is how the user takes some of that back. And
+        # A SPLITTER, not a fixed 50/50 layout, for two reasons. The plate is held at about half the
+        # window (see _BAND_DEFAULT_PX) and a handle is how the user takes some of that back. And
         # it is the drag affordance `_sync_top_row_height` existed to AVOID needing: that method
         # grew the strip while the Log TAB was in front and shrank it afterwards, inferring intent
         # from a tab selection. There is no tab selection now, and an automatic height swap would
@@ -952,45 +1001,45 @@ class PlateWindow(QMainWindow):
         right_col.addWidget(self._log_panel)    # Log, beneath
         right_col.setStretchFactor(0, 3)
         right_col.setStretchFactor(1, 2)
-        right_col.setSizes([300, 190])          # ~7 operator cards visible; ~14 log lines
+        right_col.setSizes(list(_RIGHT_COL_SIZES))
         self._right_col = right_col
 
-        top_row = QSplitter(Qt.Horizontal)
-        top_row.setStyleSheet("QSplitter{background:#0b0e14;}"
-                              "QSplitter::handle{background:#232b3a;width:1px;}")
-        top_row.addWidget(self._open_views)     # top-left: "Open View list 'selectable'"
-        top_row.addWidget(right_col)            # top-right: Operators over the one global console
+        band = QSplitter(Qt.Horizontal)
+        band.setStyleSheet("QSplitter{background:#0b0e14;}"
+                           "QSplitter::handle{background:#232b3a;width:1px;}")
+        band.addWidget(self._open_views)        # band left: the Window Navigator
+        band.addWidget(right_col)               # band right: Operators over the one global console
         # 280/280 -> 230/360. The navigator's contents are a tree of short window titles plus two
         # buttons; the operator cards are the widget actually starved of width, and _qtstyle.py
         # records that every blurb elides in the ~300 px it gets. Splitter sizes are hints, so this
-        # is a default and not a constraint.
-        top_row.setSizes([230, 360])
-        top_row.setHandleWidth(6)
-        top_row.setMinimumHeight(150)
-        self._top_row = top_row
+        # is a default and not a constraint — and the navigator's two side-by-side buttons set a
+        # minimum width that wins over this ratio at the 596 px design size (measured: 313/277).
+        band.setSizes([230, 360])
+        band.setHandleWidth(6)
+        band.setMinimumHeight(150)
+        self._band = band
 
         # THE CAP GOES ON A PLAIN HOST, NOT ON THE SPLITTER, AND THAT IS A BUG FIX.
         #
-        # `top_row.setMaximumHeight(_TOP_ROW_COMPACT_PX)` was here and DID NOT WORK.
-        # QSplitterPrivate::recalc calls setMaximumSize() on the splitter itself out of its
-        # children's maximums every time a child is added or its geometry changes, so it overwrites
-        # any cap set from outside. MEASURED on 83c486c, offscreen, a 596x850 window:
-        # `_top_row.maximumHeight()` reads 16777215 (QWIDGETSIZE_MAX) and the strip renders 479 px
-        # tall, not 240. The only thing that ever re-applied the cap was `_sync_top_row_height`
-        # firing on `currentChanged` — and the next recalc dropped it again.
+        # `band.setMaximumHeight(...)` DOES NOT WORK. QSplitterPrivate::recalc calls
+        # setMaximumSize() on the splitter itself out of its children's maximums every time a child
+        # is added or its geometry changes, so it overwrites any cap set from outside. MEASURED on
+        # 83c486c, offscreen, a 596x850 window: the splitter's `maximumHeight()` reads 16777215
+        # (QWIDGETSIZE_MAX) and the strip rendered 479 px tall against a 240 px cap. The only thing
+        # that ever re-applied it was `_sync_top_row_height` firing on `currentChanged` — and the
+        # next recalc dropped it again.
         #
-        # So the "compact strip, the plate is the star" rule has been decorative for some time, and
-        # deleting `_sync_top_row_height` would have removed the last thing touching it. A plain
-        # QWidget does not rewrite its own maximum, so the cap holds here for real. Its OWN panels
-        # scroll inside this height, which is what the original comment promised.
-        top_row_host = QWidget()
-        _th = QVBoxLayout(top_row_host)
+        # A plain QWidget does not rewrite its own maximum, so the cap holds here for real. It is
+        # the ceiling, not the size: `_BAND_DEFAULT_PX` is what the band actually opens at, and this
+        # is what stops the operator cards' size hint arguing it upwards. Its OWN panels scroll.
+        band_host = QWidget()
+        _th = QVBoxLayout(band_host)
         _th.setContentsMargins(0, 0, 0, 0)
         _th.setSpacing(0)
-        _th.addWidget(top_row)
-        top_row_host.setMaximumHeight(_TOP_ROW_COMPACT_PX)
-        top_row_host.setMinimumHeight(150)
-        self._top_row_host = top_row_host
+        _th.addWidget(band)
+        band_host.setMaximumHeight(_BAND_MAX_PX)
+        band_host.setMinimumHeight(150)
+        self._band_host = band_host
 
         root = QWidget()
         root.setStyleSheet(f"background:{_BG};")
@@ -1015,10 +1064,10 @@ class PlateWindow(QMainWindow):
         # toggle the turbo colormap mini-gui where we click on there image and it moves teh
         # crosshairs to display XZ and YZ bands." He was asking for something already built.
         #
-        # It goes in a VERTICAL SPLITTER with the plate, not back into the top strip: the
+        # It goes in the SAME VERTICAL SPLITTER as the plate and the band, not inside the band: the
         # composite is a real picture (2*view_half plus the two z sections on each axis) and the
-        # strip is capped at _TOP_ROW_COMPACT_PX. The splitter is the same idiom as `top_row`, so
-        # the user can give the picture as much of the deck as they want and take it back.
+        # band is capped at _BAND_MAX_PX. A splitter child means the user can give the picture as
+        # much of the deck as they want and take it back.
         #
         # HIDDEN WHILE EMPTY, which is a reversal of IMA-260's "visible from open, teaching by
         # example". That reversal is deliberate: the example copy teaches the Shift-drag, and
@@ -1026,20 +1075,35 @@ class PlateWindow(QMainWindow):
         # this pane. A permanent strip teaching a gesture whose result lands somewhere else is
         # worse than no strip. `_sync_explore_pane` owns both the page swap and this visibility,
         # so there is one place that answers "what is pane 3 doing".
+        # THE WHOLE BODY IS ONE VERTICAL SPLITTER, TOP TO BOTTOM: plate, pane 3, band. Three
+        # children of one splitter rather than a splitter nested in a splitter — same orientation
+        # twice would put two indistinguishable horizontal handles on screen and make "which one
+        # moves the plate" a guess. Pane 3 is hidden while empty, and a QSplitter gives a hidden
+        # child no pixels and no handle, so the common case looks and drags like two panes.
         body = QSplitter(Qt.Vertical)
         body.setStyleSheet("QSplitter{background:#0b0e14;}"
                            "QSplitter::handle{background:#232b3a;height:1px;}")
         body.setHandleWidth(6)
-        body.addWidget(plate_host)
-        body.addWidget(self._explore_pane)
-        body.setStretchFactor(0, 3)
-        body.setStretchFactor(1, 2)
+        body.addWidget(plate_host)              # index 0: THE PLATE, on top, full width, dominant
+        body.addWidget(self._explore_pane)      # index 1: pane 3, hidden until it holds a tab
+        body.addWidget(band_host)               # index 2: navigator | operator over log
+        # A CONSOLE YOU CAN DRAG TO NOTHING IS A CONSOLE YOU HAVE LOST — the same invariant
+        # `_right_col` buys, one level up: the band must not be draggable to zero either, or the
+        # navigator and the operators go with it.
+        body.setChildrenCollapsible(False)
+        # THE STRETCH IS WHAT KEEPS THE PLATE DOMINANT AS THE WINDOW GROWS. Qt hands a resize
+        # delta out by stretch factor, so with the band at 0 the extra height is the PLATE's and its
+        # share only ever goes up from the design ratio. `setSizes` sets the starting position.
+        body.setStretchFactor(0, 1)
+        body.setStretchFactor(1, 0)
+        body.setStretchFactor(2, 0)
+        body.setSizes([self._DESIGN_H - _BAND_DEFAULT_PX, 0, _BAND_DEFAULT_PX])
+        plate_host.setMinimumHeight(160)        # the band cannot squeeze the plate out of existence
         self._body = body
 
-        rv.addWidget(top_row_host, 0)           # compact strip, keeps its height (capped for real)
-        rv.addWidget(body, 1)                   # the Wellplate view + pane 3 fill the rest
+        rv.addWidget(body, 1)                   # plate / pane 3 / band, in the drawing's order
         rv.addWidget(self._time_point_bar, 0)   # hidden unless n_t > 1
-        self._split = top_row
+        self._split = band
         self.setCentralWidget(root)
 
         # LOCK THE WHOLE ROOT DARK so macOS LIGHT theme cannot whiten the framing (Julio: "make
@@ -1060,7 +1124,7 @@ class PlateWindow(QMainWindow):
         self._sync_explore_pane()                  # pane 3 starts hidden: it holds no tab yet
 
         # 596 x 850 stays the DEFAULT portrait shape (Julio): the plate dominates below the
-        # capped top strip, and the window opens identically on every monitor. It is no longer
+        # band, and the window opens identically on every monitor. It is no longer
         # a setFixedSize, for two reasons.
         #
         # 1. Spencer: the root has to be resizable, and the type has to come up with it.
@@ -1070,7 +1134,7 @@ class PlateWindow(QMainWindow):
         #    a window with its lower half off the bottom of the display.
         #
         # So: open at the design size, clamped to what the screen can actually show, and let
-        # the user take it from there. The minimum keeps the top strip's controls from
+        # the user take it from there. The minimum keeps the band's controls from
         # collapsing into each other.
         self.setMinimumSize(420, 520)
         self.resize(*self._default_root_size())
@@ -1154,7 +1218,7 @@ class PlateWindow(QMainWindow):
         super().resizeEvent(e)
         self._rescale_fonts()
 
-    # -- the Operators panel (top-right): a scrollable list of operator blocks ----------------------
+    # -- the Operators panel (band, upper right): a scrollable list of operator blocks -------------
     def _build_process_pane(self) -> QWidget:
         """The Operators panel: JUST a scrollable list of operator blocks — no header, no footer
         (Julio, 2026-07-23). Each block opens that operator; operators apply to the plate SELECTION
@@ -1498,7 +1562,7 @@ class PlateWindow(QMainWindow):
             return
         col.addWidget(panel)                    # index 1: _left_tabs is still index 0
         panel.setVisible(True)
-        col.setSizes([300, 190])
+        col.setSizes(list(_RIGHT_COL_SIZES))    # the same split it opened at, not a second guess
 
     def _close_op_tab(self, index: int, tabs=None):
         tabs = self._left_tabs if tabs is None else tabs
@@ -1899,7 +1963,7 @@ class PlateWindow(QMainWindow):
     # reading the console" from a tab selection. The log is no longer a tab, so there is nothing
     # left to read the intent from — and its own docstring said it was "deliberately not a
     # remembered setting and not a drag handle", which is precisely what `_right_col`'s splitter
-    # handle now is. 520 is the single cap (see `_TOP_ROW_COMPACT_PX`) and the boundary between
+    # handle now is. `_BAND_MAX_PX` is the single cap and the boundary between
     # Operator and Log is dragged, not guessed.
 
     def _on_tab_changed(self, index: int = -1, force: bool = False):
@@ -1914,7 +1978,7 @@ class PlateWindow(QMainWindow):
         dropping it is what left the front tab lying about what the viewer shows (BUG 2), because
         nothing re-emits ``currentChanged`` when the run later drains.
 
-        It used to size the top strip too (``_sync_top_row_height``, deleted 2026-08-03): the Log
+        It used to size the band too (``_sync_top_row_height``, deleted 2026-08-03): the Log
         was a tab, so the tab you selected said whether you were reading the console or working the
         plate. Both are on screen at once now and the boundary is a splitter handle.
 
@@ -5843,8 +5907,8 @@ def main(dataset_path: str = None):
     # FULL HEIGHT, DESIGN WIDTH -- not maximised. `showMaximized()` was tried first, on Spencer's
     # "start full screen and let me close it down", and Julio caught it immediately on a laptop:
     # "aspect ratio is good in height, but too much width". That is the layout telling the truth.
-    # This root is a PORTRAIT window (596 x 850): a capped top strip over a plate that wants to be
-    # tall, so height is the dimension it can actually use and width past the design number just
+    # This root is a PORTRAIT window (596 x 850): a plate that takes the top half and wants to be
+    # taller, so height is the dimension it can actually use and width past the design number just
     # pads empty gutters around the plate. Maximising is the right default for a document window
     # and the wrong one for this.
     #

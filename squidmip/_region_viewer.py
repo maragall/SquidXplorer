@@ -2686,6 +2686,30 @@ class OpenViewList(QWidget):
         self._on_run_progress(manager.run_progress)
         self.refresh()
 
+    def take_status_row(self) -> tuple:
+        """Hand the memory bar and the run-progress bar to whoever is going to show them.
+
+        Julio, 2026-08-03: "the status bar and memory bar should be moved to inside the logger so
+        that we save space." The v2 drawing deletes the status block that sat under this list.
+
+        THE WIRING IS NOT TOUCHED, and that is the point. ``manager.memoryChanged`` and
+        ``manager.runProgressChanged`` are connected to ``_on_memory`` / ``_on_run_progress`` on
+        THIS object, and those write into these four widgets by attribute. Removing them from this
+        layout and letting another layout adopt them reparents the pixels and leaves every one of
+        those paths intact — including ``_on_run_progress``'s hide/show, which is what makes the
+        progress bar absent while nothing runs wherever it lives. Rebuilding them in the log panel
+        instead would have meant two memory bars and a choice about which one is real.
+
+        Returns ``(memory_caption, memory_bar, work_caption, work_bar)`` in the order
+        :meth:`squidmip._logpanel.LogPanel.adopt_status_row` takes them. Callable once; calling it
+        twice is harmless (``removeWidget`` on an absent widget is a no-op) but pointless.
+        """
+        lay = self.layout()
+        widgets = (self._mem_label, self._mem_bar, self._work_label, self._work_bar)
+        for w in widgets:
+            lay.removeWidget(w)
+        return widgets
+
     def showEvent(self, e):
         """Hand the tree keyboard focus, and give the arrows a row to start from.
 
