@@ -224,7 +224,14 @@ def paint_slides(p, rects: Iterable[Rect], label_frac: float = LABEL_FRAC,
         text = _label_at(labels, i)
         if text and lh > 10:
             p.setPen(QColor(198, 208, 222))
-            p.setFont(QFont("Helvetica Neue", 10, QFont.DemiBold))
+            # PIXELS, not points: a point size resolves against the paint device's per-screen
+            # logicalDpiY, so this label changed apparent size between a laptop panel and an
+            # external monitor while every other size in the app (all logical px) held still.
+            # 10 px is what 10 pt already rendered as at macOS's 72 dpi, so nothing moves here.
+            label_font = QFont("Helvetica Neue")
+            label_font.setPixelSize(10)
+            label_font.setWeight(QFont.DemiBold)
+            p.setFont(label_font)
             p.drawText(QRectF(x, y, w, lh), int(Qt.AlignCenter), text)
     p.restore()
 

@@ -1,4 +1,4 @@
-"""Type that grows with its window, for EVERY window rather than just the root.
+"""Display-derived window facts every window needs: the type scale, and WHICH SCREEN.
 
 Spencer, 2026-07-27: "the root window rescales its type on resize (`501f71e`), but the
 `[N] <well>` view windows and the Log window do not. They inherit the high-DPI fix, so they are
@@ -18,13 +18,17 @@ be silently ignored at every one of them.
 from the last scaled one. Without the cache, two resizes compound the multiplier and the type runs
 away.
 
-This module imports only qtpy on purpose, so both `_viewer` and `_region_viewer` can use it
-without either importing the other: `_viewer` already imports `_region_viewer`, so keeping the
-shared helper in `_viewer` would have been a circular import.
+**Why `window_screen` lives here too.** It is the same shape of fact as the type scale: something
+read off the DISPLAY that both the root window and every view window need in order to open at a
+sensible size, and that neither can ask the other for. This module imports only qtpy on purpose, so
+both `_viewer` and `_region_viewer` can use it without either importing the other: `_viewer` already
+imports `_region_viewer`, so keeping the shared helper in `_viewer` would have been a circular
+import.
 """
 from __future__ import annotations
 
 import re
+from typing import Optional
 
 from qtpy.QtWidgets import QWidget
 
@@ -36,6 +40,31 @@ DESIGN_W = 1100
 _SCALE_EPSILON = 0.02
 
 _FONT_SIZE_RE = re.compile(r"(font-size\s*:\s*)(\d+(?:\.\d+)?)(px)", re.IGNORECASE)
+
+
+def window_screen(widget: Optional[QWidget]):
+    """The screen *widget* is actually on, falling back to the primary screen.
+
+    On a laptop + external monitor setup ``primaryScreen()`` is whichever display the OS calls
+    first, NOT the one the user dragged the app onto. Sizing or placing a window against it gives
+    a window measured for the wrong display: a view window sized to a third of the laptop panel
+    while it opens on the 4K external, or vice versa. ``QWidget.screen()`` reports the display the
+    widget's window occupies, so the numbers and the pixels are about the same monitor.
+
+    Defensive on both counts: ``screen()`` only exists from Qt 5.14, and it returns None for a
+    widget with no window handle yet. Either way the primary screen is still a better answer than
+    no answer, so the fallback is the OLD behaviour rather than a crash.
+    """
+    from qtpy.QtGui import QGuiApplication
+
+    screen = None
+    getter = getattr(widget, "screen", None) if widget is not None else None
+    if callable(getter):
+        try:
+            screen = getter()
+        except Exception:                    # noqa: BLE001 - a screen query is never worth a crash
+            screen = None
+    return screen if screen is not None else QGuiApplication.primaryScreen()
 
 
 def scale_qss_fonts(qss: str, scale: float) -> str:

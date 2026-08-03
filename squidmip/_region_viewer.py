@@ -48,7 +48,7 @@ from qtpy.QtWidgets import (
 from squidmip._time_point import TimePointBar
 from squidmip._address import Address, Extent
 from squidmip._logpane import ViewLog, get_logger
-from squidmip._fontscale import rescale_fonts
+from squidmip._fontscale import rescale_fonts, window_screen
 
 log = get_logger("regionviewer")
 
@@ -457,9 +457,18 @@ class RegionViewer(QMainWindow):
         # is about three inches wide: Spencer's report. The rounding fix is the actual repair, so
         # this floor is a SECOND line of defence rather than the fix -- a view window is never
         # worth opening at under a third of the screen, whatever the scale factor turns out to be.
+        #
+        # The cascade offset is measured from the HOME SCREEN's work area, not from the desktop
+        # origin. `move(120, 90)` is a GLOBAL coordinate, so on a laptop + external monitor it put
+        # every view window on whichever display owns (0, 0) -- the plate could be on the external
+        # and its views would open on the laptop, at a size computed from a third display's
+        # geometry. Same numbers, now relative to the screen the plate is on.
         self.resize(*self._default_view_size())
         off = 28 * ((self.window_id - 1) % 8)
-        self.move(120 + off, 90 + off)
+        home = self._home_screen()
+        origin = home.availableGeometry().topLeft() if home is not None else None
+        ox, oy = (origin.x(), origin.y()) if origin is not None else (0, 0)
+        self.move(ox + 120 + off, oy + 90 + off)
 
         self._build()
 
@@ -469,17 +478,28 @@ class RegionViewer(QMainWindow):
     #: two different names.
     _OPEN_W, _OPEN_H = 860, 720
 
+    def _home_screen(self):
+        """The display this window belongs on: the PLATE's, else this window's, else the primary.
+
+        A view window is parentless and unshown while it is being sized, so asking Qt which screen
+        it is on answers "the primary one" no matter where the user is working. The plate IS
+        reachable, though, by exactly the route ``ViewerManager.raise_plate`` already uses: the
+        manager's Qt parent is the ``PlateWindow``. A view opens from the plate, so the plate's
+        display is the right one to measure and place against.
+        """
+        opener = self._manager.parent() if self._manager is not None else None
+        return window_screen(opener if opener is not None else self)
+
     def _default_view_size(self) -> tuple:
         """The design size, floored at a third of the screen and capped to fit on it.
 
-        Read the screen through ``QGuiApplication`` rather than ``QApplication``: this module is
-        widget-side but the screen list is a GUI-layer fact, and the import stays local so the
-        headless paths that import this module for its non-Qt helpers do not pay for it.
+        Measured against the screen the window will OPEN on (see :meth:`_home_screen`), not
+        ``primaryScreen()``: on a laptop + external monitor those are different displays with
+        different work areas, and "a third of the screen" computed from the wrong one is the
+        cross-monitor size inconsistency, not a rounding artefact.
         """
-        from qtpy.QtGui import QGuiApplication
-
         w, h = self._OPEN_W, self._OPEN_H
-        screen = QGuiApplication.primaryScreen()
+        screen = self._home_screen()
         if screen is None:
             return w, h
         avail = screen.availableGeometry()
@@ -575,6 +595,22 @@ class RegionViewer(QMainWindow):
         "QPushButton:checked{background:#1f6feb;color:#ffffff;border-color:#1f6feb;}"
         "QPushButton:disabled{color:#586069;border-color:#20262e;}"
     )
+    #: The operator dropdown's OWN chrome. `_CHIP_QSS` above is `QPushButton`-only, so a combo
+    #: styled with it alone declared no `color` at all -- and `_build_top_row` sets a SELECTOR-LESS
+    #: `background:#0b0e14` on the row, which Qt parses as `*{...}` and applies to every descendant.
+    #: The background therefore came from the row's sheet and the FOREGROUND from the OS palette:
+    #: white in macOS dark mode, BLACK in light mode, on a near-black box (Julio, light mode).
+    #: Foreground and background are stated together here, for the closed combo AND for the popup
+    #: `QAbstractItemView` (a separate top-level window that the `QComboBox` selector never reaches),
+    #: so neither half is ever left to the platform palette to supply.
+    _COMBO_CHIP_QSS = (
+        "QComboBox{background:#161b22;color:#c9d1d9;border:1px solid #30363d;"
+        "border-radius:4px;padding:3px 9px;font-size:11px;min-width:120px;}"
+        "QComboBox:hover{background:#21262d;color:#c9d1d9;}"
+        "QComboBox:disabled{color:#586069;border-color:#20262e;}"
+        "QComboBox QAbstractItemView{background:#161b22;color:#c9d1d9;border:1px solid #30363d;"
+        "selection-background-color:#1f6feb;selection-color:#ffffff;outline:none;}"
+    )
 
     def _titled_box(self, title: str) -> "tuple[QFrame, QVBoxLayout]":
         box = QFrame(self)
@@ -654,7 +690,7 @@ class RegionViewer(QMainWindow):
         # drop-down menus"). Runs the same registry the plate uses, scoped to this window's regions.
         opr = QHBoxLayout(); opr.setSpacing(4)
         self._op_combo = QComboBox()
-        self._op_combo.setStyleSheet(self._CHIP_QSS + "QComboBox{min-width:120px;}")
+        self._op_combo.setStyleSheet(self._COMBO_CHIP_QSS)
         for spec in self._operator_specs:
             self._op_combo.addItem(str(spec[1]), spec[0])   # label shown, key as data
         if self._op_combo.count() == 0:
