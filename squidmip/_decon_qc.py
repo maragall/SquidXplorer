@@ -371,6 +371,18 @@ def _display(panel, gamma=0.5, reference=None):
 GAP_RGB = (128, 128, 128)
 
 
+def _view_window(n, c, half):
+    """The [start, stop) slice one lateral axis is CROPPED to around *c*, clamped to the axis.
+
+    One function so the composite and its inverse (:func:`composite_centre_at`) cannot drift:
+    a click maps to the wrong voxel the instant these two disagree about where the crop starts,
+    and that is a defect nobody can see in a picture of a blob.
+    """
+    if not half:
+        return 0, n
+    return max(int(c) - half, 0), min(int(c) + half, n)
+
+
 def qc_composite(volume, centre, view_half=None, gamma=0.5, gap=2):
     """The x-y plane through *centre* with the y-z and x-z sections CONCATENATED to it.
 
@@ -403,8 +415,8 @@ def qc_composite(volume, centre, view_half=None, gamma=0.5, gap=2):
     zc, yc, xc = (int(v) for v in centre)
     nz, ny, nx = volume.shape
 
-    y0, y1 = (0, ny) if not view_half else (max(yc - view_half, 0), min(yc + view_half, ny))
-    x0, x1 = (0, nx) if not view_half else (max(xc - view_half, 0), min(xc + view_half, nx))
+    y0, y1 = _view_window(ny, yc, view_half)
+    x0, x1 = _view_window(nx, xc, view_half)
     crop = volume[:, y0:y1, x0:x1]
 
     xy = volume[zc, y0:y1, x0:x1]          # (Y, X)
@@ -419,6 +431,47 @@ def qc_composite(volume, centre, view_half=None, gamma=0.5, gap=2):
     out[h_xy + gap:, :w_xy] = _display(xz, gamma, reference=crop)
     # bottom-right stays NaN: a z-vs-z section does not exist, so nothing may be drawn there.
     return out
+
+
+def composite_centre_at(shape, centre, row, col, view_half=None, gap=2):
+    """Which ``(z, y, x)`` a CLICK at composite pixel ``(row, col)`` is pointing at.
+
+    The exact inverse of :func:`qc_composite`'s layout, and it lives HERE, beside the layout it
+    inverts, rather than in the Qt widget that receives the mouse press: the widget knows where
+    the pointer was, not where the panels are, and a second copy of the panel geometry in a
+    view is how a crosshair ends up one crop-offset away from the pixel that was clicked.
+
+    Only the axes the clicked panel actually shows are moved; the third keeps its old value.
+    Clicking the x-y panel picks y and x at the current z, the x-z panel picks z and x at the
+    current y, the y-z panel picks z and y at the current x.
+
+    Returns
+    -------
+    tuple or None
+        The new centre, or ``None`` when the click landed in a separator band, in the dead
+        bottom-right corner (there is no z-vs-z section) or outside the composite. A caller
+        should do nothing at all on ``None`` — moving the crosshair to a guess is worse than
+        not moving it.
+    """
+    nz, ny, nx = (int(v) for v in shape)
+    zc, yc, xc = (int(v) for v in centre)
+    row, col, gap = int(row), int(col), int(gap)
+    y0, y1 = _view_window(ny, yc, view_half)
+    x0, x1 = _view_window(nx, xc, view_half)
+    h_xy, w_xy = y1 - y0, x1 - x0
+
+    in_xy_rows = 0 <= row < h_xy
+    in_xy_cols = 0 <= col < w_xy
+    in_z_cols = w_xy + gap <= col < w_xy + gap + nz     # the y-z strip, to the right
+    in_z_rows = h_xy + gap <= row < h_xy + gap + nz     # the x-z strip, below
+
+    if in_xy_rows and in_xy_cols:
+        return zc, y0 + row, x0 + col
+    if in_xy_rows and in_z_cols:
+        return col - (w_xy + gap), y0 + row, xc
+    if in_z_rows and in_xy_cols:
+        return row - (h_xy + gap), yc, x0 + col
+    return None
 
 
 def turbo_rgb(panel):
