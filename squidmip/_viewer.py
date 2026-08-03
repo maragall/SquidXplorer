@@ -1423,7 +1423,17 @@ class PlateWindow(QMainWindow):
         panel = getattr(self, "_log_panel", None)
         if panel is None:
             return
-        return
+        win = self._floating.get(self._LOG_FLOAT_KEY)
+        if win is not None:
+            if panel.collapsed:
+                panel.set_collapsed(False)
+            win.show()
+            win.raise_()
+            win.activateWindow()
+            return
+        if panel.collapsed:
+            panel.set_collapsed(False)
+        panel.setVisible(True)
 
     # -- the console in a window of its own (Julio: "Log (option to open in a new window)") --------
     def _float_log(self):
