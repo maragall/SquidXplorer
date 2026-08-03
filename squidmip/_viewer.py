@@ -1568,6 +1568,36 @@ class PlateWindow(QMainWindow):
         self._run_units = report
         self._run_readout(f"● {report.sentence()}{self._run_dest}")
         self._tell_requester(self._run_requester, "operator_progress", report)
+        # ...and to the ONE bar next to the memory bar, which is where Julio asked to see a run
+        # WHEREVER it was started from ("in bulk or in a specific window"). The requester above is
+        # told only when the run came from a region window; this covers both, and the preview.
+        self._publish_progress(report)
+
+    def _publish_progress(self, report) -> None:
+        """Hand a ``ProgressReport`` (or None for idle) to the window navigator's work bar.
+
+        Routed through the ViewerManager rather than reaching into ``self._open_views`` because the
+        manager is the thing that outlives the navigator widget: the panel can be closed and rebuilt,
+        and a producer must not have to know whether it currently exists.
+        """
+        mgr = getattr(self, "_viewer_manager", None)
+        if mgr is not None:
+            mgr.set_run_progress(report)
+
+    def _clear_progress_if_idle(self) -> None:
+        """Take the work bar down, but ONLY once nothing is left running.
+
+        Asked on every worker's ``finished``, and both questions are needed. ``operator_busy``
+        deliberately does not count the raw preview (it opts out with ``IS_PREVIEW``, see
+        ``_explore.operator_busy``), so an operator run ending while a preview is still filling the
+        plate would otherwise hide a bar that has live work behind it.
+        """
+        if _explore.operator_busy(self._worker, self._retired):
+            return
+        preview = getattr(self, "_preview", None)
+        if preview is not None and preview.isRunning():
+            return
+        self._publish_progress(None)
 
     @staticmethod
     def _tell_requester(requester, method: str, *args) -> None:
@@ -1815,6 +1845,10 @@ class PlateWindow(QMainWindow):
         Fires on QThread.finished, so it also covers a run that was STOPPED (closing a tab mid-run)
         — ``_stop_worker`` returns immediately but the thread keeps going until its current well is
         done, and ``_busy()`` stays True for all of that window."""
+        # The work bar comes down here and not on ``finished_ok``, for the reason the console pair
+        # below is closed here: this slot fires on ok, failed and STOPPED alike, and a bar that is
+        # only taken down on success is a bar left running over a dead run.
+        self._clear_progress_if_idle()
         if _explore.operator_busy(self._worker, self._retired):
             return                       # another operator run is still draining — wait for it
         # No operator run is in flight now — clear the activity header. end() is a no-op if it was
@@ -2978,12 +3012,8 @@ class PlateWindow(QMainWindow):
 
         # fast RAW preview: fill the plate with downsampled thumbnails immediately (grey dots),
         # in the SAME row-major order the operator will later process them in.
-        self._preview = _PreviewWorker(reader, meta, self._fov_index, order)
-        self._preview_order = list(order)
-        self._preview.tileReady.connect(self._on_preview_tile)
-        self._preview.streamEnded.connect(lambda: self._recomposite("raw"))
-        self._preview.failed.connect(self._on_preview_failed)
-        self._preview.start()   # (the detail already landed on order[0] via _setup_raw_detail)
+        self._start_preview(reader, meta, order)   # (the detail already landed on order[0] via
+        #                                             _setup_raw_detail)
         # top-left = STATUS (what's happening / what's shown); the plate name is the pane title.
         # "live" is retired from user-facing copy: this is POST-ACQUISITION review, and calling
         # a loaded plate "live" reads as a running scope. The phrasing is operator/stitcher
@@ -3679,12 +3709,7 @@ class PlateWindow(QMainWindow):
         # opened: the slider showed only the well that had already loaded.
         if getattr(self, "_preview", None) is not None and order != getattr(self, "_preview_order", None):
             self._stop_preview()
-            self._preview = _PreviewWorker(reader, meta, self._fov_index, order)
-            self._preview_order = list(order)
-            self._preview.tileReady.connect(self._on_preview_tile)
-            self._preview.streamEnded.connect(lambda: self._recomposite("raw"))
-            self._preview.failed.connect(self._on_preview_failed)
-            self._preview.start()
+            self._start_preview(reader, meta, order)
         self._pushed = set()
         # The raw slider is 1:1 with `order`, so pushes must map into THAT, not the plate index.
         # Identity when the slider IS the whole plate; a subset map otherwise.
@@ -3739,12 +3764,7 @@ class PlateWindow(QMainWindow):
         # resume the raw thumbnail fill — the operator run stopped the preview partway, so re-run it to
         # finish downsampling every well's raw tile (idempotent: it just re-renders the raw layer).
         self._stop_preview()
-        self._preview = _PreviewWorker(self._reader, self._meta, self._fov_index, self._order)
-        self._preview_order = list(self._order)
-        self._preview.tileReady.connect(self._on_preview_tile)
-        self._preview.streamEnded.connect(lambda: self._recomposite("raw"))
-        self._preview.failed.connect(self._on_preview_failed)
-        self._preview.start()
+        self._start_preview(self._reader, self._meta, self._order)
         self._readout.setText("raw view")
 
     def _open_computed(self):
@@ -4297,6 +4317,31 @@ class PlateWindow(QMainWindow):
         """The raw preview aborted before it finished. Name it in the status line instead of
         leaving a half-grey plate that looks identical to one still loading."""
         self._readout.setText(f"the raw preview could not finish: {message}")
+
+    def _start_preview(self, reader, meta, order):
+        """Start the raw preview over *order*, fully wired. THE only place a preview is built.
+
+        Extracted because there were three byte-identical five-line copies of this (first ingest,
+        the tab re-scope, and the return-to-raw resume), and the progress wiring below had to land
+        on all three or the bar would appear on some entry paths and not others — the "wired on one
+        of N call sites" defect that made the stdout capture look like a partial integration in the
+        first place. One constructor, one set of connections, no third chance to disagree.
+        """
+        self._preview = _PreviewWorker(reader, meta, self._fov_index, order)
+        self._preview_order = list(order)
+        self._preview.tileReady.connect(self._on_preview_tile)
+        self._preview.streamEnded.connect(lambda: self._recomposite("raw"))
+        self._preview.failed.connect(self._on_preview_failed)
+        # The preview reports on the SAME channel an operator run does, so the one bar covers it
+        # ("even if it's preview"). Published straight through: the plate window is only a relay
+        # here, because the preview has no status line or side-pane tab of its own to feed.
+        self._preview.runProgress.connect(self._publish_progress)
+        # QThread.finished, not streamEnded: at streamEnded the thread is still running, so
+        # _clear_progress_if_idle would see it and decline. This also covers the failed and the
+        # stopped preview, which never reach streamEnded at all.
+        self._preview.finished.connect(self._clear_progress_if_idle)
+        self._preview.start()
+        return self._preview
 
     def _on_tile(self, ri, ci, well_id, tile, box=None):
         """A field landed. ``box`` is None for the single-tile producers (_ComputedPlateWorker emits

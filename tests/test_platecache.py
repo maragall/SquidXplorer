@@ -536,6 +536,14 @@ def test_the_plate_preview_actually_goes_through_the_cache():
     """The regression guard, in the shape ``test_tsctx`` uses: the wiring, not just the module."""
     import inspect
 
-    src = inspect.getsource(V._PreviewWorker.run)
+    # `run` is now a two-line wrapper (it opens the stdout capture and calls `_run_body`), the same
+    # split `_OperatorWorker` uses, so read BOTH — pointing this at `run` alone would go quietly
+    # green forever the moment anything else moves out of it.
+    src = (inspect.getsource(V._PreviewWorker.run)
+           + inspect.getsource(V._PreviewWorker._run_body))
     assert "_replay_cached" in src, "the preview stopped consulting the cache"
     assert "_remember" in src, "the preview stopped filling the cache"
+    # ...and the capture itself, which is the wiring Julio's "it doesn't show may standalone
+    # stitchers log messages" report was actually about: the preview printed into a terminal
+    # nobody is watching because the capture was on the operator worker only.
+    assert "capture_stdout_to_log" in src, "the preview stopped capturing print() into the log"
