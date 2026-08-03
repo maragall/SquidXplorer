@@ -536,6 +536,10 @@ class MosaicLayers:
             # (#FF0000), so the mosaic rendered flat RED and read as a single-channel bug.
             # Reported twice from the live GUI: "mosaic showing red, so like single collor" and
             # "why is the mosaic only displaying a channel?".
+            #
+            # Additive is right ACROSS CHANNELS and wrong across OPERATORS of one channel, and a
+            # blending mode cannot tell those two apart -- see `_connect_exclusive_op`, which is
+            # where that distinction is actually enforced.
             "blending": blending,
         }
         window = contrast_limits
@@ -590,6 +594,13 @@ class MosaicLayers:
                     self._model.reset_view()
             except Exception:                    # noqa: BLE001 - view convenience, never fatal
                 pass
+        # A layer that ARRIVES lit is the same gesture as one the user lights, so it obeys the
+        # same one-operator-per-channel rule. Otherwise an operator result delivered over a
+        # visible raw is a sum from the moment it lands, and the user never touched anything.
+        # OUTSIDE `programmatic()` deliberately: the peer really did go dark, and the plate is a
+        # sink that has to be told, exactly as it is told about a user's own toggle.
+        if visible:
+            self._darken_other_ops(key.channel, layer)
         return layer
 
     def _reuse_layer(self, layer: Any, data: Any, *, bbox_um, z_scale_um, multiscale, visible):
@@ -741,6 +752,12 @@ class MosaicLayers:
             # objects are destroyed and recreated on every region change, so a subscription made
             # anywhere else goes deaf after one.
             self._connect_user_op(key.op, layer)
+        # LAST, and the order is load-bearing. This tap darkens the channel's other operators, and
+        # each of those emits its own op event; connecting it after `_connect_user_op` means a
+        # subscriber hears "mip came on" before it hears "raw went off", which is the order the
+        # gesture actually happened in. Connected before, the consequence was reported ahead of
+        # the cause.
+        self._connect_exclusive_op(channel, layer)
         # Link contrast across every processing layer showing this channel, so that FROM THE
         # NEXT WRITE ON there is only ever one value: a drag on any peer moves them all.
         #
@@ -954,6 +971,12 @@ class MosaicLayers:
             for cb in list(self._user_visibility_cbs):
                 cb(_ch, on)
 
+        # SEEDED at registration, for the same reason the op latch below is: an unseeded latch
+        # always delivers its first event even when the answer did not move. Switching operators
+        # leaves "is 488 on screen" at True throughout, and an unseeded latch announced that
+        # non-change to the plate as though the user had touched the channel.
+        self._last_visible[channel] = any(
+            bool(getattr(p, "visible", False)) for p in (self._by_channel.get(channel) or []))
         layer.events.visible.connect(_fire)
 
     def on_user_visibility(self, callback) -> None:
@@ -989,6 +1012,91 @@ class MosaicLayers:
                 return                      # OUR write: recorded, never reported as a gesture
             for cb in list(self._user_op_cbs):
                 cb(_op, on)
+
+        # SEED the latch with the truth as the layer is registered, so the op's first event is
+        # collapsed like any other echo when it reports a state that never changed. An unseeded
+        # latch always fires once: `_darken_other_ops` hiding raw · 405 while raw · 488 is still
+        # up leaves "is raw on screen" at True, and an unseeded latch announced that non-change as
+        # a gesture, ahead of the real one.
+        self._last_op_visible[str(op)] = any(
+            bool(getattr(ly, "visible", False)) for ly in self.group(str(op)))
+        layer.events.visible.connect(_fire)
+
+    # -- one operator per channel on screen ----------------------------------------------
+    def _darken_other_ops(self, channel: str, keep: Any) -> list[str]:
+        """Make *keep* the ONLY lit mosaic for *channel*. Returns the ops darkened.
+
+        Operates over ``_by_channel``, which holds image mosaics and nothing else: ``add_labels``
+        and ``add_points`` deliberately skip ``_register_channel`` (see ``_add_result``), so a
+        segmentation mask or a spot overlay is never darkened by a mosaic switch. That is the
+        behaviour ``SPOTS_OP`` already relies on -- an analysis overlay is drawn OVER whichever
+        mosaic is showing, not instead of it -- and it is preserved here for free rather than
+        special-cased.
+        """
+        key = key_of(keep)
+        if key is None:
+            return []
+        gone: list[str] = []
+        for peer in list(self._by_channel.get(channel) or []):
+            if peer is keep or not bool(getattr(peer, "visible", False)):
+                continue
+            pk = key_of(peer)
+            if pk is None or pk.op == key.op:
+                continue
+            peer.visible = False
+            gone.append(pk.op)
+        return gone
+
+    def _connect_exclusive_op(self, channel: str, layer: Any) -> None:
+        """At most ONE operator's mosaic per channel is lit at a time.
+
+        Julio: "Intensity grows with the amount of layers that are toggled on in my window."
+
+        Exactly right, and it is arithmetic, not a rendering glitch. Every mosaic is added
+        ``additive`` (see ``add_mosaic``), so raw · 488 + mip · 488 + decon · 488 all lit is
+        three copies of one channel's signal summed into one green. Turn on a fourth and it gets
+        brighter again. The channels were never the problem -- summing 405/488/561/638 is the
+        whole point of a composite and is what ``additive`` is for -- the problem is that the
+        SAME channel is on screen more than once.
+
+        WHY NOT `translucent`. Because a blending mode cannot express this requirement. napari
+        blends a layer against everything beneath it in the one flat stack; there is no "sum with
+        those siblings, occlude these". Setting the operator layers ``translucent`` at full
+        opacity makes each one OCCLUDE the channels under it -- which is precisely the defect the
+        additive choice was made to fix ("mosaic showing red, so like single collor"), just moved
+        one level up. At partial opacity it is worse: a weighted average of raw and decon is not a
+        comparison of them, it is a third picture that is neither, and the contrast slider then
+        describes none of what is on screen.
+
+        WHY EXCLUSIVITY. It is already this application's model, stated in three places and
+        enforced in none of them: ``show_op`` is documented as "make exactly one processing layer
+        visible", ``visible_op`` returns ONE op, and ``on_user_op``'s subscriber is the plate
+        asking "which operator am I looking at", a question with one answer. The layer tree simply
+        let the user check two groups at once and nothing said no.
+
+        Scoped per CHANNEL rather than per group, which is strictly more permissive than
+        ``show_op``: raw · 405 beside mip · 488 is two different channels and is a legitimate
+        composite, so it is left alone. Only a second copy of the same channel is darkened.
+
+        Enforced HERE, on the layer's own ``visible`` event, rather than in the layer tree,
+        because the tree is not the only surface that writes it -- napari's own eye icons do too,
+        and a rule that lives in one of two controls over one quantity is this project's
+        most-repeated defect. Both surfaces write ``layer.visible``, so both obey.
+
+        Programmatic writes are skipped: ``_reuse_layer`` restores a region's saved visibility and
+        ``render_max_res_3d`` swaps data under lit layers, and neither is a user choosing an
+        operator. The ARRIVAL of a new lit layer is handled in ``add_mosaic`` instead, where the
+        layer is known to be new.
+
+        Recursion is bounded by construction: darkening a peer fires this handler for that peer,
+        which returns at its first branch because the peer is no longer visible.
+        """
+        def _fire(event=None, _ch=channel, _ly=layer):
+            if self.is_programmatic:
+                return
+            if not bool(getattr(_ly, "visible", False)):
+                return                      # a layer going DARK never forces anything else
+            self._darken_other_ops(_ch, _ly)
 
         layer.events.visible.connect(_fire)
 

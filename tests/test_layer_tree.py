@@ -220,6 +220,17 @@ def _img(seed=0, shape=(8, 8)):
 
 @pytest.fixture
 def mosaic():
+    """raw and stitched, four channels each. STITCHED IS THE LIT GROUP and raw is dark.
+
+    That is not the fixture making a choice; it is what ``MosaicLayers`` does. At most one
+    operator per channel is lit at a time (``_connect_exclusive_op``), because every mosaic is
+    drawn ``additive`` and two operators of one channel therefore SUM -- Julio: "intensity grows
+    with the amount of layers that are toggled on in my window". stitched is added second, so it
+    arrives lit and raw · 405 goes dark as stitched · 405 comes up, and so on.
+
+    Before 2026-08-03 this fixture left all eight layers lit, which is exactly the state the user
+    reported, so the tests below are written against the lit group rather than against raw.
+    """
     from napari.components import ViewerModel
 
     m = MosaicLayers(ViewerModel())
@@ -284,11 +295,11 @@ def test_the_tree_reads_visibility_off_the_layer_and_keeps_no_copy(tree, mosaic)
     dominant defect shape (4+ confirmed, most recently the contrast sync silently killed by
     layer recreation). The tree is a VIEW: napari's Image layer owns ``visible``."""
     m = tree.model()
-    assert m.data(_ch_index_of(tree, "raw", "405"), Qt.CheckStateRole) == Qt.Checked
+    assert m.data(_ch_index_of(tree, "stitched", "405"), Qt.CheckStateRole) == Qt.Checked
 
     # Change it BEHIND the tree's back, the way napari's own layer list does.
-    mosaic.find("raw", "405").visible = False
-    assert m.data(_ch_index_of(tree, "raw", "405"), Qt.CheckStateRole) == Qt.Unchecked, (
+    mosaic.find("stitched", "405").visible = False
+    assert m.data(_ch_index_of(tree, "stitched", "405"), Qt.CheckStateRole) == Qt.Unchecked, (
         "the tree is holding its own copy of visibility instead of reading the layer"
     )
 
@@ -309,10 +320,32 @@ def test_toggling_a_processing_layer_toggles_its_four_channels(tree, mosaic):
     m = tree.model()
     assert m.setData(_op_index_of(tree, "stitched"), Qt.Unchecked, Qt.CheckStateRole) is True
     assert [ly.visible for ly in mosaic.group("stitched")] == [False] * 4
-    assert [ly.visible for ly in mosaic.group("raw")] == [True] * 4, "it toggled the wrong group"
+    assert [ly.visible for ly in mosaic.group("raw")] == [False] * 4, (
+        "hiding a group LIT another one -- a checkbox going off must never turn anything on")
 
     m.setData(_op_index_of(tree, "stitched"), Qt.Checked, Qt.CheckStateRole)
     assert [ly.visible for ly in mosaic.group("stitched")] == [True] * 4
+
+
+def test_checking_a_processing_layer_darkens_the_one_it_replaces(tree, mosaic):
+    """Julio: "Intensity grows with the amount of layers that are toggled on in my window."
+
+    Every mosaic is drawn ``additive``, which is right ACROSS CHANNELS (405+488+561+638 is the
+    composite) and is arithmetic nonsense across OPERATORS of one channel: raw · 488 plus
+    stitched · 488 is one channel's signal counted twice. The tree used to let the user check both
+    groups, and each extra check made the picture brighter.
+
+    The group checkbox is therefore a switch, not an accumulator. Asserted through ``setData``
+    rather than by writing ``layer.visible``, because the tree is only one of the two surfaces
+    that can light a layer and the rule has to hold from either.
+    """
+    m = tree.model()
+    m.setData(_op_index_of(tree, "raw"), Qt.Checked, Qt.CheckStateRole)
+
+    assert [ly.visible for ly in mosaic.group("raw")] == [True] * 4
+    assert [ly.visible for ly in mosaic.group("stitched")] == [False] * 4, (
+        "both operators of every channel are lit at once, so each channel is summed twice")
+    assert mosaic.visible_op() == "raw"
 
 
 def test_a_group_check_state_is_derived_from_its_channels_not_stored(tree, mosaic):
@@ -320,21 +353,21 @@ def test_a_group_check_state_is_derived_from_its_channels_not_stored(tree, mosai
     syncs it upward, so a group checkbox drifts out of step with its own contents. We derive it
     instead -- there is no group state to drift."""
     m = tree.model()
-    assert m.data(_op_index_of(tree, "raw"), Qt.CheckStateRole) == Qt.Checked
+    assert m.data(_op_index_of(tree, "stitched"), Qt.CheckStateRole) == Qt.Checked
 
-    mosaic.find("raw", "561").visible = False
-    assert m.data(_op_index_of(tree, "raw"), Qt.CheckStateRole) == Qt.PartiallyChecked, (
+    mosaic.find("stitched", "561").visible = False
+    assert m.data(_op_index_of(tree, "stitched"), Qt.CheckStateRole) == Qt.PartiallyChecked, (
         "one hidden channel out of four is neither on nor off"
     )
-    for ly in mosaic.group("raw"):
+    for ly in mosaic.group("stitched"):
         ly.visible = False
-    assert m.data(_op_index_of(tree, "raw"), Qt.CheckStateRole) == Qt.Unchecked
+    assert m.data(_op_index_of(tree, "stitched"), Qt.CheckStateRole) == Qt.Unchecked
 
 
 def test_toggling_one_channel_writes_that_layer_only(tree, mosaic):
     m = tree.model()
-    m.setData(_ch_index_of(tree, "raw", "561"), Qt.Unchecked, Qt.CheckStateRole)
-    assert [ly.visible for ly in mosaic.group("raw")] == [True, True, False, True]
+    m.setData(_ch_index_of(tree, "stitched", "561"), Qt.Unchecked, Qt.CheckStateRole)
+    assert [ly.visible for ly in mosaic.group("stitched")] == [True, True, False, True]
 
 
 def test_the_tree_survives_layers_being_destroyed_and_recreated(tree, mosaic, qapp):
@@ -450,6 +483,15 @@ _MOUNT_SCRIPT = r"""
     _m = tree.model()
     idx = next(_m.index(r, 0) for r in range(_m.rowCount())
                if _m.data(_m.index(r, 0), _Qt.DisplayRole) == "stitched")
+    # ...but FIRST the switch: checking the raw group must darken stitched, because both lit is
+    # one channel summed twice (see test_checking_a_processing_layer_darkens_the_one_it_replaces).
+    _rawidx = next(_m.index(r, 0) for r in range(_m.rowCount())
+                   if _m.data(_m.index(r, 0), _Qt.DisplayRole) == "raw")
+    tree.model().setData(_rawidx, _Qt.Checked, _Qt.CheckStateRole)
+    app.processEvents()
+    out["switched_to"] = [bool(l.visible) for l in pane.mosaic.group("raw")]
+    out["switched_away_from"] = [bool(l.visible) for l in pane.mosaic.group("stitched")]
+
     tree.model().setData(idx, _Qt.Unchecked, _Qt.CheckStateRole)
     app.processEvents()
     out["group_hidden"] = [bool(l.visible) for l in pane.mosaic.group("stitched")]
@@ -494,6 +536,12 @@ def test_the_tree_is_mounted_beside_naparis_own_controls(tmp_path):
     )
     # 506c813, again: adding a dock must never move the canvas out of napari's window.
     assert got["canvas_still_inside_napari_window"] is True
+    # Checking a group in the real mounted tree SWITCHES to it: both operators of one channel lit
+    # is that channel summed twice, which is the reported "intensity grows with the amount of
+    # layers that are toggled on".
+    assert got["switched_to"] == [True] * 4
+    assert got["switched_away_from"] == [False] * 4, (
+        "checking raw left stitched lit, so every channel is being drawn twice, additively")
     assert got["group_hidden"] == [False] * 4
     assert got["other_group_untouched"] == [True] * 4
     assert got["leaf_state_after_external_change"] == 0        # Qt.Unchecked

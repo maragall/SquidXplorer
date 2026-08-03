@@ -153,6 +153,95 @@ def test_show_op_rejects_an_unknown_processing_layer(layers):
         layers.show_op("deconvolved")
 
 
+# ---------------------- ONE operator per channel on screen (Julio, 2026-08-03)
+#
+# "Intensity grows with the amount of layers that are toggled on in my window."
+#
+# Every mosaic is added ``additive``. That is CORRECT across channels -- 405+488+561+638 summing
+# is the composite, and it is why `add_mosaic` chose additive over napari's occluding default --
+# and it is arithmetic nonsense across OPERATORS of one channel: raw · 488 and mip · 488 lit
+# together is one channel's signal counted twice, three of them counted three times.
+#
+# A blending mode cannot draw that distinction: napari blends a layer against everything beneath
+# it in one flat stack, so `translucent` would stop the operators summing only by making them
+# OCCLUDE the other channels -- the exact defect additive was chosen to fix. Exclusivity is the
+# fix, per CHANNEL, and it is enforced on `layer.visible` itself so that the layer tree AND
+# napari's own eye icons both obey it.
+
+
+def test_lighting_one_operator_darkens_the_other_operator_of_that_channel(layers):
+    """The reported defect, driven the way napari's own eye icon drives it."""
+    layers.add_mosaic("raw", "488", _img())
+    layers.add_mosaic("mip", "488", _img(1), visible=False)
+    assert layers.find("raw", "488").visible is True
+
+    layers.find("mip", "488").visible = True
+
+    assert layers.find("raw", "488").visible is False, (
+        "raw · 488 and mip · 488 are both lit and both additive, so 488 is being summed twice")
+    assert layers.find("mip", "488").visible is True
+
+
+def test_channels_of_one_operator_still_all_sum(layers):
+    """The other half, and the one that must NOT change. Four channels of one operator are a
+    composite; darkening them would be the 'why is the mosaic only displaying a channel?' bug."""
+    for ch in ("405", "488", "561", "638"):
+        layers.add_mosaic("raw", ch, _img())
+
+    assert [ly.visible for ly in layers.group("raw")] == [True] * 4
+    assert {str(ly.blending) for ly in layers.group("raw")} == {"additive"}
+
+
+def test_an_operator_result_arrives_instead_of_raw_rather_than_on_top_of_it(layers):
+    """The delivery path. ``_add_result_layers`` / ``deliver_result`` add an operator layer with
+    ``visible=True`` over a lit raw, so without this the sum is there before the user has touched
+    anything -- same defect, no gesture."""
+    layers.add_mosaic("raw", "488", _img())
+    layers.add_mosaic("raw", "561", _img(1))
+
+    layers.add_mosaic("mip", "488", _img(2))          # the result, as delivered
+
+    assert layers.find("raw", "488").visible is False
+    assert layers.find("raw", "561").visible is True, (
+        "561 has no second copy on screen, so nothing about it had to change")
+
+
+def test_a_result_delivered_dark_darkens_nothing(layers):
+    """A window that did not ask gets ``visible=False`` (``_deliver_to_views``). A layer that is
+    not on screen cannot be summing with anything, so it must not take raw down with it."""
+    layers.add_mosaic("raw", "488", _img())
+
+    layers.add_mosaic("mip", "488", _img(1), visible=False)
+
+    assert layers.find("raw", "488").visible is True
+
+
+def test_hiding_an_operator_lights_nothing(layers):
+    """Only turning a layer ON can force another off. A checkbox going dark that turns something
+    else on is a control moving a second control, which is this project's oldest defect shape."""
+    layers.add_mosaic("raw", "488", _img())
+    layers.add_mosaic("mip", "488", _img(1))         # raw · 488 is now dark
+
+    layers.find("mip", "488").visible = False
+
+    assert layers.find("raw", "488").visible is False
+    assert layers.visible_op() is None
+
+
+def test_an_analysis_overlay_is_never_darkened_by_the_mosaic_it_is_drawn_over(layers):
+    """``add_labels``/``add_points`` skip ``_register_channel`` on purpose (they have no
+    ``contrast_limits`` to link), so they are not in ``_by_channel`` and the exclusivity never
+    sees them. That is what ``SPOTS_OP`` relies on: a mask is drawn OVER the mosaic, not instead
+    of it, and it is ``translucent`` rather than additive so it does not sum either."""
+    layers.add_mosaic("raw", "488", _img())
+    mask = layers.add_labels("spots", "488 mask", np.zeros((32, 32), dtype="uint32"))
+
+    layers.add_mosaic("mip", "488", _img(1))         # a switch under the overlay
+
+    assert mask.visible is True, "the spot mask went dark when the mosaic under it was switched"
+    assert layers.find("raw", "488").visible is False
+
+
 # --------------------------------- contrast: ONE value per channel, no duplication
 
 
@@ -1075,25 +1164,39 @@ def test_showing_a_processing_layer_is_reported_once_for_the_whole_group(layers)
     for ly in layers.group("mip"):        # the group checkbox, which writes every child
         ly.visible = True
 
-    assert seen == [("mip", True)], f"one group toggle reported as {seen}"
+    # ONE delivery per op, and the cause is reported before its consequence: the user lit mip,
+    # and raw went dark BECAUSE of that (two additive operators of one channel would sum). The
+    # group toggle writes four layers and must not arrive as four "mip" deliveries.
+    assert seen == [("mip", True), ("raw", False)], f"one group toggle reported as {seen}"
 
 
-def test_hiding_a_processing_layer_is_reported_even_though_raw_still_shows_the_channel(layers):
+def test_switching_operator_is_reported_by_the_op_tap_and_not_by_the_channel_tap(layers):
     """The exact swallow. ``on_user_visibility`` answers "is this CHANNEL on screen anywhere",
-    which is unchanged while raw is up, so it returns early and the plate hears nothing. The op
-    fan-out has to be a separate tap for that reason."""
+    which is unchanged across an operator switch -- 488 is up before and after -- so it returns
+    early and the plate hears nothing. The op fan-out has to be a separate tap for that reason.
+
+    The gesture is the SWITCH rather than a bare hide, because at most one operator per channel is
+    lit at a time now (``_connect_exclusive_op``): "raw and mip both showing 488" is the summing
+    state the exclusivity exists to prevent, so it is not a state a test may start from.
+    """
     channel_seen, op_seen = [], []
-    layers.add_mosaic("raw", "488", _img())
-    layers.add_mosaic("mip", "488", _img(1))
+    layers.add_mosaic("raw", "405", _img())
+    layers.add_mosaic("raw", "488", _img(1))
+    layers.add_mosaic("mip", "488", _img(2), visible=False)
     layers.on_user_visibility(lambda ch, on: channel_seen.append((ch, on)))
     layers.on_user_op(lambda op, on: op_seen.append((op, on)))
 
-    layers.find("mip", "488").visible = False
+    layers.find("mip", "488").visible = True      # -> raw · 488 goes dark, 488 stays on screen
 
-    assert all(on for _ch, on in channel_seen), (
-        f"the channel is still on screen via raw, so the channel tap cannot say the layer went "
-        f"off: {channel_seen}")
-    assert op_seen == [("mip", False)], f"the processing layer change was swallowed: {op_seen}"
+    assert channel_seen == [], (
+        f"488 is on screen before and after the switch, so the channel tap has nothing to say and "
+        f"the plate must not be told its channel changed: {channel_seen}")
+    assert op_seen == [("mip", True)], (
+        f"the processing layer change was swallowed: {op_seen}")
+    assert layers.find("raw", "488").visible is False, "488 is being drawn twice, additively"
+    assert layers.find("raw", "405").visible is True, (
+        "darkening raw · 488 took raw · 405 with it -- the rule is per CHANNEL, and 405 has no "
+        "second copy on screen to sum with")
 
 
 def test_our_own_writes_are_never_reported_as_a_user_picking_a_layer(layers):

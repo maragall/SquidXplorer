@@ -205,3 +205,69 @@ def test_the_cards_in_the_process_pane_all_elide(qapp, monkeypatch):
             assert c.toolTip(), f"the {key!r} card lost the full text its elision hides"
     finally:
         win.close()
+
+
+# --- 4. every stylesheet in a built window must actually PARSE ----------------------------------
+#
+# Reported as "gallery view is giving us vispy problems", followed by hundreds of
+# `WARN vispy: Could not parse stylesheet of object QPushButton(0x600000d06060)` -- the same
+# pointer every time, so one widget re-warning rather than many widgets.
+#
+# It is not vispy and it is not the gallery view. vispy installs a PROCESS-WIDE Qt message handler
+# (``vispy/app/backends/_qt.py``: ``qInstallMessageHandler(message_handler)``), so every Qt warning
+# in this process comes out through vispy's logger. The warning itself is Qt's own CSS parser
+# giving up on one widget's stylesheet, after which that widget is left completely unstyled --
+# which is the part that matters and the part a log filter would hide.
+#
+# The offender was the log panel's collapse toggle: a two-part string whose first half is an
+# f-string (``{{`` -> ``{``) and whose second half is a plain literal, so its ``}}`` stayed two
+# braces and the sheet closed one brace too many. It repeated because ``rescale_fonts`` rewrites
+# every stylesheet carrying a ``font-size:`` on each resize, dropping Qt's per-object parse cache.
+#
+# Asserted over the WHOLE WINDOW rather than over that one string, because the failure is a class
+# (Python brace-escaping meeting Qt's grammar) and the only honest question is whether anything in
+# a built window fails to parse.
+
+def _qt_parse_failures(qapp, build, resizes=((1400, 900), (900, 700), (1600, 1000))):
+    """Build a window, resize it, and collect Qt's "could not parse" complaints."""
+    from qtpy.QtCore import qInstallMessageHandler
+
+    seen: "list[str]" = []
+    previous = qInstallMessageHandler(lambda *a: seen.append(str(a[-1])))
+    try:
+        win = build()
+        try:
+            win.show()
+            qapp.processEvents()
+            for w, h in resizes:
+                win.resize(w, h)
+                qapp.processEvents()
+            win.grab()                       # force a real polish + paint of every child
+            qapp.processEvents()
+        finally:
+            win.close()
+    finally:
+        qInstallMessageHandler(previous)
+    return [m for m in seen if "parse stylesheet" in m]
+
+
+def test_no_widget_in_the_plate_window_has_an_unparseable_stylesheet(qapp):
+    from squidmip._viewer import PlateWindow
+
+    failures = _qt_parse_failures(qapp, lambda: PlateWindow(None))
+    assert failures == [], (
+        "Qt refused to parse a stylesheet, so that widget is rendering unstyled and the app "
+        f"spams the log on every repolish: {failures[:3]}")
+
+
+def test_the_log_panel_toggle_closes_its_qss_block_exactly_once(qapp):
+    """The specific brace bug, named. ``}}`` in a NON-f-string half of a split literal."""
+    from squidmip._logpanel import LogPanel
+
+    panel = LogPanel()
+    try:
+        qss = panel._toggle.styleSheet()
+        assert qss.count("{") == qss.count("}"), f"unbalanced braces in {qss!r}"
+        assert not qss.endswith("}}"), "the sheet still closes one brace too many"
+    finally:
+        panel.deleteLater()
