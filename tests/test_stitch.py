@@ -907,6 +907,9 @@ def test_the_warp_field_reaches_the_fuser(master, monkeypatch):
 
 
 def test_without_distortion_the_fuser_gets_no_field(master, monkeypatch):
+    """``correct_distortion=False`` is now EXPLICIT here. It used to be left off the call and
+    rely on the signature default, which was ``False`` and became "on wherever it can run" on
+    2026-08-03. The subject of the test is unchanged: off -> the fuser gets no warp field."""
     import tilefusion.fusion as fusion
 
     real = fusion.fuse_plane
@@ -914,8 +917,56 @@ def test_without_distortion_the_fuser_gets_no_field(master, monkeypatch):
     monkeypatch.setattr(fusion, "fuse_plane",
                         lambda **kw: seen.update(get_field=kw.get("get_field")) or real(**kw))
     reader = _FakeReader(master)
-    stitch_region(reader, "A1", list(range(GRID * GRID)), channels=[0], max_workers=2)
+    stitch_region(reader, "A1", list(range(GRID * GRID)), channels=[0], max_workers=2,
+                  correct_distortion=False)
     assert seen["get_field"] is None
+
+
+def test_distortion_correction_is_ON_by_default(master, monkeypatch):
+    """Julio, 2026-08-03: "Correct lens distort should be defaulted to on". Asked of the ENGINE
+    call and not of the checkbox, because the checkbox is one of four places the default lived
+    and the only one that matters to a CLI or a script is this one.
+
+    MUTATION: put the signature default back to ``False`` -> get_field is None -> red."""
+    import tilefusion.fusion as fusion
+
+    real = fusion.fuse_plane
+    seen = {}
+    monkeypatch.setattr(fusion, "fuse_plane",
+                        lambda **kw: seen.update(get_field=kw.get("get_field")) or real(**kw))
+    reader = _FakeReader(master, error_px={3: (6.0, -4.0)})
+    stitch_region(reader, "A1", list(range(GRID * GRID)), channels=[0], max_workers=2)
+    assert callable(seen["get_field"])
+
+
+def test_the_on_by_default_does_not_break_coordinate_placement(master, monkeypatch):
+    """The default is "on wherever it can run", not a plain True, and this is the reason.
+
+    Distortion correction is registration-only and stitch_region RAISES on the combination. The
+    `coordinate` control operator, Minerva's fusion and the A/B benchmarks all pass
+    ``register=False`` and say nothing about distortion, so a plain ``True`` default would have
+    made every one of them raise on a combination none of them asked for.
+
+    MUTATION: change the default to a plain ``True`` -> ValueError -> red."""
+    import tilefusion.fusion as fusion
+
+    real = fusion.fuse_plane
+    seen = {}
+    monkeypatch.setattr(fusion, "fuse_plane",
+                        lambda **kw: seen.update(get_field=kw.get("get_field")) or real(**kw))
+    reader = _FakeReader(master)
+    stitch_region(reader, "A1", list(range(GRID * GRID)), channels=[0], max_workers=2,
+                  register=False)
+    assert seen["get_field"] is None
+
+
+def test_an_explicit_yes_with_no_registration_still_raises(master):
+    """The loud refusal is for a USER asking for something impossible, and it survives the
+    default change untouched."""
+    reader = _FakeReader(master)
+    with pytest.raises(ValueError, match="needs registration"):
+        stitch_region(reader, "A1", list(range(GRID * GRID)), channels=[0], max_workers=2,
+                      register=False, correct_distortion=True)
 
 
 # -- registration timepoint -------------------------------------------------------------
