@@ -1124,8 +1124,12 @@ class RegionViewer(QMainWindow):
                 levels, bbox = cropped
                 plane = levels[0]
             try:
-                mosaic.add_mosaic(
-                    str(op), channel, plane,
+                # `add_result`, not `add_mosaic`: the RESULT's own declaration picks the layer
+                # type. `Result.kind` carries the operator registry's `produces`, so a segmentation
+                # arrives as a napari Labels layer here and in the plate pane by the same rule,
+                # rather than as an Image auto-windowed as if its label ids were photons.
+                mosaic.add_result(
+                    result.kind, str(op), channel, plane,
                     colormap=_colormap_for(channel),
                     bbox_um=bbox,
                     # Only a result that DECLARES depth gets a z scale. _place ignores it for a

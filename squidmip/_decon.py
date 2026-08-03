@@ -444,6 +444,13 @@ def decon_op(
 
         add_projector("decon_sharp", decon_op(iterations=25))
 
+    A SECOND NAME IS NO LONGER THE ONLY WAY to change a number. Since 2026-08-03 a registry entry
+    can declare its own ``params`` and be RUN at a different value
+    (``project_plate(..., operator_kwargs={"iterations": 25})``); see ``_engine.Param`` and
+    ``_spots.segmentation_operator`` for the shape. ``decon`` has not been migrated -- its iteration
+    count is chosen by eye against the QC panel, which is its own UI seam -- so the recipe above is
+    still what this function serves today.
+
     The returned callable carries ``consumes = frozenset()`` (stamped by
     :func:`squidmip.plane_op`), so the registry infers the declaration and z survives.
     """

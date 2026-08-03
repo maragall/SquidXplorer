@@ -116,12 +116,22 @@ class Substance:
     Frozen and hashable, so Task 3's legend can group by it without a defensive copy. Comparable,
     unlike :class:`Result`: comparing two DESCRIPTIONS is how a legend lists what is present, and
     it is the comparison of two RESULTS that this module refuses.
+
+    ``kind`` is what the pixels MEAN — the operator registry's ``produces`` declaration, carried on
+    the result so a sink does not have to go back to the registry with a layer key that may be
+    scoped (``"spot@tab2"``) and split it apart to ask. It is what picks the napari layer type:
+    ``"intensity"`` is windowed and colormapped, ``"labels"`` is integer object ids with a
+    transparent background and no window at all. Not validated against a list here: the vocabulary
+    belongs to the engine and is enforced at ``add_projector``, which is the boundary where the
+    declaration is actually made; a second copy of the list in this module is the two-owner defect
+    this codebase keeps meeting.
     """
 
     channels: "tuple[str, ...]"
     z_depth: int
     dtype: str
     pixel_size_um: float
+    kind: str = "intensity"
 
     def __post_init__(self) -> None:
         chans = tuple(str(c) for c in self.channels)
@@ -150,15 +160,27 @@ class Substance:
                 "wrong; see reader.py's refusal to place FOVs without stage positions")
         object.__setattr__(self, "pixel_size_um", px)
 
+        kind = str(self.kind).strip()
+        if not kind:
+            raise ValueError(
+                "a result must declare what its pixels MEAN; got an empty kind. An operator's "
+                "registry entry answers this (produces='intensity' / 'labels')")
+        object.__setattr__(self, "kind", kind)
+
     def label(self) -> str:
-        """What a human reads in a legend: ``DAPI,GFP  z_depth 1  uint16  0.325 um/px``.
+        """What a human reads in a legend: ``DAPI,GFP  z_depth 1  uint16  0.325 um/px  labels``.
 
         Squid's words spelled out, as :meth:`squidmip._address.Address.label` does: ``z_depth``
         and never ``nz``, because a shortening printed a thousand times a run is how a second name
         for one thing starts.
+
+        The kind is appended only when it is NOT ``"intensity"``. Intensity is what every label in
+        this app has always meant, so spelling it out on every line would be noise; a result whose
+        pixels are object ids is the exceptional thing and says so.
         """
-        return (f"{','.join(self.channels)}  z_depth {self.z_depth}  {self.dtype}  "
+        text = (f"{','.join(self.channels)}  z_depth {self.z_depth}  {self.dtype}  "
                 f"{self.pixel_size_um:g} um/px")
+        return text if self.kind == "intensity" else f"{text}  {self.kind}"
 
     def __str__(self) -> str:
         return self.label()
@@ -170,15 +192,22 @@ class Substance:
             "z_depth": self.z_depth,
             "dtype": self.dtype,
             "pixel_size_um": self.pixel_size_um,
+            "kind": self.kind,
         }
 
     @classmethod
     def from_dict(cls, data: Mapping) -> "Substance":
+        # `kind` is READ WITH A FALLBACK, not required. Every declaration written to the on-disk
+        # cache before 2026-08-03 has no such key, and those results are intensities -- that was
+        # the only thing the app could produce down this path. Refusing them would reject the
+        # installed base to enforce a field invented after it, which is the same judgement the
+        # plate contract makes about an absent `plate_contract_version`.
         return cls(
             channels=tuple(data["channels"]),
             z_depth=data["z_depth"],
             dtype=data["dtype"],
             pixel_size_um=data["pixel_size_um"],
+            kind=data.get("kind", "intensity"),
         )
 
 
@@ -226,6 +255,11 @@ class Result:
     def pixel_size_um(self) -> float:
         return self.substance.pixel_size_um
 
+    @property
+    def kind(self) -> str:
+        """What these pixels MEAN — ``"intensity"`` or ``"labels"``. ONE way to ask."""
+        return self.substance.kind
+
     def declares(self, channel: str) -> bool:
         """Does THIS result carry *channel*?
 
@@ -267,7 +301,7 @@ class Result:
     # -- construction ------------------------------------------------------------------
     @classmethod
     def of(cls, extent: Extent, data: Any, *, channels: Sequence[str], z_depth: int,
-           pixel_size_um: float, dtype: Any = None) -> "Result":
+           pixel_size_um: float, dtype: Any = None, kind: str = "intensity") -> "Result":
         """Build a result, taking the dtype FROM THE PIXELS unless one is given.
 
         Derived rather than declared because a producer cannot then mislabel its own output, and
@@ -293,7 +327,7 @@ class Result:
         return cls(
             extent=extent,
             substance=Substance(channels=names, z_depth=z_depth, dtype=dtype,
-                                pixel_size_um=pixel_size_um),
+                                pixel_size_um=pixel_size_um, kind=kind),
             data=data,
         )
 

@@ -47,6 +47,9 @@ def _stack(z=5, shape=(64, 64), seed=0):
 def test_available_projectors_exact_list():
     assert s.available_projectors() == [
         "bgsub",
+        # Cellpose is an ENGINE operator as of 2026-08-03, not just a segmenter behind the GUI's
+        # Detect-nuclei button. Registering it costs one add_projector call in `_cellpose`.
+        "cellpose",
         "decon",
         "decon3d",
         "flatfield",

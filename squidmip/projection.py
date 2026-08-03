@@ -71,6 +71,76 @@ Z_REDUCER: frozenset[str] = frozenset({"z"})
 CONSUMABLE_AXES: frozenset[str] = frozenset({"z"})
 
 
+# --- the SECOND declaration: what does an operator PRODUCE? -----------------------------------
+#
+# ``consumes`` says which axis an operator eats, and it is enough to derive the engine's loop and
+# the output SHAPE. It says nothing about what the output pixels MEAN, and that turned out to be a
+# real gap rather than a theoretical one: ``spot`` returns a LABEL IMAGE — integer object ids, not
+# a measurement of light — and it travelled to napari down the same path as a MIP, so it arrived
+# as an ``Image`` layer, auto-windowed by the fluorescence contrast rule (``_napari_view
+# ._auto_window_for``) as if label 37 were 37 photons. That renders a segmentation as a near-black
+# gradient with no transparent background and no click-to-pick.
+#
+#   INTENSITY  the pixels measure light. Windowed, colormapped, blended additively across
+#              channels. mip, reference, decon, bgsub, flatfield, stitch.
+#   LABELS     the pixels are integer OBJECT IDS. 0 is background and renders transparent; the
+#              value is a name, not a quantity, so it must never be windowed or interpolated.
+#
+# Same rule as ``consumes``: this is a DECLARATION the registry carries and a generic delivery
+# path reads (``MosaicLayers.add_result`` picks the layer type off a table keyed by this string).
+# A sink that asked "is this operator called cellpose?" instead would need editing for every
+# operator after it, which is the property this codebase is trying to keep.
+#
+# Prior art, the same two projects ``consumes`` was taken from:
+# * **napari-segment-blobs-and-things-with-membranes** annotates every segmenter
+#   ``-> "napari.types.LabelsData"`` and lets napari's own type dispatch pick the layer. TAKEN:
+#   the RETURN KIND is the declaration, and it is what selects the layer type.
+# * **Fractal** declares ``output_types`` per task as data in its manifest. TAKEN: one string on
+#   the registry record, so the runner and the viewer both read a declaration instead of a name.
+INTENSITY: str = "intensity"
+LABELS: str = "labels"
+RESULT_KINDS: frozenset[str] = frozenset({INTENSITY, LABELS})
+
+
+def normalise_produces(produces) -> str:
+    """Coerce a ``produces`` declaration to a known result-kind string, refusing anything else.
+
+    Refuses by name rather than defaulting silently: an operator that believes it produces labels
+    while the delivery path draws intensities is exactly the defect this declaration exists to end,
+    and a typo that fell back to ``"intensity"`` would reproduce it with no symptom.
+
+    Raises
+    ------
+    ValueError
+        If *produces* is not one of :data:`RESULT_KINDS`.
+    """
+    kind = str(produces)
+    if kind not in RESULT_KINDS:
+        raise ValueError(
+            f"unknown result kind {produces!r}; this engine knows {sorted(RESULT_KINDS)}. "
+            f"An operator whose pixels measure light declares produces={INTENSITY!r}; one whose "
+            f"pixels are integer object ids declares produces={LABELS!r}."
+        )
+    return kind
+
+
+def labels_op(fn: Callable[[Iterable[np.ndarray]], np.ndarray]) -> Callable[..., np.ndarray]:
+    """Stamp ``produces = LABELS`` on an already-shaped operator callable.
+
+    The counterpart of :func:`plane_op` for the second declaration: an author who has built the
+    engine-facing callable says what it produces ON the callable, so
+    :func:`squidmip.add_projector` infers it and every registration of that callable — the shipped
+    one and any variant a user registers later — carries the same answer. Declaring it at the
+    registration site instead would let two registrations of one function disagree about what its
+    own output means.
+
+    Mutates and returns *fn* rather than wrapping it: a wrapper would hide the ``consumes``
+    attribute :func:`plane_op` already stamped, and the two declarations belong on one object.
+    """
+    fn.produces = LABELS
+    return fn
+
+
 def normalise_consumes(consumes) -> frozenset[str]:
     """Coerce a ``consumes`` declaration to a frozenset of axis names, refusing anything unsupported.
 

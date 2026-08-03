@@ -49,6 +49,31 @@ One group-by-then-reduce loop (in ``project_well``) serves both, so a new plane-
 ``add_projector`` call and no engine edit. ``{"fov"}`` is deliberately not a member — inter-FOV
 work needs stage geometry a ``Iterable[plane] -> plane`` callable never sees (IMA-222's seam).
 
+Two more declarations were added when Cellpose was made a real operator (2026-08-03), and both
+follow the same rule: **extend the declaration, never the loop.** Nothing in this module branches
+on an operator's name, and nothing added here does either.
+
+    produces="intensity"        the pixels measure light -> a napari Image layer, windowed
+    produces="labels"           the pixels are integer OBJECT IDS -> a napari Labels layer
+
+    params=(Param("min_area_px", 30), ...)   the entry is ONE operator that can be RUN with
+                                             arguments, not N entries frozen at N parameter sets
+
+``produces`` closes a defect that was live rather than theoretical: ``spot`` emitted a label image
+down the intensity delivery path, so a segmentation arrived auto-windowed by the FLUORESCENCE
+contrast rule, as if label 37 were 37 photons. ``params`` closes the asymmetry ``write_plate``
+documented in a hardcoded refusal — a region operator took ``operator_kwargs`` and a projector did
+not, so the only way to change a projector's number was a second registry entry (``decon`` /
+``decon3d``, ``"bgsub_tight"``, ``"flatfield_638"``) or a module-level global behind a lock
+(``_flatfield.set_profile``, ``_decon.set_optics``).
+
+WHAT ``params`` STILL CANNOT EXPRESS, stated rather than discovered later: **a channel.** "Detect
+on Fluorescence_405_nm_Ex" is a parameter a user genuinely wants, and it cannot be one here,
+because ``project_well`` calls the operator once per ``(t, c, z_group)`` and hands it PLANES ONLY
+— the callable never learns which channel it is looking at. That is the same structural refusal as
+``consumes={"fov"}`` one axis over: the shape ``Iterable[plane] -> plane`` does not carry the fact.
+Widening it would be a loop change touching every operator, so it is deliberately not done here.
+
 NOTE for plane-ops: ``write_plate``/IMA-184 currently accept only ``Z == 1`` frames and reject a
 Z>1 frame LOUD (``_validate_image``). So a plane-op streams correctly out of ``project_plate``
 today, and gains a persistence path when the writer learns Z>1 — it is not silently wrong.
@@ -90,14 +115,16 @@ from __future__ import annotations
 import os
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable, Iterable, Iterator, Optional
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Iterator, Optional, Sequence
 
 import numpy as np
 
 from squidmip.projection import (
+    INTENSITY,
     PLANE_OP,
     Z_REDUCER,
     normalise_consumes,
+    normalise_produces,
     project,
     project_reference,
     project_well,
@@ -110,6 +137,26 @@ if TYPE_CHECKING:  # avoid import cost / cycle at runtime
 # An operator maps a GROUP of planes to one plane (the ``reduce=`` argument of project_well).
 # One callable shape for every operator — what differs is which axis the engine groups over.
 Projector = Callable[[Iterable[np.ndarray]], np.ndarray]
+
+
+@dataclass(frozen=True)
+class Param:
+    """One parameter a registry entry declares it can be run with.
+
+    A NAME and a DEFAULT, nothing clever. It exists so a parameterised operator is one entry that
+    says what it takes, rather than one entry per parameter set — which is what the table held
+    before: ``decon``/``decon3d`` are two entries for one algorithm, and the docstrings of
+    ``decon_op``/``bgsub_op``/``flatfield_op`` all tell the reader to register ANOTHER name
+    (``"decon_sharp"``, ``"bgsub_tight"``, ``"flatfield_638"``) to change a number.
+
+    ``blurb`` is the one line a UI shows. There is deliberately no type, no range and no widget
+    hint: this is a declaration the engine validates NAMES against, not a form builder. The moment
+    it grows a widget hint it has become the UI's schema and two places own the same fact.
+    """
+
+    name: str
+    default: Any
+    blurb: str = ""
 
 
 @dataclass(frozen=True)
@@ -130,10 +177,56 @@ class Operator:
     attribute that makes ``project_well`` solve focus once per (t, fov) and share it across
     channels. Encoding "selects" as a distinct consumed axis would re-open the bug where the
     channels of one FOV were sampled at different z and stopped overlaying.
+
+    ``produces`` is the SECOND declaration and the same kind of thing: ``consumes`` decides the
+    engine's loop and the output SHAPE, ``produces`` decides what the output pixels MEAN and
+    therefore which napari layer type they become. See
+    :data:`squidmip.projection.INTENSITY` / :data:`squidmip.projection.LABELS`. Default
+    ``"intensity"``, so every pre-existing registration keeps its exact meaning.
+
+    ``params`` and ``factory`` are how ONE entry carries a parameter set. ``factory(**kwargs)``
+    builds a projector; ``fn`` is that factory called at the declared defaults, so a run that names
+    no parameters is byte-identical to the un-parameterised registration it replaced. An entry with
+    no ``factory`` is a fixed operator and refuses parameters by name.
     """
     name: str
     fn: Projector
     consumes: frozenset[str]
+    produces: str = INTENSITY
+    params: tuple[Param, ...] = ()
+    factory: Optional[Callable[..., Projector]] = None
+
+    def bind(self, operator_kwargs: Optional[dict] = None) -> Projector:
+        """The callable to run, with *operator_kwargs* applied. THE parameter seam.
+
+        No kwargs -> ``fn``, the default binding built at registration. That identity is what
+        makes this change invisible to every existing caller: ``project_plate(projector="mip")``
+        runs the exact object the table has always held.
+
+        Refuses LOUD on an unknown parameter name, naming what this operator does accept. Accepting
+        and dropping it would run the operator at its defaults while the console line and the
+        recipe both said otherwise, which is a wrong result that looks right.
+        """
+        if not operator_kwargs:
+            return self.fn
+        if self.factory is None:
+            raise ValueError(
+                f"operator {self.name!r} declares no parameters, so it cannot be run with "
+                f"{sorted(operator_kwargs)}. Its behaviour is fixed at registration; register a "
+                f"named variant, or give the entry params= and a factory."
+            )
+        known = {p.name for p in self.params}
+        unknown = sorted(set(operator_kwargs) - known)
+        if unknown:
+            raise ValueError(
+                f"operator {self.name!r} has no parameter {unknown[0]!r}; it declares "
+                f"{sorted(known)}."
+            )
+        return self.factory(**operator_kwargs)
+
+    def defaults(self) -> dict:
+        """``{name: default}`` for every declared parameter. What a UI seeds its fields from."""
+        return {p.name: p.default for p in self.params}
 
 
 # name -> Operator. Selected by name in project_plate; extended via add_projector.
@@ -161,7 +254,8 @@ def _default_workers() -> int:
     return n or 1
 
 
-def add_projector(name: str, projector: Projector, *, consumes=None) -> None:
+def add_projector(name: str, projector: Projector, *, consumes=None, produces=None,
+                  params: Sequence[Param] = ()) -> None:
     """Add a named operator so it can be selected by name in :func:`project_plate`.
 
     This is how a new operator plugs in **without touching the engine**: add a name and its
@@ -188,13 +282,31 @@ def add_projector(name: str, projector: Projector, *, consumes=None) -> None:
         ``consumes`` attribute (:func:`squidmip.plane_op` stamps one) and otherwise falls back to
         ``frozenset({"z"})``, the shipped z-reduction contract — so every pre-IMA-210 registration
         keeps its exact meaning. ``{"fov"}`` is refused by name: see :class:`Operator`.
+    produces:
+        What this operator's pixels MEAN — ``"intensity"`` or ``"labels"``, see
+        :data:`squidmip.projection.LABELS`. ``None`` (default) reads the callable's own
+        ``produces`` attribute (:func:`squidmip.projection.labels_op` stamps one) and otherwise
+        falls back to ``"intensity"``, so every pre-existing registration keeps its exact meaning.
+    params:
+        The parameters this ONE entry can be run with, as :class:`Param` records. When non-empty,
+        *projector* is read as a **factory**: it is called with the declared defaults to build the
+        entry's default binding, and called again with a caller's ``operator_kwargs`` per run
+        (:meth:`Operator.bind`)::
+
+            add_projector("cellpose", _build, params=(Param("min_area_px", 30),))
+            project_plate(reader, projector="cellpose", operator_kwargs={"min_area_px": 80})
+
+        The presence of *params* is what makes *projector* a factory — there is one registrar and
+        one rule, not two entry points that mean nearly the same thing. Empty (default) keeps the
+        original contract exactly: *projector* is the callable, and the entry refuses parameters.
 
     Raises
     ------
     ValueError
         If *name* is empty, *projector* is not callable, *consumes* names an axis this engine
-        cannot group over, or *name* is already defined (a silent clobber of an existing
-        projector would be a quiet correctness bug).
+        cannot group over, *produces* is not a known result kind, a declared parameter is unnamed
+        or duplicated, or *name* is already defined (a silent clobber of an existing projector
+        would be a quiet correctness bug).
     """
     if not name:
         raise ValueError("projector name must be a non-empty string")
@@ -205,9 +317,35 @@ def add_projector(name: str, projector: Projector, *, consumes=None) -> None:
             f"projector {name!r} is already defined; pick a distinct name "
             f"(defined: {available_projectors()})."
         )
+    declared = tuple(params)
+    for p in declared:
+        if not isinstance(p, Param) or not p.name:
+            raise ValueError(
+                f"projector {name!r}: params must be Param(name, default) records with a "
+                f"non-empty name; got {p!r}")
+    names = [p.name for p in declared]
+    if len(set(names)) != len(names):
+        raise ValueError(
+            f"projector {name!r} declares a parameter twice: {sorted(names)}; a duplicate makes "
+            "operator_kwargs ambiguous")
+
+    factory: Optional[Callable[..., Projector]] = None
+    if declared:
+        factory = projector
+        projector = factory(**{p.name: p.default for p in declared})
+        if not callable(projector):
+            raise ValueError(
+                f"projector factory for {name!r} returned {projector!r}, which is not callable. "
+                "With params=, the registered object is a FACTORY: it is called with the declared "
+                "defaults and must return the operator callable.")
     if consumes is None:
         consumes = getattr(projector, "consumes", Z_REDUCER)
-    _PROJECTORS[name] = Operator(name, projector, normalise_consumes(consumes))
+    if produces is None:
+        produces = getattr(projector, "produces", INTENSITY)
+    _PROJECTORS[name] = Operator(
+        name, projector, normalise_consumes(consumes), normalise_produces(produces),
+        declared, factory,
+    )
 
 
 def available_projectors() -> list[str]:
@@ -222,6 +360,33 @@ def projector_consumes(name: str) -> frozenset[str]:
     full depth, a z-reducer collapses it to 1) rather than re-deriving it from the callable.
     """
     return _resolve_projector(name).consumes
+
+
+def projector_produces(name: str) -> str:
+    """Return what a registered operator's pixels MEAN — ``"intensity"`` or ``"labels"``.
+
+    The registry's declaration, for the delivery path that must pick a napari layer type. Read
+    this rather than testing the operator's NAME: a sink that knows ``"spot"`` and ``"cellpose"``
+    by name needs editing for every segmenter after them, and that is precisely the property the
+    ``consumes`` table was built to avoid.
+    """
+    return _resolve_projector(name).produces
+
+
+def projector_params(name: str) -> tuple[Param, ...]:
+    """The parameters a registered operator declares — ``()`` when its behaviour is fixed."""
+    return _resolve_projector(name).params
+
+
+def bind_projector(name: str, operator_kwargs: Optional[dict] = None) -> Projector:
+    """Resolve *name* and apply *operator_kwargs*, raising on an unknown name or parameter.
+
+    Exists so a caller that must refuse EARLY can. ``project_plate`` is a generator, so anything it
+    validates is validated at the first ``next()``; ``write_plate`` creates a directory before it
+    gets there, and "the run failed after making the output tree" is a worse answer than "the run
+    did not start". Same object, same errors, asked sooner.
+    """
+    return _resolve_projector(name).bind(operator_kwargs)
 
 
 def _resolve_projector(name: str) -> Operator:
@@ -243,6 +408,7 @@ def project_plate(
     projector: str = "mip",
     on_error=None,
     regions=None,
+    operator_kwargs: Optional[dict] = None,
 ) -> Iterator[tuple[str, int, np.ndarray]]:
     """Project every selected well of a plate in parallel, streaming results well-by-well.
 
@@ -291,6 +457,13 @@ def project_plate(
         callable ``on_error(region, fov, exc)``, a well whose projection raises is passed to it and
         then SKIPPED — the stream keeps going instead of aborting the whole plate on one corrupt
         file. ``None`` (default) keeps the fail-fast contract exactly. Peak-memory bound is unchanged.
+    operator_kwargs:
+        Per-run parameters for *projector*, applied through :meth:`Operator.bind`. Only an operator
+        that DECLARES parameters accepts them; anything else raises, naming what it does accept.
+        ``None``/``{}`` (default) runs the entry's default binding — the same object the table has
+        always held, so no existing run changes by a pixel. This is the projector half of the seam
+        ``stitch_plate`` has had since IMA-222; the two tables were asymmetric for no reason other
+        than history, and ``write_plate`` had a hardcoded refusal saying so.
 
     Notes
     -----
@@ -305,6 +478,7 @@ def project_plate(
     n_workers = workers if workers is not None else _default_workers()
 
     op = _resolve_projector(projector)
+    fn = bind_projector(projector, operator_kwargs)  # the declaration decides, never the name
 
     # Warm the reader's lazy index/time-folders/metadata single-threaded BEFORE fan-out.
     meta = reader.metadata
@@ -326,7 +500,7 @@ def project_plate(
             except StopIteration:
                 return False
             future = pool.submit(project_well, reader, region, fov,
-                                 reduce=op.fn, consumes=op.consumes)
+                                 reduce=fn, consumes=op.consumes)
             in_flight[future] = (region, fov)
             return True
 

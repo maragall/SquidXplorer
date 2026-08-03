@@ -38,6 +38,7 @@ from qtpy.QtWidgets import (  # noqa: E402
 )
 
 from squidmip import _viewer as V  # noqa: E402
+from squidmip._napari_view import MosaicLayers as _MosaicLayers  # noqa: E402
 
 from .conftest import CH_IN_YAML  # noqa: E402
 
@@ -5095,6 +5096,12 @@ def test_gallery_view_is_a_view_menu_command_and_not_an_operator(qapp):
 CLI_ONLY_OPERATORS = {
     "spot": "a LABELS overlay, not a plate result; it is driven from the spot-count controls "
             "on the mosaic, not from a card that writes an OME-Zarr plate.",
+    "cellpose": "the same LABELS overlay as `spot`, with the model instead of the Otsu recipe. "
+                "Same reason it has no card, and one more: a card offers 'run on the whole "
+                "plate', and this operator's result cannot be written (write_plate's "
+                "_validate_image accepts Z == 1 and a plane-op keeps z at full depth). It is "
+                "reachable from the CLI (--projector cellpose), the operator dropdown and the "
+                "Detect-nuclei button, all of which read the registry.",
     "decon3d": "the volume-then-project variant of `decon`; the decon card's own panel is where "
                "an iteration count gets chosen, and a second card for the same operator with a "
                "different z contract is how a user picks the wrong one.",
@@ -5378,10 +5385,27 @@ def test_closing_a_tab_restores_the_plate_even_while_the_raw_preview_streams(qap
 # exactly the test that made the hole look covered -- it asserts nothing about layers.
 
 class _RecordingMosaic:
+    """A fake that records the TERMINAL layer calls and borrows the REAL kind dispatch.
+
+    ``add_result`` and its ``_RESULT_ADDERS`` table are taken off ``MosaicLayers`` rather than
+    re-implemented here. That is deliberate: a fake that reimplements the thing under test can
+    agree with itself while disagreeing with the app, and the dispatch from a result's declared
+    kind to a layer type is exactly what these tests are for. What is faked is only the napari
+    boundary -- ``add_mosaic`` (an Image) and ``add_labels`` (a Labels).
+    """
+
+    add_result = _MosaicLayers.add_result
+    _RESULT_ADDERS = _MosaicLayers._RESULT_ADDERS
+
     def __init__(self):
         self.calls = []
+        self.labels = []
 
     def add_mosaic(self, op, channel, data, **kw):
+        self.calls.append((op, channel, data, kw))
+
+    def add_labels(self, op, channel, data, **kw):
+        self.labels.append((op, channel, data, kw))
         self.calls.append((op, channel, data, kw))
 
     # the real MosaicLayers' group view, over what was actually added

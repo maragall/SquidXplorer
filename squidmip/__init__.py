@@ -53,10 +53,14 @@ if "QT_API" not in _os.environ and _importlib_util.find_spec("PyQt6") is not Non
 
 from squidmip._engine import (
     Operator,
+    Param,
     add_projector,
     available_projectors,
+    bind_projector,
     project_plate,
     projector_consumes,
+    projector_params,
+    projector_produces,
 )
 from squidmip._minerva import export_selection, launch_minerva
 from squidmip._montage import build_montage
@@ -78,8 +82,11 @@ from squidmip._tilesource import (
     plate_ladder,
 )
 from squidmip.projection import (
+    INTENSITY,
+    LABELS,
     PLANE_OP,
     Z_REDUCER,
+    labels_op,
     plane_op,
     project,
     project_well,
@@ -142,6 +149,14 @@ __all__ = [
     "plane_op",
     "PLANE_OP",
     "Z_REDUCER",
+    # The result-kind declaration and the per-entry parameters (cellpose-as-an-operator, 2026-08-03)
+    "projector_produces",
+    "projector_params",
+    "bind_projector",
+    "labels_op",
+    "INTENSITY",
+    "LABELS",
+    "Param",
     "write_plate",
     "build_montage",
     # IMA-222 region operators (inter-FOV; the parallel table to the projectors)

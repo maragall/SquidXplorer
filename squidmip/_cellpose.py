@@ -30,6 +30,7 @@ import logging
 
 import numpy as np
 
+from squidmip._engine import add_projector
 from squidmip._spots import (
     SpotDetectionCancelled,
     SpotParams,
@@ -125,3 +126,38 @@ def register() -> None:
         SEGMENTER_NAME, cellpose_nuclei, requires=("cellpose",),
         blurb="Cellpose — pretrained generalist, zero-shot (slow on CPU; wants a GPU)",
     )
+
+
+#: The name Cellpose holds in the ENGINE's operator table, i.e. in ``available_projectors()``,
+#: ``runnable_operators()``, the CLI's ``--projector`` and the viewer's operator list. Deliberately
+#: the same string as :data:`SEGMENTER_NAME`: the two tables answer different questions about the
+#: SAME algorithm, and giving it two spellings is how a log line and a layer key start disagreeing.
+OPERATOR_NAME = SEGMENTER_NAME
+
+
+def register_operator() -> None:
+    """Add Cellpose to the ENGINE's operator table — the half that was missing.
+
+    Cellpose has been a registered SEGMENTER (``add_segmenter``, above) and nothing else. That
+    table answers "which algorithm counts the nuclei" for the GUI's one Detect-nuclei button; it is
+    not the operator table, so ``available_projectors()`` had never heard of Cellpose, no card, no
+    dropdown, no CLI ``--projector cellpose``, and no plate-scale run. It was the analysis feature
+    bolted on BESIDE the operator system rather than into it.
+
+    This is what plugging it in costs, in full: one call, no engine edit, no delivery-path edit,
+    no napari edit. Everything that makes it work is a DECLARATION the generic code reads —
+
+        consumes  frozenset()   inferred from `plane_op`   -> segmented per plane, z survives
+        produces  "labels"      inferred from `labels_op`  -> delivered as a napari Labels layer
+        params    SPOT_PARAMS   declared                   -> runnable at a different diameter
+
+    NO TORCH AT IMPORT TIME. Registering here builds the default binding, which is a closure over
+    ``SpotParams`` and the string ``"cellpose"``; the ``from cellpose import models`` lives inside
+    ``cellpose_nuclei``, one call deeper, and runs when a plane is actually segmented. Measured on
+    the developer machine: ``import squidmip`` 0.146 s, ``import cellpose`` 0.52 s (torch alone
+    0.498 s). Registering eagerly and importing lazily is what keeps the second number off app
+    startup, and it is why this operator needs no lazy-registration machinery.
+    """
+    from squidmip._spots import SPOT_PARAMS, segmentation_operator
+
+    add_projector(OPERATOR_NAME, segmentation_operator(SEGMENTER_NAME), params=SPOT_PARAMS)

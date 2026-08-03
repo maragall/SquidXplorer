@@ -614,13 +614,19 @@ def test_write_plate_forwards_operator_kwargs_to_stitch_plate(monkeypatch):
     assert seen["register"] is False
 
 
-def test_write_plate_refuses_operator_kwargs_for_a_non_region_operator():
-    """project_plate has no such seam -- a projector's parameters are baked in at
-    registration. Accepting them here and dropping them is the silent failure this whole
-    change exists to avoid, so refuse BY NAME instead."""
+def test_write_plate_refuses_operator_kwargs_an_operator_does_not_declare():
+    """Accepting a parameter and dropping it is the silent failure this seam exists to avoid.
+
+    The REASON for the refusal moved on 2026-08-03 and the test says so. It used to be a rule
+    about WHICH TABLE the operator is in: "project_plate has no such seam -- a projector's
+    parameters are baked in at registration". A projector can now declare its own ``params``
+    (``Operator.bind``), so the refusal comes from ``mip``'s own entry, which declares none. That
+    is a strictly better answer to the same question: ``mip`` genuinely takes no ``blend_px``,
+    whereas the old message would have refused a parameter the operator really did have.
+    """
     import squidmip._output as out_mod
 
-    with pytest.raises(ValueError, match="operator_kwargs"):
+    with pytest.raises(ValueError, match="declares no parameters"):
         out_mod.write_plate(_MetaOnlyReader(), "/tmp/does-not-matter", projector="mip",
                             operator_kwargs={"blend_px": 64})
 # ═══════════════════════════════════════════════════════════════════════════════════════
