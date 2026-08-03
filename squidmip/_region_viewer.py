@@ -718,6 +718,18 @@ class RegionViewer(QMainWindow):
                                   self._copy_luts))
         sync.addWidget(self._chip("⤓ Paste LUTs", "Apply the copied LUTs to this window's channels.",
                                   self._paste_luts))
+        # MATCH RAW CONTRAST. It sits HERE, in the row the operator that made those layers was run
+        # from, and not in a menu: an operator result is seeded from its OWN pixels so it arrives
+        # legible on its own terms, which means raw and the result are on two different stretches
+        # and the before->after flip compares two stretches rather than two images. This is the
+        # one click that turns it into a real comparison, and it is next to the operator Run
+        # button because that is where the user is standing when they want it.
+        sync.addWidget(self._chip("≡ Match raw contrast",
+                                  "Copy raw's contrast window onto every operator layer, so "
+                                  "flipping between raw and a result compares the same window. "
+                                  "Results open on their own auto window so they are legible "
+                                  "alone; this is the deliberate opt-in to raw's.",
+                                  self._match_raw_contrast))
         sync.addStretch(1)
         ov.addLayout(sync)
         h.addWidget(op_box, 1)
@@ -1521,6 +1533,32 @@ class RegionViewer(QMainWindow):
         _LUT_CLIPBOARD.clear()
         _LUT_CLIPBOARD.update(caught)
         self._say(f"copied LUTs for {len(caught)} channel(s) — paste them into another window.")
+
+    def _match_raw_contrast(self) -> None:
+        """Put the RAW layer's contrast window on every operator layer of the same channel.
+
+        The one action that makes the raw->operator flip a comparison. Operator layers are seeded
+        from their own pixels on arrival (deliberately: a decon result has to be legible alone
+        before you can judge its iteration count), and napari's per-channel link connects events
+        without equalising values, so the two sides sit on two different stretches until somebody
+        writes one. This writes them.
+
+        Deliberately NOT recorded as a setting change: it moves operator layers only, never raw,
+        so ``_per_channel_luts`` -- which reads the raw layers -- reports exactly what it did
+        before, and the window has not diverged from its defaults. Unlike a paste, which does move
+        raw and therefore is recorded.
+        """
+        pane = self._pane
+        mosaic = getattr(pane, "mosaic", None) if pane is not None else None
+        if mosaic is None:
+            self._say("no mosaic here to match contrast on.")
+            return
+        matched = mosaic.match_contrast_to(_RAW_OP)
+        if not matched:
+            self._say("nothing to match — this window has no operator layers over the raw mosaic "
+                      "yet. Run an operator on this view first.")
+            return
+        self._say(f"matched {matched} operator layer(s) to the raw contrast window.")
 
     def _paste_luts(self) -> None:
         if not _LUT_CLIPBOARD:

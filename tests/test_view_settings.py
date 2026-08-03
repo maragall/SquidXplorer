@@ -52,6 +52,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")  # headless Qt; must prece
 
 import sys  # noqa: E402
 
+import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 
 # The ONE guard in this file, and it is an ENVIRONMENT gate rather than a skipped assertion: PyQt5
@@ -465,6 +466,49 @@ def test_pasting_luts_marks_the_window_diverged(qapp, manager):
     assert _layer_clims(two) == {CH_IN_YAML: (33.0, 333.0), CH_NOT_IN_YAML: (44.0, 444.0)}
     assert one.settings.diverged == (), "the copy diverged the window it copied FROM"
     RV._LUT_CLIPBOARD.clear()
+
+
+def test_match_raw_contrast_is_wired_to_this_window_s_mosaic_and_leaves_it_at_defaults(
+        qapp, manager):
+    """The window-level half of "Match raw contrast": the chip's handler reaches THIS window's
+    layers, and the action does not pretend the window's settings changed.
+
+    Two claims, both of which a unit test on MosaicLayers cannot make:
+
+    * the handler is bound to the right pane (a typo'd attribute would find no mosaic and say
+      "no mosaic here" while looking like it worked);
+    * it does NOT mark the window diverged. It writes operator layers only, never raw, so the
+      window's recorded LUTs are byte-for-byte what they were -- unlike a paste, which moves raw
+      and IS recorded (see the paste test above).
+    """
+    one = manager.open([REGIONS[0]])
+    _loaded(qapp, one)
+    mosaic = one._pane.mosaic
+
+    # A fake operator result over the raw mosaic, on a deliberately DIFFERENT window from raw's.
+    for ch in (CH_IN_YAML, CH_NOT_IN_YAML):
+        raw = mosaic.find("raw", ch)
+        if raw is None:
+            continue
+        raw.contrast_limits = (100.0, 900.0)
+        peer = mosaic.add_mosaic("decon", ch, np.full((16, 16), 9000, dtype=np.uint16))
+        peer.contrast_limits = (1.0, 2.0)
+    diverged_before = one.settings.diverged
+
+    one._match_raw_contrast()
+
+    matched = 0
+    for ch in (CH_IN_YAML, CH_NOT_IN_YAML):
+        raw, peer = mosaic.find("raw", ch), mosaic.find("decon", ch)
+        if raw is None or peer is None:
+            continue
+        assert list(peer.contrast_limits) == list(raw.contrast_limits), ch
+        matched += 1
+    assert matched, "the window had no raw/operator pair to match, so nothing was proven"
+    assert one.settings.diverged == diverged_before, (
+        "matching operator layers to raw moved the window's recorded settings; it writes "
+        "operator layers only and raw is untouched"
+    )
 
 
 def test_the_autofocus_default_is_actually_read_when_a_window_loads(qapp, manager):

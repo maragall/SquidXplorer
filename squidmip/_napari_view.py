@@ -741,10 +741,51 @@ class MosaicLayers:
             # objects are destroyed and recreated on every region change, so a subscription made
             # anywhere else goes deaf after one.
             self._connect_user_op(key.op, layer)
-        # Link contrast across every processing layer showing this channel, so the
-        # before->after toggle preserves the window and there is only ever one value.
+        # Link contrast across every processing layer showing this channel, so that FROM THE
+        # NEXT WRITE ON there is only ever one value: a drag on any peer moves them all.
+        #
+        # What linking does NOT do, measured on a bare ViewerModel: it does not equalise the
+        # values at link time. napari's link_layers connects events, nothing more. Each layer
+        # keeps the window `add_mosaic` seeded from ITS OWN pixels until somebody writes one,
+        # and only then do they converge. That is deliberate and it is not a bug: a fresh decon
+        # result has to be individually legible on arrival or you cannot judge whether it used
+        # the right iteration count. When the user wants the flip to be a real comparison
+        # instead, `match_contrast_to` equalises them on demand ("Match raw contrast").
         if len(peers) > 1:
             self._model.layers.link_layers(peers, ("contrast_limits",))
+
+    def match_contrast_to(self, op: str) -> int:
+        """Copy *op*'s contrast window onto every OTHER processing layer of the same channel.
+
+        The explicit half of the contrast story. Layers are seeded per layer (see
+        :meth:`add_mosaic`) so an operator result arrives legible on its own terms, and linked
+        per channel (see :meth:`_register_channel`) so they never diverge again once written.
+        Between those two lies the case this method serves: raw and its operator layers are on
+        DIFFERENT windows, so flipping between them compares two stretches rather than two
+        images. Calling this makes the flip a real comparison.
+
+        Writes each peer explicitly rather than nudging *op*'s own layer and relying on the
+        link to propagate: assigning a layer the value it already holds is not a state change
+        anyone should have to reason about, and the point here is to be sure, not to be clever.
+
+        Returns the number of peer layers written (channels with no *op* layer are skipped, and
+        *op*'s own layers are not counted).
+        """
+        matched = 0
+        for channel, peers in self._by_channel.items():
+            source = self.find(op, channel)
+            if source is None:
+                continue                     # this channel has no `op` layer to match against
+            window = (float(source.contrast_limits[0]), float(source.contrast_limits[1]))
+            for ly in peers:
+                if ly is source:
+                    continue
+                try:
+                    ly.contrast_limits = window
+                except Exception:            # noqa: BLE001 - one odd layer is skipped, not fatal
+                    continue
+                matched += 1
+        return matched
 
     def remove_op_channel(self, op: str, channel: str) -> bool:
         layer = self.find(op, channel)
