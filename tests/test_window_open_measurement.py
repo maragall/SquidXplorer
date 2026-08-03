@@ -21,9 +21,9 @@ signal passes every test in that file and reports nonsense.
 Per docs/adr/0001-ci-gates-work-not-time.md nothing here asserts a duration. These tests assert
 that a number was recorded and that it was recorded once.
 
-NOT TESTED, and stated rather than left to be found: that the clock starts BEFORE the napari pane is
-constructed, which is the whole reason it lives in ``_spawn`` rather than in ``RegionViewer``.
-Asserting it means asserting that an interval contains a cost, which is a duration assertion.
+NOT TESTED, and stated rather than left to be found: that first paint is taken where the layer is
+ADDED rather than where the worker emits it. Both placements produce a number, and only a stalled
+interface tells them apart, which needs a real interface under load.
 """
 
 from __future__ import annotations
@@ -114,6 +114,34 @@ def test_opening_a_region_window_is_measured(qapp, manager):
         "from 'quick to show, slow to finish' — which is the distinction being investigated")
     assert m.seconds >= m.first_paint_seconds, (
         "the whole open finished before its first layer appeared; the two ends are crossed")
+
+
+def test_the_clock_covers_building_the_window_not_only_loading_it(qapp, manager, napari_pane_stub,
+                                                                  monkeypatch):
+    """Constructing the napari pane is time the user waits, and on the complaint being investigated
+    it may be most of it (the backlog plan records 91 MB to 419 MB just opening a 9-well plate). A
+    clock started after the window exists would report every part of the wait except that one, and
+    would keep reporting a healthy number while the app got slower to open.
+
+    Asserted as ORDER, not as duration: at the moment the clock is created, no pane has been built
+    yet. ADR-0001 forbids the direct form of this assertion, and the order is what makes the number
+    honest anyway.
+    """
+    from squidmip import _measure
+
+    panes_at_start = []
+    real = _measure.WindowOpen
+    monkeypatch.setattr(_measure, "WindowOpen",
+                        lambda *a, **kw: (panes_at_start.append(len(napari_pane_stub)),
+                                          real(*a, **kw))[1])
+
+    win = manager.open([REGIONS[0]])
+    _loaded(qapp, win)
+
+    assert len(napari_pane_stub) == 1, "no pane was built, so this test proved nothing"
+    assert panes_at_start == [0], (
+        "the clock started after the window's pane was built, so it cannot see the cost of "
+        "building it")
 
 
 def test_an_roi_child_open_is_measured_and_names_itself_as_one(qapp, manager):
