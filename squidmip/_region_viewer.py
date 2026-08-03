@@ -761,9 +761,13 @@ class RegionViewer(QMainWindow):
         def_box, dv = self._titled_box("Defaults")
         d1 = QHBoxLayout(); d1.setSpacing(4)
         self._focus_default_chk = QCheckBox("auto focus")
+        # ONCE, not per region: _apply_settings_once returns early after the first mosaic, so the
+        # jump happens when this window first paints and never again. The tooltip said "whenever
+        # this window loads a region", which promised a per-region refocus the code does not do.
         self._focus_default_chk.setToolTip(
-            "Jump to the sharpest plane (Tenengrad) whenever this window loads a region. A global "
-            "default; ticking it HERE changes this window only and marks it diverged.")
+            "Jump to the sharpest plane (Tenengrad) once, when this window first shows a region. "
+            "Later regions keep the z you are on. A global default; ticking it HERE changes this "
+            "window only and marks it diverged.")
         self._focus_default_chk.setStyleSheet("QCheckBox{color:#c9d1d9;font-size:11px;}")
         self._focus_default_chk.setChecked(bool(self.settings.get("tenengrad_focus")))
         self._focus_default_chk.toggled.connect(self._on_focus_default_toggled)
@@ -835,7 +839,10 @@ class RegionViewer(QMainWindow):
         """The autofocus default, changed IN THIS WINDOW. Never propagated to the others."""
         self.settings.set("tenengrad_focus", bool(on))
         self._refresh_divergence()
-        self._echo(f"auto focus {'on' if on else 'off'} for this window.")
+        # _say, not _echo: this is a settings change with no structured console line behind it, and
+        # its NEIGHBOURS in the same box ("make default", "reset") both _say. A quiet control next
+        # to a loud one reads as a control that did nothing, which is why it was clicked four times.
+        self._say(f"auto focus {'on' if on else 'off'} for this window.")
 
     def _sync_settings_widgets(self) -> None:
         """Put the controls back in step with the settings after a programmatic change.

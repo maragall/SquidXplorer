@@ -199,7 +199,10 @@ def test_the_cards_in_the_process_pane_all_elide(qapp, monkeypatch):
     win = PlateWindow(None)
     try:
         cards = win._op_cards
-        assert set(cards) == {"galleryview"} | {op.key for op in _OPERATIONS}
+        # The operator stack is the operator REGISTRY and nothing else. "galleryview" used to be
+        # here as a bare extra key; it arranges windows rather than pixels and is a View-menu
+        # action now, so a stray key in this dict is once again a real defect.
+        assert set(cards) == {op.key for op in _OPERATIONS}
         for key, c in cards.items():
             assert hasattr(c, "_retext"), f"the {key!r} card is a plain QPushButton again"
             assert c.toolTip(), f"the {key!r} card lost the full text its elision hides"

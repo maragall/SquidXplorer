@@ -10,8 +10,9 @@ an 8,000-line QMainWindow module purely by accident of history, which had two co
 
 The first is that it could not be tested in isolation, so the fact that the CARD list and the
 ENGINE's list are different sets was discovered in production rather than by a unit test.
-:func:`runnable_operators` documents the two ways that bit: ``reference`` is a registered projector
-with no card, and ``minerva`` is a card that is not an operator at all but an export hand-off.
+:func:`runnable_operators` documents the two ways that bit: ``spot`` is a registered projector with
+no card, and ``minerva`` is a card that is not an operator at all but an export hand-off.
+(``reference`` used to be the first example and is now carded — see the entry below.)
 Reading capability off ``_OPERATIONS`` therefore raised bare ``KeyError``s out of the Qt event loop.
 The rule this module now states in one place is: **a card is presentation, the engine is capability,
 and the two are asked separately.**
@@ -74,6 +75,13 @@ _OPERATIONS = (
     Operation("mip", "Maximum Intensity Projection",
               "Collapse each well's z-stack to one max-intensity image; save a navigable OME-Zarr plate.",
               "_build_mip_tab"),
+    # The OTHER z-reduction, and the one Julio asked for twice: the engine has had `reference` in
+    # `_PROJECTORS` since IMA-210 but no card, so it was CLI-only and in no dropdown and no menu.
+    # Same builder as MIP (`_build_run_tab` is one builder for every z-reducer), same shape here.
+    Operation("reference", "Reference plane (best focus)",
+              "Keep each well's sharpest z-plane (Tenengrad) instead of combining them; save a "
+              "navigable OME-Zarr plate.",
+              "_build_reference_tab"),
     Operation("stitch", "Stitch (register + fuse)",
               "Register every FOV of a well against its neighbours and fuse one seamless mosaic "
               "per well, instead of trusting the stage coordinates alone.",
@@ -134,8 +142,12 @@ def runnable_operators() -> list[str]:
 
     The two lists are not the same set and never were:
 
-    * ``reference`` is a registered projector with no card, so ``_OPERATIONS_BY_KEY[key].label``
-      raised a bare ``KeyError`` out of the event loop the moment anything asked to run it.
+    * ``spot`` (and ``decon3d``, and the ``coordinate`` region operator) is a registered operator
+      with no card, so ``_OPERATIONS_BY_KEY[key].label`` raised a bare ``KeyError`` out of the
+      event loop the moment anything asked to run it. ``reference`` was the original example and
+      now has a card; the SHAPE it demonstrated has not gone away, which is why
+      ``test_every_runnable_operator_is_either_carded_or_declared_cli_only`` pins the other
+      direction: an engine entry with no card must be listed as deliberately CLI-only.
     * ``minerva`` is a card that is NOT an operator — it is an export hand-off. Handing its key to
       the engine dies with a raw ``KeyError: unknown projector 'minerva'`` in the status line.
 
