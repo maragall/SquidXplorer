@@ -669,11 +669,16 @@ class PlateWindow(QMainWindow):
         #            switch; raw plane paths are re-registered so it isn't black.
         #   PANE 3 = the EXPLORATION pane: one tab per Shift-dragged FOV subset (IMA-205/221).
         #
-        # Pane 3 is VISIBLE FROM OPEN (IMA-260), reversing IMA-237's reveal-on-first-drag. The
-        # saving of a fifth of the monitor bought undiscoverability: you cannot find a pane that is
-        # not there, so nobody found the Shift-drag that was the only way to make it appear. It now
-        # opens showing EXAMPLE USAGE (_build_explore_empty) and swaps to the tab bar the moment it
-        # holds real content — a pane that teaches costs its width back immediately.
+        # Pane 3 was VISIBLE FROM OPEN (IMA-260), reversing IMA-237's reveal-on-first-drag,
+        # because the saving of a fifth of the monitor bought undiscoverability: you cannot find a
+        # pane that is not there, so nobody found the Shift-drag that was the only way to make it
+        # appear. It opened showing EXAMPLE USAGE (_build_explore_empty) and swapped to the tab bar
+        # the moment it held real content.
+        # AS OF 2026-08-03 it is visible ONLY WHILE IT HOLDS A TAB, and the tab it holds today is
+        # the Decon QC result. The discoverability argument died with the gesture it was made
+        # about: a Shift-drag now opens an independent window, so a permanent strip of copy
+        # teaching it would point at the wrong place. See `_sync_explore_pane`, which owns both
+        # the page swap and the visibility.
         # Exploration tabs moved OUT of the process console to get here: the console is pane 1, and
         # pane 1 is not where the user asked exploration to live.
 
@@ -749,6 +754,9 @@ class PlateWindow(QMainWindow):
         # Wide enough to set 24 px copy without one word per line — the legibility floor is a floor
         # on the TEXT, and text you have to read a syllable at a time is not legible either.
         self._explore_pane.setMinimumWidth(360)
+        # It is PARENTED into the root layout further down (the `body` splitter). Between
+        # 2b8fbc5 and this commit it was not, and `publish_qc_result` was posting the decon QC
+        # result into it the whole time.
 
         # NO CENTRAL VIEWER (decentralized, 2026-07-23). The locked central napari pane is gone:
         # viewing now happens in INDEPENDENT windows spawned from the plate (see _region_viewer),
@@ -918,8 +926,41 @@ class PlateWindow(QMainWindow):
         self._time_point_bar = TimePointBar(on_change=self._on_time_point_changed)
         self._time_point_bar.set_count(1)
 
+        # PANE 3 HAS A HOME AGAIN, UNDER THE PLATE, AND ONLY WHEN IT HOLDS SOMETHING.
+        #
+        # 2b8fbc5 ("Decentralize GUI") took the exploration pane out of the layout but left
+        # `_explore_pane` constructed. A day earlier a619381 had wired `publish_qc_result` to put
+        # the deconvolution QC result INTO that pane's tab bar. So from 2026-07-23 the decon QC
+        # view — the turbo x-y / x-z / y-z composite the whole iterate-and-look loop exists for —
+        # was computed, put in a tab, and shown to nobody: a QStackedWidget with no parent that is
+        # never show()n is invisible rather than floating, which is why it never looked like the
+        # orphan-window bug tests/test_no_orphan_windows.py pins. Julio: "we should be able to
+        # toggle the turbo colormap mini-gui where we click on there image and it moves teh
+        # crosshairs to display XZ and YZ bands." He was asking for something already built.
+        #
+        # It goes in a VERTICAL SPLITTER with the plate, not back into the top strip: the
+        # composite is a real picture (2*view_half plus the two z sections on each axis) and the
+        # strip is capped at _TOP_ROW_COMPACT_PX. The splitter is the same idiom as `top_row`, so
+        # the user can give the picture as much of the deck as they want and take it back.
+        #
+        # HIDDEN WHILE EMPTY, which is a reversal of IMA-260's "visible from open, teaching by
+        # example". That reversal is deliberate: the example copy teaches the Shift-drag, and
+        # since the decentralization a Shift-drag opens an INDEPENDENT WINDOW rather than filling
+        # this pane. A permanent strip teaching a gesture whose result lands somewhere else is
+        # worse than no strip. `_sync_explore_pane` owns both the page swap and this visibility,
+        # so there is one place that answers "what is pane 3 doing".
+        body = QSplitter(Qt.Vertical)
+        body.setStyleSheet("QSplitter{background:#0b0e14;}"
+                           "QSplitter::handle{background:#232b3a;height:1px;}")
+        body.setHandleWidth(6)
+        body.addWidget(plate_host)
+        body.addWidget(self._explore_pane)
+        body.setStretchFactor(0, 3)
+        body.setStretchFactor(1, 2)
+        self._body = body
+
         rv.addWidget(top_row, 0)                # compact strip, keeps its height
-        rv.addWidget(plate_host, 1)             # the Wellplate view fills the rest
+        rv.addWidget(body, 1)                   # the Wellplate view + pane 3 fill the rest
         rv.addWidget(self._time_point_bar, 0)   # hidden unless n_t > 1
         self._split = top_row
         self.setCentralWidget(root)
@@ -939,7 +980,7 @@ class PlateWindow(QMainWindow):
             "QMenuBar{background:#0b0e14;color:#c9d1d9;} "
             "QMenuBar::item:selected{background:#1f6feb;}")
 
-        self._sync_explore_pane()                  # keeps the (now-hidden) op-tab stack coherent
+        self._sync_explore_pane()                  # pane 3 starts hidden: it holds no tab yet
 
         # 596 x 850 stays the DEFAULT portrait shape (Julio): the plate dominates below the
         # capped top strip, and the window opens identically on every monitor. It is no longer
@@ -1216,10 +1257,32 @@ class PlateWindow(QMainWindow):
         Pane 3 keeps its width either way (IMA-260) — it is a permanent third column, so this is a
         page swap inside it, never a collapse. Both directions matter: the copy has to come back
         when the last tab closes, or a user who explores once and tidies up is left with the blank
-        strip the empty state exists to prevent."""
+        strip the empty state exists to prevent.
+
+        ...and since the decentralization it also decides whether pane 3 is ON SCREEN AT ALL. The
+        pane is a splitter child under the plate now (see ``__init__``) and it earns its room only
+        while it holds a tab — today that means a Decon QC result. Empty, it would be a permanent
+        strip of copy teaching a Shift-drag whose result opens an independent window instead, so it
+        stands down and gives every pixel back to the plate. This is the one place both answers
+        live; every caller already routes through it (tab open, tab close, detach, re-dock, float
+        close), so nothing else has to learn the rule."""
         page = self._explore_tabs if self._explore_tabs.count() > 0 else self._explore_empty
         if self._explore_pane.currentWidget() is not page:
             self._explore_pane.setCurrentWidget(page)
+        # WHICH tabs earn the deck's room: the ones the CURRENT design puts here, which today
+        # means the Decon QC result. An `_ExplorationTab` does not, and that is not an oversight:
+        # it embeds a second napari mosaic, and taking the embedded viewer out of the root window
+        # is precisely what the decentralization did. A preview run still builds one of those tabs
+        # (`_open_preview_tab`) and it has been invisible since 2b8fbc5; un-hiding it would put a
+        # napari canvas back under the plate as a side effect of a decon fix, which is a change
+        # that should be made deliberately, on its own, by someone who can watch it happen.
+        #
+        # setVisible on a widget whose parent is not shown yet is remembered by Qt and applied at
+        # show(); this is called once from __init__ (before the window is shown) precisely so the
+        # pane starts hidden rather than flashing on the first paint.
+        deck_tabs = any(not isinstance(self._explore_tabs.widget(i), _ExplorationTab)
+                        for i in range(self._explore_tabs.count()))
+        self._explore_pane.setVisible(page is self._explore_tabs and deck_tabs)
 
     def _open_op_tab(self, key: str, title: str, builder, tabs=None):
         """Open (or focus) a UI as a tab. Built lazily, once. *tabs* is the bar it belongs in —
