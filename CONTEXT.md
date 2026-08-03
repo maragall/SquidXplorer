@@ -43,6 +43,17 @@ _Avoid_: operation, processor, job
 One execution of an operator over a stated scope of regions.
 _Avoid_: job, task, batch
 
+**Window id**:
+The integer identifying one open viewer window, allocated per process and never reused while that
+window lives. It is what the console prints in brackets (`[3] A1 fov 2 …`), what the window
+registry and the navigator rows key on, what contrast inheritance and adopt-as-default look up, and
+what an ROI child's `◂ view 3` points at. A window's **name** is a separate, user-editable label
+that identifies nothing: two windows may carry the same name, and the bracket is what tells them
+apart. Nothing parses a window title, and nothing about a window is persisted, so an id means
+nothing across a restart.
+_Avoid_: treating the window title, the region name, or the label as an identity; "view id" for
+anything other than this integer
+
 **Preview**:
 The raw imagery painted when an acquisition opens, before any operator has run. A preview is not a
 processed result and never becomes one.

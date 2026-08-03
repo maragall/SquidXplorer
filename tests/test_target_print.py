@@ -145,12 +145,22 @@ def test_a_long_label_is_elided_rather_than_wrapped():
 
 def test_the_columns_line_up_across_rows():
     """Alignment is the "organized manner" half of the request, and it is only free if the widths
-    are computed from the actual rows -- a fixed width breaks the moment an id reaches two digits."""
+    are computed from the actual rows.
+
+    ``window_id`` is a per-process counter with no ceiling, and a user who opens and closes windows
+    all day reaches four digits. So one id here is deliberately wider than any plausible fixed
+    column: a hard-coded width would pad the short ids and then overflow on this one, which is worse
+    than no alignment because it looks aligned until it is not.
+
+    MUTATION that turns this red: replace the computed ``id_w`` with any constant.
+    """
     views = [_View(2, "aa", ["A1"]), _View(11, "bbbb", ["A2", "A3"]),
-             _View(120, "c", ["A4", "A5", "A6"])]
+             _View(1207, "c", ["A4", "A5", "A6"])]
     rows = [ln for ln in describe_view_target(views).splitlines() if ln.startswith("  [")]
     assert len(rows) == 3
     assert len({r.index("region") for r in rows}) == 1, "the count column is ragged"
+    assert len({r.index("]") for r in rows}) == 3, (
+        "the fixture stopped exercising varying id widths")
 
 
 def test_the_roi_subset_is_printed_in_the_existing_extent_spelling():
