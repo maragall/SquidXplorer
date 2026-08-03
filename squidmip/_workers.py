@@ -56,7 +56,7 @@ from qtpy.QtCore import QThread, Signal
 
 from squidmip import _explore
 from squidmip._engine import _default_workers
-from squidmip._logpane import get_logger
+from squidmip._logpane import capture_stdout_to_log, get_logger
 from squidmip._measure import (
     FAILED as _MEASURE_FAILED, OK as _MEASURE_OK, PARTIAL as _MEASURE_PARTIAL,
     STOPPED as _MEASURE_STOPPED, measure_run,
@@ -276,7 +276,19 @@ class _OperatorWorker(QThread):
         # both surfaces' runs and the one line per run reaches the log panel (measure_run logs at
         # INFO to the root logger, which the panel is a sink of). One measurement, three consumers.
         target = _explore.describe_run_target(self._regions, total=self._total) or self._operator
-        with measure_run(self._operator, target, n_targets=self._total) as _run_metrics:
+        # CAPTURE print() FOR THE DURATION OF THE RUN. tilefusion says what it is doing with bare
+        # print (registration.py:274, optimization.py:254, distortion.py:245, fusion.py:358), not
+        # through its loggers, so the panel showed none of it while maragall/stitcher's own GUI
+        # showed all of it -- it swaps sys.stdout for the same purpose (gui/app.py:580).
+        #
+        # It sits HERE and not inside _stitch.py deliberately, in both directions. Not lower,
+        # because a CLI or tools/stitch_demo.py run must keep printing to the terminal it was
+        # started from, and routing its lines into a logger nobody configured would SWALLOW them.
+        # Not narrower, because stitch_plate hands each region to a ThreadPoolExecutor, so the
+        # prints land on a pool thread rather than on this QThread: the capture is scoped to the
+        # RUN's duration, not to a thread (see squidmip._logpane.capture_stdout_to_log).
+        with capture_stdout_to_log(), \
+                measure_run(self._operator, target, n_targets=self._total) as _run_metrics:
             _run_metrics.note(surface="gui", save=self._save)
             self._run_body(_run_metrics)
 
