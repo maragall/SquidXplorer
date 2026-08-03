@@ -64,7 +64,7 @@ from squidmip._measure import (
 from squidmip._montage import _area_downsample
 from squidmip._plate_overview import (
     _CELL, _PUSH_PX, _box_union, _fit_box, _fit_cell, _fit_letterboxed, _mosaic_boxes,
-    push_shape_for, region_mosaic_extent_px,
+    content_box, push_shape_for, region_mosaic_extent_px,
 )
 from squidmip._tsctx import HANDLES
 from squidmip.contract import field_path
@@ -226,15 +226,23 @@ class _OperatorWorker(QThread):
         box = self._boxes.get((region, fov))
         n_c = len(self._channels)
 
-        # Downsample OUTSIDE the lock (the expensive part stays parallel). Single-FOV fills the
-        # whole cell; a mosaic FOV is fitted to its own sub-cell box and carries that box along,
-        # so the widget can slot it in at the right offset without knowing the geometry.
+        # Downsample OUTSIDE the lock (the expensive part stays parallel). A mosaic FOV is fitted
+        # to its own sub-cell box; a field that is the WHOLE cell's content (a single-FOV well, or
+        # a REGION operator's fused mosaic) gets the box its own aspect ratio implies. Either way
+        # the box travels with the tile, so the widget slots it in without knowing the geometry.
+        #
+        # This branch used to call `_fit_cell`, which resizes to EXACTLY (_CELL, _CELL) — fine for
+        # a square frame, a STRETCH for a fused mosaic. `_boxes` is deliberately empty for a region
+        # operator (there are no per-FOV sub-boxes when the mosaic IS the cell), so every stitched
+        # well was squashed into the square: on a 2x5 mosaic that is 2.4x vertically, against a raw
+        # preview of the same well letterboxed by `cell_boxes` into the middle band of the cell.
+        # Same cell, same size, different geometry — Julio: "raw vs stitched ... are not registered
+        # ... for stitching it gets warped". `content_box` is `cell_boxes`' own rule, so the two
+        # now land identically.
         if box is None:
-            tiles = [_fit_cell(well[c_i]) for c_i in range(n_c)]
-            bh = bw = _CELL
-        else:
-            top, left, bh, bw = box
-            tiles = [_fit_box(well[c_i], bh, bw) for c_i in range(n_c)]
+            box = content_box(well.shape[1:], _CELL, _CELL)
+        top, left, bh, bw = box
+        tiles = [_fit_box(well[c_i], bh, bw) for c_i in range(n_c)]
         raw = np.empty((n_c, bh, bw), self._dtype)   # native dtype (half the RAM)
         for c_i, ds in enumerate(tiles):
             raw[c_i] = ds
@@ -977,7 +985,8 @@ class _ComputedPlateWorker(QThread):
     it used to take percentiles per well, which made a dim well and a bright well look identical and
     silently broke the one thing a plate overview is for (comparing wells at a glance)."""
 
-    tileReady = Signal(int, int, str, object)   # (ri, ci, well_id, (C, cell, cell) native tile)
+    tileReady = Signal(int, int, str, object, object)   # (ri, ci, well_id, (C, h, w) native tile,
+    #                                                          box=(top, left, h, w) in cell px)
     pushReady = Signal(int, object)             # (fov_idx, [per-channel ~512px plane])
     progress = Signal(int, int)
     streamEnded = Signal()                      # plate fully loaded -> recomposite globally
@@ -1015,8 +1024,15 @@ class _ComputedPlateWorker(QThread):
                 if self._stop.is_set():
                     return
                 coarse = self._read(wpath, fov, self._coarse, self._time_point)   # thumbnail (C,y,x)
-                tile = np.stack([_fit_cell(plane.astype(np.float32)) for plane in coarse])
-                self.tileReady.emit(ri, ci, wid, tile.astype(self._dtype))
+                # By the field's OWN aspect ratio, not squashed into the square. A written plate's
+                # field is a per-FOV projection (square: `content_box` returns the whole cell and
+                # this is `_fit_cell` exactly) OR a stitched region mosaic (not square: `_fit_cell`
+                # stretched it). Reopening a stitched plate has to draw the same cell the run that
+                # wrote it drew, or the defect survives the round trip through disk.
+                box = content_box(coarse.shape[1:], _CELL, _CELL)
+                _, _, bh, bw = box
+                tile = np.stack([_fit_box(plane.astype(np.float32), bh, bw) for plane in coarse])
+                self.tileReady.emit(ri, ci, wid, tile.astype(self._dtype), box)
                 push_src = self._read(wpath, fov, self._push, self._time_point)   # slider src (C,Y,X)
                 # ...at the declared push canvas exactly (IMA-245): a pyramid level smaller than
                 # _PUSH_PX used to be pushed at its own size, which the viewer silently refused.

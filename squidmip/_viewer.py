@@ -169,8 +169,9 @@ from squidmip._plate_overview import (  # noqa: F401 (re-exports)
     PlateOverview, _LoupeSource, _LoupeWorker, _RawLoupeSource, _RunningContrast, _TileFetcher,
     _ZarrLoupeSource, _box_union, _deep_zoom_enabled, _fit_box, _fit_cell, _fit_letterboxed,
     _fmt_um, _fov_of_well, _mosaic_boxes, _nice_scale_um, _pct_window, _plate_grid, _row_letter,
-    cells_in_rect, loupe_clamp_crop, loupe_crop_px, loupe_decimation, loupe_level, loupe_scale,
-    loupe_um_per_screen_px, push_shape_for, region_mosaic_extent_px, resolve_plate_root, well_at,
+    cells_in_rect, content_box, loupe_clamp_crop, loupe_crop_px, loupe_decimation, loupe_level,
+    loupe_scale, loupe_um_per_screen_px, push_shape_for, region_mosaic_extent_px,
+    resolve_plate_root, well_at,
 )
 
 # The eight QThread workers moved to `squidmip._workers` (gap 6, 2026-07-29): 949 lines whose only
@@ -424,6 +425,8 @@ class _ExplorationTab(QWidget):
         self.minerva_btn = None
         self.mosaic_worker = None   # the fuse-this-region thread currently feeding self.viewer
         self.tiles: dict = {}       # region -> the cell canvas a multi-FOV run is filling in
+        self.tile_boxes: dict = {}  # region -> the union of the boxes landed in that canvas, so the
+        #                             layer is cropped to its CONTENT before being placed at bbox_um
         self.plate_layer = None     # the PLATE layer the run displayed here writes into
 
     def dispose(self):
@@ -1479,9 +1482,17 @@ class PlateWindow(QMainWindow):
             if canvas is None or canvas.shape[0] != arr.shape[0]:
                 canvas = np.zeros((arr.shape[0], _CELL, _CELL), arr.dtype)
                 tab.tiles[region] = canvas
+                tab.tile_boxes[region] = None
             top, left, bh, bw = box
             canvas[:, top:top + bh, left:left + bw] = arr[:, :bh, :bw]
-            arr = canvas
+            # CROP TO THE CONTENT, because the layer below is placed at `bbox_um` — the region's
+            # mosaic bounding box — and `_place` divides that box by the array's shape. Handing it
+            # the whole _CELL square makes the letterbox margins part of the mosaic: the subject
+            # shrinks into the middle of its own bbox and the scale is wrong by the margin. The
+            # union of the boxes that have landed IS the rectangle those pixels occupy, and once
+            # the region is complete it is exactly the rectangle `bbox_um` describes.
+            u = tab.tile_boxes[region] = _box_union(tab.tile_boxes.get(region), box)
+            arr = canvas[:, u[0]:u[0] + u[2], u[1]:u[1] + u[3]]
         try:
             bbox = mosaic_bbox_um(self._meta, region)
         except Exception as exc:                     # noqa: BLE001 - said, never swallowed

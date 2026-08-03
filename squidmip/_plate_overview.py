@@ -23,7 +23,7 @@ WHAT IS IN HERE, IN THE ORDER THE FILE HAD IT
   :func:`_fit_cell`, :func:`_fit_box`, :func:`_box_union`, :func:`_row_letter`,
   :func:`_plate_grid`, :func:`resolve_plate_root`, and the mosaic-box geometry
   (:func:`_mosaic_boxes`, :func:`region_mosaic_extent_px`, :func:`push_shape_for`,
-  :func:`_fit_letterboxed`).
+  :func:`content_box`, :func:`_fit_letterboxed`).
 * **contrast over a streaming plate**: :class:`_RunningContrast` and :func:`_pct_window`, the
   during-run histogram approximation and the exact percentile window the final render uses.
 * **the loupe** (IMA-208): the magnification math, and the three sources it can read real pixels
@@ -2544,6 +2544,29 @@ def push_shape_for(meta: dict, region_op: bool, regions: Optional[list] = None) 
     return (max(1, int(round(mh * s))), max(1, int(round(mw * s))))
 
 
+def content_box(shape, h: int = _CELL, w: int = _CELL) -> tuple[int, int, int, int]:
+    """``(top, left, height, width)``: where a *shape*-shaped plane lands in an ``h`` x ``w`` box.
+
+    ``_placement.cell_boxes``' rule — ``s = min(box/mh, box/mw)``, then centre — applied to a plane
+    that IS the whole mosaic rather than to the FOVs composing it. For a region whose mosaic extent
+    is ``shape``, the rectangle this returns is the union of the boxes ``cell_boxes`` puts that
+    region's FOVs in, so a FUSED mosaic and the RAW mosaic of the same region land in the same
+    place, at the same size, in the same cell.
+
+    That identity is the point. Every consumer of a plate cell — the deep-zoom overlay
+    (``_worldview.fit_preserving_aspect``), the montage blit (``_viewer._cell_source``), the loupe —
+    recovers the letterbox from the cell rect and the mosaic's aspect ratio alone. A cell painted
+    corner-to-corner by a fit that ignores aspect breaks all three at once, on top of drawing the
+    subject stretched.
+    """
+    h, w = max(1, int(h)), max(1, int(w))
+    mh, mw = max(1, int(shape[0])), max(1, int(shape[1]))
+    s = min(h / mh, w / mw)
+    ih = max(1, min(h, int(round(mh * s))))
+    iw = max(1, min(w, int(round(mw * s))))
+    return (h - ih) // 2, (w - iw) // 2, ih, iw
+
+
 def _fit_letterboxed(a: np.ndarray, h: int, w: int, dtype) -> np.ndarray:
     """Scale a 2D plane into an exactly ``(h, w)`` canvas, aspect preserved and centred.
 
@@ -2551,12 +2574,12 @@ def _fit_letterboxed(a: np.ndarray, h: int, w: int, dtype) -> np.ndarray:
     to be that exact shape — while two regions of one acquisition can have differently shaped
     mosaics. Letterboxing is the only way to satisfy both without stretching one of them, and it
     is the policy the plate cell already uses (``cell_boxes`` centres a mosaic in its cell).
+
+    The inner rectangle comes from :func:`content_box`, the one place that arithmetic lives, so a
+    push and the plate cell it corresponds to cannot letterbox to two different rectangles.
     """
     h, w = max(1, int(h)), max(1, int(w))
-    s = min(h / a.shape[0], w / a.shape[1])
-    ih = max(1, min(h, int(round(a.shape[0] * s))))
-    iw = max(1, min(w, int(round(a.shape[1] * s))))
+    top, left, ih, iw = content_box(a.shape, h, w)
     out = np.zeros((h, w), dtype)
-    out[(h - ih) // 2:(h - ih) // 2 + ih,
-        (w - iw) // 2:(w - iw) // 2 + iw] = _fit_box(a, ih, iw)
+    out[top:top + ih, left:left + iw] = _fit_box(a, ih, iw)
     return out
