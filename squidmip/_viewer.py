@@ -2008,38 +2008,55 @@ class PlateWindow(QMainWindow):
         self._pending_resync = False
         self._on_tab_changed(force=True)
 
-    def _on_run_drained(self):
+    def _on_run_drained(self, worker=None):
         """A worker thread has exited. Deliver any tab switch that was deferred while it ran.
 
         Fires on QThread.finished, so it also covers a run that was STOPPED (closing a tab mid-run)
         — ``_stop_worker`` returns immediately but the thread keeps going until its current well is
-        done, and ``_busy()`` stays True for all of that window."""
+        done, and ``_busy()`` stays True for all of that window.
+
+        ``worker`` IS THE THREAD THAT EXITED, and it decides whether this is the RUN's drain or
+        merely some thread's. ``run_operator`` retires the raw preview on its way in ("the operator
+        supersedes the raw preview", below), and ``_retire`` hooks EVERY retired thread's
+        ``finished`` here on purpose — a deferred re-sync must wait for the last of them. But the
+        preview's exit is not the run's drain, and treating it as one closed the run's books early:
+        observed on 2026-08-03, 5 runs in 200, as ``_close_requester_pair`` running while the
+        operator worker's own ``runProgress`` and ``failed`` were still sitting in the queue. The
+        window that asked was then unsubscribed (``_run_requester = None``) before a single unit
+        report reached it, so its bar's ONLY frame was the drain's final "2 of 2", and a failed run
+        was reported as "produced nothing" instead of naming its cause. ``operator_busy`` cannot
+        catch this: the run's thread has already exited, so it is honestly not busy — what has not
+        happened yet is the DELIVERY of its terminal signals, which only its own ``finished`` can
+        stand behind (queued after them, from the same thread).
+        """
         # The work bar comes down here and not on ``finished_ok``, for the reason the console pair
         # below is closed here: this slot fires on ok, failed and STOPPED alike, and a bar that is
         # only taken down on success is a bar left running over a dead run.
         self._clear_progress_if_idle()
         if _explore.operator_busy(self._worker, self._retired):
             return                       # another operator run is still draining — wait for it
-        # No operator run is in flight now — clear the activity header. end() is a no-op if it was
-        # already cleared, so a failed/stopped run that never reached here does not leave it stuck.
-        self._activity.end("operator-run")
-        # ...and close the console's started/done pair. This fires on ok, failed and STOPPED alike,
-        # which is why the pair is closed here and not on finished_ok: an action that starts and
-        # then says nothing is indistinguishable from one still running, and a stopped run is
-        # exactly the case that would have gone quiet. A run that landed nothing is reported as a
-        # failure however politely the engine returned.
-        action = getattr(self, "_run_action", None)
-        if action is not None:
-            self._run_action = None
-            elapsed = time.monotonic() - getattr(self, "_run_began", time.monotonic())
-            landed = getattr(self._worker, "landed", None)
-            if landed == 0:
-                self.log.failed(action, f"produced nothing after {elapsed:.1f} s",
-                                address=self._run_address)
-            else:
-                self.log.done(action, elapsed, address=self._run_address)
-            self._close_requester_pair(landed, elapsed)
-        self._run_tab_key = self._run_view_tab_key = None
+        if not getattr(worker, "IS_PREVIEW", False):
+            # No operator run is in flight now — clear the activity header. end() is a no-op if it
+            # was already cleared, so a failed/stopped run that never reached here does not leave
+            # it stuck.
+            self._activity.end("operator-run")
+            # ...and close the console's started/done pair. This fires on ok, failed and STOPPED
+            # alike, which is why the pair is closed here and not on finished_ok: an action that
+            # starts and then says nothing is indistinguishable from one still running, and a
+            # stopped run is exactly the case that would have gone quiet. A run that landed nothing
+            # is reported as a failure however politely the engine returned.
+            action = getattr(self, "_run_action", None)
+            if action is not None:
+                self._run_action = None
+                elapsed = time.monotonic() - getattr(self, "_run_began", time.monotonic())
+                landed = getattr(self._worker, "landed", None)
+                if landed == 0:
+                    self.log.failed(action, f"produced nothing after {elapsed:.1f} s",
+                                    address=self._run_address)
+                else:
+                    self.log.done(action, elapsed, address=self._run_address)
+                self._close_requester_pair(landed, elapsed)
+            self._run_tab_key = self._run_view_tab_key = None
         # A genuine drain: every worker has exited AND (finished being FIFO-queued after this
         # worker's tileReady/streamEnded) their terminal slots have already run on this thread.
         # Bump BEFORE the pending-resync branch so a run with no deferred switch still counts.
@@ -4550,6 +4567,9 @@ class PlateWindow(QMainWindow):
         # QThread.finished (not finished_ok): it fires for a FAILED or STOPPED run too, and a tab
         # switch deferred during any of those still has to be delivered. _retire only disconnects
         # the worker's own signals, so this survives a stop.
+        # Connected bare, so the slot is entered with ``worker=None`` — "the RUN's own thread
+        # exited", which is the one drain allowed to close the run's books. Only ``_retire`` names
+        # the thread, because only there can it be the superseded raw preview.
         self._worker.finished.connect(self._on_run_drained)
         # Announce the run to the activity registry the log panel's header reads. Keyed
         # "operator-run" (re-entrant by key: a new run replaces the old entry rather than stacking).
@@ -5406,7 +5426,11 @@ class PlateWindow(QMainWindow):
             # _busy() counts EVERY retired thread (the raw preview included), so a deferred tab
             # switch can only be delivered once the last one exits — hook them all, not just the
             # operator run, or the resync waits for an event that never comes.
-            w.finished.connect(self._on_run_drained)
+            # WHICH thread exited is passed on, because the slot needs it: a retired RAW PREVIEW
+            # exiting mid-run must deliver a deferred re-sync WITHOUT closing the run's books (see
+            # _on_run_drained). Hooking them all and then treating them all alike is what made the
+            # run's outcome depend on when the superseded preview happened to stop.
+            w.finished.connect(lambda w=w: self._on_run_drained(w))
 
     def _stop_worker(self):
         self._retire(self._worker)
