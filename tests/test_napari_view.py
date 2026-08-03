@@ -416,6 +416,123 @@ def test_add_mosaic_places_the_layer_in_stage_micrometres(layers):
     assert tuple(lyr.translate) == pytest.approx((0.0, 0.0))
 
 
+# ------------------------------------------- what a window open COSTS to put on screen
+#
+# The three tests below are one claim in three parts: opening a region window must pull each
+# channel's mosaic ONCE, not four times. They are counting tests, not timing tests (ADR-0001),
+# and they are here rather than in a benchmark because the cost is not incidental — it is decided
+# by the ORDER of the calls in `add_mosaic`, which is exactly the sort of thing a later edit
+# rearranges without noticing.
+
+
+def _pyramid(nz=10, pulls=None):
+    """A lazy ``(z, y, x)`` pyramid built EXACTLY as ``fuse_region_pyramid`` builds one — one dask
+    block per z, per level — whose blocks record the z index when they are computed.
+
+    Same construction as the real thing (``da.from_delayed`` per z, concatenated on axis 0) so the
+    count this yields is the count of whole-region fuses a real open would pay. A plain ndarray
+    would count nothing: napari would slice it for free and the test would pass on a viewer that
+    fetches every plane.
+    """
+    import dask.array as da
+    from dask import delayed
+
+    pulls = [] if pulls is None else pulls
+    levels = []
+    for side in (64, 32):
+        def _block(z, side=side):
+            pulls.append(int(z))
+            return np.full((side, side), 100 + int(z) * 7, dtype=np.uint16)
+
+        levels.append(da.concatenate(
+            [da.from_delayed(delayed(_block)(z), shape=(side, side), dtype=np.uint16)[None, ...]
+             for z in range(nz)], axis=0))
+    return levels, pulls
+
+
+def test_the_contrast_seed_samples_the_plane_napari_shows(layers):
+    """The seed and the display must be the SAME plane, or the window describes one the user is
+    not looking at — and pays a whole extra fuse of the region to get it.
+
+    They disagreed. ``sample_plane`` took ``nz // 2`` while napari centres its slider on
+    ``(nz - 1) // 2`` of the world range, so on an even stack the seed came from plane 5 and the
+    canvas showed plane 4. Invisible on screen (both are in-focus middle planes) and 27 extra
+    whole-frame decodes per channel on the real 10x region.
+
+    Driven through a REAL ``ViewerModel`` rather than by restating napari's centring arithmetic:
+    the claim is about what napari does, so napari has to be the one asked. If a future napari
+    centres differently, this fails instead of the cost quietly returning.
+    """
+    from squidmip._contrast import opening_z
+
+    for nz in (10, 9, 2):
+        mdl = MosaicLayers(type(layers._model)())
+        data, _pulls = _pyramid(nz=nz)
+        mdl.add_mosaic("raw", "488", data, multiscale=True,
+                       bbox_um=(0.0, 0.0, 640.0, 640.0), z_scale_um=1.5)
+
+        assert mdl._model.dims.current_step[0] == opening_z(nz), (
+            f"nz={nz}: napari displays plane {mdl._model.dims.current_step[0]} but the contrast "
+            f"seed samples plane {opening_z(nz)}")
+
+
+def test_adding_a_placed_mosaic_pulls_two_z_not_four(layers):
+    """The whole point of the change, stated as the number of region fuses an open costs.
+
+    Measured on the real acquisition (manual0, 27 FOVs, 4 channels, nz=10) before this: FOUR
+    whole-region decode passes per channel — the seed's z, napari's first slice at z=0, napari's
+    centred slice, and a fourth because ``_place`` assigned ``layer.scale`` AFTER the layer
+    existed, which moved the dims range and moved the slider again. 432 frame decodes for a window
+    that needs 216.
+
+    Two remain and only one is avoidable here: napari's ``Image`` slices itself at point 0 in its
+    own constructor, before the viewer's dims can be consulted. That one is NOT fixed and is not
+    fixable from outside napari.
+    """
+    from squidmip._contrast import opening_z
+
+    data, pulls = _pyramid(nz=10)
+    layers.add_mosaic("raw", "488", data, multiscale=True,
+                      bbox_um=(0.0, 0.0, 640.0, 640.0), z_scale_um=1.5)
+
+    assert set(pulls) == {0, opening_z(10)}, (
+        f"a mosaic add materialised planes {sorted(set(pulls))}; every plane beyond "
+        f"{{0, {opening_z(10)}}} is a whole region decoded and thrown away")
+
+
+def test_placing_at_construction_puts_the_layer_exactly_where_placing_it_after_would(layers):
+    """The saving must not move the picture. ``placement_for`` is now used twice — once as
+    ``add_image`` kwargs and once by ``_place`` — and two placement rules that disagree is the
+    defect ``_place``'s docstring exists to prevent.
+
+    Units are asserted too: they used to be set inside ``_place``, and a layer that skips ``_place``
+    would otherwise lose its µm scale-bar labels with nothing on screen to say so.
+    """
+    # (x0, y0, x1, y1) = 640 µm square over a 64 px level 0, so 10 µm/px on both displayed axes,
+    # translate (y0, x0) after the flip, and 1.5 µm on the z axis in front of both.
+    data, _pulls = _pyramid(nz=6)
+    lyr = layers.add_mosaic("raw", "488", data, multiscale=True,
+                            bbox_um=(100.0, 20.0, 740.0, 660.0), z_scale_um=1.5)
+
+    assert tuple(lyr.scale) == pytest.approx((1.5, 10.0, 10.0))
+    assert tuple(lyr.translate) == pytest.approx((0.0, 20.0, 100.0))
+    assert [str(u) for u in lyr.units] == ["micrometer"] * 3, (
+        "a layer placed at construction lost the micrometre axis labels the scale bar reads")
+
+
+def test_a_bbox_the_placement_rule_refuses_is_still_refused(layers):
+    """Placement moved into the ``add_image`` call, and moving WHERE a rule runs must not change
+    WHETHER it runs. A degenerate box raised out of ``add_mosaic`` before this change (``_place``
+    let ``scale_translate_from_bbox_um`` through) and must still: a mosaic that silently lands
+    unplaced sits at scale 1 in a µm world, which looks like a rendering bug and reports as one.
+
+    The ``except`` in ``add_mosaic`` only declines to place EARLY; ``_place`` is what then raises.
+    """
+    with pytest.raises(ValueError):
+        layers.add_mosaic("raw", "488", _img(shape=(64, 64)),
+                          bbox_um=(10.0, 10.0, 10.0, 50.0))
+
+
 # ----------------------------------------------------------------- replacement
 
 

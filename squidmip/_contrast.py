@@ -112,8 +112,30 @@ def dtype_range(dtype: Any) -> tuple[float, float]:
     return 0.0, 65535.0
 
 
+def opening_z(n_planes: int) -> int:
+    """The z index a window opens on, and the z a contrast window is derived from. ONE rule.
+
+    MIDDLE z, not z=0: the first plane of a z-stack is routinely out of focus, and a window
+    derived from an out-of-focus plane is derived from blur.
+
+    ``(n - 1) // 2``, which is NAPARI'S centring rule, not a second opinion about what "middle"
+    means. napari centres its dimension slider on ``int((stop - start) / (2 * step))`` of the world
+    range, and for a stack of *n* planes at any z scale that is ``(n - 1) // 2``. This function
+    used to be an inline ``n // 2`` inside :func:`sample_plane`, one greater on an even stack, and
+    the two disagreed in the only way that matters on screen: the contrast seed described plane 5
+    while the viewer displayed plane 4. It was invisible -- both are in-focus middle planes -- and
+    it cost a WHOLE extra fuse of the region per channel, because a plane nobody displays still has
+    to be read to be sampled.
+
+    Guarded by ``tests/test_napari_view.py::test_the_contrast_seed_samples_the_plane_napari_shows``,
+    which drives a real napari model rather than restating this arithmetic. If napari ever centres
+    differently, that test fails instead of the cost quietly coming back.
+    """
+    return max(0, (int(n_planes) - 1) // 2)
+
+
 def sample_plane(levels: Any) -> Optional[np.ndarray]:
-    """The cheapest representative plane to derive a window from: coarsest level, middle z.
+    """The cheapest representative plane to derive a window from: coarsest level, opening z.
 
     The stitcher reads ``pyramid[-1]`` (the smallest level), middle T, then middle Z, precisely so
     that computing a window costs nothing against a lazy store. We have the same pyramid, so we
@@ -121,8 +143,8 @@ def sample_plane(levels: Any) -> Optional[np.ndarray]:
     5731x4793, i.e. ~36x fewer pixels, and it is the level napari is already fetching to draw the
     layer thumbnail.
 
-    MIDDLE z, not z=0: the first plane of a z-stack is routinely out of focus, and a window
-    derived from an out-of-focus plane is derived from blur.
+    The z is :func:`opening_z`, which is also the z the viewer is parked on, so this sample is the
+    plane the user is actually shown and its fuse is the fuse the display needs anyway.
 
     Accepts a level list (multiscale) or a single array, and returns None if nothing usable is
     there -- a caller must not have to sniff which shape it was handed.
@@ -132,5 +154,6 @@ def sample_plane(levels: Any) -> Optional[np.ndarray]:
     arr = levels[-1] if isinstance(levels, (list, tuple)) else levels
     if arr is None:
         return None
-    a = np.asarray(arr[arr.shape[0] // 2]) if getattr(arr, "ndim", 0) == 3 else np.asarray(arr)
+    a = np.asarray(arr[opening_z(arr.shape[0])]) if getattr(arr, "ndim", 0) == 3 \
+        else np.asarray(arr)
     return a if a.size else None
