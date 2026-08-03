@@ -165,3 +165,79 @@ class TestRawPushCarriesVoxelSize:
             assert level0.shape[0] == n_z, (
                 f"{op}/{channel} declared {level0.shape[0]} planes, not {n_z}")
         shutdown_plate_window(qapp, win)
+
+
+class TestThe3DPopoutDoesNotPileUp:
+    """Julio: "consider changing the 3D interaction so clicking 3D reuses the current window
+    instead of opening an extra one".
+
+    Every 3D click used to construct a fresh ``napari.Viewer`` (``_napari3d.py:268``, ``:366``) and
+    the window only remembered the LATEST, so the earlier ones stayed on screen: napari keeps every
+    Viewer in a global set, so dropping our reference closes nothing. That is a window pile from an
+    ordinary gesture, and it is the same family as the open window-lifetime ticket.
+    """
+
+    def test_a_second_3D_click_CLOSES_the_first_popout(
+        self, qapp, stub_detail, napari_pane_stub, squid_dataset, monkeypatch  # noqa: F811
+    ):
+        """MUTATION: assign self._native3d directly instead of going through
+        _replace_native3d -> the first popout is never closed -> red."""
+        import squidmip._napari3d as napari3d
+
+        class _FakeViewer:
+            def __init__(self):
+                self.closed = False
+
+            def close(self):
+                self.closed = True
+
+        opened = []
+        monkeypatch.setattr(
+            napari3d, "open_native_3d_volume",
+            lambda volumes, **kw: opened.append(_FakeViewer()) or opened[-1])
+
+        root, _ = squid_dataset
+        win = V.PlateWindow(None)
+        win.ingest(str(root))
+        w = _open_window(win, win._order)
+        pane = napari_pane_stub[-1]
+        _wait_for_layers(qapp, pane)
+
+        w._render_roi_volume(pane.mosaic, {}, {})
+        w._render_roi_volume(pane.mosaic, {}, {})
+
+        assert len(opened) == 2, f"the second 3D click opened nothing: {pane.said}"
+        assert opened[0].closed, "the first 3D popout was left on screen"
+        assert not opened[1].closed, "the popout the user just asked for was closed"
+        assert w._native3d is opened[1]
+        shutdown_plate_window(qapp, win)
+
+    def test_a_popout_that_REFUSES_to_close_does_not_block_the_new_one(
+        self, qapp, stub_detail, napari_pane_stub, squid_dataset, monkeypatch  # noqa: F811
+    ):
+        """A stale window whose close() raises (already destroyed, no Qt window) must not be the
+        reason the user cannot open the view they asked for."""
+        import squidmip._napari3d as napari3d
+
+        class _StuckViewer:
+            def close(self):
+                raise RuntimeError("wrapped C/C++ object has been deleted")
+
+        opened = []
+        monkeypatch.setattr(
+            napari3d, "open_native_3d_volume",
+            lambda volumes, **kw: opened.append(_StuckViewer()) or opened[-1])
+
+        root, _ = squid_dataset
+        win = V.PlateWindow(None)
+        win.ingest(str(root))
+        w = _open_window(win, win._order)
+        pane = napari_pane_stub[-1]
+        _wait_for_layers(qapp, pane)
+
+        w._render_roi_volume(pane.mosaic, {}, {})
+        w._render_roi_volume(pane.mosaic, {}, {})
+
+        assert len(opened) == 2, f"a stuck popout blocked the new one: {pane.said}"
+        assert w._native3d is opened[1]
+        shutdown_plate_window(qapp, win)

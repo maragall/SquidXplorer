@@ -20,6 +20,35 @@ logger, and this module attaches a handler to it. The consequence is the point:
 That is the same property Julio asked for on the data model — "plug and play different algos" —
 applied to the thing the user watches.
 
+...EXCEPT THAT THE STITCHER DOES NOT, AND "every serious library uses logging" WAS WRONG
+----------------------------------------------------------------------------------------
+The paragraph above is the design and it still holds; the assumption underneath it did not survive
+contact with the library this app orchestrates most. ``tilefusion`` HAS module loggers
+(``registration.py:28``, ``optimization.py:29``, …) but reserves them for warnings and debug. Every
+line that says what a run is DOING is a bare ``print()``: "Parallel registration: N pairs in M
+batches…" (``registration.py:274``), "WARNING: N disconnected tile groups…"
+(``optimization.py:254``), "Distortion correction: fit N seams…" (``distortion.py:245``), "Using
+chunked mode…" (``fusion.py:358``). ``maragall/stitcher``'s own GUI sees them because it swaps
+``sys.stdout`` for a shim that re-emits each line as a progress signal (``gui/app.py:580``). We
+attached to the root logger and therefore saw NONE of them, which is exactly the report "stitcher
+logger not showing the same logs as maragall/stitcher".
+
+:func:`capture_stdout_to_log` is the missing half: while a run is in flight, ``print`` becomes an
+INFO record and joins everything else on the bus. It is scoped to the RUN, not to a thread, because
+the work does not stay on one thread — ``stitch_plate`` submits each region to a pool
+(``_stitch.py:863``), so every tilefusion print happens somewhere other than where the run was
+started, and a thread-scoped switch would have captured nothing at all. Attribution is honest: the
+records are named :data:`STDOUT_LOGGER`, OUTSIDE ``squid.xplorer``, because a line tilefusion
+printed is not a line we logged — the rule at :func:`format_console` ("an unattributed log line is
+a rumour") cuts both ways.
+
+What it deliberately does NOT capture is ``stderr``, and therefore ``tqdm``. tilefusion drives
+progress bars through tqdm (``registration.py:311``, ``:343``), which repaints the same line tens
+to hundreds of times a second. maragall/stitcher captures them and re-renders them as "{desc}:
+{n}/{total}"; a bounded 2000-line panel that also holds the plate run's own lines cannot afford
+that, and a progress bar that arrives as a thousand separate log lines is the firehose that teaches
+a user to stop reading the panel.
+
 BOUNDED, BECAUSE EVERYTHING HERE IS BOUNDED
 -------------------------------------------
 A log that grows without limit is a memory leak with a nice UI. A plate run emits one line per
@@ -76,10 +105,12 @@ under THEIR formatter rather than requiring ours, and the record still carries `
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import sys
 import threading
 import time
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 
 #: Lines retained in the view. ~200 KB of text at typical line lengths — enough to scroll back
 #: through a long run, small enough that it can never be the reason we run out of memory.
@@ -265,6 +296,119 @@ class ViewLog(logging.LoggerAdapter):
 
 def _extra(address: Any) -> dict:
     return {} if address is None else {ADDRESS_FIELD: address}
+
+
+# --------------------------------------------------------------------------------------
+# print() -> logging. See the "…EXCEPT THAT THE STITCHER DOES NOT" section of the module
+# docstring for why this exists at all.
+# --------------------------------------------------------------------------------------
+
+#: Logger name carrying captured ``print`` output. NOT under :data:`XPLORER_ROOT`: these lines were
+#: printed by a library we are orchestrating, and claiming them as ours would be a false
+#: attribution. It is a top-level name so a user who wants them gone can say
+#: ``logging.getLogger("stdout").setLevel(logging.WARNING)`` without touching anything else.
+STDOUT_LOGGER = "stdout"
+
+#: Line prefixes that carry no information: tilefusion frames its section headers with rules of
+#: "=" and "-" (``core.py:1162``). maragall/stitcher's own shim drops exactly these
+#: (``gui/app.py:589-591``), so the panel and the stitcher's log agree on what a line IS.
+_DECORATION_PREFIXES = ("=", "-")
+
+#: Per-thread PARTIAL LINE. Only the buffer is thread-local; whether capture is on is not. A run's
+#: work does not stay on the thread that started it — ``stitch_plate`` submits each region to a
+#: ``ThreadPoolExecutor`` (``_stitch.py:863``) and every tilefusion ``print`` therefore happens on a
+#: POOL thread, so a thread-scoped switch would have captured exactly nothing. The buffer stays
+#: per-thread so two regions in flight cannot splice half-lines into each other.
+_capture_state = threading.local()
+
+#: Guards the ``sys.stdout`` swap, its refcount, and the active logger across threads.
+_install_lock = threading.Lock()
+_install_count = 0
+_capture_logger: Optional[logging.Logger] = None
+
+
+class _StdoutToLog:
+    """The ``sys.stdout`` stand-in: a logger while a run is in flight, a passthrough otherwise.
+
+    ``print`` calls ``write`` once per fragment and again for the newline, so writes are buffered
+    per thread and emitted only on a completed line — otherwise one print becomes two log records,
+    the second of which is empty.
+    """
+
+    def __init__(self, stream) -> None:
+        self._stream = stream
+
+    #: The real stream this wraps. Named so :func:`capture_stdout_to_log` can tell "already
+    #: installed" from "someone else replaced sys.stdout while we were running".
+    @property
+    def wrapped(self):
+        return self._stream
+
+    def write(self, s) -> int:
+        logger = _capture_logger
+        if logger is None:
+            return self._stream.write(s)
+        text = getattr(_capture_state, "buf", "") + str(s)
+        lines = text.split("\n")
+        _capture_state.buf = lines.pop()            # the tail has no newline yet
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith(_DECORATION_PREFIXES):
+                continue
+            # "%s" with an argument, never an f-string: a captured line containing a stray "%d"
+            # must not be treated as a format spec by a downstream formatter.
+            logger.info("%s", line)
+        return len(str(s))
+
+    def flush(self) -> None:
+        # Do NOT flush a partial captured line into the log: half a sentence on its own row reads
+        # as a truncated message. It joins the next write, or is dropped at the end of the run.
+        if _capture_logger is None:
+            self._stream.flush()
+
+    def __getattr__(self, name):
+        # isatty/encoding/fileno/… — anything we do not override belongs to the real stream. Note
+        # this leaves isatty() truthful, so a library that checks it still behaves as it would in a
+        # terminal; we are changing where the text goes, not pretending it is a pipe.
+        return getattr(self._stream, name)
+
+
+@contextlib.contextmanager
+def capture_stdout_to_log(logger_name: str = STDOUT_LOGGER) -> Iterator[None]:
+    """While this is open, ``print`` becomes an INFO record on *logger_name*.
+
+    Scope is the PROCESS for the duration, not the calling thread, because the work does not stay
+    on the calling thread (see :data:`_capture_state`). That is also what ``maragall/stitcher``
+    does — its ``FusionWorker`` assigns ``sys.stdout`` outright for the length of a run
+    (``gui/app.py:600``) — so both applications answer "what did the stitcher say" the same way.
+    The cost is that OUR own stray ``print`` during a run lands in the panel too. That is the right
+    outcome: a print in a GUI process goes to a terminal nobody is watching, and the panel is the
+    place a user can actually see it.
+
+    Nesting is counted, not stacked: an inner use is a no-op and the stream is restored when the
+    outermost one ends.
+    """
+    global _install_count, _capture_logger
+
+    with _install_lock:
+        if not isinstance(sys.stdout, _StdoutToLog):
+            sys.stdout = _StdoutToLog(sys.stdout)
+        if _install_count == 0:
+            _capture_logger = logging.getLogger(logger_name)
+        _install_count += 1
+    try:
+        yield
+    finally:
+        with _install_lock:
+            _install_count -= 1
+            # Only the LAST capture restores, and only if sys.stdout is still the object we put
+            # there — pytest's capsys and napari both swap stdout, and stamping our saved stream
+            # over theirs would silence them for the rest of the process.
+            if _install_count <= 0:
+                _install_count = 0
+                _capture_logger = None
+                if isinstance(sys.stdout, _StdoutToLog):
+                    sys.stdout = sys.stdout.wrapped
 
 
 class _QtBridgeHandler(logging.Handler):

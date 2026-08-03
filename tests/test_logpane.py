@@ -11,12 +11,15 @@ breaks the code that called it, and the history is bounded.
 from __future__ import annotations
 
 import logging
+import sys
 
 import pytest
 
 from squidmip._logpane import (
     MAX_LINES,
+    STDOUT_LOGGER,
     LogBus,
+    capture_stdout_to_log,
     color_for,
     format_record,
 )
@@ -168,3 +171,94 @@ def test_levels_are_visually_distinct_but_INFO_does_not_shout():
     assert color_for("WARNING") != color_for("INFO")
     assert color_for("CRITICAL") == color_for("ERROR")
     assert color_for("something-unknown") == color_for("INFO")
+
+
+# ---------------------------------------------------------------------------------------
+# print() -> logging: the stitcher's own progress lines
+# ---------------------------------------------------------------------------------------
+
+
+def test_a_LIBRARYS_PRINT_reaches_the_panel(bus):
+    """The reported defect: "stitcher logger not showing the same logs as maragall/stitcher".
+
+    tilefusion keeps its module loggers for warnings and says what it is DOING with bare print
+    (registration.py:274, optimization.py:254, distortion.py:245). The bus is on the root logger,
+    so those lines could never reach it. maragall/stitcher's GUI sees them only because it swaps
+    sys.stdout (gui/app.py:580); this is our half of the same trade.
+    """
+    seen = []
+    bus.subscribe(lambda level, line, full=None: seen.append(line))
+    bus.install()
+
+    with capture_stdout_to_log():
+        print("Parallel registration: 12 pairs in 3 batches")
+
+    assert any("Parallel registration: 12 pairs" in ln for ln in seen), seen
+    # ATTRIBUTED, and attributed HONESTLY: the line is not ours, so it is not named as ours.
+    assert any(f"{STDOUT_LOGGER}:" in ln for ln in seen), seen
+
+
+def test_capture_survives_the_THREAD_POOL_the_work_actually_runs_on(bus):
+    """The reason this is run-scoped and not thread-scoped.
+
+    stitch_plate submits each region to a ThreadPoolExecutor (_stitch.py:863), so every tilefusion
+    print happens on a POOL thread rather than on the worker that opened the capture. A
+    thread-local switch would have captured exactly nothing, which is the bug this pins.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    seen = []
+    bus.subscribe(lambda level, line, full=None: seen.append(line))
+    bus.install()
+
+    with capture_stdout_to_log():
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            list(pool.map(lambda i: print(f"region {i} fused"), range(2)))
+
+    assert sum("fused" in ln for ln in seen) == 2, seen
+
+
+def test_print_goes_back_to_the_TERMINAL_when_the_run_ends(bus, capsys):
+    """A GUI capture that outlives its run would silence the CLI for the life of the process."""
+    seen = []
+    bus.subscribe(lambda level, line, full=None: seen.append(line))
+    bus.install()
+
+    before = sys.stdout
+    with capture_stdout_to_log():
+        print("during the run")
+    assert sys.stdout is before, "sys.stdout was not handed back"
+
+    print("after the run")
+    assert any("during the run" in ln for ln in seen), seen
+    assert not any("after the run" in ln for ln in seen), "capture outlived its run"
+    assert "after the run" in capsys.readouterr().out
+
+
+def test_decoration_and_blank_lines_are_DROPPED(bus):
+    """tilefusion frames its sections with rules of '=' (core.py:1162). A bounded 2000-line panel
+    spends its budget on facts, and maragall/stitcher's own shim drops exactly these
+    (gui/app.py:589-591), so both logs agree on what a line IS."""
+    seen = []
+    bus.subscribe(lambda level, line, full=None: seen.append(line))
+    bus.install()
+
+    with capture_stdout_to_log():
+        print("=" * 60)
+        print("")
+        print("   ")
+        print("Fusing tiles...")
+
+    assert sum("Fusing tiles" in ln for ln in seen) == 1
+    assert not any("======" in ln for ln in seen), seen
+
+
+def test_nesting_restores_only_ONCE(bus):
+    """_coordinate_region calls stitch_region, and a saved run wraps a preview's machinery, so the
+    capture nests. An inner exit that restored the stream would silence the rest of the run."""
+    before = sys.stdout
+    with capture_stdout_to_log():
+        with capture_stdout_to_log():
+            pass
+        assert sys.stdout is not before, "the inner exit tore down the outer capture"
+    assert sys.stdout is before

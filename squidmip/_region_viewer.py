@@ -395,7 +395,7 @@ class RegionViewer(QMainWindow):
         self._pane = None
         self._slider = None
         self._cursor = None
-        self._native3d = None      # keeps a spawned 3D popout viewer alive
+        self._native3d = None      # THE 3D popout of this window; see _replace_native3d
         self._spot_worker = None   # nuclei detection (Cellpose) on this view's MIP, off-thread
         self._focus_worker = None  # Tenengrad reference-plane autofocus, off-thread
         # OPERATOR CONTROLS AT EACH LEVEL (the deck: "Operators for this window"; Julio, 2026-07-23:
@@ -651,7 +651,9 @@ class RegionViewer(QMainWindow):
         # which exceeds the GPU texture and renders blocky). 2D just keeps the mosaic. No embedded
         # 3D toggle, no separate "native" button -- one behaviour, so the cases don't explode.
         self._btn_3d = self._chip("3D", "Open this view in 3D at NATIVE resolution (the region if it "
-                                  "fits the GPU texture, else draw an ROI to pick the spot).",
+                                  "fits the GPU texture, else draw an ROI to pick the spot). "
+                                  "Replaces this window's previous 3D view rather than adding "
+                                  "another window.",
                                   self._open_3d)
         # Tenengrad autofocus, back on the slider (Julio): jump this window's z-slider to the
         # sharpest plane of the current region's centre FOV. The worker lived under the removed
@@ -1683,6 +1685,41 @@ class RegionViewer(QMainWindow):
                 best, best_d = int(f), d
         return best
 
+    def _replace_native3d(self, open_it) -> None:
+        """ONE 3D popout per window: close the one this window already has, then open the new one.
+
+        Julio: "consider changing the 3D interaction so clicking 3D reuses the current window
+        instead of opening an extra one". Each 3D click used to construct a fresh ``napari.Viewer``
+        (``_napari3d.py:268`` and ``:366``) and only the LATEST was remembered here, so five clicks
+        left five top-level windows on screen -- and napari holds every Viewer in a global set
+        (see ``_napari3d._wire_close_to_release_memory``), so dropping our reference never closed
+        anything. This is the reason that pile grows.
+
+        This is REPLACEMENT, not in-place reuse. The stronger reading -- click 3D and flip THIS
+        window's embedded pane to ``ndisplay=3`` -- is not available, and deliberately so: the
+        pane's layers are the FUSED PYRAMID, whose level 0 is already capped to ``_MAX_FUSED_PX``
+        (``_mosaic_source.py:123``), while 3D reads a NATIVE z-stack straight from the reader. That
+        is the "still downsampled" bug ``_open_3d``'s own docstring names below. The in-place
+        toggle does exist as its own control -- napari's ndisplay button, lifted into the pane at
+        ``_napari_pane.py:223`` and wired to ``render_max_res_3d`` -- and shows the coarse volume,
+        which is exactly why the 3D chip is a separate action.
+
+        Closing FIRST rather than after also matters on a big volume: two native stacks resident at
+        once is the memory spike ``_wire_close_to_release_memory`` was written to avoid.
+
+        Failure to close is swallowed by design: a stale popout that will not go away must not stop
+        the new one from opening, and *open_it* raising is the caller's to report by name.
+        """
+        old, self._native3d = self._native3d, None
+        if old is not None:
+            close = getattr(old, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:                    # noqa: BLE001 - already-closed / no Qt window
+                    pass
+        self._native3d = open_it()
+
     def _open_3d(self) -> None:
         """3D = THIS view at NATIVE resolution, read STRAIGHT FROM THE READER (gallery-view recipe).
 
@@ -1732,11 +1769,11 @@ class RegionViewer(QMainWindow):
         from squidmip._napari3d import open_native_3d
 
         try:
-            self._native3d = open_native_3d(
+            self._replace_native3d(lambda: open_native_3d(
                 self._reader, self._meta, region, fov=fov,
                 contrast_by_channel=contrast_by or None,
                 colormap_by_channel=colormap_by or None,
-            )
+            ))
         except Exception as exc:                     # noqa: BLE001 - named to the window, never silent
             self._say(f"3D could not open: {exc}")
 
@@ -1763,14 +1800,14 @@ class RegionViewer(QMainWindow):
         except Exception:                                # noqa: BLE001
             pass
         try:
-            self._native3d = open_native_3d_volume(
+            self._replace_native3d(lambda: open_native_3d_volume(
                 {n: np.asarray(v) for n, v in volumes.items()},
                 scale=(dz, px, px),
                 title=f"3D ROI — {self._region_label(self._regions)}",
                 contrast_by_channel=contrast_by or None,
                 colormap_by_channel=colormap_by or None,
                 max_texture=max_tex,
-            )
+            ))
         except Exception as exc:                         # noqa: BLE001 - named to the window
             self._say(f"ROI 3D could not open: {exc}")
 
@@ -1804,14 +1841,14 @@ class RegionViewer(QMainWindow):
         dz = z_step_um(self._meta or {}, px, where="3D ROI volume")
 
         try:
-            self._native3d = open_native_3d_volume(
+            self._replace_native3d(lambda: open_native_3d_volume(
                 {n: np.asarray(v) for n, v in volumes.items()},
                 scale=(dz, px, px),
                 title=f"3D ROI — {self._region_label(self._regions)}",
                 contrast_by_channel=contrast_by or None,
                 colormap_by_channel=colormap_by or None,
                 max_texture=max_tex,
-            )
+            ))
         except Exception as exc:                         # noqa: BLE001 - named to the window
             self._say(f"ROI 3D could not open: {exc}")
 
