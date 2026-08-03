@@ -45,6 +45,7 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
+from squidmip import _measure
 from squidmip._time_point import TimePointBar
 from squidmip._address import Address, Extent
 from squidmip._logpane import ViewLog, get_logger
@@ -375,6 +376,11 @@ class RegionViewer(QMainWindow):
     #: ``operator_*`` callbacks are called by the plate on whatever window asked, including one a
     #: test built without the row.
     _op_progress: Any = None
+    #: The :class:`squidmip._measure.WindowOpen` clock for THIS window's open, set by
+    #: ``ViewerManager._spawn`` because the clock starts before the window exists. Same class-default
+    #: rule: ``_on_plane`` and ``_on_done`` are slots and fire on windows a test built directly,
+    #: which never went through ``_spawn`` and so are honestly unmeasured rather than broken.
+    open_clock: Any = None
 
     def __init__(
         self,
@@ -1788,6 +1794,14 @@ class RegionViewer(QMainWindow):
             bbox_um=add_bbox,
             z_scale_um=(self._meta or {}).get("dz_um"),
         )
+        # FIRST PAINT stops here, one line after the layer is actually in the pane, for the same
+        # reason the operator metric stops in _on_tile rather than where the worker emits: what is
+        # being measured is what the user saw, and a queue delay between those two is the thing
+        # being looked for. The clock keeps the FIRST report and drops the rest, so the second
+        # channel of this region -- and every later region this window navigates to -- needs no
+        # "have I done this already" flag here.
+        if self.open_clock is not None:
+            self.open_clock.first_layer()
 
     def _on_done(self, region: str, n: int) -> None:
         pane = self._pane
@@ -1795,6 +1809,8 @@ class RegionViewer(QMainWindow):
             return
         if n == 0:
             pane.say(f"{region}: no mosaic could be built (see the message above).")
+            if self.open_clock is not None:
+                self.open_clock.finish(_measure.FAILED, f"{region}: no mosaic could be built")
             self._frame_done()
             return
         pane.say("")
@@ -1810,6 +1826,11 @@ class RegionViewer(QMainWindow):
         # Seed this window's settings ONCE, now that the layers exist. For an ROI child that is the
         # parent's contrast, so the child looks like the window it was cut out of.
         self._apply_settings_once()
+        # The open is OVER: every channel of the first region is in the pane. Idempotent, so the
+        # second region this window loads does not record a second open -- what is being measured is
+        # opening a window, not changing region inside one.
+        if self.open_clock is not None:
+            self.open_clock.finish()
         self._frame_done()
 
     def _frame_done(self) -> None:
@@ -2317,6 +2338,17 @@ class ViewerManager(QObject):
             return None
         wid = self._next_id
         self._next_id += 1
+        # THE WINDOW-OPEN CLOCK starts HERE, before the window is built, because building the napari
+        # pane is time the user waits: a clock started after the constructor would measure
+        # everything except the part Julio complained about ("If we can speed up window loading
+        # time, that would be good"). It stops in _on_plane, the interface-thread handler that adds
+        # the first mosaic layer -- not in the worker that produced it, because the gap between
+        # those two is queue delay and queue delay is the suspect.
+        n = len(regions)
+        clock = _measure.WindowOpen(
+            f"{'ROI in ' if roi_bbox is not None else ''}{n} region{'' if n == 1 else 's'}: "
+            f"{RegionViewer._region_label(regions)}",
+            n_targets=n)
         baseline = self._baseline_for(parent_id)
         if luts is not None:
             baseline["luts"] = luts          # an explicit LUT set beats the derived one
@@ -2326,6 +2358,7 @@ class ViewerManager(QObject):
             operator_specs=self.operator_specs, run_operator=self.run_operator,
             parent_id=parent_id, settings=ViewSettings(baseline),
         )
+        win.open_clock = clock
         win.closed.connect(self._on_window_closed)
         self._windows[wid] = win
         self._focused_id = wid
@@ -2440,6 +2473,13 @@ class ViewerManager(QObject):
         self.viewFocused.emit([])                        # nothing raised -> clear the plate wash
 
     def _on_window_closed(self, win: "RegionViewer") -> None:
+        # A window closed before its mosaic ever landed is a wait somebody GAVE UP ON, which is the
+        # most interesting open there is and the one that would otherwise leave no record at all.
+        # No-op on a window that already loaded: WindowOpen.finish is idempotent and the first call
+        # is the true one.
+        clock = getattr(win, "open_clock", None)
+        if clock is not None:
+            clock.finish(_measure.STOPPED, "closed before its mosaic landed")
         wid = getattr(win, "window_id", -1)
         self._windows.pop(wid, None)
         if self._focused_id == wid:
