@@ -3499,7 +3499,8 @@ def test_closing_mid_export_disconnects_the_worker(qapp, stub_detail, squid_data
 #   test_a_real_shift_drag_fills_pane3_without_moving_a_single_divider
 #
 # The three-pane layout is gone. `self._split` is now the compact top ROW of the portrait deck and
-# holds exactly TWO widgets (`OpenViewList` | `_left_tabs`); there is no `_explore_col` at all, the
+# holds exactly TWO widgets (`OpenViewList` | `_right_col`, the latter a vertical splitter of
+# `_left_tabs` over the log panel since the 2026-08-03 restack); there is no `_explore_col`, the
 # central pane was deleted, and the log moved into its own top-level window. `_explore_pane` /
 # `_explore_empty` are still CONSTRUCTED but are never parented into any layout, so nothing in them
 # is on screen — which is why the geometry these three measured is no longer measurable rather

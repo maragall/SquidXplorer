@@ -305,17 +305,22 @@ def _signal_names(cls) -> tuple:
     return tuple(out)
 
 
-#: Height of the top strip when you are working the plate: the plate is the star, and a fixed cap
-#: stops the operator cards' size hint ballooning it into the "super thick" top that squashed the
-#: plate (Julio).
-_TOP_ROW_COMPACT_PX = 240
-
-#: ...and its height while the Log tab is in front. A console you cannot read is not a console: 240
-#: px is about ten lines, which is a status light rather than a log. When you deliberately select
-#: the Log tab you are reading it, not watching the plate, so the strip earns more room and gives it
-#: straight back when you leave. This is the layout half of the same fix as `format_console`, which
-#: shortened the LINE; this shortens the number of lines you have to scroll.
-_TOP_ROW_READING_PX = 520
+#: Height of the top strip. A fixed cap stops the operator cards' size hint ballooning it into the
+#: "super thick" top that squashed the plate (Julio).
+#:
+#: 240 -> 520 ON 2026-08-03, because the strip now holds TWO stacked panels instead of one tab at a
+#: time. Julio: "I think that we should modify the layout of our main window", with a drawing that
+#: puts Operator above Log, both visible at once. 240 px was sized for one tab; split two ways it
+#: leaves the log about five lines, which is a status light and not a log. There used to be a second
+#: constant, `_TOP_ROW_READING_PX = 520`, that `_sync_top_row_height` swapped in while the Log TAB
+#: was in front; the reading height is now the only height, and that mechanism is gone with the tab
+#: it keyed on. See `_right_col`: the Operator/Log boundary is a QSplitter handle, so the user drags
+#: rather than the app guessing.
+#:
+#: THE COST, STATED: the plate loses 280 px of the 850 px design height. That is the trade this
+#: number is, and reversing it is this one literal. The splitter above the plate means the user can
+#: also take it back by dragging.
+_TOP_ROW_COMPACT_PX = 520
 
 
 # Pane 3's identity and label rules live in ``_explore`` (no Qt, no napari), and are re-exported
@@ -708,18 +713,29 @@ class PlateWindow(QMainWindow):
         self._left_tabs.addTab(self._build_process_pane(), "Operators")
         self._left_tabs.tabBar().setTabButton(0, QTabBar.RightSide, None)  # home tab isn't closable
 
-        # THE ONE GLOBAL CONSOLE, AS A FIXED TAB (Task 1, 2026-07-29). It was a separate top-level
+        # THE ONE GLOBAL CONSOLE, STACKED UNDER THE OPERATORS RATHER THAN BEHIND THEM.
+        #
+        # 2026-07-29 Task 1 made it a FIXED TAB of `_left_tabs`. It had been a separate top-level
         # QMainWindow; Spencer logged that it "opens over the main window" on every launch, and the
-        # fix is not to position it but to stop it being a window. Julio: "making the logger global
-        # will force you to abstract the data layers cleanly" — a floating window per app is not
-        # what makes it global, ONE console printing every window's actions with an address is, and
-        # a fixed tab beside the operators is where the user already is. Fixed = never closable and
-        # never detachable: a console you can lose is not a console, and _FIXED_TABS below is what
-        # the close/detach paths check.
+        # fix chosen was not to position it but to stop it being a window. That decision was about
+        # WINDOW vs NOT-WINDOW. Tab vs stacked panel was never argued, and the tab bar is the only
+        # reason Operators and Log alternate instead of both being on screen.
+        #
+        # 2026-08-03, Julio, with a drawing: "I think that we should modify the layout of our main
+        # window" — Operator above, Log below, both visible, and the Log gains an option to open in
+        # a new window. So the panel comes OUT of the tab bar and goes into `_right_col`, the
+        # vertical splitter built with the layout further down. It was written for this: its own
+        # docstring calls it "the bottom-right log panel", and its collapse toggle and
+        # setMinimumWidth(0) are the machinery of a panel stacked under something else.
+        #
+        # THE INVARIANT THAT REPLACES `_FIXED_TABS = 2`, and it is what the tests pin: the panel
+        # exists for the life of the window and is reachable from View > Log in EVERY state —
+        # docked, collapsed or floated. What changes is where it is, never whether it is. Floating
+        # RELOCATES the console; nothing destroys it. That is why `_float_log`'s close handler
+        # re-docks instead of routing through `_dispose_tab_widget` the way an operator float does.
         self._log_panel = LogPanel(self._log_bus, self._activity)
         self._log_panel.start()
-        self._left_tabs.addTab(self._log_panel, "Log")
-        self._left_tabs.tabBar().setTabButton(1, QTabBar.RightSide, None)
+        self._log_panel.float_requested.connect(self._float_log)
 
         # PANE 3: the exploration pane. Same _DetachTabs class as the console (one detach seam, not
         # two), but every tab is detachable — it has no permanent home tab to protect.
@@ -891,29 +907,81 @@ class PlateWindow(QMainWindow):
 
         # THE ROOT IS JUST THE PLATE (decentralized, 2026-07-23). The central viewer and the
         # exploration pane are gone from the layout; the plate column IS the window. Selections
-        # open independent napari windows (the Views dock, added below), and the log is the fixed
-        # "Log" tab built with _left_tabs above — Julio: "the logger on the bottom of the GUI".
-        # This replaces the locked 3-pane grid that Spencer asked us to dismantle.
+        # open independent napari windows (the Views dock, added below), and the log sits UNDER the
+        # operators in `_right_col` — Julio: "the logger on the bottom of the GUI". This replaces
+        # the locked 3-pane grid that Spencer asked us to dismantle.
 
         # THE DECK LAYOUT (2026-07-23 image): ONE COMPACT PORTRAIT (h>w) window — a top row of two
-        # small panels [Open View list | Operators (bulk)] over a big Wellplate view below. NOT OS
+        # small panels [Open View list | Operators over Log] over a big Wellplate view below. NOT OS
         # docks spread across a wide window (that was wrong): the deck is a single tidy rectangle.
         from squidmip._region_viewer import OpenViewList
         self._open_views = OpenViewList(self._viewer_manager, self)
+
+        # THE RIGHT COLUMN IS A VERTICAL SPLIT: Operator on top, Log beneath (Julio's 2026-08-03
+        # drawing). Both visible at once, which is the whole request; the tab bar that made them
+        # alternate now carries only the Operators home tab and the user's detachable operator tabs.
+        #
+        # A SPLITTER, not a fixed 50/50 layout, for two reasons. The plate pays 280 px for this
+        # strip (see _TOP_ROW_COMPACT_PX) and a handle is how the user takes some of that back. And
+        # it is the drag affordance `_sync_top_row_height` existed to AVOID needing: that method
+        # grew the strip while the Log TAB was in front and shrank it afterwards, inferring intent
+        # from a tab selection. There is no tab selection now, and an automatic height swap would
+        # fight a user who has just dragged the boundary where they want it. It is deleted, not
+        # adapted.
+        #
+        # setChildrenCollapsible(False) IS THE INVARIANT IN CODE: a splitter will happily let you
+        # drag a child to zero, and a console dragged to zero is a console you have lost — exactly
+        # what `_FIXED_TABS` was protecting when the log was a tab. The pressure valve is the
+        # panel's own collapse toggle (`▸ Log`), which drops it to its header and hands the space
+        # to the operators without ever taking the console off screen.
+        right_col = QSplitter(Qt.Vertical)
+        right_col.setStyleSheet("QSplitter{background:#0b0e14;}"
+                                "QSplitter::handle{background:#232b3a;height:1px;}")
+        right_col.setHandleWidth(6)
+        right_col.setChildrenCollapsible(False)
+        right_col.addWidget(self._left_tabs)    # Operator, on top
+        right_col.addWidget(self._log_panel)    # Log, beneath
+        right_col.setStretchFactor(0, 3)
+        right_col.setStretchFactor(1, 2)
+        right_col.setSizes([300, 190])          # ~7 operator cards visible; ~14 log lines
+        self._right_col = right_col
 
         top_row = QSplitter(Qt.Horizontal)
         top_row.setStyleSheet("QSplitter{background:#0b0e14;}"
                               "QSplitter::handle{background:#232b3a;width:1px;}")
         top_row.addWidget(self._open_views)     # top-left: "Open View list 'selectable'"
-        top_row.addWidget(self._left_tabs)      # top-right: "Operators (bulk) to selection"
-        top_row.setSizes([280, 280])
+        top_row.addWidget(right_col)            # top-right: Operators over the one global console
+        # 280/280 -> 230/360. The navigator's contents are a tree of short window titles plus two
+        # buttons; the operator cards are the widget actually starved of width, and _qtstyle.py
+        # records that every blurb elides in the ~300 px it gets. Splitter sizes are hints, so this
+        # is a default and not a constraint.
+        top_row.setSizes([230, 360])
         top_row.setHandleWidth(6)
-        # The top row is a COMPACT strip — the plate is the star, not these two small panels. A
-        # fixed max height stops the operator cards' size hint from ballooning it into the "super
-        # thick" top that squashed the plate. Its OWN panels scroll inside this height.
-        top_row.setMaximumHeight(_TOP_ROW_COMPACT_PX)
         top_row.setMinimumHeight(150)
-        self._top_row = top_row     # _on_tab_changed grows it while the console is being read
+        self._top_row = top_row
+
+        # THE CAP GOES ON A PLAIN HOST, NOT ON THE SPLITTER, AND THAT IS A BUG FIX.
+        #
+        # `top_row.setMaximumHeight(_TOP_ROW_COMPACT_PX)` was here and DID NOT WORK.
+        # QSplitterPrivate::recalc calls setMaximumSize() on the splitter itself out of its
+        # children's maximums every time a child is added or its geometry changes, so it overwrites
+        # any cap set from outside. MEASURED on 83c486c, offscreen, a 596x850 window:
+        # `_top_row.maximumHeight()` reads 16777215 (QWIDGETSIZE_MAX) and the strip renders 479 px
+        # tall, not 240. The only thing that ever re-applied the cap was `_sync_top_row_height`
+        # firing on `currentChanged` — and the next recalc dropped it again.
+        #
+        # So the "compact strip, the plate is the star" rule has been decorative for some time, and
+        # deleting `_sync_top_row_height` would have removed the last thing touching it. A plain
+        # QWidget does not rewrite its own maximum, so the cap holds here for real. Its OWN panels
+        # scroll inside this height, which is what the original comment promised.
+        top_row_host = QWidget()
+        _th = QVBoxLayout(top_row_host)
+        _th.setContentsMargins(0, 0, 0, 0)
+        _th.setSpacing(0)
+        _th.addWidget(top_row)
+        top_row_host.setMaximumHeight(_TOP_ROW_COMPACT_PX)
+        top_row_host.setMinimumHeight(150)
+        self._top_row_host = top_row_host
 
         root = QWidget()
         root.setStyleSheet(f"background:{_BG};")
@@ -959,7 +1027,7 @@ class PlateWindow(QMainWindow):
         body.setStretchFactor(1, 2)
         self._body = body
 
-        rv.addWidget(top_row, 0)                # compact strip, keeps its height
+        rv.addWidget(top_row_host, 0)           # compact strip, keeps its height (capped for real)
         rv.addWidget(body, 1)                   # the Wellplate view + pane 3 fill the rest
         rv.addWidget(self._time_point_bar, 0)   # hidden unless n_t > 1
         self._split = top_row
@@ -998,13 +1066,21 @@ class PlateWindow(QMainWindow):
         self.setMinimumSize(420, 520)
         self.resize(*self._default_root_size())
 
-        # The console is a tab now, so the View menu RAISES it rather than toggling a window. Not
-        # checkable: there is no state to toggle, and a menu item that can hide the one global
-        # console would put the app back where Spencer found it.
+        # The View menu RAISES the console rather than toggling it. NEITHER action is checkable:
+        # there is no state to toggle, and a menu item that can HIDE the one global console would
+        # put the app back where Spencer found it. This menu is the other half of the invariant in
+        # `show_log` — the console is reachable from here whether it is docked, collapsed or
+        # floated, which is what makes "you cannot lose it" survive the log becoming floatable.
         view_menu = self.menuBar().addMenu("&View")
         self._log_act = QAction("&Log", self)
         self._log_act.triggered.connect(self.show_log)
         view_menu.addAction(self._log_act)
+        # Julio's drawing: "Log (option to open in a new window)". The panel's header carries the
+        # same gesture as a ⧉ button; this is the discoverable duplicate, and it doubles as the way
+        # back if the float is somehow off-screen (it raises rather than building a second).
+        self._log_float_act = QAction("Log in a &New Window", self)
+        self._log_float_act.triggered.connect(self._float_log)
+        view_menu.addAction(self._log_float_act)
 
         self.setAcceptDrops(True)
         if initial_path:
@@ -1303,21 +1379,93 @@ class PlateWindow(QMainWindow):
             self._sync_explore_pane()
         tabs.setCurrentWidget(w)
 
-    #: How many tabs at the head of the process console are FIXED: [0] Operators, [1] Log. They
-    #: cannot close and cannot detach, so their indices never move and a plain `index < _FIXED_TABS`
-    #: is a sound test. The log is fixed because it is THE one global console (Task 1): a console
-    #: the user can close is a console that is missing when the thing worth reading happens.
-    _FIXED_TABS = 2
+    #: How many tabs at the head of the process console are FIXED: [0] Operators. It cannot close
+    #: and cannot detach, so the indices above it never move and a plain `index < _FIXED_TABS` is a
+    #: sound test. It was 2 while the Log was tab [1]; the Log is now a sibling panel in
+    #: `_right_col` and is protected by being always on screen instead of by this counter. Note
+    #: `_DetachTabBar(first_detachable=1)` already agreed with 1.
+    _FIXED_TABS = 1
+
+    #: Registry key for the floated log in `_floating`. Not an entry in `_op_tabs`: the log is not
+    #: an operator UI and must never be routed through `_dispose_tab_widget`, which deletes.
+    _LOG_FLOAT_KEY = "__log__"
 
     def show_log(self) -> None:
-        """Bring the one global console to the front. The View menu's action, and the call any
-        code should make instead of reaching for a window that no longer exists."""
+        """Bring the one global console to the front, wherever it currently is.
+
+        THE INVARIANT: the panel exists for the life of the window and is reachable from View > Log
+        in every state — docked, collapsed or floated. This is the method that makes that true, so
+        it has to answer for all three:
+
+        * floated  -> raise and activate its window;
+        * collapsed -> expand it;
+        * docked   -> make sure the strip is showing it (it always is: it is a splitter child that
+          cannot be collapsed to zero).
+
+        It used to end in ``_left_tabs.setCurrentWidget(panel)``, which was the whole of it while
+        the log was a tab. There is no tab to select now.
+        """
         panel = getattr(self, "_log_panel", None)
         if panel is None:
             return
+        return
+
+    # -- the console in a window of its own (Julio: "Log (option to open in a new window)") --------
+    def _float_log(self):
+        """Open the one global console in its own window, and give it back on Re-dock.
+
+        THIS PARTLY REVERSES 2026-07-29 Task 1, deliberately, and the difference is the whole
+        justification. The `_log_window` that was deleted was constructed and shown on EVERY
+        launch, which is why Spencer saw it "open over the main window" every time. This is a user
+        gesture on an always-present panel: docked by default, a window only when asked for.
+
+        It reuses `_FloatWindow` rather than hand-rolling a second float, which matters: the old
+        `_log_window` was one of the four widgets handed a Python-owned Fusion QStyle that ~QWidget
+        then unpolished after GC (the segfault pinned by tests/test_window_lifetime.py), and
+        `_FloatWindow` explicitly refuses that style for that reason (_qt_tabs.py:94-97). The
+        hazard is fixed AT THE SEAM a new float uses, not merely absent.
+
+        Its close handler RE-DOCKS. An operator float's close disposes the widget through
+        `_dispose_tab_widget`; doing that to the console would delete a live sink on the
+        process-wide root logger and lose it for good, which is the one outcome that would make
+        this the wrong call.
+        """
+        panel = getattr(self, "_log_panel", None)
+        if panel is None:
+            return None
+        win = self._floating.get(self._LOG_FLOAT_KEY)
+        if win is not None:                     # already out: raise it, never build a second
+            win.raise_()
+            win.activateWindow()
+            return win
         if panel.collapsed:
-            panel.set_collapsed(False)
-        self._left_tabs.setCurrentWidget(panel)
+            panel.set_collapsed(False)          # a floated console that shows only its header is a
+                                                # window with nothing in it
+        key = self._LOG_FLOAT_KEY
+        win = _FloatWindow("Log", panel,
+                           on_close=lambda *_: self._redock_log(),
+                           on_redock=lambda *_: self._redock_log())
+        win._home_tabs = None                   # it has no tab bar to go home to; _redock_log knows
+        self._floating[key] = win
+        win.show()
+        return win
+
+    def _redock_log(self):
+        """Put the console back in `_right_col`, under the operators. Idempotent."""
+        win = self._floating.pop(self._LOG_FLOAT_KEY, None)
+        if win is None:
+            return
+        panel = win.take_content()              # the SAME widget: the log's scrollback survives
+        win.close()
+        win.deleteLater()
+        if panel is None:
+            return
+        col = getattr(self, "_right_col", None)
+        if col is None:                         # no layout to return to (never in a built window)
+            return
+        col.addWidget(panel)                    # index 1: _left_tabs is still index 0
+        panel.setVisible(True)
+        col.setSizes([300, 190])
 
     def _close_op_tab(self, index: int, tabs=None):
         tabs = self._left_tabs if tabs is None else tabs
@@ -1683,25 +1831,13 @@ class PlateWindow(QMainWindow):
         if self._reader is not None:
             self._return_to_raw()
 
-    def _sync_top_row_height(self) -> None:
-        """Give the top strip room while the Log tab is in front, and take it back afterwards.
-
-        The strip is capped at ``_TOP_ROW_COMPACT_PX`` because the plate is the star. But the one
-        global console lives in that strip now, and 240 px is roughly ten lines, which is a status
-        light rather than a log. Selecting the Log tab is the user saying they are reading it, so it
-        earns ``_TOP_ROW_READING_PX`` for as long as that is true.
-
-        Deliberately not a remembered setting and not a drag handle. It follows the tab, so there is
-        no state to get stuck in a shape the user did not ask for, which is the failure mode the
-        placement-mode indicator elsewhere guards against for the same reason.
-        """
-        row = getattr(self, "_top_row", None)
-        tabs = getattr(self, "_left_tabs", None)
-        panel = getattr(self, "_log_panel", None)
-        if row is None or tabs is None or panel is None:
-            return
-        reading_log = tabs.currentWidget() is panel
-        row.setMaximumHeight(_TOP_ROW_READING_PX if reading_log else _TOP_ROW_COMPACT_PX)
+    # `_sync_top_row_height` WAS HERE, and it is deleted rather than adapted (2026-08-03). It swung
+    # the strip's cap between 240 and 520 px while the Log TAB was in front, inferring "the user is
+    # reading the console" from a tab selection. The log is no longer a tab, so there is nothing
+    # left to read the intent from — and its own docstring said it was "deliberately not a
+    # remembered setting and not a drag handle", which is precisely what `_right_col`'s splitter
+    # handle now is. 520 is the single cap (see `_TOP_ROW_COMPACT_PX`) and the boundary between
+    # Operator and Log is dragged, not guessed.
 
     def _on_tab_changed(self, index: int = -1, force: bool = False):
         """The plate + detail follow the ACTIVE tab (IMA-205).
@@ -1715,8 +1851,9 @@ class PlateWindow(QMainWindow):
         dropping it is what left the front tab lying about what the viewer shows (BUG 2), because
         nothing re-emits ``currentChanged`` when the run later drains.
 
-        It also sizes the top strip: see ``_sync_top_row_height``. Reading the console and working
-        the plate want different amounts of room, and the tab you selected says which you are doing.
+        It used to size the top strip too (``_sync_top_row_height``, deleted 2026-08-03): the Log
+        was a tab, so the tab you selected said whether you were reading the console or working the
+        plate. Both are on screen at once now and the boundary is a splitter handle.
 
         ``force=True`` re-runs the sync from ``_on_run_drained`` even when there is no outgoing
         exploration tab to park — after a mid-run tab close there ISN'T one, and that is precisely
@@ -1726,7 +1863,6 @@ class PlateWindow(QMainWindow):
         viewer. Computed frames pushed via register_array are in-memory and do not survive the
         switch; we re-register the subset's RAW plane paths (cheap — paths only) so the pane shows
         real imagery rather than black. Re-run the operator in the tab to recompute its frames."""
-        self._sync_top_row_height()
         if self._reader is None or self._overview is None or self._tabs_muted:
             return
         if _explore.operator_busy(self._worker, self._retired):
@@ -5073,6 +5209,18 @@ class PlateWindow(QMainWindow):
         ov = getattr(self, "_overview", None)
         if ov is not None:
             ov.clear_tile_source()   # joins the tile fetcher; a live QThread blocks a clean exit
+        # The console float first, and NOT through the loop below: that loop disposes each float's
+        # content, and disposing the log panel would delete a widget `panel.stop()` is about to be
+        # called on. Re-docking returns it to `_right_col`, where it is destroyed with the window
+        # like any other child. It is a no-op when the log is not floated.
+        #
+        # NOTE for to-do/2026-08-03-window-lifetime-design.md, which has not decided whether child
+        # windows outlive the plate: floats are ALREADY swept here, unlike RegionViewers, so the log
+        # float lands on the safe side today by construction. If that document later chooses
+        # "windows are peers that outlive the plate", the log float must be explicitly excluded —
+        # the panel is a live sink on the process-wide root logger and the bus is uninstalled a few
+        # lines below, so a surviving log window would be a console attached to nothing.
+        self._redock_log()
         for key in list(self._floating):   # floated tabs are top-levels of their own — Qt won't
             win = self._floating.pop(key)  # close them for us, and each may hold a live shell
             w = win.take_content()
