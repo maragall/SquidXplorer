@@ -136,6 +136,46 @@ def operator_layer_key(op_key: str, tab_key: Optional[str]) -> str:
     return f"{op_key}@{tab_key}" if tab_key else op_key
 
 
+def operator_name(layer_key: str) -> str:
+    """The REGISTRY name behind a layer key: ``"spot@tab2"`` -> ``"spot"``, ``"mip"`` -> ``"mip"``.
+
+    The exact inverse of :func:`operator_layer_key`, and it lives beside it so the ``@`` rule has
+    ONE spelling. Needed because everything downstream of a run holds the LAYER key
+    (``PlateWindow._active_op_key``), while anything that wants to read the operator's own
+    declaration -- ``projector_produces``, ``projector_consumes``, ``available_region_operators``
+    -- has to ask the registry, and the registry has never heard of ``"spot@tab2"``.
+
+    That mismatch was already live: ``_on_result`` builds its accumulator with
+    ``region_operator=(op in available_region_operators())`` off the layer key, so a stitch run
+    scoped to an exploration tab looked like a per-FOV operator to the accumulator. Splitting here
+    fixes both callers with one rule rather than two ``split("@")`` calls that can drift.
+    """
+    return str(layer_key).split("@", 1)[0]
+
+
+def result_kind(layer_key: str) -> str:
+    """What an operator's pixels MEAN, for a caller holding a LAYER key: ``"intensity"``/``"labels"``.
+
+    :func:`operator_name` then the engine's own ``produces`` declaration. Three cases answer
+    ``"intensity"`` without the registry having heard of the key, and each is a real one rather
+    than a defensive shrug:
+
+    * a REGION operator (``stitch``, ``coordinate``) — that table has no ``produces`` column
+      because every entry in it fuses a mosaic out of the acquisition's own pixels;
+    * ``"computed"``, the pseudo-key the reopened-plate path sets, whose pixels are a written
+      plate's;
+    * ``"raw"``, the preview.
+
+    A key that is none of those and is not registered is still ``"intensity"``, which is what this
+    app produced down every path before result kinds existed -- the same "absent means the old
+    guarantee" rule the plate contract applies to an unstamped store.
+    """
+    from squidmip._engine import _PROJECTORS
+
+    op = _PROJECTORS.get(operator_name(layer_key))
+    return op.produces if op is not None else "intensity"
+
+
 def runnable_operators() -> list[str]:
     """Every operator ``run_operator`` can stream live (IMA-226) — read off the ENGINE registry,
     never off ``_OPERATIONS``.

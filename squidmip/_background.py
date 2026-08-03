@@ -285,6 +285,11 @@ def bgsub_op(
         add_projector("bgsub_tight", bgsub_op(BackgroundParams(radius_px=20)))
 
     The returned callable carries ``consumes = frozenset()``, so z survives at full depth.
+
+    A second registry entry is no longer the only way to change ``radius_px``: an entry can declare
+    its own ``params`` and be run at a different value (``_engine.Param``, ``Operator.bind``).
+    ``bgsub`` has not been migrated -- doing so is a one-line change to its registration below and
+    is deliberately left for whoever needs it, rather than done speculatively.
     """
     params = params or DEFAULT_PARAMS
 

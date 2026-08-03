@@ -1060,22 +1060,24 @@ def write_plate(
     # seam "Run on the whole plate" would quietly fuse with the pipeline defaults while the
     # panel still showed the settings that were tuned on the preview, and nothing would say so.
     #
-    # A PROJECTOR has no equivalent seam -- its parameters are baked in when it is registered
-    # (`add_projector("decon_sharp", decon_op(iterations=25))`), so project_plate has nowhere
-    # to put them. Refuse by name rather than accept-and-drop.
-    if operator_kwargs and not region_operator:
-        raise ValueError(
-            f"operator_kwargs={sorted(operator_kwargs)} was passed for projector {projector!r}, "
-            "which is not a region operator. project_plate takes no per-run operator "
-            "parameters -- a projector is parameterised when it is REGISTERED "
-            "(add_projector(name, decon_op(iterations=...))). Register a named variant instead."
-        )
+    # A PROJECTOR now has the same seam. It used to have none -- its parameters were baked in when
+    # it was registered (`add_projector("decon_sharp", decon_op(iterations=25))`), so this function
+    # refused `operator_kwargs` for a projector BY NAME rather than accept-and-drop. That refusal
+    # was correct for what the table could then express and is gone because the table changed: an
+    # `Operator` declares its own `params` and `Operator.bind` applies them, so project_plate has
+    # somewhere to put them. An operator that declares NONE still refuses, but now the refusal
+    # comes from that operator's own declaration instead of from a rule about which table it is in.
+    if not region_operator and operator_kwargs:
+        from squidmip._engine import bind_projector
+
+        bind_projector(projector, operator_kwargs)   # refuse BEFORE any directory is made
     if region_operator:
         stream = stitch_plate(reader, n_fovs=None, workers=1, operator=projector,
                               on_error=on_error, regions=regions, **(operator_kwargs or {}))
     else:
         stream = project_plate(reader, n_fovs=n_fovs, workers=workers, projector=projector,
-                               on_error=on_error, regions=regions)
+                               on_error=on_error, regions=regions,
+                               operator_kwargs=operator_kwargs)
     return write_from_stream(metadata, stream, out_dir, n_fovs=n_fovs, tiff=tiff, on_well=on_well,
                              write_workers=write_workers, stop=stop, regions=regions,
                              check_disk=check_disk, disk_headroom=disk_headroom,

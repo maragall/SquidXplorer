@@ -101,13 +101,13 @@ FOV attached, so a region that cannot be segmented SAYS SO BY NAME.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import Callable, Iterable, Optional
 
 import numpy as np
 
-from squidmip._engine import add_projector
-from squidmip.projection import plane_op
+from squidmip._engine import Param, add_projector
+from squidmip.projection import labels_op, plane_op
 
 # The layer key the UI files this operator's results under, so the registry and the UI cannot
 # drift apart on the spelling (same discipline as _background.LAYER_KEY).
@@ -467,12 +467,18 @@ def skimage_watershed(plane: np.ndarray, params: SpotParams, *,
 
 def spots_op(params: Optional[SpotParams] = None, *,
              algorithm: str = DEFAULT_SEGMENTER) -> Callable[[Iterable[np.ndarray]], np.ndarray]:
-    """Build the engine-facing **plane-op**: plane -> label image, ready for ``add_projector``::
+    """Build the engine-facing **plane-op**: plane -> label image.
 
-        add_projector("spot_tight", spots_op(SpotParams(min_area_px=80)))
-        add_projector("cellpose", spots_op(algorithm="cellpose"))   # once registered
+    This is the FACTORY behind a registry entry, not the registration itself. It used to be called
+    at registration time with a frozen parameter set — ``add_projector("spot_tight",
+    spots_op(SpotParams(min_area_px=80)))`` — i.e. one registry entry per parameter set. It is now
+    reached through :func:`segmentation_operator`, so ONE entry takes its numbers at run time::
 
-    The returned callable carries ``consumes = frozenset()``, so z survives at full depth.
+        project_plate(reader, projector="spot", operator_kwargs={"min_area_px": 80})
+
+    The returned callable carries ``consumes = frozenset()`` (z survives at full depth) and
+    ``produces = "labels"`` (the pixels are object ids, so the delivery path builds a napari
+    Labels layer rather than windowing them as fluorescence).
 
     *algorithm* is resolved LAZILY, inside the call, on purpose: registering a Cellpose operator
     must not import cellpose (or claim a GPU) at ``import squidmip`` time, and a plate run that
@@ -503,7 +509,12 @@ def spots_op(params: Optional[SpotParams] = None, *,
     _spots.__name__ = (f"spot({algorithm},sigma_px={params.sigma_px},"
                        f"min_area_px={params.min_area_px},"
                        f"split_touching={params.split_touching})")
-    return plane_op(_spots)
+    # TWO declarations on one callable. `plane_op` stamps consumes=frozenset() (z survives);
+    # `labels_op` stamps produces="labels" (the pixels are OBJECT IDS, not light). The second one
+    # is what stops the delivery path handing a segmentation to `add_image`, where the fluorescence
+    # auto-window treats label 37 as 37 photons and the mask renders as a near-black gradient with
+    # an opaque background over the mosaic it is supposed to annotate.
+    return labels_op(plane_op(_spots))
 
 
 # ---------------------------------------------------------------------------------------------
@@ -524,7 +535,11 @@ add_segmenter(
 # should trump this"). Registered here unconditionally so it is always listed; it becomes the
 # default only when its package is importable (see ``preferred_segmenter``). The registration is
 # in _cellpose.py so the heavyweight adapter stays out of this module's import path.
-from squidmip._cellpose import SEGMENTER_NAME as _CELLPOSE, register as _register_cellpose
+from squidmip._cellpose import (
+    SEGMENTER_NAME as _CELLPOSE,
+    register as _register_cellpose,
+    register_operator as _register_cellpose_operator,
+)
 
 _register_cellpose()
 
@@ -540,6 +555,54 @@ def preferred_segmenter() -> str:
     ok, _why = segmenter_available(_CELLPOSE)
     return _CELLPOSE if ok else DEFAULT_SEGMENTER
 
+#: The engine parameters a segmentation operator declares, derived from :class:`SpotParams` so the
+#: dataclass stays the ONE place the knobs and their defaults are written down. Adding a field to
+#: ``SpotParams`` adds it to every registered segmentation operator with no second edit; spelling
+#: them out here again is how the two would drift.
+_SPOT_PARAM_BLURBS: dict[str, str] = {
+    "sigma_px": "Gaussian denoise radius, in pixels, before thresholding.",
+    "min_area_px": "Objects smaller than this many pixels are noise, not cells.",
+    "min_distance_px": "Closest two nuclei centres may be, in pixels. Cellpose reads twice this "
+                       "as the expected nucleus diameter.",
+    "split_touching": "Split touching nuclei with the distance-transform watershed.",
+}
+SPOT_PARAMS: tuple[Param, ...] = tuple(
+    Param(f.name, f.default, _SPOT_PARAM_BLURBS.get(f.name, ""))
+    for f in fields(SpotParams)
+)
+
+
+def segmentation_operator(algorithm: str) -> Callable[..., Callable]:
+    """The FACTORY an ``add_projector`` entry registers for *algorithm*.
+
+    ``add_projector(name, factory, params=SPOT_PARAMS)`` calls this with the declared defaults to
+    build the entry's default binding, and calls it again with a run's ``operator_kwargs``. So
+    ``spot`` and ``cellpose`` are one entry each that can be RUN at a different ``min_area_px``,
+    rather than the ``add_projector("spot_tight", spots_op(SpotParams(min_area_px=80)))`` this
+    module's own docstring used to recommend — which is one registry entry per parameter set, and
+    is how a table of eight operators becomes a table of forty.
+
+    *algorithm* is closed over rather than declared as a parameter, deliberately: it names WHICH
+    OPERATOR this is (``spot`` is the traditional recipe, ``cellpose`` is the model), and an
+    operator that can be re-pointed at a different algorithm at run time would make the layer key,
+    the console line and the cache recipe all describe something other than what ran.
+    """
+    def _build(**kwargs) -> Callable:
+        return spots_op(SpotParams(**kwargs), algorithm=algorithm)
+
+    _build.__name__ = f"spots_op[{algorithm}]"
+    return _build
+
+
 # The whole engine registration: one call, no engine edit. `spot` is now a peer of mip / bgsub /
 # decon / flatfield in the SAME table, and therefore appears in `runnable_operators()` for free.
-add_projector(LAYER_KEY, spots_op())
+#
+# It now declares TWO more things about itself, and both are read by generic code that has never
+# heard of spot detection: `produces="labels"` (inferred off the callable, stamped by `labels_op`
+# in `spots_op`) picks the napari layer type, and `params=SPOT_PARAMS` lets one entry be run at a
+# different min_area_px instead of needing a second entry.
+add_projector(LAYER_KEY, segmentation_operator(DEFAULT_SEGMENTER), params=SPOT_PARAMS)
+
+# ...and Cellpose, the SECOND consumer of the same two declarations. Two consumers is the point:
+# one is a hypothetical seam. See `_cellpose.register_operator`.
+_register_cellpose_operator()

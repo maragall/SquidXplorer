@@ -204,7 +204,7 @@ from squidmip._workers import (  # noqa: F401 (re-exports)
 # `operator_label` and `runnable_operators`; it can point at `_operations` directly now, and should.
 from squidmip._operations import (  # noqa: F401 (re-exports)
     _OPERATIONS, _OPERATIONS_BY_KEY, _SAVE_OPERATOR, _TO_BE_ADDED, Operation, _action_label,
-    operator_label, operator_layer_key, runnable_operators,
+    operator_label, operator_layer_key, operator_name, result_kind, runnable_operators,
 )
 
 # Chrome (colours, stylesheets, palette) is defined ONCE in `squidmip._qtstyle` and aliased here
@@ -4739,7 +4739,10 @@ class PlateWindow(QMainWindow):
 
             acc = RegionResultAccumulator(
                 op, region, self._meta, [c["name"] for c in self._meta["channels"]],
-                region_operator=(op in available_region_operators()),
+                # The REGISTRY name, not the layer key: a run scoped to an exploration tab files
+                # under "stitch@tab2", which is in no registry, so this asked the wrong question
+                # and a scoped stitch was accumulated as if it were a per-FOV operator.
+                region_operator=(operator_name(op) in available_region_operators()),
             )
             accs[str(region)] = acc
         try:
@@ -4804,6 +4807,14 @@ class PlateWindow(QMainWindow):
         a second meaning for it is how the address model starts to drift. Placement is derived by
         each surface from ``mosaic_bbox_um``, the one placement rule that placed raw.
 
+        THE RESULT KIND IS READ HERE, ONCE. ``produces`` is the operator's own declaration
+        (``add_projector(..., produces="labels")``), and this is the single place it is looked up
+        on the display side; from here it rides on the ``Result`` to every sink, so no sink has to
+        take a possibly-scoped layer key apart to ask the registry, and no sink can disagree with
+        another about what an operator's pixels mean. An operator the engine does not know (there
+        is one: the pseudo-key ``"computed"``, set by the reopened-plate path) falls back to
+        intensity, which is what those pixels are.
+
         Returns None, having said why in the readout, when the acquisition cannot declare a pixel
         size: a result that cannot say its own scale is not self-describing, and inventing one is
         exactly the plausible-and-wrong guess this codebase refuses.
@@ -4831,6 +4842,7 @@ class PlateWindow(QMainWindow):
                 Extent(region_id=op_result.region), planes,
                 channels=op_result.channels, z_depth=z_depth,
                 pixel_size_um=float(pixel_size_um), dtype=first.dtype,
+                kind=result_kind(op_result.op),
             )
         except ValueError as exc:
             self._readout.setText(f"result not shown as a layer: {exc}")
@@ -4921,8 +4933,11 @@ class PlateWindow(QMainWindow):
         bbox = mosaic_bbox_um(self._meta, result.region_id)
         dz = (self._meta or {}).get("dz_um")
         for channel in result.channels:
-            pane.mosaic.add_mosaic(
-                op, channel, result.plane(channel),
+            # `add_result`, not `add_mosaic`: the RESULT's own declaration picks the layer type.
+            # A segmentation went down the add_image path here and arrived auto-windowed as if its
+            # label ids were photons.
+            pane.mosaic.add_result(
+                result.kind, op, channel, result.plane(channel),
                 colormap=_colormap_for(channel),
                 bbox_um=bbox,
                 # Only a result that DECLARES depth gets a z scale, the same rule the windows use.

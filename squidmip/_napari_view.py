@@ -834,6 +834,85 @@ class MosaicLayers:
             kwargs["features"] = features
         return self._add_result("add_points", op, channel, data, kwargs, bbox_um, shape)
 
+    # -- THE delivery seam: one operator result -> the layer type its DECLARATION names ---------
+    #
+    # Before this, every operator result reached napari through `add_mosaic`, i.e. through
+    # `add_image`, whatever the pixels meant. `spot` was already shipping a LABEL IMAGE down that
+    # path: integer object ids handed to the fluorescence auto-window (`_auto_window_for`), which
+    # stretched "label 1 .. label 400" as if it were photons and drew an opaque near-black gradient
+    # over the mosaic it was supposed to annotate. `add_labels` existed the whole time, twelve
+    # lines further up this file, and no delivery path called it.
+    #
+    # The cure is a TABLE keyed by the result's declared kind, not a branch. Nothing here knows
+    # what a spot or a cellpose is; it knows "labels" and "intensity", and an operator says which
+    # one it is at registration (`add_projector(..., produces=...)`). A third kind -- a Points
+    # result, a Shapes result -- is one more entry plus one adapter, and no edit to either caller.
+    def _add_intensity(self, op, channel, data, *, colormap, bbox_um, visible, z_scale_um,
+                       multiscale, contrast_limits):
+        """The pixels measure light: an Image layer, windowed, colormapped, blended additively."""
+        return self.add_mosaic(op, channel, data, colormap=colormap, bbox_um=bbox_um,
+                               visible=visible, z_scale_um=z_scale_um, multiscale=multiscale,
+                               contrast_limits=contrast_limits)
+
+    def _add_label_result(self, op, channel, data, *, colormap, bbox_um, visible, z_scale_um,
+                          multiscale, contrast_limits):
+        """The pixels are OBJECT IDS: a Labels layer.
+
+        Four of this adapter's arguments are dropped on purpose, and dropping them is the whole
+        point rather than an omission:
+
+        * ``colormap`` / ``contrast_limits`` — a label VALUE is a name, not a quantity. napari's
+          Labels layer has no ``contrast_limits`` at all, and its colouring is a per-label lookup;
+          handing it a fluorescence window would be meaningless if it were even accepted.
+        * ``multiscale`` — a coarser level of a label image is only correct under nearest-neighbour
+          decimation, and nothing on this path guarantees that. A result arrives as one array here.
+        * ``z_scale_um`` — the operator that produces labels today is a plane-op delivered per
+          plane; there is no z axis on this layer to scale.
+
+        Integer dtype is REQUIRED by napari and is checked here rather than left to raise from
+        inside napari, so the message names the operator whose declaration was wrong.
+        """
+        import numpy as _np
+
+        arr = _np.asarray(data)
+        if not (_np.issubdtype(arr.dtype, _np.integer) or arr.dtype == bool):
+            raise ValueError(
+                f"operator {op!r} declares produces='labels' but its {channel} pixels are "
+                f"{arr.dtype}. A label image is integer object ids; napari's Labels layer rejects "
+                "floats, and a float 'label' cannot be picked or counted.")
+        return self.add_labels(op, channel, arr, bbox_um=bbox_um, visible=visible)
+
+    #: result kind -> the adapter that turns it into a layer. THE dispatch. Extended by adding a
+    #: row, never by adding a branch in a caller.
+    _RESULT_ADDERS: dict = {
+        "intensity": _add_intensity,
+        "labels": _add_label_result,
+    }
+
+    def add_result(self, kind: str, op: str, channel: str, data: Any, *,
+                   colormap: Optional[Any] = None, bbox_um: Optional[Sequence[float]] = None,
+                   visible: bool = True, z_scale_um: Optional[float] = None,
+                   multiscale: Optional[bool] = None,
+                   contrast_limits: Optional[tuple[float, float]] = None) -> Any:
+        """Add one operator result as the layer type its *kind* names.
+
+        *kind* is the operator registry's ``produces`` declaration, carried here on the
+        :class:`squidmip._result.Result`. Every sink calls THIS, so a new result kind lands in the
+        plate pane and in every region window at once instead of in whichever one was edited.
+
+        Raises ``ValueError``, naming the operator, on a kind this viewer cannot draw — an operator
+        that declares something the display does not implement must not fall back to drawing it as
+        an image, which is exactly the failure being fixed.
+        """
+        adder = self._RESULT_ADDERS.get(str(kind))
+        if adder is None:
+            raise ValueError(
+                f"operator {op!r} declares result kind {kind!r}, which this viewer cannot draw; "
+                f"it knows {sorted(self._RESULT_ADDERS)}.")
+        return adder(self, op, channel, data, colormap=colormap, bbox_um=bbox_um, visible=visible,
+                     z_scale_um=z_scale_um, multiscale=multiscale,
+                     contrast_limits=contrast_limits)
+
     def _register_channel(self, channel: str, layer: Any) -> None:
         peers = self._by_channel.setdefault(channel, [])
         peers.append(layer)

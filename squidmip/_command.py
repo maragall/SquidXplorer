@@ -496,13 +496,20 @@ class EngineExecutor:
 
     def do_list_operators(self, cmd: ListOperators) -> CommandResult:
         from squidmip import (available_projectors, available_region_operators,
-                              projector_consumes)
+                              projector_consumes, projector_params, projector_produces)
 
         projectors = available_projectors()
         region_ops = available_region_operators()
+        # Every column here is a DECLARATION read off the registry, never a fact this method
+        # knows about any particular operator -- which is why a new operator appears in `ops list`
+        # fully described with no edit to this file.
         rows = [{"name": n, "kind": "z-reducer" if projector_consumes(n) else "plane-op",
-                 "consumes": sorted(projector_consumes(n))} for n in projectors]
-        rows += [{"name": n, "kind": "region-operator", "consumes": ["fov"]} for n in region_ops]
+                 "consumes": sorted(projector_consumes(n)),
+                 "produces": projector_produces(n),
+                 "params": {p.name: p.default for p in projector_params(n)}}
+                for n in projectors]
+        rows += [{"name": n, "kind": "region-operator", "consumes": ["fov"],
+                  "produces": "intensity", "params": {}} for n in region_ops]
         names = sorted(set(projectors) | set(region_ops))
         return _done(cmd.kind, f"{len(names)} operator(s): {', '.join(names)}",
                      operators=rows, names=names)

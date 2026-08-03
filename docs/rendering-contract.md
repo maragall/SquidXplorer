@@ -85,6 +85,48 @@ selection, or the whole plate). It runs on the View's regions via the CLI engine
 processed result renders under the exact same 2D/3D contract as raw. Operators do not live in the
 windows; they are picked centrally and aimed at a View (Spencer, 2026-07-23).
 
+### Not every result is an image: the operator declares its RESULT KIND
+
+The paragraph above is true of an operator whose pixels measure LIGHT, which was every operator
+until segmentation arrived. A segmenter returns a **label image**: integer object ids, where the
+value is a name and not a quantity. Handing one to `add_image` is not a cosmetic mistake. The
+fluorescence auto-window (`_napari_view._auto_window_for`, background peak to black) stretches
+"label 1 … label 400" as if it were photons, so the mask renders as a near-black gradient, with an
+opaque background covering the mosaic it is supposed to annotate, no label colours and no
+click-to-pick. That is what `spot` did from the day it shipped until 2026-08-03.
+
+The cure is a declaration, not a branch. An operator's registry entry carries `produces`
+(`_engine.Operator`, `projection.INTENSITY` / `projection.LABELS`) exactly as it carries `consumes`:
+
+| `produces` | the pixels are | the layer |
+| --- | --- | --- |
+| `"intensity"` (default) | a measurement of light | napari `Image`, windowed, colormapped, additive |
+| `"labels"` | integer object ids, 0 = background | napari `Labels`, transparent background, no window |
+
+The kind is read ONCE on the display side (`_viewer.PlateWindow._as_result`), rides on the
+`Result`'s `Substance`, and both sinks — the plate's own pane and every open region window — call
+`MosaicLayers.add_result(result.kind, …)`, which dispatches off a TABLE. Nothing in either sink
+knows what a segmentation is.
+
+**The rules this adds to the contract:**
+
+- A result kind is declared by the operator and read by the delivery path. **Never test an
+  operator's name.** `tests/test_operator_declaration.py::test_no_module_branches_on_an_operator_name`
+  checks that over the AST, with a written-down allowlist of the two comparisons that predate it.
+- A kind the viewer cannot draw **raises**, naming the operator. No fallback to `add_image`: a
+  segmentation quietly rendered as fluorescence is the defect, and a fallback is how it comes back.
+- Labels are **never** windowed, never interpolated and never multiscale on this path. A coarser
+  level of a label image is only meaningful under nearest-neighbour decimation, which nothing here
+  guarantees.
+- A label mosaic's ids are **per FOV**, so two nuclei in different FOVs of one region can share an
+  id and therefore a colour. `_op_result` fuses by paste-and-stride (`_mosaic_source
+  .fuse_region_mosaic`), which is correct — it never blends or averages, so no invented label
+  values appear at a seam — but region-wide unique ids need inter-FOV work, which is the
+  `consumes={"fov"}` seam a plane-op structurally cannot reach.
+- A labels result **cannot be written to a plate.** It is a plane-op, so z survives at full depth,
+  and `_output._validate_image` accepts `Z == 1` only. The refusal is loud and is the same one
+  every plane-op has had since IMA-223; nothing about the result kind changes it.
+
 ## The gallery-view bridge (organoids at max res)
 
 To render an organoid at max resolution in 3D with the gallery-view recipe:
