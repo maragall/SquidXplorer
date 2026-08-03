@@ -33,8 +33,10 @@ from qtpy.QtWidgets import (
     QComboBox,
     QFrame,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QMainWindow,
+    QMenu,
     QProgressBar,
     QPushButton,
     QScrollArea,
@@ -98,7 +100,13 @@ class View:
     ``kind`` records the origin so a UI can label it ('window' | 'plate' | 'selection' | 'roi');
     ``window_id`` is set when the View is backed by an open window (else None). Building the tab /
     selector UI over ``PlateWindow.available_views()`` is Spencer's operate-on-views lane; this
-    model + the engine hook (``run_on_view``) is the plumbing under it."""
+    model + the engine hook (``run_on_view``) is the plumbing under it.
+
+    ``name`` carries the window's LABEL WITHOUT the ``[wid]`` bracket (2026-08-03). It used to carry
+    ``windowTitle()``, bracket included, and that was safe only while nothing read it. Now that
+    ``_explore.describe_view_target`` prints it, an id living inside a string field is an id that
+    can drift from ``window_id`` sitting beside it, so the printer composes ``[{window_id}] {name}``
+    from the two fields and neither one spells the other."""
     id: str
     name: str
     regions: tuple
@@ -435,10 +443,22 @@ class RegionViewer(QMainWindow):
         # Name the window by the regions it holds (the deck shows the slider as "<> A1, B6, C3"),
         # not "N regions" — Julio: "'2 regions' is a bad name". Truncate a long list so the title
         # bar stays readable, keeping the count only as an overflow tail.
-        label = title or self._region_label(self._regions)
+        #
+        # THE ID IS NOT THE NAME (Julio, 2026-08-03: "we should be able to rename our windows ...
+        # this might break our logging and data model"). It does not, and the split below is why:
+        # ``window_id`` is the identity and it is immutable, ``_display_name`` is a LABEL and it is
+        # not. Everything functional — the registry, the log prefix, navigator row identity, tree
+        # nesting, contrast inheritance, ``make_default``, the plate's followed-windows set — keys
+        # on the int and never on this string, and nothing anywhere parses a window title. So a
+        # rename moves the label and moves nothing else. The ``[wid]`` prefix is rendered here and
+        # is NOT user-editable: it is the only visible join between a log line ("[3] A1 fov 2 ...",
+        # `_logpane._address_prefix`) and a window on the desktop, and `_address.py`'s naming law
+        # makes that join the point.
+        self._derived_name = title or self._region_label(self._regions)
         if self._roi_bbox is not None:
-            label = f"ROI · {label}"
-        self.setWindowTitle(f"[{self.window_id}] {label}")
+            self._derived_name = f"ROI · {self._derived_name}"
+        self._display_name = self._derived_name
+        self._refresh_title()
         self.setAttribute(Qt.WA_DeleteOnClose, True)
 
         # THE LOGGER FOR THIS WINDOW (Task 1, 2026-07-29). Every line it emits carries two things:
@@ -518,6 +538,34 @@ class RegionViewer(QMainWindow):
         if len(regions) <= limit:
             return ", ".join(regions)
         return ", ".join(regions[:limit]) + f", +{len(regions) - limit}"
+
+    # -- the name, which is not the identity ---------------------------------------------
+    @property
+    def display_name(self) -> str:
+        """The window's LABEL, without the ``[wid]`` bracket. Mutable; the id is not."""
+        return self._display_name
+
+    def _refresh_title(self) -> None:
+        """Render identity + label into the title bar. The ONE place the two are joined."""
+        self.setWindowTitle(f"[{self.window_id}] {self._display_name}")
+
+    def set_display_name(self, name: "Optional[str]") -> bool:
+        """Rename this window. Returns False for a blank name, which is a refusal, not a reset.
+
+        An empty box in the rename dialog means "I changed my mind", so it must not silently wipe
+        the region-derived name a user relies on to tell two windows apart. Passing ``None``
+        explicitly RESTORES the derived name, which is the deliberate undo.
+        """
+        if name is None:
+            self._display_name = self._derived_name
+            self._refresh_title()
+            return True
+        text = str(name).strip()
+        if not text:
+            return False
+        self._display_name = text
+        self._refresh_title()
+        return True
 
     # -- construction -------------------------------------------------------------------
     def _build(self) -> None:
@@ -2177,7 +2225,7 @@ class ViewerManager(QObject):
         for win in self.windows:
             roi = getattr(win, "_roi_bbox", None)
             out.append(View(
-                id=f"w{win.window_id}", name=win.windowTitle(),
+                id=f"w{win.window_id}", name=win.display_name,
                 regions=tuple(win._regions),
                 kind="roi" if roi is not None else "window",
                 window_id=win.window_id, roi_bbox=roi))
@@ -2240,6 +2288,28 @@ class ViewerManager(QObject):
                 value = live[name]
             out[name] = value
         return out
+
+    def rename(self, window_id: int, name: "Optional[str]") -> bool:
+        """Give window *window_id* a new display label. Returns False when the id is not in the
+        registry or the name is blank, so a caller can say so rather than appear to succeed.
+
+        Mirrors :meth:`make_default` deliberately: same lookup, same "False when absent" contract.
+        The repaint is FREE — the navigator connects ``windowsChanged`` to ``refresh``, and
+        ``refresh`` reads the title back off the window — so this adds no signal to the widget with
+        the documented use-after-free (see ``OpenViewList.refresh``).
+
+        What this does NOT touch, and the reason a rename is safe: the key of ``self._windows``,
+        the ``view_id`` on every record this window logs, the ``Qt.UserRole`` int on its navigator
+        row, ``parent_id`` nesting, ``_baseline_for``'s contrast inheritance, ``make_default``, and
+        the plate's ``_followed_windows`` set. Every one of those is the integer.
+        """
+        win = self._windows.get(int(window_id))
+        if win is None:
+            return False
+        if not win.set_display_name(name):
+            return False
+        self.windowsChanged.emit()
+        return True
 
     def make_default(self, window_id: int) -> bool:
         """Adopt one window's settings as the global defaults, for windows opened FROM NOW ON.
@@ -2456,6 +2526,13 @@ class OpenViewList(QWidget):
         # deselect (nothing selected) -> no wash. itemActivated (double-click) also raises the window.
         self._tree.itemActivated.connect(self._on_activated)
         self._tree.itemSelectionChanged.connect(self._on_selection_changed)
+        # RENAME (Julio, 2026-08-03: "we should be able to rename our windows"). A context menu and
+        # a modal QInputDialog, NOT an in-place QTreeWidget editor: `refresh()` calls
+        # `self._tree.clear()` on every `windowsChanged`, which destroys the item being edited, so
+        # in-place editing needs refresh() to become incremental first — a bigger and riskier change
+        # to this widget (see its use-after-free note) than the feature is worth.
+        self._tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._tree.customContextMenuRequested.connect(self._on_context_menu)
         self._syncing = False   # guards refresh()'s programmatic selection from re-emitting
         lay.addWidget(self._tree, 1)
 
@@ -2563,6 +2640,44 @@ class OpenViewList(QWidget):
         wid = item.data(0, Qt.UserRole)
         if wid is not None:
             self._manager.focus(int(wid))
+
+    # -- rename -------------------------------------------------------------------------
+    def _on_context_menu(self, pos) -> None:
+        item = self._tree.itemAt(pos)
+        if item is None:
+            return
+        wid = item.data(0, Qt.UserRole)
+        if wid is None:
+            return
+        menu = QMenu(self)
+        act = menu.addAction("Rename…")
+        # `exec`, not `exec_`: PyQt6 removed every trailing-underscore alias (see the note at the
+        # bottom of `_viewer.py`), and this is a context menu, so an AttributeError here would only
+        # ever fire in front of a user.
+        if menu.exec(self._tree.viewport().mapToGlobal(pos)) is act:
+            self.rename_window(int(wid))
+
+    def rename_window(self, window_id: int) -> bool:
+        """Ask for a new label for *window_id* and apply it. Returns whether anything changed.
+
+        Public and separate from the menu handler so a keybinding, a test, or a future in-place
+        editor drives the SAME path rather than a second one.
+
+        The dialog seeds with the current label and asks for a label only: the ``[wid]`` bracket is
+        never in the box, because a user-editable bracket would break the join between a log line
+        and the window that emitted it.
+        """
+        win = self._manager._windows.get(int(window_id))
+        if win is None:
+            return False
+        text, ok = QInputDialog.getText(
+            self, f"Rename view [{window_id}]",
+            f"Label for view [{window_id}] (the [{window_id}] prefix stays, so log lines still "
+            f"point here):",
+            text=win.display_name)
+        if not ok:
+            return False
+        return self._manager.rename(int(window_id), text)
 
     def _close_selected(self) -> None:
         """Close EVERY selected row, not just the current one.
