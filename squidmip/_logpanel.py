@@ -16,6 +16,11 @@ ALWAYS, and the log body available but not allowed to dominate. This panel is th
 one-line header that is always visible (RAM + activity + a level tally), and a collapsible body
 that holds the actual lines.
 
+2026-08-03 (v2 layout) finished the copy: the memory BAR and the run-progress bar moved in here
+from under the Window Navigator, where they were a separate status block the new drawing deletes.
+See ``adopt_status_row`` — they are adopted, not rebuilt, so there is still one of each in the
+process and the poller that drives them never learned they moved.
+
 BOUNDED FOR FREE
 ----------------
 ``QPlainTextEdit.setMaximumBlockCount(MAX_LINES)`` makes Qt drop the oldest block when the cap is
@@ -196,6 +201,33 @@ class LogPanel(QWidget):
         header.setMinimumWidth(0)
         outer.addWidget(header)
 
+        # -- status strip: the window's memory and run-progress bars, adopted from elsewhere -----
+        #
+        # Julio, 2026-08-03: "the status bar and memory bar should be moved to inside the logger so
+        # that we save space." They were stacked under the Window Navigator, four widgets deep, in a
+        # block the v2 drawing deletes outright. They belong here for the reason the module
+        # docstring already gives: Squid's persistent bottom bar is RAM + backpressure + warnings
+        # together, and this panel is that bar. Two status blocks in one window is the same
+        # two-representations-of-one-truth shape this file's neighbours carry scars from.
+        #
+        # ADOPTED, NOT REBUILT. The widgets keep their existing wiring to ViewerManager's
+        # ``memoryChanged`` / ``runProgressChanged`` signals — those land on ``OpenViewList``'s
+        # handlers, which write into these very objects. Reparenting moves the pixels and touches
+        # none of the plumbing, so there is exactly one memory bar in the process and it is still
+        # driven by the one poller. Building a second one here would have been a second truth.
+        #
+        # BETWEEN the header and the body, so it survives ``set_collapsed``: collapsing hides only
+        # ``_view``. A status readout that vanishes when you fold the log away cannot tell you the
+        # app is busy, which is the one thing it is for.
+        self._status = QWidget()
+        self._status.setStyleSheet(f"background:{_HEADER_BG};")
+        self._status_l = QVBoxLayout(self._status)
+        self._status_l.setContentsMargins(8, 2, 8, 3)
+        self._status_l.setSpacing(2)
+        self._status.setMinimumWidth(0)
+        self._status.setVisible(False)      # nothing adopted: it costs no pixels at all
+        outer.addWidget(self._status)
+
         # -- body: the bounded log view --------------------------------------------------
         self._view = QPlainTextEdit()
         self._view.setReadOnly(True)
@@ -224,6 +256,29 @@ class LogPanel(QWidget):
             self.set_collapsed(True)
         else:
             self._sync_toggle_text()
+
+    # -- the adopted status bars --------------------------------------------------------
+    def adopt_status_row(self, memory_caption: QWidget, memory_bar: QWidget,
+                         work_caption: QWidget, work_bar: QWidget) -> None:
+        """Show the window's memory and run-progress indicators inside this panel.
+
+        Caller hands over widgets it already owns and already drives (see
+        ``OpenViewList.take_status_row``); this only re-homes them. Idempotent enough to be safe on
+        a re-dock: adding a widget to a layout it is already in is a no-op move, not a duplicate.
+
+        The memory caption and its bar share ONE row — stacked, they cost two lines to say one
+        thing, and saving lines is the whole point of the move. The work caption keeps its own row
+        because it carries a sentence ("decon · 12 of 27 FOVs · ~4 min left") that wraps.
+        """
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+        row.addWidget(_shrinkable(memory_caption))
+        row.addWidget(memory_bar, 1)
+        self._status_l.addLayout(row)
+        self._status_l.addWidget(work_caption)
+        self._status_l.addWidget(work_bar)
+        self._status.setVisible(True)
 
     # -- wiring -------------------------------------------------------------------------
     def attach_bus(self, bus: LogBus, *, level: int = DEFAULT_LEVEL) -> None:

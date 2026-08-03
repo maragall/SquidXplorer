@@ -35,8 +35,10 @@ WHAT IS IN HERE
 
 WHAT IS DELIBERATELY NOT IN HERE
 --------------------------------
-``_TOP_ROW_COMPACT_PX`` and ``_TOP_ROW_READING_PX`` stayed in ``_viewer.py``. They are the height of
-the top strip in pixels, which is window layout, not an operator fact. They only looked like they
+``_BAND_DEFAULT_PX`` and ``_BAND_MAX_PX`` stayed in ``_viewer.py`` (they were
+``_TOP_ROW_COMPACT_PX`` and ``_TOP_ROW_READING_PX`` until the band moved under the plate on
+2026-08-03). They are the height of the navigator/operator/log band in pixels, which is window
+layout, not an operator fact. They only looked like they
 belonged because ``_SAVE_OPERATOR``'s comment had drifted three declarations away from
 ``_SAVE_OPERATOR`` and landed above them; that comment moved back to what it describes.
 

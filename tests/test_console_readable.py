@@ -94,28 +94,37 @@ def test_the_full_line_is_still_byte_identical_to_squids_layout():
     assert format_record(r) == expected
 
 
-def test_the_reading_height_is_now_the_only_height():
-    """REPLACES test_the_strip_grows_while_the_console_is_in_front, 2026-08-03.
+def test_no_height_is_swapped_in_and_out_behind_the_users_back():
+    """REPLACES test_the_reading_height_is_now_the_only_height, 2026-08-03 (v2 layout), which in
+    turn replaced test_the_strip_grows_while_the_console_is_in_front.
 
-    That test pinned ``_sync_top_row_height``: the strip's cap swapped to ``_TOP_ROW_READING_PX``
-    (520) while the Log TAB was in front and back to ``_TOP_ROW_COMPACT_PX`` (240) otherwise,
-    because 240 px is about ten lines, which is a status light rather than a log.
+    The original pinned ``_sync_top_row_height``: the strip's cap swapped to
+    ``_TOP_ROW_READING_PX`` (520) while the Log TAB was in front and back to
+    ``_TOP_ROW_COMPACT_PX`` (240) otherwise, because 240 px is about ten lines, which is a status
+    light rather than a log. The log stopped being a tab, so there was no tab selection left to
+    infer intent from, and the mechanism was deleted rather than adapted: its own docstring said it
+    was "deliberately not a remembered setting and not a drag handle", and a drag handle is
+    precisely what replaced it. THAT part is unchanged and is what the first two assertions keep.
 
-    The log is no longer a tab (Julio's 2026-08-03 restack: Operator above, Log below, both
-    visible), so there is no tab selection left to infer intent from. 520 is now the ONE cap and
-    the Operator/Log boundary is a QSplitter handle the user drags. The mechanism is deleted, not
-    adapted: its own docstring said it was "deliberately not a remembered setting and not a drag
-    handle", and a drag handle is precisely what replaced it.
+    WHAT CHANGED, AND WHY THE THIRD ASSERTION IS DIFFERENT: v2 moves the whole block UNDER the
+    plate (Spencer: the plate should take roughly half the window) and renames it the band. The old
+    assertion pinned one literal, ``_TOP_ROW_COMPACT_PX == 520``, as "the ONE cap". There are two
+    numbers now and they are not two caps: ``_BAND_DEFAULT_PX`` is the height the band opens at and
+    ``_BAND_MAX_PX`` is the ceiling. Pinning the pair as an ordering is what actually protects the
+    console — a default at or above the ceiling means the cap is doing the sizing again, which is
+    the shape of the bug this file has been chasing since 240 px.
 
-    The argument this test still has to carry is the SIZING one, which did not go away: a strip
-    holding two stacked panels cannot be sized like a strip holding one tab. Splitting 240 px two
-    ways is what leaves the log about five lines. Measured offscreen at 596x850 with the cap forced
-    back to 240: Operator 122 px, Log 112 px. With 520: Operator 315 px, Log 199 px.
+    The sizing argument itself did not go away: a band holding two stacked panels cannot be sized
+    like a strip holding one tab. Measured offscreen at 596x850 with the v2 band: Operator 203 px,
+    Log 156 px. The log is 43 px shorter than it was in the 520 px top strip, and that is the price
+    of the plate reaching 50%.
     """
     pytest.importorskip("qtpy")
     import squidmip._viewer as V
 
     assert not hasattr(V, "_TOP_ROW_READING_PX"), "the second height is back"
     assert not hasattr(V.PlateWindow, "_sync_top_row_height"), "the tab-driven height swap is back"
-    assert V._TOP_ROW_COMPACT_PX == 520, (
-        "the strip holds Operator AND Log now; 240 px split two ways is a five-line log")
+    assert V._BAND_DEFAULT_PX < V._BAND_MAX_PX, (
+        "the band opens at its ceiling, so the cap is sizing it again rather than bounding it")
+    assert V._BAND_DEFAULT_PX >= 300, (
+        "the band holds Operator AND Log; split two ways, less than this is a five-line log")
