@@ -2337,16 +2337,16 @@ class _FakeLoupeSource(V._LoupeSource):
             return False, "not written yet"
         return True, ""
 
-    def read_crop(self, well_id, level, y0, x0, h, w):
-        self.reads.append((well_id, level, y0, x0, h, w))
-        f = self._field(level)
+    def read_crop(self, well_id, level, y0, x0, h, w, time_point=0):
+        self.reads.append((well_id, level, y0, x0, h, w, int(time_point)))
+        f = self._field(level) + int(time_point)     # +t: a crop names the FRAME it came from
         span = f.shape[-1]
         y0, x0, h, w = V.loupe_clamp_crop(y0, x0, h, w, span, span)   # what a real source must do
         step = V.loupe_decimation(max(h, w))
         return f[:, y0:y0 + h:step, x0:x0 + w:step]
 
-    def coarse(self, well_id):
-        return self._field(max(0, self.n_levels - 1))
+    def coarse(self, well_id, time_point=0):
+        return self._field(max(0, self.n_levels - 1)) + int(time_point)
 
 
 def _loupe_win(qapp, root, tmp_path=None):
@@ -2744,6 +2744,133 @@ def test_loupe_shows_pixels_in_every_quadrant_of_a_well(qapp, stub_detail, squid
         ov.mouseReleaseEvent(_press(x, y))
     ov.set_loupe_source(None)
     win.close()
+
+
+# -- current plate state: the cell under the cursor, the timepoint, the active layer -----------
+#
+# Three separate ways the inset showed real pixels from somewhere the plate was not. All three
+# are silent: the loupe comes up, it is full of plausible data, and nothing says it is the wrong
+# data. That is why they are pinned at the WIDGET seam and not on the pure helpers -- every one
+# of them lived in the wiring between a helper that took the right argument and a caller that
+# never passed it.
+
+def _freeform_overview():
+    """A slide-carrier plate: two regions, each placed by its own rectangle, each letterboxed.
+
+    ``layout`` is in GRID UNITS and ``boxes`` in ``_CELL`` px, and the two carry the SAME aspect
+    ratio per region -- which is what ``_mosaic_boxes`` and ``even_carrier_layout`` produce
+    together, and what ``_cell_source``'s "recoverable from the rect alone" claim rests on.
+    """
+    layout = {(0, 0): (0.0, 0.0, 2.0, 1.0),        # A1: a 2-FOV row, bars top and bottom
+              (0, 1): (2.2, 0.0, 1.0, 2.0)}        # A2: a 2-FOV column, bars left and right
+    ov = V.PlateOverview(["A"], ["1", "2"], {(0, 0): "A1", (0, 1): "A2"}, layout=layout)
+    ov.resize(800, 600)
+    ov.set_mosaic_boxes({("A1", 0): (22, 0, 44, 44), ("A1", 1): (22, 44, 44, 44),
+                         ("A2", 0): (0, 22, 44, 44), ("A2", 1): (44, 22, 44, 44)})
+    ov._fit()
+    return ov
+
+
+def test_the_loupe_reads_the_cell_the_cursor_is_actually_over(qapp):
+    """A freeform holder places each cell by its own rectangle. The loupe used to invert the
+    UNIFORM grid instead (``ax + ci*cd``, a ``cd`` square), which is right on a well plate and
+    wrong on every other holder.
+
+    Pressing the middle of a cell asked for a rectangle clamped hard against the far corner of
+    the field, so the inset filled with real pixels from a place the cursor was not -- the worst
+    kind of wrong, because it looks like it is working."""
+    ov = _freeform_overview()
+    ov.set_loupe_source(_FakeLoupeSource(well_px=1000, n_levels=1))
+    try:
+        for rc in ((0, 0), (0, 1)):
+            rx, ry, rw, rh = ov._cell_rect(*rc)
+            geo = ov._loupe_geometry(int(rx + rw / 2), int(ry + rh / 2))
+            assert geo is not None, f"cell {rc}: the cursor was over a cell and got nothing"
+            _well, _lvl, (y0, x0, h, w), _s, _m = geo
+            assert (y0 + h / 2, x0 + w / 2) == pytest.approx((500, 500), abs=2), (
+                f"cell {rc}: the middle of the cell read {(y0 + h / 2, x0 + w / 2)} of a "
+                "1000 px field, not its middle")
+        # ...and the corners of the drawn rect are the corners of the field, not of the block.
+        rx, ry, rw, rh = ov._cell_rect(0, 0)
+        assert ov._cell_fraction(0, 0, rx, ry) == pytest.approx((0.0, 0.0), abs=0.02)
+        assert ov._cell_fraction(0, 0, rx + rw, ry + rh) == pytest.approx((1.0, 1.0), abs=0.02)
+    finally:
+        ov.set_loupe_source(None)
+
+
+def test_the_loupe_and_the_blit_share_one_content_box(qapp):
+    """ONE letterbox formula, not two. ``_cell_source`` recovers the inner box from the cell
+    RECT's aspect ratio (for the blit); ``_content_box`` recovers it from ``self._boxes`` (for the
+    hit test and the loupe). They are the same rectangle by construction -- both are the mosaic's
+    aspect centred in the same square -- and this is the assertion that keeps them so, since the
+    two live at opposite ends of the file and neither calls the other."""
+    ov = _freeform_overview()
+    for ri, ci in ((0, 0), (0, 1)):
+        sx, sy, sw, sh = ov._cell_source(ri, ci)
+        assert (sx - ci * V._CELL, sy - ri * V._CELL, sw, sh) == pytest.approx(
+            ov._content_box(ri, ci), abs=0.5), f"cell {(ri, ci)}: the blit and the loupe disagree"
+
+
+def test_the_loupe_reads_the_timepoint_the_plate_is_showing(qapp, stub_detail, squid_dataset):
+    """The sources have taken a ``time_point`` since 2026-07-29 (docs/plate-contract.md pins the
+    signatures) and NOTHING passed one, so every read defaulted to frame 0. Move the plate's
+    timepoint and the inset went on magnifying the first frame, silently.
+
+    Driven through the widget on purpose: a signature test cannot see a caller that never calls."""
+    root, _ = squid_dataset
+    win = _loupe_win(qapp, root)
+    ov = win._overview
+    ov.resize(600, 400)
+    src = _FakeLoupeSource(well_px=2084, n_levels=1)
+    ov.set_loupe_source(src, np.ones((2, 3), np.float32))
+    try:
+        rc = sorted(ov._by_rc)[0]
+        x, y = _cell_center(ov, *rc)
+        ov.set_time_point(3)
+        ov.mousePressEvent(_press(x, y))
+        ov._arm_loupe()
+        assert _drain_until(qapp, lambda: ov._loupe_img is not None)
+        assert src.reads, "the loupe never issued a read"
+        assert [r[-1] for r in src.reads] == [3] * len(src.reads), (
+            f"the plate is showing timepoint 3 and the loupe read {[r[-1] for r in src.reads]}")
+        ov.mouseReleaseEvent(_press(x, y))
+        # ...and moving the plate's timepoint under a LIVE inset re-reads rather than sitting on
+        # the old frame: the crop cache is keyed by rectangle, so nothing else would notice.
+        ov.mousePressEvent(_press(x, y))
+        ov._arm_loupe()
+        assert _drain_until(qapp, lambda: ov._loupe_img is not None)
+        src.reads.clear()
+        ov.set_time_point(5)
+        assert _drain_until(qapp, lambda: bool(src.reads))
+        assert src.reads[-1][-1] == 5
+        ov.mouseReleaseEvent(_press(x, y))
+    finally:
+        ov.set_loupe_source(None)
+        win.close()
+
+
+def test_switching_the_active_layer_repoints_the_loupe(qapp, stub_detail, squid_dataset, tmp_path):
+    """The plate follows which operator layer a window is showing (``set_active_layer``). The
+    loupe's source is chosen BY that layer, and four of the six call sites happened to re-point it
+    afterwards while ``_on_exploration_tab_changed`` did not -- so clicking onto a window's tab
+    moved the plate and left the inset reading the layer the plate had stopped showing.
+
+    Pinned at ``set_active_layer`` rather than at the tab switch because that is the one place
+    ``_active`` moves, and therefore the only place that can guarantee it for all six."""
+    root, _ = squid_dataset
+    win = _loupe_win(qapp, root)
+    try:
+        raw = win._loupe_sources["raw"]
+        assert win._overview._loupe_src is raw
+        other = _FakeLoupeSource()
+        win._loupe_sources["mip"] = other          # registered, but the plate still shows raw
+        win._overview.set_active_layer("mip")
+        assert win._overview._loupe_src is other, (
+            "the plate moved to the 'mip' layer and the loupe kept reading raw")
+        win._overview.set_active_layer("raw")
+        assert win._overview._loupe_src is raw
+    finally:
+        win.close()
 
 
 def test_loupe_read_stays_bounded_when_the_source_has_no_pyramid(qapp, stub_detail, squid_dataset):

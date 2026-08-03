@@ -1523,10 +1523,14 @@ class PlateWindow(QMainWindow):
         which is what stops this looping when we set the bar from an ingest.
         """
         self._say(f"time_point {time_point + 1} of {self._time_point_bar.count}")
-        # The loupe caches coarse tiles per (well, timepoint), so it needs no invalidation and the
-        # next hover is already correct. The plate THUMBNAILS are a different matter: they were
-        # streamed by a worker reading at a fixed timepoint, so showing a new one means asking
-        # again rather than filtering what already arrived.
+        # Tell the PLATE, which is what the loupe reads its timepoint from. This comment used to
+        # claim the loupe needed no invalidation "because it caches coarse tiles per (well,
+        # timepoint)" — true of the cache and irrelevant, because nothing passed a timepoint in:
+        # every read defaulted to frame 0 whatever the slider said. The plate THUMBNAILS are a
+        # separate matter: they were streamed by a worker reading at a fixed timepoint, so showing
+        # a new one means asking again rather than filtering what already arrived.
+        if self._overview is not None:
+            self._overview.set_time_point(time_point)
         if self._reader is not None:
             self._return_to_raw()
 
@@ -2738,6 +2742,9 @@ class PlateWindow(QMainWindow):
         self._overview.wellActivated.connect(self.activate_well)
         self._overview.selectionChanged.connect(self._on_selection_changed)
         self._overview.marqueeSelected.connect(self._on_marquee_selected)
+        # The loupe's source is chosen by which layer the plate SHOWS, so it follows the plate
+        # rather than being re-pointed by hand at each of the six places the layer moves.
+        self._overview.activeLayerChanged.connect(lambda _k: self._update_loupe_source())
         self._plate_mode = "raw"                     # a freshly-opened plate shows raw previews
         self._plate_title.setText(f"{self._acq_name}   ·   raw")   # bottom-left plate-pane title
         self._op_stack.reset()                       # fresh layer stack (base only)
@@ -2780,6 +2787,9 @@ class PlateWindow(QMainWindow):
         # clamps the position, so re-ingesting a SHORTER acquisition cannot leave the bar pointing
         # past the end. It does not fire the callback: an ingest is not a user gesture.
         self._time_point_bar.set_count(int(meta.get("n_t", 1) or 1))
+        # set_count CLAMPS the position, so read it back rather than assuming it survived: a
+        # re-ingest onto a shorter acquisition moves the bar, and the loupe must move with it.
+        self._overview.set_time_point(self.time_point)
 
         # fast RAW preview: fill the plate with downsampled thumbnails immediately (grey dots),
         # in the SAME row-major order the operator will later process them in.
@@ -3588,6 +3598,8 @@ class PlateWindow(QMainWindow):
         self._overview.set_carrier(self._plate)
         self._overview.hovered.connect(self._on_hover)
         self._overview.wellActivated.connect(self.activate_well)
+        self._overview.activeLayerChanged.connect(lambda _k: self._update_loupe_source())
+        self._overview.set_time_point(self.time_point)
         self._active_op_key = "computed"
         if getattr(self, "_raw_btn", None):
             self._raw_btn.hide()                      # a computed plate has no raw to return to

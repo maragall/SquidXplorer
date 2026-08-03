@@ -591,32 +591,37 @@ class _LoupeSource:
         """(ok, reason-if-not). ``reason`` is shown to the user verbatim."""
         return False, "no pixel source"
 
-    def read_crop(self, well_id, level, y0, x0, h, w):
+    def read_crop(self, well_id, level, y0, x0, h, w, time_point: int = 0):
         """(C, y, x) crop at ``level``, CLAMPED into the field (see loupe_clamp_crop) and
         decimated to at most _LOUPE_MAX_CROP samples per side. Runs on the worker thread."""
         raise NotImplementedError
 
-    def coarse(self, well_id):
+    def coarse(self, well_id, time_point: int = 0):
         """A small whole-field (C, y, x) plane used ONLY to derive the contrast window."""
         raise NotImplementedError
 
-    def window(self, well_id):
+    def window(self, well_id, time_point: int = 0):
         """Per-channel contrast window for a well, mirroring the tile's rule.
 
         Computed HERE, on the loupe worker thread, and memoised per well — never on the GUI
         thread. It used to be derived in ``_on_loupe_crop`` by calling ``coarse()``, which for
         raw meant decoding a whole TIFF plane inside a paint-driven slot AND touching the same
         plane cache the worker was writing (two threads, no lock, one well's pixels labelled as
-        another's). One owner, one thread."""
+        another's). One owner, one thread.
+
+        Keyed by ``(well, timepoint)``, for the reason the coarse cache already is: a window
+        memoised at one timepoint would go on contrast-stretching every later timepoint by the
+        first frame's percentiles, which is a cache answering the wrong question quickly."""
+        key = (well_id, int(time_point))
         with _LOUPE_WIN_LOCK:
             cache = self.__dict__.setdefault("_win_cache", {})
-            hit = cache.get(well_id)
+            hit = cache.get(key)
         if hit is not None:
             return hit
-        coarse = self.coarse(well_id)
+        coarse = self.coarse(well_id, time_point)
         win = [_pct_window(coarse[c]) for c in range(coarse.shape[0])]
         with _LOUPE_WIN_LOCK:
-            cache[well_id] = win
+            cache[key] = win
         return win
 
 
@@ -640,39 +645,44 @@ class _RawLoupeSource(_LoupeSource):
         self._lock = threading.RLock()         # _planes is touched by the worker AND the GUI thread
         self._cache_key = None
         self._cache = None
-        self._coarse: dict[str, np.ndarray] = {}
+        self._coarse: dict[tuple, np.ndarray] = {}
 
     def available(self, well_id) -> tuple[bool, str]:
         if well_id in self._meta["regions"]:
             return True, ""
         return False, "no image for this well"
 
-    def _planes(self, well_id):
-        """The well's (C, y, x) planes, decoded once and cached.
+    def _planes(self, well_id, time_point: int = 0):
+        """The well's (C, y, x) planes at ``time_point``, decoded once and cached.
 
         Held under a lock for the whole check-decode-publish sequence. Unsynchronised, the two
         callers (worker thread reading a crop, GUI thread deriving a window) could interleave
         between the key test and the store and hand back ANOTHER well's pixels labelled as the
         well under the cursor — a wrong-image bug in a microscopy tool, not a glitch. The GUI
         thread no longer calls in at all (see _LoupeSource.window), but the lock stays: the class
-        must be correct for its callers, not for today's call sites."""
+        must be correct for its callers, not for today's call sites.
+
+        The key is ``(well, timepoint)`` for the same reason: a key of ``well`` alone hands back
+        one timepoint's pixels under another timepoint's label, which is the identical wrong-image
+        failure with the axis changed."""
+        key = (well_id, int(time_point))
         with self._lock:
-            if self._cache_key != well_id:
+            if self._cache_key != key:
                 fov = self._fov_of(well_id)
                 planes = np.stack([
-                    np.asarray(self._reader.read(well_id, fov, ch, self._z))
+                    np.asarray(self._reader.read(well_id, fov, ch, self._z, int(time_point)))
                     for ch in self._channels])
-                self._cache, self._cache_key = planes, well_id
+                self._cache, self._cache_key = planes, key
             return self._cache
 
-    def read_crop(self, well_id, level, y0, x0, h, w):
+    def read_crop(self, well_id, level, y0, x0, h, w, time_point: int = 0):
         """Level is always 0 here — raw has no pyramid — so the whole burden of bounding the
         work falls on decimation. At plate fit the rect IS most of the field (2084 px on the
         synthetic plate); area-averaging it down to <= _LOUPE_MAX_CROP happens HERE, on the
         worker thread, so what crosses to the GUI thread to be composited is a 456 px square
         (3.3 MB, 11 ms) instead of a 1826 px one (26.7 MB, 118 ms) — which is also what the
         worker's LRU then caches."""
-        p = self._planes(well_id)
+        p = self._planes(well_id, time_point)
         ny, nx = p.shape[-2], p.shape[-1]
         y0, x0, h, w = loupe_clamp_crop(y0, x0, h, w, ny, nx)   # NEGATIVE origin -> empty slice
         crop = p[:, y0:y0 + h, x0:x0 + w]
@@ -685,12 +695,13 @@ class _RawLoupeSource(_LoupeSource):
         return np.stack([_area_downsample(crop[c], oh, ow).astype(np.float32, copy=False)
                          for c in range(crop.shape[0])])
 
-    def coarse(self, well_id):
-        if well_id not in self._coarse:
-            p = self._planes(well_id)
-            self._coarse[well_id] = np.stack(
+    def coarse(self, well_id, time_point: int = 0):
+        key = (well_id, int(time_point))
+        if key not in self._coarse:
+            p = self._planes(well_id, time_point)
+            self._coarse[key] = np.stack(
                 [_area_downsample(p[c], _CELL, _CELL) for c in range(p.shape[0])])
-        return self._coarse[well_id]
+        return self._coarse[key]
 
 
 class _ZarrLoupeSource(_LoupeSource):
@@ -806,9 +817,9 @@ class _LoupeWorker(QThread):
         self._cache: dict[tuple, np.ndarray] = {}
         self._order: list[tuple] = []
 
-    def request(self, gen, well_id, level, y0, x0, h, w):
+    def request(self, gen, well_id, level, y0, x0, h, w, time_point: int = 0):
         with self._cv:
-            self._pending = (gen, well_id, level, y0, x0, h, w)
+            self._pending = (gen, well_id, level, y0, x0, h, w, int(time_point))
             self._cv.notify()
 
     def stop(self):
@@ -836,18 +847,21 @@ class _LoupeWorker(QThread):
                     self._cv.wait()
                 if self._stop:
                     return
-                gen, well_id, level, y0, x0, h, w = self._pending
+                gen, well_id, level, y0, x0, h, w, time_point = self._pending
                 self._pending = None
-            key = (well_id, level, y0, x0, h, w)
+            # The LRU key carries the TIMEPOINT. Without it the first frame's crop answers for
+            # every later one at the same rectangle — the plate moves, the inset does not, and
+            # nothing errors. Same rule as the sources' own coarse caches.
+            key = (well_id, level, y0, x0, h, w, time_point)
             try:
                 crop = self._cached(key)
                 if crop is None:
-                    crop = self._source.read_crop(well_id, level, y0, x0, h, w)
+                    crop = self._source.read_crop(well_id, level, y0, x0, h, w, time_point)
                     self._store(key, crop)
                 # The contrast window belongs on this side too: deriving it on the GUI thread
                 # meant a paint-driven slot could decode a whole TIFF plane (IMA-208).
                 try:
-                    win = self._source.window(well_id)
+                    win = self._source.window(well_id, time_point)
                 except Exception:
                     win = None                        # the widget falls back to a flat window
                 self.ready.emit(gen, well_id, crop, win, None)
@@ -950,6 +964,7 @@ class PlateOverview(QWidget):
                                            # tab (IMA-205). Shift+CLICK refines the selection one well
                                            # at a time and deliberately does NOT fire it — otherwise
                                            # every corrective click spawns another tab.
+    activeLayerChanged = Signal(str)   # the layer the plate is SHOWING changed (see set_active_layer)
 
     def __init__(self, rows, cols, wells: dict, layout: Optional[dict] = None):
         """``wells``: (row_index, col_index) -> well_id for every acquired well (drawn grey until
@@ -1049,6 +1064,7 @@ class PlateOverview(QWidget):
         self._loupe_note = ""         # user-visible reason when the loupe can't show pixels
         self._loupe_win = {}          # well_id -> per-channel window, mirroring the tile's rule
         self._loupe_colors = None     # (C, 3) float RGB, set with the source
+        self._time_point = 0          # the timepoint the PLATE is showing; the loupe reads it too
         self._hold = QTimer(self)
         self._hold.setSingleShot(True)
         self._hold.setInterval(_LOUPE_HOLD_MS)
@@ -1252,6 +1268,24 @@ class PlateOverview(QWidget):
             self._loupe_worker.ready.connect(self._on_loupe_crop)
             self._loupe_worker.start()
 
+    def set_time_point(self, time_point: int):
+        """Tell the plate which timepoint it is showing, so the loupe reads the SAME frame.
+
+        The sources have taken a ``time_point`` since 2026-07-29 and nothing ever passed one, so
+        every source defaulted to 0: the plate moved to timepoint k and the inset went on
+        magnifying frame 0, with no error and nothing on screen to say so — the exact shape of the
+        bug ``docs/plate-contract.md`` records for the plate itself.
+
+        The per-well contrast memo is keyed by well alone, so it is dropped here rather than
+        made to carry a timepoint it would only ever be read at one of."""
+        tp = max(0, int(time_point))
+        if tp == self._time_point:
+            return
+        self._time_point = tp
+        self._loupe_win.clear()
+        if self._loupe is not None:          # a live inset re-reads at the new frame
+            self._request_loupe(self._loupe["x"], self._loupe["y"])
+
     def _arm_loupe(self):
         """Hold timer fired: the press became a loupe. Only reachable while still ARMED."""
         self._hold.stop()             # a pending fire must never re-arm and blank a LIVE loupe:
@@ -1283,10 +1317,18 @@ class PlateOverview(QWidget):
         s_loupe, mag = loupe_scale(self._cd, src.well_px)
         level = loupe_level(s_loupe, src.n_levels)
         crop = loupe_crop_px(s_loupe, level)
-        # cursor -> position within the cell -> image px at level 0 -> image px at ``level``
-        ax, ay = self._ox + _HDR, self._oy + _COLH
-        fy = (y - (ay + c["row_index"] * self._cd)) / max(1e-9, self._cd)
-        fx = (x - (ax + c["col_index"] * self._cd)) / max(1e-9, self._cd)
+        # cursor -> position within the cell's CONTENT -> image px at level 0 -> image px at
+        # ``level``. Through _cell_fraction, which is the same widget-to-cell inverse _fov_at and
+        # the blit use. This used to be a private copy of the UNIFORM grid's inverse
+        # (``ax + ci*cd``, ``cd`` square), which is right on a well plate and wrong on every other
+        # holder: a freeform cell is placed by its own rectangle (``_cell_rect``) and a letterboxed
+        # mosaic occupies only part of its block (``_cell_source``). Pressing the middle of a
+        # freeform cell asked for a rectangle clamped hard against the field's far corner, so the
+        # inset showed real pixels from somewhere the cursor was not.
+        frac = self._cell_fraction(c["row_index"], c["col_index"], x, y)
+        if frac is None:
+            return None
+        fx, fy = frac
         span = max(1, src.well_px >> level)
         cy, cx = int(fy * span), int(fx * span)
         # Clamp HERE as well as in the source. Two reasons beyond belt-and-braces: the request
@@ -1312,7 +1354,7 @@ class PlateOverview(QWidget):
             self.update()
             return
         self._loupe_gen += 1
-        self._loupe_worker.request(self._loupe_gen, well, level, y0, x0, h, w)
+        self._loupe_worker.request(self._loupe_gen, well, level, y0, x0, h, w, self._time_point)
 
     def _on_loupe_crop(self, gen, well_id, crop, window, error):
         """A crop landed. Drop it unless it is the newest request and the loupe is still up.
@@ -1661,13 +1703,22 @@ class PlateOverview(QWidget):
             self.update()
 
     def set_active_layer(self, layer: str):
-        """Show a layer (LayersTab toggle/reorder). Swaps in its montage + streamed canvas."""
+        """Show a layer (LayersTab toggle/reorder). Swaps in its montage + streamed canvas.
+
+        Announces the change, because ``_active`` is what the LOUPE's source is chosen by
+        (``_viewer._update_loupe_source``) and this is the only place it moves. Four of the six
+        call sites happened to call ``_update_loupe_source`` right afterwards; the exploration-tab
+        switch (``_viewer._on_exploration_tab_changed``) did not, so following a window onto its
+        operator layer left the inset magnifying the layer the plate had stopped showing. Emitting
+        from the one place ``_active`` changes is what makes that unforgettable rather than
+        remembered."""
         self._active = layer
         self._final = self._op_final.get(layer)   # None for "raw" -> falls back to the base canvas
         self._scaled = None
         self.update()
         if layer in self._store:     # bring it up to the CURRENT mask/windows: its canvas was blitted
             self.recomposite(layer)  # cell-by-cell, with whatever mask was set when each tile landed
+        self.activeLayerChanged.emit(str(layer))
 
     def drop_layer(self, layer: str):
         """Forget a layer entirely and FREE its canvas (IMA-205: an exploration tab's layers die
@@ -2097,6 +2148,57 @@ class PlateOverview(QWidget):
         ih = _CELL * min(1.0, 1.0 / a)
         return (ci * _CELL + (_CELL - iw) / 2.0, ri * _CELL + (_CELL - ih) / 2.0, iw, ih)
 
+    def _content_box(self, ri: int, ci: int) -> tuple:
+        """``(x, y, w, h)`` in the cell's own ``_CELL`` px block: where the PIXELS actually are.
+
+        The letterbox bars are background, not acquired data, so "half way across the cell" and
+        "half way across the image" are different points whenever a cell is letterboxed. Derived
+        from ``self._boxes`` — the one table ``set_mosaic_boxes`` publishes and ``_fov_at`` already
+        resolves FOVs against — via ``_box_union``, whose docstring already names this rectangle:
+        "the rectangle the mosaic actually occupies inside its cell". An unboxed cell (one FOV, or
+        a region operator's fused result) fills its block, which is the fallback.
+
+        Agrees with ``_cell_source``'s inner box by construction: both are the same aspect ratio
+        centred in the same square. ``test_the_loupe_and_the_blit_share_one_content_box`` pins
+        that rather than trusting it.
+        """
+        region = self._by_rc.get((ri, ci))
+        box = None
+        if region is not None and region in self._boxed_regions:
+            for (r, _fov), b in self._boxes.items():
+                if r == region:
+                    box = _box_union(box, b)
+        if box is None:
+            return (0.0, 0.0, float(_CELL), float(_CELL))
+        top, left, h, w = box
+        return (float(left), float(top), float(max(w, 1)), float(max(h, 1)))
+
+    def _cell_point(self, ri: int, ci: int, x, y) -> Optional[tuple]:
+        """A widget point as ``(bx, by)`` in cell (ri, ci)'s own ``_CELL`` px block.
+
+        THE widget-to-cell inverse. ``_fov_at`` and ``_loupe_geometry`` both go through it, so a
+        click and a press-and-hold at the same pixel can never resolve to different places.
+        """
+        rx, ry, rw, rh = self._cell_rect(ri, ci)
+        sx, sy, sw, sh = self._cell_source(ri, ci)
+        if not (rw > 0 and rh > 0):
+            return None
+        return ((x - rx) / rw * sw + (sx - ci * _CELL),
+                (y - ry) / rh * sh + (sy - ri * _CELL))
+
+    def _cell_fraction(self, ri: int, ci: int, x, y) -> Optional[tuple]:
+        """A widget point as ``(fx, fy)`` in 0..1 across the cell's CONTENT, or ``None``.
+
+        Block position from :meth:`_cell_point`, normalised by :meth:`_content_box` — so the
+        loupe reads the image the cell is showing, not the square the image is centred in.
+        """
+        pt = self._cell_point(ri, ci, x, y)
+        if pt is None:
+            return None
+        bx, by = pt
+        ix, iy, iw, ih = self._content_box(ri, ci)
+        return ((bx - ix) / iw, (by - iy) / ih)
+
     def _tiled_region(self) -> "QRegion":
         """The cells that HAVE an image on the active layer, as a QRegion at pan origin (0, 0).
 
@@ -2129,16 +2231,14 @@ class PlateOverview(QWidget):
         region = c["well_id"]
         if not region or not self._boxes:
             return 0
-        ri, ci = c["row_index"], c["col_index"]
-        rx, ry, rw, rh = self._cell_rect(ri, ci)
-        sx, sy, sw, sh = self._cell_source(ri, ci)
-        if not (rw > 0 and rh > 0):
-            return 0
         # position within the cell, normalised to the _CELL-px space the boxes live in. Going via
         # the cell's SOURCE rect is what keeps the hit-test agreeing with the blit on a freeform
-        # holder, where the drawn rect is the mosaic's box and not the whole square block.
-        fx = (e.x() - rx) / rw * sw + (sx - ci * _CELL)
-        fy = (e.y() - ry) / rh * sh + (sy - ri * _CELL)
+        # holder, where the drawn rect is the mosaic's box and not the whole square block. That
+        # inverse now lives in _cell_point, because the loupe needs the identical one.
+        pt = self._cell_point(c["row_index"], c["col_index"], e.x(), e.y())
+        if pt is None:
+            return 0
+        fx, fy = pt
         hit = 0
         for (r, fov), (top, left, h, w) in self._boxes.items():
             if r == region and top <= fy < top + h and left <= fx < left + w:
