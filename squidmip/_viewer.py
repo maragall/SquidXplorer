@@ -3337,8 +3337,50 @@ class PlateWindow(QMainWindow):
         sub = getattr(mosaic, "on_user_op", None)            # same slot-abort hazard as above
         if callable(sub):
             sub(_op_sink)
+        # ...and PULL what this window has ALREADY resolved. No sink can ever report it.
+        self._adopt_window_view(mosaic, index_of)
         bound.add(wid)
         self._napari_contrast_bound = True
+
+    def _adopt_window_view(self, mosaic, index_of):
+        """Take the LUT a window is ALREADY showing, at the moment the plate starts following it.
+
+        ``_adopt_centre_view`` below does exactly this and CANNOT RUN. It is gated on
+        ``self._mosaic_pane``, which the decentralization pinned to ``None`` permanently (see the
+        "NO CENTRAL VIEWER" note in ``__init__``) and never assigns again -- so the fix that method
+        carries, written for Julio's "Look at contrast difference between napari window and plate
+        view", was orphaned the day the central pane was removed. The plate went back to painting
+        from its own running histogram while every spawned window painted from napari's autoscale,
+        and nothing said so.
+
+        An EVENT tells you about a CHANGE; the initial state is not a change. ``on_user_contrast``
+        deliberately filters napari's own autoscale out (treating it as a user gesture is what
+        latched every channel MANUAL and killed the plate's auto-contrast the first time), so the
+        one moment that matters most -- the window a region comes up with -- is the one moment no
+        sink can report. This pulls it instead, per WINDOW rather than per central pane, and lands
+        in the FOLLOW path, not the manual latch.
+
+        Every read is capability-checked for the same reason the subscriptions above are: this
+        runs from a Qt slot, and an unhandled exception escaping one aborts the process.
+        """
+        if self._overview is None or self._meta is None:
+            return
+        get_window = getattr(mosaic, "contrast", None)
+        get_rgb = getattr(mosaic, "channel_rgb", None)
+        get_visible = getattr(mosaic, "channel_visible", None)
+        for c in self._meta.get("channels", []):
+            ch = index_of(c["name"])
+            if ch is None:
+                continue                     # a channel this window draws and the plate does not
+            window = get_window(c["name"]) if callable(get_window) else None
+            if window is not None:
+                self._on_detail_contrast(ch, float(window[0]), float(window[1]))
+            rgb = get_rgb(c["name"]) if callable(get_rgb) else None
+            if rgb is not None:
+                self._overview.set_channel_color(ch, rgb)
+            visible = get_visible(c["name"]) if callable(get_visible) else None
+            if visible is not None:
+                self._overview.set_channel_visible(ch, bool(visible))
 
     def _follow_window_layer(self, layer_key: str, on: bool) -> None:
         """A window showed or hid a processing layer: put the plate on the same one.

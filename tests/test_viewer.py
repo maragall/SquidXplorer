@@ -2401,9 +2401,12 @@ class _FakeLoupeSource(V._LoupeSource):
             return False, "not written yet"
         return True, ""
 
-    def read_crop(self, well_id, level, y0, x0, h, w, time_point=0):
-        self.reads.append((well_id, level, y0, x0, h, w, int(time_point)))
-        f = self._field(level) + int(time_point)     # +t: a crop names the FRAME it came from
+    def read_crop(self, well_id, level, y0, x0, h, w, time_point=0, fov=None):
+        # fov before time_point so `r[-1]` stays the TIMEPOINT for the callers that read it.
+        self.reads.append((well_id, level, y0, x0, h, w, fov, int(time_point)))
+        # +fov as well as +t: a crop names the FIELD and the FRAME it came from, so a test can
+        # tell a read of field 1 from a read of field 0 at the same rectangle.
+        f = self._field(level) + int(time_point) + 1000 * int(fov or 0)
         span = f.shape[-1]
         y0, x0, h, w = V.loupe_clamp_crop(y0, x0, h, w, span, span)   # what a real source must do
         step = V.loupe_decimation(max(h, w))
@@ -2835,29 +2838,93 @@ def _freeform_overview():
     return ov
 
 
-def test_the_loupe_reads_the_cell_the_cursor_is_actually_over(qapp):
-    """A freeform holder places each cell by its own rectangle. The loupe used to invert the
-    UNIFORM grid instead (``ax + ci*cd``, a ``cd`` square), which is right on a well plate and
-    wrong on every other holder.
+def _widget_point_of_block(ov, ri, ci, bx, by):
+    """The widget pixel that ``_cell_point(ri, ci, ...)`` maps back to block point (bx, by).
 
-    Pressing the middle of a cell asked for a rectangle clamped hard against the far corner of
-    the field, so the inset filled with real pixels from a place the cursor was not -- the worst
-    kind of wrong, because it looks like it is working."""
+    The exact inverse of ``_cell_point``, written out rather than solved numerically so a
+    mistake in it cannot cancel a mistake in the thing under test."""
+    rx, ry, rw, rh = ov._cell_rect(ri, ci)
+    sx, sy, sw, sh = ov._cell_source(ri, ci)
+    return (rx + (bx - (sx - ci * V._CELL)) / sw * rw,
+            ry + (by - (sy - ri * V._CELL)) / sh * rh)
+
+
+def test_the_loupe_magnifies_the_field_the_cursor_is_over(qapp):
+    """A freeform holder places each cell by its own rectangle, AND each cell holds a MOSAIC of
+    several fields. Two transforms, and the loupe used to get both wrong in turn.
+
+    The first was fixed: ``_cell_fraction`` now inverts the cell's own rect and its letterbox
+    instead of the uniform grid. The second was not, and is what Julio still saw ("Coordinate map
+    is off, as you can see in my mouse positioning"): that fraction is across the whole MOSAIC,
+    and ``_loupe_geometry`` multiplied it by ONE field's pixel span and read the region's FIRST
+    field. A 2-FOV region therefore mapped its entire width onto FOV 0 -- the middle of the cell,
+    which is the LEFT EDGE of FOV 1, read the middle of FOV 0.
+
+    The invariant that says it properly: the centre of a field's own box magnifies the centre of
+    THAT field."""
     ov = _freeform_overview()
     ov.set_loupe_source(_FakeLoupeSource(well_px=1000, n_levels=1))
     try:
-        for rc in ((0, 0), (0, 1)):
-            rx, ry, rw, rh = ov._cell_rect(*rc)
-            geo = ov._loupe_geometry(int(rx + rw / 2), int(ry + rh / 2))
-            assert geo is not None, f"cell {rc}: the cursor was over a cell and got nothing"
-            _well, _lvl, (y0, x0, h, w), _s, _m = geo
+        for (region, fov), (top, left, bh, bw) in sorted(ov._boxes.items()):
+            ri, ci = next(rc for rc, r in ov._by_rc.items() if r == region)
+            x, y = _widget_point_of_block(ov, ri, ci, left + bw / 2, top + bh / 2)
+            geo = ov._loupe_geometry(int(round(x)), int(round(y)))
+            assert geo is not None, f"{region} fov {fov}: the cursor was over a field, got nothing"
+            well, got_fov, _lvl, (y0, x0, h, w), _s, _m = geo
+            assert (well, got_fov) == (region, fov), (
+                f"the cursor was over {region} fov {fov} and the loupe went to {well} "
+                f"fov {got_fov}")
             assert (y0 + h / 2, x0 + w / 2) == pytest.approx((500, 500), abs=2), (
-                f"cell {rc}: the middle of the cell read {(y0 + h / 2, x0 + w / 2)} of a "
-                "1000 px field, not its middle")
-        # ...and the corners of the drawn rect are the corners of the field, not of the block.
+                f"{region} fov {fov}: the middle of the FIELD read "
+                f"{(y0 + h / 2, x0 + w / 2)} of a 1000 px field, not its middle")
+        # ...and the corners of the drawn rect are still the corners of the MOSAIC, not of the
+        # block: the letterbox inverse the earlier fix landed is untouched by any of the above.
         rx, ry, rw, rh = ov._cell_rect(0, 0)
         assert ov._cell_fraction(0, 0, rx, ry) == pytest.approx((0.0, 0.0), abs=0.02)
         assert ov._cell_fraction(0, 0, rx + rw, ry + rh) == pytest.approx((1.0, 1.0), abs=0.02)
+    finally:
+        ov.set_loupe_source(None)
+
+
+def test_the_loupe_and_a_double_click_resolve_the_same_field(qapp):
+    """One box lookup, so the field the inset showed and the field a double-click opens cannot
+    be different fields. They were two loops over ``self._boxes`` before, and only one of them
+    existed."""
+    ov = _freeform_overview()
+    ov.set_loupe_source(_FakeLoupeSource(well_px=1000, n_levels=1))
+    try:
+        for (region, fov), (top, left, bh, bw) in sorted(ov._boxes.items()):
+            ri, ci = next(rc for rc, r in ov._by_rc.items() if r == region)
+            x, y = _widget_point_of_block(ov, ri, ci, left + bw / 2, top + bh / 2)
+            c = ov._cell(int(round(x)), int(round(y)))
+            assert ov._fov_at(c, _press(int(round(x)), int(round(y)))) == fov
+            assert ov._loupe_geometry(int(round(x)), int(round(y)))[1] == fov
+    finally:
+        ov.set_loupe_source(None)
+
+
+def test_the_loupe_reads_the_field_the_cursor_is_over_not_the_regions_first(qapp):
+    """The read that actually reaches the source carries the field, not just the geometry.
+
+    ``docs/plate-contract.md`` records the shape of this exact failure for the TIMEPOINT: every
+    read site took one and nothing passed one, so a signature test read as correct from both
+    ends. Driven through the widget for the same reason."""
+    ov = _freeform_overview()
+    src = _FakeLoupeSource(well_px=1000, n_levels=1)
+    ov.set_loupe_source(src, np.ones((2, 3), np.float32))
+    try:
+        seen = {}
+        for (region, fov), (top, left, bh, bw) in sorted(ov._boxes.items()):
+            ri, ci = next(rc for rc, r in ov._by_rc.items() if r == region)
+            x, y = _widget_point_of_block(ov, ri, ci, left + bw / 2, top + bh / 2)
+            src.reads.clear()
+            ov.mousePressEvent(_press(int(round(x)), int(round(y))))
+            ov._arm_loupe()
+            assert _drain_until(qapp, lambda: bool(src.reads)), "the loupe never issued a read"
+            ov.mouseReleaseEvent(_press(int(round(x)), int(round(y))))
+            seen[(region, fov)] = src.reads[-1][6]          # the fov the SOURCE was asked for
+        assert seen == {k: k[1] for k in seen}, (
+            f"the source was asked for the wrong fields: {seen}")
     finally:
         ov.set_loupe_source(None)
 
@@ -2873,6 +2940,73 @@ def test_the_loupe_and_the_blit_share_one_content_box(qapp):
         sx, sy, sw, sh = ov._cell_source(ri, ci)
         assert (sx - ci * V._CELL, sy - ri * V._CELL, sw, sh) == pytest.approx(
             ov._content_box(ri, ci), abs=0.5), f"cell {(ri, ci)}: the blit and the loupe disagree"
+
+
+def _loupe_rgb(ov):
+    """The inset's pixels as (h, w, 3) uint8."""
+    img = ov._loupe_img
+    a = np.frombuffer(img.constBits().asstring(img.sizeInBytes()), np.uint8)
+    a = a.reshape(img.height(), img.bytesPerLine() // 3, 3)
+    return a[:, :img.width(), :].copy()
+
+
+def _contrast_overview(colors):
+    """A bare plate with a declared channel set, so it owns a contrast model and a LUT table."""
+    ov = V.PlateOverview(["A"], ["1"], {(0, 0): "A1"})
+    ov.set_channels(["c0", "c1"], np.asarray(colors, np.float32))
+    ov._loupe = {"well": "A1", "x": 0, "y": 0}
+    ov._loupe_colors = np.ones((2, 3), np.float32)     # the STALE display_color snapshot
+    return ov
+
+
+def test_the_loupe_paints_with_the_plates_own_contrast(qapp):
+    """Julio, with a screenshot: "loupe not contrast synched with window ... the yellow vs green."
+
+    The plate resolves a channel's window through ``_RunningContrast`` -- the user's latch, the
+    napari window's followed LUT, else the running histogram under the maragall fluorescence rule
+    (background mode + 2sigma to black). The SOURCE derived a second one, ``_pct_window`` over
+    the well's coarse plane, and the loupe painted with that.
+
+    They do not merely differ on a channel carrying no signal: they disagree about whether
+    anything is there. The plate's rule returns a DEGENERATE window and renders it black on
+    purpose; a 1/99.8 percentile window over pure background is a tight window ON the background,
+    which lifts the whole field. Two channels doing that additively is the yellow.
+
+    So: a plate whose channels both window to black must show a BLACK inset, whatever window the
+    source computed for itself."""
+    ov = _contrast_overview([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+    for ch in (0, 1):
+        ov._contrast.add(ch, np.full((32, 32), 900, np.uint16))   # flat -> degenerate -> black
+        assert ov.channel_windows()[ch][1] <= ov.channel_windows()[ch][0]
+    crop = np.stack([np.full((8, 8), 5000, np.uint16)] * 2)
+    # ...and the source insists the field is bright: the exact disagreement, handed in.
+    ov._on_loupe_crop(ov._loupe_gen, "A1", crop, [(0.0, 6000.0)] * 2, None)
+    assert _loupe_rgb(ov).max() == 0, (
+        "the plate windows both channels to black and the inset lit them up: the loupe is still "
+        "painting with the source's own percentile window")
+
+
+def test_the_loupe_paints_with_the_plates_own_colours(qapp):
+    """Julio: "I change channel colormap in napari and plate view doesn't react" was fixed for the
+    PLATE (``set_channel_color`` -> ``self._colors``) and not for the loupe, whose ``_loupe_colors``
+    is a snapshot of the acquisition's ``display_color`` taken once in ``set_loupe_source``. Recolour
+    a channel in napari and the plate moved while the inset kept the acquisition's colour."""
+    ov = _contrast_overview([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+    for ch in (0, 1):
+        ov.set_channel_window(ch, 0.0, 10000.0)        # a latch, so the WINDOW is not the variable
+    crop = np.stack([np.full((8, 8), 5000, np.uint16)] * 2)
+    ov._on_loupe_crop(ov._loupe_gen, "A1", crop, [(0.0, 10000.0)] * 2, None)
+    rgb = _loupe_rgb(ov)
+    assert rgb[..., 2].max() == 0, (
+        "no plate channel is blue and the inset has blue in it: the loupe is painting with the "
+        "stale display_color snapshot, not the LUT napari owns")
+    assert rgb[..., 0].min() > 0 and rgb[..., 1].min() > 0
+    # ...and a recolour in napari moves the inset, not just the plate.
+    ov.set_channel_color(0, np.array([0.0, 0.0, 1.0], np.float32))
+    ov._on_loupe_crop(ov._loupe_gen, "A1", crop, [(0.0, 10000.0)] * 2, None)
+    after = _loupe_rgb(ov)
+    assert after[..., 0].max() == 0 and after[..., 2].min() > 0, (
+        "channel 0 was recoloured blue and the inset is still painting it red")
 
 
 def test_the_loupe_reads_the_timepoint_the_plate_is_showing(qapp, stub_detail, squid_dataset):
@@ -2948,7 +3082,7 @@ def test_loupe_read_stays_bounded_when_the_source_has_no_pyramid(qapp, stub_deta
     ov.set_loupe_source(src, np.ones((2, 3), np.float32))
     rc = sorted(ov._by_rc)[0]
     x, y = _cell_center(ov, *rc)
-    _w, level, (y0, x0, h, w), _s, _m = ov._loupe_geometry(x, y)
+    _w, _f, level, (y0, x0, h, w), _s, _m = ov._loupe_geometry(x, y)
     assert level == 0 and max(h, w) > V._LOUPE_MAX_CROP          # the rect really is huge
     crop = src.read_crop("B2", level, y0, x0, h, w)
     assert max(crop.shape[-2:]) <= V._LOUPE_MAX_CROP             # ...the ARRAY never is
@@ -3145,10 +3279,17 @@ def test_loupe_geometry_maps_cursor_to_the_right_well_and_crop(qapp, stub_detail
     ov.resize(600, 400)
     ov.set_loupe_source(_FakeLoupeSource(well_px=1024, n_levels=4), np.ones((2, 3), np.float32))
 
+    # The SINGLE-FIELD path on purpose. This fixture's two FOVs are 0.5 mm apart with 4 px frames,
+    # so `_mosaic_boxes` places each field in ONE pixel of the 88 px cell -- a cell where a single
+    # screen pixel of cursor motion spans the whole field, and "centred where the user pointed" is
+    # not expressible at all. Multi-field centring is pinned on `_freeform_overview`, whose boxes
+    # are 44 px. Here the question is the WELL, the crop centre and the level.
+    ov.set_mosaic_boxes({})
     rc = sorted(ov._by_rc)[0]
     x, y = _cell_center(ov, *rc)
-    well, level, (y0, x0, h, w), s_loupe, mag = ov._loupe_geometry(x, y)
+    well, fov, level, (y0, x0, h, w), s_loupe, mag = ov._loupe_geometry(x, y)
     assert well == ov._by_rc[rc]                     # the well actually under the cursor
+    assert fov is None                               # no mosaic to name a field from
     span = 1024 >> level
     # The crop is centred on where the user pointed, to within the resolution the plate can
     # even express: on a 1536wp at fit, one screen pixel IS span/cd image pixels, so that is
@@ -3164,12 +3305,12 @@ def test_loupe_geometry_maps_cursor_to_the_right_well_and_crop(qapp, stub_detail
     ov._cd = 20.0
     ax, ay = ov._ox + V._HDR, ov._oy + V._COLH
     pt_out = (int(ax + (rc[1] + 0.5) * ov._cd), int(ay + (rc[0] + 0.5) * ov._cd))
-    _w, lvl_out, _r, _s, mag_out = ov._loupe_geometry(*pt_out)
+    _w, _f, lvl_out, _r, _s, mag_out = ov._loupe_geometry(*pt_out)
     # Zoomed in near native, it reads level 0 and stops claiming magnification.
     ov._cd = 4096.0
     ax, ay = ov._ox + V._HDR, ov._oy + V._COLH
     pt_in = (int(ax + (rc[1] + 0.5) * ov._cd), int(ay + (rc[0] + 0.5) * ov._cd))
-    _w, lvl_in, _r, _s, mag_in = ov._loupe_geometry(*pt_in)
+    _w, _f, lvl_in, _r, _s, mag_in = ov._loupe_geometry(*pt_in)
     assert lvl_out > lvl_in and lvl_in == 0
     assert mag_out > mag_in and mag_in == pytest.approx(1.0)
 
@@ -5289,3 +5430,4 @@ def test_the_empty_pane_does_not_name_CONTROL_WELL_on_a_slide(qapp, stub_detail,
     assert "control well" not in plate_labels, "the plate copy teaches a deleted gesture"
     assert plate_labels != labels, "the plate and slide copy are identical; the unit differs"
     win.close()
+

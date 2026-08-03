@@ -155,6 +155,18 @@ the widget rather than inspecting a signature.
 `python -m squidmip.contract.validate` still warns when a plate carries more than one timepoint.
 That warning was the only thing saying so out loud while the gap existed; it is now belt and braces.
 
+**The next axis, found the same day: the FIELD.** The Time section closes by naming the part that
+generalises — every fixture was `Nt = 1`, so the bug was invisible by construction. The identical
+shape was live one axis over. A loupe read addresses `(well, fov, level, rect, t)`, and `fov` was
+not an argument at all: `_fov_of_well` returned the region's FIRST field for every position, while
+the widget handed the read a position measured across the whole MOSAIC. On a multi-FOV region the
+loupe therefore stretched the entire mosaic onto field 0 — real pixels, from a field the cursor was
+mostly not over, with nothing on screen to say so. `read_crop` now takes a `fov`, the widget
+resolves it from the mosaic boxes it already draws by (`PlateOverview._fov_box_at`, shared with the
+double-click hit test), and `_fov_of_well` is what a caller that has not resolved one falls back to.
+The contrast WINDOW stays per WELL (`coarse` still reads the region's first field) so brightness
+does not lurch as the cursor crosses a seam.
+
 ### Level 0 is full resolution, and a MIP never comes from a coarser level
 
 `datasets` is ordered highest resolution first. `datasets[0]` is the full-resolution,
