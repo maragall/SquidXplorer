@@ -420,8 +420,8 @@ def test_write_story_strips_the_ome_suffix_from_the_dataset_name(tmp_path):
 #
 # Julio: "channels need to be set to specific colors". The export's own defaults are the
 # acquisition's display_color plus a 1/99.9 percentile stretch, neither of which knows the user
-# recoloured a layer or dragged a contrast slider. These assert the OUTCOME — what is in the
-# .story.json Minerva reads — and never that some function was called.
+# recoloured a layer or dragged a contrast slider. These assert the OUTCOME - what is in the
+# .story.json Minerva reads - and never that some function was called.
 
 def _story_channels(story) -> dict:
     return {c["label"]: c for c in json.loads(story.read_text())["groups"][0]["channels"]}
@@ -482,7 +482,7 @@ def test_an_unrepresentable_colormap_falls_back_instead_of_guessing(squid_datase
     """``rgb: None`` is what colormap_hue_rgb returns for a multi-stop map (viridis, turbo).
     Minerva has ONE colour field per channel and cannot hold a ramp, so the acquisition's colour
     is kept. Emitting the ramp's brightest stop would put a colour into Minerva that is on no
-    screen — which is the failure this asserts against. The CONTRAST still comes from the screen:
+    screen - which is the failure this asserts against. The CONTRAST still comes from the screen:
     a colormap we cannot represent says nothing about where the slider is."""
     root, _ = squid_dataset
     reader = open_reader(root)
@@ -498,7 +498,7 @@ def test_an_unrepresentable_colormap_falls_back_instead_of_guessing(squid_datase
 
 def test_auto_groups_takes_clim_in_raw_units_not_normalised_ones():
     """The unit is the one napari's contrast slider works in, which is also the unit the
-    percentiles are computed in — so both paths divide by dtype_max in the same place."""
+    percentiles are computed in - so both paths divide by dtype_max in the same place."""
     img = np.stack([np.full((8, 8), 100, np.uint16), np.full((8, 8), 200, np.uint16)])
     (group,) = auto_groups(
         img, ["a", "b"], [(255, 0, 0), (0, 255, 0)],
@@ -533,7 +533,7 @@ def test_render_exhibit_says_which_piece_is_missing(monkeypatch, tmp_path):
 
 def _fake_checkout(tmp_path, render_body: str):
     """A checkout whose render.py is a real Python script we control. Runs the actual subprocess
-    plumbing — Popen, poll, exit code, stdout — instead of mocking the thing under test."""
+    plumbing - Popen, poll, exit code, stdout - instead of mocking the thing under test."""
     import sys
 
     home = tmp_path / "home"
@@ -561,7 +561,7 @@ def test_render_exhibit_returns_the_index_html_it_wrote(monkeypatch, tmp_path):
     index = _minerva.render_exhibit(ome, story, tmp_path / "out")
 
     assert index == tmp_path / "out" / "index.html" and index.is_file()
-    # The renderer is handed OUR pair, resolved — its own cwd is the checkout, not ours.
+    # The renderer is handed OUR pair, resolved - its own cwd is the checkout, not ours.
     assert index.read_text() == f"{ome.resolve()}|{story.resolve()}"
 
 
@@ -604,7 +604,7 @@ def test_render_exhibit_abandons_a_long_render_when_told_to_stop(monkeypatch, tm
     with pytest.raises(RuntimeError, match="stopped"):
         _minerva.render_exhibit(tmp_path / "x.ome.tiff", tmp_path / "x.story.json",
                                 tmp_path / "o", should_stop=lambda: stop[0])
-    assert time.monotonic() - t0 < 20.0          # not 60 — the poll honoured the flag
+    assert time.monotonic() - t0 < 20.0          # not 60 - the poll honoured the flag
 
 
 def test_the_internet_requirement_is_stated_somewhere_a_user_meets_it():
@@ -652,7 +652,7 @@ def test_a_cold_start_opens_exactly_one_tab_and_it_is_not_ours(monkeypatch, tmp_
     """minerva-author opens the browser ITSELF and cannot be told not to.
 
     ``src/app.py`` v1.21.0 (commit c555515) defines ``open_browser()`` at :2033 and calls it at
-    :2050 AND :2053, once in each arm of ``if "--dev" in sys.argv`` — its only argv handling. So
+    :2050 AND :2053, once in each arm of ``if "--dev" in sys.argv`` - its only argv handling. So
     a cold start opened two tabs: Author's and ours. Ours is the one we can drop.
 
     Asserted on the OUTCOME (how many opens happen) rather than on a flag, so it stays true if

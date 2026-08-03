@@ -196,6 +196,7 @@ import sys  # noqa: E402
 if "PySide6" in sys.modules or "PySide2" in sys.modules:   # pragma: no cover
     pytest.skip("a PySide binding is already loaded", allow_module_level=True)
 
+from qtpy.QtCore import Qt  # noqa: E402
 from qtpy.QtWidgets import QApplication  # noqa: E402
 
 from squidmip._op_panels import DeconQCPanel, DeconQCResultView, StitcherPanel  # noqa: E402
@@ -377,6 +378,129 @@ def test_the_result_view_renders_the_turbo_composite_at_the_composite_s_own_size
     img = view.image_label.pixmap().toImage()
     assert (img.width(), img.height()) == (composite.shape[1], composite.shape[0])
     assert "3" in view.caption_label.text()
+
+
+def _click(qapp, view, row, col):
+    """A REAL mouse press on the picture at composite pixel (row, col).
+
+    Goes through `_ClickableImage.mousePressEvent`, so the centring offset of a pixmap inside a
+    wider label is exercised rather than assumed: emitting `clicked` directly would test the
+    mapping and skip the half of this that has actually been wrong in Qt code before.
+    """
+    from qtpy.QtCore import QPoint
+    from qtpy.QtTest import QTest
+
+    label = view.image_label
+    pm = label.pixmap()
+    dx = max((label.width() - pm.width()) // 2, 0)
+    dy = max((label.height() - pm.height()) // 2, 0)
+    QTest.mouseClick(label, Qt.LeftButton, Qt.NoModifier, QPoint(dx + col, dy + row))
+    qapp.processEvents()
+
+
+def _qc_view(qapp, volume, centre, view_half=None):
+    """A result view showing one iteration of *volume*, laid out and clickable."""
+    from squidmip._decon_qc import qc_composite
+
+    view = DeconQCResultView("A1/0/c0")
+    view.show_iteration(3, qc_composite(volume, centre, view_half=view_half), 0.31,
+                        "improving", "still tightening",
+                        volume=volume, centre=centre, view_half=view_half)
+    view.resize(400, 400)
+    view.show()
+    qapp.processEvents()
+    return view
+
+
+def test_clicking_the_picture_moves_the_crosshairs_and_re_cuts_the_strips(qapp):
+    """Julio: "we should be able to ... click on there image and it moves teh crosshairs to
+    display XZ and YZ bands."
+
+    The x-z and y-z strips are sections through ONE point, and the point the run picked is the
+    brightest structure it found, not necessarily the one worth judging. A click re-sections the
+    SAME volume: qc_composite already takes `centre`, so no RL run happens here.
+    """
+    pytest.importorskip("matplotlib")
+    volume = np.zeros((5, 40, 40), dtype=np.float32)
+    volume[2, 20, 20] = 1000.0            # what the run centred on
+    volume[2, 10, 10] = 700.0             # a second structure, off both current sections
+    view = _qc_view(qapp, volume, (2, 20, 20))
+    before = view._rgb.copy()
+
+    _click(qapp, view, row=10, col=10)    # inside the x-y panel
+
+    assert view._centre == (2, 10, 10), "the crosshairs did not move to the clicked voxel"
+    assert not np.array_equal(view._rgb, before), (
+        "the crosshairs moved but the strips were not re-cut — the picture is stale")
+    assert "z=2" in view.crosshair_label.text() and "y=10" in view.crosshair_label.text()
+    # The halo/core number was measured where the RUN put the crosshairs, so once they move by
+    # hand the picture and the number are about different points and the view has to say so.
+    assert "moved by hand" in view.crosshair_label.text()
+    assert view.history == [(3, pytest.approx(0.31))], "a click is not another iteration"
+    view.close()
+
+
+def test_clicking_a_separator_band_moves_nothing(qapp):
+    """A gap pixel points at no section. Snapping to the nearest one would move the crosshairs
+    somewhere the user did not click, which reads as the feature working."""
+    pytest.importorskip("matplotlib")
+    volume = np.zeros((5, 40, 40), dtype=np.float32)
+    volume[2, 20, 20] = 1000.0
+    view = _qc_view(qapp, volume, (2, 20, 20))
+    before = view._rgb.copy()
+
+    _click(qapp, view, row=41, col=10)    # the horizontal separator (gap=2 at rows 40..41)
+
+    assert view._centre == (2, 20, 20)
+    assert np.array_equal(view._rgb, before)
+    view.close()
+
+
+def test_a_view_shown_without_its_volume_is_simply_not_clickable(qapp):
+    """The three-argument show_iteration still works and must not raise on a click: there is
+    nothing to re-slice, so the picture just sits there."""
+    pytest.importorskip("matplotlib")
+    from squidmip._decon_qc import qc_composite
+
+    volume = np.zeros((5, 40, 40), dtype=np.float32)
+    volume[2, 20, 20] = 1000.0
+    view = DeconQCResultView("A1/0/c0")
+    view.show_iteration(3, qc_composite(volume, (2, 20, 20)), 0.31, "improving", "")
+    view.resize(400, 400)
+    view.show()
+    qapp.processEvents()
+    before = view._rgb.copy()
+
+    _click(qapp, view, row=10, col=10)
+
+    assert view._centre is None
+    assert np.array_equal(view._rgb, before)
+    view.close()
+
+
+def test_the_worker_hands_the_volume_through_so_the_click_has_something_to_re_slice(qapp):
+    """The seam that makes the click possible at all: the RL volume has to survive the worker.
+
+    It used to emit the composite alone, which is a picture — you cannot cut a different
+    section out of a picture. Pinned as a shape, not a run: `_on_done` reads `frame.volume` /
+    `frame.centre` / `frame.view_half` and passes them to the view.
+    """
+    pytest.importorskip("matplotlib")
+    from squidmip._decon_qc import qc_composite
+    from squidmip._op_panels import QCFrame
+
+    volume = np.zeros((5, 40, 40), dtype=np.float32)
+    volume[2, 20, 20] = 1000.0
+    panel = DeconQCPanel(_Host())
+    panel._view = DeconQCResultView("A1/0/c0")
+    frame = QCFrame(qc_composite(volume, (2, 20, 20), view_half=8), volume, (2, 20, 20), 8)
+
+    panel._on_done(3, frame, 0.31)
+
+    assert panel._view._volume is not None, "the view got a picture but no volume to re-slice"
+    assert panel._view._centre == (2, 20, 20)
+    assert panel._view._view_half == 8
+    panel._view.close()
 
 
 def test_the_result_view_keeps_every_iteration_so_they_can_be_compared(qapp):

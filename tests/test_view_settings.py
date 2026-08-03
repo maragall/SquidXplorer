@@ -270,11 +270,19 @@ def test_an_roi_child_inherits_its_parents_contrast_not_the_global_default(qapp,
                                parent_id=parent.window_id)
     assert child is not None
 
-    assert child.settings.get("luts") == {
-        CH_IN_YAML: {"clim": (33.0, 333.0), "cmap": "red"},
-        CH_NOT_IN_YAML: {"clim": (44.0, 444.0), "cmap": "green"},
-    }, "the ROI child took the global default instead of its parent's contrast"
-    assert child.settings.get("luts") != _LUT_A
+    # Asserted field by field, not as one dict equality. What is inherited is CONTRAST and
+    # COLORMAP, and that is what this test is named for; a LUT record read off live layers also
+    # carries derived fields (``rgb``, the colormap reduced to one colour for the Minerva export)
+    # that say nothing about inheritance. Pinning the exact dict made every added field look like
+    # a contrast regression, which is a false alarm this test should not raise.
+    inherited = child.settings.get("luts")
+    assert set(inherited) == {CH_IN_YAML, CH_NOT_IN_YAML}
+    for ch, expected in _LUT_B.items():
+        assert inherited[ch]["clim"] == expected["clim"], (
+            "the ROI child took the global default instead of its parent's contrast")
+        assert inherited[ch]["cmap"] == expected["cmap"]
+    for ch, defaulted in _LUT_A.items():
+        assert inherited[ch]["clim"] != defaulted["clim"]
 
     assert child.settings.diverged == (), (
         "a child that inherited a parent's contrast is reporting itself diverged; it is showing "
@@ -356,6 +364,64 @@ def test_a_diverged_window_says_so_in_the_window_and_reset_clears_it(qapp, manag
         "the control still shows the overridden value after a reset")
     assert one._diverged_label.text() == "at the defaults"
     assert one._reset_btn.isEnabled() is False
+
+
+def test_every_control_in_the_defaults_box_reaches_the_shared_console(qapp, manager, caplog):
+    """A quiet control next to a loud one reads as a control that did nothing.
+
+    `auto focus` used to `_echo` (the in-window strip only) while `make default` and `reset`, in
+    the same box, `_say` (the strip AND the one global console). Julio clicked it four times: the
+    loud confirmation appeared in the console and the quiet one did not, so the tick looked
+    ignored. `_echo` is for events the console ALREADY has a structured line for; a settings
+    change has none, so all three of these speak.
+    """
+    import logging
+
+    one = manager.open([REGIONS[0]])
+    _loaded(qapp, one)
+
+    def _console_lines(fn) -> list[str]:
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger=one.log.logger.name):
+            fn()
+        return [r.getMessage() for r in caplog.records]
+
+    ticked = _console_lines(lambda: one._focus_default_chk.setChecked(True))
+    assert any("auto focus" in m for m in ticked), (
+        "ticking auto focus said nothing in the console; the other two controls in its box do")
+
+    reset = _console_lines(one._reset_settings)
+    assert any("auto focus" in m for m in reset), (
+        "reset stopped naming what it put back")
+
+    # and the neighbour it was compared against, so the three stay a set rather than drifting apart
+    one._focus_default_chk.setChecked(True)
+    made = _console_lines(one._make_default)
+    assert made, "make default said nothing in the console"
+
+
+def test_the_auto_focus_tooltip_describes_the_once_per_window_behaviour(qapp, manager):
+    """`_apply_settings_once` returns early after the first mosaic, so the jump happens ONCE.
+
+    The tooltip promised it "whenever this window loads a region", i.e. a refocus on every region
+    change that the code does not do. A tooltip is the only documentation this control has.
+    """
+    one = manager.open([REGIONS[0]])
+    tip = one._focus_default_chk.toolTip()
+
+    assert "once" in tip.lower(), "the tooltip does not say the jump happens once"
+    assert "whenever this window loads a region" not in tip, (
+        "the tooltip still promises a per-region refocus")
+
+    # the behaviour the tooltip now describes, unchanged: the guard is what makes it once
+    _loaded(qapp, one)
+    assert one._settings_applied is True
+    called = []
+    one._focus_reference_plane = lambda: called.append(1)
+    one.settings.set("tenengrad_focus", True)
+    one._apply_settings_once()
+    assert called == [], (
+        "_apply_settings_once ran a second time; the tooltip's 'once' is now the wrong description")
 
 
 def test_resetting_contrast_puts_the_layers_back(qapp, manager):
@@ -465,6 +531,65 @@ def test_pasting_luts_marks_the_window_diverged(qapp, manager):
     assert "contrast" in two._diverged_label.text()
     assert _layer_clims(two) == {CH_IN_YAML: (33.0, 333.0), CH_NOT_IN_YAML: (44.0, 444.0)}
     assert one.settings.diverged == (), "the copy diverged the window it copied FROM"
+    RV._LUT_CLIPBOARD.clear()
+
+
+def test_copy_paste_luts_is_the_only_contrast_path_between_two_open_windows(qapp, manager):
+    """The scope NOTHING else reaches, pinned so deleting the chips can never look free.
+
+    Julio, 2026-07-31: "if contrast are synched, the LUT copy paste should be removed. Prove me
+    wrong if not." What is synced automatically is exactly ONE scope: napari's ``link_layers``
+    holds the operator layers of ONE channel together INSIDE ONE window
+    (``MosaicLayers._register_channel``). It cannot cross windows -- every window builds its own
+    napari ``ViewerModel`` (``MosaicPane.__init__`` -> ``build_pane``) and napari cannot link
+    layers across viewers. The two other ways contrast travels are both shut here, deliberately:
+
+    * ``_baseline_for`` (the ``_INHERIT`` rule) hands a window its opener's contrast AT OPEN, and
+      only when an opener was named -- ``open_child``/ROI. Window two is ALREADY OPEN, and was
+      opened from the plate with no parent, so nothing reaches it that way.
+    * ``make_default`` is documented and tested as "windows opened FROM NOW ON"; it leaves every
+      open window exactly as it is.
+
+    So two wells side by side sit on two different stretches until somebody copies, which is the
+    routine comparison this app exists for. And the copy is also the ONLY carrier of the
+    COLORMAP: ``link_layers`` is bound to ``("contrast_limits",)`` and ``match_contrast_to``
+    writes contrast and nothing else.
+    """
+    from squidmip import _region_viewer as RV
+
+    RV._LUT_CLIPBOARD.clear()
+    one = manager.open([REGIONS[0]])
+    two = manager.open([REGIONS[1]])
+    _loaded(qapp, one)
+    _loaded(qapp, two)
+
+    before_clims = dict(_layer_clims(two))
+    before_cmaps = {ch: two._pane.mosaic.find("raw", ch).colormap
+                    for ch in (CH_IN_YAML, CH_NOT_IN_YAML)}
+
+    # Window one is re-tuned: a new stretch AND a new colour, both by hand, as the user does.
+    for ch, lut in _LUT_B.items():
+        layer = one._pane.mosaic.find("raw", ch)
+        layer.contrast_limits = lut["clim"]
+        layer.colormap = "magenta"
+    assert before_cmaps[CH_IN_YAML] != "magenta", "the fixture already used the colour under test"
+
+    # Nothing crossed. Not the link, not the baseline...
+    assert _layer_clims(two) == before_clims, (
+        "window one's contrast reached an already-open window two on its own; if that is now real "
+        "then this test, not the chips, is what is wrong")
+    # ...and not make_default either, which is the affordance that REPLACED propagation.
+    assert manager.make_default(one.window_id) is True
+    assert _layer_clims(two) == before_clims, "make_default reached back into an open window"
+
+    # The chips are the path. Both halves of a LUT travel: the stretch and the colour.
+    one._copy_luts()
+    two._paste_luts()
+
+    assert _layer_clims(two) == {CH_IN_YAML: (33.0, 333.0), CH_NOT_IN_YAML: (44.0, 444.0)}
+    for ch in (CH_IN_YAML, CH_NOT_IN_YAML):
+        assert two._pane.mosaic.find("raw", ch).colormap == "magenta", (
+            f"{ch}: the colormap did not travel, and no other mechanism carries it at all")
     RV._LUT_CLIPBOARD.clear()
 
 

@@ -2402,9 +2402,12 @@ class _FakeLoupeSource(V._LoupeSource):
             return False, "not written yet"
         return True, ""
 
-    def read_crop(self, well_id, level, y0, x0, h, w, time_point=0):
-        self.reads.append((well_id, level, y0, x0, h, w, int(time_point)))
-        f = self._field(level) + int(time_point)     # +t: a crop names the FRAME it came from
+    def read_crop(self, well_id, level, y0, x0, h, w, time_point=0, fov=None):
+        # fov before time_point so `r[-1]` stays the TIMEPOINT for the callers that read it.
+        self.reads.append((well_id, level, y0, x0, h, w, fov, int(time_point)))
+        # +fov as well as +t: a crop names the FIELD and the FRAME it came from, so a test can
+        # tell a read of field 1 from a read of field 0 at the same rectangle.
+        f = self._field(level) + int(time_point) + 1000 * int(fov or 0)
         span = f.shape[-1]
         y0, x0, h, w = V.loupe_clamp_crop(y0, x0, h, w, span, span)   # what a real source must do
         step = V.loupe_decimation(max(h, w))
@@ -2836,29 +2839,93 @@ def _freeform_overview():
     return ov
 
 
-def test_the_loupe_reads_the_cell_the_cursor_is_actually_over(qapp):
-    """A freeform holder places each cell by its own rectangle. The loupe used to invert the
-    UNIFORM grid instead (``ax + ci*cd``, a ``cd`` square), which is right on a well plate and
-    wrong on every other holder.
+def _widget_point_of_block(ov, ri, ci, bx, by):
+    """The widget pixel that ``_cell_point(ri, ci, ...)`` maps back to block point (bx, by).
 
-    Pressing the middle of a cell asked for a rectangle clamped hard against the far corner of
-    the field, so the inset filled with real pixels from a place the cursor was not -- the worst
-    kind of wrong, because it looks like it is working."""
+    The exact inverse of ``_cell_point``, written out rather than solved numerically so a
+    mistake in it cannot cancel a mistake in the thing under test."""
+    rx, ry, rw, rh = ov._cell_rect(ri, ci)
+    sx, sy, sw, sh = ov._cell_source(ri, ci)
+    return (rx + (bx - (sx - ci * V._CELL)) / sw * rw,
+            ry + (by - (sy - ri * V._CELL)) / sh * rh)
+
+
+def test_the_loupe_magnifies_the_field_the_cursor_is_over(qapp):
+    """A freeform holder places each cell by its own rectangle, AND each cell holds a MOSAIC of
+    several fields. Two transforms, and the loupe used to get both wrong in turn.
+
+    The first was fixed: ``_cell_fraction`` now inverts the cell's own rect and its letterbox
+    instead of the uniform grid. The second was not, and is what Julio still saw ("Coordinate map
+    is off, as you can see in my mouse positioning"): that fraction is across the whole MOSAIC,
+    and ``_loupe_geometry`` multiplied it by ONE field's pixel span and read the region's FIRST
+    field. A 2-FOV region therefore mapped its entire width onto FOV 0 -- the middle of the cell,
+    which is the LEFT EDGE of FOV 1, read the middle of FOV 0.
+
+    The invariant that says it properly: the centre of a field's own box magnifies the centre of
+    THAT field."""
     ov = _freeform_overview()
     ov.set_loupe_source(_FakeLoupeSource(well_px=1000, n_levels=1))
     try:
-        for rc in ((0, 0), (0, 1)):
-            rx, ry, rw, rh = ov._cell_rect(*rc)
-            geo = ov._loupe_geometry(int(rx + rw / 2), int(ry + rh / 2))
-            assert geo is not None, f"cell {rc}: the cursor was over a cell and got nothing"
-            _well, _lvl, (y0, x0, h, w), _s, _m = geo
+        for (region, fov), (top, left, bh, bw) in sorted(ov._boxes.items()):
+            ri, ci = next(rc for rc, r in ov._by_rc.items() if r == region)
+            x, y = _widget_point_of_block(ov, ri, ci, left + bw / 2, top + bh / 2)
+            geo = ov._loupe_geometry(int(round(x)), int(round(y)))
+            assert geo is not None, f"{region} fov {fov}: the cursor was over a field, got nothing"
+            well, got_fov, _lvl, (y0, x0, h, w), _s, _m = geo
+            assert (well, got_fov) == (region, fov), (
+                f"the cursor was over {region} fov {fov} and the loupe went to {well} "
+                f"fov {got_fov}")
             assert (y0 + h / 2, x0 + w / 2) == pytest.approx((500, 500), abs=2), (
-                f"cell {rc}: the middle of the cell read {(y0 + h / 2, x0 + w / 2)} of a "
-                "1000 px field, not its middle")
-        # ...and the corners of the drawn rect are the corners of the field, not of the block.
+                f"{region} fov {fov}: the middle of the FIELD read "
+                f"{(y0 + h / 2, x0 + w / 2)} of a 1000 px field, not its middle")
+        # ...and the corners of the drawn rect are still the corners of the MOSAIC, not of the
+        # block: the letterbox inverse the earlier fix landed is untouched by any of the above.
         rx, ry, rw, rh = ov._cell_rect(0, 0)
         assert ov._cell_fraction(0, 0, rx, ry) == pytest.approx((0.0, 0.0), abs=0.02)
         assert ov._cell_fraction(0, 0, rx + rw, ry + rh) == pytest.approx((1.0, 1.0), abs=0.02)
+    finally:
+        ov.set_loupe_source(None)
+
+
+def test_the_loupe_and_a_double_click_resolve_the_same_field(qapp):
+    """One box lookup, so the field the inset showed and the field a double-click opens cannot
+    be different fields. They were two loops over ``self._boxes`` before, and only one of them
+    existed."""
+    ov = _freeform_overview()
+    ov.set_loupe_source(_FakeLoupeSource(well_px=1000, n_levels=1))
+    try:
+        for (region, fov), (top, left, bh, bw) in sorted(ov._boxes.items()):
+            ri, ci = next(rc for rc, r in ov._by_rc.items() if r == region)
+            x, y = _widget_point_of_block(ov, ri, ci, left + bw / 2, top + bh / 2)
+            c = ov._cell(int(round(x)), int(round(y)))
+            assert ov._fov_at(c, _press(int(round(x)), int(round(y)))) == fov
+            assert ov._loupe_geometry(int(round(x)), int(round(y)))[1] == fov
+    finally:
+        ov.set_loupe_source(None)
+
+
+def test_the_loupe_reads_the_field_the_cursor_is_over_not_the_regions_first(qapp):
+    """The read that actually reaches the source carries the field, not just the geometry.
+
+    ``docs/plate-contract.md`` records the shape of this exact failure for the TIMEPOINT: every
+    read site took one and nothing passed one, so a signature test read as correct from both
+    ends. Driven through the widget for the same reason."""
+    ov = _freeform_overview()
+    src = _FakeLoupeSource(well_px=1000, n_levels=1)
+    ov.set_loupe_source(src, np.ones((2, 3), np.float32))
+    try:
+        seen = {}
+        for (region, fov), (top, left, bh, bw) in sorted(ov._boxes.items()):
+            ri, ci = next(rc for rc, r in ov._by_rc.items() if r == region)
+            x, y = _widget_point_of_block(ov, ri, ci, left + bw / 2, top + bh / 2)
+            src.reads.clear()
+            ov.mousePressEvent(_press(int(round(x)), int(round(y))))
+            ov._arm_loupe()
+            assert _drain_until(qapp, lambda: bool(src.reads)), "the loupe never issued a read"
+            ov.mouseReleaseEvent(_press(int(round(x)), int(round(y))))
+            seen[(region, fov)] = src.reads[-1][6]          # the fov the SOURCE was asked for
+        assert seen == {k: k[1] for k in seen}, (
+            f"the source was asked for the wrong fields: {seen}")
     finally:
         ov.set_loupe_source(None)
 
@@ -2874,6 +2941,73 @@ def test_the_loupe_and_the_blit_share_one_content_box(qapp):
         sx, sy, sw, sh = ov._cell_source(ri, ci)
         assert (sx - ci * V._CELL, sy - ri * V._CELL, sw, sh) == pytest.approx(
             ov._content_box(ri, ci), abs=0.5), f"cell {(ri, ci)}: the blit and the loupe disagree"
+
+
+def _loupe_rgb(ov):
+    """The inset's pixels as (h, w, 3) uint8."""
+    img = ov._loupe_img
+    a = np.frombuffer(img.constBits().asstring(img.sizeInBytes()), np.uint8)
+    a = a.reshape(img.height(), img.bytesPerLine() // 3, 3)
+    return a[:, :img.width(), :].copy()
+
+
+def _contrast_overview(colors):
+    """A bare plate with a declared channel set, so it owns a contrast model and a LUT table."""
+    ov = V.PlateOverview(["A"], ["1"], {(0, 0): "A1"})
+    ov.set_channels(["c0", "c1"], np.asarray(colors, np.float32))
+    ov._loupe = {"well": "A1", "x": 0, "y": 0}
+    ov._loupe_colors = np.ones((2, 3), np.float32)     # the STALE display_color snapshot
+    return ov
+
+
+def test_the_loupe_paints_with_the_plates_own_contrast(qapp):
+    """Julio, with a screenshot: "loupe not contrast synched with window ... the yellow vs green."
+
+    The plate resolves a channel's window through ``_RunningContrast`` -- the user's latch, the
+    napari window's followed LUT, else the running histogram under the maragall fluorescence rule
+    (background mode + 2sigma to black). The SOURCE derived a second one, ``_pct_window`` over
+    the well's coarse plane, and the loupe painted with that.
+
+    They do not merely differ on a channel carrying no signal: they disagree about whether
+    anything is there. The plate's rule returns a DEGENERATE window and renders it black on
+    purpose; a 1/99.8 percentile window over pure background is a tight window ON the background,
+    which lifts the whole field. Two channels doing that additively is the yellow.
+
+    So: a plate whose channels both window to black must show a BLACK inset, whatever window the
+    source computed for itself."""
+    ov = _contrast_overview([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+    for ch in (0, 1):
+        ov._contrast.add(ch, np.full((32, 32), 900, np.uint16))   # flat -> degenerate -> black
+        assert ov.channel_windows()[ch][1] <= ov.channel_windows()[ch][0]
+    crop = np.stack([np.full((8, 8), 5000, np.uint16)] * 2)
+    # ...and the source insists the field is bright: the exact disagreement, handed in.
+    ov._on_loupe_crop(ov._loupe_gen, "A1", crop, [(0.0, 6000.0)] * 2, None)
+    assert _loupe_rgb(ov).max() == 0, (
+        "the plate windows both channels to black and the inset lit them up: the loupe is still "
+        "painting with the source's own percentile window")
+
+
+def test_the_loupe_paints_with_the_plates_own_colours(qapp):
+    """Julio: "I change channel colormap in napari and plate view doesn't react" was fixed for the
+    PLATE (``set_channel_color`` -> ``self._colors``) and not for the loupe, whose ``_loupe_colors``
+    is a snapshot of the acquisition's ``display_color`` taken once in ``set_loupe_source``. Recolour
+    a channel in napari and the plate moved while the inset kept the acquisition's colour."""
+    ov = _contrast_overview([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+    for ch in (0, 1):
+        ov.set_channel_window(ch, 0.0, 10000.0)        # a latch, so the WINDOW is not the variable
+    crop = np.stack([np.full((8, 8), 5000, np.uint16)] * 2)
+    ov._on_loupe_crop(ov._loupe_gen, "A1", crop, [(0.0, 10000.0)] * 2, None)
+    rgb = _loupe_rgb(ov)
+    assert rgb[..., 2].max() == 0, (
+        "no plate channel is blue and the inset has blue in it: the loupe is painting with the "
+        "stale display_color snapshot, not the LUT napari owns")
+    assert rgb[..., 0].min() > 0 and rgb[..., 1].min() > 0
+    # ...and a recolour in napari moves the inset, not just the plate.
+    ov.set_channel_color(0, np.array([0.0, 0.0, 1.0], np.float32))
+    ov._on_loupe_crop(ov._loupe_gen, "A1", crop, [(0.0, 10000.0)] * 2, None)
+    after = _loupe_rgb(ov)
+    assert after[..., 0].max() == 0 and after[..., 2].min() > 0, (
+        "channel 0 was recoloured blue and the inset is still painting it red")
 
 
 def test_the_loupe_reads_the_timepoint_the_plate_is_showing(qapp, stub_detail, squid_dataset):
@@ -2949,7 +3083,7 @@ def test_loupe_read_stays_bounded_when_the_source_has_no_pyramid(qapp, stub_deta
     ov.set_loupe_source(src, np.ones((2, 3), np.float32))
     rc = sorted(ov._by_rc)[0]
     x, y = _cell_center(ov, *rc)
-    _w, level, (y0, x0, h, w), _s, _m = ov._loupe_geometry(x, y)
+    _w, _f, level, (y0, x0, h, w), _s, _m = ov._loupe_geometry(x, y)
     assert level == 0 and max(h, w) > V._LOUPE_MAX_CROP          # the rect really is huge
     crop = src.read_crop("B2", level, y0, x0, h, w)
     assert max(crop.shape[-2:]) <= V._LOUPE_MAX_CROP             # ...the ARRAY never is
@@ -3146,10 +3280,17 @@ def test_loupe_geometry_maps_cursor_to_the_right_well_and_crop(qapp, stub_detail
     ov.resize(600, 400)
     ov.set_loupe_source(_FakeLoupeSource(well_px=1024, n_levels=4), np.ones((2, 3), np.float32))
 
+    # The SINGLE-FIELD path on purpose. This fixture's two FOVs are 0.5 mm apart with 4 px frames,
+    # so `_mosaic_boxes` places each field in ONE pixel of the 88 px cell -- a cell where a single
+    # screen pixel of cursor motion spans the whole field, and "centred where the user pointed" is
+    # not expressible at all. Multi-field centring is pinned on `_freeform_overview`, whose boxes
+    # are 44 px. Here the question is the WELL, the crop centre and the level.
+    ov.set_mosaic_boxes({})
     rc = sorted(ov._by_rc)[0]
     x, y = _cell_center(ov, *rc)
-    well, level, (y0, x0, h, w), s_loupe, mag = ov._loupe_geometry(x, y)
+    well, fov, level, (y0, x0, h, w), s_loupe, mag = ov._loupe_geometry(x, y)
     assert well == ov._by_rc[rc]                     # the well actually under the cursor
+    assert fov is None                               # no mosaic to name a field from
     span = 1024 >> level
     # The crop is centred on where the user pointed, to within the resolution the plate can
     # even express: on a 1536wp at fit, one screen pixel IS span/cd image pixels, so that is
@@ -3165,12 +3306,12 @@ def test_loupe_geometry_maps_cursor_to_the_right_well_and_crop(qapp, stub_detail
     ov._cd = 20.0
     ax, ay = ov._ox + V._HDR, ov._oy + V._COLH
     pt_out = (int(ax + (rc[1] + 0.5) * ov._cd), int(ay + (rc[0] + 0.5) * ov._cd))
-    _w, lvl_out, _r, _s, mag_out = ov._loupe_geometry(*pt_out)
+    _w, _f, lvl_out, _r, _s, mag_out = ov._loupe_geometry(*pt_out)
     # Zoomed in near native, it reads level 0 and stops claiming magnification.
     ov._cd = 4096.0
     ax, ay = ov._ox + V._HDR, ov._oy + V._COLH
     pt_in = (int(ax + (rc[1] + 0.5) * ov._cd), int(ay + (rc[0] + 0.5) * ov._cd))
-    _w, lvl_in, _r, _s, mag_in = ov._loupe_geometry(*pt_in)
+    _w, _f, lvl_in, _r, _s, mag_in = ov._loupe_geometry(*pt_in)
     assert lvl_out > lvl_in and lvl_in == 0
     assert mag_out > mag_in and mag_in == pytest.approx(1.0)
 
@@ -3499,7 +3640,8 @@ def test_closing_mid_export_disconnects_the_worker(qapp, stub_detail, squid_data
 #   test_a_real_shift_drag_fills_pane3_without_moving_a_single_divider
 #
 # The three-pane layout is gone. `self._split` is now the compact top ROW of the portrait deck and
-# holds exactly TWO widgets (`OpenViewList` | `_left_tabs`); there is no `_explore_col` at all, the
+# holds exactly TWO widgets (`OpenViewList` | `_right_col`, the latter a vertical splitter of
+# `_left_tabs` over the log panel since the 2026-08-03 restack); there is no `_explore_col`, the
 # central pane was deleted, and the log moved into its own top-level window. `_explore_pane` /
 # `_explore_empty` are still CONSTRUCTED but are never parented into any layout, so nothing in them
 # is on screen — which is why the geometry these three measured is no longer measurable rather
@@ -4899,6 +5041,110 @@ def test_every_card_declares_whether_it_is_a_runnable_operator():
             )
 
 
+def test_gallery_view_is_a_view_menu_command_and_not_an_operator(qapp):
+    """"I guess I don't understand how this can be treated as an operator in bulk" (Julio).
+
+    He is right. An operator here is something the engine runs over regions to produce derived
+    data, declared by a `consumes` frozenset; "arrange the open windows in a grid" consumes no
+    axis and produces no pixels. It was never in `_OPERATIONS`, but it sat in the operator card
+    stack wearing the same card, which is what made it read as one.
+
+    It is also NOT IMPLEMENTED, and this pins that it says so instead of describing a plan in the
+    present tense. Delete this half of the test when the assembly actually lands.
+    """
+    win = V.PlateWindow(None)
+    try:
+        assert "galleryview" not in win._op_cards
+        assert "galleryview" not in win._op_actions
+        assert "galleryview" not in {op.key for op in V._OPERATIONS}
+        assert "galleryview" not in V.runnable_operators()
+
+        act = win._gallery_act
+        assert act.menu() is not None or act.parent() is not None
+        assert [a for a in win.menuBar().actions()
+                if a.text() == "&View" and act in a.menu().actions()], (
+            "Gallery View is not in the View menu, so it is nowhere")
+        # window management is not gated on an acquisition; the operator cards are
+        assert act.isEnabled() is True
+
+        act.trigger()
+        assert "not implemented" in win._readout.text().lower(), (
+            "Gallery View reports a plan rather than saying it is unbuilt")
+    finally:
+        win.close()
+
+
+# The OTHER direction of the same contract, and the one nothing checked.
+#
+# `test_every_card_declares_whether_it_is_a_runnable_operator` walks the CARDS and asks the engine.
+# An operator the engine can run but that has NO card is invisible to that walk: there is no card
+# to iterate, so nothing fails. That is exactly how `reference` -- a z-reduction to the sharpest
+# plane, the capability Julio asked for twice -- stayed CLI-only for months while being in
+# `available_projectors()` the whole time. It was in no dropdown, no menu and no card, and no test
+# said a word.
+#
+# So: every runnable operator must either have a card or be DECLARED CLI-only here, with the
+# reason written down. Registering a projector is one line anywhere in the package
+# (`add_projector`), so without this the next one lands the same way: shipped, runnable, and
+# unreachable from the GUI. The allowlist lives in the test rather than in `_operations.py`
+# because "this operator has no card" is not a fact about the card table -- it is a decision, and
+# the point is that the decision has to be made out loud when the operator is added.
+
+#: Runnable operators that deliberately have no GUI card, and why. Adding an operator without
+#: adding it here (or giving it a card) fails the test below. Removing a card without moving its
+#: key here fails it too.
+CLI_ONLY_OPERATORS = {
+    "spot": "a LABELS overlay, not a plate result; it is driven from the spot-count controls "
+            "on the mosaic, not from a card that writes an OME-Zarr plate.",
+    "decon3d": "the volume-then-project variant of `decon`; the decon card's own panel is where "
+               "an iteration count gets chosen, and a second card for the same operator with a "
+               "different z contract is how a user picks the wrong one.",
+    "coordinate": "the unregistered CONTROL for `stitch` (stage coordinates, no registration). "
+                  "It exists to be the baseline a stitch is graded against in the benchmark, "
+                  "not to be offered as a thing to run.",
+}
+
+
+def test_every_runnable_operator_is_either_carded_or_declared_cli_only():
+    """An engine entry with no card is a capability the GUI cannot reach.
+
+    The reverse of the card->engine check above. `reference` is the case that proves it: the
+    engine has run it since IMA-210 and it appeared in no GUI surface at all.
+    """
+    carded = {op.key for op in V._OPERATIONS}
+    for key in V.runnable_operators():
+        assert key in carded or key in CLI_ONLY_OPERATORS, (
+            f"the engine can run {key!r} but no card offers it and it is not declared CLI-only. "
+            f"Either add an Operation for it to _OPERATIONS (plus its _build_<x>_tab), or add it "
+            f"to CLI_ONLY_OPERATORS with the reason it is deliberately not in the GUI."
+        )
+
+
+def test_the_cli_only_declaration_cannot_go_stale():
+    """A key that is no longer runnable, or that has since been given a card, must be removed.
+
+    Without this the allowlist becomes a place where names go to be forgotten, and the test above
+    would keep passing over an operator that has quietly gained a card or lost its registration.
+    """
+    runnable = set(V.runnable_operators())
+    carded = {op.key for op in V._OPERATIONS}
+    for key in CLI_ONLY_OPERATORS:
+        assert key in runnable, (
+            f"{key!r} is declared CLI-only but the engine no longer runs it; delete the entry.")
+        assert key not in carded, (
+            f"{key!r} is declared CLI-only but now HAS a card; delete the entry.")
+
+
+def test_the_reference_plane_operator_is_reachable_from_the_gui():
+    """The defect itself, pinned: `reference` has a card, and the card is wired to a real tab."""
+    op = V._OPERATIONS_BY_KEY["reference"]
+    assert op.runnable is True
+    assert "reference" in V.runnable_operators()
+    assert hasattr(V.PlateWindow, op.build_tab), (
+        f"the reference card names {op.build_tab!r} and PlateWindow has no such method; "
+        "clicking it would raise AttributeError out of the event loop.")
+
+
 def test_the_save_button_names_its_operator_instead_of_taking_the_first_card():
     """`_OPERATIONS[0].key` made 'Save this subset to disk' mean whatever happened to be first.
 
@@ -4912,10 +5158,14 @@ def test_the_save_button_names_its_operator_instead_of_taking_the_first_card():
 
 
 def test_operator_label_falls_back_to_the_key_for_a_cardless_operator():
-    # `reference` is a registered projector with no card. It must still name itself rather
-    # than raising a bare KeyError out of the event loop.
-    assert V.operator_label("reference") == "reference"
+    # `spot` is a registered projector with no card. It must still name itself rather than
+    # raising a bare KeyError out of the event loop. (`reference` was this example until it
+    # was given a card; the fallback is what makes a cardless operator survive, so it is
+    # pinned against whichever operator is currently cardless.)
+    assert V.operator_label("spot") == "spot"
     assert V.operator_label("mip") == V._OPERATIONS_BY_KEY["mip"].label
+    # and the newly carded one now answers with its card
+    assert V.operator_label("reference") == V._OPERATIONS_BY_KEY["reference"].label
 
 
 
@@ -5299,7 +5549,7 @@ def test_the_minerva_export_hands_the_on_screen_luts_to_the_exporter(
     """Julio: "channels need to be set to specific colors". The colours are on SCREEN, and the
     export defaults (acquisition display_color + 1/99.9 percentiles) do not know about them.
 
-    Asserted at the seam that actually carries them — what export_selection is called with —
+    Asserted at the seam that actually carries them - what export_selection is called with - 
     rather than by inspecting the widget, because a checkbox wired to nothing looks identical.
     """
     root, _ = squid_dataset

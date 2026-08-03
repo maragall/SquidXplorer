@@ -68,11 +68,19 @@ class _FakeMosaic:
     ``MosaicLayers`` does once it has decided a napari event was a user gesture.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, resolved=None) -> None:
         self.contrast_cbs: list = []
         self.visibility_cbs: list = []
         self.colormap_cbs: list = []
         self.op_cbs: list = []
+        # What napari has ALREADY resolved for each channel in this window -- its own autoscale at
+        # open. Deliberately NOT reachable through the gesture helpers below: an autoscale is not a
+        # gesture, the sinks filter it out, and it is therefore the one state that can only be
+        # READ. `_adopt_window_view` is the reader.
+        self.resolved: dict = dict(resolved or {})
+
+    def contrast(self, channel: str):
+        return self.resolved.get(channel)
 
     def on_user_contrast(self, cb) -> None:
         self.contrast_cbs.append(cb)
@@ -114,9 +122,9 @@ class _FakeWindow:
     exactly two attributes of a window, so those two are what this carries.
     """
 
-    def __init__(self, window_id: int = 1) -> None:
+    def __init__(self, window_id: int = 1, resolved=None) -> None:
         self.window_id = int(window_id)
-        self.mosaic = _FakeMosaic()
+        self.mosaic = _FakeMosaic(resolved)
         self._pane = type("_Pane", (), {"ok": True, "mosaic": self.mosaic})()
 
 
@@ -131,9 +139,9 @@ def _channels(win) -> list:
     return [c["name"] for c in win._meta["channels"]]
 
 
-def _spawn(win, window_id: int = 1) -> _FakeWindow:
+def _spawn(win, window_id: int = 1, resolved=None) -> _FakeWindow:
     """A window opens: the manager announces it exactly as ``_spawn`` does."""
-    child = _FakeWindow(window_id)
+    child = _FakeWindow(window_id, resolved)
     win._viewer_manager.windowOpened.emit(child)
     return child
 
@@ -174,6 +182,36 @@ def test_a_contrast_drag_in_a_window_repaints_the_plate(qapp, squid_dataset):
             f"the plate is not rendering channel 0 with the window the user set in the window: "
             f"{contrast.window(0)}"
         )
+    finally:
+        win.close()
+
+
+def test_the_plate_adopts_the_window_it_opens_with_before_any_gesture(qapp, squid_dataset):
+    """Julio, with a screenshot: "loupe not contrast synched with window ... the yellow vs green."
+
+    The sink above only reports a CHANGE, and deliberately so. But napari's autoscale at open is
+    not a change, it is the initial state, so the moment that matters most -- the window a region
+    comes up with -- is the one moment no sink can ever report. ``_adopt_centre_view`` was written
+    to pull it and is gated on ``self._mosaic_pane``, which the test above pins as permanently
+    None: the pull was orphaned when the central pane was removed, and until the user happened to
+    drag a slider the plate painted from its running histogram while the window painted from
+    napari's autoscale. The loupe magnifies the plate, so it inherited the disagreement.
+
+    MUTATION: drop the ``_adopt_window_view`` call from ``_bind_window_contrast`` (or point it back
+    at ``self._mosaic_pane``) and this goes red while every gesture test above stays green -- which
+    is exactly the state the code shipped in.
+    """
+    win = _open_plate(squid_dataset)
+    try:
+        ch_name = _channels(win)[0]
+        _spawn(win, resolved={ch_name: (321.0, 4321.0)})     # no gesture: it just opened
+
+        contrast = win._overview._contrast
+        assert contrast.window(0) == (321.0, 4321.0), (
+            "the window came up showing (321, 4321) and the plate is painting "
+            f"{contrast.window(0)}; nobody has touched a slider, so no sink will ever say so")
+        assert contrast.is_followed(0) and not contrast.is_manual(0), (
+            "the pull latched the channel MANUAL: an owner's autoscale is not a user gesture")
     finally:
         win.close()
 

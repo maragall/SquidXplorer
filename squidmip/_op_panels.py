@@ -85,7 +85,7 @@ picture, so "are the light halos handled" has a number beside the eye.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import NamedTuple, Optional
 
 import numpy as np
 from qtpy.QtCore import Qt, QThread, Signal
@@ -566,6 +566,21 @@ class StitcherPanel(_Panel):
 # 2. deconvolution — the iterative QC loop
 # ---------------------------------------------------------------------------------------
 
+class QCFrame(NamedTuple):
+    """One finished QC run, as the panel receives it.
+
+    The VOLUME travels with the composite because the picture is clickable: re-sectioning
+    through a different point is ``qc_composite`` again on this same array (see
+    ``DeconQCResultView._on_image_clicked``), and the alternative — throwing the volume away in
+    the worker and re-running RL to look two pixels to the left — is an RL run per click.
+    """
+
+    composite: object          # (H, W) float, what qc_composite returned at `centre`
+    volume: object             # (Z, Y, X) the deconvolved crop the sections were cut from
+    centre: tuple              # (z, y, x) in `volume`: the brightest structure RL was judged at
+    view_half: object          # the lateral half-width the composite was cut to, or None
+
+
 class _DeconQCWorker(QThread):
     """Run RL at ONE iteration count on ONE FOV's z-stack and measure the halo.
 
@@ -573,7 +588,7 @@ class _DeconQCWorker(QThread):
     during a QC loop is the reason nobody runs the QC loop.
     """
 
-    done = Signal(int, object, float)        # (iterations, composite, halo/core ratio)
+    done = Signal(int, object, float)        # (iterations, QCFrame, halo/core ratio)
     failed = Signal(str)
 
     def __init__(self, dataset, region, fov, channel, iterations, gpu, crop_half, view_half):
@@ -610,9 +625,33 @@ class _DeconQCWorker(QThread):
             ratio = halo_core_ratio(volume, centre, optics.dxy_um, optics.dz_um,
                                     core_um, window_um)
             self.done.emit(int(iterations),
-                           qc_composite(volume, centre, view_half=view_half), float(ratio))
+                           QCFrame(qc_composite(volume, centre, view_half=view_half),
+                                   volume, tuple(int(v) for v in centre), view_half),
+                           float(ratio))
         except Exception as exc:                  # reported as a sentence, never swallowed
             self.failed.emit(f"{type(exc).__name__}: {exc}")
+
+
+class _ClickableImage(QLabel):
+    """A QLabel showing an unscaled pixmap, which reports clicks in PIXMAP pixels.
+
+    The label is centred in a scroll area and is usually larger than the picture, so the
+    press position has to have the centring offset taken off it before it means anything.
+    Clicks outside the pixmap are dropped here rather than sent on as negative coordinates.
+    """
+
+    clicked = Signal(int, int)             # (row, col) in the pixmap's own pixels
+
+    def mousePressEvent(self, event):      # noqa: N802 (Qt's spelling)
+        pm = self.pixmap()
+        if pm is not None and not pm.isNull():
+            pos = event.pos()
+            dx = max((self.width() - pm.width()) // 2, 0)
+            dy = max((self.height() - pm.height()) // 2, 0)
+            col, row = pos.x() - dx, pos.y() - dy
+            if 0 <= col < pm.width() and 0 <= row < pm.height():
+                self.clicked.emit(int(row), int(col))
+        super().mousePressEvent(event)
 
 
 class DeconQCResultView(QWidget):
@@ -622,12 +661,28 @@ class DeconQCResultView(QWidget):
     :func:`squidmip._decon_qc.turbo_rgb` produced; it builds no picture of its own. A view
     that assembled three panels itself would be a second renderer to keep in step with the
     CLI montage, which is this project's dominant defect shape.
+
+    CLICK TO MOVE THE CROSSHAIRS. Julio: "we should be able to toggle the turbo colormap
+    mini-gui where we click on there image and it moves teh crosshairs to display XZ and YZ
+    bands." The x-z and y-z strips are sections through ONE point, and the point the QC run
+    picked is the brightest structure it found — not necessarily the one worth judging. A
+    click re-sections the SAME volume through the clicked point: ``qc_composite`` already
+    takes ``centre``, so this is a re-slice of an array already in memory, not another RL
+    run. The mapping from pixel to voxel is ``_decon_qc.composite_centre_at``, beside the
+    layout it inverts.
     """
 
     def __init__(self, subject: str):
         super().__init__()
         self.setStyleSheet(f"background:{_BG};color:#e6edf3;")
         self.history: list = []
+        # The volume BEHIND the current picture, kept so a click can re-section it. None until
+        # a caller passes one (the old three-argument show_iteration still works and simply
+        # leaves the picture unclickable — there is nothing to re-slice).
+        self._volume = None
+        self._centre = None
+        self._view_half = None
+        self._gap = 2
         v = QVBoxLayout(self)
         v.setContentsMargins(14, 12, 14, 12)
         v.setSpacing(8)
@@ -652,8 +707,22 @@ class DeconQCResultView(QWidget):
         self.verdict_label.setStyleSheet("color:#d29922;font-size:11px;")
         v.addWidget(self.verdict_label)
 
-        self.image_label = QLabel()
+        # WHERE the sections are cut. It is the one thing a moved crosshair changes that the
+        # picture alone cannot state, and it is also where the caveat lives: the halo/core number
+        # belongs to the structure the run measured, not to wherever the user has clicked since.
+        self.crosshair_label = QLabel("")
+        self.crosshair_label.setWordWrap(True)
+        self.crosshair_label.setStyleSheet(_SUB)
+        v.addWidget(self.crosshair_label)
+
+        self.image_label = _ClickableImage()
         self.image_label.setAlignment(Qt.AlignCenter)
+        self.image_label.setCursor(Qt.CrossCursor)
+        self.image_label.setToolTip(
+            "Click anywhere in the x-y plane, the x-z strip or the y-z strip to move the "
+            "crosshairs there. The sections are re-cut from the same deconvolved volume; "
+            "nothing is re-run.")
+        self.image_label.clicked.connect(self._on_image_clicked)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setStyleSheet("QScrollArea{border:none;background:transparent;}")
@@ -666,8 +735,31 @@ class DeconQCResultView(QWidget):
         v.addWidget(self.trail_label)
 
     def show_iteration(self, iterations: int, composite, ratio: float,
-                       kind: str, verdict: str) -> None:
-        """Display one iteration's composite and remember it, so the loop can be compared."""
+                       kind: str, verdict: str, volume=None, centre=None,
+                       view_half=None, gap: int = 2) -> None:
+        """Display one iteration's composite and remember it, so the loop can be compared.
+
+        *volume*, *centre* and *view_half* are what the composite was cut FROM. Passing them
+        makes the picture clickable (see :meth:`_on_image_clicked`); leaving them out shows
+        exactly the same picture and simply does not respond to clicks, which is what the
+        older three-argument callers get.
+        """
+        self._volume = None if volume is None else np.asarray(volume)
+        self._centre = None if centre is None else tuple(int(v) for v in centre)
+        self._view_half = view_half
+        self._gap = int(gap)
+        self._paint(composite)
+        self.history.append((int(iterations), float(ratio)))
+        self.caption_label.setText(
+            f"{iterations} iteration" + ("s" if iterations != 1 else "")
+            + f"  ·  halo/core {ratio:.3f}")
+        self.verdict_label.setText(verdict)
+        self.trail_label.setText("  ".join(f"k={k}: {r:.3f}" for k, r in self.history))
+        self._sync_crosshair_label()
+
+    def _paint(self, composite) -> None:
+        """Put one composite on screen. The ONLY place a pixmap is set, so the first paint and
+        every crosshair move go through identical code."""
         from squidmip._decon_qc import turbo_rgb
 
         rgb = np.ascontiguousarray(turbo_rgb(composite))
@@ -676,12 +768,40 @@ class DeconQCResultView(QWidget):
         self.image_label.setPixmap(QPixmap.fromImage(image))
         self.image_label.setMinimumSize(w, h)
         self._rgb = rgb                       # keep the buffer alive alongside the pixmap
-        self.history.append((int(iterations), float(ratio)))
-        self.caption_label.setText(
-            f"{iterations} iteration" + ("s" if iterations != 1 else "")
-            + f"  ·  halo/core {ratio:.3f}")
-        self.verdict_label.setText(verdict)
-        self.trail_label.setText("  ".join(f"k={k}: {r:.3f}" for k, r in self.history))
+
+    def _on_image_clicked(self, row: int, col: int) -> None:
+        """Move the crosshairs to the clicked voxel and re-cut the three sections there.
+
+        No RL run, no worker: the deconvolved volume is already in memory and
+        :func:`~squidmip._decon_qc.qc_composite` takes the centre, so this is a re-slice.
+        A click in a separator band or in the dead corner maps to nothing and is ignored —
+        guessing a nearby voxel would move the crosshairs somewhere the user did not point.
+        """
+        if self._volume is None or self._centre is None:
+            return
+        from squidmip._decon_qc import composite_centre_at, qc_composite
+
+        centre = composite_centre_at(self._volume.shape, self._centre, row, col,
+                                     view_half=self._view_half, gap=self._gap)
+        if centre is None or centre == self._centre:
+            return
+        self._centre = centre
+        self._paint(qc_composite(self._volume, centre, view_half=self._view_half,
+                                 gap=self._gap))
+        self._sync_crosshair_label(moved=True)
+
+    def _sync_crosshair_label(self, moved: bool = False) -> None:
+        if self._centre is None:
+            self.crosshair_label.setText(
+                "" if self._volume is None else "crosshairs: unknown")
+            return
+        z, y, x = self._centre
+        where = f"crosshairs at z={z}, y={y}, x={x}"
+        self.crosshair_label.setText(
+            where + ("  ·  moved by hand; the halo/core number above was measured at the "
+                     "structure the run picked, not here." if moved else
+                     "  ·  the brightest structure the run found. Click the picture to "
+                     "section somewhere else."))
 
 
 class DeconQCPanel(_Panel):
@@ -801,7 +921,7 @@ class DeconQCPanel(_Panel):
         self._worker.failed.connect(self._on_failed)
         self._worker.start()
 
-    def _on_done(self, iterations, composite, ratio) -> None:
+    def _on_done(self, iterations, frame, ratio) -> None:
         from squidmip._decon_qc import halo_verdict
 
         self.progress.setVisible(False)
@@ -810,7 +930,9 @@ class DeconQCPanel(_Panel):
         # so build the history to judge on here rather than reading it back afterwards.
         history = list(self._view.history) + [(int(iterations), float(ratio))]
         kind, verdict = halo_verdict(history)
-        self._view.show_iteration(iterations, composite, ratio, kind, verdict)
+        self._view.show_iteration(iterations, frame.composite, ratio, kind, verdict,
+                                  volume=frame.volume, centre=frame.centre,
+                                  view_half=frame.view_half)
         self.say(verdict)
 
     def _on_failed(self, message: str) -> None:

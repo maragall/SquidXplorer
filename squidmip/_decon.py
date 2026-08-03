@@ -24,6 +24,14 @@ What is reused, and from where
   6 axial FWHM or the ``2*Nz-1`` signal-processing floor axially). Not guessed here.
 * **``petakit.deconvolve(method="rl")``** — PetaKit5D's ``decon_lucy_function.m`` ported, with
   Biggs-Andrews acceleration. GPU via CuPy when present, CPU via scipy otherwise.
+
+  CuPy is CUDA, so "GPU when present" has always meant "never, on a Mac". :mod:`squidmip._decon_gpu`
+  adds Metal: the SAME Biggs-Andrews RL update, transcribed onto torch, chosen by :func:`_run`
+  only when it can be shown to beat the CPU thread pool, and disabled by
+  ``SQUIDMIP_DECON_DEVICE=cpu``. Measured on an Apple M4 against the ten-thread CPU status quo:
+  **2.2x to 2.5x** at plane widths Metal's FFT likes, and 0.55x (i.e. a REGRESSION) at widths it
+  does not, which is why the choice is guarded rather than unconditional. That module's docstring
+  carries both tables and the null control that validates them.
 * **``petakit.open_acquisition`` / ``infer_immersion_index`` / ``wavelength_from_channel``** —
   how :meth:`OpticsParams.from_acquisition` turns an acquisition folder into optics. The
   metadata parse (``sensor_pixel_size_um / magnification``, ``dz(um)``, ``objective.NA``) is
@@ -80,6 +88,7 @@ from typing import Callable, Iterable, Optional
 
 import numpy as np
 
+from squidmip import _decon_gpu
 from squidmip._engine import add_projector
 from squidmip.projection import plane_op
 
@@ -268,12 +277,27 @@ def make_psf_2d(optics: OpticsParams) -> np.ndarray:
 
 
 def _run(volume: np.ndarray, psf: np.ndarray, iterations: int, gpu: bool) -> np.ndarray:
-    """One call into petakit's RL, with the all-zero guard from trap 1."""
-    petakit = _petakit()
-    out = petakit.deconvolve(
-        np.ascontiguousarray(volume, dtype=np.float32), psf,
-        method=METHOD, iterations=iterations, gpu=gpu,
-    )
+    """One call into RL, with the all-zero guard from trap 1.
+
+    THE DEVICE FORK LIVES HERE, and it is a fork between *backends of the same algorithm*, never
+    between algorithms. petakit's own GPU branch is CuPy, i.e. CUDA only, so on Apple Silicon it
+    can never be taken and every plane runs on ``scipy.fft``: 87% of a plane's wall clock,
+    measured. :mod:`squidmip._decon_gpu` runs the identical Biggs-Andrews RL update on Metal
+    (or on torch-CUDA where CuPy is absent) and returns ``None`` for a device whenever it cannot
+    beat the CPU thread pool, so the CPU path below stays the default and the fallback.
+    ``SQUIDMIP_DECON_DEVICE`` overrides the choice in both directions.
+    """
+    volume = np.ascontiguousarray(volume, dtype=np.float32)
+    device = _decon_gpu.select_device(volume.shape, gpu=gpu)
+    _decon_gpu.log_choice(volume.shape, gpu=gpu)
+    if device is not None:
+        out = _decon_gpu.rl(volume, psf, iterations, device)
+    else:
+        petakit = _petakit()
+        out = petakit.deconvolve(
+            volume, psf,
+            method=METHOD, iterations=iterations, gpu=gpu,
+        )
     if np.any(volume) and not np.any(out):
         raise RuntimeError(
             "petakit returned an all-zero result for a non-empty input. That is the failure "

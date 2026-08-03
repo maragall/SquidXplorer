@@ -735,23 +735,55 @@ class RegionViewer(QMainWindow):
         # Nuclei detection lives on the pane's own "Detect on: [channel] Detect nuclei" strip (the
         # channel-aware Cellpose picker Julio asked for) -- wired to _detect_nuclei in _build. No
         # duplicate control here.
-        # Row 2: contrast sync (copy/paste LUTs) — window <-> window <-> plate.
+        # Row 2: contrast sync. THREE controls, TWO scopes, and the scopes are captioned because
+        # that is the only thing that made them look like duplicates (Julio: "if contrast are
+        # synched, the LUT copy paste should be removed", and "'Match raw contrast' seems like a
+        # strange button to have"). They are not duplicates. What is actually synced automatically
+        # is ONE scope: napari's `link_layers` keeps the operator layers of one channel together
+        # INSIDE THIS WINDOW, from the next write on. Nothing at all crosses windows -- each
+        # window builds its own napari ViewerModel (`MosaicPane.__init__` -> `build_pane`), and
+        # napari cannot link layers across viewers. So:
+        #
+        #   between windows  -> copy/paste, the ONLY path. It also carries the COLORMAP, which no
+        #                       link and no match ever touches (`link_layers(..., ("contrast_
+        #                       limits",))`). The clipboard is shared with the plate's own
+        #                       'LUTs' buttons, so plate <-> window works both ways.
+        #   in this window   -> match, the one-shot equalise. `link_layers` connects EVENTS and
+        #                       does NOT equalise at link time, so a fresh operator layer sits on
+        #                       its own auto window until somebody writes one. This writes them,
+        #                       without moving raw's window to do it.
         sync = QHBoxLayout(); sync.setSpacing(4)
-        sync.addWidget(self._chip("⧉ Copy LUTs", "Copy this window's per-channel contrast + colormap.",
+        _across = QLabel("between windows:")
+        _across.setStyleSheet(self._AT_DEFAULTS_QSS)
+        sync.addWidget(_across)
+        sync.addWidget(self._chip("⧉ Copy LUTs",
+                                  "THIS WINDOW → clipboard: its per-channel contrast + colormap. "
+                                  "The only way to move contrast to a window that is ALREADY OPEN "
+                                  "(a new window inherits, an open one does not), and the only "
+                                  "one that carries the colormap. Shared with the plate.",
                                   self._copy_luts))
-        sync.addWidget(self._chip("⤓ Paste LUTs", "Apply the copied LUTs to this window's channels.",
+        sync.addWidget(self._chip("⤓ Paste LUTs",
+                                  "clipboard → THIS WINDOW: apply the copied contrast + colormap "
+                                  "to this window's channels. Counts as you changing contrast "
+                                  "here, so this window will report itself diverged.",
                                   self._paste_luts))
-        # MATCH RAW CONTRAST. It sits HERE, in the row the operator that made those layers was run
-        # from, and not in a menu: an operator result is seeded from its OWN pixels so it arrives
-        # legible on its own terms, which means raw and the result are on two different stretches
-        # and the before->after flip compares two stretches rather than two images. This is the
-        # one click that turns it into a real comparison, and it is next to the operator Run
-        # button because that is where the user is standing when they want it.
-        sync.addWidget(self._chip("≡ Match raw contrast",
-                                  "Copy raw's contrast window onto every operator layer, so "
-                                  "flipping between raw and a result compares the same window. "
+        # MATCH. It sits HERE, in the row the operator that made those layers was run from, and
+        # not in a menu: an operator result is seeded from its OWN pixels so it arrives legible on
+        # its own terms, which means raw and the result are on two different stretches and the
+        # before->after flip compares two stretches rather than two images. This is the one click
+        # that turns it into a real comparison, and it is next to the operator Run button because
+        # that is where the user is standing when they want it. Renamed from "Match raw contrast",
+        # which named the SOURCE and not the scope and so read as a third clipboard verb.
+        _within = QLabel("│  in this window:")
+        _within.setStyleSheet(self._AT_DEFAULTS_QSS)
+        sync.addWidget(_within)
+        sync.addWidget(self._chip("≡ Match layers to raw",
+                                  "THIS WINDOW's operator layers ← THIS WINDOW's raw: put raw's "
+                                  "contrast window on every operator layer of the same channel, "
+                                  "so flipping between raw and a result compares the same window. "
                                   "Results open on their own auto window so they are legible "
-                                  "alone; this is the deliberate opt-in to raw's.",
+                                  "alone; this is the deliberate opt-in to raw's. Touches no "
+                                  "other window and does not move raw.",
                                   self._match_raw_contrast))
         sync.addStretch(1)
         ov.addLayout(sync)
@@ -765,9 +797,13 @@ class RegionViewer(QMainWindow):
         def_box, dv = self._titled_box("Defaults")
         d1 = QHBoxLayout(); d1.setSpacing(4)
         self._focus_default_chk = QCheckBox("auto focus")
+        # ONCE, not per region: _apply_settings_once returns early after the first mosaic, so the
+        # jump happens when this window first paints and never again. The tooltip said "whenever
+        # this window loads a region", which promised a per-region refocus the code does not do.
         self._focus_default_chk.setToolTip(
-            "Jump to the sharpest plane (Tenengrad) whenever this window loads a region. A global "
-            "default; ticking it HERE changes this window only and marks it diverged.")
+            "Jump to the sharpest plane (Tenengrad) once, when this window first shows a region. "
+            "Later regions keep the z you are on. A global default; ticking it HERE changes this "
+            "window only and marks it diverged.")
         self._focus_default_chk.setStyleSheet("QCheckBox{color:#c9d1d9;font-size:11px;}")
         self._focus_default_chk.setChecked(bool(self.settings.get("tenengrad_focus")))
         self._focus_default_chk.toggled.connect(self._on_focus_default_toggled)
@@ -839,7 +875,10 @@ class RegionViewer(QMainWindow):
         """The autofocus default, changed IN THIS WINDOW. Never propagated to the others."""
         self.settings.set("tenengrad_focus", bool(on))
         self._refresh_divergence()
-        self._echo(f"auto focus {'on' if on else 'off'} for this window.")
+        # _say, not _echo: this is a settings change with no structured console line behind it, and
+        # its NEIGHBOURS in the same box ("make default", "reset") both _say. A quiet control next
+        # to a loud one reads as a control that did nothing, which is why it was clicked four times.
+        self._say(f"auto focus {'on' if on else 'off'} for this window.")
 
     def _sync_settings_widgets(self) -> None:
         """Put the controls back in step with the settings after a programmatic change.
@@ -2110,6 +2149,16 @@ class ViewerManager(QObject):
 
     windowsChanged = Signal()          # the set of open windows changed
     memoryChanged = Signal(float)      # process RSS as a fraction 0..1 of total RAM
+    # WHATEVER WORK IS RUNNING, as one immutable ``squidmip._progress.ProgressReport``, or None when
+    # nothing is. Julio: "Where the memory bar is, there should also be a loading bar for whichever
+    # operator we're applying in bulk or in a specific window, even if it's preview."
+    #
+    # It lives on the MANAGER for the same reason memory does (see the class docstring): the bar is
+    # ONE bar next to ONE memory bar, and the work it reports comes from several producers -- a
+    # plate-wide operator run, a run started in a region window, and the raw preview. A per-window
+    # signal would need the navigator to subscribe to windows that come and go, and to decide which
+    # of them the single bar is currently about. The manager already outlives them all.
+    runProgressChanged = Signal(object)   # ProgressReport | None
     viewFocused = Signal(object)       # a window was opened/raised -> its regions (list[str])
     # A window was just SPAWNED, carrying the window itself. ``windowsChanged`` says the SET
     # changed and is what a list view wants; a subscriber that has to reach into the new window's
@@ -2138,6 +2187,11 @@ class ViewerManager(QObject):
         # by a later change, because a default is a fact about the NEXT window.
         self.defaults = ViewDefaults()
 
+        #: The most recent report of whatever is running, or None. Held as well as emitted so a
+        #: navigator built DURING a run shows the bar immediately instead of staying blank until the
+        #: next unit lands -- which on decon, where one unit is minutes, is most of the run.
+        self._run_progress = None
+
         self._mem_timer = QTimer(self)
         self._mem_timer.setInterval(2000)
         self._mem_timer.timeout.connect(self._poll_memory)
@@ -2145,6 +2199,22 @@ class ViewerManager(QObject):
 
     def set_dataset(self, reader: Any, meta: dict) -> None:
         self._reader, self._meta = reader, meta
+
+    @property
+    def run_progress(self):
+        """The in-flight work's latest ``ProgressReport``, or None when nothing is running."""
+        return self._run_progress
+
+    def set_run_progress(self, report) -> None:
+        """Publish (or clear, with None) what is running, for the navigator's bar.
+
+        LAST WRITER WINS, on purpose. There is one bar, so there is one answer; producers do not
+        overlap in practice (``_stop_preview`` runs before an operator run starts), and if they ever
+        did, a bar that shows the most recent report is a true statement about SOMETHING running,
+        where an aggregate over two different denominators would be a true statement about nothing.
+        """
+        self._run_progress = report
+        self.runProgressChanged.emit(report)
 
     @property
     def windows(self) -> "list[RegionViewer]":
@@ -2466,8 +2536,37 @@ class OpenViewList(QWidget):
         self._mem_bar.setFixedHeight(14)
         lay.addWidget(self._mem_bar)
 
+        # THE WORK BAR, directly under the memory bar because that is where Julio asked for it:
+        # "Where the memory bar is, there should also be a loading bar for whichever operator we're
+        # applying in bulk or in a specific window, even if it's preview."
+        #
+        # HIDDEN WHEN IDLE, rather than parked empty. An always-present bar sitting at 0 % is
+        # indistinguishable from a run that has started and produced nothing, which is precisely the
+        # confusion this is meant to end. Absent means nothing is running; present means something
+        # is, and it says what.
+        self._work_label = QLabel("")
+        self._work_label.setStyleSheet("color:#8b949e;font-size:11px;border:none;")
+        self._work_label.setWordWrap(True)
+        self._work_label.hide()
+        lay.addWidget(self._work_label)
+        self._work_bar = QProgressBar(self)
+        self._work_bar.setTextVisible(False)
+        self._work_bar.setFixedHeight(14)
+        # BLUE, where memory is green/red. Two identically-coloured bars stacked on each other is
+        # one bar with a mystery second value; the colour is what says these measure different things.
+        self._work_bar.setStyleSheet(
+            "QProgressBar{background:#161b22;border:1px solid #30363d;border-radius:3px;}"
+            "QProgressBar::chunk{background:#1f6feb;border-radius:3px;}"
+        )
+        self._work_bar.hide()
+        lay.addWidget(self._work_bar)
+
         manager.windowsChanged.connect(self.refresh)
         manager.memoryChanged.connect(self._on_memory)
+        manager.runProgressChanged.connect(self._on_run_progress)
+        # A navigator built mid-run must not wait for the next unit to find out (see
+        # ViewerManager._run_progress). Ask once, now.
+        self._on_run_progress(manager.run_progress)
         self.refresh()
 
     def showEvent(self, e):
@@ -2569,6 +2668,33 @@ class OpenViewList(QWidget):
                if i is not None]
         for wid in ids:
             self._manager.close(wid)
+
+    def _on_run_progress(self, report) -> None:
+        """Draw (or take down) the work bar. ``report`` is a ``ProgressReport``, or None for idle.
+
+        DETERMINATE ONLY WHEN THE REPORT IS. An indeterminate report gets Qt's busy animation
+        (``setRange(0, 0)``) and its count without a percentage, never a fabricated one -- the same
+        rule ``_progress.ProgressReport.percent`` and ``squidmip._activity`` already follow, and for
+        the same reason: a progress bar that invents a denominator is a lie that gets believed.
+        """
+        if report is None:
+            self._work_label.hide()
+            self._work_bar.hide()
+            return
+        try:
+            sentence, percent = report.sentence(), report.percent
+        except Exception:                            # noqa: BLE001 - a bad report is not a crash
+            self._work_label.hide()
+            self._work_bar.hide()
+            return
+        self._work_label.setText(sentence)
+        if percent is None:
+            self._work_bar.setRange(0, 0)            # Qt's busy sweep: working, total unknown
+        else:
+            self._work_bar.setRange(0, 100)
+            self._work_bar.setValue(int(percent))
+        self._work_label.show()
+        self._work_bar.show()
 
     def _on_memory(self, frac: float) -> None:
         pct = max(0, min(100, int(round(frac * 100))))

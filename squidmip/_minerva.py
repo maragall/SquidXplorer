@@ -57,7 +57,7 @@ takes the OME-TIFF and the same ``.story.json`` we already write, honours every 
 contrast in its ``groups``, and produces a viewable exhibit. That is the whole of the "no manual
 step" answer: not a way into the editor, a way past it.
 
-**Both front ends need internet to VIEW** — see :data:`NEEDS_INTERNET_NOTE`.
+**Both front ends need internet to VIEW** - see :data:`NEEDS_INTERNET_NOTE`.
 
 Why we do not import ``squid2minerva``
 --------------------------------------
@@ -254,7 +254,7 @@ def auto_groups(
     """One Minerva group over all channels: colour + contrast.
 
     Contrast defaults to a 1st-percentile floor and 99.9th-percentile ceiling per channel,
-    normalised to 0..1 against the dtype maximum — Minerva's own convention. This is the *only*
+    normalised to 0..1 against the dtype maximum - Minerva's own convention. This is the *only*
     place our channel colours reach Minerva.
 
     *luts*, when given, is ``{channel_name: {"clim": (lo, hi) | None, "rgb": (r,g,b) | None}}``
@@ -426,7 +426,7 @@ def export_selection(
         Optional ``fn(done, total)`` called after each REGION, for a GUI readout. ``total`` is
         the number of regions, not FOVs.
     luts:
-        Optional ``{channel_name: {"clim": (lo, hi) | None, "rgb": (r,g,b) | None}}`` — THE LUTS
+        Optional ``{channel_name: {"clim": (lo, hi) | None, "rgb": (r,g,b) | None}}`` - THE LUTS
         THE USER HAS ON SCREEN, from ``RegionViewer._per_channel_luts``. When given they beat the
         defaults per channel and per field; see :func:`auto_groups` for what each field replaces
         and what happens when a channel is missing from the dict.
@@ -567,7 +567,7 @@ def launch_minerva(story_path=None, *, open_browser: bool = True, timeout: float
     ONE TAB, NOT TWO
     ----------------
     **minerva-author opens the browser itself.** ``src/app.py`` (v1.21.0, commit ``c555515``)
-    defines ``open_browser()`` at ``:2033`` and calls it at ``:2050`` and ``:2053`` — once in
+    defines ``open_browser()`` at ``:2033`` and calls it at ``:2050`` and ``:2053`` - once in
     each arm of ``if "--dev" in sys.argv``, so it is **unconditional and there is no flag that
     suppresses it**. That is the whole of the server's argv handling: ``sys.argv`` is read
     exactly once, at ``:2049``, and only to test for ``--dev``. Asking Author not to open a tab
@@ -581,7 +581,7 @@ def launch_minerva(story_path=None, *, open_browser: bool = True, timeout: float
     Why dropping our call on a cold start is safe, stated as the failure rather than the happy
     path: if Author's ``webbrowser.open_new`` cannot find a browser it returns ``False`` and the
     server still serves, so the user gets no tab and a ``True`` from here. That is why the
-    caller's success line names the URL — a user with no tab has an address to paste rather than
+    caller's success line names the URL - a user with no tab has an address to paste rather than
     a dead end. If instead that call *raises*, it raises before ``serve()`` on the next line, so
     the server never binds the port, ``is_running()`` never becomes true, this returns ``False``,
     and the caller already reports a launch failure. Neither case is silent.
@@ -650,9 +650,9 @@ def launch_minerva(story_path=None, *, open_browser: bool = True, timeout: float
 #: user meets it as a blank page rather than as an error. BOTH Minerva front ends load their
 #: JavaScript from jsdelivr, so both need a working internet connection at VIEWING time:
 #:
-#: * Minerva Author's own UI — ``static/index.html`` ends with
+#: * Minerva Author's own UI - ``static/index.html`` ends with
 #:   ``<script src="https://cdn.jsdelivr.net/npm/minerva-author-ui@1.10.2/build/bundle...js">``;
-#: * the exhibit :func:`render_exhibit` writes — ``src/exhibit.py:30`` emits
+#: * the exhibit :func:`render_exhibit` writes - ``src/exhibit.py:30`` emits
 #:   ``<script src="https://cdn.jsdelivr.net/npm/minerva-browser@3.20.0/build/bundle.js">``.
 #:
 #: Verified against the sibling checkout at v1.21.0, commit ``c555515``. The rendered tiles ARE
@@ -660,7 +660,7 @@ def launch_minerva(story_path=None, *, open_browser: bool = True, timeout: float
 #: ``static/bundle.*.js`` in that checkout that nothing references, so "it worked offline once"
 #: is not a thing this can fall back on.
 NEEDS_INTERNET_NOTE = (
-    "Minerva's viewer JavaScript is loaded from a CDN (jsdelivr), so viewing needs internet — "
+    "Minerva's viewer JavaScript is loaded from a CDN (jsdelivr), so viewing needs internet - "
     "the rendered tiles themselves are local."
 )
 
@@ -691,11 +691,23 @@ def render_exhibit(ome_path, story_path, out_dir, *, threads: Optional[int] = No
     * **Lossy.** The output is a JPEG pyramid. The OME-TIFF is untouched and remains the archival
       copy; the exhibit is a rendering of it.
     * **Slow, and here are the numbers.** Measured on this machine against real exported Squid
-      mosaics: 4 channels of 2048x2048 uint16 (a 33.5 MB OME-TIFF) took **15 s** at
-      ``--threads 4`` and wrote 580 KB; the whole 4-channel 11535x9635 uint16 region (an 889 MB
-      OME-TIFF) took **132 s** at ``--threads 8`` and wrote 29 MB. So it is minutes, not seconds,
-      on a real region — which is why this takes *should_stop* and why the GUI runs it off the
-      main thread.
+      mosaics, both written by :func:`export_selection` itself:
+
+      ==========================================  =========  ==========  ==========
+      input                                       threads    wall        output
+      ==========================================  =========  ==========  ==========
+      4ch 2048x2048 uint16 (33.5 MB OME-TIFF)     4          2.1 s       580 KB
+      4ch 11535x9635 uint16 (889 MB OME-TIFF)     8          132 s       29 MB
+      ==========================================  =========  ==========  ==========
+
+      The FIRST render of a session costs about 13 s more than the table says. That is
+      ``render.py``'s own imports (skimage, tifffile, ome-types) loading cold in Minerva's venv,
+      not work on the image: the same 2048x2048 input measured 15.1 s on the first run of the
+      session and 2.1 s on a later one into a fresh output directory. It is a fixed cost, so it
+      dominates a small crop and is noise on a real region.
+
+      So: **seconds for a crop, minutes for a whole region**, which is why this takes
+      *should_stop* and why the GUI runs it off the main thread.
     * **Needs internet to VIEW.** See :data:`NEEDS_INTERNET_NOTE`.
 
     Raises
@@ -707,7 +719,7 @@ def render_exhibit(ome_path, story_path, out_dir, *, threads: Optional[int] = No
         ``render.py`` exited non-zero (its stderr tail is the message), or the wait was abandoned,
         or it finished without writing an ``index.html``. It runs as a script under a FOREIGN
         venv, so its failure arrives as an exit code and stderr, never as a Python exception we
-        could let through — turning that into one here is what lets the caller report it by name.
+        could let through - turning that into one here is what lets the caller report it by name.
     """
     import time
 

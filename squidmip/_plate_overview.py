@@ -463,13 +463,16 @@ _LOUPE_MAX_CROP = 2 * _LOUPE_PX   # ceiling on the RETURNED array's side, in px
 
 
 def _fov_of_well(well_id, fovs_per_region=None) -> int:
-    """The FOV index the plate addresses for ``well_id`` — the single seam for multi-FOV.
+    """The FOV index the plate addresses for ``well_id`` when nothing has named one — the
+    FALLBACK half of the multi-FOV seam.
 
-    The plate hit-test resolves a WELL, never a FOV, so today this is always 0: the viewer is
-    one-FOV-per-well (the library folded IMA-187, the viewer has not). Everything that needs a
-    FOV goes through here rather than writing a bare ``0``, so when the plate grows FOV
-    sub-cells there is one place to change and ``test_fov_seam_is_single_fov`` fails loudly
-    instead of the loupe silently magnifying FOV 0 of every position."""
+    It used to be the whole story, and that is what put the loupe on FOV 0 of every multi-FOV
+    region while ``_cell_fraction`` was handing it a position across the whole mosaic. The plate
+    hit-test DOES resolve a field now, from the mosaic boxes it already draws by
+    (``PlateOverview._fov_box_at``, used by both ``_fov_at`` and ``_loupe_target``), and that
+    field is passed down to the sources. This remains the answer for a cell that holds a single
+    field, for a point in a gap between fields, and for any caller that has not resolved one --
+    a stated default rather than a bare ``0`` scattered across four read paths."""
     if fovs_per_region:
         fovs = fovs_per_region.get(well_id)
         if fovs:
@@ -613,9 +616,14 @@ class _LoupeSource:
         """(ok, reason-if-not). ``reason`` is shown to the user verbatim."""
         return False, "no pixel source"
 
-    def read_crop(self, well_id, level, y0, x0, h, w, time_point: int = 0):
+    def read_crop(self, well_id, level, y0, x0, h, w, time_point: int = 0, fov=None):
         """(C, y, x) crop at ``level``, CLAMPED into the field (see loupe_clamp_crop) and
-        decimated to at most _LOUPE_MAX_CROP samples per side. Runs on the worker thread."""
+        decimated to at most _LOUPE_MAX_CROP samples per side. Runs on the worker thread.
+
+        ``fov`` is the FIELD the crop is in, resolved from the plate's mosaic boxes by
+        ``PlateOverview._loupe_target``. ``None`` means "the plate could not name one" (a cell
+        holding a single field, or a point in a gap) and falls back to ``_fov_of_well`` — which
+        is the seam, not a guess."""
         raise NotImplementedError
 
     def coarse(self, well_id, time_point: int = 0):
@@ -674,8 +682,8 @@ class _RawLoupeSource(_LoupeSource):
             return True, ""
         return False, "no image for this well"
 
-    def _planes(self, well_id, time_point: int = 0):
-        """The well's (C, y, x) planes at ``time_point``, decoded once and cached.
+    def _planes(self, well_id, time_point: int = 0, fov=None):
+        """The FIELD's (C, y, x) planes at ``time_point``, decoded once and cached.
 
         Held under a lock for the whole check-decode-publish sequence. Unsynchronised, the two
         callers (worker thread reading a crop, GUI thread deriving a window) could interleave
@@ -684,27 +692,27 @@ class _RawLoupeSource(_LoupeSource):
         thread no longer calls in at all (see _LoupeSource.window), but the lock stays: the class
         must be correct for its callers, not for today's call sites.
 
-        The key is ``(well, timepoint)`` for the same reason: a key of ``well`` alone hands back
-        one timepoint's pixels under another timepoint's label, which is the identical wrong-image
-        failure with the axis changed."""
-        key = (well_id, int(time_point))
+        The key is ``(well, fov, timepoint)`` for the same reason: a key missing either of the
+        last two hands back one field's / one timepoint's pixels under another's label, which is
+        the identical wrong-image failure with the axis changed."""
+        f = self._fov_of(well_id) if fov is None else int(fov)
+        key = (well_id, f, int(time_point))
         with self._lock:
             if self._cache_key != key:
-                fov = self._fov_of(well_id)
                 planes = np.stack([
-                    np.asarray(self._reader.read(well_id, fov, ch, self._z, int(time_point)))
+                    np.asarray(self._reader.read(well_id, f, ch, self._z, int(time_point)))
                     for ch in self._channels])
                 self._cache, self._cache_key = planes, key
             return self._cache
 
-    def read_crop(self, well_id, level, y0, x0, h, w, time_point: int = 0):
+    def read_crop(self, well_id, level, y0, x0, h, w, time_point: int = 0, fov=None):
         """Level is always 0 here — raw has no pyramid — so the whole burden of bounding the
         work falls on decimation. At plate fit the rect IS most of the field (2084 px on the
         synthetic plate); area-averaging it down to <= _LOUPE_MAX_CROP happens HERE, on the
         worker thread, so what crosses to the GUI thread to be composited is a 456 px square
         (3.3 MB, 11 ms) instead of a 1826 px one (26.7 MB, 118 ms) — which is also what the
         worker's LRU then caches."""
-        p = self._planes(well_id, time_point)
+        p = self._planes(well_id, time_point, fov)
         ny, nx = p.shape[-2], p.shape[-1]
         y0, x0, h, w = loupe_clamp_crop(y0, x0, h, w, ny, nx)   # NEGATIVE origin -> empty slice
         crop = p[:, y0:y0 + h, x0:x0 + w]
@@ -718,6 +726,9 @@ class _RawLoupeSource(_LoupeSource):
                          for c in range(crop.shape[0])])
 
     def coarse(self, well_id, time_point: int = 0):
+        # Deliberately the REGION's first field (fov=None), not the field under the cursor: the
+        # contrast window is per WELL, so that brightness does not lurch as the cursor crosses a
+        # mosaic seam and make one region look like two different acquisitions.
         key = (well_id, int(time_point))
         if key not in self._coarse:
             p = self._planes(well_id, time_point)
@@ -780,20 +791,20 @@ class _ZarrLoupeSource(_LoupeSource):
         self.n_levels = max(1, len(self._levels))
         return self._levels
 
-    def _open(self, well_id, level):
+    def _open(self, well_id, level, fov=None):
         levels = self._resolve_levels(well_id)
         level = max(0, min(int(level), len(levels) - 1))
-        key = (well_id, level)
+        f = self._fov_of(well_id) if fov is None else int(fov)
+        key = (well_id, f, level)
         if key not in self._handles:
             import tensorstore as ts
-            path = field_path(self._base, self._path_of(well_id), self._fov_of(well_id),
-                              levels[level])
+            path = field_path(self._base, self._path_of(well_id), f, levels[level])
             self._handles[key] = ts.open(
                 {"driver": "zarr3", "kvstore": {"driver": "file", "path": path}}).result()
         return self._handles[key]
 
-    def read_crop(self, well_id, level, y0, x0, h, w, time_point: int = 0):
-        arr = self._open(well_id, level)
+    def read_crop(self, well_id, level, y0, x0, h, w, time_point: int = 0, fov=None):
+        arr = self._open(well_id, level, fov)
         ny, nx = arr.shape[-2], arr.shape[-1]
         # Clamp the ORIGIN so the window stays whole near an edge (shift it in), rather than
         # truncating the extent — clamping y0 to ny-1 first would return a 1px sliver.
@@ -839,9 +850,10 @@ class _LoupeWorker(QThread):
         self._cache: dict[tuple, np.ndarray] = {}
         self._order: list[tuple] = []
 
-    def request(self, gen, well_id, level, y0, x0, h, w, time_point: int = 0):
+    def request(self, gen, well_id, level, y0, x0, h, w, time_point: int = 0, fov=None):
         with self._cv:
-            self._pending = (gen, well_id, level, y0, x0, h, w, int(time_point))
+            self._pending = (gen, well_id, level, y0, x0, h, w, int(time_point),
+                             None if fov is None else int(fov))
             self._cv.notify()
 
     def stop(self):
@@ -869,16 +881,19 @@ class _LoupeWorker(QThread):
                     self._cv.wait()
                 if self._stop:
                     return
-                gen, well_id, level, y0, x0, h, w, time_point = self._pending
+                gen, well_id, level, y0, x0, h, w, time_point, fov = self._pending
                 self._pending = None
-            # The LRU key carries the TIMEPOINT. Without it the first frame's crop answers for
-            # every later one at the same rectangle — the plate moves, the inset does not, and
-            # nothing errors. Same rule as the sources' own coarse caches.
-            key = (well_id, level, y0, x0, h, w, time_point)
+            # The LRU key carries the TIMEPOINT and the FOV. Without the timepoint the first
+            # frame's crop answers for every later one at the same rectangle; without the FOV the
+            # first FIELD's crop answers for every other field of the same region at the same
+            # rectangle, which on a mosaic is every field the cursor crosses. The plate moves, the
+            # inset does not, and nothing errors. Same rule as the sources' own coarse caches.
+            key = (well_id, fov, level, y0, x0, h, w, time_point)
             try:
                 crop = self._cached(key)
                 if crop is None:
-                    crop = self._source.read_crop(well_id, level, y0, x0, h, w, time_point)
+                    crop = self._source.read_crop(well_id, level, y0, x0, h, w, time_point,
+                                                  fov=fov)
                     self._store(key, crop)
                 # The contrast window belongs on this side too: deriving it on the GUI thread
                 # meant a paint-driven slot could decode a whole TIFF plane (IMA-208).
@@ -1344,18 +1359,12 @@ class PlateOverview(QWidget):
         s_loupe, mag = loupe_scale(self._cd, src.well_px)
         level = loupe_level(s_loupe, src.n_levels)
         crop = loupe_crop_px(s_loupe, level)
-        # cursor -> position within the cell's CONTENT -> image px at level 0 -> image px at
-        # ``level``. Through _cell_fraction, which is the same widget-to-cell inverse _fov_at and
-        # the blit use. This used to be a private copy of the UNIFORM grid's inverse
-        # (``ax + ci*cd``, ``cd`` square), which is right on a well plate and wrong on every other
-        # holder: a freeform cell is placed by its own rectangle (``_cell_rect``) and a letterboxed
-        # mosaic occupies only part of its block (``_cell_source``). Pressing the middle of a
-        # freeform cell asked for a rectangle clamped hard against the field's far corner, so the
-        # inset showed real pixels from somewhere the cursor was not.
-        frac = self._cell_fraction(c["row_index"], c["col_index"], x, y)
-        if frac is None:
+        # cursor -> WHICH FOV, and where inside THAT FOV -> image px at level 0 -> image px at
+        # ``level``. See _loupe_target for why the FOV step is not optional on a mosaic cell.
+        tgt = self._loupe_target(c["row_index"], c["col_index"], c["well_id"], x, y)
+        if tgt is None:
             return None
-        fx, fy = frac
+        fov, fx, fy = tgt
         span = max(1, src.well_px >> level)
         cy, cx = int(fy * span), int(fx * span)
         # Clamp HERE as well as in the source. Two reasons beyond belt-and-braces: the request
@@ -1363,7 +1372,57 @@ class PlateOverview(QWidget):
         # edge produces the SAME key as the cursor drifts, so the LRU hits instead of decoding a
         # fresh full-field crop per pixel of motion.
         y0, x0, h, w = loupe_clamp_crop(cy - crop // 2, cx - crop // 2, crop, crop, span, span)
-        return c["well_id"], level, (y0, x0, h, w), s_loupe, mag
+        return c["well_id"], fov, level, (y0, x0, h, w), s_loupe, mag
+
+    def _loupe_target(self, ri: int, ci: int, region, x, y) -> Optional[tuple]:
+        """``(fov, fx, fy)``: WHICH field the cursor is over, and where in it, 0..1.
+
+        THE step the earlier "read the cell the cursor is actually over" fix did not reach, and
+        the reason the coordinate map was still off after it (Julio: "Coordinate map is off, as
+        you can see in my mouse positioning"). That fix made ``_cell_fraction`` correct: a
+        position 0..1 across the cell's CONTENT, which on a multi-FOV region is the whole MOSAIC.
+        ``_loupe_geometry`` then multiplied that mosaic fraction by ONE FIELD's pixel span and
+        read the region's FIRST field, so a 27-FOV region had its entire mosaic mapped onto FOV
+        0. Sweep the cursor across the region and the inset swept across a single field --
+        plausible pixels, from a field the cursor was mostly not even over.
+
+        So it is BOTH things at once: the declared ``_fov_of_well`` FOV-0 limitation surfacing,
+        AND a transform that compounds it, because even a cursor genuinely inside FOV 0 landed at
+        1/N of the way into it. Resolving the field first is what makes the fraction mean
+        something, and it is the same resolution ``_fov_at`` already does for a double-click --
+        which is the point of routing both through :meth:`_fov_box_at`: the field the loupe
+        magnifies and the field a double-click opens can never be different fields.
+
+        ``fov`` is ``None`` when the cell holds no mosaic (one field fills its block), and the
+        fraction is then across the cell's whole content exactly as before -- the single-FOV
+        path, unchanged.
+        """
+        pt = self._cell_point(ri, ci, x, y)
+        if pt is None:
+            return None
+        bx, by = pt
+        hit = self._fov_box_at(region, bx, by)
+        if hit is None:
+            frac = self._cell_fraction(ri, ci, x, y)
+            return None if frac is None else (None, frac[0], frac[1])
+        fov, (top, left, bh, bw) = hit
+        return fov, (bx - left) / max(float(bw), 1e-9), (by - top) / max(float(bh), 1e-9)
+
+    def _fov_box_at(self, region, bx, by) -> Optional[tuple]:
+        """``(fov, (top, left, h, w))`` for the mosaic box under block point ``(bx, by)``.
+
+        Boxes overlap by ~9% at the seams, so the LAST match wins -- matching the draw order in
+        ``_OperatorWorker._on_well``, where later FOVs paint over earlier ones. Without that
+        agreement a point in a seam would resolve to a different field than the one visibly on
+        top. ``None`` when the cell holds no mosaic, or the point fell in a gap between fields.
+        """
+        if not region or not self._boxes:
+            return None
+        hit = None
+        for (r, fov), (top, left, h, w) in self._boxes.items():
+            if r == region and top <= by < top + h and left <= bx < left + w:
+                hit = (fov, (top, left, h, w))
+        return hit
 
     def _request_loupe(self, x, y):
         geo = self._loupe_geometry(x, y)
@@ -1374,14 +1433,15 @@ class PlateOverview(QWidget):
             return
         if self._loupe_worker is None:
             return
-        well, level, (y0, x0, h, w), _s, _m = geo
+        well, fov, level, (y0, x0, h, w), _s, _m = geo
         ok, why = self._loupe_src.available(well)
         if not ok:
             self._loupe_img, self._loupe_note = None, why
             self.update()
             return
         self._loupe_gen += 1
-        self._loupe_worker.request(self._loupe_gen, well, level, y0, x0, h, w, self._time_point)
+        self._loupe_worker.request(self._loupe_gen, well, level, y0, x0, h, w,
+                                   self._time_point, fov)
 
     def _on_loupe_crop(self, gen, well_id, crop, window, error):
         """A crop landed. Drop it unless it is the newest request and the loupe is still up.
@@ -1395,23 +1455,7 @@ class PlateOverview(QWidget):
             self._loupe_img, self._loupe_note = None, error or "no pixels here"
             self.update()
             return
-        # Mirror the TILE's contrast rule on the WELL's pixels (computed by the source, per well)
-        # — never percentiles of the crop under the cursor, which would make brightness lurch as
-        # the cursor moves and make the inset look like different data.
-        #
-        # That AUTO window is then resolved through the plate's one contrast model (IMA-242), so a
-        # channel the user latched with the slider shows the user's window here too. Before, the
-        # loupe kept its own memo and the inset went on displaying the pre-drag contrast — two
-        # representations of one truth, never synced.
-        auto = window if window is not None else self._loupe_win.get(well_id)
-        if auto is None:
-            auto = [(0.0, 1.0)] * crop.shape[0]
-        self._loupe_win[well_id] = auto              # memo the AUTO window, never the resolved one
-        win = ([self._contrast.resolve(c, auto[c]) for c in range(len(auto))]
-               if self._contrast is not None else list(auto))
-        colors = self._loupe_colors
-        if colors is None:
-            colors = np.ones((crop.shape[0], 3), np.float32)
+        win, colors = self._loupe_lut(well_id, crop.shape[0], window)
         # The same compositor the plate uses, with the same channel mask: unticking a channel must
         # remove it from the inset as well, or the loupe contradicts the plate it sits on top of.
         planes = np.stack([crop[c].astype(np.float32) for c in range(crop.shape[0])])
@@ -1423,6 +1467,53 @@ class PlateOverview(QWidget):
         img = QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888).copy()   # copy: rgb is transient
         self._loupe_img, self._loupe_note = img, ""
         self.update()
+
+    def _loupe_lut(self, well_id, n_ch: int, window):
+        """``(windows, colours)`` the inset paints with: THE PLATE'S OWN, whenever it has them.
+
+        Julio, with a screenshot: "loupe not contrast synched with window, as you can see the
+        yellow vs green." Two separate SECOND ANSWERS, both the shape the IMA-242 note above
+        already killed three times in this file, both left standing in the loupe:
+
+        * COLOUR. ``_loupe_colors`` is a snapshot of the acquisition's ``display_color``, taken
+          once in ``set_loupe_source`` (``_viewer._update_loupe_source``) and never moved again --
+          and ``_update_loupe_source`` returns early when the SOURCE is unchanged, so re-pointing
+          could not refresh it either. ``set_channel_color`` moves ``self._colors`` when napari
+          recolours a channel, which is the whole sink contract; recolouring therefore moved the
+          window and the plate and left the inset on the acquisition's colour.
+        * CONTRAST. The SOURCE derives its own AUTO window with ``_pct_window`` (the 1/99.8
+          percentile rule) over one well's coarse plane. The plate derives its own with
+          ``_RunningContrast._auto_window`` (background mode + 2sigma to black, 99.9th on top).
+          On a channel carrying NO signal those two do not merely differ, they disagree about
+          whether anything is there: the plate returns a DEGENERATE window and renders it black
+          ON PURPOSE, while a 1/99.8 window over pure background is a tight window ON the
+          background -- measured at 39% of the field rendered past half brightness. Two such
+          channels composited additively is the yellow in the screenshot, over a subject the
+          window was drawing green.
+
+        The loupe is a magnifier OF THE PLATE, so the only defensible window and colour are the
+        ones the plate is already painting with: ``channel_windows()``, which resolves the user
+        latch, the window's followed LUT and the running histogram in that order, and
+        ``self._colors``, which napari owns. The source-derived window survives ONLY as the
+        fallback for a plate with no contrast model at all -- one with nothing to be out of sync
+        with.
+        """
+        win = self.channel_windows()
+        if len(win) != n_ch:
+            # No plate contrast model (or a source whose channel count is not the plate's): fall
+            # back to the source's own window, still resolved through the one precedence rule.
+            auto = window if window is not None else self._loupe_win.get(well_id)
+            if auto is None:
+                auto = [(0.0, 1.0)] * n_ch
+            self._loupe_win[well_id] = auto          # memo the AUTO window, never the resolved one
+            win = ([self._contrast.resolve(c, auto[c]) for c in range(len(auto))]
+                   if self._contrast is not None else list(auto))
+        colors = self._colors
+        if colors is None or len(colors) != n_ch:
+            colors = self._loupe_colors
+        if colors is None or len(colors) != n_ch:
+            colors = np.ones((n_ch, 3), np.float32)
+        return win, colors
 
     def _fit(self):
         """Reset the view: the whole plate fits the widget, centered (zoom = 1)."""
@@ -2332,16 +2423,13 @@ class PlateOverview(QWidget):
         # position within the cell, normalised to the _CELL-px space the boxes live in. Going via
         # the cell's SOURCE rect is what keeps the hit-test agreeing with the blit on a freeform
         # holder, where the drawn rect is the mosaic's box and not the whole square block. That
-        # inverse now lives in _cell_point, because the loupe needs the identical one.
+        # inverse now lives in _cell_point, because the loupe needs the identical one — and the
+        # box lookup below it now lives in _fov_box_at, for exactly the same reason.
         pt = self._cell_point(c["row_index"], c["col_index"], e.x(), e.y())
         if pt is None:
             return 0
-        fx, fy = pt
-        hit = 0
-        for (r, fov), (top, left, h, w) in self._boxes.items():
-            if r == region and top <= fy < top + h and left <= fx < left + w:
-                hit = fov
-        return hit
+        hit = self._fov_box_at(region, pt[0], pt[1])
+        return 0 if hit is None else hit[0]
 
     def focusOutEvent(self, e):
         # Only reachable because __init__ sets ClickFocus: with the default NoFocus this widget
@@ -2648,7 +2736,7 @@ class PlateOverview(QWidget):
                        self._loupe_note or "reading …")
         geo = self._loupe_geometry(x, y)
         if geo is not None and self._loupe_img is not None:
-            _w, _l, _r, s_loupe, mag = geo
+            _w, _f, _l, _r, s_loupe, mag = geo
             um_px = loupe_um_per_screen_px(getattr(self._loupe_src, "pixel_size_um", None), s_loupe)
             p.setFont(_plate_font(_SCALE_PX, QFont.DemiBold))
             if um_px is None:

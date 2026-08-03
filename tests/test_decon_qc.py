@@ -230,6 +230,82 @@ def test_the_corner_that_no_section_covers_is_blank():
     assert np.isnan(m[42:, 42:]).all()
 
 
+# --- clicking the composite: which voxel did the user point at? -------------------------
+#
+# Julio: "we should be able to toggle the turbo colormap mini-gui where we click on there
+# image and it moves teh crosshairs to display XZ and YZ bands." The crosshair move is a
+# RE-SLICE of the same volume (qc_composite already takes `centre`), so the only new thing
+# to get right is the pixel -> voxel map, and it is tested here rather than in the Qt
+# widget: it is arithmetic over the composite's own layout, and it has to stay the exact
+# inverse of the function two screens up in the same module.
+
+def test_a_click_in_the_xy_panel_picks_y_and_x_and_keeps_z():
+    got = decon_qc.composite_centre_at((5, 40, 60), (2, 20, 30), row=7, col=11, gap=2)
+    assert got == (2, 7, 11)
+
+
+def test_a_click_in_the_xz_strip_picks_z_and_x_and_keeps_y():
+    """The x-z strip is BELOW the x-y panel: rows are z, columns are x."""
+    got = decon_qc.composite_centre_at((5, 40, 60), (2, 20, 30),
+                                       row=40 + 2 + 3, col=11, gap=2)
+    assert got == (3, 20, 11)
+
+
+def test_a_click_in_the_yz_strip_picks_z_and_y_and_keeps_x():
+    """The y-z strip is to the RIGHT: rows are y, columns are z."""
+    got = decon_qc.composite_centre_at((5, 40, 60), (2, 20, 30),
+                                       row=7, col=60 + 2 + 4, gap=2)
+    assert got == (4, 7, 30)
+
+
+def test_a_click_on_a_separator_or_the_dead_corner_moves_nothing():
+    """None, not a nearby guess: a crosshair that jumps to a voxel the user did not point
+    at is worse than one that does not move, because it looks like it worked."""
+    shape, centre = (5, 40, 60), (2, 20, 30)
+    assert decon_qc.composite_centre_at(shape, centre, row=41, col=11) is None   # row gap
+    assert decon_qc.composite_centre_at(shape, centre, row=7, col=61) is None    # col gap
+    assert decon_qc.composite_centre_at(shape, centre, row=45, col=65) is None   # corner
+    assert decon_qc.composite_centre_at(shape, centre, row=-1, col=11) is None   # outside
+    assert decon_qc.composite_centre_at(shape, centre, row=999, col=11) is None
+
+
+def test_the_click_map_is_the_composite_s_own_inverse_when_the_view_is_cropped():
+    """The CROP is where this goes wrong. With view_half the x-y panel starts at
+    (yc - half, xc - half), so a click at panel pixel (0, 0) is that corner voxel and NOT
+    (0, 0) of the volume. Both the composite and this map read the crop window from one
+    function so they cannot disagree; this drives it end to end.
+    """
+    volume = np.zeros((5, 80, 80), dtype=np.float32)
+    volume[2, 40, 40] = 1000.0
+    centre, half = (2, 40, 40), 8
+    m = decon_qc.qc_composite(volume, centre, view_half=half, gap=2)
+    assert m.shape == (16 + 2 + 5, 16 + 2 + 5)
+
+    # The structure sits at the MIDDLE of the cropped x-y panel; clicking it must return the
+    # centre unchanged, which is the round trip.
+    assert decon_qc.composite_centre_at(volume.shape, centre, row=8, col=8,
+                                        view_half=half, gap=2) == centre
+    # ...and the panel's top-left pixel is the crop's corner, not the volume's.
+    assert decon_qc.composite_centre_at(volume.shape, centre, row=0, col=0,
+                                        view_half=half, gap=2) == (2, 32, 32)
+    # A click one pixel past the cropped panel is the separator, not the strip.
+    assert decon_qc.composite_centre_at(volume.shape, centre, row=0, col=16,
+                                        view_half=half, gap=2) is None
+
+
+def test_the_click_map_uses_the_cropped_width_so_the_strips_are_where_they_are_drawn():
+    """Regression shape, stated: if this map used the FULL width instead of the cropped one
+    it would still return sane-looking voxels for x-y clicks and put every strip click in
+    the wrong place. The y-z strip starts at column w_xy + gap of the CROPPED panel."""
+    volume = np.zeros((5, 80, 80), dtype=np.float32)
+    centre, half = (2, 40, 40), 8
+    m = decon_qc.qc_composite(volume, centre, view_half=half, gap=2)
+    first_strip_col = m.shape[1] - 5              # the y-z strip is nz columns wide
+    got = decon_qc.composite_centre_at(volume.shape, centre, row=0, col=first_strip_col,
+                                       view_half=half, gap=2)
+    assert got == (0, 32, 40)                     # z=0, y=crop corner, x unchanged
+
+
 def test_turbo_rgb_is_turbo_and_paints_the_gaps_neutral():
     """The colormap is matplotlib's turbo, not a hand-rolled ramp, and NaN is NOT mapped
     into the ramp -- otherwise the separator reads as a real intensity."""
