@@ -251,6 +251,25 @@ def test_a_failed_run_closes_the_pair_so_the_bar_cannot_be_left_running(qapp, pl
     assert "no such plane" in r.failed[0][1], "the failure did not name its cause"
 
 
+def test_the_asking_window_is_left_knowing_the_run_reached_its_total(qapp, plate):
+    """The last unit's report and ``QThread.finished`` are two signals racing out of one thread,
+    and the window was being torn out of the run by whichever won: on a fast run the bar's last
+    frame was "1 of 2" and the final unit's report was dropped. Observed, not theorised.
+
+    So the drain path reads the worker's own tally instead of waiting for the signal. This pins
+    that with the signal path REMOVED, which is the only way to assert it without a race: no
+    report can reach the requester here except the one the drain sends.
+    """
+    r = _Requester()
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(V.PlateWindow, "_on_unit_progress", lambda self, report: None)
+        plate.run_operator("mip", regions=[REGIONS[0]], save=False, requester=r)
+        assert _drain_until(qapp, lambda: bool(r.done or r.failed), timeout=60)
+    assert r.reports, "the run ended without ever telling the window how far it got"
+    last = r.reports[-1]
+    assert last.done == last.total == len(FOVS)
+
+
 def test_the_plate_stops_talking_to_a_requester_once_its_run_has_drained(qapp, plate):
     """One run, one pair. A stale requester would take the NEXT run's progress into a window that
     did not ask for it — the same 'a result you did not ask for' rule ``deliver_result`` follows."""
