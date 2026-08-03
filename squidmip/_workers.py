@@ -278,6 +278,11 @@ class _OperatorWorker(QThread):
         if info is not None:
             self.wellFailed.emit(*info["rc"])
 
+    #: The in-flight run's recorder, or None between runs. A CLASS-level default rather than an
+    #: __init__ assignment so that a first-paint report arriving before ``run`` has started, or
+    #: after it has finished, finds None instead of raising on the GUI thread.
+    _recorder = None
+
     def run(self):
         # TIME AND MEASURE THIS RUN. The same measurement the CLI's EngineExecutor makes, at the
         # GUI's own operator-run path, into the same METRICS log — so the comparison table sees
@@ -298,7 +303,27 @@ class _OperatorWorker(QThread):
         with capture_stdout_to_log(), \
                 measure_run(self._operator, target, n_targets=self._total) as _run_metrics:
             _run_metrics.note(surface="gui", save=self._save)
-            self._run_body(_run_metrics)
+            # FIRST PAINT is measured by the WINDOW, not here: only the GUI thread knows when a
+            # tile was actually drawn, and the gap between emitting one and drawing it is the
+            # queue delay the metric exists to expose. Publishing the recorder for the lifetime of
+            # the run is what lets the window report into the record before it is written. Cleared
+            # in a finally so a tile arriving late finds nothing rather than a stale run's record.
+            self._recorder = _run_metrics
+            try:
+                self._run_body(_run_metrics)
+            finally:
+                self._recorder = None
+
+    def report_first_paint(self, seconds: float) -> None:
+        """This run's first tile has been drawn, ``seconds`` after the user asked for it.
+
+        Called from the GUI thread. Safe against the run finishing underneath it: the recorder
+        takes the first report only and refuses any report after its block has exited, so a tile
+        landing during teardown cannot alter a record that is already written.
+        """
+        r = self._recorder
+        if r is not None:
+            r.first_paint(seconds)
 
     def _run_body(self, _run_metrics):
         try:
