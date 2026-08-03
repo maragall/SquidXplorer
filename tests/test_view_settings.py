@@ -270,11 +270,19 @@ def test_an_roi_child_inherits_its_parents_contrast_not_the_global_default(qapp,
                                parent_id=parent.window_id)
     assert child is not None
 
-    assert child.settings.get("luts") == {
-        CH_IN_YAML: {"clim": (33.0, 333.0), "cmap": "red"},
-        CH_NOT_IN_YAML: {"clim": (44.0, 444.0), "cmap": "green"},
-    }, "the ROI child took the global default instead of its parent's contrast"
-    assert child.settings.get("luts") != _LUT_A
+    # Asserted field by field, not as one dict equality. What is inherited is CONTRAST and
+    # COLORMAP, and that is what this test is named for; a LUT record read off live layers also
+    # carries derived fields (``rgb``, the colormap reduced to one colour for the Minerva export)
+    # that say nothing about inheritance. Pinning the exact dict made every added field look like
+    # a contrast regression, which is a false alarm this test should not raise.
+    inherited = child.settings.get("luts")
+    assert set(inherited) == {CH_IN_YAML, CH_NOT_IN_YAML}
+    for ch, expected in _LUT_B.items():
+        assert inherited[ch]["clim"] == expected["clim"], (
+            "the ROI child took the global default instead of its parent's contrast")
+        assert inherited[ch]["cmap"] == expected["cmap"]
+    for ch, defaulted in _LUT_A.items():
+        assert inherited[ch]["clim"] != defaulted["clim"]
 
     assert child.settings.diverged == (), (
         "a child that inherited a parent's contrast is reporting itself diverged; it is showing "

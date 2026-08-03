@@ -75,7 +75,11 @@ except Exception:                                        # pragma: no cover
 #: Cross-window LUT clipboard for Julio's "sync windows = copy/paste LUTs": one window's per-channel
 #: (contrast_limits, colormap) is stashed here by "Copy LUTs" and applied by "Paste LUTs" in any
 #: other window (or the plate). A parameter file on the desktop is the same idea; this is the
-#: in-session GUI form of it. Keyed by channel name -> {"clim": (lo, hi), "cmap": <name>}.
+#: in-session GUI form of it. Keyed by channel name -> {"clim": (lo, hi), "cmap": <name>,
+#: "rgb": (r, g, b) | None}. ``cmap`` is what a napari layer is SET to; ``rgb`` is what that
+#: colormap LOOKS like reduced to one 8-bit colour, for consumers that store a colour and not a
+#: ramp (the Minerva export). ``None`` there means "this colormap is not one colour" - see
+#: :func:`squidmip._napari_view.colormap_hue_rgb`.
 _LUT_CLIPBOARD: "dict[str, dict]" = {}
 
 #: Distinct edge colours cycled per ROI so each annotation box is told apart (Julio: "roi boxes
@@ -1550,6 +1554,16 @@ class RegionViewer(QMainWindow):
                 lut["cmap"] = getattr(cmap, "name", cmap)
             except Exception:                            # noqa: BLE001
                 lut["cmap"] = None
+            # ``cmap`` is a NAME, and a name is not a colour: "squid-Fluorescence_488_nm_Ex" tells
+            # an exporter nothing. ``rgb`` is the same colormap reduced to the one 8-bit triple it
+            # tints with, or None when it does not reduce to one (a multi-stop map). Recorded here
+            # and not derived later because the napari layer is the only thing that has the
+            # lookup table; by the time a LUT dict reaches _minerva the layer is gone.
+            try:
+                from squidmip._napari_view import colormap_hue_rgb
+                lut["rgb"] = colormap_hue_rgb(layer)
+            except Exception:                            # noqa: BLE001
+                lut["rgb"] = None
             out[name] = lut
         return out
 

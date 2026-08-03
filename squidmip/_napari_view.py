@@ -304,6 +304,63 @@ def _colormap_rgb(layer: Any) -> Optional[tuple]:
         return None
 
 
+#: How far a lookup-table row may sit off the black-to-hue line and still count as that hue, in
+#: 0..1 colour units. 2/255 is one 8-bit step per component: below that, no screen and no exported
+#: hex can tell the difference, so insisting on exactness would reject colormaps for rounding.
+_HUE_TOL = 2.0 / 255.0
+
+
+def colormap_hue_rgb(layer: Any) -> "Optional[tuple[int, int, int]]":
+    """The ONE 8-bit RGB a layer's colormap reduces to, or ``None`` if it does not reduce.
+
+    Some consumers store one colour per channel, not a ramp - Minerva's story ``groups`` carry a
+    single six-digit ``"color"`` per channel (``_minerva.auto_groups``) and there is no second
+    field to put a gradient in. A colormap is representable there only when it is a black-to-
+    single-hue ramp: every row of its lookup table a non-negative multiple of the last row.
+
+    That covers everything this app puts on a layer by itself - ``_napari_pane._colormap_for``
+    builds exactly ``[[0,0,0,1], [r,g,b,1]]`` from Squid's palette - and napari's own ``red``,
+    ``green``, ``blue``, ``cyan``, ``magenta``, ``yellow`` and ``gray``, all of which are two-stop
+    black-to-hue maps.
+
+    It does NOT cover a multi-stop map the user picked in napari's colormap combo (``viridis``,
+    ``turbo``, ``inferno``, ...). There is no correct single colour for those: the last stop is
+    the top of a ramp, not the map. **Returning that stop would emit a colour the user is not
+    looking at**, so this returns ``None`` and lets the caller keep whatever it had - which for
+    the Minerva export means the acquisition's ``display_color``, a colour that is at least
+    honestly labelled as coming from the acquisition rather than from the screen.
+
+    NOT A DUPLICATE OF :func:`_colormap_rgb` / :meth:`MosaicLayers.channel_rgb`, which sit right
+    beside it and look like the same question. Those answer "what tint does the plate paint with",
+    and for that the last stop is the right and sufficient answer: the plate composites a live
+    canvas, and a slightly-off tint on a thumbnail is a cosmetic mismatch the user can see next to
+    the real thing and ignore. This answers "what colour do we WRITE INTO A FILE that outlives the
+    session", where the same approximation is a lie with no context beside it to correct it. Same
+    lookup table, different tolerance for being wrong, so they are deliberately two functions.
+    """
+    cm = getattr(layer, "colormap", None)
+    colors = getattr(cm, "colors", None)
+    if colors is None:
+        return None
+    try:
+        table = np.asarray(colors, dtype=float)
+        if table.ndim != 2 or table.shape[0] < 1 or table.shape[1] < 3:
+            return None
+        rgb = table[:, :3]
+        last = rgb[-1]
+        denom = float(last @ last)
+        if denom <= 0.0:            # the map ends at black: there is no hue to name
+            return None
+        # Project every row onto the last row and require it to land there. A ramp that dips or
+        # swings off the line (any perceptual map) fails here and is reported as unrepresentable.
+        t = np.clip((rgb @ last) / denom, 0.0, 1.0)[:, None]
+        if float(np.max(np.abs(rgb - t * last))) > _HUE_TOL:
+            return None
+        return tuple(int(round(min(1.0, max(0.0, float(v))) * 255.0)) for v in last)
+    except Exception:                       # noqa: BLE001 - unknown colormap shape; say nothing
+        return None
+
+
 class MosaicLayers:
     """The two-level hierarchy over a napari ``ViewerModel``.
 

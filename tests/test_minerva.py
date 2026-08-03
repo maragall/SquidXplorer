@@ -416,6 +416,204 @@ def test_write_story_strips_the_ome_suffix_from_the_dataset_name(tmp_path):
     assert json.loads(story.read_text())["out_name"] == "plate_B2_fov0"
 
 
+# --- the on-screen LUTs reach the story ------------------------------------------------------
+#
+# Julio: "channels need to be set to specific colors". The export's own defaults are the
+# acquisition's display_color plus a 1/99.9 percentile stretch, neither of which knows the user
+# recoloured a layer or dragged a contrast slider. These assert the OUTCOME - what is in the
+# .story.json Minerva reads - and never that some function was called.
+
+def _story_channels(story) -> dict:
+    return {c["label"]: c for c in json.loads(story.read_text())["groups"][0]["channels"]}
+
+
+def test_a_supplied_lut_reaches_the_story_groups(squid_dataset, tmp_path):
+    """The whole point of the parameter: colour AND contrast in the file Minerva opens."""
+    root, _ = squid_dataset
+    reader = open_reader(root)
+    name = reader.metadata["channels"][0]["name"]
+    luts = {name: {"clim": (100.0, 500.0), "rgb": (0x12, 0x34, 0x56)}}
+
+    (_, story), = export_selection(reader, [("B2", 0)], tmp_path, luts=luts)
+    ch = _story_channels(story)[name]
+
+    assert ch["color"] == "123456", "the on-screen colour, not the acquisition's display_color"
+    # uint16 planes, so clim is normalised against 65535 exactly as the percentiles are.
+    assert ch["min"] == pytest.approx(100.0 / 65535.0, abs=1e-6)
+    assert ch["max"] == pytest.approx(500.0 / 65535.0, abs=1e-6)
+
+
+def test_omitting_luts_keeps_the_percentile_and_display_colour_behaviour(squid_dataset, tmp_path):
+    """The default must not move. The plate-level export and the CLI have no screen to read, so
+    the percentiles are the right answer there and every existing caller passes nothing.
+
+    Asserted as an EQUALITY between two exports rather than against remembered numbers: that is
+    what makes it a regression test for "did adding luts change the no-luts path".
+    """
+    root, _ = squid_dataset
+    before = export_selection(open_reader(root), [("B2", 0)], tmp_path / "a")
+    after = export_selection(open_reader(root), [("B2", 0)], tmp_path / "b", luts=None)
+
+    a, b = _story_channels(before[0][1]), _story_channels(after[0][1])
+    assert a == b
+    for ch in open_reader(root).metadata["channels"]:
+        assert a[ch["name"]]["color"].lower() == str(ch["display_color"]).lstrip("#").lower()
+        assert 0.0 <= a[ch["name"]]["min"] < a[ch["name"]]["max"] <= 1.0
+
+
+def test_a_channel_missing_from_luts_keeps_its_defaults(squid_dataset, tmp_path):
+    """A view window showing three of four channels must not blank the fourth. Per channel, not
+    all-or-nothing: the one that IS in luts moves and the ones that are not do not."""
+    root, _ = squid_dataset
+    reader = open_reader(root)
+    names = [c["name"] for c in reader.metadata["channels"]]
+    assert len(names) > 1, "this fixture needs more than one channel to say anything"
+    luts = {names[0]: {"clim": (7.0, 9.0), "rgb": (1, 2, 3)}}
+
+    plain = _story_channels(export_selection(reader, [("B2", 0)], tmp_path / "a")[0][1])
+    mixed = _story_channels(export_selection(reader, [("B2", 0)], tmp_path / "b", luts=luts)[0][1])
+
+    assert mixed[names[0]] != plain[names[0]], "the supplied channel moved"
+    for n in names[1:]:
+        assert mixed[n] == plain[n], f"{n} is not in luts and must be untouched"
+
+
+def test_an_unrepresentable_colormap_falls_back_instead_of_guessing(squid_dataset, tmp_path):
+    """``rgb: None`` is what colormap_hue_rgb returns for a multi-stop map (viridis, turbo).
+    Minerva has ONE colour field per channel and cannot hold a ramp, so the acquisition's colour
+    is kept. Emitting the ramp's brightest stop would put a colour into Minerva that is on no
+    screen - which is the failure this asserts against. The CONTRAST still comes from the screen:
+    a colormap we cannot represent says nothing about where the slider is."""
+    root, _ = squid_dataset
+    reader = open_reader(root)
+    ch0 = reader.metadata["channels"][0]
+    luts = {ch0["name"]: {"clim": (10.0, 20.0), "rgb": None}}
+
+    (_, story), = export_selection(reader, [("B2", 0)], tmp_path, luts=luts)
+    ch = _story_channels(story)[ch0["name"]]
+
+    assert ch["color"].lower() == str(ch0["display_color"]).lstrip("#").lower()
+    assert ch["max"] == pytest.approx(20.0 / 65535.0, abs=1e-6)
+
+
+def test_auto_groups_takes_clim_in_raw_units_not_normalised_ones():
+    """The unit is the one napari's contrast slider works in, which is also the unit the
+    percentiles are computed in - so both paths divide by dtype_max in the same place."""
+    img = np.stack([np.full((8, 8), 100, np.uint16), np.full((8, 8), 200, np.uint16)])
+    (group,) = auto_groups(
+        img, ["a", "b"], [(255, 0, 0), (0, 255, 0)],
+        luts={"a": {"clim": (0.0, 65535.0), "rgb": None}},
+    )
+    a = group["channels"][0]
+    assert a["min"] == 0.0 and a["max"] == 1.0
+
+
+# --- render.py: the destination that needs no file picking ------------------------------------
+
+def test_render_exhibit_says_which_piece_is_missing(monkeypatch, tmp_path):
+    """render.py runs as a script under a FOREIGN venv, so nothing it does raises into us. Every
+    way it can be unavailable must therefore be named here, not discovered as a silent no-op."""
+    monkeypatch.setattr(_minerva, "minerva_home", lambda: None)
+    with pytest.raises(FileNotFoundError, match="checkout not found"):
+        _minerva.render_exhibit("a.ome.tiff", "a.story.json", tmp_path / "out")
+
+    home = tmp_path / "home"
+    (home / "vendor" / "minerva-author" / "src").mkdir(parents=True)
+    (home / "vendor" / "minerva-author" / "src" / "app.py").write_text("")
+    monkeypatch.setattr(_minerva, "minerva_home", lambda: home)
+    with pytest.raises(FileNotFoundError, match="no .venv interpreter"):
+        _minerva.render_exhibit("a.ome.tiff", "a.story.json", tmp_path / "out")
+
+    py = home / ".venv" / "bin" / "python"
+    py.parent.mkdir(parents=True)
+    py.write_text("")
+    with pytest.raises(FileNotFoundError, match="no renderer"):
+        _minerva.render_exhibit("a.ome.tiff", "a.story.json", tmp_path / "out")
+
+
+def _fake_checkout(tmp_path, render_body: str):
+    """A checkout whose render.py is a real Python script we control. Runs the actual subprocess
+    plumbing - Popen, poll, exit code, stdout - instead of mocking the thing under test."""
+    import sys
+
+    home = tmp_path / "home"
+    src = home / "vendor" / "minerva-author" / "src"
+    src.mkdir(parents=True)
+    (src / "app.py").write_text("")
+    (src / "render.py").write_text(render_body)
+    py = home / ".venv" / "bin" / "python"
+    py.parent.mkdir(parents=True)
+    py.symlink_to(sys.executable)
+    return home
+
+
+def test_render_exhibit_returns_the_index_html_it_wrote(monkeypatch, tmp_path):
+    home = _fake_checkout(tmp_path, (
+        "import sys, pathlib\n"
+        "out = pathlib.Path(sys.argv[3])\n"
+        "out.mkdir(parents=True, exist_ok=True)\n"
+        "(out / 'index.html').write_text(sys.argv[1] + '|' + sys.argv[2])\n"
+    ))
+    monkeypatch.setattr(_minerva, "minerva_home", lambda: home)
+    ome, story = tmp_path / "x.ome.tiff", tmp_path / "x.story.json"
+    ome.write_text(""); story.write_text("{}")
+
+    index = _minerva.render_exhibit(ome, story, tmp_path / "out")
+
+    assert index == tmp_path / "out" / "index.html" and index.is_file()
+    # The renderer is handed OUR pair, resolved - its own cwd is the checkout, not ours.
+    assert index.read_text() == f"{ome.resolve()}|{story.resolve()}"
+
+
+def test_render_exhibit_reports_the_renderers_own_stderr(monkeypatch, tmp_path):
+    """A non-zero exit is the only failure signal a foreign script gives us. Losing its output
+    would leave the user with 'it did not work' and nothing else."""
+    home = _fake_checkout(tmp_path, (
+        "import sys\n"
+        "print('Image is missing OME-XML pixel size', file=sys.stderr)\n"
+        "sys.exit(3)\n"
+    ))
+    monkeypatch.setattr(_minerva, "minerva_home", lambda: home)
+    with pytest.raises(RuntimeError, match="exited 3"):
+        _minerva.render_exhibit(tmp_path / "x.ome.tiff", tmp_path / "x.story.json", tmp_path / "o")
+    try:
+        _minerva.render_exhibit(tmp_path / "x.ome.tiff", tmp_path / "x.story.json", tmp_path / "o")
+    except RuntimeError as exc:
+        assert "OME-XML pixel size" in str(exc)
+
+
+def test_render_exhibit_refuses_a_zero_exit_that_wrote_nothing(monkeypatch, tmp_path):
+    """Exit 0 is not the deliverable; an index.html is. Returning a path to a directory with no
+    viewer in it would hand the user a broken link and call it a success."""
+    home = _fake_checkout(tmp_path, "pass\n")
+    monkeypatch.setattr(_minerva, "minerva_home", lambda: home)
+    with pytest.raises(RuntimeError, match="no index.html"):
+        _minerva.render_exhibit(tmp_path / "x.ome.tiff", tmp_path / "x.story.json", tmp_path / "o")
+
+
+def test_render_exhibit_abandons_a_long_render_when_told_to_stop(monkeypatch, tmp_path):
+    """Measured at 132 s for one real region, and closeEvent joins the worker. A stop flag the
+    poll never reads would hold the window for the rest of it."""
+    import time
+
+    home = _fake_checkout(tmp_path, "import time\ntime.sleep(60)\n")
+    monkeypatch.setattr(_minerva, "minerva_home", lambda: home)
+    stop = [False]
+    threading.Timer(0.3, lambda: stop.__setitem__(0, True)).start()
+    t0 = time.monotonic()
+    with pytest.raises(RuntimeError, match="stopped"):
+        _minerva.render_exhibit(tmp_path / "x.ome.tiff", tmp_path / "x.story.json",
+                                tmp_path / "o", should_stop=lambda: stop[0])
+    assert time.monotonic() - t0 < 20.0          # not 60 - the poll honoured the flag
+
+
+def test_the_internet_requirement_is_stated_somewhere_a_user_meets_it():
+    """Both Minerva front ends load their JavaScript from jsdelivr, so both need internet to
+    VIEW. That was recorded nowhere in this codebase and a user meets it as a blank page."""
+    assert "internet" in _minerva.NEEDS_INTERNET_NOTE.lower()
+    assert "CDN" in _minerva.NEEDS_INTERNET_NOTE or "cdn" in _minerva.NEEDS_INTERNET_NOTE
+
+
 # --- launch ----------------------------------------------------------------------------------
 
 def test_launch_returns_false_when_not_installed(monkeypatch):
@@ -446,6 +644,55 @@ def test_launch_reuses_an_already_running_server(monkeypatch):
         raise AssertionError("spawned a server when one was already running")
 
     monkeypatch.setattr("subprocess.Popen", boom)
+    assert launch_minerva() is True
+    assert opened == [_minerva.MINERVA_URL]
+
+
+def test_a_cold_start_opens_exactly_one_tab_and_it_is_not_ours(monkeypatch, tmp_path):
+    """minerva-author opens the browser ITSELF and cannot be told not to.
+
+    ``src/app.py`` v1.21.0 (commit c555515) defines ``open_browser()`` at :2033 and calls it at
+    :2050 AND :2053, once in each arm of ``if "--dev" in sys.argv`` - its only argv handling. So
+    a cold start opened two tabs: Author's and ours. Ours is the one we can drop.
+
+    Asserted on the OUTCOME (how many opens happen) rather than on a flag, so it stays true if
+    the implementation changes its mind about how it knows.
+    """
+    app = tmp_path / "vendor" / "minerva-author" / "src" / "app.py"
+    app.parent.mkdir(parents=True)
+    app.write_text("")
+    py = tmp_path / ".venv" / "bin" / "python"
+    py.parent.mkdir(parents=True)
+    py.write_text("")
+    monkeypatch.setenv(_minerva.MINERVA_HOME_ENV, str(tmp_path))
+
+    live = [False]                                    # comes up on the second poll
+    monkeypatch.setattr(_minerva, "is_running", lambda timeout=1.0: live[0])
+    opened = []
+    monkeypatch.setattr("webbrowser.open", lambda url: opened.append(url))
+
+    def spawn(*a, **k):
+        live[0] = True                                # ...and Author opens its own tab here
+        return None
+
+    monkeypatch.setattr("subprocess.Popen", spawn)
+
+    assert launch_minerva() is True
+    assert opened == [], "Minerva Author already opened a tab; a second one is the defect"
+
+
+def test_an_already_running_server_still_gets_a_tab_from_us(monkeypatch):
+    """The other half of the same rule, and the reason this is not just 'delete the call'.
+
+    Nothing is spawned when the server is already answering, so nobody else is about to open
+    anything. Dropping our call unconditionally would mean the second export of a session
+    silently opened no browser at all.
+    """
+    monkeypatch.setattr(_minerva, "is_running", lambda timeout=1.0: True)
+    opened = []
+    monkeypatch.setattr("webbrowser.open", lambda url: opened.append(url))
+    monkeypatch.setattr("subprocess.Popen",
+                        lambda *a, **k: pytest.fail("spawned a second server"))
     assert launch_minerva() is True
     assert opened == [_minerva.MINERVA_URL]
 
