@@ -68,7 +68,7 @@ from squidmip._plate_overview import (
     _CELL, _PUSH_PX, _box_union, _fit_box, _fit_cell, _fit_letterboxed, _mosaic_boxes,
     content_box, push_shape_for, region_mosaic_extent_px,
 )
-from squidmip._progress import RunProgress, unit_plan
+from squidmip._progress import FOV_UNIT, PREVIEW_LABEL, RunProgress, unit_plan
 from squidmip._tsctx import HANDLES
 from squidmip.contract import field_path
 
@@ -886,6 +886,19 @@ class _PreviewWorker(QThread):
     #: preview still draining cannot make the next operator run refuse itself.
     IS_PREVIEW = True
 
+    # THE SAME PROGRESS CHANNEL ``_OperatorWorker`` USES, deliberately: one immutable
+    # ``squidmip._progress.ProgressReport`` per completed unit. Julio asked for one bar covering
+    # "whichever operator we're applying in bulk or in a specific window, even if it's preview", and
+    # a second channel for the preview would be a second thing for the one bar to reconcile.
+    #
+    # WHAT IT DOES NOT REUSE IS ``unit_plan``, and that is not an oversight. ``unit_plan`` computes
+    # the ENGINE's denominator -- what ``select_fovs`` would select -- and this pass does not run the
+    # engine: ``_plan`` collapses a region to ONE read whenever a mosaic is not derivable or its
+    # boxes would be sub-pixel specks (see ``_plan``), so ``unit_plan`` would promise 27 FOVs for a
+    # region this pass reads once. The total comes from ``len(plan)``, which is the work that will
+    # actually happen, and it is still known BEFORE the first read -- the property that matters.
+    runProgress = Signal(object)                # ProgressReport
+
     streamEnded = Signal()                      # preview complete -> recomposite the whole plate
     failed = Signal(str)                         # a preview that could not finish NAMES why —
     #                                                 a bare `except: pass` left the plate frozen
@@ -912,6 +925,11 @@ class _PreviewWorker(QThread):
         self._pending: dict = {}      # region -> the cell being accumulated for the cache
         self.cache_hits = 0           # regions served from the cache, for the status line and tests
         self.cache_reads = 0          # regions actually read from the acquisition
+        # INDETERMINATE until ``run`` knows the plan. Built here rather than left as None so a
+        # consumer that reads ``progress_report`` before the thread starts (or after it exits) gets
+        # a report saying "0 so far, total unknown" instead of raising on the GUI thread -- the same
+        # rule ``_OperatorWorker._recorder`` follows for the same reason.
+        self._progress = RunProgress(PREVIEW_LABEL, None, FOV_UNIT)
 
     def _plan(self) -> list:
         """``[(region, fov, box|None), ...]`` — the read list, in plate order, FOVs in stage order.
@@ -1008,13 +1026,48 @@ class _PreviewWorker(QThread):
             top0, left0, bh, bw = st["box"]
             self._cache.put(region, st["cell"][:, top0:top0 + bh, left0:left0 + bw], st["box"])
 
+    @property
+    def progress_report(self):
+        """This pass's progress so far, for a consumer that arrives mid-pass.
+
+        Same contract as ``_OperatorWorker.progress_report``, and safe for the same reason: the
+        snapshot is built from ints the GIL makes atomic, so a report one tick stale is still a
+        report where refusing to answer would be a blank bar over running work.
+        """
+        return self._progress.report()
+
     def run(self):
+        # CAPTURE print() FOR THE DURATION OF THE PASS, exactly as ``_OperatorWorker.run`` does and
+        # for exactly the same reason (the long version is in
+        # ``squidmip._logpane.capture_stdout_to_log``). Julio: "when I run a preview it doesn't show
+        # may standalone stitchers log messages on the master log. This tell me it was a partial
+        # integration." The integration was partial in the wiring, not in the algorithm -- the
+        # capture went onto the operator worker only, so every path that is NOT an operator run
+        # still printed into a terminal nobody is watching.
+        #
+        # Scoped to the PASS and not to this thread, which is load-bearing here too: the reads below
+        # run on a ``ThreadPoolExecutor``, so a thread-scoped switch would capture nothing said by
+        # the reader (or by anything it imports) while a plane is being read.
+        with capture_stdout_to_log():
+            self._run_body()
+
+    def _run_body(self):
         try:
             from collections import Counter
             from concurrent.futures import ThreadPoolExecutor
             zs = self._meta["z_levels"]
             z_mid = zs[len(zs) // 2]      # a mid-stack plane is a fair single-plane preview
             plan = self._replay_cached(self._plan())
+            # THE DENOMINATOR IS THE PLAN THAT SURVIVED THE CACHE, not the plan before it. A region
+            # replayed from the cell cache is not work: counting it would draw a bar that sits at
+            # "1400 of 1536" from its first frame and then crawls, and feeding those instant
+            # completions to ``RunProgress`` would also poison the rate -- 1400 arrivals in one
+            # instant makes the ETA for the remaining 136 wildly optimistic. What is left IS the
+            # work, and ``_replay_cached`` already says out loud how many wells it served.
+            self._progress = RunProgress(PREVIEW_LABEL, len(plan), FOV_UNIT)
+            # Say 0 of N before the first read, same as the operator run: the total is known here,
+            # so the bar is determinate from its first frame rather than after the first arrival.
+            self.runProgress.emit(self._progress.report())
             per_region = Counter(item[0] for item in plan)
 
             def load(item):
@@ -1032,6 +1085,12 @@ class _PreviewWorker(QThread):
                     tile = np.stack(tiles).astype(self._dtype)
                     self.tileReady.emit(ri, ci, region, tile, box)
                     self._remember(region, box, tile, per_region[region])
+                    # One unit done. No lock: ``ex.map`` yields on THIS thread, so unlike
+                    # ``_OperatorWorker._on_well`` (which runs on several writer threads at once)
+                    # every tick here is serialised by construction. Stated rather than assumed,
+                    # because ``RunProgress`` is deliberately not thread-safe on its own.
+                    self._progress.tick(time.monotonic())
+                    self.runProgress.emit(self._progress.report())
             if not self._stop.is_set():
                 self.streamEnded.emit()   # the running window is mature now -> one clean recomposite
                 # The pass finished, so this generation is complete: compact the per-well cells

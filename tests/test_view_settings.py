@@ -358,6 +358,64 @@ def test_a_diverged_window_says_so_in_the_window_and_reset_clears_it(qapp, manag
     assert one._reset_btn.isEnabled() is False
 
 
+def test_every_control_in_the_defaults_box_reaches_the_shared_console(qapp, manager, caplog):
+    """A quiet control next to a loud one reads as a control that did nothing.
+
+    `auto focus` used to `_echo` (the in-window strip only) while `make default` and `reset`, in
+    the same box, `_say` (the strip AND the one global console). Julio clicked it four times: the
+    loud confirmation appeared in the console and the quiet one did not, so the tick looked
+    ignored. `_echo` is for events the console ALREADY has a structured line for; a settings
+    change has none, so all three of these speak.
+    """
+    import logging
+
+    one = manager.open([REGIONS[0]])
+    _loaded(qapp, one)
+
+    def _console_lines(fn) -> list[str]:
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger=one.log.logger.name):
+            fn()
+        return [r.getMessage() for r in caplog.records]
+
+    ticked = _console_lines(lambda: one._focus_default_chk.setChecked(True))
+    assert any("auto focus" in m for m in ticked), (
+        "ticking auto focus said nothing in the console; the other two controls in its box do")
+
+    reset = _console_lines(one._reset_settings)
+    assert any("auto focus" in m for m in reset), (
+        "reset stopped naming what it put back")
+
+    # and the neighbour it was compared against, so the three stay a set rather than drifting apart
+    one._focus_default_chk.setChecked(True)
+    made = _console_lines(one._make_default)
+    assert made, "make default said nothing in the console"
+
+
+def test_the_auto_focus_tooltip_describes_the_once_per_window_behaviour(qapp, manager):
+    """`_apply_settings_once` returns early after the first mosaic, so the jump happens ONCE.
+
+    The tooltip promised it "whenever this window loads a region", i.e. a refocus on every region
+    change that the code does not do. A tooltip is the only documentation this control has.
+    """
+    one = manager.open([REGIONS[0]])
+    tip = one._focus_default_chk.toolTip()
+
+    assert "once" in tip.lower(), "the tooltip does not say the jump happens once"
+    assert "whenever this window loads a region" not in tip, (
+        "the tooltip still promises a per-region refocus")
+
+    # the behaviour the tooltip now describes, unchanged: the guard is what makes it once
+    _loaded(qapp, one)
+    assert one._settings_applied is True
+    called = []
+    one._focus_reference_plane = lambda: called.append(1)
+    one.settings.set("tenengrad_focus", True)
+    one._apply_settings_once()
+    assert called == [], (
+        "_apply_settings_once ran a second time; the tooltip's 'once' is now the wrong description")
+
+
 def test_resetting_contrast_puts_the_layers_back(qapp, manager):
     """Reset is not just a flag: the pixels on screen have to go back too."""
     manager.defaults.set("luts", _LUT_A)

@@ -580,7 +580,8 @@ class PlateWindow(QMainWindow):
         # controls like the powerpoint specified at each level"). Every window's "Operators for this
         # window" dropdown is the SAME registry + run_operator (the CLI engine), scoped to that view,
         # so "select where to run stitching" = pick the view, Run. Only runnable operators appear
-        # (minerva/Gallery View are terminals that stay on the root's stack).
+        # (minerva is a terminal that stays on the root's stack; Gallery View is a View-menu
+        # window-management command and was never an operator at all).
         self._viewer_manager.operator_specs = [
             (op.key, op.label) for op in _OPERATIONS if op.runnable]
         self._viewer_manager.run_operator = self.run_operator
@@ -1077,10 +1078,20 @@ class PlateWindow(QMainWindow):
         view_menu.addAction(self._log_act)
         # Julio's drawing: "Log (option to open in a new window)". The panel's header carries the
         # same gesture as a ⧉ button; this is the discoverable duplicate, and it doubles as the way
-        # back if the float is somehow off-screen (it raises rather than building a second).
+        # back if the float is somehow off-screen (it raises rather than building a second). It sits
+        # DIRECTLY under "Log" because the two are one pair — where the console is, and where you
+        # would rather it were. The separator below keeps them from reading as a list with Gallery
+        # View, which is a different kind of thing entirely.
         self._log_float_act = QAction("Log in a &New Window", self)
         self._log_float_act.triggered.connect(self._float_log)
         view_menu.addAction(self._log_float_act)
+        view_menu.addSeparator()
+        # Gallery View lives HERE, not in the Operators stack: it arranges WINDOWS, it does not
+        # transform pixels, so it is not gated on an acquisition either. See _open_gallery_view for
+        # what it does and does not yet do.
+        self._gallery_act = QAction("&Gallery View…", self)
+        self._gallery_act.triggered.connect(self._open_gallery_view)
+        view_menu.addAction(self._gallery_act)
 
         self.setAcceptDrops(True)
         if initial_path:
@@ -1139,10 +1150,11 @@ class PlateWindow(QMainWindow):
     def _build_process_pane(self) -> QWidget:
         """The Operators panel: JUST a scrollable list of operator blocks — no header, no footer
         (Julio, 2026-07-23). Each block opens that operator; operators apply to the plate SELECTION
-        (Cmd/Ctrl-A picks the whole plate). Minerva and Gallery View are here as the deck's terminal
-        operators. Status moved to the window status bar; the old 'run on' scope combo and the
-        raw/3D/MIP footer buttons are kept as hidden orphans so their many callers still resolve —
-        they migrate onto the operator tabs and the windows in the operator phase."""
+        (Cmd/Ctrl-A picks the whole plate). Minerva is here as the deck's terminal operator; Gallery
+        View is NOT (it arranges windows, see the View menu). Status moved to the window status bar;
+        the old 'run on' scope combo and the raw/3D/MIP footer buttons are kept as hidden orphans so
+        their many callers still resolve — they migrate onto the operator tabs and the windows in
+        the operator phase."""
         # Status line — tests and many methods read self._readout; it now lives in the status bar,
         # not as a pane header. Created here because _build_process_pane runs during __init__.
         self._readout = QLabel("Drop a Squid acquisition, then pick an operator.")
@@ -1171,20 +1183,17 @@ class PlateWindow(QMainWindow):
         sv.setContentsMargins(0, 0, 0, 0)
         sv.setSpacing(8)
         self._op_cards = {}
-        # TERMINAL operators on TOP of the stack (Julio, 2026-07-23: "I need minerva author and the
-        # gallery view to be on the top of the stack"). Gallery View first, then Minerva Author, then
-        # the processing operators. Gallery View is a button (gathers windows), Minerva is an
-        # Operation card; the rest follow in registry order, minus minerva (already placed).
-        gv = _operator_card("Gallery View",
-                            "Arrange the open viewer windows into a gallery")
-        gv.setEnabled(False)
-        gv.setCursor(Qt.PointingHandCursor)
-        gv.setStyleSheet(_CARD_QSS)
-        gv.setMinimumHeight(54)
-        gv.clicked.connect(self._open_gallery_view)
-        sv.addWidget(gv)
-        self._op_cards["galleryview"] = gv
-
+        # TERMINAL operator on TOP of the stack (Julio, 2026-07-23: "I need minerva author and the
+        # gallery view to be on the top of the stack"): Minerva Author, then the processing
+        # operators in registry order, minus minerva (already placed).
+        #
+        # GALLERY VIEW IS NOT HERE ANY MORE (Julio, 2026-08-02: "I guess I don't understand how
+        # this can be treated as an operator in bulk"). He is right, and it was a category error:
+        # an operator in this codebase is something the engine runs over regions to produce derived
+        # data, declared by a `consumes` frozenset -- and "arrange the open windows in a grid" eats
+        # no axis and produces no pixels. It was never in `_OPERATIONS`, but it sat in this stack
+        # with the same card, the same styling and the same `_enable_operators` gate, which is what
+        # made it read as one. It is a WINDOW-MANAGEMENT command, so it is a View-menu action now.
         _minerva = [op for op in _OPERATIONS if op.key == "minerva"]
         ordered = _minerva + [op for op in _OPERATIONS if op.key != "minerva"]
         for op in ordered:
@@ -1210,16 +1219,22 @@ class PlateWindow(QMainWindow):
         return pane
 
     def _open_gallery_view(self):
-        """Gallery View terminal operator (slide 2): "prepares a gallery view instance using the
-        selected Napari windows, with current views". The window-assembly lands with the operator
-        phase; for now report what it will gather so the block is never a silent dead control."""
+        """NOT IMPLEMENTED, and it says so. Slide 2 asks for "a gallery view instance using the
+        selected Napari windows, with current views"; nothing here arranges any window.
+
+        This is the whole of Gallery View: a status line. It never opened a gallery, and the old
+        copy ("N open window(s) WILL be arranged…") described a future, not this click, which is
+        how it came to be reported as a control that "doesn't open or do anything". It is also
+        ii.5's open problem (docs/SCOPE.md): the pipeline has no "result" type for a gallery to be
+        made of. Implementing it means reading hongquanli/gallery-view first, not writing a grid
+        layout here. Until then the honest thing is to name itself as unbuilt, in the console as
+        well as the status bar, rather than to report a plan in the present tense.
+        """
         n = len(self._viewer_manager.windows) if hasattr(self, "_viewer_manager") else 0
-        if n == 0:
-            self._readout.setText("Gallery View: open some viewer windows first, then gather them.")
-            return
-        self._readout.setText(
-            f"Gallery View: {n} open window(s) will be arranged into a gallery "
-            "(assembly lands with the operator phase).")
+        msg = (f"Gallery View is not implemented yet — {n} viewer window(s) are open and none of "
+               "them will be moved. Tracked as ii.5 in docs/SCOPE.md.")
+        self._readout.setText(msg)
+        self.log.info("%s", msg)
 
     def _open_native_3d(self):
         """Popout napari 3D on the current region's centre FOV at native resolution (gallery-view
@@ -1469,7 +1484,7 @@ class PlateWindow(QMainWindow):
 
     def _close_op_tab(self, index: int, tabs=None):
         tabs = self._left_tabs if tabs is None else tabs
-        if index < self._FIXED_TABS and tabs is self._left_tabs:   # Operators + Log: never closable
+        if index < self._FIXED_TABS and tabs is self._left_tabs:   # the Operators home tab
             return
         w = tabs.widget(index)
         tabs.removeTab(index)
@@ -1506,7 +1521,7 @@ class PlateWindow(QMainWindow):
         IMA-209's callers and tests are unchanged."""
         tabs = self._left_tabs if tabs is None else tabs
         if index < self._FIXED_TABS and tabs is self._left_tabs:
-            return None                      # Operators + Log are fixed: neither detaches
+            return None                      # the Operators home tab is fixed: it never detaches
         if index < 0:
             return None
         w = tabs.widget(index)
@@ -1716,6 +1731,36 @@ class PlateWindow(QMainWindow):
         self._run_units = report
         self._run_readout(f"● {report.sentence()}{self._run_dest}")
         self._tell_requester(self._run_requester, "operator_progress", report)
+        # ...and to the ONE bar next to the memory bar, which is where Julio asked to see a run
+        # WHEREVER it was started from ("in bulk or in a specific window"). The requester above is
+        # told only when the run came from a region window; this covers both, and the preview.
+        self._publish_progress(report)
+
+    def _publish_progress(self, report) -> None:
+        """Hand a ``ProgressReport`` (or None for idle) to the window navigator's work bar.
+
+        Routed through the ViewerManager rather than reaching into ``self._open_views`` because the
+        manager is the thing that outlives the navigator widget: the panel can be closed and rebuilt,
+        and a producer must not have to know whether it currently exists.
+        """
+        mgr = getattr(self, "_viewer_manager", None)
+        if mgr is not None:
+            mgr.set_run_progress(report)
+
+    def _clear_progress_if_idle(self) -> None:
+        """Take the work bar down, but ONLY once nothing is left running.
+
+        Asked on every worker's ``finished``, and both questions are needed. ``operator_busy``
+        deliberately does not count the raw preview (it opts out with ``IS_PREVIEW``, see
+        ``_explore.operator_busy``), so an operator run ending while a preview is still filling the
+        plate would otherwise hide a bar that has live work behind it.
+        """
+        if _explore.operator_busy(self._worker, self._retired):
+            return
+        preview = getattr(self, "_preview", None)
+        if preview is not None and preview.isRunning():
+            return
+        self._publish_progress(None)
 
     @staticmethod
     def _tell_requester(requester, method: str, *args) -> None:
@@ -1951,6 +1996,10 @@ class PlateWindow(QMainWindow):
         Fires on QThread.finished, so it also covers a run that was STOPPED (closing a tab mid-run)
         — ``_stop_worker`` returns immediately but the thread keeps going until its current well is
         done, and ``_busy()`` stays True for all of that window."""
+        # The work bar comes down here and not on ``finished_ok``, for the reason the console pair
+        # below is closed here: this slot fires on ok, failed and STOPPED alike, and a bar that is
+        # only taken down on success is a bar left running over a dead run.
+        self._clear_progress_if_idle()
         if _explore.operator_busy(self._worker, self._retired):
             return                       # another operator run is still draining — wait for it
         # No operator run is in flight now — clear the activity header. end() is a no-op if it was
@@ -2042,6 +2091,11 @@ class PlateWindow(QMainWindow):
 
     def _build_mip_tab(self) -> QWidget:
         return self._build_run_tab(_OPERATIONS_BY_KEY["mip"])
+
+    def _build_reference_tab(self) -> QWidget:
+        # The other z-reduction. `_build_run_tab` is ONE builder for every z-reducer, so the
+        # focus-reference-plane operator needs no tab code of its own -- only this hand-off.
+        return self._build_run_tab(_OPERATIONS_BY_KEY["reference"])
 
     def _build_stitch_tab(self) -> QWidget:
         """maragall/stitcher's control surface, in pane 1 (IMA-decon-stitch-ui).
@@ -3114,12 +3168,8 @@ class PlateWindow(QMainWindow):
 
         # fast RAW preview: fill the plate with downsampled thumbnails immediately (grey dots),
         # in the SAME row-major order the operator will later process them in.
-        self._preview = _PreviewWorker(reader, meta, self._fov_index, order)
-        self._preview_order = list(order)
-        self._preview.tileReady.connect(self._on_preview_tile)
-        self._preview.streamEnded.connect(lambda: self._recomposite("raw"))
-        self._preview.failed.connect(self._on_preview_failed)
-        self._preview.start()   # (the detail already landed on order[0] via _setup_raw_detail)
+        self._start_preview(reader, meta, order)   # (the detail already landed on order[0] via
+        #                                             _setup_raw_detail)
         # top-left = STATUS (what's happening / what's shown); the plate name is the pane title.
         # "live" is retired from user-facing copy: this is POST-ACQUISITION review, and calling
         # a loaded plate "live" reads as a running scope. The phrasing is operator/stitcher
@@ -3627,8 +3677,50 @@ class PlateWindow(QMainWindow):
         sub = getattr(mosaic, "on_user_op", None)            # same slot-abort hazard as above
         if callable(sub):
             sub(_op_sink)
+        # ...and PULL what this window has ALREADY resolved. No sink can ever report it.
+        self._adopt_window_view(mosaic, index_of)
         bound.add(wid)
         self._napari_contrast_bound = True
+
+    def _adopt_window_view(self, mosaic, index_of):
+        """Take the LUT a window is ALREADY showing, at the moment the plate starts following it.
+
+        ``_adopt_centre_view`` below does exactly this and CANNOT RUN. It is gated on
+        ``self._mosaic_pane``, which the decentralization pinned to ``None`` permanently (see the
+        "NO CENTRAL VIEWER" note in ``__init__``) and never assigns again -- so the fix that method
+        carries, written for Julio's "Look at contrast difference between napari window and plate
+        view", was orphaned the day the central pane was removed. The plate went back to painting
+        from its own running histogram while every spawned window painted from napari's autoscale,
+        and nothing said so.
+
+        An EVENT tells you about a CHANGE; the initial state is not a change. ``on_user_contrast``
+        deliberately filters napari's own autoscale out (treating it as a user gesture is what
+        latched every channel MANUAL and killed the plate's auto-contrast the first time), so the
+        one moment that matters most -- the window a region comes up with -- is the one moment no
+        sink can report. This pulls it instead, per WINDOW rather than per central pane, and lands
+        in the FOLLOW path, not the manual latch.
+
+        Every read is capability-checked for the same reason the subscriptions above are: this
+        runs from a Qt slot, and an unhandled exception escaping one aborts the process.
+        """
+        if self._overview is None or self._meta is None:
+            return
+        get_window = getattr(mosaic, "contrast", None)
+        get_rgb = getattr(mosaic, "channel_rgb", None)
+        get_visible = getattr(mosaic, "channel_visible", None)
+        for c in self._meta.get("channels", []):
+            ch = index_of(c["name"])
+            if ch is None:
+                continue                     # a channel this window draws and the plate does not
+            window = get_window(c["name"]) if callable(get_window) else None
+            if window is not None:
+                self._on_detail_contrast(ch, float(window[0]), float(window[1]))
+            rgb = get_rgb(c["name"]) if callable(get_rgb) else None
+            if rgb is not None:
+                self._overview.set_channel_color(ch, rgb)
+            visible = get_visible(c["name"]) if callable(get_visible) else None
+            if visible is not None:
+                self._overview.set_channel_visible(ch, bool(visible))
 
     def _follow_window_layer(self, layer_key: str, on: bool) -> None:
         """A window showed or hid a processing layer: put the plate on the same one.
@@ -3773,12 +3865,7 @@ class PlateWindow(QMainWindow):
         # opened: the slider showed only the well that had already loaded.
         if getattr(self, "_preview", None) is not None and order != getattr(self, "_preview_order", None):
             self._stop_preview()
-            self._preview = _PreviewWorker(reader, meta, self._fov_index, order)
-            self._preview_order = list(order)
-            self._preview.tileReady.connect(self._on_preview_tile)
-            self._preview.streamEnded.connect(lambda: self._recomposite("raw"))
-            self._preview.failed.connect(self._on_preview_failed)
-            self._preview.start()
+            self._start_preview(reader, meta, order)
         self._pushed = set()
         # The raw slider is 1:1 with `order`, so pushes must map into THAT, not the plate index.
         # Identity when the slider IS the whole plate; a subset map otherwise.
@@ -3833,12 +3920,7 @@ class PlateWindow(QMainWindow):
         # resume the raw thumbnail fill — the operator run stopped the preview partway, so re-run it to
         # finish downsampling every well's raw tile (idempotent: it just re-renders the raw layer).
         self._stop_preview()
-        self._preview = _PreviewWorker(self._reader, self._meta, self._fov_index, self._order)
-        self._preview_order = list(self._order)
-        self._preview.tileReady.connect(self._on_preview_tile)
-        self._preview.streamEnded.connect(lambda: self._recomposite("raw"))
-        self._preview.failed.connect(self._on_preview_failed)
-        self._preview.start()
+        self._start_preview(self._reader, self._meta, self._order)
         self._readout.setText("raw view")
 
     def _open_computed(self):
@@ -4071,8 +4153,9 @@ class PlateWindow(QMainWindow):
             self._readout.setText("already processing — let the current run finish first")
             return
         # IMA-226: gate on the ENGINE registry, not on the card table. `_OPERATIONS_BY_KEY[key]`
-        # raised a bare KeyError for `reference` (a registered projector with no card) and let
-        # `minerva` (a card that is not an operator) through to die inside the engine instead.
+        # raised a bare KeyError for a registered projector with no card (`reference` then, `spot`
+        # and `decon3d` now) and let `minerva` (a card that is not an operator) through to die
+        # inside the engine instead.
         # Refuse BY NAME here, in the readout, the same way an unknown region is refused below.
         if key not in runnable_operators():
             self._readout.setText(
@@ -4391,6 +4474,31 @@ class PlateWindow(QMainWindow):
         """The raw preview aborted before it finished. Name it in the status line instead of
         leaving a half-grey plate that looks identical to one still loading."""
         self._readout.setText(f"the raw preview could not finish: {message}")
+
+    def _start_preview(self, reader, meta, order):
+        """Start the raw preview over *order*, fully wired. THE only place a preview is built.
+
+        Extracted because there were three byte-identical five-line copies of this (first ingest,
+        the tab re-scope, and the return-to-raw resume), and the progress wiring below had to land
+        on all three or the bar would appear on some entry paths and not others — the "wired on one
+        of N call sites" defect that made the stdout capture look like a partial integration in the
+        first place. One constructor, one set of connections, no third chance to disagree.
+        """
+        self._preview = _PreviewWorker(reader, meta, self._fov_index, order)
+        self._preview_order = list(order)
+        self._preview.tileReady.connect(self._on_preview_tile)
+        self._preview.streamEnded.connect(lambda: self._recomposite("raw"))
+        self._preview.failed.connect(self._on_preview_failed)
+        # The preview reports on the SAME channel an operator run does, so the one bar covers it
+        # ("even if it's preview"). Published straight through: the plate window is only a relay
+        # here, because the preview has no status line or side-pane tab of its own to feed.
+        self._preview.runProgress.connect(self._publish_progress)
+        # QThread.finished, not streamEnded: at streamEnded the thread is still running, so
+        # _clear_progress_if_idle would see it and decline. This also covers the failed and the
+        # stopped preview, which never reach streamEnded at all.
+        self._preview.finished.connect(self._clear_progress_if_idle)
+        self._preview.start()
+        return self._preview
 
     def _on_tile(self, ri, ci, well_id, tile, box=None):
         """A field landed. ``box`` is None for the single-tile producers (_ComputedPlateWorker emits

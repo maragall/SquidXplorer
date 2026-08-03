@@ -262,3 +262,96 @@ def test_nesting_restores_only_ONCE(bus):
             pass
         assert sys.stdout is not before, "the inner exit tore down the outer capture"
     assert sys.stdout is before
+
+
+# --------------------------------------------------------------------------------------
+# WHERE THE CAPTURE IS ACTUALLY WIRED, which is the half that was missing.
+#
+# Julio, 2026-08-03: "I don't believe you're using the same exact algorithm as maragall/stitcher.
+# ... The reason that I don't believe you is that when I run a preview it doesn't show may
+# standalone stitchers log messages on the master log. This tell me it was a partial integration."
+#
+# The algorithm was never the problem — `tilefusion` is imported from his own checkout, so it is
+# byte-identical code. The WIRING was partial: `capture_stdout_to_log()` was opened inside
+# `_OperatorWorker.run` alone, so every path that is not an operator run still printed into a
+# terminal nobody watches. These two tests are the guard on that, one per worker, because "wired on
+# one of N producers" is exactly the defect being fixed and it cannot be caught by testing the
+# context manager in isolation (which the tests above already do thoroughly).
+#
+# The workers are imported INSIDE each test so this module stays importable without Qt, which is
+# the property its docstring claims.
+# --------------------------------------------------------------------------------------
+
+def _run_worker_capturing(worker) -> list:
+    """Run *worker* in this thread with a bus installed; return the console lines it produced."""
+    seen: list = []
+    b = LogBus()
+    b.subscribe(lambda level, line, full=None: seen.append(line))
+    b.install()
+    try:
+        worker.run()
+    finally:
+        b.uninstall()
+    return seen
+
+
+class _PrintingReader:
+    """A reader that prints while it reads. tilefusion says what it is DOING with bare ``print``
+    (registration.py:274, optimization.py:254, distortion.py:245), so this is the honest shape."""
+
+    def __init__(self, path):
+        self._path = str(path)
+
+    def read(self, region, fov, channel, z, t=0):
+        import numpy as np
+
+        print(f"Parallel registration: {region} fov {fov}")
+        return np.zeros((8, 8), dtype=np.uint16)
+
+
+def test_the_RAW_PREVIEW_captures_print_into_the_log(tmp_path):
+    """The reported gap, at the worker that had it.
+
+    A raw preview is not an operator run, so it never entered the capture and everything the reader
+    (or anything it imports) printed went to a terminal instead of the panel.
+    """
+    pytest.importorskip("qtpy")
+    from qtpy.QtWidgets import QApplication
+
+    import squidmip._viewer as V
+
+    QApplication.instance() or QApplication([])
+    (tmp_path / "acq").mkdir()
+    meta = {"channels": [{"name": "c0"}], "dtype": "uint16", "z_levels": [0, 1, 2],
+            "regions": ["A1"], "fovs_per_region": {"A1": [0]}, "frame_shape": (8, 8),
+            "pixel_size_um": 1.0, "fov_positions_um": {}}
+    worker = V._PreviewWorker(_PrintingReader(tmp_path / "acq"), meta,
+                              {"A1": {"rc": (0, 0)}}, ["A1"], cache=None)
+
+    seen = _run_worker_capturing(worker)
+
+    assert any("Parallel registration: A1 fov 0" in ln for ln in seen), seen
+    # ATTRIBUTED HONESTLY, the same as the operator run's capture: a line a library printed is not
+    # a line we logged, so it is named `stdout` and not `squid.xplorer.*`.
+    assert any(f"{STDOUT_LOGGER}:" in ln for ln in seen), seen
+
+
+def test_the_capture_is_handed_BACK_after_a_preview_too(tmp_path):
+    """A capture that outlived the pass would silence the terminal for the life of the process —
+    the property `test_print_goes_back_to_the_TERMINAL_when_the_run_ends` pins for the operator
+    worker, asserted again here because it is a different `run` method holding the context."""
+    pytest.importorskip("qtpy")
+    from qtpy.QtWidgets import QApplication
+
+    import squidmip._viewer as V
+
+    QApplication.instance() or QApplication([])
+    (tmp_path / "acq").mkdir()
+    meta = {"channels": [{"name": "c0"}], "dtype": "uint16", "z_levels": [0],
+            "regions": ["A1"], "fovs_per_region": {"A1": [0]}, "frame_shape": (8, 8),
+            "pixel_size_um": 1.0, "fov_positions_um": {}}
+    worker = V._PreviewWorker(_PrintingReader(tmp_path / "acq"), meta,
+                              {"A1": {"rc": (0, 0)}}, ["A1"], cache=None)
+    before = sys.stdout
+    worker.run()
+    assert sys.stdout is before, "the preview did not hand sys.stdout back"
