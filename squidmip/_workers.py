@@ -49,6 +49,7 @@ the re-export block and the imports the move made dead).
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
 
 import numpy as np
@@ -62,10 +63,12 @@ from squidmip._measure import (
     STOPPED as _MEASURE_STOPPED, measure_run,
 )
 from squidmip._montage import _area_downsample
+from squidmip._operations import operator_label
 from squidmip._plate_overview import (
     _CELL, _PUSH_PX, _box_union, _fit_box, _fit_cell, _fit_letterboxed, _mosaic_boxes,
     content_box, push_shape_for, region_mosaic_extent_px,
 )
+from squidmip._progress import RunProgress, unit_plan
 from squidmip._tsctx import HANDLES
 from squidmip.contract import field_path
 
@@ -104,7 +107,16 @@ class _OperatorWorker(QThread):
 
     tileReady = Signal(int, int, str, object, object)   # (ri, ci, well_id, (C,h,w) native tile,
     #                                                          box=(top,left,h,w) in cell px | None)
-    progress = Signal(int, int)                 # (done, total)
+    progress = Signal(int, int)                 # (done, total) WELLS — the plate's header/tab unit
+    # ...and the same run counted in the ENGINE'S unit (FOVs for a per-FOV operator, regions for a
+    # region operator), carried as one immutable ``squidmip._progress.ProgressReport``. A separate
+    # signal rather than a widened ``progress`` because the two have different DENOMINATORS and both
+    # are wanted: "3 of 1536 wells" is the right sentence for a plate run's header, and it is the
+    # wrong one for the case this exists to fix — a decon over ONE region, where the well counter
+    # reads 0 of 1 for seven minutes while 27 FOVs go past underneath it (Julio, 2026-08-03).
+    # One object, not (done, total, unit, eta): four positional ints and strings crossing a thread
+    # boundary is four chances for a label to show a count from one moment and a total from another.
+    runProgress = Signal(object)                # ProgressReport
     streamEnded = Signal()                      # every well landed -> recomposite the whole plate
     writtenReady = Signal(str)                  # path of the written plate.ome.zarr
     wellFailed = Signal(int, int)               # (ri, ci) of a well SKIPPED on a read error
@@ -158,6 +170,14 @@ class _OperatorWorker(QThread):
         self._push_shape_estimated = bool(self._region_op
                                           and region_mosaic_extent_px(meta, regions) is None)
         self._total = len(regions) if regions is not None else len(meta["regions"])
+        # The ENGINE's unit and its total, known here because the iteration is known here:
+        # project_plate walks (region, fov) pairs and stitch_plate walks regions, and both draw
+        # their scope from the same `fovs_per_region` table this reads. Computed ONCE, before the
+        # run, so the bar is determinate from its first frame instead of growing a denominator.
+        # `unit_plan` returns None for the total when the metadata has no FOV table, and the
+        # window then draws an INDETERMINATE bar rather than a fabricated percentage.
+        _units, _unit = unit_plan(meta, regions, region_op=self._region_op, n_fovs=n_fovs)
+        self._progress = RunProgress(operator_label(operator), _units, _unit)
         self._channels = [c["name"] for c in meta["channels"]]
         self._dtype = np.dtype(meta["dtype"])
         self._lock = threading.Lock()             # guards _done (on_well runs on writer threads)
@@ -253,9 +273,16 @@ class _OperatorWorker(QThread):
             if was_empty:                          # count WELLS, not fields, so the bar still
                 self._done += 1                    # reads "n of n wells" on a 36-FOV plate
             done = self._done
+            # ...and count the ENGINE'S unit, which ticks on EVERY call: one per FOV for a per-FOV
+            # operator, one per region for a region operator (which is called once per region).
+            # Under the same lock as `_done` because `_on_well` runs on several writer threads at
+            # once; the report is taken here and emitted below, outside it.
+            self._progress.tick(time.monotonic())
+            report = self._progress.report()
         # per-channel + its box; the widget windows, places and composites (IMA-206 + IMA-187)
         self.tileReady.emit(ri, ci, well_id, raw, box)
         self.progress.emit(done, self._total)
+        self.runProgress.emit(report)
         # feed the ndviewer growing slider: one ~512px plane per channel, in memory (register_array),
         # so scrubbing the processed wells is instant and z-collapsed (nz=1). Downsampled -> bounded.
         # ...at `push_shape`: the frame square for a per-FOV operator, the aspect-preserved mosaic
@@ -325,7 +352,19 @@ class _OperatorWorker(QThread):
         if r is not None:
             r.first_paint(seconds)
 
+    #: The run's progress so far, for a consumer that arrives mid-run (a window connected after
+    #: start, or one asking again after a repaint). Reading the tracker without the lock is safe:
+    #: the snapshot is built from ints the GIL makes atomic, and a report one tick stale is a
+    #: report, where refusing to answer would be a blank bar over a running job.
+    @property
+    def progress_report(self):
+        return self._progress.report()
+
     def _run_body(self, _run_metrics):
+        # SAY 0 OF N BEFORE ANY WORK. The total is known from the metadata, so the window can draw
+        # a real bar from the first second rather than after the first unit lands — and on decon,
+        # where one unit is minutes, "after the first unit" is most of the wait Julio described.
+        self.runProgress.emit(self._progress.report())
         try:
             projector = self._operator
             if self._save:

@@ -510,6 +510,9 @@ class PlateWindow(QMainWindow):
     _run_requester = None
     _run_op_action = None
     _run_error = None
+    #: The most recent :class:`~squidmip._progress.ProgressReport` of the in-flight run, or None
+    #: between runs. Held for the same reason as the three above: read back by the status line.
+    _run_units = None
     #: When the user last asked for an operator run, on the perf_counter clock. The other end of
     #: FIRST PAINT, whose stop is in ``_on_tile``: the wait being measured is the user's, so it
     #: starts at the gesture and not at the moment a worker thread happens to be constructed.
@@ -1460,9 +1463,13 @@ class PlateWindow(QMainWindow):
         return w if isinstance(w, _ExplorationTab) else None
 
     def _on_progress(self, done: int, total: int):
-        """A run advanced. Says so in pane 1's status line AND, when the run belongs to a side-pane
-        tab, in that tab — where the user is actually watching the result appear."""
-        self._run_readout(f"● {self._run_label} · {done}/{total} wells{self._run_dest}")
+        """A run advanced by a WELL. Feeds the log panel's activity header and the side-pane tab.
+
+        It no longer writes the status line. ``_on_unit_progress`` does, because it is the finer
+        and therefore the more useful count, and because two slots writing one QLabel is the
+        "two representations of one truth" defect ``squidmip._activity`` was written to avoid —
+        here it would have flickered between wells and FOVs on every field.
+        """
         # Feed the activity registry the log panel's header reads — this is what turns "the GUI is
         # doing something" into a visible line. Advanced from THIS slot (the GUI thread), never
         # from the worker: the panel writes a QLabel and a worker thread must not.
@@ -1470,6 +1477,40 @@ class PlateWindow(QMainWindow):
         tab = self._run_tab()
         if tab is not None and tab.progress is not None:
             tab.progress.setText(_explore.progress_sentence(self._run_label, done, total))
+
+    def _on_unit_progress(self, report):
+        """A run advanced by one ENGINE UNIT (a FOV, or a region for a region operator).
+
+        This is the answer to Julio's 2026-08-03 report. The well counter above cannot see inside a
+        well, so a decon over one region sat at ``0/1`` for 433 seconds; this one counts the 27 FOVs
+        the engine actually iterates, and carries a time-remaining estimate with them.
+
+        It owns pane 1's status line, and it forwards the same immutable report to the window that
+        ASKED for the run — the region window, which had no progress affordance at all.
+        """
+        self._run_units = report
+        self._run_readout(f"● {report.sentence()}{self._run_dest}")
+        self._tell_requester(self._run_requester, "operator_progress", report)
+
+    @staticmethod
+    def _tell_requester(requester, method: str, *args) -> None:
+        """Call one of the four ``operator_*`` callbacks on the window that asked, if it has it.
+
+        Duck-typed and forgiving in ONE direction only: a window that does not implement a callback
+        is skipped, and a window that RAISES inside one is logged and skipped. One window's failure
+        must not abort a run, or take down the three other windows waiting to be told — the same
+        rule ``_deliver_result_to_windows`` already follows.
+        """
+        if requester is None:
+            return
+        tell = getattr(requester, method, None)
+        if tell is None:
+            return
+        try:
+            tell(*args)
+        except Exception as exc:                 # noqa: BLE001 - one window's failure is its own
+            log.warning("view %s could not take %s: %s",
+                        getattr(requester, "window_id", "?"), method, exc)
 
     def _on_run_tile(self, ri, ci, well_id, tile, box=None):
         """One computed FIELD landed — put it on the run's side-pane tab as a REAL LAYER.
@@ -1717,6 +1758,7 @@ class PlateWindow(QMainWindow):
                                 address=self._run_address)
             else:
                 self.log.done(action, elapsed, address=self._run_address)
+            self._close_requester_pair(landed, elapsed)
         self._run_tab_key = self._run_view_tab_key = None
         # A genuine drain: every worker has exited AND (finished being FIFO-queued after this
         # worker's tileReady/streamEnded) their terminal slots have already run on this thread.
@@ -1726,6 +1768,41 @@ class PlateWindow(QMainWindow):
             return
         self._pending_resync = False
         self._on_tab_changed(force=True)
+
+    def _close_requester_pair(self, landed, elapsed: float) -> None:
+        """Tell the window that ASKED that its run is over — exactly once, whatever the outcome.
+
+        Called from ``_on_run_drained``, which fires on ``QThread.finished``: success, failure and
+        a STOPPED run all reach it. That is deliberate and it is the whole safety property of the
+        region window's bar. A bar that is only taken down on success is a bar left spinning over
+        a dead run, which teaches the user that the indicator lies — the exact failure
+        ``squidmip._activity``'s docstring names.
+
+        A run that landed nothing is reported as a FAILURE however politely the engine returned,
+        the same rule the status line and the console line above already follow.
+        """
+        requester, self._run_requester = self._run_requester, None
+        action = self._run_op_action or "the operator"
+        reason, self._run_error = self._run_error, None
+        self._run_op_action = None
+        if requester is None:
+            return
+        # THE RUN'S FINAL COUNT, read from the worker rather than waited for. The worker's last
+        # ``runProgress`` and its ``finished`` are two signals queued from the same thread, and the
+        # window is torn out of the run by whichever arrives first — so the last unit's report was
+        # being dropped on a fast run, and the bar's last visible frame was "1 of 2". Asking the
+        # worker for its own tally here is not a second source of truth: it IS the source the
+        # signal carries, read directly instead of through a race.
+        final = getattr(self._worker, "progress_report", None)
+        if final is not None:
+            self._tell_requester(requester, "operator_progress", final)
+        if landed == 0 or reason:
+            # A run that landed nothing is a FAILURE however politely the engine returned, and it
+            # says so with whatever cause was captured rather than a bare "nothing happened".
+            reason = reason or f"produced nothing after {elapsed:.1f} s"
+            self._tell_requester(requester, "operator_failed", action, reason)
+        else:
+            self._tell_requester(requester, "operator_done", action, float(elapsed))
 
     def _activate_operator(self, key: str):
         """Operator card / menu clicked: open the operator's UI tab. Fully generic — driven by the
@@ -3990,6 +4067,7 @@ class PlateWindow(QMainWindow):
         self._worker.pushReady.connect(self._on_push)
         self._worker.resultReady.connect(self._on_result)
         self._worker.progress.connect(self._on_progress)
+        self._worker.runProgress.connect(self._on_unit_progress)
         self._worker.streamEnded.connect(lambda k=layer_key: self._recomposite(k))
         self._worker.writtenReady.connect(self._on_written)
         self._worker.wellFailed.connect(                     # a skipped well -> red x, run continues
@@ -4037,6 +4115,18 @@ class PlateWindow(QMainWindow):
         self._run_address = (Extent(region_id=regions[0])
                              if regions is not None and len(regions) == 1 else None)
         self._run_began = time.monotonic()
+        # THE REQUESTER IS NOW ACTUALLY HELD. ``requester=`` has been in this signature, and in its
+        # docstring, since the 2026-07-29 fix — and was dropped on the floor: nothing assigned
+        # ``_run_requester``, so ``operator_started`` / ``operator_progress`` / ``operator_done`` /
+        # ``operator_failed`` on the asking window were never called, and every result reached every
+        # window with ``visible=False`` because ``win is requester`` could never be true. The
+        # region window's silence during a run started there is that missing line, not a missing
+        # feature. Cleared in ``_on_run_drained``, which fires on ok / failed / STOPPED alike.
+        self._run_requester = requester
+        self._run_op_action = label
+        self._run_error = None
+        self._run_units = None
+        self._tell_requester(requester, "operator_started", label)
         self.log.started(self._run_action, address=self._run_address)
         self._run_readout(f"● {label} · {scope}{dest} …")
         self._worker.start()
@@ -4410,6 +4500,10 @@ class PlateWindow(QMainWindow):
         self._readout.setText(text + (f"   ·   ⚠ {why}" if why else ""))
 
     def _on_failed(self, msg):
+        # Remember WHY, for the requester's ``operator_failed`` line. ``_on_run_drained`` fires on
+        # QThread.finished and cannot see the exception; without this the asking window would be
+        # told "produced nothing" for a run that named its own cause here.
+        self._run_error = str(msg)
         if self._overview is not None:
             for rc, state in list(self._overview._status.items()):
                 if state == "processing":
