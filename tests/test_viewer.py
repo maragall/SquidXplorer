@@ -4096,6 +4096,72 @@ def test_ima245_every_region_operator_is_sized_as_a_region_not_a_frame(
     win.close()
 
 
+# --- the plate cell is ONE rectangle, whichever producer fills it ------------------------------
+#
+# Julio, from the running GUI: "Thumbnails in the plateview, say raw vs stitched, are not
+# registered, meaning that they are the same dimensions but the subject image isn't, for stitching
+# it gets warped on my particular example."
+#
+# Both halves of that sentence are one cause. The raw preview letterboxes a region's mosaic into
+# its 88 px cell (`_placement.cell_boxes`: scale by min(cell/mh, cell/mw), then centre). A REGION
+# operator has no per-FOV sub-boxes — the fused mosaic IS the cell — so it took the box=None
+# branch, which resized to EXACTLY (_CELL, _CELL). On this fixture's 456x656 mosaic that fills the
+# square: stretched 1.44x vertically (the warp) and moved off the raw cell's centred band (the
+# missing registration). Same cell, same size, two geometries.
+
+def test_a_stitched_cell_lands_exactly_where_the_raw_cell_does(
+        qapp, stub_detail, nonsquare_mosaic_dataset):
+    """A region operator's cell must be the SAME rectangle the raw preview draws for that well."""
+    from functools import reduce
+
+    from squidmip import available_region_operators
+
+    root, region, _frame_px, (mh, mw) = nonsquare_mosaic_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+
+    # RAW: the union of the boxes `cell_boxes` puts this region's FOVs in — what the preview paints.
+    raw = reduce(V._box_union,
+                 [b for (r, _f), b in V._mosaic_boxes(win._meta).items() if r == region], None)
+    assert raw != (0, 0, V._CELL, V._CELL), \
+        "the fixture stopped being non-square: it must letterbox, or this test proves nothing"
+
+    for op in available_region_operators():
+        w = V._OperatorWorker(op, win._reader, win._meta, win._fov_index, "",
+                              regions=[region], save=False, n_fovs=None)
+        assert w.mosaic_boxes == {}, "a region operator has no per-FOV sub-boxes; that is the trap"
+        got: list = []
+        w.tileReady.connect(lambda *a: got.append(a))
+        # One fused mosaic per region, the shape `stitch_plate` yields: (T, C, 1, Y, X).
+        fused = np.zeros((1, len(win._meta["channels"]), 1, mh, mw), win._meta["dtype"])
+        w._on_well(region, 0, fused)
+        _ri, _ci, _wid, tile, box = got[0]
+        assert box == raw, f"{op!r} paints its cell at {box}, the raw preview at {raw}"
+        assert tile.shape[1:] == (raw[2], raw[3]), \
+            f"{op!r} emitted a {tile.shape[1:]} tile for a {raw[2]}x{raw[3]} box"
+        # And the warp itself, named: the cell's aspect ratio is the mosaic's, not 1:1.
+        assert abs(box[3] / box[2] - mw / mh) < 0.05
+    win.close()
+
+
+def test_content_box_is_a_no_op_on_a_square_field(qapp):
+    """The historical single-FOV path must be untouched: a square field still fills its cell.
+
+    `content_box` replaced `_fit_cell` on the whole-cell branch, so this is the guard that the
+    fix costs nothing where there was nothing wrong.
+    """
+    assert V.content_box((2084, 2084)) == (0, 0, V._CELL, V._CELL)
+    assert V.content_box((37, 37)) == (0, 0, V._CELL, V._CELL)
+    # Wider than tall -> full width, centred vertically. Never taller than the cell.
+    top, left, h, w = V.content_box((100, 400))
+    assert (left, w) == (0, V._CELL) and h == V._CELL // 4 and top == (V._CELL - h) // 2
+    # ...and the letterbox canvas puts its content in exactly that box.
+    canvas = V._fit_letterboxed(np.ones((100, 400), np.float32), V._CELL, V._CELL, np.float32)
+    filled = np.argwhere(canvas > 0)
+    assert (filled[:, 0].min(), filled[:, 1].min()) == (top, left)
+    assert (filled[:, 0].max() + 1, filled[:, 1].max() + 1) == (top + h, left + w)
+
+
 def test_ima245_an_unshowable_push_is_counted_and_said_out_loud(
         qapp, stub_detail, nonsquare_mosaic_dataset):
     """A push that cannot be shown must never be silent. An ndviewer build with no
