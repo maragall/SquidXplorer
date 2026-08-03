@@ -21,12 +21,16 @@ if "PySide6" in sys.modules or "PySide2" in sys.modules:
         allow_module_level=True,
     )
 
+from squidmip import _napari_pane  # noqa: E402
 from squidmip._napari_pane import (  # noqa: E402
     SETTLE_MS,
+    MosaicPane,
     SettleCoalescer,
     gl_available,
     make_pane,
+    max_3d_texture_line,
 )
+from squidmip._napari_view import _DEFAULT_MAX_3D_TEXTURE  # noqa: E402
 
 
 class _Clock:
@@ -199,3 +203,85 @@ def test_an_unknown_viewer_name_does_not_silently_disable_the_viewer(monkeypatch
     assert mode in ("napari", "unavailable")
     if mode == "unavailable":
         assert msg, "no viewer, and no reason given"
+
+
+# ------------------------------------- the GPU 3D texture limit, made knowable
+
+
+class _Canvas:
+    """The vispy canvas as the pane reads it: (2d, 3d) maximum texture sizes."""
+
+    def __init__(self, sizes):
+        self.max_texture_sizes = sizes
+
+
+class _Pane:
+    """A stand-in for the parts of MosaicPane ``_live_max_3d_texture`` touches. The method is
+    called unbound against it, so this pins the reading rule without a GL context -- which is the
+    whole difficulty: offscreen there is no GL context to have."""
+
+    def __init__(self, canvas=None):
+        self.canvas = canvas
+        self._viewer = None
+
+
+@pytest.fixture(autouse=True)
+def _forget_what_was_already_said(monkeypatch):
+    """The announcement is per process, so a previous test's value must not silence this one's."""
+    monkeypatch.setattr(_napari_pane, "_MAX_3D_TEXTURE_SAID", None)
+
+
+def test_the_gpu_reported_limit_is_used_rather_than_the_fallback():
+    """Julio asked whether the limit is hardcoded. It is not: a GPU that reports 4096 gets 4096,
+    which is FOUR TIMES the native 3D area of the 2048 every design document has assumed."""
+    assert MosaicPane._live_max_3d_texture(_Pane(_Canvas((16384, 4096)))) == 4096
+
+
+def test_with_no_canvas_the_fallback_is_the_one_the_renderer_uses():
+    """One number, one owner. A second literal here would drift from the one _napari_view applies
+    when it actually picks a level, and the two would disagree silently."""
+    assert MosaicPane._live_max_3d_texture(_Pane()) == _DEFAULT_MAX_3D_TEXTURE
+
+
+def test_the_limit_is_announced_and_says_whether_it_was_measured(caplog):
+    """Neither the owner nor an agent can see this number: it needs a GL context, so it cannot be
+    probed offscreen, and every figure in the ROI design uses the 2048 fallback on faith. An
+    unmeasured number that the interface silently depends on is the thing to fix here."""
+    with caplog.at_level("INFO"):
+        MosaicPane._live_max_3d_texture(_Pane(_Canvas((16384, 4096))))
+    assert "4096" in caplog.text and "read from the GPU" in caplog.text
+
+    caplog.clear()
+    _napari_pane._MAX_3D_TEXTURE_SAID = None
+    with caplog.at_level("INFO"):
+        MosaicPane._live_max_3d_texture(_Pane())
+    assert "assuming" in caplog.text, (
+        "an assumed limit reads exactly like a measured one, so nobody can tell whether the "
+        "figure the design is built on is this machine's or a guess")
+
+
+def test_the_limit_is_not_announced_again_on_every_toggle(caplog):
+    """This is read on every 2D/3D change. Repeating it would bury the log the user is meant to
+    read the run's own lines in."""
+    pane = _Pane(_Canvas((16384, 2048)))
+    with caplog.at_level("INFO"):
+        for _ in range(5):
+            MosaicPane._live_max_3d_texture(pane)
+    assert caplog.text.count("GL_MAX_3D_TEXTURE_SIZE") == 1
+
+
+def test_a_limit_that_changes_is_announced_again(caplog):
+    """The first read can fall back before the canvas has drawn and succeed afterwards. That
+    correction is the single line anybody reading this log most needs to see."""
+    with caplog.at_level("INFO"):
+        MosaicPane._live_max_3d_texture(_Pane())                        # no canvas yet
+        MosaicPane._live_max_3d_texture(_Pane(_Canvas((16384, 4096))))  # canvas has drawn
+    assert caplog.text.count("GL_MAX_3D_TEXTURE_SIZE") == 2
+    assert "4096" in caplog.text
+
+
+def test_the_sentence_names_what_the_number_costs_the_user():
+    """A bare integer in a log is not knowledge. The line has to say what it decides, because the
+    person reading it is deciding how big an ROI to draw."""
+    line = max_3d_texture_line(2048, measured=True)
+    assert "2048" in line and "ROI" in line

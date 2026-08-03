@@ -49,6 +49,9 @@ processed result and never becomes one.
 _Avoid_: thumbnail, overview
 
 **First paint**:
-The interval from a user starting an operator run to the first tile of that run being drawn on
-screen. Distinct from the run's total duration.
+The interval from a user asking for something to the first pixels of it being drawn on screen: from
+starting an operator run to that run's first tile, and from asking for a window to that window's
+first mosaic layer. Distinct in both cases from the total duration, and taken where the drawing
+happens rather than where the producer emits it, because the difference between those two is queue
+delay.
 _Avoid_: latency, startup time, time to first byte

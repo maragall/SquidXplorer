@@ -22,7 +22,7 @@ from qtpy.QtWidgets import (
     QComboBox, QLabel, QPushButton, QSizePolicy, QHBoxLayout, QVBoxLayout, QWidget,
 )
 
-from squidmip._napari_view import MosaicLayers, resolve_viewer
+from squidmip._napari_view import _DEFAULT_MAX_3D_TEXTURE, MosaicLayers, resolve_viewer
 
 # Camera-settle debounce. The measured pan cost (22.6 ms median) is per SETTLED move; a drag
 # emits camera events far faster than that, and fetching per event is the mechanism behind
@@ -134,6 +134,38 @@ def apply_ndisplay_tooltip(btn) -> None:
     the button's signal, its check-state sync and what it toggles all stay napari's."""
     if btn is not None:
         btn.setToolTip(NDISPLAY_TOOLTIP)
+
+
+#: The last ``(value, measured)`` pair announced, so the number is stated when it is LEARNED and not
+#: on every 2D/3D toggle. Not a plain "said it once" flag: the first read can legitimately fall back
+#: before the canvas has drawn and succeed afterwards, and that correction is the one line anybody
+#: reading the log most wants to see.
+_MAX_3D_TEXTURE_SAID: "Optional[tuple[int, bool]]" = None
+
+
+def max_3d_texture_line(value: int, *, measured: bool) -> str:
+    """The sentence naming the GPU's 3D texture limit, and whether it was read or assumed."""
+    where = "read from the GPU" if measured else (
+        f"NOT read from the GPU, assuming {_DEFAULT_MAX_3D_TEXTURE}")
+    return (f"GL_MAX_3D_TEXTURE_SIZE = {int(value)} px ({where}). A 3D view is capped to this per "
+            f"axis; native 3D needs an ROI no larger than {int(value)} px.")
+
+
+def _say_max_3d_texture(value: int, *, measured: bool) -> int:
+    """Announce the limit when it changes, and return it unchanged.
+
+    Returns its argument so a caller reads as ``return _say_max_3d_texture(v, measured=True)``:
+    reporting a number must not be a second place that can decide it.
+    """
+    global _MAX_3D_TEXTURE_SAID
+
+    pair = (int(value), bool(measured))
+    if pair != _MAX_3D_TEXTURE_SAID:
+        _MAX_3D_TEXTURE_SAID = pair
+        from squidmip._logpane import get_logger
+
+        get_logger("napari_pane").info("%s", max_3d_texture_line(value, measured=measured))
+    return int(value)
 
 
 class MosaicPane(QWidget):
@@ -322,11 +354,24 @@ class MosaicPane(QWidget):
             pass
 
     def _live_max_3d_texture(self) -> int:
-        """The GPU's real GL_MAX_3D_TEXTURE_SIZE from the live canvas, or 2048 (Apple GPU default).
+        """The GPU's real GL_MAX_3D_TEXTURE_SIZE from the live canvas, or the fallback.
 
         napari computes this on first draw and stores (2d, 3d) on the vispy canvas. Reaching it is
-        version-specific, so this tries the known paths and falls back to the safe Apple value."""
-        default = 2048
+        version-specific, so this tries the known paths and falls back to the safe Apple value.
+
+        The fallback is ``_napari_view._DEFAULT_MAX_3D_TEXTURE`` and NOT a second literal here. It
+        was one, and two copies of a number are two answers to one question waiting to disagree.
+
+        SAID OUT LOUD, ONCE. This value decides how much of a region can be rendered natively in 3D
+        -- 2048 px is slightly SMALLER than one 2084 px field, while 4096 is four times that area,
+        which is the difference between "3D is for a corner of a field" and "3D is for a few fields"
+        -- and until now nobody could see it. It cannot be probed offscreen, because an offscreen
+        process has no GL context at all, so no test and no agent can measure it; and the only place
+        it reached the log was a sentence about a layer, printed only when a 3D swap actually
+        downsampled something. So it is logged here, with WHERE IT CAME FROM, because "your GPU says
+        4096" and "we could not ask and are assuming 2048" are different facts and the ROI design
+        above this depends on which one is true.
+        """
         for getter in (
             lambda: self._viewer.window._qt_viewer.canvas.max_texture_sizes[1],
             lambda: getattr(self.canvas, "max_texture_sizes", None)[1],
@@ -334,10 +379,10 @@ class MosaicPane(QWidget):
             try:
                 v = getter()
                 if v:
-                    return int(v)
+                    return _say_max_3d_texture(int(v), measured=True)
             except Exception:                # noqa: BLE001 - try the next path
                 continue
-        return default
+        return _say_max_3d_texture(_DEFAULT_MAX_3D_TEXTURE, measured=False)
 
     def _reapply_3d_on_insert(self, event=None) -> None:
         if self.mosaic is None or self._viewer is None:
