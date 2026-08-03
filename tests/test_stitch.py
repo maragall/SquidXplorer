@@ -247,6 +247,40 @@ def test_stitch_region_shape_and_dtype(fused_pair, master):
     assert stitched.shape[3] >= STEP + TILE - 8                     # mosaic, not one tile
 
 
+def test_the_fused_write_rounds_to_the_dtype_instead_of_truncating(master, monkeypatch):
+    """The blend accumulates in float32, ``out`` is the acquisition dtype (uint16 here).
+
+    A plain slice assignment truncates toward zero, which is a half-count systematic dimming of
+    every pixel of the mosaic. Every other operator in this codebase routes its write through
+    ``_cast_like`` for exactly that reason (``_background``/``_decon``/``_flatfield`` all say so
+    in as many words); stitch was the one that did not, and now shares the same helper.
+
+    Pinned on NUMBERS, not on which function was called: the fuse kernel is replaced by one that
+    hands ``write_block`` a block of known fractional values, and the assertion is on what lands
+    in the returned array. 11.5 and 12.7 are the discriminating ones -- truncation gives 11 and
+    12, rounding gives 12 and 13. 10.5 -> 10 is asserted too, and is not a truncation: it is
+    ``np.rint``'s half-to-EVEN, which is what the shared helper does and therefore what stitch
+    must do as well.
+    """
+    import tilefusion.fusion as tf_fusion
+
+    fractions = np.array([10.5, 11.5, 12.7, 13.2], dtype=np.float32)
+
+    def _fake_fuse_plane(*, write_block, padded_shape, channels, **_kw):
+        h, w = padded_shape
+        block = np.zeros((channels, h, w), dtype=np.float32)
+        block[:, 0, : fractions.size] = fractions
+        write_block(0, h, 0, w, block)
+
+    monkeypatch.setattr(tf_fusion, "fuse_plane", _fake_fuse_plane)
+
+    out = stitch_region(_FakeReader(master), "A1", [0, 1], channels=[0], register=False,
+                        blend_px=24, block_px=512, max_workers=1)
+
+    assert out.dtype == np.uint16
+    assert list(out[0, 0, 0, 0, : fractions.size]) == [10, 12, 13, 13]
+
+
 def test_stitching_beats_coordinate_placement(fused_pair, master):
     """The load-bearing assertion: registration must measurably reduce error vs ground truth."""
     stitched, placed = fused_pair

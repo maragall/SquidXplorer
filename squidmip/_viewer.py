@@ -4218,10 +4218,17 @@ class PlateWindow(QMainWindow):
     def _add_result_layers(self, op: str, result):
         """One layer per channel THE RESULT DECLARES, under the operator's group, over raw.
 
-        ``add_mosaic`` keys the group off *op* and ``_register_channel`` links contrast per CHANNEL
-        across every group, so flipping between raw and this operator preserves the window -- which
-        is the difference between a comparison and two unrelated pictures. ``bbox_um`` is the raw
-        mosaic's own bbox, from the one placement rule, so the layers land in register.
+        ``add_mosaic`` keys the group off *op*. It also SEEDS this layer's contrast from the
+        operator's OWN pixels, so the result arrives individually legible -- which is how you tell
+        whether decon used the right iteration count. It does NOT arrive on raw's window:
+        ``_register_channel`` links contrast per CHANNEL, and napari's ``link_layers`` connects
+        events without equalising values, so raw and this operator stay on their own stretches
+        until somebody writes one. Flipping between them is therefore two pictures until the user
+        asks for a comparison -- "Match raw contrast" (``MosaicLayers.match_contrast_to``), which
+        copies raw's window onto every operator peer.
+
+        ``bbox_um`` is the raw mosaic's own bbox, from the one placement rule, so the layers land
+        in register.
         """
         from squidmip._mosaic_source import mosaic_bbox_um
         from squidmip._napari_pane import _colormap_for

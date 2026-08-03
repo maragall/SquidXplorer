@@ -656,7 +656,25 @@ def _stub_pane_classes():
 
         def add_mosaic(self, op, channel, levels, **kw):
             self.added.append((op, channel, levels, kw))
-            self._layers[(op, channel)] = StubLayer(levels, kw)
+            layer = StubLayer(levels, kw)
+            self._layers[(op, channel)] = layer
+            return layer
+
+        def match_contrast_to(self, op):
+            """The "Match raw contrast" action: *op*'s window onto the channel's other layers.
+
+            The real one is `MosaicLayers.match_contrast_to`, pinned against a real napari
+            ViewerModel in test_napari_view.py. This stub exists so a WINDOW test can assert the
+            chip's handler reaches a mosaic at all, on the layer values rather than on the call.
+            """
+            matched = 0
+            for (layer_op, channel), layer in list(self._layers.items()):
+                source = self._layers.get((op, channel))
+                if source is None or layer_op == op:
+                    continue
+                layer.contrast_limits = source.contrast_limits
+                matched += 1
+            return matched
 
         def show_op(self, op):
             self.shown.append(op)

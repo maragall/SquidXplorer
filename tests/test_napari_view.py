@@ -190,6 +190,71 @@ def test_setting_contrast_on_one_processing_layer_writes_the_other(layers):
     assert list(stitched.contrast_limits) == [7.0, 900.0]
 
 
+def test_an_operator_layer_opens_on_its_own_window_not_raw_s(layers):
+    """The half of the contrast story the two tests above cannot see, because both of them
+    write a contrast value first and only check what happens AFTER.
+
+    ``link_layers`` connects EVENTS. It does not equalise values at link time, so a freshly
+    added operator layer keeps the window ``add_mosaic`` seeded from its own pixels until
+    somebody writes one. That is deliberate -- a decon result has to be legible on its own
+    terms or you cannot judge whether it used the right iteration count -- but it was
+    documented as the opposite ("flipping between raw and this operator preserves the window")
+    in two docstrings, so it is pinned here rather than assumed.
+    """
+    dim = np.full((32, 32), 300, dtype=np.uint16)
+    dim[:4] = 900                        # a little signal over a dim background
+    bright = np.full((32, 32), 6000, dtype=np.uint16)
+    bright[:4] = 30000
+
+    raw = layers.add_mosaic("raw", "488", dim)
+    decon = layers.add_mosaic("decon", "488", bright)
+
+    assert list(raw.contrast_limits) != list(decon.contrast_limits), (
+        "the operator layer opened on raw's window; per-layer seeding is gone, and an operator "
+        "result that is not individually legible cannot be judged on arrival"
+    )
+
+
+def test_match_raw_contrast_puts_every_operator_peer_on_raw_s_window(layers):
+    """The explicit opt-in: one action turns the raw->operator flip into a real comparison.
+
+    Asserted on the LAYERS' contrast values, across two channels and two operators, because the
+    user's question is "do these two pictures now share a stretch", not "was a method called".
+    """
+    dim = np.full((32, 32), 300, dtype=np.uint16)
+    dim[:4] = 900
+    bright = np.full((32, 32), 6000, dtype=np.uint16)
+    bright[:4] = 30000
+
+    for ch in ("488", "561"):
+        layers.add_mosaic("raw", ch, dim)
+        layers.add_mosaic("decon", ch, bright)
+        layers.add_mosaic("stitched", ch, bright)
+
+    matched = layers.match_contrast_to("raw")
+
+    assert matched == 4, "two operator layers on each of two channels should have been written"
+    for ch in ("488", "561"):
+        want = list(layers.find("raw", ch).contrast_limits)
+        for op in ("decon", "stitched"):
+            assert list(layers.find(op, ch).contrast_limits) == want, f"{op}/{ch}"
+
+
+def test_match_raw_contrast_skips_a_channel_the_source_op_does_not_show(layers):
+    """A channel with no raw layer is left alone rather than being matched to something else.
+
+    The realistic case is an operator that emits a channel raw does not have; silently handing
+    it another channel's window would be a wrong picture with no error.
+    """
+    layers.add_mosaic("raw", "488", np.full((32, 32), 300, dtype=np.uint16))
+    layers.add_mosaic("decon", "488", np.full((32, 32), 6000, dtype=np.uint16))
+    only_op = layers.add_mosaic("decon", "561", np.full((32, 32), 12000, dtype=np.uint16))
+    before = list(only_op.contrast_limits)
+
+    assert layers.match_contrast_to("raw") == 1
+    assert list(only_op.contrast_limits) == before
+
+
 def test_contrast_changes_arrive_on_the_public_event(layers):
     """Replaces the ndv contrast tap, which subclassed a private LutView and hooked
     `_lut_controllers`."""
