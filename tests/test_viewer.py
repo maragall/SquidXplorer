@@ -508,6 +508,70 @@ def test_reset_layer_frees_the_store_so_a_shorter_rerun_leaves_nothing(qapp):
     assert ov._store["raw"][0, h:2 * h, :w].max() == 0      # the old second field is GONE
 
 
+# --- a SUBSET run must replace only its own wells (Julio, 2026-08-03) -------------------------
+#
+# "When I preview an operator on a window, which contains a region subset, the plate view removes
+# the thumbnails for all the regions rather than only those that are being processed."
+#
+# The plate blitted the ACTIVE layer and nothing else, so switching to an operator layer that
+# covers four wells blanked the other 1532. A layer sits OVER the base; it does not replace it.
+
+
+def _painted_cell(ov, ri, ci, w=420, h=260):
+    """The INTERIOR of one cell as the user sees it: the widget's own paint, not the canvas.
+
+    Inset by a fifth of the cell so the 3 px grid pen and the status dot (drawn at the centre,
+    capped at 15 px) are both outside the sample — this must read the thumbnail and nothing else.
+    """
+    ov.resize(w, h)
+    img = ov.grab().toImage().convertToFormat(QImage.Format_RGB32)
+    ptr = img.bits()
+    ptr.setsize(img.sizeInBytes())
+    row = np.frombuffer(ptr, np.uint8).reshape(img.height(), img.bytesPerLine() // 4, 4)
+    rgb = row[:, : img.width(), :3]
+    x, y, cw, chh = ov._cell_rect(ri, ci)
+    ix, iy = int(cw * 0.2), int(chh * 0.2)
+    return rgb[int(y) + iy:int(y + chh) - iy, int(x) + ix:int(x + cw) - ix].copy()
+
+
+def test_a_subset_layer_leaves_the_other_wells_thumbnails_on_the_plate(qapp):
+    ov = _overview(qapp, n_ch=1)
+    ov.add_tile(0, 0, "A1", _tile([4000]))
+    ov.add_tile(0, 1, "A2", _tile([4000]))          # both wells have a raw thumbnail
+    raw_a2 = _painted_cell(ov, 0, 1)
+    assert raw_a2.size and raw_a2.max() > 0         # the fixture really does paint something
+
+    ov.add_tile(0, 0, "A1", _tile([9000]), layer="mip")   # the run covered A1 only
+    ov.set_active_layer("mip")
+
+    assert ov.shown_cells() == {(0, 0), (0, 1)}, "A2 lost its thumbnail when the layer switched"
+    assert ov.underlay_cells() == {(0, 1)}, "A2 is not the one showing the base through"
+    assert np.array_equal(_painted_cell(ov, 0, 1), raw_a2), (
+        "A2 is outside the run, so the plate must still paint A2's raw thumbnail there")
+
+
+def test_the_base_stops_showing_through_a_well_the_run_reaches(qapp):
+    """The other half of the rule: once the operator lands on a well, its pixels win there."""
+    ov = _overview(qapp, n_ch=1)
+    ov.add_tile(0, 0, "A1", _tile([4000]))
+    ov.add_tile(0, 1, "A2", _tile([4000]))
+    ov.set_active_layer("mip")
+    assert ov.underlay_cells() == {(0, 0), (0, 1)}      # nothing computed yet: all base
+
+    ov.add_tile(0, 1, "A2", _tile([9000]), layer="mip")
+    assert ov.underlay_cells() == {(0, 0)}
+    assert ov.shown_cells() == {(0, 0), (0, 1)}
+
+
+def test_the_base_never_shows_through_itself(qapp):
+    """``raw`` active is the historical path and must stay byte-identical: no underlay, no second
+    blit, and a well with no tile is still an empty slot rather than one borrowed from elsewhere."""
+    ov = _overview(qapp, n_ch=1)
+    ov.add_tile(0, 0, "A1", _tile([4000]))
+    assert ov.underlay_cells() == set()
+    assert ov.shown_cells() == {(0, 0)}
+
+
 # --- GUI behavior (offscreen; embedded viewer stubbed) --------------------------------------
 
 def test_ingest_bad_folder_does_not_crash(qapp, stub_detail, tmp_path):
@@ -3952,6 +4016,28 @@ def test_an_exploration_tab_rerun_never_wipes_the_plate_wide_layer(qapp, stub_de
     assert np.array_equal(ov._store["mip"], plate_wide), \
         "the tab run overwrote the plate-wide mip layer's pixels"
     assert [ly.key for ly in win._op_stack.layers()] == ["raw", "mip", f"mip@{key}"]
+    win._stop_worker(); win.close()
+
+
+def test_previewing_a_subset_leaves_the_wells_outside_it_showing(qapp, stub_detail, squid_dataset):
+    """END TO END, through the real run: preview MIP on B2 alone and B3 must keep its thumbnail.
+
+    Julio: "when I preview an operator on a window, which contains a region subset, the plate view
+    removes the thumbnails for all the regions rather than only those that are being processed."
+    """
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    _drain_until(qapp, lambda: len(win._overview._tiles) >= 2)
+    ov = win._overview
+    b2, b3 = win._fov_index["B2"]["rc"], win._fov_index["B3"]["rc"]
+    assert {b2, b3} <= ov._tiles_by_layer["raw"], "the raw preview did not fill both wells"
+
+    _run_to_completion(qapp, win, "mip", ["B2"])
+
+    assert ov._active == "mip" and ov._tiles_by_layer["mip"] == {b2}   # the run covered B2 only
+    assert b3 in ov.shown_cells(), "B3 was not in the run and lost its thumbnail anyway"
+    assert ov.underlay_cells() == {b3}
     win._stop_worker(); win.close()
 
 

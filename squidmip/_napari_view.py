@@ -324,6 +324,13 @@ class MosaicLayers:
         #: channel -> last visibility REPORTED, so a peer flip that does not change the answer
         #: ("is this channel on screen at all") is not delivered as a user gesture.
         self._last_visible: dict[str, bool] = {}
+        #: Subscribers to the PROCESSING LAYER the user is showing, so the plate can follow which
+        #: operator this window is looking at. Separate from the visibility fan-out above on
+        #: purpose -- see ``_connect_user_op``.
+        self._user_op_cbs: list[Any] = []
+        #: op -> last "is any layer of this processing layer visible" REPORTED, collapsing the one
+        #: gesture that arrives once per channel of the group into one delivery.
+        self._last_op_visible: dict[str, bool] = {}
         #: Subscribers to the LUT, so the plate tints a channel the way the canvas does.
         self._user_colormap_cbs: list[Any] = []
         #: channel -> last RGB reported, collapsing link/peer echoes the same way.
@@ -728,6 +735,12 @@ class MosaicLayers:
         self._connect_user_contrast(channel, layer)
         self._connect_user_visibility(channel, layer)
         self._connect_user_colormap(channel, layer)
+        key = key_of(layer)
+        if key is not None:
+            # Keyed on the OP, and connected here for the same reason the three above are: layer
+            # objects are destroyed and recreated on every region change, so a subscription made
+            # anywhere else goes deaf after one.
+            self._connect_user_op(key.op, layer)
         # Link contrast across every processing layer showing this channel, so the
         # before->after toggle preserves the window and there is only ever one value.
         if len(peers) > 1:
@@ -908,6 +921,44 @@ class MosaicLayers:
         ``callback(channel, visible)``. The seam that lets the plate drop its checkboxes.
         """
         self._user_visibility_cbs.append(callback)
+
+    def _connect_user_op(self, op: str, layer: Any) -> None:
+        """Wire one layer's visibility into the PROCESSING-LAYER fan-out.
+
+        This is a second tap on the same ``visible`` event as ``_connect_user_visibility``, and
+        it has to be, because that one answers a different question and its echo filter destroys
+        this one's answer. It reports "is this CHANNEL on screen anywhere", deliberately ORed
+        across processing layers, so showing the ``mip`` group while ``raw`` is still up leaves
+        every channel's answer unchanged and it returns at its first branch. That is correct for
+        the eye icons and it is exactly why nothing reached the plate when the user picked a
+        processing layer in a window's layer tree: the state moved (``visible_op`` would have
+        said so) and no signal was ever emitted. Julio: "after I click an operator layer in our
+        window, the thumbnails don't update."
+
+        So the question here is per OP -- "is this processing layer on screen" -- and the echo
+        collapse is per op too, which folds the one group toggle that fires once per channel into
+        a single delivery.
+        """
+        def _fire(event=None, _op=str(op)):
+            on = any(bool(getattr(ly, "visible", False)) for ly in self.group(_op))
+            if self._last_op_visible.get(_op) == on:
+                return                      # a sibling channel of the same group; already told
+            self._last_op_visible[_op] = on
+            if self.is_programmatic:
+                return                      # OUR write: recorded, never reported as a gesture
+            for cb in list(self._user_op_cbs):
+                cb(_op, on)
+
+        layer.events.visible.connect(_fire)
+
+    def on_user_op(self, callback) -> None:
+        """Subscribe to the PROCESSING LAYER the user showed or hid in this window.
+
+        ``callback(op, visible)``. The seam that lets the plate follow a window's layer tree the
+        same way it already follows its contrast, its eye icons and its colormaps: the window is
+        the owner of "which operator am I looking at", and the plate is a sink.
+        """
+        self._user_op_cbs.append(callback)
 
     def channel_visible(self, channel: str) -> Optional[bool]:
         """Is this channel on screen anywhere? None when the channel has no layers."""

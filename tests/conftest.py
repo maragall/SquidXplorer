@@ -621,6 +621,7 @@ def _stub_pane_classes():
             self.contrast_subscribers = []     # what _bind_window_contrast subscribed
             self.visibility_subscribers = []
             self.colormap_subscribers = []
+            self.op_subscribers = []           # which PROCESSING LAYER this window is showing
             self.removed = []
             self.shown = []
             self._layers = {}
@@ -643,6 +644,14 @@ def _stub_pane_classes():
 
         def on_user_colormap(self, cb):
             self.colormap_subscribers.append(cb)
+
+        def on_user_op(self, cb):
+            self.op_subscribers.append(cb)
+
+        def gesture_op(self, op, on):
+            """Pretend the user ticked a PROCESSING LAYER in this window's layer tree."""
+            for cb in list(self.op_subscribers):
+                cb(op, on)
 
         def gesture_contrast(self, channel, lo, hi):
             """Pretend the user dragged contrast in napari."""
