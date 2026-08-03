@@ -76,6 +76,8 @@ __all__ = [
     "SAMPLE_INTERVAL_S",
     "run_log_path",
     "persist_runs",
+    "WindowOpen",
+    "WINDOW_OPEN",
 ]
 
 from squidmip._logpane import get_logger
@@ -476,6 +478,103 @@ class measure_run:
         level = logging.WARNING if outcome in (FAILED, PARTIAL) else logging.INFO
         self._log.log(level, "%s", m.line())
         return False                        # never swallow: an exception here is the run's, not ours
+
+
+#: The ``operator`` name every window-open record carries. A pseudo-operator, and deliberately one
+#: string rather than a new record type: ``compare(operators=[...])`` and ``MetricsLog.for_operator``
+#: already select by this field, so "how long do windows take to open" is answerable with the
+#: machinery that answers "how long does decon take" instead of a second one beside it.
+WINDOW_OPEN = "window open"
+
+
+class WindowOpen:
+    """The clock for ONE region or ROI window: requested -> first mosaic layer -> loaded.
+
+    Julio: "If we can speed up window loading time, that would be good." Nothing could say whether
+    it got faster, because the only measured interval in this app was an operator run
+    (:class:`measure_run`), whose clock starts on a Run button that a window open never presses.
+
+    THE TWO ENDS, AND WHY THEY ARE WHERE THEY ARE
+    ---------------------------------------------
+    ``t0`` is taken in the constructor, which the manager calls BEFORE it builds the window, because
+    constructing the napari pane is time the user waits and a clock started after it would measure
+    everything except the part being complained about.
+
+    :meth:`first_layer` is called from the interface-thread handler that ADDS the first mosaic layer,
+    not from the worker that produced it. The difference between those two is queue delay, and a
+    loader that emits promptly while the user still sees an empty pane is precisely the failure being
+    investigated. Same discipline as the operator metric, for the same reason.
+
+    :meth:`finish` closes it when the region's channels are all in, which is the pair to first paint:
+    "something appeared" and "it is all here" are different facts about the same wait.
+
+    WHY IT RECORDS A ``RunMetrics``
+    ------------------------------
+    So there is ONE history and one file. ``persist_runs`` already appends every record in
+    :data:`METRICS` to ``runs.jsonl``; a window open that wrote its own file would need its own
+    subscriber, its own rotation and its own reader, and the next person would have two places to
+    look. No field is added to the record for this, so ``runs.jsonl``'s schema is unchanged.
+
+    ``peak_rss`` is ``None`` and not an endpoint reading. A single sample at the end is not a peak,
+    and this class is a CLOCK; the memory an open costs is the hardware-budget document's question
+    and it needs a sampler, not a label. ``start_rss`` is honest and free, so it is carried.
+
+    Never raises, like everything else in this module: an open that cannot be measured is an open,
+    not a crash.
+    """
+
+    def __init__(self, target: str, *, n_targets: Optional[int] = None,
+                 metrics: Optional[MetricsLog] = None, log: Optional[logging.Logger] = None,
+                 clock: Callable[[], float] = time.perf_counter) -> None:
+        self.target = str(target)
+        self.n_targets = n_targets
+        self.first_paint_seconds: Optional[float] = None
+        self.metrics: Optional[RunMetrics] = None
+        self._clock = clock
+        self._metrics = metrics if metrics is not None else METRICS
+        self._log = log if log is not None else logger
+        # perf_counter for the same reason measure_run uses it: a wall clock an NTP step can move
+        # backwards produces a negative duration, which sorts as the best result in any table.
+        self._t0 = float(self._clock())
+        self._start_rss = rss_bytes()
+        self._closed = False
+
+    def _elapsed(self) -> float:
+        return max(0.0, float(self._clock()) - self._t0)
+
+    def first_layer(self) -> None:
+        """The window's first mosaic layer just went in. FIRST wins.
+
+        Every channel of every region reaches the same handler, so last-wins would quietly turn
+        first paint into "the last channel of whatever region you navigated to". A call after
+        :meth:`finish` is dropped, because the record it would describe is already written.
+        """
+        if self._closed or self.first_paint_seconds is not None:
+            return
+        self.first_paint_seconds = self._elapsed()
+
+    def finish(self, outcome: str = OK, detail: str = "") -> Optional[RunMetrics]:
+        """Close the clock and record it. Returns the record, or None if it was already closed.
+
+        Idempotent, because there are three ways an open ends -- the mosaic lands, no mosaic can be
+        built, or the user closes the window before either -- and all three call this. The first
+        call is the true one; a window that loads and is later closed must not record twice.
+        """
+        if self._closed:
+            return None
+        self._closed = True
+        seconds = self._elapsed()
+        m = RunMetrics(
+            operator=WINDOW_OPEN, target=self.target, n_targets=self.n_targets,
+            seconds=seconds, peak_rss=None, start_rss=self._start_rss,
+            outcome=str(outcome), detail=str(detail), started_at=time.time() - seconds,
+            first_paint_seconds=self.first_paint_seconds,
+        )
+        self.metrics = m
+        self._metrics.record(m)
+        level = logging.WARNING if m.outcome in (FAILED, PARTIAL) else logging.INFO
+        self._log.log(level, "%s", m.line())
+        return m
 
 
 def compare(metrics: Optional[MetricsLog] = None, operators: Optional[Sequence[str]] = None) -> list:
