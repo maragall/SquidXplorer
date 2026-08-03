@@ -2338,9 +2338,17 @@ class PlateWindow(QMainWindow):
         target.setToolTip(
             "What the operator iterates over.\n"
             f"{TARGET_SELECTION} — the wells picked on the plate (all if none).\n"
-            f"{TARGET_OPEN} — every region held by the open viewer windows.\n"
+            f"{TARGET_OPEN} — every region held by the open viewer windows. Picking it prints the "
+            "exact window list, and each window's regions, to the log console.\n"
             f"{TARGET_PLATE} — every region of the acquisition.")
         run_row.addWidget(_rl); run_row.addWidget(target, 1)
+
+        # PRINT THE TARGET WHEN IT IS CHOSEN, not only when Run is pressed. "Open views" is the one
+        # target whose meaning is invisible from the combo: the other two name a surface the user is
+        # looking at, this one names a set of windows scattered across the desktop, deduplicated.
+        target.currentTextChanged.connect(
+            lambda choice: (self._print_open_views_target(f"Run {op.label}")
+                            if choice == TARGET_OPEN else None))
 
         def pick():
             d = QFileDialog.getExistingDirectory(self, f"Save {op.label} plate to folder")
@@ -2359,9 +2367,10 @@ class PlateWindow(QMainWindow):
             if choice == TARGET_PLATE:
                 regions = None                       # None = whole dataset (run_operator's contract)
             elif choice == TARGET_OPEN:
-                regions = self._open_views_regions()
+                # Prints the block again at launch, deliberately: the log is the record of what was
+                # run, and the state may have moved since the target was picked (a window closed).
+                regions = self._print_open_views_target(f"Run {op.label}")
                 if not regions:
-                    self._readout.setText("Run on open views: no windows are open — open some first.")
                     return
             else:                                    # selected wells (all if none selected)
                 regions = self._selected_regions or None
@@ -5146,17 +5155,59 @@ class PlateWindow(QMainWindow):
             return
         self.run_operator(key, regions=regions)
 
+    def _print_open_views_target(self, action: str) -> "Optional[list]":
+        """Say WHICH windows an "Open views" run is aimed at, and return what it resolved to.
+
+        Julio, 2026-08-03: "it has to print which windows and subsets thereof are selected." The
+        selector only names the RULE — "Open views" — and the rule is not the answer: which windows
+        are open, what each holds, and how the overlap between them collapses are three facts a user
+        cannot infer from three words in a combo box.
+
+        Called when the user PICKS the target AND again when they press Run. Printing only at launch
+        would be printing it after the decision, and a plate-scale run is minutes of compute.
+
+        The block goes to the log console via this window's ``ViewLog`` — the existing addressed
+        channel, which is monospace, scrollable and copyable, and already interleaves every stream.
+        Only the headline goes to the status line, which is one line high.
+
+        Returns ``None`` when nothing would run, having said why.
+        """
+        views = self._open_view_targets()
+        block = _explore.describe_view_target(views, action=action)
+        if block is None:
+            self._readout.setText(
+                f"Run on open views: {len(views)} open window(s) hold no regions between them — "
+                f"nothing to run." if views else
+                "Run on open views: no windows are open — open some first.")
+            return None
+        self.log.info("%s", block)
+        self._readout.setText(block.splitlines()[0])
+        return _explore.distinct_view_regions(views)
+
+    def _open_view_targets(self) -> list:
+        """Every open window as a View — the target set BEFORE it is flattened to regions.
+
+        The sibling ``_open_views_regions`` throws the windows away, which is correct for the run
+        and wrong for the print: an operator UI that cannot name which windows it is about to run
+        on makes the user infer it. This is what ``_explore.describe_view_target`` reads.
+
+        ``_open_view_targets`` and not ``_open_views``, which is already taken by the navigator
+        WIDGET (``self._open_views = OpenViewList(...)``). Same three words, two different things,
+        and the shorter name belongs to the one that shipped first.
+        """
+        mgr = getattr(self, "_viewer_manager", None)
+        return list(mgr.views()) if mgr is not None else []
+
     def _open_views_regions(self) -> list:
         """The union of regions held by the open independent windows, in first-seen order — the
-        iteration set for an operator run 'on open views' (the decentralized bulk target)."""
-        seen: set = set()
-        out: list = []
-        for win in getattr(self._viewer_manager, "windows", []):
-            for r in getattr(win, "_regions", []):
-                if r not in seen:
-                    seen.add(r)
-                    out.append(r)
-        return out
+        iteration set for an operator run 'on open views' (the decentralized bulk target).
+
+        Derived from the SAME Views the print reads, through the SAME flattener
+        (``_explore.distinct_view_regions``). That is load-bearing rather than tidy: if the printed
+        distinct-region count were computed by a second dedup, the block could disagree with what
+        actually runs, which is worse than not printing it at all.
+        """
+        return _explore.distinct_view_regions(self._open_view_targets())
 
     def _on_marquee_selected(self, wells: list):
         """Shift-DRAG released on the plate -> open an INDEPENDENT napari window for that subset.

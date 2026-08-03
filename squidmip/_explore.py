@@ -130,6 +130,143 @@ def describe_run_target(regions, *, total: int, head: int = 6) -> "Optional[str]
     return f"this will run on {n} region{'' if n == 1 else 's'}: {shown}"
 
 
+#: How wide the label column may get before it is elided. Elided rather than wrapped so the block
+#: stays ONE LINE PER WINDOW and remains scannable at a glance, which is the whole point of it.
+VIEW_LABEL_WIDTH = 30
+
+
+def _roi_spelling(bbox) -> str:
+    """``"roi [120.0,340.0 636.0,856.0] um"``, in ``Extent.label()``'s exact words.
+
+    Derived from ``Extent`` rather than copied from it. A second spelling of an ROI box is exactly
+    the drift ``_address.py``'s naming law exists to stop, and the console already prints the first
+    one on every addressed line.
+    """
+    from squidmip._address import Extent
+
+    return Extent(region_id="", bbox_um=bbox).label().strip()
+
+
+def distinct_view_regions(views) -> "list":
+    """The union of the Views' regions, in first-seen order — the set a run actually iterates.
+
+    THE flattener. ``PlateWindow._open_views_regions`` calls this and so does
+    :func:`describe_view_target`, so the printed number and the executed number cannot disagree.
+    Two flatteners is how a user comes to believe a region was processed twice.
+    """
+    seen: set = set()
+    out: list = []
+    for view in views or ():
+        for region in (getattr(view, "regions", None) or ()):
+            r = str(region)
+            if r not in seen:
+                seen.add(r)
+                out.append(r)
+    return out
+
+
+def describe_view_target(views, *, action: str = "Run", head: int = 6,
+                         label_width: int = VIEW_LABEL_WIDTH) -> "Optional[str]":
+    """Print WHICH windows a run is aimed at, and which subset of each — as a block, before it runs.
+
+    Julio, 2026-08-03: "we say smt like 'run on the {selected windows}'. But it has to print which
+    windows and subsets thereof are selected. Make sure that it is printed in an organized manner."
+
+    :func:`describe_run_target` is the sibling of this and is the right shape for a flat region
+    list; it stays exactly as it is. This one exists because the flattener throws the windows away
+    (``PlateWindow._open_views_regions``), so by the time a region list is printed there is nothing
+    left that could name a window. Aimed at window-backed Views; the plate and selection paths keep
+    ``describe_run_target``, because two spellings of "the whole dataset" is one too many.
+
+    Returns ``None`` when nothing would run — no Views, or Views that hold no regions between them.
+    The caller refuses with its own sentence rather than printing a cheerful zero, the same contract
+    :func:`describe_run_target` already has.
+
+    The shape::
+
+        Run decon on 3 windows, 12 regions
+
+          [2]  Deconvolution trial   4 regions   A1, A2, A3, A4
+          [5]  ROI · B6  ◂ view 2    1 region    B6   roi [120.0,340.0 636.0,856.0] um
+          [7]  C3, C4, C5, +5        8 regions   C3, C4, C5, C6, C7, C8, ... (+2 more)
+
+          13 region slots across 3 windows, 12 distinct regions
+          B6 is held by 2 windows and will be processed once
+
+    Every column earns its place. **The bracket** is the identity, and it is the same token the log
+    prefix prints (``_logpane._address_prefix``) and the title bar shows: a user reading a log line
+    and reading this block must be reading the same name for the same thing. **The label** is
+    ``View.name``, which is whatever the window has been renamed to — a rename is only worth having
+    if something prints the name. **The names** truncate at *head* in the one overflow spelling this
+    codebase already uses. **The ROI box** is the subset, in ``Extent.label()``'s words.
+
+    **The last two lines are not decoration.** The target set is DEDUPLICATED, so the per-window
+    counts do not sum to what runs. Printing only one of those two numbers is how a user comes to
+    believe a region was processed twice, or that one was skipped. So both are printed, and the
+    overlapping regions are named.
+    """
+    views = list(views or ())
+    if not views:
+        return None
+    distinct = distinct_view_regions(views)
+    if not distinct:
+        return None
+
+    rows = []
+    slots = 0
+    holders: "dict[str, int]" = {r: 0 for r in distinct}
+    for view in views:
+        # A window HOLDS a region once, however its own list happens to spell it, so dedupe within
+        # the window before counting. Otherwise the per-window count and the reconciliation's
+        # "region slots" would be two different numbers for the same window.
+        regions = list(dict.fromkeys(str(r) for r in (getattr(view, "regions", None) or ())))
+        slots += len(regions)
+        for r in regions:
+            holders[r] += 1
+        wid = getattr(view, "window_id", None)
+        ident = f"[{wid}]" if wid is not None else f"[{getattr(view, 'id', '?')}]"
+        name = str(getattr(view, "name", "") or "")
+        if len(name) > label_width:
+            name = name[:label_width - 1] + "…"
+        n = len(regions)
+        count = f"{n} region{'' if n == 1 else 's'}"
+        shown = ", ".join(regions[:head])
+        if n > head:
+            shown += f", ... (+{n - head} more)"
+        bbox = getattr(view, "roi_bbox", None)
+        if bbox is not None:
+            shown = f"{shown}   {_roi_spelling(bbox)}" if shown else _roi_spelling(bbox)
+        rows.append((ident, name, count, shown))
+
+    id_w = max(len(r[0]) for r in rows)
+    label_w = max(len(r[1]) for r in rows)
+    count_w = max(len(r[2]) for r in rows)
+    nw, nr = len(views), len(distinct)
+    lines = [f"{action} on {nw} window{'' if nw == 1 else 's'}, "
+             f"{nr} region{'' if nr == 1 else 's'}", ""]
+    lines += [f"  {i:<{id_w}}  {lab:<{label_w}}  {c:<{count_w}}  {s}".rstrip()
+              for i, lab, c, s in rows]
+    lines.append("")
+
+    if slots == nr:
+        lines.append(f"  {nr} region{'' if nr == 1 else 's'} across "
+                     f"{nw} window{'' if nw == 1 else 's'}")
+    else:
+        lines.append(f"  {slots} region slots across {nw} window{'' if nw == 1 else 's'}, "
+                     f"{nr} distinct region{'' if nr == 1 else 's'}")
+        dups = [(r, k) for r, k in holders.items() if k > 1]
+        if len(dups) == 1:
+            r, k = dups[0]
+            lines.append(f"  {r} is held by {k} windows and will be processed once")
+        elif dups:
+            shown = ", ".join(f"{r} ×{k}" for r, k in dups[:head])
+            if len(dups) > head:
+                shown += f", ... (+{len(dups) - head} more)"
+            lines.append(f"  {len(dups)} regions are held by more than one window and will each "
+                         f"be processed once: {shown}")
+    return "\n".join(lines)
+
+
 def resolve_run_scope(scope: str, *, selection=None, current_region=None,
                       parked_subset=None) -> "tuple[Optional[list], Optional[str]]":
     """Turn the selector's value into the region list a run is aimed at.
