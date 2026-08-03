@@ -48,6 +48,28 @@ Recipe for both (from hongquanli/gallery-view, adapted to napari 0.6.6): `add_im
 scale=(dz, py, px), blending="additive", rendering="mip", contrast_limits=<carried LUT>)`, a 100µm
 bounding box, a µm scale bar, and a close-handler that releases the GPU buffers.
 
+## What a window open COSTS, and the two rules that keep it to one fetch
+
+A fused level is ONE dask block per z (`_mosaic_source.fuse_region_pyramid`), so materialising any
+part of a level materialises that whole (level, z): a decode of every FOV in the region. On the
+real 10x set (manual0, 27 FOVs) that is ~107 ms cold, per channel, per z. **The number of DISTINCT
+z a window open touches is therefore the window's load time**, and it is decided entirely by the
+order of the calls in `MosaicLayers.add_mosaic`. Two rules keep it at one:
+
+1. **The plane the window opens on is the plane the contrast comes from.** `_contrast.opening_z`
+   names that index once, `sample_plane` seeds from it, and it is `(n - 1) // 2` because that is
+   **napari's own centring**, not a second opinion. It was `n // 2`, so on an even stack the seed
+   described plane 5 while the canvas showed plane 4 — invisible on screen, one extra whole-region
+   decode per channel.
+2. **A layer is placed at CONSTRUCTION**, via `placement_for` handed to `add_image` as
+   `scale`/`translate`, never by assigning `layer.scale` afterwards. Assigning it later moves the
+   world extent, which moves napari's dims range, which moves the slider off the plane already
+   fetched — another whole-region decode per channel.
+
+Measured on that region, four channels: 432 whole-frame decodes before, 216 after. One decode pass
+per channel remains and is NOT removable from outside napari — `Image.__init__` slices itself at
+point 0 before the viewer's dims can be consulted.
+
 ## Contrast
 
 Carry the on-screen LUT (per channel `contrast_limits` + colormap) into 3D so it matches 2D. If a

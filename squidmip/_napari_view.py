@@ -284,6 +284,25 @@ def scale_translate_from_bbox_um(
     return scale, translate
 
 
+def placement_for(ndim: int, bbox_um: Sequence[float], shape: Sequence[int],
+                  z_scale_um: Optional[float] = None) -> tuple[tuple, tuple]:
+    """``(scale, translate)`` for a layer of *ndim* axes whose trailing two are ``(y, x)``.
+
+    The arithmetic of :meth:`MosaicLayers._place`, lifted out so it can also be handed to
+    ``add_image`` as keyword arguments. Two consumers, one rule: a layer that is placed by a
+    SECOND copy of this is one edit away from sitting next to the mosaic it claims to describe.
+
+    Why ``add_image`` needs it at all: assigning ``layer.scale`` AFTER the layer exists changes the
+    world extent, which moves napari's dims range, which moves the z slider, which makes napari
+    re-slice — a second whole-region fuse of a mosaic that was already on screen. Placing at
+    construction is the same picture with one fetch instead of two.
+    """
+    scale, translate = scale_translate_from_bbox_um(bbox_um, shape)
+    extra = max(0, int(ndim) - 2)
+    lead = (float(z_scale_um) if (extra and z_scale_um) else 1.0,) * extra
+    return lead + tuple(scale), (0.0,) * extra + tuple(translate)
+
+
 def _colormap_rgb(layer: Any) -> Optional[tuple]:
     """The RGB a napari layer tints with, as three floats in 0..1.
 
@@ -614,6 +633,20 @@ class MosaicLayers:
         if multiscale is not None:
             kwargs["multiscale"] = multiscale
 
+        # PLACED AT CONSTRUCTION, not afterwards. See `placement_for`: assigning scale/translate to
+        # a live layer moves the dims range under it and costs a second whole-region fuse.
+        placed = False
+        if bbox_um is not None:
+            try:
+                shape = tuple(_first_level_shape(data, bool(multiscale)))
+                kwargs["scale"], kwargs["translate"] = placement_for(
+                    len(shape), bbox_um, shape[-2:], z_scale_um)
+                placed = True
+            except (ValueError, TypeError, IndexError):
+                # A bbox this rule refuses is a placement problem, not a reason to have no layer.
+                # `_place` below raises the same way and is where that has always been reported.
+                placed = False
+
         # Everything here is OUR write, not the user's. Subscribers must be able to tell the
         # difference or the plate latches manual on open and kills per-region contrast.
         with self.programmatic():
@@ -635,9 +668,12 @@ class MosaicLayers:
             except Exception:               # noqa: BLE001 - cosmetic; the layer is already good
                 pass
 
-            if bbox_um is not None:
+            if bbox_um is not None and not placed:
                 shape = tuple(_first_level_shape(data, bool(multiscale)))[-2:]
                 self._place(layer, bbox_um, shape, z_scale_um)
+            elif placed:
+                # `_place` also labels the axes; the placement itself already went in above.
+                self._label_units(layer)
 
             self._register_channel(key.channel, layer)
             # Point the camera at the data. add_image does NOT move the camera, so the first
@@ -700,17 +736,26 @@ class MosaicLayers:
         that is placed by a SECOND copy of this arithmetic is one edit away from sitting next to
         the mosaic it claims to describe rather than on top of it.
         """
-        scale, translate = scale_translate_from_bbox_um(bbox_um, shape)
-        extra = max(0, int(getattr(layer, "ndim", len(shape))) - 2)
-        lead = (float(z_scale_um) if (extra and z_scale_um) else 1.0,) * extra
-        layer.scale = lead + tuple(scale)
-        layer.translate = (0.0,) * extra + tuple(translate)
-        # Micrometres on every axis (x/y from pixel size, z from the µm step above), so napari's
-        # scale bar reads the LAYER's units -- the >=0.7 path, now that viewer.scale_bar.unit is
-        # deprecated (IMA-265). Guarded: an older napari has no .units, and mislabelling is never
-        # worth crashing a mosaic over. Here in _place so EVERY placed layer is labelled once.
+        scale, translate = placement_for(
+            int(getattr(layer, "ndim", len(shape))), bbox_um, shape, z_scale_um)
+        layer.scale = scale
+        layer.translate = translate
+        self._label_units(layer)
+
+    @staticmethod
+    def _label_units(layer: Any) -> None:
+        """Micrometres on every axis, so napari's scale bar reads the LAYER's units.
+
+        The >=0.7 path, now that ``viewer.scale_bar.unit`` is deprecated (IMA-265). Guarded: an
+        older napari has no ``.units``, and mislabelling is never worth crashing a mosaic over.
+
+        Split out of :meth:`_place` so that a layer placed at CONSTRUCTION (``add_mosaic`` hands
+        scale/translate to ``add_image``) is still labelled exactly once. Re-running the whole of
+        ``_place`` to get the label would re-assign the scale, which is the extra fuse that change
+        exists to remove.
+        """
         try:
-            layer.units = ("um",) * int(getattr(layer, "ndim", len(scale)))
+            layer.units = ("um",) * int(getattr(layer, "ndim", 2))
         except Exception:                # noqa: BLE001 - cosmetic; the scale is already right
             pass
 
