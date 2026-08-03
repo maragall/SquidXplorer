@@ -5290,3 +5290,96 @@ def test_the_empty_pane_does_not_name_CONTROL_WELL_on_a_slide(qapp, stub_detail,
     assert "control well" not in plate_labels, "the plate copy teaches a deleted gesture"
     assert plate_labels != labels, "the plate and slide copy are identical; the unit differs"
     win.close()
+
+
+# --- Minerva: the on-screen LUTs, and the second destination ----------------------------------
+
+def test_the_minerva_export_hands_the_on_screen_luts_to_the_exporter(
+        qapp, stub_detail, squid_dataset, tmp_path, monkeypatch):
+    """Julio: "channels need to be set to specific colors". The colours are on SCREEN, and the
+    export defaults (acquisition display_color + 1/99.9 percentiles) do not know about them.
+
+    Asserted at the seam that actually carries them — what export_selection is called with —
+    rather than by inspecting the widget, because a checkbox wired to nothing looks identical.
+    """
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    seen = {}
+
+    def spy(reader, selection, out_dir, **kw):
+        seen.update(kw)
+        return []
+
+    monkeypatch.setattr("squidmip._minerva.export_selection", spy)
+    luts = {"ch": {"clim": (3.0, 4.0), "rgb": (9, 9, 9)}}
+
+    win.run_minerva_export(out_dir=str(tmp_path), launch=False, selection=[("B2", 0)], luts=luts)
+    win._minerva.wait(20000)
+    qapp.processEvents()
+
+    assert seen.get("luts") == luts, "the LUTs stopped somewhere between the tab and the export"
+    win.close()
+
+
+def test_the_minerva_export_defaults_to_no_luts_so_the_plate_path_is_unchanged(
+        qapp, stub_detail, squid_dataset, tmp_path, monkeypatch):
+    """The plate has no window and therefore no on-screen LUTs. Passing nothing must reach the
+    exporter as nothing, so the percentile behaviour every existing caller relies on stands."""
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    seen = {}
+    monkeypatch.setattr("squidmip._minerva.export_selection",
+                        lambda reader, selection, out_dir, **kw: (seen.update(kw), [])[1])
+
+    win.run_minerva_export(out_dir=str(tmp_path), launch=False, selection=[("B2", 0)])
+    win._minerva.wait(20000)
+    qapp.processEvents()
+
+    assert seen.get("luts", "missing") is None
+    win.close()
+
+
+def test_on_screen_luts_is_none_when_no_view_window_is_open(qapp, stub_detail, squid_dataset):
+    """Not a failure: it IS the plate-level export, and the percentile defaults are right for it
+    precisely because there is no screen to match."""
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    assert win.on_screen_luts() is None
+    win.close()
+
+
+def test_the_render_destination_refuses_an_empty_export_instead_of_starting_a_worker(
+        qapp, stub_detail, squid_dataset):
+    """render.py takes minutes. Starting it on nothing would spend them and produce nothing."""
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    win.run_minerva_render([])
+    assert win._minerva_render is None
+    assert "nothing to render" in win._readout.text()
+    win.close()
+
+
+def test_a_render_worker_is_retired_with_the_export_worker(
+        qapp, stub_detail, squid_dataset, tmp_path):
+    """closeEvent joins these threads. A render left connected is a MEASURED 132 s hold on the
+    close for one real region, which is worse than the 90 s port poll that motivated
+    ``_stop_minerva`` in the first place."""
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    win._minerva_render = w = V._MinervaRenderWorker(
+        [(tmp_path / "a.ome.tiff", tmp_path / "a.json")])
+    seen = []
+    w.failed.connect(lambda m: seen.append(m))
+
+    win._stop_minerva()
+
+    assert win._minerva_render is None
+    w.failed.emit("x")
+    qapp.processEvents()
+    assert seen == [], "the render worker survived _stop_minerva still connected"
+    win.close()

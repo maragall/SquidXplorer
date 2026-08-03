@@ -35,12 +35,29 @@ Pipeline
          ▼
     [t, :, 0]  →  (C, H, W) native dtype
          ├──▶ write_ome_tiff()  →  <stem>.ome.tiff    pixels + names + PhysicalSize
-         └──▶ auto_groups()     →  write_story()  →  <stem>.story.json    COLOUR + contrast
+         └──▶ auto_groups(luts=)  →  write_story()  →  <stem>.story.json   COLOUR + contrast
                                                           │
-                                                          ▼
-                                              launch_minerva()  (best-effort)
-                                                          │
-                                              user clicks "Select File"
+                              ┌───────────────────────────┴────────────────────────┐
+                              ▼                                                    ▼
+                   launch_minerva()  (best-effort)                        render_exhibit()
+                              │                                                    │
+                   user clicks "Select File"                          open_exhibit(index.html)
+                    THE EDITOR. Needs the click.                    THE VIEWER. Needs no click.
+
+TWO DESTINATIONS, AND ONLY ONE OF THEM NEEDS A CLICK
+----------------------------------------------------
+The click cannot be removed from Author. Its server reads ``sys.argv`` exactly once and only to
+test for ``--dev`` (``app.py:2049``); its one image-opening route, ``POST /api/import``
+(``app.py:1728``), returns the loaded project to the HTTP caller and not to the browser; and
+``GET /`` unconditionally serves ``index.html`` (``app.py:865``). There is no route, flag or URL
+parameter that puts a file into the editor UI. Verified against v1.21.0, commit ``c555515``.
+
+``src/render.py`` is a different program with a real ``argparse`` (``render.py:271-323``). It
+takes the OME-TIFF and the same ``.story.json`` we already write, honours every colour and
+contrast in its ``groups``, and produces a viewable exhibit. That is the whole of the "no manual
+step" answer: not a way into the editor, a way past it.
+
+**Both front ends need internet to VIEW** — see :data:`NEEDS_INTERNET_NOTE`.
 
 Why we do not import ``squid2minerva``
 --------------------------------------
@@ -111,9 +128,13 @@ __all__ = [
     "auto_groups",
     "write_story",
     "launch_minerva",
+    "render_exhibit",
+    "render_script",
+    "open_exhibit",
     "minerva_home",
     "MINERVA_PORT",
     "MINERVA_URL",
+    "NEEDS_INTERNET_NOTE",
 ]
 
 # minerva-author binds this port in its own app.py; it is not configurable there.
@@ -228,23 +249,48 @@ def auto_groups(
     channel_names: Sequence[str],
     channel_colors: Sequence[tuple[int, int, int]],
     label: str = "All channels",
+    luts: Optional[dict] = None,
 ) -> list[dict]:
-    """One Minerva group over all channels: colour + auto-stretched contrast.
+    """One Minerva group over all channels: colour + contrast.
 
-    Contrast is a 1st-percentile floor and 99.9th-percentile ceiling per channel, normalised
-    to 0..1 against the dtype maximum — Minerva's own convention. This is the *only* place
-    our channel colours reach Minerva.
+    Contrast defaults to a 1st-percentile floor and 99.9th-percentile ceiling per channel,
+    normalised to 0..1 against the dtype maximum — Minerva's own convention. This is the *only*
+    place our channel colours reach Minerva.
+
+    *luts*, when given, is ``{channel_name: {"clim": (lo, hi) | None, "rgb": (r,g,b) | None}}``
+    read off the napari layers the user is looking at (``RegionViewer._per_channel_luts``). It
+    is applied **per channel and per field**, never all-or-nothing:
+
+    * a channel NOT in *luts* keeps the percentile contrast and *channel_colors* entry, exactly
+      as if *luts* had not been passed. A window that has three of the acquisition's four
+      channels on screen must not blank the fourth;
+    * ``"clim"`` of ``None`` keeps the percentiles for that channel;
+    * ``"rgb"`` of ``None`` keeps *channel_colors* for that channel. ``None`` is what
+      :func:`squidmip._napari_view.colormap_hue_rgb` returns for a colormap that is a ramp
+      rather than one colour (``viridis``, ``turbo``), which Minerva's single ``"color"`` field
+      cannot hold. Falling back is deliberate: emitting the ramp's brightest stop would put a
+      colour into Minerva that is on no screen.
+
+    ``clim`` is in RAW INTENSITY UNITS, the same units napari's contrast slider works in and the
+    same units the percentiles are computed in, so both paths divide by ``dtype_max`` here and
+    the arithmetic below is shared rather than duplicated.
     """
     img = np.asarray(img_cyx)
     dtype_max = float(np.iinfo(img.dtype).max) if np.issubdtype(img.dtype, np.integer) else 1.0
+    luts = luts or {}
     channels = []
     for i, name in enumerate(channel_names):
-        plane = img[i].astype(np.float32, copy=False).ravel()
-        lo = float(np.percentile(plane, 1.0))
-        hi = float(np.percentile(plane, 99.9))
+        lut = luts.get(name) or {}
+        clim = lut.get("clim")
+        if clim is not None and len(tuple(clim)) == 2:
+            lo, hi = float(tuple(clim)[0]), float(tuple(clim)[1])
+        else:
+            plane = img[i].astype(np.float32, copy=False).ravel()
+            lo = float(np.percentile(plane, 1.0))
+            hi = float(np.percentile(plane, 99.9))
         if hi <= lo:
             hi = lo + 1.0
-        r, g, b = channel_colors[i]
+        r, g, b = lut.get("rgb") or channel_colors[i]
         channels.append({
             "id": i,
             "label": name,
@@ -347,6 +393,7 @@ def export_selection(
     projector: str = "mip",
     operator: str = "stitch",
     on_progress=None,
+    luts: Optional[dict] = None,
     **operator_kwargs,
 ) -> list[tuple[Path, Path]]:
     """Export the selected region(s) to Minerva-ingestable file pairs — ONE PAIR PER REGION.
@@ -378,6 +425,21 @@ def export_selection(
     on_progress:
         Optional ``fn(done, total)`` called after each REGION, for a GUI readout. ``total`` is
         the number of regions, not FOVs.
+    luts:
+        Optional ``{channel_name: {"clim": (lo, hi) | None, "rgb": (r,g,b) | None}}`` — THE LUTS
+        THE USER HAS ON SCREEN, from ``RegionViewer._per_channel_luts``. When given they beat the
+        defaults per channel and per field; see :func:`auto_groups` for what each field replaces
+        and what happens when a channel is missing from the dict.
+
+        Optional, and the default has to stay the percentiles rather than become the screen. A
+        plate-level export has no window and therefore no on-screen LUTs, and the CLI has none
+        either; making the screen mandatory would leave those two paths with nothing to read.
+        Every existing caller passing nothing keeps today's behaviour byte for byte.
+
+        Only the STORY is affected. The OME-TIFF keeps the acquisition's ``display_color`` in its
+        OME-XML, because that file is the pixels plus what the microscope recorded, and a screen
+        setting is not a fact about the acquisition. Minerva reads colour from the story anyway
+        (see the module docstring), so this is the field that decides what Minerva shows.
     **operator_kwargs:
         Forwarded to the region operator (``blend_px=``, ``channels=``, ``register=``, ...).
 
@@ -442,7 +504,7 @@ def export_selection(
         story_path = write_story(
             out_dir / f"{stem}.story.json",
             ome_path,
-            auto_groups(img_cyx, names, colors, label=label),
+            auto_groups(img_cyx, names, colors, label=label, luts=luts),
             pixels_per_micron=ppm,
         )
         written[region] = (ome_path, story_path)
@@ -502,6 +564,28 @@ def launch_minerva(story_path=None, *, open_browser: bool = True, timeout: float
     user the story path, because Minerva has no deep link: the file is chosen by hand in
     Author's "Select File" dialog.
 
+    ONE TAB, NOT TWO
+    ----------------
+    **minerva-author opens the browser itself.** ``src/app.py`` (v1.21.0, commit ``c555515``)
+    defines ``open_browser()`` at ``:2033`` and calls it at ``:2050`` and ``:2053`` — once in
+    each arm of ``if "--dev" in sys.argv``, so it is **unconditional and there is no flag that
+    suppresses it**. That is the whole of the server's argv handling: ``sys.argv`` is read
+    exactly once, at ``:2049``, and only to test for ``--dev``. Asking Author not to open a tab
+    is therefore not available, and the only end of this we control is ours.
+
+    So the rule is: **whoever started the server opens the tab.**
+
+    * We started it -> Author opens its own tab. We do not, or the user gets two.
+    * It was already answering -> nobody is about to open anything, so we do.
+
+    Why dropping our call on a cold start is safe, stated as the failure rather than the happy
+    path: if Author's ``webbrowser.open_new`` cannot find a browser it returns ``False`` and the
+    server still serves, so the user gets no tab and a ``True`` from here. That is why the
+    caller's success line names the URL — a user with no tab has an address to paste rather than
+    a dead end. If instead that call *raises*, it raises before ``serve()`` on the next line, so
+    the server never binds the port, ``is_running()`` never becomes true, this returns ``False``,
+    and the caller already reports a launch failure. Neither case is silent.
+
     Parameters
     ----------
     should_stop:
@@ -518,6 +602,7 @@ def launch_minerva(story_path=None, *, open_browser: bool = True, timeout: float
     if stopped():
         return False
 
+    we_started_it = False
     if not is_running():
         home = minerva_home()
         if home is None:
@@ -538,6 +623,7 @@ def launch_minerva(story_path=None, *, open_browser: bool = True, timeout: float
             )
         except OSError:
             return False
+        we_started_it = True     # ...and it is about to open its own tab. See "ONE TAB, NOT TWO".
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if stopped():        # the caller (a GUI closing) gave up — do not hold it for 90 s
@@ -552,12 +638,152 @@ def launch_minerva(story_path=None, *, open_browser: bool = True, timeout: float
 
     if stopped():
         return False
-    if open_browser:
+    if open_browser and not we_started_it:
         try:
             webbrowser.open(MINERVA_URL)
         except Exception:
             pass          # the server is up; a browser that won't open is not a failure
     return True
+
+
+#: Said in the GUI, in the module docstring and here, because it is recorded nowhere else and a
+#: user meets it as a blank page rather than as an error. BOTH Minerva front ends load their
+#: JavaScript from jsdelivr, so both need a working internet connection at VIEWING time:
+#:
+#: * Minerva Author's own UI — ``static/index.html`` ends with
+#:   ``<script src="https://cdn.jsdelivr.net/npm/minerva-author-ui@1.10.2/build/bundle...js">``;
+#: * the exhibit :func:`render_exhibit` writes — ``src/exhibit.py:30`` emits
+#:   ``<script src="https://cdn.jsdelivr.net/npm/minerva-browser@3.20.0/build/bundle.js">``.
+#:
+#: Verified against the sibling checkout at v1.21.0, commit ``c555515``. The rendered tiles ARE
+#: local and complete; it is only the viewer program that is fetched. There is a stale 4.2 MB
+#: ``static/bundle.*.js`` in that checkout that nothing references, so "it worked offline once"
+#: is not a thing this can fall back on.
+NEEDS_INTERNET_NOTE = (
+    "Minerva's viewer JavaScript is loaded from a CDN (jsdelivr), so viewing needs internet — "
+    "the rendered tiles themselves are local."
+)
+
+
+def render_script(home: Path) -> Path:
+    """``src/render.py`` inside a checkout. Beside :func:`_minerva_parts`' ``src/app.py``."""
+    return Path(home) / "vendor" / "minerva-author" / "src" / "render.py"
+
+
+def render_exhibit(ome_path, story_path, out_dir, *, threads: Optional[int] = None,
+                   force: bool = True, should_stop=None, timeout: float = 3600.0) -> Path:
+    """Render *ome_path* + *story_path* into a viewable Minerva exhibit. Returns its ``index.html``.
+
+    **This is the one path from our export to a Minerva view with no file picking.** Minerva
+    Author's editor cannot be pointed at a file: its server reads ``sys.argv`` once and only for
+    ``--dev`` (``app.py:2049``), its only image-opening route is ``POST /api/import`` which
+    returns the project to the HTTP caller and not to the browser (``app.py:1728``), and ``GET /``
+    unconditionally serves ``index.html`` (``app.py:865``). ``src/render.py`` is a different
+    program with a real ``argparse`` (``render.py:271-323``) that takes the OME-TIFF, the same
+    ``.story.json`` we already write, and an output directory. It reads our ``groups``, so the
+    colours and contrast in the story are the colours and contrast in the exhibit.
+
+    It is a VIEWER, not an editor. Waypoints, story text and mask authoring are Author's job, so
+    this sits beside :func:`launch_minerva` rather than replacing it.
+
+    Three costs, measured or cited rather than asserted:
+
+    * **Lossy.** The output is a JPEG pyramid. The OME-TIFF is untouched and remains the archival
+      copy; the exhibit is a rendering of it.
+    * **Slow, and here are the numbers.** Measured on this machine against real exported Squid
+      mosaics: 4 channels of 2048x2048 uint16 (a 33.5 MB OME-TIFF) took **15 s** at
+      ``--threads 4`` and wrote 580 KB; the whole 4-channel 11535x9635 uint16 region (an 889 MB
+      OME-TIFF) took **132 s** at ``--threads 8`` and wrote 29 MB. So it is minutes, not seconds,
+      on a real region — which is why this takes *should_stop* and why the GUI runs it off the
+      main thread.
+    * **Needs internet to VIEW.** See :data:`NEEDS_INTERNET_NOTE`.
+
+    Raises
+    ------
+    FileNotFoundError
+        No checkout, no venv interpreter, or no ``render.py`` in it. Named, so the status line can
+        say which.
+    RuntimeError
+        ``render.py`` exited non-zero (its stderr tail is the message), or the wait was abandoned,
+        or it finished without writing an ``index.html``. It runs as a script under a FOREIGN
+        venv, so its failure arrives as an exit code and stderr, never as a Python exception we
+        could let through — turning that into one here is what lets the caller report it by name.
+    """
+    import time
+
+    stopped = should_stop if callable(should_stop) else (lambda: False)
+    home = minerva_home()
+    if home is None:
+        raise FileNotFoundError(
+            f"Minerva Author checkout not found (set ${MINERVA_HOME_ENV} to an explorer checkout)")
+    _app, python = _minerva_parts(home)
+    script = render_script(home)
+    if python is None:
+        raise FileNotFoundError(f"{home} has no .venv interpreter; render.py needs Minerva's own venv")
+    if not script.is_file():
+        raise FileNotFoundError(f"{script} not found; this checkout has no renderer")
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    n = int(threads) if threads else max(1, min(8, os.cpu_count() or 1))
+    cmd = [str(python), str(script), str(Path(ome_path).resolve()),
+           str(Path(story_path).resolve()), str(out_dir.resolve()), "--threads", str(n)]
+    if force:
+        cmd.append("--force")
+
+    try:
+        proc = subprocess.Popen(
+            cmd, cwd=str(script.parent.parent),
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        )
+    except OSError as exc:
+        raise RuntimeError(f"could not start render.py: {exc}") from exc
+
+    # Poll rather than communicate(): a render is minutes long and the GUI thread that closes the
+    # window must not be held for it. Same contract as launch_minerva's liveness wait.
+    deadline = time.monotonic() + timeout
+    while proc.poll() is None:
+        if stopped() or time.monotonic() > deadline:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except Exception:                    # noqa: BLE001 - best effort, then leave it
+                proc.kill()
+            raise RuntimeError("the Minerva render was stopped before it finished")
+        time.sleep(0.2)
+
+    output = ""
+    try:
+        output = proc.stdout.read() if proc.stdout is not None else ""
+    except Exception:                            # noqa: BLE001 - the exit code is the fact
+        pass
+    finally:
+        if proc.stdout is not None:
+            proc.stdout.close()
+
+    if proc.returncode != 0:
+        tail = "\n".join([ln for ln in (output or "").splitlines() if ln.strip()][-6:])
+        raise RuntimeError(
+            f"render.py exited {proc.returncode}" + (f":\n{tail}" if tail else " with no output"))
+
+    index = out_dir / "index.html"
+    if not index.is_file():
+        raise RuntimeError(f"render.py exited 0 but wrote no index.html in {out_dir}")
+    return index
+
+
+def open_exhibit(index_path) -> bool:
+    """Open a rendered exhibit's ``index.html`` in the browser. Best-effort, never raises.
+
+    A ``file://`` URL, not a server: the exhibit is static tiles plus one HTML file. The viewer
+    JavaScript still comes off the CDN (:data:`NEEDS_INTERNET_NOTE`), which is the one thing about
+    it that is not local.
+    """
+    import webbrowser
+    try:
+        return bool(webbrowser.open(Path(index_path).resolve().as_uri()))
+    except Exception:                            # noqa: BLE001
+        return False
 
 
 def reveal(path) -> None:

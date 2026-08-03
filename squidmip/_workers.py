@@ -458,7 +458,8 @@ class _MinervaWorker(QThread):
     failed = Signal(str)
     finished_ok = Signal()
 
-    def __init__(self, reader, selection, out_dir, projector: str, t: int = 0, launch: bool = True):
+    def __init__(self, reader, selection, out_dir, projector: str, t: int = 0, launch: bool = True,
+                 luts=None):
         super().__init__()
         self._reader = reader
         self._selection = list(selection)
@@ -466,6 +467,10 @@ class _MinervaWorker(QThread):
         self._projector = projector
         self._t = t
         self._launch = launch
+        # Snapshotted by the CALLER on the GUI thread and handed over as plain data. This thread
+        # must never reach into a napari layer to read a colormap: that is a Qt object owned by
+        # the main thread. ``None`` = use the export's percentile defaults.
+        self._luts = dict(luts) if luts else None
         self._stop = threading.Event()
 
     def stop(self):
@@ -489,7 +494,7 @@ class _MinervaWorker(QThread):
                 pairs.extend(
                     _minerva.export_selection(
                         self._reader, [(region, f) for f in fovs], self._out_dir,
-                        t=self._t, projector=self._projector,
+                        t=self._t, projector=self._projector, luts=self._luts,
                     )
                 )
                 on_progress(i + 1, len(grouped))
@@ -501,6 +506,67 @@ class _MinervaWorker(QThread):
                     _minerva.launch_minerva(pairs[0][1], should_stop=self._stop.is_set))
             self.finished_ok.emit()
         except Exception as e:
+            self.failed.emit(f"{type(e).__name__}: {e}")
+
+
+class _MinervaRenderWorker(QThread):
+    """Render already-exported pairs into viewable Minerva exhibits, OFF the GUI thread.
+
+    The second Minerva destination, and the only one that needs no file picking: Author's editor
+    cannot be pointed at a file (``app.py`` reads ``sys.argv`` once, for ``--dev``), but
+    ``src/render.py`` is a real CLI over the same ``.story.json`` we already write. See
+    :func:`squidmip._minerva.render_exhibit`.
+
+    Off the GUI thread because it is MEASURED in minutes, not guessed at: 132 s for one real
+    4-channel 11535x9635 region on this machine. ``stop()`` terminates the child process, because
+    a 90 s port poll was already too long to hold ``closeEvent`` and two minutes is worse.
+
+    Failure semantics differ from :class:`_MinervaWorker`'s on purpose. There is no half-success
+    to protect here: the export already happened and is already reported, so a render either
+    produces an exhibit or is a plain failure with ``render.py``'s own stderr attached.
+    """
+
+    progress = Signal(int, int)          # (done, total) exhibits rendered
+    rendered = Signal(object)            # [index_html_path, ...] in the order asked for
+    failed = Signal(str)
+
+    def __init__(self, pairs, out_root=None, threads=None, parent=None):
+        super().__init__(parent)
+        self._pairs = [(str(o), str(s)) for o, s in pairs]
+        self._out_root = out_root
+        self._threads = threads
+        self._stop = threading.Event()
+
+    def stop(self):
+        self._stop.set()
+
+    def run(self):
+        from squidmip import _minerva
+        done = []
+        try:
+            for i, (ome, story) in enumerate(self._pairs):
+                if self._stop.is_set():
+                    break
+                # Beside the export, named for it: ~/minerva_export/<acq>/<stem>_rendered/. The
+                # exhibit is a directory, so it cannot sit next to the files as a sibling FILE,
+                # and putting it under the export keeps one place to delete.
+                stem = Path(ome).name
+                for suffix in (".ome.tiff", ".ome.tif"):
+                    if stem.lower().endswith(suffix):
+                        stem = stem[: -len(suffix)]
+                        break
+                root = Path(self._out_root) if self._out_root else Path(ome).parent
+                index = _minerva.render_exhibit(
+                    ome, story, root / f"{stem}_rendered",
+                    threads=self._threads, should_stop=self._stop.is_set,
+                )
+                done.append(index)
+                self.progress.emit(i + 1, len(self._pairs))
+            self.rendered.emit(done)
+        except Exception as e:
+            # Report what LANDED as well as what broke: rendering three regions and failing on
+            # the third still leaves two exhibits the user can open.
+            self.rendered.emit(done)
             self.failed.emit(f"{type(e).__name__}: {e}")
 
 

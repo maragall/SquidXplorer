@@ -140,6 +140,12 @@ from squidmip.contract import field_path
 from squidmip._engine import available_projectors
 from squidmip._layers import OperationStack
 from squidmip._minerva import MINERVA_HOME_ENV as _MINERVA_HOME_ENV
+# Shown in the Minerva tab, not only in a docstring: both Minerva front ends fetch their
+# JavaScript from jsdelivr, so a user without internet meets a blank page rather than an error.
+# The fact is owned by _minerva (which cites the two source lines it was read from) and imported
+# here so the GUI cannot drift from it.
+from squidmip._minerva import NEEDS_INTERNET_NOTE as _MINERVA_INTERNET_NOTE
+from squidmip._minerva import MINERVA_URL as _MINERVA_URL
 from squidmip._montage import _hex_to_rgb01
 from squidmip._output import parse_well_id
 from squidmip._activity import ActivityLog
@@ -183,8 +189,9 @@ from squidmip._plate_overview import (  # noqa: F401 (re-exports)
 # imports three of them from here inside function bodies.
 from squidmip._workers import (  # noqa: F401 (re-exports)
     _CACHE_AUTO, _MIN_PREVIEW_BOX_PX, _VIEWER_WORKERS,
-    _ComputedPlateWorker, _FlatfieldWorker, _FocusWorker, _MinervaWorker, _MosaicWorker,
-    _OperatorWorker, _PreviewWorker, _SpotWorker, _full_res_mip, _full_res_plane, _spot_stages,
+    _ComputedPlateWorker, _FlatfieldWorker, _FocusWorker, _MinervaRenderWorker, _MinervaWorker,
+    _MosaicWorker, _OperatorWorker, _PreviewWorker, _SpotWorker, _full_res_mip, _full_res_plane,
+    _spot_stages,
 )
 
 # (`_SUPPORTED_PLATES` and `resolve_plate_format` used to live here. `build_plate` (IMA-214) is now
@@ -530,6 +537,7 @@ class PlateWindow(QMainWindow):
         self._worker = None           # the operator (MIP) run
         self._preview = None          # the raw preview fill on open
         self._minerva = None          # the Minerva export + Author launch (IMA-228)
+        self._minerva_render = None   # the render.py exhibit render, the no-file-picking path
         self._retired = []            # workers asked to stop; kept alive until they actually finish
         self._overview = None
         self._reader = None
@@ -2374,9 +2382,10 @@ class PlateWindow(QMainWindow):
         op = _OPERATIONS_BY_KEY["minerva"]
         w, v = self._op_tab_shell(
             op.label,
-            "Writes an OME-TIFF plus a Minerva story for every selected FOV, then starts Minerva "
-            "Author. Minerva has no deep link, so pick the .story.json below in its “Select File” "
-            "dialog — the colours and contrast are already applied.",
+            "Writes an OME-TIFF plus a Minerva story for every selected region, then starts "
+            "Minerva Author. Author’s editor cannot be pointed at a file, so pick the .story.json "
+            "below in its “Select File” dialog — the colours and contrast are already applied. "
+            "To skip that step entirely, render a viewer instead (button below the paths).",
         )
         state = {"dir": None, "pairs": []}
 
@@ -2393,6 +2402,21 @@ class PlateWindow(QMainWindow):
         proj.setCurrentText("mip")
         row.addWidget(proj); row.addStretch(1)
 
+        # "channels need to be set to specific colors" — the colours ON SCREEN, which the export's
+        # own defaults (acquisition display_color + 1/99.9 percentiles) do not know about. Checked
+        # by default because matching what you are looking at is the request; harmless with no view
+        # open, because on_screen_luts() returns None there and the defaults apply unchanged.
+        luts_cb = QCheckBox("Match the LUTs of the focused view window")
+        luts_cb.setStyleSheet(_CHECK_QSS)
+        luts_cb.setChecked(True)
+        luts_cb.setToolTip(
+            "Use the contrast and colour you have on screen in the focused view window instead of "
+            "the acquisition's channel colours and an automatic 1/99.9 percentile stretch.\n\n"
+            "With no view window open there is nothing on screen to match and the automatic "
+            "values are used. A channel that is not in that window keeps the automatic values "
+            "too, and so does a channel showing a multi-stop colormap (viridis, turbo): Minerva "
+            "stores one colour per channel and cannot hold a gradient.")
+
         launch_cb = QCheckBox("Open Minerva Author after exporting")
         launch_cb.setStyleSheet(_CHECK_QSS)
         launch_cb.setChecked(True)
@@ -2403,6 +2427,20 @@ class PlateWindow(QMainWindow):
         path_lbl.setStyleSheet("color:#8b98ad;font-size:11px;")
         copy_btn = QPushButton("Copy story path"); copy_btn.setStyleSheet(_BTN_QSS); copy_btn.hide()
         reveal_btn = QPushButton("Show in folder"); reveal_btn.setStyleSheet(_BTN_QSS); reveal_btn.hide()
+        # THE ZERO-CLICK DESTINATION. A separate button and not a replacement for the Author
+        # launch: Author is the EDITOR (waypoints, story text, masks) and needs its Select File
+        # click because its server has no route, flag or URL that opens a file; render.py is the
+        # VIEWER and needs none. Julio said "viewer". Both are offered; neither is assumed.
+        render_btn = QPushButton("Render a Minerva viewer (no file picking)")
+        render_btn.setStyleSheet(_BTN_QSS); render_btn.hide()
+        render_btn.setToolTip(
+            "Runs Minerva's own render.py on what you just exported and opens the finished "
+            "exhibit. No Select File step.\n\n"
+            "It is a viewer, not an editor: no waypoints, story text or masks.\n"
+            "It writes a JPEG pyramid, so it is lossy; the OME-TIFF is untouched.\n"
+            "Measured on this machine: about 15 s for a 2048x2048 4-channel crop and about "
+            "132 s for a whole 11535x9635 4-channel region.\n"
+            + _MINERVA_INTERNET_NOTE)
 
         def pick():
             d = QFileDialog.getExistingDirectory(self, "Save the Minerva export to folder")
@@ -2416,7 +2454,11 @@ class PlateWindow(QMainWindow):
             if not pairs:
                 return
             path_lbl.setText("\n".join(str(story) for _, story in pairs))
-            copy_btn.show(); reveal_btn.show()
+            copy_btn.show(); reveal_btn.show(); render_btn.show()
+
+        def do_render():
+            if state["pairs"]:
+                self.run_minerva_render(state["pairs"])
 
         def do_copy():
             if state["pairs"]:
@@ -2434,13 +2476,20 @@ class PlateWindow(QMainWindow):
         run.clicked.connect(lambda: self.run_minerva_export(
             out_dir=state["dir"], projector=proj.currentText(),
             launch=launch_cb.isChecked(), on_exported=on_exported,
+            luts=self.on_screen_luts() if luts_cb.isChecked() else None,
         ))
         copy_btn.clicked.connect(do_copy)
         reveal_btn.clicked.connect(do_reveal)
+        render_btn.clicked.connect(do_render)
+
+        net_lbl = QLabel(_MINERVA_INTERNET_NOTE)
+        net_lbl.setWordWrap(True)
+        net_lbl.setStyleSheet("color:#8b98ad;font-size:11px;")
 
         v.addWidget(pick_btn); v.addWidget(dir_lbl)
-        v.addLayout(row); v.addWidget(launch_cb); v.addWidget(run)
+        v.addLayout(row); v.addWidget(luts_cb); v.addWidget(launch_cb); v.addWidget(run)
         v.addWidget(_hline()); v.addWidget(path_lbl); v.addWidget(copy_btn); v.addWidget(reveal_btn)
+        v.addWidget(render_btn); v.addWidget(net_lbl)
         v.addStretch(1)
         run.setEnabled(self._reader is not None)
         return w
@@ -2484,13 +2533,47 @@ class PlateWindow(QMainWindow):
             return expand([self._current_well])
         return []
 
+    def on_screen_luts(self) -> "Optional[dict]":
+        """The per-channel LUTs of the view window the user is looking at, or ``None``.
+
+        "Channels need to be set to specific colors" means the colours ON SCREEN, and the plate
+        does not have them: the export's own defaults are the acquisition's ``display_color`` plus
+        1/99.9 percentiles, neither of which knows that the user recoloured a layer or dragged a
+        contrast slider. A :class:`RegionViewer` does know — ``_per_channel_luts`` reads it back
+        off the napari layers — so this is the one hop from that window to the exporter.
+
+        WHICH window: the manager's focused one, which is the window whose regions the plate is
+        already highlighting (``viewFocused``) and the one the navigator shows as current. Picking
+        "the first open window" instead would silently follow a window the user is not looking at.
+
+        ``None`` when there is no view open, no focused window, or that window has no layers yet —
+        and ``None`` is not a failure. It is the plate-level export, and the percentile defaults
+        are the right answer for it precisely because there is no screen to match.
+        """
+        mgr = getattr(self, "_viewer_manager", None)
+        if mgr is None:
+            return None
+        try:
+            wid = mgr.focused_id()
+            win = next((w for w in mgr.windows() if getattr(w, "window_id", None) == wid), None)
+            if win is None:
+                return None
+            luts = win._per_channel_luts()
+        except Exception:                     # noqa: BLE001 - a window mid-teardown is not an error
+            return None
+        return luts or None
+
     def run_minerva_export(self, out_dir=None, projector: str = "mip", launch: bool = True,
-                           on_exported=None, t: int = 0, selection=None):
+                           on_exported=None, t: int = 0, selection=None, luts=None):
         """Export the user's selection for Minerva Author and (optionally) open it.
 
         Runs off the GUI thread: projecting a well is real I/O plus compute, and starting
         Minerva Author polls a port for up to 90 s. Tests call this directly with launch=False.
-        *selection* overrides :meth:`minerva_selection` (tests and future callers).
+        *selection* overrides :meth:`minerva_selection` (tests and future callers). *luts* is
+        passed straight through to ``export_selection``: ``None`` means the percentile defaults,
+        exactly as before this parameter existed. Deciding whether to match the screen belongs to
+        the caller (the Minerva tab's checkbox calls :meth:`on_screen_luts`), not here — so this
+        method has no opinion and stays trivially testable in both states.
         """
         if self._reader is None or self._meta is None:
             self._readout.setText("open an acquisition first")
@@ -2513,12 +2596,18 @@ class PlateWindow(QMainWindow):
         n_t = self._meta.get("n_t", 1) or 1
         t_note = f" (t={t} of {n_t})" if n_t > 1 else ""
         self._minerva = w = _MinervaWorker(
-            self._reader, sel, out_dir, projector, t=t, launch=launch)
+            self._reader, sel, out_dir, projector, t=t, launch=launch, luts=luts)
 
         def on_launched(ok):
             if ok:
+                # The URL is named and not just implied. Exactly ONE tab is opened now (Minerva
+                # Author opens its own on a cold start, so we no longer open a second), and the
+                # one way that leaves the user with none is Author's webbrowser call failing to
+                # find a browser — in which case it returns False, the server serves anyway, and
+                # this line is the address to paste.
                 self._readout.setText(
-                    f"✓ Minerva Author open — pick a .story.json ({what}{t_note} exported)")
+                    f"✓ Minerva Author open at {_MINERVA_URL} — pick a .story.json "
+                    f"({what}{t_note} exported)")
             else:
                 self._readout.setText(
                     f"✓ exported {what}{t_note} — Minerva Author not found "
@@ -2543,6 +2632,47 @@ class PlateWindow(QMainWindow):
         w.launched.connect(on_launched)
         w.failed.connect(lambda m: self._readout.setText(f"Minerva export failed: {m}"))
         self._readout.setText(f"● Minerva export · {what}{t_note} …")
+        w.start()
+
+    def run_minerva_render(self, pairs, threads=None, open_when_done: bool = True):
+        """Render exported ``(ome, story)`` pairs into Minerva exhibits and open the first one.
+
+        The zero-click destination. ``run_minerva_export`` hands the user to Minerva Author, which
+        cannot be pointed at a file and so still needs its "Select File" click; this hands them a
+        finished, already-coloured Minerva VIEWER instead. Both exist because they are different
+        programs: Author edits, ``render.py`` renders. See
+        :func:`squidmip._minerva.render_exhibit` for the costs, which are real and measured.
+
+        Runs off the GUI thread. A render is minutes, not seconds.
+        """
+        if not pairs:
+            self._readout.setText("export something first — there is nothing to render")
+            return
+        if getattr(self, "_minerva_render", None) is not None and self._minerva_render.isRunning():
+            self._readout.setText("already rendering — let the current render finish first")
+            return
+        n = len(pairs)
+        self._minerva_render = w = _MinervaRenderWorker(pairs, threads=threads)
+
+        def on_rendered(indexes):
+            if not indexes:
+                return                       # `failed` says why; an empty success is not a message
+            note = "" if len(indexes) == n else f" of {n}"
+            if open_when_done:
+                from squidmip._minerva import open_exhibit
+                open_exhibit(indexes[0])
+            self._readout.setText(
+                f"✓ rendered {len(indexes)} Minerva viewer{'s' if len(indexes) != 1 else ''}{note} "
+                f"→ {Path(indexes[0]).parent}. {_MINERVA_INTERNET_NOTE}")
+
+        w.progress.connect(
+            lambda d, tot: self._readout.setText(f"● Minerva render · {d}/{tot} exhibits"))
+        w.rendered.connect(on_rendered)
+        # Named in the status line, because render.py runs as a script under a FOREIGN venv: its
+        # failure is an exit code plus stderr, and if we do not print it nothing does.
+        w.failed.connect(lambda m: self._readout.setText(f"Minerva render failed: {m}"))
+        self._readout.setText(
+            f"● Minerva render · {n} exhibit{'s' if n != 1 else ''} — this takes minutes …")
         w.start()
 
     def _build_layers_tab(self) -> QWidget:
@@ -4899,6 +5029,12 @@ class PlateWindow(QMainWindow):
     def _stop_minerva(self):
         self._retire(self._minerva)
         self._minerva = None
+        # The render worker is retired here too and not on its own line: it is the same feature and
+        # it is the LONGER of the two (a measured 132 s for one real region against an at-most 90 s
+        # port poll), so a close that abandons the launch wait but not the render would still hold
+        # the window for two minutes. Its stop() terminates the child render.py process.
+        self._retire(getattr(self, "_minerva_render", None))
+        self._minerva_render = None
 
     def _join_retired(self, msec: int = 3000) -> None:
         """WAIT for every deferred worker, at the one moment deferring is not allowed: teardown.

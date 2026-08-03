@@ -1210,3 +1210,71 @@ def test_our_own_writes_are_never_reported_as_a_user_picking_a_layer(layers):
     layers.add_mosaic("mip", "488", _img(2), visible=True)      # a re-add, still ours
 
     assert seen == [], f"a programmatic write was reported as a user gesture: {seen}"
+
+
+# --- one hex per channel, or an honest None --------------------------------------------------
+#
+# Minerva's story groups carry a single six-digit "color" per channel (_minerva.auto_groups) and
+# have no second field for a gradient. colormap_hue_rgb decides which napari colormaps survive
+# that and which cannot, and the answer must never be "approximate it".
+
+def _hue_layer(viewer_layers, cmap):
+    viewer_layers.add_mosaic("raw", "x", _img())
+    layer = viewer_layers.find("raw", "x")
+    layer.colormap = cmap
+    return layer
+
+
+@pytest.mark.parametrize("name,expected", [
+    ("red", (255, 0, 0)),
+    ("green", (0, 255, 0)),
+    ("blue", (0, 0, 255)),
+    ("cyan", (0, 255, 255)),
+    ("magenta", (255, 0, 255)),
+    ("yellow", (255, 255, 0)),
+    ("gray", (255, 255, 255)),
+])
+def test_a_single_hue_colormap_reduces_to_exactly_its_hue(layers, name, expected):
+    """napari's own black-to-hue maps are the ones this app and its users actually pick."""
+    from squidmip._napari_view import colormap_hue_rgb
+    assert colormap_hue_rgb(_hue_layer(layers, name)) == expected
+
+
+def test_the_colormap_this_app_builds_for_a_channel_reduces_to_its_palette_colour(layers):
+    """_napari_pane._colormap_for builds [[0,0,0,1], [r,g,b,1]] from Squid's palette. If that did
+    NOT reduce, the common case would silently fall back and the feature would do nothing."""
+    from napari.utils import Colormap
+
+    from squidmip._napari_view import colormap_hue_rgb
+
+    cmap = Colormap([[0.0, 0.0, 0.0, 1.0], [0x1F / 255, 1.0, 0.0, 1.0]], name="squid-488")
+    assert colormap_hue_rgb(_hue_layer(layers, cmap)) == (0x1F, 255, 0)
+
+
+@pytest.mark.parametrize("name", ["viridis", "turbo", "inferno", "PiYG"])
+def test_a_multi_stop_colormap_refuses_rather_than_approximating(layers, name):
+    """THE case that must not be fudged. A perceptual map's last stop is the top of a ramp, not
+    the map: viridis ends yellow and is mostly not yellow. Emitting that stop would put a colour
+    into Minerva that is on no screen, so this returns None and the caller keeps what it had."""
+    from squidmip._napari_view import colormap_hue_rgb
+    try:
+        layer = _hue_layer(layers, name)
+    except (KeyError, ValueError):
+        pytest.skip(f"this napari has no {name!r} colormap")
+    assert colormap_hue_rgb(layer) is None
+
+
+def test_a_colormap_ending_in_black_has_no_hue_to_name(layers):
+    """The degenerate case: every row is a multiple of a zero vector, so the projection test would
+    divide by zero and, unguarded, would call black a valid hue for anything."""
+    from napari.utils import Colormap
+
+    from squidmip._napari_view import colormap_hue_rgb
+
+    cmap = Colormap([[1.0, 1.0, 1.0, 1.0], [0.0, 0.0, 0.0, 1.0]], name="inverted")
+    assert colormap_hue_rgb(_hue_layer(layers, cmap)) is None
+
+
+def test_a_layer_with_no_colormap_table_says_so_instead_of_guessing(layers):
+    from squidmip._napari_view import colormap_hue_rgb
+    assert colormap_hue_rgb(object()) is None
