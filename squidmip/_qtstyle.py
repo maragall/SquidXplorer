@@ -88,8 +88,18 @@ BTN_QSS = (
     "padding:7px 12px;font-weight:700;} QPushButton:hover{border-color:#58a6ff;}"
     "QPushButton:disabled{color:#57606a;}"
 )
+#: A combo AND its popup. The popup list is a separate top-level ``QAbstractItemView``: the
+#: ``QComboBox`` selector does not reach it, and QSS property values do not cascade in Qt, so
+#: styling only the closed combo left the popup's FOREGROUND to the platform palette while its
+#: background still came from an ancestor sheet. In macOS light mode that palette hands back BLACK,
+#: over near-black. Every rule below states ink and ground together, so no half of a pair can be
+#: supplied by the OS theme in either light or dark mode.
 COMBO_QSS = ("QComboBox{background:#0d1420;color:#e6edf3;border:1px solid #232b3a;"
-             "border-radius:6px;padding:5px 8px;}")
+             "border-radius:6px;padding:5px 8px;}"
+             "QComboBox:disabled{background:#0d1420;color:#57606a;}"
+             "QComboBox QAbstractItemView{background:#0d1420;color:#e6edf3;"
+             "border:1px solid #232b3a;selection-background-color:#1c2b44;"
+             "selection-color:#e6edf3;outline:none;}")
 #: Checkbox with a visible white outline on the box.
 CHECK_QSS = (
     "QCheckBox{color:#e6edf3;spacing:7px;}"
@@ -157,6 +167,85 @@ def dark_palette() -> QPalette:
         pal.setColor(grp, QPalette.ButtonText, mut)
         pal.setColor(grp, QPalette.WindowText, mut)
     return pal
+
+
+#: Cache for :func:`_operator_card_cls`. Built on first use, never rebuilt.
+_OPERATOR_CARD_CLS = None
+
+
+def operator_card(label: str, blurb: str):
+    """An operator card whose description ELIDES to the card's width, with the full text on hover.
+
+    ``QPushButton`` does not wrap and does not elide: it draws its text and lets the far end fall
+    off the widget. The Process pane's cards were built as ``QPushButton(f"{label}\\n{blurb}")``
+    with blurbs of 100-130 characters, inside a pane roughly 300 px wide, so every description was
+    cut mid-word at the card's right edge with no indication that anything was missing.
+
+    ELIDED WITH A TOOLTIP, not shortened at the registry. The blurbs in ``squidmip._operations``
+    are the only place the app says what an operator actually does -- that deconvolution uses a
+    vectorial PSF from this acquisition's own optics and not an assumed Gaussian, that background
+    subtraction is a LAYER and leaves the raw untouched. Cutting them to fit a 300 px pane would
+    delete the sentences that stop a user picking the wrong operator, and the card is exactly where
+    that choice is made. Eliding costs nothing: the ellipsis SAYS there is more, and the full text
+    is one hover away.
+
+    Re-elided on resize and on font change, so it tracks both the pane being dragged wider and
+    ``_fontscale.rescale_fonts`` rewriting the card's ``font-size``.
+    """
+    return _operator_card_cls()(label, blurb)
+
+
+def _operator_card_cls():
+    """Build (once) the eliding card class. Lazy for the same reason :func:`hline` is: this module
+    is a leaf of colour facts and must stay importable without dragging in QtWidgets. Cached so
+    every card in the window is the SAME class, not one throwaway class per button."""
+    global _OPERATOR_CARD_CLS
+    if _OPERATOR_CARD_CLS is not None:
+        return _OPERATOR_CARD_CLS
+
+    from qtpy.QtCore import QEvent, Qt
+    from qtpy.QtWidgets import QPushButton, QSizePolicy
+
+    #: ``QEvent.Type.FontChange`` under Qt6/qtpy, ``QEvent.FontChange`` under PyQt5.
+    _FONT_CHANGE = getattr(getattr(QEvent, "Type", QEvent), "FontChange")
+
+    class _OperatorCard(QPushButton):
+        #: The card's own horizontal chrome: CARD_QSS's ``padding:9px 13px`` plus its 1 px border,
+        #: with 2 px of slack. Padding is deliberately NOT scaled by `_fontscale`, so this is a
+        #: constant rather than something that has to be re-derived per scale.
+        _CHROME_PX = 30
+
+        def __init__(self, label: str, blurb: str) -> None:
+            super().__init__()
+            self._label, self._blurb = str(label), str(blurb)
+            self.setToolTip(f"{self._label}\n{self._blurb}")
+            # The button must never demand its UNELIDED width from the layout: that is what put
+            # the text past the pane's right edge in the first place, and inside a resizable
+            # QScrollArea it would trade the clipping for a horizontal scrollbar.
+            self.setMinimumWidth(0)
+            self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+            self._retext()
+
+        def _retext(self) -> None:
+            avail = self.width() - self._CHROME_PX
+            if avail <= 0:                       # not laid out yet; resizeEvent will do it
+                self.setText(f"{self._label}\n{self._blurb}")
+                return
+            fm = self.fontMetrics()
+            self.setText(f"{fm.elidedText(self._label, Qt.ElideRight, avail)}\n"
+                         f"{fm.elidedText(self._blurb, Qt.ElideRight, avail)}")
+
+        def resizeEvent(self, e):                # noqa: N802 - Qt's spelling
+            super().resizeEvent(e)
+            self._retext()
+
+        def changeEvent(self, e):                # noqa: N802 - Qt's spelling
+            super().changeEvent(e)
+            if e is not None and e.type() == _FONT_CHANGE:
+                self._retext()
+
+    _OPERATOR_CARD_CLS = _OperatorCard
+    return _OPERATOR_CARD_CLS
 
 
 def hline():

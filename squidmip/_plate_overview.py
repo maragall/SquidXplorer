@@ -92,6 +92,28 @@ _PUSH_PX = 512             # per-well px pushed to the ndviewer scan-slider (dow
 _HDR, _COLH = 46, 30       # left / top label margins (px)
 _PAD = 16                  # breathing room around the plate
 
+#: The plate's PAINTED labels (row/column letters, freeform region names, the loupe's scale bar),
+#: in PIXELS. These were the only type in the app measured in POINTS -- `QFont("Helvetica Neue", 11)`
+#: -- and a point size is resolved against the paint device's `logicalDpiY`. That is a PER-SCREEN
+#: number, so the same label came out at a different apparent size on a laptop panel and on an
+#: external monitor with a different logical DPI, and different again between macOS (72 dpi) and
+#: Windows (96 dpi, where 11 pt is ~15 px). Everything else in this GUI -- `_CELL`, `_HDR`, `_COLH`
+#: above, and every inline stylesheet size -- is a logical pixel, which `enable_hidpi()` already
+#: makes device-independent, so these labels were the one thing that did not hold still when the
+#: window changed screens. The NUMBERS are deliberately unchanged: at macOS's 72 dpi 11 pt was
+#: already 11 px, so this pins the size the labels have today instead of picking a new one.
+_LABEL_PX = 11             # row/column letters and freeform region names
+_SCALE_PX = 10             # the loupe's scale-bar caption
+
+
+def _plate_font(px: int, weight=None) -> QFont:
+    """A plate label at a fixed PIXEL size, so it is the same size on every display."""
+    f = QFont("Helvetica Neue")
+    f.setPixelSize(int(px))
+    if weight is not None:
+        f.setWeight(weight)
+    return f
+
 #: The plate's region highlight — a MORE TRANSPARENT light-blue wash than _SEL_FILL (Julio). Shown
 #: on the manually-picked wells AND on the regions of the open view you click (highlight_regions).
 _VIEW_WASH = QColor(88, 166, 255, 40)   # ~16% alpha light blue
@@ -2265,7 +2287,7 @@ class PlateOverview(QWidget):
                 p.drawLine(int(ax), int(ay + r * cd), int(ax + W), int(ay + r * cd))
         # (a freeform holder has no shared grid lines to draw — its cells are individually placed
         #  rectangles, and _paint_carrier already outlined each one.)
-        p.setFont(QFont("Helvetica Neue", 11, QFont.DemiBold))
+        p.setFont(_plate_font(_LABEL_PX, QFont.DemiBold))
         if self._layout is not None:
             # A freeform region is named, not numbered, and the gutter is sized for "A".."AF" —
             # "manual0" gets sliced in half there. Its own cell is the only place wide enough and
@@ -2428,14 +2450,14 @@ class PlateOverview(QWidget):
             p.restore()
         else:
             p.setPen(_MUTED)
-            p.setFont(QFont("Helvetica Neue", 11))
+            p.setFont(_plate_font(_LABEL_PX))
             p.drawText(bx, by, s, s, Qt.AlignCenter | Qt.TextWordWrap,
                        self._loupe_note or "reading …")
         geo = self._loupe_geometry(x, y)
         if geo is not None and self._loupe_img is not None:
             _w, _l, _r, s_loupe, mag = geo
             um_px = loupe_um_per_screen_px(getattr(self._loupe_src, "pixel_size_um", None), s_loupe)
-            p.setFont(QFont("Helvetica Neue", 10, QFont.DemiBold))
+            p.setFont(_plate_font(_SCALE_PX, QFont.DemiBold))
             if um_px is None:
                 # No trustworthy pixel size: say so rather than draw a bar that would be fiction.
                 p.setPen(_MUTED)

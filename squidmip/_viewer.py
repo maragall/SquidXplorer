@@ -130,7 +130,7 @@ def _fusion_style():
 #: detection that raised, a region that would not fuse) MUST go through this and not only into an
 #: in-widget banner: a banner the user has already clicked past leaves no trace, and "the logger
 #: didn't show it" is the exact gap this closes.
-from squidmip._fontscale import rescale_fonts, scale_qss_fonts
+from squidmip._fontscale import rescale_fonts, scale_qss_fonts, window_screen
 from squidmip._logpane import get_logger
 
 log = get_logger("viewer")
@@ -151,6 +151,7 @@ from squidmip._plate_shape import PlateShapeError
 from squidmip._qt_tabs import _DetachTabBar, _DetachTabs, _FloatWindow  # noqa: F401 (re-export)
 from squidmip._qtstyle import dark_palette as _dark_palette
 from squidmip._qtstyle import hline as _hline
+from squidmip._qtstyle import operator_card as _operator_card
 from squidmip._time_point import TimePointBar
 from squidmip._terminal import _CmdEdit, _ProcTerminal, _Terminal  # noqa: F401 (re-export)
 from squidmip._region_nav import RegionCursor, RegionSlider
@@ -953,9 +954,15 @@ class PlateWindow(QMainWindow):
 
         In LOGICAL pixels, so this compares like with like under ``enable_hidpi()``. Leaves a
         margin for the taskbar and title bar rather than filling the work area exactly.
+
+        The screen is THIS WINDOW's, not ``primaryScreen()``: on a laptop + external monitor the
+        primary is whichever the OS names first, so the height floor below was being taken from a
+        display the window may not be on. At construction there is no window handle yet and the
+        answer is still the primary one, which is the old behaviour; from the first re-read on it
+        is the display the user actually has the plate on.
         """
         w, h = self._DESIGN_W, self._DESIGN_H
-        screen = QApplication.primaryScreen()
+        screen = window_screen(self)
         if screen is not None:
             avail = screen.availableGeometry()
             w = min(w, max(self.minimumWidth(), avail.width() - 40))
@@ -1025,7 +1032,8 @@ class PlateWindow(QMainWindow):
         # gallery view to be on the top of the stack"). Gallery View first, then Minerva Author, then
         # the processing operators. Gallery View is a button (gathers windows), Minerva is an
         # Operation card; the rest follow in registry order, minus minerva (already placed).
-        gv = QPushButton("Gallery View\nArrange the open viewer windows into a gallery")
+        gv = _operator_card("Gallery View",
+                            "Arrange the open viewer windows into a gallery")
         gv.setEnabled(False)
         gv.setCursor(Qt.PointingHandCursor)
         gv.setStyleSheet(_CARD_QSS)
@@ -1037,7 +1045,10 @@ class PlateWindow(QMainWindow):
         _minerva = [op for op in _OPERATIONS if op.key == "minerva"]
         ordered = _minerva + [op for op in _OPERATIONS if op.key != "minerva"]
         for op in ordered:
-            card = QPushButton(f"{op.label}\n{op.blurb}")
+            # ELIDED, not shortened: the blurb is where the registry says what the operator
+            # actually does, and this pane is ~300 px wide, so the plain QPushButton was cutting
+            # every description off mid-word at the card's edge. See _qtstyle.operator_card.
+            card = _operator_card(op.label, op.blurb)
             card.setEnabled(False)                         # enabled once an acquisition loads
             card.setCursor(Qt.PointingHandCursor)
             card.setStyleSheet(_CARD_QSS)
