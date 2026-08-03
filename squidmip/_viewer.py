@@ -822,16 +822,30 @@ class PlateWindow(QMainWindow):
         # Copy/paste LUTs TO THE PLATE (Julio: "we have to be able to copy and paste luts to the
         # plate"). Shares the one _LUT_CLIPBOARD windows use, so a window's contrast pastes onto the
         # plate and vice versa — the plate is a View with controls like any window.
+        #
+        # NOT a duplicate of the automatic window->plate tap in `_bind_window_contrast`, and the
+        # difference is authority, not numbers. That tap lands in `follow_channel_window` ->
+        # `_RunningContrast.set_followed`, which `resolve` OUTRANKS with the per-region scope and
+        # drops entirely when the user picks SCOPE_PER_REGION. This paste lands in
+        # `set_channel_window` -> `set_manual`, the user latch, which wins over everything
+        # including per-region scope. The tap is "show me what that window resolved"; this is
+        # "pin the plate here". Also the ONLY way OUT of the plate: the tap is one-directional.
         _lut_qss = ("QPushButton{background:#161b22;color:#c9d1d9;border:1px solid #30363d;"
                     "border-radius:4px;padding:3px 10px;font-size:12px;}"
                     "QPushButton:hover{background:#21262d;}")
         self._plate_copy_lut_btn = QPushButton("⧉ LUTs")
-        self._plate_copy_lut_btn.setToolTip("Copy the plate's per-channel contrast.")
+        self._plate_copy_lut_btn.setToolTip(
+            "PLATE → clipboard: the plate's per-channel contrast. Paste it into a window with "
+            "that window's '⤓ Paste LUTs' — the clipboard is shared. This is the only way out "
+            "of the plate; the automatic sync only runs window → plate.")
         self._plate_copy_lut_btn.setCursor(Qt.PointingHandCursor)
         self._plate_copy_lut_btn.setStyleSheet(_lut_qss)
         self._plate_copy_lut_btn.clicked.connect(self._plate_copy_luts)
         self._plate_paste_lut_btn = QPushButton("⤓ LUTs")
-        self._plate_paste_lut_btn.setToolTip("Apply the copied LUTs to the plate.")
+        self._plate_paste_lut_btn.setToolTip(
+            "clipboard → PLATE: apply the copied contrast. This LATCHES each channel manual, so "
+            "it survives per-region scope and the wells still streaming in cannot stomp it — "
+            "unlike the automatic window → plate sync, which the plate is free to outrank.")
         self._plate_paste_lut_btn.setCursor(Qt.PointingHandCursor)
         self._plate_paste_lut_btn.setStyleSheet(_lut_qss)
         self._plate_paste_lut_btn.clicked.connect(self._plate_paste_luts)

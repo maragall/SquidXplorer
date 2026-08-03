@@ -344,6 +344,32 @@ def test_match_raw_contrast_skips_a_channel_the_source_op_does_not_show(layers):
     assert list(only_op.contrast_limits) == before
 
 
+def test_neither_the_link_nor_the_match_carries_the_COLORMAP(layers):
+    """Contrast is shared in this window; COLOUR is not, by either mechanism.
+
+    This is half of why the copy/paste-LUTs chips survive an audit that asked whether they were
+    redundant (Julio: "if contrast are synched, the LUT copy paste should be removed"). The link
+    is bound to ``("contrast_limits",)`` and nothing else, and ``match_contrast_to`` writes
+    ``contrast_limits`` and nothing else, so a recolour in one layer stays in that layer. The
+    window's ``_apply_luts`` -- the paste -- is the only thing in the app that writes
+    ``layer.colormap``. Asserted against a real ``ViewerModel`` because the claim is about what
+    napari's own linking does, not about our stub.
+    """
+    raw = layers.add_mosaic("raw", "488", _img(), colormap="green")
+    decon = layers.add_mosaic("decon", "488", _img(1), colormap="green")
+
+    raw.colormap = "magenta"
+    raw.contrast_limits = (7, 900)
+
+    assert list(decon.contrast_limits) == [7.0, 900.0], "the contrast link stopped working"
+    assert decon.colormap.name == "green", "the link carried the colormap; the paste is now a dupe"
+
+    layers.match_contrast_to("raw")
+    assert decon.colormap.name == "green", (
+        "match_contrast_to grew a second responsibility; it is the CONTRAST equaliser and the "
+        "chip's label promises only that")
+
+
 def test_contrast_changes_arrive_on_the_public_event(layers):
     """Replaces the ndv contrast tap, which subclassed a private LutView and hooked
     `_lut_controllers`."""
