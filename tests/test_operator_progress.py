@@ -355,3 +355,222 @@ def test_every_outcome_takes_the_bar_down(region_window, close):
     bar = region_window._op_progress
     assert bar.isHidden()
     assert (bar.minimum(), bar.maximum()) == (0, 100), "an indeterminate sweep was left behind"
+
+
+# --------------------------------------------------------------------------------------
+# ...and the SAME report next to the memory bar, for work started ANYWHERE.
+#
+# Julio, 2026-08-03: "Where the memory bar is, there should also be a loading bar for whichever
+# operator we're applying in bulk or in a specific window, even if it's preview."
+#
+# The region window's bar above answers only for a run that window ASKED for. A plate-wide run and
+# the raw preview have no requester at all, so they had nowhere to report. These pin the second
+# consumer: one bar, on the manager's channel, fed by every producer.
+# --------------------------------------------------------------------------------------
+
+@pytest.fixture
+def navigator(qapp):
+    """A real ``OpenViewList`` on a real ``ViewerManager``, with no dataset and no windows.
+
+    Deliberately dataset-free: the bar is a pure function of the report it is handed, and giving it
+    an acquisition would only add a way for the test to fail for an unrelated reason.
+    """
+    from squidmip._region_viewer import OpenViewList, ViewerManager
+
+    mgr = ViewerManager()
+    mgr._mem_timer.stop()                       # no polling: this test is not about memory
+    panel = OpenViewList(mgr)
+    try:
+        yield mgr, panel
+    finally:
+        panel.deleteLater()
+        qapp.processEvents()
+
+
+def test_the_work_bar_is_ABSENT_while_nothing_is_running(navigator):
+    """Absent, not parked at 0 %. A bar sitting empty is indistinguishable from a run that has
+    started and produced nothing, which is the confusion it exists to end."""
+    _mgr, panel = navigator
+    assert panel._work_bar.isHidden()
+    assert panel._work_label.isHidden()
+
+
+def test_a_report_from_ANY_producer_raises_the_bar_beside_the_memory_bar(navigator):
+    """The whole ask, in one assertion: something is running, and the navigator says so."""
+    mgr, panel = navigator
+    mgr.set_run_progress(
+        ProgressReport("decon", done=12, total=27, unit=FOV_UNIT, eta_seconds=200))
+    assert not panel._work_bar.isHidden()
+    assert (panel._work_bar.minimum(), panel._work_bar.maximum()) == (0, 100)
+    assert panel._work_bar.value() == 44
+    assert panel._work_label.text() == "decon · 12 of 27 FOVs · ~4 min left"
+
+
+def test_the_work_bar_stays_INDETERMINATE_when_the_total_is_not_known(navigator):
+    """The same rule the region window's bar follows, and for the same reason: a progress bar that
+    invents a denominator is a lie that gets believed."""
+    mgr, panel = navigator
+    mgr.set_run_progress(ProgressReport("preview", done=3, total=None, unit=FOV_UNIT))
+    assert (panel._work_bar.minimum(), panel._work_bar.maximum()) == (0, 0)
+    assert "3 FOVs so far" in panel._work_label.text()
+
+
+def test_clearing_the_channel_takes_the_work_bar_down(navigator):
+    mgr, panel = navigator
+    mgr.set_run_progress(ProgressReport("decon", 1, 27, FOV_UNIT))
+    mgr.set_run_progress(None)
+    assert panel._work_bar.isHidden()
+    assert panel._work_label.isHidden()
+
+
+def test_a_navigator_built_MID_RUN_shows_the_bar_without_waiting_for_the_next_unit(qapp):
+    """On decon one unit is minutes, so "wait for the next report" is most of the run. The manager
+    holds the last report precisely so a late subscriber does not have to."""
+    from squidmip._region_viewer import OpenViewList, ViewerManager
+
+    mgr = ViewerManager()
+    mgr._mem_timer.stop()
+    mgr.set_run_progress(ProgressReport("decon", 5, 27, FOV_UNIT))
+    panel = OpenViewList(mgr)                   # built AFTER the run was already reporting
+    try:
+        assert not panel._work_bar.isHidden()
+        assert panel._work_bar.value() == 19
+    finally:
+        panel.deleteLater()
+        qapp.processEvents()
+
+
+def test_a_plate_wide_run_reaches_the_navigator_and_is_taken_down_when_it_drains(qapp, plate):
+    """END TO END, at the highest seam there is: a real run on a real PlateWindow, with NO
+    requester window at all — the bulk case, which had no progress affordance anywhere.
+
+    Both halves matter. A bar that never comes up is the reported gap; a bar never taken down is
+    the failure mode ``_activity``'s docstring names, where the indicator teaches the user it lies.
+    """
+    seen = []
+    plate._viewer_manager.runProgressChanged.connect(seen.append)
+    plate.run_operator("mip", regions=[REGIONS[0]], save=False)
+    assert _drain_until(qapp, lambda: seen and seen[-1] is None, timeout=60), (
+        f"the work bar was never taken down; last was {seen[-1] if seen else None!r}")
+    reports = [r for r in seen if r is not None]
+    assert reports, "a plate-wide run published no progress to the navigator at all"
+    assert reports[-1].done == reports[-1].total == len(FOVS)
+
+
+# --------------------------------------------------------------------------------------
+# ...INCLUDING THE PREVIEW ("even if it's preview").
+#
+# ``_PreviewWorker`` is a different worker from ``_OperatorWorker`` and had no progress channel at
+# all, so the plate's first fill — the longest single wait on opening a big acquisition — reported
+# nothing. It CAN share the channel, and now does: the same immutable ProgressReport.
+#
+# What it does NOT share is ``unit_plan``, and that is the one honest difference. ``unit_plan``
+# computes the ENGINE's denominator; ``_plan`` is not the engine's iteration (it collapses a region
+# to one read whenever a mosaic is not derivable), so the total comes from the plan itself.
+# --------------------------------------------------------------------------------------
+
+class _PrintingReader:
+    """A reader that PRINTS while it reads, standing in for the libraries this app orchestrates.
+
+    tilefusion says what it is DOING with bare ``print`` rather than through its loggers
+    (registration.py:274, optimization.py:254, distortion.py:245), so a stub that prints is the
+    honest shape of the thing ``capture_stdout_to_log`` exists for.
+    """
+
+    def __init__(self, path, chatter: bool = False):
+        self._path = str(path)               # the identity the plate cache's token asks for
+        self.chatter = bool(chatter)
+
+    def read(self, region, fov, channel, z, t=0):
+        import numpy as np
+
+        if self.chatter:
+            print(f"Parallel registration: {region} fov {fov}")
+        return np.zeros((8, 8), dtype=np.uint16)
+
+
+def _preview_meta() -> dict:
+    return {"channels": [{"name": "c0"}], "dtype": "uint16", "z_levels": [0, 1, 2],
+            "regions": ["A1", "A2"], "fovs_per_region": {"A1": [0], "A2": [0]},
+            "frame_shape": (8, 8), "pixel_size_um": 1.0, "fov_positions_um": {}}
+
+
+def _preview_worker(tmp_path, cache=None, **kw):
+    (tmp_path / "acq").mkdir(exist_ok=True)
+    return V._PreviewWorker(_PrintingReader(tmp_path / "acq", **kw), _preview_meta(),
+                            {"A1": {"rc": (0, 0)}, "A2": {"rc": (0, 1)}}, ["A1", "A2"],
+                            cache=cache)
+
+
+def test_the_PREVIEW_reports_on_the_same_channel_an_operator_run_does(qapp, tmp_path):
+    """The share, asserted as a share: the preview emits ``ProgressReport``, the one type the
+    navigator's bar already knows how to draw. A second progress type would be a second thing for
+    one bar to reconcile."""
+    worker = _preview_worker(tmp_path)
+    got = []
+    worker.runProgress.connect(got.append)
+    worker.run()                                 # in-thread: signal delivery is synchronous here
+
+    assert got, "the raw preview reported no progress at all"
+    assert all(isinstance(r, ProgressReport) for r in got), \
+        "the preview invented a second progress type instead of sharing the channel"
+
+
+def test_the_previews_bar_is_DETERMINATE_from_its_first_frame(qapp, tmp_path):
+    """The total is known before the first read (``len(plan)``), so the bar never grows a
+    denominator as it goes — the same property the operator run's bar has."""
+    worker = _preview_worker(tmp_path)
+    got = []
+    worker.runProgress.connect(got.append)
+    worker.run()
+
+    assert got[0].done == 0, "the preview's first report was not 0 of N"
+    assert {r.total for r in got} == {2}, "the preview's denominator moved mid-pass"
+    dones = [r.done for r in got]
+    assert dones == sorted(dones), f"preview progress went backwards: {dones}"
+    assert got[-1].done == got[-1].total, "the preview never reached its own total"
+    assert got[-1].percent == 100
+
+
+def test_the_preview_names_itself_so_the_one_bar_says_WHICH_work_is_running(qapp, tmp_path):
+    """One bar, two kinds of work. CONTEXT.md's word for the raw fill is "preview", and the label
+    is the only field that distinguishes it from an operator run on the wire."""
+    from squidmip._progress import PREVIEW_LABEL
+
+    worker = _preview_worker(tmp_path)
+    got = []
+    worker.runProgress.connect(got.append)
+    worker.run()
+    assert got[-1].label == PREVIEW_LABEL
+    assert got[-1].sentence().startswith("preview · ")
+
+
+def test_a_CACHED_well_is_not_counted_as_work_the_preview_still_has_to_do(qapp, tmp_path):
+    """The denominator is the plan that SURVIVED the cache.
+
+    Counting replayed wells would draw a bar that starts near full and then crawls, and feeding
+    those instant completions to ``RunProgress`` would poison the rate too: N arrivals in one
+    instant makes the ETA for whatever is left wildly optimistic.
+    """
+    import numpy as np
+
+    from squidmip._platecache import PlateCellCache
+
+    exp = tmp_path / "acq"
+    exp.mkdir(exist_ok=True)
+    (exp / "acquisition.yaml").write_text("objective:\n  pixel_size_um: 1.0\n")
+
+    def _cache():
+        return PlateCellCache(exp, cell_px=88, channels=["c0"], dtype=np.uint16,
+                              root=tmp_path / "cachedir")
+
+    _preview_worker(tmp_path, cache=_cache()).run()      # fills the cache for A1 and A2
+
+    second = _preview_worker(tmp_path, cache=_cache())
+    got = []
+    second.runProgress.connect(got.append)
+    second.run()
+
+    assert second.cache_hits == 2, "the fixture did not actually exercise the cache"
+    assert got and got[0].total == 0, \
+        f"a fully cached reopen still claimed {got[0].total} units of work to do"

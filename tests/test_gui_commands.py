@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from qtpy.QtWidgets import QApplication, QTabBar
+from qtpy.QtWidgets import QApplication
 
 import squidmip._viewer as V
 from squidmip import _explore
@@ -178,8 +178,8 @@ def test_the_run_scope_is_resolved_by_the_shared_resolver_from_window_state(open
 
 # --- the log panel is THE one global console, and it is a fixed tab -----------------------------
 
-def test_the_log_panel_is_a_fixed_tab_in_the_operators_tab_space(win):
-    """Rewritten twice, and the history is the point.
+def test_the_log_panel_is_stacked_under_the_operators_and_can_never_be_lost(win):
+    """Rewritten THREE times, and the history is the point.
 
     2026-07-28: this asserted ``win._explore_col`` held the pane above the log panel, an
     exploration COLUMN that the decentralization removed; the attribute no longer existed, so the
@@ -187,37 +187,65 @@ def test_the_log_panel_is_a_fixed_tab_in_the_operators_tab_space(win):
     (tests/test_window_lifetime.py) segfaulted this file five tests earlier and took the summary
     line with it, so a test that was broken and a test that never ran looked the same. It was then
     rewritten to pin the log as a separate top-level QMainWindow, with a note saying a future move
-    to a tab should fail loudly instead of silently. This is that failure, collected.
+    to a tab should fail loudly instead of silently.
 
-    2026-07-29, Task 1: the log is ONE GLOBAL CONSOLE and a FIXED TAB in the operators tab space.
-    Julio: "making the logger global will force you to abstract the data layers cleanly." A
-    floating window per app is not what makes a console global; one console printing every
-    window's actions with an address is. Being a tab also retires Spencer's NEXT_STEPS item that
-    the Log window "opens over the main window" on every launch, because the fix for a window that
-    lands in the wrong place is not to position it, it is to stop it being a window.
+    2026-07-29, Task 1: the log became ONE GLOBAL CONSOLE and a FIXED TAB in the operators tab
+    space, never closable and never detachable, and this test pinned exactly that:
+    ``index < win._FIXED_TABS``, ``tabText == "Log"``, ``not hasattr(win, "_log_window")``,
+    ``win._detach_tab(index) is None``.
 
-    Fixed means it cannot be closed and cannot be detached. A console the user can lose is a
-    console that is missing at the moment worth reading."""
-    tabs = win._left_tabs
-    index = tabs.indexOf(win._log_panel)
-    assert index >= 0, "the log panel is not in the operators tab space at all"
-    assert index < win._FIXED_TABS, "the log tab is not one of the fixed head tabs"
-    assert tabs.tabText(index) == "Log"
-    assert not hasattr(win, "_log_window"), "the log is a top-level window again"
+    2026-08-03: THAT EXPECTATION IS CHANGED HERE, DELIBERATELY, and this docstring is the record.
+    Julio, with a drawing: "I think that we should modify the layout of our main window" — Operator
+    above, Log below, both visible at once, and "Log (option to open in a new window)". Two things
+    move, and only one of them touches the 2026-07-29 decision:
 
-    # not closable: no close button, and the close path refuses even when driven directly
-    assert tabs.tabBar().tabButton(index, QTabBar.RightSide) is None
-    win._close_op_tab(index)
-    assert tabs.indexOf(win._log_panel) == index, "the console was closed"
+    * Stacking does not reverse it at all. That decision was WINDOW vs NOT-WINDOW; tab vs stacked
+      panel was never argued, and the tab bar was the only reason the two alternated. The panel was
+      written as a stacked one ("The bottom-right log panel", _logpanel.py) and a console that is
+      always on screen is MORE global than one behind a tab, not less.
+    * "Open in a new window" does reverse the second half, and reintroduces the object the old
+      version of this test asserted the absence of. It is justified on facts, not taste: the old
+      `_log_window` was built and shown on EVERY launch, which is why Spencer saw it land over the
+      main window every time, whereas this is a user gesture on an always-present panel; and the
+      QStyle segfault the old float participated in is fixed at the seam a new float uses
+      (_qt_tabs.py refuses the per-widget Fusion style for exactly that reason).
 
-    # not detachable: it must not float away from the window it reports on
-    assert win._detach_tab(index) is None
-    assert tabs.indexOf(win._log_panel) == index, "the console detached"
+    WHAT IS PINNED INSTEAD is the invariant that survives the change, and it is stronger than
+    "cannot detach": the panel exists for the life of the window and is reachable from View > Log
+    in EVERY state — docked, collapsed, floated. What changes is where it is, never whether it is.
+    If a floated log could be closed and not come back, the 2026-07-29 decision was right and this
+    is a regression; that is the assertion at the end of this test.
+    """
+    panel = win._log_panel
 
-    # and the View menu raises it rather than toggling a window that no longer exists
-    win._left_tabs.setCurrentIndex(0)
+    # NOT a tab any more: it is a sibling of the tab widget in the right column's vertical splitter
+    assert win._left_tabs.indexOf(panel) == -1, "the log is back in the tab bar"
+    assert win._right_col.indexOf(panel) >= 0, "the log is not in the right column at all"
+    assert win._right_col.indexOf(win._left_tabs) == 0, "Operators is not above the log"
+    assert win._FIXED_TABS == 1, "only the Operators home tab is fixed now"
+
+    # ...and the tab bar it left still protects its own home tab
+    assert win._close_op_tab(0) is None and win._left_tabs.count() >= 1
+    assert win._detach_tab(0) is None, "the Operators home tab detached"
+
+    # REACHABLE FROM THE VIEW MENU IN EVERY STATE. Docked and collapsed:
+    panel.set_collapsed(True)
     win.show_log()
-    assert tabs.currentWidget() is win._log_panel
+    assert not panel.collapsed, "View > Log did not expand the collapsed console"
+
+    # ...and floated: show_log raises the float rather than losing track of it
+    fl = win._float_log()
+    assert fl is not None and win._floating[win._LOG_FLOAT_KEY] is fl
+    assert win._float_log() is fl, "a second request built a SECOND console window"
+    win.show_log()
+    assert win._floating.get(win._LOG_FLOAT_KEY) is fl, "show_log dropped the float"
+
+    # CLOSING THE FLOAT MUST NOT LOSE THE CONSOLE. An operator float's close disposes its widget;
+    # this one re-docks. Same object, so the scrollback survives.
+    fl.close()
+    assert win._LOG_FLOAT_KEY not in win._floating
+    assert win._log_panel is panel, "the console was replaced"
+    assert win._right_col.indexOf(panel) >= 0, "the console did not come back to the window"
 
 
 def test_a_plate_run_opens_AND_closes_a_started_done_pair_in_the_console(open_win, qapp, caplog):

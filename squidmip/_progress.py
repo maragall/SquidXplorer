@@ -57,13 +57,20 @@ import math
 from dataclasses import dataclass
 from typing import Optional
 
-__all__ = ["ProgressReport", "RunProgress", "format_eta", "unit_plan"]
+__all__ = ["PREVIEW_LABEL", "ProgressReport", "RunProgress", "format_eta", "unit_plan"]
 
 #: What a per-FOV operator and a region operator each count. Kept as constants rather than as bare
 #: strings at the call sites so the two spellings cannot drift, and so ``CONTEXT.md``'s vocabulary
 #: (FOV, region) is the one that reaches the screen.
 FOV_UNIT = "FOV"
 REGION_UNIT = "region"
+
+#: The label the RAW PREVIEW pass reports under. Julio asked for the bar to cover the preview too
+#: ("even if it's preview"), and the preview is not an operator, so it has no ``operator_label``.
+#: Spelled the way ``CONTEXT.md`` spells it -- "the raw imagery painted when an acquisition opens,
+#: before any operator has run" -- so the one bar can say WHICH of the two kinds of work is running
+#: without a second field on the wire.
+PREVIEW_LABEL = "preview"
 
 
 def unit_plan(metadata: dict, regions, *, region_op: bool,

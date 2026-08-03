@@ -140,6 +140,12 @@ from squidmip.contract import field_path
 from squidmip._engine import available_projectors
 from squidmip._layers import OperationStack
 from squidmip._minerva import MINERVA_HOME_ENV as _MINERVA_HOME_ENV
+# Shown in the Minerva tab, not only in a docstring: both Minerva front ends fetch their
+# JavaScript from jsdelivr, so a user without internet meets a blank page rather than an error.
+# The fact is owned by _minerva (which cites the two source lines it was read from) and imported
+# here so the GUI cannot drift from it.
+from squidmip._minerva import NEEDS_INTERNET_NOTE as _MINERVA_INTERNET_NOTE
+from squidmip._minerva import MINERVA_URL as _MINERVA_URL
 from squidmip._montage import _hex_to_rgb01
 from squidmip._output import parse_well_id
 from squidmip._activity import ActivityLog
@@ -183,8 +189,9 @@ from squidmip._plate_overview import (  # noqa: F401 (re-exports)
 # imports three of them from here inside function bodies.
 from squidmip._workers import (  # noqa: F401 (re-exports)
     _CACHE_AUTO, _MIN_PREVIEW_BOX_PX, _VIEWER_WORKERS,
-    _ComputedPlateWorker, _FlatfieldWorker, _FocusWorker, _MinervaWorker, _MosaicWorker,
-    _OperatorWorker, _PreviewWorker, _SpotWorker, _full_res_mip, _full_res_plane, _spot_stages,
+    _ComputedPlateWorker, _FlatfieldWorker, _FocusWorker, _MinervaRenderWorker, _MinervaWorker,
+    _MosaicWorker, _OperatorWorker, _PreviewWorker, _SpotWorker, _full_res_mip, _full_res_plane,
+    _spot_stages,
 )
 
 # (`_SUPPORTED_PLATES` and `resolve_plate_format` used to live here. `build_plate` (IMA-214) is now
@@ -305,17 +312,22 @@ def _signal_names(cls) -> tuple:
     return tuple(out)
 
 
-#: Height of the top strip when you are working the plate: the plate is the star, and a fixed cap
-#: stops the operator cards' size hint ballooning it into the "super thick" top that squashed the
-#: plate (Julio).
-_TOP_ROW_COMPACT_PX = 240
-
-#: ...and its height while the Log tab is in front. A console you cannot read is not a console: 240
-#: px is about ten lines, which is a status light rather than a log. When you deliberately select
-#: the Log tab you are reading it, not watching the plate, so the strip earns more room and gives it
-#: straight back when you leave. This is the layout half of the same fix as `format_console`, which
-#: shortened the LINE; this shortens the number of lines you have to scroll.
-_TOP_ROW_READING_PX = 520
+#: Height of the top strip. A fixed cap stops the operator cards' size hint ballooning it into the
+#: "super thick" top that squashed the plate (Julio).
+#:
+#: 240 -> 520 ON 2026-08-03, because the strip now holds TWO stacked panels instead of one tab at a
+#: time. Julio: "I think that we should modify the layout of our main window", with a drawing that
+#: puts Operator above Log, both visible at once. 240 px was sized for one tab; split two ways it
+#: leaves the log about five lines, which is a status light and not a log. There used to be a second
+#: constant, `_TOP_ROW_READING_PX = 520`, that `_sync_top_row_height` swapped in while the Log TAB
+#: was in front; the reading height is now the only height, and that mechanism is gone with the tab
+#: it keyed on. See `_right_col`: the Operator/Log boundary is a QSplitter handle, so the user drags
+#: rather than the app guessing.
+#:
+#: THE COST, STATED: the plate loses 280 px of the 850 px design height. That is the trade this
+#: number is, and reversing it is this one literal. The splitter above the plate means the user can
+#: also take it back by dragging.
+_TOP_ROW_COMPACT_PX = 520
 
 
 # Pane 3's identity and label rules live in ``_explore`` (no Qt, no napari), and are re-exported
@@ -530,6 +542,7 @@ class PlateWindow(QMainWindow):
         self._worker = None           # the operator (MIP) run
         self._preview = None          # the raw preview fill on open
         self._minerva = None          # the Minerva export + Author launch (IMA-228)
+        self._minerva_render = None   # the render.py exhibit render, the no-file-picking path
         self._retired = []            # workers asked to stop; kept alive until they actually finish
         self._overview = None
         self._reader = None
@@ -575,7 +588,8 @@ class PlateWindow(QMainWindow):
         # controls like the powerpoint specified at each level"). Every window's "Operators for this
         # window" dropdown is the SAME registry + run_operator (the CLI engine), scoped to that view,
         # so "select where to run stitching" = pick the view, Run. Only runnable operators appear
-        # (minerva/Gallery View are terminals that stay on the root's stack).
+        # (minerva is a terminal that stays on the root's stack; Gallery View is a View-menu
+        # window-management command and was never an operator at all).
         self._viewer_manager.operator_specs = [
             (op.key, op.label) for op in _OPERATIONS if op.runnable]
         self._viewer_manager.run_operator = self.run_operator
@@ -708,18 +722,29 @@ class PlateWindow(QMainWindow):
         self._left_tabs.addTab(self._build_process_pane(), "Operators")
         self._left_tabs.tabBar().setTabButton(0, QTabBar.RightSide, None)  # home tab isn't closable
 
-        # THE ONE GLOBAL CONSOLE, AS A FIXED TAB (Task 1, 2026-07-29). It was a separate top-level
+        # THE ONE GLOBAL CONSOLE, STACKED UNDER THE OPERATORS RATHER THAN BEHIND THEM.
+        #
+        # 2026-07-29 Task 1 made it a FIXED TAB of `_left_tabs`. It had been a separate top-level
         # QMainWindow; Spencer logged that it "opens over the main window" on every launch, and the
-        # fix is not to position it but to stop it being a window. Julio: "making the logger global
-        # will force you to abstract the data layers cleanly" — a floating window per app is not
-        # what makes it global, ONE console printing every window's actions with an address is, and
-        # a fixed tab beside the operators is where the user already is. Fixed = never closable and
-        # never detachable: a console you can lose is not a console, and _FIXED_TABS below is what
-        # the close/detach paths check.
+        # fix chosen was not to position it but to stop it being a window. That decision was about
+        # WINDOW vs NOT-WINDOW. Tab vs stacked panel was never argued, and the tab bar is the only
+        # reason Operators and Log alternate instead of both being on screen.
+        #
+        # 2026-08-03, Julio, with a drawing: "I think that we should modify the layout of our main
+        # window" — Operator above, Log below, both visible, and the Log gains an option to open in
+        # a new window. So the panel comes OUT of the tab bar and goes into `_right_col`, the
+        # vertical splitter built with the layout further down. It was written for this: its own
+        # docstring calls it "the bottom-right log panel", and its collapse toggle and
+        # setMinimumWidth(0) are the machinery of a panel stacked under something else.
+        #
+        # THE INVARIANT THAT REPLACES `_FIXED_TABS = 2`, and it is what the tests pin: the panel
+        # exists for the life of the window and is reachable from View > Log in EVERY state —
+        # docked, collapsed or floated. What changes is where it is, never whether it is. Floating
+        # RELOCATES the console; nothing destroys it. That is why `_float_log`'s close handler
+        # re-docks instead of routing through `_dispose_tab_widget` the way an operator float does.
         self._log_panel = LogPanel(self._log_bus, self._activity)
         self._log_panel.start()
-        self._left_tabs.addTab(self._log_panel, "Log")
-        self._left_tabs.tabBar().setTabButton(1, QTabBar.RightSide, None)
+        self._log_panel.float_requested.connect(self._float_log)
 
         # PANE 3: the exploration pane. Same _DetachTabs class as the console (one detach seam, not
         # two), but every tab is detachable — it has no permanent home tab to protect.
@@ -891,29 +916,81 @@ class PlateWindow(QMainWindow):
 
         # THE ROOT IS JUST THE PLATE (decentralized, 2026-07-23). The central viewer and the
         # exploration pane are gone from the layout; the plate column IS the window. Selections
-        # open independent napari windows (the Views dock, added below), and the log is the fixed
-        # "Log" tab built with _left_tabs above — Julio: "the logger on the bottom of the GUI".
-        # This replaces the locked 3-pane grid that Spencer asked us to dismantle.
+        # open independent napari windows (the Views dock, added below), and the log sits UNDER the
+        # operators in `_right_col` — Julio: "the logger on the bottom of the GUI". This replaces
+        # the locked 3-pane grid that Spencer asked us to dismantle.
 
         # THE DECK LAYOUT (2026-07-23 image): ONE COMPACT PORTRAIT (h>w) window — a top row of two
-        # small panels [Open View list | Operators (bulk)] over a big Wellplate view below. NOT OS
+        # small panels [Open View list | Operators over Log] over a big Wellplate view below. NOT OS
         # docks spread across a wide window (that was wrong): the deck is a single tidy rectangle.
         from squidmip._region_viewer import OpenViewList
         self._open_views = OpenViewList(self._viewer_manager, self)
+
+        # THE RIGHT COLUMN IS A VERTICAL SPLIT: Operator on top, Log beneath (Julio's 2026-08-03
+        # drawing). Both visible at once, which is the whole request; the tab bar that made them
+        # alternate now carries only the Operators home tab and the user's detachable operator tabs.
+        #
+        # A SPLITTER, not a fixed 50/50 layout, for two reasons. The plate pays 280 px for this
+        # strip (see _TOP_ROW_COMPACT_PX) and a handle is how the user takes some of that back. And
+        # it is the drag affordance `_sync_top_row_height` existed to AVOID needing: that method
+        # grew the strip while the Log TAB was in front and shrank it afterwards, inferring intent
+        # from a tab selection. There is no tab selection now, and an automatic height swap would
+        # fight a user who has just dragged the boundary where they want it. It is deleted, not
+        # adapted.
+        #
+        # setChildrenCollapsible(False) IS THE INVARIANT IN CODE: a splitter will happily let you
+        # drag a child to zero, and a console dragged to zero is a console you have lost — exactly
+        # what `_FIXED_TABS` was protecting when the log was a tab. The pressure valve is the
+        # panel's own collapse toggle (`▸ Log`), which drops it to its header and hands the space
+        # to the operators without ever taking the console off screen.
+        right_col = QSplitter(Qt.Vertical)
+        right_col.setStyleSheet("QSplitter{background:#0b0e14;}"
+                                "QSplitter::handle{background:#232b3a;height:1px;}")
+        right_col.setHandleWidth(6)
+        right_col.setChildrenCollapsible(False)
+        right_col.addWidget(self._left_tabs)    # Operator, on top
+        right_col.addWidget(self._log_panel)    # Log, beneath
+        right_col.setStretchFactor(0, 3)
+        right_col.setStretchFactor(1, 2)
+        right_col.setSizes([300, 190])          # ~7 operator cards visible; ~14 log lines
+        self._right_col = right_col
 
         top_row = QSplitter(Qt.Horizontal)
         top_row.setStyleSheet("QSplitter{background:#0b0e14;}"
                               "QSplitter::handle{background:#232b3a;width:1px;}")
         top_row.addWidget(self._open_views)     # top-left: "Open View list 'selectable'"
-        top_row.addWidget(self._left_tabs)      # top-right: "Operators (bulk) to selection"
-        top_row.setSizes([280, 280])
+        top_row.addWidget(right_col)            # top-right: Operators over the one global console
+        # 280/280 -> 230/360. The navigator's contents are a tree of short window titles plus two
+        # buttons; the operator cards are the widget actually starved of width, and _qtstyle.py
+        # records that every blurb elides in the ~300 px it gets. Splitter sizes are hints, so this
+        # is a default and not a constraint.
+        top_row.setSizes([230, 360])
         top_row.setHandleWidth(6)
-        # The top row is a COMPACT strip — the plate is the star, not these two small panels. A
-        # fixed max height stops the operator cards' size hint from ballooning it into the "super
-        # thick" top that squashed the plate. Its OWN panels scroll inside this height.
-        top_row.setMaximumHeight(_TOP_ROW_COMPACT_PX)
         top_row.setMinimumHeight(150)
-        self._top_row = top_row     # _on_tab_changed grows it while the console is being read
+        self._top_row = top_row
+
+        # THE CAP GOES ON A PLAIN HOST, NOT ON THE SPLITTER, AND THAT IS A BUG FIX.
+        #
+        # `top_row.setMaximumHeight(_TOP_ROW_COMPACT_PX)` was here and DID NOT WORK.
+        # QSplitterPrivate::recalc calls setMaximumSize() on the splitter itself out of its
+        # children's maximums every time a child is added or its geometry changes, so it overwrites
+        # any cap set from outside. MEASURED on 83c486c, offscreen, a 596x850 window:
+        # `_top_row.maximumHeight()` reads 16777215 (QWIDGETSIZE_MAX) and the strip renders 479 px
+        # tall, not 240. The only thing that ever re-applied the cap was `_sync_top_row_height`
+        # firing on `currentChanged` — and the next recalc dropped it again.
+        #
+        # So the "compact strip, the plate is the star" rule has been decorative for some time, and
+        # deleting `_sync_top_row_height` would have removed the last thing touching it. A plain
+        # QWidget does not rewrite its own maximum, so the cap holds here for real. Its OWN panels
+        # scroll inside this height, which is what the original comment promised.
+        top_row_host = QWidget()
+        _th = QVBoxLayout(top_row_host)
+        _th.setContentsMargins(0, 0, 0, 0)
+        _th.setSpacing(0)
+        _th.addWidget(top_row)
+        top_row_host.setMaximumHeight(_TOP_ROW_COMPACT_PX)
+        top_row_host.setMinimumHeight(150)
+        self._top_row_host = top_row_host
 
         root = QWidget()
         root.setStyleSheet(f"background:{_BG};")
@@ -959,7 +1036,7 @@ class PlateWindow(QMainWindow):
         body.setStretchFactor(1, 2)
         self._body = body
 
-        rv.addWidget(top_row, 0)                # compact strip, keeps its height
+        rv.addWidget(top_row_host, 0)           # compact strip, keeps its height (capped for real)
         rv.addWidget(body, 1)                   # the Wellplate view + pane 3 fill the rest
         rv.addWidget(self._time_point_bar, 0)   # hidden unless n_t > 1
         self._split = top_row
@@ -998,13 +1075,31 @@ class PlateWindow(QMainWindow):
         self.setMinimumSize(420, 520)
         self.resize(*self._default_root_size())
 
-        # The console is a tab now, so the View menu RAISES it rather than toggling a window. Not
-        # checkable: there is no state to toggle, and a menu item that can hide the one global
-        # console would put the app back where Spencer found it.
+        # The View menu RAISES the console rather than toggling it. NEITHER action is checkable:
+        # there is no state to toggle, and a menu item that can HIDE the one global console would
+        # put the app back where Spencer found it. This menu is the other half of the invariant in
+        # `show_log` — the console is reachable from here whether it is docked, collapsed or
+        # floated, which is what makes "you cannot lose it" survive the log becoming floatable.
         view_menu = self.menuBar().addMenu("&View")
         self._log_act = QAction("&Log", self)
         self._log_act.triggered.connect(self.show_log)
         view_menu.addAction(self._log_act)
+        # Julio's drawing: "Log (option to open in a new window)". The panel's header carries the
+        # same gesture as a ⧉ button; this is the discoverable duplicate, and it doubles as the way
+        # back if the float is somehow off-screen (it raises rather than building a second). It sits
+        # DIRECTLY under "Log" because the two are one pair — where the console is, and where you
+        # would rather it were. The separator below keeps them from reading as a list with Gallery
+        # View, which is a different kind of thing entirely.
+        self._log_float_act = QAction("Log in a &New Window", self)
+        self._log_float_act.triggered.connect(self._float_log)
+        view_menu.addAction(self._log_float_act)
+        view_menu.addSeparator()
+        # Gallery View lives HERE, not in the Operators stack: it arranges WINDOWS, it does not
+        # transform pixels, so it is not gated on an acquisition either. See _open_gallery_view for
+        # what it does and does not yet do.
+        self._gallery_act = QAction("&Gallery View…", self)
+        self._gallery_act.triggered.connect(self._open_gallery_view)
+        view_menu.addAction(self._gallery_act)
 
         self.setAcceptDrops(True)
         if initial_path:
@@ -1063,10 +1158,11 @@ class PlateWindow(QMainWindow):
     def _build_process_pane(self) -> QWidget:
         """The Operators panel: JUST a scrollable list of operator blocks — no header, no footer
         (Julio, 2026-07-23). Each block opens that operator; operators apply to the plate SELECTION
-        (Cmd/Ctrl-A picks the whole plate). Minerva and Gallery View are here as the deck's terminal
-        operators. Status moved to the window status bar; the old 'run on' scope combo and the
-        raw/3D/MIP footer buttons are kept as hidden orphans so their many callers still resolve —
-        they migrate onto the operator tabs and the windows in the operator phase."""
+        (Cmd/Ctrl-A picks the whole plate). Minerva is here as the deck's terminal operator; Gallery
+        View is NOT (it arranges windows, see the View menu). Status moved to the window status bar;
+        the old 'run on' scope combo and the raw/3D/MIP footer buttons are kept as hidden orphans so
+        their many callers still resolve — they migrate onto the operator tabs and the windows in
+        the operator phase."""
         # Status line — tests and many methods read self._readout; it now lives in the status bar,
         # not as a pane header. Created here because _build_process_pane runs during __init__.
         self._readout = QLabel("Drop a Squid acquisition, then pick an operator.")
@@ -1095,20 +1191,17 @@ class PlateWindow(QMainWindow):
         sv.setContentsMargins(0, 0, 0, 0)
         sv.setSpacing(8)
         self._op_cards = {}
-        # TERMINAL operators on TOP of the stack (Julio, 2026-07-23: "I need minerva author and the
-        # gallery view to be on the top of the stack"). Gallery View first, then Minerva Author, then
-        # the processing operators. Gallery View is a button (gathers windows), Minerva is an
-        # Operation card; the rest follow in registry order, minus minerva (already placed).
-        gv = _operator_card("Gallery View",
-                            "Arrange the open viewer windows into a gallery")
-        gv.setEnabled(False)
-        gv.setCursor(Qt.PointingHandCursor)
-        gv.setStyleSheet(_CARD_QSS)
-        gv.setMinimumHeight(54)
-        gv.clicked.connect(self._open_gallery_view)
-        sv.addWidget(gv)
-        self._op_cards["galleryview"] = gv
-
+        # TERMINAL operator on TOP of the stack (Julio, 2026-07-23: "I need minerva author and the
+        # gallery view to be on the top of the stack"): Minerva Author, then the processing
+        # operators in registry order, minus minerva (already placed).
+        #
+        # GALLERY VIEW IS NOT HERE ANY MORE (Julio, 2026-08-02: "I guess I don't understand how
+        # this can be treated as an operator in bulk"). He is right, and it was a category error:
+        # an operator in this codebase is something the engine runs over regions to produce derived
+        # data, declared by a `consumes` frozenset -- and "arrange the open windows in a grid" eats
+        # no axis and produces no pixels. It was never in `_OPERATIONS`, but it sat in this stack
+        # with the same card, the same styling and the same `_enable_operators` gate, which is what
+        # made it read as one. It is a WINDOW-MANAGEMENT command, so it is a View-menu action now.
         _minerva = [op for op in _OPERATIONS if op.key == "minerva"]
         ordered = _minerva + [op for op in _OPERATIONS if op.key != "minerva"]
         for op in ordered:
@@ -1134,16 +1227,22 @@ class PlateWindow(QMainWindow):
         return pane
 
     def _open_gallery_view(self):
-        """Gallery View terminal operator (slide 2): "prepares a gallery view instance using the
-        selected Napari windows, with current views". The window-assembly lands with the operator
-        phase; for now report what it will gather so the block is never a silent dead control."""
+        """NOT IMPLEMENTED, and it says so. Slide 2 asks for "a gallery view instance using the
+        selected Napari windows, with current views"; nothing here arranges any window.
+
+        This is the whole of Gallery View: a status line. It never opened a gallery, and the old
+        copy ("N open window(s) WILL be arranged…") described a future, not this click, which is
+        how it came to be reported as a control that "doesn't open or do anything". It is also
+        ii.5's open problem (docs/SCOPE.md): the pipeline has no "result" type for a gallery to be
+        made of. Implementing it means reading hongquanli/gallery-view first, not writing a grid
+        layout here. Until then the honest thing is to name itself as unbuilt, in the console as
+        well as the status bar, rather than to report a plan in the present tense.
+        """
         n = len(self._viewer_manager.windows) if hasattr(self, "_viewer_manager") else 0
-        if n == 0:
-            self._readout.setText("Gallery View: open some viewer windows first, then gather them.")
-            return
-        self._readout.setText(
-            f"Gallery View: {n} open window(s) will be arranged into a gallery "
-            "(assembly lands with the operator phase).")
+        msg = (f"Gallery View is not implemented yet — {n} viewer window(s) are open and none of "
+               "them will be moved. Tracked as ii.5 in docs/SCOPE.md.")
+        self._readout.setText(msg)
+        self.log.info("%s", msg)
 
     def _open_native_3d(self):
         """Popout napari 3D on the current region's centre FOV at native resolution (gallery-view
@@ -1303,25 +1402,107 @@ class PlateWindow(QMainWindow):
             self._sync_explore_pane()
         tabs.setCurrentWidget(w)
 
-    #: How many tabs at the head of the process console are FIXED: [0] Operators, [1] Log. They
-    #: cannot close and cannot detach, so their indices never move and a plain `index < _FIXED_TABS`
-    #: is a sound test. The log is fixed because it is THE one global console (Task 1): a console
-    #: the user can close is a console that is missing when the thing worth reading happens.
-    _FIXED_TABS = 2
+    #: How many tabs at the head of the process console are FIXED: [0] Operators. It cannot close
+    #: and cannot detach, so the indices above it never move and a plain `index < _FIXED_TABS` is a
+    #: sound test. It was 2 while the Log was tab [1]; the Log is now a sibling panel in
+    #: `_right_col` and is protected by being always on screen instead of by this counter. Note
+    #: `_DetachTabBar(first_detachable=1)` already agreed with 1.
+    _FIXED_TABS = 1
+
+    #: Registry key for the floated log in `_floating`. Not an entry in `_op_tabs`: the log is not
+    #: an operator UI and must never be routed through `_dispose_tab_widget`, which deletes.
+    _LOG_FLOAT_KEY = "__log__"
 
     def show_log(self) -> None:
-        """Bring the one global console to the front. The View menu's action, and the call any
-        code should make instead of reaching for a window that no longer exists."""
+        """Bring the one global console to the front, wherever it currently is.
+
+        THE INVARIANT: the panel exists for the life of the window and is reachable from View > Log
+        in every state — docked, collapsed or floated. This is the method that makes that true, so
+        it has to answer for all three:
+
+        * floated  -> raise and activate its window;
+        * collapsed -> expand it;
+        * docked   -> make sure the strip is showing it (it always is: it is a splitter child that
+          cannot be collapsed to zero).
+
+        It used to end in ``_left_tabs.setCurrentWidget(panel)``, which was the whole of it while
+        the log was a tab. There is no tab to select now.
+        """
         panel = getattr(self, "_log_panel", None)
         if panel is None:
             return
+        win = self._floating.get(self._LOG_FLOAT_KEY)
+        if win is not None:
+            if panel.collapsed:
+                panel.set_collapsed(False)
+            win.show()
+            win.raise_()
+            win.activateWindow()
+            return
         if panel.collapsed:
             panel.set_collapsed(False)
-        self._left_tabs.setCurrentWidget(panel)
+        panel.setVisible(True)
+
+    # -- the console in a window of its own (Julio: "Log (option to open in a new window)") --------
+    def _float_log(self):
+        """Open the one global console in its own window, and give it back on Re-dock.
+
+        THIS PARTLY REVERSES 2026-07-29 Task 1, deliberately, and the difference is the whole
+        justification. The `_log_window` that was deleted was constructed and shown on EVERY
+        launch, which is why Spencer saw it "open over the main window" every time. This is a user
+        gesture on an always-present panel: docked by default, a window only when asked for.
+
+        It reuses `_FloatWindow` rather than hand-rolling a second float, which matters: the old
+        `_log_window` was one of the four widgets handed a Python-owned Fusion QStyle that ~QWidget
+        then unpolished after GC (the segfault pinned by tests/test_window_lifetime.py), and
+        `_FloatWindow` explicitly refuses that style for that reason (_qt_tabs.py:94-97). The
+        hazard is fixed AT THE SEAM a new float uses, not merely absent.
+
+        Its close handler RE-DOCKS. An operator float's close disposes the widget through
+        `_dispose_tab_widget`; doing that to the console would delete a live sink on the
+        process-wide root logger and lose it for good, which is the one outcome that would make
+        this the wrong call.
+        """
+        panel = getattr(self, "_log_panel", None)
+        if panel is None:
+            return None
+        win = self._floating.get(self._LOG_FLOAT_KEY)
+        if win is not None:                     # already out: raise it, never build a second
+            win.raise_()
+            win.activateWindow()
+            return win
+        if panel.collapsed:
+            panel.set_collapsed(False)          # a floated console that shows only its header is a
+                                                # window with nothing in it
+        key = self._LOG_FLOAT_KEY
+        win = _FloatWindow("Log", panel,
+                           on_close=lambda *_: self._redock_log(),
+                           on_redock=lambda *_: self._redock_log())
+        win._home_tabs = None                   # it has no tab bar to go home to; _redock_log knows
+        self._floating[key] = win
+        win.show()
+        return win
+
+    def _redock_log(self):
+        """Put the console back in `_right_col`, under the operators. Idempotent."""
+        win = self._floating.pop(self._LOG_FLOAT_KEY, None)
+        if win is None:
+            return
+        panel = win.take_content()              # the SAME widget: the log's scrollback survives
+        win.close()
+        win.deleteLater()
+        if panel is None:
+            return
+        col = getattr(self, "_right_col", None)
+        if col is None:                         # no layout to return to (never in a built window)
+            return
+        col.addWidget(panel)                    # index 1: _left_tabs is still index 0
+        panel.setVisible(True)
+        col.setSizes([300, 190])
 
     def _close_op_tab(self, index: int, tabs=None):
         tabs = self._left_tabs if tabs is None else tabs
-        if index < self._FIXED_TABS and tabs is self._left_tabs:   # Operators + Log: never closable
+        if index < self._FIXED_TABS and tabs is self._left_tabs:   # the Operators home tab
             return
         w = tabs.widget(index)
         tabs.removeTab(index)
@@ -1358,7 +1539,7 @@ class PlateWindow(QMainWindow):
         IMA-209's callers and tests are unchanged."""
         tabs = self._left_tabs if tabs is None else tabs
         if index < self._FIXED_TABS and tabs is self._left_tabs:
-            return None                      # Operators + Log are fixed: neither detaches
+            return None                      # the Operators home tab is fixed: it never detaches
         if index < 0:
             return None
         w = tabs.widget(index)
@@ -1568,6 +1749,36 @@ class PlateWindow(QMainWindow):
         self._run_units = report
         self._run_readout(f"● {report.sentence()}{self._run_dest}")
         self._tell_requester(self._run_requester, "operator_progress", report)
+        # ...and to the ONE bar next to the memory bar, which is where Julio asked to see a run
+        # WHEREVER it was started from ("in bulk or in a specific window"). The requester above is
+        # told only when the run came from a region window; this covers both, and the preview.
+        self._publish_progress(report)
+
+    def _publish_progress(self, report) -> None:
+        """Hand a ``ProgressReport`` (or None for idle) to the window navigator's work bar.
+
+        Routed through the ViewerManager rather than reaching into ``self._open_views`` because the
+        manager is the thing that outlives the navigator widget: the panel can be closed and rebuilt,
+        and a producer must not have to know whether it currently exists.
+        """
+        mgr = getattr(self, "_viewer_manager", None)
+        if mgr is not None:
+            mgr.set_run_progress(report)
+
+    def _clear_progress_if_idle(self) -> None:
+        """Take the work bar down, but ONLY once nothing is left running.
+
+        Asked on every worker's ``finished``, and both questions are needed. ``operator_busy``
+        deliberately does not count the raw preview (it opts out with ``IS_PREVIEW``, see
+        ``_explore.operator_busy``), so an operator run ending while a preview is still filling the
+        plate would otherwise hide a bar that has live work behind it.
+        """
+        if _explore.operator_busy(self._worker, self._retired):
+            return
+        preview = getattr(self, "_preview", None)
+        if preview is not None and preview.isRunning():
+            return
+        self._publish_progress(None)
 
     @staticmethod
     def _tell_requester(requester, method: str, *args) -> None:
@@ -1683,25 +1894,13 @@ class PlateWindow(QMainWindow):
         if self._reader is not None:
             self._return_to_raw()
 
-    def _sync_top_row_height(self) -> None:
-        """Give the top strip room while the Log tab is in front, and take it back afterwards.
-
-        The strip is capped at ``_TOP_ROW_COMPACT_PX`` because the plate is the star. But the one
-        global console lives in that strip now, and 240 px is roughly ten lines, which is a status
-        light rather than a log. Selecting the Log tab is the user saying they are reading it, so it
-        earns ``_TOP_ROW_READING_PX`` for as long as that is true.
-
-        Deliberately not a remembered setting and not a drag handle. It follows the tab, so there is
-        no state to get stuck in a shape the user did not ask for, which is the failure mode the
-        placement-mode indicator elsewhere guards against for the same reason.
-        """
-        row = getattr(self, "_top_row", None)
-        tabs = getattr(self, "_left_tabs", None)
-        panel = getattr(self, "_log_panel", None)
-        if row is None or tabs is None or panel is None:
-            return
-        reading_log = tabs.currentWidget() is panel
-        row.setMaximumHeight(_TOP_ROW_READING_PX if reading_log else _TOP_ROW_COMPACT_PX)
+    # `_sync_top_row_height` WAS HERE, and it is deleted rather than adapted (2026-08-03). It swung
+    # the strip's cap between 240 and 520 px while the Log TAB was in front, inferring "the user is
+    # reading the console" from a tab selection. The log is no longer a tab, so there is nothing
+    # left to read the intent from — and its own docstring said it was "deliberately not a
+    # remembered setting and not a drag handle", which is precisely what `_right_col`'s splitter
+    # handle now is. 520 is the single cap (see `_TOP_ROW_COMPACT_PX`) and the boundary between
+    # Operator and Log is dragged, not guessed.
 
     def _on_tab_changed(self, index: int = -1, force: bool = False):
         """The plate + detail follow the ACTIVE tab (IMA-205).
@@ -1715,8 +1914,9 @@ class PlateWindow(QMainWindow):
         dropping it is what left the front tab lying about what the viewer shows (BUG 2), because
         nothing re-emits ``currentChanged`` when the run later drains.
 
-        It also sizes the top strip: see ``_sync_top_row_height``. Reading the console and working
-        the plate want different amounts of room, and the tab you selected says which you are doing.
+        It used to size the top strip too (``_sync_top_row_height``, deleted 2026-08-03): the Log
+        was a tab, so the tab you selected said whether you were reading the console or working the
+        plate. Both are on screen at once now and the boundary is a splitter handle.
 
         ``force=True`` re-runs the sync from ``_on_run_drained`` even when there is no outgoing
         exploration tab to park — after a mid-run tab close there ISN'T one, and that is precisely
@@ -1726,7 +1926,6 @@ class PlateWindow(QMainWindow):
         viewer. Computed frames pushed via register_array are in-memory and do not survive the
         switch; we re-register the subset's RAW plane paths (cheap — paths only) so the pane shows
         real imagery rather than black. Re-run the operator in the tab to recompute its frames."""
-        self._sync_top_row_height()
         if self._reader is None or self._overview is None or self._tabs_muted:
             return
         if _explore.operator_busy(self._worker, self._retired):
@@ -1815,6 +2014,10 @@ class PlateWindow(QMainWindow):
         Fires on QThread.finished, so it also covers a run that was STOPPED (closing a tab mid-run)
         — ``_stop_worker`` returns immediately but the thread keeps going until its current well is
         done, and ``_busy()`` stays True for all of that window."""
+        # The work bar comes down here and not on ``finished_ok``, for the reason the console pair
+        # below is closed here: this slot fires on ok, failed and STOPPED alike, and a bar that is
+        # only taken down on success is a bar left running over a dead run.
+        self._clear_progress_if_idle()
         if _explore.operator_busy(self._worker, self._retired):
             return                       # another operator run is still draining — wait for it
         # No operator run is in flight now — clear the activity header. end() is a no-op if it was
@@ -1906,6 +2109,11 @@ class PlateWindow(QMainWindow):
 
     def _build_mip_tab(self) -> QWidget:
         return self._build_run_tab(_OPERATIONS_BY_KEY["mip"])
+
+    def _build_reference_tab(self) -> QWidget:
+        # The other z-reduction. `_build_run_tab` is ONE builder for every z-reducer, so the
+        # focus-reference-plane operator needs no tab code of its own -- only this hand-off.
+        return self._build_run_tab(_OPERATIONS_BY_KEY["reference"])
 
     def _build_stitch_tab(self) -> QWidget:
         """maragall/stitcher's control surface, in pane 1 (IMA-decon-stitch-ui).
@@ -2460,9 +2668,10 @@ class PlateWindow(QMainWindow):
         op = _OPERATIONS_BY_KEY["minerva"]
         w, v = self._op_tab_shell(
             op.label,
-            "Writes an OME-TIFF plus a Minerva story for every selected FOV, then starts Minerva "
-            "Author. Minerva has no deep link, so pick the .story.json below in its “Select File” "
-            "dialog — the colours and contrast are already applied.",
+            "Writes an OME-TIFF plus a Minerva story for every selected region, then starts "
+            "Minerva Author. Author’s editor cannot be pointed at a file, so pick the .story.json "
+            "below in its “Select File” dialog - the colours and contrast are already applied. "
+            "To skip that step entirely, render a viewer instead (button below the paths).",
         )
         state = {"dir": None, "pairs": []}
 
@@ -2479,6 +2688,21 @@ class PlateWindow(QMainWindow):
         proj.setCurrentText("mip")
         row.addWidget(proj); row.addStretch(1)
 
+        # "channels need to be set to specific colors" - the colours ON SCREEN, which the export's
+        # own defaults (acquisition display_color + 1/99.9 percentiles) do not know about. Checked
+        # by default because matching what you are looking at is the request; harmless with no view
+        # open, because on_screen_luts() returns None there and the defaults apply unchanged.
+        luts_cb = QCheckBox("Match the LUTs of the focused view window")
+        luts_cb.setStyleSheet(_CHECK_QSS)
+        luts_cb.setChecked(True)
+        luts_cb.setToolTip(
+            "Use the contrast and colour you have on screen in the focused view window instead of "
+            "the acquisition's channel colours and an automatic 1/99.9 percentile stretch.\n\n"
+            "With no view window open there is nothing on screen to match and the automatic "
+            "values are used. A channel that is not in that window keeps the automatic values "
+            "too, and so does a channel showing a multi-stop colormap (viridis, turbo): Minerva "
+            "stores one colour per channel and cannot hold a gradient.")
+
         launch_cb = QCheckBox("Open Minerva Author after exporting")
         launch_cb.setStyleSheet(_CHECK_QSS)
         launch_cb.setChecked(True)
@@ -2489,6 +2713,21 @@ class PlateWindow(QMainWindow):
         path_lbl.setStyleSheet("color:#8b98ad;font-size:11px;")
         copy_btn = QPushButton("Copy story path"); copy_btn.setStyleSheet(_BTN_QSS); copy_btn.hide()
         reveal_btn = QPushButton("Show in folder"); reveal_btn.setStyleSheet(_BTN_QSS); reveal_btn.hide()
+        # THE ZERO-CLICK DESTINATION. A separate button and not a replacement for the Author
+        # launch: Author is the EDITOR (waypoints, story text, masks) and needs its Select File
+        # click because its server has no route, flag or URL that opens a file; render.py is the
+        # VIEWER and needs none. Julio said "viewer". Both are offered; neither is assumed.
+        render_btn = QPushButton("Render a Minerva viewer (no file picking)")
+        render_btn.setStyleSheet(_BTN_QSS); render_btn.hide()
+        render_btn.setToolTip(
+            "Runs Minerva's own render.py on what you just exported and opens the finished "
+            "exhibit. No Select File step.\n\n"
+            "It is a viewer, not an editor: no waypoints, story text or masks.\n"
+            "It writes a JPEG pyramid, so it is lossy; the OME-TIFF is untouched.\n"
+            "Measured on this machine: about 2 s for a 2048x2048 4-channel crop and about "
+            "132 s for a whole 11535x9635 4-channel region, plus about 13 s once per session "
+            "while Minerva's renderer loads.\n"
+            + _MINERVA_INTERNET_NOTE)
 
         def pick():
             d = QFileDialog.getExistingDirectory(self, "Save the Minerva export to folder")
@@ -2502,7 +2741,11 @@ class PlateWindow(QMainWindow):
             if not pairs:
                 return
             path_lbl.setText("\n".join(str(story) for _, story in pairs))
-            copy_btn.show(); reveal_btn.show()
+            copy_btn.show(); reveal_btn.show(); render_btn.show()
+
+        def do_render():
+            if state["pairs"]:
+                self.run_minerva_render(state["pairs"])
 
         def do_copy():
             if state["pairs"]:
@@ -2520,13 +2763,20 @@ class PlateWindow(QMainWindow):
         run.clicked.connect(lambda: self.run_minerva_export(
             out_dir=state["dir"], projector=proj.currentText(),
             launch=launch_cb.isChecked(), on_exported=on_exported,
+            luts=self.on_screen_luts() if luts_cb.isChecked() else None,
         ))
         copy_btn.clicked.connect(do_copy)
         reveal_btn.clicked.connect(do_reveal)
+        render_btn.clicked.connect(do_render)
+
+        net_lbl = QLabel(_MINERVA_INTERNET_NOTE)
+        net_lbl.setWordWrap(True)
+        net_lbl.setStyleSheet("color:#8b98ad;font-size:11px;")
 
         v.addWidget(pick_btn); v.addWidget(dir_lbl)
-        v.addLayout(row); v.addWidget(launch_cb); v.addWidget(run)
+        v.addLayout(row); v.addWidget(luts_cb); v.addWidget(launch_cb); v.addWidget(run)
         v.addWidget(_hline()); v.addWidget(path_lbl); v.addWidget(copy_btn); v.addWidget(reveal_btn)
+        v.addWidget(render_btn); v.addWidget(net_lbl)
         v.addStretch(1)
         run.setEnabled(self._reader is not None)
         return w
@@ -2570,13 +2820,47 @@ class PlateWindow(QMainWindow):
             return expand([self._current_well])
         return []
 
+    def on_screen_luts(self) -> "Optional[dict]":
+        """The per-channel LUTs of the view window the user is looking at, or ``None``.
+
+        "Channels need to be set to specific colors" means the colours ON SCREEN, and the plate
+        does not have them: the export's own defaults are the acquisition's ``display_color`` plus
+        1/99.9 percentiles, neither of which knows that the user recoloured a layer or dragged a
+        contrast slider. A :class:`RegionViewer` does know - ``_per_channel_luts`` reads it back
+        off the napari layers - so this is the one hop from that window to the exporter.
+
+        WHICH window: the manager's focused one, which is the window whose regions the plate is
+        already highlighting (``viewFocused``) and the one the navigator shows as current. Picking
+        "the first open window" instead would silently follow a window the user is not looking at.
+
+        ``None`` when there is no view open, no focused window, or that window has no layers yet - 
+        and ``None`` is not a failure. It is the plate-level export, and the percentile defaults
+        are the right answer for it precisely because there is no screen to match.
+        """
+        mgr = getattr(self, "_viewer_manager", None)
+        if mgr is None:
+            return None
+        try:
+            wid = mgr.focused_id()
+            win = next((w for w in mgr.windows() if getattr(w, "window_id", None) == wid), None)
+            if win is None:
+                return None
+            luts = win._per_channel_luts()
+        except Exception:                     # noqa: BLE001 - a window mid-teardown is not an error
+            return None
+        return luts or None
+
     def run_minerva_export(self, out_dir=None, projector: str = "mip", launch: bool = True,
-                           on_exported=None, t: int = 0, selection=None):
+                           on_exported=None, t: int = 0, selection=None, luts=None):
         """Export the user's selection for Minerva Author and (optionally) open it.
 
         Runs off the GUI thread: projecting a well is real I/O plus compute, and starting
         Minerva Author polls a port for up to 90 s. Tests call this directly with launch=False.
-        *selection* overrides :meth:`minerva_selection` (tests and future callers).
+        *selection* overrides :meth:`minerva_selection` (tests and future callers). *luts* is
+        passed straight through to ``export_selection``: ``None`` means the percentile defaults,
+        exactly as before this parameter existed. Deciding whether to match the screen belongs to
+        the caller (the Minerva tab's checkbox calls :meth:`on_screen_luts`), not here - so this
+        method has no opinion and stays trivially testable in both states.
         """
         if self._reader is None or self._meta is None:
             self._readout.setText("open an acquisition first")
@@ -2599,12 +2883,18 @@ class PlateWindow(QMainWindow):
         n_t = self._meta.get("n_t", 1) or 1
         t_note = f" (t={t} of {n_t})" if n_t > 1 else ""
         self._minerva = w = _MinervaWorker(
-            self._reader, sel, out_dir, projector, t=t, launch=launch)
+            self._reader, sel, out_dir, projector, t=t, launch=launch, luts=luts)
 
         def on_launched(ok):
             if ok:
+                # The URL is named and not just implied. Exactly ONE tab is opened now (Minerva
+                # Author opens its own on a cold start, so we no longer open a second), and the
+                # one way that leaves the user with none is Author's webbrowser call failing to
+                # find a browser - in which case it returns False, the server serves anyway, and
+                # this line is the address to paste.
                 self._readout.setText(
-                    f"✓ Minerva Author open — pick a .story.json ({what}{t_note} exported)")
+                    f"✓ Minerva Author open at {_MINERVA_URL} - pick a .story.json "
+                    f"({what}{t_note} exported)")
             else:
                 self._readout.setText(
                     f"✓ exported {what}{t_note} — Minerva Author not found "
@@ -2629,6 +2919,47 @@ class PlateWindow(QMainWindow):
         w.launched.connect(on_launched)
         w.failed.connect(lambda m: self._readout.setText(f"Minerva export failed: {m}"))
         self._readout.setText(f"● Minerva export · {what}{t_note} …")
+        w.start()
+
+    def run_minerva_render(self, pairs, threads=None, open_when_done: bool = True):
+        """Render exported ``(ome, story)`` pairs into Minerva exhibits and open the first one.
+
+        The zero-click destination. ``run_minerva_export`` hands the user to Minerva Author, which
+        cannot be pointed at a file and so still needs its "Select File" click; this hands them a
+        finished, already-coloured Minerva VIEWER instead. Both exist because they are different
+        programs: Author edits, ``render.py`` renders. See
+        :func:`squidmip._minerva.render_exhibit` for the costs, which are real and measured.
+
+        Runs off the GUI thread. A render is minutes, not seconds.
+        """
+        if not pairs:
+            self._readout.setText("export something first - there is nothing to render")
+            return
+        if getattr(self, "_minerva_render", None) is not None and self._minerva_render.isRunning():
+            self._readout.setText("already rendering - let the current render finish first")
+            return
+        n = len(pairs)
+        self._minerva_render = w = _MinervaRenderWorker(pairs, threads=threads)
+
+        def on_rendered(indexes):
+            if not indexes:
+                return                       # `failed` says why; an empty success is not a message
+            note = "" if len(indexes) == n else f" of {n}"
+            if open_when_done:
+                from squidmip._minerva import open_exhibit
+                open_exhibit(indexes[0])
+            self._readout.setText(
+                f"✓ rendered {len(indexes)} Minerva viewer{'s' if len(indexes) != 1 else ''}{note} "
+                f"→ {Path(indexes[0]).parent}. {_MINERVA_INTERNET_NOTE}")
+
+        w.progress.connect(
+            lambda d, tot: self._readout.setText(f"● Minerva render · {d}/{tot} exhibits"))
+        w.rendered.connect(on_rendered)
+        # Named in the status line, because render.py runs as a script under a FOREIGN venv: its
+        # failure is an exit code plus stderr, and if we do not print it nothing does.
+        w.failed.connect(lambda m: self._readout.setText(f"Minerva render failed: {m}"))
+        self._readout.setText(
+            f"● Minerva render · {n} exhibit{'s' if n != 1 else ''} - this takes minutes …")
         w.start()
 
     def _build_layers_tab(self) -> QWidget:
@@ -2987,12 +3318,8 @@ class PlateWindow(QMainWindow):
 
         # fast RAW preview: fill the plate with downsampled thumbnails immediately (grey dots),
         # in the SAME row-major order the operator will later process them in.
-        self._preview = _PreviewWorker(reader, meta, self._fov_index, order)
-        self._preview_order = list(order)
-        self._preview.tileReady.connect(self._on_preview_tile)
-        self._preview.streamEnded.connect(lambda: self._recomposite("raw"))
-        self._preview.failed.connect(self._on_preview_failed)
-        self._preview.start()   # (the detail already landed on order[0] via _setup_raw_detail)
+        self._start_preview(reader, meta, order)   # (the detail already landed on order[0] via
+        #                                             _setup_raw_detail)
         # top-left = STATUS (what's happening / what's shown); the plate name is the pane title.
         # "live" is retired from user-facing copy: this is POST-ACQUISITION review, and calling
         # a loaded plate "live" reads as a running scope. The phrasing is operator/stitcher
@@ -3500,8 +3827,50 @@ class PlateWindow(QMainWindow):
         sub = getattr(mosaic, "on_user_op", None)            # same slot-abort hazard as above
         if callable(sub):
             sub(_op_sink)
+        # ...and PULL what this window has ALREADY resolved. No sink can ever report it.
+        self._adopt_window_view(mosaic, index_of)
         bound.add(wid)
         self._napari_contrast_bound = True
+
+    def _adopt_window_view(self, mosaic, index_of):
+        """Take the LUT a window is ALREADY showing, at the moment the plate starts following it.
+
+        ``_adopt_centre_view`` below does exactly this and CANNOT RUN. It is gated on
+        ``self._mosaic_pane``, which the decentralization pinned to ``None`` permanently (see the
+        "NO CENTRAL VIEWER" note in ``__init__``) and never assigns again -- so the fix that method
+        carries, written for Julio's "Look at contrast difference between napari window and plate
+        view", was orphaned the day the central pane was removed. The plate went back to painting
+        from its own running histogram while every spawned window painted from napari's autoscale,
+        and nothing said so.
+
+        An EVENT tells you about a CHANGE; the initial state is not a change. ``on_user_contrast``
+        deliberately filters napari's own autoscale out (treating it as a user gesture is what
+        latched every channel MANUAL and killed the plate's auto-contrast the first time), so the
+        one moment that matters most -- the window a region comes up with -- is the one moment no
+        sink can report. This pulls it instead, per WINDOW rather than per central pane, and lands
+        in the FOLLOW path, not the manual latch.
+
+        Every read is capability-checked for the same reason the subscriptions above are: this
+        runs from a Qt slot, and an unhandled exception escaping one aborts the process.
+        """
+        if self._overview is None or self._meta is None:
+            return
+        get_window = getattr(mosaic, "contrast", None)
+        get_rgb = getattr(mosaic, "channel_rgb", None)
+        get_visible = getattr(mosaic, "channel_visible", None)
+        for c in self._meta.get("channels", []):
+            ch = index_of(c["name"])
+            if ch is None:
+                continue                     # a channel this window draws and the plate does not
+            window = get_window(c["name"]) if callable(get_window) else None
+            if window is not None:
+                self._on_detail_contrast(ch, float(window[0]), float(window[1]))
+            rgb = get_rgb(c["name"]) if callable(get_rgb) else None
+            if rgb is not None:
+                self._overview.set_channel_color(ch, rgb)
+            visible = get_visible(c["name"]) if callable(get_visible) else None
+            if visible is not None:
+                self._overview.set_channel_visible(ch, bool(visible))
 
     def _follow_window_layer(self, layer_key: str, on: bool) -> None:
         """A window showed or hid a processing layer: put the plate on the same one.
@@ -3646,12 +4015,7 @@ class PlateWindow(QMainWindow):
         # opened: the slider showed only the well that had already loaded.
         if getattr(self, "_preview", None) is not None and order != getattr(self, "_preview_order", None):
             self._stop_preview()
-            self._preview = _PreviewWorker(reader, meta, self._fov_index, order)
-            self._preview_order = list(order)
-            self._preview.tileReady.connect(self._on_preview_tile)
-            self._preview.streamEnded.connect(lambda: self._recomposite("raw"))
-            self._preview.failed.connect(self._on_preview_failed)
-            self._preview.start()
+            self._start_preview(reader, meta, order)
         self._pushed = set()
         # The raw slider is 1:1 with `order`, so pushes must map into THAT, not the plate index.
         # Identity when the slider IS the whole plate; a subset map otherwise.
@@ -3706,12 +4070,7 @@ class PlateWindow(QMainWindow):
         # resume the raw thumbnail fill — the operator run stopped the preview partway, so re-run it to
         # finish downsampling every well's raw tile (idempotent: it just re-renders the raw layer).
         self._stop_preview()
-        self._preview = _PreviewWorker(self._reader, self._meta, self._fov_index, self._order)
-        self._preview_order = list(self._order)
-        self._preview.tileReady.connect(self._on_preview_tile)
-        self._preview.streamEnded.connect(lambda: self._recomposite("raw"))
-        self._preview.failed.connect(self._on_preview_failed)
-        self._preview.start()
+        self._start_preview(self._reader, self._meta, self._order)
         self._readout.setText("raw view")
 
     def _open_computed(self):
@@ -3944,8 +4303,9 @@ class PlateWindow(QMainWindow):
             self._readout.setText("already processing — let the current run finish first")
             return
         # IMA-226: gate on the ENGINE registry, not on the card table. `_OPERATIONS_BY_KEY[key]`
-        # raised a bare KeyError for `reference` (a registered projector with no card) and let
-        # `minerva` (a card that is not an operator) through to die inside the engine instead.
+        # raised a bare KeyError for a registered projector with no card (`reference` then, `spot`
+        # and `decon3d` now) and let `minerva` (a card that is not an operator) through to die
+        # inside the engine instead.
         # Refuse BY NAME here, in the readout, the same way an unknown region is refused below.
         if key not in runnable_operators():
             self._readout.setText(
@@ -4264,6 +4624,31 @@ class PlateWindow(QMainWindow):
         """The raw preview aborted before it finished. Name it in the status line instead of
         leaving a half-grey plate that looks identical to one still loading."""
         self._readout.setText(f"the raw preview could not finish: {message}")
+
+    def _start_preview(self, reader, meta, order):
+        """Start the raw preview over *order*, fully wired. THE only place a preview is built.
+
+        Extracted because there were three byte-identical five-line copies of this (first ingest,
+        the tab re-scope, and the return-to-raw resume), and the progress wiring below had to land
+        on all three or the bar would appear on some entry paths and not others — the "wired on one
+        of N call sites" defect that made the stdout capture look like a partial integration in the
+        first place. One constructor, one set of connections, no third chance to disagree.
+        """
+        self._preview = _PreviewWorker(reader, meta, self._fov_index, order)
+        self._preview_order = list(order)
+        self._preview.tileReady.connect(self._on_preview_tile)
+        self._preview.streamEnded.connect(lambda: self._recomposite("raw"))
+        self._preview.failed.connect(self._on_preview_failed)
+        # The preview reports on the SAME channel an operator run does, so the one bar covers it
+        # ("even if it's preview"). Published straight through: the plate window is only a relay
+        # here, because the preview has no status line or side-pane tab of its own to feed.
+        self._preview.runProgress.connect(self._publish_progress)
+        # QThread.finished, not streamEnded: at streamEnded the thread is still running, so
+        # _clear_progress_if_idle would see it and decline. This also covers the failed and the
+        # stopped preview, which never reach streamEnded at all.
+        self._preview.finished.connect(self._clear_progress_if_idle)
+        self._preview.start()
+        return self._preview
 
     def _on_tile(self, ri, ci, well_id, tile, box=None):
         """A field landed. ``box`` is None for the single-tile producers (_ComputedPlateWorker emits
@@ -5027,6 +5412,12 @@ class PlateWindow(QMainWindow):
     def _stop_minerva(self):
         self._retire(self._minerva)
         self._minerva = None
+        # The render worker is retired here too and not on its own line: it is the same feature and
+        # it is the LONGER of the two (a measured 132 s for one real region against an at-most 90 s
+        # port poll), so a close that abandons the launch wait but not the render would still hold
+        # the window for two minutes. Its stop() terminates the child render.py process.
+        self._retire(getattr(self, "_minerva_render", None))
+        self._minerva_render = None
 
     def _join_retired(self, msec: int = 3000) -> None:
         """WAIT for every deferred worker, at the one moment deferring is not allowed: teardown.
@@ -5124,6 +5515,18 @@ class PlateWindow(QMainWindow):
         ov = getattr(self, "_overview", None)
         if ov is not None:
             ov.clear_tile_source()   # joins the tile fetcher; a live QThread blocks a clean exit
+        # The console float first, and NOT through the loop below: that loop disposes each float's
+        # content, and disposing the log panel would delete a widget `panel.stop()` is about to be
+        # called on. Re-docking returns it to `_right_col`, where it is destroyed with the window
+        # like any other child. It is a no-op when the log is not floated.
+        #
+        # NOTE for to-do/2026-08-03-window-lifetime-design.md, which has not decided whether child
+        # windows outlive the plate: floats are ALREADY swept here, unlike RegionViewers, so the log
+        # float lands on the safe side today by construction. If that document later chooses
+        # "windows are peers that outlive the plate", the log float must be explicitly excluded —
+        # the panel is a live sink on the process-wide root logger and the bus is uninstalled a few
+        # lines below, so a surviving log window would be a console attached to nothing.
+        self._redock_log()
         for key in list(self._floating):   # floated tabs are top-levels of their own — Qt won't
             win = self._floating.pop(key)  # close them for us, and each may hold a live shell
             w = win.take_content()

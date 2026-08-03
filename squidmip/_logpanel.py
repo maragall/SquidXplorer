@@ -114,6 +114,13 @@ class LogPanel(QWidget):
     before the window has wired the buses).
     """
 
+    #: "Log (option to open in a new window)" (Julio, 2026-08-03). The panel only NOTICES the
+    #: gesture; who owns the window and how it comes back is PlateWindow's policy (`_float_log` /
+    #: `_redock_log`), exactly as `_DetachTabBar` notices a drag and `_detach_tab` decides what it
+    #: means. Unconnected, the button is inert rather than broken — the panel is constructed bare in
+    #: tests and in the layout before the window has wired anything.
+    float_requested = Signal()
+
     def __init__(self, bus: Optional[LogBus] = None, activity: Optional[ActivityLog] = None,
                  *, level: int = DEFAULT_LEVEL, max_lines: int = MAX_LINES,
                  start_collapsed: bool = False, parent=None) -> None:
@@ -168,6 +175,20 @@ class LogPanel(QWidget):
         self._mem_lbl.setStyleSheet(
             f"color:{_MUTED};font-family:{_MONO};font-size:11px;background:transparent;")
         hl.addWidget(_shrinkable(self._mem_lbl))
+
+        # "Log (option to open in a new window)". BOTH lines are f-strings, so each `}}` collapses
+        # to one `}` — see the long note on `self._toggle` above for what a stray second brace
+        # costs (Qt fails to parse the WHOLE sheet, leaves the button unstyled, and warns on every
+        # repolish under a label that blames vispy).
+        self._float_btn = QPushButton("⧉")
+        self._float_btn.setFlat(True)
+        self._float_btn.setCursor(Qt.PointingHandCursor)
+        self._float_btn.setToolTip("Open the log in a new window")
+        self._float_btn.setStyleSheet(
+            f"QPushButton{{color:#c3ccd9;border:none;background:transparent;"
+            f"font-family:{_MONO};font-size:11px;}}")
+        self._float_btn.clicked.connect(lambda *_: self.float_requested.emit())
+        hl.addWidget(self._float_btn)
 
         # The panel itself must not impose a width on the pane-3 column — the exploration pane above
         # it owns that column's minimum. Its OWN body (the log view) can shrink too.
