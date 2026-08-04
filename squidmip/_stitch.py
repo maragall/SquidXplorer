@@ -238,6 +238,183 @@ def auto_blend_px(
     return max(int(np.median(seams)) * 2, 10)
 
 
+_FF_MAX_TILES = 50   # GUI's n_samples: the field is low-frequency and BaSiC is robust from few
+#                      tiles, so more than this buys nothing and costs a read each.
+_FF_SEED = 42        # the GUI's seed, so the same acquisition samples the same tiles twice.
+
+
+def estimate_region_flatfield(
+    reader: "SquidReader",
+    region: str,
+    fovs: Sequence[int],
+    *,
+    channels: Optional[Sequence[int]] = None,
+    z: Optional[int] = None,
+    t: int = 0,
+    use_darkfield: bool = False,
+    max_tiles: int = _FF_MAX_TILES,
+) -> dict:
+    """``{channel_name: FlatfieldProfile}`` estimated from RAW tiles — the standalone's recipe.
+
+    maragall/stitcher's ``_FlatfieldWorker`` (app.py:1122-1171), step for step: sample up to
+    ``max_tiles`` FOVs with a fixed seed, read ONE raw plane each at the registration z, and run
+    ``estimate_flatfield_channel`` per channel. squidmip already wraps that exact estimator as
+    :func:`squidmip.estimate_profile`, so the algorithm is Julio's BaSiC port either way.
+
+    RAW is load-bearing and the standalone says so out loud ("flatfield estimation must be
+    performed on raw, uncorrected tiles"): estimating from already-corrected pixels measures the
+    residual of a correction rather than the illumination, and converges to a unit field.
+
+    Per channel, not per FOV: illumination is a property of the optical path, so every FOV of a
+    channel shares one gain field. Memory is bounded by ONE channel's stack (BaSiC downsamples to
+    128x128 internally, but the float32 input stack is real — ~0.5 GB for 27 2084^2 tiles), which
+    is why the channels are walked in sequence rather than stacked together.
+    """
+    from squidmip._flatfield import estimate_profile
+
+    meta = reader.metadata
+    all_channels = [c["name"] for c in meta["channels"]]
+    if channels is None:
+        channels = list(range(len(all_channels)))
+    if z is None:
+        z = int(meta["n_z"]) // 2
+
+    fovs = list(fovs)
+    n = min(int(max_tiles), len(fovs))
+    rng = np.random.default_rng(_FF_SEED)
+    picked = [fovs[i] for i in sorted(rng.choice(len(fovs), size=n, replace=False))]
+
+    profiles = {}
+    for c in channels:
+        name = all_channels[c]
+        stack = np.stack([reader.read(region, f, name, z, t) for f in picked])
+        profiles[name] = estimate_profile(stack, use_darkfield=use_darkfield)
+        del stack
+    _log.info(
+        "Flatfield: estimated %d channel profile(s) from %d raw tile(s) of region %s at z=%d.",
+        len(profiles), n, region, z,
+    )
+    return profiles
+
+
+def _flatfield_npy_path(reader):
+    """Where maragall/stitcher keeps this acquisition's profile, or ``None`` if unknowable.
+
+    Its convention, verbatim (``app.py:1716-1722``), for a directory acquisition — which is what
+    Squid writes: ``<root>/<root.name>_flatfield.npy`` first, then
+    ``<root.parent>/<root.name>_flatfield.npy`` beside it. Auto-save uses the FIRST of those
+    (``app.py:1911``), so the two tools converge on one file.
+
+    Returns the inside path when neither exists, because that is where a new one is written.
+    ``None`` when the reader has no path at all (the test fakes), which disables both the lookup
+    and the save rather than guessing at a location.
+    """
+    from pathlib import Path
+
+    root = getattr(reader, "_path", None)
+    if root is None:
+        return None
+    root = Path(root)
+    if not root.is_dir():
+        return root.parent / f"{root.stem}_flatfield.npy"
+    inside = root / f"{root.name}_flatfield.npy"
+    beside = root.parent / f"{root.name}_flatfield.npy"
+    return inside if inside.exists() or not beside.exists() else beside
+
+
+def resolve_flatfield(reader, region: str, fovs: Sequence[int], *, channels=None,
+                      z: Optional[int] = None, t: int = 0, use_darkfield: bool = False) -> dict:
+    """Load this acquisition's profile, or estimate it and save it. The standalone's lifecycle.
+
+    ``app.py:1724-1732`` on drop: look for the ``.npy``; found -> load it and tick the box; not
+    found -> tick the box, auto-calculate, and ``app.py:1903-1916`` auto-saves the result next to
+    the data. So flat-fielding is on by default there, and it is compute-ONCE: the second run of
+    the same acquisition reads the file the first run wrote, and so does the standalone.
+
+    Saving is best-effort, exactly as the standalone's is (it wraps its own save in try/except and
+    logs the failure): an acquisition on a read-only share must still stitch. Failing to persist
+    costs a re-estimate next run; failing to stitch costs the run.
+    """
+    from squidmip._flatfield import FlatfieldProfile
+
+    meta = reader.metadata
+    names = [c["name"] for c in meta["channels"]]
+    path = _flatfield_npy_path(reader)
+
+    if path is not None and path.exists():
+        try:
+            profiles = {n: FlatfieldProfile.from_npy(path, channel=i) for i, n in enumerate(names)}
+            _log.info("Flatfield: loaded %d channel profile(s) from %s.", len(profiles), path.name)
+            return profiles
+        except Exception as exc:
+            # A profile we cannot read is no reason to skip the correction, and no reason to
+            # trust a partial one either. Name the file, then estimate.
+            _log.warning("Flatfield: could not read %s (%s); estimating from tiles instead.",
+                         path, exc)
+
+    # ALL channels, never the caller's subset. Three reasons, and the first is the one that bit:
+    # a subset profile cannot be SAVED (the .npy is (C, Y, X) and a partial one would claim to
+    # describe channels it never measured), so narrowing here silently disabled the persistence
+    # and every run re-estimated. It is also what the standalone does -- its worker loops
+    # `range(n_channels)` -- and it makes the artifact reusable by a later run that asks for
+    # different channels.
+    profiles = estimate_region_flatfield(reader, region, fovs, channels=None, z=z, t=t,
+                                         use_darkfield=use_darkfield)
+    if path is not None and len(profiles) == len(names):
+        try:
+            from tilefusion.flatfield import save_flatfield
+
+            ff = np.stack([profiles[n].flatfield for n in names])
+            dfs = [profiles[n].darkfield for n in names]
+            df = np.stack(dfs) if all(d is not None for d in dfs) else None
+            save_flatfield(path, ff, df)
+            _log.info("Flatfield: saved to %s; later runs and maragall/stitcher reuse it.", path)
+        except Exception as exc:
+            _log.warning("Flatfield: could not save to %s (%s); it will be re-estimated next run.",
+                         path, exc)
+    return profiles
+
+
+class _FlatfieldReader:
+    """A ``SquidReader`` whose ``read`` hands back illumination-corrected planes.
+
+    The correction lives in the READ PATH, which is the whole point and the reason this is a
+    wrapper rather than a post-processing step on the projected tiles.
+
+    ``TileFusion`` applies flatfield inside ``_read_tile`` and ``_read_tile_region`` — so it
+    reaches registration and fusion alike, and it never meets a z-reduction because the standalone
+    fuses every z independently. squidmip DOES z-reduce, so correcting the projector's OUTPUT
+    instead would raise a question the standalone never has to answer: whether the correction
+    commutes with the reducer. For a monotone per-pixel map it does (``_flatfield.py`` makes that
+    argument for the MIP), but ``decon3d`` is not monotone and the answer would quietly become
+    "no" for it.
+
+    Correcting at the read means the question never arises: every projector, monotone or not, sees
+    exactly the pixels ``TileFusion`` would have registered and fused. The commutation property is
+    then a nice fact about the MIP rather than a correctness dependency.
+
+    Unknown channels pass through uncorrected rather than raising: a caller may legitimately read
+    a channel no profile was estimated for, and a silent identity is the same thing
+    ``TileWarper.field`` does for an unfittable seam.
+    """
+
+    def __init__(self, inner, profiles: dict):
+        self._inner = inner
+        self._profiles = profiles
+
+    def __getattr__(self, name):
+        # Only fires for attributes this wrapper does not define, so `metadata` (often a lazy
+        # property) is delegated rather than snapshotted at construction.
+        return getattr(self._inner, name)
+
+    def read(self, region, fov, channel, z, t=0):
+        from squidmip._flatfield import correct_flatfield
+
+        plane = self._inner.read(region, fov, channel, z, t)
+        profile = self._profiles.get(str(channel))
+        return plane if profile is None else correct_flatfield(plane, profile)
+
+
 class _SeamSource:
     """The six members ``tilefusion.distortion`` reads off a ``TileFusion``.
 
@@ -500,6 +677,9 @@ def stitch_region(
     channels: Optional[Sequence[int]] = None,
     blend_px: Optional[int] = None,
     correct_distortion: Optional[bool] = None,
+    correct_illumination: Optional[bool] = None,
+    flatfield: Optional[dict] = None,
+    use_darkfield: bool = False,
     registration_t: int = _REG_T,
     registration_z: Optional[int] = None,
     block_px: int = _BLOCK_PX,
@@ -554,6 +734,34 @@ def stitch_region(
         default of :data:`_BLEND_PX` was sized to ONE acquisition and is 128 px against a
         measured 208 px seam here, where Auto gives 416 — so it under-feathered every seam of
         the very dataset it was tuned on.
+    correct_illumination:
+        Retrospective flat-field correction, applied **in the read path** so registration and
+        fusion both see corrected pixels — which is where ``TileFusion`` applies it
+        (``_read_tile_region`` feeds the registration strips).
+
+        **On by default** (``None`` = on), which is maragall/stitcher's behaviour, not an
+        extension of it: dropping a dataset in looks for a stored profile and, finding none,
+        ticks the box and auto-calculates from the tiles (``app.py:1724-1732``).
+
+        Worth knowing before trusting it to help: on the 10x tissue set the correction COSTS a
+        registered pair in both regions (manual0 42->41, manual1 41->40), because the vignetting
+        there is only ~4.5% deep and dividing it out amplifies noise in the dim corners where the
+        marginal pairs live. Mean NCC rises, but a pair falls under threshold and its tile lands
+        in the affine fallback. Any pair lost this way is named in a WARNING.
+    flatfield:
+        ``{channel_name: FlatfieldProfile}`` to use instead of resolving one. ``None`` (the
+        default) runs :func:`resolve_flatfield`: load the acquisition's stored
+        ``<root>_flatfield.npy`` if present, else estimate from raw tiles and save it there.
+
+        :func:`stitch_plate` resolves ONCE and passes the same profile to every region, which is
+        the standalone's semantics — its flat-field worker builds a ``TileFusion`` with no region
+        filter and hands one ``(C, Y, X)`` array to every region. That matters beyond tidiness:
+        illumination is a property of the optical path, not of a well, so a per-region profile
+        would divide each well by a different gain and break photometric comparability across the
+        plate.
+    use_darkfield:
+        Also estimate the additive pedestal. Off by default, matching the standalone's own
+        default: for fluorescence the pedestal is ~0 and the estimate is the less stable half.
     correct_distortion:
         Per-seam elastic lens-distortion correction, fitted on the REGISTERED positions and
         applied during fusion. **On by default** (``None`` = on wherever it can run, i.e.
@@ -680,6 +888,26 @@ def stitch_region(
     # reason this shortcut existed: holding every z for 27 FOVs x 4 channels x 2084^2 uint16 is
     # ~9.4 GB, so it needs a z-outer streaming loop, not a bigger allocation.
 
+    # ILLUMINATION CORRECTION, wrapped around the reader BEFORE anything is read, so every read
+    # below this line -- the registration planes AND project_well's z-stack -- is corrected. That
+    # ordering is the whole feature: TileFusion corrects inside _read_tile_region, so its phase
+    # correlation runs on corrected strips, and vignetting is a fixed multiplicative pattern
+    # present on both tiles of a seam for the correlator to lock onto.
+    #
+    # Estimated from RAW tiles (`reader`, not the wrapper), which is what the standalone's worker
+    # is emphatic about: estimating from corrected pixels measures a correction's residual and
+    # converges to a unit field.
+    if correct_illumination is None:
+        correct_illumination = True
+    if correct_illumination:
+        if flatfield is None:
+            with timer.stage("flatfield"):
+                flatfield = resolve_flatfield(
+                    reader, region, fovs, channels=sorted(set(channels) | {reg_c_global}),
+                    z=registration_z, t=registration_t, use_darkfield=use_darkfield,
+                )
+        reader = _FlatfieldReader(reader, flatfield)
+
     # The RAW planes the geometry is solved on: one z, one channel, straight from the reader.
     # Shape (n_tiles, 1, Y, X) so solve_offsets_px's `tiles[i][c]` indexes it with c=0.
     #
@@ -713,6 +941,26 @@ def stitch_region(
             metrics_out=metrics,
             timer=timer,
         )
+        # Say what the correction cost, when it costs anything. Flat-fielding is ON by default
+        # and on the 10x tissue set it drops a marginal pair per region -- measured, not feared.
+        # This CANNOT name the specific pairs without solving twice, and a second full solve is
+        # not worth paying for on every run, so it reports the two numbers it does know and says
+        # how to get the comparison. Silence here is what would let the trade go unnoticed.
+        if correct_illumination and len(fovs) > 1:
+            from tilefusion.registration import find_adjacent_pairs
+
+            expected = len(find_adjacent_pairs(
+                [(y, x) for y, x in positions], pixel_size, tile_shape,
+                min_overlap=_MIN_OVERLAP_PX))
+            if len(metrics) < expected:
+                _log.warning(
+                    "Flatfield is ON and %d of %d adjacent pair(s) in region %s did not "
+                    "register. The correction can push a marginal pair under threshold "
+                    "(measured: it costs one pair per region on the 10x tissue set). Re-run "
+                    "with correct_illumination=False to see whether it is implicated.",
+                    expected - len(metrics), expected, region,
+                )
+
         # Apply the solved correction in micrometres, exactly as TileFusion.run does:
         # position += offset_px * pixel_size.
         positions = [
@@ -743,6 +991,7 @@ def stitch_region(
         reg_channel=all_channels[reg_c_global] if register else None,
         reg_t=registration_t if register else None,
         reg_z=registration_z if register else None,
+        illumination_corrected=bool(correct_illumination),
     )
 
     # `geometry` is the legacy out-dict, kept so existing callers (tools/stitch_demo.py) keep
@@ -918,6 +1167,25 @@ def available_region_operators() -> list[str]:
     return sorted(_REGION_OPERATORS)
 
 
+def _accepts_kwarg(fn, name: str) -> bool:
+    """Whether *fn* can be called with keyword *name*, directly or through ``**kwargs``.
+
+    :func:`stitch_plate` injects a plate-wide ``flatfield=`` into the operator's kwargs, and the
+    operator table is an EXTENSION POINT (:func:`add_region_operator`) — a third-party operator
+    that never heard of flat-fielding would get a TypeError from an argument it did not ask for.
+    Asking first keeps the injection additive.
+    """
+    import inspect
+
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):   # builtins / C callables have no introspectable signature
+        return False
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return True
+    return name in params
+
+
 def _resolve_region_operator(name: str) -> RegionOperator:
     """Look up a region operator by name, failing loud (named) on an unknown key."""
     try:
@@ -1031,6 +1299,65 @@ def stitch_plate(
     tasks: Iterator[tuple[str, list[int]]] = iter(
         [(region, list(fovs)) for region, fovs in wells.items() if fovs]
     )
+
+    # ONE illumination profile for the whole plate, estimated before any well starts.
+    #
+    # This is the standalone's semantics: its flat-field worker builds a `TileFusion` with NO
+    # region filter and hands the single (C, Y, X) array to every region it then stitches. It is
+    # also the only defensible answer -- illumination is a property of the optical path, so a
+    # per-well profile would divide each well by a different gain and quietly destroy
+    # photometric comparability ACROSS wells, which is most of what a plate is for.
+    #
+    # Sampling is spread over the wells rather than taken from the first one, so a plate whose
+    # first well is empty or saturated does not set the gain for all the others. Skipped when the
+    # caller supplied a profile or turned the correction off, and left to the operator (which
+    # estimates per region and says so) if estimation raises -- a plate that cannot estimate a
+    # profile should still stitch.
+    if _accepts_kwarg(op, "flatfield") \
+            and operator_kwargs.get("correct_illumination", True) is not False \
+            and operator_kwargs.get("flatfield") is None and wells:
+        spread = [(r, f) for r, fs in wells.items() for f in fs]
+        rng = np.random.default_rng(_FF_SEED)
+        picked = [spread[i] for i in
+                  sorted(rng.choice(len(spread), size=min(_FF_MAX_TILES, len(spread)),
+                                    replace=False))]
+        try:
+            from squidmip._flatfield import FlatfieldProfile, estimate_profile
+
+            z = int(meta["n_z"]) // 2
+            names = [c["name"] for c in meta["channels"]]
+            path = _flatfield_npy_path(reader)
+            if path is not None and path.exists():
+                # The acquisition already carries a profile -- ours from a previous run, or the
+                # standalone's. Reuse beats re-deriving: it is what makes this compute-once, and
+                # it is the only way the two tools agree on the SAME gain field rather than two
+                # independently estimated ones.
+                operator_kwargs["flatfield"] = {
+                    n: FlatfieldProfile.from_npy(path, channel=i) for i, n in enumerate(names)}
+                _log.info("Flatfield: loaded %d plate-wide profile(s) from %s.",
+                          len(names), path.name)
+            else:
+                profiles = {}
+                for name in names:
+                    stack = np.stack([reader.read(r, f, name, z, 0) for r, f in picked])
+                    profiles[name] = estimate_profile(stack)
+                    del stack
+                operator_kwargs["flatfield"] = profiles
+                _log.info("Flatfield: one plate-wide profile per channel from %d tile(s) across "
+                          "%d well(s), at z=%d.", len(picked), len(wells), z)
+                if path is not None:
+                    try:
+                        from tilefusion.flatfield import save_flatfield
+
+                        save_flatfield(path, np.stack([profiles[n].flatfield for n in names]), None)
+                        _log.info("Flatfield: saved to %s.", path)
+                    except Exception as save_exc:
+                        _log.warning("Flatfield: could not save to %s (%s); it will be "
+                                     "re-estimated next run.", path, save_exc)
+        except Exception as exc:
+            _log.warning(
+                "Flatfield: plate-wide estimate failed (%s); each well will estimate from its "
+                "own tiles instead, so wells are not photometrically comparable.", exc)
 
     with ThreadPoolExecutor(max_workers=n_workers) as pool:
         in_flight: dict = {}

@@ -352,6 +352,14 @@ class Placement:
     ``reg_t``: a solve running somewhere the user cannot name is how the registration defects
     already fixed in this module stayed invisible."""
 
+    illumination_corrected: bool = False
+    """Whether these pixels were flat-field corrected before registration and fusion.
+
+    Provenance for the PIXELS, where ``reg_channel``/``reg_t``/``reg_z`` are provenance for the
+    solve. It belongs here for the same reason: the correction changes both the intensities a
+    downstream measurement reads and the alignment they were placed with, and "was this
+    corrected" is not recoverable from the array afterwards."""
+
     def __post_init__(self):
         if not self.pixel_size_um > 0:
             raise ValueError(f"pixel_size_um must be > 0, got {self.pixel_size_um!r}")

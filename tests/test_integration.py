@@ -516,3 +516,75 @@ def test_ima185_sim1536_montage_real_seam_subset(sim_1536wp, tmp_path):
     rgb = np.asarray(Image.open(manifest["montage"]))
     assert rgb.shape == (n_rows * 48, n_cols * 48, 3)
     assert rgb.max() > 0
+
+
+# ---------------------------------------------------------------------------------------
+# IMA-222 ↔ maragall/stitcher : the geometry PARITY gate
+# ---------------------------------------------------------------------------------------
+#
+# This is the check that caught the MIP defect, promoted out of a scratch script.
+#
+# tests/test_operator_fidelity.py already asserts solve_offsets_px equals a hand-run tilefusion
+# pipeline -- but on a 2-FOV SYNTHETIC fixture, driving tilefusion's primitives directly. It
+# cannot see the defect that mattered, because that one was about WHICH IMAGE squidmip fed the
+# solver, and a fixture with a single z-plane has only one image to feed.
+#
+# So this runs the two tools end to end on a real z-stack: TileFusion.run()'s registration half
+# against stitch_region, on every region, and asserts the solved offsets agree exactly. Before
+# the fix that was 6.62 px apart with 2 of 43 pairs lost; after it, 0.00 px.
+
+_STITCHER_PARITY_SET = Path(
+    "/Users/julioamaragall/Downloads/"
+    "test_10x_laser_af_z_stack_2025-10-28_13-40-43.939945 yy"
+)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("region", ["manual0", "manual1"])
+def test_stitch_geometry_matches_maragall_stitcher_on_a_real_zstack(region):
+    """squidmip's solved offsets == TileFusion.run()'s, to the bit, on a real acquisition."""
+    if not _STITCHER_PARITY_SET.is_dir():
+        pytest.skip(f"parity acquisition not on this machine: {_STITCHER_PARITY_SET}")
+    pytest.importorskip("tilefusion")
+    from tilefusion.core import TileFusion
+
+    from squidmip import stitch_region
+
+    # --- the reference: TileFusion.run()'s registration half, verbatim -----------------------
+    tf = TileFusion(_STITCHER_PARITY_SET, output_path="/tmp/parity_never_written.ome.zarr",
+                    region=region, channel_to_use=0, blend_pixels=(0, 0))
+    try:
+        tf.refine_tile_positions_with_cross_correlation(
+            downsample_factors=tf.downsample_factors, ch_idx=tf.channel_to_use)
+        tf.optimize_shifts(method="TWO_ROUND_ITERATIVE", rel_thresh=0.5, abs_thresh=2.0,
+                           iterative=True)
+        reference = np.asarray(tf.global_offsets, dtype=np.float64)
+        ref_fovs = [t[1] for t in tf._tile_identifiers]
+    finally:
+        tf.close()
+
+    # --- ours. correct_illumination=False: TileFusion above was built with no flatfield, which
+    # is what it does when the acquisition carries no <root>_flatfield.npy. Comparing a
+    # corrected solve against an uncorrected one would compare two different things and the
+    # failure would read as a parity break rather than a configuration difference.
+    reader = open_reader(_STITCHER_PARITY_SET)
+    fovs = list(reader.metadata["fovs_per_region"][region])
+    assert fovs == ref_fovs, "FOV ordering differs; the offsets are not comparable row-wise"
+
+    geometry: dict = {}
+    stitch_region(reader, region, fovs, channels=[0], correct_illumination=False,
+                  geometry=geometry)
+    ours = np.asarray(geometry["offsets_px"], dtype=np.float64)
+
+    # Tiles the pose graph SOLVED are bit-identical -- same edges, same solver, same order.
+    # The affine-placed ones (manual1's FOV 3, which registers against nothing) differ by ~1e-12
+    # px: both sides compute `M @ d - d / pixel_size`, but through different array temporaries,
+    # so the last bit of the matrix product lands differently. That is float op ordering, not
+    # geometry, and a tolerance is the honest assertion -- 1e-9 px is still eleven orders of
+    # magnitude tighter than the 6.62 px defect this gate exists to catch.
+    np.testing.assert_allclose(ours, reference, rtol=0, atol=1e-9)
+
+    placement = geometry["placement"]
+    # The solve must have run on the acquisition's own middle plane, not the projector's output.
+    assert placement.reg_z == reader.metadata["n_z"] // 2
+    assert placement.registered and placement.illumination_corrected is False

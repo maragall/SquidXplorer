@@ -301,7 +301,8 @@ def auto_groups(
     return [{"label": label, "channels": channels}]
 
 
-def write_story(story_path, ome_path, groups: list[dict], pixels_per_micron: float = 0.0):
+def write_story(story_path, ome_path, groups: list[dict], pixels_per_micron: float = 0.0,
+                provenance: str = ""):
     """Write a Minerva Author saved-story that pre-loads *groups* for *ome_path*.
 
     The user opens this file through Author's "Select File" and lands in the editor with our
@@ -323,7 +324,11 @@ def write_story(story_path, ome_path, groups: list[dict], pixels_per_micron: flo
         "sample_info": {
             "name": dataset,
             "rotation": 0,
-            "text": "",
+            # What was DONE to these pixels, travelling with them. An exported OME-TIFF outlives
+            # this session and the log line that described it, and flat-field correction is on by
+            # default -- so "these intensities were divided by a gain field" has to be legible
+            # from the export itself, not reconstructed from whoever remembers the run.
+            "text": provenance,
             "pixels_per_micron": float(pixels_per_micron),
         },
         "waypoints": [],
@@ -333,6 +338,27 @@ def write_story(story_path, ome_path, groups: list[dict], pixels_per_micron: flo
     story_path.parent.mkdir(parents=True, exist_ok=True)
     story_path.write_text(json.dumps(story, indent=2), encoding="utf-8")
     return story_path
+
+
+def _provenance_text(image, projector: str, operator: str) -> str:
+    """One line saying what produced these pixels, for the story's ``sample_info.text``.
+
+    Reads the :class:`~squidmip._placement.Placement` riding on the fused array rather than
+    re-deriving anything, so it cannot drift from what actually ran. Degrades to just the
+    operator names when the array carries no placement (a plain ndarray from a custom region
+    operator), because a partial record is still better than none and a raise here would fail an
+    export over a caption.
+    """
+    parts = [f"squidmip {operator}/{projector}"]
+    p = getattr(image, "placement", None)
+    if p is not None:
+        if p.registered:
+            parts.append(f"registered on {p.reg_channel} (z={p.reg_z}, t={p.reg_t})")
+        else:
+            parts.append("coordinate placement (no registration)")
+        parts.append("flat-field corrected" if p.illumination_corrected
+                     else "no flat-field correction")
+    return "; ".join(parts)
 
 
 # --- export ----------------------------------------------------------------------------------
@@ -506,6 +532,7 @@ def export_selection(
             ome_path,
             auto_groups(img_cyx, names, colors, label=label, luts=luts),
             pixels_per_micron=ppm,
+            provenance=_provenance_text(image, projector, operator),
         )
         written[region] = (ome_path, story_path)
         del image, img_cyx
