@@ -117,6 +117,69 @@ def pytest_configure(config):
     except ImportError:
         return                      # headless CI without the [gui] extra: nothing to pin
     _QT_APP = QApplication.instance() or QApplication([])
+    _keep_test_windows_off_the_foreground()
+
+
+def _keep_test_windows_off_the_foreground() -> None:
+    """Let test windows OPEN without dragging the user to the Space they open on. macOS only.
+
+    The windows are wanted -- this is not ``QT_QPA_PLATFORM=offscreen``, which would delete them.
+    What is not wanted is the side effect: macOS follows an APPLICATION when it activates, and Qt
+    activates the process the moment it shows a window. Over a full run that is dozens of
+    activations, so anyone working on another Space gets yanked back at intervals. The Mission
+    Control preference that governs it ("when switching to an application, switch to a Space with
+    open windows") is global and worth keeping on for real apps, so the fix belongs on THIS
+    process, not in System Settings.
+
+    Two levers, both needed, because they cover different moments:
+
+    ``NSApplicationActivationPolicyAccessory``
+        Stops the pytest process from being a foreground app at all: no Dock tile, and it is
+        never made frontmost on its own. Windows still render and still appear on the Space
+        they are created on.
+    ``WA_ShowWithoutActivating``
+        Per window, set on every top-level widget just before it is shown. The activation policy
+        governs the process; this governs the individual ``show()``, which is what would
+        otherwise make the window key and pull focus.
+
+    Best-effort by construction: every failure path leaves the old behaviour rather than breaking
+    a test run over a display nicety. Set ``SQUIDMIP_TEST_FOREGROUND=1`` to opt back into windows
+    that take focus (useful when driving a test by hand and wanting it frontmost).
+    """
+    import sys
+
+    if sys.platform != "darwin" or os.environ.get("SQUIDMIP_TEST_FOREGROUND"):
+        return
+
+    try:                                        # process-level: never become the active app
+        from AppKit import NSApp, NSApplicationActivationPolicyAccessory
+
+        app = NSApp()
+        if app is not None:
+            app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+    except Exception:
+        pass                                    # no pyobjc, or a Qt that owns NSApp differently
+
+    try:                                        # window-level: show without becoming key
+        from qtpy.QtCore import Qt
+        from qtpy.QtWidgets import QWidget
+
+        if getattr(QWidget, "_squidmip_no_activate", False):
+            return                              # already patched (pytest_configure ran twice)
+        original_set_visible = QWidget.setVisible
+
+        def set_visible(self, visible):
+            # Every show() and showNormal() funnels through setVisible, so patching the one
+            # entry point covers napari's windows too -- and those are built deep inside napari,
+            # where there is no seam to pass a flag through.
+            if visible and self.isWindow():
+                self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+            return original_set_visible(self, visible)
+
+        QWidget.setVisible = set_visible
+        QWidget._squidmip_no_activate = True
+    except Exception:
+        pass
 
 
 # --- process-global operator registries: snapshot + restore around every test ----------------
