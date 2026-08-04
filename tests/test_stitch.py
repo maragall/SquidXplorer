@@ -726,26 +726,35 @@ def test_the_registration_only_channel_is_not_leaked_into_the_output(master):
     assert interior.std() < 1.0, f"output plane is not the flat channel (std={interior.std():.1f})"
 
 
-def test_honouring_the_registration_channel_costs_no_extra_reads(master):
-    """The fix reads a channel the caller did not select — but not one extra byte off disk.
+def test_registration_costs_exactly_one_extra_plane_read_per_fov(master):
+    """Registering on the RAW plane costs a read, and the price is pinned at ONE plane per FOV.
 
-    project_well already decodes EVERY channel of the FOV; the old code just discarded the
-    unselected ones at `[:, channels, 0]`. So including the registration channel is free in
-    I/O, and that is worth pinning: if this ever regresses into a second read pass, a 27-FOV
-    well pays for it on every stitch.
+    This replaces a test that asserted registration was free. It was free because registration
+    consumed the projector's output — which is precisely the defect: on a z-stack the pose graph
+    was then solved on a MIP, an image maragall/stitcher never registers, costing 2 of 43 pairs
+    and up to 6.62 px on the 10x tissue set. Reading the acquisition's own middle z-plane is what
+    buys back the agreement, so the honest thing to pin is the SIZE of that cost, not its absence.
+
+    One plane per FOV, one channel, one z. Not a second z-stack pass: if this ever regresses into
+    re-reading depth, a 27-FOV 10-deep well pays 10x for it on every stitch.
     """
     def reads(**kw):
         r = _SplitChannelReader(master, error_px=_ERR)
         stitch_region(r, "A1", list(range(4)), blend_px=24, block_px=512, max_workers=2, **kw)
         return r.reads
 
-    all_channels = reads(registration_channel=CHANNELS[0])
-    reg_outside_selection = reads(channels=[1], registration_channel=CHANNELS[0])
-    no_registration = reads(channels=[1], register=False, registration_channel=CHANNELS[0])
-    assert reg_outside_selection == all_channels == no_registration, (
-        f"read counts diverged: all={all_channels}, reg-outside-selection="
-        f"{reg_outside_selection}, register=False {no_registration}"
+    n_fovs = 4
+    baseline = reads(channels=[1], register=False, registration_channel=CHANNELS[0])
+    registered = reads(channels=[1], registration_channel=CHANNELS[0])
+    assert registered == baseline + n_fovs, (
+        f"registration should read exactly one extra plane per FOV: "
+        f"register=False {baseline}, register=True {registered}, FOVs {n_fovs}"
     )
+
+    # And the cost does not depend on the channel SELECTION — registration reads its own plane
+    # either way, which is why the solved geometry is selection-independent by construction.
+    assert reads(registration_channel=CHANNELS[0]) - reads(
+        register=False, registration_channel=CHANNELS[0]) == n_fovs
 
 
 def test_an_unknown_registration_channel_is_still_refused_by_name(master):
@@ -1072,3 +1081,149 @@ def test_auto_blend_falls_back_when_nothing_overlaps(master):
 
     far = [(0.0, 0.0), (10000.0, 0.0), (0.0, 10000.0), (10000.0, 10000.0)]
     assert auto_blend_px(far, (PIXEL_UM, PIXEL_UM), (TILE, TILE)) > 0
+
+
+# ---------------------------------------------------------------------------------------
+# registration reads the RAW plane, not the projector's output
+# ---------------------------------------------------------------------------------------
+
+
+class _ZStackReader(_FakeReader):
+    """A 3-plane stack whose MIP is unregistrable and whose MIDDLE plane is not.
+
+    z=1 carries the master texture with the injected stage error. z=0 and z=2 are a CONSTANT
+    field brighter than any master pixel, identical for every FOV. So:
+
+        max over z  -> the constant, everywhere: no structure, no alignment signal at all
+        plane z=1   -> the texture: the 6 px error is recoverable
+
+    That asymmetry turns "which image did registration actually solve on" into a NUMBER. It is
+    the same trick ``_SplitChannelReader`` plays for channels, and it exists because the MIP
+    substitution was invisible for exactly as long as nothing measured it: on the real 10x
+    tissue set it cost 2 of 43 pairs and 6.62 px, silently.
+    """
+
+    _FLOOR = 60000  # above the master's ~42000 ceiling, so it wins every max()
+
+    def __init__(self, *args, n_z: int = 3, **kw):
+        super().__init__(*args, **kw)
+        self.metadata["n_z"] = n_z
+        self.metadata["z_levels"] = list(range(n_z))
+        self._mid_z = n_z // 2
+
+    def read(self, region, fov, channel, z=0, t=0):
+        if z != self._mid_z:
+            self.reads += 1
+            return np.full((TILE, TILE), self._FLOOR, dtype=np.uint16)
+        return super().read(region, fov, channel, z=z, t=t)
+
+
+def test_registration_solves_on_the_raw_middle_plane_not_the_projected_one(master):
+    """The defect this module carried: the pose graph was solved on the projector's output.
+
+    ``stitch_region`` runs a z-reducer, so on a z-stack the thing registration used to see was a
+    MIP -- an image ``TileFusion`` never registers. Here the MIP is constant by construction, so
+    a regression to it recovers NOTHING while the correct read recovers the injected 6 px.
+    """
+    reader = _ZStackReader(master, error_px=_ERR)
+    fovs = list(range(4))
+    positions = _positions_yx_um(reader.metadata, "A1", fovs)
+
+    # Guard the guard: prove the two registration inputs give DIFFERENT answers on this fixture,
+    # or the assertion below is vacuous. This repo has already shipped a test that was dead its
+    # whole life.
+    mip = np.stack([
+        np.max(np.stack([reader.read("A1", f, CHANNELS[0], z=z) for z in range(3)]), axis=0)[None]
+        for f in fovs
+    ])
+    mip_offsets = solve_offsets_px(mip, positions, (PIXEL_UM, PIXEL_UM), (TILE, TILE))
+    assert np.abs(mip_offsets).max() < 0.5, (
+        "the fixture's MIP is supposed to be unregistrable; if it registers, this test cannot "
+        "tell the MIP path from the raw-plane path"
+    )
+
+    g: dict = {}
+    stitch_region(_ZStackReader(master, error_px=_ERR), "A1", fovs,
+                  blend_px=24, block_px=512, max_workers=2,
+                  registration_channel=CHANNELS[0], geometry=g)
+    offsets = np.asarray(g["offsets_px"])
+    assert np.abs(offsets[3]).max() > 2.0, (
+        "registration recovered nothing, i.e. it solved on the MIP (constant here) rather than "
+        f"the raw middle plane; offsets={offsets.tolist()}"
+    )
+    assert g["placement"].reg_z == 1, "the middle plane of a 3-deep stack is z=1"
+
+
+def test_the_registration_plane_is_the_callers_and_is_recorded(master):
+    """``registration_z`` selects the plane, and the Placement says which one it was.
+
+    Provenance for the same reason as ``reg_channel``/``reg_t``: a solve running on a plane the
+    user cannot name is how this class of defect stays invisible.
+    """
+    g: dict = {}
+    stitch_region(_ZStackReader(master, error_px=_ERR), "A1", list(range(4)),
+                  blend_px=24, block_px=512, max_workers=2, registration_z=0,
+                  registration_channel=CHANNELS[0], geometry=g)
+    assert g["placement"].reg_z == 0
+    # z=0 is the constant floor: nothing to register against, so it degrades to stage placement.
+    assert np.abs(np.asarray(g["offsets_px"])).max() < 0.5
+
+    with pytest.raises(ValueError, match="registration_z=7 is outside"):
+        stitch_region(_ZStackReader(master), "A1", list(range(4)), registration_z=7,
+                      blend_px=24, block_px=512, max_workers=2)
+
+
+def test_a_tile_that_registered_against_nothing_is_placed_by_the_affine_not_left_at_stage():
+    """``two_round_optimization`` does NOT place a tile with no registered edge — it warns.
+
+    Its docstring is explicit that such a tile "is left for the caller's affine/stage-model
+    fallback", and this module used to have no such fallback, so the tile kept a ZERO offset and
+    fused at its raw, miscalibrated stage position. Zero is also what a perfectly-placed tile
+    gets, so nothing downstream could tell the two apart. Measured on the real 10x tissue set,
+    region manual1: FOV 3 registers against nothing and TileFusion places it 34.4 px away.
+    """
+    from squidmip._stitch import _place_unconstrained_tiles
+
+    # 3x3 grid at a 100 um pitch, 1 um/px. Tile 8 (the corner) is the isolated one.
+    step, n = 100.0, 3
+    positions = [(float(r * step), float(c * step)) for r in range(n) for c in range(n)]
+    # Every neighbouring pair EXCEPT the ones touching tile 8: 12 - 2 = 10 edges, over the
+    # _MIN_PAIRS_FOR_AFFINE floor of 8.
+    metrics, edges = {}, []
+    for i in range(n * n):
+        for j in (i + 1, i + n):
+            if j >= n * n or (j == i + 1 and (i + 1) % n == 0):
+                continue
+            if 8 in (i, j):
+                continue
+            dy = positions[j][0] - positions[i][0]
+            dx = positions[j][1] - positions[i][1]
+            metrics[(i, j)] = (dy, dx, 0.99)
+            edges.append({"i": i, "j": j, "t": np.array([dy, dx]), "w": 0.99})
+    assert len(metrics) >= 8
+
+    solved = np.zeros((n * n, 2), dtype=np.float64)
+    placed = _place_unconstrained_tiles(solved, edges, metrics, positions, (1.0, 1.0))
+
+    assert np.allclose(placed[:8], 0.0), "tiles the solve constrained must keep their offsets"
+    assert not np.allclose(placed[8], 0.0), (
+        "the unconstrained corner tile was left at its raw stage position; the affine fallback "
+        "did not run"
+    )
+
+
+def test_the_affine_fallback_refuses_to_guess_from_too_few_pairs():
+    """Below ``_MIN_PAIRS_FOR_AFFINE`` the fit is not trustworthy, so the tiles stay put.
+
+    Degrading to the stage position is the honest outcome here — it is what the caller had
+    before — and it must not be dressed up as a solve.
+    """
+    from squidmip._stitch import _place_unconstrained_tiles
+
+    positions = [(0.0, 0.0), (0.0, 100.0), (100.0, 0.0), (500.0, 500.0)]
+    metrics = {(0, 1): (0.0, 100.0, 0.9), (0, 2): (100.0, 0.0, 0.9)}
+    edges = [{"i": 0, "j": 1, "t": np.array([0.0, 100.0]), "w": 0.9},
+             {"i": 0, "j": 2, "t": np.array([100.0, 0.0]), "w": 0.9}]
+    solved = np.zeros((4, 2), dtype=np.float64)
+    placed = _place_unconstrained_tiles(solved, edges, metrics, positions, (1.0, 1.0))
+    assert np.allclose(placed, 0.0)

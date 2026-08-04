@@ -343,6 +343,15 @@ class Placement:
     reg_t: "int | None"
     """Timepoint the transform was solved at; ``None`` if nothing was registered."""
 
+    reg_z: "int | None" = None
+    """RAW z-plane the transform was solved on; ``None`` if nothing was registered.
+
+    Registration reads the acquisition's own z-plane (``n_z // 2`` by default, matching
+    maragall/stitcher's ``TileFusion._middle_z``) rather than the projector's output, so this
+    names a plane that exists on disk. Recorded for the same reason as ``reg_channel`` and
+    ``reg_t``: a solve running somewhere the user cannot name is how the registration defects
+    already fixed in this module stayed invisible."""
+
     def __post_init__(self):
         if not self.pixel_size_um > 0:
             raise ValueError(f"pixel_size_um must be > 0, got {self.pixel_size_um!r}")
