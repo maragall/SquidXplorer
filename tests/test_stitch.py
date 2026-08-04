@@ -1212,6 +1212,75 @@ def test_a_tile_that_registered_against_nothing_is_placed_by_the_affine_not_left
     )
 
 
+# ---------------------------------------------------------------------------------------
+# flat-field correction, applied in the READ path
+# ---------------------------------------------------------------------------------------
+
+
+def _nonunit_profile(gain: float = 2.0):
+    """A profile with a KNOWN, non-unit gain: the top half is dimmer, mean forced to 1.0."""
+    from squidmip._flatfield import FlatfieldProfile
+
+    ff = np.ones((TILE, TILE), dtype=np.float32)
+    ff[: TILE // 2] = gain
+    ff /= ff.mean()
+    return FlatfieldProfile(ff)
+
+
+def test_the_flatfield_wrapper_corrects_every_plane_it_hands_back(master):
+    """The wrapper IS the mechanism, and its position is the feature.
+
+    maragall/stitcher corrects inside _read_tile_region -- the reader feeding the registration
+    strips -- so phase correlation runs on corrected pixels. Wrapping the READER puts squidmip in
+    the same place, and unlike correcting the projector's OUTPUT it holds for a non-monotone
+    z-reducer too, because the reducer never sees uncorrected data.
+    """
+    from squidmip._flatfield import correct_flatfield
+    from squidmip._stitch import _FlatfieldReader
+
+    inner = _FakeReader(master)
+    profile = _nonunit_profile()
+    wrapped = _FlatfieldReader(inner, {CHANNELS[0]: profile})
+
+    raw = inner.read("A1", 0, CHANNELS[0], 0, 0)
+    got = wrapped.read("A1", 0, CHANNELS[0], 0, 0)
+    np.testing.assert_array_equal(got, correct_flatfield(raw, profile))
+    assert not np.array_equal(got, raw), "the fixture profile must actually change the pixels"
+
+    # A channel with no profile passes through untouched rather than raising -- the same
+    # identity fallback TileWarper gives an unfittable seam.
+    np.testing.assert_array_equal(
+        wrapped.read("A1", 0, CHANNELS[1], 0, 0), inner.read("A1", 0, CHANNELS[1], 0, 0))
+    assert wrapped.metadata is inner.metadata, "metadata must be delegated, not snapshotted"
+
+
+def test_illumination_correction_is_on_by_default_and_recorded(master):
+    """Default ON is a step PAST the standalone (its checkbox is on, but nothing presses the
+    Calculate button), so both the default and its provenance are pinned."""
+    g: dict = {}
+    stitch_region(_FakeReader(master), "A1", list(range(4)), blend_px=24, block_px=512,
+                  max_workers=2, geometry=g)
+    assert g["placement"].illumination_corrected is True
+
+    g_off: dict = {}
+    stitch_region(_FakeReader(master), "A1", list(range(4)), blend_px=24, block_px=512,
+                  max_workers=2, correct_illumination=False, geometry=g_off)
+    assert g_off["placement"].illumination_corrected is False
+
+
+def test_a_supplied_profile_is_used_instead_of_estimating(master):
+    """A caller-supplied profile must be honoured verbatim — that is how stitch_plate keeps every
+    well on ONE plate-wide gain field instead of a different one per well."""
+    kw = dict(channels=[0], blend_px=24, block_px=512, max_workers=2, register=False,
+              correct_distortion=False)
+    supplied = stitch_region(_FakeReader(master), "A1", list(range(4)),
+                             flatfield={CHANNELS[0]: _nonunit_profile()}, **kw)
+    plain = stitch_region(_FakeReader(master), "A1", list(range(4)),
+                          correct_illumination=False, **kw)
+    assert not np.array_equal(np.asarray(supplied), np.asarray(plain)), (
+        "the supplied non-unit profile did not reach the fused pixels")
+
+
 def test_the_affine_fallback_refuses_to_guess_from_too_few_pairs():
     """Below ``_MIN_PAIRS_FOR_AFFINE`` the fit is not trustworthy, so the tiles stay put.
 

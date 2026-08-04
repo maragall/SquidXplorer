@@ -99,7 +99,13 @@ def test_exported_pixels_are_the_fused_mosaic_byte_for_byte(squid_dataset, tmp_p
     # taper every one of them to zero at the edge. Turning the feather off is what makes a
     # byte-for-byte comparison meaningful at this size; it is a fixture concession, not a
     # claim that fusion normally copies pixels through untouched.
-    (ome, _), = export_selection(open_reader(root), [("B3", 1)], tmp_path, blend_px=0)
+    # correct_illumination=False for the same reason as blend_px=0 above: flat-fielding is ON by
+    # default and divides by an estimated gain field, so the pixels would no longer equal a plain
+    # MIP of the fixture planes. Both are fixture concessions that isolate the thing under test
+    # (do the fused pixels reach the file in native dtype, unrescaled) from a correction that is
+    # orthogonal to it -- and on 4 px tiles an estimated illumination profile is noise anyway.
+    (ome, _), = export_selection(open_reader(root), [("B3", 1)], tmp_path, blend_px=0,
+                                 correct_illumination=False)
 
     written = tifffile.imread(str(ome))
     assert written.dtype == np.uint16
@@ -205,10 +211,15 @@ def test_export_honours_the_projector_choice(squid_dataset, tmp_path):
     match ITS OWN one and differ from the other.
     """
     root, arrays = squid_dataset
+    # correct_illumination=False: the claim under test is that the PROJECTOR choice reaches the
+    # pixels, and both expectations below are computed from the raw fixture planes. Leaving the
+    # default flat-field on would divide both by a gain field estimated from 4 px tiles, which
+    # tests nothing about projector dispatch.
     (mip, _), = export_selection(open_reader(root), [("B2", 0)], tmp_path / "a",
-                                 projector="mip", blend_px=0)
+                                 projector="mip", blend_px=0, correct_illumination=False)
     (ref, _), = export_selection(
-        open_reader(root), [("B2", 0)], tmp_path / "b", projector="reference", blend_px=0
+        open_reader(root), [("B2", 0)], tmp_path / "b", projector="reference", blend_px=0,
+        correct_illumination=False,
     )
     assert "mip" in mip.name and "reference" in ref.name
 
