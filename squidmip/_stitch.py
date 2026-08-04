@@ -37,15 +37,38 @@ parameters as ``TileFusion.run()`` drives them — but on **in-memory arrays**, 
 ``TileFusion`` is a file->file pipeline that writes a fused OME-Zarr, which is unusable both
 for a streaming viewer operator and on a disk-constrained machine::
 
-    projection.project_well          per-FOV z-reduction (MIP), the IMA-183 primitive
     registration.find_adjacent_pairs        which FOVs actually overlap, from stage geometry
     registration.rotation_aware_max_shift   residual-rejection cap, adaptive to tile spacing
     registration.compute_pair_bounds        the overlap strip of each pair, per tile
     registration.register_pairs_batched     phase correlation (upsample 20) + NCC score
     optimization._edges_from_pairwise_metrics    pairwise metrics -> weighted pose-graph edges
     optimization.two_round_optimization     global least-squares solve + blunder rejection
+    optimization.fit_stage_to_image_transform    stage->image affine, for tiles the solve
+                                            left unconstrained
+    projection.project_well          per-FOV z-reduction (MIP), the IMA-183 primitive
     utils.make_1d_profile                   the Hann feather ramp
     fusion.fuse_plane                       sub-pixel placement + feathered blend, block-wise
+
+REGISTRATION READS THE RAW PLANE, NOT THE PROJECTOR OUTPUT
+----------------------------------------------------------
+The order above is deliberate and was WRONG until it was measured. ``project_well`` sits below
+the registration calls because the geometry is solved on the acquisition's own z-plane -- the
+middle one, ``n_z // 2``, which is ``TileFusion._middle_z`` -- and the projector's output is
+only ever fused, never registered.
+
+Registering on the MIP is not a harmless substitution. Measured on the 10x tissue set
+(``test_10x_laser_af_z_stack``, region ``manual0``, 27 FOVs), against ``TileFusion.run()``'s
+own solve as the reference:
+
+    registration input      pairs registered    offsets vs reference
+    raw middle z-plane      42 / 43             0.00 px   (identical)
+    MIP over 10 planes      40 / 43             6.62 px max, 2.00 px RMS
+
+The MIP flattens ten planes of a thick sample into one, and the out-of-focus content it drags
+forward decorrelates the overlap strips: two more pairs fail outright and FOV 4 is left with no
+registered edge at all, disconnected from the pose graph. So this is not "a different but equally
+valid choice of registration image" -- it registers strictly worse AND it disagrees with the
+standalone. Solving on the raw plane reproduces ``TileFusion`` exactly.
 
 Geometry, and the units trap
 ----------------------------
@@ -70,8 +93,11 @@ import numpy as np
 
 from squidmip._background import _cast_like
 from squidmip._engine import _default_workers, _resolve_projector
+from squidmip._logpane import get_logger
 from squidmip._placement import PlacedArray, Placement
 from squidmip.projection import project_well, select_fovs
+
+_log = get_logger("stitch")
 
 if TYPE_CHECKING:  # avoid import cost / cycle at runtime
     from squidmip.reader import SquidReader
@@ -87,10 +113,13 @@ _SSIM_WINDOW = 15              # kept for API compatibility with register_and_sc
 _REL_THRESH = 0.5              # TileFusion.run(): optimize_shifts(TWO_ROUND_ITERATIVE, ...)
 _ABS_THRESH = 2.0
 _MIN_OVERLAP_PX = 15           # find_adjacent_pairs default
-_BLEND_PX = 128                # feather ramp width. Sized to the MEASURED ~208 px overlap on
-#                                the 10x tissue set: the ramp must fit inside the overlap
-#                                (a ramp wider than the overlap never reaches full weight and
-#                                dims the seam) with margin for registration residual.
+_BLEND_PX = 128                # feather ramp FALLBACK, used only when nothing overlaps and so
+#                                there is no seam to measure (see auto_blend_px). It is no
+#                                longer the default: stitch_region defaults to blend_px=None =
+#                                Auto, which is maragall/stitcher's GUI default and the only one
+#                                that adapts to the acquisition. As a fixed default this number
+#                                was wrong even on the set it was tuned for -- 128 px against a
+#                                measured 208 px seam, where Auto gives 416.
 _REG_T = 0                     # geometry is solved at ONE timepoint. Named so the solve site
 #                                and the Placement that reports it cannot drift apart: a
 #                                Placement claiming reg_t=0 while the solve moved to another
@@ -221,6 +250,10 @@ class _SeamSource:
     Positions are the REGISTERED ones. build_seam_corrections' own docstring is explicit that
     it corrects the residual left AFTER the global solve; fitting it on raw stage positions
     would re-measure the error registration had just removed.
+
+    *tiles* is the same ``(n_tiles, 1, Y, X)`` raw registration-plane stack the global solve
+    consumed, so ``registration_channel`` is 0 here. Both fits see the same pixels by
+    construction.
     """
 
     def __init__(self, tiles, positions_yx_um, pixel_size, tile_shape, metrics,
@@ -360,9 +393,78 @@ def solve_offsets_px(
             return np.zeros((n_tiles, 2), dtype=np.float64)
         # Anchor tile 0 at the origin, exactly as TileFusion.optimize_shifts does; the solve
         # is translation-only and otherwise gauge-free.
-        return two_round_optimization(
-            edges, n_tiles, [0], rel_thresh, abs_thresh, True
+        offsets = two_round_optimization(edges, n_tiles, [0], rel_thresh, abs_thresh, True)
+        return _place_unconstrained_tiles(offsets, edges, metrics, positions_yx_um, pixel_size)
+
+
+# The affine fallback's minimum evidence: a 2-3 DOF global transform needs a handful of spread
+# pairs. TileFusion._place_unconstrained_tiles_with_affine's own _MIN_PAIRS_FOR_AFFINE.
+_MIN_PAIRS_FOR_AFFINE = 8
+
+
+def _place_unconstrained_tiles(
+    offsets: np.ndarray,
+    edges,
+    metrics: dict,
+    positions_yx_um: Sequence[tuple[float, float]],
+    pixel_size: tuple[float, float],
+) -> np.ndarray:
+    """Place tiles the pose graph left unconstrained, via the global stage->image affine.
+
+    A port of ``TileFusion._place_unconstrained_tiles_with_affine``, which this module used to
+    omit. The omission was silent and load-bearing: ``two_round_optimization`` does NOT place a
+    tile that registered against nothing -- its own docstring says such a tile "is left for the
+    caller's affine/stage-model fallback" and it merely logs a warning -- so every tile whose
+    overlaps were too low-texture to register kept a ZERO offset and was fused at its raw,
+    miscalibrated stage position. Zero is also what a perfectly-placed tile gets, so nothing
+    downstream could tell the two apart.
+
+    The affine is a property of the instrument (stage axes vs sensor axes: scale, rotation,
+    shear), fit from the pairs that DID register, so it predicts where an unregistered tile
+    belongs far better than the stage does. No-op when the graph is fully connected to the
+    anchor, which is the normal case -- on the 10x tissue set's ``manual0`` all 27 FOVs connect,
+    which is exactly why this gap survived review.
+
+    Degrades rather than guesses: with fewer than :data:`_MIN_PAIRS_FOR_AFFINE` registered pairs
+    the fit is not trustworthy, so the tiles are left at stage positions (what this function
+    replaced) and the caller is told.
+    """
+    from tilefusion.optimization import _check_connectivity, fit_stage_to_image_transform
+
+    n_tiles = len(positions_yx_um)
+    components = _check_connectivity(edges, n_tiles)
+    anchor_component = next((c for c in components if 0 in c), [])
+    unconstrained = [t for t in range(n_tiles) if t not in anchor_component]
+    if not unconstrained:
+        return offsets  # fully connected: the solve already placed everything
+
+    if len(metrics) < _MIN_PAIRS_FOR_AFFINE:
+        _log.warning(
+            "%d tile(s) unconstrained but only %d registered pair(s) (< %d); leaving them at "
+            "stage positions rather than fitting an unreliable affine.",
+            len(unconstrained), len(metrics), _MIN_PAIRS_FOR_AFFINE,
         )
+        return offsets
+
+    cal = fit_stage_to_image_transform(
+        metrics, [tuple(p) for p in positions_yx_um], pixel_size
+    )
+    M = cal["M"]
+    pos = np.asarray(positions_yx_um, dtype=np.float64)
+    ps = np.asarray(pixel_size, dtype=np.float64)
+    ref = pos[0]
+    offsets = np.array(offsets, dtype=np.float64, copy=True)
+    for k in unconstrained:
+        d = pos[k] - ref
+        # Stored as an offset to the isotropic model, consistent with the solved entries.
+        offsets[k] = M @ d - d / ps
+    _log.warning(
+        "Affine calibration: placed %d unconstrained tile(s) %s (scale %.2f px/unit, "
+        "rotation %+.3f deg, fit residual %.1f px over %d pairs).",
+        len(unconstrained), unconstrained, cal["scale"], cal["rotation_deg"],
+        cal["residual_rms"], cal["n_pairs"],
+    )
+    return offsets
 
 
 def _mosaic_geometry(
@@ -396,9 +498,10 @@ def stitch_region(
     register: bool = True,
     registration_channel=None,
     channels: Optional[Sequence[int]] = None,
-    blend_px: Optional[int] = _BLEND_PX,
+    blend_px: Optional[int] = None,
     correct_distortion: Optional[bool] = None,
     registration_t: int = _REG_T,
+    registration_z: Optional[int] = None,
     block_px: int = _BLOCK_PX,
     max_workers: Optional[int] = None,
     rel_thresh: float = _REL_THRESH,
@@ -414,10 +517,13 @@ def stitch_region(
 
     Stages (all timed through *timer*, which is Julio's ``StageTimer``):
 
+    ``read_reg``
+        One RAW plane per FOV — ``registration_z``, one channel — read straight from the
+        reader. This is what the geometry is solved on, exactly as ``TileFusion`` does; see the
+        module docstring for the measurement that says why it is not the projector's output.
     ``project``
-        ``project_well`` per FOV — the IMA-183 z-reduction, unchanged. Done once and held,
-        because both registration and fusion consume the same planes and re-reading a 10-deep
-        z-stack twice per FOV would double the I/O for nothing.
+        ``project_well`` per FOV — the IMA-183 z-reduction, unchanged. Its output is FUSED,
+        never registered.
     ``register`` / ``optimize``
         :func:`solve_offsets_px`. Skipped entirely when ``register=False``.
     ``fuse``
@@ -434,12 +540,20 @@ def stitch_region(
     channels:
         Channel indices to fuse (``None`` = all). A mosaic costs ``C x H x W x 2`` bytes, so
         a one-channel request is the difference between ~0.2 GB and ~0.9 GB on a 27-FOV 10x
-        well. Registration always runs on *registration_channel*, whatever this selects — if
-        the selection excludes it, it is read anyway, solved on, and then dropped before
-        fusion, so the solved geometry is IDENTICAL for every channel selection of the same
-        region. (It did not always do this; see the note at the ``reg_c`` assignment.)
+        well. It cannot affect the geometry: registration reads *registration_channel* out of
+        the reader itself, so the solved offsets are identical for every channel selection of
+        the same region BY CONSTRUCTION, not by an invariant someone has to maintain.
+    registration_z:
+        RAW z-plane the geometry is solved on. ``None`` (default) = the middle plane,
+        ``n_z // 2``, which is ``TileFusion._middle_z``. This indexes the ACQUISITION's z, not
+        the projector's output — the projector is not run for registration at all.
     blend_px:
-        Hann feather ramp width. Must fit inside the real overlap; see :data:`_BLEND_PX`.
+        Hann feather ramp width. ``None`` (default) = **Auto**: measured from this
+        acquisition's own overlap by :func:`auto_blend_px`, which is both maragall/stitcher's
+        GUI default and what its "Auto" checkbox computes. An int overrides it. The old fixed
+        default of :data:`_BLEND_PX` was sized to ONE acquisition and is 128 px against a
+        measured 208 px seam here, where Auto gives 416 — so it under-feathered every seam of
+        the very dataset it was tuned on.
     correct_distortion:
         Per-seam elastic lens-distortion correction, fitted on the REGISTERED positions and
         applied during fusion. **On by default** (``None`` = on wherever it can run, i.e.
@@ -530,29 +644,23 @@ def stitch_region(
     _op = _resolve_projector(projector)
 
     reg_c_global = _resolve_registration_channel(meta, registration_channel)
-    # The registration channel is READ WHETHER OR NOT IT WAS SELECTED, so the solve always runs
-    # on it — the promise this function's docstring makes ("Registration always runs on
-    # *registration_channel*, whatever this selects").
+
+    # The registration Z-PLANE, the same way registration_t is the caller's. `None` = the middle
+    # plane, which is TileFusion._middle_z -- the standalone's own choice, and the one the
+    # measurement in the module docstring reproduces to 0.00 px.
     #
-    # This used to be:
-    #     reg_c = channels.index(reg_c_global) if reg_c_global in channels else 0
-    # which, when the selection excluded the registration channel, silently registered on
-    # whichever channel happened to be FIRST in the subset. The old comment called that "an
-    # explicit fallback", but nothing was explicit about it: no warning, no record in the
-    # geometry, nothing in the output to say which channel had actually solved the transform.
-    # The consequence is the one a scientific tool cannot have — the SAME region stitched with
-    # different channel selections got DIFFERENT SOLVED OFFSETS, i.e. the placement of the
-    # pixels depended on which channels you happened to ask to see.
-    #
-    # Reading the extra channel is FREE in I/O: project_well already decodes every channel of
-    # the FOV and the old code simply threw the others away at `[:, channels, 0]`. The only
-    # cost is one extra channel held in `tiles` between the solve and the drop below, and only
-    # when register=True and the registration channel was not selected. Refusing the operation
-    # (the other honest option) would have been a worse trade for the same guarantee.
-    proj_channels = list(channels)
-    if register and reg_c_global not in proj_channels:
-        proj_channels.append(reg_c_global)
-    reg_c = proj_channels.index(reg_c_global) if register else 0
+    # This indexes the ACQUISITION's z. It used to index nothing at all: registration consumed
+    # `tiles`, i.e. the PROJECTOR's output, so on this 10-plane acquisition the pose graph was
+    # solved on a MIP. That is the defect this function was carrying -- not a missing knob but a
+    # solve running on an image the standalone never registers, which cost 2 of 43 pairs and up
+    # to 6.62 px of placement.
+    if registration_z is None:
+        registration_z = int(meta["n_z"]) // 2
+    registration_z = int(registration_z)
+    if not 0 <= registration_z < int(meta["n_z"]):
+        raise ValueError(
+            f"registration_z={registration_z} is outside this acquisition's "
+            f"{meta['n_z']} z-plane(s)")
 
     # (guard for plane-ops lives just after _resolve_projector, so nothing is read first)
     # This whole pipeline is z=1 BY CONSTRUCTION: `out` below is allocated with a z extent of 1,
@@ -572,23 +680,33 @@ def stitch_region(
     # reason this shortcut existed: holding every z for 27 FOVs x 4 channels x 2084^2 uint16 is
     # ~9.4 GB, so it needs a z-outer streaming loop, not a bigger allocation.
 
-    with timer.stage("project"):
-        # (n_tiles, T, C, Y, X) native dtype. Guarded above: only z-reducers reach here, so
-        # project_well's output is (T, C, 1, Y, X) and index 0 is the whole reduced plane.
-        tiles = np.empty((len(fovs), n_t, len(proj_channels), *tile_shape), dtype=dtype)
-        for i, fov in enumerate(fovs):
-            tiles[i] = project_well(reader, region, fov, reduce=_op.fn,
-                                    consumes=_op.consumes)[:, proj_channels, 0]
+    # The RAW planes the geometry is solved on: one z, one channel, straight from the reader.
+    # Shape (n_tiles, 1, Y, X) so solve_offsets_px's `tiles[i][c]` indexes it with c=0.
+    #
+    # This is the read TileFusion._read_tile_region does, and it is why the channel selection can
+    # no longer reach the solve: `channels` is a fusion concern now, and there is no longer an
+    # appended-registration-channel dance to keep the two apart. It costs one extra plane per FOV
+    # (2084^2 uint16 = 8.7 MB here, freed before fusion), which is the price of registering on
+    # what the standalone registers on.
+    reg_planes = None
+    if register:
+        with timer.stage("read_reg"):
+            reg_planes = np.empty((len(fovs), 1, *tile_shape), dtype=dtype)
+            for i, fov in enumerate(fovs):
+                reg_planes[i, 0] = reader.read(
+                    region=region, fov=fov, channel=all_channels[reg_c_global],
+                    z=registration_z, t=registration_t,
+                )
 
     offsets = np.zeros((len(fovs), 2), dtype=np.float64)
     metrics: dict = {}
     if register:
         offsets = solve_offsets_px(
-            tiles[:, registration_t],   # geometry is solved once, at ONE timepoint
+            reg_planes,                 # raw plane, ONE timepoint and ONE z: geometry is geometry
             positions,
             pixel_size,
             tile_shape,
-            registration_channel=reg_c,
+            registration_channel=0,
             max_workers=max_workers,
             rel_thresh=rel_thresh,
             abs_thresh=abs_thresh,
@@ -624,6 +742,7 @@ def stitch_region(
         # the assumption that made the old registration bug invisible.
         reg_channel=all_channels[reg_c_global] if register else None,
         reg_t=registration_t if register else None,
+        reg_z=registration_z if register else None,
     )
 
     # `geometry` is the legacy out-dict, kept so existing callers (tools/stitch_demo.py) keep
@@ -671,12 +790,36 @@ def stitch_region(
         from tilefusion.distortion import TileWarper, build_seam_corrections
 
         with timer.stage("distortion"):
-            source = _SeamSource(tiles[:, registration_t], positions, pixel_size, tile_shape,
-                                 metrics, reg_c, max_workers)
+            # The RAW registration planes, not the projected ones: build_seam_corrections
+            # block-registers ALONG each seam, so it is the same measurement as the global solve
+            # at finer granularity and has to see the same pixels. Fitting it on the MIP while
+            # the solve ran on the raw plane would correct the residual of a solve that never
+            # happened.
+            source = _SeamSource(reg_planes, positions, pixel_size, tile_shape,
+                                 metrics, 0, max_workers)
             corrections = build_seam_corrections(source)
             # A tile with no correction gets None from .field() = identity, so an unfittable
             # seam degrades to plain fusion rather than failing the run.
             get_field = TileWarper(corrections, tile_shape[0], tile_shape[1]).field
+            # `source` holds `reg_planes`, and Python scoping keeps a function local alive to the
+            # end of the call -- so clearing `reg_planes` alone below would free nothing. Both
+            # names have to go.
+            source = None
+
+    # Registration is done with; drop its planes before allocating the projected stack, so the
+    # two never coexist at peak (~0.24 GB against ~0.94 GB on a 27-FOV 4-channel well).
+    reg_planes = None
+
+    with timer.stage("project"):
+        # (n_tiles, T, C, Y, X) native dtype, C == len(channels) EXACTLY -- there is no longer a
+        # registration channel riding along to be sliced off later, because registration read its
+        # own plane above. Guarded above: only z-reducers reach here, so project_well's output is
+        # (T, C, 1, Y, X) and index 0 is the whole reduced plane. These planes are FUSED, never
+        # registered.
+        tiles = np.empty((len(fovs), n_t, len(channels), *tile_shape), dtype=dtype)
+        for i, fov in enumerate(fovs):
+            tiles[i] = project_well(reader, region, fov, reduce=_op.fn,
+                                    consumes=_op.consumes)[:, channels, 0]
 
     with timer.stage("fuse"):
         y_profile = make_1d_profile(tile_shape[0], blend_px)
@@ -687,14 +830,11 @@ def stitch_region(
             # float32 because the numba blend kernels accumulate in float32; converting the
             # ONE tile the block is currently consuming keeps this at ~C x tile bytes.
             #
-            # `[:len(channels)]` drops a registration-only channel. `proj_channels` is
-            # `channels` with the registration channel APPENDED (never inserted), so the
-            # requested channels are exactly the leading entries, in the order asked for.
-            # This is the ONE place the extra channel is excluded: fuse_plane is also told
-            # `channels=len(channels)` below and would ignore the tail anyway, so an earlier
-            # draft that ALSO re-sliced `tiles` was a second mechanism for the same guarantee
-            # that no test could distinguish -- and, being a view, it never freed anything.
-            return tiles[idx][time_idx][: len(channels)].astype(np.float32, copy=False)
+            # No channel slice: `tiles` holds exactly the requested channels, in the requested
+            # order. The old `[:len(channels)]` existed to drop a registration channel that had
+            # been appended to the projected stack; registration now reads its own raw plane, so
+            # the two concerns no longer share an array to be trimmed.
+            return tiles[idx][time_idx].astype(np.float32, copy=False)
 
         for t in range(n_t):
 
