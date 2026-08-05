@@ -417,6 +417,9 @@ class RegionViewer(QMainWindow):
         #: rather than waited for on the GUI thread. See `_load_mosaic`.
         self._load_gen = 0
         self._retired_workers: list = []       # superseded loads, held until Qt reaps them
+        #: Which region the camera was last framed to. A reload of the SAME region (another
+        #: timepoint) must not re-frame: see `_on_done`.
+        self._framed_region: Optional[str] = None
         self._pending_region: Optional[str] = None
         self._load_timer: Optional[QTimer] = None
         self._time_load_timer: Optional[QTimer] = None
@@ -1853,7 +1856,22 @@ class RegionViewer(QMainWindow):
         # would leave it placed at the old region's stage coordinates over the new region's raw.
         if self._result_region is not None and self._result_region != str(region):
             self._drop_result_layers(f"this window moved from {self._result_region} to {region}")
-        pane.mosaic.remove_op(_RAW_OP)
+        # THE RAW LAYERS ARE **NOT** DESTROYED TO RELOAD THEM. This line used to read
+        # `pane.mosaic.remove_op(_RAW_OP)`, and it silently undid `6465069` ("reuse layers across
+        # region changes instead of destroying them", Julio: "I can't cycle rapidly through these
+        # mosaics"). `add_mosaic` reuses a layer it can FIND, so removing them first guaranteed
+        # the slow path every time — and since the decentralization this window is the only
+        # viewing path there is, so the fix had no live caller left.
+        #
+        # MEASURED HERE, on sim_5d_2x2_t3 (4 FOVs, 2 channels, 256 px) with a real napari canvas:
+        # the read is 10-13 ms in the worker, while the GUI-thread slots cost 165-265 ms per
+        # channel plus 85-130 ms in `_on_done` — i.e. essentially all of a frame's cost was
+        # tearing down vispy nodes and layer-control widgets and building them again. That is
+        # what made a timepoint frame take ~1.3 s and freeze the window for ~0.8 s of it.
+        #
+        # A failed load is handled where the failure is KNOWN (`_on_done`, n == 0), which removes
+        # the layers then. Removing them here would have been "clear the screen in case the next
+        # read fails", paid on every successful frame.
         channels = [c["name"] for c in self._meta["channels"]]
         # t=THIS WINDOW'S TIMEPOINT. Without it the worker fused timepoint 0 whatever the
         # timepoint bar said, and the reload this method performs on every slider move repainted
@@ -1864,8 +1882,26 @@ class RegionViewer(QMainWindow):
                         self._on_plane(r, ch, levels, bbox, win, gen=gen))
         w.problem.connect(self._say)
         w.finished_count.connect(lambda n: self._on_done(region, n, gen=gen))
+        # EVERY WORKER IS DELETED WHEN IT ENDS. `parent=self` makes Qt's C++ object graph own it,
+        # so a finished worker stays alive for as long as the window does — measured: 78 live
+        # `_MosaicWorker` objects after 78 playback frames, with `gc.collect()` freeing none of
+        # them, which is exactly the accumulation `tools/run_suite_chunked.py` diagnosed as the
+        # reason the suite cannot run in one process. Before playback a window created a worker
+        # per navigation; now it creates one per FRAME, so an unbounded pile is no longer
+        # something that merely offends.
+        w.finished.connect(lambda: self._worker_ended(w))
         self._worker = w
         w.start()
+
+    def _worker_ended(self, worker) -> None:
+        """A load's thread has ended. Drop every reference to it, ours and Qt's."""
+        if self._worker is worker:
+            self._worker = None
+        self._forget_worker(worker)
+        try:
+            worker.deleteLater()
+        except RuntimeError:
+            pass            # already gone
 
     def _retire_worker(self, worker) -> None:
         """Let a superseded worker die on its own time, without dropping it on the floor.
@@ -1880,7 +1916,9 @@ class RegionViewer(QMainWindow):
         if retired is None:
             retired = self._retired_workers = []
         retired.append(worker)
-        worker.finished.connect(lambda: self._forget_worker(worker))
+        # No second `finished` connection: `_load_mosaic` already wired one to `_worker_ended`,
+        # which forgets it here AND deletes it. Two hooks doing half the cleanup each is how one
+        # of them ends up being the only one anybody remembers to update.
 
     def _forget_worker(self, worker) -> None:
         retired = getattr(self, "_retired_workers", None)
@@ -1952,6 +1990,15 @@ class RegionViewer(QMainWindow):
             return
         if n == 0:
             pane.say(f"{region}: no mosaic could be built (see the message above).")
+            # NOW the raw layers go, and only now. `_load_mosaic` deliberately leaves them alone
+            # so a reload can reuse them; the one case where that would lie is a load that
+            # produced nothing, where the previous frame's pixels would sit under this region's
+            # name. This is where that is known, so this is where they are dropped.
+            try:
+                pane.mosaic.remove_op(_RAW_OP)
+            except Exception:                        # noqa: BLE001 - already gone is fine
+                pass
+            self._framed_region = None
             if self.open_clock is not None:
                 self.open_clock.finish(_measure.FAILED, f"{region}: no mosaic could be built")
             self._frame_done()
@@ -1963,7 +2010,15 @@ class RegionViewer(QMainWindow):
             # user's toggle, undone by a reload they did not ask anything of.
             if self._result_region is None:
                 pane.mosaic.show_op(_RAW_OP)
-            pane.mosaic.model.reset_view()
+            # RE-FRAME ONLY WHEN THE PICTURE IS SOMEWHERE ELSE. A timepoint step reloads the SAME
+            # region at the same stage coordinates, so resetting the camera each time does two
+            # unwanted things: it costs 85-130 ms of GUI thread per frame (measured), and it drags
+            # the user's zoom back to fit-the-region on every frame of playback -- you cannot
+            # watch a blob move at 1:1 if the camera keeps pulling out. Framing follows the
+            # REGION, which is the thing whose extent actually changed.
+            if getattr(self, "_framed_region", None) != str(region):
+                pane.mosaic.model.reset_view()
+                self._framed_region = str(region)
         except Exception:                            # noqa: BLE001 - view framing is cosmetic
             pass
         # Seed this window's settings ONCE, now that the layers exist. For an ROI child that is the

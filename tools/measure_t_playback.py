@@ -198,20 +198,31 @@ def measure(root: Path, fps_list, seconds: float, blocking: bool) -> int:
         print(f"{fps:>8} {n_step:>6} {max(0, n_req - n_step):>5} {inflight['queued']:>7} "
               f"{interval:>22} {achieved} {watch.p95_ms:>8.0f} /{watch.worst_ms:>7.0f}")
 
-    # MEMORY OVER A FULL LOOP: play long enough to walk the series several times over.
-    loops = 3
+    # MEMORY OVER A FULL LOOP, SAMPLED. A single before/after pair cannot tell a cache filling to
+    # its bound from a leak; a trace can, because a bounded cache PLATEAUS and a leak does not.
+    print()
+    print("memory over continuous playback (RSS MB / frames landed):")
+    landed.clear()
     watch.start()
     bar.play(fps=max(fps_list))
-    _pump(app, max(4.0, seconds))
-    for _ in range(loops):
-        _pump(app, seconds)
+    trace = []
+    for _ in range(8):
+        _pump(app, 5.0)
+        # `is_playing` is recorded because a window that LOSES FOCUS stops its own playback on
+        # purpose (`RegionViewer.set_active`), and a trace that did not say so would read as a
+        # stall. A flat frame count next to "playing no" is the halt working, not a hang.
+        trace.append((_rss_mb(), len(landed), bar.is_playing))
     bar.stop()
     _pump(app, 0.5)
     watch.stop()
-    rss1 = _rss_mb()
-    print()
-    print(f"memory: {rss0:.0f} MB before, {rss1:.0f} MB after "
-          f"{len(landed)} frames over {loops + 1} passes  (delta {rss1 - rss0:+.0f} MB)")
+    print(f"  start {rss0:6.0f}")
+    for rss, frames, playing in trace:
+        print(f"        {rss:6.0f}   after {frames:4d} frames   playing={'yes' if playing else 'NO'}")
+    import gc
+
+    gc.collect()
+    _pump(app, 0.5)
+    print(f"  after gc.collect(): {_rss_mb():.0f} MB")
 
     mgr._mem_timer.stop()
     mgr.close_all()

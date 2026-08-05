@@ -395,6 +395,149 @@ def test_a_superseded_load_does_not_open_the_playback_gate(
             qapp.processEvents()
 
 
+def test_a_reload_reuses_the_layers_instead_of_destroying_them(
+    multi_time_point_dataset, napari_pane_stub, qapp
+):
+    """A timepoint step must NOT tear the raw layers down and build them again.
+
+    `add_mosaic` reuses a layer it can find (6465069, "I can't cycle rapidly through these
+    mosaics"), and `_load_mosaic` used to remove them first, which guaranteed the slow path.
+    Measured with a real napari canvas on sim_5d_2x2_t3: 165-265 ms of GUI thread per channel to
+    rebuild, against a 10-13 ms read. That is the difference between ~0.75 fps and ~4.5 fps, and
+    between an 800 ms freeze per frame and a 400 ms one.
+    """
+    from squidmip._region_viewer import _RAW_OP, ViewerManager
+
+    root, _planes = multi_time_point_dataset
+    reader = open_reader(root)
+    mgr = ViewerManager(reader, reader.metadata)
+    channel = TIME_SERIES_CHANNELS[0]
+    try:
+        win = mgr.open([TIME_SERIES_REGION])
+        pane = napari_pane_stub[0]
+        assert _pump(qapp, lambda: bool(_added_values(pane, channel)))
+        pane.mosaic.removed.clear()
+
+        win._time_point_bar.set_time_point_from_user(1)
+        assert _pump(qapp, lambda: _added_values(pane, channel)[-1]
+                     == time_series_pixel_value(1, 0, 0), seconds=10.0)
+        assert _RAW_OP not in pane.mosaic.removed, (
+            "the reload destroyed the raw layers; every frame now pays a full rebuild")
+    finally:
+        mgr._mem_timer.stop()
+        mgr.close_all()
+        for _ in range(20):
+            qapp.processEvents()
+
+
+def test_a_load_that_produces_nothing_DOES_drop_the_stale_layers(
+    multi_time_point_dataset, napari_pane_stub, qapp
+):
+    """The other half of not removing up front: a failed load must not leave the old frame up.
+
+    Reusing layers is only safe while a reload actually produces pixels. When it produces none,
+    what is on screen belongs to another timepoint and is now sitting under this one's label,
+    which is the exact class of silent lie this axis already had once.
+    """
+    from squidmip._region_viewer import _RAW_OP, ViewerManager
+
+    root, _planes = multi_time_point_dataset
+    reader = open_reader(root)
+    mgr = ViewerManager(reader, reader.metadata)
+    try:
+        win = mgr.open([TIME_SERIES_REGION])
+        pane = napari_pane_stub[0]
+        assert _pump(qapp, lambda: bool(pane.mosaic.added))
+        pane.mosaic.removed.clear()
+        win._on_done(TIME_SERIES_REGION, 0, gen=win._load_gen)
+        assert _RAW_OP in pane.mosaic.removed, (
+            "a load that built nothing left the previous timepoint's pixels on screen")
+    finally:
+        mgr._mem_timer.stop()
+        mgr.close_all()
+        for _ in range(20):
+            qapp.processEvents()
+
+
+def test_the_camera_is_not_re_framed_on_every_frame(
+    multi_time_point_dataset, napari_pane_stub, qapp
+):
+    """Framing follows the REGION, not the timepoint.
+
+    `reset_view` cost 85-130 ms of GUI thread per frame (measured), but the reason it is
+    conditional is not the milliseconds: a timepoint step reloads the same region at the same
+    stage coordinates, so re-framing drags the user's zoom back to fit on every frame. You
+    cannot watch a blob move at 1:1 if the camera keeps pulling out.
+    """
+    from squidmip._region_viewer import ViewerManager
+
+    class _Camera:
+        def __init__(self):
+            self.frames = 0
+
+        def reset_view(self):
+            self.frames += 1
+
+    root, _planes = multi_time_point_dataset
+    reader = open_reader(root)
+    mgr = ViewerManager(reader, reader.metadata)
+    channel = TIME_SERIES_CHANNELS[0]
+    try:
+        win = mgr.open([TIME_SERIES_REGION])
+        pane = napari_pane_stub[0]
+        camera = pane.mosaic.model = _Camera()
+        assert _pump(qapp, lambda: bool(_added_values(pane, channel)))
+
+        win._on_done(TIME_SERIES_REGION, 2, gen=win._load_gen)      # first framing of this region
+        assert camera.frames >= 1, "the region was never framed at all"
+        was = camera.frames
+        for time_point in (1, 2):
+            win._time_point_bar.set_time_point_from_user(time_point)
+            assert _pump(qapp, lambda: _added_values(pane, channel)[-1]
+                         == time_series_pixel_value(time_point, 0, 0), seconds=10.0)
+        assert camera.frames == was, (
+            f"the camera was re-framed {camera.frames - was} times while only the timepoint moved")
+    finally:
+        mgr._mem_timer.stop()
+        mgr.close_all()
+        for _ in range(20):
+            qapp.processEvents()
+
+
+def test_a_finished_mosaic_worker_is_released_rather_than_piling_up(
+    multi_time_point_dataset, napari_pane_stub, qapp
+):
+    """One QThread per frame, kept alive by its Qt parent, is a pile that grows with playback.
+
+    Measured before this changed: 78 live `_MosaicWorker` objects after 78 playback frames, none
+    of them reclaimable by `gc.collect()`. It is the same accumulation `tools/run_suite_chunked.py`
+    diagnosed as the reason this suite cannot run in one process — and playback turns "one per
+    navigation" into "one per frame".
+    """
+    from squidmip._region_viewer import ViewerManager
+
+    root, _planes = multi_time_point_dataset
+    reader = open_reader(root)
+    mgr = ViewerManager(reader, reader.metadata)
+    channel = TIME_SERIES_CHANNELS[0]
+    try:
+        win = mgr.open([TIME_SERIES_REGION])
+        pane = napari_pane_stub[0]
+        assert _pump(qapp, lambda: bool(_added_values(pane, channel)))
+        for time_point in (1, 2, 0):
+            win._time_point_bar.set_time_point_from_user(time_point)
+            assert _pump(qapp, lambda: _added_values(pane, channel)[-1]
+                         == time_series_pixel_value(time_point, 0, 0), seconds=10.0)
+        assert _pump(qapp, lambda: win._worker is None, seconds=5.0), (
+            "the window is still holding its finished worker; nothing will ever free it")
+        assert win._retired_workers == [], "superseded workers were never reaped"
+    finally:
+        mgr._mem_timer.stop()
+        mgr.close_all()
+        for _ in range(20):
+            qapp.processEvents()
+
+
 def test_the_window_does_not_block_the_ui_thread_to_supersede_a_load(
     multi_time_point_dataset, napari_pane_stub, qapp
 ):
