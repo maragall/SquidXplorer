@@ -123,9 +123,10 @@ knows what a segmentation is.
   .fuse_region_mosaic`), which is correct — it never blends or averages, so no invented label
   values appear at a seam — but region-wide unique ids need inter-FOV work, which is the
   `consumes={"fov"}` seam a plane-op structurally cannot reach.
-- A labels result **cannot be written to a plate.** It is a plane-op, so z survives at full depth,
-  and `_output._validate_image` accepts `Z == 1` only. The refusal is loud and is the same one
-  every plane-op has had since IMA-223; nothing about the result kind changes it.
+- A labels result **can** be written to a plate. It is a plane-op, so z survives at full depth;
+  `_output._validate_image` accepted `Z == 1` only until IMA-277, which is what used to refuse it
+  (loudly, and identically for every plane-op since IMA-223). `Nz > 1` is now written, so nothing
+  refuses it on shape. See `docs/plate-contract.md` "Z: the axis is real".
 
 ## The gallery-view bridge (organoids at max res)
 

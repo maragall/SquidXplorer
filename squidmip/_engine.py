@@ -106,9 +106,10 @@ The same word, spelled once, is now on all three registrars: ``add_projector``,
 a contributor reads, and ``squidmip/_plugins.py`` is how an operator in SOMEBODY ELSE'S package
 reaches this table without editing ``squidmip/__init__.py``.
 
-NOTE for plane-ops: ``write_plate``/IMA-184 currently accept only ``Z == 1`` frames and reject a
-Z>1 frame LOUD (``_validate_image``). So a plane-op streams correctly out of ``project_plate``
-today, and gains a persistence path when the writer learns Z>1 — it is not silently wrong.
+NOTE for plane-ops: ``write_plate`` accepts ``Nz > 1`` (IMA-277). It used to reject it LOUD, which
+is what made a plane-op stream correctly out of ``project_plate`` and then fail at save; that
+restriction is gone and ``_validate_image`` now only refuses a non-5-D array, an empty axis, or a
+channel count that disagrees with the metadata. A plane-op keeps z at full depth end to end.
 
 Prior art (what established pipelines declare, and what IMA-210 took from each)
 ------------------------------------------------------------------------------
