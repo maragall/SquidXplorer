@@ -412,8 +412,14 @@ class RegionViewer(QMainWindow):
         self._regions = [str(r) for r in regions]
         self.window_id = int(window_id)
         self._worker = None
+        #: Which mosaic load this window is waiting for. Bumped by every `_load_mosaic`, carried
+        #: by every result, and checked on arrival: that is how a superseded read is DROPPED
+        #: rather than waited for on the GUI thread. See `_load_mosaic`.
+        self._load_gen = 0
+        self._retired_workers: list = []       # superseded loads, held until Qt reaps them
         self._pending_region: Optional[str] = None
         self._load_timer: Optional[QTimer] = None
+        self._time_load_timer: Optional[QTimer] = None
         self._pane = None
         self._slider = None
         self._cursor = None
@@ -636,7 +642,14 @@ class RegionViewer(QMainWindow):
         # a shared position would mean comparing two wells at the same timepoint was impossible.
         # Same widget CLASS as the plate's, deliberately, so the two can never disagree about what
         # a timepoint control is. Hidden at n_t == 1, so this call site stays unconditional.
-        self._time_point_bar = TimePointBar(on_change=self._on_time_point_changed)
+        #
+        # WITH PLAYBACK, and only here. A window can honestly animate the time axis because its
+        # picture comes from `_MosaicWorker`, which takes a `t` and fuses that timepoint. The
+        # plate's bar cannot and does not: its preview cells are cached per (token, region) with
+        # no timepoint, so a plate play button would animate timepoint 0's pixels under a moving
+        # label. Same class, playback where the read path can serve it. See `_time_point`.
+        self._time_point_bar = TimePointBar(on_change=self._on_time_point_changed, playback=True)
+        self._time_point_bar.on_problem(self._say)
         self._time_point_bar.set_count(int((self._meta or {}).get("n_t", 1) or 1))
         lay.addWidget(self._time_point_bar)
 
@@ -1775,13 +1788,29 @@ class RegionViewer(QMainWindow):
         return bar.time_point if bar is not None else 0
 
     def _on_time_point_changed(self, time_point: int) -> None:
-        """A user moved THIS window's timepoint. Reload its mosaic at that timepoint.
+        """A user moved THIS window's timepoint, or playback advanced it. Reload the mosaic.
 
         Only a user gesture arrives here; TimePointBar does not echo its own programmatic moves, so
         sizing the bar on open cannot trigger a load.
+
+        A PLAYBACK step is loaded IMMEDIATELY and a drag is DEBOUNCED, which is one rule stated
+        twice rather than two policies: never have more than one load in flight. Playback already
+        guarantees that with the frame gate — napari does not request the next timepoint until
+        `frame_done()` says this one is on screen — so a debounce there would only add its own
+        interval to every frame and cap the achievable rate. A DRAG is not gated by anything: the
+        scrollbar emits a step per pixel of travel, so without the debounce a 40-step drag would
+        start 40 loads and cancel 39 of them. Same debounce, same value, as the region axis.
         """
         self._say(f"time_point {time_point + 1} of {self._time_point_bar.count}")
-        self._load_mosaic(region=self.current_region())
+        if self._time_point_bar.is_playing:
+            self._load_mosaic(region=self.current_region())
+            return
+        if getattr(self, "_time_load_timer", None) is None:
+            self._time_load_timer = QTimer(self)
+            self._time_load_timer.setSingleShot(True)
+            self._time_load_timer.timeout.connect(
+                lambda: self._load_mosaic(self.current_region()))
+        self._time_load_timer.start(_REGION_LOAD_DEBOUNCE_MS)
 
     def _on_region_changed(self, index: int, region: str) -> None:
         """Current region moved. Debounce the fuse; the slider label already moved instantly."""
@@ -1802,10 +1831,23 @@ class RegionViewer(QMainWindow):
             return
         from squidmip._viewer import _MosaicWorker
 
+        # SUPERSEDE THE PRIOR LOAD WITHOUT BLOCKING THE UI THREAD. This used to stop the prior
+        # worker and then BLOCKING-JOIN it for up to 2 s, on the GUI thread. `stop()` only sets an
+        # Event that `_MosaicWorker.run` polls BETWEEN channels, and one channel is a full
+        # `fuse_region_pyramid` plus a contrast seed that materialises the coarsest level, so a
+        # scrub froze the window for as long as the current channel took, up to that cap.
+        # Under playback that is a freeze per frame.
+        #
+        # What the wait was really buying was "no stale pixels", and a GENERATION does that
+        # properly: every result carries the load it belongs to, and anything from an earlier one
+        # is dropped on arrival. So the old worker is asked to stop, kept referenced until Qt
+        # reaps it (a QThread destroyed while running aborts the process), and simply ignored.
+        self._load_gen = int(getattr(self, "_load_gen", 0)) + 1
+        gen = self._load_gen
         prior = self._worker
         if prior is not None and prior.isRunning():
             prior.stop()
-            prior.wait(2000)
+            self._retire_worker(prior)
 
         # An operator layer belongs to the region it was computed on. Moving to another region
         # would leave it placed at the old region's stage coordinates over the new region's raw.
@@ -1819,15 +1861,46 @@ class RegionViewer(QMainWindow):
         w = _MosaicWorker(self._reader, self._meta, region, channels, z_index=0, parent=self,
                           t=self.time_point)
         w.ready.connect(lambda r, ch, levels, bbox, win:
-                        self._on_plane(r, ch, levels, bbox, win))
+                        self._on_plane(r, ch, levels, bbox, win, gen=gen))
         w.problem.connect(self._say)
-        w.finished_count.connect(lambda n: self._on_done(region, n))
+        w.finished_count.connect(lambda n: self._on_done(region, n, gen=gen))
         self._worker = w
         w.start()
 
-    def _on_plane(self, region: str, channel: str, levels, bbox_um, window=None) -> None:
+    def _retire_worker(self, worker) -> None:
+        """Let a superseded worker die on its own time, without dropping it on the floor.
+
+        Two failures are being avoided at once. Dropping the only reference to a RUNNING QThread
+        lets Python free it and Qt aborts the process ("QThread: Destroyed while thread is still
+        running") — the same hazard `RegionSlider.shutdown` exists for. Waiting for it instead
+        blocks the GUI thread, which is what this replaces. So it is parked here and removed when
+        Qt says it has finished.
+        """
+        retired = getattr(self, "_retired_workers", None)
+        if retired is None:
+            retired = self._retired_workers = []
+        retired.append(worker)
+        worker.finished.connect(lambda: self._forget_worker(worker))
+
+    def _forget_worker(self, worker) -> None:
+        retired = getattr(self, "_retired_workers", None)
+        if retired is not None and worker in retired:
+            retired.remove(worker)
+
+    def _is_current_load(self, gen: int) -> bool:
+        """Whether *gen* is the load this window is still waiting for."""
+        return int(gen) == int(getattr(self, "_load_gen", 0))
+
+    def _on_plane(self, region: str, channel: str, levels, bbox_um, window=None,
+                  gen: Optional[int] = None) -> None:
         pane = self._pane
         if pane is None or not getattr(pane, "ok", False):
+            return
+        # A SUPERSEDED LOAD'S PIXELS ARE DROPPED. The region check below cannot see this one: a
+        # timepoint change keeps the region, so the loser and the winner agree about `region` and
+        # differ only in `t`. Without the generation, the retired worker's timepoint 0 lands after
+        # the new worker's timepoint 2 and the window shows the older frame under the newer label.
+        if gen is not None and not self._is_current_load(gen):
             return
         if self._cursor is not None and self._cursor.region != region:
             return                                  # a later region won the race; drop this one
@@ -1868,9 +1941,14 @@ class RegionViewer(QMainWindow):
         if self.open_clock is not None:
             self.open_clock.first_layer()
 
-    def _on_done(self, region: str, n: int) -> None:
+    def _on_done(self, region: str, n: int, gen: Optional[int] = None) -> None:
         pane = self._pane
         if pane is None or not getattr(pane, "ok", False):
+            return
+        # A retired worker finishing must NOT open the playback gate: the frame the user is
+        # waiting for is still being read, and letting the next one be requested here is exactly
+        # the backlog the gate exists to prevent.
+        if gen is not None and not self._is_current_load(gen):
             return
         if n == 0:
             pane.say(f"{region}: no mosaic could be built (see the message above).")
@@ -1899,9 +1977,18 @@ class RegionViewer(QMainWindow):
         self._frame_done()
 
     def _frame_done(self) -> None:
-        """Open the playback gate: this region is on screen, the next may be requested."""
+        """Open the playback gate: this mosaic is on screen, the next frame may be requested.
+
+        BOTH axes, unconditionally. One mosaic load is what a region step and a timepoint step
+        both wait on, so the completion is one event and it opens whichever gate is closed. Asking
+        which axis is playing first would be a second copy of "who is animating", and the bar and
+        the slider each already know: `frame_done` on a control that is not playing is a no-op.
+        """
         if self._slider is not None:
             self._slider.frame_done()
+        bar = getattr(self, "_time_point_bar", None)
+        if bar is not None:
+            bar.frame_done()
 
     # -- 2D -> 3D, per window -----------------------------------------------------------
     def _selected_roi(self) -> "tuple":
@@ -2164,13 +2251,16 @@ class RegionViewer(QMainWindow):
         A window that is not the active one stops its playback so it is not fusing regions in the
         background and competing for the GPU with the window the user is actually looking at.
         """
-        if active or self._slider is None:
+        if active:
             return
-        try:
-            if self._slider.is_playing:
-                self._slider.stop()
-        except Exception:                            # noqa: BLE001 - best effort
-            pass
+        for control in (self._slider, getattr(self, "_time_point_bar", None)):
+            if control is None:
+                continue
+            try:
+                if control.is_playing:
+                    control.stop()
+            except Exception:                        # noqa: BLE001 - best effort
+                pass
 
     def changeEvent(self, event):                    # noqa: N802 - Qt naming
         from qtpy.QtCore import QEvent
@@ -2219,6 +2309,21 @@ class RegionViewer(QMainWindow):
                 self._slider.shutdown()
         except Exception:                            # noqa: BLE001
             pass
+        try:
+            # The TIME axis has an animation thread of its own, and Qt aborts the process on a
+            # QThread destroyed while it is still running. Closing a window mid-playback is the
+            # ordinary way to meet that, so it is joined here exactly as the region slider is.
+            bar = getattr(self, "_time_point_bar", None)
+            if bar is not None:
+                bar.shutdown()
+        except Exception:                            # noqa: BLE001
+            pass
+        for worker in list(getattr(self, "_retired_workers", []) or []):
+            try:
+                worker.stop()
+                worker.wait(2000)
+            except Exception:                        # noqa: BLE001
+                pass
         self.closed.emit(self)
         super().closeEvent(event)
 
