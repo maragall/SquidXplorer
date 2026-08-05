@@ -5702,3 +5702,166 @@ def test_a_render_worker_is_retired_with_the_export_worker(
     qapp.processEvents()
     assert seen == [], "the render worker survived _stop_minerva still connected"
     win.close()
+
+
+# ==================================================================== SELECTION = A BOUNDING BOX
+# Julio, 2026-08: "Region highlights on plate view: alpha modification removed, replaced with
+# bounding boxes for selected regions. Current alpha value too high, causes confusion. Window title
+# already identifies open wells, so dual indication unnecessary." And: "No alpha-valued overlay on
+# the thumbnail. Rather frames. Do for > 3x3 wellplate."
+#
+# The confusion is specific, and it is why these tests measure the CELL INTERIOR rather than the
+# whole widget: a wash repaints the thumbnail, so the pixels the user is judging change colour when
+# the well is merely selected. At 1536wp density -- a cell is ~25 px and dozens of wells get
+# selected at once -- that reads as a difference in the DATA. A frame lands on the boundary and
+# leaves the thumbnail byte for byte alone, which is the property asserted below.
+#
+# Sized at plate scale on purpose. Spencer's warning is that the 2-region tissue set gives no
+# intuition for what an overlay does when cells are 25 px and there are 1536 of them.
+
+def _grab_rgb(ov) -> np.ndarray:
+    """The widget as actually PAINTED, (H, W, 3) uint8, in R,G,B order.
+
+    ``Format_RGB32`` packs 0xffRRGGBB, so on a little-endian machine the BYTES come out B,G,R,A --
+    the reverse at the end is what makes a comparison against a QColor mean anything. The nearby
+    ``_region_crop`` reads the same buffer without reversing, which is harmless there because it
+    only takes a std, and wrong the moment an actual ink is named.
+    """
+    img = ov.grab().toImage().convertToFormat(QImage.Format_RGB32)
+    a = np.frombuffer(img.constBits().asstring(img.sizeInBytes()), np.uint8)
+    return a.reshape(img.height(), img.bytesPerLine() // 4, 4)[:, : img.width(), 2::-1]
+
+
+def _fitted_plate(nrows, ncols, w=1400, h=900):
+    """An nrows x ncols overview, fitted to (w, h), one channel declared."""
+    rows = [V._row_letter(i) for i in range(nrows)]
+    cols = [str(i + 1) for i in range(ncols)]
+    by_rc = {(r, c): f"{rows[r]}{cols[c]}" for r in range(nrows) for c in range(ncols)}
+    ov = V.PlateOverview(rows, cols, by_rc)
+    ov.set_channels(["c0"], _RED_BLUE[:1], np.uint16)
+    ov.resize(w, h)
+    ov._fit()
+    return ov
+
+
+def _cell(ov, rc, inset=0):
+    """Index tuple for cell *rc* in a GRABBED frame, *inset* LOGICAL px in on every side.
+
+    ``grab()`` renders at the device pixel ratio (2 on a retina panel) while ``_cell_rect`` is in
+    logical px, so both the rect and the inset are scaled here. Without it the crops land a
+    quarter of the plate away -- which the whole-widget checks nearby never noticed, because they
+    only take a std.
+    """
+    r = ov.devicePixelRatioF()
+    x, y, cw, ch = (v * r for v in ov._cell_rect(*rc))
+    i = int(round(inset * r))
+    return (slice(int(y) + i, int(y + ch) - i), slice(int(x) + i, int(x + cw) - i))
+
+
+def _carries_ink(frame, sl, color, tol=24) -> bool:
+    """True when some pixel in *sl* is *color* at full strength (a 16% wash never gets there)."""
+    band = frame[sl].reshape(-1, 3).astype(int)
+    want = np.array([color.red(), color.green(), color.blue()])
+    return bool(np.abs(band - want).sum(1).min() <= tol)
+
+
+def test_selecting_a_well_on_a_1536wp_leaves_the_thumbnail_pixels_untouched(qapp):
+    """THE regression: no alpha wash over a selected cell once the plate is bigger than 3x3."""
+    ov = _fitted_plate(32, 48)
+    rc = (16, 24)
+    ov.add_tile(*rc, ov._by_rc[rc], _tile([3000]))
+    ov.recomposite(quick=True)
+    assert ov._cd > 14, f"cell is {ov._cd:.1f} px wide; the interior crop would be empty"
+
+    before = _grab_rgb(ov).copy()
+    ov.highlight_regions([ov._by_rc[rc]])
+    after = _grab_rgb(ov)
+
+    assert np.array_equal(before[_cell(ov, rc, 8)], after[_cell(ov, rc, 8)]), (
+        "selecting the well repainted the pixels INSIDE it. That is the alpha wash Julio removed: "
+        "the thumbnail's apparent contrast and hue change when the well is merely selected.")
+    assert not np.array_equal(before[_cell(ov, rc)], after[_cell(ov, rc)]), \
+        "the selection produced no visible mark on the cell at all"
+
+
+def test_the_selection_mark_on_a_1536wp_is_full_strength_ink_on_the_cell_boundary(qapp):
+    """A drawn box in the accent ink at FULL alpha. A 16% wash cannot reach that colour, and the
+    3 px black grid line between wells would bury a box painted before it."""
+    ov = _fitted_plate(32, 48)
+    rc = (10, 30)
+    ov.highlight_regions([ov._by_rc[rc]])
+    frame = _grab_rgb(ov)
+    assert _carries_ink(frame, _cell(ov, rc), V._SEL_FRAME), (
+        "no pixel of the selected cell carries the accent ink at full strength: the mark is still "
+        "a wash, or the grid lines were painted over the box")
+
+
+def test_the_selection_box_is_a_frame_and_not_a_filled_rectangle(qapp):
+    """A frame is a PERIMETER. Counting the ink separates "box" from "opaque fill", which the
+    interior-unchanged test alone does not: a fill in the accent ink would also leave a tile-less
+    cell "changed" and would still carry the ink."""
+    ov = _fitted_plate(32, 48)
+    rc = (4, 4)
+    ov.highlight_regions([ov._by_rc[rc]])
+    frame = _grab_rgb(ov)
+    band = frame[_cell(ov, rc)].reshape(-1, 3).astype(int)
+    want = np.array([V._SEL_FRAME.red(), V._SEL_FRAME.green(), V._SEL_FRAME.blue()])
+    inked = int((np.abs(band - want).sum(1) <= 24).sum())
+    assert 0 < inked < len(band) // 3, (
+        f"{inked} of {len(band)} pixels in the cell carry the accent ink: that is a filled "
+        f"rectangle, not a frame on the boundary")
+
+
+def test_a_3x3_or_smaller_plate_keeps_the_wash_because_frames_were_scoped_to_bigger_plates(qapp):
+    """"Do for > 3x3 wellplate": at that size the cells are huge, one or two are selected at a
+    time, and the wash is unambiguous rather than confusing. Changing it was not asked for."""
+    assert not V.frames_for_grid(3, 3) and not V.frames_for_grid(1, 2)
+    assert V.frames_for_grid(3, 4) and V.frames_for_grid(4, 3) and V.frames_for_grid(32, 48)
+
+    ov = _fitted_plate(3, 3, 600, 600)
+    rc = (1, 1)
+    ov.add_tile(*rc, ov._by_rc[rc], _tile([3000]))
+    ov.recomposite(quick=True)
+    before = _grab_rgb(ov).copy()
+    ov.highlight_regions([ov._by_rc[rc]])
+    after = _grab_rgb(ov)
+
+    assert not np.array_equal(before[_cell(ov, rc, 40)], after[_cell(ov, rc, 40)]), \
+        "the 3x3 plate lost its wash; frames were scoped to plates BIGGER than 3x3"
+
+
+def test_the_selection_frame_stroke_is_clamped_at_both_ends(qapp):
+    """Visible at 1536wp density (~25 px cells), not a slab on a 4-well plate (~200 px cells)."""
+    assert V.selection_frame_pen_px(25.0) == pytest.approx(2.5)
+    assert V.selection_frame_pen_px(4.0) == 1.0          # floor: still one drawn pixel
+    assert V.selection_frame_pen_px(200.0) == 3.0        # ceiling
+
+
+def test_the_red_current_fov_box_still_outranks_the_blue_selection_frame(qapp):
+    """Two boxes now share the boundary. ``_sel`` (red, the well the detail viewer is showing) is
+    painted last and must stay on top: it is the transient 'you are here', and it was already a
+    box, so it is the one indication the bounding-box change must not have swallowed."""
+    ov = _fitted_plate(32, 48)
+    rc = (5, 5)
+    ov.highlight_regions([ov._by_rc[rc]])
+    blue = _grab_rgb(ov).copy()
+    ov._sel = rc
+    ov.update()
+    red = _grab_rgb(ov)
+
+    assert _carries_ink(red, _cell(ov, rc), V._RED), "the red current-FOV box was covered"
+    assert not np.array_equal(blue, red)
+
+
+def test_the_1536_fixture_opens_and_reports_1536_wells(sim_1536wp):
+    """Task 1's fixture guard, at the reader level: 1536 regions, four channels, live symlinks.
+
+    ``open_reader`` is what fails first when the plate is hollow -- it refuses with "contains no
+    {region}_{fov}_{z}_{channel}.tiff" -- so this is the cheapest statement that the plate-scale
+    data the selection work was validated on is really there."""
+    from squidmip import open_reader
+
+    meta = open_reader(str(sim_1536wp)).metadata
+    assert len(meta["regions"]) == 1536, f"{len(meta['regions'])} regions, not 1536"
+    assert meta["wellplate_format"] == "1536 well plate"
+    assert len(meta["channels"]) == 4

@@ -172,13 +172,13 @@ from squidmip._spots import LAYER_KEY as _SPOTS_LAYER_KEY
 from squidmip._plate_overview import (  # noqa: F401 (re-exports)
     _CELL, _CLICK_SLOP, _COLH, _HDR, _LOUPE_CACHE, _LOUPE_HOLD_MS, _LOUPE_MAG, _LOUPE_MAX_CROP,
     _LOUPE_PX, _LOUPE_SLOP, _LOUPE_WIN_LOCK, _PAD, _PCT, _PLATE_DIMS, _PUSH_PX, _TILE_CACHE_BYTES,
-    _TILE_QUEUE_MAX, _VIEW_WASH,
+    _TILE_QUEUE_MAX, _VIEW_WASH, _FRAME_MIN_GRID, _SEL_FRAME,
     PlateOverview, _LoupeSource, _LoupeWorker, _RawLoupeSource, _RunningContrast, _TileFetcher,
     _ZarrLoupeSource, _box_union, _deep_zoom_enabled, _fit_box, _fit_cell, _fit_letterboxed,
     _fmt_um, _fov_of_well, _mosaic_boxes, _nice_scale_um, _pct_window, _plate_grid, _row_letter,
-    cells_in_rect, content_box, loupe_clamp_crop, loupe_crop_px, loupe_decimation, loupe_level,
-    loupe_scale, loupe_um_per_screen_px, push_shape_for, region_mosaic_extent_px,
-    resolve_plate_root, well_at,
+    cells_in_rect, content_box, frames_for_grid, loupe_clamp_crop, loupe_crop_px, loupe_decimation,
+    loupe_level, loupe_scale, loupe_um_per_screen_px, push_shape_for, region_mosaic_extent_px,
+    resolve_plate_root, selection_frame_pen_px, well_at,
 )
 
 # The eight QThread workers moved to `squidmip._workers` (gap 6, 2026-07-29): 949 lines whose only

@@ -116,7 +116,37 @@ def _plate_font(px: int, weight=None) -> QFont:
 
 #: The plate's region highlight — a MORE TRANSPARENT light-blue wash than _SEL_FILL (Julio). Shown
 #: on the manually-picked wells AND on the regions of the open view you click (highlight_regions).
+#: Only reached on a SMALL plate now; see _SEL_FRAME and frames_for_grid below.
 _VIEW_WASH = QColor(88, 166, 255, 40)   # ~16% alpha light blue
+
+#: The same ink at FULL alpha, drawn as a BOUNDING BOX around each selected cell instead of a wash
+#: over it (Julio, 2026-08): "alpha modification removed, replaced with bounding boxes for selected
+#: regions. Current alpha value too high, causes confusion. Window title already identifies open
+#: wells, so dual indication unnecessary." A wash changes the PIXELS the user is judging — on a
+#: 1536wp, where a cell is ~20 px, a 16% blue over every selected thumbnail shifts the apparent
+#: contrast and hue of the data itself, which is the confusion. A frame sits on the cell boundary
+#: and leaves the thumbnail alone.
+_SEL_FRAME = QColor(88, 166, 255)
+
+#: Frames apply on plates BIGGER than 3x3 (Julio: "Do for > 3x3 wellplate"). At 3x3 and under the
+#: cells are huge, one or two of them are selected at a time, and the wash is unambiguous rather
+#: than confusing — it is also the rendering every existing small-plate screenshot shows. The
+#: threshold is on the GRID, not the well count, so a 1x16 strip counts as large.
+_FRAME_MIN_GRID = 3
+
+
+def frames_for_grid(nrows: int, ncols: int) -> bool:
+    """True when the selection is drawn as a bounding box rather than an alpha wash."""
+    return nrows > _FRAME_MIN_GRID or ncols > _FRAME_MIN_GRID
+
+
+def selection_frame_pen_px(cell_disp: float) -> float:
+    """Frame stroke width for a cell *cell_disp* px across.
+
+    Proportional so the box reads at 1536wp density (~20 px cells) without swallowing the cell,
+    and clamped so a 4-well plate does not get a 30 px slab.
+    """
+    return max(1.0, min(cell_disp * 0.10, 3.0))
 
 # Byte budget for the deep-zoom tile cache. A quarter of the measured cache budget: the plate
 # overlay is one of several consumers (the mosaic pyramid and the reader's own plane cache are the
@@ -1068,7 +1098,7 @@ class PlateOverview(QWidget):
         self._sel = None              # well selected from the ndviewer FOV slider
         # SELECTION (IMA-221) is a DIFFERENT concept from _sel above: _sel is "the one well the
         # detail viewer is showing" (red box, driven by the FOV slider); _selection is "the set the
-        # operator picked" (tint, driven by Shift-gestures). Never merge them — the red box must
+        # operator picked" (blue box, driven by Shift-gestures). Never merge them — the red box must
         # survive selecting, and selecting must survive scrubbing.
         self._selection: set = set()  # acquired (row_index, col_index) the user picked. A SET:
         #                               paintEvent membership-tests it once per cell, 1536x on a 1536wp.
@@ -2027,8 +2057,9 @@ class PlateOverview(QWidget):
         self.update()
 
     def highlight_regions(self, region_ids):
-        """Move the blue wash onto *region_ids* — used when the user clicks an OPEN VIEW so the
-        plate shows which regions that window holds. Same wash the manual selection uses."""
+        """Move the blue highlight onto *region_ids* — used when the user clicks an OPEN VIEW so the
+        plate shows which regions that window holds. Same mark the manual selection uses: a bounding
+        box above 3x3, the wash at or below it (``frames_for_grid``)."""
         want = set(region_ids or [])
         self._selection = {rc for rc, rid in self._by_rc.items() if rid in want}
         self.selectionChanged.emit(self.selected_wells())
@@ -2038,7 +2069,9 @@ class PlateOverview(QWidget):
         """Colour-code the OPEN VIEWS on the plate: *entries* is a list of ``(region_ids, QColor)``,
         one per open window/thread. Each view's wells get that view's hue, so overlapping/adjacent
         views are told apart at a glance (Julio's "hue the different view threads"). Painted UNDER
-        the blue focus/selection wash, which still marks the one active view. Empty list clears it."""
+        the blue focus/selection mark, which still picks out the one active view. Empty list clears
+        it. NOT changed by the bounding-box work: this hue answers "which window owns this well",
+        which the selection box does not, so it is not the duplicate indication that was removed."""
         hues = []
         for region_ids, color in (entries or []):
             rcs = {rc for rc, rid in self._by_rc.items() if rid in set(region_ids or [])}
@@ -2552,10 +2585,10 @@ class PlateOverview(QWidget):
                     p.drawRect(int(rx), int(ry), int(rw), int(rh))
             p.setBrush(Qt.NoBrush)
 
-        if self._selection:            # SELECTED / focused-view wells = a light blue wash. More
-            p.setPen(Qt.NoPen)         # transparent than before (Julio), and it FOLLOWS the open
-            p.setBrush(_VIEW_WASH)     # view you click (highlight_regions), as well as manual picks.
-            for ri, ci in self._selection:
+        if self._selection and not frames_for_grid(nr, nc):
+            p.setPen(Qt.NoPen)         # SMALL PLATE (<=3x3): keep the light blue wash. Cells are
+            p.setBrush(_VIEW_WASH)     # huge here and the wash reads as selection, not as a change
+            for ri, ci in self._selection:   # to the data. Frames take over above 3x3 — see below.
                 rx, ry, rw, rh = self._cell_rect(ri, ci)
                 p.drawRect(int(rx), int(ry), int(rw), int(rh))
             p.setBrush(Qt.NoBrush)
@@ -2596,6 +2629,18 @@ class PlateOverview(QWidget):
                 continue
             p.setPen(_ACCENT if hov else _MUTED)
             p.drawText(int(self._ox), int(ay + r * cd), _HDR, int(cd), Qt.AlignCenter, str(self._rows[r]))
+        if self._selection and frames_for_grid(nr, nc):
+            # SELECTED wells on a plate bigger than 3x3 = a BOUNDING BOX, not a wash: the thumbnail
+            # keeps its own pixels, LUT and contrast, and the mark is on the boundary. Drawn HERE,
+            # after the grid lines, because the 3 px black grid is painted between the wells and
+            # would erase a frame drawn where the wash is. Inset by half the stroke so the box lands
+            # inside its own cell rather than straddling the neighbour's.
+            w = selection_frame_pen_px(cd)
+            p.setPen(QPen(_SEL_FRAME, w))
+            p.setBrush(Qt.NoBrush)
+            for ri, ci in self._selection:
+                rx, ry, rw, rh = self._cell_rect(ri, ci)
+                p.drawRect(QRectF(rx + w / 2, ry + w / 2, max(rw - w, 1.0), max(rh - w, 1.0)))
         if self._sel is not None:          # the CURRENT well in the detail viewer = a red BOX
             p.setPen(QPen(_RED, 2))
             p.setBrush(Qt.NoBrush)
