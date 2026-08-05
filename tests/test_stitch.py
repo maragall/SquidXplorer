@@ -475,34 +475,34 @@ def test_window_is_bounded_by_workers(master):
     assert peak <= 2, f"in-flight window ran to {peak}, expected <= 2"
 
 
-def test_stitching_a_plane_op_refuses_instead_of_keeping_only_z0():
-    """A plane-op must not be stitched until per-plane fusion exists (IMA-277).
+def test_stitching_a_plane_op_fuses_every_plane_instead_of_keeping_only_z0(master):
+    """A plane-op is STITCHED now, per z plane (IMA-277). It used to raise NotImplementedError.
 
-    `stitch_region` fuses with z=1 by construction: `out` is allocated with a z extent of 1,
-    write_block writes [t, :, 0, ...] and fuse_plane gets z_level=0. That is right for a
-    z-reducer, whose project_well output is (T, C, 1, Y, X). For a plane-op the output is
-    (T, C, Nz, Y, X), so the old `[:, channels, 0]` silently kept plane 0 and discarded the
-    rest — on exported science data, on three of the six registered projectors.
+    This test is the inverse of the one it replaces. `stitch_region` used to fuse with z pinned
+    to 1 — `out` allocated with a z extent of 1, write_block writing [t, :, 0, ...], fuse_plane
+    called with z_level=0 — which is right for a z-reducer and silently kept ONE plane of a
+    plane-op's full-depth output. Rather than truncate, it refused; the refusal made five of the
+    eight registered operators unstitchable. The z loop is now outer and streaming, so the
+    refusal is gone and what is asserted here is that no plane went missing.
+
+    The deep behaviour (one solved geometry for every plane, the flat-field double-apply guard,
+    the memory bound) is in tests/test_stitch_zplanes.py.
     """
-    import pytest
     from squidmip._stitch import _resolve_projector, stitch_region
 
     plane_ops = [n for n in ("bgsub", "decon", "flatfield")
                  if not _resolve_projector(n).consumes]
     assert plane_ops, "expected bgsub/decon/flatfield to be plane-ops (consumes == frozenset())"
 
-    for name in plane_ops:
-        with pytest.raises(NotImplementedError, match="plane-op"):
-            stitch_region(_DummyReader(), "A1", [0, 1], projector=name, register=False)
-
-
-class _DummyReader:
-    """Refusal must happen before any pixel is read, so the reader is never touched."""
-
-    metadata = {"regions": ["A1"], "channels": ["c0"], "fov_positions_um": {}}
-
-    def __getattr__(self, name):  # pragma: no cover - must not be reached
-        raise AssertionError(f"reader touched ({name}) before the plane-op guard refused")
+    n_z = 3
+    reader = _FakeReader(master)
+    reader.metadata["n_z"] = n_z
+    reader.metadata["z_levels"] = list(range(n_z))
+    out = stitch_region(reader, "A1", [0, 1, 2, 3], projector="bgsub", register=False,
+                        correct_illumination=False)
+    assert out.shape[2] == n_z, (
+        f"a plane-op fused {out.shape[2]} of {n_z} z planes; keeping only plane 0 is the silent "
+        "truncation the old NotImplementedError existed to prevent")
 
 
 # ---------------------------------------------------------------------------------------

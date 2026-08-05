@@ -15,12 +15,12 @@ would be a type lie that only fails at runtime.
 So IMA-222 builds a **parallel** table, :data:`_REGION_OPERATORS`, whose entries have the
 shape the work actually has::
 
-    RegionOperator = Callable[[SquidReader, str, list[int]], np.ndarray]   # -> (T, C, 1, Y, X)
+    RegionOperator = Callable[[SquidReader, str, list[int]], np.ndarray]   # -> (T, C, Nz, Y, X)
                                  reader,  region,  fovs
 
 and a :func:`stitch_plate` generator that **mirrors ``project_plate``'s exact contract** —
 same keyword names (``n_fovs``/``workers``/``on_error``/``regions``), same bounded in-flight
-window, same ``(region, fov, (T, C, 1, Y, X))`` yield — so the viewer's
+window, same ``(region, fov, (T, C, Nz, Y, X))`` yield — so the viewer's
 ``_OperatorWorker._on_well`` consumes it with no change to its body.
 
 The one contract difference, stated loud: ``project_plate``'s task is a **FOV**, so a 27-FOV
@@ -96,7 +96,8 @@ from squidmip._background import _cast_like
 from squidmip._engine import _default_workers, _resolve_projector
 from squidmip._logpane import get_logger
 from squidmip._placement import PlacedArray, Placement
-from squidmip.projection import project_well, select_fovs
+from squidmip._volume import allocate, release
+from squidmip.projection import LABELS, project_well, select_fovs
 
 _log = get_logger("stitch")
 
@@ -773,11 +774,47 @@ def stitch_region(
     geometry: Optional[dict] = None,
     timer=None,
 ) -> np.ndarray:
-    """Z-reduce every FOV of one well, register them, and fuse one seamless mosaic.
+    """Apply an operator to every FOV of one well, register them, and fuse a seamless mosaic.
 
-    The region operator. Returns the SAME 5-D shape ``project_well`` returns — ``(T, C, 1, Y,
+    The region operator. Returns the SAME 5-D shape ``project_well`` returns — ``(T, C, Nz, Y,
     X)``, native dtype — but Y/X are the whole well's mosaic rather than one FOV, so every
-    downstream consumer (the viewer's ``_on_well``, the writer) needs no new case.
+    downstream consumer (the viewer's ``_on_well``, the writer) needs no new case. ``Nz``
+    follows the operator's own ``consumes`` declaration, exactly as ``project_well``'s does:
+
+    ====================  ===================  ==============================================
+    ``consumes``          output ``Nz``        operators
+    ====================  ===================  ==============================================
+    ``frozenset({"z"})``  1 (z collapsed)      mip, reference, decon3d
+    ``frozenset()``       ``n_z`` (per plane)  bgsub, decon, flatfield, spot, cellpose
+    ====================  ===================  ==============================================
+
+    PER-PLANE FUSION (IMA-277)
+    --------------------------
+    A plane-op used to be REFUSED here, because this pipeline fused with z pinned to 1 and
+    ``[:, channels, 0]`` would have kept plane 0 and silently discarded the other nine on a
+    10-plane acquisition. It now fuses every plane, and the design is the reason it can:
+
+    **The geometry is solved ONCE.** Registration is geometry — it runs on ONE raw plane
+    (``registration_z``) at ONE timepoint (``registration_t``), and the ``offsets`` it produces
+    are applied to ``positions`` BEFORE the z loop starts. Every plane is then fused from the
+    same ``origins`` and the same ``get_field`` distortion warp. That is not an optimisation,
+    it is the correctness requirement: two planes solved independently would disagree by their
+    respective residuals and the stack would shear with depth. Pixel-identical placement in all
+    planes is what "we fuse all 10 z independently" has to mean.
+
+    **The z loop is OUTER and streaming.** For each output plane the tiles are projected
+    (``project_well(..., z=)`` reads exactly that one acquisition plane), fused for every
+    timepoint, written into ``out``, and dropped before the next plane is read. So the input
+    side stays at ONE plane's worth of tiles — ~0.94 GB for 27 FOVs x 4 channels x 2084^2
+    uint16, exactly what it was when only one plane existed — rather than the ~9.4 GB the whole
+    stack would cost.
+
+    **The output side is spilled, not swapped.** A 10-plane 4-channel mosaic of that well is
+    8.79 GB, on a 16 GB machine that is also holding the tiles. :func:`squidmip._volume.allocate`
+    backs it with a scratch file above 2 GB and :func:`squidmip._volume.release` drops the
+    resident pages after each plane, so the result is still a plain ndarray for every consumer
+    while the resident set stays flat in stack depth. A z-reducer's single plane is under the
+    threshold, so mip/reference/decon3d allocate exactly as they always have.
 
     Stages (all timed through *timer*, which is Julio's ``StageTimer``):
 
@@ -866,33 +903,18 @@ def stitch_region(
     Returns
     -------
     np.ndarray
-        ``(T, C, 1, H, W)`` native dtype, where ``C == len(channels)``.
+        ``(T, C, Nz, H, W)`` native dtype, where ``C == len(channels)`` and ``Nz`` is 1 for a
+        z-reducer and the acquisition's ``n_z`` for a plane-op.
 
     Raises
     ------
     ValueError
-        If *fovs* is empty, ``pixel_size_um`` is missing/invalid, or a channel selection is
-        out of range.
+        If *fovs* is empty, ``pixel_size_um`` is missing/invalid, a channel selection is out of
+        range, or *projector* would apply the flat-field correction a SECOND time on top of the
+        read path's (see the ``correct_illumination`` guard below).
     KeyError
         If a FOV has no stage position (see :func:`_positions_yx_um`).
     """
-    # Refuse a plane-op BEFORE reading anything. This pipeline fuses with z=1 by construction
-    # (`out` is allocated with z extent 1, write_block writes [t, :, 0, ...], fuse_plane gets
-    # z_level=0), which is correct for a z-reducer whose project_well output is (T, C, 1, Y, X).
-    # A plane-op's output is (T, C, Nz, Y, X), so the old `[:, channels, 0]` silently kept plane 0
-    # and discarded the rest of the stack -- on exported science data, for bgsub/decon/flatfield,
-    # i.e. three of the six registered projectors. On the 10x tissue set that is 9 of 10 planes
-    # gone with nothing said. Per-plane fusion is the real fix and needs a z-outer streaming loop
-    # (holding every z for 27 FOVs x 4 ch x 2084^2 uint16 is ~9.4 GB), so refuse until then.
-    _guard_op = _resolve_projector(projector)
-    if not _guard_op.consumes:
-        raise NotImplementedError(
-            f"operator {getattr(_guard_op, 'name', _guard_op)!r} is a plane-op (consumes=set()), "
-            f"and stitching does not yet fuse per z-plane. Stitching it would keep only z-plane 0 "
-            f"and silently discard the rest of the stack. Reduce z first (e.g. mip), or use a "
-            f"z-reducing operator such as decon3d."
-        )
-
     from tilefusion.fusion import fuse_plane
     from tilefusion.utils import make_1d_profile
 
@@ -955,23 +977,61 @@ def stitch_region(
             f"registration_z={registration_z} is outside this acquisition's "
             f"{meta['n_z']} z-plane(s)")
 
-    # (guard for plane-ops lives just after _resolve_projector, so nothing is read first)
-    # This whole pipeline is z=1 BY CONSTRUCTION: `out` below is allocated with a z extent of 1,
-    # write_block writes [_t, :, 0, ...], and fuse_plane is called with z_level=0. That is correct
-    # for a z-REDUCER, whose project_well output is (T, C, 1, Y, X).
+    # THE OUTPUT'S Z EXTENT, from the operator's own declaration and nothing else — the same
+    # `consumes` table project_well dispatches on, so the two cannot drift:
+    #     consumes={"z"}  -> the operator reduces z          -> Nz = 1,   z_sources = [None]
+    #     consumes=set()  -> the operator maps over planes   -> Nz = n_z, z_sources = z_levels
+    # `z_sources[k]` is the ACQUISITION plane that produces output plane k (None = "all of them",
+    # i.e. let project_well reduce). This list IS the z-outer loop below.
+    z_sources: list = [None] if "z" in _op.consumes else list(meta["z_levels"])
+
+    # LABELS CANNOT BE FEATHERED. `fuse_plane` blends overlapping tiles by a Hann-weighted convex
+    # combination, which is the right answer for intensity and meaningless for an operator whose
+    # pixels are integer OBJECT IDS (`produces="labels"`: spot, cellpose): the mean of label 12 and
+    # label 37 is label 24, an object that does not exist. Per-FOV ids also collide between tiles,
+    # so even a nearest-tile rule would merge unrelated objects across every seam.
     #
-    # It is NOT correct for a PLANE-OP. project_well's contract (see its docstring) is:
-    #     consumes=frozenset({"z"})  ->  (T, C, 1,  Y, X)   z collapsed
-    #     consumes=frozenset()       ->  (T, C, Nz, Y, X)   FULL DEPTH
-    # so `[:, channels, 0]` on a plane-op silently kept z-plane 0 and discarded every other plane
-    # — on exported science data. bgsub, decon and flatfield are all plane-ops, i.e. three of the
-    # six registered projectors, and on the 10x tissue set that threw away 9 planes out of 10
-    # with nothing said. Refuse instead: a loud refusal is recoverable, a silently truncated
-    # export is not, and this project has six confirmed silent failures already.
+    # That is a real inter-FOV problem (id reconciliation across seams), not a fusion parameter, so
+    # it is refused rather than approximated. These operators ARE end-to-end on the per-FOV path
+    # (`write_plate(projector="cellpose")`), which is where a label image is meaningful.
+    if _op.produces == LABELS:
+        raise ValueError(
+            f"operator {projector!r} produces label images (integer object ids), and fusion blends "
+            "overlapping tiles by a weighted average — the mean of two label ids is a third, "
+            "nonexistent object, and per-FOV ids collide across every seam. Stitching labels needs "
+            "id reconciliation across seams, which this operator does not do. Segment per FOV "
+            f"instead (write_plate(projector={projector!r})), or stitch an intensity operator."
+        )
+
+    # THE FLAT-FIELD DOUBLE-APPLY GUARD.
     #
-    # The real fix is per-plane fusion (IMA-277). It is not a one-liner because memory is the
-    # reason this shortcut existed: holding every z for 27 FOVs x 4 channels x 2084^2 uint16 is
-    # ~9.4 GB, so it needs a z-outer streaming loop, not a bigger allocation.
+    # Two places can flat-field, and exactly one of them may run per pass:
+    #   * the READ path (`correct_illumination`, ON by default) — `_FlatfieldReader` below, which
+    #     is where TileFusion applies it and where it must be applied for REGISTRATION to see
+    #     corrected strips;
+    #   * the OPERATOR (`projector="flatfield"`, or anything built by `_flatfield.flatfield_op`),
+    #     which corrects the pixels project_well emits.
+    #
+    # They could not meet until now: this function refused every plane-op, and `flatfield` is a
+    # plane-op. Per-plane fusion removes that refusal, so the combination became reachable in the
+    # same commit — and the correction is NOT idempotent. Measured on the 10x tissue set, region
+    # manual0, correcting twice changes 88.6% of pixels by up to 23 counts. Nothing downstream
+    # could tell: the mosaic renders, the store validates, the numbers are just wrong.
+    #
+    # So it is refused by DECLARATION, not by name — `_flatfield.CORRECTS_ILLUMINATION` is an
+    # attribute on the operator callable, in the same style as `consumes`, because this package
+    # hands out flat-field operators under names it does not choose (`flatfield_op(profile)`) and
+    # a `== "flatfield"` test would miss every one of them. Both single-correction spellings stay
+    # available and the message names them.
+    if correct_illumination is not False and getattr(_op.fn, "corrects_illumination", False):
+        raise ValueError(
+            f"projector {projector!r} flat-field corrects its input, and stitching's read path is "
+            "ALSO correcting (correct_illumination is on by default). The correction is not "
+            "idempotent — applying it twice changes ~89% of pixels by up to 23 counts, silently. "
+            "Pick ONE: correct_illumination=False to let the operator do it, or a projector that "
+            "does not correct (e.g. 'mip') and let the read path do it, which is where TileFusion "
+            "applies it and the only place registration can benefit from it."
+        )
 
     # ILLUMINATION CORRECTION, wrapped around the reader BEFORE anything is read, so every read
     # below this line -- the registration planes AND project_well's z-stack -- is corrected. That
@@ -1144,62 +1204,89 @@ def stitch_region(
     # two never coexist at peak (~0.24 GB against ~0.94 GB on a 27-FOV 4-channel well).
     reg_planes = None
 
-    with timer.stage("project"):
-        # (n_tiles, T, C, Y, X) native dtype, C == len(channels) EXACTLY -- there is no longer a
-        # registration channel riding along to be sliced off later, because registration read its
-        # own plane above. Guarded above: only z-reducers reach here, so project_well's output is
-        # (T, C, 1, Y, X) and index 0 is the whole reduced plane. These planes are FUSED, never
-        # registered.
-        tiles = np.empty((len(fovs), n_t, len(channels), *tile_shape), dtype=dtype)
-        for i, fov in enumerate(fovs):
-            tiles[i] = project_well(reader, region, fov, reduce=_op.fn,
-                                    consumes=_op.consumes)[:, channels, 0]
+    y_profile = make_1d_profile(tile_shape[0], blend_px)
+    x_profile = make_1d_profile(tile_shape[1], blend_px)
+    # Spilled to a scratch file above 2 GB (see squidmip._volume): a 10-plane 4-channel mosaic of
+    # a 27-FOV 10x well is 8.79 GB and this machine has 16, while the tiles below want ~0.94 GB of
+    # it. Still a plain ndarray, so nothing downstream changes; a z-reducer's single plane is under
+    # the threshold and allocates exactly as it always did.
+    out = allocate((n_t, len(channels), len(z_sources), h, w), dtype,
+                   what=f"region {region!r}'s fused {len(z_sources)}-plane mosaic")
 
-    with timer.stage("fuse"):
-        y_profile = make_1d_profile(tile_shape[0], blend_px)
-        x_profile = make_1d_profile(tile_shape[1], blend_px)
-        out = np.zeros((n_t, len(channels), 1, h, w), dtype=dtype)
-
-        def read_tile(idx: int, z_level: int, time_idx: int) -> np.ndarray:
-            # float32 because the numba blend kernels accumulate in float32; converting the
-            # ONE tile the block is currently consuming keeps this at ~C x tile bytes.
+    # THE Z-OUTER STREAMING LOOP. One acquisition plane at a time: project it for every FOV, fuse
+    # it for every timepoint, drop the tiles, release the written pages, move on. `origins` and
+    # `get_field` were solved ONCE, above, and are read-only from here — that is what makes every
+    # plane land on the same grid instead of each solving its own residual.
+    tiles = None
+    for z_i, z_src in enumerate(z_sources):
+        with timer.stage("project"):
+            # (n_tiles, T, C, Y, X) native dtype, C == len(channels) EXACTLY -- there is no longer
+            # a registration channel riding along to be sliced off later, because registration read
+            # its own plane above. `z=z_src` pulls exactly ONE acquisition plane for a plane-op
+            # (None for a z-reducer, which consumes the whole stack), so project_well's output is
+            # (T, C, 1, Y, X) either way and index 0 is the whole plane. These planes are FUSED,
+            # never registered.
             #
-            # No channel slice: `tiles` holds exactly the requested channels, in the requested
-            # order. The old `[:len(channels)]` existed to drop a registration channel that had
-            # been appended to the projected stack; registration now reads its own raw plane, so
-            # the two concerns no longer share an array to be trimmed.
-            return tiles[idx][time_idx].astype(np.float32, copy=False)
+            # Rebound (not reused) per z, and dropped at the end of the iteration, so two planes'
+            # worth of tiles never coexist.
+            tiles = None
+            tiles = np.empty((len(fovs), n_t, len(channels), *tile_shape), dtype=dtype)
+            for i, fov in enumerate(fovs):
+                tiles[i] = project_well(reader, region, fov, reduce=_op.fn,
+                                        consumes=_op.consumes, z=z_src)[:, channels, 0]
 
-        for t in range(n_t):
-
-            def write_block(y0, y1, x0, x1, arr, _t=t):
-                # ROUND back to the acquisition dtype, never truncate. `arr` is the numba
-                # kernel's float32 feathered blend and `out` is native (uint16 on this data),
-                # so a plain slice assignment would truncate toward zero and bias every pixel
-                # of the mosaic down by half a count -- the exact defect _cast_like was written
-                # for in _background/_decon/_flatfield. Stitch was the one operator writing
-                # around it. Same helper, not a second copy of it: one answer to "what does
-                # casting back to the acquisition dtype do".
+        with timer.stage("fuse"):
+            def read_tile(idx: int, z_level: int, time_idx: int, _tiles=tiles) -> np.ndarray:
+                # float32 because the numba blend kernels accumulate in float32; converting the
+                # ONE tile the block is currently consuming keeps this at ~C x tile bytes.
                 #
-                # No clipping is at stake here (the blend is a convex combination of the tiles,
-                # so it cannot exceed their range), but _cast_like clips anyway and that costs
-                # nothing on values already in range.
-                out[_t, :, 0, y0:y1, x0:x1] = _cast_like(arr, out.dtype)
+                # `z_level` is fuse_plane's index INTO `_tiles`, and `_tiles` holds exactly the
+                # plane this iteration is fusing — so it is 0 below and this argument is ignored.
+                # The z that varies is the OUTER loop's, which is the whole point: the tiles are
+                # streamed, not indexed.
+                #
+                # No channel slice: `_tiles` holds exactly the requested channels, in the requested
+                # order. The old `[:len(channels)]` existed to drop a registration channel that had
+                # been appended to the projected stack; registration now reads its own raw plane,
+                # so the two concerns no longer share an array to be trimmed.
+                return _tiles[idx][time_idx].astype(np.float32, copy=False)
 
-            fuse_plane(
-                read_tile=read_tile,
-                write_block=write_block,
-                origins=origins,
-                padded_shape=(h, w),
-                tile_shape=tile_shape,
-                channels=len(channels),
-                y_profile=y_profile,
-                x_profile=x_profile,
-                block_size=block_px,
-                z_level=0,
-                time_idx=t,
-                get_field=get_field,
-            )
+            for t in range(n_t):
+
+                def write_block(y0, y1, x0, x1, arr, _t=t, _z=z_i):
+                    # ROUND back to the acquisition dtype, never truncate. `arr` is the numba
+                    # kernel's float32 feathered blend and `out` is native (uint16 on this data),
+                    # so a plain slice assignment would truncate toward zero and bias every pixel
+                    # of the mosaic down by half a count -- the exact defect _cast_like was written
+                    # for in _background/_decon/_flatfield. Stitch was the one operator writing
+                    # around it. Same helper, not a second copy of it: one answer to "what does
+                    # casting back to the acquisition dtype do".
+                    #
+                    # No clipping is at stake here (the blend is a convex combination of the tiles,
+                    # so it cannot exceed their range), but _cast_like clips anyway and that costs
+                    # nothing on values already in range.
+                    out[_t, :, _z, y0:y1, x0:x1] = _cast_like(arr, out.dtype)
+
+                fuse_plane(
+                    read_tile=read_tile,
+                    write_block=write_block,
+                    origins=origins,
+                    padded_shape=(h, w),
+                    tile_shape=tile_shape,
+                    channels=len(channels),
+                    y_profile=y_profile,
+                    x_profile=x_profile,
+                    block_size=block_px,
+                    z_level=0,
+                    time_idx=t,
+                    get_field=get_field,
+                )
+
+        tiles = None          # this plane's tiles go before the next plane's are read
+        release(out)          # ...and its written pages leave the resident set (spilled case)
+        if len(z_sources) > 1:
+            _log.info("Fusion: region %s plane %d of %d fused (same solved offsets as plane 0).",
+                      region, z_i + 1, len(z_sources))
 
     return PlacedArray(out, placement)
 
@@ -1211,7 +1298,7 @@ def _coordinate_region(reader, region, fovs, **kwargs):
 
 
 # name -> region operator. The PARALLEL table to _engine._PROJECTORS: entries here take a
-# whole well (reader, region, fovs) and return its fused (T, C, 1, Y, X), because inter-FOV
+# whole well (reader, region, fovs) and return its fused (T, C, Nz, Y, X), because inter-FOV
 # work cannot be expressed as a z-reduction. Extended via add_region_operator.
 RegionOperator = Callable[..., np.ndarray]
 _REGION_OPERATORS: dict[str, RegionOperator] = {
@@ -1233,7 +1320,7 @@ def add_region_operator(name: str, operator: RegionOperator) -> None:
         Table key. Non-empty, and must not already exist — a silent clobber of an existing
         operator would be a quiet correctness bug.
     operator:
-        ``operator(reader, region, fovs, **kwargs) -> (T, C, 1, Y, X)``.
+        ``operator(reader, region, fovs, **kwargs) -> (T, C, Nz, Y, X)``.
     """
     if not name:
         raise ValueError("region operator name must be a non-empty string")
@@ -1296,7 +1383,7 @@ def stitch_plate(
 
     The region-operator twin of :func:`squidmip.project_plate`, and deliberately the SAME
     contract: same keyword names, same bounded in-flight window, same
-    ``(region, fov, (T, C, 1, Y, X))`` yield in completion order. A consumer written against
+    ``(region, fov, (T, C, Nz, Y, X))`` yield in completion order. A consumer written against
     ``project_plate`` — notably the viewer's ``_OperatorWorker._on_well`` — drives this
     unchanged.
 
@@ -1346,7 +1433,9 @@ def stitch_plate(
     Yields
     ------
     tuple[str, int, np.ndarray]
-        ``(region, anchor_fov, image)``; ``image`` is ``(T, C, 1, H, W)`` native dtype.
+        ``(region, anchor_fov, image)``; ``image`` is ``(T, C, Nz, H, W)`` native dtype —
+        ``Nz`` is 1 for a z-reducing ``projector=`` and the acquisition's depth for a plane-op
+        (IMA-277 fuses those per plane).
 
     Raises
     ------

@@ -402,6 +402,7 @@ def project_well(
     picked_z: Optional[dict] = None,
     consumes=None,
     t: Optional[int] = None,
+    z: Optional[int] = None,
 ) -> np.ndarray:
     """Apply one operator to a FOV's planes for every channel and timepoint.
 
@@ -472,6 +473,17 @@ def project_well(
         Shape ``(T, n_channels, 1, Y, X)`` where ``T`` is ``n_t`` when ``t is None`` and
         ``1`` otherwise; dtype ``reader.metadata["dtype"]``. Channels are ordered as
         ``reader.metadata["channels"]`` (kept distinct — no z-as-channel collapse).
+    z:
+        Which ACQUISITION z-plane to apply the operator to. ``None`` (default) walks every
+        plane, which is what every existing caller wants. An int applies the operator to that
+        one plane and returns ``Nz=1``, so a caller that fuses **per z-plane** (IMA-277's
+        z-outer streaming loop in :func:`squidmip._stitch.stitch_region`) can pull one plane's
+        worth of tiles at a time instead of the whole stack — for 27 FOVs x 4 channels x
+        2084^2 uint16 that is the difference between ~0.94 GB and ~9.4 GB resident.
+
+        PLANE-OPS ONLY. A z-reducer *consumes* z, so restricting it to one plane would make
+        "the MIP" mean the MIP of a single plane — a silently different scientific result under
+        the same operator name. That is refused rather than allowed to mean two things.
 
     Notes
     -----
@@ -498,6 +510,21 @@ def project_well(
         if not 0 <= t < n_t:
             raise ValueError(f"timepoint {t} out of range for an acquisition with n_t={n_t}")
         timepoints = (t,)
+
+    # ONE acquisition plane (IMA-277). Refused for a z-consumer: see the `z:` docstring entry --
+    # "the MIP of one plane" would be a different scientific result wearing the same name.
+    if z is not None:
+        if "z" in consumes:
+            raise ValueError(
+                f"z={z} selects ONE acquisition plane, which is only meaningful for a plane-op. "
+                f"{getattr(reduce, '__name__', reduce)!r} declares consumes={sorted(consumes)} — it "
+                "REDUCES over z, so restricting it to one plane would silently change what it "
+                "computes. Drop z=, or use a plane-op."
+            )
+        if z not in z_levels:
+            raise ValueError(
+                f"z={z} is not one of this acquisition's z levels {list(z_levels)}")
+        z_levels = [z]
 
     # A z-SELECTING projector advertises how to pick the index (see project_reference).
     select_index = getattr(reduce, "select_index", None)

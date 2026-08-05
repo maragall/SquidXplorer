@@ -13,13 +13,15 @@ and writes each well as it arrives. Two outputs from one pass:
           {row}/                            zarr.json  = row group (bare)
             {col}/                          zarr.json  = well group (images -> raw fov ids)
               {fov}/                        zarr.json  = image group (multiscales + omero)
-                0/                          array: full-res (T, C, 1, Y, X), native dtype
+                0/                          array: full-res (T, C, Nz, Y, X), native dtype
+                                            (Nz>1 for a plane-op result -- IMA-277)
                 1/ 2/ ...                   array: 2x-downsampled pyramid levels (native dtype)
      Opens in ndviewer_light (directory-walk -> array ``0`` + ``omero`` colors; it reads only level 0)
      AND validates as a spec plate (plate/well group metadata) under an independent reader (zarr-python).
 
-  2. ``<out>/tiff/{t}/{region}_{fov}_0_{channel}.tiff`` — individual per-plane TIFFs in Squid's
-     filename convention, z collapsed to ``0`` (the projection), native dtype. You Yan's
+  2. ``<out>/tiff/{t}/{region}_{fov}_{z}_{channel}.tiff`` — individual per-plane TIFFs in Squid's
+     filename convention, native dtype. ``{z}`` is the plane index: ``0`` for a z-reduced result
+     (the projection), and one file per plane for a plane-op's full-depth result. You Yan's
      "individual tiff output": channel identity lives in the filename, no OME-XML, so it drops
      straight into Nick's existing Squid-reading workflow.
 
@@ -28,7 +30,7 @@ Flow::
     reader.metadata ─► select_fovs ─► plate/row/well GROUP metadata written UP FRONT
                                        (full layout known from metadata, so the stream's
                                         completion-order arrival needs no ordering logic)
-    project_plate(reader, ...) ─► (region, fov, (T,C,1,Y,X))
+    project_plate(reader, ...) ─► (region, fov, (T,C,Nz,Y,X))
                                        │  per well, as it arrives:
                                        ├─► field group: array 0 (full-res) + multiscales + omero
                                        └─► individual TIFFs (one per channel, per timepoint)
@@ -75,7 +77,8 @@ import numpy as np
 import tifffile
 
 from squidmip._engine import _default_workers, project_plate
-from squidmip._zarr_store import create_array, write_array, write_group
+from squidmip._volume import release as release_pages
+from squidmip._zarr_store import create_array, write_group
 from squidmip.contract import contract_stamp
 from squidmip.projection import resolve_n_fovs, select_fovs
 
@@ -174,11 +177,13 @@ def estimate_write_bytes(metadata: dict, *, n_fovs: Optional[int] = 1, regions=N
     safety factor, plus the fixed non-image allowance — and times ``n_t``, which is the term whose
     omission let a time-lapse fill the disk mid-write.
 
-    ``n_z`` is the number of Z planes *written per field*, which is 1 on this path: the MIP
-    collapses Z (the writer asserts ``shape[2] == 1``). It is a parameter, not a constant, so a
-    caller that persists a stack passes the stack depth and gets the same arithmetic — but it
-    defaults to what this module actually writes, because a 10x over-estimate refuses runs that
-    would have fit and is no kinder than an under-estimate.
+    ``n_z`` is the number of Z planes *written per field*. It is 1 for a z-REDUCER (mip,
+    reference, decon3d collapse z) and the acquisition's ``n_z`` for a PLANE-OP (bgsub, decon,
+    flatfield, spot, cellpose keep every plane — IMA-277), which is a 10x difference on the 10x
+    tissue set. :func:`write_plate` derives it from the operator's own ``consumes`` declaration
+    and passes it here, so the guard sizes the write that is actually about to happen; it defaults
+    to 1 because a 10x over-estimate refuses runs that would have fit and is no kinder than an
+    under-estimate.
 
     UNCOMPRESSED throughout: real fluorescence zstds unpredictably (often < 1.2x), so discounting
     for compression would under-estimate. Returns 0 when the metadata cannot support an estimate
@@ -544,11 +549,32 @@ def _omero(channels: list[dict], dtype) -> dict:
 # --- field + tiff writers --------------------------------------------------------------------
 
 def _validate_image(image: np.ndarray, channels: list[dict]) -> None:
-    """Fail loud on anything that isn't a projected ``(T, C, 1, Y, X)`` frame for these channels."""
-    if image.ndim != 5 or image.shape[2] != 1:
+    """Fail loud on anything that isn't a ``(T, C, Nz, Y, X)`` operator result for these channels.
+
+    ``Nz > 1`` IS ACCEPTED (IMA-277). It used to be refused outright — "expected a projected
+    (T, C, 1, Y, X) array" — which was true of the only producer that existed when this was
+    written (a z-reducing projection) and false of five of the eight operators that exist now:
+    ``bgsub``, ``decon``, ``flatfield``, ``spot`` and ``cellpose`` are PLANE-OPS, so
+    ``project_well`` hands back the acquisition's full depth and this guard was the reason none
+    of them could be written to disk at all. The store has been 5-D with a real ``z`` axis since
+    the first version (see :func:`_multiscales`, which already scales it by ``dz_um``); nothing
+    but this check stood in the way.
+
+    What it still refuses is what it was actually protecting against: a non-5-D array, an EMPTY
+    axis (which would create a zero-sized zarr array and divide by zero building the pyramid),
+    and a channel count that disagrees with the metadata (which would mislabel ``omero``). A
+    genuinely malformed shape is still a seam bug and still fails here.
+    """
+    if image.ndim != 5:
         raise ValueError(
-            f"expected a projected (T, C, 1, Y, X) array (z collapsed to 1), got shape {image.shape}. "
-            "IMA-184 writes the projection output of IMA-188; a non-5D or Z>1 array is a seam bug."
+            f"expected a 5-D (T, C, Z, Y, X) operator result, got shape {image.shape} "
+            f"({image.ndim}-D). Every operator output is TCZYX — z-reducers give Z=1, plane-ops "
+            "give the acquisition's full depth; anything else is a seam bug."
+        )
+    if any(int(s) < 1 for s in image.shape):
+        raise ValueError(
+            f"(T, C, Z, Y, X) array has an empty axis: shape {image.shape}. Every axis must have "
+            "at least one element — a zero-sized field is not a field."
         )
     if image.shape[1] != len(channels):
         raise ValueError(
@@ -581,13 +607,36 @@ def _write_field(field_dir: Path, image: np.ndarray, channels: list[dict], pixel
     ``position_um`` is the field's top-left corner in stage µm (see :func:`field_origin_um`); it
     becomes the NGFF ``translation`` on every dataset, so the plate carries its own world layout.
 
-    Returns the number of levels written (1 for a small field with no pyramid)."""
+    Returns the number of levels written (1 for a small field with no pyramid).
+
+    Z IS WRITTEN ONE PLANE AT A TIME (IMA-277). The pyramid only ever halves Y and X — see
+    :func:`_downsample_yx`, which leaves every other axis alone — so plane ``k`` of level ``L`` is
+    a function of plane ``k`` of level 0 and of nothing else. Building the whole volume's pyramid
+    at once is therefore not required, and on a real per-plane fused mosaic it is not possible:
+    a 10-plane 4-channel mosaic of a 27-FOV 10x well is 8.79 GB and its pyramid another 2.9 GB, on
+    a 16 GB machine. Writing plane by plane keeps the writer's transient at ONE plane plus its
+    pyramid (~1.2 GB there), flat in stack depth, and the pixels are identical either way — the
+    zarr chunking is ``(1, 1, 1, <=1024, <=1024)``, so a z plane is a whole number of chunks and
+    no chunk is ever partially written.
+    """
     _validate_image(image, channels)
-    levels = _pyramid(image)
-    for i, lvl in enumerate(levels):
-        store = create_array(field_dir / str(i), lvl.shape, lvl.dtype)
-        write_array(store, lvl)
-    level_shapes = [(int(lvl.shape[-2]), int(lvl.shape[-1])) for lvl in levels]
+    level_shapes = pyramid_shapes(image.shape[-2:])
+    stores = [create_array(field_dir / str(i), (*image.shape[:3], *shape), image.dtype)
+              for i, shape in enumerate(level_shapes)]
+    for z in range(image.shape[2]):
+        plane = np.asarray(image[:, :, z:z + 1])   # asarray: a spilled mosaic is read back here
+        levels = _pyramid(plane)
+        # zip() would SILENTLY truncate if the two ladders ever disagreed, and _pyramid's stopping
+        # rule living in two places (here and pyramid_shapes) is exactly the kind of duplication
+        # that drifts. They are pinned by a test; this is the same pin, on real data.
+        if len(levels) != len(stores):
+            raise AssertionError(
+                f"pyramid ladder disagrees with pyramid_shapes: {len(levels)} levels built for "
+                f"{len(stores)} arrays created (frame {image.shape[-2:]})")
+        for store, level in zip(stores, levels):
+            store[:, :, z:z + 1].write(np.ascontiguousarray(level)).result()
+        del plane, levels
+        release_pages(image)   # drop the pages just read, if the producer spilled to a scratch file
     write_group(
         field_dir,
         {
@@ -596,31 +645,39 @@ def _write_field(field_dir: Path, image: np.ndarray, channels: list[dict], pixel
             "omero": _omero(channels, image.dtype),
         },
     )
-    return len(levels)
+    return len(stores)
 
 
 def _write_tiffs(tiff_root: Path, region: str, fov: int, image: np.ndarray, channel_names: list[str]) -> None:
-    """Individual per-plane TIFFs: tiff/{t}/{region}_{fov}_0_{channel}.tiff, native dtype.
+    """Individual per-plane TIFFs: tiff/{t}/{region}_{fov}_{z}_{channel}.tiff, native dtype.
+
+    THE ``{z}`` FIELD IS THE Z INDEX, and always was — that is Squid's own filename convention,
+    which this export copies so the files drop into Nick's Squid-reading workflow. It was hardcoded
+    to ``0`` because the only producer collapsed z, and the loop read ``image[t, c, 0]``. A plane-op
+    result (IMA-277) has real depth, so the loop now walks it and the field carries the plane index
+    it always named. A z-reduced result is one plane at ``z=0``, i.e. byte-identical filenames and
+    contents to before.
 
     Each plane is written to a ``.partial`` sibling and atomically renamed into place (IMA-230):
     a run killed by a full disk used to leave an 8-byte ``.tiff`` that every downstream tool
     happily opened as a real file. A rename either happens or does not, so a published TIFF is
     always a complete one; the temp file is removed on the way out of a failure.
     """
-    n_t = image.shape[0]
+    n_t, _, n_z = image.shape[:3]
     for t in range(n_t):
         tdir = tiff_root / str(t)
         tdir.mkdir(parents=True, exist_ok=True)
-        for c_i, channel in enumerate(channel_names):
-            plane = image[t, c_i, 0]  # (Y, X), native dtype, z collapsed
-            final = tdir / f"{region}_{fov}_0_{channel}.tiff"
-            tmp = final.with_name(final.name + _PARTIAL_SUFFIX)
-            try:
-                tifffile.imwrite(tmp, plane)
-                os.replace(tmp, final)
-            except BaseException:
-                tmp.unlink(missing_ok=True)
-                raise
+        for z in range(n_z):
+            for c_i, channel in enumerate(channel_names):
+                plane = np.asarray(image[t, c_i, z])   # (Y, X), native dtype
+                final = tdir / f"{region}_{fov}_{z}_{channel}.tiff"
+                tmp = final.with_name(final.name + _PARTIAL_SUFFIX)
+                try:
+                    tifffile.imwrite(tmp, plane)
+                    os.replace(tmp, final)
+                except BaseException:
+                    tmp.unlink(missing_ok=True)
+                    raise
 
 
 # --- IMA-231: FOV_ROI_table (Fractal / ngio ROI-table convention) -----------------------------
@@ -842,6 +899,7 @@ def write_from_stream(
     min_free_bytes: Optional[int] = None,
     roi_table: bool = True,
     region_operator: bool = False,
+    n_z: int = 1,
 ) -> dict:
     """Write the plate + (optionally) TIFFs from a ``(region, fov, image)`` stream and *metadata*.
 
@@ -877,10 +935,18 @@ def write_from_stream(
 
     if check_disk:
         need = estimate_write_bytes(metadata, n_fovs=n_fovs, regions=regions, tiff=tiff,
-                                    region_operator=region_operator)
+                                    region_operator=region_operator, n_z=n_z)
         scope = "this plate write" if regions is None else f"this {len(list(regions))}-well write"
         check_disk_space(out_dir, need, headroom=disk_headroom, min_free_bytes=min_free_bytes,
                          what=scope)
+
+    # ONE fused region at a time when the result has real depth (IMA-277). The writer pool exists
+    # to overlap pyramid+zstd with the projection, and at 4 threads it holds up to 4 results at
+    # once -- fine at ~139 MB per projected FOV, fatal at 8.79 GB per 10-plane fused mosaic (4 of
+    # those is 35 GB). A region operator already streams one region at a time; this stops the
+    # WRITER from re-widening the window behind it. The per-FOV path is untouched.
+    if region_operator and int(n_z) > 1:
+        write_workers = 1
 
     wells = select_fovs(metadata, n_fovs=n_fovs)  # {region: [fov, ...]}, deterministic
     # NGFF field_count is a single plate-level scalar and is int()-ed below, so n_fovs=None
@@ -1071,6 +1137,17 @@ def write_plate(
         from squidmip._engine import bind_projector
 
         bind_projector(projector, operator_kwargs)   # refuse BEFORE any directory is made
+    # HOW DEEP THE RESULT WILL BE, from the operator's own `consumes` declaration — the same table
+    # project_well and stitch_region dispatch on, so the disk estimate cannot disagree with what is
+    # then written. A z-reducer collapses z (n_z=1, what this module wrote for its whole history);
+    # a plane-op keeps every plane, which is 10x the bytes on the 10x tissue set and used to be
+    # unwritable at all. The region operator's `projector=` kwarg is what decides it for a stitch;
+    # absent one, stitch_region's own default is "mip", a z-reducer.
+    from squidmip._engine import projector_consumes
+
+    inner = (operator_kwargs or {}).get("projector", "mip") if region_operator else projector
+    n_z_out = 1 if "z" in projector_consumes(inner) else int(metadata.get("n_z", 1) or 1)
+
     if region_operator:
         stream = stitch_plate(reader, n_fovs=None, workers=1, operator=projector,
                               on_error=on_error, regions=regions, **(operator_kwargs or {}))
@@ -1082,4 +1159,4 @@ def write_plate(
                              write_workers=write_workers, stop=stop, regions=regions,
                              check_disk=check_disk, disk_headroom=disk_headroom,
                              min_free_bytes=min_free_bytes, roi_table=roi_table,
-                             region_operator=region_operator)
+                             region_operator=region_operator, n_z=n_z_out)
