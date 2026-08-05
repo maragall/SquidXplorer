@@ -13,6 +13,8 @@ inverts the blur the instrument actually applies.
 
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pytest
 
@@ -31,9 +33,12 @@ from squidmip._decon import (
     deconvolve_stack,
     make_psf,
     make_psf_2d,
+    optics_for_channel,
+    optics_override,
     set_optics,
 )
-from squidmip.projection import PLANE_OP, Z_REDUCER
+from squidmip._engine import _resolve_projector
+from squidmip.projection import PLANE_OP, Z_REDUCER, bind_channel
 from squidmip.reader import open_reader
 
 scipy_ndimage = pytest.importorskip("scipy.ndimage")
@@ -412,3 +417,189 @@ def test_channel_labels_from_squidmips_own_reader_parse_into_a_wavelength():
     }
     assert len(wavelengths) == 1
     assert 0.50 < wavelengths.pop() < 0.55       # the 488 line's Stokes-shifted emission
+
+
+# ==============================================================================================
+# PER-CHANNEL OPTICS: the PSF is the channel's, not one module-level default
+# ==============================================================================================
+#
+# THE DEFECT THESE PIN. `deconvolve()` passed `optics=None`, which fell through to
+# `active_optics()`, which returned DEFAULT_OPTICS (525 nm) because `set_optics()` was called
+# from NOWHERE in the package. So every channel of every run was deconvolved with the 488 line's
+# PSF: 405 at 525 instead of 450, 561 at 525 instead of 590, 638 at 525 instead of 670. Only 488
+# was right, and it was right by accident.
+#
+# Measured on the real acquisition, one 638 plane (manual0/fov 0/z 5, 3 RL iterations): 97.28% of
+# the 4.34 M pixels differ between the two PSFs, mean 13.8 counts, 190 counts mean over the
+# brightest 0.1%. The kernels differ by 24% in second-moment sigma (1.165 px vs 1.441 px).
+
+_PER_CHANNEL_CHANNELS = ["Fluorescence 488 nm Ex", "Fluorescence 638 nm Ex"]
+
+
+def _two_channel_acquisition(root, nz: int = 2, frame: int = 64):
+    """A tiny 10x/NA-0.3 acquisition whose two channels have DIFFERENT emission wavelengths.
+
+    Both sidecars, because two parsers read them: ``acquisition.yaml`` is squidmip's
+    (``open_reader``) and ``acquisition parameters.json`` is petakit's, which is where
+    ``objective.NA`` lives and therefore where ``OpticsParams.from_acquisition`` gets it. 64 px
+    frames because the 638 PSF is 23 px wide and a kernel wider than the image measures nothing.
+    """
+    tifffile = pytest.importorskip("tifffile")
+    (root / "ome_tiff").mkdir(parents=True)
+    (root / "acquisition parameters.json").write_text(json.dumps({
+        "Nz": nz, "Nt": 1, "dz(um)": 1.5,
+        "objective": {"magnification": 10.0, "NA": 0.3},
+        "sensor_pixel_size_um": 7.52,
+    }))
+    (root / "acquisition.yaml").write_text(
+        "objective:\n  pixel_size_um: 0.752\n  magnification: 10.0\n  sensor_pixel_size_um: 7.52\n"
+        "sample:\n  wellplate_format: glass slide\n"
+        f"z_stack:\n  nz: {nz}\n  delta_z_mm: 0.0015\n"
+        "time_series:\n  nt: 1\n")
+
+    rng = np.random.default_rng(0)
+    data = np.zeros((1, nz, len(_PER_CHANNEL_CHANNELS), frame, frame), np.uint16) + 200
+    for z in range(nz):                       # sparse puncta: what a wrong PSF actually distorts
+        for c in range(len(_PER_CHANNEL_CHANNELS)):
+            ys = rng.integers(8, frame - 8, 12)
+            xs = rng.integers(8, frame - 8, 12)
+            data[0, z, c, ys, xs] = 9000 + 500 * c
+    tifffile.imwrite(root / "ome_tiff" / "manual0_0000.ome.tiff", data,
+                     metadata={"axes": "TZCYX",
+                               "Channel": {"Name": list(_PER_CHANNEL_CHANNELS)}})
+    return root
+
+
+def test_the_registered_decon_deconvolves_each_channel_at_its_own_wavelength(tmp_path):
+    """THE regression test. Run the REGISTERED ``decon`` through the real engine loop and check
+    the 638 channel came out of a 0.670 um PSF, not the 0.525 um default.
+
+    Fails on the unfixed code: there, ``project_well`` calls one operator for every channel and
+    that operator resolves DEFAULT_OPTICS, so the 638 output equals ``shipped`` below and not
+    ``per_channel``.
+    """
+    root = _two_channel_acquisition(tmp_path / "acq")
+    reader = open_reader(root)
+    names = [c["name"] for c in reader.metadata["channels"]]
+    assert names == ["Fluorescence_488_nm_Ex", "Fluorescence_638_nm_Ex"]
+
+    out = project_well(reader, "manual0", 0,
+                       reduce=_resolve_projector("decon").fn, consumes=PLANE_OP)
+
+    c638 = names.index("Fluorescence_638_nm_Ex")
+    optics = optics_for_channel(root, names[c638])
+    assert optics.wavelength_um == pytest.approx(0.670)
+
+    plane = reader.read("manual0", 0, names[c638], reader.metadata["z_levels"][0], 0)
+    per_channel = deconvolve_plane(plane, optics, DEFAULT_ITERATIONS)
+    shipped = deconvolve_plane(plane, DEFAULT_OPTICS, DEFAULT_ITERATIONS)
+
+    # The two candidates must actually differ, or this test could pass on a no-op.
+    assert not np.array_equal(per_channel, shipped), (
+        "the 525 nm and 670 nm PSFs produced identical output on this phantom; the test would "
+        "prove nothing")
+    assert np.array_equal(out[0, c638, 0], per_channel), (
+        "the registered decon did NOT use the 638 channel's own PSF")
+    assert not np.array_equal(out[0, c638, 0], shipped)
+
+    # ...and the 488 channel, whose emission IS 525 nm, is unchanged by the fix.
+    c488 = names.index("Fluorescence_488_nm_Ex")
+    plane488 = reader.read("manual0", 0, names[c488], reader.metadata["z_levels"][0], 0)
+    assert np.array_equal(out[0, c488, 0],
+                          deconvolve_plane(plane488, DEFAULT_OPTICS, DEFAULT_ITERATIONS))
+
+
+def test_the_registered_decon3d_also_gets_per_channel_optics(tmp_path):
+    """``decon`` and ``decon3d`` are the same algorithm registered twice; both must be fixed."""
+    root = _two_channel_acquisition(tmp_path / "acq")
+    reader = open_reader(root)
+    names = [c["name"] for c in reader.metadata["channels"]]
+
+    out = project_well(reader, "manual0", 0,
+                       reduce=_resolve_projector("decon3d").fn, consumes=Z_REDUCER)
+    assert out.shape[2] == 1                                   # still a z-reducer
+
+    c638 = names.index("Fluorescence_638_nm_Ex")
+    stack = np.stack([reader.read("manual0", 0, names[c638], z, 0)
+                      for z in reader.metadata["z_levels"]])
+    per_channel = deconvolve_stack(stack, optics_for_channel(root, names[c638]),
+                                   DEFAULT_ITERATIONS)
+    shipped = deconvolve_stack(stack, DEFAULT_OPTICS, DEFAULT_ITERATIONS)
+    assert not np.array_equal(per_channel, shipped)
+    assert np.array_equal(out[0, c638, 0], per_channel)
+
+
+def test_optics_are_derived_per_channel_on_the_real_acquisition(real_dataset):
+    """The four channels of the acquisition this is demoed on, at their four wavelengths."""
+    assert {c: optics_for_channel(real_dataset, c).wavelength_um for c in (
+        "Fluorescence_405_nm_Ex", "Fluorescence_488_nm_Ex",
+        "Fluorescence_561_nm_Ex", "Fluorescence_638_nm_Ex")} == {
+        "Fluorescence_405_nm_Ex": pytest.approx(0.450),
+        "Fluorescence_488_nm_Ex": pytest.approx(0.525),
+        "Fluorescence_561_nm_Ex": pytest.approx(0.590),
+        "Fluorescence_638_nm_Ex": pytest.approx(0.670),
+    }
+    # ...and the kernels they produce are materially different sizes, not a rounding difference.
+    assert (make_psf_2d(optics_for_channel(real_dataset, "Fluorescence_638_nm_Ex")).shape
+            != make_psf_2d(DEFAULT_OPTICS).shape)
+
+
+def test_set_optics_is_an_override_that_wins_over_the_per_channel_derivation(tmp_path):
+    """The override still works — it is now the exception, not the default path."""
+    root = _two_channel_acquisition(tmp_path / "acq")
+    assert optics_override() is None
+    forced = OpticsParams(na=0.75, wavelength_um=0.61, dxy_um=0.325, dz_um=1.0, nz=2)
+    set_optics(forced)
+    assert optics_override() == forced
+    for channel in ("Fluorescence_638_nm_Ex", "Fluorescence_488_nm_Ex", "nonsense"):
+        assert optics_for_channel(root, channel) == forced
+    clear_optics()
+    assert optics_for_channel(root, "Fluorescence_638_nm_Ex").wavelength_um == pytest.approx(0.670)
+
+
+def test_a_channel_with_no_derivable_emission_is_refused_by_name(tmp_path):
+    """Brightfield has no emission line. Refuse, naming the channel — never substitute another
+    channel's optics, which is a different measurement rather than a degraded one."""
+    root = _two_channel_acquisition(tmp_path / "acq")
+    with pytest.raises(ValueError, match="BF_LED_matrix_full"):
+        optics_for_channel(root, "BF_LED_matrix_full")
+    with pytest.raises(ValueError, match="Fluorescence_638_nm_Ex"):
+        optics_for_channel(None, "Fluorescence_638_nm_Ex")     # no acquisition, no wavelength
+
+
+def test_the_psf_is_cached_by_its_optics_tuple_not_rebuilt_per_plane(tmp_path):
+    """4 channels x 10 z is 40 operator calls against 4 kernels. Measured: 1.341 s of rebuilds
+    without the cache, 0.092 s with it (14.6x) on the real acquisition."""
+    root = _two_channel_acquisition(tmp_path / "acq", nz=3)
+    reader = open_reader(root)
+    make_psf_2d.cache_clear()
+    make_psf.cache_clear()
+
+    project_well(reader, "manual0", 0,
+                 reduce=_resolve_projector("decon").fn, consumes=PLANE_OP)
+
+    info = make_psf_2d.cache_info()
+    assert info.misses == 2, f"one PSF build per CHANNEL, got {info}"
+    assert info.hits == 4, f"the other 2 channels x 3 z must be cache hits, got {info}"
+
+
+def test_an_operator_that_declares_nothing_is_handed_through_unchanged():
+    """``bind_channel`` is a declaration seam, not a wrapper: no ``for_channel``, no change."""
+    from squidmip.projection import project
+    assert bind_channel(project, "/some/acquisition", "Fluorescence_638_nm_Ex") is project
+    # An explicit optics argument is an instruction, so it is never re-derived per channel.
+    fixed = decon_op(FAST_OPTICS, iterations=1)
+    assert not hasattr(fixed, "for_channel")
+    assert bind_channel(fixed, "/some/acquisition", "Fluorescence_638_nm_Ex") is fixed
+
+
+def test_specialising_to_a_channel_may_not_change_the_consumed_axis():
+    """A ``for_channel`` that returned a z-reducer where a plane-op was registered would reshape
+    the result silently. Caught at the seam, named."""
+    def _plane_op(planes):
+        return next(iter(planes))
+
+    _plane_op.consumes = PLANE_OP
+    _plane_op.for_channel = lambda path, channel: decon3d_op(FAST_OPTICS, 1)   # a z-reducer
+    with pytest.raises(ValueError, match="must not change the output shape"):
+        bind_channel(_plane_op, "/some/acquisition", "Fluorescence_638_nm_Ex")

@@ -123,6 +123,7 @@ from squidmip._decon import (
     deconvolve,
     deconvolve_plane,
     deconvolve_stack,
+    optics_for_channel,
     set_optics,
 )
 from squidmip._flatfield import FlatfieldProfile, correct_flatfield, estimate_profile, flatfield_op
@@ -188,6 +189,7 @@ __all__ = [
     "decon_op",
     "decon3d_op",
     "OpticsParams",
+    "optics_for_channel",
     "set_optics",
     "subtract_background",
     "BackgroundParams",
