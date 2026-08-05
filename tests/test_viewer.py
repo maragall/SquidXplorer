@@ -5702,3 +5702,188 @@ def test_a_render_worker_is_retired_with_the_export_worker(
     qapp.processEvents()
     assert seen == [], "the render worker survived _stop_minerva still connected"
     win.close()
+
+
+# ==============================================================================================
+# THE PLATE THUMBNAIL AND ITS PER-CHANNEL DOWNSAMPLE PASS
+#
+# Julio, from the running GUI: "mip layer causes incomplete thumbnail ... incomplete render,
+# likely a process getting stuck and losing sync with downsampling."
+#
+# MEASURED on the real 10x tissue set (2 regions) before the fix: open the plate and run mip on
+# ONE region while the raw preview is still walking it, and the OTHER well ends the session with
+# no thumbnail at all -- `PlateOverview.shown_cells()` returned {(0,0)} out of {(0,0), (0,1)} and
+# `_tiles_by_layer` held no "raw" entry whatsoever.
+#
+# `_PreviewWorker` IS the per-channel downsample pass, and it fills the BASE layer that shows
+# through wherever a subset run has nothing (`PlateOverview.underlay_cells`). `_run_operator`
+# retired it unconditionally, and `_retire` disconnects a worker's signals before stopping it, so
+# the tiles already in flight went too. Nothing restarts it but the return-to-raw path.
+
+class _GatedPreview(V.QThread):
+    """A ``_PreviewWorker`` stand-in that is STILL WALKING the plate until the test releases it.
+
+    Deterministic where the real pass is a race: the defect only shows when an operator run starts
+    while wells are still to be downsampled, which on a 2-well fixture is a few hundred
+    milliseconds wide. Carries ``IS_PREVIEW`` because ``_explore.operator_busy`` reads it.
+    """
+
+    tileReady = V.Signal(int, int, str, object, object)
+    runProgress = V.Signal(object)
+    streamEnded = V.Signal()
+    failed = V.Signal(str)
+    IS_PREVIEW = True
+
+    def __init__(self):
+        super().__init__()
+        import threading
+        self._go = threading.Event()
+
+    def run(self):
+        self._go.wait(20)            # bounded: a hung test must not hang the suite
+
+    def stop(self):
+        self._go.set()
+
+
+def _gated_preview_on(win, qapp):
+    """Put a preview that is provably mid-plate in front of *win*, wired as the real one is."""
+    win._stop_preview()
+    gate = _GatedPreview()
+    win._preview = gate
+    gate.tileReady.connect(win._on_preview_tile)
+    gate.start()
+    assert _drain_until(qapp, gate.isRunning, 5)
+    return gate
+
+
+def test_a_subset_operator_run_leaves_the_thumbnail_downsample_pass_running(
+        qapp, stub_detail, squid_dataset, blocking_worker):
+    """THE reported defect. A run over SOME wells must not stop the pass that fills the rest."""
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    regions = list(win._order)
+    assert len(regions) >= 2, "this fixture must have a well outside the run, or it proves nothing"
+    n_ch = len(win._meta["channels"])
+    gate = _gated_preview_on(win, qapp)
+
+    win.run_operator("mip", save=False, regions=[regions[0]])
+
+    assert win._preview is gate and gate.isRunning(), (
+        "the operator run retired the per-channel downsample pass, so every well it had not yet "
+        "reached keeps no thumbnail for the rest of the session")
+    # ...and it is still WIRED: _retire disconnects before it stops, so a live thread alone is not
+    # enough -- the tiles it is about to produce have to still reach the plate.
+    ri, ci = win._fov_index[regions[-1]]["rc"]
+    gate.tileReady.emit(ri, ci, regions[-1],
+                        np.full((n_ch, V._CELL, V._CELL), 1000, np.uint16), None)
+    assert (ri, ci) in win._overview.shown_cells(), (
+        "the downsample pass is running but its tiles no longer reach the plate")
+
+    gate.stop()
+    gate.wait(5000)
+    win.close()
+
+
+def test_a_plate_wide_run_still_supersedes_the_downsample_pass(
+        qapp, stub_detail, squid_dataset, blocking_worker):
+    """The other direction, so the fix is a scope and not a deletion. A plate-wide run gives every
+    well an operator tile, so continuing to read the same planes twice is pure cost."""
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    gate = _gated_preview_on(win, qapp)
+
+    win.run_operator("mip", save=False)                 # regions=None: the whole plate
+
+    assert win._preview is None, "a plate-wide run no longer supersedes the raw preview"
+    assert _drain_until(qapp, lambda: not gate.isRunning(), 5)
+    win.close()
+
+
+# --- the downsample itself: EVERY CHANNEL, ON ITS OWN -----------------------------------------
+#
+# The plate cell is (C, h, w) native dtype all the way to the widget, and that channel axis is what
+# the channel toggle and the global-contrast recomposite are built on. Both producers of a cell
+# resize each channel independently; a cell built from one channel's pixels, or one that lost the
+# axis, renders as a plausible picture of the wrong thing.
+
+_DOWNSAMPLE_CHANNELS = ["c0", "c1", "c2", "c3"]
+_DOWNSAMPLE_FRAME = (64, 64)
+
+
+def _downsample_meta(fovs=(0, 1)):
+    """Two coordinate-placed FOVs, so the cell is a real mosaic rather than one square tile."""
+    return {
+        "channels": [{"name": c} for c in _DOWNSAMPLE_CHANNELS], "dtype": "uint16",
+        "z_levels": [0, 1, 2], "regions": ["A1"], "fovs_per_region": {"A1": list(fovs)},
+        "fov_positions_um": {("A1", f): (float(f) * 24.0, 0.0) for f in fovs},
+        "frame_shape": _DOWNSAMPLE_FRAME, "pixel_size_um": 1.0, "n_z": 3,
+    }
+
+
+class _PerChannelReader:
+    """Every plane is a constant that NAMES its channel, so a swapped axis is unmistakable."""
+
+    def __init__(self, path):
+        self._path = str(path)
+
+    def read(self, region, fov, channel, z, t=0):
+        return np.full(_DOWNSAMPLE_FRAME, (_DOWNSAMPLE_CHANNELS.index(str(channel)) + 1) * 1000,
+                       dtype=np.uint16)
+
+
+def _expected_levels():
+    return [(i + 1) * 1000 for i in range(len(_DOWNSAMPLE_CHANNELS))]
+
+
+def test_the_raw_preview_downsamples_every_channel_on_its_own(qapp, tmp_path):
+    """``_PreviewWorker`` -- the pass that fills the plate before any operator runs."""
+    meta = _downsample_meta()
+    worker = V._PreviewWorker(_PerChannelReader(tmp_path), meta,
+                              {"A1": {"rc": (0, 0), "well_id": "A1", "idx": 0}}, ["A1"], cache=None)
+    got = []
+    worker.tileReady.connect(lambda *a: got.append(a))
+    worker.run()
+
+    assert got, "the downsample pass produced no tile at all"
+    for _ri, _ci, _wid, tile, box in got:
+        tile = np.asarray(tile)
+        assert tile.ndim == 3 and tile.shape[0] == len(_DOWNSAMPLE_CHANNELS), (
+            f"the plate cell lost its channel axis: {tile.shape}")
+        assert box is not None and tile.shape[1:] == (box[2], box[3]), (
+            f"a {tile.shape[1:]} tile was emitted for a {box[2]}x{box[3]} box")
+        assert [int(round(float(tile[c].mean()))) for c in range(tile.shape[0])] \
+            == _expected_levels(), (
+            "a channel of the plate cell was downsampled from another channel's pixels")
+
+
+def test_an_operator_tile_downsamples_every_channel_on_its_own(qapp, tmp_path):
+    """``_OperatorWorker._on_well`` -- the same cell, the other producer, the same rule.
+
+    Driven with the shape ``project_well`` yields for a z-REDUCER, ``(T, C, 1, Y, X)``: the z axis
+    is already collapsed by the time a tile is built, so what is left to get wrong is the channel
+    axis.
+    """
+    meta = _downsample_meta()
+    idx = {"A1": {"rc": (0, 0), "well_id": "A1", "idx": 0}}
+    worker = V._OperatorWorker("mip", _PerChannelReader(tmp_path), meta, idx, "",
+                               regions=["A1"], save=False, n_fovs=None)
+    assert worker.mosaic_boxes, "this fixture must mosaic, or the per-FOV box path is untested"
+    got = []
+    worker.tileReady.connect(lambda *a: got.append(a))
+    fh, fw = _DOWNSAMPLE_FRAME
+    image = np.stack([np.full((1, fh, fw), (i + 1) * 1000, np.uint16)
+                      for i in range(len(_DOWNSAMPLE_CHANNELS))])[None]      # (T, C, 1, Y, X)
+    for fov in meta["fovs_per_region"]["A1"]:
+        worker._on_well("A1", fov, image)
+
+    assert len(got) == len(meta["fovs_per_region"]["A1"])
+    for _ri, _ci, _wid, tile, box in got:
+        tile = np.asarray(tile)
+        assert tile.shape == (len(_DOWNSAMPLE_CHANNELS), box[2], box[3]), (
+            f"the operator emitted {tile.shape} for a {box[2]}x{box[3]} box")
+        assert [int(round(float(tile[c].mean()))) for c in range(tile.shape[0])] \
+            == _expected_levels(), (
+            "a channel of the operator's plate cell came from another channel's pixels")
