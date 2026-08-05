@@ -88,6 +88,12 @@ log = get_logger("napari")
 #: is read off the canvas at runtime; this is only used until that is known.
 _DEFAULT_MAX_3D_TEXTURE = 2048
 
+#: Key on a layer's own ``metadata`` where its z stack waits while a z-REDUCED result is the layer
+#: on screen. See ``MosaicLayers._present_z_axis``; the same stash-on-the-layer mechanism
+#: ``_swap_layer_scale`` uses for the 2D/3D swap, and for the same reason -- a layer that is never
+#: destroyed cannot strand the contrast, visibility and colormap subscribers bound to it.
+_Z_STASH = "_zstack"
+
 # NOTE: napari is NOT imported at module scope. It costs ~88 ms and pulls Qt, and the pure
 # hierarchy logic below must stay importable (and testable) in a headless process with no
 # napari installed at all. Every napari touch is inside a function.
@@ -513,6 +519,12 @@ class MosaicLayers:
 
     def _swap_layer_scale(self, ly: Any, *, full_res: bool, limit: int) -> None:
         meta = dict(getattr(ly, "metadata", None) or {})
+        # A layer parked in the z-COLLAPSED presentation (see `_present_z_axis`) has no volume to
+        # render, so give it its stack back before either direction of the 3D swap. Two mechanisms
+        # stash on the same layer; whichever runs second must not stash the other's placeholder.
+        if _Z_STASH in meta:
+            self._restore_layer_z(ly)
+            meta = dict(getattr(ly, "metadata", None) or {})
         try:
             if full_res:
                 data = ly.data
@@ -546,6 +558,129 @@ class MosaicLayers:
                 ly.data = list(pyr)
         except Exception as exc:                 # noqa: BLE001 - a render nicety, never fatal
             log.warning("napari 3D swap failed on %s: %s", getattr(ly, "name", "layer"), exc)
+
+    # -- a z-REDUCED result is presented WITHOUT a z axis --------------------------------
+    #
+    # Julio, from the running GUI: "the MIP layer doesn't collapse the z-level axis inside napari".
+    # docs/DESIGN.md:188 already states the rule -- "z slider hidden when nz is 1 (a z reduced
+    # result)" -- and docs/rendering-contract.md:13 states the producer half of it: a fused level
+    # is `(y, x)` rather than `(1, y, x)` when nz == 1, "so no singleton z-slider appears".
+    #
+    # WHAT WAS ACTUALLY WRONG, measured rather than assumed. The MIP layer is ALREADY 2-D by the
+    # time it gets here: `project_well` returns (T, C, 1, Y, X), `_workers._on_well` takes
+    # `image[0, :, 0]`, and the fused result plane that reaches `add_result` is (Y, X). Nothing
+    # downstream keeps a singleton z. The slider belongs to the RAW layer sharing the pane --
+    # `_mosaic_source.fuse_region_pyramid` hands napari `(nz, y, x)` levels -- and napari derives
+    # `dims.ndim` from the MAXIMUM over EVERY layer, visible or not. So delivering the MIP darkens
+    # raw (see `_darken_other_ops`) and leaves raw's z slider standing over a picture it cannot
+    # move: a control that lies about what is on screen.
+    #
+    # So the rule is applied where "what is on screen" is decided, and it is read off the
+    # OPERATOR'S OWN DECLARATION (`consumes`), never off its name: a z-reducer showing means no z
+    # axis, anything else showing (raw, or a plane-op result that genuinely kept its depth) means
+    # the axis comes straight back.
+    #
+    # The swap is `_swap_layer_scale`'s mechanism exactly -- stash on the layer's own metadata,
+    # reassign `data` -- so no layer is ever destroyed and no subscriber is ever stranded, which is
+    # the property `add_mosaic`'s reuse path exists to protect. It is also why the collapsed
+    # presentation uses the COARSEST pyramid level: the layer it is applied to is by construction
+    # the hidden one, and a full-resolution plane would be a whole-region fuse nobody looks at.
+
+    def _restore_layer_z(self, ly: Any) -> None:
+        """Give a z-collapsed layer its stack, its multiscale flag and its placement back."""
+        meta = dict(getattr(ly, "metadata", None) or {})
+        stash = meta.pop(_Z_STASH, None)
+        if stash is None:
+            return
+        try:
+            ly.metadata = meta
+            ly.multiscale = bool(stash["multiscale"])
+            ly.data = stash["data"]
+            # AFTER the data: napari pads scale/translate to the new ndim with 1.0 / 0.0, which
+            # would silently render an anisotropic stack isotropically (the defect `_place`'s z
+            # step exists to prevent). The saved values are the ones `_place` computed.
+            ly.scale = stash["scale"]
+            ly.translate = stash["translate"]
+        except Exception as exc:                 # noqa: BLE001 - a presentation nicety, never fatal
+            log.warning("z axis restore failed on %s: %s", getattr(ly, "name", "layer"), exc)
+
+    def _collapse_layer_z(self, ly: Any, z: int) -> None:
+        """Present a ``(z, y, x)`` layer as the single plane *z*, so it stops carrying a z axis."""
+        meta = dict(getattr(ly, "metadata", None) or {})
+        if _Z_STASH in meta:
+            return                               # already collapsed; idempotent by design
+        try:
+            multiscale = bool(getattr(ly, "multiscale", False))
+            data = ly.data
+            # `list(...)` and not `isinstance(data, list)`: napari wraps a pyramid in its own
+            # ``MultiScaleData``, which is a Sequence of levels but is neither a list nor a tuple,
+            # and indexing it as if it were one array walks the LEVELS instead of the z planes.
+            levels = list(data) if multiscale else [data]
+            if not levels or min(int(getattr(lv, "ndim", 2)) for lv in levels) < 3:
+                return                           # already a plane: nothing to collapse
+            scale, translate = tuple(ly.scale), tuple(ly.translate)
+            meta[_Z_STASH] = {"data": list(levels) if multiscale else data,
+                              "multiscale": multiscale,
+                              "scale": scale, "translate": translate}
+            coarsest = levels[-1]
+            plane = coarsest[max(0, min(int(z), int(coarsest.shape[0]) - 1))]
+            ly.metadata = meta
+            ly.multiscale = False
+            ly.data = plane
+            # The COARSEST level's own pixel size, not level 0's: `scale` placed the pyramid, whose
+            # scale is level 0's, and this presentation is a different-sized array in the same box.
+            fine_h, fine_w = int(levels[0].shape[-2]), int(levels[0].shape[-1])
+            ly.scale = (scale[-2] * fine_h / float(plane.shape[-2]),
+                        scale[-1] * fine_w / float(plane.shape[-1]))
+            ly.translate = translate[-2:]
+        except Exception as exc:                 # noqa: BLE001 - a presentation nicety, never fatal
+            log.warning("z axis collapse failed on %s: %s", getattr(ly, "name", "layer"), exc)
+
+    @staticmethod
+    def _reduces_z(op: str) -> bool:
+        """Does the operator behind this layer key DECLARE ``consumes={"z"}``?
+
+        The DECLARATION, never the name. ``tests/test_operator_declaration.py`` fails the build on
+        an ``x == "<operator name>"`` comparison for exactly this reason: a name test answers for
+        one operator and is wrong for the next one registered with ``add_projector``. The layer key
+        may be scoped to an exploration tab (``"mip@tab2"``), which is in no registry, so it goes
+        through ``operator_name`` first -- the one place that ``@`` rule is spelled.
+        """
+        from squidmip._engine import Z_REDUCER, projector_consumes
+        from squidmip._operations import operator_name
+
+        try:
+            return bool(projector_consumes(operator_name(str(op))) & Z_REDUCER)
+        except Exception:                        # noqa: BLE001 - "raw", "computed", an unknown key
+            return False
+
+    def _present_z_axis(self) -> None:
+        """Drop the pane's z axis while a z-REDUCED result is the layer on screen; else restore it.
+
+        Called wherever "which processing layer is showing" settles: a result arriving lit, a user
+        toggling an eye icon or a layer-tree checkbox, and ``show_op``. One rule, every surface,
+        because two surfaces enforcing one rule is this project's most-repeated defect.
+        """
+        model = self._model
+        dims = getattr(model, "dims", None)
+        if int(getattr(dims, "ndisplay", 2) or 2) == 3:
+            return          # a 3D view is asking for the volume; taking z away would empty it
+        op = self.visible_op()
+        collapse = op is not None and self._reduces_z(op)
+        # The plane the user was last looking at, so toggling raw back on does not jump the stack
+        # to z=0 -- and so the collapsed presentation is the plane they had, not an arbitrary one.
+        z = 0
+        if dims is not None and int(getattr(dims, "ndim", 0) or 0) >= 3:
+            try:
+                z = int(dims.current_step[int(dims.ndim) - 3])
+            except Exception:                    # noqa: BLE001 - a missing step is z=0
+                z = 0
+        with self.programmatic():
+            for ly in self.ours():
+                if collapse:
+                    self._collapse_layer_z(ly, z)
+                else:
+                    self._restore_layer_z(ly)
 
     # -- construction -------------------------------------------------------------------
     def add_mosaic(
@@ -596,8 +731,10 @@ class MosaicLayers:
             # ("the sink went deaf after a rebuild"). A layer that is never destroyed cannot
             # strand its subscribers. It also keeps the user's contrast, colormap and visibility
             # across a region change, which is what "one value per channel" is supposed to mean.
-            return self._reuse_layer(existing, data, bbox_um=bbox_um, z_scale_um=z_scale_um,
-                                     multiscale=multiscale, visible=visible)
+            reused = self._reuse_layer(existing, data, bbox_um=bbox_um, z_scale_um=z_scale_um,
+                                       multiscale=multiscale, visible=visible)
+            self._present_z_axis()
+            return reused
 
         kwargs: dict[str, Any] = {
             "name": key.label(),
@@ -694,6 +831,9 @@ class MosaicLayers:
         # sink that has to be told, exactly as it is told about a user's own toggle.
         if visible:
             self._darken_other_ops(key.channel, layer)
+        # ...and the pane presents a z axis only while something on screen HAS one. A z-reduced
+        # result arriving lit is exactly the moment raw's slider stops describing the picture.
+        self._present_z_axis()
         return layer
 
     def _reuse_layer(self, layer: Any, data: Any, *, bbox_um, z_scale_um, multiscale, visible):
@@ -711,6 +851,10 @@ class MosaicLayers:
         a user gesture. napari re-renders on the data assignment; nothing else has to be told.
         """
         with self.programmatic():
+            # A region change replaces the pixels, so any z stack stashed for the previous region
+            # is now a stale mosaic wearing this layer's name. Restore FIRST (which puts the layer
+            # back at full ndim) and let `_present_z_axis` re-decide after the new data lands.
+            self._restore_layer_z(layer)
             layer.data = data
             if visible is not None:
                 layer.visible = bool(visible)
@@ -1023,6 +1167,7 @@ class MosaicLayers:
             k = key_of(ly)
             assert k is not None
             ly.visible = k.op == op
+        self._present_z_axis()
         return self.channels(op)
 
     def visible_op(self) -> Optional[str]:
@@ -1275,9 +1420,11 @@ class MosaicLayers:
         def _fire(event=None, _ch=channel, _ly=layer):
             if self.is_programmatic:
                 return
-            if not bool(getattr(_ly, "visible", False)):
-                return                      # a layer going DARK never forces anything else
-            self._darken_other_ops(_ch, _ly)
+            if bool(getattr(_ly, "visible", False)):
+                self._darken_other_ops(_ch, _ly)
+            # ...and BOTH directions re-decide the z axis: a layer going dark never forces anything
+            # else on, but it does change what is on screen, which is what the axis describes.
+            self._present_z_axis()
 
         layer.events.visible.connect(_fire)
 

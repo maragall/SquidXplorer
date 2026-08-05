@@ -4510,7 +4510,29 @@ class PlateWindow(QMainWindow):
             if not ok:
                 self._readout.setText(msg)
                 return
-        self._stop_preview()                                 # the operator supersedes the raw preview
+        # THE OPERATOR SUPERSEDES THE RAW PREVIEW ONLY WHERE IT ACTUALLY LANDS.
+        #
+        # Julio, from the running GUI: "mip layer causes incomplete thumbnail ... incomplete
+        # render, likely a process getting stuck and losing sync with downsampling."
+        #
+        # MEASURED (real 10x tissue set, 2 regions): open the plate and run mip on ONE region while
+        # the raw preview is still walking the plate, and the other well ends the session with NO
+        # thumbnail at all -- `PlateOverview.shown_cells()` returns {(0,0)} out of {(0,0), (0,1)}
+        # and `_tiles_by_layer` has no "raw" entry whatsoever. The preview is the per-channel
+        # DOWNSAMPLE pass, and `_retire` (see its docstring) disconnects its signals before
+        # stopping it, so the tiles already in flight are dropped as well as the reads not yet
+        # made. Nothing restarts it: only the return-to-raw path does.
+        #
+        # A plate-wide run really does supersede the preview -- every well gets an operator tile,
+        # so continuing to read the same planes twice is pure cost. A SUBSET run does not: the
+        # layer stack's own rule is that "a layer sits OVER the base, it does not replace it"
+        # (`_plate_overview.underlay_cells`), and the base is what fills every well outside the
+        # run. Stopping the pass that produces the base is how the base ends up missing.
+        #
+        # So the stop is scoped to the runs that genuinely replace it, which is the same
+        # `regions is None` distinction the amber status below already makes.
+        if regions is None:
+            self._stop_preview()
         if regions is not None:                              # amber only the wells we'll actually run
             for r in regions:
                 self._overview.set_status(*self._fov_index[r]["rc"], "processing")

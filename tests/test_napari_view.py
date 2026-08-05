@@ -1421,3 +1421,122 @@ def test_a_colormap_ending_in_black_has_no_hue_to_name(layers):
 def test_a_layer_with_no_colormap_table_says_so_instead_of_guessing(layers):
     from squidmip._napari_view import colormap_hue_rgb
     assert colormap_hue_rgb(object()) is None
+
+
+# ==============================================================================================
+# A Z-REDUCED RESULT IS PRESENTED WITHOUT A Z AXIS
+#
+# Julio, from the running GUI: "the MIP layer doesn't collapse the z-level axis inside napari."
+# docs/DESIGN.md:188 already states the rule ("z slider hidden when nz is 1 (a z reduced result)")
+# and docs/rendering-contract.md:13 states the producer half of it.
+#
+# WHAT WAS ACTUALLY WRONG, measured before the fix rather than assumed. The MIP layer is ALREADY
+# 2-D when it arrives: `project_well` returns (T, C, 1, Y, X) for a z-reducer, `_workers._on_well`
+# takes `image[0, :, 0]`, and the fused plane handed to `add_result` is (Y, X). Nothing downstream
+# keeps a singleton z. The slider belongs to the RAW pyramid sharing the pane -- `(nz, y, x)`
+# levels -- and napari derives `dims.ndim` from the MAXIMUM over EVERY layer, VISIBLE OR NOT. So
+# delivering the MIP darkened raw and left raw's slider standing over a picture it could not move.
+#
+# These drive a bare `ViewerModel`, so they pin the rule rather than a widget.
+
+def _z_stack_pyramid(nz=10, shape=(64, 64)):
+    """A raw mosaic the way `_mosaic_source.fuse_region_pyramid` hands it over: (z, y, x) levels."""
+    h, w = shape
+    return [np.zeros((nz, h, w), np.uint16), np.zeros((nz, h // 2, w // 2), np.uint16)]
+
+
+_Z_BBOX = (0.0, 0.0, 100.0, 200.0)
+
+
+def test_a_z_reducers_result_takes_the_z_axis_off_the_pane(layers):
+    """THE reported defect, in one assertion."""
+    layers.add_mosaic("raw", "405", _z_stack_pyramid(), multiscale=True,
+                      bbox_um=_Z_BBOX, z_scale_um=2.0)
+    assert layers.model.dims.ndim == 3, "the fixture must have a z axis, or this proves nothing"
+
+    layers.add_result("intensity", "mip", "405", np.zeros((64, 64), np.uint16),
+                      bbox_um=_Z_BBOX, visible=True)
+
+    assert layers.model.dims.ndim == 2, (
+        "the pane still carries a z axis while a z-reduced result is what is on screen: napari "
+        "takes dims.ndim from every layer, visible or not, so raw's stack keeps the slider alive "
+        "over a picture it cannot move")
+
+
+def test_the_z_axis_comes_straight_back_when_raw_is_shown_again(layers):
+    """The toggle is a comparison, so it has to be reversible -- pyramid, scale and translate."""
+    raw = layers.add_mosaic("raw", "405", _z_stack_pyramid(), multiscale=True,
+                            bbox_um=_Z_BBOX, z_scale_um=2.0)
+    placed = tuple(raw.scale), tuple(raw.translate)
+    layers.add_result("intensity", "mip", "405", np.zeros((64, 64), np.uint16),
+                      bbox_um=_Z_BBOX, visible=True)
+
+    layers.find("raw", "405").visible = True
+
+    assert layers.model.dims.ndim == 3, "z browsing did not come back with raw"
+    assert raw.multiscale is True, "raw came back as a single scale: the pyramid was lost"
+    assert [tuple(np.asarray(lv).shape) for lv in raw.data] == [(10, 64, 64), (10, 32, 32)]
+    assert (tuple(raw.scale), tuple(raw.translate)) == placed, (
+        "the z step was rebuilt as 1.0 rather than restored, so an anisotropic stack would render "
+        "isotropically -- the defect `_place`'s z scale exists to prevent")
+
+
+def test_a_layer_a_z_reducer_never_touched_is_not_collapsed(layers):
+    """The rule is scoped to the pane's own mosaics and to a REAL z axis: a 2-D layer has nothing
+    to stash, so restoring it later must not be able to invent a stack."""
+    flat = layers.add_mosaic("raw", "405", np.zeros((64, 64), np.uint16), bbox_um=_Z_BBOX)
+    layers.add_result("intensity", "mip", "405", np.zeros((64, 64), np.uint16),
+                      bbox_um=_Z_BBOX, visible=True)
+    layers.find("raw", "405").visible = True
+
+    assert flat.ndim == 2 and np.asarray(flat.data).shape == (64, 64)
+
+
+def test_a_plane_op_result_KEEPS_the_z_axis(layers):
+    """The other half, and the one an ``op == "mip"`` branch would get wrong.
+
+    A plane-op declares ``consumes=frozenset()`` -- z survives at full depth -- so its result says
+    nothing about whether the pane should show a z axis, and raw's stack must stay browsable under
+    it. The distinction is read off the operator's DECLARATION; ``tests/test_operator_declaration``
+    fails the build on a comparison against an operator's name for exactly this reason.
+    """
+    from squidmip import add_projector, available_projectors, plane_op
+
+    if "zaxis_plane_op" not in available_projectors():
+        add_projector("zaxis_plane_op", plane_op(lambda a: a))
+    layers.add_mosaic("raw", "405", _z_stack_pyramid(), multiscale=True,
+                      bbox_um=_Z_BBOX, z_scale_um=2.0)
+
+    layers.add_result("intensity", "zaxis_plane_op", "405", np.zeros((64, 64), np.uint16),
+                      bbox_um=_Z_BBOX, visible=True)
+
+    assert layers.model.dims.ndim == 3, (
+        "a plane-op's result took the z axis away; only an operator declaring consumes={'z'} may")
+
+
+def test_the_rule_reads_the_declaration_through_an_exploration_tabs_scoped_key(layers):
+    """A run scoped to an exploration tab files under ``"mip@tab2"``, which is in no registry."""
+    layers.add_mosaic("raw", "405", _z_stack_pyramid(), multiscale=True,
+                      bbox_um=_Z_BBOX, z_scale_um=2.0)
+
+    layers.add_result("intensity", "mip@tab2", "405", np.zeros((64, 64), np.uint16),
+                      bbox_um=_Z_BBOX, visible=True)
+
+    assert layers.model.dims.ndim == 2, (
+        "the scoped layer key was handed to the registry unsplit, so the declaration behind it "
+        "could not be read and the z axis stayed")
+
+
+def test_show_op_moves_the_z_axis_too(layers):
+    """`show_op` is the before/after toggle's other entrance; one rule, every surface."""
+    layers.add_mosaic("raw", "405", _z_stack_pyramid(), multiscale=True,
+                      bbox_um=_Z_BBOX, z_scale_um=2.0)
+    layers.add_result("intensity", "mip", "405", np.zeros((64, 64), np.uint16),
+                      bbox_um=_Z_BBOX, visible=False)
+    assert layers.model.dims.ndim == 3
+
+    layers.show_op("mip")
+    assert layers.model.dims.ndim == 2
+
+    layers.show_op("raw")
+    assert layers.model.dims.ndim == 3
