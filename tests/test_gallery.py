@@ -661,6 +661,41 @@ def test_a_repaint_is_budgeted_so_a_big_gallery_stutters_no_more_than_a_small_on
         qapp.processEvents()
 
 
+def test_compositing_at_display_resolution_never_starves_the_label(qapp, squid_dataset):
+    """The invariant that makes the 2.5x paint speed-up safe: >= 1 source pixel per drawn pixel.
+
+    `_paint` strides the cell down before windowing it, because windowing all 451x451 of a cell and
+    then throwing 90% away scaling it into a 160 px label cost a measured 5.5 ms median / 46 ms
+    worst per cell. That is only sound while the strided view is still at least as large as the
+    label — `//` rounds down, so it is, and this says so rather than trusting the arithmetic. If
+    the stride ever exceeded that, cells would go visibly soft and no other test would notice.
+    """
+    from squidmip._gallery_window import GalleryWindow
+
+    root, _arrays = squid_dataset
+    reader, meta = _meta(root)
+    win = GalleryWindow(reader, meta, G.GalleryScope.whole(meta), title="t")
+    try:
+        _drain(qapp, win)
+        assert win._cells, "nothing was fused, so the invariant below is vacuous"
+        for size_index, expected_px in ((0, 80), (1, 160), (2, 320)):
+            win._size.setCurrentIndex(size_index)
+            qapp.processEvents()
+            assert win._cell_px == expected_px
+            for cell in win._cells.values():
+                k = win._draw_stride(cell)
+                assert k >= 1
+                h, w = cell.shape
+                if k > 1:
+                    assert len(range(0, h, k)) >= win._cell_px, (
+                        f"stride {k} leaves {len(range(0, h, k))} rows for a "
+                        f"{win._cell_px} px label — the cell would be upscaled")
+                    assert len(range(0, w, k)) >= win._cell_px
+    finally:
+        win.close()
+        qapp.processEvents()
+
+
 def test_a_size_change_re_renders_from_ram_and_reads_nothing(qapp, squid_dataset):
     """gallery-view's rule: display settings re-render the arrays already in RAM, never re-read."""
     from squidmip._gallery_window import GalleryWindow
