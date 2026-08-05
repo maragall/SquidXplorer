@@ -23,13 +23,44 @@ The four things worth pinning, and why each one is a test rather than a comment:
 """
 from __future__ import annotations
 
+import os
+import sys
 import threading
 
-import numpy as np
-import pytest
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")  # headless Qt; must precede the PyQt import
 
-from squidmip import _gallery as G
-from squidmip.reader import open_reader
+import numpy as np                                                       # noqa: E402
+import pytest                                                            # noqa: E402
+
+pytest.importorskip("qtpy")
+# Same guard as test_viewer.py, for the same segfault: with PySide already in the process
+# (napari / pytest-qt autoload it), importing PyQt5 GUI widgets on top crashes.
+if "PySide6" in sys.modules or "PySide2" in sys.modules:
+    pytest.skip(
+        "PySide already loaded (napari/pytest-qt) — Qt binding conflict; run with "
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 to run the PyQt5 GUI tests.",
+        allow_module_level=True,
+    )
+
+from qtpy.QtWidgets import QApplication                                   # noqa: E402
+
+from squidmip import _gallery as G                                        # noqa: E402
+from squidmip.reader import open_reader                                   # noqa: E402
+
+
+@pytest.fixture(scope="module")
+def qapp():
+    """This module's QApplication, by the same convention every other GUI test module here uses.
+
+    NOT pytest-qt's fixture of the same name: `tools/run_suite_chunked.py` runs with
+    `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` (it has to, or the PyQt5 tests silently skip on a PySide
+    that napari dragged in), so pytest-qt is not loaded and its `qapp` does not exist. A test that
+    only ever ran under a bare `pytest` invocation passes locally and errors at SETUP in the
+    suite — which is exactly how this module first went red.
+    """
+    app = QApplication.instance() or QApplication([])
+    app.setProperty("_squidmip_test", True)   # main() won't call exec_/exit under test
+    return app
 
 
 # --- helpers --------------------------------------------------------------------------------
@@ -78,7 +109,12 @@ def _drain(qapp, win, timeout_s: float = 60.0):
         qapp.processEvents()
     for _ in range(10):
         qapp.processEvents()
-    win._flush_repaints()
+    # Repaints are BUDGETED (see GalleryWindow._flush_repaints), so one flush is not the end of
+    # them. Drain to a settled gallery, which is the state the assertions are about.
+    guard = 0
+    while win._dirty and guard < 10_000:
+        win._flush_repaints()
+        guard += 1
     return win
 
 
@@ -226,6 +262,30 @@ def test_a_cell_whose_every_fov_is_unreadable_raises_instead_of_going_black(squi
         G.fuse_gallery_cell(reader, meta, "B2", (0, 1), "no_such_channel")
 
 
+def test_a_ragged_z_is_cropped_to_the_common_shape_rather_than_losing_the_whole_cell(
+        squid_dataset, monkeypatch):
+    """A MIP collapses the z axis away, so there is nothing left to misregister.
+
+    ``fuse_region_pyramid`` RAISES on a ragged z, and is right to: a pyramid level whose z planes
+    disagree misaligns the stack napari puts a slider on. Here z is being reduced, so the honest
+    thing is the opposite — crop to the common shape and keep the FOVs that are fine, rather than
+    lose the cell to one bad plane. Both rules are stated where they apply.
+    """
+    root, _arrays = squid_dataset
+    reader, meta = _meta(root)
+    ch = G.channel_field(meta["channels"][0], "name")
+    real_read = reader.read
+
+    def ragged(region, fov, channel, z, t=0):
+        plane = real_read(region, fov, channel, z, t)
+        return plane[:3, :3] if int(z) == 1 else plane      # z=1 is one pixel short both ways
+
+    monkeypatch.setattr(reader, "read", ragged)
+    cell = G.fuse_gallery_cell(reader, meta, "B2", (0, 1), ch, projection="mip")
+    assert cell is not None and cell.image.size
+    assert not cell.unreadable, "a ragged plane was counted as an unreadable FOV"
+
+
 def test_one_unreadable_fov_leaves_a_counted_hole_in_its_own_place(squid_dataset, monkeypatch):
     """gallery-view builds the canvas from EVERY coordinate for exactly this reason: dropping the
     FOV instead would shift its neighbours and the region would be misregistered, not incomplete."""
@@ -323,6 +383,40 @@ def test_a_gallery_cell_keys_into_the_shared_plane_cache_and_a_second_fuse_reads
     assert subset.full_shape != first.full_shape
 
 
+def test_a_cell_with_a_hole_in_it_is_not_cached(squid_dataset, monkeypatch):
+    """A degraded read is a read to RETRY, not a picture to keep.
+
+    Two failures avoided by one rule. The transient that caused the hole (a disk hiccup, a file
+    mid-write) would otherwise become this session's permanent picture of that region. And the
+    cache stores pixels only, so a hit would rebuild the cell with ``unreadable=()`` — the hole
+    still on screen, the caption no longer saying so, which is worse than the hole.
+    """
+    from squidmip._mosaic_source import plane_cache, source_token
+
+    root, _arrays = squid_dataset
+    inner = open_reader(root)
+    reader = _RecordingReader(inner)
+    meta = reader.metadata
+    ch = G.channel_field(meta["channels"][0], "name")
+    cache, token = plane_cache(), source_token(reader)
+    real_read = inner.read
+
+    def flaky(region, fov, channel, z, t=0):
+        if int(fov) == 1:
+            raise OSError("simulated bad plane")
+        return real_read(region, fov, channel, z, t)
+
+    monkeypatch.setattr(inner, "read", flaky)
+    holed = G.fuse_gallery_cell(reader, meta, "B2", (0, 1), ch, cache=cache, token=token)
+    assert holed.unreadable == (1,)
+    after_first = reader.reads
+
+    # Second fuse must go back to the reader rather than being served the degraded cell.
+    again = G.fuse_gallery_cell(reader, meta, "B2", (0, 1), ch, cache=cache, token=token)
+    assert reader.reads > after_first, "a cell with a hole in it was cached"
+    assert again.unreadable == (1,), "the retry lost the hole count"
+
+
 def test_a_reader_with_no_identity_runs_uncached_rather_than_risking_another_acquisitions_pixels(
         squid_dataset):
     """``source_token`` refuses a reader with no ``_path``; the gallery must degrade, not crash."""
@@ -364,9 +458,49 @@ def test_the_gallery_never_reads_a_plane_on_the_qt_thread(qapp, squid_dataset):
         qapp.processEvents()
 
 
-def test_cells_populate_one_at_a_time_as_they_are_fused(qapp, squid_dataset):
-    """The owner's words: "populate each channel as soon as it is ready". A gallery that waited
-    for all of them would show nothing for the length of the slowest region."""
+def test_cells_are_emitted_one_at_a_time_as_they_are_fused(qapp, squid_dataset):
+    """The owner's words: "populate each channel as soon as it is ready".
+
+    Driven against ``GalleryWorker`` DIRECTLY rather than by connecting to a window's worker after
+    the fact. That is not stylistic: ``GalleryWindow.__init__`` starts its worker, so a test that
+    connects afterwards races the first cell and fails intermittently — observed once here on a
+    fast fixture before this was restructured. A flaky test is worse than no test, so the subject
+    is the object whose contract this is, connected BEFORE ``start()``.
+    """
+    from squidmip._gallery_window import GalleryWorker
+
+    root, _arrays = squid_dataset
+    reader, meta = _meta(root)
+    scope = G.GalleryScope.whole(meta)
+
+    worker = GalleryWorker(reader, meta, scope)
+    seen: list = []
+    progress: list = []
+    worker.cellReady.connect(lambda c: seen.append((c.region, c.channel)))
+    worker.progress.connect(lambda d, t: progress.append((d, t)))
+    worker.start()
+    try:
+        deadline = __import__("time").time() + 60
+        while worker.isRunning() and __import__("time").time() < deadline:
+            qapp.processEvents()
+        for _ in range(10):
+            qapp.processEvents()
+
+        assert len(seen) == scope.cell_count, (
+            f"{len(seen)} cellReady signals for {scope.cell_count} cells — cells are being "
+            "batched instead of arriving as they are fused")
+        assert len(set(seen)) == len(seen), "a cell was emitted twice"
+        assert seen == scope.cells(), "cells did not arrive region-major, so a row completes late"
+        # Progress is reported per cell too, not once at the end.
+        assert len(progress) == scope.cell_count
+        assert progress[-1] == (scope.cell_count, scope.cell_count)
+    finally:
+        worker.stop()
+        worker.wait(5000)
+
+
+def test_every_cell_of_the_scope_ends_up_painted(qapp, squid_dataset):
+    """The window half of the same property: nothing is left as an empty grey square."""
     from squidmip._gallery_window import GalleryWindow
 
     root, _arrays = squid_dataset
@@ -375,16 +509,11 @@ def test_cells_populate_one_at_a_time_as_they_are_fused(qapp, squid_dataset):
 
     win = GalleryWindow(reader, meta, scope, title="t")
     try:
-        seen: list = []
-        win._worker.cellReady.connect(lambda c: seen.append((c.region, c.channel)))
         _drain(qapp, win)
-        assert len(seen) == scope.cell_count, (
-            f"{len(seen)} cellReady signals for {scope.cell_count} cells — cells are being "
-            "batched instead of arriving as they are fused")
-        assert len(set(seen)) == len(seen), "a cell was emitted twice"
         painted = [k for k, lab in win._labels.items()
                    if lab.pixmap() is not None and not lab.pixmap().isNull()]
-        assert len(painted) == scope.cell_count
+        assert len(painted) == scope.cell_count, (
+            f"{len(painted)} of {scope.cell_count} cells carry a pixmap")
     finally:
         win.close()
         qapp.processEvents()
@@ -413,6 +542,121 @@ def test_the_grid_is_regions_down_and_channels_across(qapp, squid_dataset):
             rows = {positions[(region, c)][0] for c in scope.channels}
             assert len(rows) == 1, f"region {region} is not on one row: {rows}"
     finally:
+        win.close()
+        qapp.processEvents()
+
+
+def test_a_rescope_leaves_no_orphan_widgets_painting_over_the_new_grid(qapp, squid_dataset):
+    """Taking a widget out of a QGridLayout does not reparent it, and `deleteLater` only SCHEDULES.
+
+    Between those two facts a rescoped gallery drew the previous layout on top of the new one:
+    observed on the 10x tissue set as "manual0 / 28 FOV / manual1 / 28 FOV" superimposed in one row
+    label, plus a leftover dark cell over the top-left corner. It looked like a paint bug and was
+    a lifetime bug. `tests/test_no_orphan_windows.py` is the same class one container up: a widget
+    that is no longer wanted must stop being a CHILD, not merely stop being in a layout.
+    """
+    from squidmip._gallery_window import GalleryWindow
+
+    root, _arrays = squid_dataset
+    reader, meta = _meta(root)
+    win = GalleryWindow(reader, meta, G.GalleryScope.whole(meta), title="t")
+    try:
+        _drain(qapp, win)
+        live = set(win._labels.values()) | set(win._headers)
+
+        win.rescope(G.GalleryScope.from_region_fovs(meta, [("B3", 0)]))
+        _drain(qapp, win)
+
+        wanted = set(win._labels.values()) | set(win._headers)
+        strays = [c for c in win._grid_host.children()
+                  if c.isWidgetType() and c.isVisible() and c not in wanted]
+        assert not strays, (
+            f"{len(strays)} widget(s) from the previous scope are still children of the grid host "
+            f"and still visible: {[getattr(s, 'text', lambda: '?')() for s in strays[:4]]}")
+        assert not (live & wanted), "rescope reused widgets it was supposed to rebuild"
+        assert set(k[0] for k in win._labels) == {"B3"}, "the rescoped grid kept the old regions"
+        assert len(win._labels) == len(win._scope.channels)
+    finally:
+        win.close()
+        qapp.processEvents()
+
+
+def test_a_column_header_never_overruns_its_column(qapp, squid_dataset):
+    """Observed on the 10x tissue set: four "Fluorescence_405_nm_Ex"-length headers ran together
+    into one illegible line and overprinted a row label.
+
+    Two fixes, both pinned here. The header is FIXED to the cell width so it cannot overrun
+    whatever it is called, and it is labelled by excitation wavelength — which is what actually
+    distinguishes the columns, where "Fluorescence_" is what they all share. The full name stays
+    reachable as the tooltip, so this narrows the label and not the datum.
+    """
+    from squidmip._gallery_window import GalleryWindow
+
+    root, _arrays = squid_dataset
+    reader, meta = _meta(root)
+    win = GalleryWindow(reader, meta, G.GalleryScope.whole(meta), title="t")
+    try:
+        assert win._headers, "no column headers were built"
+        for head in win._headers:
+            assert head.width() <= win._cell_px, (
+                f"header {head.text()!r} is {head.width()} px wide in a {win._cell_px} px column")
+            assert head.toolTip(), "the short header dropped the full channel name entirely"
+
+        # The fixture's channels are 488 nm and 638 nm; headings are the wavelength, not the
+        # 22-character filename channel.
+        headings = {h.text() for h in win._headers}
+        assert any(t.endswith(" nm") for t in headings), headings
+        assert not any("Fluorescence" in t for t in headings), headings
+
+        # A size change moves the columns; the headers must move with them or they overrun again.
+        win._size.setCurrentIndex(2)              # Large
+        qapp.processEvents()
+        for head in win._headers:
+            assert head.width() == win._cell_px == 320
+    finally:
+        win.close()
+        qapp.processEvents()
+
+
+def test_a_repaint_is_budgeted_so_a_big_gallery_stutters_no_more_than_a_small_one(
+        qapp, squid_dataset):
+    """MEASURED on the 1536-well plate before this was budgeted: 159-190 ms of frozen Qt thread.
+
+    Not a decode — the reads were all on the worker, exactly as intended. It was the REPAINT: the
+    shared window widens as cells land, each widening invalidates every cell of that channel, and
+    64 cells x ~2-3 ms of composite + QImage + scale in one slot is the stall. The property that
+    has to hold is that a gallery of 4 regions and a gallery of 64 feel the same, so the work per
+    tick is bounded by a budget rather than by how many regions are in scope.
+    """
+    from squidmip import _gallery_window as GW
+
+    root, _arrays = squid_dataset
+    reader, meta = _meta(root)
+    win = GW.GalleryWindow(reader, meta, G.GalleryScope.whole(meta), title="t")
+    try:
+        _drain(qapp, win)
+        painted: list = []
+        original = win._paint
+        win._paint = lambda cell: (painted.append(cell), original(cell))[1]
+
+        win._queue_repaint(win._cells.keys())
+        assert len(win._dirty) == len(win._cells)
+
+        win._flush_repaints()
+        assert len(painted) <= GW.REPAINT_BUDGET, (
+            f"one flush painted {len(painted)} cells, over the {GW.REPAINT_BUDGET} budget — "
+            "the stall scales with the gallery again")
+
+        # And it must not stop half-done: the timer re-arms while work remains.
+        if win._dirty:
+            assert win._repaint_timer.isActive(), "a partial flush left cells dirty and disarmed"
+        guard = 0
+        while win._dirty and guard < 1000:
+            win._flush_repaints()
+            guard += 1
+        assert not win._dirty, "the budgeted flush never converged"
+    finally:
+        win._paint = original
         win.close()
         qapp.processEvents()
 

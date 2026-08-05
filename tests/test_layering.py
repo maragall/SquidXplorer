@@ -55,6 +55,11 @@ GUI_MODULES = frozenset({
     #                      widget stylesheets), and shared so CHILD windows get it too: it lives
     #                      outside `_viewer` only to avoid a circular import, not to escape this
     #                      boundary.
+    "_gallery_window",   # Gallery View's WINDOW: the grid of QLabels, its worker, its controls.
+    #                      Its producer is `_gallery`, which is Qt-free and stays on the other side
+    #                      of this boundary — that split is the point, not an accident: the scope,
+    #                      the crop, the fuse and the contrast are all testable without a window,
+    #                      and the window holds nothing but layout.
     "_layer_tree",       # the grouped layer tree (a QTreeView over napari's item model)
     "_legend",           # Task 3: the mixed-recipe legend painted on the plate. A deliberate
     #                      GUI addition: it exists to say on the plate's FACE that more than one

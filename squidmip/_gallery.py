@@ -99,10 +99,31 @@ TARGET_CELL_PX = 512
 #: selection as the control** — which is the point of the subset requirement, not a workaround for it.
 MAX_GALLERY_CELLS = 256
 
-#: Projections a cell can be. "mip" is gallery-view's region view (a per-region stitched MIP);
-#: "plane" is one z, the acquisition's opening z, and is what a single-plane acquisition collapses
-#: to anyway. Both are offered because the difference is a whole extra read pass per FOV.
-PROJECTIONS = ("mip", "plane")
+def _every_z(levels: list[int]) -> list[int]:
+    """gallery-view's region view: a per-region stitched MIP over the whole depth."""
+    return levels
+
+
+def _opening_z_only(levels: list[int]) -> list[int]:
+    """One z — the opening z, which is the plane the viewer is parked on and the plate previews."""
+    from squidmip._contrast import opening_z
+
+    return [levels[opening_z(len(levels))]]
+
+
+#: How each projection picks the z values one FOV contributes. A TABLE, and deliberately so.
+#:
+#: ``tests/test_operator_declaration.py::test_no_module_branches_on_an_operator_name`` fails the
+#: build on any ``x == "mip"`` in the package, because "mip" is a registered projector and the
+#: standing property is that adding an operator is a registry entry, never an edit to a module that
+#: had to learn its name. This gallery setting is not that registry — it is a display choice that
+#: happens to share a word — but a string comparison here has the same decay, and the same fix:
+#: adding a projection is an entry in this dict, not a branch in two files. The comparison the
+#: window used to make is a ``findData`` lookup now.
+Z_SELECTORS = {"mip": _every_z, "plane": _opening_z_only}
+
+#: Projections a cell can be, in the order a control should offer them.
+PROJECTIONS = tuple(Z_SELECTORS)
 
 
 @dataclass(frozen=True)
@@ -358,19 +379,20 @@ def plan_cell(meta: Mapping, region: str, fovs: Sequence[int],
 
 
 def _z_indices(meta: Mapping, projection: str) -> list[int]:
-    """The z values one FOV contributes. Every level for a MIP, the opening z for a plane.
+    """The z values one FOV contributes, via :data:`Z_SELECTORS` — a lookup, never a name branch.
 
     ``meta["z_levels"]`` holds the z values as they appear on disk, and ``reader.read`` keys on
     that value — so this iterates the LEVELS, like ``_FocusWorker`` does, rather than
     ``range(n_z)``. On every acquisition seen so far the two agree; when they do not, ``range``
     is the one that raises KeyError halfway through a gallery.
+
+    A single-plane acquisition short-circuits before the lookup: every projection is the same
+    plane there, and reading the table would only be a slower way to say so.
     """
     levels = [int(z) for z in (meta.get("z_levels") or [0])]
-    if projection == "plane" or len(levels) <= 1:
-        from squidmip._contrast import opening_z
-
-        return [levels[opening_z(len(levels))]]
-    return levels
+    if len(levels) <= 1:
+        return levels
+    return Z_SELECTORS[projection](levels)
 
 
 def fuse_gallery_cell(
@@ -446,7 +468,14 @@ def fuse_gallery_cell(
             f"so there is no mosaic. First failures: {unreadable[:3]}"
         )
 
-    _cache_cell(cache, token, region, fovs, channel, t, projection, step, image, covered)
+    if not unreadable:
+        # A DEGRADED CELL IS NOT CACHED, for two reasons that point the same way. It would outlive
+        # the transient that caused it — a disk hiccup or a file being written would become this
+        # session's permanent picture of that region, unrefreshable. And the cache stores pixels
+        # only, so a hit reconstructs the cell with `unreadable=()`: the hole would still be on
+        # screen while the caption stopped saying so, which is worse than the hole. A clean cell
+        # is deterministic and safe to keep; a holed one is a read to retry.
+        _cache_cell(cache, token, region, fovs, channel, t, projection, step, image, covered)
     return GalleryCell(str(region), str(channel), image, covered,
                        cell_window(image, covered), step, full_shape, len(fovs),
                        tuple(unreadable))
@@ -457,7 +486,14 @@ def _fov_tile(reader, region, fov, channel, zs: Sequence[int], t: int, istep: in
 
     ``frame[::step, ::step]`` strides at read, so a coarse cell allocates and pastes a fraction of
     a frame — the decode itself is whole-frame either way, which is why the MIP loop maxes into an
-    already-strided accumulator instead of stacking full frames and reducing at the end.
+    already-strided accumulator instead of stacking full frames and reducing at the end. Peak memory
+    per FOV is therefore ONE decimated plane, not the z-stack.
+
+    Planes of a FOV are assumed to be the same shape and are CROPPED to the common one when they
+    are not, rather than raising: a ragged z is a broken acquisition, but losing the whole cell over
+    it would hide the FOVs that are fine. ``fuse_region_pyramid`` raises on a ragged z because a
+    misaligned pyramid LEVEL misregisters the stack; here the z axis is being collapsed away, so
+    there is nothing left to misregister.
     """
     acc = None
     for z in zs:
@@ -471,7 +507,14 @@ def _fov_tile(reader, region, fov, channel, zs: Sequence[int], t: int, istep: in
         if frame.ndim != 2:
             frame = frame.reshape(frame.shape[-2:])
         sub = frame[::istep, ::istep]
-        acc = sub if acc is None else np.maximum(acc, sub[: acc.shape[0], : acc.shape[1]])
+        if acc is None:
+            # A COPY, not the strided view: `sub` aliases the decoded frame, and returning it would
+            # hand a cache a window onto a buffer whose lifetime is this loop.
+            acc = np.ascontiguousarray(sub)
+            continue
+        h = min(acc.shape[0], sub.shape[0])
+        w = min(acc.shape[1], sub.shape[1])
+        acc = np.maximum(acc[:h, :w], sub[:h, :w])
     return acc
 
 
