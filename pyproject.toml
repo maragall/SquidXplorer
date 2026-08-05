@@ -105,6 +105,13 @@ squidmip-view = "squidmip._viewer:main"   # the MIP tool desktop app
 packages = ["squidmip"]
 
 [tool.pytest.ini_options]
+# THIS repo's suite is tests/. Stated explicitly as of 2026-08-05, because it stopped being the
+# only answer: `templates/operator/` is a standalone example PACKAGE with its own pyproject and
+# its own tests, and those tests import `squidmip_operator_template`, which is only importable
+# when a contributor has installed the template. Collected from the repo root they are an import
+# error in a suite that has nothing to do with them. Run them where they belong:
+#     pip install -e templates/operator && pytest templates/operator/tests
+testpaths = ["tests"]
 markers = [
     "integration: requires the real hongquan dataset on disk (deselect with -m 'not integration')",
     "agave: talks to a REAL AGAVE server; skips with a named reason when AGAVE is not installed",

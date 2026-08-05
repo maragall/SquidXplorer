@@ -2653,16 +2653,18 @@ class PlateWindow(QMainWindow):
         tab.viewer.say(f"loading {region} …")
         channels = [c["name"] for c in self._meta["channels"]]
         op = _explore.subset_layer_op("raw", region)
-        wk = _MosaicWorker(self._reader, self._meta, region, channels, parent=self)
+        wk = _MosaicWorker(self._reader, self._meta, region, channels, parent=self,
+                           t=self.time_point)
         wk.ready.connect(
-            lambda r, ch, plane, bbox, t=tab, o=op: self._on_explore_plane(t, o, r, ch, plane, bbox))
+            lambda r, ch, plane, bbox, win, tb=tab, o=op:
+            self._on_explore_plane(tb, o, r, ch, plane, bbox, win))
         wk.problem.connect(lambda m, t=tab: t.viewer.say(m) if t.viewer is not None else None)
         wk.finished_count.connect(
             lambda n, t=tab, r=region: self._on_explore_region_done(t, r, n))
         tab.mosaic_worker = wk
         wk.start()
 
-    def _on_explore_plane(self, tab, op, region, channel, levels, bbox_um):
+    def _on_explore_plane(self, tab, op, region, channel, levels, bbox_um, window=None):
         """Same contract as ``_on_mosaic_plane``: ``_MosaicWorker`` emits a LAZY PYRAMID.
 
         ``levels`` is the list napari's ``multiscale=True`` wants, highest resolution first. The
@@ -2676,6 +2678,7 @@ class PlateWindow(QMainWindow):
 
         tab.viewer.mosaic.add_mosaic(
             op, channel, levels,
+            contrast_limits=window,
             colormap=_colormap_for(channel),
             multiscale=True,
             bbox_um=bbox_um,
@@ -3554,15 +3557,16 @@ class PlateWindow(QMainWindow):
         z_now = 0
         if self._pending_dims_step and self._napari_z_axis() is not None:
             z_now = int(self._pending_dims_step[self._napari_z_axis()])
-        w = _MosaicWorker(self._reader, self._meta, region, channels, z_index=z_now, parent=self)
-        w.ready.connect(lambda r, ch, levels, bbox:
-                        self._on_mosaic_plane(op, r, ch, levels, bbox))
+        w = _MosaicWorker(self._reader, self._meta, region, channels, z_index=z_now, parent=self,
+                          t=self.time_point)
+        w.ready.connect(lambda r, ch, levels, bbox, win:
+                        self._on_mosaic_plane(op, r, ch, levels, bbox, win))
         w.problem.connect(lambda msg: pane.say(msg))
         w.finished_count.connect(lambda n: self._on_mosaic_done(op, region, n))
         self._mosaic_worker = w
         w.start()
 
-    def _on_mosaic_plane(self, op: str, region: str, channel: str, levels, bbox_um):
+    def _on_mosaic_plane(self, op: str, region: str, channel: str, levels, bbox_um, window=None):
         """One channel of the mosaic arrived, as a LAZY PYRAMID. Add it as a napari layer.
 
         ``levels`` is always the list napari's ``multiscale=True`` contract wants — highest
@@ -3576,26 +3580,24 @@ class PlateWindow(QMainWindow):
             return                                  # a later region won the race; drop this one
         from squidmip._napari_pane import _colormap_for
 
-        # NO contrast_limits: napari autoscales, and napari OWNS contrast.
+        # ``window`` IS the window `add_mosaic` would have derived here, computed by the worker.
         #
-        # What must NOT come back is _pct_window's percentile window. Two things were wrong with it.
-        # First it duplicated napari's job — napari computes its own percentile autoscale and
-        # exposes it on the layer, so passing ours meant two percentile rules over one quantity,
-        # which is this project's most-repeated defect shape. Second it made the composite
-        # unreadable: a window like 561 -> 576..4032 sends every mid-tone tissue pixel to full
-        # intensity in THAT channel, and with additive blending four saturated channels sum to
-        # white. Julio, repeatedly: "Channel blending still sucks."
+        # This comment used to read "NO contrast_limits: napari autoscales, and napari OWNS
+        # contrast", which was already not what happened: passing None does not reach napari's
+        # autoscale, it reaches `add_mosaic`'s own fluorescence seed (`_auto_window_for`), on the
+        # UI thread, and that seed has to materialise a pyramid level to sample. The rule the
+        # comment was defending is intact and unchanged — ONE contrast decision, seeded from the
+        # pixels once and owned by napari from then on. What changed is which thread makes it.
+        # What must still NOT come back is _pct_window's percentile window: it duplicated napari's
+        # job, and a window like 561 -> 576..4032 sends every mid-tone tissue pixel to full
+        # intensity so four additive channels sum to white ("Channel blending still sucks").
         #
-        # Julio: "Napari has so many pre-built features that you're not leveraging." This is one.
-        # napari autoscales on add and the user retunes with the layer's own contrast slider,
-        # which is also the single owner the plate now follows. ima-nav-controls measured that
-        # autoscale at ~940 ms/channel and moved it off-thread; against the PYRAMID napari
-        # autoscales from the small level it renders, so the cost is gone rather than relocated.
         # multiscale=True is what makes the pyramid a pyramid. Without it napari treats the list
         # as one array to stack, or takes level 0 and renders exactly as slowly as before — the
         # levels would exist and buy nothing.
         pane.mosaic.add_mosaic(
             op, channel, levels,
+            contrast_limits=window,
             colormap=_colormap_for(channel),
             multiscale=True,
             bbox_um=bbox_um,
@@ -4400,6 +4402,18 @@ class PlateWindow(QMainWindow):
                 f"'{key}' is not a runnable operator — this viewer can run: "
                 f"{', '.join(runnable_operators())}")
             return
+        # REGISTERED, and this machine cannot run it: a declared `requires=` package is missing
+        # (2026-08-05). Refused in the readout, in the operator's own words, BEFORE the worker
+        # starts. Previously the run started, every well raised the same ImportError from a lazy
+        # import, `_on_error` recorded each as a per-well skip, and the readout said "done".
+        from squidmip import (available_region_operators as _region_ops, operator_available,
+                              region_operator_available)
+
+        _ok, _why = (region_operator_available(key) if key in _region_ops()
+                     else operator_available(key))
+        if not _ok:
+            self._readout.setText(_why)
+            return
         # FLAT-FIELD needs an illumination profile. Without one, _correct_with_active raises per
         # field and the plate fills with red x's (Julio: "flatfield shows as x's"). If none is
         # active, AUTO-ESTIMATE one from a spread sample of plate tiles (tilefusion BaSiC, off-thread)
@@ -4950,6 +4964,19 @@ class PlateWindow(QMainWindow):
         result = self._as_result(op_result)
         if result is None:
             return                              # _as_result has already said why
+        # FILE IT IN THE CROSS-WINDOW RESULT CACHE, whose docstring has promised exactly this
+        # since it was written and which had no production call site at all: "two windows over the
+        # same node running the same chain at the same version hit the SAME entry: results
+        # cross-propagate for free". The propagation below only reaches windows that are open NOW;
+        # a window opened a minute later saw nothing and the only way to get the layer was to run
+        # the operator again. `ViewerManager._replay_cached_results` is the reader.
+        #
+        # One store for the whole process. Both windows share one reader object and one
+        # interpreter (DEFAULT_MAX_GUI=1 with an flock refuses a second process), so this is
+        # same-process reuse, not IPC, and nothing has to be serialised.
+        from squidmip._recipe import acquisition_version, cache_operator_result
+
+        cache_operator_result(op, result, acquisition_version(self._reader))
         added = 0
         if getattr(self, "_mosaic_pane", None) is not None:
             self._add_result_layers(op, result)
