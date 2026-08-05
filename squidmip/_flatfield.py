@@ -147,6 +147,22 @@ def estimate_profile(planes, *, use_darkfield: bool = False) -> FlatfieldProfile
     *planes* is ``(n_tiles, Y, X)`` (or any iterable of equal-shape planes) — the more tiles and
     the more decorrelated their content, the better the low-rank/sparse split. Not
     reimplemented: this is ``tilefusion.flatfield.estimate_flatfield_channel``.
+
+    THE ESTIMATE IS RE-NORMALISED TO MEAN 1 HERE, and that is a fix, not a formality. BaSiC's
+    low-rank/sparse split fixes the gain field only up to a scale, and it converges to mean 1
+    only when it has enough decorrelated tiles: measured on ``sim_5d_2x2_t3``, four tiles give
+    1.000000, three give 1.000000, TWO give 1.0030 and ONE gives 1.0053 — both outside
+    :class:`FlatfieldProfile`'s 1e-3 tolerance, so the constructor raised and the whole run died
+    with a message telling the caller to "divide by its mean first". Nobody could: the estimate
+    is produced inside ``resolve_flatfield`` and never surfaces. Flat-field is ON by default, so
+    that made every stitch and every Minerva export of a ONE- or TWO-FOV selection fail outright.
+
+    Doing it here and not by loosening the tolerance is deliberate. The tolerance is what
+    protects us from a FOREIGN profile (a user's ``.npy``) that would rescale every image while
+    calling itself a correction; that check must stay exact. This is the one place we own an
+    estimator's raw output, so this is the one place the documented remedy belongs. The divide
+    changes overall brightness by whatever the estimate was off by — 0.3 % at two tiles — and the
+    shape of the correction, which is the whole content of a gain field, is untouched.
     """
     from tilefusion.flatfield import estimate_flatfield_channel
 
@@ -155,6 +171,13 @@ def estimate_profile(planes, *, use_darkfield: bool = False) -> FlatfieldProfile
     if stack.ndim != 3 or stack.shape[0] < 1:
         raise ValueError(f"estimate_profile needs (n_tiles, Y, X); got shape {stack.shape}")
     ff, df = estimate_flatfield_channel(stack, use_darkfield=use_darkfield)
+    ff = np.asarray(ff, dtype=np.float32)
+    mean = float(ff.mean())
+    if np.isfinite(mean) and mean > _MIN_GAIN:
+        ff = ff / np.float32(mean)
+    # A non-finite or ~zero mean is NOT normalised: there is nothing to divide by and pretending
+    # otherwise would manufacture a field. FlatfieldProfile still refuses it, by name, which is
+    # the right outcome for an estimate that did not converge at all.
     return FlatfieldProfile(ff, df)
 
 

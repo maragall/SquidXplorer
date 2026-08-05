@@ -3377,6 +3377,218 @@ def test_run_minerva_export_writes_one_fused_mosaic_for_the_selected_region(
     win._stop_minerva(); win.close()
 
 
+#: How many widget px a FOV box needs before a drag inside it clears ``_CLICK_SLOP`` and is a
+#: DRAG rather than a Shift-click toggle. The gesture is only available zoomed in; this is what
+#: "zoomed in enough" means, in the one unit the gesture is decided in.
+_GRABBABLE_PX = 60.0
+
+
+def _zoom_onto(ov, qapp, region):
+    """Zoom the overview until *region*'s FOV boxes are big enough to drag inside.
+
+    Derived from the geometry, not from a guessed factor: ``squid_dataset``'s tiles are 4 px
+    and land as 1x1 boxes in an 88 px cell block, so a "reasonable" 8x zoom leaves a field
+    ~1 px wide and every drag inside one is a click. Returns ``(row_index, col_index)``.
+    """
+    (rc,), = ([rc for rc, w in ov._by_rc.items() if w == region],)
+    r, c = rc
+    ov._user_view = True                       # stop paintEvent re-fitting under the gesture
+    fov = sorted({f for rr, f in ov._boxes if rr == region})[0]
+    _x, _y, w, _h = ov._block_rect(r, c, *ov._boxes[(region, fov)])
+    ov._cd *= max(1.0, _GRABBABLE_PX / max(w, 1e-9))
+    qapp.processEvents()
+    return r, c
+
+
+def _drag(qapp, ov, x0, y0, x1, y1, mods):
+    for kind, x, y, buttons in (
+        (QEvent.MouseButtonPress, x0, y0, Qt.LeftButton),
+        (QEvent.MouseMove, (x0 + x1) / 2, (y0 + y1) / 2, Qt.LeftButton),
+        (QEvent.MouseButtonRelease, x1, y1, Qt.NoButton),
+    ):
+        qapp.sendEvent(ov, QMouseEvent(kind, QPointF(int(x), int(y)), Qt.LeftButton, buttons, mods))
+    qapp.processEvents()
+
+
+def test_a_shift_alt_box_inside_a_mosaic_selects_fovs_not_the_whole_well(
+        qapp, stub_detail, squid_dataset):
+    """THE gesture that makes a FOV subset expressible, driven as a real drag.
+
+    ``stitch_plate(regions={region: [fov, ...]})`` has always cropped — it derives the mosaic
+    canvas from the positions it is handed — but no gesture could say which fields, and every
+    GUI caller expanded a well to all of them before the engine saw it
+    (``selected_region_fovs``, ``minerva_selection``, ``_explore.subset_selection``, all three).
+    So "run Minerva on a subset of the acquisition" could pick WELLS and never FIELDS.
+
+    Zoomed out the same gesture covers every field of each well it touches, ``_fovs_in``
+    reports no strict subset, and the behaviour is what it always was — that half is pinned
+    below, because a gesture that quietly starts cropping whole-plate runs would be worse than
+    the gap it closes.
+    """
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    ov = win._overview
+    ov.resize(700, 560)
+    ov.show()
+    qapp.processEvents()
+    assert ov._boxes, "fixture has no mosaic boxes; a FOV subset is not expressible on it"
+
+    region = "B2"
+    fovs = win._meta["fovs_per_region"][region]
+    assert len(fovs) > 1, "a single-FOV region cannot be subset"
+    r, c = _zoom_onto(ov, qapp, region)
+
+    # A box over the FIRST field only.
+    x, y, w, h = ov._block_rect(r, c, *ov._boxes[(region, fovs[0])])
+    mods = Qt.ShiftModifier | Qt.AltModifier
+    _drag(qapp, ov, x + w * 0.2, y + h * 0.2, x + w * 0.8, y + h * 0.8, mods)
+
+    assert ov.selected_wells() == [region]
+    assert ov.fov_subsets() == {region: [fovs[0]]}
+    assert win.selected_region_fovs() == [(region, fovs[0])]
+    assert win.minerva_selection() == [(region, fovs[0])], (
+        "the export still expands the well to every FOV — the box never reached it")
+    assert f"1/{len(fovs)} FOVs" in win._selection_label.text(), (
+        "a cropped well reads exactly like a whole one in the Selection bar")
+
+    # A SECOND box completing the region is back to "the whole region", with no special case.
+    x2, y2, w2, h2 = ov._block_rect(r, c, *ov._boxes[(region, fovs[-1])])
+    _drag(qapp, ov, x2 + w2 * 0.2, y2 + h2 * 0.2, x2 + w2 * 0.8, y2 + h2 * 0.8, mods)
+    assert ov.fov_subsets() == {}, "a box over every field is the whole region, not a subset"
+    assert win.minerva_selection() == [(region, f) for f in fovs]
+
+    # ZOOMED OUT, the same gesture is the whole-well union it has always been.
+    ov.clear_selection()
+    ov._user_view = False
+    qapp.processEvents()
+    cd = ov._cd
+    ax, ay = ov._ox + V._HDR, ov._oy + V._COLH
+    _drag(qapp, ov, ax + c * cd + 2, ay + r * cd + 2,
+          ax + (c + 1) * cd - 2, ay + (r + 1) * cd - 2, mods)
+    assert ov.selected_wells() == [region]
+    assert ov.fov_subsets() == {}
+    assert win.minerva_selection() == [(region, f) for f in fovs]
+    win.close()
+
+
+@_needs("tilefusion")
+def test_a_boxed_fov_subset_exports_a_smaller_mosaic_than_the_whole_region(
+        qapp, stub_detail, squid_dataset, tmp_path):
+    """...and it lands as ONE cropped mosaic, not N files and not the whole region.
+
+    The end of the chain the test above starts: gesture -> selection -> export. Measured on the
+    5-D fixture the same way (``sim_5d_2x2_t3``, A1): 2 of 4 fields fused to (2, 256, 448)
+    against (2, 449, 448) whole, 460 KB against 806 KB, filename ``..._2fov.ome.tiff``.
+    """
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    ov = win._overview
+    ov.resize(700, 560)
+    ov.show()
+    qapp.processEvents()
+
+    region = "B2"
+    fovs = win._meta["fovs_per_region"][region]
+    r, c = _zoom_onto(ov, qapp, region)
+    x, y, w, h = ov._block_rect(r, c, *ov._boxes[(region, fovs[0])])
+    _drag(qapp, ov, x + w * 0.2, y + h * 0.2, x + w * 0.8, y + h * 0.8,
+          Qt.ShiftModifier | Qt.AltModifier)
+    assert ov.fov_subsets() == {region: [fovs[0]]}
+
+    win.run_minerva_export(out_dir=str(tmp_path / "crop"), launch=False)
+    assert _drain_until(qapp, lambda: "✓ exported" in win._readout.text())
+    crop, = list((tmp_path / "crop").glob("*.ome.tiff"))
+    assert "1fov" in crop.name, f"the filename does not say it is a crop: {crop.name}"
+    assert "cropped" in win._readout.text(), "the readout does not say the mosaic was cropped"
+
+    ov.clear_selection()
+    ov._selection = {(r, c)}
+    win._on_selection_changed(ov.selected_wells())
+    assert win.minerva_selection() == [(region, f) for f in fovs]
+    win._stop_minerva()
+    win.run_minerva_export(out_dir=str(tmp_path / "whole"), launch=False)
+    assert _drain_until(qapp, lambda: str(tmp_path / "whole") in win._readout.text())
+    whole, = list((tmp_path / "whole").glob("*.ome.tiff"))
+
+    import tifffile
+    crop_px, whole_px = tifffile.imread(str(crop)), tifffile.imread(str(whole))
+    assert crop_px.shape[0] == whole_px.shape[0], "the crop lost a channel"
+    assert crop_px.shape[-1] < whole_px.shape[-1], (
+        f"the boxed subset was not cropped: {crop_px.shape} vs {whole_px.shape}")
+    win._stop_minerva(); win.close()
+
+
+def test_a_user_drag_of_the_timepoint_bar_does_not_raise(qapp, stub_detail,
+                                                         multi_time_point_dataset):
+    """``_on_time_point_changed`` called ``self._say`` — a method that does not exist on this
+    window and never did. It is the FIRST statement of the only slot the bar calls, so every
+    user drag raised AttributeError out of Qt's slot dispatch and nothing below it ran: the
+    plate never re-read at the new timepoint. Found 2026-08-05 while proving the Minerva export
+    follows the slider; the export cannot follow a bar that cannot be moved.
+    """
+    root, _ = multi_time_point_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    assert win._time_point_bar.count > 1, "fixture is single-timepoint; the bar would be hidden"
+
+    win._time_point_bar.set_time_point_from_user(1)     # exactly what a drag delivers
+    qapp.processEvents()
+
+    assert win.time_point == 1
+    assert "time_point 2 of 3" in win._readout.text()
+    win.close()
+
+
+@_needs("tilefusion")
+def test_the_exported_timepoint_is_the_one_the_plate_is_showing(
+        qapp, stub_detail, multi_time_point_dataset, tmp_path, monkeypatch):
+    """``run_minerva_export`` took ``t: int = 0`` and BOTH GUI call sites took the default, so a
+    multi-timepoint acquisition always exported frame 0 whatever the bar said — the pixels on
+    screen and the pixels in the OME-TIFF were different images and nothing said so.
+
+    Asserted on what reaches the worker AND on what lands on disk: the worker argument alone
+    would pass if the export then ignored it, and the file alone would not say where the value
+    came from.
+    """
+    root, _ = multi_time_point_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    region = win._meta["regions"][0]
+
+    seen = []
+    real = V._MinervaWorker
+
+    class Spy(real):
+        def __init__(self, reader, selection, out_dir, projector, t=0, **kw):
+            seen.append(t)
+            super().__init__(reader, selection, out_dir, projector, t=t, **kw)
+
+    monkeypatch.setattr(V, "_MinervaWorker", Spy)
+
+    for t in (1, 2):
+        win._time_point_bar.set_time_point_from_user(t)
+        qapp.processEvents()
+        out = tmp_path / f"t{t}"
+        win.run_minerva_export(out_dir=str(out), launch=False)
+        assert _drain_until(qapp, lambda o=out: str(o) in win._readout.text()), \
+            win._readout.text()
+        win._stop_minerva()
+        written = [p.name for p in out.glob("*.ome.tiff")]
+        assert written and f"_t{t}_" in written[0], f"t={t} wrote {written}"
+
+    assert seen == [1, 2], f"the window's timepoint never reached the worker: {seen}"
+    assert region                                    # the selection was a real region, not a stub
+
+    import tifffile
+    px1 = tifffile.imread(str(next((tmp_path / "t1").glob("*.ome.tiff"))))
+    px2 = tifffile.imread(str(next((tmp_path / "t2").glob("*.ome.tiff"))))
+    assert not np.array_equal(px1, px2), (
+        "two timepoints exported identical pixels — the slider is not reaching the export")
+    win.close()
+
+
 def test_run_minerva_export_with_nothing_selected_says_so(qapp, stub_detail, squid_dataset, tmp_path):
     """No selection must be a message, not a silent export of fov 0 of the first well."""
     root, _ = squid_dataset

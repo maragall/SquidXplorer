@@ -315,6 +315,45 @@ def test_export_reads_only_the_requested_timepoint(squid_dataset, tmp_path):
     assert set(seen_t) == {0}
 
 
+def test_two_timepoints_export_to_two_files_with_different_pixels(multi_time_point_dataset,
+                                                                  tmp_path):
+    """A MULTI-TIMEPOINT acquisition must land a DIFFERENT image for a different *t*.
+
+    ``test_export_reads_only_the_requested_timepoint`` above pins that the reader is asked for
+    one timepoint, but it asks for t=0 on a single-timepoint fixture, so it cannot tell "the
+    timepoint reached the pixels" from "there was only ever one timepoint". This does: the
+    fixture's planes carry the timepoint in their hundreds digit
+    (``time_series_pixel_value``), so the two exports are comparable constants and a t that was
+    dropped anywhere in the chain shows up as equal pixels rather than as a message.
+
+    ``correct_illumination=False``: the fixture is 4x4 constant planes and an estimated gain
+    field over them is meaningless. Same fixture concession the byte-for-byte test above makes,
+    and for the same reason — the claim here is about the TIME axis, not about flat-fielding.
+    """
+    from tests.conftest import (
+        TIME_SERIES_CHANNELS, TIME_SERIES_FOV, TIME_SERIES_NZ, TIME_SERIES_REGION,
+        time_series_pixel_value,
+    )
+
+    root, _planes = multi_time_point_dataset
+    sel = [(TIME_SERIES_REGION, TIME_SERIES_FOV)]
+    (ome1, _), = export_selection(open_reader(root), sel, tmp_path / "t1", t=1,
+                                  blend_px=0, correct_illumination=False)
+    (ome2, _), = export_selection(open_reader(root), sel, tmp_path / "t2", t=2,
+                                  blend_px=0, correct_illumination=False)
+
+    assert "_t1_" in ome1.name and "_t2_" in ome2.name, "the filename does not name the timepoint"
+    px1, px2 = tifffile.imread(str(ome1)), tifffile.imread(str(ome2))
+    assert not np.array_equal(px1, px2), (
+        "both timepoints exported the same pixels — the t never reached the read")
+    # ...and they are the RIGHT timepoints, not merely two different ones. MIP over z of a
+    # constant plane is the brightest z, which is the last one.
+    top_z = TIME_SERIES_NZ - 1
+    for t, px in ((1, px1), (2, px2)):
+        for c in range(len(TIME_SERIES_CHANNELS)):
+            assert px[c].min() == px[c].max() == time_series_pixel_value(t, top_z, c)
+
+
 def test_export_reports_progress_in_regions_not_fovs(squid_dataset, tmp_path):
     """The export unit is a fused mosaic per region, so the readout counts regions. Four FOVs
     across two regions is 2 steps, not 4 — a FOV count here would promise progress the export

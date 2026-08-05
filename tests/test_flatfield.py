@@ -113,6 +113,44 @@ def test_estimate_profile_recovers_a_vignette_from_tiles():
     assert corr > 0.9, f"estimated field does not track the planted one (r={corr:.2f})"
 
 
+def test_estimate_profile_normalises_a_field_the_constructor_would_have_refused():
+    """FEW TILES: BaSiC's gain is only fixed up to a scale, and with one or two tiles it lands
+    outside ``FlatfieldProfile``'s 1e-3 tolerance — so the constructor raised and the whole run
+    died telling the caller to "divide by its mean first", from inside ``resolve_flatfield``
+    where no caller can reach. Flat-field is ON by default, so that broke every stitch and every
+    Minerva export of a one- or two-FOV selection. Measured on ``sim_5d_2x2_t3``: 1.0053 at one
+    tile, 1.0030 at two, 1.000000 at three and four.
+
+    Pinned through the SEAM rather than the estimator, because the claim is about what
+    ``estimate_profile`` guarantees its caller, not about what BaSiC happens to return today.
+    """
+    import squidmip._flatfield as F
+
+    off_by = np.full((8, 8), 1.0, dtype=np.float32)
+    off_by[0, 0] = 1.32                    # mean 1.005 — the failing magnitude, deterministic
+    assert abs(float(off_by.mean()) - 1.0) > 1e-3
+    with pytest.raises(ValueError, match="normalised to mean 1.0"):
+        FlatfieldProfile(off_by)           # the raw estimate, straight in: still refused
+
+    def stub(stack, use_darkfield=False):
+        return off_by.copy(), None
+
+    real = None
+    try:
+        import tilefusion.flatfield as tff
+        real, tff.estimate_flatfield_channel = tff.estimate_flatfield_channel, stub
+        est = F.estimate_profile(np.zeros((2, 8, 8), dtype=np.uint16))
+    except ImportError:                    # no tilefusion: the seam is what is under test
+        pytest.skip("tilefusion not installed")
+    finally:
+        if real is not None:
+            tff.estimate_flatfield_channel = real
+
+    assert abs(float(est.flatfield.mean()) - 1.0) < 1e-6
+    # The SHAPE of the correction is what a gain field is; only its scale moved.
+    assert np.corrcoef(est.flatfield.ravel(), off_by.ravel())[0, 1] > 0.999
+
+
 def test_dtype_preserved_input_not_mutated_and_no_integer_wrap():
     ff = _vignette(64)
     raw = (np.float32(60000) * ff).astype(np.uint16)
