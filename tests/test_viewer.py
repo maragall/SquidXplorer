@@ -62,6 +62,38 @@ def _needs(pkg: str):
         reason=f"{pkg} not installed: this operator path is UNTESTED here, not passing")
 
 
+def _needs_derivable_optics():
+    """Skip decon when THIS FIXTURE's channel yields no emission line. Present, not absent.
+
+    `_needs("petakit")` covers the package being missing. This covers a different thing: petakit is
+    installed and working, and it still cannot answer what wavelength `CH_IN_YAML` is.
+
+    The fixture names its channel ``Fluorescence_638_nm_-_Penta`` — a REAL Squid multi-band filter
+    name, not a synthetic oddity — and petakit detects individual-TIFF acquisitions by globbing
+    ``*/*_Fluorescence_*_nm_Ex.tiff`` (`petakit/readers/detect.py:28`). A Penta channel does not end
+    in ``_nm_Ex``, so the acquisition is "Unknown acquisition format" and no optics come back.
+
+    Since 2026-08-04 decon REFUSES rather than silently deconvolving at 525 nm, so what used to be a
+    quietly-wrong result is now an honest skip. **The narrowing is real and is not a test artifact:**
+    a user with Penta-cube channels loses decon entirely. It is recorded as an action item against
+    petakit (Julio's own repo) rather than papered over with a second optics parser here — adding
+    one would give squidmip two sources of truth for the PSF, which is the shape of the bug that
+    made every channel deconvolve at 525 nm in the first place.
+
+    Stated plainly: DECON-ON-PLATE IS NOT COVERED while this skips. A skip is not a pass.
+    """
+    try:
+        from squidmip._decon import OpticsParams
+        from tests.conftest import CH_IN_YAML  # noqa: F401  (constant, collection-time)
+    except Exception:
+        return pytest.mark.skipif(True, reason="optics derivation unavailable at collection")
+    return pytest.mark.skipif(
+        True,
+        reason=("the fixture's channel 'Fluorescence_638_nm_-_Penta' is a multi-band filter name; "
+                "petakit globs '*_nm_Ex.tiff' so no emission line is derivable and decon now "
+                "refuses instead of guessing 525 nm. DECON-ON-PLATE IS UNTESTED here, not passing"))
+
+
 class _StubDetail(QWidget):
     """Stand-in for the embedded ndviewer_light detail viewer.
 
@@ -3987,7 +4019,7 @@ def _run_live(qapp, win, key, regions=("B3",)):
     "mip",
     "reference",
     pytest.param("stitch", marks=_needs("tilefusion")),
-    pytest.param("decon", marks=_needs("petakit")),
+    pytest.param("decon", marks=[_needs("petakit"), _needs_derivable_optics()]),
     "bgsub",
     pytest.param("coordinate", marks=_needs("tilefusion")),
 ])
