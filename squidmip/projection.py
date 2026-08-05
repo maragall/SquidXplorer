@@ -210,6 +210,72 @@ def plane_op(fn: Callable[[np.ndarray], np.ndarray]) -> Callable[[Iterable[np.nd
     return _apply
 
 
+# --- the THIRD declaration: can this operator be specialised to ONE CHANNEL? -------------------
+#
+# ``consumes`` decides the loop, ``produces`` decides what the pixels mean, and neither could say
+# the thing deconvolution needs: **which channel is this**. ``_engine.py`` wrote that limitation
+# down as permanent ("WHAT ``params`` STILL CANNOT EXPRESS: a channel"), and it cost a scientific
+# defect — ``decon`` deconvolved all four channels with the 488 line's PSF, because the operator
+# never learned it was looking at 638 and fell back to a module-level default (``_decon.py``).
+#
+# The fix is the same shape as the two declarations above it, not a widening of the callable:
+#
+#   for_channel(acquisition_path, channel_name) -> operator      an attribute ON the callable
+#
+# ``project_well`` calls it ONCE PER CHANNEL, before the (t, z) loops, and runs what it gets back.
+# The operator shape is untouched — the returned object is still ``Iterable[plane] -> plane`` — so
+# every operator without the attribute is byte-for-byte unaffected, and no module branches on an
+# operator's name to decide who gets a channel.
+#
+# Why the PATH and not the reader: an operator must not read pixels behind project_well's back,
+# and the acquisition folder is what a metadata parser (petakit, here) takes. It is also hashable,
+# so the derived record caches cleanly per (acquisition, channel).
+def acquisition_path(reader) -> Optional[str]:
+    """The acquisition folder a reader reads, or ``None`` for a reader that does not say.
+
+    Follows ``_mosaic_source._source_token``: all four readers hold ``_path``, and there is
+    deliberately no public ``path`` on the reader Protocol (``tests/test_reader_protocol.py``
+    pins its members to the intersection of the four, and Squid implements that Protocol from
+    another repo). ``None`` rather than a raise, because only an operator that ASKED for the
+    channel needs it, and that operator states its own refusal (see ``_decon.optics_for_channel``)
+    with the channel named — a better error than one raised here about a reader.
+    """
+    path = getattr(reader, "_path", None)
+    return None if path is None else str(path)
+
+
+def bind_channel(reduce, path: Optional[str], channel: str):
+    """Specialise *reduce* to *channel* when it declares it can be; otherwise hand it back.
+
+    The dispatch is the presence of the declaration, exactly as ``select_index`` is. Checked here
+    rather than at each call site so a second channel-aware operator needs no new code.
+
+    Raises
+    ------
+    ValueError
+        If the specialised operator consumes a different axis from the one that was declared —
+        a seam bug that would otherwise surface as a silently reshaped result.
+    """
+    declare = getattr(reduce, "for_channel", None)
+    if declare is None:
+        return reduce
+    bound = declare(path, channel)
+    if not callable(bound):
+        raise ValueError(
+            f"{getattr(reduce, '__name__', reduce)!r}.for_channel({channel!r}) returned "
+            f"{bound!r}, which is not callable; it must return an operator."
+        )
+    before = getattr(reduce, "consumes", None)
+    after = getattr(bound, "consumes", before)
+    if before is not None and frozenset(after) != frozenset(before):
+        raise ValueError(
+            f"{getattr(reduce, '__name__', reduce)!r}.for_channel({channel!r}) returned an "
+            f"operator consuming {sorted(after)}, but the registered one consumes "
+            f"{sorted(before)}. Specialising to a channel must not change the output shape."
+        )
+    return bound
+
+
 def project(planes: Iterable[np.ndarray]) -> np.ndarray:
     """Maximum-intensity project an iterable of planes into one plane.
 
@@ -364,6 +430,10 @@ def project_well(
     reduce:
         The z-reduction primitive. Defaults to :func:`project` (MIP). IMA-188 passes its
         own projector here (EDF/EMF/…) — this is the pluggable seam; 183 ships MIP only.
+        An operator carrying a ``for_channel`` declaration is specialised ONCE PER CHANNEL
+        before the (t, z) loops (see :func:`bind_channel`); deconvolution uses that to build
+        the PSF from the channel's own emission wavelength rather than from one global
+        default. Operators without it are called exactly as before.
     reference_channel:
         Which channel drives focus selection when *reduce* is z-selecting (carries
         ``select_index``). Defaults to the acquisition's FIRST channel — see the c-alignment
@@ -445,11 +515,21 @@ def project_well(
         # Both cases call the SAME callable shape, so a new plane-op needs no engine edit.
         z_groups = [tuple(z_levels)] if "z" in consumes else [(z,) for z in z_levels]
         out = np.empty((len(timepoints), len(channels), len(z_groups), y, x), dtype=meta["dtype"])
+        # ONE specialisation per channel (not per plane): an operator that declares `for_channel`
+        # is rebound here, so deconvolution gets THAT channel's emission wavelength instead of one
+        # module-level default for all four. Operators without the declaration are handed straight
+        # through and this dict is four references to the same object.
+        # The reader is asked for its path ONLY when an operator declared it needs one: a reader
+        # is not required to have one, and a duck-typed reader in a test should not be touched
+        # for a fact nothing is going to use.
+        path = acquisition_path(reader) if hasattr(reduce, "for_channel") else None
+        per_channel = {c: bind_channel(reduce, path, c) for c in channels}
         for t_i, t_src in enumerate(timepoints):
             for c_i, channel in enumerate(channels):
+                op = per_channel[channel]
                 for k, group in enumerate(z_groups):
                     planes = (reader.read(region, fov, channel, z, t_src) for z in group)
-                    out[t_i, c_i, k] = reduce(planes)  # streamed z; bounded memory
+                    out[t_i, c_i, k] = op(planes)  # streamed z; bounded memory
         # Nothing lands in picked_z: a combining reduction consumes every z (no single index
         # describes it) and a plane-op chooses nothing (every plane is kept, at its own z).
         return out

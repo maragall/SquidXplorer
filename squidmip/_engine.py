@@ -65,14 +65,26 @@ contrast rule, as if label 37 were 37 photons. ``params`` closes the asymmetry `
 documented in a hardcoded refusal — a region operator took ``operator_kwargs`` and a projector did
 not, so the only way to change a projector's number was a second registry entry (``decon`` /
 ``decon3d``, ``"bgsub_tight"``, ``"flatfield_638"``) or a module-level global behind a lock
-(``_flatfield.set_profile``, ``_decon.set_optics``).
+(``_flatfield.set_profile``; ``_decon.set_optics`` was the other one, and it is now an OVERRIDE
+rather than the source of truth — see the next paragraph).
 
-WHAT ``params`` STILL CANNOT EXPRESS, stated rather than discovered later: **a channel.** "Detect
-on Fluorescence_405_nm_Ex" is a parameter a user genuinely wants, and it cannot be one here,
-because ``project_well`` calls the operator once per ``(t, c, z_group)`` and hands it PLANES ONLY
-— the callable never learns which channel it is looking at. That is the same structural refusal as
-``consumes={"fov"}`` one axis over: the shape ``Iterable[plane] -> plane`` does not carry the fact.
-Widening it would be a loop change touching every operator, so it is deliberately not done here.
+WHAT ``params`` CANNOT EXPRESS, and what was done about it (2026-08-04). "Detect on
+Fluorescence_405_nm_Ex" cannot be a ``Param``: ``project_well`` calls the operator once per
+``(t, c, z_group)`` and hands it PLANES ONLY, so a value bound at registration never learns which
+channel it is looking at. This module used to record that as permanent, and it cost a scientific
+defect — ``decon`` deconvolved 405, 561 and 638 with the 488 line's PSF (525 nm), because its
+optics came from a module-level default nothing ever set.
+
+The answer was the same rule again, **extend the declaration, never the loop**:
+
+    for_channel(acquisition_path, channel) -> operator    an attribute ON the callable
+
+``project_well`` calls it once per channel and runs what it returns; the callable shape is still
+``Iterable[plane] -> plane`` and nothing here changed. So an operator can now be specialised to a
+channel, while a ``Param`` still cannot BE one — a parameter is a value fixed for the run and a
+channel is a thing the loop knows. See ``squidmip.projection.bind_channel`` and
+``_decon.optics_for_channel``. ``consumes={"fov"}`` remains genuinely refused: stage geometry is
+not carried by any declaration on the callable.
 
 NOTE for plane-ops: ``write_plate``/IMA-184 currently accept only ``Z == 1`` frames and reject a
 Z>1 frame LOUD (``_validate_image``). So a plane-op streams correctly out of ``project_plate``

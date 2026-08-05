@@ -68,21 +68,41 @@ TWO TRAPS FOUND IN petakit, BOTH PINNED BY TESTS HERE
    sharpness (0.2526 -> 0.5282) where the 2-D path cannot, because out-of-focus light from
    neighbouring planes is exactly what a 3-D PSF removes.
 
-Where the optics come from
---------------------------
-PSF parameters are **acquisition metadata**, not constants::
+Where the optics come from: PER CHANNEL, AT THE CALL SITE
+--------------------------------------------------------
+PSF parameters are **acquisition metadata**, not constants — and the one that varies WITHIN an
+acquisition is the emission wavelength, because it is a property of the CHANNEL::
 
-    set_optics(OpticsParams.from_acquisition(dataset_path, channel="488"))
+    Fluorescence_405_nm_Ex -> 0.450 um      Fluorescence_561_nm_Ex -> 0.590 um
+    Fluorescence_488_nm_Ex -> 0.525 um      Fluorescence_638_nm_Ex -> 0.670 um
 
-The plane-op seam carries no metadata alongside the plane (the same limitation
-``_flatfield.py`` documents for per-channel profiles), so the registered ``decon`` reads a
-module-level *active* optics record, exactly as ``_flatfield.py`` does for its profile. Unlike
-a flat-field, decon has a defensible default — :data:`DEFAULT_OPTICS` is the **measured
-configuration of the 10x scope this tool ships against** (NA 0.3, 10x, 7.52 um sensor pitch,
-1.5 um z-step, 525 nm emission), transcribed from that instrument's own
-``acquisition parameters.json`` rather than invented — so ``decon`` keeps working with no setup
-for the benchmark and the walkthrough. It is a *starting point that names its instrument*, and
-:func:`set_optics` overrides it from the data actually loaded.
+(measured, ``OpticsParams.from_acquisition`` on the 10x tissue acquisition this ships against.)
+
+That is 1.49x of wavelength across the four, and the PSF width follows it: measured second-moment
+sigma 1.165 px at 525 nm against 1.441 px at 670 nm (kernels 19x19 and 23x23 px), so the 525 nm
+kernel is **19% narrower** than the one the 638 channel needs. Deconvolving every channel with one
+PSF is not an approximation of the instrument, it is three of the four channels sharpened with
+another channel's optics.
+
+THE DEFECT THIS SECTION USED TO DESCRIBE, stated plainly because it shipped: the registered
+``decon`` read a module-level *active* optics record and fell back to :data:`DEFAULT_OPTICS`
+(525 nm), and ``set_optics`` — the function this docstring called "THE intended entry point" —
+**was never called anywhere in the package**. Measured on one real 638 plane (manual0/fov 0/z 5,
+3 RL iterations): 97.28% of the 4.34 M pixels differ between the 525 nm PSF and the correct
+670 nm one, mean 13.8 counts, and 190 counts mean (1684 max) over the brightest 0.1% — the
+puncta a biologist is looking at.
+
+So the optics are now derived **per channel, at the call site**. ``project_well`` knows the
+channel it is about to read and the acquisition it is reading from; an operator that can be
+specialised to a channel says so by carrying a ``for_channel`` attribute (the same kind of
+declaration as ``consumes``/``produces``/``select_index``, never a branch on the operator's
+name), and ``project_well`` calls it once per channel. :func:`optics_for_channel` is what
+``decon``/``decon3d`` hand it, and its parse is still petakit's
+:meth:`OpticsParams.from_acquisition`, cached by ``(acquisition, channel)``.
+
+:func:`set_optics` survives as a **deliberate override** — set it and every channel uses it, which
+is what a user who is re-deriving optics by hand wants. It is no longer the default path, and
+:data:`DEFAULT_OPTICS` is no longer what a plate run silently gets.
 """
 
 from __future__ import annotations
@@ -240,18 +260,47 @@ class OpticsParams:
 
 # The 10x scope this tool ships against, transcribed from its own acquisition metadata
 # (`objective: {magnification: 10.0, NA: 0.3}`, `sensor_pixel_size_um: 7.52`, `dz(um): 1.5`)
-# with the 488 nm line's ~525 nm emission. A named instrument, not a tuning constant — and
-# overridden by set_optics() the moment a real dataset is loaded.
+# with the 488 nm line's ~525 nm emission. A named instrument, not a tuning constant.
+#
+# THE COMMENT THAT USED TO BE HERE SAID it was "overridden by set_optics() the moment a real
+# dataset is loaded". THAT WAS FALSE, and it is the whole of the defect the module docstring now
+# opens with: `set_optics` was called from NOWHERE in this package, so this 525 nm record WAS the
+# PSF for every channel of every run, including 405, 561 and 638.
+#
+# What it is now: the value for a caller who deconvolves a bare array with no acquisition behind
+# it (`deconvolve_plane(plane)`, the benchmark, a doctest). Any operator running through
+# `project_well` derives its optics per channel instead — see `optics_for_channel` — so this
+# constant is never what a plate run gets.
 DEFAULT_OPTICS = OpticsParams(na=0.3, wavelength_um=0.525, dxy_um=7.52 / 10.0, dz_um=1.5, nz=10)
 
 
-@lru_cache(maxsize=8)
+# PSF cache size. The kernel depends ONLY on the optics record, and the optics record is now
+# per channel, so a plate run needs one live entry per (channel, form) — 4 channels x {3-D, the
+# in-focus plane} = 8 on this instrument, and `deconvolve_stack` mints one more per distinct
+# stack depth. 32 leaves headroom for a 6-channel plate running decon and decon3d in one session
+# without evicting a kernel that is about to be asked for again, and the kernels are small (this
+# acquisition: 2-D 1.1-2.1 KB, 3-D 121x23x23 float32 = 250 KB), so the bound is arithmetic.
+#
+# MEASURED, this machine, on the 10x tissue acquisition (idle Apple M4, one FOV's operator calls
+# for 4 channels x 10 z = 40 make_psf_2d calls):
+#   cold build, per distinct optics    0.022 s (405) .. 0.045 s (638)   petakit.generate_psf
+#   cached lookup                      0.18 us
+#   40 calls WITHOUT the cache         1.341 s   (a vectorial-PSF rebuild per plane)
+#   40 calls WITH the cache            0.092 s   (4 builds, 36 hits)  ->  14.6x
+# The 3-D kernel decon3d uses costs the same 0.046 s to build and is rebuilt on the same schedule,
+# so the same cache serves both paths.
+_PSF_CACHE_SIZE = 32
+
+
+@lru_cache(maxsize=_PSF_CACHE_SIZE)
 def make_psf(optics: OpticsParams) -> np.ndarray:
     """The 3-D vectorial PSF for *optics*, ``(Z, Y, X)`` float32 normalised to sum 1.
 
     Both the sizing and the model are petakit's (``compute_psf_size`` then ``generate_psf``).
-    Cached, because the plate engine calls the operator once per plane while the PSF depends
-    only on the optics.
+    Cached on the optics TUPLE (``OpticsParams`` is a frozen dataclass, so it hashes by value):
+    the plate engine calls the operator once per plane, and with per-channel optics that is
+    4 channels x Nz calls per FOV against 4 distinct kernels. See :data:`_PSF_CACHE_SIZE` for
+    the measured cost of getting this wrong.
     """
     petakit = _petakit()
     ni = optics.immersion_index
@@ -267,7 +316,7 @@ def make_psf(optics: OpticsParams) -> np.ndarray:
     return np.ascontiguousarray(psf, dtype=np.float32)
 
 
-@lru_cache(maxsize=8)
+@lru_cache(maxsize=_PSF_CACHE_SIZE)
 def make_psf_2d(optics: OpticsParams) -> np.ndarray:
     """The **in-focus plane** of the 3-D PSF, shaped ``(1, Y, X)`` and renormalised to sum 1.
 
@@ -342,8 +391,10 @@ def deconvolve_plane(
     plane:
         2-D image, any dtype. The caller's array is never mutated.
     optics:
-        Acquisition optics. ``None`` uses the active optics (:func:`set_optics`), which falls
-        back to :data:`DEFAULT_OPTICS`.
+        Acquisition optics. ``None`` uses the override (:func:`set_optics`) and otherwise
+        :data:`DEFAULT_OPTICS` — the answer for a bare plane with no acquisition behind it. A
+        caller who knows the acquisition and the channel should pass
+        ``optics_for_channel(path, channel)``, which is what the registered operators do.
     iterations:
         RL iterations. ``0`` is the identity (a plain copy), so "no deconvolution" has an
         unambiguous spelling and a benchmark has a zero point.
@@ -414,22 +465,28 @@ def _cast_like(values: np.ndarray, dtype: np.dtype) -> np.ndarray:
     return values.astype(dtype, copy=False)
 
 
-# --- the ACTIVE optics, for the registry entry -------------------------------------------------
+# --- the OVERRIDE optics ------------------------------------------------------------------------
 #
-# Same shape as _flatfield.py's active profile and for the same reason: the registered operator
-# is selected by NAME, so it cannot take arguments, and the plane-op seam does not carry
-# acquisition metadata alongside the plane. Guarded by a lock because project_plate runs the
-# operator on a thread pool.
+# Same shape as _flatfield.py's active profile, but NO LONGER THE SOURCE OF TRUTH. It was, and the
+# result was one 525 nm PSF for every channel of every run (module docstring). What it is now: a
+# deliberate override for a caller who has derived optics by hand and wants them used for every
+# channel — an escape hatch, checked FIRST by `optics_for_channel` and empty by default.
+# Guarded by a lock because project_plate runs the operator on a thread pool.
 _lock = threading.Lock()
 _active: Optional[OpticsParams] = None
 
 
 def set_optics(optics: OpticsParams) -> None:
-    """Install the optics the registered ``decon``/``decon3d`` operators compute their PSF from.
+    """Install an optics OVERRIDE, used for every channel until :func:`clear_optics`.
 
-    THE intended entry point for real work::
+    Use it when you have optics the acquisition's own metadata does not describe (a filter set
+    the Stokes-shift table does not know, a re-measured NA)::
 
-        set_optics(OpticsParams.from_acquisition(dataset_path, channel="488"))
+        set_optics(OpticsParams(na=0.3, wavelength_um=0.610, dxy_um=0.752))
+
+    It is NOT how a plate run gets its optics. ``decon``/``decon3d`` derive those per channel from
+    the acquisition being read (:func:`optics_for_channel`), because the emission wavelength is a
+    property of the channel and a single installed record cannot be right for four of them.
     """
     global _active
     if not isinstance(optics, OpticsParams):
@@ -438,22 +495,88 @@ def set_optics(optics: OpticsParams) -> None:
         _active = optics
 
 
+def optics_override() -> Optional[OpticsParams]:
+    """The override installed by :func:`set_optics`, or ``None``. The honest question.
+
+    :func:`active_optics` cannot answer it: it substitutes :data:`DEFAULT_OPTICS` for "nothing
+    installed", which is exactly the conflation that let a default masquerade as a measurement.
+    """
+    with _lock:
+        return _active
+
+
 def active_optics() -> OpticsParams:
-    """The installed optics, or :data:`DEFAULT_OPTICS` when none has been set."""
+    """The override, or :data:`DEFAULT_OPTICS` when none has been set.
+
+    For a caller holding a bare plane and no acquisition. Anything that knows which acquisition
+    and which channel a plane came from should call :func:`optics_for_channel` instead.
+    """
     with _lock:
         return _active if _active is not None else DEFAULT_OPTICS
 
 
 def clear_optics() -> None:
-    """Uninstall the optics; the operators go back to :data:`DEFAULT_OPTICS`."""
+    """Remove the override; per-channel derivation resumes."""
     global _active
     with _lock:
         _active = None
 
 
-def deconvolve(plane: np.ndarray) -> np.ndarray:
-    """Deconvolve one plane with the active optics — the function behind the ``decon`` name."""
-    return deconvolve_plane(plane, None, DEFAULT_ITERATIONS)
+@lru_cache(maxsize=64)
+def _acquisition_optics(path: str, channel: str) -> OpticsParams:
+    """``OpticsParams.from_acquisition`` memoised on ``(acquisition, channel)``.
+
+    ``from_acquisition`` re-opens the acquisition and re-parses its metadata, and the binding
+    happens once per channel per FOV — 55 FOVs x 4 channels = 220 parses of the tissue plate for
+    4 distinct answers. Measured: 1.4 ms cold, 4.7 us cached, so 0.31 s of re-parsing per plate
+    becomes 0.007 s. Keyed by strings so two readers over the same folder share the entry.
+    """
+    return OpticsParams.from_acquisition(path, channel=channel)
+
+
+def optics_for_channel(path, channel: str) -> OpticsParams:
+    """The optics for ONE channel of ONE acquisition. **The per-channel seam.**
+
+    Resolution order, and there is no fourth case:
+
+    1. an override installed with :func:`set_optics` — deliberate, so it wins;
+    2. the acquisition's own metadata for *this channel* (petakit's parse, memoised);
+    3. a refusal, naming the channel.
+
+    No fall-through to :data:`DEFAULT_OPTICS`. That fall-through is what made every 638 plane
+    deconvolve at 525 nm with nothing in the log to say so, and a wrong PSF is not a degraded
+    result but a different measurement. A channel whose emission cannot be derived (brightfield
+    has no emission line) must be answered by a human — with ``set_optics``, or by registering
+    ``decon_op(optics=...)`` under its own name — not by this module picking a wavelength.
+    """
+    override = optics_override()
+    if override is not None:
+        return override
+    if path is None:
+        raise ValueError(
+            f"cannot derive the PSF for channel {channel!r}: the operator was not told which "
+            "acquisition it is reading, so the emission wavelength is unknown. Pass optics "
+            "explicitly (decon_op(optics=...)) or install an override with set_optics()."
+        )
+    try:
+        return _acquisition_optics(str(path), str(channel))
+    except Exception as exc:
+        raise ValueError(
+            f"cannot derive the PSF for channel {channel!r} of {path}: "
+            f"{type(exc).__name__}: {exc}. Deconvolution needs this channel's EMISSION "
+            "wavelength; refusing to substitute another channel's optics, which is a different "
+            "measurement and not a degraded one. Pass optics explicitly (decon_op(optics=...)) "
+            "or install an override with set_optics()."
+        ) from exc
+
+
+def deconvolve(plane: np.ndarray, optics: Optional[OpticsParams] = None) -> np.ndarray:
+    """Deconvolve one plane at the module defaults. *optics* ``None`` -> :func:`active_optics`.
+
+    Kept for callers holding a bare plane. The registered ``decon`` is built by :func:`decon_op`,
+    which is specialised to a channel by ``project_well`` before it ever sees a plane.
+    """
+    return deconvolve_plane(plane, optics, DEFAULT_ITERATIONS)
 
 
 def decon_op(
@@ -473,12 +596,22 @@ def decon_op(
 
     The returned callable carries ``consumes = frozenset()`` (stamped by
     :func:`squidmip.plane_op`), so the registry infers the declaration and z survives.
+
+    PER-CHANNEL OPTICS. With ``optics=None`` the returned callable also carries ``for_channel``,
+    the declaration :func:`squidmip.projection.bind_channel` reads: ``project_well`` calls it once
+    per channel with the acquisition it is reading, and runs the specialised operator it gets
+    back. Given explicit *optics* the attribute is absent, because an explicit argument is an
+    instruction and must not be silently re-derived per channel.
     """
     def _decon(p: np.ndarray) -> np.ndarray:
         return deconvolve_plane(p, optics, iterations)
 
     _decon.__name__ = f"decon(rl,iterations={iterations})"
-    return plane_op(_decon)
+    op = plane_op(_decon)
+    if optics is None:
+        op.for_channel = lambda path, channel: decon_op(
+            optics_for_channel(path, channel), iterations)
+    return op
 
 
 def decon3d_op(
@@ -491,15 +624,24 @@ def decon3d_op(
     been part of that signature since IMA-210. Unlike the plane-op, this one collapses z (it
     deconvolves the volume and then projects), which is the honest shape for an operator that
     needs the whole stack to do its job.
+
+    Like :func:`decon_op` it carries ``for_channel`` when *optics* is ``None``, so the 3-D kernel
+    is the one for the channel actually being deconvolved. ``decon`` and ``decon3d`` are the same
+    algorithm registered twice, and a per-channel PSF is not optional in one of them.
     """
     def _decon3d(planes: Iterable[np.ndarray]) -> np.ndarray:
         return deconvolve_stack(planes, optics, iterations)
 
     _decon3d.__name__ = f"decon3d(rl,iterations={iterations})"
     _decon3d.consumes = frozenset({"z"})
+    if optics is None:
+        _decon3d.for_channel = lambda path, channel: decon3d_op(
+            optics_for_channel(path, channel), iterations)
     return _decon3d
 
 
-# The whole registration. No engine edit — that is the IMA-210 seam working as designed.
-add_projector("decon", plane_op(deconvolve))
+# The whole registration. No engine edit — that is the IMA-210 seam working as designed, and the
+# per-channel optics ride the same rails: a declaration on the callable (`for_channel`), read by
+# project_well. Nothing here is named "decon" anywhere outside this line.
+add_projector("decon", decon_op())
 add_projector("decon3d", decon3d_op(), consumes=frozenset({"z"}))
