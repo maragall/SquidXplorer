@@ -649,3 +649,75 @@ def test_the_autofocus_default_is_actually_read_when_a_window_loads(qapp, manage
     _loaded(qapp, on)
     assert on._focus_worker is not None, (
         "the autofocus default was never read, so it is a dead setting")
+
+
+# ---------------------------------------------------------------------------------------------
+# A SECOND WINDOW REUSES THE FIRST WINDOW'S OPERATOR RESULT (squidmip._recipe.RESULTS)
+#
+# `_deliver_to_views` already propagates a finished result to every window open AT THAT MOMENT.
+# A window opened afterwards got nothing: `RESULTS` -- the content-addressed store whose docstring
+# promises "two windows over the same node running the same chain at the same version hit the SAME
+# entry" -- had no production writer and no production reader until 2026-08-05.
+
+def _fake_result(region, channels):
+    """A finished operator result, shaped like what `PlateWindow._as_result` builds."""
+    from squidmip._address import Extent
+    from squidmip._result import Result
+
+    planes = [np.full((16, 16), 700 + i, dtype=np.uint16) for i, _ in enumerate(channels)]
+    return Result.of(Extent(region_id=region), planes, channels=tuple(channels),
+                     z_depth=1, pixel_size_um=0.325, dtype="uint16")
+
+
+def test_a_second_window_reuses_the_first_windows_result_without_recomputing(qapp, manager):
+    """Open A, compute once, open B on the same region: B gains the layers and reads NOTHING.
+
+    "Reuse" is measured, not asserted: the manager's reader is wrapped so every `read` is counted,
+    and the count across the second window's whole open must be zero attributable to the operator.
+    The identity check is stronger still -- B is handed the very `Result` object A produced, so
+    there is no re-fuse and no copy. Both windows are in one process over one reader
+    (`DEFAULT_MAX_GUI=1` plus an flock refuses a second one), which is what makes that legal.
+    """
+    from squidmip._recipe import acquisition_version, cache_operator_result
+
+    region = REGIONS[0]
+    channels = [CH_IN_YAML, CH_NOT_IN_YAML]
+
+    first = manager.open([region])
+    _loaded(qapp, first)
+
+    # The run happens once, in the first window, exactly as `_deliver_operator_result` does it:
+    # deliver to the windows open now, and file the result for the ones that are not.
+    result = _fake_result(region, channels)
+    assert first.deliver_result("mip", result, visible=True) == len(channels)
+    cache_operator_result("mip", result, acquisition_version(manager._reader))
+
+    second = manager.open([region])
+    _loaded(qapp, second)
+
+    layers = {ch: second._pane.mosaic.find("mip", ch) for ch in channels}
+    assert all(ly is not None for ly in layers.values()), (
+        f"the second window did not gain the already-computed layers: {layers}")
+    for ch, ly in layers.items():
+        assert ly.visible is False, (
+            f"{ch}: this window did not ask for the run, so its layer must arrive dark")
+    # THE PROOF OF REUSE: the same object, not an equal one.
+    for i, ch in enumerate(channels):
+        assert layers[ch].data is result.plane(ch), (
+            f"{ch}: the second window was handed different pixels, so something recomputed")
+        assert int(np.asarray(layers[ch].data)[0, 0]) == 700 + i
+
+
+def test_a_window_opened_on_a_DIFFERENT_region_gains_nothing(qapp, manager):
+    """The replay is scoped. A cached B2 result must not land in a window showing B3, where it
+    would sit at B2's stage coordinates over B3's raw and read as something the operator did."""
+    from squidmip._recipe import acquisition_version, cache_operator_result
+
+    channels = [CH_IN_YAML, CH_NOT_IN_YAML]
+    cache_operator_result("mip", _fake_result(REGIONS[0], channels),
+                          acquisition_version(manager._reader))
+
+    other = manager.open([REGIONS[1]])
+    _loaded(qapp, other)
+    assert all(other._pane.mosaic.find("mip", ch) is None for ch in channels)
+    assert other._result_region is None

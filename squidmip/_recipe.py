@@ -251,6 +251,61 @@ class ResultCache:
 #: (scope, chain) it has computed before, or that ANOTHER window computed, reuses the result.
 RESULTS = ResultCache()
 
+
+# --- the two production doors onto RESULTS ------------------------------------------------------
+#
+# Both live HERE, next to the store, because they are the same fact read twice: what a run puts in
+# and what a newly-opened window takes out have to agree about the key or the cache is a write-only
+# log. Until 2026-08-05 `RESULTS` had a writer nowhere and a reader nowhere -- exercised only by
+# tests -- so a second window opening a region another window had already computed showed nothing,
+# and the only way to see the result was to run the operator again.
+#
+# `cache_scope` is imported in the body rather than at module scope on purpose: this module is pure
+# Python (no Qt, no numpy) and importing it must stay free, which `squidmip._plate` is not.
+
+def acquisition_version(reader: Any) -> str:
+    """What ``version`` means for a static acquisition: WHICH acquisition.
+
+    ``ResultCache``'s key has always carried a version and every caller has always passed the
+    default ``0``. A region id is not unique across datasets -- every plate has a ``B2`` -- so
+    with one constant version, ingesting a second acquisition into the same process would replay
+    the first one's ``B2`` result into a window showing the second one's ``B2``. Reusing the field
+    for the acquisition's identity is what its own docstring reserves it for ("baked in now so
+    re-parenting to the live Squid source is trivial later"), and it is the same token
+    ``_mosaic_source`` keys its plane cache on, so the two caches agree about what "the same
+    acquisition" is.
+    """
+    from squidmip._mosaic_source import _source_token
+
+    return _source_token(reader)
+
+
+def cache_operator_result(op: str, result, version: Any = 0) -> None:
+    """File one finished operator result under ``(its region, that operator, this acquisition)``.
+
+    ``op`` is the LAYER KEY, not the bare operator name, so a run scoped to an exploration tab
+    (``mip@preview:…``) is a different entry from the plate-wide ``mip``. That is the same
+    distinction the layer stack makes, and folding them together here would let a tab's subset
+    result be replayed into a window as if it were the whole-plate run.
+    """
+    from squidmip._plate import cache_scope
+
+    RESULTS.put(cache_scope(str(result.region_id)),
+                RecipeChain.of(Recipe.operator(str(op))), result, version=version)
+
+
+def cached_operator_results(region: str, version: Any = 0) -> "list[tuple[str, Result]]":
+    """``[(op, result)]`` already computed for *region* of this acquisition, LRU first.
+
+    Order is :meth:`ResultCache.entries`'s, which is a snapshot: a caller delivering these into a
+    window must not have the store reorder under it while it iterates.
+    """
+    from squidmip._plate import cache_scope
+
+    scope, version = cache_scope(str(region)), str(version)
+    return [(str(e.chain.recipes[0].name), e.result) for e in RESULTS.entries()
+            if e.scope == scope and e.version == version and e.chain.recipes]
+
 #: The copy/paste buffer for a recipe chain (generalises the contrast-only _LUT_CLIPBOARD). "Copy"
 #: puts a chain here (and its script); "Paste" applies it to a view / the plate / everything.
 CLIPBOARD: "dict[str, RecipeChain]" = {"chain": RecipeChain()}

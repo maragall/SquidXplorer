@@ -95,3 +95,62 @@ def test_the_cache_refuses_a_bare_array():
     cache = ResultCache()
     with pytest.raises(TypeError, match="Result"):
         cache.put("B7", RecipeChain.of(Recipe.operator("mip")), [[1, 2], [3, 4]])
+
+
+# --------------------------------------------------------------------------------------------
+# The two PRODUCTION doors onto RESULTS.
+#
+# Until 2026-08-05 `RESULTS` was instantiated, documented, and exercised only by this file: it had
+# no writer and no reader anywhere in `squidmip/`. A second window opening a region that another
+# window had already computed therefore showed nothing, and the only way to get the layer was to
+# run the operator again over the same pixels.
+
+def test_a_result_filed_by_one_caller_is_found_by_another_for_the_same_region():
+    from squidmip import _recipe
+
+    _recipe.RESULTS.clear()
+    result = _result("B7", "DAPI")
+    _recipe.cache_operator_result("mip", result, version="/acq/one")
+
+    assert _recipe.cached_operator_results("B7", "/acq/one") == [("mip", result)]
+    # The SAME object, not a copy: both windows are in one process over one reader, so reuse
+    # means handing the first window's result over, not re-deriving it.
+    assert _recipe.cached_operator_results("B7", "/acq/one")[0][1] is result
+
+
+def test_the_lookup_is_scoped_to_its_region_its_operator_and_its_acquisition():
+    """Three ways a replay could serve the wrong pixels, all closed by the key.
+
+    The acquisition one is the one the field was reserved for and never used: every plate has a
+    ``B7``, so with the historical constant ``version=0`` a second acquisition ingested into the
+    same process would replay the first one's ``B7`` into a window showing a different plate.
+    """
+    from squidmip import _recipe
+
+    _recipe.RESULTS.clear()
+    mine = _result("B7", "DAPI")
+    _recipe.cache_operator_result("mip", mine, version="/acq/one")
+    _recipe.cache_operator_result("stitch", _result("B7", "GFP"), version="/acq/one")
+    _recipe.cache_operator_result("mip", _result("B8", "DAPI"), version="/acq/one")
+    _recipe.cache_operator_result("mip", _result("B7", "DAPI"), version="/acq/TWO")
+
+    got = dict(_recipe.cached_operator_results("B7", "/acq/one"))
+    assert set(got) == {"mip", "stitch"}, "another region's or acquisition's entry leaked in"
+    assert got["mip"] is mine
+    assert _recipe.cached_operator_results("B7", "/acq/three") == []
+    assert _recipe.cached_operator_results("ZZ99", "/acq/one") == []
+
+
+def test_a_tab_scoped_run_is_a_different_entry_from_the_plate_wide_one():
+    """``op`` is the LAYER KEY. A subset run filed under ``mip`` would be replayed into a window
+    as if it were the whole-plate ``mip``, which is a mosaic with holes wearing the wrong name."""
+    from squidmip import _recipe
+
+    _recipe.RESULTS.clear()
+    whole = _result("B7", "DAPI")
+    subset = _result("B7", "DAPI")
+    _recipe.cache_operator_result("mip", whole, version="/acq/one")
+    _recipe.cache_operator_result("mip@preview:1", subset, version="/acq/one")
+
+    got = dict(_recipe.cached_operator_results("B7", "/acq/one"))
+    assert got["mip"] is whole and got["mip@preview:1"] is subset
