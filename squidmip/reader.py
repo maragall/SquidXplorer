@@ -244,6 +244,21 @@ def _coords_path(root):
     Direction of travel: Squid has APPROVED making the per-FOV OME ``translation`` authoritative and
     demoting ``coordinates.csv`` to "a derived export for the stitcher". Our zarr path already
     prefers ``translation``; this is the raw-TIFF path catching up one step.
+
+    **Do not "fix" this to match maragall/stitcher (measured 2026-08-05).** That standalone reads
+    the PLANNED file on its OME-TIFF path (``tilefusion/io/ome_tiff_tiles.py``, which tries
+    ``{root}/coordinates.csv`` FIRST and falls back to ``0/``) while its own individual-TIFF path
+    (``io/individual_tiffs.py``) tries ``{image_folder}/coordinates.csv`` first and so reads the
+    EXECUTED file. It disagrees with itself, not only with us. Measured on both real acquisitions,
+    planned minus executed: 10x z-stack max 0.393 um = 0.523 px, 20x scan max 0.298 um = 0.794 px.
+    Sub-micron and NOT a fixed offset (means +0.01..+0.07 um against spreads of 0.19..0.30), so no
+    constant can reconcile them. The 20x planned file is a PERFECT lattice -- step std exactly
+    0.000000 um, against 0.389 um in the executed file -- which is what a synthesised grid looks
+    like and what a real stage does not. Our positions equal the executed file to 0.00000000 um on
+    both datasets and both reader classes, so the parity gap closes by changing ome_tiff_tiles.py
+    to prefer ``0/``, matching its sibling. Adopting the planned file here would also cost us the
+    ``fov`` column that only the executed file has, forcing fov to be inferred from ROW ORDER --
+    which is exactly the fragile assumption that path already makes.
     """
     root = Path(root)
     executed = root / "0" / _COORDS_NAME
