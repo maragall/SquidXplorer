@@ -95,6 +95,7 @@ __all__ = [
     "REFUSALS",
     "NO_ACQUISITION",
     "UNKNOWN_OPERATOR",
+    "UNAVAILABLE_OPERATOR",
     "UNKNOWN_REGION",
     "EMPTY_SCOPE",
     "BAD_SCOPE",
@@ -115,6 +116,12 @@ __all__ = [
 
 NO_ACQUISITION = "no_acquisition"        # nothing is open; open one first
 UNKNOWN_OPERATOR = "unknown_operator"    # not in the engine registry (the answer lists what is)
+# REGISTERED, spelled right, and this machine cannot run it: a `requires=` package is missing.
+# A DISTINCT code from UNKNOWN_OPERATOR because the caller's next move is different -- an agent
+# that gets `unknown_operator` should pick another name, and one that gets this should install
+# the package the sentence names (or tell a human to). Collapsing the two would make "you typo'd"
+# and "your environment is incomplete" the same branch.
+UNAVAILABLE_OPERATOR = "unavailable_operator"
 UNKNOWN_REGION = "unknown_region"        # a named region is not in this acquisition
 EMPTY_SCOPE = "empty_scope"              # the scope resolved to nothing — never widen it silently
 BAD_SCOPE = "bad_scope"                  # not one of _explore.RUN_SCOPES
@@ -126,8 +133,9 @@ BAD_COMMAND = "bad_command"              # the kind exists; the payload does not
 NO_DISK_SPACE = "no_disk_space"          # the estimated write does not fit
 FAILED = "failed"                        # the work ran and raised — the detail carries the name
 
-REFUSALS = (NO_ACQUISITION, UNKNOWN_OPERATOR, UNKNOWN_REGION, EMPTY_SCOPE, BAD_SCOPE, BUSY,
-            NO_RUN, NOT_SUPPORTED_HERE, UNKNOWN_COMMAND, BAD_COMMAND, NO_DISK_SPACE, FAILED)
+REFUSALS = (NO_ACQUISITION, UNKNOWN_OPERATOR, UNAVAILABLE_OPERATOR, UNKNOWN_REGION,
+            EMPTY_SCOPE, BAD_SCOPE, BUSY, NO_RUN, NOT_SUPPORTED_HERE, UNKNOWN_COMMAND,
+            BAD_COMMAND, NO_DISK_SPACE, FAILED)
 
 
 # --- the result --------------------------------------------------------------------------------
@@ -217,6 +225,16 @@ class ListOperators(Command):
     Answered off the ENGINE registries (``available_projectors`` /
     ``available_region_operators``), never off the GUI's card table — a card is presentation, an
     engine entry is capability, and confusing the two already shipped a button that did nothing.
+
+    Every row carries the operator's whole declaration: ``consumes``, ``produces``, ``params``,
+    ``requires``, and ``available`` + ``unavailable_reason``. The list is NEVER filtered by
+    availability — an operator whose package is missing is still listed, with the reason, because
+    dropping it makes "the package is missing" and "nobody wrote this operator" the same answer.
+    ``data["unavailable"]`` is the subset an agent should not attempt without installing something
+    first; attempting one anyway is refused with :data:`UNAVAILABLE_OPERATOR`.
+
+    Includes operators installed from OTHER packages via the ``squidmip.operators`` entry-point
+    group, which is what makes this the discovery answer as well as the capability answer.
     """
 
     kind: ClassVar[str] = "list_operators"
@@ -496,23 +514,42 @@ class EngineExecutor:
 
     def do_list_operators(self, cmd: ListOperators) -> CommandResult:
         from squidmip import (available_projectors, available_region_operators,
-                              projector_consumes, projector_params, projector_produces)
+                              operator_available, projector_consumes, projector_params,
+                              projector_produces, projector_requires,
+                              region_operator_available, region_operator_requires)
 
         projectors = available_projectors()
         region_ops = available_region_operators()
+
+        def _row(name, kind, consumes, produces, params, requires, available):
+            # `available` and `requires` are the fourth declaration (2026-08-05). The list is NOT
+            # filtered by it -- an operator whose package is missing is still listed, because
+            # dropping it would make "petakit is not installed" and "nobody wrote a deconvolution
+            # operator" identical to the agent asking this question, which is the same rule
+            # `available_segmenters` has always applied. What changes is that the answer now says
+            # which is which, and why, in the operator's own words.
+            ok, why = available
+            return {"name": name, "kind": kind, "consumes": consumes, "produces": produces,
+                    "params": params, "requires": list(requires),
+                    "available": ok, "unavailable_reason": why}
+
         # Every column here is a DECLARATION read off the registry, never a fact this method
         # knows about any particular operator -- which is why a new operator appears in `ops list`
-        # fully described with no edit to this file.
-        rows = [{"name": n, "kind": "z-reducer" if projector_consumes(n) else "plane-op",
-                 "consumes": sorted(projector_consumes(n)),
-                 "produces": projector_produces(n),
-                 "params": {p.name: p.default for p in projector_params(n)}}
+        # fully described with no edit to this file. That now includes an operator installed from
+        # ANOTHER package through the `squidmip.operators` entry-point group.
+        rows = [_row(n, "z-reducer" if projector_consumes(n) else "plane-op",
+                     sorted(projector_consumes(n)), projector_produces(n),
+                     {p.name: p.default for p in projector_params(n)},
+                     projector_requires(n), operator_available(n))
                 for n in projectors]
-        rows += [{"name": n, "kind": "region-operator", "consumes": ["fov"],
-                  "produces": "intensity", "params": {}} for n in region_ops]
+        rows += [_row(n, "region-operator", ["fov"], "intensity", {},
+                      region_operator_requires(n), region_operator_available(n))
+                 for n in region_ops]
         names = sorted(set(projectors) | set(region_ops))
-        return _done(cmd.kind, f"{len(names)} operator(s): {', '.join(names)}",
-                     operators=rows, names=names)
+        blocked = [r["name"] for r in rows if not r["available"]]
+        detail = f" ({len(blocked)} unavailable: {', '.join(blocked)})" if blocked else ""
+        return _done(cmd.kind, f"{len(names)} operator(s): {', '.join(names)}{detail}",
+                     operators=rows, names=names, unavailable=blocked)
 
     def do_describe(self, cmd: Describe) -> CommandResult:
         meta = self._meta()
@@ -559,6 +596,19 @@ class EngineExecutor:
             return _refuse(cmd.kind, UNKNOWN_OPERATOR,
                            f"{cmd.operator!r} is not a runnable operator — this application can "
                            f"run: {', '.join(runnable)}", available=runnable)
+        # REGISTERED but not INSTALLABLE. A separate question with a separate answer: the operator
+        # exists and is spelled correctly, and the machine cannot run it. Asked here, before the
+        # target is resolved and before an output directory is named, so the refusal is the whole
+        # outcome rather than something discovered mid-run. Without it, `decon` on a machine
+        # without petakit raised the same ImportError for every well, `on_error` recorded each as
+        # a skip, and the command returned `completed` with an empty manifest.
+        from squidmip import operator_available, region_operator_available
+
+        ok, why = (region_operator_available(cmd.operator)
+                   if cmd.operator in available_region_operators()
+                   else operator_available(cmd.operator))
+        if not ok:
+            return _refuse(cmd.kind, UNAVAILABLE_OPERATOR, why, operator=cmd.operator)
         all_regions = list(meta["regions"])
         regions, refusal = resolve_target(cmd, selection=self.selection,
                                           known_regions=all_regions, total=len(all_regions))

@@ -40,7 +40,7 @@ Design contracts:
 from __future__ import annotations
 
 import functools
-from typing import TYPE_CHECKING, Callable, Iterable, Optional
+from typing import TYPE_CHECKING, Callable, Iterable, Optional, Sequence
 
 import numpy as np
 
@@ -100,6 +100,83 @@ CONSUMABLE_AXES: frozenset[str] = frozenset({"z"})
 INTENSITY: str = "intensity"
 LABELS: str = "labels"
 RESULT_KINDS: frozenset[str] = frozenset({INTENSITY, LABELS})
+
+
+# ---------------------------------------------------------------------------------------------
+# THE FOURTH DECLARATION: ``requires`` — which importable packages an entry needs to run at all.
+# (After ``consumes``, ``produces`` and ``params``; see :class:`squidmip._engine.Operator`.)
+#
+# ``_spots.Segmenter`` has had this since Cellpose landed, and it is the ONLY registry that did.
+# The consequence was measured on a stock ``pip install .[gui]`` (2026-08-04): ``decon``,
+# ``decon3d`` and ``flatfield`` are advertised by ``available_projectors()``, raise ImportError
+# from a LAZY import one call deep (petakit / tilefusion are not declared dependencies), and
+# ``project_plate(on_error=...)`` records that as a per-well skip — so the run finishes, writes
+# nothing, and REPORTS SUCCESS. An operator that cannot run must refuse before any work, by name.
+#
+# The two helpers below are that spelling, ONCE, so ``_spots``, ``_engine`` and ``_stitch`` cannot
+# drift into three dialects of the same refusal. They live here rather than in ``_engine`` because
+# ``_stitch`` and ``_spots`` must reach them without importing the engine.
+class MissingDependency(RuntimeError):
+    """A registry entry declared a package that is not importable. The base of every such refusal.
+
+    One base class across the three registries so a RUNNER can say "this is an environment fault,
+    not a data fault" without importing each registry to name its own exception — see
+    ``_engine._NOT_A_WELL_FAULT``, which is what stops per-well fault isolation from absorbing it.
+    ``RuntimeError``, because ``_spots.MissingSegmenterDependency`` was one first and every existing
+    ``except RuntimeError`` around a segmenter keeps working unchanged.
+    """
+
+
+def missing_requirements(requires: Iterable[str]) -> list[str]:
+    """The module names in *requires* that are NOT importable right now, in declaration order.
+
+    ``find_spec`` rather than ``import``: it answers exactly the question ("is this installed")
+    without paying for a heavyweight package's import, which is the whole reason these operators
+    import lazily in the first place. A dotted name whose PARENT is missing makes ``find_spec``
+    raise rather than return ``None``; that is the same answer ("not importable") and is reported
+    as such, never allowed to escape as a surprising exception from an availability probe.
+    """
+    import importlib.util
+
+    missing = []
+    for module in requires:
+        try:
+            found = importlib.util.find_spec(module) is not None
+        except (ImportError, ValueError):     # parent package absent, or a malformed name
+            found = False
+        if not found:
+            missing.append(module)
+    return missing
+
+
+def requirement_refusal(kind: str, name: str, missing: Sequence[str]) -> str:
+    """The one refusal sentence every registry uses: what is missing, and how to install it.
+
+    *kind* is the registry's noun (``"operator"``, ``"segmenter"``, ``"region operator"``). Worded
+    to be byte-identical to the message ``_spots.segmenter_available`` has always produced, so
+    adopting this helper there changed no text a user or a test had already seen.
+    """
+    return (f"{kind} {name!r} needs {', '.join(missing)}, which "
+            f"{'are' if len(missing) > 1 else 'is'} not installed "
+            f"(pip install {' '.join(missing)})")
+
+
+def normalise_requires(requires) -> tuple[str, ...]:
+    """Coerce a ``requires`` declaration to a tuple of module names, refusing anything else.
+
+    Accepts any iterable of names, and a bare string as the one-name case (``requires="cellpose"``)
+    — spelling that as ``("cellpose",)`` is the tuple-comma trap, and a caller who forgets the comma
+    would otherwise declare eight one-letter dependencies. Refuses empties and non-strings by name:
+    a requirement nothing can import is a declaration that can only ever refuse.
+    """
+    if isinstance(requires, str):
+        requires = (requires,)
+    names = tuple(requires)
+    for module in names:
+        if not isinstance(module, str) or not module:
+            raise ValueError(
+                f"requires must be importable MODULE names (e.g. ('cellpose',)); got {module!r}")
+    return names
 
 
 def normalise_produces(produces) -> str:

@@ -52,22 +52,33 @@ if "QT_API" not in _os.environ and _importlib_util.find_spec("PyQt6") is not Non
     _os.environ["QT_API"] = "pyqt6"
 
 from squidmip._engine import (
+    MissingOperatorDependency,
     Operator,
     Param,
     add_projector,
     available_projectors,
     bind_projector,
+    operator_available,
     project_plate,
     projector_consumes,
     projector_params,
     projector_produces,
+    projector_requires,
 )
 from squidmip._minerva import export_selection, launch_minerva
 from squidmip._montage import build_montage
 from squidmip._output import write_plate
+from squidmip._plugins import (
+    GROUP as OPERATOR_PLUGIN_GROUP,
+    OperatorPluginError,
+    declared_operator_plugins,
+    load_operator_plugins,
+)
 from squidmip._stitch import (
     add_region_operator,
     available_region_operators,
+    region_operator_available,
+    region_operator_requires,
     solve_offsets_px,
     stitch_plate,
     stitch_region,
@@ -129,6 +140,23 @@ from squidmip._decon import (
 from squidmip._flatfield import FlatfieldProfile, correct_flatfield, estimate_profile, flatfield_op
 from squidmip._spots import SpotParams, SpotResult, detect_spots, spots_op
 
+# --- operators that live in OTHER packages -----------------------------------------------------
+#
+# The line above this one is the hardcoded list, and it is the reason a contributor could not add
+# an operator without editing this file. This call is the seam that fixes it: every installed
+# package declaring a `squidmip.operators` entry point gets its `register()` run, right here, and
+# its operators are in the same tables as `mip` with the same declarations and the same tests.
+#
+# AFTER the built-ins on purpose — a plugin then sees a fully populated registry, and a plugin that
+# names its operator "mip" is refused by `add_projector` instead of silently replacing ours.
+#
+# LOUD on a broken plugin: this raises out of `import squidmip`, naming the plugin and how to
+# uninstall it. See `squidmip/_plugins.py` for why that is the choice, and for
+# `SQUIDMIP_NO_PLUGINS=1`, the escape hatch when a plugin stops the app from starting.
+#
+# The template a contributor copies is `templates/operator/` in this repo.
+load_operator_plugins()
+
 __all__ = [
     "open_reader",
     # The NAME of that interface, for a consumer in another repo (Squid) to depend on.
@@ -158,6 +186,17 @@ __all__ = [
     "INTENSITY",
     "LABELS",
     "Param",
+    # The operator TEMPLATE's contract (2026-08-05): declared dependencies and the discovery seam
+    # that lets an operator live in somebody else's package. See templates/operator/.
+    "projector_requires",
+    "operator_available",
+    "MissingOperatorDependency",
+    "region_operator_available",
+    "region_operator_requires",
+    "load_operator_plugins",
+    "declared_operator_plugins",
+    "OperatorPluginError",
+    "OPERATOR_PLUGIN_GROUP",
     "write_plate",
     "build_montage",
     # IMA-222 region operators (inter-FOV; the parallel table to the projectors)

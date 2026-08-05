@@ -150,6 +150,15 @@ def register_operator() -> None:
         consumes  frozenset()   inferred from `plane_op`   -> segmented per plane, z survives
         produces  "labels"      inferred from `labels_op`  -> delivered as a napari Labels layer
         params    SPOT_PARAMS   declared                   -> runnable at a different diameter
+        requires  ("cellpose",) declared                   -> refused BY NAME when absent, listed
+                                                              either way
+
+    The `requires` line is the SEGMENTER declaration ten lines above, repeated on the operator
+    entry, and it has to be: the two tables are asked by different callers. `resolve_segmenter`
+    guards the GUI's Detect-nuclei button; `bind_projector` guards `--projector cellpose` and every
+    plate-scale run, and until this it guarded nothing — a plate run of cellpose on a machine
+    without cellpose raised ImportError per well, which `on_error` filed as a skip, and the run
+    reported success having produced no masks at all.
 
     NO TORCH AT IMPORT TIME. Registering here builds the default binding, which is a closure over
     ``SpotParams`` and the string ``"cellpose"``; the ``from cellpose import models`` lives inside
@@ -160,4 +169,5 @@ def register_operator() -> None:
     """
     from squidmip._spots import SPOT_PARAMS, segmentation_operator
 
-    add_projector(OPERATOR_NAME, segmentation_operator(SEGMENTER_NAME), params=SPOT_PARAMS)
+    add_projector(OPERATOR_NAME, segmentation_operator(SEGMENTER_NAME), params=SPOT_PARAMS,
+                  requires=("cellpose",))

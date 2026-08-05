@@ -48,6 +48,7 @@ from squidmip._command import (
     OpenAcquisition,
     RunOperator,
     StopRun,
+    UNAVAILABLE_OPERATOR,
     UNKNOWN_OPERATOR,
     _done,
     _refuse,
@@ -151,6 +152,19 @@ class WindowExecutor:
             return _refuse(cmd.kind, UNKNOWN_OPERATOR,
                            f"{cmd.operator!r} is not a runnable operator — this window can run: "
                            f"{', '.join(runnable_operators())}", available=runnable_operators())
+        # REGISTERED but not INSTALLABLE -- the same question the headless executor asks, asked the
+        # same way, so the two surfaces refuse identically. Without it the GUI starts a QThread,
+        # every well raises the same ImportError, `on_error` files each as a skip, and the run
+        # finishes with a green readout and no pixels.
+        from squidmip import (available_region_operators, operator_available,
+                              region_operator_available)
+
+        avail_ok, avail_why = (
+            region_operator_available(cmd.operator)
+            if cmd.operator in available_region_operators()
+            else operator_available(cmd.operator))
+        if not avail_ok:
+            return _refuse(cmd.kind, UNAVAILABLE_OPERATOR, avail_why, operator=cmd.operator)
         if self._busy():
             return _refuse(cmd.kind, BUSY,
                            "a run is already in flight — stop it or let it finish first")
