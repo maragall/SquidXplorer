@@ -252,6 +252,25 @@ def _cold_plate_cell_cache(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _cold_result_cache():
+    """Every test starts and ends with an EMPTY ``squidmip._recipe.RESULTS``.
+
+    ``RESULTS`` is process-wide by design -- that is what makes a result computed in one window
+    available to a window opened later -- and its key is ``(region scope, acquisition, chain)``.
+    Every fixture in this file uses the SAME region ids (``B2``, ``B3``, ``A1``), so an entry left
+    behind by one test is a candidate replay for the next one that opens a window on that region.
+    The acquisition version keeps two DIFFERENT acquisitions apart, but ``squid_dataset`` is a
+    tmp_path fixture and two tests that happen to get the same tmp_path prefix are not worth
+    reasoning about: the same argument as ``_cold_plate_cell_cache`` above, and the same fix.
+    """
+    from squidmip import _recipe
+
+    _recipe.RESULTS.clear()
+    yield
+    _recipe.RESULTS.clear()
+
+
+@pytest.fixture(autouse=True)
 def _restore_operator_registries():
     import importlib
 
@@ -710,6 +729,9 @@ def _stub_pane_classes():
             self.translate = kw.get("translate")
             self.contrast_limits = None
             self.colormap = kw.get("colormap")
+            #: A result delivered to a window that did not ask for the run arrives DARK. That is
+            #: a property of `deliver_result`, so the stub has to carry it or no test can see it.
+            self.visible = bool(kw.get("visible", True))
 
     class StubMosaic:
         """The `MosaicPane.mosaic` surface RegionViewer drives, recording what it was handed."""
@@ -765,6 +787,20 @@ def _stub_pane_classes():
         def add_mosaic(self, op, channel, levels, **kw):
             self.added.append((op, channel, levels, kw))
             layer = StubLayer(levels, kw)
+            self._layers[(op, channel)] = layer
+            return layer
+
+        def add_result(self, kind, op, channel, data, **kw):
+            """The sink `RegionViewer.deliver_result` actually calls for an OPERATOR result.
+
+            It was missing, and its absence was invisible: `deliver_result` wraps the call in
+            ``except Exception`` so an operator layer that cannot be added is named rather than
+            lost, and against a stub with no `add_result` that turned every delivery into a
+            reported no-op. A stub that answers a narrower surface than the production object
+            silently changes what the code under test does.
+            """
+            self.added.append((op, channel, data, dict(kw, kind=kind)))
+            layer = StubLayer(data, kw)
             self._layers[(op, channel)] = layer
             return layer
 

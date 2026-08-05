@@ -47,6 +47,7 @@ import json
 import warnings
 
 import numpy as np
+import pytest
 import tensorstore as ts
 
 from squidmip import open_reader
@@ -65,6 +66,23 @@ from tests.conftest import (
 #: The timepoint the plate preview path is hardcoded to. Not a parameter anywhere yet: that is
 #: the bug. When the slider lands this becomes the slider's value.
 _PREVIEW_TIME_POINT = 0
+
+
+@pytest.fixture(scope="module")
+def qapp():
+    """This module's QApplication.
+
+    Declared here rather than taken from ``pytest-qt``: the suite runs under
+    ``PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`` (see ``tools/run_suite_chunked.py``), where pytest-qt's
+    ``qapp`` does not exist and a test asking for it ERRORS instead of running. Same
+    module-scoped shape as every other GUI module in this suite, and held by the fixture cache's
+    own reference for the reason ``tests/conftest.py`` states at length.
+    """
+    from qtpy.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    app.setProperty("_squidmip_test", True)
+    return app
 
 
 # --- the fixture is Squid's layout, not an invention -------------------------------------------
@@ -196,6 +214,93 @@ def test_the_engine_keeps_all_three_timepoints(multi_time_point_dataset):
             assert image[time_point, channel_index, 0].min() == want
     # And the frames differ across t, which is the property every assertion below depends on.
     assert len({int(image[k, 0, 0, 0, 0]) for k in range(N_TIME_POINTS)}) == N_TIME_POINTS
+
+
+# --- the RAW REGION MOSAIC, which is a different path from the written plate below -------------
+#
+# `_MosaicWorker` -> `fuse_region_pyramid` is what pane 2 and every region window read. It used to
+# call `fuse_region_pyramid(reader, meta, region, channel)` with NO `t`, and that signature
+# defaults `t=0` — so a window whose timepoint bar said 2 rendered timepoint 0, and moving the bar
+# re-read the whole region to repaint byte-identical pixels. Unlike the two bug-documenting tests
+# further down, this one asserts the CORRECT behaviour and is green because it is fixed.
+
+def test_the_region_mosaic_fuses_the_timepoint_it_is_asked_for(multi_time_point_dataset, qapp):
+    """t=1 must render DIFFERENT pixels from t=0, and specifically timepoint 1's own pixels."""
+    from squidmip._workers import _MosaicWorker
+
+    root, _planes = multi_time_point_dataset
+    reader = open_reader(root)
+    meta = reader.metadata
+    channels = [c["name"] for c in meta["channels"]]
+
+    def fused(time_point):
+        got = {}
+        w = _MosaicWorker(reader, meta, TIME_SERIES_REGION, channels, t=time_point)
+        w.ready.connect(lambda r, ch, levels, bbox, win: got.__setitem__(ch, levels))
+        problems = []
+        w.problem.connect(problems.append)
+        w.run()                                  # synchronous; no thread, no event loop
+        assert problems == [], f"t={time_point}: the worker reported {problems}"
+        assert set(got) == set(channels)
+        # Level 0, at the z the viewer opens on, as a real array — the fuse is lazy until here.
+        return {ch: np.asarray(levels[0][z]) for ch, levels in got.items()
+                for z in [0]}
+
+    at0, at1 = fused(0), fused(1)
+    for channel_index, channel in enumerate(channels):
+        want0 = time_series_pixel_value(0, 0, channel_index)
+        want1 = time_series_pixel_value(1, 0, channel_index)
+        assert at0[channel].min() == at0[channel].max() == want0, channel
+        assert at1[channel].min() == at1[channel].max() == want1, channel
+        assert not np.array_equal(at0[channel], at1[channel]), (
+            f"{channel}: t=1 fused to the same pixels as t=0")
+
+
+def test_a_region_window_fuses_the_timepoint_its_own_bar_shows(
+    multi_time_point_dataset, napari_pane_stub, qapp
+):
+    """The WIRING, through the real window: the bar's value reaches the worker's ``t``.
+
+    Worth pinning separately from the worker test above, because the defect was not in the fuse —
+    it was that nobody passed the window's timepoint to it. A test that calls the worker with an
+    explicit ``t`` cannot see a call site that never supplies one.
+    """
+    from squidmip import _viewer as V
+    from squidmip._region_viewer import ViewerManager
+
+    root, _planes = multi_time_point_dataset
+    reader = open_reader(root)
+    mgr = ViewerManager(reader, reader.metadata)
+    try:
+        win = mgr.open([TIME_SERIES_REGION])
+        assert win is not None
+        assert win._time_point_bar.count == N_TIME_POINTS, (
+            "the window must offer every timepoint or there is nothing to select")
+
+        seen = []
+        real_worker = V._MosaicWorker
+
+        class _Recording(real_worker):
+            def __init__(self, *a, **kw):
+                seen.append(int(kw.get("t", 0)))
+                super().__init__(*a, **kw)
+
+            def start(self):
+                pass                              # wiring only; no thread
+
+        V._MosaicWorker = _Recording
+        try:
+            win._time_point_bar.set_time_point(1)
+            win._load_mosaic(TIME_SERIES_REGION)
+        finally:
+            V._MosaicWorker = real_worker
+        assert seen and seen[-1] == 1, (
+            f"the window's mosaic worker was built with t={seen}, not the bar's timepoint 1")
+    finally:
+        mgr._mem_timer.stop()
+        mgr.close_all()
+        for _ in range(20):
+            qapp.processEvents()
 
 
 # --- THE BUG. Both tests below assert the WRONG behaviour on purpose. See the module docstring --

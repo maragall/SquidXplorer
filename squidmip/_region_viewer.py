@@ -1813,14 +1813,19 @@ class RegionViewer(QMainWindow):
             self._drop_result_layers(f"this window moved from {self._result_region} to {region}")
         pane.mosaic.remove_op(_RAW_OP)
         channels = [c["name"] for c in self._meta["channels"]]
-        w = _MosaicWorker(self._reader, self._meta, region, channels, z_index=0, parent=self)
-        w.ready.connect(lambda r, ch, levels, bbox: self._on_plane(r, ch, levels, bbox))
+        # t=THIS WINDOW'S TIMEPOINT. Without it the worker fused timepoint 0 whatever the
+        # timepoint bar said, and the reload this method performs on every slider move repainted
+        # the same pixels.
+        w = _MosaicWorker(self._reader, self._meta, region, channels, z_index=0, parent=self,
+                          t=self.time_point)
+        w.ready.connect(lambda r, ch, levels, bbox, win:
+                        self._on_plane(r, ch, levels, bbox, win))
         w.problem.connect(self._say)
         w.finished_count.connect(lambda n: self._on_done(region, n))
         self._worker = w
         w.start()
 
-    def _on_plane(self, region: str, channel: str, levels, bbox_um) -> None:
+    def _on_plane(self, region: str, channel: str, levels, bbox_um, window=None) -> None:
         pane = self._pane
         if pane is None or not getattr(pane, "ok", False):
             return
@@ -1832,15 +1837,23 @@ class RegionViewer(QMainWindow):
         # the ROI corner (read a corner, not the whole region). A window with no ROI box adds the
         # full region unchanged. The crop also adjusts bbox_um so placement lands on the ROI.
         add_levels, add_bbox = levels, bbox_um
+        # The worker's window describes the WHOLE region, which is what this window is adding —
+        # unless the crop below replaces the pixels, in which case it describes something else.
+        add_window = window
         if self._roi_bbox is not None and bbox_um is not None:
             cropped = _crop_levels_to_bbox(levels, bbox_um, self._roi_bbox)
             if cropped is not None:
                 add_levels, add_bbox = cropped
+                # An ROI child is seeded from ITS OWN corner, exactly as before this seed moved
+                # off the UI thread. Deriving it here still costs nothing measurable: the worker
+                # has already decoded and cached the level the crop slices.
+                add_window = None
             else:
                 self._say("ROI does not overlap this region — showing the whole region.")
 
         pane.mosaic.add_mosaic(
             _RAW_OP, channel, add_levels,
+            contrast_limits=add_window,
             colormap=_colormap_for(channel),
             multiscale=True,
             bbox_um=add_bbox,
@@ -2440,10 +2453,47 @@ class ViewerManager(QObject):
         win.show()
         win.raise_()
         win.activateWindow()
+        self._replay_cached_results(win)
         self.windowOpened.emit(win)                     # ...so the plate can follow ITS napari
         self.windowsChanged.emit()
         self.viewFocused.emit(list(win._regions))       # highlight its regions on the plate
         return win
+
+    def _replay_cached_results(self, win: RegionViewer) -> int:
+        """Give a NEWLY OPENED window every operator result already computed for its region.
+
+        Julio: "even if we have a cache of operations, when it propagates to other windows, it
+        adds a layer, but it doesn't toggle it." ``PlateWindow._deliver_to_views`` settled that for
+        the windows open at the moment a run finishes. This is the other half of the same
+        sentence: a window opened AFTER the run got nothing at all, and the only way to see the
+        result in it was to run the operator a second time over the same pixels.
+
+        Reuse, not recompute -- and not IPC either. Both windows are in ONE interpreter over ONE
+        reader object (``DEFAULT_MAX_GUI=1`` plus an flock refuses a second process), so the
+        second window is handed the FIRST window's ``Result`` object itself: no re-read, no
+        re-fuse, no copy.
+
+        ``visible=False``, always. This window did not ask for the run, and the rule the
+        propagation path already follows is that asking is the consent: the layer is there to
+        toggle and nothing changes under someone who just opened a window. That also keeps
+        ``_on_done``'s ``show_op(_RAW_OP)`` from firing, so raw stays the visible group.
+        """
+        from squidmip._recipe import acquisition_version, cached_operator_results
+
+        region = win.current_region()
+        if not region or self._reader is None:
+            return 0
+        added = 0
+        for op, result in cached_operator_results(region, acquisition_version(self._reader)):
+            try:
+                added += int(win.deliver_result(op, result, visible=False) or 0)
+            except Exception as exc:            # noqa: BLE001 - a replay must not fail an open
+                log.warning("view %s could not take the cached %s result for %s: %s",
+                            win.window_id, op, region, exc)
+        if added:
+            win._say(f"reused {added} already-computed layer(s) for {region} "
+                     "(no recompute) — toggle them in the layers panel.")
+        return added
 
     @property
     def focused_id(self) -> Optional[int]:

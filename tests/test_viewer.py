@@ -4940,7 +4940,7 @@ def test_the_mosaic_worker_emits_a_pyramid_not_a_single_resolution_stack(qapp):
     meta = _pyr_meta()
     got, problems = [], []
     w = V._MosaicWorker(_PyrReader(), meta, "A1", ["488", "561"])
-    w.ready.connect(lambda r, ch, data, bbox: got.append((ch, data)))
+    w.ready.connect(lambda r, ch, data, bbox, win: got.append((ch, data)))
     w.problem.connect(problems.append)         # or a failure reads as a silent empty list
     w.run()                                    # synchronous; no thread, no event loop
 
@@ -4954,8 +4954,56 @@ def test_the_mosaic_worker_emits_a_pyramid_not_a_single_resolution_stack(qapp):
         assert all(lv.shape[0] == 4 for lv in data), "every level keeps the z axis"
 
 
-def test_the_mosaic_worker_builds_the_pyramid_without_reading_anything(qapp):
-    """Opening a region must not cost a fuse. Four channels x 10 z x 54.9 MB is 2.2 GB."""
+def test_the_mosaic_worker_derives_the_contrast_seed_ITSELF(qapp):
+    """The contrast seed is sampled on the WORKER thread, not in the ``ready`` slot.
+
+    `add_mosaic` does not let napari autoscale: given no window it derives one with
+    `_contrast.auto_contrast`, and `_contrast.sample_plane` has to materialise a pyramid level to
+    do it. Every level of a region pyramid is fused from the FOV TIFFs at its own decimation, so
+    even the coarsest rung decodes every FOV of the region — which is why sampling on the UI
+    thread froze the window for the length of a whole region read (measured: 128 ms on a 27-FOV
+    4-channel region here, 493-604 ms on the machine it was reported from).
+
+    Two things are asserted and they are different: that a window comes over the wire at all, and
+    that it is EXACTLY the window the UI thread used to derive. The second is what makes this a
+    move rather than a second contrast rule — this project's most-repeated defect shape.
+    """
+    from squidmip._napari_view import _auto_window_for
+
+    meta = _pyr_meta()
+    got, problems = [], []
+    w = V._MosaicWorker(_PyrReader(), meta, "A1", ["488", "561"])
+    w.ready.connect(lambda r, ch, data, bbox, win: got.append((ch, data, win)))
+    w.problem.connect(problems.append)
+    w.run()
+
+    assert problems == [], f"the worker reported: {problems}"
+    assert [ch for ch, _d, _w in got] == ["488", "561"]
+    for ch, data, window in got:
+        assert window == _auto_window_for(data, True), (
+            f"{ch}: the worker's seed is not the window add_mosaic would have derived")
+
+
+def test_the_mosaic_worker_reads_exactly_the_coarsest_level_at_one_z(qapp):
+    """Opening a region costs ONE coarse fuse per channel — the seed — and nothing else.
+
+    This test used to assert ``reads == []``: the pyramid is lazy, so building it read nothing at
+    all. That was true of the worker and false of the OPEN, because the very next thing that
+    happened was `add_mosaic` sampling that pyramid for a contrast window on the Qt thread. The
+    read did not go away when it was invisible here; it went somewhere this suite could not see
+    it. Now the worker does it, so the bound is asserted where the work is:
+
+      * ONE decode pass per channel — 16 FOVs x 2 channels — not one per pyramid level;
+      * at ONE z (`_contrast.opening_z`, the plane the viewer opens on), not the whole 4-deep
+        stack, which is what "four channels x 10 z x 54.9 MB is 2.2 GB" was guarding against;
+      * and level 0 is still never materialised, which is the property the pyramid exists for.
+
+    The plane cache is process-wide and keyed on the reader's path, so a stale entry from another
+    test would make this pass while reading nothing. It is cleared first, deliberately.
+    """
+    from squidmip import _mosaic_source as MS
+    from squidmip._contrast import opening_z
+
     reads = []
 
     class _Counting(_PyrReader):
@@ -4963,13 +5011,26 @@ def test_the_mosaic_worker_builds_the_pyramid_without_reading_anything(qapp):
             reads.append(a)
             return super().read(*a, **kw)
 
+    meta = _pyr_meta()
+    n_fovs, n_channels, nz = len(meta["fovs_per_region"]["A1"]), 2, meta["n_z"]
     problems = []
-    w = V._MosaicWorker(_Counting(), _pyr_meta(), "A1", ["488", "561"])
+    MS._PLANE_CACHE.clear()
+    w = V._MosaicWorker(_Counting(), meta, "A1", ["488", "561"])
     w.ready.connect(lambda *a: None)
     w.problem.connect(problems.append)
     w.run()
+
     assert problems == [], f"the worker reported: {problems}"
-    assert reads == [], f"building the pyramids read {len(reads)} frames; it must read none"
+    assert len(reads) == n_fovs * n_channels, (
+        f"the seed read {len(reads)} frames; one pass over {n_fovs} FOVs per channel is "
+        f"{n_fovs * n_channels}")
+    # read(region, fov, channel, z, t) -> a[3] is z, a[4] is t.
+    assert {r[3] for r in reads} == {opening_z(nz)}, (
+        "the seed must sample the ONE z the viewer opens on, not the whole stack")
+    assert {r[4] for r in reads} == {0}, "and the timepoint this worker was built for"
+    # The z axis is still 4 deep and level 0 still exists — the pyramid was not flattened to
+    # make the seed cheap.
+    assert MS._PLANE_CACHE.nbytes > 0, "the seed's decode must be cached, not thrown away"
 
 
 def test_on_mosaic_plane_tells_napari_the_data_is_multiscale(qapp):
@@ -4999,16 +5060,57 @@ def test_on_mosaic_plane_tells_napari_the_data_is_multiscale(qapp):
     win._meta = _pyr_meta()
 
     levels = [np.zeros((4, 64, 48), "uint16"), np.zeros((4, 32, 24), "uint16")]
-    V.PlateWindow._on_mosaic_plane(win, "raw", "A1", "488", levels, (0.0, 0.0, 10.0, 8.0))
+    V.PlateWindow._on_mosaic_plane(win, "raw", "A1", "488", levels, (0.0, 0.0, 10.0, 8.0),
+                                   (12.0, 345.0))
 
     assert len(calls) == 1
     op, ch, data, kw = calls[0]
     assert kw.get("multiscale") is True, "napari must be told the data is a pyramid"
     assert data is levels
-    # napari OWNS contrast: still no contrast_limits, pyramid or not.
-    assert "contrast_limits" not in kw
+    # THE WORKER'S CONTRAST SEED IS PASSED THROUGH, unchanged.
+    #
+    # This used to assert `"contrast_limits" not in kw` under the heading "napari OWNS contrast",
+    # and the second half of that was never what the code did: `add_mosaic` treats a missing /
+    # None window as "derive one" and derives `_contrast.auto_contrast` from the pixels, on the
+    # calling thread. The window is the same window; the only thing that moved is which thread
+    # samples for it (`_MosaicWorker.run`). What napari still owns is contrast FROM HERE ON --
+    # this is a seed and nothing recomputes it behind the user.
+    assert kw.get("contrast_limits") == (12.0, 345.0)
     # the z scale commit 19cd491 established must survive the pyramid
     assert kw.get("z_scale_um") == 1.5
+
+
+def test_on_mosaic_plane_without_a_window_still_lets_add_mosaic_derive_one():
+    """``window=None`` means "derive one", which is what a missing argument always meant.
+
+    Guards the degrade path: `_auto_window_for` returns None for a blank or unreadable plane, and
+    a None on the wire must not become a contrast window of `(None, None)` — it must land as the
+    same "you decide" `add_mosaic` has always answered to.
+    """
+    calls = []
+
+    class _Mosaic:
+        def add_mosaic(self, op, channel, data, **kw):
+            calls.append(kw)
+
+    class _Pane:
+        ok = True
+        mosaic = _Mosaic()
+
+        def say(self, msg):
+            pass
+
+    win = _plate_window_shell()
+    win._mosaic_pane = _Pane()
+    from squidmip._region_nav import RegionCursor
+    win._cursor = RegionCursor()
+    win._cursor.set_order(["A1"])
+    win._cursor.activate("A1")
+    win._meta = _pyr_meta()
+
+    V.PlateWindow._on_mosaic_plane(win, "raw", "A1", "488",
+                                   [np.zeros((4, 64, 48), "uint16")], (0.0, 0.0, 10.0, 8.0), None)
+    assert calls and calls[0].get("contrast_limits") is None
 # ---------------------------------------------- Defect 4: ONE contract across the two registries
 #
 # _OPERATIONS (the card table) and runnable_operators() (the engine registry) are two lists that
@@ -5234,6 +5336,11 @@ def test_the_mosaic_workers_signal_actually_reaches_on_mosaic_plane(qapp, monkey
     # instead of returning the default — so the shell has to carry every attribute the path
     # touches. Seeding it None is also what a real window has before any segmentation run.
     win._spot_worker = None
+    # Same rule, one more attribute: `_load_mosaic` now reads `self.time_point` so the worker
+    # fuses the timepoint the window is showing rather than always timepoint 0, and that property
+    # goes through `getattr(self, "_time_point_bar", None)`. None is what a real window has before
+    # its bar is built.
+    win._time_point_bar = None
     from squidmip._region_nav import RegionCursor
     win._cursor = RegionCursor()
     win._cursor.set_order(["A1"])
@@ -5255,12 +5362,13 @@ def test_the_mosaic_workers_signal_actually_reaches_on_mosaic_plane(qapp, monkey
     # Emit exactly what the worker emits in `run()`. A lambda that does not match this
     # raises inside PyQt's emit and the mosaic silently never arrives.
     levels = [np.zeros((4, 8, 8), "uint16")]
-    worker.ready.emit("A1", "488", levels, (0.0, 0.0, 8.0, 8.0))
+    worker.ready.emit("A1", "488", levels, (0.0, 0.0, 8.0, 8.0), (10.0, 200.0))
 
     assert landed, "the ready signal never reached _on_mosaic_plane"
-    op, region, channel, got_levels, bbox = landed[0]
+    op, region, channel, got_levels, bbox, window = landed[0]
     assert (op, region, channel) == ("raw", "A1", "488")
     assert got_levels is levels
+    assert window == (10.0, 200.0), "the worker's contrast seed must survive the connection"
 
 
 def test_the_plate_adopts_napari_s_window_the_moment_a_region_lands(qapp, monkeypatch):
@@ -5443,6 +5551,11 @@ def _result_win(op="bgsub", region="A1", channels=("405", "488")):
     win._active_op_key = op
     win._readout = type("R", (), {"setText": lambda self, t: setattr(self, "t", t),
                                   "text": lambda self: getattr(self, "t", "")})()
+    # A finished result is now also FILED in `_recipe.RESULTS` so a window opened later can reuse
+    # it instead of recomputing, and the key carries WHICH acquisition (every plate has a `B2`).
+    # That identity comes from the reader's path, so the shell has to carry a reader -- the same
+    # rule every other attribute on this shell follows.
+    win._reader = type("R", (), {"_path": "/fake/acquisition/result-win"})()
     win._meta = {
         # B7 is a REAL region here, with real positions. Without it the off-screen-drop test
         # would pass for the wrong reason: an unknown region cannot complete anyway, so the
