@@ -225,6 +225,10 @@ _REGISTRIES = (
     ("squidmip._engine", "_PROJECTORS"),
     ("squidmip._spots", "_SEGMENTERS"),
     ("squidmip._stitch", "_REGION_OPERATORS"),
+    # The region table's `requires=` sidecar (2026-08-05). Listed here for the same reason as the
+    # table it shadows: `add_region_operator` writes both, so restoring only one leaves a
+    # requirement behind for a name that no longer exists.
+    ("squidmip._stitch", "_REGION_REQUIRES"),
 )
 
 
