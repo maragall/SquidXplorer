@@ -74,6 +74,7 @@ here, at the producer, and the metadata key is ``fov_positions_um``.
 
 from __future__ import annotations
 
+import bisect
 import json
 import re
 import warnings
@@ -581,24 +582,60 @@ def _time_folders(path: Path) -> list[Path]:
     return sorted(numeric, key=lambda d: int(d.name)) if numeric else [path]
 
 
-def _classify_tiff_folder(folder: Path) -> tuple[int, int, list]:
-    """``(n_individual, n_stack, other_names)`` for one timepoint folder.
+#: How many unrecognised filenames an error message may name. An error listing 20 000 filenames
+#: is not a message.
+_NAMES_IN_ERRORS = 8
+
+
+def _note_odd_name(names: list, name: str) -> None:
+    """Keep the ``_NAMES_IN_ERRORS`` lexicographically smallest *name*s seen, in order.
+
+    Both scan sites below used to iterate a SORTED directory listing and take the first eight
+    names they did not recognise, so their error messages were deterministic. The listings are no
+    longer sorted (see :func:`_classify_tiff_folder`), and "eight arbitrary filenames" is a
+    message that says something different every run and cannot be asserted on. This keeps the
+    exact same eight, at the cost of an insort into a list that is never longer than eight.
+    """
+    if len(names) >= _NAMES_IN_ERRORS:
+        if name >= names[-1]:
+            return
+        names.pop()
+    bisect.insort(names, name)
+
+
+def _classify_tiff_folder(folder: Path, entries: "Optional[list]" = None
+                          ) -> tuple[int, int, list, list]:
+    """``(n_individual, n_stack, other_names, entries)`` for one timepoint folder.
 
     The dispatch evidence, gathered ONCE so the error message can state what was actually on
-    disk. ``other_names`` is capped — an error listing 20 000 filenames is not a message.
+    disk — and the ``entries`` it gathered it from, handed back so the reader this dispatches to
+    does not scan the same directory a second time (see :meth:`SquidReader._build_index`).
+
+    UNSORTED, and the listing is materialised once. On the 1536-well plate (24 576 files in one
+    timepoint folder) ``sorted(folder.iterdir())`` measured 149 ms against ``list(folder.iterdir())``
+    at 30 ms, and this function ran once here and once again inside the reader: ``open_reader``
+    plus ``.metadata`` went 551 ms -> 210 ms (medians of 15, same process, back to back). Nothing
+    downstream of either scan depends on the order: this one counts, ``_build_index`` fills a dict,
+    and ``SquidReader.metadata`` re-sorts every axis it publishes (``sorted(fovs, key=_plate_key)``,
+    ``sorted(channels)``, ``sorted(z_levels)``) precisely because "filesystem iteration order is
+    not stable". The two places that DID read order — the capped filename lists in the error
+    messages, and the frame sampled for shape/dtype — are each made order-independent rather than
+    left to the filesystem.
     """
+    if entries is None:
+        entries = list(folder.iterdir())
     individual = stacks = 0
     other: list = []
-    for f in sorted(folder.iterdir()):
+    for f in entries:
         if not f.is_file() or f.suffix.lower() not in _TIFF_SUFFIXES:
             continue
         if _STEM_RE.match(f.stem):
             individual += 1
         elif _STACK_STEM_RE.match(f.stem):
             stacks += 1
-        elif len(other) < 8:
-            other.append(f.name)
-    return individual, stacks, other
+        else:
+            _note_odd_name(other, f.name)
+    return individual, stacks, other, entries
 
 
 def open_reader(path) -> SquidAcquisitionReader:
@@ -646,7 +683,7 @@ def open_reader(path) -> SquidAcquisitionReader:
         return SquidZarrReader(store, acquisition_root=path)
 
     folder = _time_folders(path)[0]
-    individual, stacks, other = _classify_tiff_folder(folder)
+    individual, stacks, other, entries = _classify_tiff_folder(folder)
     if individual:
         if stacks:
             # Both writers' output in one folder. Serve the richer one, but say so: this is
@@ -659,7 +696,10 @@ def open_reader(path) -> SquidAcquisitionReader:
                 "this folder holds two runs. Reading the individual TIFFs and IGNORING the "
                 "stacks — split them into separate folders to read the stacks."
             )
-        return SquidReader(path)
+        # Hand the scan on. The dispatch above already listed this folder; without the seed
+        # ``_build_index`` lists it again, which on the 1536-well plate is a second 83 ms of
+        # ``iterdir`` plus a second 24 576 stat calls for nothing.
+        return SquidReader(path, _scanned=(folder, entries))
     if stacks:
         return SquidMultiPageTiffReader(path)
     raise ValueError(
@@ -745,11 +785,16 @@ def _find_zarr_store(path: Path):
 class SquidReader:
     """Lazy reader over a Squid individual-TIFF acquisition folder."""
 
-    def __init__(self, path) -> None:
+    def __init__(self, path, *, _scanned: "Optional[tuple[Path, list]]" = None) -> None:
         self._path = Path(path)
         self._time_folders: Optional[list[Path]] = None
         self._index: Optional[dict] = None
         self._meta: Optional[dict] = None
+        #: ``(folder, entries)`` from a directory listing the CALLER already paid for, or None.
+        #: ``open_reader`` scans the first timepoint folder to decide which reader to build, so
+        #: without this the index build below re-lists the same directory. Consumed once, then
+        #: dropped: anything that rebuilds the index after that wants what is on disk now.
+        self._scanned = _scanned
 
     # -- timepoints -------------------------------------------------------
     def _discover_time_folders(self) -> list[Path]:
@@ -763,9 +808,19 @@ class SquidReader:
         if self._index is not None:
             return self._index
         folder = self._discover_time_folders()[0]
+        entries = None
+        if self._scanned is not None:
+            scanned_folder, scanned_entries = self._scanned
+            self._scanned = None                 # one use only; see __init__
+            if scanned_folder == folder:
+                entries = scanned_entries
+        if entries is None:
+            # UNSORTED. Nothing below or downstream reads the order — see _classify_tiff_folder,
+            # which states the whole argument and names the two places that used to.
+            entries = folder.iterdir()
         index: dict = {}
         skipped: list = []
-        for f in sorted(folder.iterdir()):
+        for f in entries:
             if f.suffix.lower() not in _TIFF_SUFFIXES:
                 continue
             m = _STEM_RE.match(f.stem)
@@ -788,8 +843,7 @@ class SquidReader:
                     "serves. Use squidmip.open_reader(), which dispatches to "
                     "SquidMultiPageTiffReader for this format."
                 )
-            if len(skipped) < 8:
-                skipped.append(f.name)
+            _note_odd_name(skipped, f.name)
         if not index:
             raise ValueError(
                 "No Squid individual-TIFF files "
@@ -836,7 +890,11 @@ class SquidReader:
             )
 
         # frame shape + dtype come from a real frame — they vary with binning / pixel format.
-        sample_key = next(iter(index))
+        # ``min``, not ``next(iter(index))``: the index is filled in filesystem order now, so the
+        # first key is whatever the directory happened to hand back, and an acquisition would
+        # report its shape from a different plane on different machines. ``min`` over the 1536
+        # plate's 24 576 key tuples measured 0.40 ms, which is the price of a reproducible answer.
+        sample_key = min(index)
         sample_path = self._resolve_file(time_folders[0], sample_key, index[sample_key])
         sample = _validate_plane(tifffile.imread(sample_path), sample_path)
 
