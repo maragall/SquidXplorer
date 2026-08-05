@@ -708,5 +708,12 @@ def decon3d_op(
 # The whole registration. No engine edit — that is the IMA-210 seam working as designed, and the
 # per-channel optics ride the same rails: a declaration on the callable (`for_channel`), read by
 # project_well. Nothing here is named "decon" anywhere outside this line.
-add_projector("decon", decon_op())
-add_projector("decon3d", decon3d_op(), consumes=frozenset({"z"}))
+#
+# `requires=("petakit",)` is the DECLARATION of what `_petakit()` imports lazily further down. It
+# was undeclared, and that was a measured silent success rather than a tidiness point: on a stock
+# `pip install .[gui]` petakit is absent (it is not in [project.dependencies]), the ImportError
+# `_petakit` raises so carefully was recorded by `project_plate(on_error=...)` as a per-well skip,
+# and a whole-plate deconvolution finished green having written nothing. Declared, the run now
+# refuses BY NAME at bind time, before a well is read.
+add_projector("decon", decon_op(), requires=("petakit",))
+add_projector("decon3d", decon3d_op(), consumes=frozenset({"z"}), requires=("petakit",))

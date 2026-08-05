@@ -323,4 +323,9 @@ LAYER_LABEL: str = "flat-field correction"
 # The whole registration. No engine edit — the IMA-210 seam working as designed.
 _ACTIVE_OP = plane_op(_correct_with_active)
 _ACTIVE_OP.corrects_illumination = True    # see CORRECTS_ILLUMINATION above
-add_projector(LAYER_KEY, _ACTIVE_OP)
+# `requires=("tilefusion",)` states what every route to a profile actually imports: `from_npy`
+# loads one through `tilefusion.flatfield.load_flatfield` and `estimate_profile` derives one
+# through `estimate_flatfield_channel`. tilefusion is not in [project.dependencies], so on a stock
+# install this operator could only ever raise from a lazy import one call deep — which
+# `project_plate(on_error=...)` then filed as a per-well skip. Declared, it refuses by name first.
+add_projector(LAYER_KEY, _ACTIVE_OP, requires=("tilefusion",))
