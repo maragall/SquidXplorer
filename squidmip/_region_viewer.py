@@ -361,6 +361,32 @@ _REGION_LOAD_DEBOUNCE_MS = 140
 #: an OME-Zarr will add their own op key as a second visibility layer; not needed for exploration.
 _RAW_OP = "raw"
 
+#: The Apple floor for GL_MAX_3D_TEXTURE_SIZE, used only until the live canvas can be asked. Not a
+#: second literal: it is the one ``_napari_view`` owns.
+from squidmip._napari_view import _DEFAULT_MAX_3D_TEXTURE      # noqa: E402  (kept beside its use)
+
+
+def _brick_budget_bytes() -> int:
+    """How much a bricked 3D view may hold resident.
+
+    ``_budget.cache_budget`` is the repo's one answer to "how much of this machine may a cache
+    take", measured off FREE memory rather than total, so this does not invent a fourth memory
+    mechanism. It is deliberately a share of the same budget the 2D pyramid cache uses: a 3D view is
+    up instead of heavy 2D navigation, not as well as it.
+    """
+    try:
+        from squidmip._budget import cache_budget
+
+        return int(cache_budget())
+    except Exception:                                    # noqa: BLE001 - a floor beats no render
+        return 512 << 20
+
+
+def _started(vol):
+    """``open()`` the volume and hand it back, so ``_replace_native3d`` still takes one callable."""
+    vol.open()
+    return vol
+
 
 class RegionViewer(QMainWindow):
     """ONE independent napari window over a subset of regions.
@@ -2024,38 +2050,92 @@ class RegionViewer(QMainWindow):
             self._say(f"3D could not open: {exc}")
 
     def _open_roi_3d(self, region: str, roi_bbox: tuple, contrast_by: dict, colormap_by: dict) -> None:
-        """3D of an ROI = native fusion of the FOVs it overlaps, cropped to the box (full z)."""
-        names = [c["name"] for c in (self._meta or {}).get("channels", [])]
-        from squidmip._napari3d import native_roi_volume, open_native_3d_volume, z_step_um
+        """3D of an ROI, BRICKED and IN THIS WINDOW. Any ROI renders; none is refused.
 
-        try:
-            volumes = native_roi_volume(self._reader, self._meta, region, roi_bbox, names)
-        except Exception as exc:                         # noqa: BLE001 - named to the window
-            self._say(f"ROI 3D fusion failed: {exc}")
+        Julio: "the 3D rendering ROI design improvement, which now sucks because the user has no
+        in-window computation and can select ROIs that can't be seen (I thought we had decided to do
+        bricking)". Both halves are answered here.
+
+        IN-WINDOW. This paints into the pane's own napari canvas (``_napari_viewer()``) instead of
+        constructing a popout ``napari.Viewer``. The old objection to doing that -- ``_replace_native3d``'s
+        docstring, "the pane's layers are the FUSED PYRAMID whose level 0 is already capped to
+        _MAX_FUSED_PX, while 3D reads a NATIVE z-stack" -- was about reusing the pane's LAYERS. It
+        does not apply to adding our own: the brick layers are read straight from the reader, exactly
+        as the popout was, and the pyramid layers are hidden while they are up. Sharing a canvas was
+        never the problem; sharing the pyramid was.
+
+        BRICKED. An ROI over the GL texture limit is tiled rather than turned away. Nothing is read
+        that the camera cannot see, so a box over a whole 11538 x 9645 region opens against a bounded
+        budget instead of a 2.2 GB/channel fusion.
+        """
+        names = [c["name"] for c in (self._meta or {}).get("channels", [])]
+        if not names:
+            self._say("this acquisition declares no channels to render in 3D.")
             return
-        volumes = {n: v for n, v in (volumes or {}).items()
-                   if v is not None and int(v.shape[0]) >= 2}
-        if not volumes:
-            self._say("ROI 3D: no z-stack over this ROI (single z plane, or the box is off-tissue).")
+        viewer = self._napari_viewer()
+        if viewer is None:
+            self._say("3D needs this window's napari canvas, which isn't available here.")
+            return
+        from squidmip._brick_view import BrickedVolume
+        from squidmip._napari3d import region_origin_um, roi_window_px, z_step_um
+
+        window = roi_window_px(self._meta or {}, region, roi_bbox)
+        origin = region_origin_um(self._meta or {}, region)
+        if window is None or origin is None:
+            self._say("ROI 3D: this ROI does not land on any FOV of this region.")
+            return
+        nz = len(list((self._meta or {}).get("z_levels") or [0]))
+        if nz < 2:
+            self._say("3D needs a z-stack; this acquisition has a single z plane.")
             return
         px = float((self._meta or {}).get("pixel_size_um") or 1.0)
         dz = z_step_um(self._meta or {}, px, where=f"3D ROI {region}")
-        max_tex = 2048
+        max_tex = _DEFAULT_MAX_3D_TEXTURE
         try:
             max_tex = int(self._pane._live_max_3d_texture())
-        except Exception:                                # noqa: BLE001
+        except Exception:                                # noqa: BLE001 - the Apple value is the floor
             pass
+        r0, r1, c0, c1 = window
+        # The ROI's own world corner: the region origin plus the crop, in stage micrometres. This is
+        # the same arithmetic `_crop_levels_to_bbox` does for 2D, so the volume lands exactly where
+        # the box was drawn.
+        roi_origin = (0.0, float(origin[1]) + r0 * px, float(origin[0]) + c0 * px)
+        budget = _brick_budget_bytes()
         try:
-            self._replace_native3d(lambda: open_native_3d_volume(
-                {n: np.asarray(v) for n, v in volumes.items()},
-                scale=(dz, px, px),
-                title=f"3D ROI — {self._region_label(self._regions)}",
-                contrast_by_channel=contrast_by or None,
-                colormap_by_channel=colormap_by or None,
-                max_texture=max_tex,
-            ))
+            self._replace_native3d(lambda: _started(BrickedVolume(
+                viewer, self._reader, self._meta, region, window,
+                channels=names, scale=(dz, px, px), origin_um=roi_origin,
+                limit=max_tex, budget_bytes=budget,
+                contrast_by=contrast_by or None, colormap_by=colormap_by or None,
+                say=self._say, parent=self,
+            )))
         except Exception as exc:                         # noqa: BLE001 - named to the window
             self._say(f"ROI 3D could not open: {exc}")
+            return
+        # THE CAMERA IS THE INPUT to which bricks are resident and how finely they are sampled, so
+        # the settle callback is what makes zooming converge to native. Debounced by the pane (120
+        # ms quiet period) for the reason the 2D fetch is: a drag emits camera events far faster
+        # than a brick can be read, and fetching per event grows a queue that never drains.
+        try:
+            self._pane.on_camera_settled(self._refresh_bricks)
+        except Exception:                                # noqa: BLE001 - static bricks still render
+            pass
+        vol = self._native3d
+        n = getattr(vol, "brick_count", 0)
+        self._say(f"3D in-window: {(r1 - r0)}x{(c1 - c0)} px ROI, {nz} z, {len(names)} channel(s), "
+                  f"{n} brick{'' if n == 1 else 's'} at native {px:.3f} um/px "
+                  f"({budget / 1e6:.0f} MB budget).")
+
+    def _refresh_bricks(self) -> None:
+        """The camera stopped: re-decide stride and visible set. No-op unless 3D bricks are up."""
+        vol = self._native3d
+        refresh = getattr(vol, "refresh", None)
+        if not callable(refresh):
+            return
+        try:
+            refresh()
+        except Exception as exc:                         # noqa: BLE001 - named, never silent
+            self._say(f"3D: could not follow the camera ({exc}).")
 
     def _render_roi_volume(self, mosaic, contrast_by: dict, colormap_by: dict) -> None:
         """Render the EXACT ROI subarray in 3D: the cropped level-0 volume this window's 2D view
@@ -2204,6 +2284,15 @@ class RegionViewer(QMainWindow):
         try:
             if self._slider is not None:
                 self._slider.shutdown()
+        except Exception:                            # noqa: BLE001
+            pass
+        # The bricked 3D view owns a long-lived QThread. "QThread: Destroyed while thread is still
+        # running" aborts the interpreter, so it is stopped and joined here like every other worker.
+        try:
+            vol, self._native3d = self._native3d, None
+            close = getattr(vol, "close", None)
+            if callable(close):
+                close()
         except Exception:                            # noqa: BLE001
             pass
         self.closed.emit(self)
