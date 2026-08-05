@@ -61,9 +61,14 @@ level down: the operator is named for WHAT IT PRODUCES (`spot`), never for the a
 a silently absent menu entry.
 
 **Gap:** there is no `consumes={"t"}` (time) operator yet, and no RESULT type for anything that is
-not pixels — which is why background subtraction is invisible in napari and why gallery view has
-nowhere to land. An agent cannot register a tool whose output shape the host has no concept of.
+not pixels — which is why background subtraction is invisible in napari. An agent cannot register a
+tool whose output shape the host has no concept of.
 **This is the single biggest blocker and it is worth fixing for its own sake.**
+
+Gallery view USED to be listed here as a second symptom of the same gap. It is not one, and saying
+so was what kept it unbuilt: a gallery is a look, not an operator run, so it needs no result type at
+all. It shipped (2026-08-05, `squidmip/_gallery.py`) over the raw mosaic's own placement helpers
+and the plate selection that already existed. Background subtraction is still the real instance.
 
 ### 3. "Did it work?" — PARTLY ANSWERED
 
@@ -131,7 +136,7 @@ Nautilus is not the next task. But three things on its critical path are worth d
 reasons that have nothing to do with agents:
 
 1. **A result type for non-pixel operator output** (labels, points, tables). Unblocks background
-   subtraction in napari, gallery view, and Fractal-style feature tables.
+   subtraction in napari and Fractal-style feature tables. (Not gallery view — see above.)
 2. **The workbench + named test datasets.** This is the regression-fixture work Julio already
    asked for, wearing a different hat.
 3. **One command surface** shared by GUI, CLI and script. This is Core v.2.
