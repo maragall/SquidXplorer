@@ -239,24 +239,30 @@ def auto_blend_px(
     return max(int(np.median(seams)) * 2, 10)
 
 
-_FF_MAX_TILES = 49   # The owner's cap (2026-08-04). The field is low-frequency and BaSiC is robust
-#                      from few tiles, so more than this buys nothing and costs a read each.
+_FF_MAX_TILES = 50   # maragall/stitcher's `_FlatfieldWorker` n_samples (app.py:1122-1171). PARITY
+#                      is the reason for this number, not a belief that 50 is optimal: the two
+#                      tools read AND WRITE the same `<root>_flatfield.npy` (see
+#                      _flatfield_npy_path), so a different cap means whichever ran last silently
+#                      owns a profile the other would not have produced.
 #
-#                      THIS NOW DIFFERS FROM maragall/stitcher BY ONE TILE. Its `_FlatfieldWorker`
-#                      samples `n_samples=50` (app.py:1122-1171); we sample 49. Wherever MORE than
-#                      49 tiles are available the two tools estimate from different stacks and
-#                      their profiles are not the same array — so a run of ours and a run of the
-#                      standalone on the same acquisition no longer agree bit-for-bit, and the
-#                      `.npy` the two share (see _flatfield_npy_path) is whichever tool wrote it
-#                      last. Measured on the 10x tissue set, 405 nm channel:
+#                      It was briefly 49, from a note reading "limit to n=49 (Ian-stitcher)". Two
+#                      things came out of checking that (Julio ruled 50, 2026-08-04):
 #
-#                        per REGION (estimate_region_flatfield, manual0 = 27 FOVs): the cap never
-#                          binds, both take all 27 tiles, profiles are BIT-IDENTICAL (max|d| = 0).
-#                        PLATE-WIDE (stitch_plate's spread sample, 55 tiles available): 50 -> 49
-#                          changes the gain field by max|d| = 7.8e-3, RMS 1.7e-3, i.e. 0.78% of
-#                          mean gain against a field only ~4% deep (0.975..1.015) — roughly a fifth
-#                          of the correction's own magnitude. Not zero, and not worth calling
-#                          negligible; it is the price of the owner's cap.
+#                        * Ian's number is neither 49 nor 249. ~/CEPHLA/projects/ian-stitcher,
+#                          image_stitcher/flatfield_correction.py:11-12, is MAX_FLATFIELD_IMAGES=48
+#                          plus MAX_FLATFIELD_IMAGES_PER_T=32 — a per-TIMEPOINT cap we have no
+#                          equivalent of. His sample is `random.shuffle` UNSEEDED, so his estimate
+#                          is not reproducible run to run; ours is (_FF_SEED).
+#                        * The cap only bites plate-wide. Measured, 10x tissue set, 405 nm: per
+#                          REGION (27 FOVs) it never binds and 49 vs 50 are BIT-IDENTICAL;
+#                          plate-wide (55 tiles) they differ by max|d| 7.8e-3 / RMS 1.7e-3, which
+#                          against a field only ~4% deep is ~0.78% of mean gain -- a fifth of the
+#                          correction's own magnitude, so not negligible.
+#
+#                      Revisit if the sample ever needs STRATIFYING across wells: on a 1536-well
+#                      plate, 50 tiles out of tens of thousands may not represent the illumination
+#                      across the whole plate. stitch_plate already spreads its sample over wells;
+#                      estimate_region_flatfield does not.
 _FF_SEED = 42        # the GUI's seed, so the same acquisition samples the same tiles twice.
 
 
