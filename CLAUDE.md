@@ -3,6 +3,37 @@
 Post-acquisition HCS plate viewer. Reads finished Squid well-plate data (T, C, Z, FOV already on
 disk); no live capture, no stage motion.
 
+## The operator contract
+
+`templates/operator/README.md` is the contract, and it is the public one: a complete, installable
+example package a contributor copies. Read it before adding an operator anywhere.
+
+Four declarations on the registry record, and nothing generic branches on an operator's NAME
+(`tests/test_operator_declaration.py` fails the build if anything does):
+
+| declaration | decides |
+|---|---|
+| `consumes` | the engine's loop and the output shape — `{"z"}` collapses z, `frozenset()` keeps it |
+| `produces` | what the pixels MEAN, and therefore the napari layer type |
+| `params` | what one entry can be RUN with (`params=` makes the registered object a factory) |
+| `requires` | the modules it needs — **listed either way, run refused BY NAME when missing** |
+
+`requires=` (2026-08-05) is the same word on all three registrars — `add_projector`,
+`add_region_operator`, `add_segmenter`. It closed a measured silent success: `decon`, `decon3d` and
+`flatfield` import packages absent from `[project.dependencies]`, raised ImportError one call deep,
+and `project_plate(on_error=...)` filed that as a per-well skip — a green run that wrote nothing.
+Per-well fault isolation now refuses to absorb `ImportError` / `MissingDependency`
+(`_engine._NOT_A_WELL_FAULT`): a missing package is not a corrupt well.
+
+**Discovery**: `squidmip/_plugins.py` scans the `squidmip.operators` entry-point group on
+`import squidmip`, AFTER the built-ins. An operator in someone else's package needs no edit here.
+A broken plugin aborts the import, NAMED; `SQUIDMIP_NO_PLUGINS=1` is the escape hatch. The
+hardcoded built-in imports in `squidmip/__init__.py` stay — discovery is additive.
+
+**Not supported, do not build against it**: composition (`_recipe.RecipeChain` documents chaining
+and nothing executes it), and GUI panels generated from `params` (`_op_panels.py` is hand-written
+per operator). Both are named in the template README so a contributor is not misled.
+
 ## Two producers of a region's pixels, and they are not interchangeable
 
 `stitch_plate()` is the mosaic **of record**: registration, fusion, native resolution, ~0.9 GB per
@@ -19,14 +50,25 @@ which is `stitch_plate(regions=…)`'s own parameter and `GalleryScope.fovs`. It
 Do not build a second selection mechanism; `_placement.fov_offsets_px` normalises whatever FOV set
 it is handed, so the crop needs no cropping code.
 
-## Nothing decodes on the Qt thread
+## Nothing decodes on the Qt thread — including the contrast seed
 
-Measured: `_contrast.py:157` costs 493 ms per region when a caller materialises a dask level on the
-UI thread to pick contrast limits. Long reads live in a `QThread` in `_workers.py` (or
-`_gallery_window.GalleryWorker`), results arrive per unit so the first one paints while the rest are
-still being read, and `tests/test_gallery.py` pins the rule by recording which thread every
-`reader.read` ran on. Caches are shared, not per-feature: `_mosaic_source.plane_cache()`,
-`_platecache.PlateCellCache`, both bounded by `_budget.cache_budget()`.
+The contrast seed is the one that keeps getting missed, because it does not look like a read.
+`_contrast.sample_plane` already picks the COARSEST pyramid level, so it looks free — but every
+level of a raw-preview pyramid is fused from the FOV TIFFs at its own decimation, so materialising
+even the smallest rung decodes every FOV of the region. Measured twice, on two different paths:
+128 ms of frozen UI per region on the mosaic path (493–604 ms on the reporting machine), and the
+same shape of cost per cell for a gallery, which is N regions and would have been N freezes.
+
+Both are fixed the same way and it is now the rule: whatever computes the pixels computes the
+window, on the worker thread, and the UI receives `(lo, hi)` as data. See `_MosaicWorker`
+(`_workers.py`, `_auto_window_for` on the worker) and `_gallery_window.GalleryWorker`. Results
+arrive per unit so the first one paints while the rest are still being read.
+`tests/test_gallery.py::test_the_gallery_never_reads_a_plane_on_the_qt_thread` pins it by recording
+the thread ident of every `reader.read`, so a later refactor cannot quietly reintroduce it.
+
+Caches are shared, not per-feature: `_mosaic_source.plane_cache()`, `_platecache.PlateCellCache`,
+both bounded by `_budget.cache_budget()`. A feature-private cache spends the same budget twice and
+the two evict against each other.
 
 ## Agent skills
 

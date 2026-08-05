@@ -211,6 +211,49 @@ def test_measure_region_pitch_um_is_none_without_coordinates():
     assert measure_region_pitch_um({}, ["A1", "A2"]) == (None, None)
 
 
+def test_measure_region_pitch_um_matches_the_all_pairs_reference_on_a_jittered_plate():
+    """The grouped implementation returns EXACTLY what the all-pairs one returned.
+
+    ``measure_region_pitch_um`` used to compare every well against every other well and throw the
+    ~97% that shared neither a row nor a column away; on 1536 wells that was 180 ms, the only cost
+    in this module that grew quadratically with plate size. It now buckets the wells by the shared
+    index first (9.6 ms, measured the same way).
+
+    The guard has to be an EQUIVALENCE, not a spot value: an optimisation that quietly drops a
+    pair, or forms one it should not, still measures a plausible pitch on a regular grid. So the
+    input is JITTERED per well — a regular plate would give the same answer under almost any bug —
+    and the expected value is computed here by the exact all-pairs rule the function used to run.
+    """
+    rows, cols, pitch = 8, 12, 4500.0
+    regions, positions, index = [], {}, {}
+    for r in range(rows):
+        for c in range(cols):
+            region = f"{chr(ord('A') + r)}{c + 1}"
+            # Deterministic per-well jitter, big enough that a wrong pair set shifts the median.
+            jx = ((r * 31 + c * 17) % 23) - 11.0
+            jy = ((r * 13 + c * 29) % 19) - 9.0
+            regions.append(region)
+            positions[(region, 0)] = (c * pitch + jx, r * pitch + jy)
+            index[region] = (r, c)
+
+    def _reference(shared, varying, coord):
+        deltas = []
+        for i, a in enumerate(regions):
+            for b in regions[i + 1:]:
+                if index[a][shared] != index[b][shared]:
+                    continue
+                d_idx = index[b][varying] - index[a][varying]
+                if d_idx == 0:
+                    continue
+                deltas.append(abs(positions[(b, 0)][coord] - positions[(a, 0)][coord])
+                              / abs(d_idx))
+        deltas.sort()
+        return deltas[len(deltas) // 2] if deltas else None
+
+    assert measure_region_pitch_um(positions, regions) == (
+        _reference(0, 1, 0), _reference(1, 0, 1))
+
+
 def test_format_from_pitch_um_distinguishes_96_from_384():
     assert format_from_pitch_um(9000.0, 9000.0) == "96 well plate"
     assert format_from_pitch_um(4500.0, 4500.0) == "384 well plate"

@@ -9,11 +9,14 @@ ever calls ``reader.read``.
 
 WHY THAT RULE IS WRITTEN DOWN RATHER THAN ASSUMED
 --------------------------------------------------
-``_contrast.py``'s ``sample_plane`` (line 157) costs a measured **493 ms per region** when its
-caller materialises a dask level on the Qt thread just to pick contrast limits, because that
-materialisation decodes every FOV of the region at full resolution. A gallery is N of those. The
-gallery therefore computes its contrast where it computes its pixels — in the worker, off one
-already-decimated array — and the window receives ``(lo, hi)`` as data.
+Because the thing that breaks it does not look like a read. ``_contrast.sample_plane`` picks the
+COARSEST pyramid level, which is why it kept passing review — but every level of a raw-preview
+pyramid is fused from the FOV TIFFs at its own decimation, so materialising even the smallest rung
+decodes every FOV of the region. ``_MosaicWorker`` was fixed for exactly this (``_workers.py``,
+merged at 400c63f): **128 ms of frozen UI per region**, 493-604 ms on the machine it was reported
+from. A gallery is N regions, so the same mistake here is N freezes rather than one. The gallery
+therefore computes its contrast where it computes its pixels — in the worker, off one
+already-decimated array — and this thread receives ``(lo, hi)`` as data.
 
 THE LAYOUT IS gallery-view's, NOT A REFLOWING GRID
 ---------------------------------------------------

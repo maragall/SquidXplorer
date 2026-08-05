@@ -107,7 +107,14 @@ from typing import Callable, Iterable, Optional
 import numpy as np
 
 from squidmip._engine import Param, add_projector
-from squidmip.projection import labels_op, plane_op
+from squidmip.projection import (
+    MissingDependency,
+    labels_op,
+    missing_requirements,
+    normalise_requires,
+    plane_op,
+    requirement_refusal,
+)
 
 # The layer key the UI files this operator's results under, so the registry and the UI cannot
 # drift apart on the spelling (same discipline as _background.LAYER_KEY).
@@ -203,7 +210,7 @@ STAGES: tuple[str, ...] = (
 )
 
 
-class MissingSegmenterDependency(RuntimeError):
+class MissingSegmenterDependency(MissingDependency):
     """A registered segmenter's optional package is not importable. NAMED, never silent.
 
     Cellpose and StarDist are heavyweight optional dependencies. A segmenter that quietly drops
@@ -277,7 +284,7 @@ def add_segmenter(name: str, fn, *, requires=(), blurb: str = "") -> None:
             f"segmenter {name!r} is already defined; pick a distinct name "
             f"(defined: {available_segmenters()})."
         )
-    _SEGMENTERS[name] = Segmenter(name, fn, tuple(requires), blurb)
+    _SEGMENTERS[name] = Segmenter(name, fn, normalise_requires(requires), blurb)
 
 
 def available_segmenters() -> list[str]:
@@ -291,17 +298,20 @@ def available_segmenters() -> list[str]:
 
 
 def segmenter_available(name: str) -> tuple[bool, str]:
-    """``(ok, reason_if_not)`` — is this segmenter's dependency importable right now?"""
-    import importlib.util
+    """``(ok, reason_if_not)`` — is this segmenter's dependency importable right now?
 
+    The probe and the sentence now come from ``squidmip.projection`` (``missing_requirements`` /
+    ``requirement_refusal``) rather than from a copy living here, because the operator and region
+    tables grew the same ``requires=`` declaration and three hand-written spellings of one refusal
+    is how they start disagreeing. The wording is byte-identical to what this function always
+    produced; the only change is where it is written down.
+    """
     seg = _SEGMENTERS.get(name)
     if seg is None:
         return False, f"unknown segmenter {name!r}; available: {available_segmenters()}"
-    missing = [m for m in seg.requires if importlib.util.find_spec(m) is None]
+    missing = missing_requirements(seg.requires)
     if missing:
-        return False, (f"segmenter {name!r} needs {', '.join(missing)}, which "
-                       f"{'are' if len(missing) > 1 else 'is'} not installed "
-                       f"(pip install {' '.join(missing)})")
+        return False, requirement_refusal("segmenter", name, missing)
     return True, ""
 
 

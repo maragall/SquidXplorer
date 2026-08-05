@@ -60,6 +60,19 @@ level down: the operator is named for WHAT IT PRODUCES (`spot`), never for the a
 `requires=` names the optional dependency so a missing package is a **named refusal** rather than
 a silently absent menu entry.
 
+**Now fully answered, in public (2026-08-05).** `templates/operator/` is a complete, installable
+example package with `README.md` stating the contract precisely — what arrives, what to return for
+each `consumes` value, what `produces` means for rendering, how parameters are declared, how
+dependencies are declared and what happens when they are missing. `requires=` is on all three
+registrars with one spelling. And `squidmip/_plugins.py` scans the `squidmip.operators` entry-point
+group, so **an operator in a repo we do not ship registers itself with no edit to SquidXplorer** —
+which is precisely the "turn a repo link into an operator" step this document is about. The agent's
+job shrinks to: write the adapter, declare four things, `pip install`.
+
+**Still a gap for Nautilus specifically:** the *adapter* is what an agent must author, and nothing
+verifies its declaration against its behaviour except the operator author's own tests (the template
+ships the four groups of tests that check exactly that). See §3.
+
 **Gap:** there is no `consumes={"t"}` (time) operator yet, and no RESULT type for anything that is
 not pixels — which is why background subtraction is invisible in napari. An agent cannot register a
 tool whose output shape the host has no concept of.

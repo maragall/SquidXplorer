@@ -259,6 +259,57 @@ def test_empty_dir_raises(tmp_path):
         open_reader(tmp_path).metadata
 
 
+def test_opening_an_acquisition_lists_the_timepoint_folder_exactly_once(squid_dataset,
+                                                                       monkeypatch):
+    """``open_reader`` + ``metadata`` scans the first timepoint folder ONE time, unsorted.
+
+    It used to scan it twice and sort both times: once in ``_classify_tiff_folder`` to pick the
+    reader, once in ``SquidReader._build_index`` to map the planes. On the 1536-well plate (24 576
+    files in one folder) that measured 551 ms for the pair, of which the two sorts were ~230 ms and
+    the duplicate listing the rest; one unsorted scan, handed from the dispatch to the reader, is
+    210 ms. Counting the LISTINGS rather than timing them is what makes this a regression test
+    instead of a benchmark: a reintroduced second scan fails it on any machine.
+    """
+    from pathlib import Path
+
+    root, _arrays = squid_dataset
+    folder = (root / "0").resolve()
+    calls = []
+    real_iterdir = Path.iterdir
+
+    def counting_iterdir(self):
+        if self.resolve() == folder:
+            calls.append(self)
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", counting_iterdir)
+    reader = open_reader(root)
+    reader.metadata
+    assert len(calls) == 1, f"the timepoint folder was listed {len(calls)} times, expected 1"
+
+
+def test_the_index_seed_is_used_once_and_a_later_rebuild_re_reads_disk(squid_dataset):
+    """A reader built with a seeded listing drops the seed after using it.
+
+    The seed is a directory listing the CALLER already paid for, so it is only true for as long as
+    nobody has written to the folder. Keeping it would mean a reader that re-indexed after an
+    acquisition appended a plane still served the old listing, which is a stale-cache bug wearing
+    a performance fix's clothes. One use, then gone.
+    """
+    root, _arrays = squid_dataset
+    reader = open_reader(root)
+    assert reader._scanned is not None, "open_reader should hand its listing to the reader"
+    first = reader._build_index()
+    assert reader._scanned is None, "the seed must be consumed by the first index build"
+
+    # A plane written after the seed was taken is found by a rebuilt index, not hidden by it.
+    new = f"{list(first)[0][0]}_9_0_{CH_IN_YAML}.tiff"
+    tifffile.imwrite(root / "0" / new, np.zeros((4, 4), np.uint16))
+    reader._index = None
+    assert any(k[1] == 9 for k in reader._build_index()), \
+        "a rebuild after the seed was consumed must re-read the directory"
+
+
 # --- integration: the real 10x laser-AF tissue acquisition (AC1 + AC4 on real data) ---------
 # Repointed from the deleted hongquan z-stack. This is the harder and more representative case:
 # a GLASS SLIDE with freeform regions, which the viewer refused outright until IMA-214.

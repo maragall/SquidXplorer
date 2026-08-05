@@ -578,17 +578,23 @@ class _MosaicWorker(QThread):
     Results arrive per channel so the first channel paints while the rest are still being read.
     """
 
-    ready = Signal(str, str, object, object)   # region, channel, LEVELS (pyramid), bbox_um|None
-    #                                                (no contrast window: napari owns contrast)
+    ready = Signal(str, str, object, object, object)
+    #        region, channel, LEVELS (pyramid), bbox_um|None, contrast window (lo, hi)|None
     problem = Signal(str)
     finished_count = Signal(int)
 
-    def __init__(self, reader, meta, region, channels, z_index=0, parent=None):
+    def __init__(self, reader, meta, region, channels, z_index=0, parent=None, t=0):
         super().__init__(parent)
         self._reader, self._meta = reader, meta
         self._region = region
         self._channels = list(channels)
         self._z_index = int(z_index)
+        #: WHICH TIMEPOINT this mosaic is of. It used to be nothing at all: ``run`` called
+        #: ``fuse_region_pyramid`` without a ``t`` and the signature defaults it to 0, so a window
+        #: whose timepoint slider said 3 rendered timepoint 0, and moving that slider re-read the
+        #: whole region to repaint byte-identical pixels. Invisible on this machine, where every
+        #: acquisition is n_t=1 — see tests/test_time_point.py, which drives an Nt=3 fixture.
+        self._t = int(t)
         self._stop = threading.Event()
 
     def stop(self):
@@ -596,6 +602,11 @@ class _MosaicWorker(QThread):
 
     def run(self):
         from squidmip._mosaic_source import fuse_region_pyramid, mosaic_bbox_um
+        # THE SAME seeding function `add_mosaic` calls, imported rather than reimplemented: two
+        # contrast rules over one quantity is this codebase's most-repeated defect shape, and
+        # `_auto_window_for` already degrades to "let napari autoscale" on any failure, so nothing
+        # raised here can cost the layer. It carries no Qt and imports napari nowhere.
+        from squidmip._napari_view import _auto_window_for
 
         try:
             bbox = mosaic_bbox_um(self._meta, self._region)
@@ -617,7 +628,8 @@ class _MosaicWorker(QThread):
                 # napari's own dimension slider is still the z control: every level keeps the z
                 # axis at full length and only y/x are coarsened. Only the visible (level, z) is
                 # ever materialised, and _mosaic_source's bounded cache keeps a revisited one.
-                res = fuse_region_pyramid(self._reader, self._meta, self._region, ch)
+                res = fuse_region_pyramid(self._reader, self._meta, self._region, ch,
+                                          t=self._t)
             except Exception as exc:                # noqa: BLE001 - reported, never swallowed
                 self.problem.emit(f"{self._region}/{ch}: {type(exc).__name__}: {exc}")
                 continue
@@ -626,14 +638,26 @@ class _MosaicWorker(QThread):
                     f"{self._region}: no stage positions / pixel size — mosaic not derivable."
                 )
                 continue
-            # NO contrast window on the wire. ima-nav-controls added one here, computing
-            # napari's own calc_data_range off-thread because it cost ~940 ms/channel on the GUI
-            # thread. That measurement was taken against a FLAT level-0 stack; with the multiscale
-            # pyramid napari autoscales from the small level it actually renders, so the cost it
-            # was routing around is gone. Passing a window again would put a second contrast
-            # decision on the wire for no measured gain.
             levels, _step, _nz = res
-            self.ready.emit(self._region, ch, levels, bbox)
+            # THE CONTRAST SEED IS COMPUTED HERE, ON THIS THREAD. It is the one piece of work in
+            # this path that is not lazy, and until now it happened on the Qt UI thread.
+            #
+            # An earlier comment here said there was "no contrast window on the wire" because
+            # "napari autoscales from the small level it actually renders". Half of that is true
+            # and the half that matters is not: `MosaicLayers.add_mosaic` does NOT let napari
+            # autoscale, it seeds the fluorescence window itself (`_auto_window_for` ->
+            # `_contrast.sample_plane`), and it did so inside the `ready` slot. `sample_plane`
+            # already picks the COARSEST pyramid level, so this is not about pixel count: every
+            # level of this pyramid is fused from the FOV TIFFs at its own decimation, so
+            # materialising even the smallest rung decodes every FOV of the region. Measured on a
+            # 27-FOV x 4-channel region: 2.2 ms in this worker and 128 ms of frozen UI, against
+            # 493-604 ms on the machine the defect was reported from.
+            #
+            # Nothing extra is computed by moving it. The decode is one napari needs anyway to
+            # draw the layer, and `_mosaic_source`'s bounded plane cache keeps it, so the first
+            # paint is served from what this line just warmed.
+            window = _auto_window_for(levels, True)
+            self.ready.emit(self._region, ch, levels, bbox, window)
             n += 1
         self.finished_count.emit(n)
 

@@ -48,13 +48,20 @@ cell would put minutes in front of first paint. So the gallery fuses at PREVIEW 
 same "later FOV overwrites earlier" rule ``_mosaic_source.fuse_region_mosaic`` uses, through the
 same ``_placement`` helpers — one geometry, two resolutions, never two implementations.
 
-NOTHING HERE MAY RUN ON THE Qt THREAD
---------------------------------------
-``_contrast.py``'s ``sample_plane`` costs a measured 493 ms per region when the caller materialises
-a dask level to pick contrast limits, because it decodes every FOV at full resolution. A gallery of
-N regions would pay that N times, as N freezes. So the window never calls anything in this module
-directly: :class:`squidmip._gallery_window.GalleryWorker` does, on its own thread, and the window
-only ever receives finished :class:`GalleryCell` values. ``test_gallery.py`` pins that.
+NOTHING HERE MAY RUN ON THE Qt THREAD, AND THE CONTRAST SEED IS PART OF "HERE"
+------------------------------------------------------------------------------
+This is the same defect ``_MosaicWorker`` was fixed for (``_workers.py``, merged at 400c63f), one
+path over. ``_contrast.sample_plane`` picks the COARSEST pyramid level and therefore looks free,
+but every level of a raw-preview pyramid is fused from the FOV TIFFs at its own decimation, so
+materialising even the smallest rung decodes every FOV of the region: 128 ms of frozen UI per
+region measured there, 493-604 ms on the machine it was reported from. A gallery is N regions, so
+the same mistake here is N freezes rather than one.
+
+So the window never calls anything in this module directly. :class:`GalleryCell` carries its
+``window`` as DATA, computed in :class:`squidmip._gallery_window.GalleryWorker` beside the pixels
+it describes, and the Qt thread only ever windows an array that is already in RAM at cell
+resolution. ``test_gallery.py::test_the_gallery_never_reads_a_plane_on_the_qt_thread`` records the
+thread ident of every ``reader.read`` and fails on the main one, so this cannot decay quietly.
 """
 
 from __future__ import annotations
