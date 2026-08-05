@@ -188,12 +188,54 @@ def test_uint8_dtype_preserved(tmp_path):
 
 
 def test_fails_loud_on_wrong_shape(tmp_path):
+    """A malformed shape is still refused — but Z>1 is NOT malformed any more (IMA-277).
+
+    This test used to assert the opposite: Z=3 raised "expected a projected (T, C, 1, Y, X)
+    array". That refusal was the single reason five of the eight registered operators (bgsub,
+    decon, flatfield, spot, cellpose — every plane-op) could not be written to disk at all, and
+    it was never protecting a real invariant: the store is 5-D with a real z axis, its
+    multiscales already scale that axis by dz_um. What it protected against is what it still
+    refuses below.
+    """
     import pytest
 
-    # z not collapsed (Z=3) -> a seam bug; refuse rather than write a mislabelled field
-    bad = np.zeros((1, 2, 3, 8, 8), np.uint16)
-    with pytest.raises(ValueError, match="T, C, 1, Y, X"):
-        write_from_stream(_meta(), iter([("B2", 0, bad)]), tmp_path, n_fovs=1, tiff=False)
+    for bad, why in [
+        (np.zeros((2, 1, 8, 8), np.uint16), "4-D, not TCZYX"),
+        (np.zeros((1, 2, 1, 8, 8, 2), np.uint16), "6-D, not TCZYX"),
+        (np.zeros((1, 2, 0, 8, 8), np.uint16), "empty z axis"),
+        (np.zeros((1, 2, 1, 0, 8), np.uint16), "empty y axis"),
+    ]:
+        with pytest.raises(ValueError):
+            write_from_stream(_meta(), iter([("B2", 0, bad)]), tmp_path, n_fovs=1, tiff=False)
+
+
+def test_z_stack_round_trips_through_the_plate(tmp_path):
+    """A (T, C, Nz, Y, X) result is written as a real z-stack and reads back pixel-identical.
+
+    The writer's half of IMA-277. Every plane must land at its own z index — the failure this
+    replaces would have been "plane 0 written Nz times" or "only plane 0 written", both of which
+    a shape-only assertion passes.
+    """
+    import tifffile
+
+    rng = np.random.default_rng(7)
+    stack = rng.integers(0, 4096, size=(2, 2, 5, 8, 8), dtype=np.uint16)   # T=2, C=2, Nz=5
+    meta = {**_meta(), "n_t": 2, "n_z": 5}
+    write_from_stream(meta, iter([("B2", 0, stack)]), tmp_path, n_fovs=1, tiff=True, n_z=5)
+
+    arr = _read_array(tmp_path / "plate.ome.zarr" / "B" / "2" / "0" / "0")
+    assert arr.shape == stack.shape
+    assert np.array_equal(arr, stack), "z-stack did not round-trip pixel-identically"
+    # ...and each plane is DISTINCT, so "plane 0 broadcast over z" cannot pass.
+    assert len({arr[0, 0, z].tobytes() for z in range(5)}) == 5
+
+    # The TIFF export names the plane in the z field of Squid's convention, and does not
+    # collapse the stack to one file per channel.
+    for z in range(5):
+        for t in range(2):
+            path = tmp_path / "tiff" / str(t) / f"B2_0_{z}_{CH[0]['name']}.tiff"
+            assert path.exists(), f"missing per-plane TIFF for t={t} z={z}"
+            assert np.array_equal(tifffile.imread(path), stack[t, 0, z])
 
 
 def test_fails_loud_on_channel_count_mismatch(tmp_path):

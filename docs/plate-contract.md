@@ -103,6 +103,40 @@ package assumes.
 The non-HCS Squid layout `zarr/{region}/acquisition.zarr` is 6-D `(fov, t, c, z, y, x)`. That is
 Squid's shape, not ours: we read it, we never write it. See `reader._discover_flat`.
 
+### Z: the axis is real, and `Nz > 1` is written (IMA-277, 2026-08-05)
+
+`z` has always been a real axis of the store — `_output._multiscales` scales it by the
+acquisition's `dz_um` — but until IMA-277 nothing could put more than one plane in it:
+`_output._validate_image` refused any array with `shape[2] != 1`, and `_stitch.stitch_region`
+refused any plane-op outright. Between them that meant **no path in this system wrote a Z>1
+result**, which is why five of the eight registered operators could be run and displayed but
+never persisted.
+
+What is guaranteed now:
+
+| Operator kind (`consumes`) | Written `Nz` | Operators |
+| --- | --- | --- |
+| z-reducer `{"z"}` | `1` | `mip`, `reference`, `decon3d` |
+| plane-op `set()` | the acquisition's `n_z` | `bgsub`, `decon`, `flatfield`, `spot`, `cellpose` |
+
+The depth comes from the operator's own declaration, in one place (`write_plate` reads
+`projector_consumes`), so the disk pre-flight estimate and the bytes actually written cannot
+disagree. A z-reduced write is byte-identical to what this writer has always produced.
+
+Two consequences worth knowing:
+
+* `_write_field` writes **one z plane at a time** and builds that plane's pyramid alone. The
+  pyramid only halves Y and X, so this is pixel-identical to building the whole volume's — and it
+  is the only version that fits: a 10-plane 4-channel fused mosaic of a 27-FOV 10x well is 8.79 GB.
+* The individual-TIFF export's `{z}` filename field now carries the plane index it always named
+  (`{region}_{fov}_{z}_{channel}.tiff`), instead of a hardcoded `0`.
+
+**Where Z>1 is still flattened, and it is the RENDERER, not the store.**
+`_tilesource.InMemoryMultiscale._planes` takes `arr[t, :, 0]` — plane 0 — when it folds a field
+into the plate overview. That is pre-existing and unchanged by IMA-277 (plane-op results already
+reached it through `project_plate`); it flattens the DISPLAY, never the written pixels. A viewer
+that shows a z slider is separate work.
+
 ### Time: the format carries it, and the viewer now reads it
 
 This section used to state a GAP. As of 2026-07-29 it states a guarantee, because the gap was

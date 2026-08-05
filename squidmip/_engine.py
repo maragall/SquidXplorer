@@ -450,7 +450,8 @@ def project_plate(
     ------
     tuple[str, int, np.ndarray]
         ``(region, fov, image)`` per selected well, in completion order (not plate order —
-        downstream keys by ``(region, fov)``). ``image`` is ``(T, C, 1, Y, X)`` native dtype.
+        downstream keys by ``(region, fov)``). ``image`` is ``(T, C, Nz, Y, X)`` native dtype;
+        ``Nz`` is 1 for a z-reducer and the acquisition's depth for a plane-op.
 
     Raises
     ------

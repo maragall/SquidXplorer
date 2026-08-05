@@ -203,7 +203,33 @@ def flatfield_op(profile: FlatfieldProfile) -> Callable[[Iterable[np.ndarray]], 
         return correct_flatfield(p, profile)
 
     _flatfield.__name__ = f"flatfield{profile.shape}"
-    return plane_op(_flatfield)
+    op = plane_op(_flatfield)
+    op.corrects_illumination = True     # see CORRECTS_ILLUMINATION below
+    return op
+
+
+# --- the DOUBLE-APPLY declaration --------------------------------------------------------------
+#
+# ``corrects_illumination = True`` on an operator callable means: THESE PIXELS COME OUT
+# FLAT-FIELDED. It exists because there are now two places that can apply the correction and only
+# one of them may run per pass:
+#
+#   * the READ path — ``_stitch._FlatfieldReader``, which is where TileFusion applies it and where
+#     it has to be applied for registration to see corrected strips. ON by default;
+#   * this OPERATOR, which corrects the pixels a projector emits.
+#
+# Until IMA-277 they could not meet: stitching refused every plane-op outright, so the ``flatfield``
+# projector could not reach a stitch. Removing that refusal makes the combination reachable, and
+# the correction is NOT idempotent — measured on the 10x tissue set, correcting twice changes 88.6%
+# of pixels, by up to 23 counts. Silently. ``_stitch.stitch_region`` reads this attribute and
+# refuses the combination; see tests/test_stitch_zplanes.py.
+#
+# An ATTRIBUTE ON THE CALLABLE, in the same style as ``consumes`` (``projection.plane_op``) and
+# ``select_index``, rather than a name comparison: this module already registers the correction
+# under one name and hands out others through ``flatfield_op()``, and a guard keyed on the string
+# "flatfield" would miss every one of those. ``_engine.Operator`` reads it off the callable exactly
+# as it reads ``consumes``.
+CORRECTS_ILLUMINATION = "corrects_illumination"
 
 
 # --- the ACTIVE profile, for the registry entry ------------------------------------------------
@@ -272,4 +298,6 @@ LAYER_KEY: str = "flatfield"
 LAYER_LABEL: str = "flat-field correction"
 
 # The whole registration. No engine edit — the IMA-210 seam working as designed.
-add_projector(LAYER_KEY, plane_op(_correct_with_active))
+_ACTIVE_OP = plane_op(_correct_with_active)
+_ACTIVE_OP.corrects_illumination = True    # see CORRECTS_ILLUMINATION above
+add_projector(LAYER_KEY, _ACTIVE_OP)

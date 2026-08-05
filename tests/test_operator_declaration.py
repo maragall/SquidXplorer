@@ -442,23 +442,42 @@ def test_registering_cellpose_does_not_import_torch():
 # 5. THE PERSISTENCE ANSWER, PINNED
 # ==============================================================================================
 
-def test_a_labels_operator_still_cannot_be_written_to_a_plate_and_says_so(squid_dataset):
-    """A segmentation is a plane-op, so z survives at full depth, and ``write_plate`` accepts Z==1.
+def test_a_labels_operator_is_written_to_a_plate_as_a_real_z_stack(squid_dataset):
+    """A segmentation is a plane-op, so z survives at full depth — and that is now WRITTEN.
 
-    Nothing about the result KIND changes that: it was already true of every plane-op (decon,
-    bgsub, flatfield) and the ``NOTE for plane-ops`` in ``_engine``'s docstring says so. Pinned
-    here because "can a label result be persisted" is the first question anyone asks about this
-    branch, and the answer is a LOUD refusal rather than a silently truncated stack.
+    This test asserted the opposite until IMA-277: ``write_plate`` refused any Z>1 result ("z
+    collapsed to 1"), so a label result — like every other plane-op result — could be computed
+    and displayed but never persisted. The refusal was not protecting an invariant; the store has
+    always been 5-D with a real z axis. What it cost was five of the eight registered operators
+    having nowhere to go.
+
+    The label result is written PER FOV, which is where a label image is meaningful. Fusing it
+    across a well is separately refused (``_stitch``: averaging object ids invents objects), and
+    that refusal is pinned in tests/test_stitch_zplanes.py.
     """
+    import numpy as np
+    import tensorstore as ts
     from squidmip import open_reader, write_plate
 
     root, _ = squid_dataset
     reader = open_reader(str(root))
-    assert reader.metadata["n_z"] >= 2, (
-        "this fixture has one z plane, so a plane-op's output would be Z==1 and the refusal "
-        "under test could not fire — the test would pass for the wrong reason")
-    with pytest.raises(ValueError, match=r"z collapsed to 1"):
-        write_plate(reader, str(root.parent / "labels_out"), projector=SPOT_KEY, n_fovs=1)
+    n_z = reader.metadata["n_z"]
+    assert n_z >= 2, (
+        "this fixture has one z plane, so a plane-op's output would be Z==1 and this test could "
+        "not tell a written stack from a written plane")
+    out = root.parent / "labels_out"
+    manifest = write_plate(reader, str(out), projector=SPOT_KEY, n_fovs=1)
+    assert manifest["complete"] and manifest["n_fields_written"] >= 1
+
+    region = reader.metadata["regions"][0]
+    fov = reader.metadata["fovs_per_region"][region][0]
+    row = "".join(c for c in region if c.isalpha())
+    col = "".join(c for c in region if not c.isalpha())
+    field = out / "plate.ome.zarr" / row / col / str(fov) / "0"
+    arr = ts.open({"driver": "zarr3",
+                   "kvstore": {"driver": "file", "path": str(field)}}).result()[...].read().result()
+    assert arr.shape[2] == n_z, f"wrote {arr.shape[2]} z planes for an {n_z}-plane acquisition"
+    assert np.issubdtype(arr.dtype, np.integer), "label ids must stay integers on disk"
 
 
 def test_write_plate_refuses_kwargs_only_for_an_operator_that_declares_none(squid_dataset):
