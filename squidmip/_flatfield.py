@@ -217,6 +217,13 @@ def flatfield_op(profile: FlatfieldProfile) -> Callable[[Iterable[np.ndarray]], 
 # declared parameter is what deletes them, and it is deliberately NOT done here: it changes how the
 # GUI's auto-estimate worker hands its result to a run, which is a separate change.
 #
+# WHO READS IT (2026-08-04). No longer only the plane-op below. ``_stitch._selected_profiles``
+# reads it too, so a profile chosen in the GUI's flat-field tab is also the one STITCHING corrects
+# by — it used to have zero effect there, because ``resolve_flatfield`` went straight to the
+# ``.npy`` and estimated its own. This global is now the single owner of "the profile the user
+# chose"; the per-call ``stitch_region(flatfield=...)`` argument still outranks it. Keep it that
+# way: a second place that remembers a chosen profile is the defect that was just removed.
+#
 # The registered ``flatfield`` operator is selected by NAME (``project_plate(projector=...)``),
 # so it cannot take a profile argument — and unlike decon's sigma or bgsub's radius, a flat-field
 # has no sane default: an identity field would silently do nothing while the UI said "flat-field

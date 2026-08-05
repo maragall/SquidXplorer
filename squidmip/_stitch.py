@@ -85,6 +85,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Callable, Iterator, Optional, Sequence
@@ -238,8 +239,24 @@ def auto_blend_px(
     return max(int(np.median(seams)) * 2, 10)
 
 
-_FF_MAX_TILES = 50   # GUI's n_samples: the field is low-frequency and BaSiC is robust from few
-#                      tiles, so more than this buys nothing and costs a read each.
+_FF_MAX_TILES = 49   # The owner's cap (2026-08-04). The field is low-frequency and BaSiC is robust
+#                      from few tiles, so more than this buys nothing and costs a read each.
+#
+#                      THIS NOW DIFFERS FROM maragall/stitcher BY ONE TILE. Its `_FlatfieldWorker`
+#                      samples `n_samples=50` (app.py:1122-1171); we sample 49. Wherever MORE than
+#                      49 tiles are available the two tools estimate from different stacks and
+#                      their profiles are not the same array — so a run of ours and a run of the
+#                      standalone on the same acquisition no longer agree bit-for-bit, and the
+#                      `.npy` the two share (see _flatfield_npy_path) is whichever tool wrote it
+#                      last. Measured on the 10x tissue set, 405 nm channel:
+#
+#                        per REGION (estimate_region_flatfield, manual0 = 27 FOVs): the cap never
+#                          binds, both take all 27 tiles, profiles are BIT-IDENTICAL (max|d| = 0).
+#                        PLATE-WIDE (stitch_plate's spread sample, 55 tiles available): 50 -> 49
+#                          changes the gain field by max|d| = 7.8e-3, RMS 1.7e-3, i.e. 0.78% of
+#                          mean gain against a field only ~4% deep (0.975..1.015) — roughly a fifth
+#                          of the correction's own magnitude. Not zero, and not worth calling
+#                          negligible; it is the price of the owner's cap.
 _FF_SEED = 42        # the GUI's seed, so the same acquisition samples the same tiles twice.
 
 
@@ -284,11 +301,26 @@ def estimate_region_flatfield(
     rng = np.random.default_rng(_FF_SEED)
     picked = [fovs[i] for i in sorted(rng.choice(len(fovs), size=n, replace=False))]
 
+    # SAY IT BEFORE DOING IT. Every line this function used to emit was in the past tense, so the
+    # stage that runs BEFORE the first well is stitched -- and reads up to _FF_MAX_TILES tiles per
+    # channel to do it -- was silent for its whole duration and then announced itself as finished.
+    # The plate bar cannot cover it either: its unit is the REGION (squidmip._progress.unit_plan),
+    # and this runs before any region does, so the only surface that can show it live is the log
+    # panel the bar now sits in. One line per channel, at the start and at the end, is the same
+    # shape tilefusion's own stage prints have.
+    _log.info("Flatfield: no profile in hand — estimating %d channel profile(s) from %d raw "
+              "tile(s) of region %s at z=%d (tilefusion BaSiC). Stitching starts after this.",
+              len(channels), n, region, z)
     profiles = {}
-    for c in channels:
+    for i, c in enumerate(channels, 1):
         name = all_channels[c]
+        _log.info("Flatfield: channel %d of %d (%s) — reading %d raw tile(s)…",
+                  i, len(channels), name, n)
         stack = np.stack([reader.read(region, f, name, z, t) for f in picked])
+        t0 = time.perf_counter()
         profiles[name] = estimate_profile(stack, use_darkfield=use_darkfield)
+        _log.info("Flatfield: channel %d of %d (%s) estimated in %.1f s.",
+                  i, len(channels), name, time.perf_counter() - t0)
         del stack
     _log.info(
         "Flatfield: estimated %d channel profile(s) from %d raw tile(s) of region %s at z=%d.",
@@ -322,6 +354,41 @@ def _flatfield_npy_path(reader):
     return inside if inside.exists() or not beside.exists() else beside
 
 
+def _selected_profiles(names: Sequence[str]) -> Optional[dict]:
+    """The profile the USER selected in the GUI, as ``{channel_name: profile}``, or ``None``.
+
+    THE ONE OWNER OF "the profile the user chose". ``squidmip._flatfield``'s module global
+    (``set_profile``/``active_profile``) was read by exactly one consumer — the registered
+    ``flatfield`` plane-op — so a profile loaded or estimated in the GUI's flat-field tab had
+    **zero effect on stitching**: :func:`resolve_flatfield` went straight to the ``.npy`` lookup
+    and, finding nothing, estimated its own. Two unsynchronised answers to "which gain field is
+    this plate corrected by", and nothing able to notice they disagreed.
+
+    Fixed HERE rather than by having the GUI push into ``flatfield=``, because the tab that owns
+    the chooser is not the tab that starts a stitch: making the GUI set a per-run argument would
+    leave the global still owning the plane-op, i.e. two owners again. Reading the global from the
+    one place stitching resolves a profile leaves exactly one, and the precedence is total:
+
+        explicit ``flatfield=`` argument  >  GUI-selected profile  >  stored ``.npy``  >  estimate
+
+    The argument stays on top because a caller who names a profile has said something more specific
+    than a standing GUI selection (it is also how :func:`stitch_plate` hands ONE plate-wide profile
+    to every region). The GUI selection beats the file on disk because the user chose it after the
+    file was already there.
+
+    The global is a SINGLE ``FlatfieldProfile``, not one per channel — the plane-op seam has no
+    channel identity (see ``squidmip._flatfield``'s module docstring) — so it applies to every
+    channel of the run, which is what the plane-op already does with it. That is stated in the log
+    line rather than left to be discovered.
+    """
+    from squidmip._flatfield import active_profile
+
+    profile = active_profile()
+    if profile is None:
+        return None
+    return {str(n): profile for n in names}
+
+
 def resolve_flatfield(reader, region: str, fovs: Sequence[int], *, channels=None,
                       z: Optional[int] = None, t: int = 0, use_darkfield: bool = False) -> dict:
     """Load this acquisition's profile, or estimate it and save it. The standalone's lifecycle.
@@ -330,6 +397,9 @@ def resolve_flatfield(reader, region: str, fovs: Sequence[int], *, channels=None
     found -> tick the box, auto-calculate, and ``app.py:1903-1916`` auto-saves the result next to
     the data. So flat-fielding is on by default there, and it is compute-ONCE: the second run of
     the same acquisition reads the file the first run wrote, and so does the standalone.
+
+    Ahead of all of that sits the profile the user selected in the GUI, if there is one — see
+    :func:`_selected_profiles` for the precedence and for why the global is read here.
 
     Saving is best-effort, exactly as the standalone's is (it wraps its own save in try/except and
     logs the failure): an acquisition on a read-only share must still stitch. Failing to persist
@@ -341,7 +411,15 @@ def resolve_flatfield(reader, region: str, fovs: Sequence[int], *, channels=None
     names = [c["name"] for c in meta["channels"]]
     path = _flatfield_npy_path(reader)
 
+    selected = _selected_profiles(names)
+    if selected is not None:
+        _log.info("Flatfield: using the profile selected in the GUI (%dx%d), applied to all %d "
+                  "channel(s). Clear it to fall back to this acquisition's stored profile.",
+                  *next(iter(selected.values())).shape, len(names))
+        return selected
+
     if path is not None and path.exists():
+        _log.info("Flatfield: loading the stored profile from %s…", path.name)
         try:
             profiles = {n: FlatfieldProfile.from_npy(path, channel=i) for i, n in enumerate(names)}
             _log.info("Flatfield: loaded %d channel profile(s) from %s.", len(profiles), path.name)
@@ -750,7 +828,8 @@ def stitch_region(
         in the affine fallback. Any pair lost this way is named in a WARNING.
     flatfield:
         ``{channel_name: FlatfieldProfile}`` to use instead of resolving one. ``None`` (the
-        default) runs :func:`resolve_flatfield`: load the acquisition's stored
+        default) runs :func:`resolve_flatfield`, whose precedence is: the profile the user
+        selected in the GUI (:func:`_selected_profiles`), else the acquisition's stored
         ``<root>_flatfield.npy`` if present, else estimate from raw tiles and save it there.
 
         :func:`stitch_plate` resolves ONCE and passes the same profile to every region, which is
@@ -1327,20 +1406,42 @@ def stitch_plate(
             z = int(meta["n_z"]) // 2
             names = [c["name"] for c in meta["channels"]]
             path = _flatfield_npy_path(reader)
-            if path is not None and path.exists():
+            selected = _selected_profiles(names)
+            if selected is not None:
+                # The profile the user picked in the GUI's flat-field tab. ONE owner: the same
+                # global the registered `flatfield` plane-op reads, so the two operators correct
+                # by the same gain field instead of by two independently resolved ones. See
+                # _selected_profiles for the full precedence.
+                operator_kwargs["flatfield"] = selected
+                _log.info("Flatfield: using the profile selected in the GUI (%dx%d) for the whole "
+                          "plate, applied to all %d channel(s).",
+                          *next(iter(selected.values())).shape, len(names))
+            elif path is not None and path.exists():
                 # The acquisition already carries a profile -- ours from a previous run, or the
                 # standalone's. Reuse beats re-deriving: it is what makes this compute-once, and
                 # it is the only way the two tools agree on the SAME gain field rather than two
                 # independently estimated ones.
+                _log.info("Flatfield: loading the stored plate-wide profile from %s…", path.name)
                 operator_kwargs["flatfield"] = {
                     n: FlatfieldProfile.from_npy(path, channel=i) for i, n in enumerate(names)}
                 _log.info("Flatfield: loaded %d plate-wide profile(s) from %s.",
                           len(names), path.name)
             else:
+                # Before, not after (see estimate_region_flatfield): this stage runs BEFORE the
+                # first region is submitted to the pool, so nothing else in the GUI moves while it
+                # runs -- the plate bar's unit is the region and the region count is still 0.
+                _log.info("Flatfield: no stored profile — estimating one plate-wide profile per "
+                          "channel from %d tile(s) across %d well(s) at z=%d (tilefusion BaSiC). "
+                          "Stitching starts after this.", len(picked), len(wells), z)
                 profiles = {}
-                for name in names:
+                for i, name in enumerate(names, 1):
+                    _log.info("Flatfield: channel %d of %d (%s) — reading %d raw tile(s)…",
+                              i, len(names), name, len(picked))
                     stack = np.stack([reader.read(r, f, name, z, 0) for r, f in picked])
+                    t0 = time.perf_counter()
                     profiles[name] = estimate_profile(stack)
+                    _log.info("Flatfield: channel %d of %d (%s) estimated in %.1f s.",
+                              i, len(names), name, time.perf_counter() - t0)
                     del stack
                 operator_kwargs["flatfield"] = profiles
                 _log.info("Flatfield: one plate-wide profile per channel from %d tile(s) across "

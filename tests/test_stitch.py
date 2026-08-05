@@ -1281,6 +1281,70 @@ def test_a_supplied_profile_is_used_instead_of_estimating(master):
         "the supplied non-unit profile did not reach the fused pixels")
 
 
+def test_the_gui_selected_profile_reaches_stitching(master):
+    """A profile chosen in the GUI's flat-field tab must correct the STITCH too.
+
+    It did not. ``_flatfield.set_profile`` was read by exactly one consumer -- the registered
+    ``flatfield`` plane-op -- so ``resolve_flatfield`` walked straight past it to the ``.npy``
+    lookup and estimated its own field. Two owners of "which gain field is this plate corrected
+    by", and the user's choice was the one with no effect.
+    """
+    from squidmip._flatfield import clear_profile, set_profile
+    from squidmip._stitch import resolve_flatfield
+
+    reader = _FakeReader(master)
+    chosen = _nonunit_profile()
+    set_profile(chosen)
+    try:
+        resolved = resolve_flatfield(reader, "A1", list(range(4)))
+        assert all(p is chosen for p in resolved.values()), (
+            "the GUI-selected profile did not reach the stitch's profile resolution")
+        assert set(resolved) == set(CHANNELS), "every channel of the run must be covered"
+
+        # ...and an explicit per-call profile still outranks it: one total precedence, no tie.
+        kw = dict(channels=[0], blend_px=24, block_px=512, max_workers=2, register=False,
+                  correct_distortion=False)
+        explicit = stitch_region(_FakeReader(master), "A1", list(range(4)),
+                                 flatfield={CHANNELS[0]: _nonunit_profile(gain=4.0)}, **kw)
+        from_global = stitch_region(_FakeReader(master), "A1", list(range(4)), **kw)
+        assert not np.array_equal(np.asarray(explicit), np.asarray(from_global)), (
+            "the explicit flatfield= argument was overridden by the GUI-selected global")
+    finally:
+        clear_profile()
+
+
+def test_the_flatfield_stage_says_what_it_is_doing_before_it_does_it(master, monkeypatch, caplog):
+    """Announce the stage at its START, not in the past tense once it is over.
+
+    Every flat-field line used to be emitted after the work finished, so the log panel -- which is
+    also where the run's progress bar lives, and the only surface that can move during a stage that
+    runs BEFORE the first region -- was silent for the whole estimate and then reported it as done.
+    """
+    import logging
+
+    import squidmip._flatfield as ff_mod
+
+    log_at_entry = []
+
+    def _fake_estimate(planes, *, use_darkfield=False):
+        log_at_entry.append([r.getMessage() for r in caplog.records])
+        return _nonunit_profile()
+
+    monkeypatch.setattr(ff_mod, "estimate_profile", _fake_estimate)
+    caplog.set_level(logging.INFO)
+    from squidmip._stitch import estimate_region_flatfield
+
+    estimate_region_flatfield(_FakeReader(master), "A1", list(range(4)), channels=[0, 1], z=0)
+
+    assert len(log_at_entry) == 2, "the estimator should have run once per channel"
+    said_first = log_at_entry[0]
+    assert any("estimating" in m for m in said_first), (
+        "nothing was logged before the first channel's estimate started")
+    assert any("channel 1 of 2" in m for m in said_first), "no per-channel progress line"
+    assert any("channel 2 of 2" in m for m in log_at_entry[1]), (
+        "the second channel's line arrived after its estimate, not before it")
+
+
 def test_the_affine_fallback_refuses_to_guess_from_too_few_pairs():
     """Below ``_MIN_PAIRS_FOR_AFFINE`` the fit is not trustworthy, so the tiles stay put.
 
