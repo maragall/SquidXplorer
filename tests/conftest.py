@@ -271,11 +271,17 @@ channels:
 
 # Legacy flat sidecar (fallback source). Note magnification/sensor -> recomputed px 0.188,
 # deliberately DIFFERENT from acquisition.yaml's stored 0.325 so tests prove which is used.
+#
+# `objective.NA` is here because every real acquisition writes it and NOTHING ELSE DOES: Squid's
+# acquisition.yaml objective block is name/magnification/pixel_size_um/camera_binning, with no
+# aperture (see `_acquisition.load_objective_na`). 0.8 is the real 20x's own value, transcribed
+# from ~/Downloads/20x_scan_2025-09-05_17-57-50, which is the objective this fixture claims.
+# Without it the fixture is not a faithful Squid acquisition and decon must refuse on it.
 _PARAMS = {
     "Nz": NZ,
     "Nt": 1,
     "dz(um)": 1.5,
-    "objective": {"magnification": 20.0},
+    "objective": {"magnification": 20.0, "NA": 0.8},
     "sensor_pixel_size_um": 3.76,
 }
 

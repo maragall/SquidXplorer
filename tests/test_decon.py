@@ -191,27 +191,32 @@ def test_the_psf_is_a_real_vectorial_psf_not_a_gaussian():
 
 
 def test_optics_come_from_acquisition_metadata_not_constants(tmp_path):
-    """OpticsParams.from_acquisition must read the scope's OWN numbers through petakit's
-    reader. Built here as a minimal Squid-shaped acquisition so the test needs no fixture data.
+    """OpticsParams.from_acquisition must read the scope's OWN numbers, through THIS PACKAGE's
+    parse of the acquisition. Built here as a minimal Squid-shaped acquisition so the test needs
+    no fixture data.
+
+    Each field is deliberately a different number from every other source of the same field, so
+    a regression to a second parser cannot pass: the object-space pixel size stated in
+    acquisition.yaml (0.400) is NOT ``sensor_pixel_size_um / magnification`` (6.5/20 = 0.325),
+    which is what petakit's reader recomputes.
     """
-    tifffile = pytest.importorskip("tifffile")
     root = tmp_path / "acq"
-    (root / "ome_tiff").mkdir(parents=True)
+    root.mkdir(parents=True)
     (root / "acquisition parameters.json").write_text(
-        '{"dz(um)": 2.0, "Nz": 4, "Nt": 1, "objective": {"magnification": 20.0, "NA": 0.75},'
+        '{"dz(um)": 9.0, "Nz": 9, "Nt": 1, "objective": {"magnification": 20.0, "NA": 0.75},'
         ' "sensor_pixel_size_um": 6.5}'
     )
-    tifffile.imwrite(
-        root / "ome_tiff" / "manual0_0.ome.tiff",
-        np.zeros((4, 1, 8, 8), np.uint16),
-        metadata={"axes": "ZCYX", "Channel": {"Name": ["Fluorescence 488 nm Ex"]}},
-    )
+    (root / "acquisition.yaml").write_text(
+        "objective:\n  pixel_size_um: 0.400\n  magnification: 20.0\n"
+        "z_stack:\n  nz: 4\n  delta_z_mm: 0.002\n"
+        "time_series:\n  nt: 1\n")
 
-    optics = OpticsParams.from_acquisition(root)
-    assert optics.na == 0.75                     # objective.NA, not a default
-    assert optics.dxy_um == pytest.approx(6.5 / 20.0)   # sensor pitch / magnification
-    assert optics.dz_um == 2.0
-    assert optics.nz == 4
+    optics = OpticsParams.from_acquisition(root, "Fluorescence_488_nm_Ex")
+    assert optics.na == 0.75                     # objective.NA, from the json: nowhere else has it
+    assert optics.dxy_um == pytest.approx(0.400)         # acquisition.yaml, ALREADY object-space
+    assert optics.dxy_um != pytest.approx(6.5 / 20.0)    # ...not the sensor pitch recomputed
+    assert optics.dz_um == 2.0                           # delta_z_mm x 1000, not the json's 9.0
+    assert optics.nz == 4                                # z_stack.nz, not the json's 9
     assert optics.wavelength_um == pytest.approx(0.525)  # 488 excitation -> 525 emission
     # petakit's rule: NA <= 1.0 is a dry objective, <= 1.33 water, above that oil.
     assert optics.immersion_index == pytest.approx(1.0)
@@ -403,17 +408,16 @@ def test_channel_labels_from_squidmips_own_reader_parse_into_a_wavelength():
     """A caller holds the label squidmip's reader gave them. It has to work.
 
     Squid writes channels as ``Fluorescence_488_nm_Ex`` - UNDERSCORED - and that is what
-    ``reader.metadata["channels"]`` reports. petakit's parser matches ``(\\d{3})\\s*nm``, so
-    the underscored form raised ValueError and ``OpticsParams.from_acquisition(path,
-    channel=...)`` could not be called with the project's own channel names at all. All
-    three spellings must land on the same emission wavelength.
+    ``reader.metadata["channels"]`` reports, and on a multi-band cube it writes
+    ``Fluorescence_638_nm_-_Penta``. The wavelength is now read by ``_channels.excitation_nm``,
+    this package's own parse, so every spelling of one line must land on one emission.
     """
-    from squidmip._decon import _as_channel_name
-    import petakit
+    from squidmip._decon import emission_um_for
 
     wavelengths = {
-        petakit.wavelength_from_channel(_as_channel_name(name))
-        for name in ("488", "488 nm", "Fluorescence_488_nm_Ex", "Fluorescence 488 nm Ex")
+        emission_um_for(name)
+        for name in ("488", "488 nm", "Fluorescence_488_nm_Ex", "Fluorescence 488 nm Ex",
+                     "Fluorescence_488_nm_-_Penta", "Fluorescence 488 nm - Penta")
     }
     assert len(wavelengths) == 1
     assert 0.50 < wavelengths.pop() < 0.55       # the 488 line's Stokes-shifted emission
@@ -439,10 +443,11 @@ _PER_CHANNEL_CHANNELS = ["Fluorescence 488 nm Ex", "Fluorescence 638 nm Ex"]
 def _two_channel_acquisition(root, nz: int = 2, frame: int = 64):
     """A tiny 10x/NA-0.3 acquisition whose two channels have DIFFERENT emission wavelengths.
 
-    Both sidecars, because two parsers read them: ``acquisition.yaml`` is squidmip's
-    (``open_reader``) and ``acquisition parameters.json`` is petakit's, which is where
-    ``objective.NA`` lives and therefore where ``OpticsParams.from_acquisition`` gets it. 64 px
-    frames because the 638 PSF is 23 px wide and a kernel wider than the image measures nothing.
+    Both sidecars, because a real Squid acquisition writes both and they carry different fields:
+    ``acquisition.yaml`` has the object-space pixel size and the z-stack block, and
+    ``acquisition parameters.json`` is the only file that states ``objective.NA``. ONE parser
+    reads them now (``_acquisition``), where there used to be two. 64 px frames because the 638
+    PSF is 23 px wide and a kernel wider than the image measures nothing.
     """
     tifffile = pytest.importorskip("tifffile")
     (root / "ome_tiff").mkdir(parents=True)
@@ -555,6 +560,36 @@ def test_set_optics_is_an_override_that_wins_over_the_per_channel_derivation(tmp
         assert optics_for_channel(root, channel) == forced
     clear_optics()
     assert optics_for_channel(root, "Fluorescence_638_nm_Ex").wavelength_um == pytest.approx(0.670)
+
+
+def test_a_multiband_penta_channel_derives_its_wavelength_instead_of_refusing(squid_dataset):
+    """THE regression this branch exists for: a real Squid multi-band channel name.
+
+    ``Fluorescence_638_nm_-_Penta`` is what a Penta filter cube writes, and it is what this
+    repo's OWN fixture is built from. The optics used to come from a second acquisition reader
+    that recognised individual-TIFF acquisitions by globbing ``*/*_Fluorescence_*_nm_Ex.tiff``
+    (``petakit/readers/detect.py:28``); a Penta channel does not end in ``_nm_Ex``, so the whole
+    acquisition was "Unknown acquisition format", no optics came back, and DECON REFUSED
+    ENTIRELY — the user lost a whole operator, and ``test_viewer.py``'s decon-on-plate case was
+    skipped for exactly this reason.
+
+    It must now derive 0.670 um, the same emission the ``_nm_Ex`` spelling of the same 638 line
+    derives, because they are the same laser through different filters.
+    """
+    root, _ = squid_dataset
+    from tests.conftest import CH_IN_YAML, CH_NOT_IN_YAML
+
+    assert CH_IN_YAML == "Fluorescence_638_nm_-_Penta"
+    optics = optics_for_channel(root, CH_IN_YAML)
+    assert optics.wavelength_um == pytest.approx(0.670)
+    assert optics.na == pytest.approx(0.8)               # acquisition parameters.json
+    assert optics.dxy_um == pytest.approx(0.325)         # acquisition.yaml, object-space
+    assert optics.dz_um == pytest.approx(1.5)
+
+    # the same line spelled the way petakit's glob wanted lands on the same emission
+    assert optics_for_channel(root, "Fluorescence_638_nm_Ex").wavelength_um == pytest.approx(0.670)
+    # ...and the fixture's second channel is a DIFFERENT line, so this is not a constant
+    assert optics_for_channel(root, CH_NOT_IN_YAML).wavelength_um == pytest.approx(0.590)
 
 
 def test_a_channel_with_no_derivable_emission_is_refused_by_name(tmp_path):

@@ -30,7 +30,7 @@ def _kw(**over):
         fovs_per_region={"A1": [0, 1], "A2": [0]},
         fov_positions_um={("A1", 0): (0.0, 0.0), ("A1", 1): (100.0, 0.0)},
         channels=[{"name": "Fluorescence_488_nm_Ex", "display_name": "488",
-                   "display_color": "#1FFF00", "ex": 488.0}],
+                   "display_color": "#1FFF00", "excitation_nm": 488.0}],
         n_z=3,
         z_levels=[0, 1, 2],
         dz_um=1.5,

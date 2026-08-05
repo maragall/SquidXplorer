@@ -84,7 +84,7 @@ import numpy as np
 import tifffile
 
 from squidmip._acquisition import Acquisition, load_acquisition_metadata
-from squidmip._channels import fallback_color, load_channel_yaml, resolve_channels
+from squidmip._channels import excitation_nm, fallback_color, load_channel_yaml, resolve_channels
 from squidmip.contract import check_plate_contract
 
 
@@ -1776,7 +1776,8 @@ class SquidZarrReader:
                     "display_color": ("#" + colour.lstrip("#")) if colour
                                      else (info["display_color"] if info else None)
                                      or fallback_color(name) or "#FFFFFF",
-                    "ex": info["ex"] if info else None,
+                    "exposure_time_ms": info["exposure_time_ms"] if info else None,
+                    "excitation_nm": excitation_nm(name),
                 })
             return out
         names = list(yaml_map.keys())
@@ -1789,7 +1790,8 @@ class SquidZarrReader:
         try:
             return resolve_channels(names, yaml_map)
         except ValueError:
-            return [{"name": n, "display_name": n, "display_color": "#FFFFFF", "ex": None}
+            return [{"name": n, "display_name": n, "display_color": "#FFFFFF",
+                     "exposure_time_ms": None, "excitation_nm": excitation_nm(n)}
                     for n in names]
 
     def _wellplate_format(self, regions: list):
