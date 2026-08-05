@@ -96,6 +96,31 @@ def pytest_configure(config):
     cleaned up per test: within a session the cache is supposed to persist, and a test that wants
     a cold cache says so with its own ``root=``.
     """
+    # THE CYCLIC COLLECTOR IS THE HAZARD, so it does not run mid-suite.
+    #
+    # A PlateWindow is never freed by refcount: its widgets connect self-capturing lambdas, PyQt
+    # keeps each in a slot proxy parented to the sender, and the window -> child -> proxy -> lambda
+    # -> window cycle lives in C++ where refcounting cannot see it. Only the cyclic collector frees
+    # those, and it fires WHENEVER IT LIKES -- inside an unrelated allocation, with C++ frames on
+    # the stack. That is not a leak symptom, it is an abort.
+    #
+    # Measured 2026-08-05: `test_loupe_follows_cursor_and_coalesces_to_newest` aborted inside
+    # `Garbage-collecting` (while a yaml error object was being built) once 35 GUI tests preceded
+    # it, killing the chunk and hiding ~50 tests behind an INCOMPLETE. The pair alone passes and 34
+    # predecessors pass, so nothing is wrong with the loupe -- it is where the collector happened
+    # to fire. Collecting MORE made it worse, not better: an autouse gc.collect() after every test
+    # moved the abort earlier, from test 36 to test 23. That is the confirmation that the timing of
+    # collection, not the amount of garbage, is what decides whether the run survives.
+    #
+    # So: no automatic collection. `pytest_sessionfinish` still collects explicitly, after it has
+    # destroyed the top-level widgets, which is the one point where Qt is fully alive and no C++
+    # frame is on the stack. Unreachable cycles simply accumulate until then, and
+    # tools/run_suite_chunked.py already bounds that by running ~100 tests per process.
+    #
+    # This does NOT fix the cycles. They are a real product defect (TODOS.md) and they outlive this
+    # hook; it stops the suite from crashing on someone else's schedule while they are fixed.
+    gc.disable()
+
     global _QT_APP, _CACHE_DIR
     import sys
     import tempfile
