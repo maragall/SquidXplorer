@@ -35,9 +35,9 @@ from squidmip.reader import SquidZarrReader
 
 _CH = [
     {"name": "Fluorescence_488_nm_-_Penta", "display_name": "Fluorescence 488 nm - Penta",
-     "display_color": "#00FF00", "ex": None},
+     "display_color": "#00FF00", "exposure_time_ms": None, "excitation_nm": 488.0},
     {"name": "Fluorescence_638_nm_-_Penta", "display_name": "Fluorescence 638 nm - Penta",
-     "display_color": "#FF0000", "ex": None},
+     "display_color": "#FF0000", "exposure_time_ms": None, "excitation_nm": 638.0},
 ]
 
 

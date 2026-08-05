@@ -17,6 +17,7 @@ filename-derived FOV index to key rows against and so belongs beside the reader.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
@@ -70,6 +71,37 @@ def load_acquisition_metadata(root) -> dict:
     }
 
 
+def load_objective_na(root) -> Optional[float]:
+    """Objective numerical aperture, from ``acquisition parameters.json``. ``None`` if unstated.
+
+    NOT the JSON fallback this module refuses above. That refusal is about a SECOND SOURCE for
+    fields ``acquisition.yaml`` already carries; the NA is not one of them. Squid's own writer
+    (``control/acquisition_yaml_loader.py``, and every yaml on this machine) puts
+    ``name / magnification / pixel_size_um / camera_binning`` in the ``objective:`` block and no
+    aperture at all, while ``acquisition parameters.json`` records
+    ``objective: {magnification, NA, tube_lens_f_mm, name}``. So this file is the ONLY place the
+    NA is written, and reading it here is what stops a caller from going to a whole second
+    acquisition parser to get one number.
+
+    Returns ``None`` — never a default — when the file is absent, unparseable, or states no NA.
+    An NA is the width of the PSF; guessing one would produce a confidently wrong deconvolution,
+    so the refusal belongs to the caller that knows what the number is for
+    (:func:`squidmip._decon.optics_for_channel`).
+    """
+    path = Path(root) / "acquisition parameters.json"
+    try:
+        params = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    objective = params.get("objective") if isinstance(params, dict) else None
+    na = objective.get("NA") if isinstance(objective, dict) else None
+    try:
+        na = float(na)
+    except (TypeError, ValueError):
+        return None
+    return na if na > 0 else None
+
+
 # ══════════════════════════════════════════════════════════════════════════════════════════
 # The typed acquisition model.
 #
@@ -118,8 +150,24 @@ class Channel(BaseModel):
     display_color: str
     """Hex colour, e.g. ``#1FFF00``. Never a placeholder — see :func:`resolve_channels`."""
 
-    ex: Optional[float] = None
-    """Excitation wavelength (nm) when the channel YAML records one."""
+    exposure_time_ms: Optional[float] = None
+    """Camera exposure (ms) when the channel YAML records one.
+
+    THIS FIELD WAS CALLED ``ex`` AND DOCUMENTED AS "excitation wavelength (nm)", while
+    ``_channels._extract_exposure`` filled it with ``exposure_time_ms``. Nothing outside the
+    tests read it, so the contradiction never showed up as a wrong picture — but it is exactly
+    the kind of double-booked name that :attr:`excitation_nm` below would have collided with.
+    Renamed to what it holds."""
+
+    excitation_nm: Optional[float] = None
+    """Excitation wavelength (nm), parsed from the channel name by ``_channels.excitation_nm``.
+
+    ``None`` for a broadband channel (``BF_LED_matrix_full``, ``DF_LED_matrix``), which is an
+    answer rather than a gap: a consumer that needs a wavelength must refuse, not substitute.
+    Deconvolution's PSF is derived from this (``_decon.OpticsParams.from_acquisition``); no
+    acquisition on this machine states an EMISSION wavelength anywhere, so the Stokes-shifted
+    emission stays an explicit estimate made in the optics layer and is not stored here as if
+    the instrument had reported it."""
 
     # -- Mapping shim: `c["name"]` is written at many call sites; keep it working. -------
     # Membership is tested against the module-level _CHANNEL_KEYS, never against

@@ -38,10 +38,12 @@ What is reused, and from where
   opt-in (``SQUIDMIP_DECON_PAD_CPU=1``) because petakit's Biggs-Andrews lambda is reduced over
   the whole array and cannot be corrected from this layer; the GPU path corrects it and so pads
   by default. That module's docstring carries the table and the traps.
-* **``petakit.open_acquisition`` / ``infer_immersion_index`` / ``wavelength_from_channel``** —
-  how :meth:`OpticsParams.from_acquisition` turns an acquisition folder into optics. The
-  metadata parse (``sensor_pixel_size_um / magnification``, ``dz(um)``, ``objective.NA``) is
-  his, not re-derived here.
+* **``petakit.infer_immersion_index`` / ``wavelength_from_channel``** — two pure lookups: NA to
+  immersion index, and an excitation line to its Stokes-shifted emission (488 -> 525). Tables,
+  not parsers; neither touches the acquisition.
+
+  ``petakit.open_acquisition`` USED TO BE ON THIS LIST and is not any more — see the section on
+  where the optics come from, below.
 
 Measured against the deleted implementation (real 10x data, ``manual0_0``, channel 488): the
 real PSF's second-moment-equivalent sigma is **1.165 px**, not the 1.5 px that was hardcoded —
@@ -97,12 +99,45 @@ channel it is about to read and the acquisition it is reading from; an operator 
 specialised to a channel says so by carrying a ``for_channel`` attribute (the same kind of
 declaration as ``consumes``/``produces``/``select_index``, never a branch on the operator's
 name), and ``project_well`` calls it once per channel. :func:`optics_for_channel` is what
-``decon``/``decon3d`` hand it, and its parse is still petakit's
-:meth:`OpticsParams.from_acquisition`, cached by ``(acquisition, channel)``.
+``decon``/``decon3d`` hand it, cached by ``(acquisition, channel)``.
+
+...FROM THIS PACKAGE'S OWN PARSE, which cost a user a whole operator (2026-08-05)
+--------------------------------------------------------------------------------
+:meth:`OpticsParams.from_acquisition` used to answer "what wavelength is this channel" by
+calling ``petakit.open_acquisition(path)`` — a SECOND acquisition reader, re-detecting the
+format and re-parsing the metadata of a folder squidmip had already opened. It detects
+individual-TIFF acquisitions by globbing ``*/*_Fluorescence_*_nm_Ex.tiff``
+(``petakit/readers/detect.py:28``), and a real Squid multi-band channel is named
+``Fluorescence_638_nm_-_Penta``, which does not end in ``_nm_Ex``. So the whole acquisition came
+back "Unknown acquisition format", no optics came back with it, and **decon refused outright**
+for every user with a Penta cube — including this repo's own fixture, whose decon-on-plate test
+was skipped for exactly that reason.
+
+Two parsers, one question, and the narrower one was the one being asked. Every field now comes
+from squidmip's own read of the same folder:
+
+    wavelength  ``_channels.excitation_nm`` off the channel name, then petakit's Stokes table
+                (the table is a dict; asking it 638 -> 670 opens nothing)
+    dxy_um      ``acquisition.yaml`` ``objective.pixel_size_um`` via ``load_acquisition_metadata``
+                — the binning-aware object-space number the rest of the app already places
+                mosaics with, not ``sensor_pixel_size_um / magnification`` recomputed
+    dz_um       ``acquisition.yaml`` ``z_stack.delta_z_mm`` x 1000, same parse
+    nz          ``acquisition.yaml`` ``z_stack.nz``, same parse
+    na          ``acquisition parameters.json`` ``objective.NA`` via ``load_objective_na``,
+                because NO acquisition.yaml carries an aperture — see that function
+
+and none of them re-detects a format. A channel name a multi-band filter made unrecognisable to
+a glob is read by the module that already reads channel names for their COLOUR.
+
+WHAT DID NOT CHANGE: the refusal. A channel whose excitation the name does not state
+(``BF_LED_matrix_full``) still gets no PSF and no default — silently deconvolving every channel
+at 525 nm is the defect above, and widening the parse must not be the door it comes back
+through.
 
 :func:`set_optics` survives as a **deliberate override** — set it and every channel uses it, which
-is what a user who is re-deriving optics by hand wants. It is no longer the default path, and
-:data:`DEFAULT_OPTICS` is no longer what a plate run silently gets.
+is what a user who is re-deriving optics by hand wants. It is checked FIRST, so it still wins. It
+is no longer the default path, and :data:`DEFAULT_OPTICS` is no longer what a plate run silently
+gets.
 """
 
 from __future__ import annotations
@@ -115,6 +150,8 @@ from typing import Callable, Iterable, Optional
 import numpy as np
 
 from squidmip import _decon_gpu
+from squidmip._acquisition import load_acquisition_metadata, load_objective_na
+from squidmip._channels import excitation_nm
 from squidmip._engine import add_projector
 from squidmip.projection import plane_op
 
@@ -161,23 +198,28 @@ def _petakit():
     return petakit
 
 
-def _as_channel_name(channel) -> str:
-    """Normalise a channel label into the form ``petakit.wavelength_from_channel`` can parse.
+def emission_um_for(channel) -> float:
+    """The EMISSION wavelength (um) a PSF is formed at, for one channel. Or raise, naming it.
 
-    A THIRD petakit seam that does not quite meet itself: its OME-TIFF reader returns channel
-    names as bare wavelength numbers (``"488"`` — ``_parse_channels_from_ome`` keeps only the
-    digits), but ``wavelength_from_channel`` matches ``r"(\\d{3})\\s*nm"`` and raises on a bare
-    number. Feeding his reader's output straight into his own parser therefore fails. Rather
-    than duplicate the Stokes-shift table here, re-spell the label and keep using his table.
+    Two steps, and each is owned by whoever already knows the answer:
+
+    1. ``_channels.excitation_nm`` reads the excitation line off the channel name — squidmip's
+       own channel parse, the same one that resolves the channel's display colour, and the one
+       that copes with every spelling Squid writes (``Fluorescence_638_nm_-_Penta`` included);
+    2. petakit's ``wavelength_from_channel`` applies the Stokes shift (638 -> 670). It is fed a
+       canonical ``"638 nm"`` built here, so it is used as the TABLE it is and never as a parser
+       of a name it might not recognise.
+
+    No acquisition is opened, and no emission is invented for a channel that states no line.
     """
-    text = str(channel).strip()
-    if text.isdigit():
-        return f"{text} nm"
-    # Squid's own channel labels are UNDERSCORED ("Fluorescence_405_nm_Ex"), which is what
-    # squidmip's reader reports and therefore what a caller has in hand. petakit's regex wants
-    # whitespace before "nm", so the underscored form raises there too (IMA-252). Same one-line
-    # re-spelling, same table.
-    return text.replace("_", " ")
+    excitation = excitation_nm(channel)
+    if excitation is None:
+        raise ValueError(
+            f"channel {str(channel)!r} states no excitation wavelength, so it has no emission "
+            "line and no PSF can be derived from it. Broadband channels (brightfield, "
+            "darkfield) are the usual case."
+        )
+    return float(_petakit().wavelength_from_channel(f"{excitation:.0f} nm"))
 
 
 @dataclass(frozen=True)
@@ -194,7 +236,11 @@ class OpticsParams:
         light that reaches the sensor. :meth:`from_acquisition` applies petakit's Stokes-shift
         table (488 nm excitation -> 0.525 um emission).
     dxy_um:
-        Pixel size in the sample plane: ``sensor_pixel_size_um / magnification``.
+        Pixel size in the sample plane. :meth:`from_acquisition` takes ``acquisition.yaml``'s
+        ``objective.pixel_size_um``, which Squid has ALREADY computed for the objective and the
+        camera binning — not ``sensor_pixel_size_um / magnification`` recomputed here, which
+        ignores binning and disagrees with the number the rest of this package places mosaics
+        with (0.376 vs 0.373 on the 20x scan).
     dz_um:
         Z-step in um.
     nz:
@@ -228,33 +274,50 @@ class OpticsParams:
         return float(_petakit().infer_immersion_index(self.na))
 
     @classmethod
-    def from_acquisition(cls, path, channel: Optional[str] = None) -> "OpticsParams":
+    def from_acquisition(cls, path, channel: str) -> "OpticsParams":
         """Read the optics off a real acquisition — **the intended way to build this**.
 
-        Uses petakit's own reader, so the metadata parse (and the format detection across
-        OME-TIFF / individual TIFF / CurrentStack) is his code, not a second parser that can
-        drift from it.
+        Every field comes from SQUIDMIP'S OWN read of the acquisition (module docstring): the
+        scalars from ``_acquisition``, the wavelength from ``_channels`` via
+        :func:`emission_um_for`. Nothing here re-detects the acquisition format, and there is no
+        second metadata parser to drift from the one every other read path in this package uses.
 
-        *channel* picks the emission wavelength; ``None`` takes the acquisition's first
-        channel. A channel name may be either petakit's short form (``"488"``) or the long
-        Squid form (``"Fluorescence 488 nm Ex"``) — both parse to the same wavelength.
+        *channel* is required. It used to default to "the acquisition's first channel", which
+        was a property of the other reader's channel list; a PSF is per channel, and there is no
+        such thing as the right wavelength for an unspecified one.
+
+        Raises
+        ------
+        ValueError
+            Naming the missing field AND the file that supplies it, for every one of NA,
+            pixel size, z step and channel wavelength. Never a default: each of these sets the
+            width of the kernel, so a substituted value is a different measurement rather than
+            a rougher one.
         """
-        petakit = _petakit()
-        acq = petakit.open_acquisition(path)
-        meta = acq.metadata
-        if channel is None:
-            if not meta.channels:
-                raise ValueError(
-                    f"the acquisition at {path} declares no channels, so there is no emission "
-                    "wavelength to build a PSF from. Pass channel= explicitly."
-                )
-            channel = meta.channels[0]
+        meta = load_acquisition_metadata(path)           # acquisition.yaml, squidmip's own parse
+        na = load_objective_na(path)                     # acquisition parameters.json
+        if na is None:
+            raise ValueError(
+                f"the acquisition at {path} states no objective NA. The aperture sets the width "
+                "of the PSF, so it cannot be guessed. It is written as objective.NA in "
+                "'acquisition parameters.json' (acquisition.yaml has no aperture field at all)."
+            )
+        if meta["pixel_size_um"] is None:
+            raise ValueError(
+                f"the acquisition at {path} states no objective pixel size, so the PSF has no "
+                "sampling to be computed on. Add objective.pixel_size_um to acquisition.yaml."
+            )
+        if not meta["dz_um"]:
+            raise ValueError(
+                f"the acquisition at {path} states dz_um={meta['dz_um']!r}. A z step of zero or "
+                "none cannot scale the axial PSF. Add z_stack.delta_z_mm to acquisition.yaml."
+            )
         return cls(
-            na=float(meta.na),
-            wavelength_um=float(petakit.wavelength_from_channel(_as_channel_name(channel))),
-            dxy_um=float(meta.dxy),
-            dz_um=float(meta.dz),
-            nz=int(meta.nz),
+            na=na,
+            wavelength_um=emission_um_for(channel),
+            dxy_um=float(meta["pixel_size_um"]),
+            dz_um=float(meta["dz_um"]),
+            nz=int(meta["n_z_declared"] or 1),
         )
 
 
@@ -526,10 +589,12 @@ def clear_optics() -> None:
 def _acquisition_optics(path: str, channel: str) -> OpticsParams:
     """``OpticsParams.from_acquisition`` memoised on ``(acquisition, channel)``.
 
-    ``from_acquisition`` re-opens the acquisition and re-parses its metadata, and the binding
-    happens once per channel per FOV — 55 FOVs x 4 channels = 220 parses of the tissue plate for
-    4 distinct answers. Measured: 1.4 ms cold, 4.7 us cached, so 0.31 s of re-parsing per plate
-    becomes 0.007 s. Keyed by strings so two readers over the same folder share the entry.
+    ``from_acquisition`` re-reads and re-parses both sidecars, and the binding happens once per
+    channel per FOV — 55 FOVs x 4 channels = 220 parses of the tissue plate for 4 distinct
+    answers. Re-measured on this machine after the parse moved off petakit's reader onto this
+    package's own (idle Apple M4, the 10x tissue acquisition): 2.565 ms cold, 0.04 us cached, so
+    0.564 s of re-parsing per plate becomes 0.00001 s. Keyed by strings so two readers over the
+    same folder share the entry.
     """
     return OpticsParams.from_acquisition(path, channel=channel)
 
@@ -540,7 +605,7 @@ def optics_for_channel(path, channel: str) -> OpticsParams:
     Resolution order, and there is no fourth case:
 
     1. an override installed with :func:`set_optics` — deliberate, so it wins;
-    2. the acquisition's own metadata for *this channel* (petakit's parse, memoised);
+    2. the acquisition's own metadata for *this channel* (squidmip's parse, memoised);
     3. a refusal, naming the channel.
 
     No fall-through to :data:`DEFAULT_OPTICS`. That fall-through is what made every 638 plane
