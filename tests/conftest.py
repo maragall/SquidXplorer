@@ -591,7 +591,12 @@ def real_dataset():
 SIM_1536WP = Path("/Users/julioamaragall/CEPHLA/Data/sim_1536wp")
 
 #: Every plane of sim_1536wp is a symlink into this folder. Nothing in this repo generates it.
-SIM_1536WP_SOURCE = Path("/Users/julioamaragall/Downloads/synthetic_2x2_wellplate")
+#: It USED to be ``~/Downloads/synthetic_2x2_wellplate``; that folder was deleted and every link
+#: went hollow. Both 1536 fixtures on this machine (this one and ``~/Downloads/
+#: synthetic_1536_wellplate``) were recomposed onto the real 20x scan below, channel for channel,
+#: so a link ending ``_Fluorescence_561_nm_Ex.tiff`` still resolves to 561 nm pixels and the LUTs
+#: and contrast stay meaningful. The scan is REAL DATA and is read-only.
+SIM_1536WP_SOURCE = Path("/Users/julioamaragall/Downloads/20x_scan_2025-09-05_17-57-50")
 
 
 def sim_1536wp_problem():
@@ -623,11 +628,12 @@ def sim_1536wp_problem():
         return (
             f"sim_1536wp at {SIM_1536WP} is HOLLOW: its planes are symlinks whose target is gone "
             f"({target if target is not None else 'unreadable'}; e.g. {dead[0].name}). "
-            f"To restore it, put the source acquisition back at {SIM_1536WP_SOURCE}: the 1536 "
-            "wells are symlinks onto that one 2x2 plate's four planes, so restoring the source "
-            "revives every link with no regeneration step. This repo contains no generator for "
-            f"{SIM_1536WP_SOURCE.name}; tools/gates.py, tools/walkthrough.py, tools/acceptance.py "
-            "and tools/odon_benchmark.py all read it from that path and none of them create it."
+            f"To restore it, put the source acquisition back at {SIM_1536WP_SOURCE}: every plane "
+            "here is a symlink onto that scan's planes, so restoring the source revives every "
+            "link with no regeneration step. If the links point somewhere else entirely, repoint "
+            "them at that scan MATCHING THE CHANNEL IN EACH LINK'S OWN NAME, or the plate opens "
+            "with 405 nm pixels under a 561 nm LUT. This repo contains no generator for "
+            f"{SIM_1536WP_SOURCE.name}."
         )
     return None
 
