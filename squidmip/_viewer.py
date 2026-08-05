@@ -4402,6 +4402,18 @@ class PlateWindow(QMainWindow):
                 f"'{key}' is not a runnable operator — this viewer can run: "
                 f"{', '.join(runnable_operators())}")
             return
+        # REGISTERED, and this machine cannot run it: a declared `requires=` package is missing
+        # (2026-08-05). Refused in the readout, in the operator's own words, BEFORE the worker
+        # starts. Previously the run started, every well raised the same ImportError from a lazy
+        # import, `_on_error` recorded each as a per-well skip, and the readout said "done".
+        from squidmip import (available_region_operators as _region_ops, operator_available,
+                              region_operator_available)
+
+        _ok, _why = (region_operator_available(key) if key in _region_ops()
+                     else operator_available(key))
+        if not _ok:
+            self._readout.setText(_why)
+            return
         # FLAT-FIELD needs an illumination profile. Without one, _correct_with_active raises per
         # field and the plate fills with red x's (Julio: "flatfield shows as x's"). If none is
         # active, AUTO-ESTIMATE one from a spread sample of plate tiles (tilefusion BaSiC, off-thread)

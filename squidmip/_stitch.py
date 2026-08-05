@@ -93,11 +93,23 @@ from typing import TYPE_CHECKING, Callable, Iterator, Optional, Sequence
 import numpy as np
 
 from squidmip._background import _cast_like
-from squidmip._engine import _default_workers, _resolve_projector
+from squidmip._engine import (
+    _NOT_A_WELL_FAULT,
+    MissingOperatorDependency,
+    _default_workers,
+    _resolve_projector,
+)
 from squidmip._logpane import get_logger
 from squidmip._placement import PlacedArray, Placement
 from squidmip._volume import allocate, release
-from squidmip.projection import LABELS, project_well, select_fovs
+from squidmip.projection import (
+    LABELS,
+    missing_requirements,
+    normalise_requires,
+    project_well,
+    requirement_refusal,
+    select_fovs,
+)
 
 _log = get_logger("stitch")
 
@@ -1307,7 +1319,17 @@ _REGION_OPERATORS: dict[str, RegionOperator] = {
 }
 
 
-def add_region_operator(name: str, operator: RegionOperator) -> None:
+# name -> the modules that name needs to be importable. A SECOND dict rather than a record,
+# deliberately and reluctantly: `_REGION_OPERATORS` maps a name straight to a callable, and
+# `_resolve_region_operator` returns that callable to every caller in this module. Promoting the
+# table to `Operator`-style records is the right end state and it is NOT this change — it would
+# touch every consumer of that resolve. Keyed by the same string, written only by
+# `add_region_operator`, read only by `region_operator_available`, so the two cannot drift without
+# `test_every_region_operator_declares_its_requirements` noticing.
+_REGION_REQUIRES: dict[str, tuple[str, ...]] = {"stitch": (), "coordinate": ()}
+
+
+def add_region_operator(name: str, operator: RegionOperator, *, requires=()) -> None:
     """Add a named region operator so it can be selected in :func:`stitch_plate`.
 
     The IMA-222 seam, mirroring :func:`squidmip.add_projector`: a future inter-FOV operation
@@ -1321,6 +1343,11 @@ def add_region_operator(name: str, operator: RegionOperator) -> None:
         operator would be a quiet correctness bug.
     operator:
         ``operator(reader, region, fovs, **kwargs) -> (T, C, Nz, Y, X)``.
+    requires:
+        Importable MODULE names this operator needs, e.g. ``("cucim",)``. The same declaration and
+        the same spelling as ``add_projector(requires=...)`` and ``add_segmenter(requires=...)``
+        — one word, three tables, so a contributor learns it once. The entry is registered and
+        listed either way; the refusal happens by name at :func:`stitch_plate`, before any well.
     """
     if not name:
         raise ValueError("region operator name must be a non-empty string")
@@ -1332,11 +1359,34 @@ def add_region_operator(name: str, operator: RegionOperator) -> None:
             f"(defined: {available_region_operators()})."
         )
     _REGION_OPERATORS[name] = operator
+    _REGION_REQUIRES[name] = normalise_requires(requires)
 
 
 def available_region_operators() -> list[str]:
-    """Return the available region-operator names, sorted (``["coordinate", "stitch"]``)."""
+    """Every registered region operator, sorted — INCLUDING ones whose package is missing.
+
+    Same rule as ``available_projectors`` and ``available_segmenters``: absent is not the same as
+    unwritten, so nothing is ever filtered out of this list. Ask :func:`region_operator_available`
+    for the reason.
+    """
     return sorted(_REGION_OPERATORS)
+
+
+def region_operator_available(name: str) -> tuple[bool, str]:
+    """``(ok, reason_if_not)`` — can this region operator actually run right now?"""
+    if name not in _REGION_OPERATORS:
+        return False, (f"unknown region operator {name!r}; "
+                       f"available: {available_region_operators()}")
+    missing = missing_requirements(_REGION_REQUIRES.get(name, ()))
+    if missing:
+        return False, requirement_refusal("region operator", name, missing)
+    return True, ""
+
+
+def region_operator_requires(name: str) -> tuple[str, ...]:
+    """The modules a registered region operator declares it needs — ``()`` when it needs nothing."""
+    _resolve_region_operator(name)      # unknown names refuse here, by name, as everywhere else
+    return _REGION_REQUIRES.get(name, ())
 
 
 def _accepts_kwarg(fn, name: str) -> bool:
@@ -1359,7 +1409,12 @@ def _accepts_kwarg(fn, name: str) -> bool:
 
 
 def _resolve_region_operator(name: str) -> RegionOperator:
-    """Look up a region operator by name, failing loud (named) on an unknown key."""
+    """Look up a region operator by name, failing loud (named) on an unknown key.
+
+    Deliberately does NOT check ``requires``: this is also the lookup that answers "what is this
+    operator" for callers that are not about to run it. The dependency refusal belongs where the
+    run starts, and that is :func:`stitch_plate`.
+    """
     try:
         return _REGION_OPERATORS[name]
     except KeyError:
@@ -1449,6 +1504,13 @@ def stitch_plate(
     n_workers = workers if workers is not None else _default_workers()
 
     op = _resolve_region_operator(operator)
+    ok, why = region_operator_available(operator)
+    if not ok:
+        # BEFORE the reader is warmed and before a single well is submitted. The projector table's
+        # `bind_projector` refuses in the same place for the same reason: an operator that cannot
+        # run must say so by name, not run every well into the same ImportError and let `on_error`
+        # file it as N skips and a successful run.
+        raise MissingOperatorDependency(why)
 
     # Warm the reader's lazy index/metadata single-threaded BEFORE fan-out, exactly as
     # project_plate does, so concurrent read() only touches immutable state.
@@ -1579,6 +1641,8 @@ def stitch_plate(
                 _submit_next()  # slide the window first, so a SKIPPED well still refills it
                 try:
                     image = future.result()
+                except _NOT_A_WELL_FAULT:
+                    raise  # a missing package is not a corrupt well -- see project_plate
                 except Exception as exc:
                     if on_error is None:
                         raise  # default: fail-fast (project_plate's contract, unchanged)

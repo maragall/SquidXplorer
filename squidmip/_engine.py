@@ -86,6 +86,26 @@ channel is a thing the loop knows. See ``squidmip.projection.bind_channel`` and
 ``_decon.optics_for_channel``. ``consumes={"fov"}`` remains genuinely refused: stage geometry is
 not carried by any declaration on the callable.
 
+A FOURTH declaration was added when the operator TEMPLATE was built (2026-08-05), by the same rule
+again — extend the declaration, never the loop:
+
+    requires=("petakit",)       the modules this entry needs to run. LISTED either way; the run
+                                refuses BY NAME at ``bind_projector`` when one is missing.
+
+``requires`` closes a silent success that had been live for months. ``_spots.Segmenter`` has
+declared its optional packages since Cellpose landed and this record had no equivalent, so
+``decon``, ``decon3d`` and ``flatfield`` — whose ``petakit`` / ``tilefusion`` imports are not in
+this project's ``[project.dependencies]`` at all — were advertised by ``available_projectors()``,
+raised ImportError from a lazy import one call deep, and had that recorded by
+``project_plate(on_error=...)`` as a per-well skip. A whole-plate run finished GREEN having written
+nothing. Two changes end it: the declaration (refuse before any well) and ``_NOT_A_WELL_FAULT``
+(per-well fault isolation may not absorb an environment fault).
+
+The same word, spelled once, is now on all three registrars: ``add_projector``,
+``add_region_operator``, ``add_segmenter``. ``templates/operator/README.md`` is the public contract
+a contributor reads, and ``squidmip/_plugins.py`` is how an operator in SOMEBODY ELSE'S package
+reaches this table without editing ``squidmip/__init__.py``.
+
 NOTE for plane-ops: ``write_plate``/IMA-184 currently accept only ``Z == 1`` frames and reject a
 Z>1 frame LOUD (``_validate_image``). So a plane-op streams correctly out of ``project_plate``
 today, and gains a persistence path when the writer learns Z>1 — it is not silently wrong.
@@ -135,11 +155,15 @@ from squidmip.projection import (
     INTENSITY,
     PLANE_OP,
     Z_REDUCER,
+    MissingDependency,
+    missing_requirements,
     normalise_consumes,
     normalise_produces,
+    normalise_requires,
     project,
     project_reference,
     project_well,
+    requirement_refusal,
     select_fovs,
 )
 
@@ -171,6 +195,22 @@ class Param:
     blurb: str = ""
 
 
+class MissingOperatorDependency(MissingDependency):
+    """A registered operator's optional package is not importable. NAMED, never silent.
+
+    The exact twin of :class:`squidmip._spots.MissingSegmenterDependency`, and deliberately the
+    same base class and the same wording, because it is the same rule applied to the operator
+    table: an operator is ALWAYS listed by :func:`available_projectors` (absent is not the same as
+    unwritten), and the refusal happens by name at :func:`bind_projector` — before the run touches
+    a single well.
+
+    Why a distinct class rather than reusing ImportError: this is raised by the ENGINE from a
+    declaration it read, without importing anything, so it is a registry refusal and not an import
+    that went wrong. ``project_plate``'s ``on_error`` hook is the reason the distinction has teeth
+    — see :func:`project_plate`.
+    """
+
+
 @dataclass(frozen=True)
 class Operator:
     """A registry entry: a name, the callable, and the axis it consumes (IMA-210).
@@ -200,6 +240,13 @@ class Operator:
     builds a projector; ``fn`` is that factory called at the declared defaults, so a run that names
     no parameters is byte-identical to the un-parameterised registration it replaced. An entry with
     no ``factory`` is a fixed operator and refuses parameters by name.
+
+    ``requires`` is the FOURTH declaration, and the one this record was missing while its sibling
+    :class:`squidmip._spots.Segmenter` has had it since Cellpose landed: the importable module
+    names this operator needs to run AT ITS DEFAULTS. Checked at BIND time, never at registration —
+    an operator is always listed, so "petakit is not installed" and "nobody wrote a deconvolution
+    operator" cannot look identical. See :class:`MissingOperatorDependency` for what that cost
+    before it was declared.
     """
     name: str
     fn: Projector
@@ -207,6 +254,17 @@ class Operator:
     produces: str = INTENSITY
     params: tuple[Param, ...] = ()
     factory: Optional[Callable[..., Projector]] = None
+    #: Importable module names this operator needs, e.g. ``("petakit",)``. Same spelling and same
+    #: semantics as ``Segmenter.requires``; checked at bind time so a missing one is a named
+    #: refusal rather than an empty result that reports success.
+    requires: tuple[str, ...] = ()
+
+    def available(self) -> tuple[bool, str]:
+        """``(ok, reason_if_not)`` — are this operator's declared packages importable right now?"""
+        missing = missing_requirements(self.requires)
+        if missing:
+            return False, requirement_refusal("operator", self.name, missing)
+        return True, ""
 
     def bind(self, operator_kwargs: Optional[dict] = None) -> Projector:
         """The callable to run, with *operator_kwargs* applied. THE parameter seam.
@@ -218,7 +276,14 @@ class Operator:
         Refuses LOUD on an unknown parameter name, naming what this operator does accept. Accepting
         and dropping it would run the operator at its defaults while the console line and the
         recipe both said otherwise, which is a wrong result that looks right.
+
+        Refuses FIRST, and by name, when a declared ``requires`` package is missing: binding is the
+        last point before work starts that still knows the operator's name, and an operator that
+        cannot run must say so instead of running and producing nothing.
         """
+        ok, why = self.available()
+        if not ok:
+            raise MissingOperatorDependency(why)
         if not operator_kwargs:
             return self.fn
         if self.factory is None:
@@ -240,6 +305,11 @@ class Operator:
         """``{name: default}`` for every declared parameter. What a UI seeds its fields from."""
         return {p.name: p.default for p in self.params}
 
+
+# The failures ``on_error`` must NOT absorb: they are properties of the ENVIRONMENT, identical for
+# every well, so "skip this well and keep going" silently becomes "skip every well and report
+# success". Named here once because ``stitch_plate`` applies the same rule to the same tuple.
+_NOT_A_WELL_FAULT = (ImportError, MissingDependency)
 
 # name -> Operator. Selected by name in project_plate; extended via add_projector.
 _PROJECTORS: dict[str, Operator] = {
@@ -267,7 +337,7 @@ def _default_workers() -> int:
 
 
 def add_projector(name: str, projector: Projector, *, consumes=None, produces=None,
-                  params: Sequence[Param] = ()) -> None:
+                  params: Sequence[Param] = (), requires=()) -> None:
     """Add a named operator so it can be selected by name in :func:`project_plate`.
 
     This is how a new operator plugs in **without touching the engine**: add a name and its
@@ -311,6 +381,15 @@ def add_projector(name: str, projector: Projector, *, consumes=None, produces=No
         The presence of *params* is what makes *projector* a factory — there is one registrar and
         one rule, not two entry points that mean nearly the same thing. Empty (default) keeps the
         original contract exactly: *projector* is the callable, and the entry refuses parameters.
+    requires:
+        Importable MODULE names this operator needs to run at its declared defaults, e.g.
+        ``("petakit",)`` or ``"cellpose"``. Same spelling as ``add_segmenter(requires=...)``. NOT
+        checked here: the entry is registered and listed either way, and the refusal happens by
+        name at :func:`bind_projector` / :func:`project_plate`. Declare a package here iff the
+        operator imports it — usually lazily, one call deep — because an undeclared lazy import is
+        exactly the failure this argument exists to convert into a refusal::
+
+            add_projector("decon", decon_op(), requires=("petakit",))
 
     Raises
     ------
@@ -356,13 +435,38 @@ def add_projector(name: str, projector: Projector, *, consumes=None, produces=No
         produces = getattr(projector, "produces", INTENSITY)
     _PROJECTORS[name] = Operator(
         name, projector, normalise_consumes(consumes), normalise_produces(produces),
-        declared, factory,
+        declared, factory, normalise_requires(requires),
     )
 
 
 def available_projectors() -> list[str]:
-    """Return the available projector names, sorted (``["mip", ...]``)."""
+    """Every registered operator name, sorted — INCLUDING ones whose package is not installed.
+
+    "Available" here has always meant *registered*, and it deliberately still does. Filtering out
+    the ones whose ``requires`` is unmet would make "petakit is not installed" and "nobody wrote a
+    deconvolution operator" look identical in the CLI and in the viewer's list, which is the exact
+    reason ``available_segmenters`` refuses to filter either. Pair with :func:`operator_available`
+    to grey a row out WITH A REASON instead of dropping it.
+    """
     return sorted(_PROJECTORS)
+
+
+def operator_available(name: str) -> tuple[bool, str]:
+    """``(ok, reason_if_not)`` — can this operator actually run right now?
+
+    The twin of :func:`squidmip._spots.segmenter_available`, for the operator table. Read this
+    before offering a run; :func:`bind_projector` enforces it regardless, so a caller that does not
+    ask still cannot get a silent no-op.
+    """
+    op = _PROJECTORS.get(name)
+    if op is None:
+        return False, f"unknown projector {name!r}; available: {available_projectors()}"
+    return op.available()
+
+
+def projector_requires(name: str) -> tuple[str, ...]:
+    """The modules a registered operator declares it needs — ``()`` when it needs nothing extra."""
+    return _resolve_projector(name).requires
 
 
 def projector_consumes(name: str) -> frozenset[str]:
@@ -397,6 +501,9 @@ def bind_projector(name: str, operator_kwargs: Optional[dict] = None) -> Project
     validates is validated at the first ``next()``; ``write_plate`` creates a directory before it
     gets there, and "the run failed after making the output tree" is a worse answer than "the run
     did not start". Same object, same errors, asked sooner.
+
+    Raises :class:`MissingOperatorDependency` when the operator declares a ``requires`` package that
+    is not importable — before the binding, before the loop, before a single well is read.
     """
     return _resolve_projector(name).bind(operator_kwargs)
 
@@ -470,6 +577,12 @@ def project_plate(
         callable ``on_error(region, fov, exc)``, a well whose projection raises is passed to it and
         then SKIPPED — the stream keeps going instead of aborting the whole plate on one corrupt
         file. ``None`` (default) keeps the fail-fast contract exactly. Peak-memory bound is unchanged.
+
+        It does NOT absorb an ``ImportError`` or a :class:`MissingOperatorDependency` (see
+        ``_NOT_A_WELL_FAULT``). Those are properties of the environment, not of a well: they raise
+        identically for every well, so isolating them skips all of them and the run finishes green
+        having written nothing. That was measured, not theorised — see :class:`Operator`'s
+        ``requires``.
     operator_kwargs:
         Per-run parameters for *projector*, applied through :meth:`Operator.bind`. Only an operator
         that DECLARES parameters accepts them; anything else raises, naming what it does accept.
@@ -528,6 +641,16 @@ def project_plate(
                 _submit_next()  # slide the window forward first, so a SKIPPED well still refills it
                 try:
                     image = future.result()
+                except _NOT_A_WELL_FAULT:
+                    # A MISSING PACKAGE IS NOT A CORRUPT WELL. on_error buys per-well fault
+                    # isolation for data faults — one unreadable TIFF should not abort a plate.
+                    # An ImportError raised from an operator's lazy import is not that: it will
+                    # raise identically for every well, so isolating it "skips" all of them and
+                    # the run finishes green having written nothing. That is the measured
+                    # silent-success this whole `requires` change is about, and a declared
+                    # `requires` normally converts it into a refusal at bind time — this branch
+                    # is the backstop for an operator whose lazy import was never declared.
+                    raise
                 except Exception as exc:
                     if on_error is None:
                         raise                       # default: fail-fast (unchanged contract)
