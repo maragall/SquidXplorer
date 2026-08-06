@@ -52,7 +52,17 @@ _BINARIES = []
 #   tensorstore                  - compiled extension + driver registry (the zarr reader)
 #   zarr / numcodecs             - codec registry keyed by the codec name in zarr.json
 #   skimage                      - lazy submodule loader (restoration.rolling_ball)
-for _pkg in ("ndviewer_light", "ndv", "vispy", "tensorstore", "zarr", "numcodecs", "skimage"):
+#   imageio / imageio_ffmpeg   - the .mp4 export's encoder. imageio resolves its FORMAT plug-ins
+#                                by name at runtime, and imageio_ffmpeg ships an ffmpeg BINARY as
+#                                package data that no import can reveal — `collect_all` is what
+#                                brings both, and without it `squidmip._video.encoder_problem()`
+#                                would correctly report "no ffmpeg binary" inside the frozen app
+#                                and the movie button would be permanently greyed out. Both were
+#                                in _EXCLUDES below until the feature came back; that entry said
+#                                "skimage.io only", which stopped being true when this package
+#                                started encoding movies of its own. Costs ~48 MB of bundle.
+for _pkg in ("ndviewer_light", "ndv", "vispy", "tensorstore", "zarr", "numcodecs", "skimage",
+             "imageio", "imageio_ffmpeg"):
     _d, _b, _h = collect_all(_pkg)
     _DATAS += _d
     _BINARIES += _b
@@ -79,7 +89,8 @@ _HIDDEN += collect_submodules("squidmip")
 # loudly instead of shipping.
 _EXCLUDES = [
     "cv2",                 # 110 MB of OpenCV, pulled by skimage's optional io plug-in
-    "imageio", "imageio_ffmpeg",   # 48 MB (a bundled ffmpeg); skimage.io only
+    # `imageio` and `imageio_ffmpeg` USED TO BE HERE, on the grounds that only skimage.io wanted
+    # them. squidmip/_video.py wants them now, so they moved to the collect_all list above.
     "mypy",                # a type checker, in a shipped GUI
     "lxml", "cryptography",
     "matplotlib",          # skimage.io plugins + pandas.plotting reference it; the app plots nothing

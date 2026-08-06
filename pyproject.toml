@@ -43,9 +43,24 @@ dependencies = [
 # ~40-line tensorstore store-config wrapper; tensorstore is the only new runtime dep.
 
 [project.optional-dependencies]
+# video: the .mp4 movie export (squidmip/_video.py). imageio drives imageio-ffmpeg, whose wheel
+# carries its OWN ffmpeg binary for Linux, Windows and macOS — so this works on a laptop with no
+# system ffmpeg on PATH, which is the portability property the feature needs and the reason no
+# other backend was chosen (PyAV needs a compiler or a platform wheel; OpenCV is 110 MB and was
+# deliberately excluded from the frozen app).
+#
+# ITS OWN EXTRA, not folded into [gui]: the frame producer is Qt-free and headless-testable, and a
+# CI job or a script that wants a movie should not have to install napari and PyQt6 to get one.
+# [gui] and [test] both pull it in below, so the desktop app and the suite always have it.
+#
+# BOTH ARE ALREADY IN THE FROZEN APP'S COLLECT LIST (scripts/hcs-viewer.spec). They used to be in
+# its EXCLUDES — "48 MB (a bundled ffmpeg); skimage.io only" — which was correct while nothing in
+# this package encoded anything and is now the difference between shipping the feature and
+# shipping a permanently disabled button.
+video = ["imageio>=2.31", "imageio-ffmpeg>=0.4.9"]
 # ome-zarr-models: official OME-NGFF v0.5 pydantic schema — validates written plate metadata
 # in tests (test-time only; the runtime writer stays lean, no extra runtime dep).
-test = ["pytest>=7.0", "ome-zarr-models>=1.7"]
+test = ["pytest>=7.0", "ome-zarr-models>=1.7", "squidmip[video]"]
 # gui: the MIP tool desktop app. Qt (via qtpy) + napari. ndviewer_light was removed on
 # 2026-07-30: napari is the renderer and the second stack imported PyQt5 at module scope,
 # which cannot share a process with a Qt6 napari.
@@ -91,6 +106,9 @@ gui = [
     # trusting it.
     "napari>=0.7,<0.9",
     "psutil>=5.9",
+    # The movie export is a window feature, so the desktop app always has its encoder. Declared
+    # by reference rather than duplicated: two copies of a version range drift.
+    "squidmip[video]",
 ]
 
 [project.scripts]
