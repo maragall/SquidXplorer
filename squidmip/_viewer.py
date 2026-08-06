@@ -1487,6 +1487,11 @@ class PlateWindow(QMainWindow):
         if self._overview is not None:
             self._overview.set_time_point(time_point)
         if self._reader is not None:
+            # `_return_to_raw` restarts the preview, and since 2026-08-05 the preview reads the
+            # bar's timepoint and caches its cells under it. Before that this call re-read the
+            # whole plate to repaint frame 0's pixels: the request was honest and the answer was
+            # the same picture. Now it is a re-read the first time a timepoint is visited and a
+            # cache replay every time after, including stepping back.
             self._return_to_raw()
 
     # `_sync_top_row_height` WAS HERE, and it is deleted rather than adapted (2026-08-03). It swung
@@ -3974,8 +3979,15 @@ class PlateWindow(QMainWindow):
         on all three or the bar would appear on some entry paths and not others — the "wired on one
         of N call sites" defect that made the stdout capture look like a partial integration in the
         first place. One constructor, one set of connections, no third chance to disagree.
+
+        It is also the ONE place the plate's timepoint reaches the pixels. Every entry path —
+        the first ingest, the tab re-scope, and `_return_to_raw`, which is what a timepoint change
+        calls — must preview the frame the bar is showing, and reading `self.time_point` here
+        rather than at three call sites makes that true by construction rather than on whichever
+        paths somebody remembered. The worker carries the same t into its cell cache, so a
+        revisited timepoint is a cache HIT and not a re-read (`_platecache.PlateCellCache`).
         """
-        self._preview = _PreviewWorker(reader, meta, self._fov_index, order)
+        self._preview = _PreviewWorker(reader, meta, self._fov_index, order, t=self.time_point)
         self._preview_order = list(order)
         self._preview.tileReady.connect(self._on_preview_tile)
         self._preview.streamEnded.connect(lambda: self._recomposite("raw"))

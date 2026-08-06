@@ -58,10 +58,17 @@ TIFF ... memory-mapped for efficient random access", indexed by ``get_page(t_idx
 * **REJECTED: pickle for the sidecar.** It uses ``pickle.dump`` for its metadata. A cache under
   $HOME that is unpickled on open is an arbitrary-code-execution surface for anything that can
   write there, for no benefit over JSON on a dict of numbers and strings.
-* **NOT BUILT: the (t, z) page index.** Ours cannot express t at all today, and z is not a plate
-  axis for us by construction (the preview is one representative plane). The pack is SHAPED so a
-  t axis can be added without a rewrite, and :meth:`PlateCellCache.pack` says exactly where it
-  slots in. Building it now would ship an axis with no producer.
+* **TAKEN, 2026-08-05: the t index.** This said "NOT BUILT ... an axis with no producer", and that
+  stopped being true the moment ``_PreviewWorker`` learned to read a timepoint. A cell is now
+  identified by ``(token, t, region)`` end to end -- RAM key, file name and packed page -- which is
+  the same re-keying the loupe's coarse cache took when it went from ``well`` to
+  ``(well, timepoint)``. z is still not a plate axis for us by construction: the preview is one
+  representative plane, and a z-resolved plate page is a different product (theirs).
+  Where ours differs from theirs: their page is ONE array indexed ``get_page(t, z)``, ours is one
+  page PER TIMEPOINT (``plate-cells-t{t}.npy``). A pass produces exactly one timepoint, so a
+  single (t, region, C, cell, cell) page could only ever be published complete by a producer that
+  walked every timepoint -- which nothing does, and which would make the plate's first paint wait
+  on timepoints nobody asked to see.
 
 ADAPTED, three things, each decided rather than open
 ----------------------------------------------------
@@ -90,6 +97,25 @@ are the CONSERVATIVE numbers: the colder the storage, the more the cache wins)::
     dataset                                        cold open   warm open   ratio   on disk
     real 10x tissue, 2 regions x 55 FOVs, 4 ch      0.670 s     0.022 s      31x   0.06 MB
     sim_1536wp, 1536 wells, 4 ch                   15.221 s     0.075 s     202x     91 MB
+
+MEASURED: what the timepoint in the key costs and buys
+------------------------------------------------------
+Stepping the plate's bar t=0 -> t=1 -> t=0 on ``sim_5d_2x2_t3`` (4 regions x 4 FOVs x 2 channels,
+256 px frames, 3 timepoints), ``tools/measure_plate_t_steps.py``, median of 9, a cold CELL cache
+per repetition and the OS page cache warm, both columns run back to back on this machine::
+
+    step               before                              after
+    t=0 first visit    13.9 ms, 4 wells read               13.6 ms, 4 wells read
+    t=1                 6.4 ms, 4 HITS -- frame 0's cells  13.9 ms, 4 wells read
+    t=0 again           5.3 ms, 4 hits                      7.0 ms, 4 hits
+    t=0 and t=1 differ  FALSE                               True
+
+The before column IS the bug, and the fourth row is why the first three cannot be read as a
+benchmark: the second step was the FASTEST of the three because it answered t=1 with t=0's cells.
+Note what the fix does to that reading -- stepping to a NEW timepoint gets 7.5 ms SLOWER, because
+it now does the work instead of answering the wrong question. What the key buys is the third row:
+a revisited timepoint stays a hit, which a timepoint-in-the-TOKEN design would have thrown away
+(``prune_stale`` deletes token directories, so t=1 would have deleted t=0's cells).
 
 The warm 1536-well open is one memory-map of the compacted page plus 1536 slices and 1536 signal
 emissions, and that is what 0.075 s buys; before compaction, when it was 1536 file opens, the
@@ -189,7 +215,17 @@ log = get_logger("platecache")
 #: Bumped when the on-disk record changes shape. It is part of the TOKEN rather than a field to
 #: read back and compare, so entries from an older build are unreachable instead of misparsed --
 #: the same property the mtime gives us, applied to our own format.
-FORMAT_VERSION = 1
+#:
+#: 2 (2026-08-05): a cell is identified by its TIMEPOINT as well as its region. Version 1 cells
+#: carry no timepoint and were all written by a producer that read frame 0, so under the new key
+#: they are not "t=0 cells" -- they are cells whose timepoint is unknown, and the one thing that
+#: must not happen is one of them being served under a label saying t=1. Bumping the version puts
+#: every v1 entry behind a token nothing computes any more: unreachable by construction, then
+#: DELETED by :meth:`PlateCellCache.prune_stale` on the first publish of the new generation. That
+#: is chosen over reading v1 files as t=0 (which would be a guess about a producer's intent, and
+#: the guess is only free while it is right) and over a migration pass (code that runs once,
+#: is tested never, and re-derives in 0.7 s what it spends itself trying to keep).
+FORMAT_VERSION = 2
 
 #: Set to "0" to turn the cache off entirely. For a user who wants a cold read, and for any test
 #: that must observe the uncached path.
@@ -354,11 +390,20 @@ class PlateCellCache:
 
     Layout::
 
-        <user_cache_dir>/cells/<name>-<sha(path)>/<token>/<region>-<sha>.npz
+        <user_cache_dir>/cells/<name>-<sha(path)>/<token>/t<t>-<region>-<sha>.npz
 
     The token directory IS the invalidation mechanism. A changed acquisition produces a new token,
     the old directory becomes unreachable, and :meth:`prune_stale` deletes it the next time a cell
     is published -- the one moment we know a new generation exists and the old one is dead.
+
+    THE TIMEPOINT IS IN THE KEY AND NOT IN THE TOKEN, and that is the whole design of this class's
+    2026-08-05 change rather than an implementation detail. In the key, a t=1 cell can never be
+    served for t=0 -- the failure this exists to prevent, and the one the loupe's well-keyed coarse
+    cache used to commit before it was re-keyed to ``(well, timepoint)``. In the TOKEN it would
+    also have been correct, and it would have been useless: the token directory is what
+    :meth:`prune_stale` deletes, so stepping t=0 -> t=1 would delete t=0's cells and stepping back
+    would re-read the plate. Timepoints coexist under one generation; a changed ACQUISITION still
+    invalidates all of them at once.
 
     Everything here is best effort at the I/O boundary, and loud about it in the log: a cache that
     raised on a full disk would turn a warm-start optimisation into a crash on open. It is NOT
@@ -367,11 +412,16 @@ class PlateCellCache:
     """
 
     def __init__(self, experiment_path, *, cell_px: int, channels: Sequence[str], dtype,
-                 root: Optional[Path] = None) -> None:
+                 time_point: int = 0, root: Optional[Path] = None) -> None:
         self.experiment = Path(experiment_path).expanduser()
         self.cell_px = int(cell_px)
         self.channels = [str(c) for c in channels]
         self.dtype = np.dtype(dtype)
+        #: WHICH TIMEPOINT these cells are of. Fixed for the life of the instance because a
+        #: preview pass reads exactly one timepoint; the plate builds a new cache (and a new
+        #: worker) when the bar moves, and the RAM tier is process-wide, so stepping back to a
+        #: timepoint already seen still HITS.
+        self.time_point = max(0, int(time_point))
         self.token = plate_token(self.experiment,
                                  (self.cell_px, self.dtype.str, ",".join(self.channels)))
         base = Path(root) if root is not None else cache_root()
@@ -387,8 +437,8 @@ class PlateCellCache:
 
     # ---- construction from what the viewer has in hand ----------------------------------
     @classmethod
-    def for_reader(cls, reader, meta, *, cell_px: int, root: Optional[Path] = None
-                   ) -> "Optional[PlateCellCache]":
+    def for_reader(cls, reader, meta, *, cell_px: int, time_point: int = 0,
+                   root: Optional[Path] = None) -> "Optional[PlateCellCache]":
         """The cache for this reader's acquisition, or ``None`` with the reason logged.
 
         ``None`` rather than raising: every caller is on the window-open path, and an unusable
@@ -404,7 +454,7 @@ class PlateCellCache:
             path = _source_token(reader)          # the acquisition PATH, never id(reader)
             channels = [c["name"] for c in meta["channels"]]
             return cls(path, cell_px=cell_px, channels=channels,
-                       dtype=np.dtype(meta["dtype"]), root=root)
+                       dtype=np.dtype(meta["dtype"]), time_point=time_point, root=root)
         except Exception as exc:                  # noqa: BLE001 - degrade to uncached, but SAY so
             log.info("plate cell cache disabled for this acquisition: %s: %s",
                      type(exc).__name__, exc)
@@ -412,8 +462,8 @@ class PlateCellCache:
 
     # ---- read ---------------------------------------------------------------------------
     def get(self, region: str) -> Optional[CellTile]:
-        """This region's cached cell, or ``None``. RAM, then the packed page, then one file."""
-        ram_key = (self.token, str(region))
+        """This region's cell AT THIS CACHE'S TIMEPOINT, or ``None``. RAM, page, then one file."""
+        ram_key = self._ram_key(region)
         hit = _CELLS.get(ram_key)
         if hit is not None:
             self.hits += 1
@@ -461,7 +511,7 @@ class PlateCellCache:
         exists to prevent.
         """
         arr = CellTile(np.asarray(tile), box)
-        _CELLS.put((self.token, str(region)), arr)
+        _CELLS.put(self._ram_key(region), arr)
         path = self.path_for(region)
         _assert_outside_experiment(path.parent, self.experiment)
         tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
@@ -502,20 +552,33 @@ class PlateCellCache:
     # per-well form costs 0.261 s to replay 1536 wells and 1.59 s to seed the coarse rungs, and
     # both are 1536 file opens. The pack turns each into one open plus slices.
     #
-    # WHERE t WOULD SLOT IN. Their page index is ``(t, z)``. Ours cannot express t at all today:
-    # ``project_plate`` yields ``(region, fov, array)`` with no t, and the plate overview reads
-    # ``[0, :, 0]``. That is a product decision nobody has made, so it is NOT built here. It is
-    # SHAPED for: the pack is ``(region, channel, cell, cell)`` and t becomes the leading axis,
-    # ``(t, region, channel, cell, cell)``, with the region index and every box unchanged; the
-    # index sidecar already records ``"t": 0`` so an older pack is readable rather than ambiguous.
-    # z needs nothing: the preview is one representative plane by definition, and a z-resolved
-    # plate page is a different product (theirs), not a different cache.
+    # WHERE t SLOTTED IN (2026-08-05). This block used to say ours "cannot express t at all" and
+    # describe the leading axis it would grow. It grew a FILE instead: one page per timepoint,
+    # ``plate-cells-t{t}.npy``, rather than one ``(t, region, C, cell, cell)`` page. The producer
+    # decides that. ``_PreviewWorker`` walks ONE timepoint per pass, so a single page over all t
+    # could only be published complete by something that walked every timepoint -- which nothing
+    # does, and which would make the plate's first paint wait on frames nobody asked to see. A
+    # page per t is publishable the moment its own pass ends, which is the property ``pack`` is
+    # built on ("only called when a preview pass finished"). The sidecar's ``"t"`` stopped being
+    # the placeholder 0 and became this cache's timepoint, and ``_pack_index`` checks it.
+    # z still needs nothing: the preview is one representative plane by definition, and a
+    # z-resolved plate page is a different product (theirs), not a different cache.
 
-    #: The compacted page and its sidecar. The array is a plain ``.npy`` precisely so it can be
-    #: memory-mapped; an ``.npz`` cannot be, and holding a 96 MB page in RAM to serve 88x88
-    #: slices out of it would be the opposite of the point.
-    PACK_ARRAY = "plate-cells.npy"
-    PACK_INDEX = "plate-index.json"
+    #: The compacted page and its sidecar, PER TIMEPOINT. The array is a plain ``.npy`` precisely
+    #: so it can be memory-mapped; an ``.npz`` cannot be, and holding a 96 MB page in RAM to serve
+    #: 88x88 slices out of it would be the opposite of the point.
+    PACK_ARRAY = "plate-cells-t{t}.npy"
+    PACK_INDEX = "plate-index-t{t}.json"
+
+    @property
+    def pack_array_path(self) -> Path:
+        """This timepoint's compacted page."""
+        return self.dir / self.PACK_ARRAY.format(t=self.time_point)
+
+    @property
+    def pack_index_path(self) -> Path:
+        """This timepoint's sidecar, and the commit marker for its page."""
+        return self.dir / self.PACK_INDEX.format(t=self.time_point)
 
     def pack(self, regions: Iterable[str]) -> bool:
         """Compact this generation into one memory-mapped page. False if it is not complete.
@@ -549,21 +612,21 @@ class PlateCellCache:
             page[i, :, top:top + h, left:left + w] = arr
             boxes.append([int(v) for v in hit.box])
 
-        index = {"format": FORMAT_VERSION, "token": self.token, "t": 0,
+        index = {"format": FORMAT_VERSION, "token": self.token, "t": self.time_point,
                  "cell_px": cell, "channels": list(self.channels), "dtype": self.dtype.str,
                  "regions": regions, "boxes": boxes}
         try:
             self.dir.mkdir(parents=True, exist_ok=True)
             _assert_outside_experiment(self.dir, self.experiment)
-            arr_path = self.dir / self.PACK_ARRAY
-            tmp = arr_path.with_name(f".{self.PACK_ARRAY}.{os.getpid()}.tmp")
+            arr_path = self.pack_array_path
+            tmp = arr_path.with_name(f".{arr_path.name}.{os.getpid()}.tmp")
             with open(tmp, "wb") as f:
                 np.lib.format.write_array(f, page)     # NOT np.save: it would append .npy to tmp
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp, arr_path)
-            idx_path = self.dir / self.PACK_INDEX
-            tmp = idx_path.with_name(f".{self.PACK_INDEX}.{os.getpid()}.tmp")
+            idx_path = self.pack_index_path
+            tmp = idx_path.with_name(f".{idx_path.name}.{os.getpid()}.tmp")
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(index, f)
                 f.flush()
@@ -597,7 +660,7 @@ class PlateCellCache:
         page = self._page
         if page is None:
             try:
-                page = self._page = np.load(self.dir / self.PACK_ARRAY, mmap_mode="r")
+                page = self._page = np.load(self.pack_array_path, mmap_mode="r")
             except Exception as exc:           # noqa: BLE001 - a damaged page is a miss
                 log.warning("dropping an unreadable plate pack in %s: %s", self.dir, exc)
                 self._index = self._page = None
@@ -608,11 +671,17 @@ class PlateCellCache:
     def _pack_index(self) -> Optional[dict]:
         if self._index is None:
             try:
-                raw = json.loads((self.dir / self.PACK_INDEX).read_text(encoding="utf-8"))
+                raw = json.loads(self.pack_index_path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 return None
             if raw.get("token") != self.token or raw.get("format") != FORMAT_VERSION:
                 return None                    # a page from another generation is not ours
+            # The timepoint is already in the FILE NAME, so this can only fire on a hand-edited or
+            # foreign sidecar. Checked anyway: serving another timepoint's page is the precise
+            # failure this whole re-keying exists to make impossible, and a name is a convention
+            # while the sidecar is the record.
+            if int(raw.get("t", 0)) != self.time_point:
+                return None
             raw["at"] = {r: i for i, r in enumerate(raw["regions"])}
             self._index = raw
         return self._index
@@ -624,6 +693,13 @@ class PlateCellCache:
         Without this the token-in-the-key design never frees anything: a store that changes ten
         times leaves ten full generations of every cell under $HOME. Run on first publish, which
         is when a new generation is known to exist and the previous one is known to be dead.
+
+        A GENERATION IS NOT A TIMEPOINT. This deletes other TOKEN directories, and the timepoint
+        is deliberately not in the token, so every timepoint of the live acquisition lives in one
+        directory and stepping t=0 -> t=1 keeps t=0's cells. That is what makes stepping back a
+        cache hit instead of a re-read; see the class docstring. It also means this is the pass
+        that finally removes the pre-2026-08-05 (FORMAT_VERSION 1) cells, which are under a token
+        nothing computes any more.
         """
         gone = 0
         parent = self.dir.parent
@@ -644,18 +720,30 @@ class PlateCellCache:
         return gone
 
     def path_for(self, region: str) -> Path:
-        """One file per region. The digest suffix makes any region id safe AND unique.
+        """One file per region PER TIMEPOINT. The digest suffix makes any region id safe AND unique.
 
         Sanitising alone is not enough: ``A/1`` and ``A_1`` sanitise to the same name, and one
-        well would then serve the other's pixels.
+        well would then serve the other's pixels. The ``t`` prefix is the same argument one axis
+        over: two timepoints of one well are two different pictures and must be two files.
         """
         r = str(region)
         clean = _UNSAFE.sub("_", r)[:40] or "region"
-        return self.dir / f"{clean}-{hashlib.sha256(r.encode('utf-8')).hexdigest()[:8]}.npz"
+        digest = hashlib.sha256(r.encode("utf-8")).hexdigest()[:8]
+        return self.dir / f"t{self.time_point}-{clean}-{digest}.npz"
+
+    def _ram_key(self, region: str) -> tuple:
+        """The process-wide RAM tier's key. ``(token, t, region)``: see the class docstring.
+
+        One function rather than the tuple written at each site, because ``get`` and ``put`` are
+        the two halves of one identity and a key that drifted between them would present as a
+        cache that simply never hits -- slow, correct, and nearly invisible.
+        """
+        return (self.token, self.time_point, str(region))
 
     def __repr__(self) -> str:
         return (f"PlateCellCache({self.experiment.name!r}, token={self.token}, "
-                f"hits={self.hits}, misses={self.misses}, writes={self.writes})")
+                f"t={self.time_point}, hits={self.hits}, misses={self.misses}, "
+                f"writes={self.writes})")
 
 
 def _unlink(path: Path) -> None:

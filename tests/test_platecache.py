@@ -246,7 +246,7 @@ def test_a_finished_pass_compacts_into_ONE_memory_mapped_page(tmp_path):
     assert len(list(cache.dir.glob("*.npz"))) == 8
 
     assert cache.pack(regions) is True
-    assert (cache.dir / cache.PACK_ARRAY).exists() and (cache.dir / cache.PACK_INDEX).exists()
+    assert cache.pack_array_path.exists() and cache.pack_index_path.exists()
     assert not list(cache.dir.glob("*.npz")), "the per-well files were not compacted away"
 
     _platecache.clear_memory_tier()
@@ -278,7 +278,7 @@ def test_an_incomplete_pass_is_NEVER_compacted(tmp_path):
     cache = _cache(tmp_path, exp)
     cache.put("A1", _cell(1), (0, 0, 88, 88))
     assert cache.pack(["A1", "A2"]) is False
-    assert not (cache.dir / cache.PACK_INDEX).exists()
+    assert not cache.pack_index_path.exists()
     assert cache.get("A1") is not None, "the per-well cells must survive a refused compaction"
 
 
@@ -290,10 +290,10 @@ def test_a_page_from_another_generation_is_not_read(tmp_path):
     cache.pack(["A1"])
     forged = _cache(tmp_path, exp)
     forged.dir.mkdir(parents=True, exist_ok=True)
-    (forged.dir / forged.PACK_ARRAY).write_bytes((cache.dir / cache.PACK_ARRAY).read_bytes())
-    index = json.loads((cache.dir / cache.PACK_INDEX).read_text())
+    forged.pack_array_path.write_bytes(cache.pack_array_path.read_bytes())
+    index = json.loads(cache.pack_index_path.read_text())
     index["token"] = "0000000000000000"
-    (forged.dir / forged.PACK_INDEX).write_text(json.dumps(index))
+    forged.pack_index_path.write_text(json.dumps(index))
     _platecache.clear_memory_tier()
     assert _cache(tmp_path, exp).get("A1") is None
 
@@ -305,9 +305,9 @@ def test_the_sidecar_is_JSON_and_never_pickle(tmp_path):
     cache = _cache(tmp_path, exp)
     cache.put("A1", _cell(1), (0, 0, 88, 88))
     cache.pack(["A1"])
-    index = json.loads((cache.dir / cache.PACK_INDEX).read_text(encoding="utf-8"))
+    index = json.loads(cache.pack_index_path.read_text(encoding="utf-8"))
     assert index["regions"] == ["A1"] and index["t"] == 0, \
-        "the sidecar records where a t axis would slot in; see PlateCellCache.pack"
+        "the sidecar records the timepoint this page is of; see PlateCellCache.pack"
     import inspect
 
     src = inspect.getsource(_platecache)          # the docstring names pickle to reject it
@@ -547,3 +547,304 @@ def test_the_plate_preview_actually_goes_through_the_cache():
     # stitchers log messages" report was actually about: the preview printed into a terminal
     # nobody is watching because the capture was on the operator worker only.
     assert "capture_stdout_to_log" in src, "the preview stopped capturing print() into the log"
+
+
+# --- the timepoint is part of a cell's identity (2026-08-05) -------------------------------------
+#
+# The plate's timepoint bar moved and the plate did not, and the cache was half the reason. The
+# other half was `_PreviewWorker` never passing a `t` to `reader.read`; fixing only that would have
+# been WORSE than the bug, because the first frame's cells were cached under a key with no
+# timepoint in it and would then have been replayed under a label saying t=1.
+#
+# So these tests are about PIXELS wherever they can be. A test that asserts the slider's value, or
+# that the worker was constructed with t=1, passes against a cache that serves frame 0 -- which is
+# exactly the failure being prevented. Where a test can only reach state (the on-disk generation,
+# the read count) it says which property it is standing in for.
+
+class _TimeReader:
+    """A reader whose pixels NAME their timepoint, so a stuck frame is visible, not inferred.
+
+    The same trick ``tools/make_5d_fixture.py`` plays and for the same reason: every fixture in
+    this suite was Nt=1, so the timepoint bugs were invisible by construction rather than by
+    oversight (``docs/plate-contract.md``). One value per (t, channel) is enough here -- the plate
+    cell is an area downsample of the frame, so a frame filled with a value reduces to a cell
+    filled with it.
+    """
+
+    def __init__(self, path):
+        self._path = str(path)               # the identity _source_token asks for
+        self.reads = 0
+        self.reads_at: dict = {}             # t -> planes read at that timepoint
+
+    def read(self, region, fov, channel, z, t=0):
+        self.reads += 1
+        self.reads_at[int(t)] = self.reads_at.get(int(t), 0) + 1
+        return np.full(FRAME, 1000 * (int(t) + 1) + CHANNELS.index(str(channel)), dtype=np.uint16)
+
+
+def _preview_cells(worker, cell_px: int = 88) -> dict:
+    """``{region: cell}`` from one preview pass -- the PIXELS the plate would paint.
+
+    The tiles are composited into the cell at their boxes, exactly as ``PlateOverview.add_tile``
+    does, because a cold pass emits one tile per FOV and a cache replay emits ONE tile per region
+    (that is the reopen win). Comparing the raw emissions would compare a mosaic against a field.
+    """
+    cells: dict = {}
+    for _ri, _ci, region, tile, box in _run(worker):
+        arr = np.asarray(tile)
+        canvas = cells.get(region)
+        if canvas is None:
+            canvas = cells[region] = np.zeros((arr.shape[0], cell_px, cell_px), dtype=arr.dtype)
+        top, left = (0, 0) if box is None else (int(box[0]), int(box[1]))
+        canvas[:, top:top + arr.shape[1], left:left + arr.shape[2]] = arr
+    return cells
+
+
+def test_a_cell_is_identified_by_its_TIMEPOINT_as_well_as_its_region(tmp_path):
+    """The re-key, at the cache's own boundary: t=0's cell is not an answer to t=1's question."""
+    exp = _acquisition(tmp_path)
+    at0 = _cache(tmp_path, exp)
+    at1 = _cache(tmp_path, exp, time_point=1)
+    at0.put("A1", _cell(10), (0, 0, 88, 88))
+
+    assert at1.get("A1") is None, "timepoint 1 was served timepoint 0's cell"
+    at1.put("A1", _cell(20), (0, 0, 88, 88))
+    assert np.asarray(at0.get("A1")).max() == 10, "publishing t=1 overwrote t=0's cell"
+    assert np.asarray(at1.get("A1")).max() == 20
+
+    _platecache.clear_memory_tier()                       # i.e. a restart: now the DISK tier
+    assert np.asarray(_cache(tmp_path, exp).get("A1")).max() == 10
+    assert np.asarray(_cache(tmp_path, exp, time_point=1).get("A1")).max() == 20
+    assert at0.path_for("A1") != at1.path_for("A1"), "two timepoints share one file"
+
+
+def test_the_timepoint_is_in_the_KEY_and_not_in_the_TOKEN(tmp_path):
+    """Both would be correct; only one is useful, and the difference is a whole plate re-read.
+
+    The token directory is what ``prune_stale`` deletes. Put the timepoint in it and stepping
+    t=0 -> t=1 deletes t=0's cells, so stepping back re-reads the acquisition: a cache that is
+    correct and empty. Timepoints coexist under one generation; a changed ACQUISITION still
+    invalidates every one of them at once.
+    """
+    exp = _acquisition(tmp_path)
+    at0, at1 = _cache(tmp_path, exp), _cache(tmp_path, exp, time_point=1)
+    assert at0.token == at1.token and at0.dir == at1.dir
+
+    at0.put("A1", _cell(1), (0, 0, 88, 88))
+    at1.put("A1", _cell(2), (0, 0, 88, 88))               # publishes, and prunes stale generations
+    _platecache.clear_memory_tier()
+    assert _cache(tmp_path, exp).get("A1") is not None, \
+        "visiting timepoint 1 pruned timepoint 0's cells"
+
+    os.utime(exp / "coordinates.csv", (1_000_000, 1_000_000))       # the store changed
+    _platecache.clear_memory_tier()
+    assert (_cache(tmp_path, exp).get("A1") is None
+            and _cache(tmp_path, exp, time_point=1).get("A1") is None), \
+        "a changed acquisition must invalidate EVERY timepoint, not just the live one"
+
+
+def test_cells_written_before_the_re_key_are_unreachable_and_then_DELETED(tmp_path, monkeypatch):
+    """The on-disk tier, migrated by a version bump rather than by a guess.
+
+    A ``FORMAT_VERSION`` 1 cell carries no timepoint. It was written by a producer that always
+    read frame 0, but the RECORD does not say so, and the point of this change is that a cell
+    whose timepoint is unknown is never served under a timepoint that is. ``FORMAT_VERSION`` is
+    hashed into the token, so every v1 entry sits under a token nothing computes any more -- and
+    then ``prune_stale`` removes it on the first publish of the new generation.
+    """
+    exp = _acquisition(tmp_path)
+    monkeypatch.setattr(_platecache, "FORMAT_VERSION", 1)
+    old = _cache(tmp_path, exp)
+    old.put("A1", _cell(42), (0, 0, 88, 88))
+    old_dir = old.dir
+    assert old_dir.exists()
+
+    monkeypatch.undo()                                    # today's build, FORMAT_VERSION 2
+    _platecache.clear_memory_tier()
+    new = _cache(tmp_path, exp)
+    assert new.dir != old_dir, "the re-keyed cache reads the pre-timepoint generation's directory"
+    assert new.get("A1") is None, "a cell with no timepoint was served under one"
+
+    new.put("A1", _cell(7), (0, 0, 88, 88))               # the first publish prunes
+    assert not old_dir.exists(), "the pre-timepoint generation was left under $HOME forever"
+
+
+def test_the_packed_page_is_per_timepoint(tmp_path):
+    """Compaction is where a shared page would quietly merge two frames into one picture."""
+    exp = _acquisition(tmp_path)
+    at0, at1 = _cache(tmp_path, exp), _cache(tmp_path, exp, time_point=1)
+    at0.put("A1", _cell(3), (0, 0, 88, 88))
+    at1.put("A1", _cell(4), (0, 0, 88, 88))
+    assert at0.pack(["A1"]) and at1.pack(["A1"])
+    assert at0.pack_array_path != at1.pack_array_path
+    assert json.loads(at1.pack_index_path.read_text())["t"] == 1
+
+    _platecache.clear_memory_tier()                       # force the read through the PAGE
+    assert np.asarray(_cache(tmp_path, exp).get("A1")).max() == 3
+    assert np.asarray(_cache(tmp_path, exp, time_point=1).get("A1")).max() == 4
+
+
+def test_a_page_whose_sidecar_names_ANOTHER_timepoint_is_not_read(tmp_path):
+    """The file name is a convention; the sidecar is the record, and it is checked too."""
+    exp = _acquisition(tmp_path)
+    at1 = _cache(tmp_path, exp, time_point=1)
+    at1.put("A1", _cell(4), (0, 0, 88, 88))
+    at1.pack(["A1"])
+    index = json.loads(at1.pack_index_path.read_text())
+    index["t"] = 0                                        # the page now lies about its frame
+    at1.pack_index_path.write_text(json.dumps(index))
+    _platecache.clear_memory_tier()
+    assert _cache(tmp_path, exp, time_point=1).get("A1") is None
+
+
+# --- the PLATE's pixels follow the bar -----------------------------------------------------------
+
+def test_the_plate_CELL_at_t1_differs_from_the_cell_at_t0(qapp, tmp_path):
+    """The whole bug, in pixels: not "the worker took a t", but what the plate would PAINT.
+
+    Mutation-verified: make ``PlateCellCache._ram_key`` ignore ``self.time_point`` (the key this
+    change introduced) and this goes red, because t=1's pass is served t=0's cached cells.
+    """
+    exp = _acquisition(tmp_path)
+    meta, idx = _meta(), {"A1": {"rc": (0, 0)}, "A2": {"rc": (0, 1)}}
+    reader = _TimeReader(exp)
+
+    at0 = _preview_cells(V._PreviewWorker(reader, meta, idx, ["A1", "A2"],
+                                          cache=_cache(tmp_path, exp), t=0))
+    at1 = _preview_cells(V._PreviewWorker(reader, meta, idx, ["A1", "A2"],
+                                          cache=_cache(tmp_path, exp, time_point=1), t=1))
+
+    assert set(at0) == set(at1) == {"A1", "A2"}
+    for region in ("A1", "A2"):
+        assert not np.array_equal(at0[region], at1[region]), \
+            f"{region}'s plate cell did not move with the timepoint"
+        assert at0[region].max() == 1001 and at1[region].max() == 2001, \
+            "the cell is not the frame the reader was asked for"
+
+    # ...and it survives the restart, which is where a cache lies most convincingly. BOTH
+    # timepoints are replayed, in the order that catches a disk tier keyed without t: t=1 was
+    # written last, so replaying only t=1 would look right while t=0 came back as t=1's picture.
+    _platecache.clear_memory_tier()
+    cold = _TimeReader(exp)
+    for t, expected in ((1, at1), (0, at0)):
+        replayed = _preview_cells(V._PreviewWorker(cold, meta, idx, ["A1", "A2"],
+                                                   cache=_cache(tmp_path, exp, time_point=t), t=t))
+        assert cold.reads == 0, "the replay re-read the acquisition"
+        for region in ("A1", "A2"):
+            assert np.array_equal(replayed[region], expected[region]), \
+                f"{region}: the reopened plate showed another frame at t={t}"
+
+
+def test_the_preview_READS_the_timepoint_it_was_asked_for(qapp, tmp_path):
+    """``reader.read`` takes a ``t`` and defaulted to 0 forever because nothing passed one.
+
+    ``docs/plate-contract.md`` records that exact shape for the loupe: a signature is not a call.
+    The test above proves the pixels differ; this one names WHY, so a regression reads as "the
+    preview stopped passing t" rather than as a cache mystery.
+    """
+    exp = _acquisition(tmp_path)
+    reader = _TimeReader(exp)
+    _run(V._PreviewWorker(reader, _meta(), {"A1": {"rc": (0, 0)}, "A2": {"rc": (0, 1)}},
+                          ["A1", "A2"], cache=None, t=2))
+    assert set(reader.reads_at) == {2}, f"the preview read timepoints {sorted(reader.reads_at)}"
+
+
+def test_stepping_BACK_to_a_visited_timepoint_reads_NOTHING(qapp, tmp_path):
+    """The performance half. ``_on_time_point_changed`` re-reads the whole plate on every tick,
+    so a revisited timepoint has to HIT or scrubbing t costs a full plate read per step.
+
+    This is the property the re-key buys that a ``(token, region)`` key could not, and it is also
+    the one a timepoint-in-the-token would have thrown away.
+    """
+    exp = _acquisition(tmp_path)
+    meta, idx = _meta(), {"A1": {"rc": (0, 0)}, "A2": {"rc": (0, 1)}}
+    reader = _TimeReader(exp)
+    per_pass = len(CHANNELS) * len(meta["regions"])
+
+    _run(V._PreviewWorker(reader, meta, idx, ["A1", "A2"], cache=_cache(tmp_path, exp), t=0))
+    assert reader.reads == per_pass, "the first visit must read the plate"
+    _run(V._PreviewWorker(reader, meta, idx, ["A1", "A2"],
+                          cache=_cache(tmp_path, exp, time_point=1), t=1))
+    assert reader.reads == 2 * per_pass, "a NEW timepoint must read the plate"
+
+    back = V._PreviewWorker(reader, meta, idx, ["A1", "A2"], cache=_cache(tmp_path, exp), t=0)
+    _run(back)
+    assert reader.reads == 2 * per_pass, "stepping back to t=0 re-read the acquisition"
+    assert back.cache_hits == 2 and back.cache_reads == 0
+
+
+def test_a_preview_handed_a_cache_for_ANOTHER_timepoint_refuses_to_start(qapp, tmp_path):
+    """Two objects, each correct alone, whose disagreement publishes a cell under the wrong frame.
+    Reconciling that silently is how this class of bug survives, so it raises instead."""
+    exp = _acquisition(tmp_path)
+    with pytest.raises(ValueError, match="wrong frame"):
+        V._PreviewWorker(_TimeReader(exp), _meta(), {"A1": {"rc": (0, 0)}}, ["A1"],
+                         cache=_cache(tmp_path, exp), t=1)
+
+
+def test_the_plate_previews_the_timepoint_the_BAR_says():
+    """The wiring at the window, which no unit test above can reach.
+
+    ``_start_preview`` is the ONE place a preview is built, so reading ``self.time_point`` there
+    is what makes the first ingest, the tab re-scope and ``_return_to_raw`` (which is what a
+    timepoint change calls) agree without three call sites having to remember.
+    """
+    import inspect
+
+    assert "t=self.time_point" in inspect.getsource(V.PlateWindow._start_preview), \
+        "the plate's preview stopped carrying the bar's timepoint"
+    assert "_start_preview" in inspect.getsource(V.PlateWindow._return_to_raw), \
+        "returning to raw stopped restarting the preview, so a timepoint change repaints nothing"
+    assert "_return_to_raw" in inspect.getsource(V.PlateWindow._on_time_point_changed), \
+        "a timepoint change stopped asking the plate to re-read"
+
+
+# --- the same property, on the real 3-timepoint acquisition --------------------------------------
+
+FIXTURE_5D = Path("~/Downloads/sim_5d_2x2_t3").expanduser()
+
+
+@pytest.mark.skipif(not FIXTURE_5D.exists(),
+                    reason=f"{FIXTURE_5D} is absent (build it: tools/make_5d_fixture.py)")
+def test_the_plate_cell_follows_t_on_the_REAL_5D_acquisition(qapp, tmp_path):
+    """The only test in this file that could have failed for the ORIGINAL reason.
+
+    Every other acquisition on this machine is n_t=1, so a stuck timepoint is invisible in them by
+    construction. ``sim_5d_2x2_t3`` moves a bright blob across the frame WITH t (4 regions, 4 FOVs,
+    3 z, 2 channels, 3 timepoints, 256 px), precisely so the difference is in the pixels rather
+    than in a call. Written by ``tools/make_5d_fixture.py``.
+
+    The cache root is ``tmp_path``: a test must never write into the developer's real cache, and
+    ``_platecache`` has ``SQUIDMIP_CACHE_DIR`` for exactly this.
+    """
+    from squidmip.reader import open_reader
+
+    reader = open_reader(FIXTURE_5D)
+    meta = reader.metadata
+    assert meta["n_t"] == 3, "this fixture is supposed to be the multi-timepoint one"
+    order = list(meta["regions"])
+    idx = {r: {"rc": (i // 2, i % 2), "idx": i} for i, r in enumerate(order)}
+
+    def _cache_at(t):
+        return PlateCellCache.for_reader(reader, meta, cell_px=88, time_point=t,
+                                         root=tmp_path / "cachedir")
+
+    cells = {}
+    for t in range(3):
+        cells[t] = _preview_cells(
+            V._PreviewWorker(reader, meta, idx, order, cache=_cache_at(t), t=t))
+        assert set(cells[t]) == set(order)
+
+    for region in order:
+        for a, b in ((0, 1), (1, 2), (0, 2)):
+            assert not np.array_equal(cells[a][region], cells[b][region]), \
+                f"{region}: the plate cell at t={a} is identical to the one at t={b}"
+
+    _platecache.clear_memory_tier()                          # the reopen, served from disk
+    for t in range(3):
+        worker = V._PreviewWorker(reader, meta, idx, order, cache=_cache_at(t), t=t)
+        replayed = _preview_cells(worker)
+        assert worker.cache_hits == len(order) and worker.cache_reads == 0
+        for region in order:
+            assert np.array_equal(replayed[region], cells[t][region]), \
+                f"{region}: the cached cell for t={t} came back as another frame"
