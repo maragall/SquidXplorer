@@ -1,4 +1,18 @@
-"""The two operator interfaces in PANE 1: the stitcher's controls and deconvolution's QC loop.
+"""The two HAND-WRITTEN operator interfaces in PANE 1: the stitcher's controls and decon's QC loop.
+
+THESE TWO, AND ONLY THESE TWO (2026-08-05). Every other operator's panel is BUILT FROM ITS
+``params`` DECLARATION by :mod:`squidmip._param_panel`, which asks the registry what an operator
+takes and maps each :class:`~squidmip._engine.Param` to a widget by the type of its default. This
+module used to be the only source of an operator panel, and the cost was measured: an operator
+declaring ``params`` got zero widgets and ran silently at its defaults, so ``spot`` and
+``cellpose`` declared four parameters each and not one was reachable from any panel.
+
+The two below stay hand-written because they do things a parameter FORM cannot, and deleting them
+to gain uniformity would delete real behaviour: :class:`StitcherPanel` converts a percentage to a
+fraction, greys out the knobs that provably do nothing with registration off, and refuses a
+plane-op with a sentence before the run starts; :class:`DeconQCPanel` runs an iterative
+semi-convergence loop and publishes a picture into pane 3. ``_viewer._activate_operator`` prefers a
+hand-written panel and falls back to the generic one, so adding an operator needs no edit here.
 
 Julio: "Right now I'm blocked in testing the post-processing because Stitcher doesn't have
 that maragall/Stitcher interface embedded in our top-left subpane. The deconvolution is not
@@ -105,24 +119,60 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
-from squidmip._stitch import _ABS_THRESH, _BLEND_PX, _REL_THRESH
+#: The feather-ramp FALLBACK. The one number here with no signature default behind it:
+#: ``stitch_region(blend_px=None)`` means "measure this acquisition's real overlap", and this is
+#: what the pipeline falls back to when nothing overlaps. It is the spin's starting value, with the
+#: "Auto" box beside it selecting the other mode, so the panel offers both of the pipeline's
+#: modes rather than inventing a third number.
+from squidmip._stitch import _BLEND_PX
+
+
+def _stitch_default(name: str):
+    """One default, read off ``stitch_region``'s OWN SIGNATURE rather than mirrored here.
+
+    Why this is not simply ``from squidmip._stitch import _REL_THRESH``, which is what it was:
+    that spelling made the panel a SECOND copy of the pipeline's numbers, kept in step by hand and
+    reaching through the module's privacy to do it. ``_ABS_THRESH`` and ``_REL_THRESH`` are not the
+    contract -- they are how the contract's defaults happen to be spelled inside ``_stitch``, and
+    renaming one silently left the panel launching a different run from the pipeline it claimed to
+    reproduce.
+
+    Why not from a DECLARATION, which is where a projector's parameters come from
+    (``squidmip._param_panel``): ``stitch`` is a REGION operator, and ``add_region_operator``
+    carries no ``params=`` at all -- one callable and a ``requires`` tuple, nothing more. There is
+    no ``Param`` record for this panel to read. The signature is the closest thing to a
+    declaration that this table has, and reading it is what removes the hand-kept copy. If the
+    region table ever grows ``params=``, this function is the one place that changes.
+    """
+    from inspect import signature
+
+    from squidmip._stitch import stitch_region
+
+    return signature(stitch_region).parameters[name].default
+
 
 #: The panel's starting position. Every value here is the pipeline's own default, so an
 #: untouched panel launches byte-for-byte what ``stitch_region`` does unaided - a panel with
 #: opinions of its own would be a second set of defaults to keep in step.
+#:
+#: ``blend_px`` is the ONE deliberate divergence and it is spelled out rather than hidden:
+#: ``stitch_region``'s own default is ``None``, which means "measure this acquisition's real
+#: overlap", and the panel starts at the fixed fallback with an "Auto" box beside it. Both
+#: numbers reach ``stitch_region`` through ``auto_blend``, so nothing here is a second default --
+#: it is which of the pipeline's two modes the box starts in.
 STITCH_DEFAULTS = {
-    "register": True,
-    "registration_channel": None,
-    "channels": None,
+    "register": _stitch_default("register"),
+    "registration_channel": _stitch_default("registration_channel"),
+    "channels": _stitch_default("channels"),
     "blend_px": _BLEND_PX,
-    "outlier_rel_pct": int(round(_REL_THRESH * 100)),
-    "outlier_abs_px": int(round(_ABS_THRESH)),
+    "outlier_rel_pct": int(round(_stitch_default("rel_thresh") * 100)),
+    "outlier_abs_px": int(round(_stitch_default("abs_thresh"))),
     "auto_blend": False,
     # ON (Julio, 2026-08-03: "Correct lens distort should be defaulted to on"). Same value as
     # stitch_region's own resolved default, which is what keeps this dict honest: an untouched
     # panel still launches byte-for-byte what stitch_region does unaided.
     "correct_distortion": True,
-    "registration_t": 0,
+    "registration_t": _stitch_default("registration_t"),
 }
 
 

@@ -44,8 +44,24 @@ step inside a chain** (`reference` — its z is solved on raw planes outside the
 **repeated step** (namespaced params would be ambiguous). A bare name still resolves to the exact
 registry object, so nothing existing routes through composition.
 
-**Not supported, do not build against it**: GUI panels generated from `params` (`_op_panels.py` is
-hand-written per operator). Named in the template README so a contributor is not misled.
+**GUI panels ARE generated from `params`** (2026-08-05). `squidmip/_param_panel.py` builds one
+widget per declared `Param`, choosing it from the TYPE OF THE DEFAULT — `bool` a check box, `int`
+a spin, `float` a decimal spin, `str` a text field, the `blurb` its tooltip. Any other type is
+**refused by name**; a guessed widget is how a value the user typed becomes a value the run did
+not receive. It is the FALLBACK for an operator with no hand-written panel, reached from
+**Process well-plates -> From their declaration** (built off `runnable_operators()`, so a plugin
+appears with no edit here). A chain's params arrive namespaced (`spot.min_area_px`) and are drawn
+as one group per step. `_viewer._activate_operator` opens that panel or states a refusal; it used
+to be a silent no-op for any key the card table did not know.
+
+The bespoke panels stay: `StitcherPanel` and `DeconQCPanel` do things a parameter form cannot.
+`STITCH_DEFAULTS` is **not** derived from a declaration and cannot be — `add_region_operator`
+carries no `params=` at all — but it no longer mirrors private `_stitch` constants either: it reads
+`stitch_region`'s own signature (`_op_panels._stitch_default`).
+
+Measured while building it: `_workers._OperatorWorker`'s PREVIEW branch called `project_plate`
+without `operator_kwargs` while the save branch passed them, so a panel value reached the console
+line and not the pixels (57 labels vs 57 at `min_area_px` 30/400; 57 vs 44 once fixed).
 
 ## 3D is capped at DRAWING time, and renders in-window
 
