@@ -34,6 +34,34 @@ hardcoded built-in imports in `squidmip/__init__.py` stay — discovery is addit
 and nothing executes it), and GUI panels generated from `params` (`_op_panels.py` is hand-written
 per operator). Both are named in the template README so a contributor is not misled.
 
+## 3D is capped at DRAWING time, and renders in-window
+
+`docs/rendering-contract.md` is the contract; this is the rule that binds every render path.
+
+**An ROI rectangle is clamped to the live `GL_MAX_3D_TEXTURE_SIZE` as it is drawn**
+(`_bricks.clamp_bbox_um` <- `RegionViewer._clamp_last_roi`). So *anything drawable is renderable,
+at full native resolution, from one texture* — the limit is felt while drawing instead of being a
+refusal afterwards. **Query the ceiling, never hardcode it**: 2048 px (1540 um) on Apple, commonly
+16384 px (12321 um) on desktop NVIDIA, which is 512x the volume. `_bricks.ceiling_line` states it
+in the window so better hardware visibly lifts it.
+
+**3D paints into the window's own napari canvas** (`_brick_view.BrickedVolume`), never a fresh
+`napari.Viewer`. Adding our own layers to the pane is fine; what was never allowed is rendering the
+pane's fused PYRAMID in 3D, whose level 0 is capped to `_MAX_FUSED_PX`.
+
+**Which layer 3D shows comes off the declaration** — `MosaicLayers.visible_op()` picks it and
+`_reduces_z` (i.e. the registry's `consumes`) refuses a Z_REDUCER's single plane with a reason.
+Never compare an operator name; `tests/test_operator_declaration.py` fails the build on it.
+
+Three numbers decide whether a volume "looks downsampled", and all three are enforced in
+`_bricks`, not asserted: voxels per screen pixel must stay **>= 1** (`uniform_step` floors the
+ratio), zooming in must **monotonically refine to stride 1**, and **z is never strided** — bricks
+tile Y and X only, so a volume keeps every acquired plane and cannot read as flattened.
+
+Bricking (many textures + GL `max` compositing + a 1-voxel halo) is the mechanism underneath and is
+pixel-exact, but it is NOT what a drawn ROI takes any more. Do not route a whole region through it
+expecting interaction — see the measured cost in the contract.
+
 ## Agent skills
 
 ### Issue tracker
