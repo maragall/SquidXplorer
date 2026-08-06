@@ -171,7 +171,11 @@ def test_many_windows_can_be_built_and_destroyed_in_one_process(qapp):
     """Bug 1: dropping the last reference to a window used to corrupt the heap."""
     for i in range(_N_WINDOWS):
         win = V.PlateWindow(None)
-        assert win.menuBar() is not None, f"window {i} came up wrong"
+        # NOT `menuBar() is not None`: QMainWindow CREATES a menu bar on first access, so
+        # that is true of a window whose __init__ built nothing at all. Ask for something
+        # this window put there.
+        titles = [a.text() for a in win.menuBar().actions()]
+        assert titles, f"window {i} came up with an empty menu bar"
         win.close()
         del win          # the trigger: PyQt deletes the C++ object here
 

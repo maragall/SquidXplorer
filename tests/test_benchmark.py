@@ -54,8 +54,7 @@ def test_block_uniformity_rejects_non_2d_and_tiny():
 
 
 def test_overlap_ncc_is_one_at_the_true_offset():
-    tilefusion = pytest.importorskip("tilefusion.registration")
-    assert tilefusion is not None
+    pytest.importorskip("tilefusion.registration")
     rng = np.random.default_rng(1)
     full = rng.random((256, 400)).astype(np.float32)
     # Two tiles 256x256 sharing a 112 px strip: tile_j sits 144 px to the right of tile_i.
@@ -102,7 +101,12 @@ def test_guard_memory_refuses_an_impossible_run():
 
 
 def test_guard_memory_allows_a_small_run():
-    assert bm.guard_memory(1024, what="a small run")["checked"] in (True, False)
+    """``in (True, False)`` was here, which is the whole domain of a bool: the assertion could
+    only fail on a raise, so a guard that stopped checking anything at all was green."""
+    pytest.importorskip("psutil")            # without it `checked` is legitimately False
+    got = bm.guard_memory(1024, what="a small run")
+    assert got["checked"] is True, got
+    assert got["available_gb"] is not None and got["available_gb"] > 0, got
 
 
 def test_persist_estimate_is_overlap_aware_for_region_operators():
@@ -141,7 +145,10 @@ def test_read_recorder_accumulates_and_restores():
         reader.read("A1", 0, "c0", 1, 0)
     assert rec.calls == 2
     assert rec.nbytes == 2 * 4 * 4 * 2
-    assert rec.ms >= 0.0
+    # `>= 0.0` is true of any accumulated perf_counter delta, including one that never
+    # accumulated: a recorder whose timing was removed reported 0.0 and passed.
+    assert rec.ms > 0.0, "the recorder timed nothing"
+    assert rec.ms < 5000.0, rec.ms
     assert reader.calls == 2
     # The wrapper must come off: a reader left permanently instrumented would make every
     # later measurement include this run's bookkeeping.

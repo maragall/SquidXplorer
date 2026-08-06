@@ -96,7 +96,11 @@ def test_samplesheet_header_and_positional_columns(hcs):
 def test_samplesheet_paths_are_relative_and_resolve(hcs):
     """Odon resolves relative paths against the CSV's own directory."""
     csv_path = write_samplesheet(hcs)
-    for row in _read_sheet(csv_path):
+    rows = _read_sheet(csv_path)
+    # `_read_sheet` is `list(csv.DictReader(...))`, so a header-only sheet iterates zero times and
+    # every claim below is vacuous. The fixture has one group per well.
+    assert rows, "the samplesheet has no rows: nothing below this line was checked"
+    for row in rows:
         assert not Path(row["path"]).is_absolute()
         assert row["path"].startswith("plate.ome.zarr/")
         assert (csv_path.parent / row["path"] / "zarr.json").is_file()
@@ -108,7 +112,9 @@ def test_samplesheet_survives_the_output_being_moved(hcs, tmp_path):
     moved = tmp_path / "elsewhere" / "acq.hcs"
     moved.parent.mkdir(parents=True)
     hcs.rename(moved)
-    for row in _read_sheet(moved / "odon_samplesheet.csv"):
+    rows = _read_sheet(moved / "odon_samplesheet.csv")
+    assert rows, "the moved samplesheet has no rows: nothing below this line was checked"
+    for row in rows:
         assert (moved / row["path"] / "zarr.json").is_file()
 
 

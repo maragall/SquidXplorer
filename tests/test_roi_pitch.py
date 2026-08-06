@@ -39,6 +39,8 @@ if "PySide6" in sys.modules or "PySide2" in sys.modules:
     )
 
 from squidmip import _bricks  # noqa: E402
+from squidmip._address import Extent  # noqa: E402
+from squidmip._result import Result  # noqa: E402
 from squidmip import _viewer as V  # noqa: E402
 
 from .conftest import shutdown_plate_window  # noqa: E402
@@ -203,6 +205,58 @@ class TestTheVolumeSourceReportsWhichPitchItChose:
         assert pitch is None, (
             f"the raw source reported a pitch of {pitch}: it has none of its own, because "
             f"read_brick reads the acquisition's own planes and the caller says so")
+        shutdown_plate_window(qapp, win)
+
+    def test_an_operator_layer_is_the_source_and_reports_ITS_OWN_pitch(
+        self, qapp, napari_pane_stub, squid_dataset  # noqa: F811
+    ):
+        """The OTHER branch, and until now no window test could reach it.
+
+        `_volume_source` asks `mosaic.visible_op()` inside ``except Exception: return raw``, and
+        `tests/conftest.py`'s `StubMosaic` had no `visible_op` -- so every window in this suite
+        answered RAW whatever was on screen, and the sibling above ("no operator is displayed, so
+        this is the reader") passed for that reason rather than for its own. With the stub honest,
+        this is what the operator branch is owed: the source is the OPERATOR's layer, and the
+        pitch that travels back is THAT LAYER's, not the acquisition's.
+        """
+        root, _ = squid_dataset
+        win, w, pane = _window_with_layers(qapp, napari_pane_stub, root)
+        channels = [c["name"] for c in win._meta["channels"]]
+        px, dz = win._meta["pixel_size_um"], win._meta["dz_um"]
+
+        # A z-PRESERVING result: `_volume_source` refuses a single plane by declaration, and
+        # rightly, so the volume has to have depth for the branch to be reached at all.
+        planes = [np.arange(2 * 8 * 8, dtype=np.uint16).reshape(2, 8, 8) + i * 100
+                  for i, _ in enumerate(channels)]
+        result = Result.of(Extent(region_id=w.current_region()), planes,
+                           channels=tuple(channels), z_depth=2,
+                           pixel_size_um=MEASURED_FUSE_STEP * px, dtype="uint16")
+        assert w.deliver_result("bgsub", result, visible=True) == len(channels)
+        # Raw is what a window shows underneath; the operator layer is the one on top and visible.
+        for ch in channels:
+            raw = pane.mosaic.find("raw", ch)
+            if raw is not None:
+                raw.visible = False
+        for ch in channels:
+            layer = pane.mosaic.find("bgsub", ch)
+            assert layer is not None, f"the operator layer for {ch} never landed"
+            layer.visible = True
+            layer.scale = (dz, MEASURED_FUSE_STEP * px, MEASURED_FUSE_STEP * px)
+            layer.translate = (0.0, 0.0, 0.0)
+
+        read, source, pitch = w._volume_source((0, 4, 0, 4))
+
+        assert source == "bgsub", (
+            f"the visible operator layer is 'bgsub' and the source said {source!r} -- this is the "
+            f"answer `visible_op()` decides, and a stub without it answered 'raw' forever")
+        assert read is not None, "the operator branch produced no brick reader"
+        # The pitch travels back as the layer's own (y, x) micrometres-per-pixel.
+        assert tuple(pitch) == pytest.approx((MEASURED_FUSE_STEP * px, MEASURED_FUSE_STEP * px)), (
+            f"the operator source reported {pitch} um/px where its own layer is placed at "
+            f"{MEASURED_FUSE_STEP * px}: a fused preview is DECIMATED and does not carry the "
+            f"acquisition's pitch")
+        assert tuple(pitch) != pytest.approx((px, px)), (
+            "the acquisition's pitch was reported for fused pixels")
         shutdown_plate_window(qapp, win)
 
 

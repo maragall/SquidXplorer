@@ -46,7 +46,11 @@ def test_metadata_no_dead_attributes(squid_dataset):
     }
     for key, value in meta.items():
         assert value is not None, f"metadata[{key!r}] is None — dead attribute"
-    assert all(meta.values()) or meta["n_z"] >= 1  # no empty containers on a real dataset
+    # `all(...) or meta["n_z"] >= 1` was here. `n_z` is a plane count and is >= 1 for any
+    # dataset that opened, so the right operand was a constant True and the left half was
+    # never reached: a metadata dict full of empty containers passed.
+    empty = [k for k, v in meta.items() if not v]
+    assert not empty, f"empty metadata container(s) on a real dataset: {empty}"
 
 
 def test_channel_count_independent_of_nz(squid_dataset):

@@ -95,19 +95,47 @@ def test_upstream_packages_importable():
 
 
 def test_decon_module_wires_petakit():
+    """"Wired" is the DECLARATION, not the import.
+
+    This used to be ``assert importlib.import_module("petakit") is not None``, which cannot fail:
+    ``import_module`` raises on a missing package and never returns None, so the assertion added
+    nothing to the import above it and said nothing at all about `_decon` being wired to petakit.
+    The wiring that matters is ``requires=`` -- it is what refuses a run BY NAME when the package
+    is absent, and it is what a chain's `requires` union is built from.
+    """
     import importlib
 
     importlib.import_module("squidmip._decon")
-    petakit = importlib.import_module("petakit")
-    assert petakit is not None
+    for name in ("decon", "decon3d"):
+        assert "petakit" in s.operator_requires(name), (name, s.operator_requires(name))
 
 
 def test_background_module_wires_bgsub():
+    """Same fix, and the wiring here is the CALL: `estimate_background(method="sep")` must reach
+    ``bgsub.core._run_sep`` rather than quietly computing a background some other way.
+    """
     import importlib
 
-    importlib.import_module("squidmip._background")
-    bgsub = importlib.import_module("bgsub")
-    assert bgsub is not None
+    bg = importlib.import_module("squidmip._background")
+    import bgsub.core
+
+    calls = []
+    real = bgsub.core._run_sep
+
+    def spy(img, radius):
+        calls.append((img.shape, radius))
+        return real(img, radius)
+
+    bgsub.core._run_sep = spy
+    try:
+        out = bg.estimate_background(
+            np.random.RandomState(0).rand(32, 32).astype(np.float32),
+            bg.BackgroundParams(method="sep", radius_px=8),
+        )
+    finally:
+        bgsub.core._run_sep = real
+    assert calls == [((32, 32), 8)], calls
+    assert out.shape == (32, 32) and out.dtype == np.float32
 
 
 # ======================================================================================
@@ -203,8 +231,14 @@ def test_decon_op_end_to_end_tiny_stack():
         s.OpticsParams(na=0.5, wavelength_um=0.5, dxy_um=0.325, dz_um=1.5, nz=1)
     )
     plane = np.random.RandomState(0).rand(32, 32).astype(np.float32)
+    # ONLY a missing package skips. This was `except Exception: pytest.skip(...)` wrapped around
+    # the call the test exists to check, so ANY regression in `decon_op` -- a shape error, a
+    # dtype error, an arithmetic fault -- reported as a skip and the suite stayed green. That is
+    # the same distinction `_engine._NOT_A_WELL_FAULT` already makes in production: a missing
+    # package is not a fault of the thing being run, and nothing else may be absorbed.
     try:
         out = s.decon_op(iterations=1)([plane])
-    except Exception as exc:  # pragma: no cover - env-gap guard
-        pytest.skip(f"decon end-to-end unavailable in this env: {exc!r}")
+    except ImportError as exc:
+        pytest.skip(f"decon needs a package that is not installed here: {exc!r}")
     assert out.shape == plane.shape
+    assert np.isfinite(out).all(), "decon returned non-finite pixels"

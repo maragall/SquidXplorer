@@ -68,9 +68,17 @@ def _rules(qss: str) -> "dict[str, str]":
 ])
 def test_a_combo_states_its_foreground_wherever_it_states_a_background(qss, who):
     """The defect exactly: a background with no foreground, so the OS palette supplies the ink."""
+    # The guard used to be `"background" in decls and "background-color" not in decls`, i.e. the
+    # assertion only ran for the BARE `background:` shorthand. Every rule spelling
+    # `background-color:` -- the common form -- was skipped, so a stylesheet with no foreground
+    # anywhere was green. The claim is about ANY background property.
+    checked = 0
     for selector, decls in _rules(qss).items():
-        if "background" in decls and "background-color" not in decls:
-            assert "color:" in decls, f"{who}: {selector!r} sets a background but no colour"
+        if "background" not in decls:
+            continue
+        checked += 1
+        assert "color:" in decls, f"{who}: {selector!r} sets a background but no colour"
+    assert checked, f"{who}: no rule in this style sheet sets a background at all"
 
 
 @pytest.mark.parametrize("qss", [RegionViewer._COMBO_CHIP_QSS, _qtstyle.COMBO_QSS])

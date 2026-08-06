@@ -196,6 +196,42 @@ def test_only_the_gui_layer_imports_qt(path):
     )
 
 
+# --- THE ALLOWLISTS THEMSELVES ---------------------------------------------------------------
+#
+# `test_only_the_gui_layer_imports_qt` and `test_napari_belongs_to_the_napari_modules` RETURN for
+# every name in these sets, so 22 of their parametrized cases report PASS having asserted nothing.
+# That is the right shape for an exemption -- but it means the sets are the only thing standing
+# between an exempt module and no check at all, and NOTHING checked the sets. An entry naming a
+# module that has since been deleted, or one that no longer imports what it was exempted for, is a
+# stale check of exactly the kind `tools/walkthrough.py`'s IMA-261 check turned out to be: it looks
+# like a decision and is a leftover. This file calls the list "the visible cost of the exception",
+# and an exemption nobody pays for is not visible.
+
+@pytest.mark.parametrize("stem", sorted(GUI_MODULES))
+def test_every_gui_exemption_is_still_earned(stem):
+    """A name in GUI_MODULES must exist, and must still import Qt. Otherwise delete the entry."""
+    path = PKG / f"{stem}.py"
+    assert path.is_file(), (
+        f"GUI_MODULES names {stem!r} and squidmip/{stem}.py does not exist. The exemption outlived "
+        f"the module: delete the entry.")
+    imports = sorted({name for name, _ in _imports(path) if _top(name) in QT_BINDINGS})
+    assert imports, (
+        f"squidmip/{stem}.py is exempted from the Qt boundary and imports no Qt at all any more. "
+        f"It is Qt-free now: remove {stem!r} from GUI_MODULES so the boundary starts covering it.")
+
+
+@pytest.mark.parametrize("stem", sorted(NAPARI_EXCEPTIONS))
+def test_every_napari_exemption_is_still_earned(stem):
+    """The same rule for the napari list, which is two names and so the easier one to forget."""
+    path = PKG / f"{stem}.py"
+    assert path.is_file(), (
+        f"NAPARI_EXCEPTIONS names {stem!r} and squidmip/{stem}.py does not exist.")
+    imports = sorted({name for name, _ in _imports(path) if _top(name) == "napari"})
+    assert imports, (
+        f"squidmip/{stem}.py is on NAPARI_EXCEPTIONS and imports no napari any more. Remove "
+        f"{stem!r} from the list so the `_napari_*` rule starts covering it.")
+
+
 @pytest.mark.parametrize("stem", sorted(CUT_OUT_OF_VIEWER))
 def test_what_was_cut_out_of_the_viewer_does_not_import_it_back(stem):
     """No back-edge to ``_viewer``, at module scope or deferred.

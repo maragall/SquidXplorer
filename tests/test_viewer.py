@@ -2580,6 +2580,10 @@ def test_the_loupe_magnifies_the_field_the_cursor_is_over(qapp):
     THAT field."""
     ov = _freeform_overview()
     ov.set_loupe_source(_FakeLoupeSource(well_px=1000, n_levels=1))
+    # `PlateOverview._boxes` staying EMPTY is a defect this file already has a test for
+    # (`test_set_mosaic_boxes_is_actually_called_by_the_viewer`). Without this line the loop
+    # below runs zero times and the whole claim is green over a plate with no fields.
+    assert len(ov._boxes) == 4, sorted(ov._boxes)
     try:
         for (region, fov), (top, left, bh, bw) in sorted(ov._boxes.items()):
             ri, ci = next(rc for rc, r in ov._by_rc.items() if r == region)
@@ -2608,6 +2612,10 @@ def test_the_loupe_and_a_double_click_resolve_the_same_field(qapp):
     existed."""
     ov = _freeform_overview()
     ov.set_loupe_source(_FakeLoupeSource(well_px=1000, n_levels=1))
+    # `PlateOverview._boxes` staying EMPTY is a defect this file already has a test for
+    # (`test_set_mosaic_boxes_is_actually_called_by_the_viewer`). Without this line the loop
+    # below runs zero times and the whole claim is green over a plate with no fields.
+    assert len(ov._boxes) == 4, sorted(ov._boxes)
     try:
         for (region, fov), (top, left, bh, bw) in sorted(ov._boxes.items()):
             ri, ci = next(rc for rc, r in ov._by_rc.items() if r == region)
@@ -2628,6 +2636,7 @@ def test_the_loupe_reads_the_field_the_cursor_is_over_not_the_regions_first(qapp
     ov = _freeform_overview()
     src = _FakeLoupeSource(well_px=1000, n_levels=1)
     ov.set_loupe_source(src, np.ones((2, 3), np.float32))
+    assert len(ov._boxes) == 4, sorted(ov._boxes)
     try:
         seen = {}
         for (region, fov), (top, left, bh, bw) in sorted(ov._boxes.items()):
@@ -2639,6 +2648,9 @@ def test_the_loupe_reads_the_field_the_cursor_is_over_not_the_regions_first(qapp
             assert _drain_until(qapp, lambda: bool(src.reads)), "the loupe never issued a read"
             ov.mouseReleaseEvent(_press(int(round(x)), int(round(y))))
             seen[(region, fov)] = src.reads[-1][6]          # the fov the SOURCE was asked for
+        # `seen == {k: k[1] for k in seen}` is `{} == {}` when nothing was seen, so the
+        # empty case was doubly silent.
+        assert len(seen) == 4, seen
         assert seen == {k: k[1] for k in seen}, (
             f"the source was asked for the wrong fields: {seen}")
     finally:
@@ -3303,7 +3315,6 @@ def test_the_exported_timepoint_is_the_one_the_plate_is_showing(
         assert written and f"_t{t}_" in written[0], f"t={t} wrote {written}"
 
     assert seen == [1, 2], f"the window's timepoint never reached the worker: {seen}"
-    assert region                                    # the selection was a real region, not a stub
 
     import tifffile
     px1 = tifffile.imread(str(next((tmp_path / "t1").glob("*.ome.tiff"))))
@@ -5220,7 +5231,15 @@ class _RecordingMosaic:
 
     # the real MosaicLayers' group view, over what was actually added
     def ops(self):
-        return sorted({c[0] for c in self.calls})
+        # INSERTION order, de-duplicated -- what `MosaicLayers.ops` returns. `sorted()` was here,
+        # and that order is load-bearing one caller away: `_layer_tree` renders
+        # `list(reversed(ops()))` so the topmost layer is drawn first. A fake that sorts agrees
+        # with alphabetical input by luck and disagrees with everything else.
+        seen = []
+        for c in self.calls:
+            if c[0] not in seen:
+                seen.append(c[0])
+        return seen
 
     def group(self, op):
         return [c for c in self.calls if c[0] == op]

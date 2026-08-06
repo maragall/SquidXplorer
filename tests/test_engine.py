@@ -198,6 +198,9 @@ def test_projector_swap_runs_through_the_same_engine():
     add_projector("first_z", lambda planes: next(iter(planes)))
     reader = FakeReader(n_wells=3, z_levels=(0, 1, 2, 3))
     out = _collect(reader, workers=2, projector="first_z")
+    # Per-well fault isolation can yield an EMPTY dict, and a loop over nothing asserts nothing.
+    # `test_yields_every_well_with_correct_shape_and_dtype` already guards this way; these did not.
+    assert set(out) == {(f"W{i:04d}", 0) for i in range(3)}, sorted(out)
     for (region, fov), img in out.items():
         for c_i, ch in enumerate(reader._channels):
             first_plane = reader.read(region, fov, ch, reader._z_levels[0])
@@ -333,6 +336,7 @@ def test_plane_op_preserves_z_and_maps_each_plane():
     add_projector("plus_one", plane_op(_plus_one), consumes=frozenset())
     reader = FakeReader(n_wells=2, z_levels=(0, 1, 3))
     out = _collect(reader, workers=2, projector="plus_one")
+    assert set(out) == {(f"W{i:04d}", 0) for i in range(2)}, sorted(out)
     for (region, fov), img in out.items():
         # z SURVIVES a plane-op — one output plane per input plane, in z_levels order.
         assert img.shape == (reader._n_t, len(reader._channels), 3, *reader._shape)
@@ -384,14 +388,18 @@ def test_adding_a_plane_op_needs_zero_engine_edits():
 
 def test_mip_shape_is_still_z_collapsed_to_one():
     reader = FakeReader(n_wells=3, z_levels=(0, 1, 2))
-    for img in _collect(reader, workers=2).values():
+    out = _collect(reader, workers=2)
+    assert set(out) == {(f"W{i:04d}", 0) for i in range(3)}, sorted(out)
+    for img in out.values():
         assert img.shape[2] == 1
 
 
 def test_n_equals_1_mip_is_byte_identical_to_the_single_plane():
     # THE regression guard: with one z, a MIP must return that plane's bytes, unchanged.
     reader = FakeReader(n_wells=2, z_levels=(7,))
-    for (region, fov), img in _collect(reader, workers=2).items():
+    out = _collect(reader, workers=2)
+    assert set(out) == {(f"W{i:04d}", 0) for i in range(2)}, sorted(out)
+    for (region, fov), img in out.items():
         for c_i, ch in enumerate(reader._channels):
             plane = reader.read(region, fov, ch, 7)
             np.testing.assert_array_equal(img[0, c_i, 0], plane)

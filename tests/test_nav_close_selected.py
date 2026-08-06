@@ -62,12 +62,25 @@ class _FakeWindow:
         self.parent_id = parent_id
         self._title = title
         self.closes = 0
+        self.manager = None                 # set by `_nav`; see `close`
 
     def windowTitle(self) -> str:           # noqa: N802 - Qt naming
         return self._title
 
     def close(self) -> None:
+        """DEREGISTERS, which is the whole hazard `_close_selected` is written against.
+
+        This used to be `self.closes += 1` and nothing else. A real `RegionViewer.close()` runs
+        `closeEvent` -> `closed.emit` -> `ViewerManager._on_window_closed` -> `windowsChanged` ->
+        `OpenViewList.refresh` -> `self._tree.clear()`, which DESTROYS every QTreeWidgetItem under
+        the caller's loop. `_close_selected`'s docstring calls that a use-after-free and collects
+        the ids BEFORE the loop for exactly that reason -- and against the old fake the registry
+        never shrank, the tree was never rebuilt, and moving the `data(0, Qt.UserRole)` read back
+        inside the loop stayed green. The fake now does what the real one does.
+        """
         self.closes += 1
+        if self.manager is not None:
+            self.manager._on_window_closed(self)
 
     # raise_views() touches these the moment a row is selected
     def showNormal(self) -> None:           # noqa: N802 - Qt naming
@@ -85,6 +98,7 @@ def _nav(*wins):
     manager = ViewerManager()
     for w in wins:
         manager._windows[w.window_id] = w   # what _spawn does, minus the GL canvas
+        w.manager = manager                 # so `close()` deregisters, as a real window does
     return manager, OpenViewList(manager)
 
 

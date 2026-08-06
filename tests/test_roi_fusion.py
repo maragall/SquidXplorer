@@ -19,7 +19,19 @@ from squidmip._napari3d import read_brick, roi_window_px
 
 
 class _FakeReader:
-    def read(self, region, fov, ch, z):
+    """The reader protocol's own signature: ``read(region, fov, channel, z, t=0)``.
+
+    It said ``read(self, region, fov, ch, z)`` -- the third parameter RENAMED and no ``t`` at all
+    -- so a keyword call would have raised and a timepoint could not be passed. Both real readers
+    spell it ``channel`` (`tests/test_reader_protocol.py` pins the four signatures), and the
+    3D path this file drives calls positionally, which is the only reason the rename never bit.
+    """
+
+    def __init__(self):
+        self.reads = []
+
+    def read(self, region, fov, channel, z, t=0):
+        self.reads.append((region, int(fov), channel, int(z), int(t)))
         base = 10 if int(fov) == 0 else 20        # FOV0 -> 10+z, FOV1 -> 20+z, so the seam is visible
         return np.full((4, 4), base + int(z), dtype=np.uint16)
 

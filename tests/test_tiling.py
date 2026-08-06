@@ -203,6 +203,8 @@ def test_cull_is_deterministic_and_channel_major():
 def test_cull_bboxes_match_the_geometry():
     g = _ladder()
     tiles = select_tiles((50.0, 50.0, 150.0, 150.0), 0.5, g)
+    # A cull that culled EVERYTHING would iterate zero times and pass every claim below.
+    assert tiles, "select_tiles returned nothing over a box that covers real tiles"
     for t in tiles:
         x0, y0, x1, y1 = t.bbox_um
         assert (x1 - x0, y1 - y0) == (100.0, 100.0)

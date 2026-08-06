@@ -86,7 +86,21 @@ def test_translate_does_not_move_with_the_stride():
     """A coarse brick must be replaceable by a fine one without anything shifting on screen: the
     stride rides on `scale`, never on `translate`."""
     b = _bricks.Brick(iy=0, ix=1, r0=0, r1=1024, c0=1024, c1=2048)
-    assert b.translate_um((0, 0, 0), 1.0, 1.0) == b.translate_um((0, 0, 0), 1.0, 1.0)
+    py = px = 0.752
+    # `f(a) == f(a)` was here, which is true of any function at all. `translate_um` takes NO
+    # stride argument, so the claim can only be pinned where the stride actually enters -- the
+    # production call site (`_brick_view._add_layer`) puts it on `scale`, not on `translate`.
+    # This walks the strides the caller uses and requires the NEAR corner to be identical while
+    # the FAR corner stays inside one strided sample of the level-0 extent.
+    at_1 = b.translate_um((0, 0, 0), py, px)
+    assert at_1 == (0.0, 0.0, 1024 * px)
+    for step in (1, 2, 4, 8):
+        assert b.translate_um((0, 0, 0), py, px) == at_1, f"the corner moved at stride {step}"
+        _z, h, w = b.sampled_shape(10, step)
+        far_y = at_1[1] + h * py * step
+        far_x = at_1[2] + w * px * step
+        assert abs(far_y - (at_1[1] + 1024 * py)) <= py * step, (step, far_y)
+        assert abs(far_x - (at_1[2] + 1024 * px)) <= px * step, (step, far_x)
     # sampled shape shrinks with the stride; the corner does not move
     assert b.sampled_shape(10, 1) == (10, 1024, 1024)
     assert b.sampled_shape(10, 4) == (10, 256, 256)
@@ -197,9 +211,24 @@ def test_budget_finally_drops_only_when_the_stride_is_exhausted():
 
 # -- the read: a brick's voxels are the mosaic's voxels -----------------------------------
 class _Reader:
-    """Each FOV is filled with a value derived from its own index, so a mis-paste is visible."""
+    """Each FOV is filled with a value derived from its own index, so a mis-paste is visible.
 
-    def read(self, region, fov, channel, z):
+    ``t`` is in the signature because the READER PROTOCOL has it (`reader.read(region, fov,
+    channel, z, t=0)`, pinned across all four real readers by `tests/test_reader_protocol.py`).
+    It was absent here, so this double could not be handed a timepoint at all -- and the whole
+    3D/brick path in `squidmip/_napari3d.py` calls `reader.read(region, fov, channel, z)` with no
+    ``t``, i.e. it is HARDCODED TO TIMEPOINT 0 while the same window passes `t=self.time_point`
+    to its mosaic worker and its video worker. That is a live defect (see the note in the report
+    for this change); the point here is that the double no longer LOCKS IT IN: threading ``t``
+    through production would have raised a TypeError against this fake and read as the test
+    catching a regression, when it is the reverse. The value is recorded so a test can assert it.
+    """
+
+    def __init__(self):
+        self.reads = []
+
+    def read(self, region, fov, channel, z, t=0):
+        self.reads.append((region, int(fov), channel, int(z), int(t)))
         return np.full((4, 4), fov * 10 + z, dtype=np.uint16)
 
 
