@@ -23,6 +23,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")  # headless Qt; must precede PyQt import
 
 import sys  # noqa: E402
+import threading  # noqa: E402
 import time  # noqa: E402
 from pathlib import Path  # noqa: E402
 
@@ -222,6 +223,38 @@ def test_the_click_handler_does_not_read_or_encode_on_the_ui_thread(
         f"{synchronous * 1000:.1f} ms export — reads and encoding belong to _VideoWorker")
     w._video_worker.stop()
     w._video_worker.wait(5000)
+    shutdown_plate_window(qapp, win)
+
+
+def test_the_export_never_reads_a_plane_on_the_qt_thread(
+        qapp, stub_detail, napari_pane_stub, five_d_root, save_dialog):
+    """The rule CLAUDE.md now states, pinned the way the gallery pins it: by thread ident.
+
+    The timing test above measures the CLICK; this measures every read of the whole export, so a
+    later refactor that "just" fuses one frame inline to fix a repaint fails here rather than
+    becoming a freeze somebody reports. Same instrumented-wrapper shape as
+    ``test_gallery.py::test_the_gallery_never_reads_a_plane_on_the_qt_thread``, and a wrapper over
+    a REAL reader rather than a fake for the same reason: a fake would pass this suite while
+    failing on a real acquisition's geometry.
+    """
+    from .test_gallery import _RecordingReader
+
+    win, w = _open_window(qapp, five_d_root)
+    _drain_until(qapp, lambda: bool(w._pane.mosaic._layers), timeout=20)
+    recording = _RecordingReader(w._reader)
+    w._reader = recording
+    before = recording.reads
+    main = threading.get_ident()
+
+    w._record_movie()
+    assert _drain_until(qapp, lambda: w._video_worker is None, timeout=60), (
+        "the export never finished")
+
+    assert recording.reads > before, "the export read nothing — this assertion would be vacuous"
+    on_ui = [t for t in recording.read_threads if t == main]
+    assert not on_ui, (
+        f"{len(on_ui)} of {recording.reads} plane reads happened on the Qt thread; the export "
+        f"must decode only in _VideoWorker")
     shutdown_plate_window(qapp, win)
 
 
