@@ -3644,8 +3644,9 @@ def test_the_redock_BUTTON_works_not_just_the_method(qapp, stub_detail):
 
 def test_the_plane_op_cards_build_and_are_preview_only(qapp, stub_detail, squid_dataset):
     """DRIVEN, not read: open each plane-op tab through the real _open_op_tab path and inspect
-    the widgets it actually produced. A plane-op keeps z at full depth and _validate_image accepts
-    Z == 1 only, so the card must offer Preview and NO Save/destination half.
+    the widgets it actually produced. The card offers Preview and NO Save/destination half. That
+    began as a consequence of _validate_image accepting Z == 1 only; IMA-277 lifted that, so what
+    this now pins is the CARD's shape, not a writer limit (see _operations.py).
 
     DECON IS NO LONGER IN THIS LIST. It is still a plane-op in the engine, but its card is now
     the RL semi-convergence QC panel (iteration count, +1, turbo x-z / y-z view in pane 3), not
@@ -4962,9 +4963,9 @@ CLI_ONLY_OPERATORS = {
     "spot": "a LABELS overlay, not a plate result; it is driven from the spot-count controls "
             "on the mosaic, not from a card that writes an OME-Zarr plate.",
     "cellpose": "the same LABELS overlay as `spot`, with the model instead of the Otsu recipe. "
-                "Same reason it has no card, and one more: a card offers 'run on the whole "
-                "plate', and this operator's result cannot be written (write_plate's "
-                "_validate_image accepts Z == 1 and a plane-op keeps z at full depth). It is "
+                "Same reason it has no card. (It is NOT because the result cannot be written -- "
+                "that was true while _validate_image accepted Z == 1 only, and IMA-277 lifted "
+                "it.) It is "
                 "reachable from the CLI (--projector cellpose), the operator dropdown and the "
                 "Detect-nuclei button, all of which read the registry.",
     "decon3d": "the volume-then-project variant of `decon`; the decon card's own panel is where "
@@ -5021,11 +5022,100 @@ def test_the_save_button_names_its_operator_instead_of_taking_the_first_card():
 
     Reordering the card table - a presentation edit - would then silently change which
     operator the save button RUNS. The operator is now named.
+
+    The button itself went with the exploration pane (2026-08-05); the constant and this rule
+    stay for the next one. See the note at `_SAVE_OPERATOR`.
     """
     assert V._SAVE_OPERATOR == "mip"
     assert V._SAVE_OPERATOR in V.runnable_operators()
     # and it must not be a positional accident: reordering the cards must not change it
     assert V._SAVE_OPERATOR in V._OPERATIONS_BY_KEY
+
+
+def test_a_cardless_operator_opens_a_panel_built_from_its_declaration(qapp, stub_detail,
+                                                                     squid_dataset):
+    """`_activate_operator` used to end at `if op is not None:` and do NOTHING for a key the card
+    table did not know: no tab, no error, no line in the readout. Silence was the bug.
+
+    `spot` is the case: a registered projector with four declared parameters, no card, and
+    therefore no way to reach any of them from the GUI. It now opens the generic panel, and the
+    panel's widgets ARE the declaration.
+    """
+    from squidmip._engine import projector_params
+    from squidmip._param_panel import GenericOperatorPanel
+
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    assert "spot" not in V._OPERATIONS_BY_KEY, "spot has gained a card; pick another cardless one"
+    win._activate_operator("spot")
+    panel = win._op_tabs.get("spot")
+    assert panel is not None, f"no panel opened; readout said {win._readout.text()!r}"
+    assert isinstance(panel, GenericOperatorPanel)
+    assert sorted(panel.widgets) == sorted(p.name for p in projector_params("spot"))
+    win.close()
+
+
+def test_a_key_that_has_no_panel_at_all_is_refused_by_name_never_silently(qapp, stub_detail,
+                                                                         squid_dataset):
+    """The other half: a key with neither a card nor a readable declaration must SAY SO. A click
+    that lands on nothing is indistinguishable from one that is still working."""
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    before = dict(win._op_tabs)
+    win._activate_operator("stitch_but_misspelled")
+    assert win._op_tabs == before, "a refused operator must not open a tab"
+    assert "stitch_but_misspelled" in win._readout.text()
+    win.close()
+
+
+def test_the_preview_path_carries_operator_kwargs_to_the_engine(qapp, squid_dataset, monkeypatch):
+    """MEASURED, not read: `_OperatorWorker`'s PREVIEW branch called `project_plate` WITHOUT
+    `operator_kwargs` while the save branch passed them and the class's own docstring said both
+    branches carried them. It was true when written -- a projector's parameters were baked in at
+    registration -- and stopped being true the moment `Operator.params`/`factory` landed.
+
+    The symptom is the worst shape there is: the panel says min_area_px=400, the console line
+    (`_action_label`) says min_area_px=400, and the pixels are the ones min_area_px=30 produces.
+    Verified end to end on a real acquisition (57 labels vs 44 at min_area_px 30/400); this is the
+    unit that keeps it from coming back.
+    """
+    import squidmip
+    from squidmip.reader import open_reader
+
+    root, _ = squid_dataset
+    reader = open_reader(str(root))
+    meta = reader.metadata
+    seen = {}
+
+    def fake_project_plate(_reader, **kw):
+        seen.update(kw)
+        return iter(())
+
+    monkeypatch.setattr(squidmip, "project_plate", fake_project_plate)
+    fov_index = {r: {"rc": (0, i), "idx": i, "well_id": r}
+                 for i, r in enumerate(meta["regions"])}
+    worker = V._OperatorWorker("spot", reader, meta, fov_index, "", regions=meta["regions"][:1],
+                               save=False, n_fovs=None,
+                               operator_kwargs={"min_area_px": 400})
+    worker.run()
+    assert seen.get("operator_kwargs") == {"min_area_px": 400}, (
+        "the preview branch dropped the panel's parameters on the floor: "
+        f"project_plate was called with {sorted(seen)}")
+
+
+def test_every_uncarded_runnable_operator_is_offered_in_the_declaration_submenu(qapp):
+    """A card is presentation and the engine is capability, and the gap between them used to be a
+    capability the GUI could not reach AT ALL. The submenu is built off `runnable_operators()`, so
+    an operator added by a plugin appears without an edit here."""
+    win = V.PlateWindow(None)
+    offered = {a.text() for a in win._declared_menu.actions()}
+    expected = {V.operator_label(k) for k in V.runnable_operators()
+                if k not in V._OPERATIONS_BY_KEY}
+    assert offered == expected
+    assert "spot" in offered and "cellpose" in offered
+    win.close()
 
 
 def test_operator_label_falls_back_to_the_key_for_a_cardless_operator():

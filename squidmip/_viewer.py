@@ -521,6 +521,24 @@ class PlateWindow(QMainWindow):
             act.triggered.connect(lambda _=False, k=op.key: self._activate_operator(k))
             proc_menu.addAction(act)
             self._op_actions[op.key] = act
+        # EVERY OTHER RUNNABLE OPERATOR, off the ENGINE registry. A card is presentation and the
+        # engine is capability (`_operations.runnable_operators`), and the gap between the two was
+        # a capability the GUI could not reach at all: `spot` and `cellpose` declare four
+        # parameters each and appeared in no menu, no card and no dropdown, so not one of those
+        # parameters was settable anywhere. These open a panel built from the declaration
+        # (`_param_panel.GenericOperatorPanel`), so this submenu needs no edit when an operator is
+        # added — including one discovered from another package through `squidmip._plugins`.
+        self._declared_menu = proc_menu.addMenu("&From their declaration")
+        self._declared_menu.setToolTip(
+            "Operators with no hand-written panel. Their controls are built from the params= they "
+            "declare.")
+        self._declared_menu.setEnabled(False)
+        for key in runnable_operators():
+            if key in _OPERATIONS_BY_KEY:
+                continue
+            act = QAction(operator_label(key), self)
+            act.triggered.connect(lambda _=False, k=key: self._activate_operator(k))
+            self._declared_menu.addAction(act)
 
         self._acq_name = ""           # acquisition folder name, shown as the Process-pane title
         self._current_well = None     # a PROPERTY over self._cursor — see below. Kept as an
@@ -1634,14 +1652,37 @@ class PlateWindow(QMainWindow):
             self._tell_requester(requester, "operator_done", action, float(elapsed))
 
     def _activate_operator(self, key: str):
-        """Operator card / menu clicked: open the operator's UI tab. Fully generic — driven by the
-        Operation template, so a new operator needs no edit here (just a registry entry + build_tab)."""
+        """Operator card / menu clicked: open the operator's UI tab.
+
+        Two sources, in this order, and NEITHER of them is silent:
+
+        1. a HAND-WRITTEN panel, named by the ``Operation`` template's ``build_tab``. These do more
+           than parameter entry (``StitcherPanel`` converts units and refuses a plane-op;
+           ``DeconQCPanel`` runs a QC loop and publishes a picture into pane 3), so they win.
+        2. otherwise a panel built FROM THE DECLARATION — :class:`squidmip._param_panel
+           .GenericOperatorPanel` over the operator's ``params``. This is how ``spot``, ``cellpose``
+           and an operator discovered from somebody else's package get real controls without an
+           edit here.
+
+        This method used to end at step 1 with a bare ``if op is not None:``, so a key the card
+        table did not know made the click land on NOTHING: no tab, no error, no line in the
+        readout. Silence was the bug. Every path below now opens a panel or says why it cannot.
+        """
         if self._reader is None or self._overview is None:
             self._readout.setText("open an acquisition first")
             return
         op = _OPERATIONS_BY_KEY.get(key)
         if op is not None:
             self._open_op_tab(op.key, op.label, getattr(self, op.build_tab))
+            return
+        from squidmip._param_panel import GenericOperatorPanel, panel_refusal
+
+        why = panel_refusal(key)
+        if why:
+            self._readout.setText(why)
+            return
+        self._open_op_tab(key, operator_label(key),
+                          lambda k=key: GenericOperatorPanel(self, k))
 
     def _op_tab_shell(self, title: str, blurb: str) -> tuple:
         """A standard operator-UI tab body: title + blurb, returns (widget, vbox) to fill."""
@@ -1729,10 +1770,15 @@ class PlateWindow(QMainWindow):
         """Generic PLANE-OP tab (IMA-223/224/225): preview on a subset, never save.
 
         A plane-op maps plane -> plane and does NOT consume z (IMA-210), so its output keeps the
-        z-stack at full depth -- and write_plate's _validate_image accepts Z == 1 only. So this
-        builder deliberately omits the "Run on the whole plate" / destination half of
-        _build_run_tab: there is nothing to write yet. The moment the OME-Zarr writer learns
-        Z > 1, this method can simply forward to _build_run_tab and disappear.
+        z-stack at full depth. This builder omits the "Run on the whole plate" / destination half
+        of _build_run_tab because write_plate's _validate_image accepted Z == 1 only, so there was
+        nothing to write -- and it said "the moment the OME-Zarr writer learns Z > 1, this method
+        can simply forward to _build_run_tab and disappear."
+
+        THAT MOMENT HAS PASSED. IMA-277 taught _validate_image that a plane-op's full-depth result
+        is a real result, and per-plane fusion taught stitch_region to fuse every z. So the save
+        path exists and only this card has not been given it: preview-only is now a GUI GAP TO
+        CLOSE, not a contract. Do not cite Z == 1 to justify it.
 
         The preview path itself is unchanged and needs no worker edit: _OperatorWorker's save=False
         branch streams project_plate, and _on_well already indexes image[0, :, 0] -- for a plane-op
@@ -2479,6 +2525,9 @@ class PlateWindow(QMainWindow):
             a.setEnabled(flag)
         for c in getattr(self, "_op_cards", {}).values():
             c.setEnabled(flag)
+        menu = getattr(self, "_declared_menu", None)
+        if menu is not None:                       # the uncarded operators gate on the same flag
+            menu.setEnabled(flag)
 
     def _make_detail_viewer(self):
         try:

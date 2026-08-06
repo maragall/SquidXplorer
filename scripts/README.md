@@ -2,6 +2,38 @@
 
 Utility scripts for the SquidMIP / SquidXplorer repo.
 
+## Building the desktop app (macOS)
+
+```sh
+conda create -n squidbuild python=3.11 && conda activate squidbuild
+pip install ".[gui]" pyinstaller
+python scripts/build_app.py --dataset /path/to/an/acquisition
+```
+
+`build_app.py` freezes `hcs-viewer.spec`, then **runs the frozen binary** against a real
+acquisition (`hcs_viewer_entry.py --selftest`) and prints a JSON verdict. Use `--dataset`; without
+it nothing is verified, and an unverified bundle is not evidence. Add `--clean` to delete the
+~660 MB of build scratch afterwards.
+
+Measured on an M-series Mac, 2026-08-05: **284 MB**, `arm64`, ~4.5 min. Largest components are
+PyQt6 (51 MB), tensorstore (47 MB), scipy (35 MB).
+
+Two things to know before you trust a build:
+
+* **`"ingested": false` does not necessarily mean the app is broken.** The selftest ANDs ingestion
+  with a compute check that runs `bgsub` **and `decon`**, and `decon` needs `petakit`, which is an
+  optional extra (`pip install ".[gui,decon]"`). With petakit absent the verdict is `false` while
+  every other field shows the plate read correctly. Read `compute.error` before concluding
+  anything.
+* **The selftest is headless and cannot see the renderer.** It exercises the reader and the
+  operators, not napari. A bundle can pass `--selftest` and still show
+  "napari viewer unavailable" in every view window — that exact bug shipped in the first build
+  and is why `napari` is now in the spec's `collect_all` list. **Open a view window before you
+  call a build good.**
+
+Signing: see [SIGNING.md](../SIGNING.md). The bundle is ad-hoc signed automatically and Gatekeeper
+still rejects it; fixing that needs an Apple Developer ID.
+
 ## Git sync watchdog
 
 `git-sync-watchdog.sh` keeps your local checkout in sync with the shared branch

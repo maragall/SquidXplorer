@@ -11,12 +11,22 @@ on:
   workflow_dispatch: {}
 
 jobs:
-  # ---- dependency-import smoke + tests (all 3 OSes) --------------------------------------------
+  # ---- dependency-import smoke + tests (the two OSes that gate the artifacts) ------------------
+  #
+  # WINDOWS WAS SPLIT OUT OF THIS MATRIX on 2026-08-05, into `smoke-windows` below. Read that job's
+  # comment before assuming this is a convenience: it is a deliberate, narrow, TEMPORARY decoupling
+  # of one platform's KNOWN defect from the other two platforms' artifacts, and it is not a way of
+  # making a red test green.
+  #
+  # `freeze` has `needs: smoke`, and a `needs:` waits on the WHOLE matrix job -- GitHub has no
+  # per-leg dependency. So while Windows was a leg of this matrix, one Windows failure skipped the
+  # freeze job for macOS and Linux too. That is why this workflow has never produced an artifact on
+  # ANY platform (run 31056664194: all three smoke legs `failure`, `freeze` `skipped`).
   smoke:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -44,11 +54,81 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
         run: python scripts/smoke_import.py
-      - name: Tests (headless)
+      # CHUNKED, not a bare `pytest`, as of 2026-08-05. This step had failed on ALL THREE OSes on
+      # every push, and `freeze` has `needs: smoke`, so NO BUILD ARTIFACT HAS EVER BEEN PRODUCED
+      # by this workflow -- verified on run 31056664194, where all three smoke legs are `failure`
+      # and `freeze` is `skipped`. macOS and ubuntu both died the same way:
+      #
+      #     Fatal Python error: Aborted        (exit 134)
+      #
+      # That is not a test failure. It is the GUI-test resource-accumulation crash that
+      # tools/run_suite_chunked.py exists for: finished QThread workers pile up and around ~150
+      # GUI tests' worth exhausts the process. CI ran ~2500 tests in ONE process, which is far
+      # past the measured cliff, so the abort was guaranteed. `gc.disable()` in conftest (31798d9)
+      # reduces the pressure but cannot survive a single process that large.
+      #
+      # The runner puts each ~100-test chunk in its own process and -- the part that matters for a
+      # gate -- distinguishes a chunk that CRASHED MID-RUN (tests never executed; INCOMPLETE, hard
+      # fail) from one that finished every test and then crashed in Qt teardown (benign, reported).
+      # Its exit code is already correct for CI use: `return 0 if (total_f == 0 and not incomplete)
+      # else 1` (tools/run_suite_chunked.py:223), so a crashed-mid-run chunk cannot exit 0. It was
+      # read and confirmed rather than assumed, because a CI step that always exits 0 is worse
+      # than no CI step.
+      #
+      # Local baseline on macOS with this exact invocation: 2509 passed, 0 failed, 36 skipped,
+      # SUITE INCOMPLETE: none.
+      #
+      # QT_QPA_PLATFORM and PYTEST_DISABLE_PLUGIN_AUTOLOAD are set by the runner itself for every
+      # chunk (_base_env), and are kept here so the environment is visible at the call site.
+      - name: Tests (headless, chunked)
         env:
           QT_QPA_PLATFORM: offscreen
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
-        run: pytest -q --ignore=tests/test_performance.py
+        run: python tools/run_suite_chunked.py
+
+  # ---- Windows: runs, reports, does NOT gate the artifacts -------------------------------------
+  #
+  # WHY THIS IS A SEPARATE JOB AND NOT A MATRIX LEG. Windows fails this suite for a reason that is
+  # documented, reproducible only on Windows, and NOT fixed here:
+  #
+  #   an access violation in squidmip/_montage.py:302 `_composite_band`
+  #   (`gray[ch] = table[plane.reshape(-1)]`), reached from :262 inside concurrent.futures
+  #   worker threads.
+  #
+  # The AI-docs NOTES entry for it records that the "LUT bounds check" hypothesis looks like a red
+  # herring -- the LUT is sized to the full domain and numpy fancy-indexing bounds-checks anyway --
+  # and that the likelier cause is `store` being memory-mapped by `_platecache` and read
+  # concurrently by the band pool, since POSIX allows unlinking a mapped file and Windows does not.
+  # It ends: "Needs Windows to reproduce; do not 'fix' it from a Mac on hypothesis (b) alone."
+  # That instruction is respected here. Nothing in the product was changed for Windows.
+  #
+  # So this job exists to keep the failure VISIBLE (it goes red, on every push, with the real logs)
+  # while not holding the macOS and Linux artifacts hostage to it. It is NOT `continue-on-error`
+  # and it is NOT excluded: a red X on `smoke-windows` is the honest state of Windows today.
+  #
+  # DELETE THIS JOB and put windows-latest back in the `smoke` matrix the moment the montage crash
+  # is fixed on a real Windows machine. Until then, treat the Windows artifact from `freeze` as
+  # UNVALIDATED -- it builds, and no test has confirmed it runs.
+  smoke-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install (with GUI extra)
+        run: |
+          python -m pip install --upgrade pip
+          pip install ".[gui,test]"
+      - name: Dependency-import smoke (headless)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python scripts/smoke_import.py
+      - name: Tests (headless, chunked)
+        env:
+          QT_QPA_PLATFORM: offscreen
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+        run: python tools/run_suite_chunked.py
 
   # ---- freeze the GUI per OS via PyInstaller ---------------------------------------------------
   freeze:

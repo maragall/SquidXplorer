@@ -121,10 +121,10 @@ from squidmip.reader import (
 # the CLI's ``--projector`` validation and the viewer's projector selector, which both read that
 # list rather than a hardcoded one.
 #
-# KNOWN LIMIT (documented in _engine's docstring): these are plane-ops, so their output keeps z
-# at FULL depth, and ``_output._validate_image`` accepts only Z == 1. A plane-op therefore
-# streams correctly out of ``project_plate`` but fails LOUD at ``write_plate``. That is by
-# design for now — loud, not silently wrong — and it lifts the moment the writer learns Z > 1.
+# These are plane-ops, so their output keeps z at FULL depth. That used to be a KNOWN LIMIT:
+# ``_output._validate_image`` accepted only Z == 1, so a plane-op streamed correctly out of
+# ``project_plate`` and then failed LOUD at ``write_plate``. IMA-277 lifted it — ``Nz > 1`` is
+# written, and a plane-op now has a persistence path end to end.
 from squidmip import _background, _decon, _flatfield, _spots  # noqa: E402,F401  (registration side effect)
 from squidmip._background import BackgroundParams, bgsub_op, subtract_background
 from squidmip._decon import (

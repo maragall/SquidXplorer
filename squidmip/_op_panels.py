@@ -1,4 +1,18 @@
-"""The two operator interfaces beside the plate: the stitcher's controls and decon's QC loop.
+"""The two HAND-WRITTEN operator interfaces: the stitcher's controls and decon's QC loop.
+
+THESE TWO, AND ONLY THESE TWO (2026-08-05). Every other operator's panel is BUILT FROM ITS
+``params`` DECLARATION by :mod:`squidmip._param_panel`, which asks the registry what an operator
+takes and maps each :class:`~squidmip._engine.Param` to a widget by the type of its default. This
+module used to be the only source of an operator panel, and the cost was measured: an operator
+declaring ``params`` got zero widgets and ran silently at its defaults, so ``spot`` and
+``cellpose`` declared four parameters each and not one was reachable from any panel.
+
+The two below stay hand-written because they do things a parameter FORM cannot, and deleting them
+to gain uniformity would delete real behaviour: :class:`StitcherPanel` converts a percentage to a
+fraction, greys out the knobs that provably do nothing with registration off, and refuses a
+labels operator with a sentence before the run starts; :class:`DeconQCPanel` runs an iterative
+semi-convergence loop and publishes a picture as a tab of its own. ``_viewer._activate_operator`` prefers a
+hand-written panel and falls back to the generic one, so adding an operator needs no edit here.
 
 Julio: "Right now I'm blocked in testing the post-processing because Stitcher doesn't have
 that maragall/Stitcher interface embedded in our top-left subpane. The deconvolution is not
@@ -105,24 +119,60 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
-from squidmip._stitch import _ABS_THRESH, _BLEND_PX, _REL_THRESH
+#: The feather-ramp FALLBACK. The one number here with no signature default behind it:
+#: ``stitch_region(blend_px=None)`` means "measure this acquisition's real overlap", and this is
+#: what the pipeline falls back to when nothing overlaps. It is the spin's starting value, with the
+#: "Auto" box beside it selecting the other mode, so the panel offers both of the pipeline's
+#: modes rather than inventing a third number.
+from squidmip._stitch import _BLEND_PX
+
+
+def _stitch_default(name: str):
+    """One default, read off ``stitch_region``'s OWN SIGNATURE rather than mirrored here.
+
+    Why this is not simply ``from squidmip._stitch import _REL_THRESH``, which is what it was:
+    that spelling made the panel a SECOND copy of the pipeline's numbers, kept in step by hand and
+    reaching through the module's privacy to do it. ``_ABS_THRESH`` and ``_REL_THRESH`` are not the
+    contract -- they are how the contract's defaults happen to be spelled inside ``_stitch``, and
+    renaming one silently left the panel launching a different run from the pipeline it claimed to
+    reproduce.
+
+    Why not from a DECLARATION, which is where a projector's parameters come from
+    (``squidmip._param_panel``): ``stitch`` is a REGION operator, and ``add_region_operator``
+    carries no ``params=`` at all -- one callable and a ``requires`` tuple, nothing more. There is
+    no ``Param`` record for this panel to read. The signature is the closest thing to a
+    declaration that this table has, and reading it is what removes the hand-kept copy. If the
+    region table ever grows ``params=``, this function is the one place that changes.
+    """
+    from inspect import signature
+
+    from squidmip._stitch import stitch_region
+
+    return signature(stitch_region).parameters[name].default
+
 
 #: The panel's starting position. Every value here is the pipeline's own default, so an
 #: untouched panel launches byte-for-byte what ``stitch_region`` does unaided - a panel with
 #: opinions of its own would be a second set of defaults to keep in step.
+#:
+#: ``blend_px`` is the ONE deliberate divergence and it is spelled out rather than hidden:
+#: ``stitch_region``'s own default is ``None``, which means "measure this acquisition's real
+#: overlap", and the panel starts at the fixed fallback with an "Auto" box beside it. Both
+#: numbers reach ``stitch_region`` through ``auto_blend``, so nothing here is a second default --
+#: it is which of the pipeline's two modes the box starts in.
 STITCH_DEFAULTS = {
-    "register": True,
-    "registration_channel": None,
-    "channels": None,
+    "register": _stitch_default("register"),
+    "registration_channel": _stitch_default("registration_channel"),
+    "channels": _stitch_default("channels"),
     "blend_px": _BLEND_PX,
-    "outlier_rel_pct": int(round(_REL_THRESH * 100)),
-    "outlier_abs_px": int(round(_ABS_THRESH)),
+    "outlier_rel_pct": int(round(_stitch_default("rel_thresh") * 100)),
+    "outlier_abs_px": int(round(_stitch_default("abs_thresh"))),
     "auto_blend": False,
     # ON (Julio, 2026-08-03: "Correct lens distort should be defaulted to on"). Same value as
     # stitch_region's own resolved default, which is what keeps this dict honest: an untouched
     # panel still launches byte-for-byte what stitch_region does unaided.
     "correct_distortion": True,
-    "registration_t": 0,
+    "registration_t": _stitch_default("registration_t"),
 }
 
 
@@ -189,28 +239,35 @@ def stitch_operator_kwargs(*, register, registration_channel, channels, blend_px
     return kwargs
 
 
-def plane_op_refusal(projector: str) -> Optional[str]:
+def stitch_refusal(projector: str) -> Optional[str]:
     """The sentence explaining why *projector* cannot be stitched, or ``None`` if it can.
 
-    ``stitch_region`` already refuses a plane-op (IMA-277: fusing one would keep z-plane 0
-    and silently discard the rest of the stack). This asks the SAME registry the same
-    question before the run starts, because discovering it at the end of a multi-minute
-    fuse is a bad way to learn it. It is a pre-check, not a second guard - the operator's
-    own refusal stays exactly where it is.
+    This MIRRORS the guard ``stitch_region`` actually has, asked of the same registry before
+    the run starts, because discovering it at the end of a multi-minute fuse is a bad way to
+    learn it. It is a pre-check, not a second guard - the operator's own refusal stays
+    exactly where it is.
+
+    It used to refuse a PLANE-OP, and that was right while the pipeline fused with z pinned
+    to 1. IMA-277's per-plane fusion removed that refusal from ``stitch_region`` (see its
+    "PER-PLANE FUSION" section: the geometry is solved once and every plane is fused from the
+    same origins), so a plane-op stitches and this pre-check was blocking, in the GUI only,
+    something the engine had learned to do. What ``stitch_region`` still refuses is LABELS,
+    and only labels: feathering blends overlapping tiles by a weighted average, and the mean
+    of label 12 and label 37 is label 24, an object that does not exist.
     """
-    from squidmip._stitch import _resolve_projector
+    from squidmip._stitch import LABELS, _resolve_projector
 
     try:
         op = _resolve_projector(projector)
     except Exception as exc:                       # unknown name -> name it, don't crash
         return (f"{projector!r} is not a projector this build knows: {exc}")
-    if op.consumes:
+    if op.produces != LABELS:
         return None
     return (
-        f"{projector!r} is a plane-op: it maps plane -> plane and keeps the z-stack at full "
-        f"depth. Stitching does not fuse per z-plane yet, so it would keep z-plane 0 and "
-        f"silently discard the rest of the stack. Reduce z first (mip), or pick a "
-        f"z-reducing operator such as decon3d.")
+        f"{projector!r} produces label images (integer object ids), and fusion blends "
+        f"overlapping tiles by a weighted average - the mean of two label ids is a third, "
+        f"nonexistent object, and per-FOV ids collide across every seam. Segment per FOV "
+        f"instead, or stitch an intensity operator such as mip or decon.")
 
 
 # ---------------------------------------------------------------------------------------
@@ -226,7 +283,7 @@ def _qss():
     """The window's OWN button/combo/checkbox styles, imported lazily.
 
     Not a second dark theme: `_viewer` already owns these three strings and every other
-    control in pane 1 is drawn with them. Screenshotting the first build is what caught
+    control in the operator panel is drawn with them. Screenshotting the first build is what caught
     this -- unstyled QPushButtons render as flat text on this background and do not read as
     clickable at all. Lazy so this module stays importable without pulling in the 6k-line
     viewer, and so a Qt-free test of the policy functions above costs nothing.
@@ -237,7 +294,7 @@ def _qss():
 
 
 def _apply_qss(root: QWidget) -> None:
-    """Style every control in *root* the way the rest of pane 1 is styled."""
+    """Style every control in *root* the way the rest of the operator panel is styled."""
     btn, combo, check = _qss()
     for w in root.findChildren(QPushButton):
         w.setStyleSheet(btn)
@@ -296,7 +353,7 @@ class _Panel(QWidget):
 
         # A SCROLL AREA, because these are tall control stacks in a narrow pane. The
         # stitcher's alone is scope + z-reduction + registration + fusion + channels + run,
-        # and pane 1 also has to hold the plate view. Without this the bottom controls are
+        # and the window also has to hold the plate view. Without this the bottom controls are
         # simply unreachable at ordinary window heights -- and "the canvas squeezed to a
         # 140 px sliver" is the precedent for trusting a screenshot over a layout argument.
         outer = QVBoxLayout(self)
@@ -346,7 +403,7 @@ class StitcherPanel(_Panel):
         names = _channel_names(host)
 
         # SCOPE IS NOT HERE, DELIBERATELY (Defect 2). It belongs to the RUN, not to the
-        # operator, and pane 1's "run on" selector owns it. This panel used to carry a second
+        # operator, and the window's "run on" selector owns it. This panel used to carry a second
         # scope combo, and it was wrong in both of its states:
         #
         #   * it was built ONCE and cached by _open_op_tab, from a selection read at build
@@ -520,7 +577,7 @@ class StitcherPanel(_Panel):
             w.setEnabled(bool(on))
 
     def _check_projector(self, name: str) -> None:
-        why = plane_op_refusal(name)
+        why = stitch_refusal(name)
         self.run_btn.setEnabled(why is None)
         self.say("" if why is None else why)
 
@@ -545,7 +602,7 @@ class StitcherPanel(_Panel):
         )
 
     def _run(self) -> None:
-        why = plane_op_refusal(self.projector_combo.currentText())
+        why = stitch_refusal(self.projector_combo.currentText())
         if why is not None:
             self.say(why)
             return
