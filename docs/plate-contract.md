@@ -178,13 +178,57 @@ load-bearing and both are inherited rather than written:
   (`RegionViewer._load_gen`); a result from an older one is ignored on arrival. The region check
   cannot do this job, because a timepoint change keeps the region and differs only in `t`.
 
-**The plate does NOT play, and that is a decision.** `_PreviewWorker`'s persistent cell cache is
-keyed `(token, region)` with no timepoint (`_platecache.PlateCellCache.get/put`), so a plate
-animating the time axis would serve timepoint 0's cells under a moving label — the same lie the
-loupe's well-keyed cache told before it was re-keyed to `(well, timepoint)`. Re-keying the cell
-cache is the price of a plate play button, and until somebody pays it the plate's bar is built with
-`playback=False` and has no play button to press. `TimePointBar.play()` on it raises rather than
-no-ops.
+**The plate's own pixels follow its bar, 2026-08-05.** This section used to record the plate as the
+one consumer that did not, and the reason was two failures that had to be fixed together:
+
+* `_PreviewWorker` never passed a `t` to `reader.read`, so the plate previewed frame 0 whatever
+  its bar said — the same "a signature is not a call" shape as the loupe, one axis over.
+* its persistent cell cache was keyed `(token, region)` with no timepoint, so threading `t`
+  through the read ALONE would have replayed timepoint 0's cells under a label saying timepoint 1.
+  Worse than the bug, which is why the fix is one change and not two.
+
+The cell is now identified by `(token, t, region)` end to end — RAM key, file name
+(`t<t>-<region>-<sha>.npz`) and packed page (`plate-cells-t<t>.npy`, whose sidecar records its own
+`t` and is checked on read). The timepoint is in the KEY and deliberately not in the TOKEN: the
+token directory is what `prune_stale` deletes, so a timepoint in it would delete t=0's cells the
+moment you stepped to t=1, and stepping back would re-read the plate. `_start_preview` is the one
+place a preview is built and it reads `PlateWindow.time_point`, so the first ingest, the
+exploration-tab re-scope and `_return_to_raw` (which is what a timepoint change calls) cannot
+disagree.
+
+`FORMAT_VERSION` went 1 -> 2 with that change. A v1 cell carries no timepoint; it was written by a
+producer that always read frame 0, but the record does not SAY so, and a cell whose timepoint is
+unknown must never be served under one that is. The version is hashed into the token, so every v1
+entry is unreachable immediately and deleted by `prune_stale` on the first publish after.
+
+MEASURED on `sim_5d_2x2_t3` (4 regions x 4 FOVs x 2 channels, 256 px), stepping t=0 -> t=1 -> t=0
+with `tools/measure_plate_t_steps.py`, median of 9, a cold cell cache per repetition, both columns
+run back to back:
+
+| step | before | after |
+| --- | --- | --- |
+| t=0, first visit | 13.9 ms, 4 wells read | 13.6 ms, 4 wells read |
+| t=1 | **6.4 ms, 4 cache hits — and the WRONG pixels** | 13.9 ms, 4 wells read |
+| t=0 again | 5.3 ms, 4 cache hits | 7.0 ms, 4 cache hits |
+| t=0 and t=1 differ | **False** | True |
+
+The before column is the whole bug in one row: the second step was the FASTEST of the three,
+because it answered t=1 with frame 0's cells. "A full plate re-read per tick" turned out to be true
+only of an uncached plate (`SQUIDMIP_PLATE_CACHE=0`); warm, every tick after the first was a replay
+of the first frame. After, a NEW timepoint costs a plate read, which is honest work, and a
+REVISITED one is a cache hit — the property a play button would need.
+
+**The plate still does not play, and that is now a product decision rather than a blocker.** This
+document used to say re-keying the cell cache "is the price of a plate play button". The price is
+paid; nobody has asked for the button, so `TimePointBar(playback=False)` stands on the plate and
+`play()` on it raises rather than no-ops. Adding it is a widget flag and a frame gate, not a
+correctness problem.
+
+**Not covered by this change: the deep-zoom coarse rungs.** `PlateOverview.set_tile_source` builds
+its `CompositePlateSource` with a `PlateCellCache` at the default `time_point=0` and never passes
+`t` to the source either, so a coarse tile is frame 0's regardless of the bar. That is unchanged
+behaviour, not a regression, and it is a different seam (the source is armed once at ingest and
+seeds lazily). It is named here so it is a known gap rather than a discovery.
 
 **The shape of the bug that was here, worth remembering.** The plate overview and the loupe read
 `arr[0, :, 0]` unconditionally, so a 40-timepoint plate looked exactly like a 1-timepoint plate.

@@ -137,10 +137,12 @@ def test_a_one_timepoint_acquisition_refuses_to_play_out_loud(make_bar):
 def test_the_plate_s_bar_has_no_playback_and_says_why(make_bar):
     """The plate does NOT animate time, and the refusal names the reason.
 
-    `_PreviewWorker`'s persistent cell cache is keyed (token, region) with no timepoint, so a
-    plate that played would show timepoint 0's pixels under a moving label — worse than the bug
-    it would look like it was fixing. There is therefore no play button, and calling `play()`
-    anyway is a PROGRAMMING error that raises rather than a user gesture that no-ops.
+    That reason used to be correctness: the cell cache was keyed (token, region) with no
+    timepoint, so a plate that played would have shown timepoint 0's pixels under a moving label.
+    Fixed 2026-08-05 — the key is (token, t, region) and the preview reads the bar's timepoint —
+    so what remains is a product decision: nobody asked the plate to animate. Either way there is
+    no play button, and calling `play()` anyway is a PROGRAMMING error that raises rather than a
+    user gesture that no-ops.
     """
     bar = make_bar(playback=False)
     bar.set_count(3)

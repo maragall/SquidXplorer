@@ -54,12 +54,16 @@ that has not changed. What differs is which SKIN the one class wears:
 * ``playback=True`` (a region window) — napari's dims widget IS the slider, so the position has
   exactly ONE owner (napari's ``Dims``) rather than a QSlider and a Dims hand-synced.
 
-The plate does NOT get playback, and that is a refusal with a reason rather than an omission:
-``_PreviewWorker``'s persistent cell cache is keyed ``(token, region)`` with no timepoint
-(`_platecache.py`), so a plate that animated the time axis would serve timepoint 0's pixels
-labelled timepoint 1 — worse than the bug it would look like it was fixing. Re-keying that cache is
-the price of a plate play button and nobody has paid it, so there is no button to press. See
-`docs/plate-contract.md`.
+The plate does NOT get playback. The reason USED to be a correctness blocker: ``_PreviewWorker``
+read frame 0 whatever the bar said, and its persistent cell cache was keyed ``(token, region)``
+with no timepoint, so an animated plate would have served timepoint 0's pixels labelled timepoint
+1. Both were fixed on 2026-08-05 — the cell is keyed ``(token, t, region)`` and the preview reads
+the bar's timepoint (`_platecache.py`, `docs/plate-contract.md`) — and a revisited timepoint is now
+a cache hit rather than a re-read, which is exactly what playback would lean on.
+
+So what is left is a PRODUCT decision, not a defect: nobody has asked the plate to animate, and a
+button that exists because it became possible is not a reason to ship one. ``playback=False``
+stands, and ``play()`` on the plate's bar still raises rather than no-ops.
 """
 from __future__ import annotations
 

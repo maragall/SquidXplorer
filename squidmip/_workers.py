@@ -997,13 +997,21 @@ class _PreviewWorker(QThread):
     #                                                 half-grey, indistinguishable from "loading".
 
     def __init__(self, reader, meta, fov_index: dict, order: list, mosaic: bool = True,
-                 cache=_CACHE_AUTO):
+                 cache=_CACHE_AUTO, t: int = 0):
         super().__init__()
         self._reader, self._meta = reader, meta
         self._fov_index, self._order = fov_index, order
         self._channels = [c["name"] for c in meta["channels"]]
         self._dtype = np.dtype(meta["dtype"])
         self._mosaic = bool(mosaic)
+        #: WHICH TIMEPOINT this preview is of, the same argument ``_MosaicWorker`` takes for the
+        #: same reason. ``load`` called ``reader.read(...)`` with no ``t`` and the signature
+        #: defaults it to 0, so the plate showed frame 0 whatever its bar said -- and unlike the
+        #: region window, the plate could not even be MADE to re-read, because its cells were
+        #: cached under a key with no timepoint in it. Both halves are needed: threading ``t``
+        #: through a cache keyed without it would have served t=0's pixels under a t=1 label,
+        #: which is worse than not moving at all. See ``_platecache.PlateCellCache``.
+        self._t = max(0, int(t))
         self._stop = threading.Event()
         # The persisted plate cells (_platecache). A sentinel default rather than None so a caller
         # can say "no cache" explicitly and mean it, which is what the uncached-path tests need.
@@ -1012,8 +1020,18 @@ class _PreviewWorker(QThread):
         # care whether caching is available.
         from squidmip._platecache import PlateCellCache
 
-        self._cache = (PlateCellCache.for_reader(reader, meta, cell_px=_CELL)
+        self._cache = (PlateCellCache.for_reader(reader, meta, cell_px=_CELL,
+                                                 time_point=self._t)
                        if cache is _CACHE_AUTO else cache)
+        # A caller that hands in its own cache must hand in one for the timepoint this pass reads.
+        # Reconciling them silently (taking t from the cache, or overwriting the cache's t) is how
+        # a cell read at one timepoint gets published under another, and it would be invisible:
+        # both objects would look correct on their own. Loud, at construction, before a read.
+        if (self._cache is not None
+                and getattr(self._cache, "time_point", self._t) != self._t):
+            raise ValueError(
+                f"_PreviewWorker(t={self._t}) was handed a cache for timepoint "
+                f"{self._cache.time_point}: its cells would be published under the wrong frame.")
         self._pending: dict = {}      # region -> the cell being accumulated for the cache
         self.cache_hits = 0           # regions served from the cache, for the status line and tests
         self.cache_reads = 0          # regions actually read from the acquisition
@@ -1089,8 +1107,8 @@ class _PreviewWorker(QThread):
             self.cache_hits += 1
         self.cache_reads = len(by_region) - self.cache_hits
         # Said out loud, because a cache nobody can see is indistinguishable from a fast disk.
-        log.info("plate preview: %d of %d wells served from the cell cache (%s)",
-                 self.cache_hits, len(by_region), self._cache)
+        log.info("plate preview at t=%d: %d of %d wells served from the cell cache (%s)",
+                 self._t, self.cache_hits, len(by_region), self._cache)
         return remaining
 
     def _remember(self, region: str, box, tile: np.ndarray, expected: int) -> None:
@@ -1166,7 +1184,11 @@ class _PreviewWorker(QThread):
                 region, fov, box = item
                 h, w = (_CELL, _CELL) if box is None else (box[2], box[3])
                 fit = _fit_cell if box is None else (lambda a: _fit_box(a, h, w))
-                return region, box, [fit(self._reader.read(region, fov, ch, z_mid)
+                # `t=self._t`, not the signature's default 0: this is the line that made the plate
+                # ignore its own timepoint bar. `_MosaicWorker` takes the same argument for the
+                # same reason, and `docs/plate-contract.md` records why "the signature takes a t"
+                # is not the same claim as "a t is passed".
+                return region, box, [fit(self._reader.read(region, fov, ch, z_mid, t=self._t)
                                          .astype(np.float32)) for ch in self._channels]
 
             with ThreadPoolExecutor(max_workers=_VIEWER_WORKERS) as ex:
