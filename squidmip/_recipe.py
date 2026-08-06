@@ -306,10 +306,11 @@ class RecipeChain:
 class Entry:
     """One cache entry, with everything needed to say what it is WITHOUT a second lookup.
 
-    Task 3's plate census walks these. It needs the ``chain`` OBJECT and not just the hash the key
-    carries, because the legend it builds must read ``mip + decon sigma 2.0`` and never a hash, and
-    a hash cannot be un-hashed back into recipes. So the chain is kept beside the result rather
-    than only folded into the key.
+    The ``chain`` OBJECT is kept beside the result, not just folded into the key, because a hash
+    cannot be un-hashed back into recipes and anything reporting what produced a cell must read
+    ``flatfield + decon + mip`` rather than ``a3f9c1``. :func:`cached_operator_results` is the
+    reader that depends on it today; it is also what would let a chain be re-RUN from a cache entry,
+    now that :meth:`RecipeChain.label` is an expression the engine accepts.
     """
 
     scope: str
@@ -379,9 +380,9 @@ class ResultCache:
         return self._k(scope, chain, version) in self._d
 
     def entries(self) -> "list[Entry]":
-        """Every entry, least-recently-used first. What a plate census reads.
+        """Every entry, least-recently-used first. What :func:`cached_operator_results` reads.
 
-        A snapshot list rather than a live view: a census that walked the OrderedDict directly
+        A snapshot list rather than a live view: a caller that walked the OrderedDict directly
         would see it reorder under it on the first ``get``, since ``get`` is what marks an entry
         most-recently-used.
         """
