@@ -149,10 +149,29 @@ class BrickedVolume:
                  window_px: Sequence[int], *, channels: Sequence[str], scale: Sequence[float],
                  origin_um: Sequence[float], limit: int, budget_bytes: int,
                  contrast_by: Optional[dict] = None, colormap_by: Optional[dict] = None,
+                 op: str = "raw",
                  say: Optional[Callable[[str], None]] = None, parent: Any = None,
                  read: Optional[Callable] = None) -> None:
         self._viewer = viewer
         self._meta = meta
+        #: WHICH operator's volume this is, held so every brick can DECLARE it.
+        #:
+        #: Julio, driving the real build 2026-08-05: "in 3d rendering, when all layers are off
+        #: there is still a rendered image, unlike 2d that it's a black canvas ... there is still
+        #: a layer that looks beautiful but that I can't control so then other controlled layers
+        #: are overlayed".
+        #:
+        #: Root cause: every 2-D mosaic layer declares `{META_KEY: {"op", "channel"}}` and the
+        #: layer tree recovers identity from it through `key_of`. A layer WITHOUT it is a FOREIGN
+        #: layer, which the tree "deliberately tolerates and ignores". Bricks carried no metadata
+        #: at all, so the entire volume was foreign: no group, no checkbox, nothing to switch off
+        #: -- while the 2-D layers `open()` had force-hidden kept their checkboxes and could be
+        #: switched back ON TOP of it. Stamping the bricks puts the volume inside the same
+        #: visibility model as everything else, and all bricks of one channel collapse into ONE
+        #: group row. That is the right control surface rather than a compromise: the bricks ARE
+        #: one volume, so a per-brick toggle would only be a way to punch holes in it by hand --
+        #: the same reason `_link_contrast` below refuses to give each brick its own contrast.
+        self._op = str(op)
         self._channels = list(channels)
         self._scale = tuple(float(v) for v in scale)          # (dz, py, px) micrometres
         self._origin_um = tuple(float(v) for v in origin_um)  # (z, y, x) of the ROI's corner
@@ -184,6 +203,10 @@ class BrickedVolume:
         self._epoch = 0
         self._step = 1
         self._hidden: list = []          # pane layers we hid, to restore on close
+        #: (layer, identity) for every pane layer whose `(op, channel)` we took while 3D is up, so
+        #: the tree cannot lay a flat, coarser mosaic across the volume. Restored in `close`. See
+        #: the reasoning in `open`.
+        self._surrendered: list = []
         self._closed = False
         self._propagating = False
         self._t_open: Optional[float] = None
@@ -209,10 +232,39 @@ class BrickedVolume:
         return total
 
     def open(self) -> None:
-        """Hide the 2D mosaic, flip THIS pane to 3D, and start loading what the camera can see."""
+        """Take the scene over: the 2D mosaic stops being a layer the tree can reach, and stays
+        that way until :meth:`close` gives it back.
+
+        HIDING IS NOT ENOUGH, measured. Julio, 2026-08-05: *"When I turn on raw it overlays some
+        probably downsampled copy of raw over an already full res version of raw that can't be
+        controlled by the napari layer."* Both halves of that sentence are this method's doing:
+
+        * the "full res version that can't be controlled" was the volume, before the bricks
+          declared an identity (see ``self._op``);
+        * the "downsampled copy" is the 2D mosaic layer -- a multiscale pyramid whose level 0 is
+          capped to ``_MAX_FUSED_PX``, so it genuinely is coarser than the bricks. This method set
+          it ``visible = False`` but left it in the layer TREE with a live checkbox, so one click
+          laid a flat, coarser plane across the volume.
+
+        Stamping the bricks alone would have made that WORSE for raw, not better: brick and mosaic
+        would then share one ``(op, channel)`` key, so the single group checkbox would light both.
+        The identity has to be EXCLUSIVE while 3D is up. So the 2D layers surrender theirs here and
+        get it back in ``close``: ``key_of`` reads ``layer.metadata[META_KEY]``, and a layer without
+        it is a FOREIGN layer the tree ignores. The tree then shows exactly what the scene contains
+        -- one group per channel, driving the bricks -- which is also what makes the channel
+        controls work in 3D at all.
+
+        Every layer of ours is stripped, not only the visible ones: an already-hidden mosaic layer
+        is just as clickable in the tree as a shown one.
+        """
         self._t_open = time.perf_counter()
+        from squidmip._napari_view import META_KEY
+
         for ly in list(self._viewer.layers):
             try:
+                meta = getattr(ly, "metadata", None)
+                if isinstance(meta, dict) and META_KEY in meta:
+                    self._surrendered.append((ly, meta.pop(META_KEY)))
                 if ly.visible:
                     self._hidden.append(ly)
                     ly.visible = False
@@ -264,6 +316,19 @@ class BrickedVolume:
             self._viewer.dims.ndisplay = 2
         except Exception:                               # noqa: BLE001
             pass
+        # Identity BEFORE visibility: a layer made visible while still foreign would paint for one
+        # repaint with no row in the tree to switch it off -- briefly the very defect `open` exists
+        # to prevent.
+        from squidmip._napari_view import META_KEY
+
+        for ly, identity in self._surrendered:
+            try:
+                meta = getattr(ly, "metadata", None)
+                if isinstance(meta, dict):
+                    meta[META_KEY] = identity
+            except Exception:                           # noqa: BLE001 - the layer may be gone
+                pass
+        self._surrendered = []
         for ly in self._hidden:
             try:
                 ly.visible = True
@@ -422,9 +487,16 @@ class BrickedVolume:
 
     def _add_layer(self, key, channel: str, arr, scale, translate) -> None:
         from squidmip._napari3d import pin_max_compositing
+        from squidmip._napari_view import MosaicKey
 
         kwargs = {
             "name": f"{channel} ▪ {key[1][0]},{key[1][1]}",
+            # IDENTITY, not decoration. `key_of` reads exactly this to decide whether a layer
+            # belongs to the app's layer tree; without it a brick is a foreign layer with no
+            # checkbox, which is how a 3-D volume came to be unswitchable-off. Every brick of a
+            # channel carries the SAME (op, channel), so the tree groups them into one row and one
+            # toggle drives the whole volume. See `self._op`.
+            "metadata": MosaicKey(self._op, channel).as_metadata(),
             "scale": scale,
             "translate": translate,
             "rendering": "mip",

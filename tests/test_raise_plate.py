@@ -180,3 +180,111 @@ def test_clicking_it_raises_the_plate(qapp, manager):
 
     assert plate.raised == before + 1, "the button did not reach the plate"
     assert plate.activated >= 1
+
+
+# --------------------------------------------------- ⚙ controls: the plate AND the operator tabs
+#
+# Julio, 2026-08-05, correcting the first cut: "the controls is actually for the 'operators for
+# this window'. And it is not bringing up the plateview window."
+#
+# Both corrections were one mistake. v1 asked `visible_op()` -- ONE operator, the lit one -- and
+# made RAISING THE PLATE CONDITIONAL on finding it, so a window showing raw got nothing at all: no
+# tab, and not even the trip back that `▣ plate` gives unconditionally.
+#
+# The rule these pin, in order of importance:
+#   1. the plate comes forward ALWAYS, whatever is loaded;
+#   2. every operator the window HOLDS gets a tab, plural, off the layers' own declared identity;
+#   3. a window with no results still raises, and says what is missing.
+
+
+def _controls_button(win) -> QPushButton:
+    found = [b for b in win.findChildren(QPushButton) if "controls" in b.text()]
+    assert len(found) == 1, f"expected one controls button, found {[b.text() for b in found]}"
+    return found[0]
+
+
+def _holds(win, ops):
+    """Make the window report *ops* as the processing layers it holds, the way the pane would."""
+    class _Mosaic:
+        def ops(self):
+            return ["raw", *ops]          # raw is always there and must never be offered as one
+        def visible_op(self):
+            return ops[0] if ops else "raw"
+    win._pane.mosaic = _Mosaic()
+
+
+def _wired(manager):
+    plate = manager._test_plate
+    plate.activated_ops = []
+    plate._activate_operator = plate.activated_ops.append
+    return plate
+
+
+def test_every_child_window_carries_the_controls_button(qapp, manager):
+    win = manager.open([REGIONS[0]])
+    assert win is not None
+    assert _controls_button(win).text() == "⚙ controls"
+
+
+def test_it_opens_a_tab_for_EVERY_operator_this_window_holds(qapp, manager):
+    """Plural. A window with decon and bgsub run on it must offer both, not just the lit one."""
+    win = manager.open([REGIONS[0]])
+    plate = _wired(manager)
+    _holds(win, ["decon", "bgsub"])
+    before = plate.raised
+
+    _controls_button(win).click()
+
+    assert plate.raised == before + 1, "the controls button did not raise the plate"
+    assert plate.activated_ops == ["decon", "bgsub"], (
+        f"the window holds two operators; it opened {plate.activated_ops}")
+
+
+def test_raw_is_never_offered_as_an_operator_to_tune(qapp, manager):
+    """`ops()` always contains raw. Raw is pixels off the disk, not something with parameters."""
+    win = manager.open([REGIONS[0]])
+    plate = _wired(manager)
+    _holds(win, ["stitch"])
+
+    _controls_button(win).click()
+
+    assert plate.activated_ops == ["stitch"], f"raw leaked into the tabs: {plate.activated_ops}"
+
+
+def test_the_plate_COMES_FORWARD_even_when_the_window_holds_no_operator(qapp, manager):
+    """THE REGRESSION, in the words it was reported in: "it is not bringing up the plateview
+    window". The raise is the half that always works, so it must never be gated on the half that
+    does not. v1 returned before raising and the chip looked dead."""
+    win = manager.open([REGIONS[0]])
+    plate = _wired(manager)
+    _holds(win, [])                                   # nothing run on this window yet
+    before, said_before = plate.raised, len(win._pane.said)
+
+    _controls_button(win).click()
+
+    assert plate.raised == before + 1, "the plate did not come forward on a window with no results"
+    assert plate.activated_ops == [], "there was nothing to open"
+    said = " ".join(win._pane.said[said_before:]).lower()
+    assert "run" in said or "nothing" in said, f"it did not say what was missing: {said!r}"
+
+
+def test_one_failing_panel_does_not_swallow_the_others(qapp, manager):
+    """Opening is per-operator, so a panel that raises must not cost the window its other tabs."""
+    win = manager.open([REGIONS[0]])
+    plate = manager._test_plate
+    plate.activated_ops = []
+
+    def _activate(op):
+        if op == "decon":
+            raise RuntimeError("boom")
+        plate.activated_ops.append(op)
+
+    plate._activate_operator = _activate
+    _holds(win, ["decon", "bgsub"])
+    said_before = len(win._pane.said)
+
+    _controls_button(win).click()
+
+    assert plate.activated_ops == ["bgsub"], "the surviving operator lost its tab"
+    said = " ".join(win._pane.said[said_before:])
+    assert "decon" in said and "boom" in said, f"the failure was not named: {said!r}"

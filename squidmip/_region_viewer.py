@@ -779,6 +779,14 @@ class RegionViewer(QMainWindow):
         # tools: it is a WINDOW action, not something you do to the mosaic.
         self._btn_plate = self._chip("▣ plate", "Bring the plate window to the front — it ends up "
                                      "buried under the views opened from it.", self._raise_plate)
+        # ▣ plate's twin, and deliberately next to it: same journey back to the plate, but it also
+        # opens the tab for the operator THIS window is showing, so the thing you came back to
+        # change is already in front of you. Julio: "so that we can tweak, say the iterations".
+        self._btn_controls = self._chip(
+            "⚙ controls", "Bring the plate window forward AND open the controls for the operator "
+            "this window is showing, so its parameters (iterations, thresholds) are one click "
+            "away. Says so when the window is showing raw pixels, which have none.",
+            self._show_operator_controls)
         # RECORD. A window shows ONE index of T and ONE of Z at a time, so the only way to look at
         # a time series or a focus sweep today is to drag a slider and remember. This exports the
         # sweep as a file — the axis the acquisition actually has (T if it is a time series, else
@@ -794,6 +802,7 @@ class RegionViewer(QMainWindow):
         r1.addWidget(self._btn_2d); r1.addWidget(self._btn_3d); r1.addWidget(self._btn_focus)
         r1.addWidget(self._btn_record)
         r1.addWidget(self._btn_plate)
+        r1.addWidget(self._btn_controls)     # beside ▣ plate: both are the way BACK to the plate
         r1.addStretch(1)
         self._refresh_record_chip()
         vv.addLayout(r1)
@@ -1038,6 +1047,79 @@ class RegionViewer(QMainWindow):
         """
         if self._manager is None or not self._manager.raise_plate():
             self._say("there is no plate window to raise from here.")
+
+    def _window_operators(self) -> list:
+        """THE OPERATORS FOR THIS WINDOW: every processing layer it holds, raw excluded.
+
+        `mosaic.ops()` is the whole answer and it is derived, not tracked -- it walks the layers
+        this pane owns and reads each one's declared `(op, channel)` identity. So a window that has
+        had decon and bgsub run on it lists both, in the order they arrived, and a window that has
+        had nothing run lists none. No bookkeeping to fall out of step with what is on screen.
+        """
+        mosaic = getattr(self._pane, "mosaic", None) if self._pane is not None else None
+        if mosaic is None:
+            return []
+        try:
+            return [op for op in mosaic.ops() if op and op != _RAW_OP]
+        except Exception:                                # noqa: BLE001 - treat as "none yet"
+            return []
+
+    def _show_operator_controls(self) -> None:
+        """Raise the plate AND open the controls for the operators THIS WINDOW has.
+
+        Julio, 2026-08-05, correcting the first cut of this: *"the controls is actually for the
+        'operators for this window'. And it is not bringing up the plateview window."*
+
+        Both corrections are the same mistake. The first version asked `visible_op()` -- ONE
+        operator, the one whose layer is lit -- and, worse, made **raising the plate conditional on
+        finding it**. So on a window showing raw, or with the operator layer toggled off, the chip
+        did nothing at all: no tab, and not even the trip back to the plate that `▣ plate` gives
+        you unconditionally. A gate that swallows the half that always works is worse than no gate.
+
+        Now:
+
+        * **The plate comes forward FIRST, always.** It is the same journey `▣ plate` makes and it
+          cannot depend on what is loaded. Whatever else this chip does or declines to do, the
+          window you are going back to is in front of you.
+        * **Then every operator this window holds gets its tab** (`_window_operators`, which reads
+          the layers' own declared identity). Plural, because that is what the window has: a window
+          with decon and bgsub run on it opens both, last one focused. `_activate_operator` chooses
+          a hand-written panel or one generated from the declared `params`, so an iteration count,
+          a threshold, or a plugin operator's parameters all arrive with no edit here and no name
+          comparison (`tests/test_operator_declaration.py` fails the build on one).
+        * **A window with no operator results still raises**, and says what is missing rather than
+          looking broken.
+        """
+        raised = self._manager is not None and self._manager.raise_plate()
+        if not raised:
+            self._say("controls: there is no plate window to open operator controls in.")
+            return
+
+        ops = self._window_operators()
+        if not ops:
+            self._say("controls: nothing has been run on this window yet, so it has no operator "
+                      "controls. The plate is in front; run an operator from there.")
+            return
+
+        plate = self._manager.parent()
+        activate = getattr(plate, "_activate_operator", None)
+        if activate is None:
+            self._say(f"controls: this plate cannot open operator tabs, so {', '.join(ops)} "
+                      "cannot be tuned from here.")
+            return
+
+        opened, failed = [], []
+        for op in ops:
+            try:
+                activate(op)
+                opened.append(op)
+            except Exception as exc:                     # noqa: BLE001 - named, never a dead click
+                failed.append(f"{op} ({exc})")
+        if opened:
+            self._say(f"controls: {', '.join(opened)} — open on the plate window."
+                      + (f" Could not open {'; '.join(failed)}." if failed else ""))
+        else:
+            self._say(f"controls: could not open {'; '.join(failed)}.")
 
     # -- movie export: this view's T (or Z) sweep, as a file ------------------------------
     def _refresh_record_chip(self) -> None:
@@ -2550,6 +2632,11 @@ class RegionViewer(QMainWindow):
                 viewer, self._reader, self._meta, region, window,
                 channels=names, scale=(dz, px, px), origin_um=roi_origin,
                 limit=max_tex, budget_bytes=budget,
+                # `source` is the operator `_volume_source` chose off the DECLARATION, never off a
+                # name. Handing it down is what lets each brick declare its identity, which is what
+                # puts the volume inside the layer tree at all -- see `BrickedVolume._op`. It was
+                # already computed here and spent only on a sentence in the log.
+                op=source,
                 contrast_by=contrast_by or None, colormap_by=colormap_by or None,
                 say=self._say, parent=self, read=read,
             )))
