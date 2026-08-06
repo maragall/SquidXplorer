@@ -4268,7 +4268,93 @@ class PlateWindow(QMainWindow):
                 return
         super().showEvent(e)
 
+    #: The preference behind the close-all confirmation. True (the default) = ask.
+    WARN_CLOSE_ALL = "warn_close_all"
+
+    def _open_view_count(self) -> int:
+        """How many region windows are open right now. 0 when there is no manager."""
+        mgr = getattr(self, "_viewer_manager", None)
+        try:
+            return 0 if mgr is None else len(mgr.windows)
+        except Exception:                        # noqa: BLE001 - a torn-down manager: none open
+            return 0
+
+    def _confirm_close_all(self, n: int) -> bool:
+        """Ask before the plate takes *n* region windows down with it. True = go ahead.
+
+        Julio, 2026-08-06: *"closing the plate window should close all the other windows make sure
+        that you pop up the warning, with the 'don't show me this again'."*
+
+        Both halves matter and they pull against each other, which is why this is a dialog rather
+        than either extreme. Leaving the windows open was the old behaviour and it is a trap: Qt
+        quits when the LAST top-level closes, and a `RegionViewer` is a top-level, so closing the
+        plate left a headless remainder holding the single-instance flock -- the next launch was
+        then refused by a process with no plate to find. But closing several windows is not
+        undoable either, and a window may be mid-run.
+
+        The checkbox is honoured only when it actually PERSISTS (`_prefs.set` returns whether it
+        landed). A "don't show me this again" that silently fails to save is worse than none: the
+        user stops expecting the dialog and it comes back next session.
+
+        Never shown when there is nothing to confirm (no open views) or under the test harness,
+        where a modal dialog would hang the suite with no one to dismiss it.
+        """
+        from qtpy.QtWidgets import QApplication, QCheckBox, QMessageBox
+
+        from squidmip import _prefs
+
+        if n <= 0:
+            return True
+        app = QApplication.instance()
+        if app is not None and app.property("_squidmip_test"):
+            return True
+        if not bool(_prefs.get(self.WARN_CLOSE_ALL, True)):
+            return True
+
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("Close SquidXplorer")
+        box.setText(f"Closing the plate will also close {n} open view window(s).")
+        box.setInformativeText(
+            "The plate is what the views belong to, so they go with it and the application quits.\n\n"
+            "Anything already written to disk stays; a run still in flight is stopped.")
+        box.setStandardButtons(QMessageBox.Cancel | QMessageBox.Close)
+        box.setDefaultButton(QMessageBox.Cancel)
+        never = QCheckBox("Don't show me this again")
+        box.setCheckBox(never)
+        if box.exec() != QMessageBox.Close:
+            return False
+        if never.isChecked() and not _prefs.set(self.WARN_CLOSE_ALL, False):
+            self._readout.setText(
+                "could not save 'don't show me this again' — see the log; it applies to this "
+                "session only.")
+        return True
+
     def closeEvent(self, e):
+        # THE PLATE TAKES ITS VIEWS WITH IT (2026-08-06), after confirming.
+        #
+        # `RegionViewer` is a top-level window and nothing sets `quitOnLastWindowClosed`, so Qt's
+        # default applies: the process lives until the LAST top-level closes. Closing the plate
+        # therefore used to leave a plateless remainder still holding the single-instance flock,
+        # and the next launch was refused by a process the user could no longer see the plate of.
+        # A view is a view OF this plate -- it reads through the plate's reader and follows the
+        # plate's runs -- so it cannot outlive it.
+        #
+        # FIRST, before any teardown below: `_confirm_close_all` can cancel, and cancelling has to
+        # leave the window exactly as it was. Every line under this point retires threads and
+        # uninstalls the log bus, none of which is reversible.
+        views = self._open_view_count()
+        if not self._confirm_close_all(views):
+            e.ignore()
+            return
+        if views:
+            mgr = self._viewer_manager
+            for wid in [int(w.window_id) for w in mgr.windows]:
+                try:
+                    mgr.close(wid)               # a no-op for an id a parent already took with it
+                except Exception as exc:         # noqa: BLE001 - one view must not block the quit
+                    log.warning("view %s did not close with the plate: %s: %s",
+                                wid, type(exc).__name__, exc)
         # NO REGION DEBOUNCE TO DISARM. A single-shot QTimer used to be armed here for 140 ms by
         # `_on_region_changed` and stopped at this point, because a pending one fires into a
         # torn-down window (measured: a segfault a window later). Both the timer and the
