@@ -121,6 +121,36 @@ Measured on that region, four channels: 432 whole-frame decodes before, 216 afte
 per channel remains and is NOT removable from outside napari — `Image.__init__` slices itself at
 point 0 before the viewer's dims can be consulted.
 
+### A RELOAD reuses the layer; a DIFFERENT REGION must not
+
+`add_mosaic` points an existing layer at new pixels rather than destroying and rebuilding it
+(`_reuse_layer`). That is worth 165-265 ms of GUI thread per channel — measured on a real napari
+canvas — and it is what makes timepoint playback possible at all: a frame that rebuilds every
+layer costs ~1.3 s and freezes the window for ~0.8 s of it, against ~210 ms reusing.
+
+**But reuse is only safe while the SHAPE is the same**, and `_reuse_layer` does not refuse one that
+is not. Driven against a real `ViewerModel`, assigning a different shape into a live layer fails
+inside napari and leaves it half-assigned, so the process aborts on the next touch:
+
+| transition | what napari raises |
+| --- | --- |
+| deeper -> shallower pyramid | `IndexError: index 1 is out of bounds for axis 0 with size 1` |
+| 2D -> 3D | `IndexError: index 2 is out of bounds for axis 1 with size 2` |
+| 3D -> 2D | `ValueError: operands could not be broadcast together` |
+
+So the caller owns the distinction, and `RegionViewer._load_mosaic` makes it with one flag,
+`_shown_region`:
+
+* **the same region** (another timepoint) -> keep the layers, reuse them;
+* **a different region** -> `remove_op` first, because two regions are ragged by nature (manual0 is
+  27 FOVs and manual1 is 28 on the 10x set, so their mosaics differ in extent);
+* **a load that produced nothing** -> `remove_op` in `_on_done`, so the previous frame's pixels can
+  never sit under a new region's name.
+
+This cannot be tested through `tests/conftest.py`'s pane stub, whose `add_mosaic` records the call
+and returns — nothing downstream of it runs offscreen. `tests/test_time_point_playback.py` walks
+the transitions above against a real `MosaicLayers` for that reason.
+
 ## Contrast
 
 Carry the on-screen LUT (per channel `contrast_limits` + colormap) into 3D so it matches 2D. If a
