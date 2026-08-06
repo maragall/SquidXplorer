@@ -60,7 +60,7 @@ jobs:
   #
   # `tools/walkthrough.py`, `tools/acceptance.py` and `tools/gates.py` exist because "every defect
   # this project shipped passed a green unit suite" (walkthrough's own docstring). All three were
-  # themselves dead on 2026-08-06: acceptance and gates still built a PyQt5 QApplication around
+  # themselves dead on 2026-08-05: acceptance and gates still built a PyQt5 QApplication around
   # Qt6 widgets and aborted before their first check, walkthrough's datasets had moved, and nobody
   # noticed for weeks because no job ran them. A harness nothing runs is a comment.
   #
