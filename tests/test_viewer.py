@@ -515,6 +515,40 @@ def test_reset_layer_frees_the_store_so_a_shorter_rerun_leaves_nothing(qapp):
 # covers four wells blanked the other 1532. A layer sits OVER the base; it does not replace it.
 
 
+def _cell_slices(ov, rc, inset=0, inset_frac=0.0):
+    """Index tuple for cell *rc* in a GRABBED frame, inset LOGICAL px on every side.
+
+    THE ONE PLACE THAT KNOWS ABOUT THE DEVICE PIXEL RATIO. ``grab()`` renders at the screen's
+    ratio -- measured 2.0 on this laptop's panel -- while ``_cell_rect`` answers in logical px. A
+    crop that mixes the two lands a quarter of the plate away, so it reads a NEIGHBOURING well and
+    compares it against the one it meant. That is silent on a 1x display and under
+    ``QT_QPA_PLATFORM=offscreen``, which is why it survived so long: CI never has a retina panel,
+    and the whole-widget checks nearby only take a std, which a wrong quadrant barely moves.
+
+    *inset_frac* is a share of the cell (for keeping the grid pen and the centre status dot out of
+    a thumbnail sample); *inset* is a flat logical count. Both are scaled here, once.
+    """
+    r = ov.devicePixelRatioF()
+    x, y, cw, ch = (v * r for v in ov._cell_rect(*rc))
+    ix = int(cw * inset_frac) + int(round(inset * r))
+    iy = int(ch * inset_frac) + int(round(inset * r))
+    return (slice(int(y) + iy, int(y + ch) - iy), slice(int(x) + ix, int(x + cw) - ix))
+
+
+def _grab_bgr(ov) -> np.ndarray:
+    """The widget's own paint as (H, W, 3) uint8 in BYTE order (B, G, R), at DEVICE resolution.
+
+    ``Format_RGB32`` packs 0xffRRGGBB, so little-endian bytes come out B,G,R,A. Callers that only
+    compare one grab against another do not care about the order; ``_grab_rgb`` reverses it for the
+    ones that name an actual QColor.
+    """
+    img = ov.grab().toImage().convertToFormat(QImage.Format_RGB32)
+    ptr = img.bits()
+    ptr.setsize(img.sizeInBytes())
+    row = np.frombuffer(ptr, np.uint8).reshape(img.height(), img.bytesPerLine() // 4, 4)
+    return row[:, : img.width(), :3]
+
+
 def _painted_cell(ov, ri, ci, w=420, h=260):
     """The INTERIOR of one cell as the user sees it: the widget's own paint, not the canvas.
 
@@ -522,14 +556,7 @@ def _painted_cell(ov, ri, ci, w=420, h=260):
     capped at 15 px) are both outside the sample — this must read the thumbnail and nothing else.
     """
     ov.resize(w, h)
-    img = ov.grab().toImage().convertToFormat(QImage.Format_RGB32)
-    ptr = img.bits()
-    ptr.setsize(img.sizeInBytes())
-    row = np.frombuffer(ptr, np.uint8).reshape(img.height(), img.bytesPerLine() // 4, 4)
-    rgb = row[:, : img.width(), :3]
-    x, y, cw, chh = ov._cell_rect(ri, ci)
-    ix, iy = int(cw * 0.2), int(chh * 0.2)
-    return rgb[int(y) + iy:int(y + chh) - iy, int(x) + ix:int(x + cw) - ix].copy()
+    return _grab_bgr(ov)[_cell_slices(ov, (ri, ci), inset_frac=0.2)].copy()
 
 
 def test_a_subset_layer_leaves_the_other_wells_thumbnails_on_the_plate(qapp):
@@ -4431,11 +4458,7 @@ def test_ima245_an_unshowable_push_is_counted_and_said_out_loud(
 def _region_crop(ov, region):
     """The rendered pixels of ONE region's cell -- its own rectangle, not a grid square."""
     rc = next(k for k, v in ov._by_rc.items() if v == region)
-    x, y, w, h = ov._cell_rect(*rc)
-    img = ov.grab().toImage().convertToFormat(QImage.Format_RGB32)
-    a = np.frombuffer(img.constBits().asstring(img.sizeInBytes()), np.uint8)
-    a = a.reshape(img.height(), img.bytesPerLine() // 4, 4)[:, :img.width(), :3]
-    return a[max(0, int(y)):int(y + h), max(0, int(x)):int(x + w)]
+    return _grab_bgr(ov)[_cell_slices(ov, rc)]
 
 
 def test_ima253_real_tissue_previews_both_regions_as_mosaics_before_any_operator_runs(
@@ -4596,15 +4619,8 @@ def test_ima253_empty_slots_are_visibly_distinct_from_occupied_ones(qapp, stub_d
     ov = V.PlateOverview(plate.row_labels, plate.col_labels, plate.occupied_map)
     ov.set_carrier(plate)
     ov.resize(600, 240)
-    img = ov.grab().toImage().convertToFormat(QImage.Format_RGB32)
-    a = np.frombuffer(img.constBits().asstring(img.sizeInBytes()), np.uint8)
-    a = a.reshape(img.height(), img.bytesPerLine() // 4, 4)[:, :img.width(), :3]
-
-    def _cell_px(ci):
-        x, y, w, h = ov._cell_rect(0, ci)
-        return a[int(y) + 2:int(y + h) - 2, int(x) + 2:int(x + w) - 2]
-
-    occupied, empty = _cell_px(0), _cell_px(1)
+    a = _grab_bgr(ov)
+    occupied, empty = (a[_cell_slices(ov, (0, ci), inset=2)] for ci in (0, 1))
     assert occupied.size and empty.size
     assert abs(float(occupied.mean()) - float(empty.mean())) > 1.5, \
         "an empty slot must not look like an occupied one"
@@ -5651,14 +5667,12 @@ def test_a_render_worker_is_retired_with_the_export_worker(
 def _grab_rgb(ov) -> np.ndarray:
     """The widget as actually PAINTED, (H, W, 3) uint8, in R,G,B order.
 
-    ``Format_RGB32`` packs 0xffRRGGBB, so on a little-endian machine the BYTES come out B,G,R,A --
-    the reverse at the end is what makes a comparison against a QColor mean anything. The nearby
-    ``_region_crop`` reads the same buffer without reversing, which is harmless there because it
-    only takes a std, and wrong the moment an actual ink is named.
+    ``_grab_bgr`` returns the buffer in BYTE order; the reverse here is what makes a comparison
+    against a QColor mean anything. ``_region_crop`` reads the same buffer without reversing,
+    which is harmless there because it only takes a std, and wrong the moment an actual ink is
+    named.
     """
-    img = ov.grab().toImage().convertToFormat(QImage.Format_RGB32)
-    a = np.frombuffer(img.constBits().asstring(img.sizeInBytes()), np.uint8)
-    return a.reshape(img.height(), img.bytesPerLine() // 4, 4)[:, : img.width(), 2::-1]
+    return _grab_bgr(ov)[:, :, ::-1]
 
 
 def _fitted_plate(nrows, ncols, w=1400, h=900):
@@ -5673,18 +5687,9 @@ def _fitted_plate(nrows, ncols, w=1400, h=900):
     return ov
 
 
-def _cell(ov, rc, inset=0):
-    """Index tuple for cell *rc* in a GRABBED frame, *inset* LOGICAL px in on every side.
-
-    ``grab()`` renders at the device pixel ratio (2 on a retina panel) while ``_cell_rect`` is in
-    logical px, so both the rect and the inset are scaled here. Without it the crops land a
-    quarter of the plate away -- which the whole-widget checks nearby never noticed, because they
-    only take a std.
-    """
-    r = ov.devicePixelRatioF()
-    x, y, cw, ch = (v * r for v in ov._cell_rect(*rc))
-    i = int(round(inset * r))
-    return (slice(int(y) + i, int(y + ch) - i), slice(int(x) + i, int(x + cw) - i))
+#: This file's cell-cropping helper. It was the only DPR-correct one for a while, and the three
+#: older helpers above have now been routed through the same implementation.
+_cell = _cell_slices
 
 
 def _carries_ink(frame, sl, color, tol=24) -> bool:
