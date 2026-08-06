@@ -1195,6 +1195,28 @@ class MosaicLayers:
         except Exception as exc:                 # noqa: BLE001 - presentation, never fatal
             log.warning("could not park the new display axis: %s: %s", type(exc).__name__, exc)
 
+    def reset_view(self) -> None:
+        """Point the camera at everything on screen. OUR write, never a user gesture.
+
+        `add_mosaic` resets only while it is adding the FIRST layer, so a later layer never moves
+        the camera -- deliberately, because yanking the view while the user is panning is worse
+        than a layer landing off-centre. But an OPERATOR RESULT is not "a later layer": it is a
+        different picture, on its own canvas, arriving lit while the raw beneath it goes dark.
+
+        Julio, 2026-08-06: *"This problem only happens when the stitching layer first appears that
+        it looks black. Subsequent windows I can see it. Like then opening an ROI I can see the
+        stitch properly."* That difference IS the camera -- a freshly opened window resets on its
+        first layer, so the replayed result is framed; the window that asked never reset, so the
+        stitched mosaic landed outside the view it was looking at and the canvas went black with
+        every layer correct in the list. `_delivered_ops` makes this fire once per operator, so it
+        cannot keep stealing the camera on later regions or later channels.
+        """
+        try:
+            self._model.reset_view()
+        except Exception as exc:                 # noqa: BLE001 - a camera move, never fatal
+            log.warning("could not fit the view to the new layers: %s: %s",
+                        type(exc).__name__, exc)
+
     def _reuse_layer(self, layer: Any, data: Any, *, bbox_um, z_scale_um, multiscale, visible):
         """Point an EXISTING layer at new pixels, keeping everything the user owns.
 

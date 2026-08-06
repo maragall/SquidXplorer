@@ -3336,11 +3336,20 @@ class PlateWindow(QMainWindow):
                 return
             from_selection = (regions is not None and scope_value == _run_scope.SCOPE_SELECTION)
         if regions is not None:
-            regions = list(regions)
-            if not regions:
+            # A MAPPING SURVIVES AS A MAPPING. `regions` has three shapes (see
+            # `projection.scope_wells`) and `{region: [fov, ...]}` -- the FOV subset an ROI window
+            # asks for -- is the one that carries the field lists. `list(regions)` over a dict
+            # yields its KEYS, so this line silently widened every ROI run back to whole wells,
+            # one call before the worker. It is the same defect `scope_wells` was extracted to fix
+            # in `project_plate`, surviving one level up: the checks below want NAMES, and taking
+            # the names by flattening threw away the rest of the request.
+            names = list(regions)                 # keys for a mapping, items for a sequence
+            if not isinstance(regions, dict):
+                regions = names
+            if not names:
                 self._readout.setText("empty selection — nothing to run")
                 return
-            unknown = [r for r in regions if r not in self._fov_index]
+            unknown = [r for r in names if r not in self._fov_index]
             if unknown:      # fail NAMED, not with a bare KeyError out of the status loop below
                 self._readout.setText(
                     f"{len(unknown)} region(s) are not in this acquisition: {unknown[:3]}")

@@ -805,15 +805,6 @@ class RegionViewer(QMainWindow):
         r1.addWidget(self._btn_2d); r1.addWidget(self._btn_3d); r1.addWidget(self._btn_focus)
         r1.addWidget(self._btn_record)
         r1.addWidget(self._btn_plate)
-        r1.addWidget(self._btn_controls)     # beside ▣ plate: both are the way BACK to the plate
-        # WHAT THE CHIP WOULD RUN WITH, printed beside it (Julio, 2026-08-06: "The control button
-        # should print a small text to it's side saying what the UI parameters are set to. When I
-        # modify in the plate window, the printed values should change in the roi window.").
-        # Derived from the plate on every refresh -- see `_refresh_controls_note`.
-        self._controls_note = QLabel("")
-        self._controls_note.setStyleSheet("color:#8b949e;font-size:11px;border:none;")
-        self._controls_note.setWordWrap(False)
-        r1.addWidget(self._controls_note, 1)
         r1.addStretch(1)
         self._refresh_record_chip()
         vv.addLayout(r1)
@@ -846,8 +837,23 @@ class RegionViewer(QMainWindow):
             self._op_combo.addItem("no operators", None)
             self._op_combo.setEnabled(False)
         opr.addWidget(self._op_combo, 1)
-        # The chip's side text names the operator the RUN button will use, so it follows the
-        # dropdown. `_refresh_controls_note` re-reads the plate; nothing is mirrored here.
+        # ⚙ CONTROLS BELONGS HERE, beside the dropdown it acts on and the Run it configures.
+        #
+        # Julio, 2026-08-06, twice: *"the controls is actually for the 'operators for this
+        # window'"*, then *"What part don't you understand that the controls button is in the wrong
+        # place and it should be in 'operator for this window'."* Right both times, and the second
+        # time because only the BEHAVIOUR had moved: the chip started opening the dropdown's
+        # operator while still sitting in the 2D / 3D · ROI box, next to buttons about geometry.
+        # A control's position is part of what it says it does.
+        opr.addWidget(self._btn_controls)
+        # ...and what it would run with, beside it. `default` or `custom`, not a parameter dump:
+        # *"displaying the controls is a mess. Maybe for now, do default/custom."*
+        self._controls_note = QLabel("")
+        self._controls_note.setStyleSheet("color:#8b949e;font-size:11px;border:none;")
+        self._controls_note.setWordWrap(False)
+        opr.addWidget(self._controls_note)
+        # The note names the operator the RUN button will use, so it follows the dropdown.
+        # `_refresh_controls_note` re-reads the plate; nothing is mirrored here.
         self._op_combo.currentIndexChanged.connect(lambda _i: self._refresh_controls_note())
         opr.addWidget(self._chip("Run", "Run the selected operator on THIS view's regions.",
                                  self._run_view_operator))
@@ -1706,6 +1712,16 @@ class RegionViewer(QMainWindow):
             added += 1
         if added:
             self._result_region = region
+            # FRAME IT, once per operator. See `MosaicLayers.reset_view` for why the first
+            # appearance of a result is the one layer that gets the camera and later ones do not.
+            seen = getattr(self, "_delivered_ops", None)
+            if seen is None:
+                seen = self._delivered_ops = set()
+            if str(op) not in seen:
+                seen.add(str(op))
+                fit = getattr(mosaic, "reset_view", None)
+                if callable(fit):
+                    fit()
         return added
 
     def _drop_result_layers(self, why: str) -> None:
