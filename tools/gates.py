@@ -814,18 +814,71 @@ def _pixels(root, blank=None):
         return None
 
 
-def _pixel_noise(root, app, n=4) -> bool:
-    """Do two IDLE grabs of *root* differ? If so, pixels are not evidence and are dropped.
+def _quieten_timers(root):
+    """Stop every REPEATING QTimer under *root*, and say how many.
+
+    A window with a periodic repaint has no stable pixel state, and this app has two: the
+    navigator's memory poll (2 s) and the log panel's. Measured 2026-08-06: the gate's own
+    mutation — a chip wired to nothing — was credited with "reaches: pixels" INTERMITTENTLY,
+    because a memory bar happened to tick inside its ``processEvents``. The self-test passed on
+    one run and failed on the next over the same code, which is worse than a gate that never
+    works, because it teaches people to re-run it.
+
+    Stopped at the source rather than tolerated by a weaker probe: a periodic repaint is not
+    something any control does, so nothing under test is lost.
+    """
+    from qtpy.QtCore import QTimer
+
+    stopped = 0
+    for timer in root.findChildren(QTimer):
+        if timer.isActive() and not timer.isSingleShot():
+            timer.stop()
+            stopped += 1
+    return stopped
+
+
+def _pixel_noise(root, app, n=6, seconds=1.5) -> bool:
+    """Do IDLE grabs of *root* differ, ACROSS REAL TIME? If so, pixels are not evidence.
 
     A caret, a spinner or a queued repaint would make every control look alive, and a probe that
     always fires turns a gate green over anything. Measuring the noise instead of assuming it is
     absent is the difference between this and a decoration.
+
+    The sampling spans over a second on purpose. Six back-to-back grabs take about 40 ms and would
+    sit entirely inside the gap between two ticks of a 2 s timer, so the old version measured that
+    the window was quiet for one fortieth of the interval it had to be quiet over.
     """
+    import time
+
     seen = set()
     for _ in range(n):
         app.processEvents()
         seen.add(_pixels(root))
+        time.sleep(seconds / n)
     return len(seen) > 1
+
+
+def wait_still(roots, app, tries=20, step=0.05) -> bool:
+    """Pump events until two consecutive grabs of every root agree. Returns whether they ever did.
+
+    THE BASELINE MUST BE A STILL FRAME. `_pixel_noise` proves the window has no PERIODIC repaint;
+    this is the other half, and it is the half that actually bit. The sweep clicks ~30 controls in
+    a row and several of them start something asynchronous (a preview stream, a tab build, a
+    focus worker). A repaint queued by control N lands inside control N+1's ``processEvents`` and
+    is attributed to it — measured 2026-08-06 on the gate's OWN mutation, a chip wired to nothing,
+    reported as "reaches: pixels" on one run and correctly as dead on the next. An intermittent
+    gate is worse than no gate: it teaches people to re-run it.
+    """
+    import time
+
+    for _ in range(tries):
+        first = [_pixels(r) for r in roots]
+        app.processEvents()
+        time.sleep(step)
+        app.processEvents()
+        if [_pixels(r) for r in roots] == first:
+            return True
+    return False
 
 
 def _fingerprint(root, use_pixels: bool, blank=None) -> dict:
@@ -960,7 +1013,13 @@ def sweep_controls(root, kind: str, app, watched=None, recorder=None, settle=Non
     recorder = [] if recorder is None else recorder
     observed = [] if observed is None else observed
     watched = [root, *(watched or [])]
+    for r in watched:
+        _quieten_timers(r)
     use_pixels = [not _pixel_noise(r, app) for r in watched]
+    for r, p in zip(watched, use_pixels):
+        if not p:
+            print(f"...   {kind:5} {'(pixels are NOT evidence here: ' + type(r).__name__ + ' repaints on its own)':<40}",
+                  file=sys.__stdout__, flush=True)
     rows = []
 
     def emit(row):
@@ -985,9 +1044,12 @@ def sweep_controls(root, kind: str, app, watched=None, recorder=None, settle=Non
             tip = (wdg.toolTip() or "").strip().splitlines()
             emit((label, cls, "disabled", tip[0][:120] if tip else "no tooltip says why"))
             continue
+        # A STILL FRAME first, then the baseline. See `wait_still`: the previous control's queued
+        # repaint would otherwise land inside this one's measurement.
+        still = wait_still(watched, app)
         # `blank=wdg` only on the window the control lives in; on any OTHER watched window the
         # control is not a descendant and nothing needs painting out.
-        before = [_fingerprint(r, p, wdg if i == 0 else None)
+        before = [_fingerprint(r, p and still, wdg if i == 0 else None)
                   for i, (r, p) in enumerate(zip(watched, use_pixels))]
         n_calls, n_obs = len(recorder), len(observed)
         with _LogSpy() as spy:
@@ -997,7 +1059,12 @@ def sweep_controls(root, kind: str, app, watched=None, recorder=None, settle=Non
                 emit((label, cls, "raised", f"{type(exc).__name__}: {exc}"))
                 continue
             app.processEvents()
-        after = [_fingerprint(r, p, wdg if i == 0 else None)
+            # ...and a still frame again before reading the outcome, so a control whose effect is
+            # a LATE repaint (a tab building, a worker's first tile) is credited with it here
+            # rather than blamed on whatever is clicked next. INSIDE the spy: a line logged while
+            # this settles is this control's line.
+            wait_still(watched, app, tries=10)
+        after = [_fingerprint(r, p and still, wdg if i == 0 else None)
                  for i, (r, p) in enumerate(zip(watched, use_pixels))]
 
         reached = recorder[n_calls:]

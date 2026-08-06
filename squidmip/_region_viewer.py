@@ -1061,7 +1061,15 @@ class RegionViewer(QMainWindow):
             return []
         try:
             return [op for op in mosaic.ops() if op and op != _RAW_OP]
-        except Exception:                                # noqa: BLE001 - treat as "none yet"
+        except Exception as exc:                         # noqa: BLE001 - "none yet", but SAID
+            # NAMED. This was a bare swallow, and what it swallowed was not "no operators yet": it
+            # was `AttributeError: 'StubMosaic' object has no attribute 'ops'` against the shared
+            # test double, which is why every ⚙ controls test had to replace `pane.mosaic` with a
+            # hand-written object and none of them ever exercised this line. An empty answer and an
+            # unanswerable question look identical from the caller, so the difference has to be
+            # said somewhere.
+            log.warning("view %s could not read its layers' operators: %s: %s",
+                        self.window_id, type(exc).__name__, exc)
             return []
 
     def _show_operator_controls(self) -> None:
