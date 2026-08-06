@@ -186,60 +186,24 @@ def test_opening_a_plate_shows_a_region_without_claiming_the_user_opened_it(
 
 
 # --------------------------------------------------------------------------------------
-# The z slider is GLOBAL: it is napari's, and it survives a region change
+# THE GLOBAL Z SLIDER WAS THE CENTRAL PANE'S, AND IT WENT WITH IT (2026-08-06)
 # --------------------------------------------------------------------------------------
-
-def test_z_axis_is_derived_from_the_dims_rank_not_hard_coded(qapp, squid_dataset,
-                                                             monkeypatch):
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-
-    monkeypatch.setattr(win, "_napari_dims", lambda: _FakeDims((10, 512, 512)))
-    assert win._napari_z_axis() == 0, "(z, y, x) puts z at axis 0"
-    monkeypatch.setattr(win, "_napari_dims", lambda: _FakeDims((3, 10, 512, 512)))
-    assert win._napari_z_axis() == 1, "a leading t axis must shift z, not be ignored"
-    monkeypatch.setattr(win, "_napari_dims", lambda: _FakeDims((512, 512)))
-    assert win._napari_z_axis() is None, "a plain plane has no z axis to drive"
-    win.close()
-
-
-def test_the_z_position_survives_a_region_change(qapp, squid_dataset, monkeypatch):
-    """Requirement 4's architecture note: the z slider is GLOBAL across the plate.
-
-    Replacing the layers resets napari's dims to 0, so without this the z you were inspecting
-    snapped back to the bottom of the stack every time you stepped to another region.
-    """
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    dims = _FakeDims((10, 512, 512))
-    monkeypatch.setattr(win, "_napari_dims", lambda: dims)
-
-    dims.set_current_step(0, 6)
-    win._pending_dims_step = win._napari_dims_step()   # what _load_mosaic records
-    dims.set_current_step(0, 0)                        # what replacing the layers does
-    win._restore_dims_step()                           # what _on_mosaic_done does
-
-    assert dims.current_step[0] == 6, "z was not restored after the region change"
-    win.close()
-
-
-def test_restoring_z_refuses_a_step_the_new_region_does_not_have(qapp,
-                                                                squid_dataset, monkeypatch):
-    """A region with fewer planes must not be driven to a z that does not exist."""
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    monkeypatch.setattr(win, "_napari_dims", lambda: _FakeDims((10, 512, 512)))
-    win._pending_dims_step = (9, 0, 0)
-    shallow = _FakeDims((3, 512, 512))
-    monkeypatch.setattr(win, "_napari_dims", lambda: shallow)
-
-    win._restore_dims_step()
-
-    assert shallow.current_step[0] == 0, "z was driven past the end of the new region's stack"
-    win.close()
+#
+# Three tests here pinned ``PlateWindow._napari_z_axis``, ``_napari_dims_step`` and
+# ``_restore_dims_step``: the rule that stepping to another region must not snap napari's z back
+# to the bottom of the stack. All three read ``self._mosaic_pane``, which has been unconditionally
+# ``None`` since 2b8fbc5, and the only writer of ``_pending_dims_step`` was ``_load_mosaic``, which
+# returned at its first line. So the plate has not restored a z position since 2026-07-23, and the
+# tests passed by monkeypatching ``_napari_dims`` -- the exact seam that made the pane irrelevant.
+# Deleted with the methods.
+#
+# STATED, NOT PAPERED OVER: no window restores z across a REGION change today.
+# ``RegionViewer._load_mosaic`` calls ``remove_op(_RAW_OP)`` when the region changes, and it has to
+# (a different region is a different mosaic shape, and reusing the layer raises out of napari --
+# see tests/test_time_point_playback.py), so napari's dims reset with the layers. What IS preserved
+# is a TIMEPOINT change, which keeps the layers and therefore keeps z, and that is pinned there.
+# Restoring z across a region change would be a new feature on ``RegionViewer``, not a revival of
+# these tests, and it is not part of this deletion.
 
 
 # --------------------------------------------------------------------------------------

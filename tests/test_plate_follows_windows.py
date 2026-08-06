@@ -14,11 +14,17 @@ colormap changes inside a window changed that window and NOTHING else, and no te
 because every test that touched the method assigned a stub pane onto a bare ``__new__`` shell and
 so never met the guard the real window hits.
 
+The sentinel and every method that guarded on it were deleted on 2026-08-06, including
+``_bind_napari_contrast`` itself: once ``_on_mosaic_done`` went, its sweep over every open window
+had no caller left. The binding that has always done the work is
+``ViewerManager.windowOpened -> _bind_window_contrast``, connected in ``__init__``, and that is
+what this file drives.
+
 WHAT IS PINNED. The sources are now the per-region ``RegionViewer`` windows registered in
 ``ViewerManager``, so:
 
 * a window is bound the moment the manager spawns it (``windowOpened``), with the real root
-  window and its real manager, and with ``_mosaic_pane`` still None — the premise of the bug;
+  window and its real manager;
 * a contrast gesture in a window lands in the plate's FOLLOW path, and NOT in its manual latch.
   That distinction is load-bearing: napari autoscales on its own at open, so recording an owner's
   autoscale as a user gesture latched every channel MANUAL before anyone had touched anything and
@@ -150,12 +156,17 @@ def _spawn(win, window_id: int = 1, resolved=None) -> _FakeWindow:
 
 
 def test_the_root_really_has_no_central_napari_pane_to_bind(qapp, squid_dataset):
-    """If this ever fails, the central pane is back and 8.1's rewiring should be re-examined."""
+    """The plate must own no napari surface at all. If this fails, the pane is back and the
+    precedence between it and the windows has to be DECIDED rather than inherited.
+
+    Pinned as "the attribute does not exist" rather than "the attribute is None", because None was
+    the state that let twenty dead methods sit here for two weeks looking like a feature.
+    """
     win = _open_plate(squid_dataset)
     try:
-        assert win._mosaic_pane is None, (
-            "a central mosaic pane exists again; _bind_napari_contrast now has two candidate "
-            "sources and the precedence has to be decided rather than inherited"
+        assert not hasattr(win, "_mosaic_pane"), (
+            "a central mosaic pane exists again; the window->plate follow path now has two "
+            "candidate sources and the precedence has to be decided rather than inherited"
         )
     finally:
         win.close()
@@ -192,10 +203,11 @@ def test_the_plate_adopts_the_window_it_opens_with_before_any_gesture(qapp, squi
     The sink above only reports a CHANGE, and deliberately so. But napari's autoscale at open is
     not a change, it is the initial state, so the moment that matters most -- the window a region
     comes up with -- is the one moment no sink can ever report. ``_adopt_centre_view`` was written
-    to pull it and is gated on ``self._mosaic_pane``, which the test above pins as permanently
-    None: the pull was orphaned when the central pane was removed, and until the user happened to
-    drag a slider the plate painted from its running histogram while the window painted from
-    napari's autoscale. The loupe magnifies the plate, so it inherited the disagreement.
+    to pull it and was gated on ``self._mosaic_pane``, which the test above pins as absent: the
+    pull was orphaned when the central pane was removed, and until the user happened to drag a
+    slider the plate painted from its running histogram while the window painted from napari's
+    autoscale. The loupe magnifies the plate, so it inherited the disagreement.
+    ``_adopt_centre_view`` was deleted on 2026-08-06; ``_adopt_window_view`` is the one that runs.
 
     MUTATION: drop the ``_adopt_window_view`` call from ``_bind_window_contrast`` (or point it back
     at ``self._mosaic_pane``) and this goes red while every gesture test above stays green -- which
@@ -391,8 +403,14 @@ def test_the_last_gesture_wins_when_two_windows_touch_one_channel(qapp, squid_da
 
 def test_binding_the_same_window_twice_does_not_stack_a_second_subscription(qapp, squid_dataset):
     """``MosaicLayers`` keeps a LIST of callbacks and cannot unsubscribe, so a re-bind is
-    permanent. ``_bind_napari_contrast`` is also called from the mosaic-done path, so it has to be
-    idempotent or every region load adds another copy of the plate to the window's sink."""
+    permanent: a window offered twice must not gain a second copy of the plate on its sink.
+
+    The second offer used to come from ``_bind_napari_contrast``, a sweep over every open window
+    called from the mosaic-done path; both went on 2026-08-06 with the dead pane. The requirement
+    did not go with them -- ``windowOpened`` is emitted per window and nothing stops a caller
+    offering the same window again -- so it is pinned directly on the method that carries the
+    ``_followed_windows`` guard.
+    """
     win = _open_plate(squid_dataset)
     try:
         child = _spawn(win)
@@ -400,7 +418,7 @@ def test_binding_the_same_window_twice_does_not_stack_a_second_subscription(qapp
         assert n == 1
 
         win._bind_window_contrast(child)     # the same window offered again
-        win._bind_napari_contrast()          # ...and the sweep over every open window
+        win._bind_window_contrast(child)     # ...and again
         assert len(child.mosaic.contrast_cbs) == n, (
             f"the plate subscribed {len(child.mosaic.contrast_cbs)} times to one window"
         )

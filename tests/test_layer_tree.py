@@ -371,7 +371,7 @@ def test_toggling_one_channel_writes_that_layer_only(tree, mosaic):
 
 
 def test_the_tree_survives_layers_being_destroyed_and_recreated(tree, mosaic, qapp):
-    """_load_mosaic (_viewer.py:5092) destroys and recreates every layer on each region change.
+    """RegionViewer._load_mosaic destroys and recreates every layer on each region change.
     That already killed the contrast sync silently, because the subscription was bound to layer
     OBJECTS that no longer existed. Identity here is (op, channel) out of layer.metadata, so a
     rebuilt layer is the same row -- and the checkbox drives the NEW object."""

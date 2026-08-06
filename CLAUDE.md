@@ -105,13 +105,42 @@ Bricking (many textures + GL `max` compositing + a 1-voxel halo) is the mechanis
 pixel-exact, but it is NOT what a drawn ROI takes any more. Do not route a whole region through it
 expecting interaction — see the measured cost in the contract.
 
+## The plate window owns no viewer, and contrast is not implemented twice
+
+**The plate has no napari surface of its own.** `PlateWindow._mosaic_pane` was pinned to `None` on
+2026-07-23 when viewing decentralized into independent `RegionViewer` windows, and it was deleted
+on 2026-08-06 along with everything that guarded on it: `_load_mosaic`, `_on_mosaic_plane`,
+`_on_mosaic_done`, `_region_frame_done`, the four napari-dims helpers, `_adopt_centre_view`,
+`_add_result_layers`, `_bind_napari_contrast`, `_stop_mosaic_worker`, `_populate_detect_channels`,
+`_stop_spots`, the plate's whole spot-detection chain, `_make_mosaic_pane` and `_ChannelBar`
+(unbuilt since 2026-07-22). Measured before the cut, on the real fixture: 2 of 2 `_load_mosaic`
+calls returned at the guard, 0 `_MosaicWorker` objects were built, and a 140 ms debounce `QTimer`
+armed 3 times into a slot that could only return.
+`tests/test_plate_follows_windows.py` now pins `not hasattr(win, "_mosaic_pane")` — the ABSENCE of
+the attribute, not `is None`, because `None` is what let twenty dead methods read as a feature.
+
+**Contrast is ONE job on each side of one seam, not two implementations of one job.** This was
+raised as duplication twice and audited on 2026-08-06; the answer is no, and it is recorded here so
+it is not raised a third time.
+
+| side | methods | what it does |
+|---|---|---|
+| `_viewer.py` (plate) | `_bind_window_contrast`, `_adopt_window_view`, `_on_detail_contrast`, `_plate_copy_luts`, `_plate_paste_luts`, `on_screen_luts` | makes the plate a **sink** of a window's napari. Never reads or writes a napari layer; every write goes through `PlateOverview.follow_channel_window` / `set_channel_window`. |
+| `_region_viewer.py` (window) | `_per_channel_luts`, `_apply_luts`, `_copy_luts`, `_paste_luts`, `_match_raw_contrast` | reads and writes **this window's own napari layers**. `_match_raw_contrast` is raw -> operator layers *within* one window and delegates to `MosaicLayers.match_contrast_to`. |
+
+They share a word and no code path. `on_screen_luts` **delegates** to the focused window's
+`_per_channel_luts` (one hop, not a second reader), and `_LUT_CLIPBOARD` is one dict both sides
+name. The one genuine duplicate was `_adopt_centre_view` (plate pane) against `_adopt_window_view`
+(per window) — same job, and the pane-flavoured one was the dead one. Task 1 removed it; there is
+nothing left to collapse.
+
 ## Two producers of a region's pixels, and they are not interchangeable
 
 `stitch_plate()` is the mosaic **of record**: registration, fusion, native resolution, ~0.9 GB per
 27-FOV well. `_mosaic_source` / `_gallery` produce **preview placement**: FOVs pasted at their stage
 coordinates, later-overwrites-earlier, decimated on read. Both go through the SAME `_placement`
 helpers, so they are one geometry at two resolutions — never two implementations. Anything that is a
-LOOK (pane 2's mosaic, the plate cells, Gallery View) takes the preview path; anything that is a
+LOOK (a window's mosaic, the plate cells, Gallery View) takes the preview path; anything that is a
 RESULT takes `stitch_plate`. Adding a third placement rule is the defect shape this repo has the
 most of, because the error renders as a plausible image.
 

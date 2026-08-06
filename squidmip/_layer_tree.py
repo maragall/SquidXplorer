@@ -50,9 +50,10 @@ NOT ported, on purpose:
 
 IDENTITY IS (op, channel), NEVER A LAYER OBJECT AND NEVER A PARSED NAME
 -----------------------------------------------------------------------
-``_load_mosaic`` (``_viewer.py:5092``) destroys and recreates every layer on each region
-change. A subscription bound to layer objects therefore dies silently on the next region --
-that is precisely how the contrast sync was lost (``on_user_contrast``, ``_viewer.py:5174``).
+``RegionViewer._load_mosaic`` destroys and recreates every layer on each REGION change (it
+keeps them for a timepoint change; see ``_region_viewer.py``). A subscription bound to layer
+objects therefore dies silently on the next region -- that is precisely how the contrast sync was
+lost (``MosaicLayers.on_user_contrast``).
 Every row here resolves its layer through ``MosaicLayers.find(op, channel)`` at read time, and
 identity comes from ``layer.metadata`` via ``key_of``. Names are labels; ian-stitcher's
 ``extractWavelength(layer.name)`` and petakit's unparseable channel names are why.

@@ -2178,7 +2178,7 @@ class RegionViewer(QMainWindow):
         # t=THIS WINDOW'S TIMEPOINT. Without it the worker fused timepoint 0 whatever the
         # timepoint bar said, and the reload this method performs on every slider move repainted
         # the same pixels.
-        w = _MosaicWorker(self._reader, self._meta, region, channels, z_index=0, parent=self,
+        w = _MosaicWorker(self._reader, self._meta, region, channels, parent=self,
                           t=self.time_point)
         w.ready.connect(lambda r, ch, levels, bbox, win:
                         self._on_plane(r, ch, levels, bbox, win, gen=gen))
