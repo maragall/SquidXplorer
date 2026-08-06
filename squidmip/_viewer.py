@@ -63,8 +63,8 @@ from qtpy.QtCore import (  # QThread/Signal: kept for tests that build a stub wo
 from qtpy.QtGui import QColor, QPalette
 from qtpy.QtWidgets import (
     QAction, QApplication, QCheckBox, QComboBox, QDockWidget, QFileDialog, QFrame, QHBoxLayout, QLabel,
-    QMainWindow, QMenu, QPlainTextEdit, QPushButton, QScrollArea, QSlider, QSpinBox,
-    QSplitter, QStackedWidget, QStyleFactory, QTabBar, QVBoxLayout, QWidget,
+    QMainWindow, QMenu, QPlainTextEdit, QPushButton, QScrollArea, QSpinBox,
+    QSplitter, QStyleFactory, QTabBar, QVBoxLayout, QWidget,
 )
 
 #: The one Fusion QStyle for this process, created on first use. It must NOT be per-window.
@@ -135,7 +135,7 @@ from squidmip._logpane import get_logger
 
 log = get_logger("viewer")
 
-from squidmip import _explore, _measure, _qtstyle
+from squidmip import _measure, _qtstyle, _run_scope
 from squidmip.contract import field_path
 from squidmip._engine import available_projectors
 from squidmip._layers import OperationStack
@@ -226,46 +226,6 @@ def _view_hue(view_id: int, *, focused: bool = False) -> QColor:
 
 _CONTROL_BLUE = _qtstyle.CONTROL_BLUE
 
-_EMPTY_BODY_PX = _qtstyle.EMPTY_BODY_PX   # the legibility floor; see squidmip/_qtstyle.py
-_EMPTY_HEAD_PX = _qtstyle.EMPTY_HEAD_PX
-
-# The empty exploration pane's copy (IMA-260). Framed as an EXAMPLE of what you might do, never as
-# an instruction: Julio asked for "example usage", so the pane shows one concrete path and then
-# Control Well first (Julio's stated priority), Shift-drag second. Plain sentences, no jargon,
-# and no hedging: the previous copy said "here is an example", "for example" and "these are only
-# examples" in four consecutive paragraphs, which reads as apologetic rather than instructive.
-# Julio: "The exploration pane message is really unprofessional and unlike AI."
-#
-# It also described the WRONG ROLE. Operator results belong in the plate view and the centre
-# viewer as toggleable layers -- pane 3 is SUPPLEMENTARY (3D rendering, decon previews, fields
-# worth keeping in view). Copy that promises results will "land here" teaches the wrong model.
-_EMPTY_EXPLORE_HEAD = "Exploration"
-_EMPTY_EXPLORE_LEDE = (
-    "A second viewer, for a subset of the plate. Operator results appear as layers in the plate "
-    "and the centre viewer \u2014 not here.")
-#: PRIMARY line, WELL PLATE only. Julio: "You say control well, but that feature is only for our
-#: well plate acquisition. For tissue acquisition we could print the user 'open in exploration
-#: pane'." A control well is a plate concept -- on a glass slide with hand-drawn regions there is
-#: nothing to control against, and naming a gesture the user cannot perform is worse than silence.
-# The line below used to name "Right-click a well and choose Control Well". `set_control_well`
-# and `PlateOverview._context_menu` were deleted wholesale in 2b8fbc5 (Decentralize GUI), so it
-# taught a gesture the user cannot perform, which the comment below calls worse than silence.
-# Corrected 2026-07-28 to name Shift-drag, which is the gesture that actually exists.
-_EMPTY_EXPLORE_PRIMARY = (
-    "Shift-drag across the plate to open the wells you select in their own window, so you can "
-    "compare them side by side.")
-#: PRIMARY line for a SLIDE / tissue acquisition, where the unit is a region, not a well.
-_EMPTY_EXPLORE_PRIMARY_SLIDE = (
-    "Double-click a region on the slide and choose Open in exploration pane to bring it here.")
-_EMPTY_EXPLORE_SECONDARY = (
-    "Hold Shift and drag across the plate to open a subset in its own tab, with a slider to "
-    "step through it.")
-_EMPTY_EXPLORE_SECONDARY_SLIDE = (
-    "Hold Shift and drag to open several regions in one tab, with a slider to step through "
-    "them.")
-_EMPTY_EXPLORE_CODA = (
-    "Use it for 3D volume rendering, deconvolution previews, and fields worth keeping in view.")
-_EXPLORE_W = 380                      # pane 3's width on open, in px (see PlateWindow.__init__)
 
 _STATUS = _qtstyle.STATUS   # processing-status hue coding; see squidmip/_qtstyle.py
 _NDV_DARK = _qtstyle.NDV_DARK
@@ -349,14 +309,6 @@ _BAND_MAX_PX = 520
 _RIGHT_COL_SIZES = [215, 165]
 
 
-# Pane 3's identity and label rules live in ``_explore`` (no Qt, no napari), and are re-exported
-# here under their historical names so every existing caller and test is unchanged. They MOVED
-# rather than being copied: two spellings of "what is this tab called" is the same
-# two-representations-of-one-truth defect this file already carries scars from.
-exploration_tab_key = _explore.exploration_tab_key
-exploration_tab_label = _explore.exploration_tab_label
-
-
 # --- channel bar: one row per channel, under the plate overview -----------------------------
 
 class _ChannelBar(QWidget):
@@ -423,81 +375,6 @@ class _ChannelBar(QWidget):
 
 
 # --- main window: plate overview | embedded ndviewer ----------------------------------------
-
-class _ExplorationTab(QWidget):
-    """One 'exploration' tab: a saved FOV/region subset plus the operator UI scoped to it (IMA-205).
-
-    Multi-instance by design — one per selection — which is why it does NOT reuse an operator
-    tab's fixed key. Identity is content-addressed (``exploration_tab_key``), so re-selecting the
-    same wells focuses this tab instead of opening a second copy of it.
-
-        selection {B2,B3,B4}
-              |
-              v  exploration_tab_key(acq, regions) -> "exp:1a2b3c"
-        _ExplorationTab(regions)  --run--> run_operator(op, regions=..., tab_key="exp:1a2b3c")
-              |                                              |
-              |                                    layer "<op>@exp:1a2b3c"
-              +--close--> stop run, drop layers, free canvases
-    """
-
-    def __init__(self, regions: list, tab_key: str, parent=None):
-        super().__init__(parent)
-        self.cursor = _explore.SubsetCursor(regions)
-        self.regions = self.cursor.regions
-        self.tab_key = tab_key
-        self.status: dict = {}      # this tab's plate dots, restored when it becomes active
-        self.sync_note = None       # set by _build_exploration_tab; the "not synced yet" banner
-        self.sync_pending = False   # True while this tab is in front but the view still shows a run
-        # THE TAB'S OWN VIEWER — built by pane 2's constructor, embedded in this widget. "The
-        # right pane is essentially a copy of the central pane, but it occurs on a subset."
-        self.viewer = None          # the MosaicPane, or None with the reason said on screen
-        self.slider = None          # the slider UNDER the viewer: one stop per region
-        self.region_label = None    # "region 1 of 3 · B2"
-        self.progress = None        # what a preview run scoped to this tab has computed so far
-        self.minerva_btn = None
-        self.mosaic_worker = None   # the fuse-this-region thread currently feeding self.viewer
-        self.tiles: dict = {}       # region -> the cell canvas a multi-FOV run is filling in
-        self.tile_boxes: dict = {}  # region -> the union of the boxes landed in that canvas, so the
-        #                             layer is cropped to its CONTENT before being placed at bbox_um
-        self.plate_layer = None     # the PLATE layer the run displayed here writes into
-
-    def dispose(self):
-        """Free the tab's viewer and stop its mosaic read.
-
-        A napari viewer is a GL context and tens of MB; leaking one per Shift-drag kills a
-        session after twenty selections. Called from ``_discard_exploration`` — the ONE teardown
-        path — so a tab close, a float close and app exit all free it identically.
-        """
-        w = self.mosaic_worker
-        self.mosaic_worker = None
-        if w is not None and w.isRunning():
-            w.stop()
-            w.wait(2000)
-        pane = self.viewer
-        self.viewer = None
-        if pane is not None:
-            # Close the napari Viewer FIRST. deleteLater() on the Qt wrapper does not close it —
-            # napari holds every Viewer in its own instance registry — so without this the GL
-            # context and its ~tens of MB leaked once per Shift-drag (the very leak this docstring
-            # names). MosaicPane.shutdown() is idempotent and no-ops when no viewer was built.
-            if hasattr(pane, "shutdown"):
-                pane.shutdown()
-            pane.setParent(None)
-            pane.deleteLater()
-
-    def set_sync_pending(self, pending: bool):
-        """Say out loud that this tab is in FRONT but the plate/detail beside it still belong to a
-        run that is finishing. A tab which silently shows someone else's wells is the whole bug —
-        the banner is the honest state until _on_run_drained catches the view up."""
-        self.sync_pending = bool(pending)
-        if self.sync_note is not None:
-            self.sync_note.setVisible(self.sync_pending)
-
-    def shutdown(self):
-        """Called by _close_op_tab (duck-typed, like the CLI terminal's). The window does the real
-        teardown in _discard_exploration — this exists so the hasattr(w, 'shutdown') path is safe."""
-        return
-
 
 def _make_mosaic_pane(show_docks: bool = True):
     """Build a napari mosaic viewer, or report why it could not be built.
@@ -669,13 +546,10 @@ class PlateWindow(QMainWindow):
         self._push_problem = None
         self._readout_base = ""
         self._dropped_pushes = 0
-        self._active_exploration = None   # the exploration tab currently in front, if any
         self._tabs_muted = False      # suppress _on_tab_changed during bulk teardown (ingest)
         self._run_out_dir = None      # output dir of the in-flight SAVE run (for partial cleanup)
-        self._run_tab_key = None      # exploration tab that owns the in-flight run's LAYER, if any
-        self._run_view_tab_key = None # side-pane tab the in-flight run is DISPLAYED in, if any
         self._run_label = ""          # the in-flight run's operator label, and where it is going —
-        self._run_dest = ""           # one source for the status line AND the side-pane tab
+        self._run_dest = ""           # one source for the status line
         self._pending_resync = False  # a tab switch was deferred because a run was live (IMA-205 bugs)
         self._runs_settled = 0        # monotonic: bumped once a run's TERMINAL cascade has run — the
         #                               tiles, the streamEnded recomposite AND _on_run_drained. It is
@@ -686,34 +560,19 @@ class PlateWindow(QMainWindow):
         #                               event loop had not yet applied (IMA-258 flakes).
         self._loupe_sources = {}      # layer key -> _LoupeSource backing that layer's pixels (IMA-208)
 
-        # THREE HORIZONTAL PANES on one monitor (IMA-237). Tabs live inside a pane (their bar sits at
-        # the pane's top, like the plate pane's title bar) — never a global strip across the window.
-        # Any detachable tab can be DRAGGED OUT of its bar into a free-floating window (ImageJ-style;
-        # see _detach_tab, which serves BOTH bars):
-        #   PANE 1 = plate view + the controls with the tabs. A vertical split: on top the PROCESS
-        #            console, a QTabWidget with a "Process wells" home tab (operator list) and one tab
-        #            per operator you open (MIP -> where-to-save UI; Record -> recorder UI); below it
-        #            the HCS PLATE view, whose title bar names the plate.
-        #   PANE 2 = the initial viewer: the ndviewer_light array viewer, full height. ONE widget
-        #            instance (never tabbed), but NOT plate-fixed: its FOV slider FOLLOWS the active
-        #            exploration tab, which re-points it at that tab's subset; no exploration tab
-        #            restores the whole plate (_on_tab_changed). ndviewer's only retarget seam is
-        #            start_acquisition, which resets the viewer, so computed frames do not survive a
-        #            switch; raw plane paths are re-registered so it isn't black.
-        #   PANE 3 = the EXPLORATION pane: one tab per Shift-dragged FOV subset (IMA-205/221).
+        # WHAT IS ON SCREEN, and it is no longer a grid of panes. The plate is on top, full width;
+        # under it a BAND holding [Window Navigator | Operators over the Log]. Viewing happens in
+        # INDEPENDENT windows spawned from the plate (`_region_viewer`), never in a pane locked
+        # inside this one. Tabs live inside the band's right column (their bar sits at the top of
+        # it) and any tab but the Operators home tab can be DRAGGED OUT into a free-floating window
+        # (ImageJ-style; see `_detach_tab`).
         #
-        # Pane 3 was VISIBLE FROM OPEN (IMA-260), reversing IMA-237's reveal-on-first-drag,
-        # because the saving of a fifth of the monitor bought undiscoverability: you cannot find a
-        # pane that is not there, so nobody found the Shift-drag that was the only way to make it
-        # appear. It opened showing EXAMPLE USAGE (_build_explore_empty) and swapped to the tab bar
-        # the moment it held real content.
-        # AS OF 2026-08-03 it is visible ONLY WHILE IT HOLDS A TAB, and the tab it holds today is
-        # the Decon QC result. The discoverability argument died with the gesture it was made
-        # about: a Shift-drag now opens an independent window, so a permanent strip of copy
-        # teaching it would point at the wrong place. See `_sync_explore_pane`, which owns both
-        # the page swap and the visibility.
-        # Exploration tabs moved OUT of the process console to get here: the console is pane 1, and
-        # pane 1 is not where the user asked exploration to live.
+        # There WAS a third pane, "exploration" (IMA-205/221/237/260): one tab per Shift-dragged FOV
+        # subset, each embedding a second napari mosaic. 2b8fbc5 ("Decentralize GUI") replaced the
+        # gesture that filled it — a Shift-drag opens an independent window now — and the pane was
+        # removed on 2026-08-05 along with the tab, its slider, its Minerva button and its scope.
+        # The one thing that was still routed into it, the deconvolution QC composite, goes to
+        # `_left_tabs` (see `publish_qc_result`), which is on screen.
 
         # the band's right column: the process console (build the home tab first — it owns
         # self._readout, which _make_detail_viewer writes to if ndviewer is unavailable).
@@ -764,43 +623,6 @@ class PlateWindow(QMainWindow):
         self._log_panel = LogPanel(self._log_bus, self._activity)
         self._log_panel.start()
         self._log_panel.float_requested.connect(self._float_log)
-
-        # PANE 3: the exploration pane. Same _DetachTabs class as the console (one detach seam, not
-        # two), but every tab is detachable — it has no permanent home tab to protect.
-        self._explore_tabs = _DetachTabs(self._detach_tab, first_detachable=0)
-        if self._fusion_style is not None:
-            self._explore_tabs.setStyle(self._fusion_style)
-        self._explore_tabs.setPalette(_dark_palette())
-        self._explore_tabs.setAutoFillBackground(True)
-        self._explore_tabs.setStyleSheet(_TABS_DARK)
-        self._explore_tabs.setTabsClosable(True)
-        # ELIDE long tab titles. A preview tab is named after its operator ("Maximum Intensity
-        # Projection - C3-C5 (3)"), and a QTabBar's size hint includes every tab's full width: the
-        # third such tab pushed the WHOLE WINDOW 260 px wider than it was asked to be, on a small
-        # monitor, which is the "controls eclipsing content" failure arriving from the one
-        # direction nobody watches. Measured on screen, not reasoned about.
-        self._explore_tabs.setElideMode(Qt.ElideRight)
-        self._explore_tabs.tabBar().setExpanding(False)
-        self._explore_tabs.tabBar().setUsesScrollButtons(True)
-        self._explore_tabs.tabCloseRequested.connect(
-            lambda i: self._close_op_tab(i, self._explore_tabs))
-        self._explore_tabs.currentChanged.connect(self._on_tab_changed)
-        # Pane 3 is a two-page STACK, not a bare tab bar: page 0 is the example-usage empty state,
-        # page 1 is the tab bar. One widget owns "what pane 3 shows", so the empty copy and the
-        # tabs can never be on screen together and can never both be off it. _explore_tabs.isHidden()
-        # stays truthful for free — QStackedWidget hides the page that is not current — which is
-        # exactly what "there are no exploration tabs" means, and what callers already read.
-        self._explore_empty = self._build_explore_empty()
-        self._explore_pane = QStackedWidget()
-        self._explore_pane.setStyleSheet(f"background:{_BG};")
-        self._explore_pane.addWidget(self._explore_empty)   # page 0: example usage
-        self._explore_pane.addWidget(self._explore_tabs)    # page 1: real content
-        # Wide enough to set 24 px copy without one word per line — the legibility floor is a floor
-        # on the TEXT, and text you have to read a syllable at a time is not legible either.
-        self._explore_pane.setMinimumWidth(360)
-        # It is PARENTED into the root layout further down (the `body` splitter). Between
-        # 2b8fbc5 and this commit it was not, and `publish_qc_result` was posting the decon QC
-        # result into it the whole time.
 
         # NO CENTRAL VIEWER (decentralized, 2026-07-23). The locked central napari pane is gone:
         # viewing now happens in INDEPENDENT windows spawned from the plate (see _region_viewer),
@@ -947,8 +769,8 @@ class PlateWindow(QMainWindow):
         # orphan's own clicked signal. Deleted rather than re-hidden; pinned by
         # tests/test_no_orphan_windows.py.
 
-        # THE ROOT IS JUST THE PLATE (decentralized, 2026-07-23). The central viewer and the
-        # exploration pane are gone from the layout; the plate column IS the window. Selections
+        # THE ROOT IS JUST THE PLATE (decentralized, 2026-07-23). The central viewer is gone from
+        # the layout (and the exploration pane with it); the plate column IS the window. Selections
         # open independent napari windows (the Views dock, added below), and the log sits UNDER the
         # operators in `_right_col` — Julio: "the logger on the bottom of the GUI". This replaces
         # the locked 3-pane grid that Spencer asked us to dismantle.
@@ -1052,41 +874,21 @@ class PlateWindow(QMainWindow):
         self._time_point_bar = TimePointBar(on_change=self._on_time_point_changed)
         self._time_point_bar.set_count(1)
 
-        # PANE 3 HAS A HOME AGAIN, UNDER THE PLATE, AND ONLY WHEN IT HOLDS SOMETHING.
+        # THE WHOLE BODY IS ONE VERTICAL SPLITTER, TOP TO BOTTOM: the plate, then the band. One
+        # splitter rather than a splitter nested in a splitter — same orientation twice would put
+        # two indistinguishable horizontal handles on screen and make "which one moves the plate"
+        # a guess.
         #
-        # 2b8fbc5 ("Decentralize GUI") took the exploration pane out of the layout but left
-        # `_explore_pane` constructed. A day earlier a619381 had wired `publish_qc_result` to put
-        # the deconvolution QC result INTO that pane's tab bar. So from 2026-07-23 the decon QC
-        # view — the turbo x-y / x-z / y-z composite the whole iterate-and-look loop exists for —
-        # was computed, put in a tab, and shown to nobody: a QStackedWidget with no parent that is
-        # never show()n is invisible rather than floating, which is why it never looked like the
-        # orphan-window bug tests/test_no_orphan_windows.py pins. Julio: "we should be able to
-        # toggle the turbo colormap mini-gui where we click on there image and it moves teh
-        # crosshairs to display XZ and YZ bands." He was asking for something already built.
-        #
-        # It goes in the SAME VERTICAL SPLITTER as the plate and the band, not inside the band: the
-        # composite is a real picture (2*view_half plus the two z sections on each axis) and the
-        # band is capped at _BAND_MAX_PX. A splitter child means the user can give the picture as
-        # much of the deck as they want and take it back.
-        #
-        # HIDDEN WHILE EMPTY, which is a reversal of IMA-260's "visible from open, teaching by
-        # example". That reversal is deliberate: the example copy teaches the Shift-drag, and
-        # since the decentralization a Shift-drag opens an INDEPENDENT WINDOW rather than filling
-        # this pane. A permanent strip teaching a gesture whose result lands somewhere else is
-        # worse than no strip. `_sync_explore_pane` owns both the page swap and this visibility,
-        # so there is one place that answers "what is pane 3 doing".
-        # THE WHOLE BODY IS ONE VERTICAL SPLITTER, TOP TO BOTTOM: plate, pane 3, band. Three
-        # children of one splitter rather than a splitter nested in a splitter — same orientation
-        # twice would put two indistinguishable horizontal handles on screen and make "which one
-        # moves the plate" a guess. Pane 3 is hidden while empty, and a QSplitter gives a hidden
-        # child no pixels and no handle, so the common case looks and drags like two panes.
+        # It had a THIRD child between them until 2026-08-05: the exploration pane, hidden unless
+        # it held a tab. The only thing left routed into it was the decon QC composite, and that
+        # now opens as a tab in `_left_tabs` — where the operator that produces it lives, and where
+        # a user is already looking when they press Run.
         body = QSplitter(Qt.Vertical)
         body.setStyleSheet("QSplitter{background:#0b0e14;}"
                            "QSplitter::handle{background:#232b3a;height:1px;}")
         body.setHandleWidth(6)
         body.addWidget(plate_host)              # index 0: THE PLATE, on top, full width, dominant
-        body.addWidget(self._explore_pane)      # index 1: pane 3, hidden until it holds a tab
-        body.addWidget(band_host)               # index 2: navigator | operator over log
+        body.addWidget(band_host)               # index 1: navigator | operator over log
         # A CONSOLE YOU CAN DRAG TO NOTHING IS A CONSOLE YOU HAVE LOST — the same invariant
         # `_right_col` buys, one level up: the band must not be draggable to zero either, or the
         # navigator and the operators go with it.
@@ -1096,12 +898,11 @@ class PlateWindow(QMainWindow):
         # share only ever goes up from the design ratio. `setSizes` sets the starting position.
         body.setStretchFactor(0, 1)
         body.setStretchFactor(1, 0)
-        body.setStretchFactor(2, 0)
-        body.setSizes([self._DESIGN_H - _BAND_DEFAULT_PX, 0, _BAND_DEFAULT_PX])
+        body.setSizes([self._DESIGN_H - _BAND_DEFAULT_PX, _BAND_DEFAULT_PX])
         plate_host.setMinimumHeight(160)        # the band cannot squeeze the plate out of existence
         self._body = body
 
-        rv.addWidget(body, 1)                   # plate / pane 3 / band, in the drawing's order
+        rv.addWidget(body, 1)                   # plate over band, in the drawing's order
         rv.addWidget(self._time_point_bar, 0)   # hidden unless n_t > 1
         self._split = band
         self.setCentralWidget(root)
@@ -1120,8 +921,6 @@ class PlateWindow(QMainWindow):
         self.menuBar().setStyleSheet(
             "QMenuBar{background:#0b0e14;color:#c9d1d9;} "
             "QMenuBar::item:selected{background:#1f6feb;}")
-
-        self._sync_explore_pane()                  # pane 3 starts hidden: it holds no tab yet
 
         # 596 x 850 stays the DEFAULT portrait shape (Julio): the plate dominates below the
         # band, and the window opens identically on every monitor. It is no longer
@@ -1235,7 +1034,7 @@ class PlateWindow(QMainWindow):
 
         # Hidden orphans (referenced elsewhere; not shown — no header/footer).
         self._scope_run = QComboBox()
-        self._scope_run.addItems(list(_explore.RUN_SCOPES))
+        self._scope_run.addItems(list(_run_scope.RUN_SCOPES))
         self._scope_run.hide()
         self._raw_btn = QPushButton("Return to raw view")
         self._raw_btn.clicked.connect(self._return_to_raw)
@@ -1344,112 +1143,11 @@ class PlateWindow(QMainWindow):
             log.error("native 3D view failed for region %s: %s", region, exc)
             self._readout.setText(f"3D native view failed: {exc}")
 
-    # -- operator UIs live as tabs INSIDE pane 1 (home tab + one per opened operator); exploration
-    # -- tabs live in pane 3. Both bars share every path below — *tabs* says which one. -----------
-    def _build_explore_empty(self) -> QWidget:
-        """Pane 3 with nothing in it: EXAMPLE USAGE, not a blank strip (IMA-260).
-
-        The pane is visible from open, so 'empty' is a state a user will actually look at, and a
-        blank column teaches nothing — the Shift-drag and the right-click that fill this pane are
-        both invisible gestures with no button anywhere. So the empty state names one concrete
-        path (right-click -> Control Well, the primary), then a second (Shift-drag), then says
-        plainly that these are only examples. It is illustration, not instruction: the user asked
-        to be shown a way in, not told what to do.
-
-        Every string here is sized at or above the project's legibility floor — see
-        _EMPTY_BODY_PX. Copy nobody can read from their chair is a blank pane with extra steps.
-        """
-        w = QWidget()
-        w.setStyleSheet(f"background:{_BG};color:#e6edf3;")
-        v = QVBoxLayout(w)
-        v.setContentsMargins(14, 14, 14, 14)
-        v.setSpacing(10)
-
-        head = QLabel(_EMPTY_EXPLORE_HEAD)
-        head.setWordWrap(True)
-        head.setStyleSheet(f"color:#e6edf3;font-size:{_EMPTY_HEAD_PX}px;font-weight:800;")
-        v.addWidget(head)
-
-        # The gestures DIFFER by acquisition kind, so the copy does too: "Control Well" is a
-        # plate concept and does not exist on a glass slide. Naming a gesture the user cannot
-        # perform is worse than saying nothing.
-        slide = self.is_slide_acquisition()
-        primary = _EMPTY_EXPLORE_PRIMARY_SLIDE if slide else _EMPTY_EXPLORE_PRIMARY
-        secondary = _EMPTY_EXPLORE_SECONDARY_SLIDE if slide else _EMPTY_EXPLORE_SECONDARY
-        for text, color in ((_EMPTY_EXPLORE_LEDE, "#c3ccd9"),
-                            (primary, "#e6edf3"),
-                            (secondary, "#c3ccd9"),
-                            (_EMPTY_EXPLORE_CODA, "#8b98ad")):
-            lab = QLabel(text)
-            lab.setWordWrap(True)
-            lab.setStyleSheet(f"color:{color};font-size:{_EMPTY_BODY_PX}px;line-height:150%;")
-            v.addWidget(lab)
-        v.addStretch(1)
-        return w
-
-    def is_slide_acquisition(self) -> bool:
-        """Is this a glass slide / hand-drawn tissue acquisition rather than a well plate?
-
-        Read from the RESOLVED plate format, not guessed from region names: `_plate_shape`
-        already owns that inference (and its manual override), and a second rule here would be
-        another two-answers-to-one-question. Unknown counts as a slide, because the copy it
-        selects names no gesture the user might not have.
-        """
-        from squidmip._plate_shape import GLASS_SLIDE, normalize_plate_format
-
-        meta = self._meta
-        if meta is None:
-            return False
-        fmt = normalize_plate_format(meta.get("wellplate_format"), strict=False)
-        return fmt is None or fmt == GLASS_SLIDE
-
-    def explore_empty_text(self) -> str:
-        """Everything pane 3 is currently SAYING while empty — '' once it holds content.
-
-        One reader for the whole empty state, so a check cannot pass by finding a label that is on
-        the widget but not on the screen: it returns text only while the empty page is the page
-        pane 3 is showing."""
-        if self._explore_pane.currentWidget() is not self._explore_empty:
-            return ""
-        head = self._explore_empty.findChildren(QLabel)
-        return "\n".join(lab.text() for lab in head)
-
-    def _sync_explore_pane(self):
-        """Show the tab bar once pane 3 holds a tab, and the EXAMPLE COPY whenever it does not.
-
-        Pane 3 keeps its width either way (IMA-260) — it is a permanent third column, so this is a
-        page swap inside it, never a collapse. Both directions matter: the copy has to come back
-        when the last tab closes, or a user who explores once and tidies up is left with the blank
-        strip the empty state exists to prevent.
-
-        ...and since the decentralization it also decides whether pane 3 is ON SCREEN AT ALL. The
-        pane is a splitter child under the plate now (see ``__init__``) and it earns its room only
-        while it holds a tab — today that means a Decon QC result. Empty, it would be a permanent
-        strip of copy teaching a Shift-drag whose result opens an independent window instead, so it
-        stands down and gives every pixel back to the plate. This is the one place both answers
-        live; every caller already routes through it (tab open, tab close, detach, re-dock, float
-        close), so nothing else has to learn the rule."""
-        page = self._explore_tabs if self._explore_tabs.count() > 0 else self._explore_empty
-        if self._explore_pane.currentWidget() is not page:
-            self._explore_pane.setCurrentWidget(page)
-        # WHICH tabs earn the deck's room: the ones the CURRENT design puts here, which today
-        # means the Decon QC result. An `_ExplorationTab` does not, and that is not an oversight:
-        # it embeds a second napari mosaic, and taking the embedded viewer out of the root window
-        # is precisely what the decentralization did. A preview run still builds one of those tabs
-        # (`_open_preview_tab`) and it has been invisible since 2b8fbc5; un-hiding it would put a
-        # napari canvas back under the plate as a side effect of a decon fix, which is a change
-        # that should be made deliberately, on its own, by someone who can watch it happen.
-        #
-        # setVisible on a widget whose parent is not shown yet is remembered by Qt and applied at
-        # show(); this is called once from __init__ (before the window is shown) precisely so the
-        # pane starts hidden rather than flashing on the first paint.
-        deck_tabs = any(not isinstance(self._explore_tabs.widget(i), _ExplorationTab)
-                        for i in range(self._explore_tabs.count()))
-        self._explore_pane.setVisible(page is self._explore_tabs and deck_tabs)
-
+    # -- operator UIs live as tabs in the band's right column: the Operators home tab, one tab
+    # -- per operator you open, and any result a panel publishes. ---------------------------------
     def _open_op_tab(self, key: str, title: str, builder, tabs=None):
-        """Open (or focus) a UI as a tab. Built lazily, once. *tabs* is the bar it belongs in —
-        the process console by default, pane 3 for exploration tabs.
+        """Open (or focus) a UI as a tab. Built lazily, once. *tabs* is the bar it belongs in;
+        there is one bar (the band's right column) and it is the default.
         If the UI is currently detached (see _detach_tab), focus its floating window instead —
         never rebuild: for the CLI that would mean a second live shell."""
         tabs = self._left_tabs if tabs is None else tabs
@@ -1463,7 +1161,6 @@ class PlateWindow(QMainWindow):
             w = builder()
             self._op_tabs[key] = w
             tabs.addTab(w, title)
-            self._sync_explore_pane()
         tabs.setCurrentWidget(w)
 
     #: How many tabs at the head of the process console are FIXED: [0] Operators. It cannot close
@@ -1571,17 +1268,10 @@ class PlateWindow(QMainWindow):
         w = tabs.widget(index)
         tabs.removeTab(index)
         self._dispose_tab_widget(w)
-        self._sync_explore_pane()
 
     def _dispose_tab_widget(self, w):
         """The ONE teardown path for an operator UI — tab close, float close, and app exit all
-        route here so they can't drift: registry pop, stale-ref clear, shell kill, delete.
-
-        An exploration tab owns MORE than a widget (a possibly-live run and a set of plate layers),
-        so its extra teardown hangs off this same path rather than off the tab-close caller — a
-        float-close or an app exit must free it exactly as a tab close does (IMA-209 + IMA-205)."""
-        if isinstance(w, _ExplorationTab):                 # stop its run + free its layers FIRST
-            self._discard_exploration(w)
+        route here so they can't drift: registry pop, stale-ref clear, shell kill, delete."""
         for k, v in list(self._op_tabs.items()):
             if v is w:
                 del self._op_tabs[k]
@@ -1598,9 +1288,8 @@ class PlateWindow(QMainWindow):
         drag in _DetachTabBar is a thin, deferred caller) so the offscreen tests drive it directly.
         Returns the new window, or None when the tab can't detach (home tab / unregistered).
 
-        ONE implementation serves both bars (IMA-237): pane 3's tabs float out through this exact
-        path, and re-dock to the bar they came from. *tabs* defaults to the process console, so
-        IMA-209's callers and tests are unchanged."""
+        *tabs* is the bar the tab is in and defaults to the one there is, so IMA-209's callers
+        and tests are unchanged."""
         tabs = self._left_tabs if tabs is None else tabs
         if index < self._FIXED_TABS and tabs is self._left_tabs:
             return None                      # the Operators home tab is fixed: it never detaches
@@ -1626,7 +1315,6 @@ class PlateWindow(QMainWindow):
         win._home_tabs = tabs        # re-dock returns it to the bar it was dragged out of
         self._floating[key] = win
         win.show()
-        self._sync_explore_pane()    # pane 3 collapses if that was its last tab
         return win
 
     def _on_float_closed(self, key: str):
@@ -1637,7 +1325,6 @@ class PlateWindow(QMainWindow):
         w = win.take_content()
         if w is not None:
             self._dispose_tab_widget(w)
-        self._sync_explore_pane()
 
     def _redock(self, key: str):
         """Re-dock button: return the floated widget to the tab bar — the SAME object, so a live
@@ -1647,7 +1334,7 @@ class PlateWindow(QMainWindow):
             return
         title = win._tab_title
         # `is None`, never `or`: an EMPTY QTabWidget is falsy in PyQt, so `_home_tabs or _left_tabs`
-        # sent every re-dock from a just-emptied pane 3 into the process console instead.
+        # sent every re-dock from a just-emptied bar to the wrong place.
         tabs = getattr(win, "_home_tabs", None)
         if tabs is None:
             tabs = self._left_tabs                           # back to the bar it came from
@@ -1658,44 +1345,7 @@ class PlateWindow(QMainWindow):
             return
         self._op_tabs[key] = w
         tabs.addTab(w, title)
-        self._sync_explore_pane()
         tabs.setCurrentWidget(w)
-
-    def _discard_exploration(self, tab: "_ExplorationTab"):
-        """Tear down one exploration tab's work: stop its run if it owns the live one, then drop
-        every layer it produced and FREE the plate canvases behind them.
-
-        Without this the worker keeps computing into a layer nobody can reach, and each abandoned
-        layer keeps a full plate-sized RGB canvas resident (tens of MB on a 1536wp) — silent
-        growth on the app's headline gesture, with no error anywhere."""
-        stopped = False
-        if tab.tab_key in (self._run_tab_key, self._run_view_tab_key) and self._busy():
-            self._stop_worker()          # _retire: disconnects signals, then lets the thread drain
-            self._note_partial_output()  # a stopped SAVE run leaves a half-written .hcs on disk
-            self._run_tab_key = self._run_view_tab_key = None
-            stopped = True
-        if self._active_exploration is tab:
-            # BUG 1: the tab in front is being deleted. Leaving _active_exploration pointing at it
-            # strands the whole view — _on_tab_changed would later park status onto a dead widget,
-            # and _push_index / the FOV slider stay scoped to a subset nobody can see. Drop the ref
-            # NOW and ask for a re-sync; if a run is still draining, _on_run_drained does it once
-            # the thread is actually gone (a stopped run keeps _busy() True for a while, which is
-            # exactly why the deferred path exists).
-            self._active_exploration = None
-            self._request_resync()
-        gone = self._op_stack.remove_suffix(f"@{tab.tab_key}")
-        if self._overview is not None:
-            for layer in gone:
-                self._overview.drop_layer(layer)
-        if self._active_op_key in gone:
-            self._active_op_key = None
-            self._plate_mode = "raw"
-            if self._acq_name:
-                self._plate_title.setText(f"{self._acq_name}   ·   raw")
-        self._refresh_layers_tab()
-        tab.dispose()                    # free the tab's OWN viewer + stop its mosaic read
-        if stopped:
-            self._readout.setText(f"stopped {exploration_tab_label(tab.regions)} — tab closed mid-run")
 
     def _note_partial_output(self):
         """A save run stopped mid-write leaves a partial `.hcs`. Drop an INCOMPLETE marker in it so
@@ -1714,78 +1364,8 @@ class PlateWindow(QMainWindow):
         except OSError:
             pass       # best-effort: never let cleanup bookkeeping break teardown
 
-    def _close_exploration_tabs(self):
-        """Close every exploration tab. Called on ingest: a tab's regions belong to the acquisition
-        it was opened from, and _fov_index is about to be rebuilt for a different plate.
-
-        Muted: each removeTab emits currentChanged, and letting _on_tab_changed re-point the detail
-        at the OUTGOING acquisition mid-teardown is pure waste (ingest rebuilds it all anyway)."""
-        self._tabs_muted = True
-        try:
-            for i in range(self._explore_tabs.count() - 1, -1, -1):
-                if isinstance(self._explore_tabs.widget(i), _ExplorationTab):
-                    self._close_op_tab(i, self._explore_tabs)
-            # ...and the ones dragged out into floating windows (IMA-209). A float is off the tab
-            # bar but NOT off the plate: it still owns layers and can still own the live run.
-            for key, win in list(self._floating.items()):
-                if isinstance(win.content(), _ExplorationTab):
-                    self._floating.pop(key, None)
-                    w = win.take_content()
-                    win.close()
-                    win.deleteLater()
-                    if w is not None:
-                        self._dispose_tab_widget(w)
-        finally:
-            self._tabs_muted = False
-
-    def open_exploration_tab(self, regions) -> Optional[str]:
-        """Open (or focus) the exploration tab for ``regions``. Returns its key, or None.
-
-        The UI entry point is IMA-221's Shift-drag marquee, via ``_on_marquee_selected``; it is also
-        callable programmatically (and by tests). Identity is content-addressed, so dragging the
-        same wells twice focuses the existing tab rather than opening a duplicate."""
-        if self._reader is None or self._overview is None:
-            self._readout.setText("open an acquisition first")
-            return None
-        regions = list(dict.fromkeys(regions))            # de-dupe, keep first-seen order
-        if not regions:
-            self._readout.setText("empty selection — nothing to explore")
-            return None
-        unknown = [r for r in regions if r not in self._fov_index]
-        if unknown:
-            self._readout.setText(f"{len(unknown)} region(s) are not in this acquisition: {unknown[:3]}")
-            return None
-        key = exploration_tab_key(self._acq_name, regions)
-        # PANE 3 (IMA-237), not the process console: the Shift-drag that opens this tab is also what
-        # REVEALS the exploration pane, which is why it is the gesture and not a menu item.
-        self._open_op_tab(key, exploration_tab_label(regions),
-                          lambda: self._build_exploration_tab(regions, key),
-                          tabs=self._explore_tabs)
-        return key
-
-    def _open_preview_tab(self, op_key: str, op_label: str, regions) -> Optional[str]:
-        """Open (or focus) the side-pane tab a preview run of ``op_key`` streams its results into.
-
-        Identity is content-addressed on acquisition + OPERATOR + region set, so two preview runs
-        over one selection are two tabs side by side — which is the point: "preview runs can open
-        a tab on the exploration pane so that they look at how it is behaving." Re-running the
-        SAME operator on the SAME wells reuses its tab rather than accumulating duplicates.
-        """
-        key = _explore.preview_tab_key(self._acq_name, op_key, regions)
-        self._open_op_tab(key, _explore.preview_tab_label(op_label, regions),
-                          lambda: self._build_exploration_tab(regions, key),
-                          tabs=self._explore_tabs)
-        return key
-
-    def _run_tab(self) -> Optional["_ExplorationTab"]:
-        """The side-pane tab the in-flight run is streaming into, if any."""
-        if not self._run_view_tab_key:
-            return None
-        w = self._op_tabs.get(self._run_view_tab_key)
-        return w if isinstance(w, _ExplorationTab) else None
-
     def _on_progress(self, done: int, total: int):
-        """A run advanced by a WELL. Feeds the log panel's activity header and the side-pane tab.
+        """A run advanced by a WELL. Feeds the log panel's activity header.
 
         It no longer writes the status line. ``_on_unit_progress`` does, because it is the finer
         and therefore the more useful count, and because two slots writing one QLabel is the
@@ -1796,9 +1376,6 @@ class PlateWindow(QMainWindow):
         # doing something" into a visible line. Advanced from THIS slot (the GUI thread), never
         # from the worker: the panel writes a QLabel and a worker thread must not.
         self._activity.advance("operator-run", done, total)
-        tab = self._run_tab()
-        if tab is not None and tab.progress is not None:
-            tab.progress.setText(_explore.progress_sentence(self._run_label, done, total))
 
     def _on_unit_progress(self, report):
         """A run advanced by one ENGINE UNIT (a FOV, or a region for a region operator).
@@ -1834,10 +1411,10 @@ class PlateWindow(QMainWindow):
 
         Asked on every worker's ``finished``, and both questions are needed. ``operator_busy``
         deliberately does not count the raw preview (it opts out with ``IS_PREVIEW``, see
-        ``_explore.operator_busy``), so an operator run ending while a preview is still filling the
+        ``_run_scope.operator_busy``), so an operator run ending while a preview is still filling the
         plate would otherwise hide a bar that has live work behind it.
         """
-        if _explore.operator_busy(self._worker, self._retired):
+        if _run_scope.operator_busy(self._worker, self._retired):
             return
         preview = getattr(self, "_preview", None)
         if preview is not None and preview.isRunning():
@@ -1863,76 +1440,6 @@ class PlateWindow(QMainWindow):
         except Exception as exc:                 # noqa: BLE001 - one window's failure is its own
             log.warning("view %s could not take %s: %s",
                         getattr(requester, "window_id", "?"), method, exc)
-
-    def _on_run_tile(self, ri, ci, well_id, tile, box=None):
-        """One computed FIELD landed — put it on the run's side-pane tab as a REAL LAYER.
-
-        Julio: "layers don't update in the napari mosaic... you instantiate an actual layer to be
-        in the napari interface." So each region of the run becomes its own layer group the moment
-        its first field arrives, and later fields of that region update it — rather than the tab
-        sitting empty until the run ends and then being handed finished data.
-
-        A field for a region this tab is not scoped to is DROPPED: the tab claims a subset, and
-        painting a foreign region on it would make that claim false. (It cannot normally happen —
-        the run and the tab have the same region list — but the tab's claim is not left to luck.)
-        """
-        tab = self._run_tab()
-        if tab is None or tab.viewer is None or self._meta is None:
-            return
-        region = next((r for r in tab.regions
-                       if tuple(self._fov_index[r]["rc"]) == (ri, ci)), None)
-        if region is None:
-            return
-        from squidmip._mosaic_source import mosaic_bbox_um
-        from squidmip._napari_pane import _colormap_for
-
-        arr = np.asarray(tile)
-        if box is not None:
-            # A multi-FOV region arrives field by field, each with its box inside the region's
-            # cell. Accumulate into ONE canvas per region so the layer fills in as the run walks
-            # the region, instead of one layer per field (36 FOVs x 4 channels = 144 layers).
-            canvas = tab.tiles.get(region)
-            if canvas is None or canvas.shape[0] != arr.shape[0]:
-                canvas = np.zeros((arr.shape[0], _CELL, _CELL), arr.dtype)
-                tab.tiles[region] = canvas
-                tab.tile_boxes[region] = None
-            top, left, bh, bw = box
-            canvas[:, top:top + bh, left:left + bw] = arr[:, :bh, :bw]
-            # CROP TO THE CONTENT, because the layer below is placed at `bbox_um` — the region's
-            # mosaic bounding box — and `_place` divides that box by the array's shape. Handing it
-            # the whole _CELL square makes the letterbox margins part of the mosaic: the subject
-            # shrinks into the middle of its own bbox and the scale is wrong by the margin. The
-            # union of the boxes that have landed IS the rectangle those pixels occupy, and once
-            # the region is complete it is exactly the rectangle `bbox_um` describes.
-            u = tab.tile_boxes[region] = _box_union(tab.tile_boxes.get(region), box)
-            arr = canvas[:, u[0]:u[0] + u[2], u[1]:u[1] + u[3]]
-        try:
-            bbox = mosaic_bbox_um(self._meta, region)
-        except Exception as exc:                     # noqa: BLE001 - said, never swallowed
-            tab.viewer.say(f"{region}: could not place the result ({exc}); showing it unplaced.")
-            bbox = None
-        op = _explore.subset_layer_op(self._run_label, region)
-        for c_i, channel in enumerate(c["name"] for c in self._meta["channels"]):
-            if c_i >= arr.shape[0]:
-                break
-            tab.viewer.mosaic.add_mosaic(
-                op, channel, arr[c_i],
-                colormap=_colormap_for(channel),
-                bbox_um=bbox,
-            )
-
-    def _current_exploration(self) -> Optional["_ExplorationTab"]:
-        """The exploration tab the plate and viewer follow: pane 3's FRONT tab, or None when pane 3
-        is empty (IMA-237).
-
-        Before pane 3 existed, "which tab is in front" was a single question with a single answer,
-        because exploration tabs shared the process console's bar. Now the console and pane 3 are
-        side by side and both are visible at once, so scope is owned by pane 3 alone — opening the
-        Layers tab in pane 1 must not silently un-scope the viewer beside it."""
-        if self._explore_tabs.count() == 0:
-            return None
-        w = self._explore_tabs.currentWidget()
-        return w if isinstance(w, _ExplorationTab) else None
 
     @property
     def time_point(self) -> int:
@@ -1973,107 +1480,63 @@ class PlateWindow(QMainWindow):
     # Operator and Log is dragged, not guessed.
 
     def _on_tab_changed(self, index: int = -1, force: bool = False):
-        """The plate + detail follow the ACTIVE tab (IMA-205).
+        """Put the plate back on the whole dataset once a run has drained.
 
-        An exploration tab claims to be scoped to its subset, so the plate's status dots and the
-        detail's FOV slider have to agree with it — otherwise the tab says '4 wells' while the
-        viewer beside it lists all 1536, and scrubbing lands on wells the tab never selected.
+        It used to do much more: an exploration tab claimed to be scoped to its subset, so
+        selecting one re-pointed the plate's status dots and the FOV slider at that subset and
+        selecting away restored the plate. The tabs are gone (2026-08-05) and only the RESTORE
+        half was ever plate-wide, so that is all this is now.
 
         A LIVE run is the one thing we won't retarget under: the worker is pushing into the slider
         this call would rebuild. So the switch is DEFERRED, not dropped (``_request_resync``) —
-        dropping it is what left the front tab lying about what the viewer shows (BUG 2), because
-        nothing re-emits ``currentChanged`` when the run later drains.
+        dropping it is what left the view lying about what it shows (BUG 2), because nothing
+        re-emits ``currentChanged`` when the run later drains.
+
+        ``force=True`` is what ``_on_run_drained`` and ``_deliver_pending_resync`` call it with,
+        and it is the only way past the guard below: selecting an operator tab does not touch the
+        plate, and never did once there was no subset-scoped tab to select away from.
 
         It used to size the band too (``_sync_top_row_height``, deleted 2026-08-03): the Log
         was a tab, so the tab you selected said whether you were reading the console or working the
-        plate. Both are on screen at once now and the boundary is a splitter handle.
-
-        ``force=True`` re-runs the sync from ``_on_run_drained`` even when there is no outgoing
-        exploration tab to park — after a mid-run tab close there ISN'T one, and that is precisely
-        the case that has to fall back to the whole plate (BUG 1).
-
-        Honest limitation: ndviewer's only retarget seam is ``start_acquisition``, which RESETS the
-        viewer. Computed frames pushed via register_array are in-memory and do not survive the
-        switch; we re-register the subset's RAW plane paths (cheap — paths only) so the pane shows
-        real imagery rather than black. Re-run the operator in the tab to recompute its frames."""
+        plate. Both are on screen at once now and the boundary is a splitter handle."""
         if self._reader is None or self._overview is None or self._tabs_muted:
             return
-        if _explore.operator_busy(self._worker, self._retired):
+        if _run_scope.operator_busy(self._worker, self._retired):
             # Defer for an OPERATOR RUN only. Never for the raw preview: `_setup_raw_detail`
             # re-scopes and restarts the preview itself, so a streaming preview is not a reason
-            # to postpone -- and postponing on it is what stranded the restore. Closing a tab
-            # while the preview streamed (which is most of the time on a real plate) left the
-            # viewer scoped to a subset whose tab no longer existed, until some unrelated thread
-            # happened to exit. See _explore.operator_busy: this is the third gate that was
-            # asking "is any producer alive" when the question is "is a RUN alive".
+            # to postpone -- and postponing on it is what stranded the restore. See
+            # _run_scope.operator_busy: this is the third gate that was asking "is any producer
+            # alive" when the question is "is a RUN alive".
             self._request_resync()   # never retarget the slider a live run is pushing into — LATER
             return
-        w = self._current_exploration()      # pane 3 owns scope now — not the index we were handed
-        prev = self._active_exploration
-        if prev is not None and self._overview is not None:
-            prev.status = self._overview.status_snapshot()      # park the outgoing tab's dots
-        if w is not None:
-            self._active_exploration = w
-            self._setup_raw_detail(order=w.regions)
-            self._overview.set_all_status("empty")
-            self._overview.set_status_map(w.status)
-            top = next((ly.key for ly in reversed(self._op_stack.layers())
-                        if ly.key.endswith(f"@{w.tab_key}")), None)
-            # A PREVIEW tab owns no plate layer keyed to itself — its run's results are filed
-            # under the plate-wide key on purpose (see run_operator), because the tab shows them
-            # in its OWN viewer. Falling straight to "raw" for it would flip the plate back to
-            # the raw preview the instant a preview run opened its tab: running an operator would
-            # visibly UNDO itself on the plate. ``plate_layer`` is the layer a run displayed in
-            # THIS tab wrote into, so the tab can name it instead of the window having to
-            # remember which run is whose. A tab that never hosted a run has None and keeps the
-            # historical `top or "raw"`.
-            self._overview.set_active_layer(top or w.plate_layer or "raw")
-            w.set_sync_pending(False)
-            # NB: do NOT reset _push_index here — _setup_raw_detail just built the subset map for
-            # this tab's slider, and clearing it would send register_image straight back to global
-            # plate indices (the exact off-by-a-lot this whole path exists to prevent).
-        else:
-            if prev is None and not force:
-                return                   # home -> operator tab: the plate is already plate-wide
-            self._active_exploration = None
-            self._setup_raw_detail(order=None)
-            self._overview.set_all_status("empty")
-            self._overview.set_active_layer(self._active_op_key or "raw")
+        if not force:
+            return                   # a plain tab selection: the plate is already plate-wide
+        self._setup_raw_detail(order=None)
+        self._overview.set_all_status("empty")
+        self._overview.set_active_layer(self._active_op_key or "raw")
 
     def _request_resync(self):
-        """Remember that the plate/detail need to catch up with the front tab once the run drains.
+        """Remember that the plate needs to catch up once the run drains.
 
-        Both IMA-205 bugs are the same missing edge: a tab switch that arrives while a run is live
-        is silently discarded, and no later event re-delivers it. The pending flag IS that later
+        Both IMA-205 bugs are the same missing edge: a sync that arrives while a run is live is
+        silently discarded, and no later event re-delivers it. The pending flag IS that later
         event; ``_on_run_drained`` fires it as soon as the last worker thread actually exits."""
         self._pending_resync = True
-        w = self._current_exploration()
-        if w is not None:
-            # say so IN THE TAB rather than in _readout: the run's progress writes _readout on every
-            # well, so a note there would be gone before the user could read it.
-            w.set_sync_pending(True)
-        if not _explore.operator_busy(self._worker, self._retired):
+        if not _run_scope.operator_busy(self._worker, self._retired):
             # NOTHING IS RUNNING, SO NOTHING WILL EVER DELIVER THIS. `_on_run_drained` is the only
             # other caller, and it fires on QThread.finished -- so with no live thread the flag was
-            # set and then sat there forever. Closing an exploration tab on an idle window left the
-            # viewer scoped to the subset of a tab that no longer exists: the plate came back with
-            # ['B3:0'] instead of ['B2:0', 'B3:0'], one well silently missing.
-            #
-            # It looked like a flake (~50% in isolation) because the RAW PREVIEW worker is usually
-            # still streaming when a tab is closed by hand. When it was, its finish delivered the
-            # resync and everything worked; when it had already finished, the restore was lost.
+            # set and then sat there forever, and the plate never came back to the whole dataset.
             # The bug was never in the timing -- deferral is simply only correct while something is
             # running.
             #
-            # Delivered on the event loop rather than inline: this is called from the middle of tab
-            # DISPOSAL, and re-entering _on_tab_changed there would rescope against a half-torn-down
-            # tab. A zero timer runs after the current stack unwinds, and processEvents() delivers
-            # it, so it stays deterministic for the tests too.
+            # Delivered on the event loop rather than inline: a zero timer runs after the current
+            # stack unwinds, and processEvents() delivers it, so it stays deterministic for the
+            # tests too.
             QTimer.singleShot(0, self._deliver_pending_resync)
 
     def _deliver_pending_resync(self):
         """Deliver a deferred tab switch. Idempotent, and re-defers if a run started meanwhile."""
-        if not self._pending_resync or _explore.operator_busy(self._worker, self._retired):
+        if not self._pending_resync or _run_scope.operator_busy(self._worker, self._retired):
             return
         self._pending_resync = False
         self._on_tab_changed(force=True)
@@ -2103,7 +1566,7 @@ class PlateWindow(QMainWindow):
         # below is closed here: this slot fires on ok, failed and STOPPED alike, and a bar that is
         # only taken down on success is a bar left running over a dead run.
         self._clear_progress_if_idle()
-        if _explore.operator_busy(self._worker, self._retired):
+        if _run_scope.operator_busy(self._worker, self._retired):
             return                       # another operator run is still draining — wait for it
         if not getattr(worker, "IS_PREVIEW", False):
             # No operator run is in flight now — clear the activity header. end() is a no-op if it
@@ -2126,7 +1589,6 @@ class PlateWindow(QMainWindow):
                 else:
                     self.log.done(action, elapsed, address=self._run_address)
                 self._close_requester_pair(landed, elapsed)
-            self._run_tab_key = self._run_view_tab_key = None
         # A genuine drain: every worker has exited AND (finished being FIFO-queued after this
         # worker's tileReady/streamEnded) their terminal slots have already run on this thread.
         # Bump BEFORE the pending-resync branch so a run with no deferred switch still counts.
@@ -2220,10 +1682,10 @@ class PlateWindow(QMainWindow):
     def _build_decon_tab(self) -> QWidget:
         """The RL semi-convergence loop's controls (IMA-252 + IMA-decon-stitch-ui).
 
-        The controls are here in pane 1; the picture they produce -- the deconvolved 2-D
-        image in turbo with the x-z and y-z strips concatenated -- opens as a tab in PANE 3
-        via :meth:`publish_qc_result`. It was `_build_plane_op_tab` (a preview button and
-        nothing else), which gave no way to choose an iteration count at all.
+        The controls are here; the picture they produce -- the deconvolved 2-D image in turbo
+        with the x-z and y-z strips concatenated -- opens as a tab beside them via
+        :meth:`publish_qc_result`. It was `_build_plane_op_tab` (a preview button and nothing
+        else), which gave no way to choose an iteration count at all.
         """
         from squidmip._op_panels import DeconQCPanel
 
@@ -2239,35 +1701,20 @@ class PlateWindow(QMainWindow):
         if text:
             self._run_readout(text)
 
-    def explore_scopes(self) -> list:
-        """``[(label, regions), ...]`` for every subset currently parked in pane 3.
-
-        These become SCOPE VALUES on the pane-1 panels, not buttons over in pane 3. A UI
-        audit found two operator registries launching the same operators from panes 1 and 3
-        with different labels and different `save` defaults, and they had already diverged
-        in production; a third caller would have made that worse rather than better.
-        """
-        scopes = []
-        for i in range(self._explore_tabs.count()):
-            w = self._explore_tabs.widget(i)
-            if isinstance(w, _ExplorationTab):
-                scopes.append((exploration_tab_label(w.regions), list(w.regions)))
-        for win in self._floating.values():                # detached tabs count too
-            w = win.content()
-            if isinstance(w, _ExplorationTab):
-                scopes.append((exploration_tab_label(w.regions), list(w.regions)))
-        return scopes
-
     def publish_qc_result(self, widget: QWidget, title: str) -> None:
-        """Show *widget* as a result tab in PANE 3.
+        """Show *widget* as a result tab beside the operators, and bring it to the front.
 
-        THE seam between the pane-1 controls and pane 3. It is deliberately one method wide
-        and it introduces no new tab machinery: `_open_op_tab` with `tabs=self._explore_tabs`
-        is exactly how exploration tabs already get there, so the pane-3 owner has nothing
-        to merge. Keyed by title so re-running the same subject reuses its tab instead of
-        stacking a new one per iteration.
+        THE seam between an operator panel and the window. Keyed by title, so re-running the same
+        subject reuses its tab instead of stacking one per iteration.
+
+        IT LANDS IN `_left_tabs`, WHICH IS ON SCREEN. It used to go to the exploration pane's tab
+        bar, and for six weeks after 2b8fbc5 that bar had no parent at all: the decon QC composite
+        — the turbo x-y / x-z / y-z picture the whole iterate-and-look loop exists for — was
+        computed, put in a tab, and shown to nobody. Pressing Run silently produced nothing the
+        user could see. The pane is gone now, and the result goes where the controls that asked
+        for it already are.
         """
-        self._open_op_tab(f"qc:{title}", title, lambda w=widget: w, tabs=self._explore_tabs)
+        self._open_op_tab(f"qc:{title}", title, lambda w=widget: w)
 
     def _build_bgsub_tab(self) -> QWidget:
         return self._build_plane_op_tab(_OPERATIONS_BY_KEY["bgsub"])
@@ -2503,254 +1950,6 @@ class PlateWindow(QMainWindow):
         for b in (run, prev):
             b.setEnabled(self._reader is not None)
         return w
-
-    def _make_explore_viewer(self):
-        """Build a viewer for ONE side-pane tab. Returns ``(pane_or_None, mode, message)``.
-
-        DELEGATES to pane 2's constructor. The right pane is "a copy of the central pane, but it
-        occurs on a subset", so a second viewer implementation here would be exactly the
-        duplication this project keeps failing on — and it would also be a second embedding
-        path, which is how the control well ended up in a floating window: ``napari.Viewer``
-        builds a real QMainWindow, and one that nobody reparents IS a top-level window the
-        moment anything shows it. ``MosaicPane._embed_native_window`` is the one place that
-        knows to reparent the WINDOW (never the canvas, which is that window's central widget).
-
-        It exists as a named method purely so tests can swap in a recording stub: napari's
-        canvas needs OpenGL and the headless gate has none.
-        """
-        return _make_mosaic_pane(show_docks=False)
-
-    def _build_exploration_tab(self, regions: list, tab_key: str) -> QWidget:
-        """One side-pane tab: A VIEWER ON THIS SUBSET, a slider under it, and the Minerva hand-off.
-
-        This tab is a RESULT SURFACE, not a control surface. Julio: "we have the controls for the
-        whole dataset on the left, but those controls are repeated for the subset on the right
-        pane. Maybe it's not a good idea for there to be repetition of knowledge in our user
-        interface" — and "this is just a supplementary pane that augments the processing by
-        showing preview results and how that reflects on our viewer."
-
-        So the per-operator preview buttons that used to live here are GONE. They were a second
-        operator catalogue (``runnable_operators()``) beside pane 1's (``_OPERATIONS``), with
-        different labels and a different ``save`` default, and the comment they carried recorded
-        that the two had already drifted in production. Running an operator on this subset is now
-        a SCOPE on pane 1's one control panel (``_explore.SCOPE_SUBSET``), which reads the subset
-        this pane owns.
-
-        Minerva stays, because it is not an operator: it is an export of WHAT IS DISPLAYED HERE.
-        """
-        w = _ExplorationTab(regions, tab_key)
-        regions = w.regions
-        w.setStyleSheet(f"background:{_BG};color:#e6edf3;")
-        v = QVBoxLayout(w)
-        v.setContentsMargins(10, 8, 10, 8)
-        v.setSpacing(6)
-
-        # -- what this tab is scoped to. One compact line: the pane is a fifth of a SMALL monitor,
-        # and chrome that eclipses the viewer is the complaint this layout is answering.
-        listing = QLabel(", ".join(regions))       # the tab must LIST exactly what it is scoped to
-        listing.setWordWrap(True)
-        listing.setStyleSheet(f"color:#c3ccd9;font-size:{_EMPTY_BODY_PX - 1}px;")
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setStyleSheet("QScrollArea{border:none;background:transparent;}")
-        scroll.setWidget(listing)
-        scroll.setMaximumHeight(46)
-        v.addWidget(scroll)
-        w.listing = listing                        # tests assert the tab lists exactly its regions
-
-        note = QLabel("A run is still finishing — the plate and viewer beside this tab still show "
-                      "it. They will switch to this subset when it is done.")
-        note.setWordWrap(True)
-        note.setStyleSheet(f"color:#d29922;font-size:{_EMPTY_BODY_PX - 1}px;")
-        note.setVisible(False)
-        v.addWidget(note)
-        w.sync_note = note
-        w.set_sync_pending(w.sync_pending)
-
-        # -- THE VIEWER. Same constructor as pane 2, embedded here, never a separate window.
-        pane, _mode, msg = self._make_explore_viewer()
-        if pane is not None:
-            w.viewer = pane
-            pane.setParent(w)
-            v.addWidget(pane, 1)
-        else:
-            # NO SILENT FAILURE. A tab with no viewer is not "a tab with fewer features", it is a
-            # pane that cannot do its job, and the user has to be told which and why.
-            dead = QLabel(msg or "no viewer could be built for this subset.")
-            dead.setWordWrap(True)
-            dead.setAlignment(Qt.AlignCenter)
-            dead.setStyleSheet(
-                f"color:#ffd7d7;background:#3a2020;padding:10px;font-size:{_EMPTY_BODY_PX}px;")
-            v.addWidget(dead, 1)
-
-        # -- THE SLIDER UNDER IT. "There should be a slider under." One stop per region of the
-        # subset: the unit this pane shows is a REGION (a mosaic of FOVs), never a single field.
-        w.region_label = QLabel("")
-        w.region_label.setStyleSheet(f"color:#c3ccd9;font-size:{_EMPTY_BODY_PX - 1}px;")
-        v.addWidget(w.region_label)
-        w.slider = QSlider(Qt.Horizontal)
-        w.slider.setMinimum(0)
-        w.slider.setMaximum(max(0, len(regions) - 1))
-        w.slider.setEnabled(len(regions) > 1)
-        w.slider.setStyleSheet(_NDV_DARK)
-        w.slider.valueChanged.connect(lambda i, t=w: self._on_explore_slider(t, i))
-        v.addWidget(w.slider)
-        save_btn = QPushButton("Save this subset to disk…")
-        save_btn.setStyleSheet(_BTN_QSS)
-        save_btn.clicked.connect(
-            lambda: self.run_operator(_SAVE_OPERATOR, regions=regions, save=True, tab_key=tab_key))
-        v.addWidget(save_btn)
-
-        # -- what a preview run scoped to this tab has computed so far.
-        w.progress = QLabel("")
-        w.progress.setWordWrap(True)
-        w.progress.setStyleSheet(f"color:#8b98ad;font-size:{_EMPTY_BODY_PX - 1}px;")
-        v.addWidget(w.progress)
-
-        minerva = QPushButton("Open in Minerva Author")
-        minerva.setStyleSheet(_BTN_QSS)
-        minerva.setCursor(Qt.PointingHandCursor)
-        minerva.setToolTip(
-            "Fuse each region of this subset into one mosaic, write it as an OME-TIFF plus a "
-            "Minerva story, and start Minerva Author on it.")
-        minerva.clicked.connect(lambda _=False, t=w: self._export_subset_to_minerva(t))
-        v.addWidget(minerva)
-        w.minerva_btn = minerva
-
-        self._sync_explore_region(w)
-        self._load_explore_region(w)
-        return w
-
-    # -- the side pane's viewer: aim it at one region of its subset --------------------------------
-    def _sync_explore_region(self, tab: "_ExplorationTab"):
-        """Make the tab's label agree with its cursor. The cursor is the only owner of 'which
-        region is in front'; the label and the slider are both told from it."""
-        if tab.region_label is None:
-            return
-        n = len(tab.cursor)
-        tab.region_label.setText(
-            f"region {tab.cursor.index + 1} of {n} · {tab.cursor.region}")
-
-    def _on_explore_slider(self, tab: "_ExplorationTab", index: int):
-        """The slider under a side-pane viewer moved."""
-        if not tab.cursor.set_index(index):
-            return                       # no move: do not restart a mosaic read on a stray event
-        self._sync_explore_region(tab)
-        self._load_explore_region(tab)
-
-    def _load_explore_region(self, tab: "_ExplorationTab"):
-        """Fuse the cursor's region and put it on THIS TAB's viewer, one layer per channel.
-
-        The same ``_MosaicWorker`` pane 2 uses — a region is a mosaic of FOVs and there is one
-        implementation of assembling it. Already-loaded regions stay on the canvas: the tab
-        accumulates its subset as layers, so scrubbing back is instant and the pane keeps
-        showing what was selected rather than emptying itself.
-        """
-        if tab.viewer is None or self._reader is None or self._meta is None:
-            return
-        region = tab.cursor.region
-        if tab.cursor.is_loaded(region):
-            return
-        prior = tab.mosaic_worker
-        if prior is not None and prior.isRunning():
-            prior.stop()
-            prior.wait(2000)
-        tab.viewer.say(f"loading {region} …")
-        channels = [c["name"] for c in self._meta["channels"]]
-        op = _explore.subset_layer_op("raw", region)
-        wk = _MosaicWorker(self._reader, self._meta, region, channels, parent=self,
-                           t=self.time_point)
-        wk.ready.connect(
-            lambda r, ch, plane, bbox, win, tb=tab, o=op:
-            self._on_explore_plane(tb, o, r, ch, plane, bbox, win))
-        wk.problem.connect(lambda m, t=tab: t.viewer.say(m) if t.viewer is not None else None)
-        wk.finished_count.connect(
-            lambda n, t=tab, r=region: self._on_explore_region_done(t, r, n))
-        tab.mosaic_worker = wk
-        wk.start()
-
-    def _on_explore_plane(self, tab, op, region, channel, levels, bbox_um, window=None):
-        """Same contract as ``_on_mosaic_plane``: ``_MosaicWorker`` emits a LAZY PYRAMID.
-
-        ``levels`` is the list napari's ``multiscale=True`` wants, highest resolution first. The
-        side pane is a copy of pane 2 on a subset, so it gets the same pyramid on the same terms —
-        a tab that took level 0 would put the full 5731x4793 mosaic on screen per region and undo
-        the memory win exactly where the user opens the most viewers.
-        """
-        if tab.viewer is None:
-            return
-        from squidmip._napari_pane import _colormap_for
-
-        tab.viewer.mosaic.add_mosaic(
-            op, channel, levels,
-            contrast_limits=window,
-            colormap=_colormap_for(channel),
-            multiscale=True,
-            bbox_um=bbox_um,
-            z_scale_um=(self._meta or {}).get("dz_um"),
-        )
-
-    def _on_explore_region_done(self, tab, region, n):
-        if tab.viewer is None:
-            return
-        if n == 0:
-            tab.viewer.say(f"{region}: no mosaic could be built (see the message above).")
-            return
-        tab.cursor.mark_loaded(region)
-        tab.viewer.say("")
-        self._apply_centre_contrast(tab)     # the centre viewer owns contrast; this pane follows
-
-    # -- the subset this pane owns, read by pane 1's scope selector -------------------------------
-    def parked_subset(self) -> list:
-        """The regions parked in the side pane — its FRONT tab's subset, or ``[]``.
-
-        ONE owner, ONE reader. The side pane owns the subset (it is what the user put there);
-        pane 1's scope selector reads it here when a run is aimed at ``SCOPE_SUBSET``. Neither
-        keeps its own copy, which is the whole point of deleting pane 3's operator buttons.
-        """
-        tab = self._current_exploration()
-        return list(tab.regions) if tab is not None else []
-
-    def _export_subset_to_minerva(self, tab: "_ExplorationTab"):
-        """Minerva Author on THIS TAB's subset — one fused mosaic per region.
-
-        The export contract is ``_minerva.export_selection``'s and is not touched here: a region
-        is fused into ONE OME-TIFF (Minerva lays out exactly one image and reads only
-        ``series[0]``), and a FOV subset of a region is the crop of that region's mosaic, still
-        one file. All this decides is WHAT is exported, and the answer is what this pane is
-        showing — not whatever happens to be highlighted on the plate.
-        """
-        ov = getattr(self, "_overview", None)
-        try:
-            selection = _explore.subset_selection(
-                tab.regions, (self._meta or {}).get("fovs_per_region"),
-                # A field box drawn on the plate crops this export too. The tab owns WHICH
-                # regions; the plate is the only place that can say which fields inside one.
-                ov.fov_subsets() if ov is not None else None)
-        except ValueError as exc:                     # named, in the status line, nothing exported
-            self._readout.setText(f"cannot export to Minerva: {exc}")
-            return
-
-        def _landed(pairs, t=tab):
-            """Put the story paths IN THE TAB, next to the mosaics they were made from.
-
-            Minerva Author has no local deep link — verified, not assumed: its own front-end
-            bundle reads only ``?story=`` and ``?image=``, and both route to Minerva CLOUD
-            (loadCloudStory / openMinervaImage), never to a path on this machine. So the user
-            always has to pick the file by hand in Author's "Select File" browser, which opens at
-            $HOME — and ~/minerva_export is one click from there. The one thing we can do is make
-            sure they are never hunting for the name, so it is written where they are looking."""
-            if t.progress is None:
-                return
-            if not pairs:
-                t.progress.setText("nothing was exported.")
-                return
-            t.progress.setText(
-                "exported. In Minerva Author choose Select File and pick:\n"
-                + "\n".join(str(story) for _ome, story in pairs))
-
-        self.run_minerva_export(selection=selection, on_exported=_landed)
 
     def _build_minerva_tab(self) -> QWidget:
         """Minerva Author hand-off (IMA-228): export the SELECTION, then open Author on it.
@@ -3337,10 +2536,7 @@ class PlateWindow(QMainWindow):
         self._stop_mosaic_worker()   # it holds the OLD reader, and it is joined, not drained
         # Exploration tabs belong to the acquisition they were opened from: their region sets and
         # layer keys point at a _fov_index that is about to be rebuilt for a different plate.
-        self._close_exploration_tabs()
-        self._active_exploration = None
         self._push_index = None
-        self._run_tab_key = self._run_view_tab_key = None
         self._reader = self._meta = None
         self._fov_index = {}
         self._selected_regions = []   # wells picked on the plate (IMA-221); scopes an operator run
@@ -3925,7 +3121,6 @@ class PlateWindow(QMainWindow):
             ch = index_of(channel)
             if ch is not None:
                 self._on_detail_contrast(ch, lo, hi)
-            self._push_contrast_to_side_pane(channel, lo, hi)
 
         # Capability-checked, and this is NOT defensive noise: an unhandled Python exception that
         # escapes a Qt SLOT makes PyQt abort the whole process (SIGABRT, no traceback you can act
@@ -4076,62 +3271,11 @@ class PlateWindow(QMainWindow):
             if visible is not None:
                 self._overview.set_channel_visible(i, bool(visible))
 
-    def _centre_contrast(self) -> dict:
-        """The centre viewer's per-channel window — the ONE contrast value per channel.
-
-        Read from ``MosaicLayers``, not remembered here. A remembered copy is a second answer to
-        a question that already has an owner, and this file has shipped four bugs of exactly that
-        shape."""
-        pane = getattr(self, "_mosaic_pane", None)
-        if pane is None or not getattr(pane, "ok", False) or self._meta is None:
-            return {}
-        out = {}
-        for c in self._meta["channels"]:
-            window = pane.mosaic.contrast(c["name"])
-            if window is not None:
-                out[c["name"]] = window
-        return out
-
-    def _push_contrast_to_side_pane(self, channel: str, lo: float, hi: float):
-        """Every side-pane viewer FOLLOWS the centre viewer's contrast for that channel.
-
-        Julio: "the channel toggling and contrast adjustment for the plate view should happen
-        from our central viewer window." A side-pane tab is a second napari viewer, and a second
-        viewer that autoscales independently is a second owner of one quantity however few
-        widgets it shows. napari cannot link layers across viewers, so the link is made here —
-        one direction only, centre -> side, and written inside ``programmatic()`` so a followed
-        value can never be mistaken for the user having dragged the side pane's own slider and
-        bounce back."""
-        for w in list(self._op_tabs.values()):
-            if not isinstance(w, _ExplorationTab) or w.viewer is None:
-                continue
-            try:
-                with w.viewer.mosaic.programmatic():
-                    w.viewer.mosaic.set_contrast(channel, lo, hi)
-            except KeyError:
-                continue          # this tab is not showing that channel yet — nothing to follow
-
-    def _apply_centre_contrast(self, tab: "_ExplorationTab"):
-        """Bring a side-pane viewer up to the centre viewer's current windows.
-
-        Called after a region's layers land in a tab. Without it a tab opened after the user had
-        already tuned contrast would show its own autoscale instead — the follower would be
-        correct only for changes made from that moment on, which is the same half-life defect as
-        a subscription that dies when its layers are rebuilt."""
-        if tab.viewer is None:
-            return
-        for channel, (lo, hi) in self._centre_contrast().items():
-            try:
-                with tab.viewer.mosaic.programmatic():
-                    tab.viewer.mosaic.set_contrast(channel, lo, hi)
-            except KeyError:
-                continue
-
     def _setup_raw_detail(self, order: Optional[list] = None):
         """Point the detail viewer at the RAW acquisition: full z-stack, full frame, FOV slider.
 
-        ``order=None`` is the whole plate (open / 'Return to raw view'). An exploration tab passes
-        its own region subset so the slider lists exactly the wells that tab is scoped to.
+        ``order=None`` is the whole plate (open / 'Return to raw view'); *order* names a region
+        subset so the slider lists exactly those wells.
         Registers each well's raw plane PATHS up front (cheap — paths only, no image I/O) so
         scrubbing shows a real (lazily read + cached) image per well instead of black."""
         if self._detail is None or self._reader is None:
@@ -4156,8 +3300,8 @@ class PlateWindow(QMainWindow):
         # Re-scope the RAW preview to the same wells the slider now lists. Without this the
         # producer (a full-plate _PreviewWorker) and the consumer (_push_index, built from
         # `order`) describe different well lists, and every push outside the subset is discarded.
-        # That is the bug that made the FOV slider stop advancing after an exploration tab was
-        # opened: the slider showed only the well that had already loaded.
+        # That is the bug that made the FOV slider stop advancing when it was scoped to a
+        # subset: the slider showed only the well that had already loaded.
         if getattr(self, "_preview", None) is not None and order != getattr(self, "_preview_order", None):
             self._stop_preview()
             self._start_preview(reader, meta, order)
@@ -4167,7 +3311,7 @@ class PlateWindow(QMainWindow):
         #
         # REGRESSION GUARD (found on the live GUI): this map is consumed by _on_push, which DROPS
         # any push it cannot translate. That is correct for a stale run, but it silently de-scoped
-        # the main view: opening an exploration tab on one well left _push_index == {0: 0} while
+        # the main view: scoping the slider to one well left _push_index == {0: 0} while
         # the full-plate preview kept emitting global indices 1..N-1, so every other well was
         # discarded and the FOV slider stopped advancing past the well that was clicked. The map
         # and the producer must describe the SAME well list, so record it and re-scope the raw
@@ -4301,12 +3445,9 @@ class PlateWindow(QMainWindow):
         self._meta = {"channels": channels, "z_levels": [0], "n_z": 1, "n_t": 1,
                       "pixel_size_um": px_um,
                       "regions": [f"{rows[w['rowIndex']]}{cols[w['columnIndex']]}" for w in wells_meta]}
-        # a computed plate replaces the whole session: drop exploration tabs (their regions belong
-        # to the raw acquisition) and go back to identity push indexing over the full plate.
-        self._close_exploration_tabs()
-        self._active_exploration = None
+        # a computed plate replaces the whole session: go back to identity push indexing over
+        # the full plate.
         self._push_index = None
-        self._run_tab_key = self._run_view_tab_key = None
         wells_rc, self._fov_index, self._order, worker_wells = {}, {}, [], []
         well_paths, well_fovs = {}, {}
         for idx, w in enumerate(wells_meta):
@@ -4409,7 +3550,7 @@ class PlateWindow(QMainWindow):
 
     def run_operator(self, key: str, out_parent: Optional[str] = None,
                      regions: Optional[list] = None, save: bool = True,
-                     tab_key: Optional[str] = None, operator_kwargs: Optional[dict] = None,
+                     operator_kwargs: Optional[dict] = None,
                      requester: Optional[Any] = None):
         """Run a projector operator (MIP / reference) over the plate, or over a subset of it.
 
@@ -4431,8 +3572,6 @@ class PlateWindow(QMainWindow):
         NOTHING to disk (no folder, no disk-space cost). save=True persists a navigable OME-Zarr;
         combined with a subset it saves just those regions. Tests pass out_parent to skip the dialog.
 
-        ``tab_key`` scopes the run to an exploration tab: results are filed under the layer
-        ``<op>@<tab_key>`` so two tabs running the same operator do not overwrite each other.
         """
         # The user asked for a run HERE. Everything below it — scope resolution, the disk estimate,
         # the plate statuses, worker construction — is time they spend waiting, so the clock starts
@@ -4441,10 +3580,9 @@ class PlateWindow(QMainWindow):
         self._run_t0 = time.perf_counter()
         if self._reader is None or self._overview is None:
             return
-        if _explore.operator_busy(self._worker, self._retired):
-            # NOT ``_busy()``: that also counts a retired RAW PREVIEW, and opening a side-pane tab
-            # restarts the preview, so the very next operator run refused itself over a thread the
-            # user never started. See _explore.operator_busy.
+        if _run_scope.operator_busy(self._worker, self._retired):
+            # NOT ``_busy()``: that also counts a retired RAW PREVIEW, so an operator run could
+            # refuse itself over a thread the user never started. See _run_scope.operator_busy.
             self._readout.setText("already processing — let the current run finish first")
             return
         # IMA-226: gate on the ENGINE registry, not on the card table. `_OPERATIONS_BY_KEY[key]`
@@ -4485,10 +3623,10 @@ class PlateWindow(QMainWindow):
                 w.stage.connect(self._readout.setText)
                 w.problem.connect(lambda m: self._readout.setText(f"flat-field estimate failed: {m}"))
 
-                def _profile_ready(profile, k=key, regs=regions, sv=save, op=out_parent, tk=tab_key):
+                def _profile_ready(profile, k=key, regs=regions, sv=save, op=out_parent):
                     _ff.set_profile(profile)
                     self._readout.setText("flat-field: profile ready — running.")
-                    self.run_operator(k, out_parent=op, regions=regs, save=sv, tab_key=tk)
+                    self.run_operator(k, out_parent=op, regions=regs, save=sv)
 
                 w.done.connect(_profile_ready)
                 self._ff_est_worker = w
@@ -4506,19 +3644,18 @@ class PlateWindow(QMainWindow):
         if regions is None:
             scope_value = (self._scope_run.currentText()
                            if getattr(self, "_scope_run", None) is not None
-                           else _explore.SCOPE_SELECTION)
-            regions, problem = _explore.resolve_run_scope(
+                           else _run_scope.SCOPE_SELECTION)
+            regions, problem = _run_scope.resolve_run_scope(
                 scope_value,
                 selection=self._selected_regions,
                 current_region=self._current_well,
-                parked_subset=self.parked_subset(),
             )
             if problem:
                 # A scope the user CHOSE but that has nothing behind it. Say it and stop; widening
                 # it to the whole plate would be hours of compute nobody asked for.
                 self._readout.setText(problem)
                 return
-            from_selection = (regions is not None and scope_value == _explore.SCOPE_SELECTION)
+            from_selection = (regions is not None and scope_value == _run_scope.SCOPE_SELECTION)
         if regions is not None:
             regions = list(regions)
             if not regions:
@@ -4541,28 +3678,9 @@ class PlateWindow(QMainWindow):
         # whenever the live state the rule reads is not what the user pictures, which is the
         # entire failure mode -- and the one the deleted per-panel scope combo made worse by
         # showing a THIRD, stale answer.
-        self._resolved_target = _explore.describe_run_target(regions, total=len(self._order))
+        self._resolved_target = _run_scope.describe_run_target(regions, total=len(self._order))
         if self._resolved_target:
             self._readout.setText(self._resolved_target)
-        # A PREVIEW RUN OPENS A TAB IN THE SIDE PANE. Julio: "the exploration pane can obviously
-        # visualize preliminary results as the user processes... preview runs can open a TAB on
-        # the exploration pane so that they look at how it is behaving, a.k.a. look at the
-        # results." Keyed by operator as well as by region set, so a second preview run opens a
-        # SECOND tab and the two can be compared instead of one stealing the other's canvas.
-        #
-        # A saved run does not (it is not a preview), and neither does a plate-wide one: the side
-        # pane shows a SUBSET, and the whole dataset is what pane 2 is already looking at.
-        #
-        # NOTE the tab this opens is where the run is DISPLAYED, which is a different question
-        # from ``tab_key`` — the tab whose LAYER the results are filed under on the plate. They
-        # are kept apart deliberately: folding them together would silently re-key every
-        # pane-1 preview's plate layer from "mip" to "mip@preview:…", changing what the layer
-        # stack and the before/after toggle show for a feature that is only about the side pane.
-        self._run_view_tab_key = None
-        if not save and regions is not None and tab_key is None:
-            self._run_view_tab_key = self._open_preview_tab(key, label, regions)
-        elif tab_key is not None:
-            self._run_view_tab_key = tab_key
         out_dir = est_gb = None
         if save:
             # Ask WHERE to persist: output can be hundreds of GB, so let the user aim it at a roomy
@@ -4608,19 +3726,14 @@ class PlateWindow(QMainWindow):
         else:
             self._overview.set_all_status("processing")      # amber across the plate
         self._plate_mode = label                             # plate now shows this operator's result
-        self._plate_title.setText(f"{self._acq_name}   ·   {label}"
-                                 + (f"   ·   {exploration_tab_label(regions)}" if tab_key else ""))
-        layer_key = operator_layer_key(key, tab_key)
+        self._plate_title.setText(f"{self._acq_name}   ·   {label}")
+        layer_key = operator_layer_key(key, None)
         self._active_op_key = layer_key                      # tiles stream into this layer
-        _view_tab = self._run_tab()
-        if _view_tab is not None:      # ...and the tab showing this run can name that layer later
-            _view_tab.plate_layer = layer_key
         # NOTE: _raw_btn is a hidden ORPHAN (never added to a layout since the central pane was
         # removed), so .show() made it POP UP AS A FLOATING WINDOW — Julio: "a 'return to raw view'
         # window pops up. That I don't get." Return-to-raw is handled by the layer stack / plate mode
         # now, so we no longer surface this stray button.
-        stack_label = label if not tab_key else f"{label} · {exploration_tab_label(regions)}"
-        self._op_stack.add(layer_key, stack_label)           # push the operator layer onto the stack
+        self._op_stack.add(layer_key, label)                 # push the operator layer onto the stack
         self._overview.set_active_layer(layer_key)           # show it
         # Loupe source for this run. A SAVED run gets a zarr source whose written-well set grows
         # as wells land (so the loupe works mid-run on what's finished); a PREVIEW writes nothing,
@@ -4675,18 +3788,15 @@ class PlateWindow(QMainWindow):
             self._detail.start_acquisition([c["name"] for c in self._meta["channels"]], 1,
                                            ph, pw, [f"{r}:0" for r in run_order])
         self._run_out_dir = str(out_dir) if (save and out_dir) else None   # for partial-output cleanup
-        self._run_tab_key = tab_key
         # A re-run must not composite on top of the LAST run's pixels: with a mosaic, a run that
         # lands fewer FOVs would otherwise leave the previous run's fields standing in the same
         # cell, blended into the new ones. Drop this layer's store before the first tile arrives.
-        # ...keyed by the LAYER, not the bare operator key: an exploration tab files its results
-        # under "<op>@<tab_key>" (IMA-205), and resetting "mip" from a tab run would wipe the
-        # plate-wide layer instead of the tab's own.
+        # Keyed by the LAYER rather than the bare operator key: `operator_layer_key` is the one
+        # place that decides the two are the same thing today.
         self._overview.reset_layer(layer_key)
         dest = f" → {out_dir.name}" if save else " (preview — not saved)"
-        # This run's identity, read back by _on_progress and _on_run_tile. Held as state rather
-        # than captured in a lambda because the side-pane tab has to be told the same two things
-        # the status line is, and one source is how they stay in agreement.
+        # This run's identity, read back by _on_progress. Held as state rather than captured in a
+        # lambda so the status line and the log read the same two facts.
         self._run_label, self._run_dest = label, dest
         self._worker.tileReady.connect(self._on_tile)
         self._worker.pushReady.connect(self._on_push)
@@ -4823,7 +3933,7 @@ class PlateWindow(QMainWindow):
         self._preview.failed.connect(self._on_preview_failed)
         # The preview reports on the SAME channel an operator run does, so the one bar covers it
         # ("even if it's preview"). Published straight through: the plate window is only a relay
-        # here, because the preview has no status line or side-pane tab of its own to feed.
+        # here, because the preview has no status line of its own to feed.
         self._preview.runProgress.connect(self._publish_progress)
         # QThread.finished, not streamEnded: at streamEnded the thread is still running, so
         # _clear_progress_if_idle would see it and decline. This also covers the failed and the
@@ -4848,7 +3958,6 @@ class PlateWindow(QMainWindow):
             report = getattr(w, "report_first_paint", None)
             if report is not None:
                 report(time.perf_counter() - self._run_t0)
-        self._on_run_tile(ri, ci, well_id, tile, box)       # ...and onto the run's side-pane tab
         self._overview.set_status(ri, ci, "done")           # blue
         src = self._loupe_sources.get(layer)                 # this well is now on disk -> loupe-able
         if isinstance(src, _ZarrLoupeSource):
@@ -4894,9 +4003,9 @@ class PlateWindow(QMainWindow):
 
             acc = RegionResultAccumulator(
                 op, region, self._meta, [c["name"] for c in self._meta["channels"]],
-                # The REGISTRY name, not the layer key: a run scoped to an exploration tab files
-                # under "stitch@tab2", which is in no registry, so this asked the wrong question
-                # and a scoped stitch was accumulated as if it were a per-FOV operator.
+                # The REGISTRY name, not the layer key: a namespaced layer key ("stitch@…") is
+                # in no registry, so asking with it accumulated a stitch as if it were a per-FOV
+                # operator. `operator_name` strips the namespace; see `operator_layer_key`.
                 region_operator=(operator_name(op) in available_region_operators()),
             )
             accs[str(region)] = acc
@@ -5399,7 +4508,7 @@ class PlateWindow(QMainWindow):
         Returns ``None`` when nothing would run, having said why.
         """
         views = self._open_view_targets()
-        block = _explore.describe_view_target(views, action=action)
+        block = _run_scope.describe_view_target(views, action=action)
         if block is None:
             self._readout.setText(
                 f"Run on open views: {len(views)} open window(s) hold no regions between them — "
@@ -5408,14 +4517,14 @@ class PlateWindow(QMainWindow):
             return None
         self.log.info("%s", block)
         self._readout.setText(block.splitlines()[0])
-        return _explore.distinct_view_regions(views)
+        return _run_scope.distinct_view_regions(views)
 
     def _open_view_targets(self) -> list:
         """Every open window as a View — the target set BEFORE it is flattened to regions.
 
         The sibling ``_open_views_regions`` throws the windows away, which is correct for the run
         and wrong for the print: an operator UI that cannot name which windows it is about to run
-        on makes the user infer it. This is what ``_explore.describe_view_target`` reads.
+        on makes the user infer it. This is what ``_run_scope.describe_view_target`` reads.
 
         ``_open_view_targets`` and not ``_open_views``, which is already taken by the navigator
         WIDGET (``self._open_views = OpenViewList(...)``). Same three words, two different things,
@@ -5429,11 +4538,11 @@ class PlateWindow(QMainWindow):
         iteration set for an operator run 'on open views' (the decentralized bulk target).
 
         Derived from the SAME Views the print reads, through the SAME flattener
-        (``_explore.distinct_view_regions``). That is load-bearing rather than tidy: if the printed
+        (``_run_scope.distinct_view_regions``). That is load-bearing rather than tidy: if the printed
         distinct-region count were computed by a second dedup, the block could disagree with what
         actually runs, which is worse than not printing it at all.
         """
-        return _explore.distinct_view_regions(self._open_view_targets())
+        return _run_scope.distinct_view_regions(self._open_view_targets())
 
     def _on_marquee_selected(self, wells: list):
         """Shift-DRAG released on the plate -> open an INDEPENDENT napari window for that subset.
@@ -5483,8 +4592,8 @@ class PlateWindow(QMainWindow):
     def _slider_pos(self, well_id: str) -> Optional[int]:
         """Where ``well_id`` sits in the detail's CURRENT FOV slider, or None if it isn't in it.
 
-        The slider is whole-plate by default (position == plate index) but an exploration tab
-        scopes it to a subset, where the two diverge. Everything that hands ndviewer an index —
+        The slider is whole-plate by default (position == plate index) but a run over a subset
+        scopes it to that subset, where the two diverge. Everything that hands ndviewer an index —
         register_image, register_array, go-to — has to translate through here."""
         info = self._fov_index.get(well_id)
         if info is None:
@@ -5500,8 +4609,8 @@ class PlateWindow(QMainWindow):
         if well_id not in self._fov_index:
             return
         # Resolve the slider position BEFORE moving anything. The red frame says "this is the well
-        # you are looking at"; if the detail's slider does not contain the well (an exploration tab
-        # scopes it to a subset) we cannot show it, and moving the frame anyway is how you get a red
+        # you are looking at"; if the detail's slider does not contain the well (a subset run
+        # scopes it) we cannot show it, and moving the frame anyway is how you get a red
         # frame on one well and another well's pixels beside it — silently.
         idx = self._slider_pos(well_id) if self._detail is not None else None
         if self._detail is not None and idx is None:

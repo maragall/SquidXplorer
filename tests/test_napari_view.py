@@ -1514,8 +1514,8 @@ def test_a_plane_op_result_KEEPS_the_z_axis(layers):
         "a plane-op's result took the z axis away; only an operator declaring consumes={'z'} may")
 
 
-def test_the_rule_reads_the_declaration_through_an_exploration_tabs_scoped_key(layers):
-    """A run scoped to an exploration tab files under ``"mip@tab2"``, which is in no registry."""
+def test_the_rule_reads_the_declaration_through_a_namespaced_layer_key(layers):
+    """A namespaced layer key (``"mip@tab2"``) is in no registry — the rule must strip it first."""
     layers.add_mosaic("raw", "405", _z_stack_pyramid(), multiscale=True,
                       bbox_um=_Z_BBOX, z_scale_um=2.0)
 

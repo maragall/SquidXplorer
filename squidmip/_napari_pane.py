@@ -583,10 +583,10 @@ class MosaicPane(QWidget):
         """Tear down the napari Viewer this pane owns — its GL context, its QMainWindow, and the
         camera/timer subscriptions.
 
-        ``_ExplorationTab.dispose()`` calls this before ``deleteLater()``. deleteLater() on the Qt
-        wrapper alone does NOT close the napari Viewer: napari keeps every Viewer in its own
-        instance registry, so one leaked per Shift-drag — the exact leak dispose()'s docstring
-        claims to prevent ("kills a session after twenty selections"). Idempotent.
+        Every owner of a pane calls this before ``deleteLater()``. deleteLater() on the Qt wrapper
+        alone does NOT close the napari Viewer: napari keeps every Viewer in its own instance
+        registry, so one leaked per pane built — a GL context and tens of MB each, which killed a
+        session after twenty of them. Idempotent.
         """
         if self._timer is not None:
             self._timer.stop()

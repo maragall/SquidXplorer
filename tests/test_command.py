@@ -10,7 +10,7 @@ import json
 
 import pytest
 
-from squidmip import _explore
+from squidmip import _run_scope
 from squidmip._command import (
     BAD_COMMAND,
     BAD_SCOPE,
@@ -189,7 +189,7 @@ def test_describe_names_the_regions_channels_and_scopes_a_run_could_target(open_
     d = open_bus.execute(Describe()).data
     assert d["regions"] and d["channels"]
     assert d["n_regions"] == len(d["regions"])
-    assert list(_explore.RUN_SCOPES) == d["scopes"]
+    assert list(_run_scope.RUN_SCOPES) == d["scopes"]
 
 
 # --- the target, resolved by the ONE existing owner ----------------------------------------------
@@ -214,7 +214,7 @@ def test_an_explicit_region_list_wins_over_the_scope(open_bus, monkeypatch):
     monkeypatch.setattr("squidmip.project_plate",
                         lambda reader, **kw: (seen.update(kw), iter(()))[1])
     regions = open_bus.execute(Describe()).data["regions"][:1]
-    open_bus.execute(RunOperator(operator="mip", scope=_explore.SCOPE_PLATE, regions=regions))
+    open_bus.execute(RunOperator(operator="mip", scope=_run_scope.SCOPE_PLATE, regions=regions))
     assert seen["regions"] == regions
 
 
@@ -232,19 +232,19 @@ def test_a_region_that_is_not_in_this_acquisition_is_refused_by_name(open_bus):
 def test_an_invented_scope_is_refused_and_lists_the_real_ones(open_bus):
     r = open_bus.execute(RunOperator(operator="mip", scope="everything ever"))
     assert r.refusal == BAD_SCOPE
-    for scope in _explore.RUN_SCOPES:
+    for scope in _run_scope.RUN_SCOPES:
         assert scope in r.message
 
 
 def test_the_selection_drives_the_selected_wells_scope(open_bus, monkeypatch):
     """The headless surface resolves 'selected wells' through the SAME
-    ``_explore.resolve_run_scope`` the GUI does — there is not a second resolver."""
+    ``_run_scope.resolve_run_scope`` the GUI does — there is not a second resolver."""
     seen = {}
     monkeypatch.setattr("squidmip.project_plate",
                         lambda reader, **kw: (seen.update(kw), iter(()))[1])
     regions = open_bus.execute(Describe()).data["regions"][:1]
     open_bus.executor.selection = list(regions)
-    open_bus.execute(RunOperator(operator="mip", scope=_explore.SCOPE_SELECTION))
+    open_bus.execute(RunOperator(operator="mip", scope=_run_scope.SCOPE_SELECTION))
     assert seen["regions"] == regions
 
 
@@ -267,14 +267,14 @@ def test_saving_headless_without_an_output_folder_is_refused_not_guessed(open_bu
 
 def test_a_preview_run_computes_every_well_and_writes_nothing(open_bus, tmp_path):
     before = set(p.name for p in tmp_path.iterdir())
-    r = open_bus.execute(RunOperator(operator="mip", scope=_explore.SCOPE_PLATE))
+    r = open_bus.execute(RunOperator(operator="mip", scope=_run_scope.SCOPE_PLATE))
     assert r.ok and r.status == "completed"
     assert r.data["n_landed"] >= 1
     assert set(p.name for p in tmp_path.iterdir()) == before
 
 
 def test_a_saved_run_returns_the_manifest(open_bus, tmp_path):
-    r = open_bus.execute(RunOperator(operator="mip", scope=_explore.SCOPE_PLATE, save=True,
+    r = open_bus.execute(RunOperator(operator="mip", scope=_run_scope.SCOPE_PLATE, save=True,
                                      output_folder=str(tmp_path), n_fovs=1))
     assert r.ok, r.message
     assert r.data["manifest"]["n_fields_written"] >= 1
@@ -282,7 +282,7 @@ def test_a_saved_run_returns_the_manifest(open_bus, tmp_path):
 
 
 def test_every_run_is_measured_and_the_result_carries_the_metrics(open_bus):
-    r = open_bus.execute(RunOperator(operator="mip", scope=_explore.SCOPE_PLATE))
+    r = open_bus.execute(RunOperator(operator="mip", scope=_run_scope.SCOPE_PLATE))
     m = r.data["metrics"]
     assert m["operator"] == "mip" and m["seconds"] >= 0
     assert m["outcome"] in ("ok", "partial")
@@ -290,7 +290,7 @@ def test_every_run_is_measured_and_the_result_carries_the_metrics(open_bus):
 
 
 def test_the_result_names_the_target_set_it_resolved(open_bus):
-    r = open_bus.execute(RunOperator(operator="mip", scope=_explore.SCOPE_PLATE))
+    r = open_bus.execute(RunOperator(operator="mip", scope=_run_scope.SCOPE_PLATE))
     assert "whole dataset" in r.data["target"]
 
 
@@ -298,13 +298,13 @@ def test_a_run_that_produced_nothing_is_partial_not_ok(open_bus, monkeypatch):
     """A run where every well raised still returns politely — the per-well fault isolation is what
     keeps one bad file from aborting a plate. It is not a success."""
     monkeypatch.setattr("squidmip.project_plate", lambda reader, **kw: iter(()))
-    r = open_bus.execute(RunOperator(operator="mip", scope=_explore.SCOPE_PLATE))
+    r = open_bus.execute(RunOperator(operator="mip", scope=_run_scope.SCOPE_PLATE))
     assert r.data["metrics"]["outcome"] == "partial"
     assert "produced nothing" in r.data["metrics"]["detail"]
 
 
 def test_metrics_returns_the_comparison_table(open_bus):
-    open_bus.execute(RunOperator(operator="mip", scope=_explore.SCOPE_PLATE))
+    open_bus.execute(RunOperator(operator="mip", scope=_run_scope.SCOPE_PLATE))
     r = open_bus.execute(Metrics(operator="mip"))
     assert r.ok and r.data["table"]
     assert r.data["table"][0]["operator"] == "mip"

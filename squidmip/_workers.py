@@ -55,7 +55,7 @@ from pathlib import Path
 import numpy as np
 from qtpy.QtCore import QThread, Signal
 
-from squidmip import _explore
+from squidmip import _run_scope
 from squidmip._engine import _default_workers
 from squidmip._logpane import capture_stdout_to_log, get_logger
 from squidmip._measure import (
@@ -315,7 +315,7 @@ class _OperatorWorker(QThread):
         # GUI's own operator-run path, into the same METRICS log — so the comparison table sees
         # both surfaces' runs and the one line per run reaches the log panel (measure_run logs at
         # INFO to the root logger, which the panel is a sink of). One measurement, three consumers.
-        target = _explore.describe_run_target(self._regions, total=self._total) or self._operator
+        target = _run_scope.describe_run_target(self._regions, total=self._total) or self._operator
         # CAPTURE print() FOR THE DURATION OF THE RUN. tilefusion says what it is doing with bare
         # print (registration.py:274, optimization.py:254, distortion.py:245, fusion.py:358), not
         # through its loggers, so the panel showed none of it while maragall/stitcher's own GUI
@@ -974,7 +974,7 @@ class _PreviewWorker(QThread):
     """
 
     tileReady = Signal(int, int, str, object, object)   # (ri, ci, well_id, tile, box|None)
-    #: This is the raw fill, not an operator run. ``_explore.operator_busy`` reads it so a retired
+    #: This is the raw fill, not an operator run. ``_run_scope.operator_busy`` reads it so a retired
     #: preview still draining cannot make the next operator run refuse itself.
     IS_PREVIEW = True
 

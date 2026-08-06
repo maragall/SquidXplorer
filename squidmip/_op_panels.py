@@ -1,4 +1,4 @@
-"""The two operator interfaces in PANE 1: the stitcher's controls and deconvolution's QC loop.
+"""The two operator interfaces beside the plate: the stitcher's controls and decon's QC loop.
 
 Julio: "Right now I'm blocked in testing the post-processing because Stitcher doesn't have
 that maragall/Stitcher interface embedded in our top-left subpane. The deconvolution is not
@@ -7,26 +7,26 @@ the iterations."
 
 WHERE THINGS LIVE, AND WHY
 --------------------------
-* Every CONTROL is in pane 1. Pane 3 gets no operator launcher. A UI audit found two
-  operator registries (``_OPERATIONS`` and ``runnable_operators()``) launching the same
-  operators from panes 1 and 3 with different labels and different ``save`` defaults, and a
-  comment in ``_viewer.py`` records that they diverged in production. So "run this on the
-  subset parked in pane 3" is a SCOPE VALUE on pane 1's run selector,
-  not a second set of buttons. This module adds no third caller to either registry.
+* Every CONTROL is on the ONE operator panel. A UI audit found two operator registries
+  (``_OPERATIONS`` and ``runnable_operators()``) launching the same operators from two
+  different panes with different labels and different ``save`` defaults, and a comment in
+  ``_viewer.py`` records that they diverged in production. A target is a SCOPE VALUE on the
+  one run selector, not a second set of buttons somewhere else. This module adds no third
+  caller to either registry.
 * The deconvolution RESULT - the 2-D image in turbo with the x-z and y-z strips concatenated
-  to it - is a TAB IN PANE 3 (:class:`DeconQCResultView`). That is where a preview result is
-  looked at, and it is big: it needs the room.
+  to it - is a TAB (:class:`DeconQCResultView`) opened beside these controls. That is where a
+  preview result is looked at, and it is big: it needs the room.
 
-THE SEAM WITH PANE 3, STATED NARROWLY
--------------------------------------
-This module never touches pane 3's tab bar. It calls exactly one method on its host::
+THE SEAM WITH THE WINDOW, STATED NARROWLY
+-----------------------------------------
+This module never touches a tab bar. It calls exactly one method on its host::
 
-    host.publish_qc_result(widget, title)   # -> pane 3 shows `widget` as a tab called `title`
+    host.publish_qc_result(widget, title)   # -> shows `widget` as a tab called `title`
 
-``PlateWindow`` implements that with its EXISTING ``_open_op_tab(key, title, builder,
-tabs=self._explore_tabs)`` - the same mechanism exploration tabs already use, so no new tab
-API is introduced and the pane-3 owner has nothing to merge. If a host does not implement
-it, the panel SAYS SO in the readout; the picture is never computed and then dropped.
+``PlateWindow`` implements that with its EXISTING ``_open_op_tab``, so no new tab API is
+introduced. If a host does not implement it, the panel SAYS SO in the readout; the picture is
+never computed and then dropped. It used to land in the exploration pane, which between
+2b8fbc5 and 2026-08-05 was not in any layout — computed, tabbed, and shown to nobody.
 
 WHAT WAS PORTED FROM maragall/stitcher, AND WHAT WAS NOT
 --------------------------------------------------------
@@ -805,7 +805,7 @@ class DeconQCResultView(QWidget):
 
 
 class DeconQCPanel(_Panel):
-    """PANE 1. Pick an iteration count, run it, judge the picture in pane 3, add one more."""
+    """Pick an iteration count, run it, judge the picture in the tab beside this, add one more."""
 
     def __init__(self, host):
         super().__init__(
@@ -813,7 +813,7 @@ class DeconQCPanel(_Panel):
             "Richardson-Lucy is SEMI-CONVERGENT: the halo tightens for a few iterations and "
             "then a disc around the core starts growing back as the algorithm fits noise. "
             "There is no universally correct count, so run one, look at the turbo x-z / y-z "
-            "view in pane 3, then add ONE more and look again.")
+            "view in the tab it opens, then add ONE more and look again.")
         from squidmip._decon import QC_START_ITERATIONS
         from squidmip._decon_qc import DEFAULT_CROP_HALF, DEFAULT_VIEW_HALF
 
@@ -876,7 +876,7 @@ class DeconQCPanel(_Panel):
         self.v.addWidget(self.progress)
         self.v.addWidget(self.status)
 
-        note = _wrapped("The result opens as a tab in pane 3. Nothing is written next to "
+        note = _wrapped("The result opens as a tab beside this one. Nothing is written next to "
                         "the acquisition; the datasets are opened read only.", _SUB)
         self.v.addWidget(note)
         self.v.addStretch(1)
@@ -899,8 +899,8 @@ class DeconQCPanel(_Panel):
             return
         if not hasattr(self.host, "publish_qc_result"):
             self.say("this window cannot show a QC result: it does not implement "
-                     "publish_qc_result(widget, title), which is how pane 3 is handed a "
-                     "result tab. Refusing to deconvolve and then drop the picture.")
+                     "publish_qc_result(widget, title), which is how it is handed a result "
+                     "tab. Refusing to deconvolve and then drop the picture.")
             return
 
         iterations = self.iter_spin.value()
