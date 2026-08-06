@@ -107,6 +107,34 @@ which is `stitch_plate(regions=…)`'s own parameter and `GalleryScope.fovs`. It
 Do not build a second selection mechanism; `_placement.fov_offsets_px` normalises whatever FOV set
 it is handed, so the crop needs no cropping code.
 
+The **.mp4 export** (`_video.region_movie_frames`) is a LOOK and takes the preview path, one
+`fuse_region_mosaic` per channel per axis index, capped at `MOVIE_MAX_PX` (1080 on the long side —
+a movie is a display artifact, and the fuser's own 8192 cap is a 200 MB RGB frame no player opens).
+
+## Recording is post-acquisition, and that is why it exists here
+
+`squidmip/_video.py` assembles an **already-acquired axis** into an .mp4 — T when `n_t > 1`, else
+Z. It is not camera capture, which belongs to Squid. That distinction is load-bearing: the module
+was deleted on 2026-07-31 (c25d84d, "users record at acquisition time, not here") and
+`scripts/smoke_import.py` recorded the removal as final; both statements are true of camera capture
+and were applied to a module whose first paragraph disclaims it.
+
+The button is offered when **`n_t > 1 or n_z > 1`** (`_video.can_record`), never on `n_t` alone:
+every acquisition on this machine is `n_t = 1`, so a T-only gate makes the feature invisible on all
+real data and drops the Z focus sweep.
+
+**Contrast is latched once for the whole movie**, taken from the layers on screen. Per-frame
+percentiles — what the deleted module did — normalise away the very change being recorded: a blob
+moving through a field shifts the percentiles, so the movie comes out looking static. This is the
+same "one contrast rule per quantity" discipline as `_montage.composite`, which the frame
+compositor routes through rather than carrying a second windowing loop.
+
+**Encoder**: `imageio` + `imageio-ffmpeg` (its wheel carries an ffmpeg binary for all three
+platforms, so no system ffmpeg is needed), declared as the `[video]` extra and pulled in by `[gui]`
+and `[test]`. It is probed by `_video.encoder_problem()` before anything is written, and the chip
+greys out naming what is missing. Both packages are in `scripts/hcs-viewer.spec`'s `collect_all`
+list, not its excludes — the same package-data blind spot napari has there.
+
 ## Nothing decodes on the Qt thread — including the contrast seed
 
 The contrast seed is the one that keeps getting missed, because it does not look like a read.
@@ -122,6 +150,9 @@ window, on the worker thread, and the UI receives `(lo, hi)` as data. See `_Mosa
 arrive per unit so the first one paints while the rest are still being read.
 `tests/test_gallery.py::test_the_gallery_never_reads_a_plane_on_the_qt_thread` pins it by recording
 the thread ident of every `reader.read`, so a later refactor cannot quietly reintroduce it.
+`tests/test_video_window.py::test_the_export_never_reads_a_plane_on_the_qt_thread` is the same
+instrument on the .mp4 export (`_workers._VideoWorker`), where the click handler measures 0.91 ms
+against a 4.20 s export on the real 10x acquisition.
 
 Caches are shared, not per-feature: `_mosaic_source.plane_cache()`, `_platecache.PlateCellCache`,
 both bounded by `_budget.cache_budget()`. A feature-private cache spends the same budget twice and

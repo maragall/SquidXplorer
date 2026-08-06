@@ -85,9 +85,19 @@ _BINARIES = []
 # IPython/jupyter_core/ipykernel are excluded below; collecting the console while excluding its
 # interpreter would trade one runtime ImportError for another. This app is a plate viewer, not a
 # notebook, and nothing on the demo path opens a console.
+#
+# imageio / imageio_ffmpeg: the .mp4 export's encoder (squidmip/_video.py). imageio resolves
+# its FORMAT plug-ins by name at runtime, and imageio_ffmpeg ships an ffmpeg BINARY as package
+# data that no import can reveal -- so `collect_all` is what brings both, and it is the same
+# manifest-off-disk failure napari has above. Without it `_video.encoder_problem()` would
+# correctly report "no ffmpeg binary" inside the frozen app and the movie button would be
+# permanently greyed out: the guard would work and the packaging would not, exactly as with
+# napari. Both were in _EXCLUDES below until 2026-08-05 on the grounds that only skimage.io
+# wanted them, which stopped being true when this package started encoding movies of its own.
+# Costs ~48 MB of bundle, which is the whole price of the feature.
 for _pkg in ("napari", "napari_svg", "npe2", "app_model", "magicgui",
              "superqt", "psygnal", "in_n_out", "vispy", "tensorstore", "zarr", "numcodecs",
-             "skimage"):
+             "skimage", "imageio", "imageio_ffmpeg"):
     _d, _b, _h = collect_all(_pkg)
     _DATAS += _d
     _BINARIES += _b
@@ -114,7 +124,8 @@ _HIDDEN += collect_submodules("squidmip")
 # loudly instead of shipping.
 _EXCLUDES = [
     "cv2",                 # 110 MB of OpenCV, pulled by skimage's optional io plug-in
-    "imageio", "imageio_ffmpeg",   # 48 MB (a bundled ffmpeg); skimage.io only
+    # `imageio` and `imageio_ffmpeg` USED TO BE HERE, on the grounds that only skimage.io wanted
+    # them. squidmip/_video.py wants them now, so they moved to the collect_all list above.
     "mypy",                # a type checker, in a shipped GUI
     "lxml", "cryptography",
     # matplotlib is NOT unconditionally excluded any more (2026-08-05). The old note said "the app

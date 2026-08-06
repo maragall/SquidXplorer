@@ -1,4 +1,4 @@
-"""The eight background threads the plate window runs its long work on.
+"""The background threads the app runs its long work on.
 
 Gap 6 of the GUI backlog plan (2026-07-29), step 2 of the split of ``squidmip/_viewer.py``.
 
@@ -18,7 +18,7 @@ WHAT IS IN HERE
 * :class:`_OperatorWorker` streams an operator over the plate (``project_plate`` for a z-reducer,
   ``stitch_plate`` for a region operator) and persists it as a navigable OME-zarr plate.
 * :class:`_MinervaWorker`, :class:`_MosaicWorker`, :class:`_FocusWorker`, :class:`_SpotWorker`,
-  :class:`_FlatfieldWorker`: one long operation each, off the GUI thread.
+  :class:`_FlatfieldWorker`, :class:`_VideoWorker`: one long operation each, off the GUI thread.
 * :class:`_PreviewWorker` mosaics the RAW plate thumbnail before any operator has run.
 * :class:`_ComputedPlateWorker` re-reads an ALREADY written plate back into the overview.
 * the helpers those runs call: :func:`_spot_stages`, :func:`_full_res_plane`, :func:`_full_res_mip`,
@@ -888,6 +888,74 @@ class _FlatfieldWorker(QThread):
         except Exception as exc:                      # noqa: BLE001 - NAMED to the log, not swallowed
             log.error("flat-field estimate failed for %s: %s", self._channel, exc)
             self.problem.emit(f"{type(exc).__name__}: {exc}")
+
+
+class _VideoWorker(QThread):
+    """Fuse, composite and ENCODE a region's T (or Z) sweep to an .mp4, off the GUI thread.
+
+    Every expensive thing this feature does happens here. The click handler does a save dialog and
+    ``start()``; it reads no plane and encodes no frame, because both are seconds of work — 4.0 s
+    for 10 frames of the 27-FOV 4-channel 10x region, measured — and the region window has already
+    paid once for putting a decode on the UI thread (see ``_MosaicWorker``'s contrast-seed note).
+
+    ``stop()`` is polled BEFORE each frame by ``region_movie_frames``, so a cancel lands within one
+    frame rather than at the end of the sweep. A cancelled run emits ``cancelled`` and deletes
+    nothing it did not create — the partial .mp4 is left where the user pointed the dialog, because
+    silently removing a file at a path the user typed is worse than a short movie.
+
+    NO SOURCE DATA IS TOUCHED: this reads planes and writes the one .mp4 it was given.
+    """
+
+    progress = Signal(int, int)        # (frames done, frames total) — the convention every worker uses
+    done = Signal(str, int, float)     # (path, frame count, seconds)
+    problem = Signal(str)              # a NAMED failure, never a silent no-op
+    cancelled = Signal()
+
+    def __init__(self, reader, meta, region, out_path, *, axis, fps,
+                 channels=None, windows=None, rgb_by_channel=None, z=0, t=0, parent=None):
+        super().__init__(parent)
+        self._reader, self._meta, self._region = reader, meta, region
+        self._out_path = str(out_path)
+        self._axis, self._fps = str(axis), int(fps)
+        self._channels = list(channels) if channels is not None else None
+        self._windows = list(windows) if windows else None
+        self._rgb_by_channel = dict(rgb_by_channel or {})
+        self._z, self._t = int(z), int(t)
+        self._stop = threading.Event()
+
+    def stop(self):
+        self._stop.set()
+
+    def run(self):                                    # pragma: no cover - Qt thread
+        from squidmip._video import record_region
+
+        started = time.perf_counter()
+        try:
+            path, n = record_region(
+                self._reader, self._meta, self._region, self._out_path,
+                axis=self._axis, fps=self._fps, channels=self._channels,
+                windows=self._windows, rgb_by_channel=self._rgb_by_channel,
+                z=self._z, t=self._t,
+                on_frame=lambda d, total: self.progress.emit(int(d), int(total)),
+                should_stop=self._stop.is_set,
+            )
+        except Exception as exc:                      # noqa: BLE001 - NAMED, never swallowed
+            if self._stop.is_set():
+                # A cancel empties the frame iterator, and write_mp4 reports "no frames" for that
+                # exactly as it would for a real one. Which of the two happened is knowable here
+                # and nowhere else, so it is answered here rather than guessed at by the window.
+                self.cancelled.emit()
+                return
+            log.error("movie export failed for %s: %s", self._region, exc)
+            self.problem.emit(f"{type(exc).__name__}: {exc}")
+            return
+        if self._stop.is_set():
+            self.cancelled.emit()
+            return
+        seconds = time.perf_counter() - started
+        log.info("movie: wrote %d %s-axis frames of %s to %s in %.1fs",
+                 n, self._axis, self._region, path, seconds)
+        self.done.emit(path, int(n), float(seconds))
 
 
 def _full_res_plane(data, z_index):
