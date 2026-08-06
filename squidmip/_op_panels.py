@@ -10,7 +10,7 @@ declaring ``params`` got zero widgets and ran silently at its defaults, so ``spo
 The two below stay hand-written because they do things a parameter FORM cannot, and deleting them
 to gain uniformity would delete real behaviour: :class:`StitcherPanel` converts a percentage to a
 fraction, greys out the knobs that provably do nothing with registration off, and refuses a
-plane-op with a sentence before the run starts; :class:`DeconQCPanel` runs an iterative
+labels operator with a sentence before the run starts; :class:`DeconQCPanel` runs an iterative
 semi-convergence loop and publishes a picture into pane 3. ``_viewer._activate_operator`` prefers a
 hand-written panel and falls back to the generic one, so adding an operator needs no edit here.
 

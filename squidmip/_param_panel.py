@@ -43,7 +43,7 @@ receive, which is the exact failure this module exists to end.
 
 **Why ``str`` is a text field and not a combo.** A combo needs a set of legal values, and a
 ``Param`` declares none — there is no ``choices=`` and, per the docstring quoted above, there
-deliberably will not be one. A combo built from a lone default would be a one-item combo, i.e. a
+deliberately will not be one. A combo built from a lone default would be a one-item combo, i.e. a
 control that cannot be changed. Free text is the honest widget for "a string, and the declaration
 does not say which". Nothing in this build declares a ``str`` parameter, so this branch ships
 untested against a real operator and is pinned by a synthetic one in the tests.
@@ -63,8 +63,8 @@ WHAT THIS PANEL IS NOT
 It is the FALLBACK, not a replacement for :class:`~squidmip._op_panels.StitcherPanel` or
 :class:`~squidmip._op_panels.DeconQCPanel`. Those two do things a parameter form cannot: the
 stitcher converts units, drops registration-only knobs when registration is off and refuses a
-plane-op with a sentence; the decon panel runs an iterative QC loop and publishes a picture into
-pane 3. Generating a form over them would delete real behaviour to gain uniformity.
+labels operator with a sentence; the decon panel runs an iterative QC loop and publishes a
+picture into pane 3. Generating a form over them would delete real behaviour to gain uniformity.
 """
 
 from __future__ import annotations
