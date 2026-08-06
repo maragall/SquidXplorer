@@ -159,7 +159,11 @@ def resolve_plate_format(metadata, override=None) -> str:
 
 
 def _row_index(letters: str) -> int:
-    """"A"->0, "Z"->25, "AA"->26, ... — the inverse of the viewer's ``_row_letter``."""
+    """"A"->0, "Z"->25, "AA"->26, ... — the inverse of :func:`squidmip._plate._row_letter`.
+
+    Named by its module, not as "the viewer's": there were two ``_row_letter``s when this was
+    written and this docstring pointed at the dead one.
+    """
     n = 0
     for ch in letters.upper():
         n = n * 26 + (ord(ch) - 64)

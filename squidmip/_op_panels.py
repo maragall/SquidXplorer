@@ -124,6 +124,7 @@ from qtpy.QtWidgets import (
 #: what the pipeline falls back to when nothing overlaps. It is the spin's starting value, with the
 #: "Auto" box beside it selecting the other mode, so the panel offers both of the pipeline's
 #: modes rather than inventing a third number.
+from squidmip import _qtstyle
 from squidmip._stitch import _BLEND_PX
 
 
@@ -279,32 +280,32 @@ _SUB = "color:#8b98ad;font-size:11px;"
 _HEAD = "color:#57606a;font-size:10px;font-weight:800;letter-spacing:1.5px;padding-top:6px;"
 
 
-def _qss():
-    """The window's OWN button/combo/checkbox styles, imported lazily.
-
-    Not a second dark theme: `_viewer` already owns these three strings and every other
-    control in the operator panel is drawn with them. Screenshotting the first build is what caught
-    this -- unstyled QPushButtons render as flat text on this background and do not read as
-    clickable at all. Lazy so this module stays importable without pulling in the 6k-line
-    viewer, and so a Qt-free test of the policy functions above costs nothing.
-    """
-    from squidmip._viewer import _BTN_QSS, _CHECK_QSS, _COMBO_QSS
-
-    return _BTN_QSS, _COMBO_QSS, _CHECK_QSS
-
-
 def _apply_qss(root: QWidget) -> None:
-    """Style every control in *root* the way the rest of the operator panel is styled."""
-    btn, combo, check = _qss()
+    """Style every control in *root* the way the rest of the operator panel is styled.
+
+    Not a second dark theme: :mod:`squidmip._qtstyle` owns these strings and every other control
+    in the operator panel is drawn with them. Screenshotting the first build is what caught this --
+    unstyled QPushButtons render as flat text on this background and do not read as clickable at
+    all.
+
+    Read from ``_qtstyle`` DIRECTLY, at module scope. This used to be a ``_qss()`` helper doing
+    ``from squidmip._viewer import _BTN_QSS, _CHECK_QSS, _COMBO_QSS`` inside its own body, and that
+    lazy import was the exact line ``_qtstyle``'s docstring quotes as the reason ``_qtstyle``
+    exists: a leaf colour fact reachable only through the 4,500-line window module, deferred into a
+    function to dodge a cycle. ``_viewer`` had already been reduced to seven ``_BTN_QSS =
+    _qtstyle.BTN_QSS`` aliases, so the cycle was gone and the hop was pure ceremony -- and it
+    carried a live footgun, because the helper took the three names in one order and returned them
+    in another.
+    """
     for w in root.findChildren(QPushButton):
-        w.setStyleSheet(btn)
+        w.setStyleSheet(_qtstyle.BTN_QSS)
         w.setCursor(Qt.PointingHandCursor)
     for w in root.findChildren(QComboBox):
-        w.setStyleSheet(combo)
+        w.setStyleSheet(_qtstyle.COMBO_QSS)
     for w in root.findChildren(QSpinBox):
-        w.setStyleSheet(combo)
+        w.setStyleSheet(_qtstyle.COMBO_QSS)
     for w in root.findChildren(QCheckBox):
-        w.setStyleSheet(check)
+        w.setStyleSheet(_qtstyle.CHECK_QSS)
 
 
 def _wrapped(text: str, style: str) -> QLabel:

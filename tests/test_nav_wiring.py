@@ -62,9 +62,16 @@ class _FakeDims:
 #
 # THE REGION SLIDER MOVED OFF THE ROOT PLATE (decentralization, 2026-07-23). `_viewer.py`:
 # "NO region slider on the root plate. The deck puts the region slider in each spawned WINDOW."
-# `PlateWindow._region_slider` is now permanently None and `_make_region_slider` has no call
-# sites; the real slider is built in `squidmip/_region_viewer.py` (`RegionViewer._build`) from the
-# same `RegionCursor` / `RegionSlider` pair, one per window.
+# The real slider is built in `squidmip/_region_viewer.py` (`RegionViewer._build`) from the same
+# `RegionCursor` / `RegionSlider` pair, one per window.
+#
+# Until 2026-08-06 the plate still carried `self._region_slider = None`, a `_make_region_slider`
+# with no call sites, a tooltip branch in `_on_region_changed` guarding on it, and a
+# `_region_slider_failure` string written twice and read never. That is the `_mosaic_pane` shape
+# exactly (see CLAUDE.md): a `None` that reads as "the feature is off" when the truth is "there is
+# no feature", keeping a producer, a guard and an import alive behind it.
+# `test_the_plate_has_no_region_slider_attribute_at_all` below pins the ABSENCE, not `is None`,
+# for the same reason `tests/test_plate_follows_windows.py` pins `_mosaic_pane`'s.
 #
 # The three tests below are those three, re-pointed at the window. They were NOT deleted, because
 # every property they pinned still exists: a slider the length of what it navigates, bound to a
@@ -86,8 +93,16 @@ def test_a_spawned_window_builds_a_region_slider_bound_to_its_own_cursor(
     win = V.PlateWindow(None)
     win.ingest(str(root))
 
-    assert win._region_slider is None, (
+    # The ABSENCE of the attribute, not `is None`. This assertion read `is None` until 2026-08-06
+    # and passed for two weeks over a `_make_region_slider` nobody called, a guard nobody could
+    # reach and an import only the dead method used: `None` is a value, and a value reads as a
+    # feature that happens to be off.
+    assert not hasattr(win, "_region_slider"), (
         "the root plate grew a region slider again; navigation is per WINDOW now")
+    assert not hasattr(win, "_make_region_slider"), (
+        "the plate grew a region-slider BUILDER again; nothing on the plate calls one")
+    assert not hasattr(win, "_region_slider_failure"), (
+        "a failure string for a slider the plate does not build is a report nobody reads")
 
     w = _open_window(win, win._order)
     assert w._slider is not None, "the window built no region slider"

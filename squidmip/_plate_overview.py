@@ -20,9 +20,9 @@ is that comment made structural: the cut follows the line the file itself had dr
 WHAT IS IN HERE, IN THE ORDER THE FILE HAD IT
 ---------------------------------------------
 * **plate geometry**, Qt-free and unit-testable: :func:`well_at`, :func:`cells_in_rect`,
-  :func:`_fit_cell`, :func:`_fit_box`, :func:`_box_union`, :func:`_row_letter`,
-  :func:`_plate_grid`, :func:`resolve_plate_root`, and the mosaic-box geometry
-  (:func:`_mosaic_boxes`, :func:`content_box`).
+  :func:`_fit_cell`, :func:`_fit_box`, :func:`_box_union`, :func:`resolve_plate_root`, and the
+  mosaic-box geometry (:func:`_mosaic_boxes`, :func:`content_box`). Row letters and the
+  well-count -> (rows, cols) table are NOT here: see the note where they used to be.
 * **contrast over a streaming plate**: :class:`_RunningContrast` and :func:`_pct_window`, the
   during-run histogram approximation and the exact percentile window the final render uses.
 * **the loupe** (IMA-208): the magnification math, and the three sources it can read real pixels
@@ -248,32 +248,23 @@ def _box_union(a, b):
     return (int(top), int(left), int(bottom - top), int(right - left))
 
 
-# The Squid well-plate formats we fit a plate to (well count -> (rows, cols)). An acquisition whose
-# format isn't one of these falls back to a present-only grid (see _plate_grid).
-_PLATE_DIMS = {4: (2, 2), 6: (2, 3), 12: (3, 4), 24: (4, 6), 96: (8, 12),
-               384: (16, 24), 1536: (32, 48)}
-
-
-def _row_letter(i: int) -> str:
-    """0->A, 25->Z, 26->AA, ... (plate row labels)."""
-    s, i = "", i + 1
-    while i:
-        i, r = divmod(i - 1, 26)
-        s = chr(65 + r) + s
-    return s
-
-
-def _plate_grid(wellplate_format) -> Optional[tuple[list, list]]:
-    """Full (rows, cols) label grid for a Squid wellplate format, so the plate view shows every
-    position evenly spaced (present wells fill; absent stay blank) rather than collapsing gaps.
-    Returns None for an unknown/absent format (caller falls back to present-only)."""
-    import re
-    m = re.search(r"(\d+)", str(wellplate_format or ""))
-    dims = _PLATE_DIMS.get(int(m.group(1))) if m else None
-    if not dims:
-        return None
-    nr, nc = dims
-    return [_row_letter(i) for i in range(nr)], [str(c) for c in range(1, nc + 1)]
+# NO PLATE-FORMAT TABLE HERE, AND NO ROW LETTERS (2026-08-06).
+#
+# `_PLATE_DIMS` (well count -> (rows, cols)), `_plate_grid` and `_row_letter` lived here with ZERO
+# callers -- `_plate_grid` was `_row_letter`'s only reader and nothing read `_plate_grid`. The grid
+# a plate is actually drawn on comes from `_plate.WellPlate.row_labels` / `col_labels` via
+# `build_plate` (`_viewer._build_plate` -> `plate.viewer_grid()`), off `_plate_shape`'s
+# `_STANDARD_FORMATS`.
+#
+# It was not merely dead, it DISAGREED with the live table: `_PLATE_DIMS` mapped 4 -> (2, 2), a
+# format `_plate_shape` deliberately rejects (`tests/test_plate_shape.py` asserts
+# `plate_dims("4 well plate") is None`). A third table for the one question "how is this plate laid
+# out", unreachable and already wrong, is the shape that gets copied by the next person who greps
+# for a plate format. `_plate_grid` also re-derived `normalize_plate_format`'s digit regex inline
+# rather than calling it.
+#
+# Row letters are ONE function, `_plate._row_letter`, which `WellPlate` uses. `_viewer` re-exports
+# it under the historical name for the tests that reach in through `V._row_letter`.
 
 
 def resolve_plate_root(path) -> tuple[Path, bool]:
