@@ -65,13 +65,18 @@ class Operation:
     label: str
     blurb: str
     build_tab: str        # name of the PlateWindow method that builds this operator's UI tab
-    runnable: bool = True
-    """Whether the ENGINE can run this key (`runnable_operators()`), as opposed to the card
-    merely existing. The two registries are deliberately not the same set - a card is
-    presentation, an engine entry is capability - but that was written in a comment and
-    enforced nowhere, so a card whose key the engine does not know produced a button that
-    silently did nothing. Declaring it here makes the divergence checkable, and
-    test_every_card_declares_whether_it_is_a_runnable_operator checks it."""
+
+    @property
+    def runnable(self) -> bool:
+        """Can the ENGINE run this key, as opposed to the card merely existing?
+
+        DERIVED, never declared (2026-08-05). This was a hand-maintained ``bool`` field on the
+        card and a test existed for the sole purpose of checking it still agreed with
+        ``runnable_operators()`` — i.e. the card table carried a mirror of the engine's membership,
+        and the mirror needed a guard. A card is presentation and the engine is capability; asking
+        the engine is how you find out, and it cannot be stale.
+        """
+        return self.key in runnable_operators()
 
 # The operator registry. MIP is operator #1; append an Operation + write its `_build_*_tab` and both
 # the console cards and the Process-well-plates menu grow automatically.
@@ -91,10 +96,12 @@ _OPERATIONS = (
               "per well, instead of trusting the stage coordinates alone.",
               "_build_stitch_tab"),
     # NOT an operator: an export hand-off. Handing "minerva" to the engine dies with a raw
-    # KeyError: unknown projector 'minerva'. Declared, rather than left to be rediscovered.
+    # KeyError: unknown operator 'minerva'. It used to say so with `runnable=False`, a field that
+    # only ever restated what the registry already knows -- `Operation.runnable` asks it now, so
+    # this card is non-runnable BECAUSE nobody registered "minerva", which is the actual reason.
     Operation("minerva", "Open in Minerva Author",
               "Export the selected FOVs to Minerva-ingestable OME-TIFFs and open Minerva Author on them.",
-              "_build_minerva_tab", runnable=False),
+              "_build_minerva_tab"),
     # IMA-223/224/225 -- the PLANE-OPS. Unlike mip/stitch these keep z at full depth, so they get
     # _build_plane_op_tab (preview only) rather than _build_run_tab. The ORIGINAL reason was that
     # write_plate's _validate_image accepted Z == 1 only and would fail LOUD on save; IMA-277

@@ -1342,7 +1342,7 @@ def _accepts_kwarg(fn, name: str) -> bool:
     return name in params
 
 
-def _resolve_region_operator(name: str) -> RegionOperator:
+def _resolve_region_operator(name: str, operator_kwargs: Optional[dict] = None) -> RegionOperator:
     """The CALLABLE a region-operator name resolves to, refusing anything this loop cannot run.
 
     Two refusals, both read off the one table's declaration and neither off a name:
@@ -1366,7 +1366,7 @@ def _resolve_region_operator(name: str) -> RegionOperator:
             f"operator (reader, region, fovs). Region operators: "
             f"{available_region_operators()}; run {name!r} with squidmip.project_plate."
         )
-    return operator.fn
+    return operator.with_params(operator_kwargs)
 
 
 def stitch_plate(
@@ -1448,7 +1448,15 @@ def stitch_plate(
         raise ValueError(f"workers must be >= 1, got {workers}")
     n_workers = workers if workers is not None else _default_workers()
 
-    op = _resolve_region_operator(operator)
+    # DECLARED parameters are BOUND; everything else is passed through to the call. A region
+    # operator could declare none until it became a record in the one table, so every kwarg used to
+    # be pass-through — and a declared `Param` that arrived as a pass-through kwarg would be
+    # swallowed by the operator's own `**kwargs` and silently run at its default, which is exactly
+    # the "the panel value reached the console line and not the pixels" defect `params=` exists to
+    # end. Split here, once, by asking the declaration.
+    declared = {p.name for p in _resolve_operator(operator).params}
+    bound = {k: operator_kwargs.pop(k) for k in list(operator_kwargs) if k in declared}
+    op = _resolve_region_operator(operator, bound)
     ok, why = operator_available(operator)
     if not ok:
         # BEFORE the reader is warmed and before a single well is submitted. The plane-operator

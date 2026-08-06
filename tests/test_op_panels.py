@@ -738,12 +738,12 @@ def test_a_parameterised_operator_is_not_refused():
     assert panel_refusal("cellpose") is None
 
 
-def test_a_region_operator_is_refused_because_its_table_declares_no_params():
-    """`add_region_operator` carries one callable and a `requires` tuple -- no `params=` at all.
-    That asymmetry between the two tables is exactly why `STITCH_DEFAULTS` still exists, so the
-    refusal says it rather than reporting `stitch` as an unknown projector."""
+def test_a_region_operator_that_declares_no_params_is_refused_for_that_reason():
+    """`stitch` declares no `params=`, so there is nothing for a form to show and StitcherPanel is
+    where its controls live. The refusal used to be by KIND -- every region operator, because that
+    table had no `params` column at all. It is one table now, so the refusal is about `stitch`."""
     why = panel_refusal("stitch")
-    assert why and "REGION operator" in why and "StitcherPanel" in why
+    assert why and "declares no params" in why and "StitcherPanel" in why
 
 
 def test_a_key_that_is_not_an_operator_is_refused_by_name():
@@ -847,7 +847,7 @@ def test_a_plane_op_is_offered_preview_only_and_the_choice_comes_off_consumes(qa
     """`spot` keeps z at full depth, so there is no plate to save. Read off `consumes`, never off
     the name -- test_operator_declaration fails the build on a name comparison."""
     p = GenericOperatorPanel(_Host(), "spot")
-    assert p._reduces_z is False
+    assert p._can_save is False
     # Not built at all rather than built and left out of the layout: `_viewer._raw_btn` is the
     # precedent for an orphan QPushButton popping up as its own floating window.
     assert p.save_btn is None
@@ -855,7 +855,7 @@ def test_a_plane_op_is_offered_preview_only_and_the_choice_comes_off_consumes(qa
 
 def test_a_z_reducer_is_offered_the_save_run(qapp):
     p = GenericOperatorPanel(_Host(), "mip")
-    assert p._reduces_z is True
+    assert p._can_save is True
     assert p.save_btn is not None and p.save_btn.parent() is not None
 
 

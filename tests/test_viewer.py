@@ -4885,26 +4885,23 @@ def test_on_mosaic_plane_without_a_window_still_lets_add_mosaic_derive_one():
 # These pin the contract instead of restating it in prose.
 
 
-def test_every_card_declares_whether_it_is_a_runnable_operator():
-    """A card key that is not in the engine registry must be DECLARED non-runnable.
+def test_a_cards_runnability_is_the_engines_answer_and_cannot_go_stale():
+    """`Operation.runnable` used to be a hand-written bool, and this test checked it still agreed.
 
-    `minerva` is the honest case: an export hand-off, not an operator - handing its key to the
-    engine dies with a raw KeyError. That is fine, but it has to be said out loud, because the
-    same shape produced by a typo'd key is a button that silently does nothing.
+    That is the shape of the defect this whole change removes: a second table restating a fact the
+    first one owns, plus a test to catch it drifting. It is a property over `runnable_operators()`
+    now, so the only thing left to check is that the derivation is live -- register an operator
+    named after a card and the card becomes runnable with no edit to `_OPERATIONS`.
     """
-    runnable = set(V.runnable_operators())
-    for op in V._OPERATIONS:
-        if op.runnable:
-            assert op.key in runnable, (
-                f"card {op.key!r} declares runnable=True but the engine cannot run it "
-                f"(engine has: {sorted(runnable)}). Either it is not an operator - set "
-                "runnable=False - or its key is a typo."
-            )
-        else:
-            assert op.key not in runnable, (
-                f"card {op.key!r} declares runnable=False but the engine CAN run it; "
-                "the declaration is stale."
-            )
+    from squidmip import add_projector, plane_op
+
+    assert V._OPERATIONS_BY_KEY["minerva"].runnable is False   # nobody registered it
+    assert V._OPERATIONS_BY_KEY["mip"].runnable is True
+
+    card = V.Operation("card_only_key", "Card only", "no engine entry", "_build_mip_tab")
+    assert card.runnable is False
+    add_projector("card_only_key", plane_op(lambda p: p))
+    assert card.runnable is True, "runnable is stale; it must be read, not stored"
 
 
 def test_gallery_view_is_a_view_menu_command_and_not_an_operator(qapp):
