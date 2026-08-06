@@ -480,12 +480,28 @@ def test_the_template_readme_states_the_contract_the_viewer_depends_on():
 
 
 def test_the_template_names_what_it_does_not_support():
-    """Composition does NOT exist — ``_recipe.RecipeChain`` documents it and nothing executes it.
-    A template that implies otherwise sends a contributor to build against a hole."""
+    """The unsupported list is real and stays stated: a template that implies a feature exists sends
+    a contributor to build against a hole. (Composition WAS on this list. It is now §2.6, because it
+    executes — see ``squidmip/_compose.py`` and ``tests/test_compose.py``.)"""
     readme = (_TEMPLATE / "README.md").read_text()
 
     assert "does NOT support" in readme
-    assert "nothing executes it" in readme
+    assert "hand-written per operator" in readme        # the GUI panel, still not generated
+
+
+def test_the_template_states_how_a_contributed_operator_composes():
+    """A contributor's operator chains with the shipped ones the moment it is registered, and the
+    README has to say so with the rule that decides it — otherwise the first thing they learn is a
+    refusal. The rule is ``consumes``, which they already declared."""
+    readme = (_TEMPLATE / "README.md").read_text()
+
+    for fact in (
+        "projector=\"flatfield + my_operator(smooth_sigma=2.0) + mip\"",   # the expression
+        "plane-op → z-reducer",                                      # what composes
+        "z-reducer → anything",                                      # what does not
+        "squidmip/_compose.py",                                           # where to read the rule
+    ):
+        assert fact in readme, f"templates/operator/README.md does not state: {fact}"
 
 
 def test_the_template_package_imports_and_registers_in_a_clean_interpreter():

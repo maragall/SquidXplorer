@@ -47,6 +47,74 @@ def test_chain_script_round_trips():
     assert RecipeChain.from_script(ch.to_script()).key() == ch.key()
 
 
+# --- parse: the label IS the expression --------------------------------------------------------
+#
+# `RecipeChain.label()` was a one-way renderer for two weeks and nothing executed what it printed.
+# Now `parse` is its inverse, which is what lets `_compose` accept the same string a legend shows
+# and a console logs. These pin the inversion itself; what a parsed chain RUNS as is
+# tests/test_compose.py.
+
+
+def test_a_chain_round_trips_through_its_own_label():
+    """label -> parse -> label, for every shape a chain takes: bare, parameterised, and EMPTY.
+
+    The empty chain is included on purpose. Its label is ``raw`` -- a word, not an expression -- so
+    a parser that only understood operator names would be the inverse of ``label`` everywhere except
+    the one state a fresh plate is actually in.
+    """
+    for text in ("mip",
+                 "flatfield + decon + mip",
+                 "spot(min_area_px=80)",
+                 "bgsub + spot(min_area_px=80, split_touching=False)",
+                 "raw"):
+        assert RecipeChain.parse(text).label() == text, text
+    assert RecipeChain.parse("raw") == RecipeChain()
+    assert RecipeChain.parse("   ") == RecipeChain()
+
+
+def test_parse_reads_a_parameter_as_the_literal_it_is_written_as():
+    """``iters=15`` is an int and ``gpu=False`` is a bool, because an operator's parameter is a
+    VALUE and a chain that handed every one of them through as a string would silently run the
+    operator with ``"15"``."""
+    params = RecipeChain.parse("decon3d(iters=15, gpu=False, sigma=2.0)").recipes[0].params
+    assert params == {"iters": 15, "gpu": False, "sigma": 2.0}
+    for value in params.values():
+        assert not isinstance(value, str)
+
+
+def test_parse_reads_an_unquoted_string_back_as_a_string():
+    """``Recipe.label`` renders a value with ``str``, so a string parameter comes out UNQUOTED. A
+    parser that insisted on quotes could not read back the label it is the inverse of."""
+    chain = RecipeChain.of(Recipe.operator("seg", segmenter="cellpose"))
+    assert chain.label() == "seg(segmenter=cellpose)"
+    assert RecipeChain.parse(chain.label()) == chain
+
+
+def test_a_separator_inside_an_argument_list_is_not_a_separator():
+    """``+`` is chain punctuation at depth 0 and arithmetic inside parentheses. Without the depth
+    rule ``bgsub(scale=1e+5)`` would split into two nonsense steps."""
+    assert len(RecipeChain.parse("bgsub(scale=1e+5)").recipes) == 1
+    assert len(RecipeChain.parse("crop(shape=(4, 4)) + mip").recipes) == 2
+
+
+def test_a_malformed_chain_is_refused_naming_what_was_typed():
+    """A chain is typed by a human into a CLI flag or a command, so the refusal has to say which
+    character was wrong -- not that "the chain" was."""
+    import re
+
+    import pytest
+
+    for text, expected in (("mip + + decon", "empty step"),
+                           ("mip(", "unbalanced '('"),
+                           ("mip)", "unbalanced ')'"),
+                           ("decon(15)", "not name=value")):
+        with pytest.raises(ValueError, match=re.escape(expected)):
+            RecipeChain.parse(text)
+        # ...and the refusal quotes what was typed, not the fragment it was looking at
+        with pytest.raises(ValueError, match=re.escape(repr(text))):
+            RecipeChain.parse(text)
+
+
 def test_cache_shares_by_content_not_window():
     ch = RecipeChain.of(Recipe.operator("decon3d"))
     cache = ResultCache()
