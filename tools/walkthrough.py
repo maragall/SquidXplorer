@@ -30,11 +30,31 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
 
+#: The acquisitions this walkthrough drives. Every one is a developer-machine path, and every
+#: check that wants one goes through :func:`need`, so a machine that lacks it SKIPS with the path
+#: printed instead of erroring out somewhere less obvious.
+#:
+#: ``PLATE`` was ``~/Downloads/synthetic_2x2_wellplate`` until 2026-08-06 and that folder no
+#: longer exists, so every plate check below was a FAIL for reasons that had nothing to do with
+#: the product. Its replacement is REPRODUCIBLE rather than found, which is the point: the command
+#: in ``PLATE_RECIPE`` rebuilds it byte-for-byte, and the SKIP message prints that command.
+#:
+#: ``SQUIDMIP_FIXTURE_PLATE`` points ``PLATE`` somewhere else. That is what lets CI run this file
+#: for real instead of watching it skip: the plate fixture is GENERATED (0.1 s, 2.5 MB at CI size),
+#: so a runner can make one and hand over the path. TISSUE and PLATE1536 have no override because
+#: they are real acquisitions nothing can synthesise -- they skip off this machine, by name.
 TISSUE = ("/Users/julioamaragall/Downloads/"
           "test_10x_laser_af_z_stack_2025-10-28_13-40-43.939945 yy")
-PLATE = "/Users/julioamaragall/Downloads/synthetic_2x2_wellplate"
-PLATE1536 = "/Users/julioamaragall/CEPHLA/Data/sim_1536wp"
+PLATE = os.environ.get("SQUIDMIP_FIXTURE_PLATE") or \
+    "/Users/julioamaragall/Downloads/sim_2x2_36fov_96wp"
+PLATE1536 = "/Users/julioamaragall/Downloads/synthetic_1536_wellplate"
 MIN_FREE_GB = 4.0
+
+#: How to rebuild PLATE. 4 wells x 36 FOVs = 144 positions on a 9 mm (96-well) pitch under a
+#: "384 well plate" declaration, which is exactly the shape the deleted fixture had: enough FOVs
+#: per well for a mosaic, and a declaration the coordinates contradict.
+PLATE_RECIPE = ('python tools/make_5d_fixture.py "%s" --fovs 36 --nz 1 --nt 1 '
+                '--well-pitch-mm 9.0 --declared-format "384 well plate"' % PLATE)
 
 _APP = None
 _RESULTS: list[tuple[str, str, str, str]] = []      # (ticket, title, verdict, detail)
@@ -63,11 +83,31 @@ def _app():
 _ONLY = os.environ.get("WALKTHROUGH_ONLY", "")   # e.g. IMA-261 — for mutation-checking one ticket
 
 
+def say(text=""):
+    """Print the harness's own report, PAST anything the product has done to ``sys.stdout``.
+
+    Measured 2026-08-06: ``_workers._PreviewWorker.run`` wraps its whole pass in
+    ``_logpane.capture_stdout_to_log()``, which is deliberately process-wide and not thread-scoped
+    (its own comment says so). So while a plate preview is streaming, EVERY print on the main
+    thread is swallowed into the GUI's log panel -- and a check whose window still had a preview
+    running simply had no row in the output, which reads as the check having vanished. A console
+    tool that drives this widget cannot report through ``sys.stdout``.
+    """
+    print(text, file=sys.__stdout__, flush=True)
+
+
 def check(ticket, title):
-    """Decorator: run a check, catch everything, record one row."""
+    """Decorator: run a check, catch everything, record one row.
+
+    The row is PRINTED as it is produced as well as recorded. ``try/except`` cannot catch a Qt
+    abort or a vispy segfault, and this file drives a GUI toolkit: when one check took the process
+    down, the summary at the bottom never ran and the whole run reported nothing at all -- not even
+    which check was in the chair. Streaming makes the crash name itself.
+    """
     def wrap(fn):
         if _ONLY and _ONLY not in ticket:
             return fn
+        say(f"...   {ticket:9} {title}")
         try:
             detail = fn()
             verdict = "PASS"
@@ -80,6 +120,9 @@ def check(ticket, title):
             detail = f"{type(e).__name__}: {e}"
             if os.environ.get("WALKTHROUGH_TRACE"):
                 detail += "\n" + traceback.format_exc()
+        finally:
+            close_windows()
+        say(f"{verdict:5} {ticket:9} {title}\n      {detail}")
         _RESULTS.append((ticket, title, verdict, str(detail)))
         return fn
     return wrap
@@ -89,10 +132,49 @@ class SkipCheck(Exception):
     """Raised when a check cannot run here (missing dataset, missing optional dep)."""
 
 
+def need(path):
+    """*path*, or SKIP this check naming it. The ONE gate between a check and a dataset.
+
+    The datasets live on one workstation, so on every other machine most of this file cannot run.
+    "Cannot run here" and "ran and failed" are different answers and the summary distinguishes
+    them -- but only if the absence is stated rather than discovered as a FileNotFoundError three
+    frames deep, which is what a `python tools/walkthrough.py` on CI used to produce.
+    """
+    if os.path.isdir(path):
+        return path
+    hint = f"\n            rebuild it with: {PLATE_RECIPE}" if path == PLATE else ""
+    raise SkipCheck(f"dataset absent on this machine: {path}{hint}")
+
+
+#: Every window :func:`open_window` built and nobody has closed yet. See :func:`close_windows`.
+_OPEN: list = []
+
+
+def close_windows():
+    """Close every window this run opened and has not closed. Called after EVERY check.
+
+    A check that raises before its own ``w.close()`` leaves a ``PlateWindow`` with a live
+    ``_LoupeWorker`` and ``_TileFetcher`` on it. Those are QThreads parented to the window, so when
+    the next check's ingest triggers a collection, Qt destroys a running QThread and the PROCESS
+    ABORTS -- measured: IMA-221 failed on a Qt6 TypeError, and the abort landed two checks later
+    on IMA-228, which is where anyone reading the output would have gone looking. One check's
+    failure must not be able to end the run, and must not be able to frame a different check.
+    """
+    while _OPEN:
+        win = _OPEN.pop()
+        try:
+            win.close()
+        except Exception:                 # already torn down, or never fully built
+            pass
+    _app().processEvents()
+
+
 def open_window(path, size=(1600, 900)):
     import squidmip._viewer as V
+    need(path)
     _app()
     win = V.PlateWindow(None)
+    _OPEN.append(win)
     # Size and show BEFORE ingest: pane 3 carries setMinimumWidth(300), and a splitter that was
     # never laid out at a real size reports every child at its default. Testing layout on an
     # unshown window measures the harness, not the product.
@@ -137,29 +219,23 @@ def drain_preview(win, timeout_s=120):
         time.sleep(0.01)
 
 
-def ndv_clims_slider(win, ch=0):
-    """The REAL contrast range-slider inside the embedded ndv viewer, for channel *ch*.
-
-    Tests must drive this widget, not the LUTModel and not set_channel_window: every defect this
-    project shipped passed a suite that called the handler instead of moving the control.
-    """
-    d = getattr(win, "_detail", None)
-    ctrls = getattr(getattr(d, "ndv_viewer", None), "_lut_controllers", None) or {}
-    ctrl = ctrls.get(ch)
-    if ctrl is None:
-        return None
-    for v in getattr(ctrl, "lut_views", []):
-        q = getattr(v, "_qwidget", None)
-        if q is not None and hasattr(q, "clims"):
-            return q.clims
-    return None
-
-
 def rendered(widget, w=900, h=700):
-    """Grab a widget as an RGB array - what a human would actually see."""
+    """Grab a widget as an RGB array - what a human would actually see.
+
+    Returns DEVICE pixels, which on a retina panel is 2x the ``(w, h)`` asked for. Callers here
+    only ever diff one grab against another, so that is fine -- but anything that wants to crop
+    this by a WIDGET rectangle must scale by ``devicePixelRatioF()`` first. See
+    ``tests/test_viewer.py::_cell_slices``, which is the one place in the repo that does it and
+    says what a mixed-up crop looks like (it reads a neighbouring well and compares it to the one
+    it meant).
+    """
+    from qtpy.QtGui import QImage
     widget.resize(w, h)
     _app().processEvents()
-    img = widget.grab().toImage().convertToFormat(4)
+    # ``convertToFormat(4)`` -- the raw int for Format_RGB32 -- was accepted by PyQt5 and is a
+    # TypeError under PyQt6, which took out every check in this file that looks at pixels. Naming
+    # the enum is also the only spelling that survives a Qt renumbering.
+    img = widget.grab().toImage().convertToFormat(QImage.Format.Format_RGB32)
     ptr = img.bits(); ptr.setsize(img.sizeInBytes())   # byteCount() is Qt5-only
     # bytesPerLine, not width*4: Qt pads scanlines to a 4-byte boundary, and a padded row read as
     # width*4 shears the image by a pixel per row. Device pixel ratio too -- grab() renders at the
@@ -176,6 +252,10 @@ def free_gb():
 def run_all():
     from squidmip import available_projectors, open_reader
     from squidmip._stitch import available_region_operators
+
+    def read(ds):
+        """``open_reader``, but an absent dataset SKIPs the check instead of raising."""
+        return open_reader(need(ds))
 
     # ---------- ingest, all three acquisitions --------------------------------------
     @check("IMA-214", "Glass slide opens (was refused outright)")
@@ -200,8 +280,6 @@ def run_all():
 
     @check("IMA-219", "1536-well plate scale ingests")
     def _():
-        if not os.path.isdir(PLATE1536):
-            raise SkipCheck(f"fixture absent: {PLATE1536}")
         w = open_window(PLATE1536)
         m = w._reader.metadata
         n, first, last = len(m["regions"]), m["regions"][0], m["regions"][-1]
@@ -212,30 +290,53 @@ def run_all():
 
     @check("IMA-215", "coordinates.csv: both on-disk schemas parse")
     def _():
-        a = open_reader(PLATE).metadata["fov_positions_um"]        # 20x-style, row order = fov
-        b = open_reader(TISSUE).metadata["fov_positions_um"]       # monkey-style, fov column
-        assert len(a) == 144 and len(b) == 55, (len(a), len(b))
-        xs = [v[0] for v in a.values()]
-        span = max(xs) - min(xs)
-        assert span > 1000, f"x span {span} looks like mm not um"
-        return f"20x-style {len(a)} positions (span {span:.1f} um), monkey-style {len(b)}"
+        """The discriminator is the HEADER (reader.py ``_has_fov_column``), so this check has to
+        drive one dataset of each header, and say which is which.
+
+        It used to name PLATE "20x-style, row order = fov" and TISSUE "monkey-style, fov column",
+        which is both backwards and, since the fixtures moved, untrue: every acquisition it opened
+        carried a ``fov`` column, so the type-(b) parser was never entered at all. The 1536 plate
+        is the type-(b) one on this machine -- its root ``coordinates.csv`` is
+        ``region,x (mm),y (mm),z (mm)`` with no fov column and one row per FOV in image order.
+        """
+        with_fov = read(TISSUE).metadata["fov_positions_um"]        # type (a): explicit fov column
+        row_order = read(PLATE1536).metadata["fov_positions_um"]    # type (b): row order IS the fov
+        assert len(with_fov) == 55, len(with_fov)
+        assert len(row_order) == 6144, len(row_order)
+        # Both parsers must land in MICROMETRES. A plate spans tens of thousands of um; the 1000x
+        # tell is a span that looks like a millimetre count.
+        spans = {}
+        for name, pos in (("type-a", with_fov), ("type-b", row_order)):
+            xs = [v[0] for v in pos.values()]
+            spans[name] = max(xs) - min(xs)
+            assert spans[name] > 1000, f"{name}: x span {spans[name]} looks like mm, not um"
+        return (f"type-(a) fov-column {len(with_fov)} positions (span {spans['type-a']:.0f} um), "
+                f"type-(b) row-order {len(row_order)} positions (span {spans['type-b']:.0f} um)")
 
     # ---------- mosaic + geometry ---------------------------------------------------
     @check("IMA-187", "Each well is a coordinate-placed MOSAIC, not one thumbnail")
     def _():
         from squidmip._viewer import _mosaic_boxes
-        boxes = _mosaic_boxes(open_reader(PLATE).metadata)
+        m = read(PLATE).metadata
+        boxes = _mosaic_boxes(m)
         per_well: dict = {}
         for (region, _fov), _b in boxes.items():
             per_well[region] = per_well.get(region, 0) + 1
-        assert len(boxes) == 144, len(boxes)
-        assert set(per_well.values()) == {36}, per_well
-        return f"{len(boxes)} boxes, {sorted(per_well)} x 36 fields each"
+        # Derived from the acquisition, not from the fixture that happened to be here in July:
+        # the claim is "one box per acquired FOV, and more than one per well", and hard-coding
+        # 144/36 turned a fixture swap into a product FAIL. `_mosaic_boxes` computes placement
+        # independently of the metadata dict, so comparing the two is not circular.
+        want = {r: len(f) for r, f in m["fovs_per_region"].items()}
+        assert len(boxes) == len(m["fov_positions_um"]), (len(boxes), len(m["fov_positions_um"]))
+        assert per_well == want, f"{per_well} != {want}"
+        assert min(want.values()) > 1, f"no well has more than one FOV: {want} — nothing to mosaic"
+        return (f"{len(boxes)} boxes over {sorted(per_well)}, "
+                f"{sorted(set(want.values()))} field(s) each")
 
     @check("IMA-187", "Y-sign: larger stage y maps to a LARGER row (no mirroring)")
     def _():
         from squidmip._placement import fov_offsets_px
-        m = open_reader(PLATE).metadata
+        m = read(PLATE).metadata
         off = fov_offsets_px(m["fov_positions_um"], "A1",
                              m["fovs_per_region"]["A1"], m["pixel_size_um"])
         pos = m["fov_positions_um"]
@@ -250,8 +351,9 @@ def run_all():
         from squidmip._tilesource import plate_ladder
         from squidmip._tiling import select_tiles
         counts = {}
-        for label, ds in (("144 FOVs", PLATE), ("55 FOVs", TISSUE)):
-            m = open_reader(ds).metadata
+        for name, ds in (("plate", PLATE), ("tissue", TISSUE)):
+            m = read(ds).metadata
+            label = f"{name} ({len(m['fov_positions_um'])} FOVs)"
             lad = plate_ladder(m)
             geo = lad.geometry if hasattr(lad, "geometry") else lad
             x0, y0, x1, y1 = geo.levels[-1].bboxes[:, 0].min(), geo.levels[-1].bboxes[:, 1].min(), \
@@ -288,15 +390,37 @@ def run_all():
         rendered(ov)
         a = QPointF(2, 2)
         b = QPointF(ov.width() - 2, ov.height() - 2)
-        ov.mousePressEvent(ev("press", a, _SHIFT))
-        ov.mouseMoveEvent(ev("move", b, _SHIFT))
-        ov.mouseReleaseEvent(ev("release", b, _SHIFT, buttons=_NONE))
+
+        def drag(mods):
+            ov.mousePressEvent(ev("press", a, mods))
+            ov.mouseMoveEvent(ev("move", b, mods))
+            ov.mouseReleaseEvent(ev("release", b, mods, buttons=_NONE))
+
+        # WHAT A PLAIN SHIFT-DRAG DOES CHANGED ON 2026-07-23 (2b8fbc5, "Decentralize GUI"): it
+        # emits `marqueeSelected` -- open an independent window over the box -- and deliberately
+        # leaves NO selection wash behind, because the boxed set is visible in the new window's
+        # region slider. This check asserted the old binding and so reported `[] != [...]`, which
+        # reads as "the marquee is broken" and is not: the gesture that still SELECTS is Shift+Alt.
+        # Both halves are driven here, because "it opened the right wells" and "it selected the
+        # right wells" are now two different gestures and a check on one says nothing about the
+        # other.
+        opened = []
+        ov.marqueeSelected.connect(lambda wells: opened.append(list(wells)))
+        drag(_SHIFT)
+        after_plain = ov.selected_wells()
+        drag(_SHIFT | Qt.KeyboardModifier.AltModifier)      # ...the gesture that DOES select
         wells = ov.selected_wells()
         sel = w.selected_region_fovs()
+        m = w._reader.metadata
+        want_wells = list(m["regions"])
+        want_pairs = sum(len(f) for f in m["fovs_per_region"].values())
         w.close()
-        assert wells == ["A1", "A2", "B1", "B2"], wells
-        assert len(sel) == 144, f"expected 144 (region, fov) pairs, got {len(sel)}"
-        return f"drag over the whole plate -> {wells}, {len(sel)} (region, fov) pairs"
+        assert opened == [want_wells], f"Shift-drag asked to open {opened}, expected {want_wells}"
+        assert after_plain == [], f"a plain Shift-drag left a selection wash: {after_plain}"
+        assert wells == want_wells, f"Shift+Alt-drag selected {wells} != {want_wells}"
+        assert len(sel) == want_pairs, f"expected {want_pairs} (region, fov) pairs, got {len(sel)}"
+        return (f"Shift-drag over the whole plate -> opens {opened[0]} and selects nothing; "
+                f"Shift+Alt-drag -> selects {wells}, {len(sel)} (region, fov) pairs")
 
 
 
@@ -355,9 +479,11 @@ def run_all():
             raise SkipCheck(f"only {free_gb():.1f} GB free; refusing to write")
         import tifffile
         from squidmip._minerva import export_selection
-        reader = open_reader(PLATE)
+        reader = read(PLATE)
         fovs = reader.metadata["fovs_per_region"]["A1"][:4]      # a subset: the crop path
-        assert len(fovs) == 4, "PLATE well A1 must have >=4 FOVs for this check"
+        if len(fovs) < 4:
+            raise SkipCheck(f"precondition: well A1 of {PLATE} must have >=4 FOVs to exercise the "
+                            f"crop path; it has {len(fovs)}")
         tmp = tempfile.mkdtemp(prefix="walkthrough_minerva_")
         try:
             pairs = export_selection(reader, [("A1", f) for f in fovs], tmp)
@@ -440,185 +566,93 @@ def run_all():
                        f"std={g.std():.1f}")
         return " | ".join(out)
 
-    @check("IMA-207", "Per-region contrast lifts a dim well that global crushes")
-    def _():
-        w = open_window(PLATE)
-        ov = w._overview
-        if not hasattr(ov, "set_contrast_scope"):
-            w.close(); raise SkipCheck("set_contrast_scope() not present")
-        from squidmip._viewer import SCOPE_PER_REGION
-        ov.set_contrast_scope("global"); a = rendered(ov).mean()
-        ov.set_contrast_scope(SCOPE_PER_REGION); b = rendered(ov).mean()
-        w.close()
-        return f"mean brightness global={a:.2f} -> per-region={b:.2f}"
+    # IMA-207 ("per-region contrast lifts a dim well that global crushes") WAS HERE AND IS GONE.
+    # Per-region contrast was DELETED on 2026-07-22 (8b0cbfc) on purpose, with the reason on the
+    # record: "It made a dim well readable beside a bright one, which is a presentation trick that
+    # costs the one thing a plate view is for - two wells that look identical could differ by
+    # orders of magnitude." `set_contrast_scope`, `SCOPE_PER_REGION` and `_cell_windows` all went
+    # with it, so the check could only ever SKIP again -- and a permanent skip in a list of skips
+    # is how a dead check hides.
 
-    @check("IMA-261", "The plate view has NO contrast sliders (the duplicate control is GONE)")
+    @check("IMA-261", "The plate view owns NO contrast control (the duplicate is GONE)")
     def _():
-        """Not hidden, not disabled - absent. Walked over the REAL widget tree, because a control
-        that is merely `hide()`-den is still a second owner waiting to be un-hidden."""
-        from qtpy.QtWidgets import QAbstractSlider, QPushButton
-        w = open_window(PLATE)
-        bar = w._channel_bar
-        if bar is None:
-            w.close(); raise SkipCheck("no channel bar")
-        sliders = bar.findChildren(QAbstractSlider)
-        autos = [b for b in bar.findChildren(QPushButton) if "auto" in b.text().lower()]
-        n_rows = len(bar._rows)
-        has_setter = hasattr(bar, "_push") or hasattr(bar, "_auto") or hasattr(bar, "_slider")
-        w.close()
-        assert not sliders, f"{len(sliders)} contrast slider(s) still in the plate's channel bar"
-        assert not autos, f"{len(autos)} 'auto' button(s) still in the plate's channel bar"
-        assert not has_setter, "the channel bar still has a contrast-SETTING method"
-        return (f"{n_rows} channel rows, 0 sliders, 0 auto buttons, no setter method - "
-                "the plate reports contrast, it does not set it")
+        """Not hidden, not disabled - ABSENT, walked over the REAL widget tree of a shown window.
 
-    @check("IMA-261", "DRAGGING the CENTRAL viewer's contrast slider repaints the PLATE")
-    def _():
-        """The user's actual complaint: what the array viewer shows was not reflected on the plate.
-        Drives the REAL QLabeledRangeSlider inside ndv - not set_channel_window, not the model -
-        and asserts on the plate's DISPLAYED PIXELS."""
-        w = open_window(PLATE)
-        drain_preview(w)
-        ov = w._overview
-        sl = ndv_clims_slider(w, 0)
-        if sl is None:
-            w.close(); raise SkipCheck("ndv has no clims slider for channel 0 yet")
-        dmax = ov._contrast.dmax
-        sl.setValue((0, int(dmax * 0.9)))
-        _app().processEvents()
-        base = rendered(ov)
-        sl.setValue((int(dmax * 0.45), int(dmax * 0.55)))     # a hard, visible re-window
-        _app().processEvents()
-        after = rendered(ov)
-        plate_win = ov.channel_windows()[0]
-        view_win = w._detail.channel_windows().get(0)
-        w.close()
-        h = min(base.shape[0], after.shape[0]); wd = min(base.shape[1], after.shape[1])
-        changed = int((np.abs(base[:h, :wd] - after[:h, :wd]) > 0).sum())
-        assert changed > 0, "the array viewer's contrast slider changed nothing on the plate"
-        assert plate_win == view_win, f"plate {plate_win} != array viewer {view_win}"
-        return (f"{changed} px changed on the plate; plate window == viewer window == "
-                f"({plate_win[0]:.0f}, {plate_win[1]:.0f})")
+        Rewritten 2026-08-06. It used to read ``w._channel_bar``, which raised AttributeError:
+        8b0cbfc (2026-07-22) deleted the plate's whole channel bar, not merely its sliders. So the
+        check FAILED on a change that had over-satisfied it -- the worst kind of stale check,
+        because a real regression and a tightened design produce the same red.
 
-    @check("IMA-261", "Plate PIXELS are the array viewer's window, not merely its numbers")
-    def _():
-        """Agreeing on a (lo, hi) pair proves nothing if the plate then renders something else.
-        Recomposite the plate's own store under the window READ BACK FROM THE ARRAY VIEWER and
-        require the result to be the very bytes the plate is showing."""
-        from squidmip._montage import composite
-        w = open_window(PLATE)
-        drain_preview(w)
-        ov = w._overview
-        sl = ndv_clims_slider(w, 0)
-        if sl is None:
-            w.close(); raise SkipCheck("ndv has no clims slider for channel 0 yet")
-        sl.setValue((321, 8765))
-        _app().processEvents()
-        ov.recomposite(quick=False)
-        shown = ov._final_arr.get(ov._active)
-        store = ov._store.get(ov._active)
-        viewer_wins = w._detail.channel_windows()
-        if shown is None or store is None:
-            w.close(); raise SkipCheck("plate has not composited yet")
-        # Build the expected image from the VIEWER's windows only - nothing from the plate's
-        # own contrast model gets a vote here.
-        wins = [viewer_wins.get(c, ov.channel_windows()[c]) for c in range(store.shape[0])]
-        expect = composite(store, ov._colors, wins, ov._mask)
-        ch0 = viewer_wins.get(0)
-        w.close()
-        assert ch0 == (321.0, 8765.0), f"viewer did not take the slider value: {ch0}"
-        assert shown.shape == expect.shape, f"{shown.shape} != {expect.shape}"
-        diff = int(np.abs(shown.astype(int) - expect.astype(int)).max())
-        assert diff == 0, f"plate pixels differ from the viewer's window by up to {diff}/255"
-        return (f"{shown.shape} plate pixels are BYTE-IDENTICAL to a recomposite under the array "
-                f"viewer's own windows {[(round(a), round(b)) for a, b in wins]}")
-
-    @check("IMA-261", "A contrast drag is under 16 ms/frame on all three datasets")
-    def _():
-        """'Buttery' with a number on it: the wall time from moving the array viewer's slider to
-        the plate having repainted, with the Qt event loop in between. Measured, not asserted.
-
-        EVERY TICK MUST ACTUALLY REPAINT THE PLATE, and that is asserted here rather than assumed.
-        Mutation-checked against parent 8859c52, where the plate did not follow the array viewer at
-        all: the identical loop reported 0.2 ms / 5000 fps on all three datasets and PASSED, because
-        it was timing a slider nothing was listening to. A latency budget over a disconnected
-        control is the "832 green tests, one wrong model" defect in miniature — the number was real,
-        the thing it measured was not. So each tick's composited buffer is fingerprinted, and a tick
-        that did not change the plate's pixels disqualifies the measurement instead of flattering
-        it.
+        The claim is now the stronger one that commit actually made: no interactive control ANY-
+        WHERE under the plate, and no ``_ChannelBar`` instance in the tree. Walking the tree rather
+        than naming an attribute is the point: this keeps holding whatever the bar is next called.
         """
-        import time
-        out, worst = [], 0.0
-        for label, ds in (("tissue", TISSUE), ("2x2", PLATE), ("1536wp", PLATE1536)):
-            if not os.path.exists(ds):
-                out.append(f"{label}: absent"); continue
-            w = open_window(ds, size=(2560, 1440))
-            drain_preview(w)
-            ov = w._overview
-            sl = ndv_clims_slider(w, 0)
-            if sl is None or ov._store.get(ov._active) is None:
-                w.close(); out.append(f"{label}: no slider/store"); continue
-            dmax = ov._contrast.dmax
+        from qtpy.QtWidgets import QAbstractButton, QAbstractSlider, QAbstractSpinBox, QComboBox
+        import squidmip._viewer as V
+        w = open_window(PLATE)
+        ov = w._overview
+        controls = []
+        for kind in (QAbstractSlider, QAbstractSpinBox, QComboBox, QAbstractButton):
+            controls += [f"{type(c).__name__}({c.text() if hasattr(c, 'text') else ''})"
+                         for c in ov.findChildren(kind)]
+        bars = w.findChildren(V._ChannelBar)
+        attr = hasattr(w, "_channel_bar")
+        w.close()
+        assert not controls, f"the plate pane carries {len(controls)} control(s): {controls}"
+        assert not bars, f"{len(bars)} _ChannelBar still mounted under the window"
+        assert not attr, "PlateWindow still has a _channel_bar attribute"
+        return ("0 interactive controls under the plate, 0 _ChannelBar instances, no "
+                "_channel_bar attribute - the plate reports contrast, it does not set it")
 
-            def frame():
-                """A fingerprint of what the plate is CURRENTLY showing, or None if nothing is."""
-                a = ov._final_arr.get(ov._active)
-                return None if a is None else hash(a.tobytes())
+    # THREE IMA-261 CHECKS WERE HERE AND ARE GONE, all of them drivers of an `ndv_clims_slider`
+    # helper (deleted with them):
+    # "DRAGGING the CENTRAL viewer's contrast slider repaints the PLATE", "Plate PIXELS are the
+    # array viewer's window, not merely its numbers", and "A contrast drag is under 16 ms/frame on
+    # all three datasets".
+    #
+    # There is no central viewer to drag. ``PlateWindow._detail`` has been unconditionally None
+    # since 19cd491 (2026-07-22) and the locked central pane was removed by 2b8fbc5 (2026-07-23,
+    # "Decentralize GUI"); contrast now belongs to napari in an INDEPENDENT RegionViewer window,
+    # reaching the plate through ``MosaicLayers.on_user_contrast`` -> ``_on_detail_contrast``.
+    # the helper returned None on every dataset, so the first two SKIPped and -- worse --
+    # the 16 ms budget PASSED while measuring nothing at all ("tissue: no slider/store | 2x2: no
+    # slider/store | 1536wp: no slider/store", a green row over zero measurements, which is the
+    # exact failure its own docstring was written to prevent).
+    #
+    # They are not rewritten HERE because they cannot be: napari needs a real GL context and this
+    # file runs under QT_QPA_PLATFORM=offscreen, where its canvas does not exist. The claim moved
+    # to ``tools/verify_napari_mosaic.py``, which is the harness that has a GL context.
 
-            sl.setValue((0, int(dmax * 0.5))); _app().processEvents()   # warm every cache
-            ts, frames = [], []
-            for i in range(30):
-                t0 = time.perf_counter()
-                sl.setValue((0, int(dmax * (0.25 + 0.5 * i / 30))))
-                _app().processEvents()
-                ts.append((time.perf_counter() - t0) * 1000)
-                frames.append(frame())
-            med = float(np.median(ts))
-            store = ov._store[ov._active]
-            w.close()
-            # 30 strictly increasing windows over real (non-flat) pixels must give 30 different
-            # images. Anything less means some ticks repainted nothing and their times are noise.
-            distinct = len(set(frames))
-            assert None not in frames, f"{label}: the plate composited nothing during the drag"
-            assert distinct == len(frames), (
-                f"{label}: {len(frames)} slider ticks produced only {distinct} distinct plate "
-                f"images — the plate is NOT following the array viewer, so this timing is of a "
-                f"disconnected control")
-            worst = max(worst, med)
-            out.append(f"{label} {tuple(store.shape)}: {med:.1f} ms ({1000 / med:.0f} fps), "
-                       f"{distinct}/{len(frames)} repaints")
-        assert worst < 16.0, f"slowest dataset {worst:.1f} ms/frame, over the 16 ms budget"
-        return " | ".join(out)
-
-    @check("IMA-242", "ONE contrast model: the loupe obeys the slider the plate obeys")
+    @check("IMA-242", "ONE contrast model: the loupe obeys the window the plate obeys")
     def _():
         """The duplication this ticket collapsed: the loupe used to memoise its own window and its
-        own compositor, so a slider drag moved the plate and left the magnifier of that same plate
-        showing the pre-drag contrast."""
+        own compositor, so a contrast change moved the plate and left the magnifier of that same
+        plate showing the pre-change contrast. Latch a channel and require both to report it.
+
+        The PER-REGION arm was dropped on 2026-08-06: ``PlateOverview._cell_windows`` went with
+        per-region contrast itself in 8b0cbfc (2026-07-22), so reaching for it raised
+        AttributeError and reported "the contrast model is broken" about a third renderer that no
+        longer exists. Two renderers is now the whole population, and the check says so rather
+        than quietly measuring fewer things than its title claims.
+        """
         import squidmip._viewer as V
         w = open_window(PLATE)
         ov = w._overview
         settle()
         if ov._contrast is None:
             w.close(); raise SkipCheck("no contrast model")
-        # The three renderers must agree about a LATCHED channel, whatever auto they each derive.
         ov._contrast.set_manual(0, 123.0, 4567.0)
         plate_win = ov.channel_windows()[0]
-        store = ov._store.get(ov._active)
-        cell_win = None
-        if store is not None and ov._tiles_by_layer.get(ov._active):
-            ri, ci = sorted(ov._tiles_by_layer[ov._active])[0]
-            cell_win = ov._cell_windows(store, ri, ci)[0]
         loupe_win = ov._contrast.resolve(0, (0.0, 65535.0))   # the loupe's resolution path
+        assert not hasattr(ov, "_cell_windows"), \
+            "a per-region contrast path is back; it was deleted on purpose in 8b0cbfc"
         w.close()
         assert plate_win == (123.0, 4567.0), f"plate ignored the latch: {plate_win}"
         assert loupe_win == (123.0, 4567.0), f"loupe ignored the latch: {loupe_win}"
-        if cell_win is not None:
-            assert cell_win == (123.0, 4567.0), f"per-region ignored the latch: {cell_win}"
         assert not hasattr(V, "_composite_rgb") and not hasattr(V, "_percentile_window"), \
             "a duplicate contrast implementation is back"
-        return (f"plate={plate_win} per-region={cell_win} loupe={loupe_win} — all one model; "
-                "both duplicate implementations gone")
+        return (f"plate={plate_win} loupe={loupe_win} — both renderers, one model; both duplicate "
+                "implementations still gone, and no per-region path came back")
 
     # ---------- operators ------------------------------------------------------------
     @check("IMA-210", "Operator registry exposes every shipped operator")
@@ -665,7 +699,7 @@ def run_all():
     @check("IMA-230", "Region-operator estimate is overlap-aware, not frame-counted")
     def _():
         from squidmip._output import estimate_write_bytes
-        m = open_reader(PLATE).metadata
+        m = read(PLATE).metadata
         proj = estimate_write_bytes(m, n_fovs=None)
         stit = estimate_write_bytes(m, n_fovs=None, region_operator=True)
         assert stit != proj, "region estimate identical to the frame count"
@@ -675,7 +709,7 @@ def run_all():
     def _():
         from squidmip._output import fov_roi_records_um
         from squidmip._tilesource import fov_bboxes_um
-        m = open_reader(PLATE).metadata
+        m = read(PLATE).metadata
         region = m["regions"][0]
         fovs = m["fovs_per_region"][region]
         pos = {k[1]: v for k, v in m["fov_positions_um"].items() if k[0] == region}
@@ -699,7 +733,7 @@ def run_all():
     @check("IMA-217", "Pyramid ladder is coarse-to-fine and never widens")
     def _():
         from squidmip._tilesource import plate_ladder
-        m = open_reader(PLATE).metadata
+        m = read(PLATE).metadata
         lad = plate_ladder(m)
         geo = lad.geometry if hasattr(lad, "geometry") else lad
         counts = [len(lv) for lv in geo.levels]
@@ -715,17 +749,17 @@ def run_all():
         if free_gb() < MIN_FREE_GB + 1:
             raise SkipCheck(f"only {free_gb():.1f} GB free")
         import inspect
-        from squidmip import open_reader as _open, write_plate
+        from squidmip import open_reader as _open, write_plate       # _open: the Zarr we wrote
         tmp = tempfile.mkdtemp(prefix="walkthrough_zarr_")
         try:
             # One well, one FOV: enough to prove the round trip, kilobytes on disk.
-            write_plate(_open(PLATE), tmp, regions=["A1"], n_fovs=1, projector="mip")
+            write_plate(read(PLATE), tmp, regions=["A1"], n_fovs=1, projector="mip")
             back = _open(os.path.join(tmp, "plate.ome.zarr"))
             m = back.metadata
             regions = list(m["regions"])
             # the seam: the SAME read() signature serves TIFF and Zarr
             sig_zarr = list(inspect.signature(type(back).read).parameters)
-            sig_tiff = list(inspect.signature(type(_open(PLATE)).read).parameters)
+            sig_tiff = list(inspect.signature(type(read(PLATE)).read).parameters)
             plane = back.read(regions[0], m["fovs_per_region"][regions[0]][0],
                               m["channels"][0]["name"], 0)
             assert regions == ["A1"], regions
@@ -736,90 +770,20 @@ def run_all():
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
-    @check("IMA-255", "A z-stack switches to 3D volume rendering with the right geometry")
-    def _():
-        """Drives ndv's OWN 2D/3D button on a real tissue z-stack and reads back what
-        reached the renderer. Everything here is checkable without a GPU: which axis
-        became the third visible one, that the channel axis survived, that Volume
-        visuals replaced Images, and the voxel scale the vertices were built with.
-
-        NOT checked here: that pixels actually appear on screen. Vispy volume rendering
-        needs a real OpenGL context, and under QT_QPA_PLATFORM=offscreen there is none
-        ("QOpenGLWidget is not supported on this platform"). "The volume was built with
-        the right geometry" and "the volume is visible" are different claims.
-        """
-        try:
-            import ndviewer_light.core as nvc
-            from ndv.views._vispy._array_canvas import VispyArrayCanvas
-            from vispy.visuals.volume import VolumeVisual
-        except ImportError as e:
-            # ndviewer_light was DELETED on 2026-07-30, so this check now skips permanently
-            # rather than intermittently. Named here so nobody spends an afternoon working
-            # out why a check that used to run stopped: the thing it checked is gone.
-            raise SkipCheck(
-                f"ndviewer_light was removed from this product on 2026-07-30, so its volume "
-                f"patch can no longer be checked ({e}). napari's voxel scale is asserted in "
-                "tests/test_viewer_3d.py instead."
-            )
-        if not os.path.isdir(TISSUE):
-            raise SkipCheck("tissue z-stack not present")
-
-        assert nvc.VOLUME_PATCH_ERROR is None, nvc.VOLUME_PATCH_ERROR
-        assert VispyArrayCanvas.add_volume.__name__ == "_patched_add_volume", \
-            "the volume monkey-patch is not bound — 3D would silently render isotropic"
-
-        app = _app()
-        meta = open_reader(TISSUE).metadata
-        px, dz = meta["pixel_size_um"], meta["dz_um"]
-
-        seen = []
-        orig = VispyArrayCanvas.add_volume
-        VispyArrayCanvas.add_volume = (
-            lambda self, data=None: (
-                seen.append((getattr(data, "shape", None), nvc._effective_voxel_scale())),
-                orig(self, data))[1])
-        try:
-            v = nvc.LightweightViewer()
-            v.show()
-            settle(500)
-            # A small canvas: this check is about geometry, not throughput.
-            v.start_acquisition([c["name"] for c in meta["channels"]], meta["n_z"],
-                                256, 256, ["manual0:0"], pixel_size_um=px, dz_um=dz)
-            settle(1500)
-            nv = v.ndv_viewer
-            wrapper = nv._data_model.data_wrapper
-            z_axis, ch_axis = wrapper.guess_z_axis(), wrapper.guess_channel_axis()
-            assert z_axis != ch_axis, \
-                f"3D would stack CHANNELS, not z (both axis {z_axis})"
-
-            nv._view._qwidget.ndims_btn.click()     # the user-reachable control
-            settle(3000)
-
-            axes = tuple(nv.display_model.visible_axes)
-            vols = [e for e in nv._canvas._elements if isinstance(e, VolumeVisual)]
-            assert len(axes) == 3, axes
-            assert axes[0] == z_axis, f"third visible axis is {axes[0]}, not z ({z_axis})"
-            assert nv.display_model.channel_axis == ch_axis, \
-                "channel_axis was dropped — composite colours would be lost"
-            assert vols, "no Volume visual was created"
-            assert seen, "add_volume never fired"
-
-            want = dz / px
-            scales = {round(getattr(x, "_voxel_scale", (0, 0, 0))[2], 6) for x in vols}
-            assert scales == {round(want, 6)}, f"voxel z-scale {scales}, expected {want}"
-            assert type(nv._canvas._view.camera).__name__ == "ArcballCamera"
-
-            nv._view._qwidget.ndims_btn.click()     # and back to 2D
-            settle(2000)
-            assert len(nv.display_model.visible_axes) == 2, nv.display_model.visible_axes
-
-            shape = seen[-1][0]
-            return (f"3D button -> visible_axes {axes} (z={z_axis}, channel {ch_axis} "
-                    f"kept), {len(vols)} Volume visuals of shape {shape}, ArcballCamera, "
-                    f"voxel z-scale {want:.5f} (dz {dz} um / pixel {px} um); toggled back "
-                    f"to 2D. On-screen pixels NOT verified: offscreen has no GL context.")
-        finally:
-            VispyArrayCanvas.add_volume = orig
+    # IMA-255 ("A z-stack switches to 3D volume rendering with the right geometry") WAS HERE AND
+    # IS GONE. It drove `ndviewer_light`'s volume monkey-patch. That package was deleted from this
+    # product on 2026-07-30 (58d342d, "Delete the ndviewer_light fallback: one renderer, and a
+    # named failure") precisely BECAUSE it imports PyQt5 at module scope.
+    #
+    # The check anticipated the deletion and raised SkipCheck on ImportError -- but the package is
+    # still installed on this workstation as a sibling editable checkout, so the import SUCCEEDED,
+    # dragged Qt5 into a Qt6 process ("Class QT_ROOT_LEVEL_POOL... is implemented in both PyQt6 and
+    # PyQt5"), and killed the run with "QWidget: Must construct a QApplication before a QWidget".
+    # Measured 2026-08-06: every check after it never ran. A skip guarded by ImportError cannot
+    # protect against an import that works and is still wrong.
+    #
+    # Its own docstring already named the replacement, and that replacement exists:
+    # `tests/test_viewer_3d.py` asserts napari's voxel scale.
 
     # ---------- the one real write, disk-guarded and cleaned up -----------------------
     @check("IMA-222", "A stitched well SAVES end to end (then is deleted)")
@@ -828,11 +792,11 @@ def run_all():
             raise SkipCheck(f"only {free_gb():.1f} GB free; refusing to write")
         from squidmip import write_plate
         from squidmip._output import estimate_write_bytes
-        m = open_reader(PLATE).metadata
+        m = read(PLATE).metadata
         est = estimate_write_bytes(m, n_fovs=None, regions=["A1"], region_operator=True)
         tmp = tempfile.mkdtemp(prefix="walkthrough_stitch_")
         try:
-            write_plate(open_reader(PLATE), tmp, projector="stitch", regions=["A1"], n_fovs=None)
+            write_plate(read(PLATE), tmp, projector="stitch", regions=["A1"], n_fovs=None)
             size = sum(os.path.getsize(os.path.join(d, f))
                        for d, _, fs in os.walk(tmp) for f in fs)
             return (f"wrote {size/1e9:.3f} GB (estimate {est/1e9:.3f} GB, "
@@ -843,23 +807,31 @@ def run_all():
 
 def main():
     if free_gb() < MIN_FREE_GB:
-        print(f"REFUSING TO RUN: only {free_gb():.1f} GB free, need {MIN_FREE_GB} GB.")
+        say(f"REFUSING TO RUN: only {free_gb():.1f} GB free, need {MIN_FREE_GB} GB.")
         return 2
-    print(f"disk before: {free_gb():.1f} GB free\n")
+    say(f"disk before: {free_gb():.1f} GB free\n")
     run_all()
 
     width = max(len(t) for _, t, _, _ in _RESULTS)
     n_pass = n_fail = n_skip = 0
-    print("=" * (width + 30))
+    say("=" * (width + 30))
     for ticket, title, verdict, detail in _RESULTS:
         n_pass += verdict == "PASS"; n_fail += verdict == "FAIL"; n_skip += verdict == "SKIP"
-        print(f"{verdict:5} {ticket:9} {title}")
-        print(f"      {detail}")
-    print("=" * (width + 30))
-    print(f"{n_pass} passed, {n_fail} failed, {n_skip} skipped")
-    print(f"disk after: {free_gb():.1f} GB free")
+        say(f"{verdict:5} {ticket:9} {title}")
+        say(f"      {detail}")
+    say("=" * (width + 30))
+    say(f"{n_pass} passed, {n_fail} failed, {n_skip} skipped")
+    say(f"disk after: {free_gb():.1f} GB free")
     return 1 if n_fail else 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    rc = main()
+    # os._exit, NOT sys.exit. Measured: with every check reported and the summary printed, this
+    # process still died with SIGSEGV (139) on the way out -- Qt/vispy teardown after a GUI run,
+    # and nothing to do with any check's verdict. A harness whose exit code is decided by a
+    # teardown crash cannot gate anything, so the verdict is committed here, after the report and
+    # before the interpreter tries to unwind a widget tree it no longer needs.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(rc)

@@ -16,7 +16,16 @@ So: run this after every land, on both real datasets, before believing anything.
     QT_QPA_PLATFORM=offscreen PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python tools/acceptance.py
 
 Exit code is 0 only if every case passes. Both env vars are required: without
-PYTEST_DISABLE_PLUGIN_AUTOLOAD the PyQt5 tests silently skip against PySide.
+PYTEST_DISABLE_PLUGIN_AUTOLOAD the Qt tests silently skip against a second binding.
+
+THE BINDING. Every Qt import here goes through ``qtpy`` AFTER ``import squidmip``, because
+``squidmip/__init__`` pins ``QT_API=pyqt6`` and that pin has to be set before qtpy resolves
+anything. This file said ``from PyQt5.QtWidgets import QApplication`` at three sites until
+2026-08-06 -- the same defect commit 6b51793 fixed in ``tools/walkthrough.py``, left behind here:
+the widgets under test were Qt6 while the application was Qt5, both frameworks loaded into one
+process, and every widget case aborted on "QWidget: Must construct a QApplication before a
+QWidget". Dead since the Qt6 migration (10b8348, f7f9b28, ce5605c) and nothing ran it, so nobody
+saw.
 """
 from __future__ import annotations
 
@@ -36,26 +45,50 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # or convert them; copying the 18 GB set is how this machine hit 0 bytes free.
 TISSUE = ("/Users/julioamaragall/Downloads/"
           "test_10x_laser_af_z_stack_2025-10-28_13-40-43.939945 yy")
-PLATE = "/Users/julioamaragall/Downloads/synthetic_2x2_wellplate"
+# ``~/Downloads/synthetic_2x2_wellplate`` until 2026-08-06, when that folder no longer existed and
+# the case had been silently SKIPping ("dataset not present") for however long. Its replacement is
+# built by a script rather than found, so a machine without it can make it:
+#   python tools/make_5d_fixture.py ~/Downloads/sim_2x2_36fov_96wp --fovs 36 --nz 1 --nt 1 \
+#       --well-pitch-mm 9.0 --declared-format "384 well plate"
+# ``SQUIDMIP_FIXTURE_PLATE`` overrides it, which is how CI runs this case for real: the fixture is
+# generated, so a runner can make one and point here. TISSUE has no override — it is a real
+# acquisition nothing can synthesise, and it skips by name off this machine.
+PLATE = os.environ.get("SQUIDMIP_FIXTURE_PLATE") or \
+    "/Users/julioamaragall/Downloads/sim_2x2_36fov_96wp"
 
 # (label, path, expected regions, expected fov_positions_um entries)
+#
+# ``None`` for the count means "one position per (region, fov) the acquisition declares, however
+# many that is". TISSUE is a fixed real acquisition and keeps its literal 55. The plate case had a
+# literal 144, which is a property of ONE fixture rather than of the product: point the case at a
+# smaller generated plate (which is exactly what SQUIDMIP_FIXTURE_PLATE is for) and a correct
+# reader reported "fov_positions_um has 36 entries, expected 144" -- a red gate over a fixture
+# swap. ``None`` compares the CSV parser's output against the filename scan's `fovs_per_region`,
+# which are two different producers, so it is a real cross-check and not a tautology.
 CASES = [
     ("tissue (glass slide, freeform regions)", TISSUE, ["manual0", "manual1"], 55),
-    ("2x2 well plate", PLATE, ["A1", "A2", "B1", "B2"], 144),
+    ("2x2 well plate", PLATE, ["A1", "A2", "B1", "B2"], None),
 ]
 
 
 _APP = None
 
 
-def check(label, path, want_regions, want_positions):
-    from PyQt5.QtWidgets import QApplication
-    import squidmip._viewer as V
-
+def _app():
+    """The QApplication, on THE BINDING THE APP SHIPS. See the module docstring."""
+    global _APP
+    import squidmip  # noqa: F401  -- sets QT_API before qtpy resolves a binding
+    from qtpy.QtWidgets import QApplication
     # Keep a module-level reference: a QApplication with no Python owner is garbage
     # collected, and the next QWidget aborts with 'Must construct a QApplication first'.
-    global _APP
     _APP = QApplication.instance() or QApplication([])
+    return _APP
+
+
+def check(label, path, want_regions, want_positions):
+    import squidmip._viewer as V
+
+    _app()
     win = V.PlateWindow(None)
     fails = []
     try:
@@ -76,8 +109,13 @@ def check(label, path, want_regions, want_positions):
         fails.append(f"regions {got_regions} != expected {want_regions}")
 
     n_pos = len(meta.get("fov_positions_um") or {})
+    if want_positions is None:
+        want_positions = sum(len(f) for f in (meta.get("fovs_per_region") or {}).values())
+        why = " (one per declared (region, fov))"
+    else:
+        why = ""
     if n_pos != want_positions:
-        fails.append(f"fov_positions_um has {n_pos} entries, expected {want_positions}")
+        fails.append(f"fov_positions_um has {n_pos} entries, expected {want_positions}{why}")
 
     # The units contract: world space is micrometres and the key says so. A plate
     # spans tens of thousands of um, never tens - that is the 1000x tell.
@@ -178,11 +216,9 @@ def check_one_writer(label, root, reader_cls):
             break
 
     # Then the widget, which is the whole reason this file is not a pytest module.
-    from PyQt5.QtWidgets import QApplication
     import squidmip._viewer as V
 
-    global _APP
-    _APP = QApplication.instance() or QApplication([])
+    _app()
     win = V.PlateWindow(None)
     try:
         win.ingest(str(root))
@@ -260,7 +296,8 @@ def main():
             for f in fails:
                 print(f"      - {f}")
         else:
-            print(f"PASS  {label}  ({len(regions)} regions, {positions} positions)")
+            n = positions if positions is not None else "all declared"
+            print(f"PASS  {label}  ({len(regions)} regions, {n} positions)")
 
     print("\n-- every Squid writer (synthetic, IMA-254) --")
     try:
@@ -283,4 +320,11 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    rc = main()
+    # os._exit, NOT sys.exit. Measured 2026-08-06: every case PASSed, "acceptance: PASS" printed,
+    # and the process still died with SIGSEGV (139) unwinding Qt at interpreter shutdown. A gate
+    # whose exit code is decided by a teardown crash gates nothing, so the verdict is committed
+    # here -- after the report, before the unwind.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(rc)
