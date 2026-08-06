@@ -1545,6 +1545,11 @@ class PlateWindow(QMainWindow):
             # starts and then says nothing is indistinguishable from one still running, and a
             # stopped run is exactly the case that would have gone quiet. A run that landed nothing
             # is reported as a failure however politely the engine returned.
+            # A region whose FOVs were only PARTLY read never reached `acc.complete()`, so its
+            # result was still sitting in `_result_accs` with nothing left running to finish it.
+            # Resolved here, before the books are closed, so the two lines below cannot report a
+            # run as done when it produced no layer. See `_settle_stranded_results`.
+            stranded = self._settle_stranded_results()
             action = getattr(self, "_run_action", None)
             if action is not None:
                 self._run_action = None
@@ -1552,6 +1557,10 @@ class PlateWindow(QMainWindow):
                 landed = getattr(self._worker, "landed", None)
                 if landed == 0:
                     self.log.failed(action, f"produced nothing after {elapsed:.1f} s",
+                                    address=self._run_address)
+                elif stranded:
+                    self.log.failed(action, f"{stranded} region(s) landed no layer — some of "
+                                            f"their fields could not be read",
                                     address=self._run_address)
                 else:
                     self.log.done(action, elapsed, address=self._run_address)
@@ -3552,6 +3561,51 @@ class PlateWindow(QMainWindow):
             self._readout.setText(f"result not shown as a layer: {exc}")
             return
         self._deliver_operator_result(op, result)
+
+    def _settle_stranded_results(self) -> int:
+        """A run has ended: resolve every region whose result was still being accumulated.
+
+        Returns the number of regions that ended with NO layer, so the caller can report the run
+        honestly. Always leaves ``_result_accs`` empty.
+
+        THE MEASURED DEFECT (2026-08-06), on Julio's own 10x acquisition and reported by him as
+        "the controls now brings plate view, but doesn't open the operator tab". FOVs 17 and 19 of
+        ``manual0`` are corrupt (``TiffFileError: suspicious number of tags``). Per-field fault
+        isolation skipped them, 25 of 27 FOVs landed, and ``_on_result``'s ``if not
+        acc.complete(): return`` left the accumulator sitting in ``_result_accs`` for the rest of
+        the process. Nothing ever flushed it, so **no layer was ever built** -- while the plate
+        printed "✓ Maximum Intensity Projection · 1 well" and the window that asked was told
+        "finished in 4.6 s". A run that produced no pixels, announced twice as a success. ``⚙
+        controls`` then opened no tab because ``RegionViewer._window_operators()`` was honestly
+        empty: the chip was the symptom, this was the cause.
+
+        A partial region is still REFUSED -- half a mosaic drawn as a layer reads as something the
+        operator did, and :meth:`squidmip._op_result.RegionResultAccumulator.result` owns that rule.
+        Its sentence is reused verbatim rather than re-worded here, so there is one wording of the
+        refusal. What changes is that the refusal is now said out loud and the run is reported as a
+        failure instead of as done.
+        """
+        accs, self._result_accs = dict(self._result_accs or {}), {}
+        stranded: list[str] = []
+        for region, acc in accs.items():
+            try:
+                # A complete accumulator here would be one `_on_result` never got to flush; it is
+                # delivered rather than discarded. Today it cannot happen, and costing one call to
+                # make the drain unable to strand a FINISHED result is the cheap half of this.
+                result = acc.result()
+            except ValueError as exc:            # incomplete: the accumulator's own sentence
+                stranded.append(f"{acc.op} · {region}: {exc}")
+                continue
+            self._deliver_operator_result(acc.op, result)
+        for line in stranded:
+            log.warning("%s", line)
+        if stranded:
+            self._run_readout("  ".join(stranded))
+            # So `_close_requester_pair` tells the window that ASKED that its run failed. Without
+            # this the window's bar closed on `operator_done` over a run with nothing to show.
+            if not self._run_error:
+                self._run_error = "  ".join(stranded)
+        return len(stranded)
 
     def _result_regions(self) -> set:
         """Every region a surface is SHOWING right now: one entry per open window.

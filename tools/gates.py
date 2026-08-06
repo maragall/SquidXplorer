@@ -41,6 +41,31 @@ MUTATION-CHECKED. `tools/gates.py --self-test` reintroduces a duplicate contrast
 plate, runs the gate, and requires it to FAIL — then removes it and requires it to pass. A gate
 that cannot fail is worth nothing: this project already shipped 832 passing tests over a model
 error, because every fixture had one FOV and one region.
+
+GATE 3 — NO DEAD CONTROLS
+=========================
+GATE 2 asks "does more than one widget move this value". GATE 3 asks the complementary and, on the
+evidence, more expensive question: **does this widget move ANYTHING at all.** Every defect in the
+table below shipped past a green unit suite because every test called the handler instead of
+clicking the thing:
+
+  * ``_on_detect_nuclei`` — the "run Cellpose" handler's only entry point was a button on a pane
+    deleted in July, so it was never called at all;
+  * ``run_operator`` opened its preview tab into a pane kept hidden — the decon QC picture was
+    published to nobody for six weeks;
+  * the plate's timepoint bar called ``self._say``, which does not exist on ``PlateWindow``;
+  * this gate's own ``--self-test`` mutated a ``_ChannelBar`` the window had stopped constructing,
+    so it ran zero mutations and printed PASS.
+
+So: open a real plate AND a real region window, take the full inventory of the controls a user can
+actually reach, actuate each one, and require SOME observable outcome — a changed status line, a
+changed widget anywhere in the app, a tab, a window, a napari layer, a log record, a call into a
+neutralised entry point, or changed pixels. A control with none of those is reported by name.
+
+``--inventory`` prints the whole table with a verdict per control and is the deliverable a human
+reads; the gate is the same sweep with a pass/fail on the end. Mutation-checked the same way GATE
+2 is: ``--self-test`` bolts a button wired to nothing onto each window and requires the gate to
+name it.
 """
 from __future__ import annotations
 
@@ -316,7 +341,44 @@ def _actuate(wdg):
     return None
 
 
-def _neutralise(win, monkey):
+def _recorder(called, detail=None):
+    """``rec(name)`` -> a callable that records and returns *ret*, appending into *called*.
+
+    *detail*, when given, also receives ``(name, args, kwargs)`` — which is what lets GATE 3 ask
+    the question that matters for an input control: did the value the user typed ARRIVE at the
+    call. That is the shape of the ``operator_kwargs`` defect (57 labels vs 44).
+    """
+    def rec(name, ret=None):
+        def f(*a, **k):
+            called.append(name)
+            if detail is not None:
+                detail.append((name, a, k))
+            return ret
+        return f
+    return rec
+
+
+#: Entry points that must be stubbed BEFORE ``PlateWindow`` is constructed, not after it is shown.
+#: ``ViewerManager`` is built inside ``PlateWindow.__init__`` and captures ``win.run_operator`` as a
+#: BOUND METHOD, which every region window then holds as ``self._run_operator``. Patching the class
+#: afterwards leaves that bound method pointing at the real one — measured 2026-08-06: the region
+#: window's ``Run`` chip started a genuine operator run in the middle of the sweep, and its result
+#: landed while the NEXT control ("save") was being measured, so a checkbox was credited with
+#: adding a napari layer.
+_EARLY_STUBS = ("run_operator", "run_minerva_export")
+
+
+def _neutralise_early(monkey, called, detail=None):
+    """The stubs that have to be in place before the plate window exists. See :data:`_EARLY_STUBS`."""
+    import squidmip._viewer as V
+
+    rec = _recorder(called, detail)
+    for m in _EARLY_STUBS:
+        if hasattr(V.PlateWindow, m):
+            monkey(V.PlateWindow, m, rec(f"PlateWindow.{m}"))
+
+
+def _neutralise(win, monkey, called=None):
     """Stop a click from doing something a gate has no business doing.
 
     The gate clicks every button in the window, so anything that opens a modal dialog, launches a
@@ -327,21 +389,17 @@ def _neutralise(win, monkey):
     from qtpy.QtWidgets import QFileDialog, QMessageBox
     import squidmip._viewer as V
 
-    called = []
-
-    def rec(name, ret=None):
-        def f(*a, **k):
-            called.append(name)
-            return ret
-        return f
+    called = [] if called is None else called
+    rec = _recorder(called)
 
     monkey(QFileDialog, "getExistingDirectory", staticmethod(rec("getExistingDirectory", "")))
     monkey(QFileDialog, "getOpenFileName", staticmethod(rec("getOpenFileName", ("", ""))))
+    monkey(QFileDialog, "getSaveFileName", staticmethod(rec("getSaveFileName", ("", ""))))
     monkey(QFileDialog, "exec_", rec("QFileDialog.exec_", 0))
     for m in ("warning", "information", "critical", "question", "about"):
         monkey(QMessageBox, m, staticmethod(rec(f"QMessageBox.{m}", 0)))
     monkey(QMessageBox, "exec_", rec("QMessageBox.exec_", 0))
-    for m in ("run_operator", "run_minerva_export", "ingest", "close", "_open_acquisition_dialog"):
+    for m in (*_EARLY_STUBS, "ingest", "close", "_open_acquisition_dialog"):
         if hasattr(V.PlateWindow, m):
             monkey(V.PlateWindow, m, rec(f"PlateWindow.{m}"))
     return called
@@ -538,6 +596,656 @@ def gate_no_duplicated_controllers(dataset=PLATE, verbose=False, mutate=None):
     return ok, findings
 
 
+# ==================================================================================================
+# GATE 3 — NO DEAD CONTROLS.  Clicked, not called.
+# ==================================================================================================
+
+#: Widget classes defined in these packages are somebody else's controls. napari's dims play
+#: buttons, superqt's labelled sliders and Qt's own scroll bars are all inside our windows and none
+#: of them is ours to declare alive or dead — a napari button that does nothing in an offscreen
+#: canvas is a napari fact, and reporting it here would bury the ones that are ours under noise.
+_THIRD_PARTY = ("napari", "superqt", "vispy", "qtpy", "PyQt", "PySide", "qtconsole")
+
+
+def _third_party(wdg) -> bool:
+    """True when *wdg* — or any widget it sits inside — belongs to a library rather than to us."""
+    node = wdg
+    for _ in range(20):
+        if node is None:
+            return False
+        mod = type(node).__module__ or ""
+        if mod.startswith(_THIRD_PARTY):
+            # A plain QPushButton is `PyQt6.QtWidgets`, and refusing those would empty the sweep.
+            # Only a SUBCLASS defined in a library, or a library CONTAINER, disqualifies.
+            if not mod.startswith(("PyQt", "PySide", "qtpy")):
+                return True
+        node = node.parent()
+    return False
+
+
+def our_controls(root):
+    """The inventory: every control in *root* that is OURS, with hidden/disabled ones kept.
+
+    Hidden and disabled are kept deliberately and reported as their own verdicts. "The control is
+    not on screen in this state" is an answer a human needs — it is how ``_on_detect_nuclei``'s
+    button vanished — and dropping those rows would turn an absence into a silence.
+    """
+    return [w for w in interactive_widgets(root) if not _third_party(w)]
+
+
+class _LogSpy:
+    """Every log record OURS emitted while a control is being actuated.
+
+    A handler is not a probe of state, it is a probe of ACTIVITY — and half this app's controls
+    report by logging (``RegionViewer._say`` goes to the shared logger before it goes to the pane).
+
+    SCOPED TO ``squid.xplorer``, and that scope is the difference between evidence and noise.
+    Offscreen Qt routes its own platform warnings through logging ("This plugin does not support
+    raise()", "Cannot open file theme_dark:/…"), one or more per click, so an unscoped spy would
+    report EVERY control as having done something — including a chip wired to nothing, which is
+    the exact thing this gate exists to catch. Measured: ``▣ plate`` and ``⚙ controls`` both listed
+    a Qt warning as their only evidence before this was scoped.
+    """
+
+    def __init__(self) -> None:
+        import logging
+
+        from squidmip._logpane import XPLORER_ROOT
+
+        self.records: list[str] = []
+        outer = self
+
+        class _H(logging.Handler):
+            def emit(self, record):
+                if not record.name.startswith(XPLORER_ROOT):
+                    return
+                try:
+                    outer.records.append(record.getMessage()[:200])
+                except Exception:                                  # noqa: BLE001
+                    outer.records.append(record.msg if isinstance(record.msg, str) else "?")
+
+        self._h = _H()
+        # OUR logger, not the stdlib root: the level check happens on the logger that EMITS, so
+        # lowering the root's level would not have let a single INFO from `squid.xplorer.*` through.
+        self._root = logging.getLogger(XPLORER_ROOT)
+
+    def __enter__(self):
+        self._root.addHandler(self._h)
+        self._level, self._root.level = self._root.level, 10
+        return self
+
+    def __exit__(self, *exc):
+        self._root.removeHandler(self._h)
+        self._root.level = self._level
+        return False
+
+
+def _texts(root) -> dict:
+    """Every piece of text a user can read in *root*, keyed stably.
+
+    Keyed by (class, ordinal) rather than by object identity: a click that REPLACES a label still
+    has to be visible as a change, and identity keys would make the old and new label two
+    different, both-unchanged entries.
+    """
+    from qtpy.QtWidgets import QLabel, QLineEdit, QPlainTextEdit, QTextEdit
+
+    out, n = {}, {}
+    for cls in (QLabel, QLineEdit, QPlainTextEdit, QTextEdit):
+        for wdg in root.findChildren(cls):
+            i = n[cls.__name__] = n.get(cls.__name__, -1) + 1
+            try:
+                txt = wdg.text() if hasattr(wdg, "text") else wdg.toPlainText()
+            except Exception:                                      # noqa: BLE001 - deleted C++ half
+                continue
+            out[f"{cls.__name__}[{i}]"] = str(txt)[:400]
+    return out
+
+
+def _widget_states(root) -> dict:
+    """Every control's OWN state. A control that enables, disables, checks or re-fills another
+    control has reached something, and this is the cheapest true reading of that."""
+    from qtpy.QtWidgets import QAbstractButton, QAbstractSlider, QAbstractSpinBox, QComboBox
+
+    out, n = {}, {}
+    for wdg in interactive_widgets(root):
+        cls = type(wdg).__name__
+        i = n[cls] = n.get(cls, -1) + 1
+        key = f"{cls}[{i}]"
+        try:
+            state = [wdg.isEnabled(), wdg.isVisible()]
+            if isinstance(wdg, QAbstractButton):
+                state += [wdg.isChecked(), wdg.text()]
+            elif isinstance(wdg, (QAbstractSlider, QAbstractSpinBox)):
+                state += [wdg.value(), wdg.minimum(), wdg.maximum()]
+            elif isinstance(wdg, QComboBox):
+                state += [wdg.currentIndex(), wdg.count(), wdg.currentText()]
+        except Exception:                                          # noqa: BLE001
+            continue
+        out[key] = tuple(state)
+    return out
+
+
+def _layer_state(root) -> dict:
+    """The napari model under a region window: what the pixels ARE.
+
+    This is the reading that makes the gate about PIXELS rather than about widgets. It goes
+    through ``MosaicLayers``, so a control that adds a layer group, hides one, moves a contrast
+    window or swaps a colormap is visible here whatever widget it used to do it.
+    """
+    pane = getattr(root, "_pane", None)
+    mosaic = getattr(pane, "mosaic", None) if pane is not None else None
+    if mosaic is None:
+        return {}
+    out = {}
+    try:
+        out["mosaic ops"] = tuple(mosaic.ops())
+        for i, ly in enumerate(mosaic.ours()):
+            cl = getattr(ly, "contrast_limits", None)
+            cm = getattr(ly, "colormap", None)
+            out[f"layer[{i}]"] = (
+                getattr(ly, "name", "?"), bool(getattr(ly, "visible", True)),
+                tuple(cl) if cl is not None else None,
+                str(getattr(cm, "name", cm))[:40],
+                tuple(getattr(ly, "scale", ()) or ()),
+            )
+        viewer = getattr(pane, "_viewer", None)
+        dims = getattr(viewer, "dims", None)
+        if dims is not None:
+            out["napari dims step"] = tuple(dims.current_step)
+            out["napari ndisplay"] = int(dims.ndisplay)
+    except Exception as exc:                                       # noqa: BLE001 - recorded, not hidden
+        out["mosaic UNREADABLE"] = f"{type(exc).__name__}: {exc}"
+    return out
+
+
+def _windows_open() -> tuple:
+    from qtpy.QtWidgets import QApplication
+
+    return tuple(sorted(f"{type(w).__name__}:{w.windowTitle()}"
+                        for w in QApplication.topLevelWidgets() if w.isVisible()))
+
+
+def _tab_state(root) -> dict:
+    from qtpy.QtWidgets import QTabWidget
+
+    out = {}
+    for i, tabs in enumerate(root.findChildren(QTabWidget)):
+        try:
+            out[f"tabs[{i}]"] = (tuple(tabs.tabText(j) for j in range(tabs.count())),
+                                 tabs.currentIndex())
+        except Exception:                                          # noqa: BLE001
+            continue
+    return out
+
+
+def _pixels(root, blank=None):
+    """A hash of what the window draws, with the CONTROL ITSELF painted out.
+
+    *blank* is the widget being actuated. Its own rectangle is excluded, and that exclusion is
+    load-bearing rather than tidy: a button repaints itself when it is clicked (focus ring, hover,
+    the native style's pressed state), and that repaint is the ACTUATION, not an outcome. Measured
+    2026-08-06 — the gate's own mutation, a ``QPushButton`` connected to nothing, was reported as
+    "reaches: pixels" and the self-test failed to catch its own dead chip. Exactly the same rule
+    already applied to the control's own entry in :func:`_widget_states`, one level down.
+
+    A 4-pixel pad, because a focus ring is drawn outside the widget's geometry.
+    """
+    import hashlib
+
+    from qtpy.QtCore import QPoint, QRect
+    from qtpy.QtGui import QPainter
+
+    try:
+        img = root.grab().toImage()
+        if blank is not None and blank is not root:
+            dpr = img.devicePixelRatioF() or 1.0
+            tl = blank.mapTo(root, QPoint(0, 0))
+            pad = 4
+            rect = QRect(int((tl.x() - pad) * dpr), int((tl.y() - pad) * dpr),
+                         int((blank.width() + 2 * pad) * dpr),
+                         int((blank.height() + 2 * pad) * dpr))
+            painter = QPainter(img)
+            painter.fillRect(rect, painter.background())
+            painter.end()
+        ptr = img.bits()
+        ptr.setsize(img.sizeInBytes())
+        return hashlib.blake2b(bytes(ptr), digest_size=8).hexdigest()
+    except Exception:                                              # noqa: BLE001
+        return None
+
+
+def _pixel_noise(root, app, n=4) -> bool:
+    """Do two IDLE grabs of *root* differ? If so, pixels are not evidence and are dropped.
+
+    A caret, a spinner or a queued repaint would make every control look alive, and a probe that
+    always fires turns a gate green over anything. Measuring the noise instead of assuming it is
+    absent is the difference between this and a decoration.
+    """
+    seen = set()
+    for _ in range(n):
+        app.processEvents()
+        seen.add(_pixels(root))
+    return len(seen) > 1
+
+
+def _fingerprint(root, use_pixels: bool, blank=None) -> dict:
+    out = {}
+    out.update({f"text {k}": v for k, v in _texts(root).items()})
+    out.update({f"control {k}": v for k, v in _widget_states(root).items()})
+    out.update({f"tab {k}": v for k, v in _tab_state(root).items()})
+    out.update({f"napari {k}": v for k, v in _layer_state(root).items()})
+    out["windows on screen"] = _windows_open()
+    if use_pixels:
+        out["pixels"] = _pixels(root, blank)
+    return out
+
+
+#: Why each neutralised entry point is neutralised. Printed next to the control that reached it,
+#: because "the click reached its handler and the harness stopped it there" and "the click did
+#: what it promises" are DIFFERENT claims and this file must never print the second for the first.
+NEUTRALISED_WHY = {
+    "RegionViewer._open_3d": "vispy needs a live GL context; the volume path cannot be driven "
+                             "offscreen (docs/rendering-contract.md)",
+    "RegionViewer._view_roi_2d": "opens a child window and a second preview stream",
+    "RegionViewer._record_movie": "writes an .mp4 and runs a multi-second encode",
+    "RegionViewer._open_roi_children": "opens one child window per ROI",
+    "PlateWindow.run_operator": "a multi-minute operator run over the plate",
+    "PlateWindow.run_minerva_export": "writes an export tree",
+    "PlateWindow.ingest": "re-opens the acquisition under the sweep",
+    "PlateWindow.close": "ends the window the sweep is walking",
+    "PlateWindow._open_acquisition_dialog": "a modal file dialog",
+}
+
+
+#: INPUT controls: their whole job is to hold a value another control reads, so moving one changes
+#: nothing on screen and the sweep would call them dead. They are not swept — they are PROVEN
+#: instead, by :func:`prove_inputs_reach_the_run`, which sets each one and then reads the arguments
+#: that arrived at the call. An entry here without a proof is how a real dead input gets waved
+#: through, so the proof emits their rows and the gate fails if it cannot.
+DEFERRED_INPUTS = {
+    ("view", "QComboBox"): "the operator picker — read by 'Run'",
+    ("view", "save"): "preview vs persist — read by 'Run'",
+}
+
+
+def prove_inputs_reach_the_run(view, detail, app):
+    """Set the region window's operator picker and its ``save`` box, click **Run**, and read the
+    arguments that actually arrived at ``PlateWindow.run_operator``.
+
+    This is the one question worth asking about an input control, and it is the question this
+    project has already got wrong once with money on it: ``_workers._OperatorWorker``'s preview
+    branch called ``project_plate`` WITHOUT ``operator_kwargs`` while the save branch passed them,
+    so a value the user typed reached the console line and not the pixels — 57 labels against 44.
+    "The widget changed" would have been green for that. "The value arrived at the call" is not.
+
+    Returns rows for both controls; a run that never reaches the call gives them ``no outcome``,
+    which fails the gate exactly as a dead chip does.
+    """
+    from qtpy.QtWidgets import QCheckBox, QComboBox, QPushButton
+
+    combo = next((c for c in view.findChildren(QComboBox) if not _third_party(c)), None)
+    save = next((c for c in view.findChildren(QCheckBox) if c.text() == "save"), None)
+    run = next((b for b in view.findChildren(QPushButton) if b.text() == "Run"), None)
+    if combo is None or save is None or run is None:
+        return [("view", "Run inputs", "-", "no outcome",
+                 "the operator picker, the save box or Run is missing from this window")]
+
+    # A DIFFERENT entry from the one it opens on, and `save` flipped, so a handler that ignores
+    # them and passes a default cannot accidentally agree with what was set.
+    want_index = 1 if combo.count() > 1 else 0
+    combo.setCurrentIndex(want_index)
+    want_key = combo.currentData()
+    save.setChecked(not save.isChecked())
+    want_save = save.isChecked()
+
+    n = len(detail)
+    run.click()
+    app.processEvents()
+    calls = [d for d in detail[n:] if d[0] == "PlateWindow.run_operator"]
+    if not calls:
+        return [("view", combo.currentText()[:30], "QComboBox", "no outcome",
+                 "clicking Run did not reach PlateWindow.run_operator at all"),
+                ("view", "save", "QCheckBox", "no outcome",
+                 "clicking Run did not reach PlateWindow.run_operator at all")]
+    _name, args, kwargs = calls[-1]
+    # The stub replaced an attribute on the CLASS, so it is called unbound: args[0] is the
+    # PlateWindow. Reading `args[0]` as the operator key reported "the run was asked for
+    # <PlateWindow object ...>" — a harness bug that reads exactly like a product one.
+    pos = args[1:]
+    got_key = kwargs.get("key", pos[0] if pos else None)
+    got_save = kwargs.get("save")
+    rows = []
+    rows.append(("view", combo.currentText()[:30], "QComboBox",
+                 "reaches" if got_key == want_key else "no outcome",
+                 f"the picked operator arrived as run_operator(key={got_key!r})"
+                 if got_key == want_key else
+                 f"picked {want_key!r}, the run was asked for {got_key!r}"))
+    rows.append(("view", "save", "QCheckBox",
+                 "reaches" if got_save == want_save else "no outcome",
+                 f"arrived as run_operator(save={got_save!r})" if got_save == want_save else
+                 f"ticked save={want_save!r}, the run was asked for save={got_save!r}"))
+    return rows
+
+
+def _home_tab(win):
+    """Put the plate back on its Operators home tab between controls.
+
+    Not tidiness. The first card clicked opens its own tab and takes the focus with it, so the six
+    operator cards BEHIND it become ``isVisible() == False`` and the sweep would report them as
+    "hidden" — six controls silently unmeasured because of the order this file happened to walk
+    the tree in. A sweep that changes what it can still reach has to put the surface back.
+    """
+    tabs = getattr(win, "_left_tabs", None)
+    if tabs is not None and tabs.count():
+        tabs.setCurrentIndex(0)
+
+
+def sweep_controls(root, kind: str, app, watched=None, recorder=None, settle=None, observed=None):
+    """Actuate every control of *root* and return one row per control.
+
+    A row is ``(label, class, verdict, evidence)``. The verdicts:
+
+    ``reaches``      something observable changed, and the evidence names WHAT;
+    ``raised``       the click raised — the loudest possible finding, and a failure;
+    ``neutralised``  the click reached an entry point this harness deliberately stubs. The handler
+                     was REACHED (which is the half that keeps dying); its outcome is NOT observed
+                     here and the row says which one and why;
+    ``no outcome``   nothing anywhere in the app changed, nothing was logged, nothing was called;
+    ``hidden`` / ``disabled``  the user cannot reach it in this state, reported not skipped.
+
+    *watched* is an extra list of roots to fingerprint besides *root* — a region window's chips
+    reach the PLATE, and a change there is the outcome, so the plate has to be watched too.
+    *recorder* is the list :func:`_neutralise` / :func:`_neutralise_view` append to.
+    """
+    recorder = [] if recorder is None else recorder
+    observed = [] if observed is None else observed
+    watched = [root, *(watched or [])]
+    use_pixels = [not _pixel_noise(r, app) for r in watched]
+    rows = []
+
+    def emit(row):
+        # STREAMED as it is produced, the same rule `tools/walkthrough.py::check` follows: this
+        # sweep clicks every button in a Qt app, and a click that hangs or aborts the process
+        # would otherwise take the whole table with it and name nothing. The last line printed IS
+        # the control that was in the chair.
+        rows.append(row)
+        print(f"...   {kind:5} {row[0][:40]:<40} {row[2]}", file=sys.__stdout__, flush=True)
+
+    for wdg in our_controls(root):
+        if settle is not None:
+            settle(root)
+            app.processEvents()
+        label, cls = _label(wdg), type(wdg).__name__
+        if (kind, label) in DEFERRED_INPUTS or (kind, cls) in DEFERRED_INPUTS:
+            continue                    # proven by `prove_inputs_reach_the_run`, not by a sweep
+        if not wdg.isVisible():
+            emit((label, cls, "hidden", "not on screen in this state"))
+            continue
+        if not wdg.isEnabled():
+            tip = (wdg.toolTip() or "").strip().splitlines()
+            emit((label, cls, "disabled", tip[0][:120] if tip else "no tooltip says why"))
+            continue
+        # `blank=wdg` only on the window the control lives in; on any OTHER watched window the
+        # control is not a descendant and nothing needs painting out.
+        before = [_fingerprint(r, p, wdg if i == 0 else None)
+                  for i, (r, p) in enumerate(zip(watched, use_pixels))]
+        n_calls, n_obs = len(recorder), len(observed)
+        with _LogSpy() as spy:
+            try:
+                undo = _actuate(wdg)
+            except Exception as exc:                               # noqa: BLE001 - THE finding
+                emit((label, cls, "raised", f"{type(exc).__name__}: {exc}"))
+                continue
+            app.processEvents()
+        after = [_fingerprint(r, p, wdg if i == 0 else None)
+                 for i, (r, p) in enumerate(zip(watched, use_pixels))]
+
+        reached = recorder[n_calls:]
+        if reached:
+            # The handler WAS reached — the half that keeps dying in this codebase — and the
+            # harness stopped it there on purpose. Reported as its own verdict rather than folded
+            # into `reaches`, because what happens after the entry point is not measured here.
+            name = reached[0]
+            emit((label, cls, "neutralised",
+                  f"reached {name} — not run here: {NEUTRALISED_WHY.get(name, 'see _neutralise')}"))
+            if undo is not None:
+                try:
+                    undo()
+                    app.processEvents()
+                except Exception:                                  # noqa: BLE001
+                    pass
+            continue
+
+        changed = []
+        for i, (b, a) in enumerate(zip(before, after)):
+            where = "" if i == 0 else f" (on the {['', 'plate'][min(i, 1)]})"
+            for key in sorted(b):
+                if key in a and a[key] != b[key]:
+                    # The control's OWN state moving is the actuation, not an outcome. Excluding it
+                    # is what stops every checkbox in the app from reporting itself alive.
+                    if i == 0 and key.startswith(f"control {cls}["):
+                        continue
+                    changed.append(f"{key}{where}")
+        for call in dict.fromkeys(observed[n_obs:]):
+            changed.append(f"called {call}")
+        if spy.records:
+            changed.append(f"logged: {spy.records[0][:110]!r}")
+        emit((label, cls, "reaches" if changed else "no outcome",
+                     "; ".join(changed[:4]) if changed else
+                     "nothing in the app changed, nothing was logged"))
+        if undo is not None:
+            try:
+                undo()
+                app.processEvents()
+            except Exception:                                      # noqa: BLE001
+                pass
+    return rows
+
+
+class _ModelPane:
+    """Built lazily: a region-window pane whose napari canvas is absent but whose MODEL is real.
+
+    ``napari.components.ViewerModel`` is Qt-free, so ``MosaicLayers`` — the class every operator
+    layer, every contrast write and every visibility toggle in a region window goes through — runs
+    headless in full. This is strictly more honest than the recording stub in ``tests/conftest.py``
+    (which has no ``ops()`` at all, so ``RegionViewer._window_operators()`` returned ``[]`` against
+    it and every ⚙ controls test had to replace the mosaic wholesale to see anything).
+
+    What is NOT covered, and is not claimed: the vispy canvas. Nothing here proves a layer was
+    PAINTED, only that it exists in the model with the scale, contrast and visibility it should.
+    """
+
+
+def _model_pane_class():
+    from qtpy.QtWidgets import QWidget
+
+    from napari.components import ViewerModel
+
+    from squidmip._napari_view import MosaicLayers
+
+    class ModelPane(QWidget):
+        __doc__ = _ModelPane.__doc__
+        ok = True
+
+        def __init__(self):
+            super().__init__()
+            self._viewer = ViewerModel()
+            self.mosaic = MosaicLayers(self._viewer)
+            self.detect_channel = None
+            self.detect_button = None
+            self.said = []
+
+        def say(self, text):
+            self.said.append(text)
+
+    return ModelPane
+
+
+def _watch_window_stacking(monkey, seen):
+    """WRAP (never stub) the window-stacking calls, so "bring the plate forward" is observable.
+
+    ``raise_()`` and ``activateWindow()`` are no-ops on the offscreen platform — Qt says so itself,
+    once per call: "This plugin does not support raise()". So ``▣ plate``, whose entire job is to
+    bring the plate forward and which says nothing when it succeeds, changed NOTHING this harness
+    could read and was reported as a dead control. It is not dead;
+    ``tests/test_raise_plate.py::test_clicking_it_raises_the_plate`` proves the wiring against a
+    counting fake.
+
+    Wrapping rather than neutralising is the point: the real call still runs, and the record is
+    evidence of the outcome rather than of the harness having intercepted it.
+    """
+    from qtpy.QtWidgets import QWidget
+
+    import squidmip._viewer as V
+
+    def wrap(name):
+        real = getattr(QWidget, name)
+
+        def f(self, *a, **k):
+            seen.append(f"{type(self).__name__}.{name}()")
+            return real(self, *a, **k)
+        return f
+
+    for m in ("raise_", "activateWindow", "showNormal"):
+        monkey(V.PlateWindow, m, wrap(m))
+
+
+def _neutralise_view(monkey, called):
+    """Stop a region window's chips from doing what this harness has no business doing.
+
+    Same rule as :func:`_neutralise`: the call is RECORDED and not run, so "the click reached the
+    handler" is still measured — it is the handler's blast radius that is contained. Appends into
+    the caller's *called* list so one recorder covers the plate's entry points and this window's.
+    """
+    from squidmip import _region_viewer as RV
+
+    def rec(name):
+        def f(*a, **k):
+            called.append(name)
+            return None
+        return f
+
+    for m in ("_open_3d", "_record_movie", "_open_roi_children", "_view_roi_2d"):
+        if hasattr(RV.RegionViewer, m):
+            monkey(RV.RegionViewer, m, rec(f"RegionViewer.{m}"))
+    return called
+
+
+def gate_no_dead_controls(dataset=PLATE, mutate_plate=None, mutate_view=None, verbose=False):
+    """Open a real plate and a real region window, sweep both, and report every dead control.
+
+    Returns ``(ok, findings, rows)``; *rows* is the inventory, which ``--inventory`` prints.
+    """
+    import squidmip._napari_pane as napari_pane
+    import squidmip._viewer as V
+
+    app = _app()
+    patches = []
+
+    def monkey(obj, name, value):
+        patches.append((obj, name, obj.__dict__.get(name, _MISSING)))
+        setattr(obj, name, value)
+
+    pane_cls = _model_pane_class()
+    monkey(napari_pane, "make_pane", staticmethod(lambda *a, **k: (pane_cls(), "napari", "")))
+    # BEFORE the window: see `_EARLY_STUBS`. `ingest` cannot be stubbed here, so the rest of
+    # `_neutralise` still runs after the acquisition is open.
+    recorded: list[str] = []
+    detail: list[tuple] = []            # (name, args, kwargs) — see `prove_inputs_reach_the_run`
+    _neutralise_early(monkey, recorded, detail)
+
+    win = V.PlateWindow(None)
+    win.resize(1600, 900)
+    win.show()
+    app.processEvents()
+    win.ingest(dataset)
+    app.processEvents()
+    if win._reader is None:
+        for obj, name, old in reversed(patches):
+            setattr(obj, name, old) if old is not _MISSING else delattr(obj, name)
+        return False, [f"FAIL  could not open {dataset}: {win._readout.text()!r}"], []
+    _drain_preview(win)
+
+    rows: list[tuple] = []
+    try:
+        if mutate_plate is not None:
+            mutate_plate(win)
+            app.processEvents()
+        _neutralise(win, monkey, recorded)
+        # BEFORE the window is opened, not after. `RegionViewer._chip` connects a BOUND METHOD
+        # captured at construction (``b.clicked.connect(lambda _=False: slot())``), so patching the
+        # class afterwards leaves every already-built chip calling the real handler. Measured: the
+        # sweep reported `2D` as "no outcome" (its neutralised stub never ran, so nothing was
+        # recorded) and then took the process down with SIGSEGV on `3D`, which reached vispy.
+        _neutralise_view(monkey, recorded)
+        seen: list[str] = []
+        _watch_window_stacking(monkey, seen)
+        rows += [("plate", *r) for r in sweep_controls(win, "plate", app, recorder=recorded,
+                                                       settle=_home_tab, observed=seen)]
+
+        regions = list((win._reader.metadata or {}).get("regions") or [])
+        view = win._viewer_manager.open(regions[:1]) if regions else None
+        app.processEvents()
+        if view is None:
+            rows.append(("view", "(no region window)", "-", "no window",
+                         "the acquisition declares no regions, so no view could be opened"))
+        else:
+            if mutate_view is not None:
+                mutate_view(view)
+                app.processEvents()
+            # ONE recorder for both windows: a region chip that calls back into the plate (Run ->
+            # PlateWindow.run_operator) has to be seen as reaching a neutralised entry point too.
+            rows += [("view", *r) for r in sweep_controls(view, "view", app, watched=[win],
+                                                          recorder=recorded, observed=seen)]
+            # The INPUT controls the sweep skipped: proven by the arguments that arrive at the run.
+            rows += prove_inputs_reach_the_run(view, detail, app)
+    finally:
+        for obj, name, old in reversed(patches):
+            if old is _MISSING:
+                try:
+                    delattr(obj, name)
+                except AttributeError:
+                    pass
+            else:
+                setattr(obj, name, old)
+        try:
+            win._viewer_manager.close_all()
+        except Exception:                                          # noqa: BLE001
+            pass
+        win.close()
+        app.processEvents()
+
+    dead = [r for r in rows if r[3] == "no outcome"]
+    raised = [r for r in rows if r[3] == "raised"]
+    findings = []
+    for where, label, cls, _v, why in raised:
+        findings.append(f"FAIL  {where}: {label!r} [{cls}] RAISED when clicked — {why}")
+    for where, label, cls, _v, why in dead:
+        findings.append(f"FAIL  {where}: {label!r} [{cls}] has no observable outcome — {why}")
+    def n(verdict):
+        return sum(1 for r in rows if r[3] == verdict)
+
+    findings.append(f"PASS  {n('reaches')} control(s) reached something observable; "
+                    f"{n('neutralised')} reached an entry point this harness stubs (outcome not "
+                    f"observed here); {n('hidden')} hidden, {n('disabled')} disabled")
+    return (not dead and not raised), findings, rows
+
+
+def print_inventory(rows) -> None:
+    """The deliverable a human reads: one line per control, with its verdict and the evidence."""
+    width = max((len(r[1]) for r in rows), default=10)
+    where = None
+    for row in rows:
+        if row[0] != where:
+            where = row[0]
+            title = ("PLATE WINDOW" if where == "plate" else "REGION VIEWER")
+            print("\n" + "-" * 100)
+            print(f"{title} — every control a user can act on")
+            print("-" * 100)
+        _w, label, cls, verdict, why = row
+        print(f"  {label:<{width}}  {cls:<16} {verdict:<13} {why}")
+
+
 # --- mutation check: prove the gate can fail ---------------------------------------------------
 
 def _mount_contrast_duplicate(win):
@@ -572,6 +1280,88 @@ def _mount_visibility_duplicate(win):
     box.toggled.connect(lambda on: ov.set_channel_visible(0, on))
     win.statusBar().addWidget(box)
     box.show()
+
+
+def _mount_dead_button(win):
+    """Bolt a chip that LOOKS alive and is wired to nothing onto the plate.
+
+    This is the shape of every defect in GATE 3's docstring: a button with a face, a tooltip and
+    a cursor, connected either to no slot at all or to a handler that returns at its first guard.
+    """
+    from qtpy.QtWidgets import QPushButton
+    b = QPushButton("⚙ tune", win)
+    b.setToolTip("Tune the operator on screen.")      # a promise; nothing keeps it
+    win.statusBar().addWidget(b)
+    b.show()
+
+
+def _mount_dead_view_button(view):
+    """The same mutation on a REGION window, wired to a handler that returns at its first guard.
+
+    Deliberately not "connected to nothing": ``_on_detect_nuclei`` and the plate's timepoint bar
+    both HAD a handler, and it is the early return that made them dead. A gate that only catches
+    a missing connection would have caught neither.
+    """
+    from qtpy.QtWidgets import QPushButton
+
+    def _guarded():
+        if getattr(view, "_this_attribute_does_not_exist", None) is None:
+            return                                    # ...every time
+        view._say("unreachable")
+
+    b = QPushButton("↯ enhance", view)
+    b.setToolTip("Enhance this window.")
+    b.clicked.connect(lambda _=False: _guarded())
+    view.layout().addWidget(b)
+    b.show()
+
+
+def self_test_dead_controls(dataset=PLATE):
+    """Prove GATE 3 can fail: mount a dead chip on each window and require it to be named."""
+    print("=" * 100)
+    print("SELF-TEST 1/3: GATE 3 must PASS on the tree as it stands")
+    ok, findings, _rows = gate_no_dead_controls(dataset)
+    for f in findings:
+        print("   ", f)
+    if not ok:
+        print("\nSELF-TEST FAILED: GATE 3 is red before the mutation was applied.")
+        return 1
+
+    print("=" * 100)
+    print("SELF-TEST 2/3: bolting a chip wired to NOTHING onto the plate — must fail")
+    ok_mut, findings_mut, _ = gate_no_dead_controls(dataset, mutate_plate=_mount_dead_button)
+    for f in findings_mut:
+        if f.startswith("FAIL"):
+            print("   ", f)
+    if ok_mut or not any("tune" in f for f in findings_mut):
+        print("\nSELF-TEST FAILED: a chip connected to nothing was added and GATE 3 did not name "
+              "it. The gate does not work.")
+        return 1
+    print("\n    the gate bit on a plate chip.")
+
+    print("=" * 100)
+    print("SELF-TEST 3/3: a REGION-window chip whose handler returns at its first guard —")
+    print("               the shape of _on_detect_nuclei and of the plate's timepoint bar.")
+    ok_v, findings_v, _ = gate_no_dead_controls(dataset, mutate_view=_mount_dead_view_button)
+    for f in findings_v:
+        if f.startswith("FAIL"):
+            print("   ", f)
+    if ok_v or not any("enhance" in f for f in findings_v):
+        print("\nSELF-TEST FAILED: a region chip with a dead handler was added and GATE 3 stayed "
+              "green — it only sees the plate, or it only sees a missing connection.")
+        return 1
+    print("\n    the gate bit on a region window, on an EARLY RETURN rather than a missing "
+          "connection.")
+
+    print("=" * 100)
+    print("SELF-TEST: mutations removed; confirming GATE 3 is green again")
+    ok_back, _f, _r = gate_no_dead_controls(dataset)
+    if not ok_back:
+        print("SELF-TEST FAILED: GATE 3 did not recover after the mutations were removed.")
+        return 1
+    print("\nSELF-TEST PASSED (GATE 3): passes clean, names a dead plate chip, names a dead "
+          "region chip, and recovers.")
+    return 0
 
 
 def self_test(dataset=PLATE):
@@ -632,7 +1422,7 @@ def self_test(dataset=PLATE):
 
     print("\nSELF-TEST PASSED: the gate passes clean, fails on a reintroduced contrast duplicate, "
           "fails on an unrelated duplicate, and recovers.")
-    return 0
+    return self_test_dead_controls(dataset)
 
 
 def main():
@@ -641,6 +1431,9 @@ def main():
     ap.add_argument("--dataset", default=PLATE)
     ap.add_argument("--self-test", action="store_true",
                     help="mutation-check the gate: reintroduce a duplicate and require a failure")
+    ap.add_argument("--inventory", action="store_true",
+                    help="print GATE 3's control inventory: every control of a real plate and a "
+                         "real region window, with a verdict and the evidence for each")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
 
@@ -656,6 +1449,17 @@ def main():
         return 0
     if args.self_test:
         return self_test(args.dataset)
+    if args.inventory:
+        try:
+            ok3, findings3, rows = gate_no_dead_controls(args.dataset, verbose=args.verbose)
+        except Exception:
+            traceback.print_exc()
+            return 1
+        print_inventory(rows)
+        print("\n" + "=" * 100)
+        for f in findings3:
+            print(f)
+        return 0 if ok3 else 1
 
     print("=" * 100)
     print("GATE 2 (IMA-268): exactly one control surface per concern")
@@ -669,7 +1473,22 @@ def main():
         print(f)
     print("=" * 100)
     print("GATE 2: PASS" if ok else "GATE 2: FAIL")
-    return 0 if ok else 1
+
+    print("=" * 100)
+    print("GATE 3: no dead controls — clicked, not called")
+    print("=" * 100)
+    try:
+        ok3, findings3, rows = gate_no_dead_controls(args.dataset, verbose=args.verbose)
+    except Exception:
+        traceback.print_exc()
+        return 1
+    if args.verbose:
+        print_inventory(rows)
+    for f in findings3:
+        print(f)
+    print("=" * 100)
+    print("GATE 3: PASS" if ok3 else "GATE 3: FAIL")
+    return 0 if (ok and ok3) else 1
 
 
 if __name__ == "__main__":

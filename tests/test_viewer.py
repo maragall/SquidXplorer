@@ -5237,6 +5237,45 @@ def test_the_layer_group_is_not_drawn_until_the_region_is_whole(qapp):
     assert win._view.mosaic.calls == []
 
 
+def test_a_run_that_ends_with_a_half_read_region_SAYS_SO_instead_of_stranding_it(qapp):
+    """THE MEASURED DEFECT, 2026-08-06, on the 10x acquisition Julio reported against.
+
+    Two of ``manual0``'s 27 TIFFs failed to read, so ``_on_result`` never saw a complete region,
+    ``acc.complete()`` was never True, and the accumulator sat in ``_result_accs`` for the rest of
+    the process. Nothing ever flushed it, so NO LAYER WAS EVER DRAWN — while the plate printed
+    "✓ Maximum Intensity Projection · 1 well" and the requester window was told "finished in
+    4.6 s". ``⚙ controls`` then opened no tab, which is the symptom that got reported, because
+    ``RegionViewer._window_operators()`` was honestly empty.
+
+    The refusal to draw half a mosaic stands (the test above pins it). What must not stand is
+    doing it in SILENCE at the end of the run.
+    """
+    win = _result_win("mip")
+    V.PlateWindow._on_result(win, "A1", 0, np.zeros((2, 8, 8), "uint16"))   # 1 of 2 FOVs
+    assert win._result_accs, "the accumulator should be holding the half region"
+
+    stranded = V.PlateWindow._settle_stranded_results(win)
+
+    assert stranded == 1
+    assert win._result_accs == {}, "the stranded accumulator was not resolved"
+    assert win._view.mosaic.calls == [], "half a region must still not be drawn"
+    said = win._readout.text()
+    assert "A1" in said and "1 of 2" in said, f"the run did not say what happened: {said!r}"
+    assert win._run_error, "the window that ASKED would still have been told the run finished"
+
+
+def test_settling_a_run_with_every_region_complete_is_a_no_op(qapp):
+    """The other half: a clean run must not gain a failure line for having nothing left over."""
+    win = _result_win("mip")
+    for fov in (0, 1):
+        V.PlateWindow._on_result(win, "A1", fov, np.zeros((2, 8, 8), "uint16"))
+    win._readout.setText("")
+
+    assert V.PlateWindow._settle_stranded_results(win) == 0
+    assert win._readout.text() == ""
+    assert not win._run_error
+
+
 def test_the_operator_layer_lands_in_the_raw_mosaic_s_frame(qapp):
     """bbox_um is what puts the group ON TOP of raw. Without it the toggle would jump, and
     every difference the user saw would be misregistration, not the operator."""

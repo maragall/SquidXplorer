@@ -225,6 +225,37 @@ Caches are shared, not per-feature: `_mosaic_source.plane_cache()`, `_platecache
 both bounded by `_budget.cache_budget()`. A feature-private cache spends the same budget twice and
 the two evict against each other.
 
+**A cached `TiffFile` is a FILE OBJECT, so reading one is not re-entrant** (2026-08-06).
+`reader._TiffHandles` is the one handle cache and the only accessor is `page(path, index)` /
+`read(path)` — a context manager that holds a **per-file lock** for the decode. `SquidOMEReader`
+and `SquidMultiPageTiffReader` both went through a `_tif(path)` that handed the shared object out
+unguarded, and `pages[p].asarray()` seeks: two threads decoding two pages of one file moved one
+seek position under each other. Measured on the 10x acquisition, `manual0` FOV 17: **0 errors in 8
+serial reads, 10 of 40 threaded** (`TiffFileError: suspicious number of tags`, `ValueError: failed
+to read 8686112 bytes, got 0`); 0 of 40 once locked. One lock per FILE, not per reader — the
+parallelism is across FOVs and each FOV is its own file.
+
+That fault was invisible because the layer above absorbed it, which is the more important rule:
+
+**A run may not end holding a result it never delivered.** `_viewer._on_result` refuses to draw a
+region until every FOV is in (half a mosaic reads as something the operator did), and it did that
+by returning with the accumulator still in `_result_accs` — where nothing ever looked again.
+`PlateWindow._settle_stranded_results`, called from `_on_run_drained`, now resolves every leftover:
+it delivers a complete one and NAMES an incomplete one in the accumulator's own words ("23 of 27
+FOV(s) have results"), sets `_run_error` so `_close_requester_pair` reports `operator_failed`, and
+logs it. Before that, the two corrupt-looking reads above cost the whole region its layer while the
+plate printed "✓ Maximum Intensity Projection · 1 well" and the window that asked was told
+"finished in 4.6 s" — and `⚙ controls` then opened no tab, because `_window_operators()` was
+honestly empty. `_workers._OperatorWorker._on_error` also logs the skipped field and its cause; it
+was a bare `except`-shaped swallow whose only trace was a red dot on a mosaic cell.
+
+**GATE 3 (`tools/gates.py --inventory`)** is the sweep that finds this class: every control of a
+real `PlateWindow` AND a real `RegionViewer`, actuated, with a verdict per control — reaches /
+neutralised / hidden / disabled / raised / no outcome. Its region window uses a pane whose
+`mosaic` is a real `MosaicLayers` over a Qt-free `napari.components.ViewerModel`, so everything but
+vispy's painting is production code. `--self-test` bolts a dead chip onto each window and requires
+the gate to name it.
+
 ## Agent skills
 
 ### Issue tracker
