@@ -1506,15 +1506,108 @@ class RegionViewer(QMainWindow):
                 pass
         return v, layer
 
-    @staticmethod
-    def _on_roi_data(layer) -> None:
-        """After a shape is added/removed, name the NEXT ROI R{n+1} so each box keeps a unique id
-        (which also gives it the next colour in the cycle)."""
+    def _on_roi_data(self, layer) -> None:
+        """After a shape is added/removed: name the NEXT ROI R{n+1}, and SAY WHAT THE LAST ONE COSTS.
+
+        Julio's standing complaint is that you can draw an ROI and only discover afterwards that it
+        will not render. The size is knowable the instant the box exists, so it is reported the
+        instant the box exists -- how many pixels, and how many GL textures that needs on THIS GPU.
+        That is the drawing-time feedback the refusal used to stand in for; the refusal itself is
+        gone, because bricking renders the box either way.
+        """
         try:
             n = len(getattr(layer, "data", []) or [])
             layer.current_properties = {"name": np.array([f"R{n + 1}"], dtype=object)}
         except Exception:                                # noqa: BLE001 - labelling is cosmetic
             pass
+        try:
+            self._clamp_last_roi(layer)
+        except Exception:                                # noqa: BLE001 - never break ROI drawing
+            pass
+        try:
+            self._say(self._roi_cost_line(layer))
+        except Exception:                                # noqa: BLE001 - the readout is advisory
+            pass
+
+    def _live_texture_limit(self) -> int:
+        """The GPU's real GL_MAX_3D_TEXTURE_SIZE, or the documented Apple floor. Never a literal
+        here: ``_napari_pane`` owns the query and ``_napari_view`` owns the fallback."""
+        try:
+            return int(self._pane._live_max_3d_texture())
+        except Exception:                                # noqa: BLE001
+            return int(_DEFAULT_MAX_3D_TEXTURE)
+
+    def _clamp_last_roi(self, layer) -> None:
+        """Hold the just-drawn ROI to what one GL texture can render, in place.
+
+        THE GUARANTEE: anything you can draw, you can render at full native resolution. Julio's
+        standing complaint is "I can select ROIs that can't be seen" -- so the box is corrected the
+        moment it exists, at the size the GPU can actually hold, instead of being accepted and then
+        refused. The correction is anchored at the drag's starting corner so the rectangle stops
+        growing rather than jumping somewhere else.
+        """
+        from squidmip import _bricks
+
+        # RE-ENTRANCY. Writing `layer.data` re-emits the Shapes layer's own data event, which lands
+        # back here -- measured as an immediate RecursionError the first time this ran against the
+        # real window. The correction is one edit, so the guard is a plain flag rather than a
+        # disconnect/reconnect dance that could leave the ROI layer unwired if anything raised.
+        if getattr(self, "_clamping", False):
+            return
+        rects = list(getattr(layer, "data", []) or [])
+        px = float((self._meta or {}).get("pixel_size_um") or 0.0)
+        if not rects or px <= 0:
+            return
+        arr = np.asarray(rects[-1])
+        if arr.ndim != 2 or arr.shape[0] < 4:
+            return                                       # not a rectangle; leave it alone
+        ys, xs = arr[:, -2].astype(float), arr[:, -1].astype(float)
+        limit = self._live_texture_limit()
+        (nx0, ny0, nx1, ny1), clamped = _bricks.clamp_bbox_um(
+            (xs.min(), ys.min(), xs.max(), ys.max()), px, limit)
+        if not clamped:
+            return
+        new = np.array(arr, dtype=float)
+        new[:, -1] = np.where(xs > xs.min(), nx1, nx0)
+        new[:, -2] = np.where(ys > ys.min(), ny1, ny0)
+        rects[-1] = new
+        self._clamping = True
+        try:
+            layer.data = rects
+        finally:
+            self._clamping = False
+        span = limit * px
+        self._say(f"ROI held to the 3D ceiling: {limit} x {limit} px ({span:.0f} x {span:.0f} um) "
+                  f"— the largest volume this GPU renders from one texture at full resolution.")
+
+    def _roi_cost_line(self, layer) -> str:
+        """"R3: 4096 x 3072 px (3080 x 2310 um) — 12 bricks on this GPU." Empty when unknowable."""
+        from squidmip import _bricks
+
+        rects = list(getattr(layer, "data", []) or [])
+        if not rects:
+            return ""
+        arr = np.asarray(rects[-1])
+        ys, xs = arr[:, -2], arr[:, -1]
+        px = float((self._meta or {}).get("pixel_size_um") or 0.0)
+        if px <= 0:
+            return ""
+        h_um, w_um = float(ys.max() - ys.min()), float(xs.max() - xs.min())
+        h, w = int(round(h_um / px)), int(round(w_um / px))
+        if h <= 0 or w <= 0:
+            return ""
+        limit = _DEFAULT_MAX_3D_TEXTURE
+        try:
+            limit = int(self._pane._live_max_3d_texture())
+        except Exception:                                # noqa: BLE001 - the Apple value is the floor
+            pass
+        nz = len(list((self._meta or {}).get("z_levels") or [0]))
+        single = _bricks.fits_single_texture(h, w, nz, limit)
+        edge = limit if single else _bricks.DEFAULT_BRICK_EDGE
+        n = len(_bricks.plan(h, w, limit=limit, edge=edge))
+        how = ("fits ONE texture" if single
+               else f"{n} bricks (over the {limit} px texture limit — bricked, not refused)")
+        return f"R{len(rects)}: {h} x {w} px ({h_um:.0f} x {w_um:.0f} um), {nz} z — 3D: {how}."
 
     def _new_roi(self) -> None:
         """Start drawing an ROI rectangle inside the mosaic (deck: boxes inside the well view)."""
@@ -2089,6 +2182,7 @@ class RegionViewer(QMainWindow):
         if viewer is None:
             self._say("3D needs this window's napari canvas, which isn't available here.")
             return
+        from squidmip import _bricks
         from squidmip._brick_view import BrickedVolume
         from squidmip._napari3d import region_origin_um, roi_window_px, z_step_um
 
@@ -2108,6 +2202,9 @@ class RegionViewer(QMainWindow):
             max_tex = int(self._pane._live_max_3d_texture())
         except Exception:                                # noqa: BLE001 - the Apple value is the floor
             pass
+        read, source = self._volume_source(window)
+        if source is None:
+            return                                       # _volume_source already said why
         r0, r1, c0, c1 = window
         # The ROI's own world corner: the region origin plus the crop, in stage micrometres. This is
         # the same arithmetic `_crop_levels_to_bbox` does for 2D, so the volume lands exactly where
@@ -2120,7 +2217,7 @@ class RegionViewer(QMainWindow):
                 channels=names, scale=(dz, px, px), origin_um=roi_origin,
                 limit=max_tex, budget_bytes=budget,
                 contrast_by=contrast_by or None, colormap_by=colormap_by or None,
-                say=self._say, parent=self,
+                say=self._say, parent=self, read=read,
             )))
         except Exception as exc:                         # noqa: BLE001 - named to the window
             self._say(f"ROI 3D could not open: {exc}")
@@ -2135,9 +2232,104 @@ class RegionViewer(QMainWindow):
             pass
         vol = self._native3d
         n = getattr(vol, "brick_count", 0)
-        self._say(f"3D in-window: {(r1 - r0)}x{(c1 - c0)} px ROI, {nz} z, {len(names)} channel(s), "
-                  f"{n} brick{'' if n == 1 else 's'} at native {px:.3f} um/px "
-                  f"({budget / 1e6:.0f} MB budget).")
+        self._say(f"3D in-window: '{source}', {(r1 - r0)}x{(c1 - c0)} px ROI, {nz} z, "
+                  f"{len(names)} channel(s), {n} texture{'' if n == 1 else 's'} at "
+                  f"{px:.3f} um/px. {_bricks.ceiling_line(max_tex, px, measured=True)}")
+
+    def _volume_source(self, window: tuple):
+        """WHICH volume 3D renders: the operator layer this window is SHOWING, or raw.
+
+        Julio: "make sure that the 2d/3d operator workflow is also end to end". 3D used to read
+        ``mosaic.find(_RAW_OP, name)`` with ``_RAW_OP`` hardcoded, so a decon / bgsub / stitch
+        result could be computed and displayed in 2D and then had no way to be seen as a volume --
+        the data existed (per-plane fusion makes operators produce ``(T, C, Nz, Y, X)``), only the
+        viewer refused it.
+
+        The choice comes off the DECLARATION, never off the operator's name: ``visible_op()`` says
+        which processing layer is lit and ``MosaicLayers._reduces_z`` asks the registry whether that
+        operator consumes z. ``tests/test_operator_declaration.py`` fails the build on an
+        ``x == "<operator name>"`` comparison precisely to stop the name test creeping back.
+
+        Returns ``(read, label)`` -- ``read=None`` meaning "use the reader's raw z-stack" -- or
+        ``(None, None)`` with a spoken reason when the visible layer has no volume to show.
+        """
+        mosaic = getattr(self._pane, "mosaic", None) if self._pane is not None else None
+        if mosaic is None:
+            return None, _RAW_OP
+        try:
+            op = mosaic.visible_op()
+        except Exception:                                # noqa: BLE001 - fall back to raw
+            return None, _RAW_OP
+        if not op or op == _RAW_OP:
+            return None, _RAW_OP
+        # A z-REDUCER's result is (T, C, 1, Y, X): one plane. There is no volume, and rendering a
+        # single slice as a "3D volume" would be a picture that lies about its own depth.
+        try:
+            if mosaic._reduces_z(op):
+                self._say(f"3D: '{op}' reduces z to a single plane, so it has no volume to render. "
+                          f"Show raw (or a z-preserving operator) and click 3D again.")
+                return None, None
+        except Exception:                                # noqa: BLE001 - undeclared: try to render
+            pass
+        px = float((self._meta or {}).get("pixel_size_um") or 1.0)
+        origin = None
+        try:
+            from squidmip._napari3d import region_origin_um
+
+            origin = region_origin_um(self._meta or {}, self.current_region())
+        except Exception:                                # noqa: BLE001
+            pass
+        if origin is None:
+            self._say(f"3D: '{op}' cannot be placed — this region has no stage positions.")
+            return None, None
+        # An operator layer carries its OWN grid: a parent window holds the fused pyramid (level 0
+        # capped to _MAX_FUSED_PX), an ROI child holds a crop placed at the ROI. Indexing either
+        # with mosaic pixels would be wrong in a different way each time. The layer's own
+        # translate/scale is the one mapping that is true for both, so world micrometres are the
+        # currency -- exactly as they are for placement everywhere else in this pane.
+        srcs: dict = {}
+        for ch in mosaic.channels(op):
+            layer = mosaic.find(op, ch)
+            data = getattr(layer, "data", None) if layer is not None else None
+            if isinstance(data, (list, tuple)):
+                data = data[0]                           # level 0 of a pyramid: the finest rung
+            if data is None or getattr(data, "ndim", 0) < 3 or int(data.shape[0]) < 2:
+                continue
+            try:
+                tr = tuple(float(v) for v in layer.translate[-2:])
+                sc = tuple(float(v) for v in layer.scale[-2:])
+            except Exception:                            # noqa: BLE001 - unplaceable layer
+                continue
+            if sc[0] <= 0 or sc[1] <= 0:
+                continue
+            srcs[ch] = (data, tr, sc)
+        if not srcs:
+            self._say(f"3D: '{op}' is on screen but carries no z depth here, so there is no volume "
+                      f"to render.")
+            return None, None
+        ox_um, oy_um = float(origin[0]), float(origin[1])
+
+        def _read(brick, channel, step, should_stop):
+            """One brick out of the OPERATOR's on-screen volume, same contract as the raw reader:
+            a mosaic-pixel window in, ``(z, y, x)`` out, None when superseded."""
+            got = srcs.get(channel)
+            if got is None or (should_stop is not None and should_stop()):
+                return None
+            src, (ty, tx), (sy, sx) = got
+            # brick bounds are mosaic pixels -> stage micrometres -> this layer's own indices
+            y0 = int(round((oy_um + brick.r0 * px - ty) / sy))
+            y1 = int(round((oy_um + brick.r1 * px - ty) / sy))
+            x0 = int(round((ox_um + brick.c0 * px - tx) / sx))
+            x1 = int(round((ox_um + brick.c1 * px - tx) / sx))
+            y0, x0 = max(0, y0), max(0, x0)
+            y1, x1 = min(int(src.shape[-2]), y1), min(int(src.shape[-1]), x1)
+            if y1 <= y0 or x1 <= x0:
+                return None
+            sub = np.asarray(src[:, y0:y1, x0:x1])
+            s = max(1, int(step))
+            return np.ascontiguousarray(sub[:, ::s, ::s]) if s > 1 else sub
+
+        return _read, op
 
     def _refresh_bricks(self) -> None:
         """The camera stopped: re-decide stride and visible set. No-op unless 3D bricks are up."""

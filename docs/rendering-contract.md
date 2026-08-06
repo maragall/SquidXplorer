@@ -40,9 +40,60 @@ full z. Two ways to get one:
    quick look. gallery-view's original recipe.
 2. `open_native_3d_volume(volumes_by_channel, ...)` — a READY native volume, e.g. an **ROI's
    level-0 crop** fused across the FOVs the ROI spans. This is the **organoid path**: box the
-   organoid, render exactly that at native resolution. It enforces the texture cap by **raising**
-   (NO silent downsample, NO fallback — Julio's rule) when the ROI is too big; the user draws a
-   smaller ROI.
+   organoid, render exactly that at native resolution. A volume over the cap is now **bricked**
+   rather than refused (see below).
+
+## The ROI 3D path: capped at drawing time, rendered IN-WINDOW (2026-08-05)
+
+Julio: *"the 3D rendering ROI design improvement, which now sucks because the user has no in-window
+computation and can select ROIs that can't be seen"*, and earlier *"it's very cumbersome to get an
+ROI, and then I can't render it in 3D"*.
+
+**The ROI rectangle is CAPPED to the live texture limit as it is drawn**
+(`_bricks.clamp_bbox_um`, applied from `RegionViewer._clamp_last_roi`). That makes the guarantee
+structural: *anything you can draw, you can render, at full native resolution, from one texture.*
+The constraint moved from a refusal AFTER the fact to a limit felt WHILE drawing, which is the
+entire user-facing win. The ceiling is queried per GPU (`_live_max_3d_texture`), never hardcoded —
+2048 px = 1540 µm on an Apple GPU, 16384 px = 12321 µm on a desktop NVIDIA (512x the volume) — and
+it is reported in the window so a scientist can see that better hardware lifts it
+(`_bricks.ceiling_line`).
+
+**Rendering happens in the window's OWN napari canvas** (`_brick_view.BrickedVolume`), not a fresh
+`napari.Viewer` popout. The old objection — the pane's layers are the fused pyramid, whose level 0
+is capped to `_MAX_FUSED_PX` — was about reusing the pane's LAYERS, and does not apply to adding
+our own: the 3D layers are read straight from the reader exactly as the popout's were, and the
+pyramid layers are hidden while they are up. Sharing a canvas was never the problem; sharing the
+pyramid was.
+
+**Which volume renders is read off the DECLARATION, not the name.** `_volume_source` uses
+`MosaicLayers.visible_op()` to render whichever processing layer the window is showing, so an
+operator result is viewable as a volume; `_reduces_z` (which asks the registry for `consumes`)
+makes a Z_REDUCER say plainly that it has one plane and no volume, rather than drawing a
+degenerate single-slice "volume". `tests/test_operator_declaration.py` fails the build on a name
+comparison, which is why this goes through the registry.
+
+**Bricking** (`_bricks`, `_brick_view`) remains the mechanism underneath, and it is exact: a
+volume over the cap is tiled into textures that each fit, placed with `translate`, composited with
+the **GL `max` blend equation** (`_napari3d.pin_max_compositing`). MIP is a maximum, and a maximum
+is order-independent, so max compositing reproduces the single-texture image EXACTLY — measured on
+a 2048² ROI split 16 ways at a fixed camera: **165 of 1,064,828 pixels (0.016%) differ by more than
+2/255, max 6/255**. Under `additive` the same test differs by up to 127/255 over ~31k pixels, a
+visible bright cross on the joins, because two bricks along a ray SUM instead of MAX. Neighbours
+overlap by one voxel (`BRICK_HALO`) so linear interpolation has real data at a join instead of the
+texture's edge clamp; that overlap is free only because `max(v, v) == v`, so **the halo and the
+blend equation are one decision**. napari's `Blending` enum has no `max`, and
+`VispyCanvas._reorder_layers_in_the_same_view` re-applies blending on every insert/reorder/
+visibility change, so the equation is pinned by wrapping the visual's `_on_blending_change`.
+
+Bricking is NOT on the path a drawn ROI takes, because the cap means a drawn ROI is always one
+texture. It is retained for callers that hand over an oversized ready volume, and because it
+degrades gracefully if a limit query ever fails. **Do not route the whole-region case through it
+expecting interaction**: measured on the 11462x9587 region (120 bricks, 1 channel) it renders
+correctly and stays inside its texture budget, but the READ dominates — 142 s to fully resolve and
+multi-second stalls, because a 1024 px brick straddles several 2084 px fields and each is decoded
+per brick. `_napari3d._plane_cache` (a bounded `MemoryBoundedLRUCache` sized from
+`_budget.cache_budget`) removes the redundant decodes; the cost that remains is inherent to reading
+a whole region at native resolution.
 
 Recipe for both (from hongquanli/gallery-view, adapted to napari 0.6.6): `add_image(vol,
 scale=(dz, py, px), blending="additive", rendering="mip", contrast_limits=<carried LUT>)`, a 100µm

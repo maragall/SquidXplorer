@@ -65,9 +65,17 @@ class _BrickLoader(QThread):
     problem = Signal(str)
     idle = Signal(int)                                 # epoch that just finished draining
 
-    def __init__(self, reader: Any, meta: dict, region: str, parent: Any = None) -> None:
+    def __init__(self, reader: Any, meta: dict, region: str, parent: Any = None,
+                 read: Optional[Callable] = None) -> None:
         super().__init__(parent)
         self._reader, self._meta, self._region = reader, meta, region
+        #: WHERE THE VOXELS COME FROM, injected rather than assumed. The default reads the RAW
+        #: z-stack straight from the acquisition, but 3D must be able to show whatever the window
+        #: is showing -- a decon or bgsub result is a volume too, and hardcoding raw is exactly why
+        #: an operator result could be computed in 2D and then never seen as one. The caller picks
+        #: the source from the layer DECLARATION (see ``_region_viewer._volume_source``); this only
+        #: needs it to be callable as ``read(brick, channel, step, should_stop)``.
+        self._read = read
         self._pending: list = []
         self._lock = threading.Lock()
         self._wake = threading.Event()
@@ -109,12 +117,16 @@ class _BrickLoader(QThread):
                 self._wake.clear()
                 continue
             brick, channel, step = job
+            stop = self._superseded(epoch)
             try:
-                arr = read_brick(
-                    self._reader, self._meta, self._region,
-                    (brick.r0, brick.r1, brick.c0, brick.c1), channel,
-                    step=step, should_stop=self._superseded(epoch),
-                )
+                if self._read is not None:
+                    arr = self._read(brick, channel, step, stop)
+                else:
+                    arr = read_brick(
+                        self._reader, self._meta, self._region,
+                        (brick.r0, brick.r1, brick.c0, brick.c1), channel,
+                        step=step, should_stop=stop,
+                    )
             except Exception as exc:                    # noqa: BLE001 - reported, never swallowed
                 self.problem.emit(f"brick {brick.iy},{brick.ix}/{channel}: "
                                   f"{type(exc).__name__}: {exc}")
@@ -137,7 +149,8 @@ class BrickedVolume:
                  window_px: Sequence[int], *, channels: Sequence[str], scale: Sequence[float],
                  origin_um: Sequence[float], limit: int, budget_bytes: int,
                  contrast_by: Optional[dict] = None, colormap_by: Optional[dict] = None,
-                 say: Optional[Callable[[str], None]] = None, parent: Any = None) -> None:
+                 say: Optional[Callable[[str], None]] = None, parent: Any = None,
+                 read: Optional[Callable] = None) -> None:
         self._viewer = viewer
         self._meta = meta
         self._channels = list(channels)
@@ -177,7 +190,7 @@ class BrickedVolume:
         self._t_first: Optional[float] = None
         self._t_settled: Optional[float] = None
 
-        self._loader = _BrickLoader(reader, meta, region, parent=parent)
+        self._loader = _BrickLoader(reader, meta, region, parent=parent, read=read)
         self._loader.ready.connect(self._on_brick)
         self._loader.problem.connect(self._say)
         self._loader.idle.connect(self._on_idle)
@@ -297,6 +310,17 @@ class BrickedVolume:
             return
         py = self._scale[1]
         step = _bricks.uniform_step(self.um_per_screen_px(), py)
+        # THE CAPPED ROI IS ALWAYS NATIVE. When the whole volume is ONE texture and it fits the
+        # budget there is nothing to gain by sampling it coarsely -- the texture is uploaded once
+        # and the GPU resamples it for free at every zoom, so a stride would only mean starting
+        # coarse and reloading on the first zoom. Since the drawn ROI is now capped to one texture
+        # by construction (``_bricks.clamp_bbox_um``), this is the path the user actually takes:
+        # stride 1, full native resolution, no level-of-detail in play at all. The camera-driven
+        # stride below remains for a volume that genuinely spans several textures.
+        if len(self._bricks) == 1:
+            native = self._bricks[0].nbytes(self._nz, self._itemsize, 1) * max(1, len(self._channels))
+            if native <= self._budget:
+                step = 1
         view = self.view_um()
         margin = 0.0
         if view is not None:
@@ -357,8 +381,30 @@ class BrickedVolume:
         # scale carries the stride; translate does NOT -- a brick's world corner is where it is
         # regardless of how finely it is sampled, which is what lets a coarse brick be replaced by
         # a fine one without anything moving on screen.
-        scale = (self._scale[0], self._scale[1] * s, self._scale[2] * s)
+        #
+        # For the raw reader ``py * step`` is EXACT: sample i is voxel r0 + i*step whatever the
+        # ragged last brick does. An injected operator source may hand back a DIFFERENT pixel size
+        # (a parent window's fused level 0 is capped to _MAX_FUSED_PX), and assuming native there
+        # would stretch the volume across its own footprint. So the expected strided shape is
+        # checked, and the scale is derived from the brick's WORLD extent only when it differs --
+        # the world corner and the world size are the two things known to be true either way.
+        expect = local.sampled_shape(self._nz, s)
+        got = tuple(int(v) for v in np.shape(arr))
+        if len(got) == 3 and got[1:] != expect[1:]:
+            h_um = local.height * self._scale[1]
+            w_um = local.width * self._scale[2]
+            scale = (self._scale[0], h_um / max(1, got[1]), w_um / max(1, got[2]))
+        else:
+            scale = (self._scale[0], self._scale[1] * s, self._scale[2] * s)
         translate = local.translate_um(self._origin_um, self._scale[1], self._scale[2])
+        # RE-FRAME ONCE, on the first brick. napari calls reset_view() when a layer lands in a
+        # viewer that had none, and it fits THAT LAYER -- which for a bricked ROI is one brick, not
+        # the ROI. Measured: the bricked view ended up centred and zoomed on a 512 px brick while
+        # the single-texture view of the same voxels sat on the full 2048 px box, so the two were
+        # framed differently and 91% of pixels "differed" for no reason but the camera. Framing
+        # before the first layer exists cannot survive that reset, so it is re-applied after it.
+        # Once only: every later brick must leave the user's own camera alone.
+        first = not self._layers
         existing = self._layers.get(key)
         if existing is not None:
             try:
@@ -370,6 +416,8 @@ class BrickedVolume:
             except Exception:                           # noqa: BLE001 - fall through to a re-add
                 self._drop(key)
         self._add_layer(key, channel, arr, scale, translate)
+        if first and self._layers:
+            self._frame_camera()
         self._note_first_pixels()
 
     def _add_layer(self, key, channel: str, arr, scale, translate) -> None:

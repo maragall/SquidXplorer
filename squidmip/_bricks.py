@@ -120,7 +120,26 @@ def _ceil_div(a: int, b: int) -> int:
     return -(-int(a) // int(b))
 
 
-def plan(height: int, width: int, *, limit: int, edge: int = DEFAULT_BRICK_EDGE) -> tuple:
+#: Voxels of OVERLAP between neighbouring bricks. This is the last of the seam, and it is free.
+#:
+#: A GL texture CLAMPS at its edge, so with linear interpolation the samples in the outermost half-
+#: texel of a brick interpolate against the brick's own edge texel instead of against the neighbour
+#: that is really there. Measured on the 10x set, 2048 px ROI as 1 texture vs 16 bricks, identical
+#: camera: 397 of 1,064,828 pixels (0.037%) differed by more than 2/255, and amplifying the
+#: difference 16x showed them lying exactly on the brick grid. Small, but structured -- and
+#: structured error is what the eye finds.
+#:
+#: One voxel of overlap gives each brick its neighbour's first texel, so the interpolation is
+#: against real data and the join disappears. The reason this is FREE rather than a double-count is
+#: the max blend equation (``_napari3d.pin_max_compositing``): the shared voxel carries the same
+#: value in both bricks, and max(v, v) == v. Under ADDITIVE the same overlap would paint that voxel
+#: twice and put a bright line exactly where the seam used to be -- so the halo and the blend mode
+#: are one decision, not two.
+BRICK_HALO = 1
+
+
+def plan(height: int, width: int, *, limit: int, edge: int = DEFAULT_BRICK_EDGE,
+         halo: int = BRICK_HALO) -> tuple:
     """Tile a ``height x width`` level-0 plane into bricks that each fit ONE GL texture.
 
     *limit* is the live ``GL_MAX_3D_TEXTURE_SIZE`` (read off the canvas, never assumed -- see
@@ -128,15 +147,35 @@ def plan(height: int, width: int, *, limit: int, edge: int = DEFAULT_BRICK_EDGE)
     smaller limit than our default simply gets more, smaller bricks rather than a brick napari
     would refuse. Bricks are emitted row-major, which is the order the loader prefers when nothing
     else ranks them.
+
+    Bricks OVERLAP by *halo* voxels on their far side (see ``BRICK_HALO``); the stride between brick
+    ORIGINS is still the edge, so ``translate`` is unaffected and the tiling still covers the plane
+    exactly once at every origin. The halo is included in the edge budget, so a brick never exceeds
+    *limit* even with it.
     """
     h, w = int(height), int(width)
     if h <= 0 or w <= 0:
         return ()
+    hl = max(0, int(halo))
     e = max(1, min(int(edge), int(limit)))
+    # A plane that fits ONE brick has no neighbours, so it gets no halo -- and must not, or the
+    # single-texture fast path would be split in two for nothing. Measured: subtracting the halo
+    # from the edge unconditionally turned a 2048 px ROI on a 2048 px limit into 4 bricks.
+    if h <= e and w <= e:
+        return (Brick(iy=0, ix=0, r0=0, r1=h, c0=0, c1=w),)
+    # THE HALO EXTENDS THE END, NEVER THE ORIGIN STRIDE. Brick origins must stay on multiples of a
+    # power-of-two edge or ``uniform_step`` loses the shared sampling lattice it depends on (see
+    # its docstring). Shrinking the edge to make room instead -- e -> e/2 -- keeps it a power of
+    # two. Measured, when the halo was taken out of the edge instead: origins fell on 511, 1022,
+    # ... and the stride-4 render disagreed with native on 3.8% of pixels, against 0.007% at
+    # stride 1 where the misalignment cannot bite.
+    while e + hl > int(limit) and e > 1:
+        e //= 2
     out: list = []
     for iy, r0 in enumerate(range(0, h, e)):
         for ix, c0 in enumerate(range(0, w, e)):
-            out.append(Brick(iy=iy, ix=ix, r0=r0, r1=min(r0 + e, h), c0=c0, c1=min(c0 + e, w)))
+            out.append(Brick(iy=iy, ix=ix, r0=r0, r1=min(r0 + e + hl, h),
+                             c0=c0, c1=min(c0 + e + hl, w)))
     return tuple(out)
 
 
@@ -226,6 +265,56 @@ def cull(bricks: Iterable[Brick], *, origin_um: Sequence[float], py: float, px: 
 
     keep.sort(key=_d)
     return tuple(keep)
+
+
+def clamp_bbox_um(bbox_um: Sequence[float], px_um: float, limit: int) -> tuple:
+    """Shrink an ROI box to what ONE GL texture can render, keeping its top-left anchor.
+
+    THIS IS THE SANCTIONED FALLBACK, and it is a constraint on DRAWING rather than a rendering
+    subsystem. Julio: "If (a) doesn't work well and with responsiveness then (b) will be very easy
+    to implement for the sake of practicality." The guarantee it buys is the one his complaint asks
+    for -- **anything you can draw, you can render, at full native resolution, from one texture** --
+    and it buys it by construction rather than by machinery: no level-of-detail, no culling, no
+    eviction, nothing to be janky.
+
+    The anchor is the corner the drag STARTED from, so a box that hits the ceiling stops growing
+    instead of jumping; that is what makes the limit felt while drawing rather than reported after.
+
+    Returns ``(bbox, clamped)``. *limit* is the LIVE queried texture size, so this ceiling rises on
+    better hardware -- 2048 px = 1540 um here, 16384 px = 12321 um on a desktop NVIDIA, 512x the
+    volume. Nothing here is a constant.
+    """
+    x0, y0, x1, y1 = (float(v) for v in bbox_um)
+    span = float(limit) * float(px_um)
+    if span <= 0:
+        return ((x0, y0, x1, y1), False)
+    nx1 = x0 + min(x1 - x0, span) if x1 >= x0 else x0 - min(x0 - x1, span)
+    ny1 = y0 + min(y1 - y0, span) if y1 >= y0 else y0 - min(y0 - y1, span)
+    clamped = (abs(nx1 - x1) > 1e-9) or (abs(ny1 - y1) > 1e-9)
+    return ((x0, y0, nx1, ny1), clamped)
+
+
+def ceiling_line(limit: int, px_um: float, *, measured: bool) -> str:
+    """What this GPU can trace, in the user's units, said out loud.
+
+    Julio: "the focus will be in understanding how to leverage more powerful GPUs to be able to
+    trace larger ROIs". That only becomes actionable if the ceiling is VISIBLE, so this turns the
+    live ``GL_MAX_3D_TEXTURE_SIZE`` into the two numbers a user actually reasons about: how big an
+    ROI still renders from a single texture, and how big one renders once bricked.
+
+    2048 is the APPLE figure and nothing here assumes it. Desktop NVIDIA commonly reports 16384 --
+    8x per axis, 512x the volume -- and on such a machine this line says so, which is the whole
+    point: the same build gets a bigger ceiling on better hardware and tells you it did. *measured*
+    distinguishes a value read off the live canvas from the fallback, because "your GPU says 16384"
+    and "we could not ask and are assuming 2048" are different facts.
+    """
+    where = "measured on this GPU" if measured else "ASSUMED — the canvas could not be asked"
+    one = float(limit) * float(px_um)
+    return (f"3D ceiling: GL_MAX_3D_TEXTURE_SIZE = {int(limit)} px ({where}). One texture holds "
+            f"{int(limit)}x{int(limit)} px = {one:.0f}x{one:.0f} um at native {px_um:g} um/px; "
+            f"larger ROIs are BRICKED into as many textures as they need, so the renderable size "
+            f"is bounded by memory rather than by this number. A GPU reporting a larger limit "
+            f"raises the single-texture size and lowers the brick count.")
 
 
 @dataclass(frozen=True)
