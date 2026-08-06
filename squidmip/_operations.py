@@ -94,8 +94,10 @@ _OPERATIONS = (
               "Export the selected FOVs to Minerva-ingestable OME-TIFFs and open Minerva Author on them.",
               "_build_minerva_tab", runnable=False),
     # IMA-223/224/225 -- the PLANE-OPS. Unlike mip/stitch these keep z at full depth, so they get
-    # _build_plane_op_tab (preview only) rather than _build_run_tab: write_plate's _validate_image
-    # accepts Z == 1 only and would fail LOUD on save. Loud is correct; offering the button is not.
+    # _build_plane_op_tab (preview only) rather than _build_run_tab. The ORIGINAL reason was that
+    # write_plate's _validate_image accepted Z == 1 only and would fail LOUD on save; IMA-277
+    # lifted that, so the save path now exists and only this card has not been given it. Preview
+    # only is therefore a GUI gap to close, not a contract -- do not cite Z == 1 to justify it.
     # The blurb said "the microscope's Gaussian PSF ... no explicit kernel". Both halves were
     # false and had been since IMA-247 deleted the reimplementation: the kernel is a VECTORIAL
     # PSF computed from the acquisition's own optics (NA 0.3 on this scope), and it is very much
