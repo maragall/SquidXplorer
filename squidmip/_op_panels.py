@@ -239,28 +239,35 @@ def stitch_operator_kwargs(*, register, registration_channel, channels, blend_px
     return kwargs
 
 
-def plane_op_refusal(projector: str) -> Optional[str]:
+def stitch_refusal(projector: str) -> Optional[str]:
     """The sentence explaining why *projector* cannot be stitched, or ``None`` if it can.
 
-    ``stitch_region`` already refuses a plane-op (IMA-277: fusing one would keep z-plane 0
-    and silently discard the rest of the stack). This asks the SAME registry the same
-    question before the run starts, because discovering it at the end of a multi-minute
-    fuse is a bad way to learn it. It is a pre-check, not a second guard - the operator's
-    own refusal stays exactly where it is.
+    This MIRRORS the guard ``stitch_region`` actually has, asked of the same registry before
+    the run starts, because discovering it at the end of a multi-minute fuse is a bad way to
+    learn it. It is a pre-check, not a second guard - the operator's own refusal stays
+    exactly where it is.
+
+    It used to refuse a PLANE-OP, and that was right while the pipeline fused with z pinned
+    to 1. IMA-277's per-plane fusion removed that refusal from ``stitch_region`` (see its
+    "PER-PLANE FUSION" section: the geometry is solved once and every plane is fused from the
+    same origins), so a plane-op stitches and this pre-check was blocking, in the GUI only,
+    something the engine had learned to do. What ``stitch_region`` still refuses is LABELS,
+    and only labels: feathering blends overlapping tiles by a weighted average, and the mean
+    of label 12 and label 37 is label 24, an object that does not exist.
     """
-    from squidmip._stitch import _resolve_projector
+    from squidmip._stitch import LABELS, _resolve_projector
 
     try:
         op = _resolve_projector(projector)
     except Exception as exc:                       # unknown name -> name it, don't crash
         return (f"{projector!r} is not a projector this build knows: {exc}")
-    if op.consumes:
+    if op.produces != LABELS:
         return None
     return (
-        f"{projector!r} is a plane-op: it maps plane -> plane and keeps the z-stack at full "
-        f"depth. Stitching does not fuse per z-plane yet, so it would keep z-plane 0 and "
-        f"silently discard the rest of the stack. Reduce z first (mip), or pick a "
-        f"z-reducing operator such as decon3d.")
+        f"{projector!r} produces label images (integer object ids), and fusion blends "
+        f"overlapping tiles by a weighted average - the mean of two label ids is a third, "
+        f"nonexistent object, and per-FOV ids collide across every seam. Segment per FOV "
+        f"instead, or stitch an intensity operator such as mip or decon.")
 
 
 # ---------------------------------------------------------------------------------------
@@ -570,7 +577,7 @@ class StitcherPanel(_Panel):
             w.setEnabled(bool(on))
 
     def _check_projector(self, name: str) -> None:
-        why = plane_op_refusal(name)
+        why = stitch_refusal(name)
         self.run_btn.setEnabled(why is None)
         self.say("" if why is None else why)
 
@@ -595,7 +602,7 @@ class StitcherPanel(_Panel):
         )
 
     def _run(self) -> None:
-        why = plane_op_refusal(self.projector_combo.currentText())
+        why = stitch_refusal(self.projector_combo.currentText())
         if why is not None:
             self.say(why)
             return

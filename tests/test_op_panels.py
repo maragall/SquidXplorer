@@ -18,7 +18,7 @@ import pytest
 
 from squidmip._op_panels import (
     STITCH_DEFAULTS,
-    plane_op_refusal,
+    stitch_refusal,
     stitch_operator_kwargs,
 )
 
@@ -113,25 +113,39 @@ def test_the_kwargs_are_accepted_by_stitch_region_itself():
 
 
 # ---------------------------------------------------------------------------------------
-# the plane-op guard, surfaced BEFORE the run
+# the stitch guard, surfaced BEFORE the run
 # ---------------------------------------------------------------------------------------
 
-def test_a_plane_op_projector_is_refused_with_a_sentence_naming_the_way_out():
-    """stitch_region raises NotImplementedError for a plane-op (IMA-277). Discovering that
-    at the end of a multi-minute run is a bad way to learn it, so the panel asks first."""
-    why = plane_op_refusal("decon")
+def test_a_labels_projector_is_refused_with_a_sentence_naming_the_way_out():
+    """stitch_region raises ValueError for a labels operator: feathering blends overlapping
+    tiles by a weighted average, and the mean of two object ids is a third object that does
+    not exist. Discovering that at the end of a multi-minute run is a bad way to learn it,
+    so the panel asks the same registry first."""
+    why = stitch_refusal("cellpose")
     assert why is not None
-    assert "decon" in why
-    assert "mip" in why or "decon3d" in why      # it must say what to do instead
+    assert "cellpose" in why
+    assert "label" in why.lower()
+    assert "per FOV" in why or "intensity" in why    # it must say what to do instead
+
+
+def test_a_plane_op_is_no_longer_refused():
+    """THE REGRESSION THIS GUARD ONCE WAS. Refusing a plane-op was right while the pipeline
+    fused with z pinned to 1; IMA-277's per-plane fusion removed that refusal from
+    stitch_region, and this pre-check went on blocking it in the GUI alone. A pre-check that
+    outlives the guard it mirrors is worse than no pre-check: it is the engine's answer,
+    wrong, delivered with authority."""
+    assert stitch_refusal("decon") is None
+    assert stitch_refusal("bgsub") is None
+    assert stitch_refusal("flatfield") is None
 
 
 def test_a_z_reducer_is_not_refused():
-    assert plane_op_refusal("mip") is None
-    assert plane_op_refusal("decon3d") is None
+    assert stitch_refusal("mip") is None
+    assert stitch_refusal("decon3d") is None
 
 
 def test_an_unknown_projector_is_named_rather_than_crashing_the_panel():
-    why = plane_op_refusal("does_not_exist")
+    why = stitch_refusal("does_not_exist")
     assert why is not None and "does_not_exist" in why
 
 
@@ -292,17 +306,27 @@ def test_turning_registration_off_disables_the_registration_only_controls(qapp):
     assert p.rel_spin.isEnabled()
 
 
-def test_a_plane_op_projector_disables_the_run_button_and_says_why(qapp):
+def test_a_labels_projector_disables_the_run_button_and_says_why(qapp):
     host = _Host()
     p = StitcherPanel(host)
-    p.projector_combo.setCurrentText("decon")
+    p.projector_combo.setCurrentText("cellpose")
     assert not p.run_btn.isEnabled()
-    assert host.said and "plane-op" in host.said[-1]
+    assert host.said and "label" in host.said[-1].lower()
     p.projector_combo.setCurrentText("mip")
     assert p.run_btn.isEnabled()
 
 
-def test_the_run_handler_itself_refuses_a_plane_op_not_just_the_disabled_button(qapp):
+def test_a_plane_op_projector_leaves_the_run_button_enabled(qapp):
+    """The button must follow the ENGINE, not a guard the engine outgrew. Per-plane fusion
+    (IMA-277) made a plane-op stitchable; a disabled button would be the GUI refusing on its
+    own authority something stitch_region performs."""
+    host = _Host()
+    p = StitcherPanel(host)
+    p.projector_combo.setCurrentText("decon")
+    assert p.run_btn.isEnabled()
+
+
+def test_the_run_handler_itself_refuses_labels_not_just_the_disabled_button(qapp):
     """Two defences, and this test must exercise the SECOND one.
 
     An earlier version clicked the button and passed because the button was disabled --
@@ -313,11 +337,11 @@ def test_the_run_handler_itself_refuses_a_plane_op_not_just_the_disabled_button(
     """
     host = _Host()
     p = StitcherPanel(host)
-    p.projector_combo.setCurrentText("decon")
+    p.projector_combo.setCurrentText("cellpose")
     p.run_btn.setEnabled(True)                  # simulate reaching _run some other way
     p._run()
     assert host.calls == [], "the run must not start"
-    assert "plane-op" in host.said[-1]
+    assert "label" in host.said[-1].lower()
 
 
 def test_the_decon_panel_starts_at_the_qc_start_iteration_count(qapp):

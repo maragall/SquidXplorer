@@ -2323,10 +2323,15 @@ class PlateWindow(QMainWindow):
         """Generic PLANE-OP tab (IMA-223/224/225): preview on a subset, never save.
 
         A plane-op maps plane -> plane and does NOT consume z (IMA-210), so its output keeps the
-        z-stack at full depth -- and write_plate's _validate_image accepts Z == 1 only. So this
-        builder deliberately omits the "Run on the whole plate" / destination half of
-        _build_run_tab: there is nothing to write yet. The moment the OME-Zarr writer learns
-        Z > 1, this method can simply forward to _build_run_tab and disappear.
+        z-stack at full depth. This builder omits the "Run on the whole plate" / destination half
+        of _build_run_tab because write_plate's _validate_image accepted Z == 1 only, so there was
+        nothing to write -- and it said "the moment the OME-Zarr writer learns Z > 1, this method
+        can simply forward to _build_run_tab and disappear."
+
+        THAT MOMENT HAS PASSED. IMA-277 taught _validate_image that a plane-op's full-depth result
+        is a real result, and per-plane fusion taught stitch_region to fuse every z. So the save
+        path exists and only this card has not been given it: preview-only is now a GUI GAP TO
+        CLOSE, not a contract. Do not cite Z == 1 to justify it.
 
         The preview path itself is unchanged and needs no worker edit: _OperatorWorker's save=False
         branch streams project_plate, and _on_well already indexes image[0, :, 0] -- for a plane-op

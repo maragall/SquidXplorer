@@ -3972,8 +3972,9 @@ def test_the_redock_BUTTON_works_not_just_the_method(qapp, stub_detail):
 
 def test_the_plane_op_cards_build_and_are_preview_only(qapp, stub_detail, squid_dataset):
     """DRIVEN, not read: open each plane-op tab through the real _open_op_tab path and inspect
-    the widgets it actually produced. A plane-op keeps z at full depth and _validate_image accepts
-    Z == 1 only, so the card must offer Preview and NO Save/destination half.
+    the widgets it actually produced. The card offers Preview and NO Save/destination half. That
+    began as a consequence of _validate_image accepting Z == 1 only; IMA-277 lifted that, so what
+    this now pins is the CARD's shape, not a writer limit (see _operations.py).
 
     DECON IS NO LONGER IN THIS LIST. It is still a plane-op in the engine, but its card is now
     the RL semi-convergence QC panel (iteration count, +1, turbo x-z / y-z view in pane 3), not
@@ -5422,9 +5423,9 @@ CLI_ONLY_OPERATORS = {
     "spot": "a LABELS overlay, not a plate result; it is driven from the spot-count controls "
             "on the mosaic, not from a card that writes an OME-Zarr plate.",
     "cellpose": "the same LABELS overlay as `spot`, with the model instead of the Otsu recipe. "
-                "Same reason it has no card, and one more: a card offers 'run on the whole "
-                "plate', and this operator's result cannot be written (write_plate's "
-                "_validate_image accepts Z == 1 and a plane-op keeps z at full depth). It is "
+                "Same reason it has no card. (It is NOT because the result cannot be written -- "
+                "that was true while _validate_image accepted Z == 1 only, and IMA-277 lifted "
+                "it.) It is "
                 "reachable from the CLI (--projector cellpose), the operator dropdown and the "
                 "Detect-nuclei button, all of which read the registry.",
     "decon3d": "the volume-then-project variant of `decon`; the decon card's own panel is where "
