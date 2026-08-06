@@ -51,16 +51,31 @@ _PIN_BUDGET_FRACTION = 0.5
 
 @dataclass(frozen=True)
 class TileDescriptor:
-    """One cacheable tile: a level, its key in that level, a channel and its world bbox.
+    """One cacheable tile: a level, its key in that level, a channel, a TIMEPOINT, its world bbox.
 
     Tiles are cached **pre-composite, per channel** — contrast/LUT changes are the renderer's
     job and invalidate nothing here. Frozen (and hashable) because it is the cache key.
+
+    ``t`` has **no default, on purpose**. It was absent entirely until 2026-08-06, and the two
+    caches on the same read path both carried it (``_platecache`` keys ``(token, t, region)``,
+    ``ReaderTileSource._planes`` keys on ``t``) — so deep zoom asked for "this FOV, this channel"
+    with no frame in the question, every source answered from whatever ``t`` it was CONSTRUCTED
+    with, and ``_plate_overview.set_time_point`` touched neither the source nor this cache.
+    Measured on ``sim_5d_2x2_t3`` (whose blob moves with t): after ``set_time_point(2)`` the same
+    tile came back **byte-identical** to t=0, sha ``24d0d02d…`` where t=2 is ``a265917c…``, while
+    the plate said it was showing timepoint 2.
+
+    A default of 0 is exactly how that happened one layer down (``PlateCellCache.for_reader``
+    takes ``time_point=0``, and ``_plate_overview`` simply never passed one), so the timepoint is
+    part of the identity a producer must STATE. Every source reads it from here rather than from
+    its own attribute: a tile read at one timepoint can then never be published under another.
     """
 
     level: int
     key: Hashable
     channel: str
     bbox_um: tuple[float, float, float, float]
+    t: int
 
 
 class Level:
@@ -170,7 +185,7 @@ class TileSource(Protocol):
 
 
 def select_tiles(bbox_um: tuple[float, float, float, float], um_per_px: float, geometry: Geometry, *,
-                 channels: Sequence[str] = ("0",), current_level: int | None = None,
+                 channels: Sequence[str] = ("0",), t: int = 0, current_level: int | None = None,
                  hysteresis: float = _DEFAULT_HYSTERESIS) -> list[TileDescriptor]:
     """The **ideal** tile set for a viewport: LOD pick, then frustum cull. Pure, stateless.
 
@@ -178,6 +193,11 @@ def select_tiles(bbox_um: tuple[float, float, float, float], um_per_px: float, g
     an inverted or zero-area box raises rather than being silently normalized). Returns tiles
     in a deterministic order — channel-major, then level index order — so callers can diff two
     consecutive viewports cheaply.
+
+    ``t`` is stamped onto every descriptor. It defaults to 0 because a viewport of a
+    single-timepoint acquisition genuinely has one frame; :class:`TileDescriptor` itself has NO
+    default, so a caller that builds descriptors directly (the plate overview does) must say which
+    frame it is asking for.
     """
     x0, y0, x1, y1 = (float(v) for v in bbox_um)
     if not all(np.isfinite(v) for v in (x0, y0, x1, y1)):
@@ -200,12 +220,12 @@ def select_tiles(bbox_um: tuple[float, float, float, float], um_per_px: float, g
         for i in idx:
             i = int(i)
             out.append(TileDescriptor(level_idx, level.keys[i], ch,
-                                      (b[i, 0], b[i, 1], b[i, 2], b[i, 3])))
+                                      (b[i, 0], b[i, 1], b[i, 2], b[i, 3]), int(t)))
     return out
 
 
 def viewport(bbox_world: tuple[float, float, float, float], zoom: float, geometry: Geometry, *,
-             channels: Sequence[str] = ("0",), current_level: int | None = None,
+             channels: Sequence[str] = ("0",), t: int = 0, current_level: int | None = None,
              hysteresis: float = _DEFAULT_HYSTERESIS) -> list[TileDescriptor]:
     """``select_tiles`` in the renderer's units: ``zoom`` is **screen pixels per world unit**.
 
@@ -215,7 +235,7 @@ def viewport(bbox_world: tuple[float, float, float, float], zoom: float, geometr
     z = float(zoom)
     if not np.isfinite(z) or z <= 0:
         raise ValueError(f"zoom must be finite and > 0, got {zoom!r}")
-    return select_tiles(bbox_world, 1.0 / z, geometry, channels=channels,
+    return select_tiles(bbox_world, 1.0 / z, geometry, channels=channels, t=t,
                         current_level=current_level, hysteresis=hysteresis)
 
 
@@ -342,10 +362,17 @@ class TileCache:
 
     # ----- internals --------------------------------------------------------------------
     def _nearest_ancestor(self, desc: TileDescriptor) -> TileDescriptor | None:
-        """The finest cached tile of the same channel, coarser level, whose bbox covers ``desc``."""
+        """The finest cached tile of the same channel AND TIMEPOINT, coarser, whose bbox covers it.
+
+        The timepoint is as much a part of "is this the same picture" as the channel is. The
+        blur-while-loading substitution is the one place a cached tile is drawn where a DIFFERENT
+        tile was asked for, so a t-blind ancestor here would put frame 0 on screen under a label
+        saying frame 2 — the exact defect the ``t`` on the descriptor exists to end, reintroduced
+        at the only site allowed to answer with something other than what was requested.
+        """
         best: TileDescriptor | None = None
         for other in self._cached:
-            if other.channel != desc.channel or other.level <= desc.level:
+            if other.channel != desc.channel or other.t != desc.t or other.level <= desc.level:
                 continue
             if not _contains(other.bbox_um, desc.bbox_um):
                 continue

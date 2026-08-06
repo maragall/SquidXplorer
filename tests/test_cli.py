@@ -254,6 +254,28 @@ def test_rerun_refuses_to_write_over_a_finished_plate(squid_dataset, tmp_path):
     assert wells == ["B/2", "B/3"]
 
 
+def test_an_incomplete_plate_is_refused_as_INPUT(squid_dataset, tmp_path):
+    """A written plate is a legal input, so "process this folder" can be aimed at a half-written one.
+
+    The CLI took it and reported honestly about the RUN while being wrong about the SAMPLE: it
+    would project whatever wells happened to land and exit 0. The store says it is unfinished; the
+    opener has to read that. (The GUI's `Open a computed .hcs plate` had the same hole and looked
+    for a marker no writer produces.)
+    """
+    from squidmip._output import _mark_incomplete
+
+    root, _ = squid_dataset
+    done = run(ProcessParameters(input_folder=str(root), output_folder=str(tmp_path)))
+    hcs = Path(done["plate"]).parent
+    assert run(ProcessParameters(input_folder=str(hcs), output_folder=str(tmp_path / "again"))), (
+        "a FINISHED plate must still be processable as input")
+
+    _mark_incomplete(Path(done["plate"]), {"wells": ["B2", "B3"], "fields": 2, "fields_written": 1,
+                                           "stopped": True})
+    with pytest.raises(SystemExit, match="INCOMPLETE"):
+        run(ProcessParameters(input_folder=str(hcs), output_folder=str(tmp_path / "third")))
+
+
 def test_overwrite_proceeds(squid_dataset, tmp_path):
     root, _ = squid_dataset
     run(ProcessParameters(input_folder=str(root), output_folder=str(tmp_path)))

@@ -430,10 +430,9 @@ class ZarrPyramidSource:
     is the O(1)-per-view answer for a live run, because it is built incrementally as fields arrive.
     """
 
-    def __init__(self, plate_path, *, tile_px: int = DEFAULT_TILE_PX, t: int = 0,
+    def __init__(self, plate_path, *, tile_px: int = DEFAULT_TILE_PX,
                  min_yx: int = _PYRAMID_MIN_YX, max_levels: int = _PYRAMID_MAX_LEVELS) -> None:
         self.plate_dir = _resolve_plate_dir(plate_path)
-        self.t = int(t)
         self._stores: dict = {}
         layout = _read_plate_layout(self.plate_dir)
         self.channels: list[str] = layout["channels"]
@@ -447,11 +446,16 @@ class ZarrPyramidSource:
 
     # ---- TileSource --------------------------------------------------------------------
     def read_tile(self, desc: TileDescriptor) -> np.ndarray:
-        """One tile as a 2-D native-dtype array. Satisfies ``_tiling.TileSource``."""
+        """One tile as a 2-D native-dtype array. Satisfies ``_tiling.TileSource``.
+
+        The timepoint comes off the DESCRIPTOR, never off this object: a source built once and
+        asked for two frames must answer with two pictures. This used to hold ``self.t`` from
+        construction, which is the shape of the deep-zoom freeze.
+        """
         c = self._channel_index(desc.channel)
         if self.ladder.is_fov_level(desc.level):
-            return self._read_fov_plane(desc.key, desc.level, c)
-        return self._composite_cell(desc.level, desc.key, c)
+            return self._read_fov_plane(desc.key, desc.level, c, int(desc.t))
+        return self._composite_cell(desc.level, desc.key, c, int(desc.t))
 
     # ---- internals ---------------------------------------------------------------------
     def _channel_index(self, channel: str) -> int:
@@ -470,18 +474,18 @@ class ZarrPyramidSource:
         from squidmip._tsctx import HANDLES
         return HANDLES.get(self._field_dirs[fov_key] / str(level))
 
-    def _read_fov_plane(self, fov_key, level: int, c: int) -> np.ndarray:
+    def _read_fov_plane(self, fov_key, level: int, c: int, t: int) -> np.ndarray:
         store = self._store(fov_key, level)
-        t = min(self.t, store.shape[0] - 1)
+        t = min(max(0, int(t)), store.shape[0] - 1)     # clamped to what this store actually holds
         return np.asarray(store[t, c, 0].read().result())
 
-    def _composite_cell(self, level: int, key, c: int) -> np.ndarray:
+    def _composite_cell(self, level: int, key, c: int, t: int) -> np.ndarray:
         bbox = self.ladder.cell_bbox_um(level, key)
         scale = self.ladder.geometry.levels[level].scale_um_per_px
         src_level = self.ladder.fov_source_level(scale)
         tile = np.zeros((self.ladder.tile_px, self.ladder.tile_px), dtype=self._dtype())
         for fov_key in self.ladder.fovs_overlapping(bbox):
-            plane = self._read_fov_plane(fov_key, src_level, c)
+            plane = self._read_fov_plane(fov_key, src_level, c, t)
             _paste_field(tile, bbox, scale, plane, self.ladder.fov_bboxes[fov_key])
         return tile
 
@@ -627,7 +631,17 @@ class InMemoryMultiscale:
         would make the viewer's fetch path throw once per empty tile per frame. Black is the honest
         rendering of "nothing here yet", and ``add_field`` names the tiles to invalidate when it
         stops being true.
+
+        A tile at ANOTHER TIMEPOINT is a different matter and raises. These rungs hold exactly one
+        frame — whatever ``t`` the fields folded in were sliced at — so answering a t=2 request
+        from them would publish frame ``self.t``'s pixels under frame 2, which is the mistake
+        ``_workers._PreviewWorker`` already refuses at construction for the same cells. Loud here,
+        so :class:`CompositePlateSource`'s routing is checked rather than trusted.
         """
+        if int(desc.t) != self.t:
+            raise KeyError(
+                f"this preview holds timepoint {self.t}; tile {desc.key!r} was asked for at "
+                f"timepoint {desc.t}. Its pixels are not that frame's.")
         if desc.level not in self.levels:
             raise KeyError(
                 f"level {desc.level} is not resident in this preview (resident: {self.levels}); "
@@ -680,7 +694,8 @@ class InMemoryMultiscale:
                 for c in range(len(self.channels)):
                     touched |= _paste_field(tile[c], cell_bbox, scale, planes[c], bbox_um)
                 if touched:
-                    dirty.extend(TileDescriptor(lvl, cell, ch, cell_bbox) for ch in self.channels)
+                    dirty.extend(TileDescriptor(lvl, cell, ch, cell_bbox, self.t)
+                                 for ch in self.channels)
         return dirty
 
     # ---- internals ---------------------------------------------------------------------
@@ -755,12 +770,11 @@ class ReaderTileSource:
     """
 
     def __init__(self, reader, metadata: Mapping, ladder: PlateLadder, *,
-                 projector: Optional[str] = "mip", z: Optional[int] = None, t: int = 0,
+                 projector: Optional[str] = "mip", z: Optional[int] = None,
                  cache_bytes: Optional[int] = None) -> None:
         self.reader = reader
         self.meta = dict(metadata)
         self.ladder = ladder
-        self.t = int(t)
         self.dtype = np.dtype(self.meta.get("dtype") or np.uint16)
         self.z_levels = list(self.meta.get("z_levels") or [0])
 
@@ -802,46 +816,50 @@ class ReaderTileSource:
         out = np.zeros((tile_px, tile_px), dtype=self.dtype)
 
         for key in self.ladder.fovs_overlapping(bbox):
-            plane = self._plane(key, desc.channel)
+            plane = self._plane(key, desc.channel, int(desc.t))
             if plane is None:
                 continue            # an unreadable field is a hole, not a dead viewport
             _paste_field(out, bbox, scale, plane, self.ladder.fov_bboxes[key])
         return out
 
     # ---- pixels ------------------------------------------------------------------------
-    def _plane(self, key, channel: str):
-        """The FOV's image for one channel — projected over z, or one plane if ``z`` was given.
+    def _plane(self, key, channel: str, t: int):
+        """The FOV's image for one channel at one TIMEPOINT — projected over z, or one plane.
 
         Cached by BYTES, and this is the whole performance story. A coarse plate tile touches many
         FOVs, adjacent tiles touch the same FOVs again, and every rung above revisits them, so
         without the cache a pan would re-project continuously. Note what is cached: the RESULT,
         one plane per FOV, not the stack — so a 10-deep projection costs 10 reads ONCE and then
         occupies exactly what a single-plane preview would.
+
+        ``t`` was always in this key and was always taken from ``self.t``, so the key was honest
+        about a question the caller was never allowed to ask. It comes from the descriptor now, and
+        the cache keeps both frames — stepping back to one already seen is still a hit.
         """
         region, fov = key
         ck = (str(region), int(fov), str(channel),
-              "z%d" % self.z if self.z is not None else "p:%s" % self.projector, int(self.t))
+              "z%d" % self.z if self.z is not None else "p:%s" % self.projector, int(t))
         hit = self._planes.get(ck)
         if hit is not None:
             return hit
         try:
             if self.z is not None:
-                plane = np.asarray(self._read(region, fov, channel, self.z))
+                plane = np.asarray(self._read(region, fov, channel, self.z, t))
             else:
                 from squidmip._engine import _resolve_operator
 
                 reduce = _resolve_operator(self.projector).fn
                 plane = np.asarray(reduce(
-                    np.asarray(self._read(region, fov, channel, z)) for z in self.z_levels))
+                    np.asarray(self._read(region, fov, channel, z, t)) for z in self.z_levels))
         except Exception:
             return None             # decode failure: leave the hole, keep the viewport alive
         self._planes.put(ck, plane)
         return plane
 
-    def _read(self, region, fov, channel: str, z: int):
+    def _read(self, region, fov, channel: str, z: int, t: int):
         """One plane from the reader, tolerating readers whose ``read`` has no ``t``."""
         try:
-            return self.reader.read(region, int(fov), str(channel), int(z), t=int(self.t))
+            return self.reader.read(region, int(fov), str(channel), int(z), t=int(t))
         except TypeError:
             return self.reader.read(region, int(fov), str(channel), int(z))
 
@@ -915,12 +933,25 @@ class CompositePlateSource:
     """
 
     def __init__(self, reader, metadata: Mapping, ladder: PlateLadder, *,
-                 cache=None, cells: Optional[Mapping] = None,
+                 cache=None, cells: Optional[Mapping] = None, t: int = 0,
                  budget_bytes: Optional[int] = None, **fov_kwargs) -> None:
         self.reader = reader
         self.meta = dict(metadata)
         self.ladder = ladder
         self.cache = cache
+        # WHICH FRAME THE PLATE RUNGS ARE, and nothing else. The FOV rungs take their timepoint
+        # from each descriptor (``ReaderTileSource`` has no ``t`` at all any more), but the coarse
+        # rungs are a seeded accumulation of one pass's cells, so they belong to one frame and this
+        # is it. A cache for a DIFFERENT frame is refused rather than reconciled, exactly as
+        # ``_workers._PreviewWorker`` refuses it: taking t from the cache, or overwriting the
+        # cache's t, is how a cell read at one timepoint gets published under another, and both
+        # objects would look correct on their own.
+        self.t = max(0, int(t))
+        cache_t = getattr(cache, "time_point", self.t) if cache is not None else self.t
+        if int(cache_t) != self.t:
+            raise ValueError(
+                f"CompositePlateSource(t={self.t}) was handed a plate cell cache for timepoint "
+                f"{cache_t}: its cells would be pasted into the world under the wrong frame.")
         self.fov_source = ReaderTileSource(reader, metadata, ladder, **fov_kwargs)
         self.channels = [str(c["name"]) for c in (self.meta.get("channels") or [])] or ["0"]
         self.dtype = np.dtype(self.meta.get("dtype") or np.uint16)
@@ -932,7 +963,7 @@ class CompositePlateSource:
                 ladder, self.channels, self.dtype,
                 budget_bytes=(DEFAULT_PREVIEW_BUDGET_BYTES if budget_bytes is None
                               else int(budget_bytes)),
-                t=int(fov_kwargs.get("t", 0)))
+                t=self.t)
         except ValueError:
             # No plate rungs on this ladder (a single-FOV acquisition, or a tile_px larger than
             # the whole sample). Then every rung is an FOV rung and there is nothing to compose;
@@ -992,8 +1023,18 @@ class CompositePlateSource:
 
     # ---- TileSource ---------------------------------------------------------------------
     def read_tile(self, desc: TileDescriptor) -> np.ndarray:
-        """One channel of one tile. Satisfies ``_tiling.TileSource``, like the three above."""
+        """One channel of one tile. Satisfies ``_tiling.TileSource``, like the three above.
+
+        A coarse tile at a timepoint these rungs were not seeded at goes to the READER, at its real
+        cost, on exactly the same argument as ``_covered``: a tile that would be drawn from the
+        wrong frame is served from the right one instead of quietly from what is resident. It is
+        counted in :attr:`coarse_from_reader`, so "the coarse rungs stopped being cheap after a
+        timepoint step" is a number rather than a feeling.
+        """
         if self.ladder.is_fov_level(desc.level) or self.plate_source is None:
+            return self.fov_source.read_tile(desc)
+        if int(desc.t) != self.t:
+            self.coarse_from_reader += 1
             return self.fov_source.read_tile(desc)
         self._ensure_seeded()
         if desc.level not in self.plate_source.levels or not self._covered(desc):

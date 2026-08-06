@@ -73,9 +73,9 @@ def _plate_rung(ladder) -> int:
     return plate[-1]                     # the coarsest: the fit-to-plate view
 
 
-def _desc(ladder, level, key) -> TileDescriptor:
+def _desc(ladder, level, key, t=0) -> TileDescriptor:
     return TileDescriptor(level=level, key=key, channel=CH,
-                          bbox_um=ladder.cell_bbox_um(level, key))
+                          bbox_um=ladder.cell_bbox_um(level, key), t=t)
 
 
 def _cells(value_per_region=None) -> dict:
@@ -141,7 +141,7 @@ def test_fov_rungs_are_the_reader_byte_for_byte():
     """Delegation, not a second implementation. Real resolution still comes from the frames."""
     ladder = _ladder()
     desc = TileDescriptor(level=0, key=("A1", 0), channel=CH,
-                          bbox_um=ladder.fov_bboxes[("A1", 0)])
+                          bbox_um=ladder.fov_bboxes[("A1", 0)], t=0)
     composite = CompositePlateSource(_CountingReader(), _meta(), ladder, cells=_cells())
     plain = ReaderTileSource(_CountingReader(), _meta(), ladder)
     assert np.array_equal(composite.read_tile(desc), plain.read_tile(desc))
@@ -172,7 +172,7 @@ def test_a_ladder_with_no_plate_rung_degrades_to_exactly_the_reader():
     ladder = plate_ladder(meta)
     src = CompositePlateSource(_CountingReader(), meta, ladder)
     desc = TileDescriptor(level=0, key=("A1", 0), channel=CH,
-                          bbox_um=ladder.fov_bboxes[("A1", 0)])
+                          bbox_um=ladder.fov_bboxes[("A1", 0)], t=0)
     assert src.read_tile(desc).any()
 
 
@@ -205,7 +205,7 @@ def test_the_composite_is_lazy_and_reads_the_cache_only_when_a_coarse_tile_is_as
     cache = _Cache()
     src = CompositePlateSource(_CountingReader(), _meta(), ladder, cache=cache)
     src.read_tile(TileDescriptor(level=0, key=("A1", 0), channel=CH,
-                                 bbox_um=ladder.fov_bboxes[("A1", 0)]))
+                                 bbox_um=ladder.fov_bboxes[("A1", 0)], t=0))
     assert cache.loads == 0, "the cells were read for a tile that did not need them"
     lvl = _plate_rung(ladder)
     src.read_tile(_desc(ladder, lvl, ladder.geometry.levels[lvl].keys[0]))

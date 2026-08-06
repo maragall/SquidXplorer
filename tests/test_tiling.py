@@ -49,8 +49,8 @@ def _arr(nbytes: int) -> np.ndarray:
     return np.zeros(nbytes, dtype=np.uint8)
 
 
-def _desc(level, key, bbox, channel="0") -> TileDescriptor:
-    return TileDescriptor(level, key, channel, bbox)
+def _desc(level, key, bbox, channel="0", t=0) -> TileDescriptor:
+    return TileDescriptor(level, key, channel, bbox, t)
 
 
 # ---------------------------------------------------------------------------------------

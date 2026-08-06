@@ -1227,9 +1227,13 @@ class PlateOverview(QWidget):
             # that a coarse rung can be served at all, at a dict lookup rather than the 25 s
             # full-plate decode Spencer measured. Seeding is lazy: nothing is read until a coarse
             # tile is actually asked for.
+            # `time_point=` on BOTH, and `t=` on the source, or `CompositePlateSource` refuses the
+            # pair. The cache defaults to timepoint 0 and this call simply never passed one, so
+            # the coarse rungs were seeded from frame 0's cells however far along the plate was.
             self._tile_src = CompositePlateSource(
-                reader, meta, self._ladder,
-                cache=PlateCellCache.for_reader(reader, meta, cell_px=_CELL))
+                reader, meta, self._ladder, t=self._time_point,
+                cache=PlateCellCache.for_reader(reader, meta, cell_px=_CELL,
+                                                time_point=self._time_point))
         except Exception:
             self._ladder = self._tile_src = None
             return False
@@ -1331,7 +1335,8 @@ class PlateOverview(QWidget):
                     continue
                 self._tile_level = lvl
                 out.append((TileDescriptor(level=lvl, key=key, channel=self._tile_channel(),
-                                           bbox_um=self._ladder.fov_bboxes[key]), rect))
+                                           bbox_um=self._ladder.fov_bboxes[key],
+                                           t=self._time_point), rect))
         return out
 
     def _tile_channel(self) -> str:
@@ -1423,7 +1428,18 @@ class PlateOverview(QWidget):
         bug ``docs/plate-contract.md`` records for the plate itself.
 
         The per-well contrast memo is keyed by well alone, so it is dropped here rather than
-        made to carry a timepoint it would only ever be read at one of."""
+        made to carry a timepoint it would only ever be read at one of.
+
+        DEEP ZOOM needs nothing rebuilt here, and that is the point of the timepoint being part of
+        :class:`~squidmip._tiling.TileDescriptor`. ``_visible_fov_tiles`` stamps this value on
+        every tile it asks for, ``TileCache`` is keyed by the descriptor, and every source reads
+        the frame off the request — so the repaint below fetches the new frame and the old one
+        stays cached for a step back, which is the same trade ``docs/plate-contract.md`` records
+        for putting ``t`` in the plate cell KEY rather than in its token.
+
+        This method used to touch neither ``_tile_src`` nor ``_tile_cache``, and nothing else did
+        either: measured on ``sim_5d_2x2_t3``, the same tile came back byte-identical after
+        ``set_time_point(2)`` while the plate reported it was showing timepoint 2."""
         tp = max(0, int(time_point))
         if tp == self._time_point:
             return
@@ -1431,6 +1447,8 @@ class PlateOverview(QWidget):
         self._loupe_win.clear()
         if self._loupe is not None:          # a live inset re-reads at the new frame
             self._request_loupe(self._loupe["x"], self._loupe["y"])
+        if self._tile_src is not None:
+            self.update()                    # repaint -> new descriptors -> the new frame's tiles
 
     def _arm_loupe(self):
         """Hold timer fired: the press became a loupe. Only reachable while still ARMED."""
