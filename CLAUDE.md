@@ -157,6 +157,25 @@ Counts are named with their own unit for the same reason: `n_fields_written` ove
 printed **"16/4 wells written"** on a healthy plate and **"12/4"** on one that lost a quarter of
 itself, and `_command`'s cancel line printed "stopped after 12 of 4 target(s)".
 
+**ONE marker, and the openers read it** (2026-08-06). `.squidmip-incomplete`, written inside
+`plate.ome.zarr` by `write_from_stream` and by nothing else, is THE record that a store is not
+whole. `_output.incomplete_reason(dir)` is the one reader that turns it into a sentence (quoting
+the marker's own `fields` / `fields_written` / `stopped`, never re-deriving them) and takes either
+the store or the `.hcs` folder holding it, so no caller has to resolve that itself.
+
+The writer half was already right; the READER half was not. `_viewer._open_computed` tested for a
+file called `INCOMPLETE` — a second name for the same fact, whose only writer
+(`_viewer._note_partial_output`) had **zero callers** — so the guard was dead and a save the user
+stopped opened as a finished acquisition. Measured on a store written by `write_from_stream` with
+`stop()` after 3 of 8 fields: `is_incomplete(store)` True, `(base/"INCOMPLETE").exists()` False,
+and the window printed "loading computed plate · 4 wells" over 2 wells on disk. The dead writer,
+`PlateWindow._run_out_dir` and the `finished_ok` hook that cleared it are gone — a GUI flag cannot
+see a well the engine skipped and cannot be set at all by a process that was killed, which is
+exactly why the store settles this itself. `_cli.run` refuses an INCOMPLETE plate as INPUT through
+the same function; `contract/validate.py` already warned on it. External readers were never the
+silent ones: measured, `ngio.open_ome_zarr_plate` raises `NgioValidationError` on the absent wells
+and `validate_plate` reports 5 hard errors.
+
 ## 3D is capped at DRAWING time, and renders in-window
 
 `docs/rendering-contract.md` is the contract; this is the rule that binds every render path.
@@ -297,6 +316,29 @@ They share a word and no code path. `on_screen_luts` **delegates** to the focuse
 name. The one genuine duplicate was `_adopt_centre_view` (plate pane) against `_adopt_window_view`
 (per window) — same job, and the pane-flavoured one was the dead one. Task 1 removed it; there is
 nothing left to collapse.
+
+## A tile's identity includes its TIMEPOINT
+
+`docs/plate-contract.md` is the contract; this is the rule. `_tiling.TileDescriptor` is
+`(level, key, channel, bbox_um, t)` and **`t` has no default**, because every source now reads the
+frame off the REQUEST — `ReaderTileSource` and `ZarrPyramidSource` take no `t` at construction at
+all. The plate cell cache made the same choice for the same reason (`(token, t, region)`, `t` in
+the KEY and not the token), and it buys the same thing: `TileCache` holds both frames, so stepping
+back to a timepoint already seen is a hit.
+
+It was measured, not reasoned: on `sim_5d_2x2_t3`, whose blob moves with `t`, one FOV tile came
+back **byte-identical** after `PlateOverview.set_time_point(2)` — sha `24d0d02d…` where t=2 is
+`a265917c…` — while the plate reported it was showing timepoint 2. The descriptor carried no
+timepoint, so nothing on that path could ask the question, while both caches under it (`_platecache`
+and `ReaderTileSource._planes`) keyed on one. `_workers.py` **raises** on exactly this mismatch one
+module over; the tile path avoided the reconciliation by never asking.
+
+A tile read at one frame and drawn under another is worse than one that does not move, so two
+places refuse rather than reconcile: `TileCache._nearest_ancestor` matches `t` as strictly as
+`channel` (the blur fallback is the one site licensed to draw something other than what was asked
+for), and `InMemoryMultiscale` — one frame's seeded cells — raises on a request for another, with
+`CompositePlateSource` refusing a mismatched `PlateCellCache` and routing a coarse tile at another
+`t` to the reader. `set_time_point` rebuilds nothing; it repaints, and the new descriptors do it.
 
 ## Two producers of a region's pixels, and they are not interchangeable
 

@@ -299,6 +299,45 @@ def is_incomplete(plate_dir) -> bool:
     return (Path(plate_dir) / _INCOMPLETE_MARKER).exists()
 
 
+def incomplete_reason(plate_dir) -> Optional[str]:
+    """One sentence naming this store's shortfall, or ``None`` when it is whole.
+
+    THE marker is :data:`_INCOMPLETE_MARKER`, written by :func:`write_from_stream` and by nothing
+    else, and this is how a READER turns it into words. It exists because every opener was
+    otherwise free to invent its own name for the same fact: the plate window checked a file
+    called ``INCOMPLETE`` that no writer has ever produced (its only writer,
+    ``_viewer._note_partial_output``, had zero callers), so a stopped save opened as a finished
+    acquisition — 3 of 8 fields on disk, the marker present, and the guard reading a different
+    path. Two names for one fact is the same defect as no name at all.
+
+    The marker's own recorded numbers are quoted rather than re-derived: it knows how many fields
+    the run owed and how many landed, and whether a human stopped it.
+
+    Accepts the STORE (``…/plate.ome.zarr``) or the ``.hcs`` folder holding it, because callers
+    legitimately hold either and making each one resolve that itself is how the second name got
+    invented in the first place.
+    """
+    root = Path(plate_dir)
+    marker = root / _INCOMPLETE_MARKER
+    if not marker.exists():
+        marker = root / "plate.ome.zarr" / _INCOMPLETE_MARKER
+    if not marker.exists():
+        return None
+    try:
+        info = json.loads(marker.read_text())
+    except (OSError, ValueError):
+        info = {}
+    owed, wrote = info.get("fields"), info.get("fields_written")
+    how = "was stopped mid-write" if info.get("stopped") else "did not finish"
+    if isinstance(owed, int) and isinstance(wrote, int):
+        return (f"the write that produced this plate {how}: {wrote} of {owed} field(s) landed, "
+                f"so wells its own metadata promises are not on disk")
+    # No counts: the marker was written at the START of the run and never replaced, i.e. the
+    # process died. That is MORE incomplete than a stop, not less, so it must never read as milder.
+    return (f"the write that produced this plate {how} — it was still running when it ended, so "
+            f"an unknown number of the wells its metadata promises are not on disk")
+
+
 def _mark_incomplete(plate_dir: Path, info: dict) -> None:
     (plate_dir / _INCOMPLETE_MARKER).write_text(json.dumps(info, indent=2))
 

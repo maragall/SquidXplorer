@@ -148,7 +148,7 @@ from squidmip._minerva import NEEDS_INTERNET_NOTE as _MINERVA_INTERNET_NOTE
 from squidmip._minerva import MINERVA_URL as _MINERVA_URL
 from squidmip._gallery import GalleryScope as _GalleryScope
 from squidmip._montage import _hex_to_rgb01
-from squidmip._output import parse_well_id
+from squidmip._output import incomplete_reason, parse_well_id
 from squidmip._activity import ActivityLog
 from squidmip._address import Extent
 from squidmip._logpane import LogBus, ViewLog
@@ -481,7 +481,6 @@ class PlateWindow(QMainWindow):
         self._gallery = None          # the ONE open GalleryWindow, or None (see _open_gallery_view)
         self._readout_base = ""
         self._tabs_muted = False      # suppress _on_tab_changed during bulk teardown (ingest)
-        self._run_out_dir = None      # output dir of the in-flight SAVE run (for partial cleanup)
         self._run_label = ""          # the in-flight run's operator label, and where it is going —
         self._run_dest = ""           # one source for the status line
         self._pending_resync = False  # a tab switch was deferred because a run was live (IMA-205 bugs)
@@ -1323,23 +1322,6 @@ class PlateWindow(QMainWindow):
         self._op_tabs[key] = w
         tabs.addTab(w, title)
         tabs.setCurrentWidget(w)
-
-    def _note_partial_output(self):
-        """A save run stopped mid-write leaves a partial `.hcs`. Drop an INCOMPLETE marker in it so
-        a later 'Open a computed MIP…' can refuse it instead of presenting a truncated plate as a
-        finished one (resolve_plate_root only looks for plate.ome.zarr, which a partial still has)."""
-        out = self._run_out_dir
-        self._run_out_dir = None
-        if not out:
-            return
-        try:
-            p = Path(out)
-            if p.exists():
-                (p / "INCOMPLETE").write_text(
-                    "This plate was stopped mid-write and is NOT complete.\n"
-                    "Re-run the operator to produce a full plate.\n")
-        except OSError:
-            pass       # best-effort: never let cleanup bookkeeping break teardown
 
     def _on_progress(self, done: int, total: int):
         """A run advanced by a WELL. Feeds the log panel's activity header.
@@ -2958,12 +2940,20 @@ class PlateWindow(QMainWindow):
         if not (zroot / "zarr.json").exists():
             self._readout.setText("not an .hcs plate — pick a folder containing plate.ome.zarr")
             return
-        # A run stopped mid-write leaves a real-looking plate.ome.zarr with only some wells in it.
-        # Refuse it by name rather than silently presenting a truncated plate as a finished one.
-        if (base / "INCOMPLETE").exists():
+        # A run that was stopped, or that lost a well to `on_error`, leaves a real-looking
+        # plate.ome.zarr with only some of its wells in it. Refuse it by name rather than present a
+        # truncated plate as a finished one.
+        #
+        # THE marker is the one `write_plate` writes, read through `_output.incomplete_reason`.
+        # This used to test `base / "INCOMPLETE"` -- a second name for the same fact, whose only
+        # writer (`_note_partial_output`) had no callers, so the guard was dead and every stopped
+        # save opened as a finished acquisition. The store settles this itself, so the refusal also
+        # holds for a plate this window never wrote and for one whose process was killed.
+        why = incomplete_reason(zroot)
+        if why is not None:
             self._readout.setText(
-                f"{base.name} was stopped mid-write and is incomplete — re-run the operator "
-                f"(delete the INCOMPLETE marker to open it anyway)")
+                f"{base.name} is INCOMPLETE — {why}. Re-run the operator, or delete "
+                f"{zroot.name}/.squidmip-incomplete to open it anyway.")
             return
         try:
             plate = json.loads((zroot / "zarr.json").read_text())["attributes"]["ome"]["plate"]
@@ -3331,7 +3321,6 @@ class PlateWindow(QMainWindow):
                                        str(out_dir) if out_dir else "", regions=regions, save=save,
                                        n_fovs=None, operator_kwargs=operator_kwargs)
         self._overview.set_mosaic_boxes(self._worker.mosaic_boxes)
-        self._run_out_dir = str(out_dir) if (save and out_dir) else None   # for partial-output cleanup
         # A re-run must not composite on top of the LAST run's pixels: with a mosaic, a run that
         # lands fewer FOVs would otherwise leave the previous run's fields standing in the same
         # cell, blended into the new ones. Drop this layer's store before the first tile arrives.
@@ -3369,9 +3358,11 @@ class PlateWindow(QMainWindow):
                     f"✓ {label} · {scope}{dest}" + ("  (re-openable OME-Zarr)" if save else ""))
 
         self._worker.finished_ok.connect(_done_msg)
-        # a run that FINISHED wrote a complete plate — forget the path so a later stop can never
-        # retroactively flag it incomplete
-        self._worker.finished_ok.connect(lambda: setattr(self, "_run_out_dir", None))
+        # Whether the plate this run is writing ended up whole is NOT tracked here. `write_plate`
+        # settles it on the store itself (`_output._INCOMPLETE_MARKER`, kept unless every field
+        # this run owed landed) as the last act of the write, which is the only place that knows
+        # the answer -- a GUI flag set from `finished_ok` cannot see a well the engine skipped, and
+        # cannot be set at all by a process that was killed. See `_open_computed`.
         # QThread.finished (not finished_ok): it fires for a FAILED or STOPPED run too, and a tab
         # switch deferred during any of those still has to be delivered. _retire only disconnects
         # the worker's own signals, so this survives a stop.

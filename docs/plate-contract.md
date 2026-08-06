@@ -155,7 +155,7 @@ extent, so a stale slider position cannot index off the end of a shorter re-inge
 | --- | --- |
 | `reader.read(region, fov, channel, z, t)` | takes `t`, defaults to 0 |
 | `_montage.render` | takes `t`, clamped |
-| `_tilesource` (`ZarrPyramidSource`, `InMemoryMultiscale`) | takes `t`, clamped |
+| `_tilesource` (every source) | reads `t` off the `TileDescriptor`, clamped — see "deep zoom" below |
 | `_workers._ComputedPlateWorker._read` | takes `time_point`, clamped |
 | `_plate_overview` loupe source (`read_crop`, `coarse`) | takes `time_point`, clamped |
 
@@ -224,11 +224,38 @@ paid; nobody has asked for the button, so `TimePointBar(playback=False)` stands 
 `play()` on it raises rather than no-ops. Adding it is a widget flag and a frame gate, not a
 correctness problem.
 
-**Not covered by this change: the deep-zoom coarse rungs.** `PlateOverview.set_tile_source` builds
-its `CompositePlateSource` with a `PlateCellCache` at the default `time_point=0` and never passes
-`t` to the source either, so a coarse tile is frame 0's regardless of the bar. That is unchanged
-behaviour, not a regression, and it is a different seam (the source is armed once at ingest and
-seeds lazily). It is named here so it is a known gap rather than a discovery.
+**Deep zoom, 2026-08-06: the timepoint is part of the TILE'S IDENTITY.** This section used to name
+the tile path as a known gap — `PlateOverview.set_tile_source` built its `CompositePlateSource`
+with a `PlateCellCache` at the default `time_point=0`, passed no `t` to the source, and
+`set_time_point` touched neither `_tile_src` nor `_tile_cache`. The gap was wider than "coarse
+rungs": the FOV rungs were frozen too, because `_tiling.TileDescriptor` carried
+`level, key, channel, bbox_um` and no timepoint at all, so *nothing on that path could ask the
+question*. Measured on `sim_5d_2x2_t3`, whose blob moves with `t`:
+
+| | sha256[:16] of one FOV tile, ('A1', 0), 405 nm |
+| --- | --- |
+| plate at t=0 | `24d0d02da9674b3e` |
+| plate after `set_time_point(2)` | `24d0d02da9674b3e` — **byte-identical**, while the plate reported t=2 |
+| what t=2 actually is | `a265917cd7c338cf` |
+
+`TileDescriptor` now carries `t`, **with no default**, and every source reads the frame off the
+REQUEST rather than off itself: `ReaderTileSource` and `ZarrPyramidSource` no longer take a `t` at
+construction at all. That is the same argument as `(token, t, region)` above, in the same place —
+the key — and it buys the same thing: `TileCache` holds both frames, so stepping back to one
+already seen is a hit rather than a re-read. A default of `0` is refused precisely because
+`PlateCellCache.for_reader(time_point=0)` had one and `_plate_overview` simply never passed it.
+
+Two guards keep a tile read at one frame from being drawn under another, which is the failure that
+is worse than not moving at all:
+
+* `TileCache._nearest_ancestor` matches `t` as strictly as it matches `channel`. That fallback is
+  the ONE site licensed to draw a tile other than the one requested, so a `t`-blind ancestor there
+  would have reintroduced the whole defect at the one place nobody looks.
+* `InMemoryMultiscale` holds ONE frame's seeded cells and raises on a request for another;
+  `CompositePlateSource` refuses a `PlateCellCache` whose `time_point` disagrees with its own
+  (the refusal `_workers._PreviewWorker` already makes at the other end of the same cells), and
+  routes a coarse tile at another `t` to the reader — real pixels at real cost, counted in
+  `coarse_from_reader` — instead of serving what happens to be resident.
 
 **The shape of the bug that was here, worth remembering.** The plate overview and the loupe read
 `arr[0, :, 0]` unconditionally, so a 40-timepoint plate looked exactly like a 1-timepoint plate.

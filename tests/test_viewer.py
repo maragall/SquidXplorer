@@ -1488,43 +1488,90 @@ def test_check_disk_scales_with_subset_size(qapp, squid_dataset, tmp_path):
     win.close()
 
 
-def test_note_partial_output_marks_a_stopped_plate(qapp, squid_dataset, tmp_path):
-    """A save run that is stopped mid-write leaves a real-looking plate.ome.zarr holding only some
-    wells. Mark it, so 'Open a computed MIP' can refuse it instead of showing a truncated plate as
-    a finished one."""
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    out = tmp_path / "acq.hcs"
-    (out / "plate.ome.zarr").mkdir(parents=True)
-    win._run_out_dir = str(out)
-    win._note_partial_output()
-    assert (out / "INCOMPLETE").exists()
-    assert win._run_out_dir is None                     # consumed, so it can't leak to a later run
-    win.close()
+def _write_plate_for_open(out, *, stop_after=None):
+    """Write a real ``<out>/plate.ome.zarr`` from a hand-built stream; stop it after N fields.
+
+    Deliberately the WRITER, not a fabricated marker file. The defect this pins was that the
+    plate window tested a marker no writer produces, so a test that plants the file the reader
+    expects proves nothing about a run: both halves have to be the shipped code.
+    """
+    from squidmip._output import write_from_stream
+
+    regions = ["A1", "A2", "B1", "B2"]
+    meta = {
+        "regions": regions,
+        "fovs_per_region": {r: [0, 1] for r in regions},
+        "fov_positions_um": {(r, f): (0.0, f * 16.0) for r in regions for f in (0, 1)},
+        "channels": [{"name": "C0", "display_color": "#FFFFFF"}],
+        "n_z": 1, "z_levels": [0], "dz_um": 1.0, "pixel_size_um": 1.0,
+        "frame_shape": (16, 16), "dtype": np.dtype("uint16"), "n_t": 1,
+    }
+
+    def stream():
+        for region in regions:
+            for fov in (0, 1):
+                yield region, fov, np.full((1, 1, 1, 16, 16), 7, np.uint16)
+
+    seen = {"n": 0}
+
+    def stop():
+        seen["n"] += 1
+        return seen["n"] > int(stop_after)
+
+    return write_from_stream(meta, stream(), out, n_fovs=None, check_disk=False,
+                             stop=(None if stop_after is None else stop))
 
 
-def test_open_computed_refuses_an_incomplete_plate(qapp, tmp_path, monkeypatch):
+def test_open_computed_refuses_the_plate_a_stopped_write_actually_leaves(
+        qapp, tmp_path, monkeypatch):
+    """A save the user stopped leaves a truncated store that reads as a finished acquisition.
+
+    End to end, both halves shipped: ``write_from_stream`` stops after 3 of 8 fields and marks the
+    store, and the window must refuse it. Before this, the window looked for a file called
+    ``INCOMPLETE`` whose only writer (``_note_partial_output``) had zero callers, so the guard was
+    dead: measured on this exact store, ``is_incomplete`` was True while the window opened it and
+    laid out four wells of which two are not on disk.
+    """
     base = tmp_path / "acq.hcs"
-    (base / "plate.ome.zarr").mkdir(parents=True)
-    (base / "plate.ome.zarr" / "zarr.json").write_text("{}")
-    (base / "INCOMPLETE").write_text("stopped\n")
+    manifest = _write_plate_for_open(base, stop_after=3)
+    assert manifest["complete"] is False and manifest["n_fields_written"] == 3
+
     win = V.PlateWindow(None)
     monkeypatch.setattr(V.QFileDialog, "getExistingDirectory", lambda *a, **k: str(base))
     win._open_computed()
-    assert "incomplete" in win._readout.text().lower()
+    said = win._readout.text()
+    assert "INCOMPLETE" in said, f"a stopped save opened as a finished plate; window said: {said!r}"
+    assert "3 of 8" in said, f"the refusal must quote the shortfall the store recorded: {said!r}"
     win.close()
 
 
-def test_completed_save_run_is_not_marked_incomplete(qapp, squid_dataset, tmp_path):
-    """The other half of the invariant: a run that finishes must NOT be flagged."""
+def test_open_computed_accepts_a_write_that_finished(qapp, tmp_path, monkeypatch):
+    """The other half of the invariant: a complete write must NOT be refused.
+
+    A guard that refuses everything is as useless as one that refuses nothing, and this is the
+    half the dead marker passed for free.
+    """
+    base = tmp_path / "acq.hcs"
+    assert _write_plate_for_open(base)["complete"] is True
+
+    win = V.PlateWindow(None)
+    monkeypatch.setattr(V.QFileDialog, "getExistingDirectory", lambda *a, **k: str(base))
+    win._open_computed()
+    assert "INCOMPLETE" not in win._readout.text()
+    win.close()
+
+
+def test_a_finished_save_run_leaves_no_incomplete_marker(qapp, squid_dataset, tmp_path):
+    """A real GUI save run that finishes leaves a store that says so."""
+    from squidmip._output import incomplete_reason
+
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
     win.run_operator("mip", out_parent=str(tmp_path), regions=["B2", "B3"], save=True)
     assert _drain_until(qapp, lambda: not win._busy(), timeout=90)
     out = tmp_path / f"{win._acq_name}.hcs"
-    assert not (out / "INCOMPLETE").exists(), "a completed plate must not be flagged incomplete"
+    assert incomplete_reason(out) is None, "a completed plate must not be flagged incomplete"
     win.close()
 
 

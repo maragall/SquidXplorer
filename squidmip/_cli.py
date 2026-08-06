@@ -365,7 +365,20 @@ def run(params: ProcessParameters, *, stop=None) -> dict:
     """
     from squidmip import open_reader
     from squidmip._command import CANCELLED, CommandBus, EngineExecutor, RunOperator
+    from squidmip._output import incomplete_reason
     from squidmip._plate_shape import PlateShapeError, resolve_plate_format
+
+    # An OME-Zarr plate is a legal INPUT (`reader.SquidZarrReader`), so "process this folder" can
+    # be aimed at a store some earlier run left half-written. Refuse it here, in the same words the
+    # plate window uses, rather than project a subset of a plate and report it as the plate: every
+    # count downstream -- targets, wells written, the exit code -- would be honest about the run
+    # and wrong about the sample. Deleting the marker is the override, exactly as in the GUI.
+    why = incomplete_reason(params.input_folder)
+    if why is not None:
+        raise SystemExit(
+            f"{params.input_folder} is an INCOMPLETE plate: {why}.\n"
+            f"Re-run the write that produced it, or delete its .squidmip-incomplete marker to "
+            f"process what did land.")
 
     reader = open_reader(params.input_folder)
     # What plate is this? Resolved by the module that OWNS the question: declared format ->

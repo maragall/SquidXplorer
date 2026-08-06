@@ -264,7 +264,7 @@ def test_in_ram_multiscale_dirty_tiles_drive_tilecache_invalidate():
     coarse = pv.levels[0]
     key = ladder.geometry.levels[coarse].keys[0]
     from squidmip._tiling import TileDescriptor
-    desc = TileDescriptor(coarse, key, "0", ladder.cell_bbox_um(coarse, key))
+    desc = TileDescriptor(coarse, key, "0", ladder.cell_bbox_um(coarse, key), 0)
     cache.insert(desc, pv.read_tile(desc))          # a black tile, cached before the field lands
     assert not cache.get(desc).any()
 
@@ -342,7 +342,7 @@ def test_zarr_source_composites_a_plate_tile_from_many_fovs(tmp_path):
     key = src.ladder.geometry.levels[coarse].keys[0]
     from squidmip._tiling import TileDescriptor
     bbox = src.ladder.cell_bbox_um(coarse, key)
-    tile = src.read_tile(TileDescriptor(coarse, key, src.channels[0], bbox))
+    tile = src.read_tile(TileDescriptor(coarse, key, src.channels[0], bbox, 0))
     assert tile.dtype == np.uint16
     assert tile.any()                                     # real pixels, not a blank canvas
     # the coarse tile must be small: a plate view is bounded by the tile size, not the plate
