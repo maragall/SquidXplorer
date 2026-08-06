@@ -233,8 +233,16 @@ def roi_window_px(meta: dict, region: str, roi_bbox_um: Sequence[float]) -> Opti
     """An ROI box in stage um -> ``(r0, r1, c0, c1)`` LEVEL-0 mosaic pixels, clipped to the region.
 
     Mosaic pixel space is the one ``_placement.fov_offsets_px`` speaks: row/col from the region's
-    top-left origin. This is ``native_roi_volume``'s own conversion lifted out, so the bricked path
-    and the single-volume path cannot drift apart on where the ROI is."""
+    top-left origin. THE box -> window conversion; :func:`read_brick` is the matching window ->
+    voxels half, and together they are the whole of what a drawn ROI's 3D takes.
+
+    This docstring used to say the conversion had been "lifted out of ``native_roi_volume`` so the
+    bricked path and the single-volume path cannot drift apart" — while ``native_roi_volume`` went
+    on carrying its own copy, with no caller. They had drifted three ways, and the copy was wrong
+    every time: a box past the region edge came back 40 px wide over an 8 px mosaic (32 columns of
+    zeros presented as data), a bottom-right-to-top-left drag came back empty, and a missing
+    ``pixel_size_um`` was fabricated as 1.0 rather than refused. It is deleted;
+    ``tests/test_roi_fusion.py`` pins all three and fails if it returns."""
     from squidmip._placement import fov_offsets_px, mosaic_extent_px
 
     origin = region_origin_um(meta, region)
@@ -325,9 +333,9 @@ def read_brick(reader: Any, meta: dict, region: str, window: Sequence[int], chan
                step: int = 1, should_stop: Optional[Any] = None) -> Optional[np.ndarray]:
     """ONE brick's ``(z, y, x)`` voxels, fused across the FOVs it overlaps, strided by *step*.
 
-    This is ``native_roi_volume``'s inner loop scoped to a single brick, and that scoping is the
-    whole memory argument: the caller never holds the ROI, only the bricks the camera is looking
-    at. *window* is ``(r0, r1, c0, c1)`` in level-0 mosaic pixels.
+    THE window -> voxels fuser, and the scoping to one brick is the whole memory argument: the
+    caller never holds the ROI, only the bricks the camera is looking at. *window* is
+    ``(r0, r1, c0, c1)`` in level-0 mosaic pixels, which is what :func:`roi_window_px` returns.
 
     The brick is pasted at NATIVE size and strided at the end rather than sampled sparsely, because
     the reader hands back whole decoded FOV planes either way -- striding earlier would save nothing

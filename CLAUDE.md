@@ -157,6 +157,59 @@ Counts are named with their own unit for the same reason: `n_fields_written` ove
 printed **"16/4 wells written"** on a healthy plate and **"12/4"** on one that lost a quarter of
 itself, and `_command`'s cancel line printed "stopped after 12 of 4 target(s)".
 
+## "Is this written plate incomplete?" has ONE answer, and the store holds it
+
+`_output.INCOMPLETE_MARKER` (`.squidmip-incomplete`, **inside `plate.ome.zarr`**) and
+`_output.is_incomplete()` are the only spelling of the question and the only place it is answered.
+`_cli --check`, `contract.validate` and the GUI's **Open a computed .hcs plate** all ask it;
+`contract.validate` **imports** the name rather than re-declaring the string.
+
+There was a second marker until 2026-08-06: `PlateWindow._note_partial_output` wrote a file named
+`INCOMPLETE` into the PARENT `.hcs` directory, best-effort, from a Qt teardown slot, and
+`_open_computed` was its only reader. The two were blind to each other and did not answer the same
+question — the store's marker means *every field this run owed is on disk* (see the section above),
+the window's meant only *somebody pressed stop*. Measured on a `write_from_stream` that put **2 of
+3 fields** on disk: `is_incomplete` True, the window's predicate **False**, so the GUI opened a
+plate missing a third of its wells with no warning while the plate metadata still advertised them.
+The window's own docstring justified the second marker with *"resolve_plate_root only looks for
+plate.ome.zarr, which a partial still has"* — which is the reason the FIRST marker exists.
+`_note_partial_output`, `_run_out_dir` and the file are gone;
+`tests/test_viewer.py::test_there_is_no_second_incomplete_marker` fails the build if a bare
+`INCOMPLETE` filename returns to `_viewer.py`.
+
+## One dtype-cast rule, one ROI conversion, one row alphabet
+
+Three collapses of the same shape (2026-08-06), recorded because each was a *stalled* one — a
+docstring already claimed the collapse had happened.
+
+**`projection.cast_like(values, dtype, *, copy=False)`** is THE cast of a float result back to the
+acquisition dtype: round (never truncate — half a count of systematic dimming on every pixel) and
+clip (never wrap — the frame's darkest pixel becoming its brightest), both monotone, which is why
+they do not break the commutation with the MIP. It was three byte-identical private `_cast_like`
+bodies (`_background`, `_decon`, `_flatfield`), each arguing a different third of that reason, plus
+two inline `rint`-then-`clip` loops (`_output._downsample_yx`, `_tilesource._paste_field`).
+`_stitch` already imported one of the three. `copy=False` is the in-place form for the two loops
+that own a fresh float buffer, and it **refuses a non-float array by name** — an in-place `rint`
+into an integer buffer is a silent no-op.
+
+**`_napari3d.roi_window_px` + `read_brick`** are THE box -> window -> voxels path a drawn ROI's 3D
+takes. `native_roi_volume` was both of them open-coded, with no caller outside its own test, while
+`roi_window_px`'s docstring already said it was that function's conversion "lifted out, so the
+bricked path and the single-volume path cannot drift apart". Measured, three disagreements, the
+copy wrong every time: a box past the region edge returned `(2, 4, 40)` against `(2, 4, 8)` — **32
+of 40 columns zeros presented as acquired data**; a bottom-right-to-top-left drag returned
+**nothing** (it compared raw corners with no `min`/`max`); a missing `pixel_size_um` was fabricated
+as `1.0` instead of refused. It also bypassed the shared plane cache `read_brick` uses.
+
+**`_plate_shape._row_index`** is THE letters -> row index, and it lives in `_plate_shape` because
+`_plate` imports that module and the arrow runs one way. `_row_letter` was collapsed the same day
+by another branch; `_row_index` was left as two bodies that were **not** identical and only its
+comment was corrected. The un-guarded one answered `_row_index("A1")` with **10**, `("1")` with
+**-16** and `("manual0")` with **4034554195**, silently, where the guarded one raised. Latent
+today (`_WELL_RE` filters `well_span`'s input), which is not the same as harmless.
+`tests/test_plate_shape.py` pins the COUNT of definitions, not the module, so an independent
+collapse of the same duplication still satisfies it.
+
 ## 3D is capped at DRAWING time, and renders in-window
 
 `docs/rendering-contract.md` is the contract; this is the rule that binds every render path.

@@ -5578,7 +5578,7 @@ def _grab_rgb(ov) -> np.ndarray:
 
 def _fitted_plate(nrows, ncols, w=1400, h=900):
     """An nrows x ncols overview, fitted to (w, h), one channel declared."""
-    rows = [V.row_letter(i) for i in range(nrows)]
+    rows = [V._row_letter(i) for i in range(nrows)]
     cols = [str(i + 1) for i in range(ncols)]
     by_rc = {(r, c): f"{rows[r]}{cols[c]}" for r in range(nrows) for c in range(ncols)}
     ov = V.PlateOverview(rows, cols, by_rc)
