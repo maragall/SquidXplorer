@@ -236,9 +236,24 @@ moment `find` / `channels` / `visible_op` answer about BRICKS. Therefore `_open_
 Measured, second 3D click over a `bgsub` layer: the source was one 512 px brick, **1 of 9** bricks
 of the ROI yielded voxels, and the contrast came back `(0.0, 1.0)` against `(120, 900)` on screen.
 Same reason, same commit: a key is **one-to-many**, so anything that DRIVES a pair uses
-`MosaicLayers.find_all` (the tree's checkbox drove 1 brick of N) and `find` is only for anything
+`MosaicLayers.layers_for` (the tree's checkbox drove 1 brick of N) and `find` is only for anything
 needing *a* layer. 3D's LUTs are harvested from the layer being RENDERED (`_on_screen_luts(source)`),
 never from raw.
+
+**napari will not re-slice a HIDDEN layer, but it will still update its slice INPUT** — so a 2D/3D
+flip leaves every hidden layer claiming a dimensionality its own slice does not have.
+`Layer._slice_dims` assigns `_slice_input` unconditionally and then calls `_refresh_sync`, which
+returns at `if not (self.visible or force)`. `Image._update_thumbnail` — which EVERY
+`contrast_limits` write calls, with no visibility guard — then does `np.max(image, axis=0)` on a
+stale 2-D thumbnail and hands `scipy.ndimage.zoom` a 2-element zoom for a rank-1 array. Measured on
+the real 10x set against a multiscale raw `(10, 5731, 4794)`: open a 3-D volume, drag the contrast,
+`RuntimeError: sequence argument must have length equal to input rank` — through
+`MosaicLayers.set_contrast` and through a bare layer write alike, and in BOTH flip directions.
+Reachable only since bricks became real model layers (`adopt` registers them, so `_link_set` links
+a brick to the hidden flat mosaics of its channel). `MosaicLayers._reslice_hidden_layers` is
+subscribed to `dims.events.ndisplay` — one place, so napari's own 2D/3D button is covered too — and
+calls `refresh(force=True)`, napari's own public opt-out of that guard. 4.5 ms on the real pyramid.
+`ndim > 2` is the exact precondition of napari's branch, not an optimisation.
 
 **A REGION operator's result reaches the layer at full depth** (2026-08-06).
 `_workers._OperatorWorker._result_pixels` emits `image[0]` — `(C, Nz, Y, X)` — for an operator

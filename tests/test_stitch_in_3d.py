@@ -62,6 +62,13 @@ PX_UM, DZ_UM = 1.0, 2.5
 CHANNELS = ["c0", "c1"]
 REGION = "manual0"
 
+#: The raw PREVIEW's decimation. `_mosaic_source.fuse_region_pyramid` caps level 0 to
+#: `_MAX_FUSED_PX` and records the truth in the layer's own `scale`, so a window showing raw is
+#: showing coarser pixels than the acquisition's. A stitched mosaic is not: it is the fused result
+#: at full resolution. Both pitches therefore exist in one scene, which is what makes an assertion
+#: about which one 3D reads mean anything.
+_PREVIEW_STEP = 2
+
 #: plane k is filled with this, so a dropped, duplicated or reordered plane is a NUMBER that is
 #: wrong rather than a shape that happens to match.
 def _plane_value(z: int, c: int) -> int:
@@ -167,7 +174,17 @@ def test_the_layer_z_depth_drives_3D_and_a_brick_comes_back_with_every_plane():
     ``_volume_source`` refuses a layer with no z ("carries no z depth here"), which is what a
     stitched layer used to be. This asserts the voxels, not the refusal message.
 
-    MUTATION: as above -> `_volume_source` returns (None, None) and this fails on `source`.
+    THE PITCH IS PART OF THE ANSWER, not something to discard. ``_volume_source`` returns the
+    ``(y, x)`` um/px of the LAYER it reads, because a displayed layer is not always at the
+    acquisition's pitch -- ``fuse_region_pyramid`` decimates a raw PREVIEW (measured: step 2, so
+    1.504 against 0.752 on the 10x set), and a volume drawn as if those were native voxels is a
+    physically wrong picture. A stitched region operator's layer is the opposite case and that is
+    the point of stitching for 3D: it is the fused mosaic at full resolution, placed by its own
+    canvas, so 3D of it is at the acquisition's own pitch and nothing is silently coarser.
+    ``tests/test_roi_pitch.py`` owns the decimated side of that contract; this owns the claim that
+    a STITCH is not decimated.
+
+    MUTATION: as above -> `_volume_source` returns (None, None, None) and this fails on `source`.
     """
     meta = _meta()
     h, w = _mosaic_hw(meta)
@@ -175,8 +192,14 @@ def test_the_layer_z_depth_drives_3D_and_a_brick_comes_back_with_every_plane():
     mos, _model = _pane_with(meta, op="stitch", result=result)
 
     win = _Window(meta, mos)
-    read, source, _pitch = RegionViewer._volume_source(win, (0, h, 0, w))
+    read, source, pitch = RegionViewer._volume_source(win, (0, h, 0, w))
     assert source == "stitch" and read is not None, f"3D refused the stitched layer: {win.said}"
+    # The raw preview in this same scene is at `_PREVIEW_STEP * PX_UM`, so this is a statement
+    # about WHICH layer was read as much as about the pitch.
+    assert pitch is not None and tuple(round(float(v), 6) for v in pitch) == (PX_UM, PX_UM), (
+        f"3D reads the stitched layer at {pitch} um/px, not the acquisition's {PX_UM}: a stitched "
+        f"mosaic is native, and a volume of it must not be at the preview's "
+        f"{_PREVIEW_STEP * PX_UM} um/px")
 
     brick = _bricks.Brick(iy=0, ix=0, r0=0, r1=min(16, h), c0=0, c1=min(16, w))
     voxels = read(brick, CHANNELS[0], 1, None)
@@ -237,7 +260,13 @@ def _pane_with(meta: dict, *, op: str, result=None, raw_clim=(5.0, 9.0),
     h, w = _mosaic_hw(meta)
     bbox = mosaic_bbox_um(meta, REGION)
     for channel in raw_channels:
-        mos.add_mosaic(_RAW_OP, channel, np.zeros((N_Z, h, w), np.uint16),
+        # RAW IS DECIMATED, as `fuse_region_pyramid` really builds it: level 0 is capped to
+        # `_MAX_FUSED_PX`, so the preview covers the same micrometres in half the pixels (measured
+        # on the 10x set: step 2, 1.504 um/px against an acquisition 0.752). Building it at native
+        # size here would make the two pitches in this scene identical and every assertion about
+        # WHICH layer 3D read at WHAT pitch vacuous.
+        mos.add_mosaic(_RAW_OP, channel, np.zeros((N_Z, h // _PREVIEW_STEP, w // _PREVIEW_STEP),
+                                                  np.uint16),
                        contrast_limits=raw_clim, bbox_um=bbox, z_scale_um=DZ_UM)
     if result is not None:
         for channel in CHANNELS:
@@ -330,15 +359,24 @@ def stub_bricked(monkeypatch):
     return _Stubbed
 
 
-#: The window a BRICK ends up carrying when it is not the mosaic's. Bricks derive their own with
-#: ``_napari3d._auto_clim`` whenever the harvest had no entry for the channel, and a drag inside a
-#: 3-D view propagates across the bricks and nowhere else -- so a brick's window is not the 2-D
-#: layer's, and a harvest that lands on one silently changes what the next view shows.
-_BRICK_CLIM = (7.0, 8.0)
+#: A window a user drags to while the VOLUME is what they are looking at.
+#:
+#: This constant used to stand for "a window a brick carries that the 2-D layer does not", and that
+#: state no longer exists: since `fix/one-layer-model` a brick is a real model layer, so a write on
+#: one mirrors across its identity and propagates through `_link_set` to the channel's flat
+#: mosaics. Measured on the real 10x set: writing `(11, 22)` on a brick leaves the hidden
+#: `raw · 405` layer holding `(11, 22)`. One value per channel, everywhere, which is the stronger
+#: guarantee -- so what is worth pinning is that the value SURVIVES the flip, not that two of them
+#: can disagree.
+_DRAGGED_CLIM = (7.0, 8.0)
 
 
-def _volume_up(win, roi, stub_bricked, op):
-    """Open a first 3D volume and let some of its bricks land, as a live view has them."""
+def _volume_up(win, roi, stub_bricked, op, drag_to=None):
+    """Open a first 3D volume and let some of its bricks land, as a live view has them.
+
+    *drag_to* is a contrast the user moves to while the volume is up, written on a brick because
+    that is the layer napari's slider is addressing in 3D.
+    """
     win._roi_bbox = roi
     win._open_3d()
     vol = win._native3d
@@ -347,11 +385,17 @@ def _volume_up(win, roi, stub_bricked, op):
         vol._add_layer((CHANNELS[0], (iy, ix)), CHANNELS[0],
                        np.zeros((N_Z, 16, 16), np.uint16), (DZ_UM, PX_UM, PX_UM),
                        (0.0, iy * 16 * PX_UM, ix * 16 * PX_UM))
-    for ly in win._napari_viewer().layers:
-        if key_of(ly) is not None and ly is not None and "▪" in str(getattr(ly, "name", "")):
-            ly.contrast_limits = _BRICK_CLIM
     assert [key_of(ly) for ly in win._napari_viewer().layers].count(
         MosaicKey(op, CHANNELS[0])) >= 3, "the bricks did not take the identity"
+    if drag_to is not None:
+        # THE CRASH THIS ALSO PINS. Until `MosaicLayers._reslice_hidden_layers`, this write raised
+        # `RuntimeError: sequence argument must have length equal to input rank` from
+        # `scipy.ndimage.zoom` -- the flat mosaics are hidden across the 2D->3D flip, napari left
+        # their 2-D slice under a 3-D slice input, and the link carried the write straight into
+        # `Image._update_thumbnail`. Reproduced on the real 10x acquisition through
+        # `MosaicLayers.set_contrast` and through a bare layer write alike.
+        mos = win._pane.mosaic
+        mos.find(op, CHANNELS[0]).contrast_limits = drag_to
     return vol
 
 
@@ -453,12 +497,24 @@ def test_the_volume_opens_on_the_window_the_RENDERED_layer_is_showing(stub_brick
             "screen is windowed (120.0, 900.0)")
 
 
-def test_a_SECOND_3d_open_keeps_the_window_instead_of_taking_a_bricks(stub_bricked):
-    """The other half: while a volume is up the pane's own layers are FOREIGN, so the harvest
-    landed on a brick and the second view opened at that texture's autoscale.
+def test_a_contrast_set_IN_3D_survives_the_flip_and_the_next_volume_opens_on_it(stub_bricked):
+    """A window the user moved to while the VOLUME was up is the window the next one opens on.
 
-    MUTATION: move `self._close_native3d()` in `_open_3d` after the dispatch -> the harvest reads a
-    brick, whose window is the (0, 0) `_auto_clim` of a zero array -> red.
+    Two things have to hold at once for this, and neither is free:
+
+    * the drag must not RAISE. It did, on real data, until
+      ``MosaicLayers._reslice_hidden_layers``: the flat mosaics are hidden across the 2D->3D flip
+      and napari left their 2-D slice under a 3-D slice input, so the linked write blew up in
+      ``Image._update_thumbnail``. ``_volume_up(drag_to=...)`` is that gesture.
+    * the second open must harvest the LIVE model. It reads the value the drag left behind, not
+      the one the layer was seeded with.
+
+    What this deliberately does NOT assert any more is that a brick can hold a window the flat
+    mosaic does not -- see ``_DRAGGED_CLIM``. Since `fix/one-layer-model` that state cannot exist,
+    and writing a test that manufactures it would be pinning a bug as a feature.
+
+    MUTATION: pass `contrast_by=None` in `_open_roi_3d`'s `BrickedVolume(...)` call -> the volume
+    derives its own with `_auto_clim` instead of adopting the screen's -> red.
     """
     from squidmip._mosaic_source import mosaic_bbox_um
 
@@ -468,16 +524,97 @@ def test_a_SECOND_3d_open_keeps_the_window_instead_of_taking_a_bricks(stub_brick
     mos, _model = _pane_with(meta, op="stitch", result=result)
     roi = mosaic_bbox_um(meta, REGION)
     win = _Window(meta, mos)
+    # Held by OBJECT: while a volume is up this layer has surrendered its identity, so `find` does
+    # not name it -- which is the whole reason `_open_3d` closes the volume before reading.
+    flat = mos.find("stitch", CHANNELS[0])
 
-    first = _volume_up(win, roi, stub_bricked, "stitch")
+    first = _volume_up(win, roi, stub_bricked, "stitch", drag_to=_DRAGGED_CLIM)
+    # The drag reached the flat mosaic under the volume: ONE value per channel, everywhere.
+    assert tuple(flat.contrast_limits) == _DRAGGED_CLIM
+
     win._open_3d()
 
     vol = win._native3d
     # ...and it IS the second view. Reading the first one's window back would pass this for the
     # wrong reason on a click that silently rendered nothing.
     assert vol is not None and vol is not first, f"the second 3D view never opened: {win.said}"
-    assert tuple(vol._contrast_by[CHANNELS[0]]) == (120.0, 900.0), (
-        f"the second 3D view opened at {vol._contrast_by.get(CHANNELS[0])}")
+    assert tuple(vol._contrast_by[CHANNELS[0]]) == _DRAGGED_CLIM, (
+        f"the second 3D view opened at {vol._contrast_by.get(CHANNELS[0])}, not the "
+        f"{_DRAGGED_CLIM} the user dragged to in 3D")
+
+
+# =============================================================================================
+# The crash under all of it: a HIDDEN layer's slice contradicts its own slice input across a flip
+# =============================================================================================
+#
+# Found while merging this branch with `fix/one-layer-model`, and it is a real product crash on a
+# real gesture, not a test artifact. Reproduced on the real 10x acquisition against a MULTISCALE
+# raw pyramid `(10, 5731, 4794)`, through `MosaicLayers.set_contrast` and through a bare layer
+# write alike: open a 3-D volume and drag the contrast ->
+# `RuntimeError: sequence argument must have length equal to input rank` out of `scipy.ndimage`.
+#
+# `Layer._slice_dims` assigns `_slice_input` unconditionally and then calls `_refresh_sync`, which
+# returns at its first line for an invisible layer. `BrickedVolume.open()` hides the pane's mosaics
+# and flips to `ndisplay=3`, so they end the flip claiming 3-D while holding a 2-D thumbnail; every
+# `contrast_limits` write calls `_update_thumbnail`, which then does `np.max(2-D, axis=0)`.
+#
+# Only reachable since bricks became real model layers: `adopt` registers them, so `_link_set`
+# links a brick to the hidden flat mosaics of its channel.
+
+
+def _flip_and_write(mos, ndisplay, layer, value):
+    """Flip the pane and then write a contrast on *layer*, which is what a drag does."""
+    mos.model.dims.ndisplay = ndisplay
+    layer.contrast_limits = value
+
+
+def test_a_contrast_write_survives_a_2D_3D_flip_that_left_a_layer_HIDDEN():
+    """Both directions, because both were measured to raise.
+
+    The observable is that the write lands, and the mechanism is that the hidden layer's slice
+    agrees with its own slice input -- asserted, so a `try/except` around the write could not make
+    this pass.
+
+    MUTATION: make `MosaicLayers._reslice_hidden_layers` a no-op -> RuntimeError from
+    `scipy.ndimage.zoom` in both halves -> red.
+    """
+    meta = _meta()
+    mos, model = _pane_with(meta, op="raw")
+    hidden = mos.find(_RAW_OP, CHANNELS[1])
+    shown = mos.find(_RAW_OP, CHANNELS[0])
+    hidden.visible = False
+    assert int(hidden.ndim) > 2, "a 2-D layer cannot take napari's np.max branch; premise gone"
+
+    _flip_and_write(mos, 3, shown, (11.0, 22.0))
+    assert int(hidden._slice_input.ndisplay) == 3
+    assert np.ndim(hidden._slice.thumbnail.view) == 3, (
+        "the hidden layer kept a 2-D thumbnail under a 3-D slice input")
+
+    _flip_and_write(mos, 2, shown, (33.0, 44.0))
+    assert np.ndim(hidden._slice.thumbnail.view) == 2, (
+        "the hidden layer kept a 3-D thumbnail under a 2-D slice input")
+    # ...and the value really arrived, on the hidden layer too: contrast is one value per channel.
+    assert tuple(shown.contrast_limits) == (33.0, 44.0)
+
+
+def test_a_contrast_drag_ON_THE_VOLUME_does_not_raise(stub_bricked):
+    """The same defect as the GESTURE that hits it: the volume is up, the user drags contrast.
+
+    MUTATION: make `_reslice_hidden_layers` a no-op -> RuntimeError -> red.
+    """
+    from squidmip._mosaic_source import mosaic_bbox_um
+
+    meta = _meta()
+    h, w = _mosaic_hw(meta)
+    result = _deliver(_worker(meta, "stitch"), meta, _stitched_5d(h, w))
+    mos, _model = _pane_with(meta, op="stitch", result=result)
+    win = _Window(meta, mos)
+    _volume_up(win, mosaic_bbox_um(meta, REGION), stub_bricked, "stitch")
+
+    mos.set_contrast(CHANNELS[0], 250.0, 3000.0)          # the app's own API, as a drag arrives
+
+    for ly in mos.layers_for("stitch", CHANNELS[0]):
+        assert tuple(ly.contrast_limits) == (250.0, 3000.0)
 
 
 def test_taking_the_volume_down_puts_the_MOSAIC_back_in_charge_of_the_key(stub_bricked):
