@@ -175,7 +175,7 @@ def test_the_layer_z_depth_drives_3D_and_a_brick_comes_back_with_every_plane():
     mos, _model = _pane_with(meta, op="stitch", result=result)
 
     win = _Window(meta, mos)
-    read, source = RegionViewer._volume_source(win, (0, h, 0, w))
+    read, source, _pitch = RegionViewer._volume_source(win, (0, h, 0, w))
     assert source == "stitch" and read is not None, f"3D refused the stitched layer: {win.said}"
 
     brick = _bricks.Brick(iy=0, ix=0, r0=0, r1=min(16, h), c0=0, c1=min(16, w))
