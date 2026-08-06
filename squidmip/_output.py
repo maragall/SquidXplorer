@@ -68,7 +68,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shutil
 from pathlib import Path
 from typing import Iterable, Iterator, Optional
@@ -80,7 +79,7 @@ from squidmip._engine import _default_workers, project_plate
 from squidmip._volume import release as release_pages
 from squidmip._zarr_store import create_array, write_group
 from squidmip.contract import contract_stamp
-from squidmip.projection import resolve_n_fovs, select_fovs
+from squidmip.projection import INTENSITY, LABELS, RESULT_KINDS, resolve_n_fovs, select_fovs
 
 # The OME-NGFF SPEC version of the metadata payload. It says which published schema the
 # ``attributes.ome`` blocks conform to, and it belongs to OME. It is NOT a statement about
@@ -88,7 +87,6 @@ from squidmip.projection import resolve_n_fovs, select_fovs
 # that is ``contract.PLATE_CONTRACT_VERSION``, stamped once on the plate group below and compared
 # by ``reader``. Two stores can be valid NGFF 0.5 and disagree on everything this package assumes.
 _NGFF_VERSION = "0.5"
-_WAVELENGTH_RE = re.compile(r"(?<!\d)(\d{3,4})(?!\d)")  # a standalone 3-4 digit nm in a channel name
 
 # Pyramid: halve (Y, X) per level until the coarsest level fits in a screen-sized tile, capped at a
 # few levels. A per-FOV pyramid IS worthwhile at HCS scale (4168x4168 fields): the coarse levels let
@@ -437,18 +435,84 @@ def _downsample_yx(image: np.ndarray) -> np.ndarray:
     return ds.astype(image.dtype)
 
 
+def _subsample_yx(image: np.ndarray) -> np.ndarray:
+    """Halve a ``(T, C, Z, Y, X)`` field in Y and X by taking one pixel per 2x2 block.
+
+    The LABELS counterpart of :func:`_downsample_yx`, and the reason it exists is arithmetic:
+    a label image's pixels are OBJECT IDS, and the mean of two ids is a third id belonging to a
+    third object. Measured on a real ``spot`` run over the 10x set (region ``manual0``, fov 0,
+    z 5): of 1 085 764 level-1 pixels, **1004 carried an id present in none of their four level-0
+    source pixels** — 2x2 blocks holding only background and object 4 were written as object 2,
+    which is a real object elsewhere in the field, so nothing about the result looks corrupt.
+
+    This is the same arithmetic :mod:`squidmip._compose` already refuses ("a ``produces='labels'``
+    step that is not last — arithmetic on object ids"); the writer was performing it after the
+    engine had refused it.
+
+    Crops exactly as :func:`_downsample_yx` does (an odd axis loses its last row/column, a size-1
+    axis is left intact) so both reducers walk the ladder :func:`pyramid_shapes` predicts. Every
+    id written to a coarse level is therefore an id that is really there. Objects narrower than
+    ``2**level`` px still fall out of a coarse level — that is true of any label pyramid, and it
+    is why level 0 is the one that is pixel-exact.
+    """
+    fy = 2 if image.shape[-2] >= 2 else 1
+    fx = 2 if image.shape[-1] >= 2 else 1
+    y = (image.shape[-2] // fy) * fy                       # crop to a multiple of the axis factor
+    x = (image.shape[-1] // fx) * fx
+    return np.ascontiguousarray(image[..., :y:fy, :x:fx])
+
+
+#: How a pyramid level is derived from the one below it, per ``produces`` declaration. TOTAL over
+#: :data:`~squidmip.projection.RESULT_KINDS` — a kind missing from this table is refused by name in
+#: :func:`_reducer_for`, because "what do the pixels mean" is the question that decides whether
+#: averaging them is arithmetic or nonsense, and guessing it is how the labels defect happened.
+#: The value is ``(reducer, NGFF "type", NGFF method description)``; the last two are what the store
+#: says about itself, so a reader never has to reverse-engineer the pixels.
+_REDUCERS = {
+    INTENSITY: (_downsample_yx, "mean", "2x2 block mean"),
+    LABELS: (_subsample_yx, "nearest", "2x2 nearest (object ids are never averaged)"),
+}
+
+
+def _reducer_for(produces: str):
+    """``(reducer, ngff_type, description)`` for a result kind, or raise naming the kind.
+
+    Refuses rather than defaulting to the mean. An unknown kind defaulting to ``INTENSITY`` is
+    exactly how a label image came to be block-averaged: the writer never asked what its pixels
+    meant, so it applied the only reduction it had.
+    """
+    try:
+        return _REDUCERS[str(produces)]
+    except KeyError:
+        raise ValueError(
+            f"cannot build a pyramid for result kind {produces!r}: this writer knows how to "
+            f"coarsen {sorted(_REDUCERS)} and refuses to guess. Averaging pixels whose meaning it "
+            f"does not know is how object ids became other object ids. Known result kinds are "
+            f"{sorted(RESULT_KINDS)}; add an entry to squidmip._output._REDUCERS for a new one."
+        ) from None
+
+
 def _pyramid(image: np.ndarray, *, min_yx: int = _PYRAMID_MIN_YX,
-             max_levels: int = _PYRAMID_MAX_LEVELS) -> list[np.ndarray]:
+             max_levels: int = _PYRAMID_MAX_LEVELS,
+             produces: str = INTENSITY) -> list[np.ndarray]:
     """Level list ``[full-res, /2, /4, ...]`` — halving until the coarsest fits *min_yx*
     (or *max_levels*). A field already <= the floor yields just ``[image]`` (level 0).
 
+    *produces* is the operator's own declaration and it picks the REDUCER (:data:`_REDUCERS`),
+    never the operator's name. It joins the other generic readers of that declaration — the napari
+    layer type, ``_compose``'s "a labels step must be last", and ``_stitch``'s refusal to FEATHER a
+    labels mosaic, which is the same argument about the same pixels one module over: a weighted
+    blend of two object ids is a third object's id, and so is their mean.
+
     The stopping rule is duplicated, shape-only, in :func:`pyramid_shapes`; the two are pinned
     together by a test, because IMA-217 needs the level ladder BEFORE any pixels exist (it builds
-    the viewer's :class:`~squidmip._tiling.Geometry` from metadata alone).
+    the viewer's :class:`~squidmip._tiling.Geometry` from metadata alone). Both reducers crop
+    identically, so the ladder is the same whichever one is chosen.
     """
+    reduce_yx, _type, _desc = _reducer_for(produces)
     levels = [image]
     while (max(levels[-1].shape[-2:]) > int(min_yx) and len(levels) < int(max_levels)):
-        levels.append(_downsample_yx(levels[-1]))
+        levels.append(reduce_yx(levels[-1]))
     return levels
 
 
@@ -472,7 +536,7 @@ def pyramid_shapes(frame_shape, *, min_yx: int = _PYRAMID_MIN_YX,
 
 
 def _multiscales(level_shapes: list[tuple], pixel_size_um: Optional[float], dz_um: Optional[float] = None,
-                 position_um: Optional[tuple] = None) -> dict:
+                 position_um: Optional[tuple] = None, produces: str = INTENSITY) -> dict:
     """multiscales metadata for a per-FOV pyramid: one ``datasets`` entry per level, its scale the
     real downsample factor (level 0's Y,X over this level's Y,X) so physical coordinates stay true.
 
@@ -492,6 +556,7 @@ def _multiscales(level_shapes: list[tuple], pixel_size_um: Optional[float], dz_u
     levels of one field disagree with each other by less than one coarse pixel while breaking the
     "levels share an origin" assumption every mosaic compositor makes. Corner it is, documented.
     """
+    _reduce, ngff_type, ngff_desc = _reducer_for(produces)
     p = float(pixel_size_um) if pixel_size_um else 1.0
     dz = float(dz_um) if dz_um else 1.0
     y0, x0 = level_shapes[0]
@@ -507,9 +572,13 @@ def _multiscales(level_shapes: list[tuple], pixel_size_um: Optional[float], dz_u
         "version": _NGFF_VERSION,
         "name": "0",
         # NGFF SHOULDs: name the downscaling method and record its provenance, so a consumer knows
-        # the coarse levels are area means (not decimation) without reverse-engineering the pixels.
-        "type": "mean",
-        "metadata": {"method": "squidmip._output._downsample_yx", "description": "2x2 block mean"},
+        # how the coarse levels were made without reverse-engineering the pixels. Read off the
+        # SAME table `_pyramid` reduces with (`_REDUCERS`), so the store cannot claim one method
+        # and carry another -- it used to say "2x2 block mean" unconditionally, which was a true
+        # statement about the code and a false one about a labels field, whose ids must not be
+        # averaged.
+        "type": ngff_type,
+        "metadata": {"method": f"squidmip._output.{_reduce.__name__}", "description": ngff_desc},
         "axes": [
             {"name": "t", "type": "time", "unit": "second"},
             {"name": "c", "type": "channel"},
@@ -522,10 +591,32 @@ def _multiscales(level_shapes: list[tuple], pixel_size_um: Optional[float], dz_u
     return doc
 
 
-def _wavelength_nm(channel: dict) -> Optional[int]:
-    """Best-effort emission wavelength (nm) parsed from the channel name, else None."""
-    m = _WAVELENGTH_RE.search(channel.get("name", ""))
-    return int(m.group(1)) if m else None
+def _excitation_nm(channel: dict) -> Optional[float]:
+    """The channel's EXCITATION wavelength in nm, or None when its name states none.
+
+    EXCITATION, and the key it is written under says so. This used to be ``_wavelength_nm`` and
+    its one number was stamped into OME's ``emission_wavelength`` -- which is a different physical
+    quantity, off by the Stokes shift, on every fluorescence channel this instrument has:
+
+        Fluorescence_405_nm_Ex  ->  written 405 nm, emission is ~450 nm
+        Fluorescence_488_nm_Ex  ->  written 488 nm, emission is ~525 nm
+        Fluorescence_561_nm_Ex  ->  written 561 nm, emission is ~590 nm
+        Fluorescence_638_nm_Ex  ->  written 638 nm, emission is ~670 nm
+
+    (The right-hand column is this package's own answer, ``_decon.emission_um_for``, which exists
+    because a PSF is formed by the light that REACHES the sensor -- ``tests/test_decon.py`` pins
+    488 -> 0.525.) The channel names literally end in ``_Ex``. Nothing here invents an emission:
+    deriving one needs petakit's Stokes table, which is a decon dependency and not one the writer
+    is going to acquire, and a guessed emission on disk is worse than an honest excitation.
+
+    Delegates to :func:`squidmip._channels.excitation_nm` -- squidmip's OWN channel parse, the same
+    one that resolves the display colour and that ``_decon`` builds its PSF from. The private
+    regex this used to keep was a second parser of one fact, and it did not cope with the file
+    forms that one does (``Fluorescence_638_nm_-_Penta``).
+    """
+    from squidmip._channels import excitation_nm
+
+    return excitation_nm(channel.get("name", ""))
 
 
 def _omero(channels: list[dict], dtype) -> dict:
@@ -539,9 +630,9 @@ def _omero(channels: list[dict], dtype) -> dict:
             "active": True,
             "window": {"min": 0.0, "max": dmax, "start": 0.0, "end": dmax},
         }
-        wl = _wavelength_nm(ch)
+        wl = _excitation_nm(ch)
         if wl is not None:
-            entry["emission_wavelength"] = {"value": wl, "unit": "nanometer"}
+            entry["excitation_wavelength"] = {"value": wl, "unit": "nanometer"}
         out.append(entry)
     return {"channels": out}
 
@@ -601,11 +692,17 @@ def field_origin_um(centre_um, frame_shape, pixel_size_um) -> Optional[tuple[flo
 
 
 def _write_field(field_dir: Path, image: np.ndarray, channels: list[dict], pixel_size_um, dz_um=None,
-                 position_um: Optional[tuple] = None) -> int:
+                 position_um: Optional[tuple] = None, produces: str = INTENSITY) -> int:
     """Write one field: pyramid levels ``0..L`` (0 = full-res, pixel-exact) + multiscales + omero.
 
     ``position_um`` is the field's top-left corner in stage µm (see :func:`field_origin_um`); it
     becomes the NGFF ``translation`` on every dataset, so the plate carries its own world layout.
+
+    ``produces`` is the operator's own declaration, and it decides how the COARSE levels are
+    derived (:func:`_pyramid`) and what the store says it did (:func:`_multiscales`). It is passed
+    rather than sniffed: an integer array is an integer array whether its values are photon counts
+    or object ids, and only the declaration knows which. Defaulting it here would put the guess
+    back where it was.
 
     Returns the number of levels written (1 for a small field with no pyramid).
 
@@ -625,7 +722,7 @@ def _write_field(field_dir: Path, image: np.ndarray, channels: list[dict], pixel
               for i, shape in enumerate(level_shapes)]
     for z in range(image.shape[2]):
         plane = np.asarray(image[:, :, z:z + 1])   # asarray: a spilled mosaic is read back here
-        levels = _pyramid(plane)
+        levels = _pyramid(plane, produces=produces)
         # zip() would SILENTLY truncate if the two ladders ever disagreed, and _pyramid's stopping
         # rule living in two places (here and pyramid_shapes) is exactly the kind of duplication
         # that drifts. They are pinned by a test; this is the same pin, on real data.
@@ -641,7 +738,8 @@ def _write_field(field_dir: Path, image: np.ndarray, channels: list[dict], pixel
         field_dir,
         {
             "version": _NGFF_VERSION,
-            "multiscales": [_multiscales(level_shapes, pixel_size_um, dz_um, position_um)],
+            "multiscales": [_multiscales(level_shapes, pixel_size_um, dz_um, position_um,
+                                         produces=produces)],
             "omero": _omero(channels, image.dtype),
         },
     )
@@ -900,6 +998,7 @@ def write_from_stream(
     roi_table: bool = True,
     region_operator: bool = False,
     n_z: int = 1,
+    produces: str = INTENSITY,
 ) -> dict:
     """Write the plate + (optionally) TIFFs from a ``(region, fov, image)`` stream and *metadata*.
 
@@ -911,6 +1010,13 @@ def write_from_stream(
     projection engine instead of starving it. Wells write to disjoint directories, so parallel
     writes never contend; at most ~``write_workers`` wells are in flight, so peak memory stays
     O(engine workers + write_workers), never the whole plate.
+
+    ``produces`` is the running operator's own ``produces`` declaration, and it is what the coarse
+    pyramid levels are derived by (:func:`_pyramid`). It has to travel: this writer receives an
+    array and a metadata dict, neither of which says whether the integers in it are photon counts
+    or OBJECT IDS, and 2x2-block-averaging the second kind invents ids. :func:`write_plate` reads
+    it off the registry with :func:`squidmip.operator_produces`; a caller driving this function
+    directly with intensity pixels can leave it alone.
 
     ``on_well(region, fov, image)`` is an optional callback invoked after each well is written.
     NOTE: it runs on a WRITER THREAD and several may overlap — it MUST be thread-safe (the plate
@@ -966,7 +1072,8 @@ def write_from_stream(
                 attributes=contract_stamp())
     # ...and the store declares itself unfinished from its first byte until its last (IMA-230), so
     # a run killed mid-write leaves something a reader can TELL is incomplete.
-    _mark_incomplete(plate_dir, {"wells": list(wells), "fields": sum(len(f) for f in wells.values())})
+    fields_owed = sum(len(f) for f in wells.values())
+    _mark_incomplete(plate_dir, {"wells": list(wells), "fields": fields_owed})
     for region, fovs in wells.items():
         row, col = parse_well_id(region)
         write_group(plate_dir / row)  # bare row group
@@ -998,7 +1105,8 @@ def write_from_stream(
         tmp = _partial_dir(well_dir, fov)
         shutil.rmtree(tmp, ignore_errors=True)
         try:
-            levels = _write_field(tmp, image, channels, pixel_size_um, dz_um, position_um=origin_um)
+            levels = _write_field(tmp, image, channels, pixel_size_um, dz_um,
+                                  position_um=origin_um, produces=produces)
             if tiff:
                 _write_tiffs(tiff_root, region, fov, image, channel_names)
             _publish(tmp, well_dir / str(fov))
@@ -1055,17 +1163,41 @@ def write_from_stream(
             row, col = parse_well_id(region)
             _cleanup_partials(plate_dir / row / col)
 
-    complete = not stopped
+    # COMPLETE MEANS EVERY FIELD THIS RUN OWED IS ON DISK, not merely "nobody pressed stop".
+    # `complete = not stopped` was the whole test, and it read the INTENT rather than the RESULT:
+    # a well lost to `on_error` (an unreadable TIFF, a corrupt field) never reaches `_write_one`,
+    # so `n_written` falls short, `stopped` stays False, the marker is deleted and the store
+    # declares itself trustworthy while its well group still advertises four images that are not
+    # there. Measured on a copy of sim_5d_2x2_t3 with one well's TIFFs corrupted:
+    # `is_incomplete(store)` was False with 4 of 16 fields missing. The CLI did warn — but the
+    # STORE's own self-report is what `_check_output`, Odon's samplesheet walk, ngio and every
+    # external reader consult, and it is the one that said the plate was whole.
+    #
+    # A short run therefore KEEPS the marker, and the marker now records the shortfall, so the
+    # gap is a number on disk rather than a line in a console that has since scrolled away.
+    complete = (not stopped) and n_written >= fields_owed
     if complete:
         _clear_incomplete(plate_dir)   # last act of a finished write: the store is now trustworthy
+    else:
+        _mark_incomplete(plate_dir, {"wells": list(wells), "fields": fields_owed,
+                                     "fields_written": n_written,
+                                     "stopped": bool(stopped)})
 
     return {
         "plate": str(plate_dir),
         "tiff": str(tiff_root) if tiff else None,
         "n_wells": len(wells),
+        "n_fields": fields_owed,          # what this run OWED, beside what it wrote
         "n_fields_written": n_written,
         "levels": n_levels,
+        # TWO FACTS, TWO KEYS. `complete` is "every field this run owed is on disk"; `stopped` is
+        # "the caller's stop() cut the stream". They were one flag while `complete` meant only
+        # `not stopped`, and `_command.EngineExecutor` reads it to decide whether to say STOPPED
+        # or PARTIAL -- so widening `complete` to catch a lost well would have relabelled every
+        # skipped-well run as a cancelled one. A wrong diagnosis on the last line of a run is the
+        # same class of defect as a wrong number.
         "complete": complete,
+        "stopped": bool(stopped),
     }
 
 
@@ -1144,10 +1276,16 @@ def write_plate(
     # a plane-op keeps every plane, which is 10x the bytes on the 10x tissue set and used to be
     # unwritable at all. The region operator's `projector=` kwarg is what decides it for a stitch;
     # absent one, stitch_region's own default is "mip", a z-reducer.
-    from squidmip._engine import operator_consumes
+    from squidmip._engine import operator_consumes, operator_produces
 
     inner = (operator_kwargs or {}).get("projector", "mip") if region_operator else projector
     n_z_out = 1 if "z" in operator_consumes(inner) else int(metadata.get("n_z", 1) or 1)
+    # ...and WHAT THE RESULT PIXELS MEAN, off the same operator's `produces`, for the same reason:
+    # the writer coarsens every level above 0 and the only correct way to coarsen depends on this.
+    # `inner` is the operator whose pixels actually come out in both branches, which is why the
+    # depth above reads it too -- a stitch fusing `spot` planes would be a labels mosaic, and
+    # asking `stitch` would answer for the fuser rather than for the pixels.
+    produces_out = operator_produces(inner)
 
     if region_operator:
         stream = stitch_plate(reader, n_fovs=None, workers=1, operator=projector,
@@ -1160,4 +1298,5 @@ def write_plate(
                              write_workers=write_workers, stop=stop, regions=regions,
                              check_disk=check_disk, disk_headroom=disk_headroom,
                              min_free_bytes=min_free_bytes, roi_table=roi_table,
-                             region_operator=region_operator, n_z=n_z_out)
+                             region_operator=region_operator, n_z=n_z_out,
+                             produces=produces_out)

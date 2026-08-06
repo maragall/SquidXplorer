@@ -121,6 +121,31 @@ def test_an_unreadable_fov_leaves_a_hole_rather_than_shifting_its_neighbours():
     assert np.all(mosaic[:, 6:] == 2)     # FOV 1 did NOT move left
 
 
+def test_an_unreadable_fov_is_ANNOUNCED_and_not_only_left_as_a_hole(caplog):
+    """The hole stays put (above) — but nothing told anyone it was a hole.
+
+    ``fuse_region_mosaic``'s docstring said the failed FOV was "counted, never silently skipped:
+    the caller reports the count". There was no count in the return value and no counting in any
+    of its five callers, so a corrupt or missing TIFF painted a black rectangle into a well and
+    said nothing. A black rectangle in a fluorescence mosaic reads as "no signal there", i.e. as
+    a fact about the SAMPLE, which is worse than a visible gap in the data.
+    """
+    import logging
+
+    meta = _meta({("A1", 0): (0.0, 0.0), ("A1", 1): (12.0, 0.0)}, [0, 1])
+    with caplog.at_level(logging.WARNING):
+        mosaic, _ = fuse_region_mosaic(_Reader(fail=[0]), meta, "A1", "488")
+    assert np.all(mosaic[:, :6] == 0)                 # still a hole, still in the right place
+    said = [r.getMessage() for r in caplog.records if "FOV 0" in r.getMessage()]
+    assert said, (
+        "an unreadable FOV left a black rectangle in region A1 / channel 488 and produced no log "
+        f"record naming it; records were {[r.getMessage() for r in caplog.records]}"
+    )
+    assert "A1" in said[0] and "488" in said[0], (
+        f"the warning must name the region and channel so the gap can be located; got {said[0]!r}"
+    )
+
+
 def test_a_large_region_is_decimated_rather_than_truncated():
     """Bounding RAM must not change which region the mosaic covers."""
     meta = _meta({("A1", 0): (0.0, 0.0), ("A1", 1): (2000.0, 0.0)}, [0, 1],

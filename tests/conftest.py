@@ -745,13 +745,35 @@ def _stub_pane_classes():
         except Exception:                    # noqa: BLE001 - napari is a [gui] extra
             return data
 
+    def _as_napari_placement(data, kw):
+        """``(scale, translate)`` napari would report, which is NOT what the caller passed.
+
+        ``MosaicLayers.add_mosaic`` takes ``bbox_um`` and places the layer with
+        ``_napari_view.placement_for(ndim, bbox_um, shape[-2:], z_scale_um)`` -- bbox / shape --
+        so the layer's own ``scale`` is the pitch of the pixels IT holds, whatever decimation
+        produced them (measured on the 10x set: 1.504 um/px for a mosaic fused at step 2, against
+        an acquisition ``pixel_size_um`` of 0.752). This stub reported ``scale=None`` for every
+        mosaic, which is a layer no production code path ever sees, and it is why a reader of the
+        pitch could take ``pixel_size_um`` instead and stay green.
+        """
+        scale, translate = kw.get("scale"), kw.get("translate")
+        bbox = kw.get("bbox_um")
+        if scale is not None or bbox is None:
+            return scale, translate
+        try:
+            from squidmip._napari_view import placement_for
+
+            level0 = data[0] if isinstance(data, (list, tuple)) else data
+            return placement_for(int(level0.ndim), bbox, level0.shape[-2:], kw.get("z_scale_um"))
+        except Exception:                        # noqa: BLE001 - unplaceable: report it as such
+            return scale, translate
+
     class StubLayer:
         """A napari image layer as RegionViewer reads it back."""
 
         def __init__(self, data, kw):
             self.data = _as_napari_data(data, kw.get("multiscale"))
-            self.scale = kw.get("scale")
-            self.translate = kw.get("translate")
+            self.scale, self.translate = _as_napari_placement(data, kw)
             self.contrast_limits = None
             self.colormap = kw.get("colormap")
             #: A result delivered to a window that did not ask for the run arrives DARK. That is

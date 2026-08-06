@@ -598,17 +598,21 @@ def _prepare(operator: str, reader, meta: dict, regions, n_fovs) -> None:
     """
     if operator != "flatfield":
         return
-    from squidmip._flatfield import active_profile, estimate_profile, set_profile
+    from squidmip._flatfield import active_profiles, set_profiles
+    from squidmip._stitch import estimate_region_flatfield
 
-    if active_profile() is not None:
+    if active_profiles():
         return
     region = regions[0]
     fovs = list((meta.get("fovs_per_region") or {}).get(region, ()))[: (n_fovs or 3) or 3]
-    channel = meta["channels"][0]["name"]
-    z = meta["z_levels"][len(meta["z_levels"]) // 2]
-    planes = [reader.read(region, f, channel, z, 0) for f in fovs] or None
-    if planes:
-        set_profile(estimate_profile(planes))
+    if not fovs:
+        return
+    # ONE PROFILE PER CHANNEL (2026-08-06). The operator is now specialised per channel by
+    # ``project_well`` and REFUSES a channel it has no measured field for, so installing one
+    # estimate for every channel is no longer expressible — and it was never right: it corrected
+    # 488/561/638 with 405's gain field (see squidmip._flatfield's module docstring). This runs
+    # the shipped estimator, once per channel, still outside the timed window.
+    set_profiles(estimate_region_flatfield(reader, region, fovs, max_tiles=len(fovs)))
 
 
 def _quality(operator: str, kind: str, reader, meta: dict, sink, channels) -> dict:

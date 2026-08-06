@@ -3633,6 +3633,54 @@ def test_flatfield_card_gates_preview_on_a_profile(qapp, squid_dataset):
     win.close()
 
 
+def test_loading_a_profile_installs_one_field_per_channel_not_plane_zero(qapp, squid_dataset,
+                                                                        tmp_path, monkeypatch):
+    """The button a user actually clicks. ``FlatfieldProfile.from_npy(path)`` defaults to plane 0,
+    so "Load illumination profile" installed channel 0's gain field and every other channel of the
+    plate was corrected by it — measured on the real 10x set: 99.8% of 488's pixels wrong, by up
+    to 1799 counts, while its own field sat unread in the same file."""
+    pytest.importorskip("tilefusion.flatfield")
+    from tilefusion.flatfield import save_flatfield
+
+    import squidmip._flatfield as FF
+
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    names = [c["name"] for c in win._meta["channels"]]
+    ny, nx = win._meta["frame_shape"]
+    fields = []
+    for i in range(len(names)):                    # one GENUINELY different field per channel
+        f = np.ones((ny, nx), dtype=np.float32)
+        f[: ny // 2] = 1.5 + 0.75 * i
+        fields.append((f / f.mean()).astype(np.float32))
+    npy = tmp_path / "profile.npy"
+    save_flatfield(npy, np.stack(fields), None)
+
+    op = V._OPERATIONS_BY_KEY["flatfield"]
+    win._open_op_tab(op.key, op.label, getattr(win, op.build_tab))
+    tab = win._op_tabs["flatfield"]
+    button = next(b for b in tab.findChildren(QPushButton) if "illumination profile" in b.text())
+    monkeypatch.setattr(V.QFileDialog, "getOpenFileName",
+                        staticmethod(lambda *a, **k: (str(npy), "")))
+    before = FF.active_profiles()
+    FF.clear_profile()
+    try:
+        button.click()
+        installed = FF.active_profiles()
+        assert set(installed) == set(names), (
+            f"loading a {len(names)}-channel profile installed {sorted(installed)}")
+        for i, name in enumerate(names):
+            np.testing.assert_array_equal(
+                installed[name].flatfield, fields[i],
+                err_msg=f"{name} got plane {'0' if i else 'n'} of the file, not its own")
+        assert not np.array_equal(installed[names[0]].flatfield, installed[names[1]].flatfield), (
+            "the fixture's two channels carry the same field — this test could not fail")
+    finally:
+        FF.set_profiles(before) if before else FF.clear_profile()
+    win.close()
+
+
 # --- IMA-decon-stitch-ui: the two operator INTERFACES in pane 1 --------------------------
 
 def test_the_decon_card_is_the_iteration_qc_panel_not_a_bare_preview(qapp,
@@ -3863,7 +3911,7 @@ def test_flatfield_streams_live_once_a_profile_is_installed(qapp, squid_dataset)
     RE-POINTED by 2b8fbc5 to the plate only; see the section note above.
     """
     from squidmip import FlatfieldProfile
-    from squidmip._flatfield import set_profile
+    from squidmip._flatfield import set_profiles
     import squidmip._flatfield as FF
 
     root, _ = squid_dataset
@@ -3871,7 +3919,7 @@ def test_flatfield_streams_live_once_a_profile_is_installed(qapp, squid_dataset)
     win.ingest(str(root))
     ny, nx = win._meta["frame_shape"]
 
-    prev = FF.active_profile()
+    prev = FF.active_profiles()
     try:
         # NO PROFILE. This half of the test also had a stale premise, independent of 2b8fbc5, and
         # it was invisible behind the `_detail` failure above: "no profile -> every field raises ->
@@ -3880,7 +3928,7 @@ def test_flatfield_streams_live_once_a_profile_is_installed(qapp, squid_dataset)
         # (tilefusion BaSiC) instead, precisely so the plate does not fill with red x's — the
         # symptom Julio reported. So the surviving claim is the same one, one step earlier: a
         # flat-field run without a profile must NOT start and must SAY what it is doing.
-        FF._active = None
+        FF.clear_profile()
         tiles = _run_live(qapp, win, "flatfield")
         assert tiles is None, "the operator ran without an illumination profile"
         assert win._worker is None, "an operator worker started without a profile"
@@ -3899,12 +3947,15 @@ def test_flatfield_streams_live_once_a_profile_is_installed(qapp, squid_dataset)
         assert _drain_until(qapp, lambda: not est.isRunning(), timeout=90)
         win._ff_est_worker = None
 
-        set_profile(FlatfieldProfile(np.ones((ny, nx), np.float32)))
+        # ONE PER CHANNEL. The operator is specialised per channel by project_well and refuses a
+        # channel it has no measured field for, so a live run needs every channel covered.
+        set_profiles({c["name"]: FlatfieldProfile(np.ones((ny, nx), np.float32))
+                      for c in win._meta["channels"]})
         tiles = _run_live(qapp, win, "flatfield")
         assert tiles, f"flat-field with a profile still reached no tile: {win._readout.text()!r}"
         assert win._readout.text().startswith("✓"), win._readout.text()
     finally:
-        FF._active = prev
+        FF.set_profiles(prev) if prev else FF.clear_profile()
     win._stop_worker(); win.close()
 
 

@@ -14,7 +14,7 @@ Four declarations on the registry record, and nothing generic branches on an ope
 | declaration | decides |
 |---|---|
 | `consumes` | the engine's loop and the output shape — `{"z"}` collapses z, `frozenset()` keeps it, `{"fov"}` is a whole-well region operator |
-| `produces` | what the pixels MEAN, and therefore the napari layer type |
+| `produces` | what the pixels MEAN — the napari layer type, **and how the OME-Zarr writer coarsens a pyramid level** |
 | `params` | what one entry can be RUN with (`params=` makes the registered object a factory) |
 | `requires` | the modules it needs — **listed either way, run refused BY NAME when missing** |
 
@@ -37,6 +37,31 @@ bodies. The queries are named `operator_consumes` / `operator_produces` / `opera
 and `project_plate(on_error=...)` filed that as a per-well skip — a green run that wrote nothing.
 Per-well fault isolation now refuses to absorb `ImportError` / `MissingDependency`
 (`_engine._NOT_A_WELL_FAULT`): a missing package is not a corrupt well.
+
+**`produces` reaches the DISK, not just the layer type** (2026-08-06). `_output._REDUCERS` maps a
+result kind to how a pyramid level is derived from the one below it, and `_write_field` /
+`_multiscales` take `produces` from `operator_produces(inner)` in `write_plate`. `intensity` is a
+2x2 block **mean**; `labels` is 2x2 **nearest**, because the mean of two object ids is a third
+object's id. Measured before the fix, on a real `spot` run over the 10x set (`manual0`, fov 0,
+z 5): **1004 of 1 085 764 level-1 pixels carried an id present in none of their four level-0
+source pixels** — blocks holding only background and object 4 were written as object 2, a real
+object elsewhere in the field, and the store still declared `"type": "mean"`. Level 0 was the only
+trustworthy rung and nothing said so. `_reducer_for` **refuses an unknown kind by name** rather
+than defaulting to the mean; that default is exactly how this happened. It is the same argument
+`_compose` already made ("a `produces="labels"` step must be last") and `_stitch` already made
+(labels are never feathered) — the writer was doing the arithmetic both of them refuse.
+
+**A segmenter declares which knobs it READS: `honours`** (2026-08-06). `add_segmenter(honours=…)`
+names the `SpotParams` fields the algorithm actually uses; `_spots.segmenter_honours` is the ONE
+reader, and both the operator's `params=` and the operator callable's own `__name__` derive from
+it. `cellpose` was registered with the whole of `SPOT_PARAMS`, so `_param_panel` drew four spin
+boxes and the console line and recipe named four numbers — while `cellpose_nuclei` reads
+`min_distance_px` and nothing else. Measured on `synthetic_1536_wellplate` A1 / 405 nm, 1024 px:
+`min_area_px` 30 and 4000 returned the **same 42 masks, byte for byte**, where that parameter's
+own meaning leaves 2. Declaring the honest subset makes `--param min_area_px=80` a **named refusal**
+from `Operator.bind` instead of a number the run drops.
+`tests/test_operator_declaration.py::test_every_parameter_a_segmentation_operator_DECLARES_changes_its_pixels`
+is the guard: a declared parameter that cannot change the label image fails the build.
 
 **Discovery**: `squidmip/_plugins.py` scans the `squidmip.operators` entry-point group on
 `import squidmip`, AFTER the built-ins. An operator in someone else's package needs no edit here.
@@ -75,7 +100,62 @@ as `**kwargs` and moving them to `Param` records is a separate change with its o
 
 Measured while building it: `_workers._OperatorWorker`'s PREVIEW branch called `project_plate`
 without `operator_kwargs` while the save branch passed them, so a panel value reached the console
-line and not the pixels (57 labels vs 57 at `min_area_px` 30/400; 57 vs 44 once fixed).
+line and not the pixels (57 labels vs 57 at `min_area_px` 30/400; 57 vs 44 once fixed). **The same
+omission was still live in `_command.EngineExecutor`** and was fixed on 2026-08-06: its preview
+branch called `project_plate` without `operator_kwargs` while its save branch passed them, so the
+headless and GUI command surface previewed at the defaults. On `sim_5d_2x2_t3` / A1 / `spot`,
+preview at `min_area_px=4000` found 55 objects — the same 55 the defaults find — where the save of
+that identical command found 30. Two branches of one command must pass the same arguments; the
+test that pins it asserts the preview's answer CHANGES with the parameter.
+
+## Flat-field is PER CHANNEL, through `for_channel`
+
+An illumination profile is a per-channel measurement and the stored `.npy` is `(C, Y, X)`. Until
+2026-08-06 `_flatfield` held ONE global `FlatfieldProfile` and applied it to every channel of a
+run, because the module docstring recorded per-channel dispatch as impossible: *"a plane-op's
+callable shape is `Iterable[plane] -> plane`: it never sees which CHANNEL the plane came from."*
+That stopped being true when `for_channel` was added for decon (`projection.bind_channel`,
+`_decon.optics_for_channel`) to fix the identical defect — all four channels deconvolved with one
+PSF. Flat-field was simply left behind.
+
+Measured on the 10x set, whose own stored profile carries four genuinely different gain fields
+(405: 0.974–1.020, 488: 0.645–1.102, 638: 0.840–1.096), correcting through the registered operator
+after the GUI's own "Load illumination profile":
+
+| channel | one profile (was) | its own (right) | pixels differing | mean abs | max |
+|---|---|---|---|---|---|
+| 405 | 799.76 | 799.76 | 0.000% | 0.00 | 0 |
+| 488 | 3128.63 | 3120.88 | **99.792%** | 155.68 | 1799 |
+| 561 | 792.53 | 792.54 | 88.684% | 2.89 | 20 |
+| 638 | 2118.68 | 2129.37 | **99.578%** | 67.32 | 1307 |
+
+Silent because 405 is channel 0 — the channel anyone checks first was bit-identical.
+
+The rules now: `_flatfield._active` is a `{channel: profile}` map; **`set_profile(profile, *,
+channel=…)` requires the channel** (a gain field without the channel that measured it is not a
+thing this package will hold); `_profile_for` **refuses by name**, distinguishing "nothing
+installed" from "installed for these other channels"; and
+`FlatfieldProfile.per_channel_from_npy(path, names)` is the ONE place a channel NAME becomes a
+plane INDEX of the stored file — it was open-coded in `_stitch` and the GUI took plane 0 for
+everything. `_stitch._selected_profiles` uses a GUI selection only when it covers every channel of
+the run, warns by name when it does not, and never broadcasts.
+
+## What a write REPORTS is read off the result, not the intent
+
+`write_from_stream`'s manifest carries `complete` and `stopped` as **two facts** (2026-08-06).
+`complete` used to be `not stopped`, i.e. purely "nobody pressed cancel", so a well lost to
+`on_error` — an unreadable TIFF, a corrupt field, exactly what per-well fault isolation exists to
+survive — still deleted the `.squidmip-incomplete` marker. Measured on a copy of `sim_5d_2x2_t3`
+with one well's TIFFs corrupted: `is_incomplete(store)` was **False with 4 of 16 fields missing**,
+while the well group went on advertising images that are not on disk. The CLI warned; the STORE,
+which is what `_check_output`, Odon's samplesheet walk and every external reader consult, did not.
+`complete` now means *every field this run owed is on disk*, the marker records the shortfall, and
+`_command` reads `stopped` for its STOPPED verdict so a skipped-well run is still reported as
+PARTIAL rather than relabelled a cancellation.
+
+Counts are named with their own unit for the same reason: `n_fields_written` over `n_wells`
+printed **"16/4 wells written"** on a healthy plate and **"12/4"** on one that lost a quarter of
+itself, and `_command`'s cancel line printed "stopped after 12 of 4 target(s)".
 
 ## 3D is capped at DRAWING time, and renders in-window
 
@@ -122,6 +202,28 @@ Three numbers decide whether a volume "looks downsampled", and all three are enf
 `_bricks`, not asserted: voxels per screen pixel must stay **>= 1** (`uniform_step` floors the
 ratio), zooming in must **monotonically refine to stride 1**, and **z is never strided** — bricks
 tile Y and X only, so a volume keeps every acquired plane and cannot read as flattened.
+
+**TWO pitches exist and they are not interchangeable** (2026-08-06, `tests/test_roi_pitch.py`):
+
+* `meta["pixel_size_um"]` is the **acquisition's**, and it is the unit of LEVEL-0 MOSAIC PIXELS —
+  what `_placement.fov_offsets_px` lays FOVs out in, what `_napari3d.roi_window_px` converts an
+  ROI box into, what `_bricks.plan` tiles, and what `read_brick` hands back reading off the reader;
+* the **displayed** pitch is what the mosaic on screen has. `fuse_region_pyramid` decimates
+  (`step = ceil(mosaic_px / _MAX_FUSED_PX)` — 2 on the 10x set), and the layer records the truth in
+  its own `scale`, because `add_mosaic` places it from `bbox_um / shape`: 1.504 against 0.752.
+
+**A path that renders the LAYER's pixels takes the layer's pitch; a path that reads the READER's
+takes the acquisition's.** `RegionViewer._displayed_pitch_um` reads the former off `layer.scale`
+and refuses by name rather than falling back. `_render_roi_volume` was pushing `scale=(dz, px, px)`
+for decimated pixels — a **1.99 z:xy aspect where it should be 1.00** — and is fixed.
+
+The clamp is the other way round and was **already right**: `_clamp_last_roi`, `_roi_cost_line` and
+`_bricks.ceiling_line` count in acquisition pixels because a drawn ROI's 3D goes
+`_open_roi_3d` -> `BrickedVolume` -> `read_brick`, which reads whole FOV planes off the reader.
+Measured: the shipped 1540 um clamp is a 2048 px level-0 window, `fits_single_texture` True, and
+`read_brick` returns 0.7520 um/voxel. Clamping at the displayed pitch instead gives 4096 px, 16
+bricks, 4x the read — under a sentence promising one texture. `_bricks.py` is untouched; do not
+"fix" it.
 
 Bricking (many textures + GL `max` compositing + a 1-voxel halo) is the mechanism underneath and is
 pixel-exact, but it is NOT what a drawn ROI takes any more. Do not route a whole region through it

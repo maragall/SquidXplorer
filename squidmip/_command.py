@@ -682,10 +682,17 @@ class EngineExecutor:
                                        operator_kwargs=cmd.parameters or None,
                                        on_well=self.on_well, stop=self.stop)
                 landed = int(manifest.get("n_fields_written") or 0)
-                # write_from_stream has always ANSWERED this ("complete": False when `stop` cut
-                # the stream) and this executor has always dropped it on the floor -- so a
-                # cancelled run and a finished one were the same `completed` result.
-                stopped = manifest.get("complete") is False
+                # write_from_stream has always ANSWERED this and this executor has always dropped
+                # it on the floor -- so a cancelled run and a finished one were the same
+                # `completed` result.
+                #
+                # Read off `stopped`, NOT off `complete`. `complete` used to mean exactly "stop()
+                # was not pressed", so the two were interchangeable; it now means "every field
+                # this run owed is on disk", which is also False when a well was lost to
+                # `on_error`. Keyed on `complete` this line would have called every skipped-well
+                # run a CANCELLED one -- the right verdict for it is PARTIAL, and the branch a few
+                # lines down already computes that from `skipped`.
+                stopped = bool(manifest.get("stopped"))
                 data = {"manifest": {k: (str(v) if hasattr(v, "__fspath__") else v)
                                      for k, v in manifest.items()}}
             else:
@@ -694,8 +701,19 @@ class EngineExecutor:
                                           n_fovs=None, on_error=on_error, regions=regions,
                                           **(cmd.parameters or {}))
                 else:
+                    # `operator_kwargs` ON THE PREVIEW TOO, spelled exactly as the save branch
+                    # above spells it. This is the SAME omission `_workers._OperatorWorker` was
+                    # measured with and fixed for (see the comment there): the save path passed
+                    # the parameters, the preview path did not, and the console line, the recipe
+                    # label and the manifest all reported the parameters the user asked for while
+                    # the pixels were the operator's DEFAULTS. Measured here on sim_5d_2x2_t3,
+                    # region A1, `spot`, counting objects per well: preview at defaults found
+                    # {52, 55, 59, 60} and preview at min_area_px=4000 found the SAME
+                    # {52, 55, 59, 60}, while the save of that command found {30, 39, 45, 47}.
+                    # A preview whose answer cannot change with the parameter is not a preview.
                     stream = project_plate(self.reader, projector=cmd.operator, workers=cmd.workers,
-                                           n_fovs=cmd.n_fovs, on_error=on_error, regions=regions)
+                                           n_fovs=cmd.n_fovs, on_error=on_error, regions=regions,
+                                           operator_kwargs=cmd.parameters or None)
                 landed = 0
                 for _region, _fov, _image in stream:
                     if self.stop is not None and self.stop():
@@ -712,8 +730,19 @@ class EngineExecutor:
             # profile is the routine case) still reaches here, because per-well fault isolation is
             # what keeps one bad file from aborting a plate — and the GUI already shipped a "✓"
             # over an empty plate once. Landed == 0 is a partial result however politely we got here.
+            # EACH COUNT WITH ITS OWN UNIT. `landed` counts FIELDS; `n_targets` counts WELLS. This
+            # line put one over the other and printed "stopped after 12 of 4 target(s)" — a
+            # numerator above its denominator, on the run summary a user reads to find out what
+            # they got. It is the same fields-over-wells confusion `_cli`'s completion line was
+            # printing ("16/4 wells written"), in the sentence the GUI shows.
+            #
+            # The SAVE path knows how many fields were owed and says so; the preview path does not
+            # compute a fields total, so it names the wells it was aimed at rather than inventing
+            # one. A denominator that is not the numerator's own total is worse than no denominator.
+            owed = int((data.get("manifest") or {}).get("n_fields") or 0)
             if stopped:
-                outcome, detail = STOPPED, f"stopped after {landed} of {n_targets} target(s)"
+                got = f"{landed} of {owed} field(s)" if owed else f"{landed} field(s)"
+                outcome, detail = STOPPED, f"stopped after {got} across {n_targets} target well(s)"
             elif landed == 0 and n_targets:
                 outcome, detail = PARTIAL, f"produced nothing — all {n_targets} target(s) skipped"
             elif skipped:

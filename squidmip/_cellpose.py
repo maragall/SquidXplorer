@@ -47,6 +47,37 @@ log = get_logger("cellpose")
 #: "otsu-watershed" sibling.
 SEGMENTER_NAME = "cellpose"
 
+#: The ``SpotParams`` fields :func:`cellpose_nuclei` ACTUALLY READS (line 101 — the diameter, and
+#: nothing else). Everything else in that dataclass belongs to the traditional otsu-watershed
+#: recipe and has no counterpart in a pretrained model's forward pass.
+#:
+#: Declared ONCE, here, and handed to ``add_segmenter(honours=…)``; ``_spots.segmenter_honours``
+#: is the only reader, and both the operator's ``params`` declaration and the operator callable's
+#: own name come off it. Two independent lists of "which knobs does cellpose read" is the drift
+#: this closes.
+#:
+#: THIS EXISTS BECAUSE DECLARING MORE WAS A LIE THE GUI DREW WIDGETS FOR. The operator was
+#: registered with the whole of ``SPOT_PARAMS`` (``sigma_px``, ``min_area_px``, ``min_distance_px``,
+#: ``split_touching``), so ``_param_panel`` built four controls for it, ``_recipe`` wrote all four
+#: into the chain expression, and the console line reported
+#: ``spot(cellpose,sigma_px=…,min_area_px=…,split_touching=…)`` — while three of the four never
+#: reached a pixel. Measured on ``synthetic_1536_wellplate``, region A1, 405 nm, a 1024 px crop,
+#: through the registered operator; see :attr:`squidmip._spots.Segmenter.honours` for the full
+#: table. The headline: ``min_area_px`` 30 and 4000 both returned the SAME 42 masks, byte for
+#: byte, where applying that parameter's documented meaning would have left 2.
+#:
+#: That is the "panel says 400, pixels say 30" defect this project has already paid for once, in
+#: ``_workers._OperatorWorker``. Declaring the honest subset ends it in the direction that cannot
+#: drift: an undeclared parameter is REFUSED BY NAME by ``Operator.bind`` ("operator 'cellpose'
+#: has no parameter 'min_area_px'; it declares [...]"), so ``--param min_area_px=80`` is now an
+#: error the user sees instead of a number the run ignores, and the generated panel offers exactly
+#: the control that changes the answer.
+#:
+#: Adding an honoured parameter here is how cellpose grows one. Adding it to :class:`SpotParams`
+#: is not enough and must not be — that dataclass is the otsu recipe's own knobs, and inheriting
+#: them wholesale is what produced three dead widgets.
+HONOURED_PARAMS: tuple[str, ...] = ("min_distance_px",)
+
 #: Cellpose's own progress is opaque (one ``eval`` call), so we report a single indeterminate
 #: stage rather than inventing sub-steps we cannot measure — the same honesty rule the busy
 #: indicator uses for an unknown total.
@@ -123,7 +154,7 @@ def register() -> None:
     """Add Cellpose to the segmenter table. Idempotent-safe: ``add_segmenter`` refuses a duplicate,
     so this is called exactly once, from ``_spots``' registration block."""
     add_segmenter(
-        SEGMENTER_NAME, cellpose_nuclei, requires=("cellpose",),
+        SEGMENTER_NAME, cellpose_nuclei, requires=("cellpose",), honours=HONOURED_PARAMS,
         blurb="Cellpose — pretrained generalist, zero-shot (slow on CPU; wants a GPU)",
     )
 
@@ -149,9 +180,15 @@ def register_operator() -> None:
 
         consumes  frozenset()   inferred from `plane_op`   -> segmented per plane, z survives
         produces  "labels"      inferred from `labels_op`  -> delivered as a napari Labels layer
-        params    SPOT_PARAMS   declared                   -> runnable at a different diameter
+        params    the HONOURED subset of SPOT_PARAMS       -> runnable at a different diameter
         requires  ("cellpose",) declared                   -> refused BY NAME when absent, listed
                                                               either way
+
+    The ``params`` line reads "the honoured subset" and not ``SPOT_PARAMS`` because it once read
+    ``SPOT_PARAMS`` and three of those four parameters did nothing — see :data:`HONOURED_PARAMS`
+    for the measurement. A declaration is a promise the generic code keeps on the operator's
+    behalf; promising a control that cannot change the answer is the same defect as computing the
+    answer wrong, one layer up.
 
     The `requires` line is the SEGMENTER declaration ten lines above, repeated on the operator
     entry, and it has to be: the two tables are asked by different callers. `resolve_segmenter`
@@ -167,7 +204,12 @@ def register_operator() -> None:
     0.498 s). Registering eagerly and importing lazily is what keeps the second number off app
     startup, and it is why this operator needs no lazy-registration machinery.
     """
-    from squidmip._spots import SPOT_PARAMS, segmentation_operator
+    from squidmip._spots import SPOT_PARAMS, segmentation_operator, segmenter_honours
 
-    add_projector(OPERATOR_NAME, segmentation_operator(SEGMENTER_NAME), params=SPOT_PARAMS,
+    # FILTERED from SPOT_PARAMS rather than rewritten, so each default and blurb is still written
+    # down once (in `SpotParams`) and cannot drift from the traditional segmenter's. The filter
+    # reads `segmenter_honours`, i.e. the declaration `register()` above made — not a second list.
+    honoured = frozenset(segmenter_honours(SEGMENTER_NAME))
+    add_projector(OPERATOR_NAME, segmentation_operator(SEGMENTER_NAME),
+                  params=tuple(p for p in SPOT_PARAMS if p.name in honoured),
                   requires=("cellpose",))

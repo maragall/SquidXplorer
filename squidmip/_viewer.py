@@ -1757,20 +1757,31 @@ class PlateWindow(QMainWindow):
                 if not path:
                     return
                 from squidmip import FlatfieldProfile
-                from squidmip._flatfield import set_profile
+                from squidmip._flatfield import set_profiles
+                # EVERY CHANNEL, not plane 0. A stored profile is (C, Y, X) with one genuinely
+                # different gain field per channel; `from_npy(path)` defaults to channel 0, so
+                # this button used to correct 488, 561 and 638 with the 405 field — 99.8% of
+                # pixels changed, by up to 1799 counts, on the 10x set. per_channel_from_npy is
+                # the one place a channel NAME becomes a plane index of that file.
+                names = [c["name"] for c in (self._meta or {}).get("channels", [])]
+                if not names:
+                    prof_lbl.setText("no acquisition open, so nothing says which channel each "
+                                     "field in the file belongs to. Open a plate first.")
+                    return
                 try:
-                    profile = FlatfieldProfile.from_npy(path)
+                    profiles = FlatfieldProfile.per_channel_from_npy(path, names)
                 except Exception as exc:                     # bad file -> say so, keep the tab alive
                     prof_lbl.setText(f"could not load {Path(path).name}: {exc}")
                     return
                 frame = tuple(self._reader.metadata["frame_shape"]) if self._reader else None
-                if frame is not None and profile.shape != frame:
-                    prof_lbl.setText(f"profile is {profile.shape}, this acquisition's frames are "
+                shapes = sorted({p.shape for p in profiles.values()})
+                if frame is not None and shapes != [frame]:
+                    prof_lbl.setText(f"profile is {shapes[0]}, this acquisition's frames are "
                                      f"{frame} -- wrong profile for this plate")
                     return
-                set_profile(profile)
+                set_profiles(profiles)
                 state["profile"] = path
-                prof_lbl.setText(f"{Path(path).name}  {profile.shape}")
+                prof_lbl.setText(f"{Path(path).name}  {len(profiles)} channel(s)  {shapes[0]}")
                 prev.setEnabled(True)
 
             pick_prof = QPushButton("Load illumination profile (.npy)…")
@@ -1807,10 +1818,18 @@ class PlateWindow(QMainWindow):
                                      max_tiles=est_tiles.value(), parent=self)
 
                 def _ok(profile):
-                    from squidmip._flatfield import set_profile
-                    set_profile(profile)
+                    # Installed for THE CHANNEL IT WAS ESTIMATED FROM, and only that one. The
+                    # worker reads tiles of `ch` and nothing else, so it has measured nothing
+                    # about the other channels; a run over them now refuses BY NAME instead of
+                    # correcting them with this field.
+                    from squidmip._flatfield import active_profiles, set_profile
+                    set_profile(profile, channel=ch)
                     state["profile"] = f"estimated:{ch}"
-                    prof_lbl.setText(f"estimated from plate ({ch})  {profile.shape}")
+                    others = [c["name"] for c in (self._meta or {}).get("channels", [])
+                              if c["name"] not in active_profiles()]
+                    missing = (f"  (no profile yet for {', '.join(others)} — estimate each one)"
+                               if others else "")
+                    prof_lbl.setText(f"estimated from plate ({ch})  {profile.shape}{missing}")
                     prev.setEnabled(True)
                     est_btn.setEnabled(True)
 
@@ -3162,14 +3181,18 @@ class PlateWindow(QMainWindow):
         if not _ok:
             self._readout.setText(_why)
             return
-        # FLAT-FIELD needs an illumination profile. Without one, _correct_with_active raises per
-        # field and the plate fills with red x's (Julio: "flatfield shows as x's"). If none is
-        # active, AUTO-ESTIMATE one from a spread sample of plate tiles (tilefusion BaSiC, off-thread)
-        # and re-run once it lands. The estimate uses the first channel; the flat-field tab lets the
-        # user pick a different channel and re-estimate.
+        # FLAT-FIELD needs an illumination profile PER CHANNEL. With none at all, the operator
+        # raises per field and the plate fills with red x's (Julio: "flatfield shows as x's"). If
+        # nothing is installed, AUTO-ESTIMATE one from a spread sample of plate tiles (tilefusion
+        # BaSiC, off-thread) and re-run once it lands.
+        #
+        # The estimate is for the FIRST CHANNEL and is installed for that channel only: the worker
+        # reads that channel's tiles and has measured nothing about the others, so a run over them
+        # now refuses by name rather than correcting them with this field (which was wrong by up
+        # to 1799 counts on the 10x set). The flat-field tab estimates the remaining channels.
         if key == "flatfield":
             import squidmip._flatfield as _ff
-            if _ff.active_profile() is None:
+            if not _ff.active_profiles():
                 if getattr(self, "_ff_est_worker", None) is not None and self._ff_est_worker.isRunning():
                     self._readout.setText("flat-field: estimating an illumination profile…")
                     return
@@ -3178,8 +3201,8 @@ class PlateWindow(QMainWindow):
                 w.stage.connect(self._readout.setText)
                 w.problem.connect(lambda m: self._readout.setText(f"flat-field estimate failed: {m}"))
 
-                def _profile_ready(profile, k=key, regs=regions, sv=save, op=out_parent):
-                    _ff.set_profile(profile)
+                def _profile_ready(profile, k=key, regs=regions, sv=save, op=out_parent, c=chan):
+                    _ff.set_profile(profile, channel=c)
                     self._readout.setText("flat-field: profile ready — running.")
                     self.run_operator(k, out_parent=op, regions=regs, save=sv)
 

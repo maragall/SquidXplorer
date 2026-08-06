@@ -133,9 +133,25 @@ def _area_downsample(plane: np.ndarray, out_h: int, out_w: int) -> np.ndarray:
     Uses ``np.add.reduceat`` to sum contiguous row/column blocks (bin edges spread as evenly
     as integer division allows), then divides by the per-bin element count. Averaging (not
     striding) so a thumbnail reflects the whole cell, not one sampled pixel.
+
+    NEVER upsamples, and the target is clamped **per axis**: a request larger than the source on
+    ONE axis shrinks the other axis and leaves that one at its own length, so the returned shape
+    is ``(min(out_h, Y), min(out_w, X))`` and may be smaller than asked on either axis alone.
+    Callers that need an EXACT shape must guard before calling (``_plate_overview._fit_cell`` /
+    ``_fit_box`` and ``_tilesource._resample`` all do, and nearest-sample the grow direction
+    themselves); ``build_montage`` deliberately corner-places by the tile's ACTUAL shape.
+
+    The clamp is per axis because a single shared ``out_h >= y and out_w >= x`` identity guard was
+    a wrong picture, not a wrong shape. With a 512x64 field asked for 128x128, the column edges
+    ``(np.arange(128) * 64) // 128`` REPEAT, so ``reduceat`` returned a lone element where a block
+    sum was meant and the matching ``col_counts`` entry was 0: measured 8192 of 16384 entries
+    ``inf`` on a uniform 1000-count plane. Through ``build_montage`` that inf reached the global
+    percentile window as ``hi=nan``, ``_window``'s ``span <= 0`` branch zeroed every pixel, and the
+    montage's max pixel value was **0** — a whole plate rendered black with no error raised.
     """
     y, x = plane.shape
-    if out_h >= y and out_w >= x:
+    out_h, out_w = min(int(out_h), y), min(int(out_w), x)   # per axis: no bin count can be 0
+    if out_h == y and out_w == x:
         return plane.astype(np.float32, copy=False)
     row_edges = (np.arange(out_h) * y) // out_h
     col_edges = (np.arange(out_w) * x) // out_w

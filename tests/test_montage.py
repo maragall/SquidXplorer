@@ -81,6 +81,35 @@ def test_area_downsample_no_upsample():
     assert out.shape == (4, 4)
 
 
+def test_area_downsample_with_only_ONE_axis_shrinking_is_finite_and_still_a_block_mean():
+    """The mixed case — taller than the target, ALREADY narrower than it.
+
+    The identity guard used to be ``out_h >= y and out_w >= x``: BOTH axes at-or-above target.
+    But the ``reduceat`` path below it only works when BOTH axes shrink. Asking a 512x64 field
+    for 128x128 made the column edges ``(np.arange(128) * 64) // 128`` REPEAT, so ``reduceat``
+    returned a lone element where a block sum was meant, the matching ``col_counts`` entry was 0,
+    and 8192 of 16384 entries came back ``inf`` (first row ``[inf 1000. inf 1000. ...]`` on a
+    uniform 1000-count plane). Each axis is clamped to its own length now: the rows area-average
+    in 4-row blocks, the columns are left alone, and the shape is (128, 64).
+    """
+    plane = np.arange(512 * 64, dtype=np.float32).reshape(512, 64)
+    out = _area_downsample(plane, 128, 128)
+    n_bad = int((~np.isfinite(out)).sum())
+    assert n_bad == 0, f"{n_bad} of {out.size} entries are not finite; first row {out[0, :8]}"
+    assert out.shape == (128, 64), f"clamped per axis -> (128, 64), got {out.shape}"
+    np.testing.assert_allclose(out, plane.reshape(128, 4, 64).mean(axis=1))
+
+    # the reported repro verbatim: a uniform field can only average to its own constant
+    flat = _area_downsample(np.full((512, 64), 1000.0, np.float32), 128, 128)
+    assert np.all(flat == 1000.0), f"uniform 1000-count field came back {np.unique(flat)[:4]}"
+
+    # and the other orientation — wide and short, so it is the ROW edges that would repeat
+    wide = np.arange(64 * 512, dtype=np.float32).reshape(64, 512)
+    out_w = _area_downsample(wide, 128, 128)
+    assert np.isfinite(out_w).all() and out_w.shape == (64, 128)
+    np.testing.assert_allclose(out_w, wide.reshape(64, 128, 4).mean(axis=2))
+
+
 def test_hex_to_rgb01_parses_and_fails_loud():
     np.testing.assert_allclose(_hex_to_rgb01("#FF0000"), [1.0, 0.0, 0.0])
     np.testing.assert_allclose(_hex_to_rgb01("20ADF8"), [0x20 / 255, 0xAD / 255, 0xF8 / 255])
@@ -474,3 +503,28 @@ def test_montage_small_field_no_crash_no_nan(tmp_path):
     manifest = build_montage(_make_plate(tmp_path, imgs))   # default cell_px=128 > field -> corner-place
     arr = np.asarray(Image.open(manifest["montage"]))
     assert arr.ndim == 3 and int(arr.max()) > 0             # rendered, not crashed / all-black NaN
+
+
+def test_montage_of_a_field_that_shrinks_on_ONE_axis_is_not_a_black_plate(tmp_path):
+    """A field larger than cell_px on one axis and smaller on the other blackened the WHOLE plate.
+
+    ``build_montage`` calls ``_area_downsample`` with no guard of its own, so a 512x64 field at the
+    default cell_px=128 hit the mixed case: half the tile came back ``inf``, those infs reached the
+    GLOBAL per-channel percentile window as ``hi=nan``, ``_window``'s ``span <= 0`` branch zeroed
+    every pixel, and the PNG's max pixel value was 0. Measured on this exact fixture before the
+    fix: window ``{"low": 39.0, "high": nan}``, max pixel **0** — a plate rendered entirely black
+    with no exception raised and no warning a user would ever see. Afterwards: high 1992.65,
+    max pixel 255.
+
+    The ramp (not a flat constant) matters: a flat channel is legitimately black through
+    ``_window``, so only a field with real dynamic range can tell the defect from the guard.
+    """
+    from PIL import Image
+
+    imgs = {"B2": _ramp([2000, 0], y=512, x=64)}   # 512 shrinks to 128, 64 is already below it
+    manifest = build_montage(_make_plate(tmp_path, imgs), cell_px=128)
+
+    win = json.loads(Path(manifest["sidecar"]).read_text())["channels"][0]["window"]
+    assert np.isfinite(win["high"]), f"contrast window is low={win['low']} high={win['high']}"
+    arr = np.asarray(Image.open(manifest["montage"]))
+    assert int(arr.max()) > 0, f"montage rendered entirely black: max pixel {int(arr.max())}"

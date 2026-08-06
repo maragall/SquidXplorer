@@ -281,6 +281,78 @@ def test_a_saved_run_returns_the_manifest(open_bus, tmp_path):
     assert (tmp_path / "acq.hcs").is_dir()
 
 
+def test_a_cancelled_run_counts_fields_against_fields_and_wells_against_wells(open_bus, tmp_path):
+    """"stopped after 12 of 4 target(s)" — a numerator above its denominator, on the run summary.
+
+    ``landed`` counts FIELDS and ``n_targets`` counts WELLS, and this line put one over the other.
+    It is the same fields-over-wells confusion ``_cli``'s completion line printed as
+    "16/4 wells written", in the sentence the GUI shows. The denominator here must be the fields
+    the run owed (which the save path knows, from the manifest) and the wells must be named as
+    wells.
+    """
+    bus = CommandBus(EngineExecutor(str(open_bus.executor._path), stop=lambda: True))
+    r = bus.execute(RunOperator(operator="mip", scope=_run_scope.SCOPE_PLATE, save=True,
+                                output_folder=str(tmp_path), n_fovs=1))
+    assert r.ok, r.message
+    detail = str(r.data.get("detail") or "")
+    assert r.data["outcome"] == "stopped", r.data
+    assert "field(s)" in detail and "well(s)" in detail, (
+        f"the cancel summary must name each count's own unit; got {detail!r}"
+    )
+    landed, owed = r.data["n_landed"], r.data["manifest"]["n_fields"]
+    assert f"{landed} of {owed} field(s)" in detail, (
+        f"fields must be counted against the fields the run owed ({owed}), not against the "
+        f"{r.data['n_targets']} wells it targeted; got {detail!r}"
+    )
+
+
+def test_a_preview_runs_with_the_parameters_it_was_given_not_the_defaults(squid_dataset):
+    """The parameter must reach the PIXELS, not just the console line and the manifest.
+
+    ``do_run_operator``'s preview branch called ``project_plate`` without ``operator_kwargs``
+    while its save branch passed ``operator_kwargs=cmd.parameters or None`` — the same omission
+    ``_workers._OperatorWorker`` was measured with and fixed for. Measured on sim_5d_2x2_t3,
+    region A1, ``spot``: preview at defaults found {52, 55, 59, 60} objects per well and preview
+    at ``min_area_px=4000`` found the SAME {52, 55, 59, 60}, while the save of that same command
+    found {30, 39, 45, 47}. A preview whose answer cannot change with the parameter is not a
+    preview of anything.
+
+    Pinned here with an operator that paints its parameter into the plane, so the assertion reads
+    the value the run actually used rather than a count that could coincide.
+    """
+    import numpy as np
+
+    from squidmip import add_projector
+    from squidmip._engine import Param, _OPERATORS
+
+    def _factory(fill=7):
+        return lambda planes: np.full_like(np.asarray(next(iter(planes))), fill)
+
+    add_projector("test_only_echo", _factory, params=(Param("fill", 7),))
+    root, _arrays = squid_dataset
+    try:
+        def _run(parameters):
+            seen: list[int] = []
+            b = CommandBus(EngineExecutor(on_well=lambda r, f, im: seen.append(
+                int(np.asarray(im).max()))))
+            assert b.execute(OpenAcquisition(path=str(root))).ok
+            r = b.execute(RunOperator(operator="test_only_echo", scope=_run_scope.SCOPE_PLATE,
+                                      parameters=parameters))
+            assert r.ok, r.message
+            return sorted(set(seen))
+
+        at_default = _run({})
+        at_1234 = _run({"fill": 1234})
+    finally:
+        _OPERATORS.pop("test_only_echo", None)
+
+    assert at_default == [7], at_default
+    assert at_1234 == [1234], (
+        f"the preview ran at the operator's DEFAULT: the command asked for fill=1234 and the "
+        f"pixels came back {at_1234} — the value the run did NOT receive")
+    assert at_1234 != at_default
+
+
 def test_every_run_is_measured_and_the_result_carries_the_metrics(open_bus):
     r = open_bus.execute(RunOperator(operator="mip", scope=_run_scope.SCOPE_PLATE))
     m = r.data["metrics"]

@@ -33,6 +33,9 @@ from squidmip._plate import (
     region_stage_boxes_um,
     squid_images_dir,
 )
+# Private on purpose: the pitch-matching tests below assert a PROPERTY of the candidate table
+# (no two candidates within the tolerance), which cannot be enumerated without the table itself.
+from squidmip._plate import _PITCH_TOL, _SLIDE_FORMATS, _WELLPLATE_FORMATS
 
 
 # --------------------------------------------------------------------------- helpers
@@ -273,6 +276,73 @@ def test_format_from_pitch_um_rejects_disagreeing_axes():
     assert format_from_pitch_um(9000.0, 4500.0) is None
 
 
+def test_format_from_pitch_um_names_a_12_well_plate_the_slide_carrier_used_to_shadow():
+    """A 12-well plate could not be identified from its stage coordinates AT ALL.
+
+    ``format_from_pitch_um`` matched against the whole vendored table, which since the 4-up slide
+    carrier was merged into it also contains a 27 000 um SLOT pitch. A 12-well plate's 26 000 um is
+    only 1.038x from that -- well inside ``_PITCH_TOL`` (5%) -- so both matched, the function saw
+    ``len(hits) == 2`` and returned None. A slide holder is not a wellplate and was never a
+    candidate for this question; the candidate set is now ``_WELLPLATE_FORMATS``.
+    """
+    got = format_from_pitch_um(26000.0, 26000.0)
+    assert got == "12 well plate", (
+        f"a 26 000 um pitch IS a 12 well plate; got {got!r} "
+        "(None == the slide carrier shadowing it)")
+
+
+def test_format_from_pitch_um_identifies_every_wellplate_from_its_own_pitch():
+    """Every wellplate format must be recoverable from its own vendored pitch. 12wp was not."""
+    wrong = {}
+    for name in _WELLPLATE_FORMATS:
+        pitch = PlateGeometry.vendored(name).pitch_x_um
+        if pitch <= 0:
+            continue
+        got = format_from_pitch_um(pitch, pitch)
+        if got != name:
+            wrong[name] = (pitch, got)
+    assert not wrong, (
+        "these formats do not identify from their own pitch: "
+        + "; ".join(f"{n}: pitch {p:.0f} um -> {g!r}" for n, (p, g) in wrong.items()))
+
+
+def test_no_two_wellplate_pitches_are_within_the_matching_tolerance():
+    """The property the tolerance comment CLAIMS, enumerated instead of asserted once.
+
+    Two formats are ambiguous -- one measured pitch inside both windows -- exactly when the larger
+    pitch is within ``(1 + t) / (1 - t)`` of the smaller. Over ``_WELLPLATE_FORMATS`` the closest
+    pair is 12wp/24wp at 1.347x, so nothing is ambiguous and a bare None from
+    ``format_from_pitch_um`` can only ever mean "no match", never "several". Over the whole
+    vendored table it was NOT true (12wp vs the 4-up carrier, 1.038x), which is the defect above.
+    """
+    limit = (1.0 + _PITCH_TOL) / (1.0 - _PITCH_TOL)
+    pitches = {n: PlateGeometry.vendored(n).pitch_x_um for n in _WELLPLATE_FORMATS}
+    pitches = {n: p for n, p in pitches.items() if p > 0}
+    clashes = []
+    for a, pa in pitches.items():
+        for b, pb in pitches.items():
+            if a >= b:
+                continue
+            ratio = max(pa, pb) / min(pa, pb)
+            if ratio <= limit:
+                clashes.append(f"{a} ({pa:.0f} um) vs {b} ({pb:.0f} um) at {ratio:.4g}x")
+    assert not clashes, (
+        f"pitches closer than {limit:.4g}x are mutually ambiguous under _PITCH_TOL="
+        f"{_PITCH_TOL}, so a measurement between them silently returns None: "
+        + "; ".join(clashes))
+    # and the closest surviving pair is the one the module comment names
+    ordered = sorted(pitches.values())
+    closest = min(b / a for a, b in zip(ordered, ordered[1:]))
+    assert closest == pytest.approx(26000.0 / 19300.0), f"closest wellplate pair is {closest:.4g}x"
+
+
+def test_format_from_pitch_um_never_answers_with_a_slide_holder():
+    """It is documented to return a WELLPLATE format. A slide holder is not one, at any pitch."""
+    answers = {format_from_pitch_um(p, p) for p in range(500, 60_000, 25)}
+    named_slides = answers & set(_SLIDE_FORMATS)
+    assert not named_slides, f"format_from_pitch_um named slide holders: {sorted(named_slides)}"
+
+
 # --------------------------------------------------------------------------- the builder
 
 def test_build_plate_uses_the_declared_format_when_geometry_agrees():
@@ -303,6 +373,31 @@ def test_build_plate_warning_names_both_formats_and_the_measured_pitch():
     msg = str(rec[0].message)
     assert "384 well plate" in msg and "96 well plate" in msg
     assert "9000" in msg or "9.0" in msg
+
+
+def test_build_plate_contradicts_a_lying_yaml_on_a_12_well_plate_too():
+    """The measured tier was disabled for exactly one format, and silently.
+
+    ``build_plate`` only emits its contradiction warning INSIDE ``if measured and measured !=
+    declared``. With ``format_from_pitch_um`` refusing every 12-well pitch as ambiguous, ``measured``
+    was None, so a 12-well acquisition whose yaml said "24 well plate" fell through to the
+    declaration and was laid out at 19 300 / 26 000 = 0.7423x the true scale WITH NO WARNING -- the
+    IMA-220 half-scale hazard the measured tier exists to prevent. The 24-well control below took
+    the measured branch all along, which is what made the gap invisible.
+    """
+    meta = _meta(fov_positions_um=_positions_um(26000.0, 26000.0),
+                 wellplate_format="24 well plate")
+    with pytest.warns(UserWarning, match="contradicts the stage coordinates") as rec:
+        p = build_plate(meta)
+    assert p.format_name == "12 well plate", (
+        f"stage says 26 000 um = 12 well plate; got {p.format_name!r} "
+        f"at {p.pitch_x_um} um ('24 well plate' at 19300.0 == the lying yaml believed)")
+    assert p.format_source == "measured"
+    assert p.declared_format == "24 well plate"
+    assert p.pitch_x_um == pytest.approx(26000.0)
+    assert (p.rows, p.cols) == (3, 4)
+    msg = str(rec[0].message)
+    assert "12 well plate" in msg and "24 well plate" in msg
 
 
 def test_build_plate_falls_back_to_declared_when_pitch_is_unmeasurable():

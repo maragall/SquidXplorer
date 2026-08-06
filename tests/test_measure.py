@@ -17,6 +17,7 @@ from squidmip._measure import (
     MetricsLog,
     OK,
     PARTIAL,
+    STOPPED,
     RunMetrics,
     compare,
     compare_table,
@@ -243,6 +244,41 @@ def test_a_failed_run_is_counted_but_never_timed(log):
     row = compare(log)[0]
     assert row["runs"] == 2 and row["failures"] == 1
     assert row["median_seconds"] == pytest.approx(5.0), "the failure's 0.01 s must not be a speed"
+
+
+def test_a_run_that_produced_nothing_is_counted_but_never_timed(log):
+    """A `partial` or `stopped` duration is not a speed: it is how far the run got before quitting.
+
+    Only FAILED was excluded, so the two outcomes that mean "it finished having skipped every
+    well" and "Ctrl-C" went straight into the timings. Measured on one real 4-well `mip` run
+    against a `mip` over a well whose TIFFs are unreadable: `ok` 0.2546 s beside `partial` 0.0015 s
+    ("produced nothing — all 1 target(s) skipped"), and the table ranked mip at `best 2 ms`,
+    `median 128 ms`, `fail 0` — the fastest row in the table wrote zero pixels.
+    """
+    log.record(RunMetrics("mip", "t", 1, 0.2546, None, None, OK))
+    log.record(RunMetrics("mip", "t", 1, 0.0015, None, None, PARTIAL,
+                          "produced nothing — all 1 target(s) skipped"))
+    log.record(RunMetrics("mip", "t", 1, 0.0009, None, None, STOPPED, "stopped after 0 of 1"))
+    row = compare(log)[0]
+    assert row["best_seconds"] == pytest.approx(0.2546), (
+        "an empty run's 1.5 ms is not this operator's best time — the old table ranked mip at "
+        "best 2 ms on a run that wrote nothing")
+    assert row["median_seconds"] == pytest.approx(0.2546), (
+        "the median must be over the runs that produced something (the old one was 1.5 ms, the "
+        "middle of two non-results and one real run)")
+    assert (row["runs"], row["timed"]) == (3, 1), "3 runs happened; exactly 1 of them did the job"
+
+
+def test_the_table_says_how_many_runs_were_timed_not_only_how_many_ran(log):
+    """A median over 1 of 3 runs must not read like a median over 3."""
+    log.record(RunMetrics("mip", "t", 1, 5.0, None, None, OK))
+    log.record(RunMetrics("mip", "t", 1, 0.001, None, None, PARTIAL, "produced nothing"))
+    log.record(RunMetrics("mip", "t", 1, 0.001, None, None, STOPPED, "stopped after 0 of 1"))
+    header, _rule, row = compare_table(log).splitlines()[:3]
+    assert "timed" in header, (
+        f"no 'timed' column in {header!r} — 'runs' alone reads as though every run was a timing")
+    assert row.split()[:4] == ["mip", "3", "1", "0"], (
+        f"got {row.split()!r}: 3 runs, 1 of them timed, 0 outright failures")
 
 
 def test_an_operator_that_never_succeeded_sorts_last_not_first(log):

@@ -408,6 +408,110 @@ def test_successful_write_clears_the_incomplete_marker(tmp_path):
     assert not any(p.name.startswith(".") and p.is_dir() for p in plate.rglob("*"))
 
 
+def test_a_run_that_lost_a_well_does_not_declare_the_store_trustworthy(tmp_path):
+    """`complete` must be read off the RESULT, not off "nobody pressed stop".
+
+    It used to be `complete = not stopped`, so a well the engine skipped (an unreadable TIFF, a
+    corrupt field — `project_plate(on_error=...)` swallows those by design) never reached the
+    writer, `n_written` fell short, and the marker was DELETED anyway. The store then declared
+    itself finished while its well group still advertised images that are not on disk, and the
+    store's own self-report is what `_check_output`, ngio and every external reader consult.
+
+    The stream here yields two of the three wells the metadata declares, which is exactly the
+    shape of a run that lost one.
+    """
+    images = {r: _image(i) for i, r in enumerate(REGIONS)}
+
+    def short_stream():
+        yield "B3", 0, images["B3"]
+        yield "B10", 0, images["B10"]
+
+    manifest = write_from_stream(_meta(), short_stream(), tmp_path, n_fovs=1, write_workers=1)
+    plate = Path(manifest["plate"])
+    assert manifest["n_fields"] == 3, "the run owed one field for each of the three wells"
+    assert manifest["n_fields_written"] == 2
+    assert manifest["complete"] is False, (
+        f"a run that wrote {manifest['n_fields_written']} of {manifest['n_fields']} fields "
+        f"reported complete={manifest['complete']}"
+    )
+    assert is_incomplete(plate), (
+        "the store deleted its .squidmip-incomplete marker after losing a well, so it reports "
+        "itself trustworthy with 1 of 3 fields missing"
+    )
+    marker = json.loads((plate / ".squidmip-incomplete").read_text())
+    assert marker["fields"] == 3 and marker["fields_written"] == 2, (
+        f"the marker must record the shortfall on disk, got {marker}"
+    )
+
+
+def test_a_labels_result_is_coarsened_by_nearest_because_object_ids_are_not_numbers(tmp_path):
+    """A ``produces='labels'`` field must never be block-MEANED into its coarse levels.
+
+    The mean of two object ids is a third object's id. Measured on a real ``spot`` run over the
+    10x set (region manual0, fov 0, z 5): 1004 of 1 085 764 level-1 pixels carried an id present
+    in NONE of their four level-0 source pixels — 2x2 blocks holding only background and object 4
+    were written as object 2, a real object elsewhere in the field. Nothing looked corrupt, and
+    only level 0 was trustworthy.
+
+    The fixture below is the same arithmetic in miniature: a 4x4 field of background and object
+    4 only. Block-mean writes 1s and 2s (objects that are not there); nearest writes 0s and 4s.
+    """
+    meta = dict(_meta(), frame_shape=(4, 4))
+    field = np.zeros((1, 2, 1, 4, 4), np.uint16)
+    field[:, :, :, 1, 1] = 4          # one corner of each 2x2 block carries object 4
+    field[:, :, :, 2, 3] = 4
+
+    manifest = write_from_stream(meta, iter([("B2", 0, field)]), tmp_path, n_fovs=1,
+                                 regions=["B2"], produces="labels")
+    from squidmip._output import _pyramid
+
+    coarse = _pyramid(field, min_yx=2, produces="labels")[1]
+    present = set(np.unique(field).tolist())
+    strays = sorted(set(np.unique(coarse).tolist()) - present)
+    assert not strays, (
+        f"the coarse level invented object id(s) {strays}; the field only ever contained "
+        f"{sorted(present)}, so every stray id labels pixels as an object they are not part of"
+    )
+    assert sorted(set(np.unique(_pyramid(field, min_yx=2, produces="intensity")[1]).tolist())) == [0, 1], (
+        "guard on the fixture: the intensity reducer really does produce ids that are not there"
+    )
+    # ...and the store SAYS which reduction it used, so a reader never has to infer it.
+    doc = json.loads((Path(manifest["plate"]) / "B" / "2" / "0" / "zarr.json").read_text())
+    ms = doc["attributes"]["ome"]["multiscales"][0]
+    assert ms["type"] == "nearest", f"the store declared type={ms['type']!r} for a labels field"
+    assert "never averaged" in ms["metadata"]["description"]
+
+
+def test_a_pyramid_refuses_a_result_kind_it_does_not_know_how_to_coarsen(tmp_path):
+    """No default reduction. Guessing one is how a label image came to be block-averaged."""
+    from squidmip._output import _pyramid
+
+    with pytest.raises(ValueError) as excinfo:
+        _pyramid(np.zeros((1, 1, 1, 8, 8), np.uint16), min_yx=2, produces="phase")
+    assert "phase" in str(excinfo.value) and "refuses to guess" in str(excinfo.value)
+
+
+def test_the_channel_wavelength_on_disk_is_labelled_excitation_because_that_is_what_it_is(tmp_path):
+    """``Fluorescence_638_nm_-_Penta`` states an EXCITATION line; 638 nm is not its emission.
+
+    The writer parsed the digits out of the channel name with a private regex and stamped them
+    into OME's ``emission_wavelength`` — a different physical quantity, off by the Stokes shift on
+    every fluorescence channel this instrument has (this package's own ``_decon.emission_um_for``
+    answers 405 -> 450, 488 -> 525, 561 -> 590, 638 -> 670, and ``tests/test_decon.py`` pins it).
+    Durable, on disk, and read by anything that opens the store.
+    """
+    images = {r: _image(i) for i, r in enumerate(REGIONS)}
+    manifest = write_from_stream(_meta(), _stream(images), tmp_path, n_fovs=1)
+    doc = json.loads((Path(manifest["plate"]) / "B" / "2" / "0" / "zarr.json").read_text())
+    channels = doc["attributes"]["ome"]["omero"]["channels"]
+    assert [c["excitation_wavelength"]["value"] for c in channels] == [638.0, 405.0]
+    for c in channels:
+        assert "emission_wavelength" not in c, (
+            f"{c['label']!r} carries an emission_wavelength of "
+            f"{c.get('emission_wavelength')}, which is its EXCITATION line, not its emission"
+        )
+
+
 def test_partial_tiffs_are_never_published(tmp_path, monkeypatch):
     """The 8-byte .ome.tiff that read as a real file: TIFFs land by atomic rename or not at all."""
     import squidmip._output as O

@@ -279,13 +279,56 @@ def test_clamp_respects_a_drag_in_the_negative_direction():
 
 
 def test_a_clamped_box_always_fits_one_texture():
-    """The property that makes the cap a guarantee rather than a heuristic."""
+    """The property that makes the cap a guarantee rather than a heuristic.
+
+    ``h, w`` are recovered at the SAME pitch the box was clamped with, so this is a statement about
+    ``clamp_bbox_um`` alone: whatever unit you give it, the box it returns is at most *limit* of
+    them. Whether that unit is the right one for the renderer is a different question and the test
+    below is the one that asks it.
+    """
     px = 0.752
     for limit in (512, 2048, 16384):
         (x0, y0, x1, y1), _ = _bricks.clamp_bbox_um((0.0, 0.0, 1e6, 1e6), px, limit)
         h, w = int(round((y1 - y0) / px)), int(round((x1 - x0) / px))
         assert _bricks.fits_single_texture(h, w, 10, limit)
         assert len(_bricks.plan(h, w, limit=limit, edge=limit)) == 1
+
+
+def test_a_clamped_box_fits_one_texture_of_the_VOXELS_THE_READER_HANDS_BACK():
+    """The same guarantee, asked of the render path instead of re-derived from the box.
+
+    ``clamp_bbox_um`` is fed ``meta["pixel_size_um"]`` by ``RegionViewer._clamp_last_roi``, and the
+    test above cannot tell whether that is the right unit, because it divides by the same number it
+    multiplied by. This one never divides: it hands the clamped box to ``roi_window_px`` and the
+    window to ``read_brick`` -- the two functions a drawn ROI's 3D actually goes through -- and
+    counts the voxels that come back.
+
+    That is the honest form of the question, because the mosaic the box is drawn ON is a different
+    thing from the voxels 3D reads: ``fuse_region_pyramid`` decimates the display (step 2 on the
+    10x set, 1.504 um/px), while ``read_brick`` reads whole FOV planes off the reader at 0.752.
+    Measured on ``test_10x_laser_af_z_stack_2025-10-28`` / manual0: a 1540 um clamped box is a
+    2048 x 2048 level-0 window, one texture, and a 256 px slice of it comes back as 256 voxels
+    across 192.5 um. At the display's pitch the same rule would pass a 3080 um box: 4095 x 4095
+    level-0 px, ``fits_single_texture`` False, 16 bricks.
+
+    MUTATION: clamp with ``px / 2`` (the decimated mosaic's pitch) -> the window doubles and
+    ``fits_single_texture`` goes False -> red.
+    """
+    meta = _meta()                                       # 4 x 8 mosaic, 1.0 um/px, 2 z, 2 FOVs
+    px, nz = meta["pixel_size_um"], len(meta["z_levels"])
+    x0, y0 = region_origin_um(meta, "A1")
+    for limit in (2, 3, 8, 2048):
+        box, _clamped = _bricks.clamp_bbox_um((x0, y0, 1e6, 1e6), px, limit)
+        window = roi_window_px(meta, "A1", box)
+        assert window is not None, f"a box anchored on the region origin must land on it: {box}"
+        r0, r1, c0, c1 = window
+        assert _bricks.fits_single_texture(r1 - r0, c1 - c0, nz, limit), (
+            f"a box clamped at {px} um/px became a {r1 - r0} x {c1 - c0} level-0 window, which "
+            f"does not fit one {limit} px texture — the clamp is counting in the wrong unit")
+        got = read_brick(_Reader(), meta, "A1", window, "c0")
+        assert got.shape[-2] <= limit and got.shape[-1] <= limit, (
+            f"the reader handed back {got.shape[-2]} x {got.shape[-1]} voxels for a box the clamp "
+            f"promised was at most {limit} x {limit}")
 
 
 def test_the_ceiling_scales_with_the_gpu_and_says_where_it_came_from():

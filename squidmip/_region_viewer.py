@@ -1843,6 +1843,20 @@ class RegionViewer(QMainWindow):
         moment it exists, at the size the GPU can actually hold, instead of being accepted and then
         refused. The correction is anchored at the drag's starting corner so the rectangle stops
         growing rather than jumping somewhere else.
+
+        THE PITCH HERE IS THE ACQUISITION'S, AND THAT IS NOT THE 2D LAYER'S -- checked 2026-08-06,
+        because the difference looks like a bug and is not. The mosaic ON SCREEN is decimated
+        (``fuse_region_pyramid`` step 2 on the 10x set: 1.504 um/px against an acquisition 0.752),
+        so clamping at the DISPLAYED pitch is tempting. It would be wrong: a drawn ROI's 3D goes
+        through ``_open_roi_3d`` -> ``BrickedVolume`` -> ``_napari3d.read_brick``, which converts
+        the box with ``roi_window_px`` (level-0 mosaic pixels, i.e. ``pixel_size_um``) and reads
+        whole FOV planes STRAIGHT FROM THE READER. Measured on
+        ``test_10x_laser_af_z_stack_2025-10-28``, region manual0: a 1540 um clamped box becomes a
+        2048 x 2048 level-0 window, ``fits_single_texture`` True, and ``read_brick`` on a 256 px
+        slice of it returns 256 voxels across 192.5 um = 0.7520 um/voxel. Clamp at 1.504 instead
+        and the same guarantee breaks in the user's face: 3080 um -> 4095 x 4095 level-0 px,
+        ``fits_single_texture`` False, 16 bricks, 4x the pixels read, under a sentence promising
+        one texture. ``tests/test_roi_pitch.py`` pins the whole chain.
         """
         from squidmip import _bricks
 
@@ -1876,10 +1890,19 @@ class RegionViewer(QMainWindow):
             self._clamping = False
         span = limit * px
         self._say(f"ROI held to the 3D ceiling: {limit} x {limit} px ({span:.0f} x {span:.0f} um) "
-                  f"— the largest volume this GPU renders from one texture at full resolution.")
+                  f"at the acquisition's own {px:g} um/px — the largest volume this GPU renders "
+                  f"from one texture, and 3D reads those voxels from the reader, not from the "
+                  f"decimated mosaic you are drawing on.")
 
     def _roi_cost_line(self, layer) -> str:
-        """"R3: 4096 x 3072 px (3080 x 2310 um) — 12 bricks on this GPU." Empty when unknowable."""
+        """"R3: 4096 x 3072 px (3080 x 2310 um) — 12 bricks on this GPU." Empty when unknowable.
+
+        ``px`` is ``pixel_size_um`` and MUST BE: these are LEVEL-0 MOSAIC PIXELS, the same unit
+        ``_napari3d.roi_window_px`` converts the box into and the same one ``_bricks.plan`` tiles.
+        It is deliberately NOT the pitch of the mosaic the box is drawn on (decimated 2x on the
+        10x set) -- see the measurement in ``_clamp_last_roi``. Counting the box in displayed
+        pixels here would halve every number and report "fits ONE texture" for a box that needs 16.
+        """
         from squidmip import _bricks
 
         rects = list(getattr(layer, "data", []) or [])
@@ -2687,7 +2710,7 @@ class RegionViewer(QMainWindow):
             max_tex = int(self._pane._live_max_3d_texture())
         except Exception:                                # noqa: BLE001 - the Apple value is the floor
             pass
-        read, source = self._volume_source(window)
+        read, source, src_pitch = self._volume_source(window)
         if source is None:
             return                                       # _volume_source already said why
         # The window of the layer being RENDERED, harvested here because here is where which layer
@@ -2726,9 +2749,26 @@ class RegionViewer(QMainWindow):
             pass
         vol = self._native3d
         n = getattr(vol, "brick_count", 0)
+        # WHAT PITCH THE VOXELS REALLY HAVE, said out loud. The ROI extent and the ceiling are in
+        # ACQUISITION pixels and correctly so -- the bricks are planned and read in level-0 mosaic
+        # coordinates (`roi_window_px`, `read_brick`), which is the space `clamp_bbox_um` clamps in.
+        # But the VOXELS are only at that pitch for the raw source. An operator source is the
+        # window's own 2D layer, and a parent window's layer is the fused preview at its own
+        # decimation (measured on the 10x set: step 2, so 1.504 um/px against an acquisition
+        # 0.752). Saying "at 0.752 um/px" for that volume was a sentence about the wrong pixels.
+        if src_pitch is None:
+            voxels = (f"Voxels at {px:.3f} um/px, the acquisition's own — read straight from the "
+                      f"reader.")
+        else:
+            spy, spx = src_pitch
+            coarser = ("" if max(spy, spx) <= px * 1.001 else
+                       f" — COARSER than the acquisition's {px:.3f} um/px, because a displayed "
+                       f"operator layer is the fused preview at its own decimation")
+            voxels = (f"Voxels at {spy:.3f} x {spx:.3f} um/px, read off the '{source}' "
+                      f"layer{coarser}.")
         self._say(f"3D in-window: '{source}', {(r1 - r0)}x{(c1 - c0)} px ROI, {nz} z, "
-                  f"{len(names)} channel(s), {n} texture{'' if n == 1 else 's'} at "
-                  f"{px:.3f} um/px. {_bricks.ceiling_line(max_tex, px, measured=True)}")
+                  f"{len(names)} channel(s), {n} texture{'' if n == 1 else 's'}. {voxels} "
+                  f"{_bricks.ceiling_line(max_tex, px, measured=True)}")
 
     def _volume_source(self, window: tuple):
         """WHICH volume 3D renders: the operator layer this window is SHOWING, or raw.
@@ -2744,25 +2784,29 @@ class RegionViewer(QMainWindow):
         operator consumes z. ``tests/test_operator_declaration.py`` fails the build on an
         ``x == "<operator name>"`` comparison precisely to stop the name test creeping back.
 
-        Returns ``(read, label)`` -- ``read=None`` meaning "use the reader's raw z-stack" -- or
-        ``(None, None)`` with a spoken reason when the visible layer has no volume to show.
+        Returns ``(read, label, pitch)`` -- ``read=None`` meaning "use the reader's raw z-stack",
+        and ``pitch=None`` with it, because those voxels ARE the acquisition's. An operator source
+        answers with the ``(y, x)`` micrometres per pixel of the LAYER it reads, which is not the
+        acquisition's pitch whenever that layer is a fused preview (measured: step 2 on the 10x
+        set, 1.504 um/px against 0.752) -- the caller has to say which of the two it is showing.
+        ``(None, None, None)`` with a spoken reason when the visible layer has no volume to show.
         """
         mosaic = getattr(self._pane, "mosaic", None) if self._pane is not None else None
         if mosaic is None:
-            return None, _RAW_OP
+            return None, _RAW_OP, None
         try:
             op = mosaic.visible_op()
         except Exception:                                # noqa: BLE001 - fall back to raw
-            return None, _RAW_OP
+            return None, _RAW_OP, None
         if not op or op == _RAW_OP:
-            return None, _RAW_OP
+            return None, _RAW_OP, None
         # A z-REDUCER's result is (T, C, 1, Y, X): one plane. There is no volume, and rendering a
         # single slice as a "3D volume" would be a picture that lies about its own depth.
         try:
             if mosaic._reduces_z(op):
                 self._say(f"3D: '{op}' reduces z to a single plane, so it has no volume to render. "
                           f"Show raw (or a z-preserving operator) and click 3D again.")
-                return None, None
+                return None, None, None
         except Exception:                                # noqa: BLE001 - undeclared: try to render
             pass
         px = float((self._meta or {}).get("pixel_size_um") or 1.0)
@@ -2775,7 +2819,7 @@ class RegionViewer(QMainWindow):
             pass
         if origin is None:
             self._say(f"3D: '{op}' cannot be placed — this region has no stage positions.")
-            return None, None
+            return None, None, None
         # An operator layer carries its OWN grid: a parent window holds the fused pyramid (level 0
         # capped to _MAX_FUSED_PX), an ROI child holds a crop placed at the ROI. Indexing either
         # with mosaic pixels would be wrong in a different way each time. The layer's own
@@ -2802,8 +2846,12 @@ class RegionViewer(QMainWindow):
         if not srcs:
             self._say(f"3D: '{op}' is on screen but carries no z depth here, so there is no volume "
                       f"to render.")
-            return None, None
+            return None, None, None
         ox_um, oy_um = float(origin[0]), float(origin[1])
+        # THE PITCH OF THESE VOXELS, taken from the same `sc` the reader below indexes with, so the
+        # sentence the window prints and the arithmetic that fetches the pixels cannot disagree.
+        # The channels of one operator share one grid; the first is the grid.
+        pitch = tuple(next(iter(srcs.values()))[2])
 
         def _read(brick, channel, step, should_stop):
             """One brick out of the OPERATOR's on-screen volume, same contract as the raw reader:
@@ -2825,7 +2873,7 @@ class RegionViewer(QMainWindow):
             s = max(1, int(step))
             return np.ascontiguousarray(sub[:, ::s, ::s]) if s > 1 else sub
 
-        return _read, op
+        return _read, op, pitch
 
     def _refresh_bricks(self) -> None:
         """The camera stopped: re-decide stride and visible set. No-op unless 3D bricks are up."""
@@ -2838,16 +2886,63 @@ class RegionViewer(QMainWindow):
         except Exception as exc:                         # noqa: BLE001 - named, never silent
             self._say(f"3D: could not follow the camera ({exc}).")
 
+    def _displayed_pitch_um(self, layer, *, what: str):
+        """MICROMETRES PER PIXEL of the pixels a layer is actually showing, as ``(y, x)``.
+
+        Read off the LAYER'S OWN PLACEMENT and from nowhere else. ``meta["pixel_size_um"]`` is the
+        acquisition's pitch, and for anything built by ``_mosaic_source.fuse_region_pyramid`` it is
+        not the pitch of the pixels: that fuser DECIMATES (``step = ceil(mosaic_px/_MAX_FUSED_PX)``,
+        measured as 2 on the 10x set, level 0 (10, 5731, 4794) for a 7209 x 8619 um region). The
+        layer already knows the true answer and by the better route -- ``_napari_view.add_mosaic``
+        places it with ``placement_for(ndim, bbox_um, shape[-2:], z_scale_um)``, i.e. bbox / shape,
+        so its ``scale`` carries the real pitch whatever the decimation (measured: 1.5040 y, 1.5038
+        x against an acquisition pitch of 0.752).
+
+        NO FALLBACK. A layer with no usable ``scale`` is refused by name rather than quietly
+        re-described at ``pixel_size_um``, which is precisely the wrong answer this reads around:
+        a volume 2x too small in y and x with z at full size is not an error, it is a picture with
+        the wrong aspect ratio, and nothing downstream can tell.
+        """
+        scale = getattr(layer, "scale", None)
+        try:
+            py, px = (float(v) for v in tuple(scale)[-2:])
+        except (TypeError, ValueError, IndexError):
+            self._say(f"3D refused: {what} carries no napari scale, so the micrometres per "
+                      f"displayed pixel are unknown. The acquisition's pixel_size_um is NOT that "
+                      f"number — the mosaic on screen is fused at its own decimation — so "
+                      f"there is nothing honest to render this volume at.")
+            return None
+        if not (py > 0 and px > 0):
+            self._say(f"3D refused: {what} is placed at a scale of ({py}, {px}) um/px, which is "
+                      f"not a pitch. A volume cannot be given a physical size from it.")
+            return None
+        return (py, px)
+
     def _render_roi_volume(self, mosaic, contrast_by: dict, colormap_by: dict) -> None:
         """Render the EXACT ROI subarray in 3D: the cropped level-0 volume this window's 2D view
         shows (mosaic.find(RAW).data[0]), texture-bounded, carrying the on-screen contrast. This is
-        the ROI you boxed, at the same extent as 2D -- not a whole FOV."""
+        the ROI you boxed, at the same extent as 2D -- not a whole FOV.
+
+        NOTE (2026-08-06): nothing in the app calls this. The ROI 3D button goes through
+        ``_open_3d`` -> ``_open_roi_3d``, which reads NATIVE voxels straight from the reader and is
+        a different geometry entirely; this one renders the 2D LAYER's pixels, which are the fused
+        preview at its own decimation. Only ``tests/test_viewer_3d.py`` reaches it. It is kept
+        honest rather than left as a trap, because a resurrected caller would resurrect the aspect
+        bug with it.
+        """
         volumes: dict = {}
+        pitch = None
         for c in (self._meta or {}).get("channels", []):
             name = c["name"]
             layer = mosaic.find(_RAW_OP, name)
             if layer is None:
                 continue
+            # THE PITCH COMES OFF THE LAYER, once, from the first channel that has a volume: the
+            # raw channels of one window share one grid, and the push below carries ONE scale.
+            if pitch is None:
+                pitch = self._displayed_pitch_um(layer, what=f"the raw '{name}' mosaic layer")
+                if pitch is None:
+                    return                               # already refused, by name
             # THE one pyramid rule (`_napari_view.full_res_level`), not an isinstance check:
             # napari's `MultiScaleData` is neither a list nor a tuple, so this used to hand the
             # whole pyramid on unchanged — and `np.asarray` on it below yields the COARSEST
@@ -2860,7 +2955,7 @@ class RegionViewer(QMainWindow):
         if not volumes:
             self._say("no channel on screen to render in 3D.")
             return
-        px = float((self._meta or {}).get("pixel_size_um") or 1.0)
+        py_um, px_um = pitch
         max_tex = 2048
         try:
             max_tex = int(self._pane._live_max_3d_texture())
@@ -2868,12 +2963,15 @@ class RegionViewer(QMainWindow):
             pass
         from squidmip._napari3d import open_native_3d_volume, z_step_um
 
-        dz = z_step_um(self._meta or {}, px, where="3D ROI volume")
+        # The dz STAND-IN (missing dz_um) is "assume isotropic", so it has to be isotropic with
+        # THESE voxels, not with the acquisition's. Handing it pixel_size_um next to a displayed
+        # pitch of 2x that would draw a volume half as tall as the stand-in claims.
+        dz = z_step_um(self._meta or {}, py_um, where="3D ROI volume")
 
         try:
             self._replace_native3d(lambda: open_native_3d_volume(
                 {n: np.asarray(v) for n, v in volumes.items()},
-                scale=(dz, px, px),
+                scale=(dz, py_um, px_um),
                 title=f"3D ROI — {self._region_label(self._regions)}",
                 contrast_by_channel=contrast_by or None,
                 colormap_by_channel=colormap_by or None,

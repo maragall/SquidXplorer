@@ -243,6 +243,31 @@ class Segmenter:
     requires: tuple[str, ...] = ()
     #: One line for the UI. Says out loud when something is slow or wants a GPU.
     blurb: str = ""
+    #: The :class:`SpotParams` field names this algorithm ACTUALLY READS. ``None`` means all of
+    #: them, which is true of the traditional recipe the dataclass was written for.
+    #:
+    #: THE FOURTH DECLARATION, and it exists for the reason the other three do: a fact about an
+    #: algorithm that generic code has to know and cannot infer. ``cellpose_nuclei`` reads
+    #: ``min_distance_px`` and nothing else, but the operator was registered with the whole of
+    #: ``SPOT_PARAMS`` — so ``_param_panel`` drew four widgets, three of which could not change
+    #: the answer, and the callable's own name reported all four to the console and the recipe.
+    #:
+    #: Measured on ``synthetic_1536_wellplate`` A1 / 405 nm, a 1024 px crop, through the registered
+    #: operator (``bind_operator("cellpose", {...})``)::
+    #:
+    #:     cellpose {}                        ->  42 objects
+    #:     cellpose {min_area_px: 4000}       ->  42 objects   BYTE-IDENTICAL label image
+    #:     cellpose {sigma_px: 12.0}          ->  42 objects   BYTE-IDENTICAL label image
+    #:     cellpose {split_touching: False}   ->  42 objects   BYTE-IDENTICAL label image
+    #:     cellpose {min_distance_px: 30}     ->  18 objects   the one knob that reaches a pixel
+    #:
+    #: For scale: applying ``min_area_px``'s own documented meaning to those 42 masks leaves 29 at
+    #: 1000 px and 2 at 4000 px. The panel answered 42 where the honest answer was 2.
+    #:
+    #: Declared here rather than in ``_cellpose`` so ONE record answers it for the operator
+    #: registration, for the callable's name, and for anything added later — two copies of "which
+    #: knobs does this algorithm read" would be the drift this closes.
+    honours: Optional[tuple[str, ...]] = None
 
 
 _SEGMENTERS: dict[str, Segmenter] = {}
@@ -251,7 +276,7 @@ _SEGMENTERS: dict[str, Segmenter] = {}
 DEFAULT_SEGMENTER: str = "otsu-watershed"
 
 
-def add_segmenter(name: str, fn, *, requires=(), blurb: str = "") -> None:
+def add_segmenter(name: str, fn, *, requires=(), blurb: str = "", honours=None) -> None:
     """Register a segmentation algorithm under *name*.
 
     This is the seam a real segmenter plugs into::
@@ -269,11 +294,17 @@ def add_segmenter(name: str, fn, *, requires=(), blurb: str = "") -> None:
         add_segmenter("cellpose", cellpose_nuclei, requires=("cellpose",),
                       blurb="Cellpose (slow; wants a GPU)")
 
+    ``honours`` names the :class:`SpotParams` fields this algorithm reads; leave it off when the
+    algorithm reads all of them. It is what stops an operator declaring a control that cannot
+    change its answer — see :attr:`Segmenter.honours` for the measurement that made it necessary.
+
     Raises
     ------
     ValueError
-        On an empty name, a non-callable, or a name already taken — a silent clobber of a
-        registered segmenter would be a quiet correctness bug (same rule as ``add_projector``).
+        On an empty name, a non-callable, a name already taken — a silent clobber of a registered
+        segmenter would be a quiet correctness bug (same rule as ``add_projector``) — or an
+        ``honours`` entry that is not a ``SpotParams`` field, which would register an operator
+        with a parameter nothing can apply.
     """
     if not name:
         raise ValueError("segmenter name must be a non-empty string")
@@ -284,7 +315,29 @@ def add_segmenter(name: str, fn, *, requires=(), blurb: str = "") -> None:
             f"segmenter {name!r} is already defined; pick a distinct name "
             f"(defined: {available_segmenters()})."
         )
-    _SEGMENTERS[name] = Segmenter(name, fn, normalise_requires(requires), blurb)
+    if honours is not None:
+        honours = tuple(str(n) for n in honours)
+        known = {f.name for f in fields(SpotParams)}
+        unknown = [n for n in honours if n not in known]
+        if unknown:
+            raise ValueError(
+                f"segmenter {name!r} declares it honours {unknown}, which SpotParams does not "
+                f"have (it has {sorted(known)}). A declared parameter that no field backs is a "
+                f"control that cannot reach the pixels, which is the failure this declaration "
+                f"exists to prevent."
+            )
+    _SEGMENTERS[name] = Segmenter(name, fn, normalise_requires(requires), blurb, honours)
+
+
+def segmenter_honours(algorithm: str) -> tuple[str, ...]:
+    """The :class:`SpotParams` field names *algorithm* reads. Every field, unless it says less.
+
+    The ONE reader of :attr:`Segmenter.honours`, so the operator's ``params`` declaration and the
+    operator callable's own name are derived from one answer rather than two.
+    """
+    seg = _SEGMENTERS.get(str(algorithm))
+    declared = None if seg is None else seg.honours
+    return tuple(f.name for f in fields(SpotParams)) if declared is None else declared
 
 
 def available_segmenters() -> list[str]:
@@ -516,9 +569,13 @@ def spots_op(params: Optional[SpotParams] = None, *,
                 )
         return res.labels.astype(dtype, copy=False)
 
-    _spots.__name__ = (f"spot({algorithm},sigma_px={params.sigma_px},"
-                       f"min_area_px={params.min_area_px},"
-                       f"split_touching={params.split_touching})")
+    # NAMES ONLY THE PARAMETERS THIS ALGORITHM READS. This string is the callable's identity — it
+    # reaches the layer key, the console line and the recipe — and it used to spell out
+    # `sigma_px`, `min_area_px` and `split_touching` for EVERY algorithm, including Cellpose,
+    # which reads none of the three (`_cellpose.HONOURED_PARAMS` has the measurement). A log line
+    # that names a number the run did not use is the same lie as a widget that sets one.
+    shown = ",".join(f"{n}={getattr(params, n)}" for n in segmenter_honours(algorithm))
+    _spots.__name__ = f"spot({algorithm}{',' + shown if shown else ''})"
     # TWO declarations on one callable. `plane_op` stamps consumes=frozenset() (z survives);
     # `labels_op` stamps produces="labels" (the pixels are OBJECT IDS, not light). The second one
     # is what stops the delivery path handing a segmentation to `add_image`, where the fluorescence
