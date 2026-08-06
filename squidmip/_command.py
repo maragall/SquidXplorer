@@ -106,6 +106,7 @@ __all__ = [
     "BAD_COMMAND",
     "NO_DISK_SPACE",
     "FAILED",
+    "CANCELLED",
 ]
 
 # --- refusal codes -----------------------------------------------------------------------------
@@ -132,10 +133,14 @@ UNKNOWN_COMMAND = "unknown_command"      # no such kind
 BAD_COMMAND = "bad_command"              # the kind exists; the payload does not validate
 NO_DISK_SPACE = "no_disk_space"          # the estimated write does not fit
 FAILED = "failed"                        # the work ran and raised — the detail carries the name
+# The OPERATOR asked to stop, or a human did (Ctrl-C on the headless surface). A distinct code
+# from FAILED because nothing is wrong: a caller that retries a `failed` is right and one that
+# retries a `cancelled` is arguing with the person who pressed the key.
+CANCELLED = "cancelled"
 
 REFUSALS = (NO_ACQUISITION, UNKNOWN_OPERATOR, UNAVAILABLE_OPERATOR, UNKNOWN_REGION,
             EMPTY_SCOPE, BAD_SCOPE, BUSY, NO_RUN, NOT_SUPPORTED_HERE, UNKNOWN_COMMAND,
-            BAD_COMMAND, NO_DISK_SPACE, FAILED)
+            BAD_COMMAND, NO_DISK_SPACE, FAILED, CANCELLED)
 
 
 # --- the result --------------------------------------------------------------------------------
@@ -417,6 +422,14 @@ class CommandBus:
         logger.info("%s: %s", self.surface, command.describe())
         try:
             result = handler(command)
+        except KeyboardInterrupt:
+            # Ctrl-C is the headless surface's stop button, and it arrives as a BaseException that
+            # `except Exception` does not see -- so the guarantee above ("execute NEVER raises")
+            # had a hole exactly where a user is most likely to be watching: a multi-hour run
+            # answered a keystroke with a raw traceback out of a worker thread. It is a REFUSAL
+            # with a code, like every other way a run can not-finish.
+            logger.warning("%s interrupted by the user", command.kind)
+            return _refuse(command.kind, CANCELLED, "interrupted (Ctrl-C) — nothing more was run")
         except Exception as exc:            # noqa: BLE001 - an executor bug is a refusal, not a crash
             logger.exception("%s raised out of %s", command.kind, self.surface)
             return _refuse(command.kind, FAILED, f"{type(exc).__name__}: {exc}")
@@ -478,12 +491,22 @@ class EngineExecutor:
 
     surface = "engine"
 
-    def __init__(self, path: Optional[str] = None, *, reader=None, selection=None) -> None:
+    def __init__(self, path: Optional[str] = None, *, reader=None, selection=None,
+                 on_well=None, stop=None) -> None:
         self._path = str(path) if path else None
         self._reader = reader
         #: The headless stand-in for the plate selection. ``resolve_run_scope`` reads it exactly
         #: as it reads the GUI's, so "selected wells" means the same thing on both surfaces.
         self.selection: list = list(selection or [])
+        #: ``on_well(region, fov, image)`` after each well lands, and ``stop() -> bool`` polled
+        #: before each one. NOT command fields: a command is serialisable and a callback is not,
+        #: so they belong to the SURFACE that is driving, exactly as the GUI's executor owns its
+        #: thread. Without them a headless run said nothing between "starting" and "done" and
+        #: could not be stopped at all -- ``write_plate`` has taken both since IMA-230 and this
+        #: executor was the only caller passing neither. ``on_well`` runs on a WRITER THREAD and
+        #: several may overlap: it must be thread-safe.
+        self.on_well = on_well
+        self.stop = stop
         self.last_metrics = None
 
     # -- state -------------------------------------------------------------------------
@@ -582,10 +605,14 @@ class EngineExecutor:
         Synchronous on purpose: this surface has no event loop to keep responsive, and a caller
         that gets ``completed`` back knows the pixels exist. The GUI's executor returns
         ``started`` instead, and the difference is in the result rather than hidden.
+
+        ``completed`` is not ``succeeded``. ``data["outcome"]`` is the verdict — ``"ok"``,
+        ``"partial"`` (something was skipped, possibly everything) or ``"stopped"`` (``stop()``
+        cut it) — and a caller that turns this into an exit code must read THAT, not ``ok``.
         """
         from squidmip import (available_projectors, available_region_operators, project_plate,
                               stitch_plate, write_plate)
-        from squidmip._measure import OK, PARTIAL, measure_run
+        from squidmip._measure import OK, PARTIAL, STOPPED, measure_run
 
         meta = self._meta()
         if meta is None:
@@ -634,14 +661,20 @@ class EngineExecutor:
             logger.warning("SKIP well %s (fov %s): %s: %s", region, fov, type(exc).__name__, exc)
 
         region_op = cmd.operator in set(available_region_operators())
+        stopped = False
         with measure_run(cmd.operator, target or "no target", n_targets=n_targets) as run:
             run.note(surface=self.surface, save=cmd.save, acquisition=self._path)
             if cmd.save:
                 manifest = write_plate(self.reader, out_dir, projector=cmd.operator,
                                        n_fovs=cmd.n_fovs, workers=cmd.workers, tiff=cmd.tiff,
                                        on_error=on_error, regions=regions,
-                                       operator_kwargs=cmd.parameters or None)
+                                       operator_kwargs=cmd.parameters or None,
+                                       on_well=self.on_well, stop=self.stop)
                 landed = int(manifest.get("n_fields_written") or 0)
+                # write_from_stream has always ANSWERED this ("complete": False when `stop` cut
+                # the stream) and this executor has always dropped it on the floor -- so a
+                # cancelled run and a finished one were the same `completed` result.
+                stopped = manifest.get("complete") is False
                 data = {"manifest": {k: (str(v) if hasattr(v, "__fspath__") else v)
                                      for k, v in manifest.items()}}
             else:
@@ -654,18 +687,29 @@ class EngineExecutor:
                                            n_fovs=cmd.n_fovs, on_error=on_error, regions=regions)
                 landed = 0
                 for _region, _fov, _image in stream:
+                    if self.stop is not None and self.stop():
+                        stopped = True   # same cancel contract as the save path, one loop up
+                        close = getattr(stream, "close", None)
+                        if callable(close):
+                            close()      # shut the engine's pool down NOW, not at GC
+                        break
                     landed += 1          # PREVIEW headless: computed, counted, nothing retained
+                    if self.on_well is not None:
+                        self.on_well(_region, _fov, _image)
                 data = {"n_fields": landed}
             # "It returned" is not "it worked". A run where every well raised (flat-field with no
             # profile is the routine case) still reaches here, because per-well fault isolation is
             # what keeps one bad file from aborting a plate — and the GUI already shipped a "✓"
             # over an empty plate once. Landed == 0 is a partial result however politely we got here.
-            if landed == 0 and n_targets:
-                run.finish(PARTIAL, f"produced nothing — all {n_targets} target(s) skipped")
+            if stopped:
+                outcome, detail = STOPPED, f"stopped after {landed} of {n_targets} target(s)"
+            elif landed == 0 and n_targets:
+                outcome, detail = PARTIAL, f"produced nothing — all {n_targets} target(s) skipped"
             elif skipped:
-                run.finish(PARTIAL, f"{len(set(skipped))} well(s) skipped")
+                outcome, detail = PARTIAL, f"{len(set(skipped))} well(s) skipped"
             else:
-                run.finish(OK)
+                outcome, detail = OK, ""
+            run.finish(outcome, detail)
             metrics = run
         data["n_landed"] = landed
         self.last_metrics = metrics.metrics
@@ -673,4 +717,12 @@ class EngineExecutor:
         data["metrics"] = metrics.metrics.as_dict() if metrics.metrics else None
         data["regions"] = regions
         data["target"] = target
+        # THE VERDICT, at the top level of the result, spelled with `_measure`'s own words
+        # (`ok` / `partial` / `stopped`). It was computed here and then thrown away: `_done`
+        # makes every one of them `ok=True`, so a caller reading `result.ok` could not tell a
+        # finished plate from an empty one, and the CLI exited 0 over "produced nothing". A
+        # caller now branches on this; `ok` keeps its old meaning ("the command ran").
+        data["outcome"] = outcome
+        data["detail"] = detail
+        data["n_targets"] = n_targets
         return _done(cmd.kind, metrics.metrics.line() if metrics.metrics else "done", **data)
