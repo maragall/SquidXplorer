@@ -549,6 +549,17 @@ def _fuse_levels(reader: Any, meta: dict, region: str, channel: str, z: int, t: 
                 # fuse_region_mosaic does. This is a PREVIEW placement, not a stitch.
                 outs[px][r0:r1, c0:c1] = sub[: r1 - r0, : c1 - c0]
 
+    if unreadable and len(unreadable) < len(fovs):
+        # The `noqa` above says "collected, then reported" and only the ALL-BAD case below was ever
+        # reported. A partial failure left black rectangles in the region mosaic — the main viewing
+        # surface — with nothing said anywhere: no log, no signal, no readout. Its sibling
+        # `fuse_region_mosaic` has always named each hole, and `_gallery.GalleryCell.unreadable`
+        # carries the count to the caption; this path, which is what a window actually shows, said
+        # nothing. Julio's `manual0` FOVs 17/19 are exactly this shape.
+        _log.warning("mosaic %s/%s z=%s: %d of %d FOV(s) could not be read — they are BLACK HOLES "
+                     "in this mosaic, not empty fields. First: fov %s: %s",
+                     region, channel, z, len(unreadable), len(fovs),
+                     unreadable[0][0], unreadable[0][1])
     if unreadable and len(unreadable) == len(fovs):
         # One bad FOV is a visible hole. EVERY FOV bad is not a picture at all, and a black plane
         # would report a read failure as empty tissue — the exact silent failure this codebase has

@@ -883,6 +883,19 @@ class _FlatfieldWorker(QThread):
         self._reader, self._meta, self._channel = reader, meta, channel
         self._max_tiles = int(max_tiles)
         self._use_dark = bool(use_darkfield)
+        self._stop = threading.Event()
+
+    def stop(self):
+        """Ask the sampling loop to give up. The BaSiC solve itself is not interruptible.
+
+        This worker had NO cancellation of any kind, which also made it the one worker
+        ``PlateWindow._retire`` could not accept (``_retire`` calls ``w.stop()``), so nothing
+        joined it and closing the plate during an estimate — "seconds-to-minutes" by this class's
+        own docstring — destroyed a running, parented QThread. The honest scope of the flag is
+        stated rather than implied: it cancels the READS, which are the many-seconds part, and
+        cannot cancel ``estimate_profile``, which is one third-party call with no callback.
+        """
+        self._stop.set()
 
     def run(self):                                    # pragma: no cover - Qt thread
         try:
@@ -901,16 +914,31 @@ class _FlatfieldWorker(QThread):
             step = max(1, len(pairs) // self._max_tiles)
             sample = pairs[::step][: self._max_tiles]
             tiles = []
+            unreadable = []
             for region, fov in sample:
+                if self._stop.is_set():
+                    return                            # cancelled: no profile, and nothing claimed
                 try:
                     tiles.append(np.asarray(self._reader.read(region, fov, self._channel, int(z0))))
-                except Exception:                     # noqa: BLE001 - one bad tile is not fatal
+                except Exception as exc:              # noqa: BLE001 - one bad tile is not fatal…
+                    unreadable.append(f"{region}/{fov}: {type(exc).__name__}: {exc}")
                     continue
                 self.stage.emit(f"read {len(tiles)}/{len(sample)} tiles for {self._channel}…")
+            if unreadable:
+                # …but it is not INVISIBLE either. 45 of 48 tiles failing for one cause still
+                # produced a profile from the surviving 3 and reported plain success, and the
+                # "<3" branch below named the shortfall without ever naming the cause. This class
+                # claims above to fail "to the LOG by name, never silently"; that was true of the
+                # solve and false of the reads it is computed from.
+                log.warning("flat-field %s: %d of %d sample tiles were unreadable and were left "
+                            "out of the estimate — first: %s",
+                            self._channel, len(unreadable), len(sample), unreadable[0])
             if len(tiles) < 3:
                 self.problem.emit(
                     f"flat-field estimate needs at least 3 readable tiles for {self._channel}, "
-                    f"got {len(tiles)}.")
+                    f"got {len(tiles)}"
+                    + (f" ({len(unreadable)} unreadable, first: {unreadable[0]})."
+                       if unreadable else "."))
                 return
             self.stage.emit(f"estimating illumination (tilefusion BaSiC) from {len(tiles)} tiles…")
             profile = estimate_profile(np.stack(tiles), use_darkfield=self._use_dark)
@@ -1296,6 +1324,14 @@ class _PreviewWorker(QThread):
 
             def load(item):
                 region, fov, box = item
+                # The FIRST line of the unit of work, not the last: `stop()` has to be able to
+                # cancel the queue, not merely the emitting. Every item is submitted up front (see
+                # the pool block below), so without this a stopped preview still reads every
+                # remaining FOV of the plate off disk before the pool will shut down. This turns
+                # each not-yet-started item into a no-op, so the cost of a stop is bounded by the
+                # ~`_VIEWER_WORKERS` reads already in flight rather than by the whole plate.
+                if self._stop.is_set():
+                    return None
                 h, w = (_CELL, _CELL) if box is None else (box[2], box[3])
                 fit = _fit_cell if box is None else (lambda a: _fit_box(a, h, w))
                 # `t=self._t`, not the signature's default 0: this is the line that made the plate
@@ -1305,10 +1341,15 @@ class _PreviewWorker(QThread):
                 return region, box, [fit(self._reader.read(region, fov, ch, z_mid, t=self._t)
                                          .astype(np.float32)) for ch in self._channels]
 
+            # `ex.map` submits EVERY item before the first result is yielded, so leaving this block
+            # early calls `shutdown(wait=True)` and blocks until every already-submitted read of
+            # the whole plate finishes. That is why `load` polls the stop flag itself: the poll
+            # below cancels this loop, the poll in `load` cancels the work.
             with ThreadPoolExecutor(max_workers=_VIEWER_WORKERS) as ex:
-                for region, box, tiles in ex.map(load, plan):   # plate order preserved
-                    if self._stop.is_set():
+                for done in ex.map(load, plan):                # plate order preserved
+                    if self._stop.is_set() or done is None:
                         return
+                    region, box, tiles = done
                     ri, ci = self._fov_index[region]["rc"]
                     tile = np.stack(tiles).astype(self._dtype)
                     self.tileReady.emit(ri, ci, region, tile, box)

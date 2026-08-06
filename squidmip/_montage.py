@@ -233,6 +233,7 @@ def _window_lut(dtype: np.dtype, lo: float, hi: float) -> Optional[np.ndarray]:
 
 _COMPOSITE_MIN_PX_PER_BAND = 120_000   # below this a band costs more in dispatch than it saves
 _COMPOSITE_POOL: "Optional[ThreadPoolExecutor]" = None
+_COMPOSITE_POOL_LOCK = threading.Lock()
 
 
 def _composite_pool() -> "ThreadPoolExecutor":
@@ -240,13 +241,20 @@ def _composite_pool() -> "ThreadPoolExecutor":
 
     numpy releases the GIL for the take/gemm/clip this kernel is made of, so bands really do run
     in parallel. Created lazily so importing squidmip costs no threads.
+
+    Lazily AND under a lock, because ``composite()`` is called from the Qt thread (the plate's
+    repaint, ``_plate_overview``) and from ``_VideoWorker`` (``_video.py`` -> ``composite``) — two
+    threads that can both find ``None``. The loser's pool is orphaned: never ``shutdown()``, never
+    reachable again, so up to 8 live worker threads leak per race. ``_LUT_LOCK`` forty lines above
+    already guards a far cheaper object; this is the same rule applied to the expensive one.
     """
     global _COMPOSITE_POOL
-    if _COMPOSITE_POOL is None:
-        _COMPOSITE_POOL = ThreadPoolExecutor(
-            max_workers=max(1, min(8, (os.cpu_count() or 1))),
-            thread_name_prefix="composite")
-    return _COMPOSITE_POOL
+    with _COMPOSITE_POOL_LOCK:
+        if _COMPOSITE_POOL is None:
+            _COMPOSITE_POOL = ThreadPoolExecutor(
+                max_workers=max(1, min(8, (os.cpu_count() or 1))),
+                thread_name_prefix="composite")
+        return _COMPOSITE_POOL
 
 
 def _hex_to_rgb01(hex_color: str) -> np.ndarray:

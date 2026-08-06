@@ -1678,8 +1678,13 @@ class SquidZarrReader:
         # ``<acq>/plate.ome.zarr`` and ``<acq>/zarr/`` are both children of the acquisition folder.
         self._root = Path(acquisition_root) if acquisition_root is not None else self._path.parent
         self._fields: Optional[dict] = None      # {(region, fov): Path to the image group}
-        self._ms: dict = {}                      # image group Path -> _Multiscale (cached)
-        self._arrays: dict = {}                  # image group Path -> open tensorstore (cached)
+        # image group Path -> _Multiscale. Pure parsed METADATA, no file handle, so unlike the
+        # ``_arrays`` dict that used to sit beside it this holds nothing that needs closing. It is
+        # written without a lock from several threads and that is safe by shape rather than by
+        # luck: `_Multiscale(group)` is built complete into a local and published with one atomic
+        # store, so a racing reader either sees the old absence or the finished object, never a
+        # half-built one. Two threads racing one group parse the same JSON twice; nothing else.
+        self._ms: dict = {}
         self._meta: Optional[dict] = None
         self._contract_version = None            # set by _discover: what the store declares, or None
 
@@ -1795,10 +1800,19 @@ class SquidZarrReader:
         return ms
 
     def _array(self, group: Path):
-        arr = self._arrays.get(group)
-        if arr is None:
-            arr = self._arrays[group] = _open_zarr_array(self._multiscale(group).array_path)
-        return arr
+        """The open store for a group. NOT memoised here — ``_tsctx.HANDLES`` is the cache.
+
+        There was a second dict, ``self._arrays``, in front of this call. It looked like a cheap
+        memo and it was a cap defeat: ``HandleCache`` evicts by dropping its last reference
+        (TensorStore has no explicit close), so a per-reader dict holding a strong reference to
+        every handle for the reader's whole life means ``DEFAULT_MAX_OPEN = 32`` never closes
+        anything. On a plate-scale read the bound was decorative. ``_open_zarr_array``'s own
+        docstring already claimed this dict was gone; now it is.
+
+        Nothing is lost by removing it: ``HANDLES.get`` is an ``OrderedDict`` lookup under a lock,
+        and unlike the dict it replaces it is safe to call from the several threads that do.
+        """
+        return _open_zarr_array(self._multiscale(group).array_path)
 
     # -- metadata ----------------------------------------------------------
     @property
