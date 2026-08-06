@@ -206,7 +206,11 @@ EXPECTED = {
     "visibility":            0,   # napari's eye icon; the plate's checkboxes went in 8b0cbfc
     "channel colour / LUT":  0,   # napari's colormap picker; the plate follows it
     "active layer":          0,   # the Layers tree, which is a tree item and not a control widget
-    "plate selection":       0,   # click / marquee: a gesture, no widget
+    # click / marquee are gestures, not widgets. "Select all" IS a widget and DOES move this, and
+    # it is the one EXEMPT entry -- verified live 2026-08-06 by emptying EXEMPT, which turned this
+    # line red with "Select all [QPushButton in PlateWindow]". So the 0 here is a measurement, not
+    # an absence of measurement.
+    "plate selection":       0,
     "current well":          0,   # double-click: a gesture, no widget
     "zoom / viewport":       0,   # the wheel: a gesture, no widget
 }

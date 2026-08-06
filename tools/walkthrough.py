@@ -250,8 +250,12 @@ def free_gb():
 
 # ======================================================================================
 def run_all():
-    from squidmip import available_projectors, open_reader
-    from squidmip._stitch import available_region_operators
+    # Both off the package, not off `_stitch`: the one-operator-registry change (2026-08-05)
+    # deleted `_stitch._REGION_OPERATORS` and moved `available_region_operators` onto `squidmip`
+    # as a filter over the single `_engine._OPERATORS` table. This module-level import still said
+    # `from squidmip._stitch import ...` after the merge and would have taken the whole file down
+    # with an ImportError before the first check.
+    from squidmip import available_projectors, available_region_operators, open_reader
 
     def read(ds):
         """``open_reader``, but an absent dataset SKIPs the check instead of raising."""
@@ -678,7 +682,6 @@ def run_all():
 
     @check("IMA-222", "Stitch registers real FOVs and improves seam agreement")
     def _():
-        from squidmip import available_region_operators
         region_ops = available_region_operators()
         assert "stitch" in region_ops and "coordinate" in region_ops
         import squidmip._viewer as V
