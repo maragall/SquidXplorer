@@ -78,7 +78,7 @@ from qtpy.QtWidgets import QApplication  # noqa: E402
 from squidmip import _viewer as V  # noqa: E402
 
 from .conftest import shutdown_plate_window  # noqa: E402
-from .test_viewer import qapp, stub_detail  # noqa: E402,F401  (fixtures)
+from .test_viewer import qapp  # noqa: E402,F401  (fixtures)
 
 
 def _visible_top_levels():
@@ -98,7 +98,7 @@ def _visible_top_levels():
 
 
 def test_building_and_ingesting_shows_no_window_the_caller_did_not_open(
-        qapp, stub_detail, squid_dataset):
+        qapp, squid_dataset):
     """A headless test never calls show(), so anything visible here showed ITSELF.
 
     MUTATION: put back ``self._focus_btn = QPushButton(...)`` with no parent plus a
@@ -128,7 +128,7 @@ def _ancestry(widget):
 
 
 def test_a_published_qc_result_is_really_inside_the_window_and_really_visible(
-        qapp, stub_detail, squid_dataset):
+        qapp, squid_dataset):
     """Rule 3. The decon QC view is the picture the whole iterate-and-look loop exists for.
 
     Between 2b8fbc5 (which took the exploration pane out of the layout) and 2026-08-05,
@@ -180,7 +180,7 @@ def test_a_published_qc_result_is_really_inside_the_window_and_really_visible(
     shutdown_plate_window(qapp, win)
 
 
-def test_the_dead_reference_plane_chain_is_not_on_the_plate_window(qapp, stub_detail,
+def test_the_dead_reference_plane_chain_is_not_on_the_plate_window(qapp,
                                                                   squid_dataset):
     """Focus is per-window now (each window's own z-slider, ``d07db43``). The plate's copy was
     reachable only through the orphan button, so every link in it was dead code with a live
@@ -198,7 +198,7 @@ def test_the_dead_reference_plane_chain_is_not_on_the_plate_window(qapp, stub_de
     shutdown_plate_window(qapp, win)
 
 
-def test_the_focus_worker_itself_survives_because_the_windows_use_it(qapp, stub_detail,
+def test_the_focus_worker_itself_survives_because_the_windows_use_it(qapp,
                                                                     squid_dataset):
     """Deleting the chain must not take the Tenengrad worker with it: ``RegionViewer`` imports
     ``_viewer._FocusWorker`` by name, so removing it would break the control that REPLACED the

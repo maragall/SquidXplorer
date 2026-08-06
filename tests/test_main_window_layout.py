@@ -32,7 +32,6 @@ import pytest
 from qtpy.QtWidgets import QApplication
 
 import squidmip._viewer as V
-from tests.test_viewer import _StubDetail   # the proven ndviewer stub (no offscreen-GL segfault)
 
 
 DESIGN = (596, 850)     # PlateWindow._DESIGN_W, _DESIGN_H — the shape the layout was drawn against
@@ -48,7 +47,6 @@ def qapp():
 
 def _window(qapp, monkeypatch, size):
     """A window the user could actually look at: really sized, really shown."""
-    monkeypatch.setattr(V.PlateWindow, "_make_detail_viewer", lambda self: _StubDetail())
     w = V.PlateWindow(None)
     w.resize(*size)
     w.show()
@@ -346,7 +344,6 @@ def test_the_float_is_swept_by_the_windows_close(qapp, monkeypatch):
     would be a console attached to nothing. If that document later chooses "windows are peers",
     this test is the thing that has to be argued with rather than quietly deleted.
     """
-    monkeypatch.setattr(V.PlateWindow, "_make_detail_viewer", lambda self: _StubDetail())
     win = V.PlateWindow(None)
     win.show()
     qapp.processEvents()

@@ -4,19 +4,21 @@ This module adds a **region operator** — an operation whose unit of work is a 
 (all of its FOVs at once) rather than one FOV's z-stack — and ships one: ``stitch``, which
 registers a well's FOVs against each other and fuses them into a single seamless mosaic.
 
-Why a parallel registry instead of ``_PROJECTORS``
---------------------------------------------------
-``_engine._PROJECTORS`` is a **z-reduction** table: ``Iterable[plane] -> plane``. Every entry
-sees one channel's z-planes of ONE FOV and nothing else. A stitcher cannot live there. It is
-an *inter-FOV* operation: it needs every FOV of the well simultaneously **plus each FOV's x/y
-stage geometry**, and that signature carries neither. Registering a stitcher as a "projector"
-would be a type lie that only fails at runtime.
-
-So IMA-222 builds a **parallel** table, :data:`_REGION_OPERATORS`, whose entries have the
-shape the work actually has::
+One table, and a declaration that says which loop runs it
+---------------------------------------------------------
+A stitcher's unit of work is not a plane. It needs every FOV of the well simultaneously **plus
+each FOV's x/y stage geometry**, so its callable has the shape the work actually has::
 
     RegionOperator = Callable[[SquidReader, str, list[int]], np.ndarray]   # -> (T, C, Nz, Y, X)
                                  reader,  region,  fovs
+
+IMA-222 expressed that as a PARALLEL table (``_REGION_OPERATORS``, plus a ``_REGION_REQUIRES``
+sidecar shadowing it). It is one table again as of 2026-08-05: ``squidmip.add_region_operator``
+files into ``_engine._OPERATORS`` with ``consumes=REGION_OP`` (``{"fov"}``), and
+:func:`stitch_plate` selects on that declaration. Nothing about the callable changed — what
+changed is that "which loop runs this" is now a declaration on the one record instead of which of
+two dicts the name happens to be in. See ``_engine._OPERATORS`` for the three costs the split was
+charging.
 
 and a :func:`stitch_plate` generator that **mirrors ``project_plate``'s exact contract** —
 same keyword names (``n_fovs``/``workers``/``on_error``/``regions``), same bounded in-flight
@@ -97,7 +99,9 @@ from squidmip._engine import (
     _NOT_A_WELL_FAULT,
     MissingOperatorDependency,
     _default_workers,
-    _resolve_projector,
+    _resolve_operator,
+    add_region_operator,
+    operator_available,
 )
 from squidmip._logpane import get_logger
 from squidmip._placement import PlacedArray, Placement
@@ -964,11 +968,11 @@ def stitch_region(
     # blend_px=None is maragall/stitcher's "Auto": measure the overlap instead of guessing.
     if blend_px is None:
         blend_px = auto_blend_px(positions, pixel_size, tile_shape)
-    # IMA-210 turned _PROJECTORS values into Operator(fn, consumes) records, so the
+    # IMA-210 turned _OPERATORS values into Operator(fn, consumes) records, so the
     # registry no longer hands back a bare callable. Unpack it the same way
     # _engine.project_plate does; passing the Operator itself raises
     # 'Operator object is not callable' deep inside project_well.
-    _op = _resolve_projector(projector)
+    _op = _resolve_operator(projector)
 
     reg_c_global = _resolve_registration_channel(meta, registration_channel)
 
@@ -1309,93 +1313,23 @@ def _coordinate_region(reader, region, fovs, **kwargs):
     return stitch_region(reader, region, fovs, **kwargs)
 
 
-# name -> region operator. The PARALLEL table to _engine._PROJECTORS: entries here take a
-# whole well (reader, region, fovs) and return its fused (T, C, Nz, Y, X), because inter-FOV
-# work cannot be expressed as a z-reduction. Extended via add_region_operator.
+# The two shipped REGION operators. One `add_region_operator` call each, filed into the ONE
+# operator table (`_engine._OPERATORS`) with `consumes=REGION_OP`; `stitch_plate` finds them by
+# reading that declaration. There is no `_REGION_OPERATORS` dict here any more, and no
+# `_REGION_REQUIRES` sidecar shadowing it.
 RegionOperator = Callable[..., np.ndarray]
-_REGION_OPERATORS: dict[str, RegionOperator] = {
-    "stitch": stitch_region,
-    "coordinate": _coordinate_region,
-}
 
-
-# name -> the modules that name needs to be importable. A SECOND dict rather than a record,
-# deliberately and reluctantly: `_REGION_OPERATORS` maps a name straight to a callable, and
-# `_resolve_region_operator` returns that callable to every caller in this module. Promoting the
-# table to `Operator`-style records is the right end state and it is NOT this change — it would
-# touch every consumer of that resolve. Keyed by the same string, written only by
-# `add_region_operator`, read only by `region_operator_available`, so the two cannot drift without
-# `test_every_region_operator_declares_its_requirements` noticing.
-_REGION_REQUIRES: dict[str, tuple[str, ...]] = {"stitch": (), "coordinate": ()}
-
-
-def add_region_operator(name: str, operator: RegionOperator, *, requires=()) -> None:
-    """Add a named region operator so it can be selected in :func:`stitch_plate`.
-
-    The IMA-222 seam, mirroring :func:`squidmip.add_projector`: a future inter-FOV operation
-    (flat-field-corrected stitch, distortion-corrected stitch, per-well segmentation) plugs
-    in by name with **zero engine edits**.
-
-    Parameters
-    ----------
-    name:
-        Table key. Non-empty, and must not already exist — a silent clobber of an existing
-        operator would be a quiet correctness bug.
-    operator:
-        ``operator(reader, region, fovs, **kwargs) -> (T, C, Nz, Y, X)``.
-    requires:
-        Importable MODULE names this operator needs, e.g. ``("cucim",)``. The same declaration and
-        the same spelling as ``add_projector(requires=...)`` and ``add_segmenter(requires=...)``
-        — one word, three tables, so a contributor learns it once. The entry is registered and
-        listed either way; the refusal happens by name at :func:`stitch_plate`, before any well.
-    """
-    if not name:
-        raise ValueError("region operator name must be a non-empty string")
-    if not callable(operator):
-        raise ValueError(f"region operator for {name!r} is not callable: {operator!r}")
-    if name in _REGION_OPERATORS:
-        raise ValueError(
-            f"region operator {name!r} is already defined; pick a distinct name "
-            f"(defined: {available_region_operators()})."
-        )
-    _REGION_OPERATORS[name] = operator
-    _REGION_REQUIRES[name] = normalise_requires(requires)
-
-
-def available_region_operators() -> list[str]:
-    """Every registered region operator, sorted — INCLUDING ones whose package is missing.
-
-    Same rule as ``available_projectors`` and ``available_segmenters``: absent is not the same as
-    unwritten, so nothing is ever filtered out of this list. Ask :func:`region_operator_available`
-    for the reason.
-    """
-    return sorted(_REGION_OPERATORS)
-
-
-def region_operator_available(name: str) -> tuple[bool, str]:
-    """``(ok, reason_if_not)`` — can this region operator actually run right now?"""
-    if name not in _REGION_OPERATORS:
-        return False, (f"unknown region operator {name!r}; "
-                       f"available: {available_region_operators()}")
-    missing = missing_requirements(_REGION_REQUIRES.get(name, ()))
-    if missing:
-        return False, requirement_refusal("region operator", name, missing)
-    return True, ""
-
-
-def region_operator_requires(name: str) -> tuple[str, ...]:
-    """The modules a registered region operator declares it needs — ``()`` when it needs nothing."""
-    _resolve_region_operator(name)      # unknown names refuse here, by name, as everywhere else
-    return _REGION_REQUIRES.get(name, ())
+add_region_operator("stitch", stitch_region)
+add_region_operator("coordinate", _coordinate_region)
 
 
 def _accepts_kwarg(fn, name: str) -> bool:
     """Whether *fn* can be called with keyword *name*, directly or through ``**kwargs``.
 
     :func:`stitch_plate` injects a plate-wide ``flatfield=`` into the operator's kwargs, and the
-    operator table is an EXTENSION POINT (:func:`add_region_operator`) — a third-party operator
-    that never heard of flat-fielding would get a TypeError from an argument it did not ask for.
-    Asking first keeps the injection additive.
+    operator table is an EXTENSION POINT (:func:`squidmip.add_region_operator`) — a third-party
+    operator that never heard of flat-fielding would get a TypeError from an argument it did not
+    ask for. Asking first keeps the injection additive.
     """
     import inspect
 
@@ -1408,20 +1342,31 @@ def _accepts_kwarg(fn, name: str) -> bool:
     return name in params
 
 
-def _resolve_region_operator(name: str) -> RegionOperator:
-    """Look up a region operator by name, failing loud (named) on an unknown key.
+def _resolve_region_operator(name: str, operator_kwargs: Optional[dict] = None) -> RegionOperator:
+    """The CALLABLE a region-operator name resolves to, refusing anything this loop cannot run.
+
+    Two refusals, both read off the one table's declaration and neither off a name:
+
+    * an unknown name — the engine's own resolver says so, listing every operator;
+    * a name that IS registered but is not a region operator (``"fov" not in consumes``), which
+      before the collapse showed up as "unknown region operator 'mip'" — a sentence that said the
+      operator did not exist when it existed and was simply not this kind.
 
     Deliberately does NOT check ``requires``: this is also the lookup that answers "what is this
     operator" for callers that are not about to run it. The dependency refusal belongs where the
     run starts, and that is :func:`stitch_plate`.
     """
-    try:
-        return _REGION_OPERATORS[name]
-    except KeyError:
+    from squidmip._engine import _resolve_operator, available_region_operators
+
+    operator = _resolve_operator(name)
+    if "fov" not in operator.consumes:
         raise KeyError(
-            f"unknown region operator {name!r}; available: {available_region_operators()}. "
-            "Add new ones with squidmip.add_region_operator(name, fn)."
-        ) from None
+            f"{name!r} is a registered operator but not a REGION operator: it declares "
+            f"consumes={sorted(operator.consumes)} and takes planes, while stitch_plate hands its "
+            f"operator (reader, region, fovs). Region operators: "
+            f"{available_region_operators()}; run {name!r} with squidmip.project_plate."
+        )
+    return operator.with_params(operator_kwargs)
 
 
 def stitch_plate(
@@ -1503,11 +1448,19 @@ def stitch_plate(
         raise ValueError(f"workers must be >= 1, got {workers}")
     n_workers = workers if workers is not None else _default_workers()
 
-    op = _resolve_region_operator(operator)
-    ok, why = region_operator_available(operator)
+    # DECLARED parameters are BOUND; everything else is passed through to the call. A region
+    # operator could declare none until it became a record in the one table, so every kwarg used to
+    # be pass-through — and a declared `Param` that arrived as a pass-through kwarg would be
+    # swallowed by the operator's own `**kwargs` and silently run at its default, which is exactly
+    # the "the panel value reached the console line and not the pixels" defect `params=` exists to
+    # end. Split here, once, by asking the declaration.
+    declared = {p.name for p in _resolve_operator(operator).params}
+    bound = {k: operator_kwargs.pop(k) for k in list(operator_kwargs) if k in declared}
+    op = _resolve_region_operator(operator, bound)
+    ok, why = operator_available(operator)
     if not ok:
-        # BEFORE the reader is warmed and before a single well is submitted. The projector table's
-        # `bind_projector` refuses in the same place for the same reason: an operator that cannot
+        # BEFORE the reader is warmed and before a single well is submitted. The plane-operator
+        # path's `bind_operator` refuses in the same place for the same reason: an operator that cannot
         # run must say so by name, not run every well into the same ImportError and let `on_error`
         # file it as N skips and a successful run.
         raise MissingOperatorDependency(why)

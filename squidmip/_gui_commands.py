@@ -155,13 +155,9 @@ class WindowExecutor:
         # same way, so the two surfaces refuse identically. Without it the GUI starts a QThread,
         # every well raises the same ImportError, `on_error` files each as a skip, and the run
         # finishes with a green readout and no pixels.
-        from squidmip import (available_region_operators, operator_available,
-                              region_operator_available)
+        from squidmip import operator_available
 
-        avail_ok, avail_why = (
-            region_operator_available(cmd.operator)
-            if cmd.operator in available_region_operators()
-            else operator_available(cmd.operator))
+        avail_ok, avail_why = operator_available(cmd.operator)
         if not avail_ok:
             return _refuse(cmd.kind, UNAVAILABLE_OPERATOR, avail_why, operator=cmd.operator)
         if self._busy():

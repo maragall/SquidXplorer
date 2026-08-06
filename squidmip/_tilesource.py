@@ -730,7 +730,7 @@ class ReaderTileSource:
     (usually one, sometimes many). There is no second code path to keep in step.
 
     Tiles are **maximum-intensity projections** by default. The projection reuses the registered
-    ``mip`` operator (``_engine._PROJECTORS`` → ``projection.project``) rather than folding a max
+    ``mip`` operator (``_engine._OPERATORS`` → ``projection.project``) rather than folding a max
     here, so ``reference`` — the Tenengrad best-focus plane — is a one-word change, and anything
     registered later with ``add_projector`` works with no edit to this class.
 
@@ -776,9 +776,9 @@ class ReaderTileSource:
         self.projector = projector
         self.z = None if z is None else int(z)
         if projector is not None and self.z is None:
-            from squidmip._engine import projector_consumes
+            from squidmip._engine import operator_consumes
 
-            if "z" not in projector_consumes(projector):
+            if "z" not in operator_consumes(projector):
                 raise ValueError(
                     f"projector {projector!r} does not consume z, so it cannot reduce a stack to "
                     "a tile. Pass a z-reducer (mip, reference) or an explicit z=.")
@@ -828,9 +828,9 @@ class ReaderTileSource:
             if self.z is not None:
                 plane = np.asarray(self._read(region, fov, channel, self.z))
             else:
-                from squidmip._engine import _resolve_projector
+                from squidmip._engine import _resolve_operator
 
-                reduce = _resolve_projector(self.projector).fn
+                reduce = _resolve_operator(self.projector).fn
                 plane = np.asarray(reduce(
                     np.asarray(self._read(region, fov, channel, z)) for z in self.z_levels))
         except Exception:

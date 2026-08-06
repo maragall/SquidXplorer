@@ -215,9 +215,9 @@ def test_it_declares_that_it_does_NOT_consume_z():
     CellProfiler both use. Declaring ``{"z"}`` here would silently throw away every plane but
     one's worth of cells.
     """
-    from squidmip import projector_consumes
+    from squidmip import operator_consumes
 
-    assert projector_consumes(LAYER_KEY) == frozenset()
+    assert operator_consumes(LAYER_KEY) == frozenset()
 
 
 def test_the_registered_operator_returns_a_label_image_of_the_input_shape_and_dtype():

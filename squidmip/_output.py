@@ -1112,14 +1112,15 @@ def write_plate(
     dict
         Manifest: output paths, well/field counts, pyramid level count.
     """
-    from squidmip._stitch import available_region_operators, stitch_plate
+    from squidmip._engine import is_region_operator
+    from squidmip._stitch import stitch_plate
 
     metadata = reader.metadata
     # The operator decides the stream, and both twins yield the SAME (region, fov, (T,C,1,Y,X))
     # contract, so the writer below is identical for either. A region operator's unit of work is
     # the WELL, so n_fovs does not apply to it and workers stays at 1: peak memory is one fused
     # mosaic (~0.9 GB on a 27-FOV 10x well) rather than one projected FOV (~139 MB).
-    region_operator = projector in available_region_operators()
+    region_operator = is_region_operator(projector)
     # A REGION operator is parameterised at CALL time (registration on/off, registration
     # channel, feather width, blunder thresholds, channel subset), and the stitcher panel in
     # pane 1 is where a user sets those. They have to survive the save path too: without this
@@ -1134,19 +1135,19 @@ def write_plate(
     # somewhere to put them. An operator that declares NONE still refuses, but now the refusal
     # comes from that operator's own declaration instead of from a rule about which table it is in.
     if not region_operator and operator_kwargs:
-        from squidmip._engine import bind_projector
+        from squidmip._engine import bind_operator
 
-        bind_projector(projector, operator_kwargs)   # refuse BEFORE any directory is made
+        bind_operator(projector, operator_kwargs)   # refuse BEFORE any directory is made
     # HOW DEEP THE RESULT WILL BE, from the operator's own `consumes` declaration — the same table
     # project_well and stitch_region dispatch on, so the disk estimate cannot disagree with what is
     # then written. A z-reducer collapses z (n_z=1, what this module wrote for its whole history);
     # a plane-op keeps every plane, which is 10x the bytes on the 10x tissue set and used to be
     # unwritable at all. The region operator's `projector=` kwarg is what decides it for a stitch;
     # absent one, stitch_region's own default is "mip", a z-reducer.
-    from squidmip._engine import projector_consumes
+    from squidmip._engine import operator_consumes
 
     inner = (operator_kwargs or {}).get("projector", "mip") if region_operator else projector
-    n_z_out = 1 if "z" in projector_consumes(inner) else int(metadata.get("n_z", 1) or 1)
+    n_z_out = 1 if "z" in operator_consumes(inner) else int(metadata.get("n_z", 1) or 1)
 
     if region_operator:
         stream = stitch_plate(reader, n_fovs=None, workers=1, operator=projector,

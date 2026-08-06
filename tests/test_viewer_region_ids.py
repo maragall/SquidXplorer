@@ -43,22 +43,19 @@ from qtpy.QtCore import QObject, Signal  # noqa: E402
 from squidmip import _viewer as V  # noqa: E402
 
 from .conftest import shutdown_plate_window  # noqa: E402
-from .test_viewer import qapp, stub_detail  # noqa: E402,F401  (fixtures)
+from .test_viewer import qapp  # noqa: E402,F401  (fixtures)
 
 # WHERE THESE NOW POINT (decentralization, 2026-07-23).
 #
-# `PlateWindow._detail` is permanently None: there is no central viewer any more, and
-# `_make_detail_viewer` (which the `stub_detail` fixture patches) has zero production call sites, so
-# the stub records a viewer nobody builds. Both defects below outlived that change, they just moved:
+# There is no central viewer any more, and its remains (`PlateWindow._detail`,
+# `_make_detail_viewer`, the `stub_detail` fixture) were deleted on 2026-08-05. Both defects below
+# outlived that change, they just moved:
 #
 #   (a) the region id is still passed through verbatim, now to `ViewerManager.open`, which spawns an
 #       independent window over exactly that id;
 #   (b) the autofocus is now `_region_viewer.RegionViewer._focus_reference_plane`, which picks the
 #       region's CENTRE FOV (`_napari3d._center_fov`) rather than `fovs_per_region[region][0]`, and
 #       moves THAT window's napari z slider.
-#
-# `stub_detail` is kept on the signatures because `PlateWindow` still builds against the seam and a
-# real ndviewer under offscreen GL segfaults; nothing here reads the stub any more.
 
 
 def _spy_focus_worker(monkeypatch, answer_z=1, note=""):
@@ -113,7 +110,7 @@ def _slide_acquisition(root, region: str):
 # activate_well can fix, and not what this test is pinning.
 @pytest.mark.parametrize("region", ["R2C3", "tissue-1", "scan 3"])
 def test_activate_well_opens_a_window_on_a_freeform_region_id_verbatim(
-        qapp, stub_detail, napari_pane_stub, tmp_path, region):
+        qapp, napari_pane_stub, tmp_path, region):
     """(a) A region id that is not <letters><digits> must still open its view.
 
     The id is passed through UNCHANGED. Rebuilding it from parse_well_id raised on every one
@@ -142,7 +139,7 @@ def test_activate_well_opens_a_window_on_a_freeform_region_id_verbatim(
 
 
 def test_window_autofocus_ranks_a_representative_fov_not_the_regions_first(
-        qapp, stub_detail, napari_pane_stub, squid_dataset, monkeypatch):
+        qapp, napari_pane_stub, squid_dataset, monkeypatch):
     """(b) Autofocus must rank a REPRESENTATIVE field, not `fovs_per_region[region][0]`.
 
     It is a per-FOV autofocus, so ranking field 0 while the user is looking elsewhere reports the
@@ -184,7 +181,7 @@ def test_window_autofocus_ranks_a_representative_fov_not_the_regions_first(
 
 
 def test_window_autofocus_works_without_a_double_click(
-        qapp, stub_detail, napari_pane_stub, squid_dataset, monkeypatch):
+        qapp, napari_pane_stub, squid_dataset, monkeypatch):
     """The button must act on the region the window is SHOWING.
 
     It used to demand ``_current_well``, which is only set by a double-click, and under napari
@@ -211,7 +208,7 @@ def test_window_autofocus_works_without_a_double_click(
 
 
 def test_focus_reference_plane_on_a_single_plane_acquisition_says_so(
-        qapp, stub_detail, napari_pane_stub, squid_dataset, monkeypatch):
+        qapp, napari_pane_stub, squid_dataset, monkeypatch):
     """A refusal must be a sentence. Silently doing nothing is the failure being removed.
 
     Re-pointed at the WINDOW (2026-07-29). This used to live on `PlateWindow`, reachable only

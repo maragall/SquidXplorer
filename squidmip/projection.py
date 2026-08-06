@@ -63,11 +63,21 @@ if TYPE_CHECKING:  # avoid import cost / cycle at runtime
 # ``{"z"}`` consumer and z-selecting; conflating the two is what once landed the channels of one
 # FOV on different z. Do not encode "selects" as a separate consumed axis.
 #
-# {"fov"} is deliberately NOT a member: stitching is inter-FOV and needs each tile's x/y stage
-# geometry, which an ``Iterable[plane] -> plane`` callable never sees. That seam is IMA-222's
-# ``_REGION_OPERATORS``/``stitch_plate()``, not this table.
+# {"fov"} is the THIRD value, and it is what a region operator declares:
+#
+#   REGION_OP = frozenset({"fov"})  a whole well's FOVs -> one fused array. The callable shape is
+#                                   ``operator(reader, region, fovs, **kwargs) -> (T,C,Nz,Y,X)``,
+#                                   because inter-FOV work needs each tile's x/y stage geometry.
+#
+# It is NOT a member of ``CONSUMABLE_AXES``, and that is the point rather than an omission:
+# ``CONSUMABLE_AXES`` is what ``project_well`` can GROUP OVER, and stitching is not a grouping of
+# planes. So ``normalise_consumes`` (which every ``Iterable[plane] -> plane`` registration and
+# ``project_well`` itself pass through) still refuses ``{"fov"}`` by name, while the declaration can
+# now CARRY it — which is what lets one table hold every operator and lets ``stitch_plate`` pick its
+# entries by reading a declaration instead of by consulting a second dict.
 PLANE_OP: frozenset[str] = frozenset()
 Z_REDUCER: frozenset[str] = frozenset({"z"})
+REGION_OP: frozenset[str] = frozenset({"fov"})
 CONSUMABLE_AXES: frozenset[str] = frozenset({"z"})
 
 
@@ -241,7 +251,8 @@ def normalise_consumes(consumes) -> frozenset[str]:
             "consumes={'fov'} is not supported by the projector table: a projector is "
             "Iterable[plane] -> plane and never sees a tile's x/y stage geometry, which any "
             "inter-FOV operation (stitching, illumination-field fitting across a well) requires. "
-            "Inter-FOV operators belong to the region-operator seam (IMA-222), not here."
+            "Register it with squidmip.add_region_operator(name, fn) instead: that stamps "
+            "consumes=REGION_OP on the SAME registry record, and stitch_plate reads it."
         )
     unknown = axes - CONSUMABLE_AXES
     if unknown:

@@ -120,7 +120,7 @@ What is guaranteed now:
 | plane-op `set()` | the acquisition's `n_z` | `bgsub`, `decon`, `flatfield`, `spot`, `cellpose` |
 
 The depth comes from the operator's own declaration, in one place (`write_plate` reads
-`projector_consumes`), so the disk pre-flight estimate and the bytes actually written cannot
+`operator_consumes`), so the disk pre-flight estimate and the bytes actually written cannot
 disagree. A z-reduced write is byte-identical to what this writer has always produced.
 
 Two consequences worth knowing:

@@ -535,13 +535,11 @@ class EngineExecutor:
                      wellplate_format=str(meta.get("wellplate_format", "")))
 
     def do_list_operators(self, cmd: ListOperators) -> CommandResult:
-        from squidmip import (available_projectors, available_region_operators,
-                              operator_available, projector_consumes, projector_params,
-                              projector_produces, projector_requires,
-                              region_operator_available, region_operator_requires)
+        from squidmip import (is_region_operator, operator_available, operator_consumes,
+                              operator_params, operator_produces, operator_requires,
+                              runnable_operators)
 
-        projectors = available_projectors()
-        region_ops = available_region_operators()
+        names = runnable_operators()
 
         def _row(name, kind, consumes, produces, params, requires, available):
             # `available` and `requires` are the fourth declaration (2026-08-05). The list is NOT
@@ -559,15 +557,18 @@ class EngineExecutor:
         # knows about any particular operator -- which is why a new operator appears in `ops list`
         # fully described with no edit to this file. That now includes an operator installed from
         # ANOTHER package through the `squidmip.operators` entry-point group.
-        rows = [_row(n, "z-reducer" if projector_consumes(n) else "plane-op",
-                     sorted(projector_consumes(n)), projector_produces(n),
-                     {p.name: p.default for p in projector_params(n)},
-                     projector_requires(n), operator_available(n))
-                for n in projectors]
-        rows += [_row(n, "region-operator", ["fov"], "intensity", {},
-                      region_operator_requires(n), region_operator_available(n))
-                 for n in region_ops]
-        names = sorted(set(projectors) | set(region_ops))
+        def _kind(name):
+            # The declaration, in three words. Region operators used to be a SECOND loop over a
+            # second table with three of these columns hardcoded ("intensity", {}, ["fov"]); they
+            # are rows like any other now, so every column is read and none is assumed.
+            if is_region_operator(name):
+                return "region-operator"
+            return "z-reducer" if operator_consumes(name) else "plane-op"
+
+        rows = [_row(n, _kind(n), sorted(operator_consumes(n)), operator_produces(n),
+                     {p.name: p.default for p in operator_params(n)},
+                     operator_requires(n), operator_available(n))
+                for n in names]
         blocked = [r["name"] for r in rows if not r["available"]]
         detail = f" ({len(blocked)} unavailable: {', '.join(blocked)})" if blocked else ""
         return _done(cmd.kind, f"{len(names)} operator(s): {', '.join(names)}{detail}",
@@ -609,7 +610,7 @@ class EngineExecutor:
         ``"partial"`` (something was skipped, possibly everything) or ``"stopped"`` (``stop()``
         cut it) — and a caller that turns this into an exit code must read THAT, not ``ok``.
         """
-        from squidmip import (available_projectors, available_region_operators, project_plate,
+        from squidmip import (is_region_operator, project_plate, runnable_operators,
                               stitch_plate, write_plate)
         from squidmip._measure import OK, PARTIAL, STOPPED, measure_run
 
@@ -617,7 +618,7 @@ class EngineExecutor:
         if meta is None:
             return _refuse(cmd.kind, NO_ACQUISITION,
                            "nothing is open — run open_acquisition first")
-        runnable = sorted(set(available_projectors()) | set(available_region_operators()))
+        runnable = runnable_operators()
         if cmd.operator not in runnable:
             # Not a registered name. It may still be an operator CHAIN ('bgsub+mip'), which is a
             # legal projector everywhere the engine takes one, so ask the engine to resolve it
@@ -625,10 +626,10 @@ class EngineExecutor:
             # distinct: a name nobody registered is UNKNOWN_OPERATOR and lists what exists; a chain
             # of real operators that cannot mean anything (a z-reducer that is not last, a repeated
             # step) is a BAD_COMMAND carrying `_compose`'s own reason, which names the fix.
-            from squidmip._engine import _resolve_projector
+            from squidmip._engine import _resolve_operator
 
             try:
-                _resolve_projector(cmd.operator)
+                _resolve_operator(cmd.operator)
             except (KeyError, TypeError):
                 return _refuse(cmd.kind, UNKNOWN_OPERATOR,
                                f"{cmd.operator!r} is not a runnable operator — this application can "
@@ -641,11 +642,9 @@ class EngineExecutor:
         # outcome rather than something discovered mid-run. Without it, `decon` on a machine
         # without petakit raised the same ImportError for every well, `on_error` recorded each as
         # a skip, and the command returned `completed` with an empty manifest.
-        from squidmip import operator_available, region_operator_available
+        from squidmip import operator_available
 
-        ok, why = (region_operator_available(cmd.operator)
-                   if cmd.operator in available_region_operators()
-                   else operator_available(cmd.operator))
+        ok, why = operator_available(cmd.operator)
         if not ok:
             return _refuse(cmd.kind, UNAVAILABLE_OPERATOR, why, operator=cmd.operator)
         all_regions = list(meta["regions"])
@@ -672,7 +671,7 @@ class EngineExecutor:
             skipped.append(str(region))
             logger.warning("SKIP well %s (fov %s): %s: %s", region, fov, type(exc).__name__, exc)
 
-        region_op = cmd.operator in set(available_region_operators())
+        region_op = is_region_operator(cmd.operator)
         stopped = False
         with measure_run(cmd.operator, target or "no target", n_targets=n_targets) as run:
             run.note(surface=self.surface, save=cmd.save, acquisition=self._path)

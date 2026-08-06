@@ -69,50 +69,36 @@ EXIT_PARTIAL = 3
 EXIT_INTERRUPTED = 130
 
 
-def runnable_operators() -> list[str]:
-    """Every operator this CLI can run: the projectors AND the region operators.
-
-    The SAME set ``EngineExecutor.do_run_operator`` validates against. Asking the registries (and
-    not a literal list) is what makes an operator from another package runnable here on the day it
-    is installed.
-    """
-    from squidmip import available_projectors, available_region_operators
-
-    return sorted(set(available_projectors()) | set(available_region_operators()))
-
-
-def operator_params(operator: str) -> dict:
+def operator_defaults(operator: str) -> dict:
     """``{name: default}`` an operator declares it can be run with — ``{}`` when it declares none.
 
     Read off the registry's ``params`` declaration (``squidmip._engine.Param``), which is the same
-    declaration ``Operator.bind`` applies and ``list_operators`` reports. Region operators declare
-    none today, so their kwargs pass through to ``stitch_plate`` unchecked and an unknown one is
-    refused there.
+    declaration ``Operator.bind`` applies and ``list_operators`` reports — for every operator,
+    region ones included, since they are entries in the same table. A region operator that declares
+    no params still passes its kwargs through to ``stitch_plate``, where an unknown one is refused.
     """
-    from squidmip import projector_params
+    from squidmip import operator_params
 
     # ASKED, not looked up: an operator CHAIN ('bgsub+spot') is not a table key, and it declares
     # its parts' parameters namespaced `<step>.<param>` — so `--param spot.min_area_px=80` has to
-    # be checkable here or the chain would be runnable with parameters the CLI called unknown. A
-    # region operator is not in the projector table at all and falls out here as `{}`, which is
-    # what it was: its kwargs pass through to `stitch_plate` and an unknown one is refused there.
+    # be checkable here or the chain would be runnable with parameters the CLI called unknown.
     try:
-        return {p.name: p.default for p in projector_params(operator)}
+        return {p.name: p.default for p in operator_params(operator)}
     except (KeyError, TypeError, ValueError):
         return {}
 
 
 def _operator_catalogue() -> str:
     """The ``--help`` line for ``--param``: every operator with the parameters it declares."""
-    from squidmip import available_region_operators, projector_params
+    from squidmip import is_region_operator, operator_params, runnable_operators
 
-    region_ops = set(available_region_operators())
     entries = []
     for name in runnable_operators():
-        if name in region_ops:
-            entries.append(f"{name}(**stitcher kwargs)")
-            continue
-        declared = ", ".join(f"{p.name}={p.default!r}" for p in projector_params(name))
+        declared = ", ".join(f"{p.name}={p.default!r}" for p in operator_params(name))
+        # A region operator's remaining kwargs go straight to `stitch_plate`, which refuses an
+        # unknown one there; say so rather than imply the declared list is exhaustive.
+        if is_region_operator(name):
+            declared = ", ".join(filter(None, (declared, "**stitcher kwargs")))
         entries.append(f"{name}({declared})")
     return "; ".join(entries)
 
@@ -224,24 +210,26 @@ class ProcessParameters(BaseModel, use_attribute_docstrings=True):
         # write_plate has already written an empty plate skeleton to disk, then crashes with a raw
         # traceback. A clean CLI error before any output is the safe behavior.
         #
-        # Against the RUNNABLE set, which is projectors + region operators. Validating against
+        # Against the RUNNABLE set — every entry of the one operator table. Validating against
         # `available_projectors()` alone made the CLI strictly narrower than the command layer it
         # fronts: `--projector stitch` was refused as "unknown" by a CLI whose executor accepts it
         # and whose write_plate dispatches on it.
+        from squidmip import runnable_operators
+
         runnable = runnable_operators()
         if v in runnable:
             return v
         # Not a registered name, and it may still be an operator CHAIN ('bgsub+mip') — a legal
         # projector everywhere the engine takes one. So the engine is asked to RESOLVE it, exactly
         # as `EngineExecutor.do_run_operator` does, and for the same reason: a membership test
-        # against the two tables is not the whole answer, and deciding otherwise here would make
+        # against the table is not the whole answer, and deciding otherwise here would make
         # the CLI narrower than the command layer it fronts a second time. The chain refusals
         # (`_compose`: a z-reducer that is not last, a repeated step) arrive with their own
         # sentence, which names the fix.
-        from squidmip._engine import _resolve_projector
+        from squidmip._engine import _resolve_operator
 
         try:
-            _resolve_projector(v)
+            _resolve_operator(v)
         except (KeyError, TypeError):
             raise ValueError(
                 f"unknown operator {v!r}; this application can run: {runnable}, or a chain of "
@@ -256,7 +244,7 @@ class ProcessParameters(BaseModel, use_attribute_docstrings=True):
         the output tree. Same refusal, asked sooner, in the words of the flag the user typed.
         """
         pairs = dict(_parse_param(p) for p in self.param)
-        declared = operator_params(self.projector)
+        declared = operator_defaults(self.projector)
         if declared:
             unknown = [k for k in pairs if k not in declared]
             if unknown:

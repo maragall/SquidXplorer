@@ -21,7 +21,7 @@ Data flow::
         │                              touches immutable state; no locks needed downstream)
         ▼  select_fovs(meta, n_fovs)  → {region: [fov, ...]}  → flat [(region, fov), ...]
         │                              (n_fovs=None → every FOV; a 36-FOV well emits 36 tasks)
-        ▼  _PROJECTORS[projector]     → Operator(fn, consumes) passed as project_well(reduce=,
+        ▼  _OPERATORS[projector]     → Operator(fn, consumes) passed as project_well(reduce=,
         │                              consumes=); `consumes` alone decides the grouping (IMA-210)
         │
         ▼  ThreadPoolExecutor(max_workers=N)          bounded window: ≤ N wells in flight
@@ -46,8 +46,17 @@ axis it CONSUMES (see :class:`Operator`), and deriving the loop from that declar
     consumes=frozenset()        plane-op    plane -> plane, output (T, C, Nz, Y, X)   decon, bgsub…
 
 One group-by-then-reduce loop (in ``project_well``) serves both, so a new plane-op is ONE
-``add_projector`` call and no engine edit. ``{"fov"}`` is deliberately not a member — inter-FOV
-work needs stage geometry a ``Iterable[plane] -> plane`` callable never sees (IMA-222's seam).
+``add_projector`` call and no engine edit.
+
+    consumes=frozenset({"fov"}) region-op   a well's FOVs -> its fused (T, C, Nz, Y, X)  stitch
+
+``{"fov"}`` used to be refused here and served by a PARALLEL table (``_stitch._REGION_OPERATORS``
+plus a ``_REGION_REQUIRES`` sidecar). It is a member of this one as of 2026-08-05 — see
+``_OPERATORS`` for the three costs that split was charging. The callable shape genuinely differs
+(``operator(reader, region, fovs, **kwargs)``, because inter-FOV work needs stage geometry a
+``Iterable[plane] -> plane`` callable never sees), which is exactly what the declaration is for:
+``project_plate`` runs the plane-callable entries, ``stitch_plate`` runs the ``{"fov"}`` ones, and
+both pick their entries by reading ``consumes`` rather than by consulting a second dict.
 
 Two more declarations were added when Cellpose was made a real operator (2026-08-03), and both
 follow the same rule: **extend the declaration, never the loop.** Nothing in this module branches
@@ -90,7 +99,7 @@ A FOURTH declaration was added when the operator TEMPLATE was built (2026-08-05)
 again — extend the declaration, never the loop:
 
     requires=("petakit",)       the modules this entry needs to run. LISTED either way; the run
-                                refuses BY NAME at ``bind_projector`` when one is missing.
+                                refuses BY NAME at ``bind_operator`` when one is missing.
 
 ``requires`` closes a silent success that had been live for months. ``_spots.Segmenter`` has
 declared its optional packages since Cellpose landed and this record had no equivalent, so
@@ -115,7 +124,7 @@ is untouched::
     project_plate(reader, projector="flatfield + decon + mip")   # (T, C, 1, Y, X)
     project_plate(reader, projector="flatfield + decon")         # (T, C, Nz, Y, X)
 
-``_resolve_projector`` is where a chain becomes an operator, and it is the door every ``projector=``
+``_resolve_operator`` is where a chain becomes an operator, and it is the door every ``projector=``
 already arrived at, which is why ``write_plate``, ``stitch_region``, the CLI and the ``run_operator``
 command gained composition without one new argument between them. ``consumes`` decides what can
 follow what (a z-reducer is the last step or the only one), ``produces`` decides the same for labels,
@@ -171,6 +180,7 @@ from squidmip._recipe import CHAIN_SEPARATOR, RecipeChain
 from squidmip.projection import (
     INTENSITY,
     PLANE_OP,
+    REGION_OP,
     Z_REDUCER,
     MissingDependency,
     missing_requirements,
@@ -218,7 +228,7 @@ class MissingOperatorDependency(MissingDependency):
     The exact twin of :class:`squidmip._spots.MissingSegmenterDependency`, and deliberately the
     same base class and the same wording, because it is the same rule applied to the operator
     table: an operator is ALWAYS listed by :func:`available_projectors` (absent is not the same as
-    unwritten), and the refusal happens by name at :func:`bind_projector` — before the run touches
+    unwritten), and the refusal happens by name at :func:`bind_operator` — before the run touches
     a single well.
 
     Why a distinct class rather than reusing ImportError: this is raised by the ENGINE from a
@@ -310,7 +320,7 @@ class Operator:
         anything asks whether the chain can run: a composed entry declares the UNION of its parts'
         ``requires`` and refuses once, by name, naming every missing package — so checking each part
         here would raise about one step of a chain the caller never asked about individually, and
-        would make ``projector_consumes("flatfield+mip")`` raise on a machine without tilefusion
+        would make ``operator_consumes("flatfield+mip")`` raise on a machine without tilefusion
         when it is a question about shape and not about the environment.
 
         Every caller that RUNS an operator goes through :meth:`bind`. This one only resolves the
@@ -343,8 +353,26 @@ class Operator:
 # success". Named here once because ``stitch_plate`` applies the same rule to the same tuple.
 _NOT_A_WELL_FAULT = (ImportError, MissingDependency)
 
-# name -> Operator. Selected by name in project_plate; extended via add_projector.
-_PROJECTORS: dict[str, Operator] = {
+# THE operator table — name -> Operator, and there is exactly one of it (2026-08-05).
+#
+# It used to be two, and the second one carried a sidecar of its own: ``_stitch._REGION_OPERATORS``
+# mapped a name straight to a callable and ``_stitch._REGION_REQUIRES`` shadowed it with that
+# name's ``requires``. Three consequences, all measured before this was collapsed:
+#
+#   * ``operator_available("stitch")`` answered ``(False, "unknown projector 'stitch'")`` about a
+#     shipped, runnable operator, so every caller had to know WHICH table a name lived in first.
+#     ``region_operator_available(k) if k in available_region_operators() else operator_available(k)``
+#     was written out verbatim in ``_command``, ``_gui_commands`` and ``_viewer``.
+#   * ``runnable_operators()`` — ``sorted(set(projectors) | set(region_ops))`` — existed in three
+#     copies (``_operations``, ``_cli``, inline in ``_command``).
+#   * a region operator could declare no ``produces`` and no ``params``, so it got no generated GUI
+#     panel and no ``--param`` checking, while every other operator did.
+#
+# ``consumes`` was already the dispatch, so it is the dispatch here too: an entry declaring
+# ``REGION_OP`` (``{"fov"}``) takes ``(reader, region, fovs, **kwargs)`` and is run by
+# ``stitch_plate``; everything else is ``Iterable[plane] -> plane`` and is run by ``project_plate``.
+# Nothing branches on a name. Extended via ``add_projector`` / ``add_region_operator``.
+_OPERATORS: dict[str, Operator] = {
     "mip": Operator("mip", project, Z_REDUCER),
     "reference": Operator("reference", project_reference, Z_REDUCER),
 }
@@ -417,7 +445,7 @@ def add_projector(name: str, projector: Projector, *, consumes=None, produces=No
         Importable MODULE names this operator needs to run at its declared defaults, e.g.
         ``("petakit",)`` or ``"cellpose"``. Same spelling as ``add_segmenter(requires=...)``. NOT
         checked here: the entry is registered and listed either way, and the refusal happens by
-        name at :func:`bind_projector` / :func:`project_plate`. Declare a package here iff the
+        name at :func:`bind_operator` / :func:`project_plate`. Declare a package here iff the
         operator imports it — usually lazily, one call deep — because an undeclared lazy import is
         exactly the failure this argument exists to convert into a refusal::
 
@@ -431,75 +459,170 @@ def add_projector(name: str, projector: Projector, *, consumes=None, produces=No
         or duplicated, or *name* is already defined (a silent clobber of an existing projector
         would be a quiet correctness bug).
     """
+    _declare(name, projector, consumes=consumes, produces=produces, params=params,
+             requires=requires, region=False)
+
+
+def add_region_operator(name: str, operator, *, produces=None, params: Sequence[Param] = (),
+                        requires=()) -> None:
+    """Add a named REGION operator — one that eats a whole well's FOVs — to the same table.
+
+    The inter-FOV twin of :func:`add_projector`, and deliberately the same registrar with the same
+    four declarations, because it files into the same :data:`_OPERATORS`. What differs is one
+    declaration and the callable shape it describes::
+
+        operator(reader, region, fovs, **kwargs) -> ndarray (T, C, Nz, Y, X)
+
+    That is not expressible as ``Iterable[plane] -> plane``: registration and fusion need each
+    tile's x/y stage geometry, which a plane never carries. So the entry declares
+    ``consumes=REGION_OP`` (``{"fov"}``) — stamped here, not passed, since a region operator that
+    declared anything else would be run by the wrong loop — and :func:`squidmip.stitch_plate`
+    selects on it. ``produces``, ``params`` and ``requires`` mean exactly what they mean on every
+    other entry, which is the point: before this collapse a region operator could declare none of
+    them, so it got no generated parameter panel and no ``--param`` validation while every other
+    operator did.
+
+    Raises
+    ------
+    ValueError
+        Same conditions as :func:`add_projector`: an empty name, chain punctuation in the name, a
+        non-callable, an unknown ``produces``, a duplicated parameter, or a name already defined.
+    """
+    _declare(name, operator, consumes=REGION_OP, produces=produces, params=params,
+             requires=requires, region=True)
+
+
+def _declare(name: str, fn, *, consumes, produces, params, requires, region: bool) -> None:
+    """Validate ONE operator and file it in :data:`_OPERATORS`. The only writer of that table.
+
+    Shared by both registrars so the refusals are written once: the two used to be separate
+    functions in separate modules, and ``add_region_operator`` had drifted into checking three of
+    the six things ``add_projector`` checks (no chain-punctuation check, no ``params`` at all, no
+    ``produces``). One body means a rule added for one registrar cannot be missing from the other.
+
+    *region* is not a stored field — it is the difference between the two callable shapes, and it
+    is recorded where it is dispatched on: ``consumes``. It decides only whether the declaration is
+    inferred from the callable (a plane-op stamps its own ``consumes``) or stamped as
+    :data:`~squidmip.projection.REGION_OP`.
+    """
+    kind = "region operator" if region else "projector"
     if not name:
-        raise ValueError("projector name must be a non-empty string")
+        raise ValueError(f"{kind} name must be a non-empty string")
     reserved = sorted(set(name) & set(CHAIN_CHARS))
     if reserved:
         raise ValueError(
-            f"projector name {name!r} contains {reserved[0]!r}, which is chain punctuation: "
+            f"{kind} name {name!r} contains {reserved[0]!r}, which is chain punctuation: "
             f"'{CHAIN_CHARS}' spell a COMPOSITION ('flatfield + decon + mip', "
             "see squidmip._compose). A name carrying one would read as an expression everywhere a "
             "chain is written down — in a console line, a CLI flag, a pasted recipe script — so it "
             "is refused here rather than left to be ambiguous there.")
-    if not callable(projector):
-        raise ValueError(f"projector for {name!r} is not callable: {projector!r}")
-    if name in _PROJECTORS:
+    if not callable(fn):
+        raise ValueError(f"{kind} for {name!r} is not callable: {fn!r}")
+    if name in _OPERATORS:
         raise ValueError(
-            f"projector {name!r} is already defined; pick a distinct name "
-            f"(defined: {available_projectors()})."
+            f"{kind} {name!r} is already defined; pick a distinct name "
+            f"(defined: {runnable_operators()})."
         )
     declared = tuple(params)
     for p in declared:
         if not isinstance(p, Param) or not p.name:
             raise ValueError(
-                f"projector {name!r}: params must be Param(name, default) records with a "
+                f"{kind} {name!r}: params must be Param(name, default) records with a "
                 f"non-empty name; got {p!r}")
     names = [p.name for p in declared]
     if len(set(names)) != len(names):
         raise ValueError(
-            f"projector {name!r} declares a parameter twice: {sorted(names)}; a duplicate makes "
+            f"{kind} {name!r} declares a parameter twice: {sorted(names)}; a duplicate makes "
             "operator_kwargs ambiguous")
 
     factory: Optional[Callable[..., Projector]] = None
     if declared:
-        factory = projector
-        projector = factory(**{p.name: p.default for p in declared})
-        if not callable(projector):
+        factory = fn
+        fn = factory(**{p.name: p.default for p in declared})
+        if not callable(fn):
             raise ValueError(
-                f"projector factory for {name!r} returned {projector!r}, which is not callable. "
+                f"{kind} factory for {name!r} returned {fn!r}, which is not callable. "
                 "With params=, the registered object is a FACTORY: it is called with the declared "
                 "defaults and must return the operator callable.")
-    if consumes is None:
-        consumes = getattr(projector, "consumes", Z_REDUCER)
+    if region:
+        axes = REGION_OP                       # stamped, never inferred: see add_region_operator
+    else:
+        if consumes is None:
+            consumes = getattr(fn, "consumes", Z_REDUCER)
+        axes = normalise_consumes(consumes)
     if produces is None:
-        produces = getattr(projector, "produces", INTENSITY)
-    _PROJECTORS[name] = Operator(
-        name, projector, normalise_consumes(consumes), normalise_produces(produces),
+        produces = getattr(fn, "produces", INTENSITY)
+    _OPERATORS[name] = Operator(
+        name, fn, axes, normalise_produces(produces),
         declared, factory, normalise_requires(requires),
     )
 
 
+def runnable_operators() -> list[str]:
+    """EVERY operator this application can run, sorted. The one list, asked of the one table.
+
+    It used to be ``sorted(set(available_projectors()) | set(available_region_operators()))``,
+    written out in three places (``_operations``, ``_cli``, and inline in ``_command``) because
+    there were two tables to union. There is one, so this is ``sorted`` of it.
+    """
+    return sorted(_OPERATORS)
+
+
 def available_projectors() -> list[str]:
-    """Every registered operator name, sorted — INCLUDING ones whose package is not installed.
+    """Registered operators with the ``Iterable[plane] -> plane`` shape — what ``project_plate`` runs.
 
     "Available" here has always meant *registered*, and it deliberately still does. Filtering out
     the ones whose ``requires`` is unmet would make "petakit is not installed" and "nobody wrote a
     deconvolution operator" look identical in the CLI and in the viewer's list, which is the exact
     reason ``available_segmenters`` refuses to filter either. Pair with :func:`operator_available`
     to grey a row out WITH A REASON instead of dropping it.
+
+    Region operators are excluded by their DECLARATION (``"fov" in consumes``) rather than by a
+    second table, which is the whole of this function's change: the set it returns is unchanged.
     """
-    return sorted(_PROJECTORS)
+    return sorted(n for n, op in _OPERATORS.items() if "fov" not in op.consumes)
+
+
+def is_region_operator(name) -> bool:
+    """Does *name* eat a whole well's FOVs — i.e. must it be run by ``stitch_plate``?
+
+    THE question every run path has to answer before it dispatches, asked once and answered off the
+    declaration. It used to be spelled ``name in available_region_operators()`` at ten call sites
+    (``_output``, ``_workers``, ``_command`` x2, ``_gui_commands``, ``_viewer`` x2, ``_cli`` x2,
+    ``_benchmark`` x2, ``_param_panel``, ``_bench_stitchers``), i.e. a membership test against a
+    table rather than a read of a record — which is how a chain expression, which is in no table,
+    came out as "not a region operator" for the right answer by accident.
+
+    Tolerant of an unknown name on purpose: this is a PREDICATE asked while deciding what to do,
+    and every caller already refuses an unknown operator by its own route (``_resolve_operator``,
+    ``operator_available``). Raising here would move that refusal to whichever branch happened to
+    ask first, with the wrong sentence.
+    """
+    try:
+        return "fov" in _resolve_operator(name).consumes
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def available_region_operators() -> list[str]:
+    """Registered operators that eat a whole well's FOVs — what :func:`squidmip.stitch_plate` runs.
+
+    The exact complement of :func:`available_projectors`, read off the same declaration, so a name
+    cannot be in both lists or in neither. It used to be ``sorted(_stitch._REGION_OPERATORS)``, a
+    second table whose disagreement with this one is the defect this collapse removed.
+    """
+    return sorted(n for n, op in _OPERATORS.items() if "fov" in op.consumes)
 
 
 def operator_available(name: str) -> tuple[bool, str]:
     """``(ok, reason_if_not)`` — can this operator actually run right now?
 
     The twin of :func:`squidmip._spots.segmenter_available`, for the operator table. Read this
-    before offering a run; :func:`bind_projector` enforces it regardless, so a caller that does not
+    before offering a run; :func:`bind_operator` enforces it regardless, so a caller that does not
     ask still cannot get a silent no-op.
     """
     try:
-        op = _resolve_projector(name)
+        op = _resolve_operator(name)
     except (KeyError, TypeError, ValueError) as exc:
         # An unknown name, an unrunnable CHAIN and a wrong type are all "you cannot run this", and
         # a caller offering a row has one place to put the reason. Resolving rather than looking up
@@ -509,21 +632,21 @@ def operator_available(name: str) -> tuple[bool, str]:
     return op.available()
 
 
-def projector_requires(name: str) -> tuple[str, ...]:
+def operator_requires(name: str) -> tuple[str, ...]:
     """The modules a registered operator declares it needs — ``()`` when it needs nothing extra."""
-    return _resolve_projector(name).requires
+    return _resolve_operator(name).requires
 
 
-def projector_consumes(name: str) -> frozenset[str]:
+def operator_consumes(name: str) -> frozenset[str]:
     """Return the axis a registered operator consumes — ``frozenset()`` (plane-op) or ``{"z"}``.
 
     The registry's declaration, for callers that must branch on output shape (a plane-op keeps z at
     full depth, a z-reducer collapses it to 1) rather than re-deriving it from the callable.
     """
-    return _resolve_projector(name).consumes
+    return _resolve_operator(name).consumes
 
 
-def projector_produces(name: str) -> str:
+def operator_produces(name: str) -> str:
     """Return what a registered operator's pixels MEAN — ``"intensity"`` or ``"labels"``.
 
     The registry's declaration, for the delivery path that must pick a napari layer type. Read
@@ -531,15 +654,15 @@ def projector_produces(name: str) -> str:
     by name needs editing for every segmenter after them, and that is precisely the property the
     ``consumes`` table was built to avoid.
     """
-    return _resolve_projector(name).produces
+    return _resolve_operator(name).produces
 
 
-def projector_params(name: str) -> tuple[Param, ...]:
+def operator_params(name: str) -> tuple[Param, ...]:
     """The parameters a registered operator declares — ``()`` when its behaviour is fixed."""
-    return _resolve_projector(name).params
+    return _resolve_operator(name).params
 
 
-def bind_projector(name: str, operator_kwargs: Optional[dict] = None) -> Projector:
+def bind_operator(name: str, operator_kwargs: Optional[dict] = None) -> Projector:
     """Resolve *name* and apply *operator_kwargs*, raising on an unknown name or parameter.
 
     Exists so a caller that must refuse EARLY can. ``project_plate`` is a generator, so anything it
@@ -550,10 +673,10 @@ def bind_projector(name: str, operator_kwargs: Optional[dict] = None) -> Project
     Raises :class:`MissingOperatorDependency` when the operator declares a ``requires`` package that
     is not importable — before the binding, before the loop, before a single well is read.
     """
-    return _resolve_projector(name).bind(operator_kwargs)
+    return _resolve_operator(name).bind(operator_kwargs)
 
 
-def _resolve_projector(name) -> Operator:
+def _resolve_operator(name) -> Operator:
     """Look up an operator by name OR by chain, failing loud (named) on an unknown key.
 
     THE ONE DOOR. Every caller that takes a ``projector=`` — :func:`project_plate`,
@@ -577,7 +700,7 @@ def _resolve_projector(name) -> Operator:
     caller who was asking about operators.
     """
     if isinstance(name, RecipeChain):
-        return compose_operator(name, _resolve_projector)
+        return compose_operator(name, _resolve_operator)
     if isinstance(name, (list, tuple)):
         spelled = f" {CHAIN_SEPARATOR} ".join(str(part) for part in name)
         raise TypeError(
@@ -587,15 +710,16 @@ def _resolve_projector(name) -> Operator:
         raise TypeError(
             f"a projector is named by a string or a RecipeChain, got {type(name).__name__}: "
             f"{name!r}.")
-    operator = _PROJECTORS.get(name)
+    operator = _OPERATORS.get(name)
     if operator is not None:
         return operator
     if is_chain_expression(name):
-        return compose_operator(name, _resolve_projector)
+        return compose_operator(name, _resolve_operator)
     raise KeyError(
-        f"unknown projector {name!r}; available: {available_projectors()}. "
-        "Add new modes with squidmip.add_projector(name, fn), or chain registered ones with "
-        "'+' (e.g. 'flatfield+decon+mip')."
+        f"unknown operator {name!r}; available: {runnable_operators()}. "
+        "Add new modes with squidmip.add_projector(name, fn) — or "
+        "squidmip.add_region_operator(name, fn) for one that fuses a whole well — or chain "
+        "registered ones with '+' (e.g. 'flatfield+decon+mip')."
     )
 
 
@@ -683,8 +807,16 @@ def project_plate(
         raise ValueError(f"workers must be >= 1, got {workers}")
     n_workers = workers if workers is not None else _default_workers()
 
-    op = _resolve_projector(projector)
-    fn = bind_projector(projector, operator_kwargs)  # the declaration decides, never the name
+    op = _resolve_operator(projector)
+    # BY DECLARATION, not by name: a region operator is a whole-well callable and this loop hands
+    # out planes, so running one here would call it with an iterable of arrays as its `reader`.
+    # One table means the name resolves; `consumes` is what says it does not belong to this loop.
+    if "fov" in op.consumes:
+        raise ValueError(
+            f"{projector!r} consumes fov — it fuses a whole well's FOVs and takes "
+            "(reader, region, fovs), which is not what project_plate hands an operator. Run it "
+            f"with squidmip.stitch_plate(reader, operator={projector!r}).")
+    fn = bind_operator(projector, operator_kwargs)  # the declaration decides, never the name
 
     # Warm the reader's lazy index/time-folders/metadata single-threaded BEFORE fan-out.
     meta = reader.metadata

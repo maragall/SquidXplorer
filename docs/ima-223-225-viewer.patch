@@ -33,7 +33,7 @@ Append three `Operation(...)` records after the existing `minerva` entry, INSIDE
 The keys MUST be exactly `decon` / `bgsub` / `flatfield` — they are the registry names
 `add_projector` uses in `squidmip/_decon.py`, `_background.py` and `_flatfield.py`, and
 `run_operator` passes the key straight through to the engine. A typo here surfaces as a
-KeyError from `_resolve_projector` at run time, not at import.
+KeyError from `_resolve_operator` at run time, not at import.
 
 A comment above the three entries states WHY they get a different builder from mip/stitch:
 they are plane-ops (`consumes=frozenset()`), so their output keeps z at full depth, and

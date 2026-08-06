@@ -25,7 +25,7 @@ import tifffile
 pytest.importorskip("tilefusion", reason="tilefusion (maragall/stitcher) not installed: the minerva "
                                          "export path is UNTESTED here, not passing")
 
-from squidmip import _minerva
+from squidmip import _engine, _minerva
 from squidmip._minerva import (
     auto_groups,
     default_out_dir,
@@ -131,7 +131,7 @@ def test_export_goes_through_the_region_operator_seam(squid_dataset, tmp_path):
         return _stitch.stitch_region(reader, region, fovs, register=False, **kwargs)
 
     name = "minerva_test_op"
-    _stitch._REGION_OPERATORS.pop(name, None)
+    _engine._OPERATORS.pop(name, None)
     squidmip.add_region_operator(name, spy)
     try:
         pairs = export_selection(
@@ -139,7 +139,7 @@ def test_export_goes_through_the_region_operator_seam(squid_dataset, tmp_path):
             operator=name,
         )
     finally:
-        _stitch._REGION_OPERATORS.pop(name, None)
+        _engine._OPERATORS.pop(name, None)
 
     assert calls == [("B2", (0, 1))], "the whole region reached the operator in one call"
     assert len(pairs) == 1 and name in pairs[0][0].name
@@ -170,7 +170,7 @@ def test_export_is_one_mosaic_per_region_from_every_squid_writer(label, build, t
 
 def test_export_rejects_an_unknown_region_operator(squid_dataset, tmp_path):
     root, _ = squid_dataset
-    with pytest.raises(KeyError, match="unknown region operator"):
+    with pytest.raises(KeyError, match="unknown operator"):
         export_selection(open_reader(root), [("B2", 0)], tmp_path, operator="nope")
 
 

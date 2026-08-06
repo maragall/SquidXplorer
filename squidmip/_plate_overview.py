@@ -22,8 +22,7 @@ WHAT IS IN HERE, IN THE ORDER THE FILE HAD IT
 * **plate geometry**, Qt-free and unit-testable: :func:`well_at`, :func:`cells_in_rect`,
   :func:`_fit_cell`, :func:`_fit_box`, :func:`_box_union`, :func:`_row_letter`,
   :func:`_plate_grid`, :func:`resolve_plate_root`, and the mosaic-box geometry
-  (:func:`_mosaic_boxes`, :func:`region_mosaic_extent_px`, :func:`push_shape_for`,
-  :func:`content_box`, :func:`_fit_letterboxed`).
+  (:func:`_mosaic_boxes`, :func:`content_box`).
 * **contrast over a streaming plate**: :class:`_RunningContrast` and :func:`_pct_window`, the
   during-run histogram approximation and the exact percentile window the final render uses.
 * **the loupe** (IMA-208): the magnification math, and the three sources it can read real pixels
@@ -37,7 +36,7 @@ WHAT IS DELIBERATELY NOT IN HERE
 The two QThreads that DID stay, :class:`_LoupeWorker` and :class:`_TileFetcher`, are here rather
 than in :mod:`squidmip._workers` with the other eight for a structural reason, not a stylistic one.
 They are private to :class:`PlateOverview` and it is their only caller, while ``_workers`` imports
-the plate geometry ABOVE (``_fit_cell``, ``_CELL``, ``push_shape_for``) to fill its tiles. Putting
+the plate geometry ABOVE (``_fit_cell``, ``_CELL``, ``content_box``) to fill its tiles. Putting
 them in ``_workers`` would make ``_workers`` and this module import each other, and a cycle is a
 worse outcome than two threads filed next to their owner.
 
@@ -2971,61 +2970,6 @@ def _mosaic_boxes(meta: dict) -> dict:
     return out
 
 
-def region_mosaic_extent_px(meta: dict, regions: Optional[list] = None) -> Optional[tuple]:
-    """Full-resolution ``(height, width)`` bounding box of the mosaics a REGION operator will fuse.
-
-    IMA-245. A region operator (``available_region_operators()``) yields ONE fused mosaic per
-    region, whose extent is the bounding box of the region's coordinate-placed frames — NOT the
-    frame shape. Anything that has to size a surface for that result (the array viewer's canvas,
-    the push planes fed into it) must ask this, or it sizes a mosaic as a frame.
-
-    Returns the max extent over *regions* (``None`` = every region in the acquisition), because
-    one array viewer serves the whole run and its canvas is declared once. Returns ``None`` when
-    the acquisition carries no stage positions / no pixel size — the same "not derivable, do not
-    guess" signal :func:`_mosaic_boxes` returns ``{}`` for.
-    """
-    from squidmip._placement import fov_offsets_px, mosaic_extent_px
-
-    positions = meta.get("fov_positions_um") or {}
-    if not positions or meta.get("pixel_size_um") in (None, 0):
-        return None
-    frame_shape = meta["frame_shape"]
-    scoped = list(meta["regions"]) if regions is None else list(regions)
-    best = None
-    for region in scoped:
-        fovs = meta["fovs_per_region"].get(region) or []
-        if not fovs:
-            continue
-        try:
-            offsets = fov_offsets_px(positions, region, fovs, meta.get("pixel_size_um"))
-            h, w = mosaic_extent_px(offsets, frame_shape)
-        except (KeyError, ValueError):
-            continue                     # this region contributes nothing; the rest still size it
-        best = (h, w) if best is None else (max(best[0], h), max(best[1], w))
-    return best
-
-
-def push_shape_for(meta: dict, region_op: bool, regions: Optional[list] = None) -> tuple:
-    """The ``(height, width)`` of every plane pushed into the array viewer for this run.
-
-    A per-FOV operator pushes a FRAME, so the surface is the frame shape. A REGION operator pushes
-    a whole-region MOSAIC, so the surface is the mosaic EXTENT. Either is scaled into a ``_PUSH_PX``
-    box PRESERVING ASPECT — a freeform 27-FOV strip is not a square, and squashing it into one
-    (which is what a fixed ``(_PUSH_PX, _PUSH_PX)`` surface did) is how it arrives unrecognisable.
-
-    Aspect is preserved the same way :func:`squidmip._placement.cell_boxes` preserves it for the
-    plate thumbnail, so the plate and the array viewer describe one geometry rather than two.
-    Falls back to the square when the extent is not derivable (no stage positions / pixel size);
-    the caller reports that fallback rather than showing a silently squashed mosaic.
-    """
-    extent = region_mosaic_extent_px(meta, regions) if region_op else None
-    if extent is None:                              # per-FOV op, or a region op with no geometry
-        extent = tuple(meta["frame_shape"])
-    mh, mw = int(extent[0]), int(extent[1])
-    s = min(_PUSH_PX / mh, _PUSH_PX / mw, 1.0)     # never UPSCALE: a push is a bounded thumbnail
-    return (max(1, int(round(mh * s))), max(1, int(round(mw * s))))
-
-
 def content_box(shape, h: int = _CELL, w: int = _CELL) -> tuple[int, int, int, int]:
     """``(top, left, height, width)``: where a *shape*-shaped plane lands in an ``h`` x ``w`` box.
 
@@ -3049,19 +2993,3 @@ def content_box(shape, h: int = _CELL, w: int = _CELL) -> tuple[int, int, int, i
     return (h - ih) // 2, (w - iw) // 2, ih, iw
 
 
-def _fit_letterboxed(a: np.ndarray, h: int, w: int, dtype) -> np.ndarray:
-    """Scale a 2D plane into an exactly ``(h, w)`` canvas, aspect preserved and centred.
-
-    The array viewer's canvas is declared ONCE per run (``start_acquisition``), so every push has
-    to be that exact shape — while two regions of one acquisition can have differently shaped
-    mosaics. Letterboxing is the only way to satisfy both without stretching one of them, and it
-    is the policy the plate cell already uses (``cell_boxes`` centres a mosaic in its cell).
-
-    The inner rectangle comes from :func:`content_box`, the one place that arithmetic lives, so a
-    push and the plate cell it corresponds to cannot letterbox to two different rectangles.
-    """
-    h, w = max(1, int(h)), max(1, int(w))
-    top, left, ih, iw = content_box(a.shape, h, w)
-    out = np.zeros((h, w), dtype)
-    out[top:top + ih, left:left + iw] = _fit_box(a, ih, iw)
-    return out
