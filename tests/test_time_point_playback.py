@@ -430,6 +430,200 @@ def test_a_reload_reuses_the_layers_instead_of_destroying_them(
             qapp.processEvents()
 
 
+# --- the reuse rule, against a REAL napari ViewerModel ---------------------------------------
+#
+# EVERY TEST ABOVE THIS LINE RUNS AGAINST `napari_pane_stub`, whose `add_mosaic` RECORDS THE CALL
+# AND RETURNS. `tests/conftest.py` says so where the stub is defined: "napari's own rendering is
+# not exercised here, and never was under offscreen." So nothing downstream of `add_mosaic` runs
+# in those tests — including the layer-REUSE path, which is where the hazard below lives. A green
+# suite proves nothing about it, which is exactly how the bug these two tests exist for got in.
+#
+# THE HAZARD. `add_mosaic` reuses a layer it can find, and `_reuse_layer` does not refuse a shape
+# it cannot survive: it assigns `layer.data` and napari raises somewhere downstream. Driven
+# against a real `ViewerModel`, three ordinary region transitions crash:
+#
+#     deeper -> shallower pyramid   IndexError: index 1 is out of bounds for axis 0 with size 1
+#     2D -> 3D                      IndexError: index 2 is out of bounds for axis 1 with size 2
+#     3D -> 2D                      ValueError: operands could not be broadcast together
+#
+# and "a big region then a small one" is ordinary plate navigation: on the 10x tissue set manual0
+# is 27 FOVs and manual1 is 28, so their fused mosaics differ in extent.
+#
+# THE RULE, therefore, is not "reuse" or "remove" but the DISTINCTION between them:
+#
+#     a REGION change     -> a different mosaic, different shape -> REMOVE, then add fresh
+#     a TIMEPOINT change  -> the same region at the same extent  -> REUSE, which is the point
+#
+# Both halves are asserted, because a fix in either direction alone is wrong: removing always
+# costs 165-265 ms of GUI thread per channel per frame and undoes 6465069, and reusing always
+# crashes on the first region change.
+
+def _real_mosaic():
+    from napari.components import ViewerModel
+
+    from squidmip._napari_view import MosaicLayers
+
+    return MosaicLayers(ViewerModel())
+
+
+#: One region per SHAPE, in an order that walks every transition the perf agent found crashing:
+#: two levels -> one level (deeper -> shallower), 3D -> 2D, then 2D -> 3D.
+_SHAPE_WALK = {
+    "two_levels": [np.zeros((2, 64, 64), np.uint16), np.zeros((2, 32, 32), np.uint16)],
+    "one_level": [np.zeros((2, 32, 32), np.uint16)],
+    "flat_2d": [np.zeros((16, 16), np.uint16)],
+    "deep_3d": [np.zeros((3, 16, 16), np.uint16)],
+}
+
+
+def _catch_layer_failures(win):
+    """Record what `_on_plane` raises instead of letting it reach Qt. Returns the list.
+
+    NOT decoration, and not a swallow. PyQt turns an exception raised inside a slot invoked from
+    C++ into `qFatal`, so a napari failure here ABORTS the interpreter — and an abort takes
+    pytest's summary line with it, which is the exact failure mode that hid 51 real failures in
+    this suite for weeks. Catching at the boundary turns "the process died, no idea why" into a
+    named assertion carrying napari's own message.
+    """
+    failures = []
+    real_on_plane = win._on_plane
+
+    def guarded(*args, **kwargs):
+        try:
+            real_on_plane(*args, **kwargs)
+        except BaseException as exc:                 # noqa: BLE001 - reported, never swallowed
+            failures.append(f"{type(exc).__name__}: {exc}")
+
+    win._on_plane = guarded
+    return failures
+
+
+def _shape_worker_class(shapes):
+    """A `_MosaicWorker` stand-in that emits a CHOSEN pyramid, synchronously.
+
+    Synchronous on purpose: a real worker's result arrives through a QUEUED connection, so a test
+    driving it through the event loop would have to pump and could not tell "not yet" from "never".
+    """
+    from qtpy.QtCore import QObject, Signal
+
+    class _ShapeWorker(QObject):
+        ready = Signal(str, str, object, object, object)
+        problem = Signal(str)
+        finished_count = Signal(int)
+        finished = Signal()
+
+        def __init__(self, reader, meta, region, channels, z_index=0, parent=None, t=0):
+            super().__init__(parent)
+            self._region = str(region)
+            self._channels = list(channels)
+
+        def isRunning(self):
+            return False
+
+        def stop(self):
+            pass
+
+        def start(self):
+            levels = shapes[self._region]
+            for channel in self._channels:
+                self.ready.emit(self._region, channel, levels, None, None)
+            self.finished_count.emit(len(self._channels))
+            self.finished.emit()
+
+    return _ShapeWorker
+
+
+def test_a_region_change_never_hands_napari_a_layer_of_another_shape(
+    multi_time_point_dataset, napari_pane_stub, qapp
+):
+    """Walk four region shapes through the REAL `MosaicLayers`. None of them may raise.
+
+    MUTATION: drop the region test from `_load_mosaic`'s `remove_op` (reuse across every reload)
+    and this fails on the first transition with napari's own IndexError. That is the whole reason
+    the removal is conditional rather than gone.
+    """
+    from squidmip import _viewer as V
+    from squidmip._region_viewer import ViewerManager
+
+    root, _planes = multi_time_point_dataset
+    reader = open_reader(root)
+    mgr = ViewerManager(reader, reader.metadata)
+    real_worker = V._MosaicWorker
+    try:
+        win = mgr.open([TIME_SERIES_REGION])
+        pane = napari_pane_stub[0]
+        assert _pump(qapp, lambda: bool(pane.mosaic.added)), "the window never loaded"
+        pane.mosaic = _real_mosaic()                 # REAL napari from here on
+
+        V._MosaicWorker = _shape_worker_class(_SHAPE_WALK)
+        failures = _catch_layer_failures(win)
+        regions = list(_SHAPE_WALK)
+        win._cursor.set_order(regions)
+        previous = None
+        for index, region in enumerate(regions):
+            win._cursor.set_index(index)
+            if win._load_timer is not None:
+                win._load_timer.stop()               # we drive the loads, not the debounce
+            win._load_mosaic(region)
+            # STOP AT THE FIRST BAD TRANSITION. A half-assigned napari layer takes the process
+            # down on the NEXT touch, so walking on would replace a readable failure with an abort.
+            assert not failures, (
+                f"{previous} -> {region} handed napari a layer of another shape: {failures[0]}")
+            layer = pane.mosaic.find("raw", TIME_SERIES_CHANNELS[0])
+            assert layer is not None, f"{region}: nothing was added"
+            assert np.asarray(layer.data[0]).shape == _SHAPE_WALK[region][0].shape, (
+                f"{region}: the layer kept the previous region's shape")
+            previous = region
+    finally:
+        V._MosaicWorker = real_worker
+        mgr._mem_timer.stop()
+        mgr.close_all()
+        for _ in range(20):
+            qapp.processEvents()
+
+
+def test_a_timepoint_change_keeps_the_very_same_layer_object(
+    multi_time_point_dataset, napari_pane_stub, qapp
+):
+    """The other half: the same region at another timepoint must REUSE, not rebuild.
+
+    Asserted on OBJECT IDENTITY against a real ViewerModel, because that is what makes it cheap
+    (165-265 ms of GUI thread per channel is the rebuild) and what keeps every subscription bound
+    to the layer alive — contrast, visibility and colormap all subscribe to layer objects, and
+    each of those has already broken once when a reload destroyed the object underneath them.
+    """
+    from squidmip import _viewer as V
+    from squidmip._region_viewer import ViewerManager
+
+    root, _planes = multi_time_point_dataset
+    reader = open_reader(root)
+    mgr = ViewerManager(reader, reader.metadata)
+    real_worker = V._MosaicWorker
+    try:
+        win = mgr.open([TIME_SERIES_REGION])
+        pane = napari_pane_stub[0]
+        assert _pump(qapp, lambda: bool(pane.mosaic.added))
+        pane.mosaic = _real_mosaic()
+
+        same_shape = {TIME_SERIES_REGION: [np.zeros((2, 32, 32), np.uint16)]}
+        V._MosaicWorker = _shape_worker_class(same_shape)
+        win._load_mosaic(TIME_SERIES_REGION)
+        first = pane.mosaic.find("raw", TIME_SERIES_CHANNELS[0])
+        assert first is not None
+
+        for time_point in (1, 2, 0):
+            win._time_point_bar.set_time_point(time_point)
+            win._load_mosaic(TIME_SERIES_REGION)
+            assert pane.mosaic.find("raw", TIME_SERIES_CHANNELS[0]) is first, (
+                f"timepoint {time_point} destroyed and rebuilt the layer instead of reusing it")
+    finally:
+        V._MosaicWorker = real_worker
+        mgr._mem_timer.stop()
+        mgr.close_all()
+        for _ in range(20):
+            qapp.processEvents()
+
+
 def test_a_load_that_produces_nothing_DOES_drop_the_stale_layers(
     multi_time_point_dataset, napari_pane_stub, qapp
 ):

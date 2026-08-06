@@ -417,9 +417,12 @@ class RegionViewer(QMainWindow):
         #: rather than waited for on the GUI thread. See `_load_mosaic`.
         self._load_gen = 0
         self._retired_workers: list = []       # superseded loads, held until Qt reaps them
-        #: Which region the camera was last framed to. A reload of the SAME region (another
-        #: timepoint) must not re-frame: see `_on_done`.
-        self._framed_region: Optional[str] = None
+        #: WHICH REGION'S MOSAIC IS IN THE PANE. One fact, two consequences, and they are the same
+        #: question asked twice: a reload of the SAME region must not re-frame the camera
+        #: (`_on_done`) and must not destroy the layers to rebuild them (`_load_mosaic`). A reload
+        #: of a DIFFERENT region must do both — its mosaic is a different shape, and napari does
+        #: not survive being handed one through a reused layer.
+        self._shown_region: Optional[str] = None
         self._pending_region: Optional[str] = None
         self._load_timer: Optional[QTimer] = None
         self._time_load_timer: Optional[QTimer] = None
@@ -1856,22 +1859,33 @@ class RegionViewer(QMainWindow):
         # would leave it placed at the old region's stage coordinates over the new region's raw.
         if self._result_region is not None and self._result_region != str(region):
             self._drop_result_layers(f"this window moved from {self._result_region} to {region}")
-        # THE RAW LAYERS ARE **NOT** DESTROYED TO RELOAD THEM. This line used to read
-        # `pane.mosaic.remove_op(_RAW_OP)`, and it silently undid `6465069` ("reuse layers across
-        # region changes instead of destroying them", Julio: "I can't cycle rapidly through these
-        # mosaics"). `add_mosaic` reuses a layer it can FIND, so removing them first guaranteed
-        # the slow path every time — and since the decentralization this window is the only
-        # viewing path there is, so the fix had no live caller left.
+        # REMOVE THE RAW LAYERS FOR A REGION CHANGE; KEEP THEM FOR A TIMEPOINT CHANGE. That
+        # distinction is the whole rule, and getting either half wrong has a measured cost.
         #
-        # MEASURED HERE, on sim_5d_2x2_t3 (4 FOVs, 2 channels, 256 px) with a real napari canvas:
-        # the read is 10-13 ms in the worker, while the GUI-thread slots cost 165-265 ms per
-        # channel plus 85-130 ms in `_on_done` — i.e. essentially all of a frame's cost was
-        # tearing down vispy nodes and layer-control widgets and building them again. That is
-        # what made a timepoint frame take ~1.3 s and freeze the window for ~0.8 s of it.
+        # KEEPING them when the region is the SAME is what makes playback possible. `add_mosaic`
+        # reuses a layer it can FIND (6465069, "reuse layers across region changes instead of
+        # destroying them", Julio: "I can't cycle rapidly through these mosaics"), so an
+        # unconditional removal here guaranteed the slow path on every reload — and since the
+        # decentralization this window is the only viewing path, so that fix had no live caller
+        # left. Measured on sim_5d_2x2_t3 with a real napari canvas: the read is 10-13 ms in the
+        # worker, while rebuilding costs 165-265 ms of GUI thread PER CHANNEL. That was ~1.3 s a
+        # frame and ~0.8 s of frozen window; reusing makes it ~210 ms and ~0.4 s.
         #
-        # A failed load is handled where the failure is KNOWN (`_on_done`, n == 0), which removes
-        # the layers then. Removing them here would have been "clear the screen in case the next
-        # read fails", paid on every successful frame.
+        # REMOVING them when the region CHANGES is not caution, it is a crash fix. A different
+        # region is a different mosaic with a different shape, and `_reuse_layer` does not refuse
+        # a shape it cannot survive — it assigns `layer.data` and napari raises downstream.
+        # Driven against a real ViewerModel: deeper->shallower pyramid and 2D->3D both raise
+        # IndexError, 3D->2D raises ValueError, and the half-assigned layer then aborts the
+        # process on teardown. Ragged regions are ordinary: manual0 is 27 FOVs and manual1 is 28
+        # on the 10x tissue set, so their mosaics differ. `tests/test_time_point_playback.py`
+        # walks those transitions against a real `MosaicLayers`, because the pane STUB the rest
+        # of the suite uses records `add_mosaic` and returns, so no stubbed test can ever see it.
+        #
+        # `_shown_region` is the one fact both this and the framing in `_on_done` ask about:
+        # which region's mosaic is currently in the pane. A stale answer here can only cost an
+        # unnecessary rebuild, never a crash, which is the right way round.
+        if self._shown_region != str(region):
+            pane.mosaic.remove_op(_RAW_OP)
         channels = [c["name"] for c in self._meta["channels"]]
         # t=THIS WINDOW'S TIMEPOINT. Without it the worker fused timepoint 0 whatever the
         # timepoint bar said, and the reload this method performs on every slider move repainted
@@ -1998,12 +2012,18 @@ class RegionViewer(QMainWindow):
                 pane.mosaic.remove_op(_RAW_OP)
             except Exception:                        # noqa: BLE001 - already gone is fine
                 pass
-            self._framed_region = None
+            self._shown_region = None
             if self.open_clock is not None:
                 self.open_clock.finish(_measure.FAILED, f"{region}: no mosaic could be built")
             self._frame_done()
             return
         pane.say("")
+        # ASKED BEFORE THE try, RECORDED AFTER IT, and deliberately not inside: framing is
+        # cosmetic and its failure is swallowed, but `_shown_region` also decides whether the NEXT
+        # load may reuse these layers. Updating it inside the try would tie a correctness fact to
+        # whether a camera move happened to succeed — and against a pane whose model is absent it
+        # never does, so the flag would never advance and every reload would rebuild.
+        first_look = self._shown_region != str(region)
         try:
             # show_op makes EXACTLY one group visible, so calling it unconditionally would hide an
             # operator layer this window is legitimately still showing for this same region -- the
@@ -2016,11 +2036,11 @@ class RegionViewer(QMainWindow):
             # the user's zoom back to fit-the-region on every frame of playback -- you cannot
             # watch a blob move at 1:1 if the camera keeps pulling out. Framing follows the
             # REGION, which is the thing whose extent actually changed.
-            if getattr(self, "_framed_region", None) != str(region):
+            if first_look:
                 pane.mosaic.model.reset_view()
-                self._framed_region = str(region)
         except Exception:                            # noqa: BLE001 - view framing is cosmetic
             pass
+        self._shown_region = str(region)
         # Seed this window's settings ONCE, now that the layers exist. For an ROI child that is the
         # parent's contrast, so the child looks like the window it was cut out of.
         self._apply_settings_once()
