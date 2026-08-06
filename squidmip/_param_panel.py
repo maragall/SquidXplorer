@@ -50,7 +50,7 @@ untested against a real operator and is pinned by a synthetic one in the tests.
 
 CHAINS
 ------
-``projector_params("bgsub + spot")`` returns the chain's parts' parameters NAMESPACED
+``operator_params("bgsub + spot")`` returns the chain's parts' parameters NAMESPACED
 ``<step>.<param>`` (``squidmip._compose``), so a chain arrives here as a flat tuple whose names
 carry the structure. :func:`group_params` splits on the first ``.`` and the panel draws one
 HEADED GROUP per step, in chain order. Nothing else changes: the values go back through
@@ -174,10 +174,10 @@ def panel_refusal(key: str) -> Optional[str]:
     launch that chain is a separate question the panel asks separately — see
     :meth:`GenericOperatorPanel._launch_refusal`.
     """
-    from squidmip import available_region_operators, operator_available
-    from squidmip._engine import projector_params
+    from squidmip import is_region_operator, operator_available
+    from squidmip._engine import operator_params
 
-    if key in available_region_operators():
+    if is_region_operator(key):
         return (f"'{key}' is a REGION operator, and that table declares no params= at all — there "
                 "is nothing for a generic panel to read. Its controls are hand-written in "
                 "squidmip._op_panels (StitcherPanel).")
@@ -185,7 +185,7 @@ def panel_refusal(key: str) -> Optional[str]:
     if not ok:
         return why
     try:
-        params = projector_params(key)
+        params = operator_params(key)
     except Exception as exc:                       # resolvable-but-unreadable: say it, don't crash
         return f"'{key}' declares no parameters this panel can read: {exc}"
     bad = unsupported_params(params)
@@ -205,19 +205,19 @@ def panel_refusal(key: str) -> Optional[str]:
 class GenericOperatorPanel(_Panel):
     """One operator's declared parameters, as widgets, plus the run that carries them.
 
-    Built from :func:`squidmip._engine.projector_params` and nothing else. The values leave through
+    Built from :func:`squidmip._engine.operator_params` and nothing else. The values leave through
     ``host.run_operator(key, ..., operator_kwargs=...)`` — the SAME argument
     :class:`~squidmip._op_panels.StitcherPanel` uses, which is what makes the value's journey to the
     pixels one already-tested path rather than a second one.
     """
 
     def __init__(self, host, key: str):
-        from squidmip._engine import projector_consumes, projector_params
+        from squidmip._engine import operator_consumes, operator_params
         from squidmip._operations import operator_label
 
         self.key = str(key)
-        params = projector_params(self.key)
-        self._reduces_z = bool(projector_consumes(self.key))
+        params = operator_params(self.key)
+        self._reduces_z = bool(operator_consumes(self.key))
         super().__init__(
             host, operator_label(self.key),
             "Every control below is a parameter this operator DECLARES "

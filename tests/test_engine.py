@@ -99,12 +99,12 @@ class FakeReader:
 @pytest.fixture(autouse=True)
 def _restore_projector_table():
     """Snapshot/restore the module-global projector table so tests that add don't leak."""
-    saved = dict(engine._PROJECTORS)
+    saved = dict(engine._OPERATORS)
     try:
         yield
     finally:
-        engine._PROJECTORS.clear()
-        engine._PROJECTORS.update(saved)
+        engine._OPERATORS.clear()
+        engine._OPERATORS.update(saved)
 
 
 def _collect(reader, **kw) -> dict[tuple[str, int], np.ndarray]:
@@ -139,8 +139,20 @@ def test_add_rejects_empty_name_and_non_callable():
 
 def test_project_plate_unknown_projector_raises_named():
     reader = FakeReader(n_wells=2)
-    with pytest.raises(KeyError, match="unknown projector 'nope'"):
+    with pytest.raises(KeyError, match="unknown operator 'nope'"):
         next(project_plate(reader, projector="nope"))
+
+
+def test_project_plate_refuses_a_region_operator_by_its_declaration():
+    """One table means `stitch` RESOLVES here; `consumes` is what says it is the wrong loop.
+
+    A region operator takes (reader, region, fovs), so running it through project_plate would
+    call it with an iterable of planes as its `reader`. The refusal names the function that runs
+    it instead, rather than reporting the name as unknown, which is what a second table did.
+    """
+    reader = FakeReader(n_wells=2)
+    with pytest.raises(ValueError, match="consumes fov.*stitch_plate"):
+        next(project_plate(reader, projector="stitch"))
 
 
 # ── correctness: concurrency changes no pixel ───────────────────────────────────────────
@@ -263,8 +275,8 @@ def _plus_one(plane):
 def test_shipped_projectors_declare_the_z_axis():
     # BOTH mip and reference consume z. z-SELECTING (reference) is not a different axis: it is
     # a different way of picking within z. Splitting them here is what broke channel alignment.
-    assert engine.projector_consumes("mip") == frozenset({"z"})
-    assert engine.projector_consumes("reference") == frozenset({"z"})
+    assert engine.operator_consumes("mip") == frozenset({"z"})
+    assert engine.operator_consumes("reference") == frozenset({"z"})
 
 
 def test_consumes_is_orthogonal_to_select_index():
@@ -272,40 +284,42 @@ def test_consumes_is_orthogonal_to_select_index():
     assert getattr(mip, "select_index", None) is None
     assert getattr(project_reference, "select_index", None) is not None
     # ...yet they declare the SAME consumed axis.
-    assert engine.projector_consumes("mip") == engine.projector_consumes("reference")
+    assert engine.operator_consumes("mip") == engine.operator_consumes("reference")
 
 
 def test_add_projector_defaults_to_z_reducer():
     add_projector("legacy_style", _first)                 # no consumes= → the old contract
-    assert engine.projector_consumes("legacy_style") == frozenset({"z"})
+    assert engine.operator_consumes("legacy_style") == frozenset({"z"})
 
 
 def test_add_projector_records_a_plane_op():
     add_projector("planeop", plane_op(_plus_one), consumes=frozenset())
-    assert engine.projector_consumes("planeop") == frozenset()
+    assert engine.operator_consumes("planeop") == frozenset()
 
 
 def test_consumes_accepts_any_iterable_of_axis_names():
     add_projector("as_set", _first, consumes={"z"})
     add_projector("as_str", _first, consumes="z")
     add_projector("as_tuple", _first, consumes=())
-    assert engine.projector_consumes("as_set") == frozenset({"z"})
-    assert engine.projector_consumes("as_str") == frozenset({"z"})
-    assert engine.projector_consumes("as_tuple") == frozenset()
+    assert engine.operator_consumes("as_set") == frozenset({"z"})
+    assert engine.operator_consumes("as_str") == frozenset({"z"})
+    assert engine.operator_consumes("as_tuple") == frozenset()
 
 
-def test_projector_consumes_unknown_name_is_loud():
-    with pytest.raises(KeyError, match="unknown projector 'nope'"):
-        engine.projector_consumes("nope")
+def test_operator_consumes_unknown_name_is_loud():
+    with pytest.raises(KeyError, match="unknown operator 'nope'"):
+        engine.operator_consumes("nope")
 
 
 # ── the axes this seam refuses (IMA-222 owns inter-FOV) ───────────────────────────────────
 
 def test_fov_is_refused_by_name_and_points_at_the_region_seam():
-    # A stitcher consumes fov, but a _PROJECTORS callable is Iterable[plane] -> plane and never
-    # sees a tile's x/y stage geometry. Declaring {"fov"} here would be a promise we cannot keep.
+    # A stitcher consumes fov, but an `add_projector` callable is Iterable[plane] -> plane and
+    # never sees a tile's x/y stage geometry. Declaring {"fov"} through THIS registrar is still a
+    # promise we cannot keep: the RECORD can carry {"fov"} (that is what `add_region_operator`
+    # stamps), but only for a callable of the whole-well shape.
     with pytest.raises(ValueError, match="fov"):
-        add_projector("stitch", _first, consumes=frozenset({"fov"}))
+        add_projector("would_be_stitch", _first, consumes=frozenset({"fov"}))
 
 
 def test_unknown_axis_is_refused_named():
@@ -396,4 +410,4 @@ def test_plane_op_adapter_makes_the_declaration_inferable():
     # plane_op() stamps `consumes` on the callable, so the registration site does not have to
     # repeat it — the same idiom project_reference already uses for `select_index`.
     add_projector("inferred", plane_op(_plus_one))
-    assert engine.projector_consumes("inferred") == frozenset()
+    assert engine.operator_consumes("inferred") == frozenset()

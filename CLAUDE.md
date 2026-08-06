@@ -13,10 +13,23 @@ Four declarations on the registry record, and nothing generic branches on an ope
 
 | declaration | decides |
 |---|---|
-| `consumes` | the engine's loop and the output shape — `{"z"}` collapses z, `frozenset()` keeps it |
+| `consumes` | the engine's loop and the output shape — `{"z"}` collapses z, `frozenset()` keeps it, `{"fov"}` is a whole-well region operator |
 | `produces` | what the pixels MEAN, and therefore the napari layer type |
 | `params` | what one entry can be RUN with (`params=` makes the registered object a factory) |
 | `requires` | the modules it needs — **listed either way, run refused BY NAME when missing** |
+
+**ONE table** (`_engine._OPERATORS`, 2026-08-05). `add_projector` and `add_region_operator` are two
+registrars over one record, sharing one validator (`_engine._declare`); `add_region_operator`
+stamps `consumes=REGION_OP` (`{"fov"}`) and that declaration is what `stitch_plate` selects on,
+what `project_plate` refuses on, and what `_compose` refuses inside a chain. `runnable_operators()`
+is `sorted(_OPERATORS)` and is defined once; `available_projectors()` / `available_region_operators()`
+are its two complementary filters; `is_region_operator(name)` is the ONE spelling of "which loop
+runs this", replacing `name in available_region_operators()` at ten call sites. Deleted with the
+second table: `_stitch._REGION_OPERATORS`, `_stitch._REGION_REQUIRES` (a sidecar of a sidecar),
+`region_operator_available`, `region_operator_requires`, and two duplicate `runnable_operators`
+bodies. The queries are named `operator_consumes` / `operator_produces` / `operator_params` /
+`operator_requires` / `bind_operator` — they answer for every entry, so they are no longer spelled
+`projector_*`.
 
 `requires=` (2026-08-05) is the same word on all three registrars — `add_projector`,
 `add_region_operator`, `add_segmenter`. It closed a measured silent success: `decon`, `decon3d` and
@@ -55,9 +68,10 @@ as one group per step. `_viewer._activate_operator` opens that panel or states a
 to be a silent no-op for any key the card table did not know.
 
 The bespoke panels stay: `StitcherPanel` and `DeconQCPanel` do things a parameter form cannot.
-`STITCH_DEFAULTS` is **not** derived from a declaration and cannot be — `add_region_operator`
-carries no `params=` at all — but it no longer mirrors private `_stitch` constants either: it reads
-`stitch_region`'s own signature (`_op_panels._stitch_default`).
+`STITCH_DEFAULTS` is still read off `stitch_region`'s own signature (`_op_panels._stitch_default`)
+rather than off a declaration. `add_region_operator` now ACCEPTS `params=` — it is the same record
+as every other operator — and `stitch` declares none, because its ~10 knobs reach `stitch_region`
+as `**kwargs` and moving them to `Param` records is a separate change with its own evidence.
 
 Measured while building it: `_workers._OperatorWorker`'s PREVIEW branch called `project_plate`
 without `operator_kwargs` while the save branch passed them, so a panel value reached the console

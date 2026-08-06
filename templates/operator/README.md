@@ -82,10 +82,13 @@ from squidmip import plane_op, add_projector
 add_projector("mything", plane_op(my_plane_function))     # consumes inferred = frozenset()
 ```
 
-**`consumes={"fov"}` is refused by name.** An operator is `Iterable[plane] -> plane` and never sees
-a tile's stage geometry, so anything inter-FOV (stitching, fitting an illumination field across a
-well) cannot be expressed here. That work belongs to the *region operator* table
-(`squidmip.add_region_operator`), whose entries take `(reader, region, fovs) -> (T, C, Nz, Y, X)`.
+**`consumes={"fov"}` is refused by `add_projector`.** An `add_projector` operator is
+`Iterable[plane] -> plane` and never sees a tile's stage geometry, so anything inter-FOV (stitching,
+fitting an illumination field across a well) cannot be expressed with that callable. Register it
+with `squidmip.add_region_operator` instead, whose entries take
+`(reader, region, fovs) -> (T, C, Nz, Y, X)`. It is the **same registry table** and the same four
+declarations — `add_region_operator` stamps `consumes={"fov"}` on the record, and `stitch_plate`
+finds your operator by reading it.
 
 **Stream. Do not call `list(planes)`.** The engine runs several wells concurrently and its peak
 memory is (wells in flight) × (one well's footprint). Materialising a stack multiplies that by the
@@ -123,7 +126,7 @@ values.
 ```python
 add_projector("stdev", stdev_op, params=(Param("smooth_sigma", 1.0, "..."),))
 
-squidmip.bind_projector("stdev", {"smooth_sigma": 0.0})            # a different binding
+squidmip.bind_operator("stdev", {"smooth_sigma": 0.0})            # a different binding
 squidmip.project_plate(reader, projector="stdev",
                        operator_kwargs={"smooth_sigma": 0.0})      # a run at that binding
 ```
@@ -138,7 +141,7 @@ A `Param` has a name, a default and one line of prose. Deliberately **no type, n
 hint**: the moment it carries a widget hint it has become the GUI's schema and two places own the
 same fact.
 
-**How parameters reach the GUI.** `squidmip.projector_params("<name>")` is the public accessor,
+**How parameters reach the GUI.** `squidmip.operator_params("<name>")` is the public accessor,
 and `list_operators` reports every parameter with its default, so an agent or script driving the
 app can set them. The desktop GUI reads the same accessor: **your declared parameters become
 widgets, with no code in SquidXplorer that knows your operator's name.**
@@ -189,7 +192,7 @@ What happens when one is missing:
 | **Listed?** | **Yes, always.** `available_projectors()` still contains your operator. Dropping it would make "scipy is not installed" and "nobody wrote this operator" look identical to the user. |
 | **`operator_available("stdev")`** | `(False, "operator 'stdev' needs scipy, which is not installed (pip install scipy)")` |
 | **`list_operators`** | the row carries `"available": false` and `"unavailable_reason"`, and the summary line names every unavailable operator |
-| **A run** | **refused by name, before any well is read.** `bind_projector` raises `MissingOperatorDependency` with that sentence. The headless command surface returns the refusal code `unavailable_operator`; the GUI puts the sentence in the readout and never starts a worker. |
+| **A run** | **refused by name, before any well is read.** `bind_operator` raises `MissingOperatorDependency` with that sentence. The headless command surface returns the refusal code `unavailable_operator`; the GUI puts the sentence in the readout and never starts a worker. |
 
 **Declare a module even if you import it lazily, several calls deep.** This is the direction that
 bites, and it is measured rather than hypothetical: three of SquidXplorer's own operators (`decon`,
@@ -254,14 +257,12 @@ Stated so you do not build against something that is not there.
 * **A HAND-WRITTEN GUI panel.** You get the generic one built from your `params` (§2.4), which is
   a form. A panel with behaviour of its own — unit conversions, controls that grey each other out,
   an iterative QC loop that publishes a picture — lives in SquidXplorer and a plugin cannot add one.
-* **Inter-FOV work through this table.** See §2.2 — `add_region_operator` instead. Be warned that
-  it is a WEAKER contract than the one this README documents: a region operator can declare
-  `requires=`, and nothing else. `consumes` is implicitly `{"fov"}`, `produces` is hardcoded to
-  `"intensity"` by every reader of that table, and its parameters are undeclared `**kwargs` that
-  nothing validates and no UI can enumerate — so the generic panel of §2.4 **refuses a region
-  operator by name**, and `stitch`'s controls are hand-written (`_op_panels.StitcherPanel`, whose
-  defaults are read off `stitch_region`'s signature because there is no declaration to read).
-  Adding an inter-FOV operator is possible and it is not yet this template's contract.
+* **Inter-FOV work through `add_projector`.** See §2.2 — `add_region_operator` instead. It is the
+  SAME record and the same four declarations as of 2026-08-05 (it used to be a second table with
+  only `requires=`, and `produces` hardcoded to `"intensity"` by every reader of it). What still
+  differs is the callable shape, and it is not what this template's example code is written
+  against. `stitch`'s controls stay hand-written (`_op_panels.StitcherPanel`) because it converts
+  units and greys out knobs — not because there is no declaration to read.
 * **Registering into the viewer's card table.** The card list (label, blurb, ordering) lives in
   SquidXplorer and a plugin cannot add to it. Your operator is *runnable* and *listed* without a
   card; `operator_label()` falls back to the registry name. A card is presentation, the engine is
@@ -279,7 +280,7 @@ Stated so you do not build against something that is not there.
 | Your `register()` raises | same, with "raised while registering its operators" |
 | Your entry point points at nothing | same, at `ep.load()` |
 | A `requires=` module is missing | operator LISTED, run REFUSED by name — see §2.5 |
-| You declared `consumes={"fov"}` | refused at registration, pointing at `add_region_operator` |
+| You declared `consumes={"fov"}` on `add_projector` | refused at registration, pointing at `add_region_operator` |
 | You declared `produces="mesh"` | refused at registration, listing the kinds that exist |
 | You declared a parameter twice | refused at registration — a duplicate makes `operator_kwargs` ambiguous |
 | Your factory returned something not callable | refused at registration, explaining that `params=` makes the registered object a factory |

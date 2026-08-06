@@ -646,11 +646,11 @@ class MosaicLayers:
         may be scoped to an exploration tab (``"mip@tab2"``), which is in no registry, so it goes
         through ``operator_name`` first -- the one place that ``@`` rule is spelled.
         """
-        from squidmip._engine import Z_REDUCER, projector_consumes
+        from squidmip._engine import Z_REDUCER, operator_consumes
         from squidmip._operations import operator_name
 
         try:
-            return bool(projector_consumes(operator_name(str(op))) & Z_REDUCER)
+            return bool(operator_consumes(operator_name(str(op))) & Z_REDUCER)
         except Exception:                        # noqa: BLE001 - "raw", "computed", an unknown key
             return False
 

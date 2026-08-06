@@ -3700,11 +3700,9 @@ class PlateWindow(QMainWindow):
         # (2026-08-05). Refused in the readout, in the operator's own words, BEFORE the worker
         # starts. Previously the run started, every well raised the same ImportError from a lazy
         # import, `_on_error` recorded each as a per-well skip, and the readout said "done".
-        from squidmip import (available_region_operators as _region_ops, operator_available,
-                              region_operator_available)
+        from squidmip import operator_available
 
-        _ok, _why = (region_operator_available(key) if key in _region_ops()
-                     else operator_available(key))
+        _ok, _why = operator_available(key)
         if not _ok:
             self._readout.setText(_why)
             return
@@ -4106,7 +4104,7 @@ class PlateWindow(QMainWindow):
             accs = self._result_accs = {}
         acc = accs.get(str(region))
         if acc is None or acc.op != op:
-            from squidmip import available_region_operators
+            from squidmip import is_region_operator
             from squidmip._op_result import RegionResultAccumulator
 
             acc = RegionResultAccumulator(
@@ -4114,7 +4112,7 @@ class PlateWindow(QMainWindow):
                 # The REGISTRY name, not the layer key: a namespaced layer key ("stitch@…") is
                 # in no registry, so asking with it accumulated a stitch as if it were a per-FOV
                 # operator. `operator_name` strips the namespace; see `operator_layer_key`.
-                region_operator=(operator_name(op) in available_region_operators()),
+                region_operator=is_region_operator(operator_name(op)),
             )
             accs[str(region)] = acc
         try:

@@ -19,7 +19,7 @@ import numpy as np
 import pytest
 
 from squidmip import _bench_stitchers as bs
-from squidmip import _stitch
+from squidmip import _engine, _stitch
 
 
 @pytest.fixture(autouse=True)
@@ -31,12 +31,12 @@ def _restore_region_operators():
     ``test_stitch.py::test_default_operators_present`` fail depending on collection order.
     Snapshot and restore, so these tests are order-independent.
     """
-    saved = dict(_stitch._REGION_OPERATORS)
+    saved = dict(_engine._OPERATORS)
     try:
         yield
     finally:
-        _stitch._REGION_OPERATORS.clear()
-        _stitch._REGION_OPERATORS.update(saved)
+        _engine._OPERATORS.clear()
+        _engine._OPERATORS.update(saved)
 
 
 def test_array_metadata_is_zero_based_in_pixels():
@@ -63,7 +63,7 @@ def test_array_reader_returns_the_requested_plane():
 
 
 def test_register_challengers_is_idempotent_and_keeps_stitch():
-    from squidmip._stitch import available_region_operators
+    from squidmip._engine import available_region_operators
 
     first = bs.register_challengers()
     second = bs.register_challengers()

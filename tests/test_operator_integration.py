@@ -23,7 +23,7 @@ pytest.importorskip("tilefusion")
 pytest.importorskip("bgsub")
 
 import squidmip as s
-from squidmip._engine import _resolve_projector
+from squidmip._engine import _resolve_operator
 
 
 # --------------------------------------------------------------------------------------
@@ -65,7 +65,7 @@ def test_available_region_operators_exact_list():
 
 def test_every_projector_resolves():
     for name in s.available_projectors():
-        op = _resolve_projector(name)
+        op = _resolve_operator(name)
         assert op.name == name
         assert callable(op.fn)
 
@@ -76,11 +76,11 @@ def test_every_projector_resolves():
 def test_consumes_axis_mapping():
     z = frozenset({"z"})
     empty = frozenset()
-    assert s.projector_consumes("mip") == z
-    assert s.projector_consumes("reference") == z
-    assert s.projector_consumes("bgsub") == empty
-    assert s.projector_consumes("decon") == empty
-    assert s.projector_consumes("flatfield") == empty
+    assert s.operator_consumes("mip") == z
+    assert s.operator_consumes("reference") == z
+    assert s.operator_consumes("bgsub") == empty
+    assert s.operator_consumes("decon") == empty
+    assert s.operator_consumes("flatfield") == empty
 
 
 # ======================================================================================
@@ -143,7 +143,7 @@ def test_flatfield_op_end_to_end_preserves_shape():
 def test_mip_projector_collapses_z_and_equals_max():
     stack = _stack(z=5)
     expected = np.max(np.stack(stack), axis=0)
-    out = _resolve_projector("mip").fn(list(stack))
+    out = _resolve_operator("mip").fn(list(stack))
     assert out.shape == (64, 64)
     assert np.array_equal(out, expected)
 
@@ -156,7 +156,7 @@ def test_project_primitive_equals_max_over_z():
 
 def test_reference_projector_collapses_z():
     stack = _stack(z=5, seed=2)
-    out = _resolve_projector("reference").fn(list(stack))
+    out = _resolve_operator("reference").fn(list(stack))
     assert out.shape == (64, 64)
 
 
@@ -178,15 +178,15 @@ def test_plane_op_preserves_z_but_reducer_collapses():
 
     # plane-op ('bgsub'): consumes nothing => z survives. Mapping it plane-by-plane
     # yields one output per input plane, each same shape.
-    assert s.projector_consumes("bgsub") == frozenset()
+    assert s.operator_consumes("bgsub") == frozenset()
     op = s.bgsub_op()
     mapped = [op([p]) for p in stack]
     assert len(mapped) == len(stack)
     assert all(m.shape == (64, 64) for m in mapped)
 
     # z-reducer ('mip'): consumes {'z'} => the whole stack collapses to one plane.
-    assert s.projector_consumes("mip") == frozenset({"z"})
-    reduced = _resolve_projector("mip").fn(list(stack))
+    assert s.operator_consumes("mip") == frozenset({"z"})
+    reduced = _resolve_operator("mip").fn(list(stack))
     assert reduced.ndim == 2 and reduced.shape == (64, 64)
 
 

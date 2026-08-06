@@ -74,9 +74,9 @@ from typing import Callable, Iterable, Optional, Sequence
 
 import numpy as np
 
-from squidmip._engine import available_projectors, projector_consumes
+from squidmip._engine import available_projectors, operator_consumes
 from squidmip._output import check_disk_space, estimate_write_bytes, free_bytes
-from squidmip._stitch import available_region_operators
+from squidmip._engine import available_region_operators, is_region_operator
 
 _MB = 1024.0 ** 2
 _GB = 1024.0 ** 3
@@ -517,11 +517,11 @@ def benchmark_operator(
     meta = reader.metadata
     all_regions = list(meta.get("fovs_per_region") or {})
     regions = list(regions) if regions else all_regions
-    kind = "region" if operator in available_region_operators() else "fov"
+    kind = "region" if is_region_operator(operator) else "fov"
     if kind == "fov" and operator not in available_projectors():
         raise KeyError(f"unknown operator {operator!r}; known: "
                        f"{available_projectors() + available_region_operators()}")
-    consumes_z = (kind == "region") or ("z" in projector_consumes(operator))
+    consumes_z = (kind == "region") or ("z" in operator_consumes(operator))
 
     result = OperatorResult(
         operator=operator, kind=kind, dataset=str(getattr(reader, "_path", "")),

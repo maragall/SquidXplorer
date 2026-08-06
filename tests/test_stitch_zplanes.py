@@ -21,7 +21,7 @@ import pytest
 pytest.importorskip("tilefusion", reason="tilefusion (maragall/stitcher) not installed: the stitch "
                                          "adapter is UNTESTED here, which is not the same as passing")
 
-from squidmip._engine import _PROJECTORS, add_projector
+from squidmip._engine import _OPERATORS, add_projector
 from squidmip._flatfield import (
     FlatfieldProfile,
     clear_profile,
@@ -78,7 +78,7 @@ def _register_passthrough():
     try:
         yield
     finally:
-        _PROJECTORS.pop(_PASSTHROUGH, None)
+        _OPERATORS.pop(_PASSTHROUGH, None)
 
 
 def _identity_profile(shape=(TILE, TILE)) -> FlatfieldProfile:
@@ -275,7 +275,7 @@ def test_the_guard_catches_an_operator_registered_under_another_name(master):
         with pytest.raises(ValueError, match="not idempotent"):
             stitch_region(reader, "A1", list(range(GRID * GRID)), projector=name, register=False)
     finally:
-        _PROJECTORS.pop(name, None)
+        _OPERATORS.pop(name, None)
 
 
 def test_each_single_correction_path_stays_available_and_corrects_exactly_once(master):
@@ -319,7 +319,7 @@ def test_each_single_correction_path_stays_available_and_corrects_exactly_once(m
 
 def test_stitching_a_label_operator_refuses_rather_than_averaging_object_ids(master):
     """Feathered blending of integer object ids produces objects that do not exist."""
-    labels = [n for n, op in _PROJECTORS.items() if op.produces == "labels"]
+    labels = [n for n, op in _OPERATORS.items() if op.produces == "labels"]
     assert labels, "expected at least one labels operator (spot/cellpose) to be registered"
     reader = _ZReader(master)
     for name in labels:

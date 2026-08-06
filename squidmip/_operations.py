@@ -51,6 +51,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+from squidmip._engine import runnable_operators as _runnable_operators
+
 
 @dataclass(frozen=True)
 class Operation:
@@ -78,7 +80,7 @@ _OPERATIONS = (
               "Collapse each well's z-stack to one max-intensity image; save a navigable OME-Zarr plate.",
               "_build_mip_tab"),
     # The OTHER z-reduction, and the one Julio asked for twice: the engine has had `reference` in
-    # `_PROJECTORS` since IMA-210 but no card, so it was CLI-only and in no dropdown and no menu.
+    # `_OPERATORS` since IMA-210 but no card, so it was CLI-only and in no dropdown and no menu.
     # Same builder as MIP (`_build_run_tab` is one builder for every z-reducer), same shape here.
     Operation("reference", "Reference plane (best focus)",
               "Keep each well's sharpest z-plane (Tenengrad) instead of combining them; save a "
@@ -154,7 +156,7 @@ def operator_name(layer_key: str) -> str:
     The exact inverse of :func:`operator_layer_key`, and it lives beside it so the ``@`` rule has
     ONE spelling. Needed because everything downstream of a run holds the LAYER key
     (``PlateWindow._active_op_key``), while anything that wants to read the operator's own
-    declaration -- ``projector_produces``, ``projector_consumes``, ``available_region_operators``
+    declaration -- ``operator_produces``, ``operator_consumes``, ``available_region_operators``
     -- has to ask the registry, and the registry has never heard of ``"spot@tab2"``.
 
     That mismatch was already live: ``_on_result`` builds its accumulator with
@@ -182,34 +184,29 @@ def result_kind(layer_key: str) -> str:
     app produced down every path before result kinds existed -- the same "absent means the old
     guarantee" rule the plate contract applies to an unstamped store.
     """
-    from squidmip._engine import _PROJECTORS
+    from squidmip._engine import _OPERATORS
 
-    op = _PROJECTORS.get(operator_name(layer_key))
+    op = _OPERATORS.get(operator_name(layer_key))
     return op.produces if op is not None else "intensity"
 
 
-def runnable_operators() -> list[str]:
-    """Every operator ``run_operator`` can stream live (IMA-226) — read off the ENGINE registry,
-    never off ``_OPERATIONS``.
-
-    The two lists are not the same set and never were:
-
-    * ``spot`` (and ``decon3d``, and the ``coordinate`` region operator) is a registered operator
-      with no card, so ``_OPERATIONS_BY_KEY[key].label`` raised a bare ``KeyError`` out of the
-      event loop the moment anything asked to run it. ``reference`` was the original example and
-      now has a card; the SHAPE it demonstrated has not gone away, which is why
-      ``test_every_runnable_operator_is_either_carded_or_declared_cli_only`` pins the other
-      direction: an engine entry with no card must be listed as deliberately CLI-only.
-    * ``minerva`` is a card that is NOT an operator — it is an export hand-off. Handing its key to
-      the engine dies with a raw ``KeyError: unknown projector 'minerva'`` in the status line.
-
-    Both are cured by asking the engine what it can run. A z-reducer and a region operator stream
-    through the SAME ``_OperatorWorker`` (it already branches ``project_plate``/``stitch_plate`` on
-    ``available_region_operators``), so both belong in one list.
-    """
-    from squidmip import available_projectors, available_region_operators
-
-    return sorted(set(available_projectors()) | set(available_region_operators()))
+#: Every operator ``run_operator`` can stream live (IMA-226), re-exported from the ENGINE and never
+#: derived from ``_OPERATIONS``. The two lists are not the same set and never were:
+#:
+#: * ``spot`` (and ``decon3d``, and the ``coordinate`` region operator) is a registered operator
+#:   with no card, so ``_OPERATIONS_BY_KEY[key].label`` raised a bare ``KeyError`` out of the event
+#:   loop the moment anything asked to run it. ``reference`` was the original example and now has a
+#:   card; the SHAPE it demonstrated has not gone away, which is why
+#:   ``test_every_runnable_operator_is_either_carded_or_declared_cli_only`` pins the other
+#:   direction: an engine entry with no card must be listed as deliberately CLI-only.
+#: * ``minerva`` is a card that is NOT an operator — it is an export hand-off. Handing its key to
+#:   the engine dies with a raw ``KeyError: unknown operator 'minerva'`` in the status line.
+#:
+#: Both are cured by asking the engine what it can run. This used to be a function BODY here, a
+#: second identical one in ``_cli`` and a third inlined in ``_command``, all spelling
+#: ``sorted(set(available_projectors()) | set(available_region_operators()))`` because there were
+#: two tables to union. There is one table, so there is one answer and one place it is computed.
+runnable_operators = _runnable_operators
 
 
 def operator_label(key: str) -> str:

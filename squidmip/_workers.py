@@ -161,9 +161,9 @@ class _OperatorWorker(QThread):
         # IMA-222: a REGION operator (stitch) returns ONE fused mosaic per well, not one array
         # per FOV, so there are no per-FOV sub-boxes to composite into -- the mosaic IS the cell.
         # A non-empty _boxes here would slot a whole-well mosaic into a single FOV's sub-rectangle.
-        from squidmip import available_region_operators
+        from squidmip import is_region_operator
 
-        self._region_op = self._operator in available_region_operators()
+        self._region_op = is_region_operator(self._operator)
         self._boxes = {} if (self._region_op or n_fovs == 1) else _mosaic_boxes(meta)
         # IMA-245: the shape of what this run PUSHES to the array viewer. A region operator pushes
         # a whole-region mosaic, so the surface is the mosaic extent (aspect preserved), not the

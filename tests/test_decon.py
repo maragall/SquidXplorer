@@ -18,7 +18,7 @@ import json
 import numpy as np
 import pytest
 
-from squidmip import add_projector, available_projectors, project_well, projector_consumes
+from squidmip import add_projector, available_projectors, project_well, operator_consumes
 from squidmip._decon import (
     DEFAULT_ITERATIONS,
     DEFAULT_OPTICS,
@@ -37,7 +37,7 @@ from squidmip._decon import (
     optics_override,
     set_optics,
 )
-from squidmip._engine import _resolve_projector
+from squidmip._engine import _resolve_operator
 from squidmip.projection import PLANE_OP, Z_REDUCER, bind_channel
 from squidmip.reader import open_reader
 
@@ -323,7 +323,7 @@ def test_a_missing_petakit_fails_loud_and_never_silently_falls_back():
 
 def test_decon_is_registered_as_a_plane_op():
     assert "decon" in available_projectors()
-    assert projector_consumes("decon") == PLANE_OP
+    assert operator_consumes("decon") == PLANE_OP
 
 
 def test_decon_op_factory_produces_a_plane_op_and_is_registrable():
@@ -332,7 +332,7 @@ def test_decon_op_factory_produces_a_plane_op_and_is_registrable():
     name = "decon_test_factory"
     if name not in available_projectors():
         add_projector(name, op)
-    assert projector_consumes(name) == PLANE_OP
+    assert operator_consumes(name) == PLANE_OP
     plane = _blur_with_real_psf(_ground_truth(32)).astype(np.uint16)
     assert op([plane]).shape == plane.shape
 
@@ -371,7 +371,7 @@ def test_decon3d_is_registered_as_a_z_reducer_with_zero_engine_edits():
     """A 3-D deconvolution NEEDS the whole stack, so it consumes z. That is a declaration on
     the registration, not a change to _engine.py."""
     assert "decon3d" in available_projectors()
-    assert projector_consumes("decon3d") == Z_REDUCER
+    assert operator_consumes("decon3d") == Z_REDUCER
 
 
 def test_decon3d_collapses_z_and_sharpens_more_than_the_2d_plane_op(squid_dataset):
@@ -489,7 +489,7 @@ def test_the_registered_decon_deconvolves_each_channel_at_its_own_wavelength(tmp
     assert names == ["Fluorescence_488_nm_Ex", "Fluorescence_638_nm_Ex"]
 
     out = project_well(reader, "manual0", 0,
-                       reduce=_resolve_projector("decon").fn, consumes=PLANE_OP)
+                       reduce=_resolve_operator("decon").fn, consumes=PLANE_OP)
 
     c638 = names.index("Fluorescence_638_nm_Ex")
     optics = optics_for_channel(root, names[c638])
@@ -521,7 +521,7 @@ def test_the_registered_decon3d_also_gets_per_channel_optics(tmp_path):
     names = [c["name"] for c in reader.metadata["channels"]]
 
     out = project_well(reader, "manual0", 0,
-                       reduce=_resolve_projector("decon3d").fn, consumes=Z_REDUCER)
+                       reduce=_resolve_operator("decon3d").fn, consumes=Z_REDUCER)
     assert out.shape[2] == 1                                   # still a z-reducer
 
     c638 = names.index("Fluorescence_638_nm_Ex")
@@ -611,7 +611,7 @@ def test_the_psf_is_cached_by_its_optics_tuple_not_rebuilt_per_plane(tmp_path):
     make_psf.cache_clear()
 
     project_well(reader, "manual0", 0,
-                 reduce=_resolve_projector("decon").fn, consumes=PLANE_OP)
+                 reduce=_resolve_operator("decon").fn, consumes=PLANE_OP)
 
     info = make_psf_2d.cache_info()
     assert info.misses == 2, f"one PSF build per CHANNEL, got {info}"

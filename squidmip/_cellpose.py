@@ -155,7 +155,7 @@ def register_operator() -> None:
 
     The `requires` line is the SEGMENTER declaration ten lines above, repeated on the operator
     entry, and it has to be: the two tables are asked by different callers. `resolve_segmenter`
-    guards the GUI's Detect-nuclei button; `bind_projector` guards `--projector cellpose` and every
+    guards the GUI's Detect-nuclei button; `bind_operator` guards `--projector cellpose` and every
     plate-scale run, and until this it guarded nothing — a plate run of cellpose on a machine
     without cellpose raised ImportError per well, which `on_error` filed as a skip, and the run
     reported success having produced no masks at all.

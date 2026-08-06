@@ -5048,7 +5048,7 @@ def test_a_cardless_operator_opens_a_panel_built_from_its_declaration(qapp, stub
     therefore no way to reach any of them from the GUI. It now opens the generic panel, and the
     panel's widgets ARE the declaration.
     """
-    from squidmip._engine import projector_params
+    from squidmip._engine import operator_params
     from squidmip._param_panel import GenericOperatorPanel
 
     root, _ = squid_dataset
@@ -5059,7 +5059,7 @@ def test_a_cardless_operator_opens_a_panel_built_from_its_declaration(qapp, stub
     panel = win._op_tabs.get("spot")
     assert panel is not None, f"no panel opened; readout said {win._readout.text()!r}"
     assert isinstance(panel, GenericOperatorPanel)
-    assert sorted(panel.widgets) == sorted(p.name for p in projector_params("spot"))
+    assert sorted(panel.widgets) == sorted(p.name for p in operator_params("spot"))
     win.close()
 
 

@@ -30,12 +30,14 @@ import pytest
 pytest.importorskip("tilefusion", reason="tilefusion (maragall/stitcher) not installed: the stitch "
                                          "adapter is UNTESTED here, which is not the same as passing")
 
-from squidmip._stitch import (
-    _REGION_OPERATORS,
-    _mosaic_geometry,
-    _positions_yx_um,
+from squidmip._engine import (
+    _OPERATORS,
     add_region_operator,
     available_region_operators,
+)
+from squidmip._stitch import (
+    _mosaic_geometry,
+    _positions_yx_um,
     solve_offsets_px,
     stitch_plate,
     stitch_region,
@@ -338,14 +340,14 @@ def test_default_operators_present():
 
 def test_add_and_resolve_region_operator(master):
     name = "_test_op"
-    _REGION_OPERATORS.pop(name, None)
+    _OPERATORS.pop(name, None)
     try:
         add_region_operator(name, lambda r, reg, fovs, **kw: np.zeros((1, 1, 1, 2, 2), np.uint16))
         assert name in available_region_operators()
         out = list(stitch_plate(_FakeReader(master), operator=name))
         assert [r for r, _f, _i in out] == ["A1"]
     finally:
-        _REGION_OPERATORS.pop(name, None)
+        _OPERATORS.pop(name, None)
 
 
 def test_duplicate_operator_refused():
@@ -360,8 +362,18 @@ def test_invalid_operator_registration(bad):
 
 
 def test_unknown_operator_names_the_alternatives(master):
-    with pytest.raises(KeyError, match="unknown region operator"):
+    with pytest.raises(KeyError, match="unknown operator 'nope'"):
         list(stitch_plate(_FakeReader(master), operator="nope"))
+
+
+def test_a_plane_operator_handed_to_stitch_plate_is_refused_as_the_wrong_kind(master):
+    """`mip` is a real operator and not a region one; the sentence has to say which, not 'unknown'.
+
+    With two tables this read "unknown region operator 'mip'" — a claim that the operator did not
+    exist, about one that did. One table means the name resolves and the DECLARATION refuses.
+    """
+    with pytest.raises(KeyError, match="registered operator but not a REGION operator"):
+        list(stitch_plate(_FakeReader(master), operator="mip"))
 
 
 # ---------------------------------------------------------------------------------------
@@ -410,13 +422,13 @@ def test_failure_is_loud_by_default(master):
         raise RuntimeError("corrupt plane")
 
     name = "_test_boom"
-    _REGION_OPERATORS.pop(name, None)
+    _OPERATORS.pop(name, None)
     add_region_operator(name, boom)
     try:
         with pytest.raises(RuntimeError, match="corrupt plane"):
             list(stitch_plate(_FakeReader(master, regions=("A1", "A2")), operator=name))
     finally:
-        _REGION_OPERATORS.pop(name, None)
+        _OPERATORS.pop(name, None)
 
 
 def test_on_error_skips_the_well_and_keeps_going(master):
@@ -428,7 +440,7 @@ def test_on_error_skips_the_well_and_keeps_going(master):
         return np.zeros((1, 1, 1, 2, 2), np.uint16)
 
     name = "_test_flaky"
-    _REGION_OPERATORS.pop(name, None)
+    _OPERATORS.pop(name, None)
     add_region_operator(name, flaky)
     seen = []
     try:
@@ -440,7 +452,7 @@ def test_on_error_skips_the_well_and_keeps_going(master):
             )
         )
     finally:
-        _REGION_OPERATORS.pop(name, None)
+        _OPERATORS.pop(name, None)
     assert [r for r, _f, _i in out] == ["A2"]
     assert seen == [("A1", 0, "RuntimeError")]
 
@@ -465,13 +477,13 @@ def test_window_is_bounded_by_workers(master):
         return np.zeros((1, 1, 1, 2, 2), np.uint16)
 
     name = "_test_counted"
-    _REGION_OPERATORS.pop(name, None)
+    _OPERATORS.pop(name, None)
     add_region_operator(name, counted)
     try:
         reader = _FakeReader(master, regions=tuple(f"A{i}" for i in range(8)))
         assert len(list(stitch_plate(reader, operator=name, workers=2))) == 8
     finally:
-        _REGION_OPERATORS.pop(name, None)
+        _OPERATORS.pop(name, None)
     assert peak <= 2, f"in-flight window ran to {peak}, expected <= 2"
 
 
@@ -488,10 +500,10 @@ def test_stitching_a_plane_op_fuses_every_plane_instead_of_keeping_only_z0(maste
     The deep behaviour (one solved geometry for every plane, the flat-field double-apply guard,
     the memory bound) is in tests/test_stitch_zplanes.py.
     """
-    from squidmip._stitch import _resolve_projector, stitch_region
+    from squidmip._stitch import _resolve_operator, stitch_region
 
     plane_ops = [n for n in ("bgsub", "decon", "flatfield")
-                 if not _resolve_projector(n).consumes]
+                 if not _resolve_operator(n).consumes]
     assert plane_ops, "expected bgsub/decon/flatfield to be plane-ops (consumes == frozenset())"
 
     n_z = 3
