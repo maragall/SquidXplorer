@@ -55,6 +55,11 @@ GUI_MODULES = frozenset({
     #                      widget stylesheets), and shared so CHILD windows get it too: it lives
     #                      outside `_viewer` only to avoid a circular import, not to escape this
     #                      boundary.
+    "_brick_view",       # the IN-WINDOW 3D renderer. Qt-facing on purpose: it owns a QThread that
+    #                      reads bricks off the UI thread, and it drives the pane's live napari
+    #                      canvas. The Qt-free half of bricking is `_bricks` (geometry, stride and
+    #                      budget policy) and it stays below this boundary so the decisions that
+    #                      cannot be probed without a GL context are still testable headless.
     "_layer_tree",       # the grouped layer tree (a QTreeView over napari's item model)
     "_logpanel",         # the log PANEL (the Qt widget). `_logpane`, no 'l', is the Qt-free bus.
     "_napari_pane",

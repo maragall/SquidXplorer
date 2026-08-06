@@ -445,8 +445,14 @@ def test_the_cli_validates_a_chain_before_it_writes_anything(tmp_path):
     assert ProcessParameters(projector=f"{ADD}+mip", **common).projector == f"{ADD}+mip"
     with pytest.raises(pydantic.ValidationError, match="consumes z"):
         ProcessParameters(projector=f"mip+{ADD}", **common)
-    with pytest.raises(pydantic.ValidationError, match="unknown projector"):
+    with pytest.raises(pydantic.ValidationError, match="unknown operator"):
         ProcessParameters(projector="noplease", **common)
+
+    # ...and --param reaches ONE step of a chain, by the namespaced name the chain declares.
+    assert ProcessParameters(projector=f"{ADD}+spot", param=["spot.min_area_px=80"],
+                             **common).parameters() == {"spot.min_area_px": 80}
+    with pytest.raises(pydantic.ValidationError, match="does not take spot.nope"):
+        ProcessParameters(projector=f"{ADD}+spot", param=["spot.nope=1"], **common)
 
 
 def test_operator_available_answers_for_a_chain_rather_than_calling_it_unknown():

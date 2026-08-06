@@ -211,6 +211,220 @@ def native_roi_volume(reader: Any, meta: dict, region: str,
     return out
 
 
+def pin_max_compositing(viewer: Any, layer: Any) -> bool:
+    """Composite this layer into the canvas with the GL **max** equation, and KEEP it there.
+
+    THIS IS THE SEAM FIX, and it is the one thing that makes bricking exact rather than merely
+    possible. napari composites layers in screen space after each has rendered independently, so
+    with ``additive`` a camera ray that crosses a brick join passes through TWO bricks and their
+    MIPs are SUMMED where the true answer is their maximum. Measured on a 1024^2 volume split 2x2
+    and rotated to (45, 60): additive differs from the same voxels in one layer by up to 127/255
+    over ~31k pixels -- a bright cross sitting exactly on the joins. It is not subtle.
+
+    MIP is a maximum, and a maximum is order-independent and associative, so compositing bricks
+    with ``glBlendEquation(GL_MAX)`` reproduces the single-texture answer EXACTLY: the same
+    measurement gives max|diff| = 1/255 with ZERO pixels differing by more than 2. Bricked and
+    unbricked are the same picture.
+
+    napari's ``Blending`` enum has no ``max`` (it has ``minimum``, whose implementation --
+    ``blend_equation: 'min'`` and no ``blend_func`` -- is the proof this shape works), and the enum
+    cannot be extended at runtime. So the equation is set on the vispy node directly. That is one
+    GL state call on a node napari already built; it is not a second renderer.
+
+    THE PIN IS THE HARD PART. ``VispyCanvas._reorder_layers_in_the_same_view`` calls
+    ``_on_blending_change()`` on EVERY layer whenever the layer list is inserted into, reordered,
+    or has a visibility change (napari 0.6.6 ``_vispy/canvas.py:824``), and that call overwrites
+    ``set_gl_state`` wholesale. Adding the second brick would therefore silently un-fix the first.
+    Connecting to the same events would race napari's own handler; wrapping the method the canvas
+    actually calls does not, because it re-applies at exactly the moment napari clobbers it.
+    Verified to survive insert, visibility toggle and reorder.
+    """
+    try:
+        visual = viewer.window._qt_viewer.canvas.layer_to_visual[layer]
+    except Exception:                                   # noqa: BLE001 - no canvas (headless/tests)
+        return False
+    if getattr(visual, "_squid_max_pinned", False):
+        return True
+    original = visual._on_blending_change
+
+    def _keep_max(event=None) -> None:
+        original(event)
+        visual.node.set_gl_state(depth_test=False, cull_face=False, blend=True,
+                                 blend_equation="max")
+        visual.node.update()
+
+    try:
+        visual._on_blending_change = _keep_max
+        visual._squid_max_pinned = True
+        _keep_max()
+    except Exception as exc:                            # noqa: BLE001 - named; seams, not a crash
+        log.warning("brick compositing: could not pin GL max on %s (%s); joins may show as "
+                    "bright lines under rotation.", getattr(layer, "name", "layer"), exc)
+        return False
+    return True
+
+
+def region_origin_um(meta: dict, region: str) -> Optional[tuple]:
+    """The region mosaic's top-left in stage micrometres -- ``(min x, min y)`` of its FOV positions.
+
+    The SAME origin ``mosaic_bbox_um`` uses, which is what makes a brick's world translate land on
+    the pixels 2D shows. Returns None rather than a guess when the acquisition has no positions."""
+    positions = meta.get("fov_positions_um") or {}
+    fovs = list((meta.get("fovs_per_region") or {}).get(region) or [])
+    if not fovs or not positions:
+        return None
+    try:
+        xs = [float(positions[(region, f)][0]) for f in fovs]
+        ys = [float(positions[(region, f)][1]) for f in fovs]
+    except (KeyError, TypeError, IndexError):
+        return None
+    return (min(xs), min(ys))
+
+
+def roi_window_px(meta: dict, region: str, roi_bbox_um: Sequence[float]) -> Optional[tuple]:
+    """An ROI box in stage um -> ``(r0, r1, c0, c1)`` LEVEL-0 mosaic pixels, clipped to the region.
+
+    Mosaic pixel space is the one ``_placement.fov_offsets_px`` speaks: row/col from the region's
+    top-left origin. This is ``native_roi_volume``'s own conversion lifted out, so the bricked path
+    and the single-volume path cannot drift apart on where the ROI is."""
+    from squidmip._placement import fov_offsets_px, mosaic_extent_px
+
+    origin = region_origin_um(meta, region)
+    px = float(meta.get("pixel_size_um") or 0.0)
+    if origin is None or px <= 0:
+        return None
+    x0, y0 = origin
+    try:
+        rx0, ry0, rx1, ry1 = (float(v) for v in roi_bbox_um)
+    except (TypeError, ValueError):
+        return None
+    try:
+        positions = meta.get("fov_positions_um") or {}
+        fovs = list((meta.get("fovs_per_region") or {}).get(region) or [])
+        offsets = fov_offsets_px(positions, region, fovs, px)
+        h_px, w_px = mosaic_extent_px(offsets, tuple(int(v) for v in meta["frame_shape"]))
+    except Exception:                                   # noqa: BLE001 - fall back to the box itself
+        w_px = h_px = None
+    c0, c1 = int(round((min(rx0, rx1) - x0) / px)), int(round((max(rx0, rx1) - x0) / px))
+    r0, r1 = int(round((min(ry0, ry1) - y0) / px)), int(round((max(ry0, ry1) - y0) / px))
+    c0, r0 = max(0, c0), max(0, r0)
+    if w_px:
+        c1 = min(int(w_px), c1)
+    if h_px:
+        r1 = min(int(h_px), r1)
+    if c1 <= c0 or r1 <= r0:
+        return None
+    return (r0, r1, c0, c1)
+
+
+def _plane_cache():
+    """The bounded LRU that stops adjacent bricks re-decoding the same FOV plane.
+
+    MEASURED, on the 10x set, whole region, 1 channel, 120 bricks: without this the bricked open
+    peaked at 2820 MB RSS against a 537 MB texture budget and took 142 s to resolve. The texture
+    budget was never the problem -- the DECODE was. A brick is 1024 px and a field is 2084 px, so
+    every field is straddled by four to nine bricks and each of them decoded all ten of its z
+    planes again: ~1280 plane decodes for a region that holds 270 distinct planes.
+
+    So the fix is a cache, not a smaller budget. This reuses ``MemoryBoundedLRUCache`` and
+    ``cache_budget`` rather than inventing a fourth memory mechanism: bounded by BYTES, evicting
+    LRU, and measured off FREE memory so a 16 GB laptop and a 64 GB workstation each get a share
+    they can afford. Half the budget, because the brick textures are the other consumer here.
+
+    Bounding by NOT DECODING TWICE is deliberately preferred over bounding by releasing pages
+    afterwards: ``_volume.release`` is a no-op on Windows (``madvise(MADV_DONTNEED)`` is POSIX), so
+    a design that leaned on it would hold more resident there than here. A cache hit is a cache hit
+    on every platform.
+    """
+    global _PLANES
+    if _PLANES is None:
+        from squidmip._budget import cache_budget
+        from squidmip._mosaic_source import MemoryBoundedLRUCache
+
+        _PLANES = MemoryBoundedLRUCache(max(64 << 20, int(cache_budget()) // 2))
+    return _PLANES
+
+
+#: Built on first use so importing this module costs no memory measurement. See ``_plane_cache``.
+_PLANES: Any = None
+
+
+def _read_plane(reader: Any, region: str, fov: int, channel: str, z: int) -> np.ndarray:
+    """One decoded FOV plane, from the shared bounded cache when it is already there."""
+    cache = _plane_cache()
+    try:
+        from squidmip._mosaic_source import _source_token
+
+        key = (_source_token(reader), region, int(fov), channel, int(z))
+    except Exception:                                   # noqa: BLE001 - uncacheable reader: read it
+        key = None
+    if key is not None:
+        hit = cache.get(key)
+        if hit is not None:
+            return hit
+    frame = np.asarray(reader.read(region, int(fov), channel, int(z)))
+    if frame.ndim != 2:
+        frame = frame.reshape(frame.shape[-2:])
+    if key is not None:
+        try:
+            cache.put(key, frame)
+        except ValueError:                              # noqa: PERF203 - a plane over the whole
+            pass                                        # budget: read it every time, never crash
+    return frame
+
+
+def read_brick(reader: Any, meta: dict, region: str, window: Sequence[int], channel: str, *,
+               step: int = 1, should_stop: Optional[Any] = None) -> Optional[np.ndarray]:
+    """ONE brick's ``(z, y, x)`` voxels, fused across the FOVs it overlaps, strided by *step*.
+
+    This is ``native_roi_volume``'s inner loop scoped to a single brick, and that scoping is the
+    whole memory argument: the caller never holds the ROI, only the bricks the camera is looking
+    at. *window* is ``(r0, r1, c0, c1)`` in level-0 mosaic pixels.
+
+    The brick is pasted at NATIVE size and strided at the end rather than sampled sparsely, because
+    the reader hands back whole decoded FOV planes either way -- striding earlier would save nothing
+    on the read and would put an alignment bug where an off-by-one cannot be seen. The transient is
+    one brick (21 MB at the 1024 edge, 10 z, uint16), which is bounded and freed on return.
+
+    ``should_stop`` is polled per FOV and per z so a superseded load dies inside a read instead of
+    finishing work nobody is waiting for. Returns None when it was stopped, so the caller can tell
+    "cancelled" from "empty" -- a cancelled brick must not be cached as if it were the answer.
+    """
+    from squidmip._placement import fov_offsets_px
+
+    positions = meta.get("fov_positions_um") or {}
+    px = float(meta.get("pixel_size_um") or 0.0)
+    fovs = list((meta.get("fovs_per_region") or {}).get(region) or [])
+    if not fovs or not positions or px <= 0:
+        return None
+    r0, r1, c0, c1 = (int(v) for v in window)
+    fh, fw = (int(v) for v in meta["frame_shape"])
+    offsets = fov_offsets_px(positions, region, fovs, px)
+    z_levels = list(meta.get("z_levels") or [0])
+    nz = len(z_levels)
+    vol: Optional[np.ndarray] = None
+    for f in fovs:
+        if should_stop is not None and should_stop():
+            return None
+        fr, fc = offsets[f]
+        ir0, ir1 = max(r0, fr), min(r1, fr + fh)        # FOV window ∩ brick window
+        ic0, ic1 = max(c0, fc), min(c1, fc + fw)
+        if ir1 <= ir0 or ic1 <= ic0:
+            continue
+        for zi, z in enumerate(z_levels):
+            if should_stop is not None and should_stop():
+                return None
+            frame = _read_plane(reader, region, int(f), channel, int(z))
+            if vol is None:
+                vol = np.zeros((nz, r1 - r0, c1 - c0), dtype=frame.dtype)
+            vol[zi, ir0 - r0:ir1 - r0, ic0 - c0:ic1 - c0] = frame[ir0 - fr:ir1 - fr,
+                                                                   ic0 - fc:ic1 - fc]
+    if vol is None:
+        return None
+    s = max(1, int(step))
+    return np.ascontiguousarray(vol[:, ::s, ::s]) if s > 1 else vol
+
+
 def open_native_3d(
     reader: Any,
     meta: dict,
@@ -342,12 +556,21 @@ def open_native_3d_volume(
     ROI spans — and we render it with gallery-view's recipe (additive, (dz, py, px) scale, carried
     LUT). Unlike ``open_native_3d`` this is not limited to a single FOV; it is limited by the GPU.
 
-    THE TEXTURE GUARD IS THE CONTRACT. napari renders 3D from ONE GL texture, so a volume whose Y or
-    X exceeds ``GL_MAX_3D_TEXTURE_SIZE`` is SILENTLY downsampled by napari to a blocky coarse level —
-    the exact "the AI messes up the rendering" failure. We REFUSE and name the overflow instead, so
-    the caller draws a smaller ROI rather than shipping a downsample dressed as native (Julio's
-    NO-FALLBACKS rule). Z is never the limiter (napari sliders z); only Y/X hit the texture."""
+    THE TEXTURE LIMIT IS NOW BRICKED, NOT REFUSED. napari renders 3D from ONE GL texture, so a
+    volume whose Y or X exceeds ``GL_MAX_3D_TEXTURE_SIZE`` used to be turned away here — which is
+    how the user ended up able to draw an ROI that could not be seen. A volume over the limit is now
+    TILED into blocks that each fit, one ``add_image`` per block placed with ``translate``, composed
+    with the GL max equation so the joins are invisible (see ``pin_max_compositing``). Nothing is
+    downsampled and nothing is refused. Z is never the limiter (napari sliders z); only Y/X hit the
+    texture, so the tiling is 2-D.
+
+    This entry point takes volumes ALREADY IN MEMORY, so it is the right call only when the caller
+    could afford to materialise them. The in-window path (``_brick_view.BrickedVolume``) reads brick
+    by brick and is what a whole region must use; this one keeps working for callers that hand over
+    a ready crop."""
     import napari
+
+    from squidmip import _bricks
 
     contrast_by_channel = contrast_by_channel or {}
     colormap_by_channel = colormap_by_channel or {}
@@ -357,24 +580,37 @@ def open_native_3d_volume(
     first = next(iter(vols.values()))
     if first.ndim != 3:
         raise ValueError(f"a 3D volume must be (z, y, x); got shape {first.shape}.")
-    _z, y, x = first.shape
-    if max(int(y), int(x)) > int(max_texture):
-        raise ValueError(
-            f"ROI is {y}x{x} px, over the GPU 3D texture limit ({max_texture} px). Draw a smaller "
-            "ROI so it renders at NATIVE resolution instead of a silent downsample.")
+    nz, y, x = (int(v) for v in first.shape)
+    limit = int(max_texture)
+    single = _bricks.fits_single_texture(y, x, nz, limit)
+    bricks = _bricks.plan(y, x, limit=limit,
+                          edge=(limit if single else _bricks.DEFAULT_BRICK_EDGE))
 
     viewer = napari.Viewer(ndisplay=3, title=title)
     for name, vol in vols.items():
-        kwargs = {"name": name, "scale": scale, "blending": "additive", "rendering": "mip"}
-        cmap = colormap_by_channel.get(name)
-        if cmap is not None:
-            kwargs["colormap"] = cmap
         clim = contrast_by_channel.get(name)
         if clim is None:
-            clim = _auto_clim(vol)
-        if clim is not None:
-            kwargs["contrast_limits"] = tuple(clim)
-        viewer.add_image(vol, **kwargs)
+            clim = _auto_clim(vol)                      # ONE window for the whole channel, so the
+        cmap = colormap_by_channel.get(name)            # bricks cannot step in brightness
+        for b in bricks:
+            kwargs = {
+                "name": name if single else f"{name} ▪ {b.iy},{b.ix}",
+                "scale": scale,
+                "translate": (0.0, b.r0 * float(scale[1]), b.c0 * float(scale[2])),
+                "blending": "additive",
+                "rendering": "mip",
+            }
+            if cmap is not None:
+                kwargs["colormap"] = cmap
+            if clim is not None:
+                kwargs["contrast_limits"] = tuple(clim)
+            layer = viewer.add_image(vol[:, b.r0:b.r1, b.c0:b.c1], **kwargs)
+            if not single:
+                pin_max_compositing(viewer, layer)
+    if len(bricks) > 1:
+        log.info("3D volume: %dx%d px is over the %d px texture limit — rendered as %d brick(s) "
+                 "per channel at NATIVE resolution (GL max compositing, no seam).",
+                 y, x, limit, len(bricks))
     if not viewer.layers:
         viewer.close()
         raise ValueError("no channel could be rendered, so there is no 3D volume.")
