@@ -1111,6 +1111,9 @@ class PlateOverview(QWidget):
         self._user_view = False       # True once the user wheel-zooms/pans (stop auto-fitting)
         self._boxes: dict = {}        # (region, fov) -> (top, left, h, w) in cell px; {} = single-FOV
         self._boxed_regions: set = set()   # regions whose cell holds a LETTERBOXED mosaic, not one tile
+        self._fov_selection: dict = {}     # region -> [fov, ...] the marquee boxes covered. Read
+        #   through `fov_subsets`, which publishes only the STRICT subsets: a box over every field
+        #   of a region is the whole region, and the whole region has one spelling.
         # DEEP ZOOM (below). All None until set_tile_source() succeeds; every path checks _tile_src
         # so an acquisition without stage positions simply keeps the montage and costs nothing.
         self._ladder = None
@@ -2043,8 +2046,81 @@ class PlateOverview(QWidget):
         """The selection as acquired well ids, in plate row-major order."""
         return [self._by_rc[rc] for rc in sorted(self._selection)]
 
+    def fov_subsets(self) -> dict:
+        """``{region: [fov, ...]}`` for the selected regions a marquee picked only PART of.
+
+        A region absent from this dict is selected WHOLE — that is the only meaning of absence,
+        and it is why nothing here ever records a full FOV list. Consumers (``PlateWindow.
+        selected_region_fovs`` -> the Minerva export) read this to decide whether to expand a
+        region to all its fields or to carry the user's box through.
+
+        This is the plate half of "run on a subset of the acquisition". The engine has always
+        been able to crop — ``stitch_plate(regions={region: [fov, ...]})`` derives its canvas
+        from only the positions handed in — but no gesture could express a FOV subset, so every
+        GUI caller expanded a well to all of its fields before the engine ever saw it.
+
+        Pruned on read against the live selection: deselecting a well must not leave its box
+        behind to be resurrected the next time that well is picked. Filtered to STRICT subsets on
+        read too, so a user who boxed four fields and then boxed the rest is back to "whole
+        region" without a special case in the gesture.
+        """
+        live = set(self.selected_wells())
+        out = {}
+        for region, fovs in self._fov_selection.items():
+            if region not in live or not fovs:
+                continue
+            if len(fovs) < len(self._region_fovs(region)):
+                out[region] = list(fovs)
+        return out
+
+    def _region_fovs(self, region) -> list:
+        """Every field this region has a mosaic box for, sorted. ``[]`` when it has no mosaic."""
+        return sorted({f for r, f in self._boxes if r == region})
+
+    def _fovs_in(self, x0, y0, x1, y1, cells) -> dict:
+        """``{region: [fov, ...]}`` for the fields of *cells* the widget-px box actually touches.
+
+        A region with fewer than two mosaic boxes is skipped: one field fills its cell, so there
+        is nothing to subset. That covers single-FOV wells and every acquisition with no stage
+        positions, where ``_mosaic_boxes`` returns ``{}`` and no FOV geometry exists to box.
+
+        Full coverage is NOT filtered here — a box over every field returns every field, and
+        :meth:`fov_subsets` is the one place that collapses that back to "the whole region". One
+        rule, one place, so a second box that completes a region undoes the first.
+
+        Geometry goes through :meth:`_cell_point`, the same widget-to-block inverse ``_fov_at``
+        and the loupe use, so the fields a box selects are the fields a double-click inside that
+        box would open. A rectangle needs both its corners mapped and then normalised, because
+        the drag can be released above/left of where it started.
+        """
+        if not self._boxes:
+            return {}
+        lo_x, hi_x = min(x0, x1), max(x0, x1)
+        lo_y, hi_y = min(y0, y1), max(y0, y1)
+        out: dict = {}
+        for ri, ci in cells:
+            region = self._by_rc.get((ri, ci))
+            if not region:
+                continue
+            if len(self._region_fovs(region)) < 2:
+                continue                       # one field fills the cell: nothing to subset
+            a = self._cell_point(ri, ci, lo_x, lo_y)
+            b = self._cell_point(ri, ci, hi_x, hi_y)
+            if a is None or b is None:
+                continue
+            bx0, by0 = min(a[0], b[0]), min(a[1], b[1])
+            bx1, by1 = max(a[0], b[0]), max(a[1], b[1])
+            hit = sorted(
+                fov for (r, fov), (top, left, h, w) in self._boxes.items()
+                if r == region and left < bx1 and left + w > bx0 and top < by1 and top + h > by0
+            )
+            if hit:
+                out[region] = hit
+        return out
+
     def clear_selection(self):
         """Drop the whole selection and tell listeners (used on re-ingest)."""
+        self._fov_selection = {}
         if self._selection:
             self._selection = set()
             self.selectionChanged.emit([])
@@ -2053,6 +2129,7 @@ class PlateOverview(QWidget):
     def select_all(self):
         """Select every occupied well (the Select all button and Cmd/Ctrl-A)."""
         self._selection = set(self._by_rc.keys())
+        self._fov_selection = {}       # "all wells" means all of every well, boxes included
         self.selectionChanged.emit(self.selected_wells())
         self.update()
 
@@ -2062,6 +2139,7 @@ class PlateOverview(QWidget):
         box above 3x3, the wash at or below it (``frames_for_grid``)."""
         want = set(region_ids or [])
         self._selection = {rc for rc, rid in self._by_rc.items() if rid in want}
+        self._fov_selection = {}     # a window holds whole regions; it cannot mean a FOV box
         self.selectionChanged.emit(self.selected_wells())
         self.update()
 
@@ -2188,6 +2266,10 @@ class PlateOverview(QWidget):
                 hit = self._cell(x1, y1)
                 if hit and hit["well_id"]:
                     self._selection ^= {(hit["row_index"], hit["col_index"])}
+                    # A whole-well gesture means the WHOLE well, even if a marquee had cropped
+                    # this one earlier. Dropping the box here is what keeps "clicked it" and
+                    # "boxed part of it" from silently reading the same on the next export.
+                    self._fov_selection.pop(hit["well_id"], None)
                 self.selectionChanged.emit(self.selected_wells())
             else:
                 # Shift-DRAG opens a WINDOW over the boxed regions (the meeting's "shift-drag a box
@@ -2197,7 +2279,21 @@ class PlateOverview(QWidget):
                 # clear the wash. Shift+Alt still UNIONS into the batch selection instead of opening.
                 boxed = [self._by_rc[rc] for rc in sorted(set(self._cells_in(x0, y0, x1, y1)))]
                 if add:
-                    self._selection |= set(self._cells_in(x0, y0, x1, y1))
+                    # Shift+Alt-DRAG: union into the batch selection — and, zoomed in far enough
+                    # that the box lands inside a mosaic, union the FIELDS it covers rather than
+                    # the whole well. THE gesture that makes a FOV subset expressible: everything
+                    # downstream of the selection already crops (stitch_plate derives its canvas
+                    # from the positions it is handed), but until this there was no way to say it.
+                    # Zoomed out the box covers every field of each well it touches, `_fovs_in`
+                    # returns nothing, and the behaviour is exactly what it was.
+                    cells = set(self._cells_in(x0, y0, x1, y1))
+                    self._selection |= cells
+                    for region, fovs in self._fovs_in(x0, y0, x1, y1, cells).items():
+                        prev = self._fov_selection.get(region)
+                        # A second box over the same well ADDS fields, matching the union the
+                        # gesture already performs on wells. One rule, both granularities.
+                        self._fov_selection[region] = (
+                            sorted(set(prev) | set(fovs)) if prev else list(fovs))
                     self.selectionChanged.emit(self.selected_wells())
                 else:
                     self.marqueeSelected.emit(boxed)            # open a window over the box
@@ -2386,6 +2482,21 @@ class PlateOverview(QWidget):
             return None
         return ((x - rx) / rw * sw + (sx - ci * _CELL),
                 (y - ry) / rh * sh + (sy - ri * _CELL))
+
+    def _block_rect(self, ri: int, ci: int, top, left, h, w) -> Optional[tuple]:
+        """A ``_CELL``-block rectangle back out to widget px — the inverse of :meth:`_cell_point`.
+
+        Only the SELECTED-FIELD overlay needs this: everything else in the paint path already
+        works in widget space. Written as the algebraic inverse of ``_cell_point`` rather than as
+        a second transform, so a boxed field is drawn exactly where a click inside it resolves.
+        """
+        rx, ry, rw, rh = self._cell_rect(ri, ci)
+        sx, sy, sw, sh = self._cell_source(ri, ci)
+        if not (sw > 0 and sh > 0):
+            return None
+        ox, oy = sx - ci * _CELL, sy - ri * _CELL
+        return (rx + (left - ox) * rw / sw, ry + (top - oy) * rh / sh,
+                w * rw / sw, h * rh / sh)
 
     def _cell_fraction(self, ri: int, ci: int, x, y) -> Optional[tuple]:
         """A widget point as ``(fx, fy)`` in 0..1 across the cell's CONTENT, or ``None``.
@@ -2641,6 +2752,29 @@ class PlateOverview(QWidget):
             for ri, ci in self._selection:
                 rx, ry, rw, rh = self._cell_rect(ri, ci)
                 p.drawRect(QRectF(rx + w / 2, ry + w / 2, max(rw - w, 1.0), max(rh - w, 1.0)))
+        # `self._fov_selection` first, and it is not redundant with the `if subsets` below: this
+        # runs on EVERY repaint, including every hover, and `fov_subsets()` walks `_boxes` once
+        # per selected region. A plate where nobody has drawn a field box — the overwhelmingly
+        # common one — must pay one dict truth-test, not a scan. Same reasoning as `_cell_region`'s
+        # cache a few methods up: hover repaints are where this widget's responsiveness lives.
+        subsets = self.fov_subsets() if self._fov_selection else {}
+        if subsets:
+            # A PARTLY selected well: outline the fields the box actually picked. Without this the
+            # subset is invisible — the well's frame says "selected" whether four of its 27 fields
+            # are in the export or all of them, and a crop the user cannot see is a crop they
+            # cannot trust. Drawn after the whole-well frame so it reads as a refinement of it.
+            pen = QPen(_SEL_FRAME, max(1.0, selection_frame_pen_px(cd) * 0.6))
+            p.setPen(pen)
+            p.setBrush(_VIEW_WASH)
+            for ri, ci in self._selection:
+                for fov in subsets.get(self._by_rc.get((ri, ci)), ()):
+                    box = self._boxes.get((self._by_rc[(ri, ci)], fov))
+                    if box is None:
+                        continue
+                    r = self._block_rect(ri, ci, *box)
+                    if r is not None:
+                        p.drawRect(QRectF(*r))
+            p.setBrush(Qt.NoBrush)
         if self._sel is not None:          # the CURRENT well in the detail viewer = a red BOX
             p.setPen(QPen(_RED, 2))
             p.setBrush(Qt.NoBrush)

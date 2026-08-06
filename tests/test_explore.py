@@ -280,6 +280,31 @@ def test_subset_selection_rejects_an_empty_subset():
         E.subset_selection([], {"B2": [0]})
 
 
+def test_subset_selection_carries_a_plate_fov_box_through():
+    """The tab owns WHICH regions; only the plate can say which FIELDS inside one.
+
+    This was the third of three places that expanded a region to all its FOVs before the export
+    could see the user's box (with ``PlateWindow.selected_region_fovs`` and
+    ``minerva_selection``), so the exploration tab's "Open in Minerva" button could pick wells
+    and never fields. A region absent from the boxes still expands whole — that is the ONLY
+    meaning of absence, and it is what keeps every existing caller byte-for-byte.
+    """
+    fovs = {"B2": [0, 1, 2], "B3": [0, 1]}
+    assert E.subset_selection(["B2", "B3"], fovs, {"B2": [1, 2]}) == [
+        ("B2", 1), ("B2", 2), ("B3", 0), ("B3", 1)]
+    # omitted entirely == today's behaviour, unchanged
+    assert E.subset_selection(["B2", "B3"], fovs) == \
+        E.subset_selection(["B2", "B3"], fovs, {})
+
+
+def test_subset_selection_refuses_a_boxed_fov_the_acquisition_does_not_have():
+    """A field the plate offers that the metadata does not is a DISAGREEMENT between two views
+    of the same acquisition. Exporting whatever survives the intersection would hide it."""
+    with pytest.raises(ValueError) as exc:
+        E.subset_selection(["B2"], {"B2": [0, 1]}, {"B2": [1, 9]})
+    assert "9" in str(exc.value) and "B2" in str(exc.value)
+
+
 # ---------------------------------------------------------------------------------------
 # Defect 2: the resolved target set is CONFIRMED before the run starts
 # ---------------------------------------------------------------------------------------

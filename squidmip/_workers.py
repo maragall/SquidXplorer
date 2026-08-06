@@ -452,7 +452,9 @@ class _MinervaWorker(QThread):
     The user always gets the story path either way, because Minerva has no deep link — the
     file is picked by hand in its "Select File" dialog.
     """
-    progress = Signal(int, int)          # (done, total) FOVs exported
+    progress = Signal(int, int)          # (done, total) REGIONS exported — the export unit is one
+    #                                      fused mosaic per region, and `run()` below counts
+    #                                      `grouped`, not the selection. The comment said "FOVs".
     exported = Signal(object)            # [(ome_path, story_path), ...]
     launched = Signal(bool)              # did a Minerva server end up answering?
     failed = Signal(str)

@@ -315,6 +315,45 @@ def test_export_reads_only_the_requested_timepoint(squid_dataset, tmp_path):
     assert set(seen_t) == {0}
 
 
+def test_two_timepoints_export_to_two_files_with_different_pixels(multi_time_point_dataset,
+                                                                  tmp_path):
+    """A MULTI-TIMEPOINT acquisition must land a DIFFERENT image for a different *t*.
+
+    ``test_export_reads_only_the_requested_timepoint`` above pins that the reader is asked for
+    one timepoint, but it asks for t=0 on a single-timepoint fixture, so it cannot tell "the
+    timepoint reached the pixels" from "there was only ever one timepoint". This does: the
+    fixture's planes carry the timepoint in their hundreds digit
+    (``time_series_pixel_value``), so the two exports are comparable constants and a t that was
+    dropped anywhere in the chain shows up as equal pixels rather than as a message.
+
+    ``correct_illumination=False``: the fixture is 4x4 constant planes and an estimated gain
+    field over them is meaningless. Same fixture concession the byte-for-byte test above makes,
+    and for the same reason — the claim here is about the TIME axis, not about flat-fielding.
+    """
+    from tests.conftest import (
+        TIME_SERIES_CHANNELS, TIME_SERIES_FOV, TIME_SERIES_NZ, TIME_SERIES_REGION,
+        time_series_pixel_value,
+    )
+
+    root, _planes = multi_time_point_dataset
+    sel = [(TIME_SERIES_REGION, TIME_SERIES_FOV)]
+    (ome1, _), = export_selection(open_reader(root), sel, tmp_path / "t1", t=1,
+                                  blend_px=0, correct_illumination=False)
+    (ome2, _), = export_selection(open_reader(root), sel, tmp_path / "t2", t=2,
+                                  blend_px=0, correct_illumination=False)
+
+    assert "_t1_" in ome1.name and "_t2_" in ome2.name, "the filename does not name the timepoint"
+    px1, px2 = tifffile.imread(str(ome1)), tifffile.imread(str(ome2))
+    assert not np.array_equal(px1, px2), (
+        "both timepoints exported the same pixels — the t never reached the read")
+    # ...and they are the RIGHT timepoints, not merely two different ones. MIP over z of a
+    # constant plane is the brightest z, which is the last one.
+    top_z = TIME_SERIES_NZ - 1
+    for t, px in ((1, px1), (2, px2)):
+        for c in range(len(TIME_SERIES_CHANNELS)):
+            assert px[c].min() == px[c].max() == time_series_pixel_value(t, top_z, c)
+
+
 def test_export_reports_progress_in_regions_not_fovs(squid_dataset, tmp_path):
     """The export unit is a fused mosaic per region, so the readout counts regions. Four FOVs
     across two regions is 2 steps, not 4 — a FOV count here would promise progress the export
@@ -381,6 +420,35 @@ def test_story_points_at_the_ome_with_an_absolute_path(squid_dataset, tmp_path):
     assert Path(data["in_file"]).is_absolute() and Path(data["in_file"]).exists()
     for key in ("csv_file", "waypoints", "groups", "sample_info"):
         assert key in data, "api_import hard-indexes these keys"
+
+
+def test_the_story_says_which_timepoint_and_which_fovs_these_pixels_are(squid_dataset, tmp_path):
+    """``sample_info.text`` is what an OME-TIFF carries once the log that described it is gone.
+
+    Both facts became variable in the same change and neither was recorded: the exported
+    timepoint used to be hardcoded to 0 and a FOV subset was not expressible from any GUI path,
+    so "the mosaic of region B2" was unambiguous. It no longer is — the same acquisition now
+    yields a different file per timepoint and per box — and a crop that does not SAY it is a
+    crop is a measurement waiting to be made on the wrong extent.
+    """
+    root, _ = squid_dataset
+    reader = open_reader(root)
+    all_fovs = reader.metadata["fovs_per_region"]["B2"]
+    assert len(all_fovs) > 1, "fixture cannot express a crop"
+
+    (_, whole), = export_selection(reader, [("B2", f) for f in all_fovs], tmp_path / "whole")
+    (_, crop), = export_selection(reader, [("B2", all_fovs[0])], tmp_path / "crop")
+
+    whole_text = json.loads(whole.read_text())["sample_info"]["text"]
+    crop_text = json.loads(crop.read_text())["sample_info"]["text"]
+
+    assert "region B2" in whole_text and "timepoint t=0" in whole_text
+    assert f"all {len(all_fovs)} FOV(s)" in whole_text
+    assert "CROPPED" not in whole_text, "a whole region must not claim to be a crop"
+    assert f"CROPPED to 1 of {len(all_fovs)} FOV(s)" in crop_text, crop_text
+    # The registration timepoint is a DIFFERENT number and is still reported separately, so the
+    # story can never read as though the pixels came from the timepoint the geometry was solved on.
+    assert "flat-field" in crop_text
 
 
 def test_story_groups_carry_our_channel_colours(squid_dataset, tmp_path):

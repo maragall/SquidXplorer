@@ -33,6 +33,33 @@ tests ask.
   since all of them are needed eventually. `Extent` can already express it if that changes.
 * There is no time-reduction operator. Collapsing time destroys what the time was acquired for; the
   real operation on that axis is playback and export.
+
+**PLAYBACK, 2026-08-05.** The second bullet said what the real operation on this axis is, and now
+half of it exists: ``TimePointBar(playback=True)`` walks the timepoints with a play button, an fps
+control and loop modes.
+
+None of that machinery is new and none of it is a ``QTimer``. It is
+:class:`squidmip._region_nav.AxisPlayback` — napari's own ``Dims`` + ``QtDims``, already driving the
+REGION slider, with the axis passed in. A hand-rolled timer gets two things wrong that this does
+not: it runs on the GUI event loop (napari's ``AnimationThread`` does not), and it free-runs, so at
+10 fps it queues ten region re-reads for every one that completes and playback degrades into a
+backlog that grows the longer you watch. napari drops the frames it cannot draw in time instead,
+which is the CORRECT behaviour for an axis whose every step costs a mosaic load.
+
+**Why one class with a ``playback`` flag rather than two widgets.** `tests/test_plate_contract.py`
+pins that the plate and the windows use the SAME type, for the reason at the top of this file, and
+that has not changed. What differs is which SKIN the one class wears:
+
+* ``playback=False`` (the plate) — the plain ``QSlider``, byte-identical to what shipped in 4b.
+* ``playback=True`` (a region window) — napari's dims widget IS the slider, so the position has
+  exactly ONE owner (napari's ``Dims``) rather than a QSlider and a Dims hand-synced.
+
+The plate does NOT get playback, and that is a refusal with a reason rather than an omission:
+``_PreviewWorker``'s persistent cell cache is keyed ``(token, region)`` with no timepoint
+(`_platecache.py`), so a plate that animated the time axis would serve timepoint 0's pixels
+labelled timepoint 1 — worse than the bug it would look like it was fixing. Re-keying that cache is
+the price of a plate play button and nobody has paid it, so there is no button to press. See
+`docs/plate-contract.md`.
 """
 from __future__ import annotations
 
@@ -42,35 +69,75 @@ from qtpy.QtCore import Qt
 from qtpy.QtWidgets import QHBoxLayout, QLabel, QSlider, QWidget
 
 
+class NoPlaybackError(RuntimeError):
+    """``play()`` on a bar built without playback. A programming error, never a user gesture."""
+
+
 class TimePointBar(QWidget):
-    """A labelled slider over the acquisition's timepoints.
+    """A labelled slider over the acquisition's timepoints, optionally with playback.
 
     ``on_change(time_point)`` fires only for a USER gesture, never for a programmatic
     :meth:`set_count` or :meth:`set_time_point`. That distinction is the same one the contrast sink
     makes elsewhere in this codebase, and for the same reason: treating our own write as a user
-    gesture is how a control ends up fighting the thing it is supposed to follow.
+    gesture is how a control ends up fighting the thing it is supposed to follow. A PLAYBACK step
+    counts as a gesture: it must reload the mosaic exactly as a drag does, and there is one loading
+    path, not a second one for animation.
     """
 
-    def __init__(self, on_change: Optional[Callable[[int], None]] = None, parent=None) -> None:
+    def __init__(self, on_change: Optional[Callable[[int], None]] = None, parent=None,
+                 playback: bool = False) -> None:
         super().__init__(parent)
         self._on_change = on_change
         self._count = 1
         self._muted = False          # True while WE move the slider, so we do not echo ourselves
+        self._playback = None
 
         self.label = QLabel("time_point 1 / 1")
-        self.slider = QSlider(Qt.Horizontal)
-        self.slider.setMinimum(0)
-        self.slider.setMaximum(0)
-        self.slider.setPageStep(1)
-        self.slider.valueChanged.connect(self._on_slider_moved)
-
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(6)
         row.addWidget(self.label)
-        row.addWidget(self.slider, 1)
+
+        if playback:
+            self._playback = self._build_playback()
+            # napari's OWN scrollbar, exposed under the name the plain skin uses. It is the same
+            # position control, so callers and tests that ask a bar what its slider says get an
+            # answer in both skins rather than having to know which one they were handed.
+            self.slider = self._playback.dim_slider.slider
+            row.addWidget(self._playback, 1)
+        else:
+            self.slider = QSlider(Qt.Horizontal)
+            self.slider.setMinimum(0)
+            self.slider.setMaximum(0)
+            self.slider.setPageStep(1)
+            self.slider.valueChanged.connect(self._on_slider_moved)
+            row.addWidget(self.slider, 1)
 
         self.set_count(1)
+
+    def _build_playback(self):
+        """napari's dims playback, on the time axis. Imported here, not at module scope.
+
+        This module is deliberately importable without napari — `tests/test_time_point_bar.py`
+        exists because the GUI-level test file for this control aborts the interpreter on import,
+        and that file can only stay light if the control stays light. A bar built WITHOUT playback
+        must therefore cost no napari import at all.
+        """
+        from squidmip._region_nav import AxisPlayback
+
+        class _TimeAxisPlayback(AxisPlayback):
+            def __init__(self, bar):
+                self._bar = bar
+                super().__init__(axis_label="time_point", noun="timepoint", parent=bar)
+                self.setToolTip(
+                    "Step through TIMEPOINTS of this acquisition.\nPress play to walk them; "
+                    "right-click play for frames per second and loop mode."
+                )
+
+            def _on_step(self, index: int) -> None:
+                self._bar._on_slider_moved(int(index))
+
+        return _TimeAxisPlayback(self)
 
     # -- state ---------------------------------------------------------------------------
 
@@ -81,16 +148,30 @@ class TimePointBar(QWidget):
 
     @property
     def time_point(self) -> int:
+        if self._playback is not None:
+            return int(self._playback.index)
         return int(self.slider.value())
+
+    @property
+    def playback(self):
+        """The playback engine, or ``None`` on a bar that cannot play. Never a stub.
+
+        ``None`` rather than a do-nothing object so that "this bar cannot play" is a question with
+        an answer, instead of a play button that looks pressed and moves nothing.
+        """
+        return self._playback
 
     def set_count(self, n_time_points: int) -> None:
         """Size the bar to the acquisition, and hide it when there is nothing to navigate."""
         self._count = max(1, int(n_time_points or 1))
         self._muted = True
         try:
-            self.slider.setMaximum(self._count - 1)
-            if self.slider.value() > self._count - 1:
-                self.slider.setValue(0)
+            if self._playback is not None:
+                self._playback.set_count(self._count)
+            else:
+                self.slider.setMaximum(self._count - 1)
+                if self.slider.value() > self._count - 1:
+                    self.slider.setValue(0)
         finally:
             self._muted = False
         # Hidden rather than never built: see the module docstring. Every call site stays
@@ -100,18 +181,76 @@ class TimePointBar(QWidget):
 
     def set_time_point(self, time_point: int) -> None:
         """Move the bar WITHOUT calling back. For following someone else, not for a gesture."""
+        want = self._clamp(time_point)
         self._muted = True
         try:
-            self.slider.setValue(max(0, min(int(time_point), self._count - 1)))
+            if self._playback is not None:
+                self._playback._follow(want)
+            else:
+                self.slider.setValue(want)
         finally:
             self._muted = False
         self._refresh_label()
 
     def set_time_point_from_user(self, time_point: int) -> None:
         """As if the user had dragged it: moves the bar AND fires ``on_change``."""
-        self.slider.setValue(max(0, min(int(time_point), self._count - 1)))
+        want = self._clamp(time_point)
+        if self._playback is not None:
+            if self._playback.index == want:
+                # napari's Dims does not re-announce a step it is already on, and neither does the
+                # QSlider skin: a gesture that changes nothing must not reload a mosaic.
+                return
+            self._playback.set_index_from_user(want)
+            return
+        self.slider.setValue(want)
+
+    # -- playback (only on a bar built with it) ------------------------------------------
+
+    def frame_done(self) -> None:
+        """This timepoint is on screen; playback may request the next. A no-op without playback.
+
+        Unconditional at the call site on purpose, exactly like the hidden-not-absent rule above:
+        the loader says "the frame landed" and does not have to ask whether anybody is animating.
+        """
+        if self._playback is not None:
+            self._playback.frame_done()
+
+    @property
+    def is_playing(self) -> bool:
+        return bool(self._playback is not None and self._playback.is_playing)
+
+    @property
+    def fps(self) -> float:
+        return float(self._playback.fps) if self._playback is not None else 0.0
+
+    def play(self, fps: Optional[float] = None) -> None:
+        if self._playback is None:
+            raise NoPlaybackError(
+                "this timepoint bar was built without playback, so there is nothing to start. "
+                "The plate's bar is deliberately one of them: its preview cache is not keyed by "
+                "timepoint, so animating it would show timepoint 0's pixels under another "
+                "timepoint's label."
+            )
+        self._playback.play(fps)
+
+    def stop(self) -> None:
+        if self._playback is not None:
+            self._playback.stop()
+
+    def shutdown(self) -> None:
+        """Stop and JOIN napari's animation thread. Qt aborts the process without this."""
+        if self._playback is not None:
+            self._playback.shutdown()
+
+    def on_problem(self, sink: Callable[[str], None]) -> None:
+        """Where a playback refusal or stall is shown to the USER."""
+        if self._playback is not None:
+            self._playback.on_problem(sink)
 
     # -- internals -----------------------------------------------------------------------
+
+    def _clamp(self, time_point: int) -> int:
+        return max(0, min(int(time_point), self._count - 1))
 
     def _on_slider_moved(self, value: int) -> None:
         self._refresh_label()

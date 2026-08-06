@@ -361,6 +361,32 @@ _REGION_LOAD_DEBOUNCE_MS = 140
 #: an OME-Zarr will add their own op key as a second visibility layer; not needed for exploration.
 _RAW_OP = "raw"
 
+#: The Apple floor for GL_MAX_3D_TEXTURE_SIZE, used only until the live canvas can be asked. Not a
+#: second literal: it is the one ``_napari_view`` owns.
+from squidmip._napari_view import _DEFAULT_MAX_3D_TEXTURE      # noqa: E402  (kept beside its use)
+
+
+def _brick_budget_bytes() -> int:
+    """How much a bricked 3D view may hold resident.
+
+    ``_budget.cache_budget`` is the repo's one answer to "how much of this machine may a cache
+    take", measured off FREE memory rather than total, so this does not invent a fourth memory
+    mechanism. It is deliberately a share of the same budget the 2D pyramid cache uses: a 3D view is
+    up instead of heavy 2D navigation, not as well as it.
+    """
+    try:
+        from squidmip._budget import cache_budget
+
+        return int(cache_budget())
+    except Exception:                                    # noqa: BLE001 - a floor beats no render
+        return 512 << 20
+
+
+def _started(vol):
+    """``open()`` the volume and hand it back, so ``_replace_native3d`` still takes one callable."""
+    vol.open()
+    return vol
+
 
 class RegionViewer(QMainWindow):
     """ONE independent napari window over a subset of regions.
@@ -412,8 +438,20 @@ class RegionViewer(QMainWindow):
         self._regions = [str(r) for r in regions]
         self.window_id = int(window_id)
         self._worker = None
+        #: Which mosaic load this window is waiting for. Bumped by every `_load_mosaic`, carried
+        #: by every result, and checked on arrival: that is how a superseded read is DROPPED
+        #: rather than waited for on the GUI thread. See `_load_mosaic`.
+        self._load_gen = 0
+        self._retired_workers: list = []       # superseded loads, held until Qt reaps them
+        #: WHICH REGION'S MOSAIC IS IN THE PANE. One fact, two consequences, and they are the same
+        #: question asked twice: a reload of the SAME region must not re-frame the camera
+        #: (`_on_done`) and must not destroy the layers to rebuild them (`_load_mosaic`). A reload
+        #: of a DIFFERENT region must do both — its mosaic is a different shape, and napari does
+        #: not survive being handed one through a reused layer.
+        self._shown_region: Optional[str] = None
         self._pending_region: Optional[str] = None
         self._load_timer: Optional[QTimer] = None
+        self._time_load_timer: Optional[QTimer] = None
         self._pane = None
         self._slider = None
         self._cursor = None
@@ -636,7 +674,14 @@ class RegionViewer(QMainWindow):
         # a shared position would mean comparing two wells at the same timepoint was impossible.
         # Same widget CLASS as the plate's, deliberately, so the two can never disagree about what
         # a timepoint control is. Hidden at n_t == 1, so this call site stays unconditional.
-        self._time_point_bar = TimePointBar(on_change=self._on_time_point_changed)
+        #
+        # WITH PLAYBACK, and only here. A window can honestly animate the time axis because its
+        # picture comes from `_MosaicWorker`, which takes a `t` and fuses that timepoint. The
+        # plate's bar cannot and does not: its preview cells are cached per (token, region) with
+        # no timepoint, so a plate play button would animate timepoint 0's pixels under a moving
+        # label. Same class, playback where the read path can serve it. See `_time_point`.
+        self._time_point_bar = TimePointBar(on_change=self._on_time_point_changed, playback=True)
+        self._time_point_bar.on_problem(self._say)
         self._time_point_bar.set_count(int((self._meta or {}).get("n_t", 1) or 1))
         lay.addWidget(self._time_point_bar)
 
@@ -1480,15 +1525,108 @@ class RegionViewer(QMainWindow):
                 pass
         return v, layer
 
-    @staticmethod
-    def _on_roi_data(layer) -> None:
-        """After a shape is added/removed, name the NEXT ROI R{n+1} so each box keeps a unique id
-        (which also gives it the next colour in the cycle)."""
+    def _on_roi_data(self, layer) -> None:
+        """After a shape is added/removed: name the NEXT ROI R{n+1}, and SAY WHAT THE LAST ONE COSTS.
+
+        Julio's standing complaint is that you can draw an ROI and only discover afterwards that it
+        will not render. The size is knowable the instant the box exists, so it is reported the
+        instant the box exists -- how many pixels, and how many GL textures that needs on THIS GPU.
+        That is the drawing-time feedback the refusal used to stand in for; the refusal itself is
+        gone, because bricking renders the box either way.
+        """
         try:
             n = len(getattr(layer, "data", []) or [])
             layer.current_properties = {"name": np.array([f"R{n + 1}"], dtype=object)}
         except Exception:                                # noqa: BLE001 - labelling is cosmetic
             pass
+        try:
+            self._clamp_last_roi(layer)
+        except Exception:                                # noqa: BLE001 - never break ROI drawing
+            pass
+        try:
+            self._say(self._roi_cost_line(layer))
+        except Exception:                                # noqa: BLE001 - the readout is advisory
+            pass
+
+    def _live_texture_limit(self) -> int:
+        """The GPU's real GL_MAX_3D_TEXTURE_SIZE, or the documented Apple floor. Never a literal
+        here: ``_napari_pane`` owns the query and ``_napari_view`` owns the fallback."""
+        try:
+            return int(self._pane._live_max_3d_texture())
+        except Exception:                                # noqa: BLE001
+            return int(_DEFAULT_MAX_3D_TEXTURE)
+
+    def _clamp_last_roi(self, layer) -> None:
+        """Hold the just-drawn ROI to what one GL texture can render, in place.
+
+        THE GUARANTEE: anything you can draw, you can render at full native resolution. Julio's
+        standing complaint is "I can select ROIs that can't be seen" -- so the box is corrected the
+        moment it exists, at the size the GPU can actually hold, instead of being accepted and then
+        refused. The correction is anchored at the drag's starting corner so the rectangle stops
+        growing rather than jumping somewhere else.
+        """
+        from squidmip import _bricks
+
+        # RE-ENTRANCY. Writing `layer.data` re-emits the Shapes layer's own data event, which lands
+        # back here -- measured as an immediate RecursionError the first time this ran against the
+        # real window. The correction is one edit, so the guard is a plain flag rather than a
+        # disconnect/reconnect dance that could leave the ROI layer unwired if anything raised.
+        if getattr(self, "_clamping", False):
+            return
+        rects = list(getattr(layer, "data", []) or [])
+        px = float((self._meta or {}).get("pixel_size_um") or 0.0)
+        if not rects or px <= 0:
+            return
+        arr = np.asarray(rects[-1])
+        if arr.ndim != 2 or arr.shape[0] < 4:
+            return                                       # not a rectangle; leave it alone
+        ys, xs = arr[:, -2].astype(float), arr[:, -1].astype(float)
+        limit = self._live_texture_limit()
+        (nx0, ny0, nx1, ny1), clamped = _bricks.clamp_bbox_um(
+            (xs.min(), ys.min(), xs.max(), ys.max()), px, limit)
+        if not clamped:
+            return
+        new = np.array(arr, dtype=float)
+        new[:, -1] = np.where(xs > xs.min(), nx1, nx0)
+        new[:, -2] = np.where(ys > ys.min(), ny1, ny0)
+        rects[-1] = new
+        self._clamping = True
+        try:
+            layer.data = rects
+        finally:
+            self._clamping = False
+        span = limit * px
+        self._say(f"ROI held to the 3D ceiling: {limit} x {limit} px ({span:.0f} x {span:.0f} um) "
+                  f"— the largest volume this GPU renders from one texture at full resolution.")
+
+    def _roi_cost_line(self, layer) -> str:
+        """"R3: 4096 x 3072 px (3080 x 2310 um) — 12 bricks on this GPU." Empty when unknowable."""
+        from squidmip import _bricks
+
+        rects = list(getattr(layer, "data", []) or [])
+        if not rects:
+            return ""
+        arr = np.asarray(rects[-1])
+        ys, xs = arr[:, -2], arr[:, -1]
+        px = float((self._meta or {}).get("pixel_size_um") or 0.0)
+        if px <= 0:
+            return ""
+        h_um, w_um = float(ys.max() - ys.min()), float(xs.max() - xs.min())
+        h, w = int(round(h_um / px)), int(round(w_um / px))
+        if h <= 0 or w <= 0:
+            return ""
+        limit = _DEFAULT_MAX_3D_TEXTURE
+        try:
+            limit = int(self._pane._live_max_3d_texture())
+        except Exception:                                # noqa: BLE001 - the Apple value is the floor
+            pass
+        nz = len(list((self._meta or {}).get("z_levels") or [0]))
+        single = _bricks.fits_single_texture(h, w, nz, limit)
+        edge = limit if single else _bricks.DEFAULT_BRICK_EDGE
+        n = len(_bricks.plan(h, w, limit=limit, edge=edge))
+        how = ("fits ONE texture" if single
+               else f"{n} bricks (over the {limit} px texture limit — bricked, not refused)")
+        return f"R{len(rects)}: {h} x {w} px ({h_um:.0f} x {w_um:.0f} um), {nz} z — 3D: {how}."
 
     def _new_roi(self) -> None:
         """Start drawing an ROI rectangle inside the mosaic (deck: boxes inside the well view)."""
@@ -1775,13 +1913,29 @@ class RegionViewer(QMainWindow):
         return bar.time_point if bar is not None else 0
 
     def _on_time_point_changed(self, time_point: int) -> None:
-        """A user moved THIS window's timepoint. Reload its mosaic at that timepoint.
+        """A user moved THIS window's timepoint, or playback advanced it. Reload the mosaic.
 
         Only a user gesture arrives here; TimePointBar does not echo its own programmatic moves, so
         sizing the bar on open cannot trigger a load.
+
+        A PLAYBACK step is loaded IMMEDIATELY and a drag is DEBOUNCED, which is one rule stated
+        twice rather than two policies: never have more than one load in flight. Playback already
+        guarantees that with the frame gate — napari does not request the next timepoint until
+        `frame_done()` says this one is on screen — so a debounce there would only add its own
+        interval to every frame and cap the achievable rate. A DRAG is not gated by anything: the
+        scrollbar emits a step per pixel of travel, so without the debounce a 40-step drag would
+        start 40 loads and cancel 39 of them. Same debounce, same value, as the region axis.
         """
         self._say(f"time_point {time_point + 1} of {self._time_point_bar.count}")
-        self._load_mosaic(region=self.current_region())
+        if self._time_point_bar.is_playing:
+            self._load_mosaic(region=self.current_region())
+            return
+        if getattr(self, "_time_load_timer", None) is None:
+            self._time_load_timer = QTimer(self)
+            self._time_load_timer.setSingleShot(True)
+            self._time_load_timer.timeout.connect(
+                lambda: self._load_mosaic(self.current_region()))
+        self._time_load_timer.start(_REGION_LOAD_DEBOUNCE_MS)
 
     def _on_region_changed(self, index: int, region: str) -> None:
         """Current region moved. Debounce the fuse; the slider label already moved instantly."""
@@ -1802,16 +1956,55 @@ class RegionViewer(QMainWindow):
             return
         from squidmip._viewer import _MosaicWorker
 
+        # SUPERSEDE THE PRIOR LOAD WITHOUT BLOCKING THE UI THREAD. This used to stop the prior
+        # worker and then BLOCKING-JOIN it for up to 2 s, on the GUI thread. `stop()` only sets an
+        # Event that `_MosaicWorker.run` polls BETWEEN channels, and one channel is a full
+        # `fuse_region_pyramid` plus a contrast seed that materialises the coarsest level, so a
+        # scrub froze the window for as long as the current channel took, up to that cap.
+        # Under playback that is a freeze per frame.
+        #
+        # What the wait was really buying was "no stale pixels", and a GENERATION does that
+        # properly: every result carries the load it belongs to, and anything from an earlier one
+        # is dropped on arrival. So the old worker is asked to stop, kept referenced until Qt
+        # reaps it (a QThread destroyed while running aborts the process), and simply ignored.
+        self._load_gen = int(getattr(self, "_load_gen", 0)) + 1
+        gen = self._load_gen
         prior = self._worker
         if prior is not None and prior.isRunning():
             prior.stop()
-            prior.wait(2000)
+            self._retire_worker(prior)
 
         # An operator layer belongs to the region it was computed on. Moving to another region
         # would leave it placed at the old region's stage coordinates over the new region's raw.
         if self._result_region is not None and self._result_region != str(region):
             self._drop_result_layers(f"this window moved from {self._result_region} to {region}")
-        pane.mosaic.remove_op(_RAW_OP)
+        # REMOVE THE RAW LAYERS FOR A REGION CHANGE; KEEP THEM FOR A TIMEPOINT CHANGE. That
+        # distinction is the whole rule, and getting either half wrong has a measured cost.
+        #
+        # KEEPING them when the region is the SAME is what makes playback possible. `add_mosaic`
+        # reuses a layer it can FIND (6465069, "reuse layers across region changes instead of
+        # destroying them", Julio: "I can't cycle rapidly through these mosaics"), so an
+        # unconditional removal here guaranteed the slow path on every reload — and since the
+        # decentralization this window is the only viewing path, so that fix had no live caller
+        # left. Measured on sim_5d_2x2_t3 with a real napari canvas: the read is 10-13 ms in the
+        # worker, while rebuilding costs 165-265 ms of GUI thread PER CHANNEL. That was ~1.3 s a
+        # frame and ~0.8 s of frozen window; reusing makes it ~210 ms and ~0.4 s.
+        #
+        # REMOVING them when the region CHANGES is not caution, it is a crash fix. A different
+        # region is a different mosaic with a different shape, and `_reuse_layer` does not refuse
+        # a shape it cannot survive — it assigns `layer.data` and napari raises downstream.
+        # Driven against a real ViewerModel: deeper->shallower pyramid and 2D->3D both raise
+        # IndexError, 3D->2D raises ValueError, and the half-assigned layer then aborts the
+        # process on teardown. Ragged regions are ordinary: manual0 is 27 FOVs and manual1 is 28
+        # on the 10x tissue set, so their mosaics differ. `tests/test_time_point_playback.py`
+        # walks those transitions against a real `MosaicLayers`, because the pane STUB the rest
+        # of the suite uses records `add_mosaic` and returns, so no stubbed test can ever see it.
+        #
+        # `_shown_region` is the one fact both this and the framing in `_on_done` ask about:
+        # which region's mosaic is currently in the pane. A stale answer here can only cost an
+        # unnecessary rebuild, never a crash, which is the right way round.
+        if self._shown_region != str(region):
+            pane.mosaic.remove_op(_RAW_OP)
         channels = [c["name"] for c in self._meta["channels"]]
         # t=THIS WINDOW'S TIMEPOINT. Without it the worker fused timepoint 0 whatever the
         # timepoint bar said, and the reload this method performs on every slider move repainted
@@ -1819,15 +2012,66 @@ class RegionViewer(QMainWindow):
         w = _MosaicWorker(self._reader, self._meta, region, channels, z_index=0, parent=self,
                           t=self.time_point)
         w.ready.connect(lambda r, ch, levels, bbox, win:
-                        self._on_plane(r, ch, levels, bbox, win))
+                        self._on_plane(r, ch, levels, bbox, win, gen=gen))
         w.problem.connect(self._say)
-        w.finished_count.connect(lambda n: self._on_done(region, n))
+        w.finished_count.connect(lambda n: self._on_done(region, n, gen=gen))
+        # EVERY WORKER IS DELETED WHEN IT ENDS. `parent=self` makes Qt's C++ object graph own it,
+        # so a finished worker stays alive for as long as the window does — measured: 78 live
+        # `_MosaicWorker` objects after 78 playback frames, with `gc.collect()` freeing none of
+        # them, which is exactly the accumulation `tools/run_suite_chunked.py` diagnosed as the
+        # reason the suite cannot run in one process. Before playback a window created a worker
+        # per navigation; now it creates one per FRAME, so an unbounded pile is no longer
+        # something that merely offends.
+        w.finished.connect(lambda: self._worker_ended(w))
         self._worker = w
         w.start()
 
-    def _on_plane(self, region: str, channel: str, levels, bbox_um, window=None) -> None:
+    def _worker_ended(self, worker) -> None:
+        """A load's thread has ended. Drop every reference to it, ours and Qt's."""
+        if self._worker is worker:
+            self._worker = None
+        self._forget_worker(worker)
+        try:
+            worker.deleteLater()
+        except RuntimeError:
+            pass            # already gone
+
+    def _retire_worker(self, worker) -> None:
+        """Let a superseded worker die on its own time, without dropping it on the floor.
+
+        Two failures are being avoided at once. Dropping the only reference to a RUNNING QThread
+        lets Python free it and Qt aborts the process ("QThread: Destroyed while thread is still
+        running") — the same hazard `RegionSlider.shutdown` exists for. Waiting for it instead
+        blocks the GUI thread, which is what this replaces. So it is parked here and removed when
+        Qt says it has finished.
+        """
+        retired = getattr(self, "_retired_workers", None)
+        if retired is None:
+            retired = self._retired_workers = []
+        retired.append(worker)
+        # No second `finished` connection: `_load_mosaic` already wired one to `_worker_ended`,
+        # which forgets it here AND deletes it. Two hooks doing half the cleanup each is how one
+        # of them ends up being the only one anybody remembers to update.
+
+    def _forget_worker(self, worker) -> None:
+        retired = getattr(self, "_retired_workers", None)
+        if retired is not None and worker in retired:
+            retired.remove(worker)
+
+    def _is_current_load(self, gen: int) -> bool:
+        """Whether *gen* is the load this window is still waiting for."""
+        return int(gen) == int(getattr(self, "_load_gen", 0))
+
+    def _on_plane(self, region: str, channel: str, levels, bbox_um, window=None,
+                  gen: Optional[int] = None) -> None:
         pane = self._pane
         if pane is None or not getattr(pane, "ok", False):
+            return
+        # A SUPERSEDED LOAD'S PIXELS ARE DROPPED. The region check below cannot see this one: a
+        # timepoint change keeps the region, so the loser and the winner agree about `region` and
+        # differ only in `t`. Without the generation, the retired worker's timepoint 0 lands after
+        # the new worker's timepoint 2 and the window shows the older frame under the newer label.
+        if gen is not None and not self._is_current_load(gen):
             return
         if self._cursor is not None and self._cursor.region != region:
             return                                  # a later region won the race; drop this one
@@ -1868,26 +2112,54 @@ class RegionViewer(QMainWindow):
         if self.open_clock is not None:
             self.open_clock.first_layer()
 
-    def _on_done(self, region: str, n: int) -> None:
+    def _on_done(self, region: str, n: int, gen: Optional[int] = None) -> None:
         pane = self._pane
         if pane is None or not getattr(pane, "ok", False):
             return
+        # A retired worker finishing must NOT open the playback gate: the frame the user is
+        # waiting for is still being read, and letting the next one be requested here is exactly
+        # the backlog the gate exists to prevent.
+        if gen is not None and not self._is_current_load(gen):
+            return
         if n == 0:
             pane.say(f"{region}: no mosaic could be built (see the message above).")
+            # NOW the raw layers go, and only now. `_load_mosaic` deliberately leaves them alone
+            # so a reload can reuse them; the one case where that would lie is a load that
+            # produced nothing, where the previous frame's pixels would sit under this region's
+            # name. This is where that is known, so this is where they are dropped.
+            try:
+                pane.mosaic.remove_op(_RAW_OP)
+            except Exception:                        # noqa: BLE001 - already gone is fine
+                pass
+            self._shown_region = None
             if self.open_clock is not None:
                 self.open_clock.finish(_measure.FAILED, f"{region}: no mosaic could be built")
             self._frame_done()
             return
         pane.say("")
+        # ASKED BEFORE THE try, RECORDED AFTER IT, and deliberately not inside: framing is
+        # cosmetic and its failure is swallowed, but `_shown_region` also decides whether the NEXT
+        # load may reuse these layers. Updating it inside the try would tie a correctness fact to
+        # whether a camera move happened to succeed — and against a pane whose model is absent it
+        # never does, so the flag would never advance and every reload would rebuild.
+        first_look = self._shown_region != str(region)
         try:
             # show_op makes EXACTLY one group visible, so calling it unconditionally would hide an
             # operator layer this window is legitimately still showing for this same region -- the
             # user's toggle, undone by a reload they did not ask anything of.
             if self._result_region is None:
                 pane.mosaic.show_op(_RAW_OP)
-            pane.mosaic.model.reset_view()
+            # RE-FRAME ONLY WHEN THE PICTURE IS SOMEWHERE ELSE. A timepoint step reloads the SAME
+            # region at the same stage coordinates, so resetting the camera each time does two
+            # unwanted things: it costs 85-130 ms of GUI thread per frame (measured), and it drags
+            # the user's zoom back to fit-the-region on every frame of playback -- you cannot
+            # watch a blob move at 1:1 if the camera keeps pulling out. Framing follows the
+            # REGION, which is the thing whose extent actually changed.
+            if first_look:
+                pane.mosaic.model.reset_view()
         except Exception:                            # noqa: BLE001 - view framing is cosmetic
             pass
+        self._shown_region = str(region)
         # Seed this window's settings ONCE, now that the layers exist. For an ROI child that is the
         # parent's contrast, so the child looks like the window it was cut out of.
         self._apply_settings_once()
@@ -1899,9 +2171,18 @@ class RegionViewer(QMainWindow):
         self._frame_done()
 
     def _frame_done(self) -> None:
-        """Open the playback gate: this region is on screen, the next may be requested."""
+        """Open the playback gate: this mosaic is on screen, the next frame may be requested.
+
+        BOTH axes, unconditionally. One mosaic load is what a region step and a timepoint step
+        both wait on, so the completion is one event and it opens whichever gate is closed. Asking
+        which axis is playing first would be a second copy of "who is animating", and the bar and
+        the slider each already know: `frame_done` on a control that is not playing is a no-op.
+        """
         if self._slider is not None:
             self._slider.frame_done()
+        bar = getattr(self, "_time_point_bar", None)
+        if bar is not None:
+            bar.frame_done()
 
     # -- 2D -> 3D, per window -----------------------------------------------------------
     def _selected_roi(self) -> "tuple":
@@ -2037,38 +2318,191 @@ class RegionViewer(QMainWindow):
             self._say(f"3D could not open: {exc}")
 
     def _open_roi_3d(self, region: str, roi_bbox: tuple, contrast_by: dict, colormap_by: dict) -> None:
-        """3D of an ROI = native fusion of the FOVs it overlaps, cropped to the box (full z)."""
-        names = [c["name"] for c in (self._meta or {}).get("channels", [])]
-        from squidmip._napari3d import native_roi_volume, open_native_3d_volume, z_step_um
+        """3D of an ROI, BRICKED and IN THIS WINDOW. Any ROI renders; none is refused.
 
-        try:
-            volumes = native_roi_volume(self._reader, self._meta, region, roi_bbox, names)
-        except Exception as exc:                         # noqa: BLE001 - named to the window
-            self._say(f"ROI 3D fusion failed: {exc}")
+        Julio: "the 3D rendering ROI design improvement, which now sucks because the user has no
+        in-window computation and can select ROIs that can't be seen (I thought we had decided to do
+        bricking)". Both halves are answered here.
+
+        IN-WINDOW. This paints into the pane's own napari canvas (``_napari_viewer()``) instead of
+        constructing a popout ``napari.Viewer``. The old objection to doing that -- ``_replace_native3d``'s
+        docstring, "the pane's layers are the FUSED PYRAMID whose level 0 is already capped to
+        _MAX_FUSED_PX, while 3D reads a NATIVE z-stack" -- was about reusing the pane's LAYERS. It
+        does not apply to adding our own: the brick layers are read straight from the reader, exactly
+        as the popout was, and the pyramid layers are hidden while they are up. Sharing a canvas was
+        never the problem; sharing the pyramid was.
+
+        BRICKED. An ROI over the GL texture limit is tiled rather than turned away. Nothing is read
+        that the camera cannot see, so a box over a whole 11538 x 9645 region opens against a bounded
+        budget instead of a 2.2 GB/channel fusion.
+        """
+        names = [c["name"] for c in (self._meta or {}).get("channels", [])]
+        if not names:
+            self._say("this acquisition declares no channels to render in 3D.")
             return
-        volumes = {n: v for n, v in (volumes or {}).items()
-                   if v is not None and int(v.shape[0]) >= 2}
-        if not volumes:
-            self._say("ROI 3D: no z-stack over this ROI (single z plane, or the box is off-tissue).")
+        viewer = self._napari_viewer()
+        if viewer is None:
+            self._say("3D needs this window's napari canvas, which isn't available here.")
+            return
+        from squidmip import _bricks
+        from squidmip._brick_view import BrickedVolume
+        from squidmip._napari3d import region_origin_um, roi_window_px, z_step_um
+
+        window = roi_window_px(self._meta or {}, region, roi_bbox)
+        origin = region_origin_um(self._meta or {}, region)
+        if window is None or origin is None:
+            self._say("ROI 3D: this ROI does not land on any FOV of this region.")
+            return
+        nz = len(list((self._meta or {}).get("z_levels") or [0]))
+        if nz < 2:
+            self._say("3D needs a z-stack; this acquisition has a single z plane.")
             return
         px = float((self._meta or {}).get("pixel_size_um") or 1.0)
         dz = z_step_um(self._meta or {}, px, where=f"3D ROI {region}")
-        max_tex = 2048
+        max_tex = _DEFAULT_MAX_3D_TEXTURE
         try:
             max_tex = int(self._pane._live_max_3d_texture())
-        except Exception:                                # noqa: BLE001
+        except Exception:                                # noqa: BLE001 - the Apple value is the floor
             pass
+        read, source = self._volume_source(window)
+        if source is None:
+            return                                       # _volume_source already said why
+        r0, r1, c0, c1 = window
+        # The ROI's own world corner: the region origin plus the crop, in stage micrometres. This is
+        # the same arithmetic `_crop_levels_to_bbox` does for 2D, so the volume lands exactly where
+        # the box was drawn.
+        roi_origin = (0.0, float(origin[1]) + r0 * px, float(origin[0]) + c0 * px)
+        budget = _brick_budget_bytes()
         try:
-            self._replace_native3d(lambda: open_native_3d_volume(
-                {n: np.asarray(v) for n, v in volumes.items()},
-                scale=(dz, px, px),
-                title=f"3D ROI — {self._region_label(self._regions)}",
-                contrast_by_channel=contrast_by or None,
-                colormap_by_channel=colormap_by or None,
-                max_texture=max_tex,
-            ))
+            self._replace_native3d(lambda: _started(BrickedVolume(
+                viewer, self._reader, self._meta, region, window,
+                channels=names, scale=(dz, px, px), origin_um=roi_origin,
+                limit=max_tex, budget_bytes=budget,
+                contrast_by=contrast_by or None, colormap_by=colormap_by or None,
+                say=self._say, parent=self, read=read,
+            )))
         except Exception as exc:                         # noqa: BLE001 - named to the window
             self._say(f"ROI 3D could not open: {exc}")
+            return
+        # THE CAMERA IS THE INPUT to which bricks are resident and how finely they are sampled, so
+        # the settle callback is what makes zooming converge to native. Debounced by the pane (120
+        # ms quiet period) for the reason the 2D fetch is: a drag emits camera events far faster
+        # than a brick can be read, and fetching per event grows a queue that never drains.
+        try:
+            self._pane.on_camera_settled(self._refresh_bricks)
+        except Exception:                                # noqa: BLE001 - static bricks still render
+            pass
+        vol = self._native3d
+        n = getattr(vol, "brick_count", 0)
+        self._say(f"3D in-window: '{source}', {(r1 - r0)}x{(c1 - c0)} px ROI, {nz} z, "
+                  f"{len(names)} channel(s), {n} texture{'' if n == 1 else 's'} at "
+                  f"{px:.3f} um/px. {_bricks.ceiling_line(max_tex, px, measured=True)}")
+
+    def _volume_source(self, window: tuple):
+        """WHICH volume 3D renders: the operator layer this window is SHOWING, or raw.
+
+        Julio: "make sure that the 2d/3d operator workflow is also end to end". 3D used to read
+        ``mosaic.find(_RAW_OP, name)`` with ``_RAW_OP`` hardcoded, so a decon / bgsub / stitch
+        result could be computed and displayed in 2D and then had no way to be seen as a volume --
+        the data existed (per-plane fusion makes operators produce ``(T, C, Nz, Y, X)``), only the
+        viewer refused it.
+
+        The choice comes off the DECLARATION, never off the operator's name: ``visible_op()`` says
+        which processing layer is lit and ``MosaicLayers._reduces_z`` asks the registry whether that
+        operator consumes z. ``tests/test_operator_declaration.py`` fails the build on an
+        ``x == "<operator name>"`` comparison precisely to stop the name test creeping back.
+
+        Returns ``(read, label)`` -- ``read=None`` meaning "use the reader's raw z-stack" -- or
+        ``(None, None)`` with a spoken reason when the visible layer has no volume to show.
+        """
+        mosaic = getattr(self._pane, "mosaic", None) if self._pane is not None else None
+        if mosaic is None:
+            return None, _RAW_OP
+        try:
+            op = mosaic.visible_op()
+        except Exception:                                # noqa: BLE001 - fall back to raw
+            return None, _RAW_OP
+        if not op or op == _RAW_OP:
+            return None, _RAW_OP
+        # A z-REDUCER's result is (T, C, 1, Y, X): one plane. There is no volume, and rendering a
+        # single slice as a "3D volume" would be a picture that lies about its own depth.
+        try:
+            if mosaic._reduces_z(op):
+                self._say(f"3D: '{op}' reduces z to a single plane, so it has no volume to render. "
+                          f"Show raw (or a z-preserving operator) and click 3D again.")
+                return None, None
+        except Exception:                                # noqa: BLE001 - undeclared: try to render
+            pass
+        px = float((self._meta or {}).get("pixel_size_um") or 1.0)
+        origin = None
+        try:
+            from squidmip._napari3d import region_origin_um
+
+            origin = region_origin_um(self._meta or {}, self.current_region())
+        except Exception:                                # noqa: BLE001
+            pass
+        if origin is None:
+            self._say(f"3D: '{op}' cannot be placed — this region has no stage positions.")
+            return None, None
+        # An operator layer carries its OWN grid: a parent window holds the fused pyramid (level 0
+        # capped to _MAX_FUSED_PX), an ROI child holds a crop placed at the ROI. Indexing either
+        # with mosaic pixels would be wrong in a different way each time. The layer's own
+        # translate/scale is the one mapping that is true for both, so world micrometres are the
+        # currency -- exactly as they are for placement everywhere else in this pane.
+        srcs: dict = {}
+        for ch in mosaic.channels(op):
+            layer = mosaic.find(op, ch)
+            data = getattr(layer, "data", None) if layer is not None else None
+            if isinstance(data, (list, tuple)):
+                data = data[0]                           # level 0 of a pyramid: the finest rung
+            if data is None or getattr(data, "ndim", 0) < 3 or int(data.shape[0]) < 2:
+                continue
+            try:
+                tr = tuple(float(v) for v in layer.translate[-2:])
+                sc = tuple(float(v) for v in layer.scale[-2:])
+            except Exception:                            # noqa: BLE001 - unplaceable layer
+                continue
+            if sc[0] <= 0 or sc[1] <= 0:
+                continue
+            srcs[ch] = (data, tr, sc)
+        if not srcs:
+            self._say(f"3D: '{op}' is on screen but carries no z depth here, so there is no volume "
+                      f"to render.")
+            return None, None
+        ox_um, oy_um = float(origin[0]), float(origin[1])
+
+        def _read(brick, channel, step, should_stop):
+            """One brick out of the OPERATOR's on-screen volume, same contract as the raw reader:
+            a mosaic-pixel window in, ``(z, y, x)`` out, None when superseded."""
+            got = srcs.get(channel)
+            if got is None or (should_stop is not None and should_stop()):
+                return None
+            src, (ty, tx), (sy, sx) = got
+            # brick bounds are mosaic pixels -> stage micrometres -> this layer's own indices
+            y0 = int(round((oy_um + brick.r0 * px - ty) / sy))
+            y1 = int(round((oy_um + brick.r1 * px - ty) / sy))
+            x0 = int(round((ox_um + brick.c0 * px - tx) / sx))
+            x1 = int(round((ox_um + brick.c1 * px - tx) / sx))
+            y0, x0 = max(0, y0), max(0, x0)
+            y1, x1 = min(int(src.shape[-2]), y1), min(int(src.shape[-1]), x1)
+            if y1 <= y0 or x1 <= x0:
+                return None
+            sub = np.asarray(src[:, y0:y1, x0:x1])
+            s = max(1, int(step))
+            return np.ascontiguousarray(sub[:, ::s, ::s]) if s > 1 else sub
+
+        return _read, op
+
+    def _refresh_bricks(self) -> None:
+        """The camera stopped: re-decide stride and visible set. No-op unless 3D bricks are up."""
+        vol = self._native3d
+        refresh = getattr(vol, "refresh", None)
+        if not callable(refresh):
+            return
+        try:
+            refresh()
+        except Exception as exc:                         # noqa: BLE001 - named, never silent
+            self._say(f"3D: could not follow the camera ({exc}).")
 
     def _render_roi_volume(self, mosaic, contrast_by: dict, colormap_by: dict) -> None:
         """Render the EXACT ROI subarray in 3D: the cropped level-0 volume this window's 2D view
@@ -2164,13 +2598,16 @@ class RegionViewer(QMainWindow):
         A window that is not the active one stops its playback so it is not fusing regions in the
         background and competing for the GPU with the window the user is actually looking at.
         """
-        if active or self._slider is None:
+        if active:
             return
-        try:
-            if self._slider.is_playing:
-                self._slider.stop()
-        except Exception:                            # noqa: BLE001 - best effort
-            pass
+        for control in (self._slider, getattr(self, "_time_point_bar", None)):
+            if control is None:
+                continue
+            try:
+                if control.is_playing:
+                    control.stop()
+            except Exception:                        # noqa: BLE001 - best effort
+                pass
 
     def changeEvent(self, event):                    # noqa: N802 - Qt naming
         from qtpy.QtCore import QEvent
@@ -2219,6 +2656,30 @@ class RegionViewer(QMainWindow):
                 self._slider.shutdown()
         except Exception:                            # noqa: BLE001
             pass
+        # The bricked 3D view owns a long-lived QThread. "QThread: Destroyed while thread is still
+        # running" aborts the interpreter, so it is stopped and joined here like every other worker.
+        try:
+            vol, self._native3d = self._native3d, None
+            close = getattr(vol, "close", None)
+            if callable(close):
+                close()
+        except Exception:                            # noqa: BLE001
+            pass
+        try:
+            # The TIME axis has an animation thread of its own, and Qt aborts the process on a
+            # QThread destroyed while it is still running. Closing a window mid-playback is the
+            # ordinary way to meet that, so it is joined here exactly as the region slider is.
+            bar = getattr(self, "_time_point_bar", None)
+            if bar is not None:
+                bar.shutdown()
+        except Exception:                            # noqa: BLE001
+            pass
+        for worker in list(getattr(self, "_retired_workers", []) or []):
+            try:
+                worker.stop()
+                worker.wait(2000)
+            except Exception:                        # noqa: BLE001
+                pass
         self.closed.emit(self)
         super().closeEvent(event)
 
