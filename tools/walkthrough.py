@@ -41,8 +41,21 @@ _RESULTS: list[tuple[str, str, str, str]] = []      # (ticket, title, verdict, d
 
 
 def _app():
+    """The QApplication, on THE BINDING THE APP SHIPS -- which is decided by importing `squidmip`.
+
+    This said ``from PyQt5.QtWidgets import QApplication`` until 2026-08-05. After the Qt6
+    migration (10b8348, f7f9b28, ce5605c) it did not merely test the wrong thing, it could not run
+    at all: `squidmip/__init__` pins ``QT_API=pyqt6``, so the widgets under test are Qt6 while this
+    constructed a Qt5 application, both frameworks loaded into one process, and the harness aborted
+    on ``QWidget: Must construct a QApplication before a QWidget`` before the first check.
+
+    The one harness whose whole purpose is to catch GUI wiring that no unit test can see was itself
+    dead, silently, for five days. Importing `squidmip` FIRST is the point, not tidiness: the pin
+    lives in its ``__init__`` and has to be set before qtpy resolves a binding.
+    """
     global _APP
-    from PyQt5.QtWidgets import QApplication
+    import squidmip  # noqa: F401  -- sets QT_API before qtpy resolves a binding
+    from qtpy.QtWidgets import QApplication
     _APP = QApplication.instance() or QApplication([])
     return _APP
 
@@ -98,7 +111,7 @@ def settle(ms=4000):
     ingest() starts a background worker that pushes tiles as they decode, so two grabs taken
     without settling compare different stream states, not different settings.
     """
-    from PyQt5.QtCore import QEventLoop, QTimer
+    from qtpy.QtCore import QEventLoop, QTimer
     loop = QEventLoop()
     QTimer.singleShot(ms, loop.quit)
     loop.exec_()
@@ -147,8 +160,12 @@ def rendered(widget, w=900, h=700):
     widget.resize(w, h)
     _app().processEvents()
     img = widget.grab().toImage().convertToFormat(4)
-    ptr = img.bits(); ptr.setsize(img.byteCount())
-    return np.array(ptr).reshape(img.height(), img.width(), 4)[..., :3].astype(float)
+    ptr = img.bits(); ptr.setsize(img.sizeInBytes())   # byteCount() is Qt5-only
+    # bytesPerLine, not width*4: Qt pads scanlines to a 4-byte boundary, and a padded row read as
+    # width*4 shears the image by a pixel per row. Device pixel ratio too -- grab() renders at the
+    # screen's ratio, which is 2 on a retina panel and 1 offscreen.
+    row = np.frombuffer(ptr, np.uint8).reshape(img.height(), img.bytesPerLine() // 4, 4)
+    return row[:, :img.width(), :3].astype(float)
 
 
 def free_gb():
@@ -251,22 +268,29 @@ def run_all():
         # A real drag through the widget's own event handlers - not a direct call to the
         # selection setter. The Re-dock button was dead for a day precisely because every
         # test called the handler instead of clicking.
-        from PyQt5.QtCore import QEvent, QPointF, Qt
-        from PyQt5.QtGui import QMouseEvent
+        # Enums FULLY SCOPED (Qt.MouseButton.LeftButton, not Qt.LeftButton). Qt5 accepted the
+        # short spelling and Qt6 does not, so an unscoped enum here is an AttributeError at the
+        # moment the gesture fires -- which reads as "the marquee is broken" rather than "the
+        # harness is".
+        from qtpy.QtCore import QEvent, QPointF, Qt
+        from qtpy.QtGui import QMouseEvent
 
-        def ev(kind, pos, mods, buttons=Qt.LeftButton):
-            k = {"press": QEvent.MouseButtonPress, "move": QEvent.MouseMove,
-                 "release": QEvent.MouseButtonRelease}[kind]
-            return QMouseEvent(k, pos, Qt.LeftButton, buttons, mods)
+        _LEFT, _NONE = Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton
+        _SHIFT = Qt.KeyboardModifier.ShiftModifier
+
+        def ev(kind, pos, mods, buttons=_LEFT):
+            k = {"press": QEvent.Type.MouseButtonPress, "move": QEvent.Type.MouseMove,
+                 "release": QEvent.Type.MouseButtonRelease}[kind]
+            return QMouseEvent(k, pos, _LEFT, buttons, mods)
 
         w = open_window(PLATE)
         ov = w._overview
         rendered(ov)
         a = QPointF(2, 2)
         b = QPointF(ov.width() - 2, ov.height() - 2)
-        ov.mousePressEvent(ev("press", a, Qt.ShiftModifier))
-        ov.mouseMoveEvent(ev("move", b, Qt.ShiftModifier))
-        ov.mouseReleaseEvent(ev("release", b, Qt.ShiftModifier, buttons=Qt.NoButton))
+        ov.mousePressEvent(ev("press", a, _SHIFT))
+        ov.mouseMoveEvent(ev("move", b, _SHIFT))
+        ov.mouseReleaseEvent(ev("release", b, _SHIFT, buttons=_NONE))
         wells = ov.selected_wells()
         sel = w.selected_region_fovs()
         w.close()
@@ -432,7 +456,7 @@ def run_all():
     def _():
         """Not hidden, not disabled - absent. Walked over the REAL widget tree, because a control
         that is merely `hide()`-den is still a second owner waiting to be un-hidden."""
-        from PyQt5.QtWidgets import QAbstractSlider, QPushButton
+        from qtpy.QtWidgets import QAbstractSlider, QPushButton
         w = open_window(PLATE)
         bar = w._channel_bar
         if bar is None:
