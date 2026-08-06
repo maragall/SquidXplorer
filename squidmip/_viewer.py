@@ -1604,6 +1604,75 @@ class PlateWindow(QMainWindow):
         else:
             self._tell_requester(requester, "operator_done", action, float(elapsed))
 
+    def operator_kwargs_for(self, key: str) -> dict:
+        """THE parameters an operator would run with RIGHT NOW, off its live panel.
+
+        Julio, 2026-08-06: *"Controls should be in the 'operators for this window' to show the UI
+        controls for the operator in the dropdown and apply the newly set parameters."*
+
+        The second half is what was missing. A window's own Run button called
+        ``run_operator(key, regions=…, save=…, requester=self)`` with **no** ``operator_kwargs``,
+        while the plate's panel Run passed ``self.kwargs()`` -- so tuning the stitcher's blend
+        width, its outlier thresholds or its z handling on the plate and then pressing Run in the
+        window ran the DEFAULTS, with every control on screen saying otherwise. That is the same
+        defect shape as `_workers._OperatorWorker`'s preview branch and `_command.EngineExecutor`'s,
+        both fixed on 2026-08-05/06: two entry points to one run must pass the same arguments.
+
+        ONE READER, and it reads the PANEL rather than a copy of its values. Both panel families
+        already answer ``kwargs()`` -- the hand-written ones (``StitcherPanel``) and the ones
+        generated from an operator's declared ``params``
+        (``_param_panel.GenericOperatorPanel``) -- so this needs no per-operator case and a plugin's
+        operator is covered with no edit here.
+
+        ``{}`` when the operator's tab has never been opened, which means "run with the declared
+        defaults" and is exactly right: there is no panel, so there is nothing the user has set.
+        """
+        panel = (getattr(self, "_op_tabs", None) or {}).get(str(key))
+        if panel is None:
+            return {}
+        reader = getattr(panel, "kwargs", None)
+        if not callable(reader):
+            return {}
+        try:
+            kwargs = dict(reader() or {})
+        except Exception as exc:                 # noqa: BLE001 - a refused setting, NAMED
+            log.warning("%s panel could not report its parameters: %s: %s",
+                        key, type(exc).__name__, exc)
+            return {}
+        # The stitcher's z handling lives on its own combo rather than in `kwargs()` (which is
+        # `stitch_region`'s keyword set), and `StitcherPanel._run` adds it on the way out. It is a
+        # PARAMETER of the run either way, so it is added here too -- otherwise the window's Run
+        # silently reverted the one control this round of feedback was about.
+        combo = getattr(panel, "projector_combo", None)
+        if combo is not None and "projector" not in kwargs:
+            kwargs["projector"] = combo.currentText()
+        return kwargs
+
+    def operator_params_text(self, key: str) -> str:
+        """A ONE-LINE summary of what *key* is currently set to, for a window to print.
+
+        Julio: *"The control button should print a small text to it's side saying what the UI
+        parameters are set to. When I modify in the plate window, the printed values should change
+        in the roi window."*
+
+        Derived from :meth:`operator_kwargs_for` on every call, never cached and never mirrored
+        into the window: a second copy of a value the user is actively editing is precisely how the
+        printed text and the run come to disagree, which is the thing being fixed. The window asks
+        when it repaints, so the answer cannot be stale.
+        """
+        kwargs = self.operator_kwargs_for(key)
+        if not kwargs:
+            return "defaults"
+        parts = []
+        for name in sorted(kwargs):
+            value = kwargs[name]
+            if isinstance(value, float):
+                value = f"{value:g}"
+            elif isinstance(value, (list, tuple)):
+                value = f"{len(value)} selected"
+            parts.append(f"{name}={value}")
+        return " · ".join(parts)
+
     def _activate_operator(self, key: str):
         """Operator card / menu clicked: open the operator's UI tab.
 
@@ -2778,52 +2847,35 @@ class PlateWindow(QMainWindow):
         if wid in bound:
             return          # subscribe ONCE per window: MosaicLayers keeps a list of callbacks
 
-        # The channel index is resolved WHEN A GESTURE ARRIVES, not captured here. A subscription
-        # outlives an ingest (nothing can unsubscribe from MosaicLayers), and a captured map would
-        # then be the previous acquisition's channel order applied to the current plate's tiles.
-        def index_of(channel: str):
-            for i, c in enumerate((self._meta or {}).get("channels", [])):
-                if c["name"] == channel:
-                    return i
-            return None
-
-        def _sink(channel: str, lo: float, hi: float):
-            ch = index_of(channel)
-            if ch is not None:
-                self._on_detail_contrast(ch, lo, hi)
-
-        # Capability-checked, and this is NOT defensive noise: an unhandled Python exception that
-        # escapes a Qt SLOT makes PyQt abort the whole process (SIGABRT, no traceback you can act
-        # on). This runs from `windowOpened`, so a pane whose mosaic lacks the callback would kill
-        # the app rather than fail to follow. Measured: it aborted the test suite at 46%.
-        subscribe = getattr(mosaic, "on_user_contrast", None)
-        if not callable(subscribe):
-            return          # a mosaic surface with nothing to subscribe to: nothing to follow
-        subscribe(_sink)
-
-        # ...and the eye icons, for exactly the same reason. Julio: "there shouldn't be any
-        # controls for the plate view. It just reacts to toggles and contrast adjustments in
-        # napari." The plate's own checkboxes are gone; this is what replaces them.
-        def _vis_sink(channel: str, on: bool):
-            ch = index_of(channel)
-            if ch is None or self._overview is None:
-                return
-            self._overview.set_channel_visible(ch, on)
-
-        sub = getattr(mosaic, "on_user_visibility", None)      # same slot-abort hazard as above
-        if callable(sub):
-            sub(_vis_sink)
-
-        # ...and the LUT. Julio: "I change channel colormap in napari and plate view doesn't
-        # react." Same sink shape: napari owns the colour, the plate follows it.
-        def _cmap_sink(channel: str, rgb):
-            ch = index_of(channel)
-            if ch is not None and self._overview is not None:
-                self._overview.set_channel_color(ch, rgb)
-
-        sub = getattr(mosaic, "on_user_colormap", None)      # same slot-abort hazard as above
-        if callable(sub):
-            sub(_cmap_sink)
+        # THE PLATE NO LONGER FOLLOWS A WINDOW'S LOOK LIVE (2026-08-06).
+        #
+        # Three subscriptions used to live here -- contrast, eye icons and colormap -- each per
+        # CHANNEL, each landing on the plate the instant the user moved it in any window. Plus
+        # `_adopt_window_view`, which PULLED the same three at bind time because "an event tells
+        # you about a CHANGE; the initial state is not a change".
+        #
+        # Julio, 2026-08-06: *"we're shelving the interactive contrast synch. What we do is that
+        # whichever lookup table we have for the window, we copy it and it reflects on the plate,
+        # with whichever channels were turned on on the window. And the plate image shouldn't
+        # change unless we paste a LUT. That's the pragmatic fix to this annoying contrast sync
+        # logic."*
+        #
+        # He is right, and the reason is in the docstring the deleted code carried: *"Many windows,
+        # one plate: whichever window the user last gestured in is the one the plate shows."* That
+        # sentence is the whole defect. "Last gestured in" is not a thing a user tracks, and with
+        # several windows open the plate's look was decided by a history with no surface anywhere
+        # -- so the plate could go dark, or take one window's window onto another's wells, with
+        # nothing on screen having changed. Every fix made it a longer rule with more exceptions,
+        # which is the shape of a model that is wrong rather than incomplete.
+        #
+        # An explicit copy/paste has none of it: it names its source, it happens when asked, and it
+        # is already the model the windows use between themselves through the same `_LUT_CLIPBOARD`
+        # (`Copy LUTs` / `Paste LUTs`, and the plate's own pair). See `_plate_paste_luts`, which is
+        # now the ONE place the plate's look changes.
+        #
+        # What is deliberately KEPT is `on_user_op` below: which processing LAYER the plate draws
+        # is a different quantity from how it is windowed, it has exactly one honest answer at a
+        # time, and it is not what this feedback was about.
 
         # ...and the PROCESSING LAYER. Julio: "after I click an operator layer in our window, the
         # thumbnails don't update." The three sinks above are all per CHANNEL, so picking an
@@ -2837,48 +2889,7 @@ class PlateWindow(QMainWindow):
         sub = getattr(mosaic, "on_user_op", None)            # same slot-abort hazard as above
         if callable(sub):
             sub(_op_sink)
-        # ...and PULL what this window has ALREADY resolved. No sink can ever report it.
-        self._adopt_window_view(mosaic, index_of)
         bound.add(wid)
-
-    def _adopt_window_view(self, mosaic, index_of):
-        """Take the LUT a window is ALREADY showing, at the moment the plate starts following it.
-
-        THE ONLY IMPLEMENTATION OF THIS. There used to be a second, ``_adopt_centre_view``, which
-        did the same pull off the plate's own central pane; it was gated on ``self._mosaic_pane``
-        and so could not run, and it was deleted on 2026-08-06 rather than reconciled. That is the
-        answer to "is contrast implemented twice" for this pair: it was, one of the two was dead,
-        and dead is not duplicated. Julio's "Look at contrast difference between napari window and
-        plate view" is fixed HERE, per window, and nowhere else.
-
-        An EVENT tells you about a CHANGE; the initial state is not a change. ``on_user_contrast``
-        deliberately filters napari's own autoscale out (treating it as a user gesture is what
-        latched every channel MANUAL and killed the plate's auto-contrast the first time), so the
-        one moment that matters most -- the window a region comes up with -- is the one moment no
-        sink can report. This pulls it instead, per WINDOW rather than per central pane, and lands
-        in the FOLLOW path, not the manual latch.
-
-        Every read is capability-checked for the same reason the subscriptions above are: this
-        runs from a Qt slot, and an unhandled exception escaping one aborts the process.
-        """
-        if self._overview is None or self._meta is None:
-            return
-        get_window = getattr(mosaic, "contrast", None)
-        get_rgb = getattr(mosaic, "channel_rgb", None)
-        get_visible = getattr(mosaic, "channel_visible", None)
-        for c in self._meta.get("channels", []):
-            ch = index_of(c["name"])
-            if ch is None:
-                continue                     # a channel this window draws and the plate does not
-            window = get_window(c["name"]) if callable(get_window) else None
-            if window is not None:
-                self._on_detail_contrast(ch, float(window[0]), float(window[1]))
-            rgb = get_rgb(c["name"]) if callable(get_rgb) else None
-            if rgb is not None:
-                self._overview.set_channel_color(ch, rgb)
-            visible = get_visible(c["name"]) if callable(get_visible) else None
-            if visible is not None:
-                self._overview.set_channel_visible(ch, bool(visible))
 
     def _follow_window_layer(self, layer_key: str, on: bool) -> None:
         """A window showed or hid a processing layer: put the plate on the same one.
@@ -3928,7 +3939,28 @@ class PlateWindow(QMainWindow):
         self._readout.setText(f"copied plate LUTs for {len(_LUT_CLIPBOARD)} channel(s).")
 
     def _plate_paste_luts(self):
-        """Apply the shared LUT clipboard to the plate's per-channel contrast."""
+        """Apply the shared LUT clipboard to the plate: contrast, colour, AND channel on/off.
+
+        THIS IS THE ONLY WAY THE PLATE'S LOOK CHANGES (2026-08-06). Julio: *"whichever lookup table
+        we have for the window, we copy it and it reflects on the plate, with whichever channels
+        were turned on on the window. And the plate image shouldn't change unless we paste a LUT.
+        That's the pragmatic fix to this annoying contrast sync logic."*
+
+        The live subscriptions this replaced are described in ``_bind_window_contrast``. The short
+        version: the plate followed whichever window the user last gestured in, per channel, for
+        three quantities at once, and "last gestured in" is not a thing a user tracks. With several
+        windows open, the plate's look was decided by a history nobody could see, and the only way
+        to find out what it would do was to do it.
+
+        A copy/paste pair has none of that. It is explicit, it names its source, it happens when
+        asked, and it is the model the windows already use between themselves through the same
+        ``_LUT_CLIPBOARD``. What was a rule with exceptions becomes a gesture with a result.
+
+        VISIBILITY TRAVELS WITH THE WINDOW, not as a separate step: ``lut["on"]`` is what the
+        source window had lit. Written through ``set_channel_visible``, so the plate's
+        never-go-black floor still refuses the last lit channel -- pasting from a window with
+        everything switched off must not empty the navigator.
+        """
         from squidmip._region_viewer import _LUT_CLIPBOARD
         ov = self._overview
         if not _LUT_CLIPBOARD:
@@ -3936,17 +3968,32 @@ class PlateWindow(QMainWindow):
             return
         if ov is None:
             return
-        applied = 0
+        applied = channels = 0
         for i, name in enumerate(self._plate_channels()):
             lut = _LUT_CLIPBOARD.get(name)
-            if lut and lut.get("clim") is not None:
+            if not lut:
+                continue
+            if lut.get("clim") is not None:
                 lo, hi = lut["clim"]
                 try:
                     ov.set_channel_window(i, float(lo), float(hi))
                     applied += 1
                 except Exception:                        # noqa: BLE001 - one bad channel is skipped
                     pass
-        self._readout.setText(f"pasted LUTs onto {applied} plate channel(s).")
+            if lut.get("rgb") is not None:
+                try:
+                    ov.set_channel_color(i, lut["rgb"])
+                except Exception:                        # noqa: BLE001
+                    pass
+            if lut.get("on") is not None:
+                try:
+                    ov.set_channel_visible(i, bool(lut["on"]))
+                    channels += 1
+                except Exception:                        # noqa: BLE001
+                    pass
+        self._readout.setText(
+            f"pasted LUTs onto {applied} plate channel(s)"
+            + (f", and {channels} channel on/off state(s)." if channels else "."))
 
     def _highlight_view_regions(self, regions):
         """A view was clicked/opened — move the plate's blue wash onto its regions."""

@@ -145,6 +145,18 @@ def _channels(win) -> list:
     return [c["name"] for c in win._meta["channels"]]
 
 
+def _copy(luts: dict) -> None:
+    """Put a window's LUT snapshot on the shared clipboard, as `Copy LUTs` does.
+
+    The dict shape is `RegionViewer._per_channel_luts`': `clim`, `cmap`, `rgb`, and -- since
+    2026-08-06 -- `on`, the channel's visibility, which travels WITH the look rather than as a
+    separate gesture.
+    """
+    from squidmip._region_viewer import _LUT_CLIPBOARD
+    _LUT_CLIPBOARD.clear()
+    _LUT_CLIPBOARD.update(luts)
+
+
 def _spawn(win, window_id: int = 1, resolved=None) -> _FakeWindow:
     """A window opens: the manager announces it exactly as ``_spawn`` does."""
     child = _FakeWindow(window_id, resolved)
@@ -172,85 +184,101 @@ def test_the_root_really_has_no_central_napari_pane_to_bind(qapp, squid_dataset)
         win.close()
 
 
-# ------------------------------------------------------------------------- contrast, the ask
+# ------------------------------------------- the LOOK: copy/paste, never a live subscription
+#
+# Julio, 2026-08-06: *"we're shelving the interactive contrast synch. What we do is that whichever
+# lookup table we have for the window, we copy it and it reflects on the plate, with whichever
+# channels were turned on on the window. And the plate image shouldn't change unless we paste a
+# LUT."*
+#
+# This file used to assert the opposite -- eight tests that a drag, an eye icon or a colormap
+# change in ANY window landed on the plate immediately -- and each of them was an honest
+# description of what the code did. What none of them could express is the property that made it
+# unusable: the plate followed *whichever window the user last gestured in*, so with several
+# windows open its look was decided by a history with no surface anywhere. The tests passed
+# because each one had exactly one window.
+#
+# The tests below pin the replacement, and the first one is the whole of it: gestures in a window
+# now change NOTHING on the plate.
 
 
-def test_a_contrast_drag_in_a_window_repaints_the_plate(qapp, squid_dataset):
-    """The user-visible behaviour: drag a channel's contrast in a window, the plate follows.
+def test_a_gesture_in_a_window_leaves_the_plate_alone(qapp, squid_dataset):
+    """The shelving, stated as a property. Contrast, eye icon and colormap all together, because
+    all three used to land and the requirement is about the plate's look as a whole.
 
-    MUTATION: put back the ``_mosaic_pane is None`` guard (or drop the ``windowOpened``
-    connection) and this goes red, which is the state the code shipped in.
+    MUTATION: restore any of the three subscriptions in ``_bind_window_contrast`` and this goes
+    red on that quantity.
     """
     win = _open_plate(squid_dataset)
     try:
         child = _spawn(win)
         ch_name = _channels(win)[0]
+        before_window = win._overview._contrast.window(0)
+        before_mask = list(win._overview._mask)
 
         child.mosaic.user_drags_contrast(ch_name, 11.0, 222.0)
+        child.mosaic.user_clicks_eye(ch_name, False)
 
-        contrast = win._overview._contrast
-        assert contrast.window(0) == (11.0, 222.0), (
-            f"the plate is not rendering channel 0 with the window the user set in the window: "
-            f"{contrast.window(0)}"
-        )
+        assert win._overview._contrast.window(0) == before_window, (
+            "a contrast drag in a window still reaches the plate")
+        assert list(win._overview._mask) == before_mask, (
+            "an eye icon in a window still reaches the plate")
+        assert not win._overview._contrast.is_followed(0), (
+            "the plate is still following a window's resolved window")
     finally:
         win.close()
 
 
-def test_the_plate_adopts_the_window_it_opens_with_before_any_gesture(qapp, squid_dataset):
-    """Julio, with a screenshot: "loupe not contrast synched with window ... the yellow vs green."
-
-    The sink above only reports a CHANGE, and deliberately so. But napari's autoscale at open is
-    not a change, it is the initial state, so the moment that matters most -- the window a region
-    comes up with -- is the one moment no sink can ever report. ``_adopt_centre_view`` was written
-    to pull it and was gated on ``self._mosaic_pane``, which the test above pins as absent: the
-    pull was orphaned when the central pane was removed, and until the user happened to drag a
-    slider the plate painted from its running histogram while the window painted from napari's
-    autoscale. The loupe magnifies the plate, so it inherited the disagreement.
-    ``_adopt_centre_view`` was deleted on 2026-08-06; ``_adopt_window_view`` is the one that runs.
-
-    MUTATION: drop the ``_adopt_window_view`` call from ``_bind_window_contrast`` (or point it back
-    at ``self._mosaic_pane``) and this goes red while every gesture test above stays green -- which
-    is exactly the state the code shipped in.
-    """
-    win = _open_plate(squid_dataset)
-    try:
-        ch_name = _channels(win)[0]
-        _spawn(win, resolved={ch_name: (321.0, 4321.0)})     # no gesture: it just opened
-
-        contrast = win._overview._contrast
-        assert contrast.window(0) == (321.0, 4321.0), (
-            "the window came up showing (321, 4321) and the plate is painting "
-            f"{contrast.window(0)}; nobody has touched a slider, so no sink will ever say so")
-        assert contrast.is_followed(0) and not contrast.is_manual(0), (
-            "the pull latched the channel MANUAL: an owner's autoscale is not a user gesture")
-    finally:
-        win.close()
-
-
-def test_the_windows_contrast_is_followed_and_never_latched_manual(qapp, squid_dataset):
-    """A window's resolved window is a SINK reading, not a policy decision by the user.
-
-    napari autoscales by itself, at open and whenever the displayed data changes. Recording that
-    as a user gesture is what latched every channel MANUAL before anyone had touched anything: the
-    plate's running auto-contrast was dead from the first frame, and per-region scope resolved
-    every cell to one global window while the plate drew a "wells NOT comparable" badge over the
-    top. Same numbers, different authority, and ``_RunningContrast.resolve`` reads the authority.
-
-    MUTATION: make the sink call ``set_channel_window`` (the manual latch) instead of
-    ``follow_channel_window`` and this goes red while the test above stays green.
-    """
+def test_pasting_a_windows_luts_is_what_moves_the_plate(qapp, squid_dataset):
+    """...and the explicit gesture DOES land. Shelving the subscription without this would be
+    removing the feature rather than replacing it."""
     win = _open_plate(squid_dataset)
     try:
         child = _spawn(win)
-        child.mosaic.user_drags_contrast(_channels(win)[0], 5.0, 500.0)
+        ch_name = _channels(win)[0]
+        child.mosaic.user_drags_contrast(ch_name, 11.0, 222.0)
 
-        contrast = win._overview._contrast
-        assert contrast.is_followed(0), "the window's contrast never reached the plate's sink"
-        assert not contrast.is_manual(0), (
-            "the plate latched channel 0 MANUAL from an owner's window; auto-contrast is now dead "
-            "for every well that streams in afterwards"
-        )
+        _copy({ch_name: {"clim": (11.0, 222.0), "cmap": None, "rgb": None, "on": True}})
+        win._plate_paste_luts()
+
+        assert win._overview._contrast.window(0) == (11.0, 222.0), (
+            "pasting the window's LUTs did not put its contrast on the plate")
+    finally:
+        win.close()
+
+
+def test_a_paste_carries_the_channels_the_window_had_lit(qapp, squid_dataset):
+    """*"with whichever channels were turned on on the window."* Visibility travels WITH the LUT:
+    a copied look with every channel's window and none of its on/off state is not the look that
+    was on screen."""
+    win = _open_plate(squid_dataset)
+    try:
+        child = _spawn(win)
+        names = _channels(win)
+        _copy({names[0]: {"clim": None, "cmap": None, "rgb": None, "on": False},
+               names[1]: {"clim": None, "cmap": None, "rgb": None, "on": True}})
+        win._plate_paste_luts()
+
+        assert not win._overview._mask[0], (
+            "the paste did not carry the window's channel on/off state to the plate")
+        assert win._overview._mask[1], "the paste turned off a channel the window had lit"
+    finally:
+        win.close()
+
+
+def test_a_paste_can_never_black_the_plate_out(qapp, squid_dataset):
+    """The never-go-black floor still wins over a paste. A window with everything switched off is
+    a legitimate thing to have; emptying the NAVIGATOR from it is not, because the plate has no
+    controls of its own to fill it back in from."""
+    win = _open_plate(squid_dataset)
+    try:
+        child = _spawn(win)
+        _copy({n: {"clim": None, "cmap": None, "rgb": None, "on": False}
+               for n in _channels(win)})
+        win._plate_paste_luts()
+
+        assert any(bool(v) for v in win._overview._mask), (
+            "pasting an all-off window emptied the plate")
     finally:
         win.close()
 
@@ -267,43 +295,6 @@ def test_a_channel_the_plate_does_not_have_is_ignored_rather_than_raising(qapp, 
         assert not win._overview._contrast.is_followed(0)
     finally:
         win.close()
-
-
-# ------------------------------------------------------------- visibility and colour, also asked
-
-
-def test_an_eye_icon_toggle_in_a_window_hides_that_channel_on_the_plate(qapp, squid_dataset):
-    """Julio asked for the TOGGLES as well as the contrast. napari's eye icon is the only control
-    over channel visibility now — the plate's own checkboxes are gone — so the plate has to be a
-    sink of it.
-
-    MUTATION: drop the ``on_user_visibility`` binding and this goes red.
-    """
-    win = _open_plate(squid_dataset)
-    try:
-        child = _spawn(win)
-        ch_name = _channels(win)[0]
-
-        child.mosaic.user_clicks_eye(ch_name, False)
-        assert bool(win._overview._mask[0]) is False, "the channel is still in the plate composite"
-
-        child.mosaic.user_clicks_eye(ch_name, True)
-        assert bool(win._overview._mask[0]) is True, "the channel never came back"
-    finally:
-        win.close()
-
-
-def test_a_colormap_change_in_a_window_re_tints_the_plate(qapp, squid_dataset):
-    """Julio: "I change channel colormap in napari and plate view doesn't react." Same sink
-    shape: napari owns the colour, the plate follows it."""
-    win = _open_plate(squid_dataset)
-    try:
-        child = _spawn(win)
-        child.mosaic.user_picks_colormap(_channels(win)[0], (0.0, 1.0, 0.0))
-        assert tuple(float(v) for v in win._overview._colors[0]) == (0.0, 1.0, 0.0)
-    finally:
-        win.close()
-
 
 # ------------------------------------------------------- the processing layer, Julio 2026-08-03
 
@@ -368,18 +359,19 @@ def test_a_window_layer_the_plate_never_ran_is_ignored_rather_than_raising(qapp,
 
 def test_every_open_window_is_bound_not_only_the_first(qapp, squid_dataset):
     """The old binding was a once-per-process latch over a single pane. Windows are plural, and a
-    second window whose gestures went nowhere would be the same defect one window later."""
+    second window whose gestures went nowhere would be the same defect one window later.
+
+    Asserted on the LAYER sink, which is the subscription that survived the 2026-08-06 shelving of
+    the live look-following. The property under test is about BINDING, not about contrast, so it
+    is unaffected by which quantities the plate still follows.
+    """
     win = _open_plate(squid_dataset)
     try:
         first, second = _spawn(win, 1), _spawn(win, 2)
-        names = _channels(win)
-
-        first.mosaic.user_drags_contrast(names[0], 1.0, 100.0)
-        second.mosaic.user_drags_contrast(names[1], 7.0, 700.0)
-
-        contrast = win._overview._contrast
-        assert contrast.window(0) == (1.0, 100.0)
-        assert contrast.window(1) == (7.0, 700.0), "the second window's gesture went nowhere"
+        assert 1 in win._followed_windows and 2 in win._followed_windows, (
+            "a second window was not bound")
+        assert len(first.mosaic.op_cbs) == 1 and len(second.mosaic.op_cbs) == 1, (
+            "the plate did not subscribe to both windows")
     finally:
         win.close()
 
@@ -390,13 +382,14 @@ def test_the_last_gesture_wins_when_two_windows_touch_one_channel(qapp, squid_da
     alternative — one privileged window — is the central pane the decentralization removed."""
     win = _open_plate(squid_dataset)
     try:
+        win._op_stack.add("mip", "Maximum Intensity Projection")
+        win._apply_layers()
         first, second = _spawn(win, 1), _spawn(win, 2)
-        ch_name = _channels(win)[0]
 
-        first.mosaic.user_drags_contrast(ch_name, 1.0, 100.0)
-        second.mosaic.user_drags_contrast(ch_name, 2.0, 200.0)
-
-        assert win._overview._contrast.window(0) == (2.0, 200.0)
+        first.mosaic.user_shows_layer("mip", False)
+        assert win._overview._active == "raw", "the FIRST window's layer choice was not followed"
+        second.mosaic.user_shows_layer("mip", True)
+        assert win._overview._active == "mip", "the SECOND window was never bound"
     finally:
         win.close()
 
@@ -414,13 +407,13 @@ def test_binding_the_same_window_twice_does_not_stack_a_second_subscription(qapp
     win = _open_plate(squid_dataset)
     try:
         child = _spawn(win)
-        n = len(child.mosaic.contrast_cbs)
+        n = len(child.mosaic.op_cbs)
         assert n == 1
 
         win._bind_window_contrast(child)     # the same window offered again
         win._bind_window_contrast(child)     # ...and again
-        assert len(child.mosaic.contrast_cbs) == n, (
-            f"the plate subscribed {len(child.mosaic.contrast_cbs)} times to one window"
+        assert len(child.mosaic.op_cbs) == n, (
+            f"the plate subscribed {len(child.mosaic.op_cbs)} times to one window"
         )
     finally:
         win.close()

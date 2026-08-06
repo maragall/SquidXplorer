@@ -471,6 +471,9 @@ class RegionViewer(QMainWindow):
         # run it here. The manager also lets an ROI open a CHILD window (the view tree).
         self._manager = manager
         self._operator_specs = list(operator_specs or [])
+        #: PLANE or VOLUME. Set by the 2D / 3D chips and read by `_z_kwargs_for_mode`, which is
+        #: what makes "stitch this in 3D" mean "register and fuse every z-plane".
+        self._render_mode = "2d"
         self._run_operator = run_operator
         self.parent_id = parent_id      # the view this was spawned from (ROI child) -> tree nesting
         # THE HOW-YOU-LOOK SETTINGS FOR THIS WINDOW (Task 6, 2026-07-29). Read ONCE, at
@@ -803,6 +806,14 @@ class RegionViewer(QMainWindow):
         r1.addWidget(self._btn_record)
         r1.addWidget(self._btn_plate)
         r1.addWidget(self._btn_controls)     # beside ▣ plate: both are the way BACK to the plate
+        # WHAT THE CHIP WOULD RUN WITH, printed beside it (Julio, 2026-08-06: "The control button
+        # should print a small text to it's side saying what the UI parameters are set to. When I
+        # modify in the plate window, the printed values should change in the roi window.").
+        # Derived from the plate on every refresh -- see `_refresh_controls_note`.
+        self._controls_note = QLabel("")
+        self._controls_note.setStyleSheet("color:#8b949e;font-size:11px;border:none;")
+        self._controls_note.setWordWrap(False)
+        r1.addWidget(self._controls_note, 1)
         r1.addStretch(1)
         self._refresh_record_chip()
         vv.addLayout(r1)
@@ -835,6 +846,9 @@ class RegionViewer(QMainWindow):
             self._op_combo.addItem("no operators", None)
             self._op_combo.setEnabled(False)
         opr.addWidget(self._op_combo, 1)
+        # The chip's side text names the operator the RUN button will use, so it follows the
+        # dropdown. `_refresh_controls_note` re-reads the plate; nothing is mirrored here.
+        self._op_combo.currentIndexChanged.connect(lambda _i: self._refresh_controls_note())
         opr.addWidget(self._chip("Run", "Run the selected operator on THIS view's regions.",
                                  self._run_view_operator))
         # SAVE-TO-DISK toggle, OFF by default: a window run is normally a PREVIEW ("see how the
@@ -1048,6 +1062,119 @@ class RegionViewer(QMainWindow):
         if self._manager is None or not self._manager.raise_plate():
             self._say("there is no plate window to raise from here.")
 
+    # -- the parameters this window would run with, and where they come from ---------------
+
+    def _plate(self):
+        """The plate window, or None. The plate owns every operator panel; this window borrows."""
+        return None if self._manager is None else self._manager.parent()
+
+    def _plate_operator_kwargs(self, key: str) -> dict:
+        """What *key*'s panel on the plate is currently set to. ``{}`` = its declared defaults.
+
+        Asked of the plate on every run and every repaint rather than mirrored here. A window
+        holding its own copy of a value the user is editing on the plate is two owners of one
+        quantity -- this project's dominant defect shape -- and here the two would disagree in the
+        worst possible way: the printed text would say one thing and the pixels would be another.
+        """
+        plate = self._plate()
+        reader = getattr(plate, "operator_kwargs_for", None)
+        if not callable(reader):
+            return {}
+        try:
+            return dict(reader(str(key)) or {})
+        except Exception as exc:                 # noqa: BLE001 - named, never a silent default
+            log.warning("view %s could not read %s's parameters from the plate: %s: %s",
+                        self.window_id, key, type(exc).__name__, exc)
+            return {}
+
+    def _params_summary(self, key: str) -> str:
+        """One line of what *key* is set to, for the chip's side text and the run echo."""
+        plate = self._plate()
+        reader = getattr(plate, "operator_params_text", None)
+        if not callable(reader):
+            return "defaults"
+        try:
+            return str(reader(str(key)))
+        except Exception:                        # noqa: BLE001 - a label must never raise
+            return "defaults"
+
+    def _z_kwargs_for_mode(self, key: str, current: dict) -> dict:
+        """What THIS WINDOW'S 2D/3D choice means for the operator's z handling.
+
+        Julio, 2026-08-06: *"When the user clicks 3D or 2D view, something should happen to the
+        window ID so that the operator knows whether to iterate on all the z-planes or only on the
+        current plane... if I set 3D, then I will run registration on all the z-planes and render
+        that volume."*
+
+        The window's mode is the honest place for this. "Stitch this" means something different in
+        a window showing a volume than in one showing a plane, and the operator cannot know which
+        -- ``stitch_region``'s ``projector=`` decides it and its default (``mip``) collapses z, so
+        every run from every window produced one flat plane and 3D had nothing to render.
+
+        Expressed as the ``projector`` PARAMETER, not as a new argument: ``consumes`` is already
+        the declaration that decides the z loop, so 3D picks a plane-op (``keepz``, the identity --
+        every plane, no pixel changed) and 2D leaves whatever the panel says. Nothing branches on
+        an operator's name; the mode only applies where a projector is a parameter at all, which
+        is exactly the region operators.
+
+        A single-plane acquisition is left alone: there is no volume to ask for, and silently
+        rewriting the user's projector there would change the pixels for no gain.
+        """
+        from squidmip import is_region_operator
+        from squidmip._operations import operator_name
+
+        if self._render_mode != "3d" or int((self._meta or {}).get("n_z") or 1) <= 1:
+            return {}
+        try:
+            if not is_region_operator(operator_name(str(key))):
+                return {}
+        except Exception:                        # noqa: BLE001 - an unknown key: leave it alone
+            return {}
+        chosen = str(current.get("projector") or "")
+        from squidmip._engine import Z_REDUCER, operator_consumes
+
+        try:
+            reduces = bool(operator_consumes(chosen) & Z_REDUCER) if chosen else True
+        except Exception:                        # noqa: BLE001 - an unknown projector: leave it
+            return {}
+        if not reduces:
+            return {}                            # already keeps z: the user's choice stands
+        self._say(f"3D: stitching all {int((self._meta or {}).get('n_z') or 1)} z-planes "
+                  f"(projector 'keepz') — one pose graph, every plane fused from it.")
+        return {"projector": "keepz"}
+
+    def set_render_mode(self, mode: str) -> None:
+        """Record whether this window is a PLANE or a VOLUME, and repaint what says so.
+
+        The 2D and 3D buttons already did their own jobs (open the ROI as a child; open a native
+        volume); neither left a trace an operator run could read, so "stitch this in 3D" had no
+        way to mean anything. This is that trace, and it is one word on the window rather than a
+        flag threaded through the run: `_z_kwargs_for_mode` is its only consumer.
+        """
+        mode = "3d" if str(mode).lower() == "3d" else "2d"
+        if mode == getattr(self, "_render_mode", "2d"):
+            return
+        self._render_mode = mode
+        self._refresh_controls_note()
+
+    def _refresh_controls_note(self) -> None:
+        """Print what the chip would run with, beside the chip. Derived on every call.
+
+        Julio: *"When I modify in the plate window, the printed values should change in the roi
+        window."* Refreshed whenever this window is shown, when the dropdown moves, and when the
+        mode changes -- and it READS THE PLATE each time, so there is no subscription to go deaf
+        and no copy to go stale.
+        """
+        note = getattr(self, "_controls_note", None)
+        if note is None:
+            return
+        combo = getattr(self, "_op_combo", None)
+        key = combo.currentData() if combo is not None else None
+        if not key:
+            note.setText("")
+            return
+        note.setText(f"{self._render_mode.upper()} · {self._params_summary(str(key))}")
+
     def _window_operators(self) -> list:
         """THE OPERATORS FOR THIS WINDOW: every processing layer it holds, raw excluded.
 
@@ -1103,31 +1230,37 @@ class RegionViewer(QMainWindow):
             self._say("controls: there is no plate window to open operator controls in.")
             return
 
-        ops = self._window_operators()
-        if not ops:
-            self._say("controls: nothing has been run on this window yet, so it has no operator "
-                      "controls. The plate is in front; run an operator from there.")
+        # THE OPERATOR IN THE DROPDOWN, not every layer this window holds. Julio, 2026-08-06:
+        # *"Controls should be in the 'operators for this window' to show the UI controls for the
+        # operator in the dropdown and apply the newly set parameters."*
+        #
+        # The previous cut opened a tab for every operator whose LAYER was in the pane, which is a
+        # different question and answers a different need: it is a history of what has been run,
+        # while the dropdown is what is about to be. So the chip could open three tabs and none of
+        # them the operator the Run button next to it would use -- and on a window where nothing
+        # had run yet, the dropdown offered `stitch` and the chip said there was nothing to tune.
+        # The two controls sit in the same box; they now name the same operator.
+        combo = getattr(self, "_op_combo", None)
+        key = combo.currentData() if combo is not None else None
+        if not key:
+            self._say("controls: no operator is selected in this window's dropdown, so there is "
+                      "nothing to tune. The plate is in front.")
             return
 
         plate = self._manager.parent()
         activate = getattr(plate, "_activate_operator", None)
         if activate is None:
-            self._say(f"controls: this plate cannot open operator tabs, so {', '.join(ops)} "
-                      "cannot be tuned from here.")
+            self._say(f"controls: this plate cannot open operator tabs, so {key} cannot be tuned "
+                      "from here.")
             return
-
-        opened, failed = [], []
-        for op in ops:
-            try:
-                activate(op)
-                opened.append(op)
-            except Exception as exc:                     # noqa: BLE001 - named, never a dead click
-                failed.append(f"{op} ({exc})")
-        if opened:
-            self._say(f"controls: {', '.join(opened)} — open on the plate window."
-                      + (f" Could not open {'; '.join(failed)}." if failed else ""))
-        else:
-            self._say(f"controls: could not open {'; '.join(failed)}.")
+        try:
+            activate(str(key))
+        except Exception as exc:                         # noqa: BLE001 - named, never a dead click
+            self._say(f"controls: could not open {key}: {exc}")
+            return
+        self._refresh_controls_note()
+        self._say(f"controls: {combo.currentText()} — open on the plate window. This window will "
+                  f"run it {self._render_mode.upper()} with {self._params_summary(str(key))}.")
 
     # -- movie export: this view's T (or Z) sweep, as a file ------------------------------
     def _refresh_record_chip(self) -> None:
@@ -1311,15 +1444,22 @@ class RegionViewer(QMainWindow):
         regions = list(self._regions)
         # SAVE OFF by default = preview (see how it looks); ON persists an OME-Zarr (Spencer huddle).
         save = bool(self._save_chk.isChecked()) if getattr(self, "_save_chk", None) is not None else False
+        # THE PANEL'S CURRENT VALUES, plus this window's own 2D/3D choice. This used to pass
+        # neither, so a run started from a window ignored every control the user had just set on
+        # the plate. See `PlateWindow.operator_kwargs_for` and `_z_kwargs_for_mode`.
+        kwargs = dict(self._plate_operator_kwargs(key))
+        kwargs.update(self._z_kwargs_for_mode(key, kwargs))
         try:
             # ``requester=self`` IS the completion path. Without it run_operator started a QThread
             # and returned, so this window called in and never heard back -- which is why the
             # result rendered on the plate and 'raw' / 'flatfield' / 'stitched' were not
             # selectable in the window that asked for them (Julio, 2026-07-29). The plate calls
             # operator_started / operator_done / operator_failed and deliver_result on us.
-            self._run_operator(key, regions=regions, save=save, requester=self)
+            self._run_operator(key, regions=regions, save=save, requester=self,
+                               operator_kwargs=kwargs)
             mode = "saving" if save else "previewing"
-            self._echo(f"{mode} {self._op_combo.currentText()} on {self._region_label(regions)}.")
+            self._echo(f"{mode} {self._op_combo.currentText()} on {self._region_label(regions)} "
+                       f"[{self._render_mode.upper()}] · {self._params_summary(key)}.")
         except Exception as exc:                          # noqa: BLE001 - named to the window
             self._say(f"could not start {self._op_combo.currentText()}: {exc}")
 
@@ -1747,6 +1887,7 @@ class RegionViewer(QMainWindow):
     def _view_roi_2d(self) -> None:
         """2D view of the SELECTED ROI: open it as a child window (same annotation the 3D button
         renders in 3D). With no ROI picked, just show the mosaic in 2D."""
+        self.set_render_mode("2d")     # ...and an operator run from here works on ONE plane
         bbox, _region = self._selected_roi()
         if bbox is None:
             self._set_ndisplay(2)
@@ -2062,6 +2203,21 @@ class RegionViewer(QMainWindow):
                 lut["rgb"] = colormap_hue_rgb(layer)
             except Exception:                            # noqa: BLE001
                 lut["rgb"] = None
+            # WHETHER THE CHANNEL IS ON. Julio, 2026-08-06: *"whichever lookup table we have for
+            # the window, we copy it and it reflects on the plate, with whichever channels were
+            # turned on on the window."* Channel visibility travels WITH the LUT because it is
+            # part of the same picture: a copied look with every channel's window and none of its
+            # on/off state is not the look that was on screen.
+            #
+            # Asked of the IDENTITY (`channel_visible` = "is this channel on screen anywhere"),
+            # not of the raw layer above, because an operator layer showing 488 means 488 is on
+            # even when raw's own copy of it is dark -- which is what every operator run leaves
+            # behind (`_darken_other_ops`).
+            try:
+                on = mosaic.channel_visible(name)
+                lut["on"] = None if on is None else bool(on)
+            except Exception:                            # noqa: BLE001
+                lut["on"] = None
             out[name] = lut
         return out
 
@@ -2586,6 +2742,7 @@ class RegionViewer(QMainWindow):
         under the ROI (or the region centre) directly and carry the EXACT on-screen contrast so 3D
         matches 2D. (Native fusion across the FOVs a large ROI spans is the next step; one native FOV
         is the honest max-res primitive today -- simple, and never downsampled.)"""
+        self.set_render_mode("3d")     # ...and an operator run from here works on EVERY z-plane
         region = self._cursor.region if self._cursor is not None else (
             self._regions[0] if self._regions else None)
         if region is None or self._reader is None or self._meta is None:

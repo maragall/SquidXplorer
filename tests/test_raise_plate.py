@@ -203,6 +203,22 @@ def _controls_button(win) -> QPushButton:
     return found[0]
 
 
+def _selects(win, key: str, label: str = "") -> None:
+    """Put *key* in this window's "Operators for this window" dropdown and select it.
+
+    THE chip's target since 2026-08-06. Julio: *"Controls should be in the 'operators for this
+    window' to show the UI controls for the operator in the dropdown and apply the newly set
+    parameters."* The chip used to open a tab per operator whose LAYER was in the pane, which
+    answers a different question -- that is a history of what has been RUN, while the dropdown is
+    what is about to be, and the Run button beside the chip uses the dropdown.
+    """
+    combo = win._op_combo
+    combo.clear()
+    combo.addItem(label or key, key)
+    combo.setCurrentIndex(0)
+    combo.setEnabled(True)
+
+
 def _holds(win, ops):
     """Make the window report *ops* as the processing layers it holds, the way the pane would."""
     class _Mosaic:
@@ -226,29 +242,55 @@ def test_every_child_window_carries_the_controls_button(qapp, manager):
     assert _controls_button(win).text() == "⚙ controls"
 
 
-def test_it_opens_a_tab_for_EVERY_operator_this_window_holds(qapp, manager):
-    """Plural. A window with decon and bgsub run on it must offer both, not just the lit one."""
+def test_it_opens_the_tab_for_THE_OPERATOR_IN_THE_DROPDOWN(qapp, manager):
+    """ONE operator: the one the Run button beside it would use.
+
+    MUTATION: point `_show_operator_controls` back at `_window_operators()` and this goes red --
+    it would open decon and bgsub, the two whose layers happen to be in the pane, and NOT stitch,
+    which is what the window is about to run.
+    """
     win = manager.open([REGIONS[0]])
     plate = _wired(manager)
-    _holds(win, ["decon", "bgsub"])
+    _holds(win, ["decon", "bgsub"])          # a history of what has run: NOT the chip's question
+    _selects(win, "stitch", "Stitch (register + fuse)")
     before = plate.raised
 
     _controls_button(win).click()
 
     assert plate.raised == before + 1, "the controls button did not raise the plate"
-    assert plate.activated_ops == ["decon", "bgsub"], (
-        f"the window holds two operators; it opened {plate.activated_ops}")
+    assert plate.activated_ops == ["stitch"], (
+        f"the chip opened {plate.activated_ops}, not the operator in the dropdown")
 
 
-def test_raw_is_never_offered_as_an_operator_to_tune(qapp, manager):
-    """`ops()` always contains raw. Raw is pixels off the disk, not something with parameters."""
+def test_it_says_what_the_operator_will_run_with(qapp, manager):
+    """*"The control button should print a small text to it's side saying what the UI parameters
+    are set to."* The chip's own line names the mode and the parameters, so pressing Run is not a
+    guess about which values are in force."""
     win = manager.open([REGIONS[0]])
-    plate = _wired(manager)
-    _holds(win, ["stitch"])
+    _wired(manager)
+    _selects(win, "stitch", "Stitch (register + fuse)")
+    said_before = len(win._pane.said)
 
     _controls_button(win).click()
 
-    assert plate.activated_ops == ["stitch"], f"raw leaked into the tabs: {plate.activated_ops}"
+    said = " ".join(win._pane.said[said_before:])
+    assert "Stitch" in said, f"the chip did not name the operator: {said!r}"
+    assert "2D" in said or "3D" in said, f"the chip did not say which mode it would run in: {said!r}"
+
+
+def test_the_chip_refuses_out_loud_when_no_operator_is_selected(qapp, manager):
+    """A window whose dropdown is empty still gets the trip back to the plate, and is told why
+    there is nothing to tune -- the refusal `_show_operator_controls` has always made, moved onto
+    the dropdown along with the question."""
+    win = manager.open([REGIONS[0]])
+    plate = _wired(manager)
+    win._op_combo.clear()
+    before = plate.raised
+
+    _controls_button(win).click()
+
+    assert plate.raised == before + 1, "a window with no operator selected lost its trip back"
+    assert plate.activated_ops == [], f"it opened a tab anyway: {plate.activated_ops}"
 
 
 def test_the_plate_COMES_FORWARD_even_when_the_window_holds_no_operator(qapp, manager):
@@ -290,29 +332,28 @@ def test_it_reads_the_operators_off_the_LAYERS_the_window_really_holds(qapp, man
                                          dtype=plane.dtype, kind="intensity"), visible=True)
     assert win._window_operators() == ["decon", "bgsub"]
 
+    _selects(win, "decon")
     _controls_button(win).click()
 
-    assert plate.activated_ops == ["decon", "bgsub"], (
-        f"the chip did not find the layers the window holds: {plate.activated_ops}")
+    assert plate.activated_ops == ["decon"], (
+        f"the chip opened {plate.activated_ops}, not the operator the dropdown names")
 
 
-def test_one_failing_panel_does_not_swallow_the_others(qapp, manager):
-    """Opening is per-operator, so a panel that raises must not cost the window its other tabs."""
+def test_a_panel_that_raises_is_NAMED_not_swallowed(qapp, manager):
+    """A dead click is the defect this chip was written twice to avoid. If the panel cannot open,
+    the window says which operator and what went wrong -- it does not fall silent."""
     win = manager.open([REGIONS[0]])
     plate = manager._test_plate
     plate.activated_ops = []
 
     def _activate(op):
-        if op == "decon":
-            raise RuntimeError("boom")
-        plate.activated_ops.append(op)
+        raise RuntimeError("boom")
 
     plate._activate_operator = _activate
-    _holds(win, ["decon", "bgsub"])
+    _selects(win, "decon")
     said_before = len(win._pane.said)
 
     _controls_button(win).click()
 
-    assert plate.activated_ops == ["bgsub"], "the surviving operator lost its tab"
     said = " ".join(win._pane.said[said_before:])
     assert "decon" in said and "boom" in said, f"the failure was not named: {said!r}"

@@ -305,6 +305,11 @@ class _Window(QObject):
     """
 
     _open_3d = RegionViewer._open_3d
+    # Opening 3D RECORDS the window's render mode (2026-08-06), which is what lets an operator run
+    # from this window know to iterate every z-plane rather than the shown one. Borrowed like every
+    # other method here so the real one is exercised, not stubbed past.
+    set_render_mode = RegionViewer.set_render_mode
+    _refresh_controls_note = RegionViewer._refresh_controls_note
     _open_roi_3d = RegionViewer._open_roi_3d
     _volume_source = RegionViewer._volume_source
     _on_screen_luts = RegionViewer._on_screen_luts
