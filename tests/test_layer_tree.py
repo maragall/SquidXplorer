@@ -512,6 +512,82 @@ def test_foreign_layers_never_appear_in_the_tree(tree, mosaic, qapp):
     assert [m.data(_op_index(tree, r), Qt.DisplayRole) for r in range(2)] == ["stitched", "raw"]
 
 
+# -- a channel row is one row over MANY layers while a 3-D volume is up -------------------------
+#
+# Julio, driving the real build 2026-08-06: "Turning off one layer doesn't turn the other like in
+# the 2D view."
+#
+# `_brick_view.BrickedVolume` stamps the SAME `(op, channel)` on every brick on purpose, so a
+# hundred textures collapse into ONE tree row -- and while 3D is up the pane's own 2-D layers
+# surrender that identity, so the bricks are the only holders. The tree resolved a channel row with
+# `MosaicLayers.find`, which returns the FIRST match, so unchecking a channel hid one brick of a
+# hundred and left the volume lit under a cleared checkbox. The group row was already right (it
+# iterates `group(op)`), which is why the two disagreed.
+
+
+def _brick(mosaic, op, channel, iy, ix):
+    """One brick layer, stamped exactly as ``BrickedVolume._add_layer`` stamps it."""
+    from squidmip._napari_view import MosaicKey
+
+    return mosaic.model.add_image(
+        _img(iy * 3 + ix, (4, 8, 8)), name=f"{channel} B{iy},{ix}",
+        metadata=MosaicKey(op, channel).as_metadata())
+
+
+def test_a_channel_row_switches_off_EVERY_layer_of_that_pair(tree, mosaic, qapp):
+    """THE REPORTED BUG. The row stands for the pair, not for one layer object.
+
+    MUTATION: put `layers = [self._mosaic.find(*key)]` back in `_LayerTreeModel.setData` -> only
+    the mosaic layer goes dark, three bricks stay lit -> red.
+    """
+    bricks = [_brick(mosaic, "stitched", "561", iy, ix)
+              for iy, ix in ((0, 0), (0, 1), (1, 0))]
+    qapp.processEvents()
+    m = tree.model()
+    idx = _ch_index_of(tree, "stitched", "561")
+    assert m.data(idx, Qt.CheckStateRole) == Qt.Checked
+
+    m.setData(idx, Qt.Unchecked, Qt.CheckStateRole)
+
+    lit = [ly for ly in mosaic.layers_for("stitched", "561") if ly.visible]
+    assert lit == [], (
+        f"{len(lit)} of {len(bricks) + 1} layer(s) answering to stitched/561 are still on screen "
+        "after the channel was switched off")
+    # ...and the row now reads as off, instead of showing a cleared box over a lit volume.
+    assert m.data(idx, Qt.CheckStateRole) == Qt.Unchecked
+
+
+def test_a_channel_row_reports_PARTIAL_when_its_layers_disagree(tree, mosaic, qapp):
+    """DERIVED from all of them, by the same rule the group row uses -- never from the first.
+
+    A volume half-evicted by the brick budget is a real state, and a row that reads Checked
+    because layer 0 happens to be on is the same lie `GroupLayer._visible` was rejected for.
+
+    MUTATION: read `find(*key).visible` in `_LayerTreeModel.data` -> Checked -> red.
+    """
+    _brick(mosaic, "stitched", "488", 0, 0)
+    second = _brick(mosaic, "stitched", "488", 0, 1)
+    qapp.processEvents()
+    m = tree.model()
+    second.visible = False
+    assert m.data(_ch_index_of(tree, "stitched", "488"), Qt.CheckStateRole) == Qt.PartiallyChecked
+
+
+def test_selecting_a_channel_row_selects_every_brick_of_it(qapp, mosaic):
+    """napari's contrast panel renders `viewer.layers.selection`; selecting one brick of a volume
+    shows one texture's controls and moves one texture's window.
+
+    MUTATION: `[model._mosaic.find(*key)]` in `_select_in_napari` -> 1 selected -> red.
+    """
+    _brick(mosaic, "stitched", "638", 0, 0)
+    _brick(mosaic, "stitched", "638", 0, 1)
+    tree = MosaicTree(mosaic)
+    tree.setCurrentIndex(_ch_index_of(tree, "stitched", "638"))
+    qapp.processEvents()
+    assert len(mosaic.model.layers.selection) == 3, (
+        f"the row selected {len(mosaic.model.layers.selection)} layer(s); the pair has 3")
+
+
 def test_checkboxes_are_actually_offered_to_the_user(tree):
     """A model that answers CheckStateRole but does not set ItemIsUserCheckable renders a tree
     with no checkboxes at all -- readable, unclickable, and green under every test above."""

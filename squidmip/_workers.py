@@ -123,7 +123,8 @@ class _OperatorWorker(QThread):
     # FULL-RESOLUTION result pixels, per FOV, for the napari layer group (Defect 3). The
     # operator's actual output in the raw mosaic's frame -- there used to be a second, downsampled
     # `pushReady` feed beside it for ndviewer_light's slider, and it went with that viewer.
-    resultReady = Signal(str, int, object)      # (region, fov, (C, Y, X) native dtype)
+    resultReady = Signal(str, int, object)      # (region, fov, (C, Nz, Y, X) | (C, Y, X) native
+    #                                             dtype -- see _result_pixels for which, and why)
     failed = Signal(str)                        # whole-run failure (not a per-well skip)
     finished_ok = Signal()
 
@@ -179,6 +180,7 @@ class _OperatorWorker(QThread):
         self._seen_fovs: dict[tuple, set] = {}    # (ri,ci) -> FOVs composited so far, for progress
         self._failed_regions: set = set()         # regions whose fields raised (IMA-226: report it)
         self._stop = threading.Event()            # set by the window to end the run cleanly
+        self._said_z_dropped = False              # see _z_dropped_note: once per run, not per FOV
 
     @property
     def mosaic_boxes(self) -> dict:
@@ -220,7 +222,7 @@ class _OperatorWorker(QThread):
         """
         info = self._fov_index[region]
         ri, ci, well_id = *info["rc"], info["well_id"]
-        well = image[0, :, 0]  # (C, Y, X)
+        well = image[0, :, 0]  # (C, Y, X) -- the plate THUMBNAIL's plane
         box = self._boxes.get((region, fov))
         n_c = len(self._channels)
 
@@ -261,9 +263,59 @@ class _OperatorWorker(QThread):
         self.tileReady.emit(ri, ci, well_id, raw, box)
         self.progress.emit(done, self._total)
         self.runProgress.emit(report)
-        # The operator's own pixels, undownsampled. `well` is a view into `image`; the slot
-        # copies what it keeps and drops the rest, so a plate-wide run does not accumulate.
-        self.resultReady.emit(region, fov, well)
+        # The operator's own pixels, undownsampled, AT THE DEPTH THE OPERATOR PRODUCED.
+        self.resultReady.emit(region, fov, self._result_pixels(image, well))
+
+    def _result_pixels(self, image, well):
+        """What goes to the LAYER: an operator's ``(C, Nz, Y, X)`` volume, or one ``(C, Y, X)`` plane.
+
+        This slot used to emit ``image[0, :, 0]`` for everything, and that index is a z choice
+        nothing declared. Julio, 2026-08-06: *"It is not stitching the z-levels in the 3d view
+        separately."* Measured on the real 10x set, manual0, ``projector="bgsub"``: ``stitch_plate``
+        yielded ``(1, 1, 10, 2084, 7711)`` -- ten fused planes, per-plane registration solved once
+        (IMA-277) -- and the display was handed ``(1, 2084, 7711)``. Nine of ten planes died on
+        this line, so the layer declared ``z_depth 1`` and ``_volume_source`` correctly refused to
+        render a volume that no longer existed.
+
+        The whole display side was already written for depth: ``_viewer._as_result`` derives
+        ``z_depth`` from ``planes[0].shape[0]``, ``deliver_result`` applies ``z_scale_um`` only when
+        that depth is > 1, and ``_volume_source`` requires ``ndim >= 3``. One line contradicted all
+        three.
+
+        WHY IT IS THE REGION OPERATOR'S VOLUME AND NOT EVERY OPERATOR'S -- and the split is by
+        DECLARATION (``consumes={"fov"}``, the same ``self._region_op`` that decides ``_boxes``
+        above), never by name:
+
+        * a REGION operator's mosaic is ALREADY ONE FUSED ARRAY. ``stitch_region`` spills it to a
+          scratch file above 2 GB (``_volume.allocate``) and hands back a memmap, and the slice
+          emitted here is a VIEW of it either way -- so keeping z costs nothing that the old
+          one-plane view was not already pinning.
+        * a per-FOV operator's would have to be re-fused per plane by
+          ``RegionResultAccumulator._fuse``, over per-FOV stacks the accumulator holds until the
+          region is whole: 9.4 GB of tiles plus 2.2 GB of fused planes for one 27-FOV 10x well.
+          That is a different change with its own budget, so that path still delivers ONE plane and
+          :meth:`_z_dropped_note` says so rather than letting it look like the operator produced
+          one.
+        """
+        if self._region_op:
+            return image[0]                       # (C, Nz, Y, X)
+        self._z_dropped_note(int(image.shape[2]))
+        return well                               # (C, Y, X)
+
+    def _z_dropped_note(self, depth: int) -> None:
+        """Say ONCE per run that a per-FOV operator's extra planes are not reaching the layer.
+
+        A z-reducer produces depth 1 and there is nothing to say. A plane-op produces the
+        acquisition's depth, and the layer shows plane 0 of it: that is a real limitation of the
+        per-FOV display path and this project does not let a limitation read as a result.
+        """
+        if depth <= 1 or self._said_z_dropped:
+            return
+        self._said_z_dropped = True
+        log.info("%s: the layer shows z plane 0 of %d. A per-FOV operator's mosaic is re-fused "
+                 "for display one plane at a time, and only that plane is kept; the WRITTEN "
+                 "plate carries all %d. Stitch the region to see the whole volume in 3D.",
+                 self._operator, depth, depth)
 
     def _on_error(self, region, fov, exc):
         """A well's projection failed (corrupt/missing plane): SKIP it, mark its dot failed, keep the

@@ -2521,15 +2521,30 @@ class RegionViewer(QMainWindow):
         Failure to close is swallowed by design: a stale popout that will not go away must not stop
         the new one from opening, and *open_it* raising is the caller's to report by name.
         """
-        old, self._native3d = self._native3d, None
-        if old is not None:
-            close = getattr(old, "close", None)
-            if callable(close):
-                try:
-                    close()
-                except Exception:                    # noqa: BLE001 - already-closed / no Qt window
-                    pass
+        self._close_native3d()
         self._native3d = open_it()
+
+    def _close_native3d(self) -> None:
+        """Take this window's 3D view down, and put the 2D scene back. Idempotent.
+
+        Split out of :meth:`_replace_native3d` because the close has to happen BEFORE the scene is
+        interrogated, not just before the new view is built. ``BrickedVolume.open()`` moves the
+        ``(op, channel)`` identity off the pane's 2-D mosaic layers and onto its bricks, so while a
+        volume is up ``MosaicLayers`` answers every question about the BRICKS: ``find`` returns one
+        512-px texture, and its contrast is that texture's, not the window the user set. Measured on
+        the real 10x set, second 3D click over a bgsub layer: 1 of 9 bricks of the box yielded
+        voxels (the volume showed one corner of the ROI), and the harvested contrast came back
+        ``(0.0, 1.0)`` instead of the ``(120, 900)`` on screen.
+        """
+        old, self._native3d = self._native3d, None
+        if old is None:
+            return
+        close = getattr(old, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:                        # noqa: BLE001 - already-closed / no Qt window
+                pass
 
     def _open_3d(self) -> None:
         """3D = THIS view at NATIVE resolution, read STRAIGHT FROM THE READER (gallery-view recipe).
@@ -2552,33 +2567,23 @@ class RegionViewer(QMainWindow):
             sel_bbox, sel_region = self._selected_roi()
             if sel_bbox is not None and sel_region is not None:
                 roi_bbox, region = sel_bbox, sel_region
-        mosaic = getattr(self._pane, "mosaic", None) if self._pane is not None else None
-        contrast_by: dict = {}
-        colormap_by: dict = {}
-        if mosaic is not None:
-            for c in (self._meta or {}).get("channels", []):
-                name = c["name"]
-                layer = mosaic.find(_RAW_OP, name)
-                if layer is None:
-                    continue
-                try:
-                    contrast_by[name] = tuple(layer.contrast_limits)   # EXACT window on screen
-                except Exception:                    # noqa: BLE001
-                    pass
-                try:
-                    cmap = layer.colormap
-                    colormap_by[name] = getattr(cmap, "name", cmap)
-                except Exception:                    # noqa: BLE001
-                    pass
+        # THE PREVIOUS VOLUME COMES DOWN BEFORE THE SCENE IS READ, not merely before the new one is
+        # built. Everything below asks `MosaicLayers` what is on screen -- which operator, which
+        # pixels, which contrast window -- and while a volume is up those questions are answered by
+        # its BRICKS (see `_close_native3d`). Reading the scene first and closing second is how a
+        # second 3D click came to render one corner of the box under a contrast nobody set.
+        self._close_native3d()
         # ROI -> native CROSS-FOV fusion cropped to the box (exact subarray, full z, native res),
         # read straight from the reader. Else the whole region's centre FOV (gallery-view recipe).
         if roi_bbox is not None:
-            self._open_roi_3d(region, roi_bbox, contrast_by, colormap_by)
+            self._open_roi_3d(region, roi_bbox)
             return
 
         fov = self._roi_center_fov(region, roi_bbox)
         from squidmip._napari3d import open_native_3d
 
+        # This branch reads RAW planes straight from the reader, so it adopts RAW's window.
+        contrast_by, colormap_by = self._on_screen_luts(_RAW_OP)
         try:
             self._replace_native3d(lambda: open_native_3d(
                 self._reader, self._meta, region, fov=fov,
@@ -2588,7 +2593,42 @@ class RegionViewer(QMainWindow):
         except Exception as exc:                     # noqa: BLE001 - named to the window, never silent
             self._say(f"3D could not open: {exc}")
 
-    def _open_roi_3d(self, region: str, roi_bbox: tuple, contrast_by: dict, colormap_by: dict) -> None:
+    def _on_screen_luts(self, op: str) -> "tuple[dict, dict]":
+        """``(contrast_by_channel, colormap_by_channel)`` as *op*'s layers are showing them.
+
+        Julio, 2026-08-06: *"When I stitch in 3d, in window, the contrast changes."* This used to
+        read ``find(_RAW_OP, ...)`` whatever the volume was about to render, so a volume of a
+        stitch / decon / bgsub layer opened wearing RAW's window -- and where raw had no layer for
+        a channel, nothing was carried at all and ``_brick_view._add_layer`` derived its own with
+        ``_auto_clim``. Both are the same defect: the user set a window on the layer they were
+        looking at, and the volume showed a different one.
+
+        A channel *op* has no layer for is ABSENT rather than filled in from raw. Raw's window over
+        an operator's pixels is not a safer guess than none; it is a different wrong answer, and an
+        absent entry is what lets the brick derive one from the voxels it actually holds.
+        """
+        mosaic = getattr(self._pane, "mosaic", None) if self._pane is not None else None
+        contrast_by: dict = {}
+        colormap_by: dict = {}
+        if mosaic is None:
+            return contrast_by, colormap_by
+        for c in (self._meta or {}).get("channels", []):
+            name = c["name"]
+            layer = mosaic.find(str(op), name)
+            if layer is None:
+                continue
+            try:
+                contrast_by[name] = tuple(layer.contrast_limits)   # EXACT window on screen
+            except Exception:                        # noqa: BLE001
+                pass
+            try:
+                cmap = layer.colormap
+                colormap_by[name] = getattr(cmap, "name", cmap)
+            except Exception:                        # noqa: BLE001
+                pass
+        return contrast_by, colormap_by
+
+    def _open_roi_3d(self, region: str, roi_bbox: tuple) -> None:
         """3D of an ROI, BRICKED and IN THIS WINDOW. Any ROI renders; none is refused.
 
         Julio: "the 3D rendering ROI design improvement, which now sucks because the user has no
@@ -2642,6 +2682,10 @@ class RegionViewer(QMainWindow):
         read, source = self._volume_source(window)
         if source is None:
             return                                       # _volume_source already said why
+        # The window of the layer being RENDERED, harvested here because here is where which layer
+        # that is has just been decided. Asking earlier, in `_open_3d`, is how the volume came to
+        # wear raw's contrast over a stitch's pixels.
+        contrast_by, colormap_by = self._on_screen_luts(source)
         r0, r1, c0, c1 = window
         # The ROI's own world corner: the region origin plus the crop, in stage micrometres. This is
         # the same arithmetic `_crop_levels_to_bbox` does for 2D, so the volume lands exactly where

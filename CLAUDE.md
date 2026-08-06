@@ -96,6 +96,28 @@ pane's fused PYRAMID in 3D, whose level 0 is capped to `_MAX_FUSED_PX`.
 `_reduces_z` (i.e. the registry's `consumes`) refuses a Z_REDUCER's single plane with a reason.
 Never compare an operator name; `tests/test_operator_declaration.py` fails the build on it.
 
+**While a volume is up, `MosaicLayers` is NOT describing the mosaic** (2026-08-06). `open()` moves
+the `(op, channel)` identity off the pane's 2-D layers onto the bricks on purpose, so from that
+moment `find` / `channels` / `visible_op` answer about BRICKS. Therefore `_open_3d` calls
+`_close_native3d()` **before it reads the scene**, not merely before it builds the next view.
+Measured, second 3D click over a `bgsub` layer: the source was one 512 px brick, **1 of 9** bricks
+of the ROI yielded voxels, and the contrast came back `(0.0, 1.0)` against `(120, 900)` on screen.
+Same reason, same commit: a key is **one-to-many**, so anything that DRIVES a pair uses
+`MosaicLayers.find_all` (the tree's checkbox drove 1 brick of N) and `find` is only for anything
+needing *a* layer. 3D's LUTs are harvested from the layer being RENDERED (`_on_screen_luts(source)`),
+never from raw.
+
+**A REGION operator's result reaches the layer at full depth** (2026-08-06).
+`_workers._OperatorWorker._result_pixels` emits `image[0]` — `(C, Nz, Y, X)` — for an operator
+declaring `consumes={"fov"}`, and `RegionResultAccumulator.add` accepts it. The slot used to emit
+`image[0, :, 0]` for everything: on the real 10x set `stitch_plate` yielded `(1, 1, 10, 2084, 7711)`
+and the display got `(1, 2084, 7711)`, so a stitched mosaic declared `z_depth 1` and 3D correctly
+refused a volume that no longer existed. The whole display side was already written for depth
+(`_as_result`'s `z_depth`, `deliver_result`'s `z_scale_um`, `_volume_source`'s `ndim >= 3`); one
+index contradicted all three. The per-FOV path still delivers ONE plane — keeping its depth means
+`Nz` re-fusions over ~9.4 GB of accumulated tiles for one 27-FOV well — and `_z_dropped_note` says
+which plane of how many rather than letting a limitation read as a result.
+
 Three numbers decide whether a volume "looks downsampled", and all three are enforced in
 `_bricks`, not asserted: voxels per screen pixel must stay **>= 1** (`uniform_step` floors the
 ratio), zooming in must **monotonically refine to stride 1**, and **z is never strided** — bricks
