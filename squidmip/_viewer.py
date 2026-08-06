@@ -162,7 +162,6 @@ from squidmip._qtstyle import operator_card as _operator_card
 from squidmip._time_point import TimePointBar
 from squidmip._terminal import _CmdEdit, _ProcTerminal, _Terminal  # noqa: F401 (re-export)
 from squidmip._region_nav import RegionCursor, RegionSlider
-from squidmip._spots import LAYER_KEY as _SPOTS_LAYER_KEY
 
 # The PLATE OVERVIEW and the plate geometry under it moved to `squidmip._plate_overview` (gap 6,
 # 2026-07-29): 2,459 lines, cut along the seam this file already had a comment for. Re-exported
@@ -309,93 +308,13 @@ _BAND_MAX_PX = 520
 _RIGHT_COL_SIZES = [215, 165]
 
 
-# --- channel bar: one row per channel, under the plate overview -----------------------------
-
-class _ChannelBar(QWidget):
-    """Per-channel VISIBILITY for the plate, one compact row per channel, plus a contrast READOUT.
-
-    A row is  <color dot> [x] <name>  …  <lo – hi>.  The checkbox masks that channel out of the
-    plate composite; PlateOverview recomposites from its retained per-channel store, so nothing
-    is re-read and nothing is re-projected.
-
-    THERE ARE NO CONTRAST SLIDERS HERE, AND THERE MUST NOT BE (IMA-261)
-    -------------------------------------------------------------------
-    This strip used to carry a low/high QSlider pair and an "auto" button per channel —
-    duplicating the contrast control the embedded ndviewer_light array viewer already has, two
-    hand-widths apart on the same screen. Two controls over one quantity is the shape this
-    project has now shipped a defect in four times, and it had already gone wrong here: the plate
-    followed these sliders, the array viewer followed its own, and the SAME channel was displayed
-    at two different windows side by side.
-
-    Contrast therefore has exactly ONE owner — the central array viewer — and this strip only
-    REPORTS the window that owner resolved (``set_window``, driven by
-    ``LightweightViewer.contrastChanged`` → ``PlateWindow._on_detail_contrast``). A readout is not
-    a second control surface: it cannot be dragged, it cannot disagree, and it is what makes the
-    sync visible on screen instead of merely asserted in a commit message.
-    """
-
-    def __init__(self, labels, colors: np.ndarray, overview: PlateOverview):
-        super().__init__()
-        self._overview = overview
-        self._rows = []           # per channel: (checkbox, contrast readout label)
-        self.setStyleSheet(f"background:{_BG};")
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(12, 5, 12, 6)
-        lay.setSpacing(3)
-        for c_i, label in enumerate(labels):
-            row = QHBoxLayout()
-            row.setSpacing(8)
-            dot = QLabel("\u25cf")   # the channel's own LUT color, so the strip reads as a legend too
-            dot.setStyleSheet("color:rgb({});".format(",".join(str(int(v * 255)) for v in colors[c_i])))
-            # NO CHECKBOX. Julio: "there shouldn't be any controls for the plate view. It just
-            # reacts to toggles and contrast adjustments in napari." Visibility is owned by
-            # napari's eye icons and arrives here through `on_user_visibility`; this label only
-            # dims to show the answer.
-            box = QLabel(str(label))
-            box.setStyleSheet("color:#e6edf3;")
-            win = QLabel("\u2014")
-            win.setStyleSheet("color:#8b949e;")   # dimmer than a control: this REPORTS, never sets
-            win.setToolTip("contrast window, owned by the array viewer on the right \u2014 set it there")
-            row.addWidget(dot)
-            row.addWidget(box)
-            row.addStretch(1)
-            row.addWidget(win)
-            lay.addLayout(row)
-            self._rows.append((box, win))
-
-    def set_window(self, ch: int, lo: float, hi: float):
-        """Show the window the CENTRAL VIEWER resolved for *ch*. Display only — it sets nothing."""
-        if 0 <= ch < len(self._rows):
-            self._rows[ch][1].setText(f"{lo:g} \u2013 {hi:g}")
-
-    def set_visible_state(self, ch: int, on: bool):
-        """Show whether napari has this channel on. Display only — it toggles nothing."""
-        if 0 <= ch < len(self._rows):
-            self._rows[ch][0].setStyleSheet("color:#e6edf3;" if on else "color:#4a5364;")
-
-
-# --- main window: plate overview | embedded ndviewer ----------------------------------------
-
-def _make_mosaic_pane(show_docks: bool = True):
-    """Build a napari mosaic viewer, or report why it could not be built.
-
-    Returns ``(pane_or_None, mode, message)``. Import failures are caught here rather than at
-    module import so that a machine without napari still OPENS THE WINDOW, with a visible
-    sentence saying there is no viewer and why. The window is worth having: the plate, the
-    console and the operators all still work without a mosaic.
-
-    There is no second renderer to fall back to as of 2026-07-30. ``mode`` is ``"unavailable"``
-    and the message is the whole story, which is the point: a named failure beats a silent
-    downgrade to a different picture.
-    """
-    try:
-        from squidmip._napari_pane import make_pane
-
-        return make_pane(show_docks=show_docks)
-    except Exception as exc:                     # noqa: BLE001 - surfaced, not swallowed
-        return None, "unavailable", (
-            f"napari viewer could not be imported ({type(exc).__name__}: {exc}). There is no mosaic."
-        )
+# --- the main window: the plate on top, the Open View list and the console below --------------
+#
+# There is no central viewer here and no factory for one. `_ChannelBar` (a per-channel contrast
+# READOUT under the plate) and `_make_mosaic_pane` (a napari pane for the root window) were both
+# deleted on 2026-08-06: the bar has not been constructed since 8b0cbfc (2026-07-22) and the
+# factory has had no call site since 2b8fbc5 (2026-07-23), when viewing moved out to independent
+# `RegionViewer` windows. Each window builds its own pane through `_napari_pane.make_pane`.
 
 
 class PlateWindow(QMainWindow):
@@ -443,10 +362,9 @@ class PlateWindow(QMainWindow):
         self._overview = None
         self._reader = None
         self._meta = None
-        self._mosaic_worker = None    # fuses a region's FOVs for pane 2, off the GUI thread
-        # THE SINGLE OWNER of "which region is current". The red ROI frame on the plate, the
-        # region slider, and the mosaic in pane 2 are all VIEWS of this one value — none of them
-        # keeps a copy. Before it there were three copies, hand-synced: PlateOverview._sel,
+        # THE SINGLE OWNER of "which region is current". The red ROI frame on the plate and every
+        # spawned window's mosaic are VIEWS of this one value — none of them keeps a copy. Before
+        # it there were three copies, hand-synced: PlateOverview._sel,
         # _mosaic_region and _current_well. Both `_mosaic_region` and `_current_well` are now
         # PROPERTIES that read the cursor, so an assignment cannot create a fourth.
         self._cursor = RegionCursor()
@@ -468,8 +386,6 @@ class PlateWindow(QMainWindow):
         self._activity = ActivityLog()
         from squidmip._gui_commands import install_command_bus
         self.commands = install_command_bus(self)
-        self._spot_worker = None      # spot detection on the visible mosaic, off the GUI thread
-        self._spot_counts = {}        # (region, channel) -> nuclei counted. PER-REGION, not global.
         self._fov_index = {}
         self._selected_regions = []   # wells picked on the plate (IMA-221); scopes an operator run
 
@@ -634,14 +550,17 @@ class PlateWindow(QMainWindow):
         self._log_panel.start()
         self._log_panel.float_requested.connect(self._float_log)
 
-        # NO CENTRAL VIEWER (decentralized, 2026-07-23). The locked central napari pane is gone:
-        # viewing now happens in INDEPENDENT windows spawned from the plate (see _region_viewer),
-        # each its own napari viewer. The root is just the plate + the Open View list + the log.
-        # These stay defined-as-None because dozens of methods guard on them (``_load_mosaic``,
-        # ``_on_result``, ``activate_well`` all early-return when they are None), so a stray call
-        # from a menu operator no-ops instead of crashing rather than needing every call site cut
-        # in one pass. Operator-result display migrates onto the windows next (Phase C).
-        self._mosaic_pane = None
+        # NO CENTRAL VIEWER (decentralized, 2026-07-23; the guards finally cut, 2026-08-06).
+        # Viewing happens in INDEPENDENT windows spawned from the plate (see _region_viewer), each
+        # its own napari viewer. The root is just the plate + the Open View list + the log.
+        #
+        # ``self._mosaic_pane = None`` used to sit here, with a note saying the sentinel stayed so
+        # that "dozens of methods guard on it" could no-op "rather than needing every call site cut
+        # in one pass". That pass has now happened: the sentinel and every method gated on it are
+        # gone. Nothing is left to guard, so there is nothing to define. Do not reintroduce a
+        # window-owned pane — a second surface showing a region is what the decentralization
+        # removed, and a permanently-None one is worse than none, because it reads as a feature.
+        #
         # Every finished run also goes to a file, because METRICS is a bounded in-memory deque and
         # a measurement that dies with the process cannot answer "is this slower than last month".
         # Idempotent, so eight windows in one process still attach one sink; and it writes under
@@ -1163,8 +1082,15 @@ class PlateWindow(QMainWindow):
 
     def _open_native_3d(self):
         """Popout napari 3D on the current region's centre FOV at native resolution (gallery-view
-        recipe). Carries the embedded layers' current contrast and colormap so the volume matches
-        what is on screen. Fails to the LOG by name, never silently."""
+        recipe). Fails to the LOG by name, never silently.
+
+        It carries NO contrast or colormap. It used to harvest both off ``self._mosaic_pane``'s
+        layers, which have never existed: the pane was pinned to None on 2026-07-23 and the harvest
+        could only ever produce two empty dicts. ``open_native_3d`` defaults both to None and
+        resolves the acquisition's own ``display_color`` and an autoscale, which is what this call
+        has actually been doing all along. A window's on-screen LUTs reach 3D through
+        ``RegionViewer``, which has the layers.
+        """
         if self._reader is None or self._meta is None:
             self._readout.setText("No acquisition open — drop one before opening the 3D view.")
             return
@@ -1172,26 +1098,10 @@ class PlateWindow(QMainWindow):
         if region is None:
             self._readout.setText("No region is open to render in 3D.")
             return
-        contrast, colormap = {}, {}
-        pane = getattr(self, "_mosaic_pane", None)
-        mosaic = getattr(pane, "mosaic", None) if pane is not None else None
-        if mosaic is not None:
-            op = mosaic.visible_op()
-            if op is not None and op != getattr(self, "SPOTS_OP", None):
-                for ch in mosaic.channels(op):
-                    ly = mosaic.find(op, ch)
-                    if ly is None:
-                        continue
-                    try:
-                        contrast[ch] = tuple(float(x) for x in ly.contrast_limits)
-                        colormap[ch] = ly.colormap
-                    except Exception:                # noqa: BLE001 - carry what we can
-                        pass
         try:
             from squidmip._napari3d import open_native_3d
 
-            open_native_3d(self._reader, self._meta, region,
-                           contrast_by_channel=contrast, colormap_by_channel=colormap)
+            open_native_3d(self._reader, self._meta, region)
             log.info("opened native napari 3D popout for region %s", region)
         except Exception as exc:                     # noqa: BLE001 - NAMED, to the log and readout
             log.error("native 3D view failed for region %s: %s", region, exc)
@@ -2604,9 +2514,6 @@ class PlateWindow(QMainWindow):
         self._stop_worker()
         self._stop_preview()
         self._stop_minerva()
-        self._stop_mosaic_worker()   # it holds the OLD reader, and it is joined, not drained
-        # Exploration tabs belong to the acquisition they were opened from: their region sets and
-        # layer keys point at a _fov_index that is about to be rebuilt for a different plate.
         self._reader = self._meta = None
         self._fov_index = {}
         self._selected_regions = []   # wells picked on the plate (IMA-221); scopes an operator run
@@ -2647,7 +2554,6 @@ class PlateWindow(QMainWindow):
         self._acq_name = Path(p).name
         self._acq_path = Path(p)
         self._processed_plate = None
-        self._populate_detect_channels()             # channel-aware cellpose picker
         self._viewer_manager.set_dataset(reader, meta)   # every spawned window shares this reader
         rows, cols, wells, order = plate.viewer_grid()
         for idx, region in enumerate(order):
@@ -2693,12 +2599,12 @@ class PlateWindow(QMainWindow):
         self._declare_channel_axis(meta["channels"], meta["dtype"])
 
         # Hand the plate's region order to the SINGLE OWNER. Announcing it is what puts the red
-        # ROI frame on region 0, sizes the region slider, and loads pane 2's mosaic — one move,
-        # not three calls that could each be forgotten on some path.
+        # ROI frame on region 0 — one move, not several calls that could each be forgotten on some
+        # path.
         #
-        # Cleared first so the announce always happens: re-opening an acquisition whose region
-        # ids match the previous one would otherwise be a no-op move and pane 2 would keep the
-        # OLD plate's mosaic on screen.
+        # Cleared first so the announce always happens: re-opening an acquisition whose region ids
+        # match the previous one would otherwise be a no-op move and every surface reading the
+        # cursor would keep pointing at the OLD plate's region.
         self._cursor.set_order([])
         self._cursor.set_order(order)
 
@@ -2775,7 +2681,7 @@ class PlateWindow(QMainWindow):
 
     @property
     def _mosaic_region(self) -> Optional[str]:
-        """The region pane 2 is showing. Read-only: the cursor decides, this reports."""
+        """The region this plate is CURRENT on. Read-only: the cursor decides, this reports."""
         return self._cursor.region
 
     @property
@@ -2797,9 +2703,9 @@ class PlateWindow(QMainWindow):
     def _on_region_changed(self, index: int, region: str):
         """THE current region moved. Everything that shows it follows from here, and nowhere else.
 
-        Order matters. The red ROI frame moves FIRST so the plate never lags the slider by the
-        length of a mosaic load — the frame and the slider must never disagree, and a mosaic that
-        takes a second to arrive would otherwise leave them disagreeing for that second.
+        The plate's job here is the red ROI frame. The pixels are somebody else's: every open
+        ``RegionViewer`` runs its own cursor and fuses its own mosaic, so nothing on this window
+        has to wait for a load, and there is nothing here to debounce.
         """
         if self._overview is not None:
             info = self._fov_index.get(region)
@@ -2809,338 +2715,28 @@ class PlateWindow(QMainWindow):
             self._region_slider.setToolTip(
                 f"region {index + 1} of {self._cursor.count}: {region}\n"
                 "Press play to walk the regions; right-click play for frames per second.")
-        # RESPONSIVE REGION SLIDER (viewport rendering). Fusing a region's mosaic is the expensive
-        # step: each tick stops the prior _MosaicWorker (waiting up to 2 s) and starts a new one, so
-        # dragging across ten regions queued ten fuses and stalled. The RED FRAME above already moved
-        # instantly; only the mosaic load needs to wait for the slider to SETTLE. Debounce it: the
-        # last region the slider lands on is the only one we fuse. A short delay is imperceptible when
-        # you stop, and turns a drag from ten blocking loads into one.
-        if getattr(self, "_region_load_timer", None) is None:
-            self._region_load_timer = QTimer(self)
-            self._region_load_timer.setSingleShot(True)
-            # A BOUND METHOD, never a lambda closing over ``self``. PyQt keeps a lambda alive in a
-            # slot proxy parented to the timer, and the timer is parented to this window: the
-            # closure's ``self`` closes the loop window -> timer -> proxy -> lambda -> window. That
-            # cycle means dropping the last reference to a window does NOT destroy it; the cyclic
-            # collector does, later, from arbitrary code, with a debounce still pending. A bound
-            # method of a QObject is connected by reference to the receiver instead, so this cycle
-            # does not form. Measured on its own it was enough to stop the segfault (40 windows
-            # survived, against a crash by window 21 without it); it is kept alongside the
-            # ``stop()`` in closeEvent because the two remove different halves of the hazard, the
-            # zombie window and the armed callback. See tests/test_window_lifetime.py.
-            self._region_load_timer.timeout.connect(self._fire_region_load)
-        self._pending_region = region
-        self._region_load_timer.start(140)
 
-    def _fire_region_load(self):
-        """The debounce elapsed: fuse the region the slider actually settled on."""
-        self._load_mosaic(region=self._pending_region)
-
-    def _load_mosaic(self, region: Optional[str] = None, op: str = "raw"):
-        """Show one region's fused MOSAIC in pane 2, one napari layer per channel.
-
-        The unit displayed is a mosaic, never a single FOV (IMA-265). This runs on OPEN, before
-        any operator: a raw acquisition has no pyramid on disk, so the region's FOVs are fused
-        by stage position. Once an operator has written an OME-Zarr, ``_load_mosaic_zarr`` shows
-        that pyramid lazily instead, as a SECOND processing layer, so the before/after toggle is
-        just a visibility flip.
-        """
-        pane = getattr(self, "_mosaic_pane", None)
-        if pane is None or not getattr(pane, "ok", False):
-            return
-        if self._reader is None or self._meta is None:
-            return
-        region = region or self._cursor.region
-        if region is None:
-            return
-
-        prior = getattr(self, "_mosaic_worker", None)
-        if prior is not None and prior.isRunning():
-            prior.stop()
-            prior.wait(2000)
-
-        # THE Z SLIDER IS GLOBAL ACROSS THE PLATE. Replacing the layers resets napari's dims to
-        # step 0, so the z you were inspecting silently snapped back to the bottom of the stack
-        # every time you moved to another region — which is the opposite of "the plate composites
-        # with the z and t sliders". Remember it here and restore it once the new layers are in.
-        self._pending_dims_step = self._napari_dims_step()
-        # A run in flight is counting the OLD region. Let it finish and you get a mask for B2
-        # drawn over B3's mosaic, with B2's number in the readout — a plausible-looking lie.
-        self._stop_spots()
-        pane.mosaic.remove_op(op)
-        # Drop the previous region's overlays for the same reason. `remove_op` is a no-op when
-        # nothing has been counted yet.
-        pane.mosaic.remove_op(self.SPOTS_OP)
-        channels = [c["name"] for c in self._meta["channels"]]
-        z_now = 0
-        if self._pending_dims_step and self._napari_z_axis() is not None:
-            z_now = int(self._pending_dims_step[self._napari_z_axis()])
-        w = _MosaicWorker(self._reader, self._meta, region, channels, z_index=z_now, parent=self,
-                          t=self.time_point)
-        w.ready.connect(lambda r, ch, levels, bbox, win:
-                        self._on_mosaic_plane(op, r, ch, levels, bbox, win))
-        w.problem.connect(lambda msg: pane.say(msg))
-        w.finished_count.connect(lambda n: self._on_mosaic_done(op, region, n))
-        self._mosaic_worker = w
-        w.start()
-
-    def _on_mosaic_plane(self, op: str, region: str, channel: str, levels, bbox_um, window=None):
-        """One channel of the mosaic arrived, as a LAZY PYRAMID. Add it as a napari layer.
-
-        ``levels`` is always the list napari's ``multiscale=True`` contract wants — highest
-        resolution first — even when the mosaic is too small to have a second rung, so there is
-        one code path here and no sniffing of what arrived.
-        """
-        pane = getattr(self, "_mosaic_pane", None)
-        if pane is None or not getattr(pane, "ok", False):
-            return
-        if getattr(self, "_mosaic_region", None) != region:
-            return                                  # a later region won the race; drop this one
-        from squidmip._napari_pane import _colormap_for
-
-        # ``window`` IS the window `add_mosaic` would have derived here, computed by the worker.
-        #
-        # This comment used to read "NO contrast_limits: napari autoscales, and napari OWNS
-        # contrast", which was already not what happened: passing None does not reach napari's
-        # autoscale, it reaches `add_mosaic`'s own fluorescence seed (`_auto_window_for`), on the
-        # UI thread, and that seed has to materialise a pyramid level to sample. The rule the
-        # comment was defending is intact and unchanged — ONE contrast decision, seeded from the
-        # pixels once and owned by napari from then on. What changed is which thread makes it.
-        # What must still NOT come back is _pct_window's percentile window: it duplicated napari's
-        # job, and a window like 561 -> 576..4032 sends every mid-tone tissue pixel to full
-        # intensity so four additive channels sum to white ("Channel blending still sucks").
-        #
-        # multiscale=True is what makes the pyramid a pyramid. Without it napari treats the list
-        # as one array to stack, or takes level 0 and renders exactly as slowly as before — the
-        # levels would exist and buy nothing.
-        pane.mosaic.add_mosaic(
-            op, channel, levels,
-            contrast_limits=window,
-            colormap=_colormap_for(channel),
-            multiscale=True,
-            bbox_um=bbox_um,
-            z_scale_um=(self._meta or {}).get("dz_um"),
-        )
-
-    # -- napari's own z / t dimension sliders, which are GLOBAL across the plate ---------------
-    def _napari_dims(self):
-        """napari's ``Dims`` model, or None when napari is not the viewer.
-
-        This is THE z slider — the one commit 19cd491 made real by handing napari a lazy
-        ``(z, y, x)`` stack. Nothing here builds a second one.
-        """
-        pane = getattr(self, "_mosaic_pane", None)
-        if pane is None or not getattr(pane, "ok", False):
-            return None
-        return getattr(pane.mosaic.model, "dims", None)
-
-    def _napari_z_axis(self) -> Optional[int]:
-        """Index of the z axis in napari's dims, or None when the data has no z axis.
-
-        napari puts the displayed axes LAST, so with a ``(z, y, x)`` layer z is ``ndim - 3``.
-        Derived rather than hard-coded to 0: adding a t axis would shift it, and a hard-coded
-        index would then quietly drive the wrong slider.
-        """
-        dims = self._napari_dims()
-        if dims is None or int(getattr(dims, "ndim", 0)) < 3:
-            return None
-        return int(dims.ndim) - 3
-
-    def _napari_dims_step(self):
-        dims = self._napari_dims()
-        return tuple(dims.current_step) if dims is not None else None
-
-    def _restore_dims_step(self):
-        """Put the global z (and t) back where the user left it after a region change."""
-        want = getattr(self, "_pending_dims_step", None)
-        self._pending_dims_step = None
-        dims = self._napari_dims()
-        if dims is None or not want:
-            return
-        for axis, step in enumerate(want[: int(dims.ndim)]):
-            top = int(dims.nsteps[axis]) - 1
-            if 0 <= int(step) <= top and int(dims.current_step[axis]) != int(step):
-                dims.set_current_step(axis, int(step))
-
-    def _on_mosaic_done(self, op: str, region: str, n: int):
-        pane = getattr(self, "_mosaic_pane", None)
-        if pane is None or not getattr(pane, "ok", False):
-            return
-        btn = getattr(pane, "detect_button", None)
-        if n == 0:
-            pane.say(f"{region}: no mosaic could be built (see the message above).")
-            # The frame gate must open even on failure, or playback stops dead on the first
-            # region that cannot be fused and the play button just looks stuck.
-            self._region_frame_done()
-            if btn is not None:
-                btn.setEnabled(False)   # nothing to count; an enabled button here does nothing
-            return
-        pane.say("")
-        if btn is not None:
-            btn.setEnabled(True)        # there is now a region on the canvas to run the operator on
-        try:
-            pane.mosaic.show_op(op)
-            pane.mosaic.model.reset_view()
-        except Exception:                            # noqa: BLE001 - view framing is cosmetic
-            pass
-        self._restore_dims_step()
-        self._bind_napari_contrast()
-        self._adopt_centre_view()
-        self._region_frame_done()
-
-    def _region_frame_done(self):
-        """Tell the region slider this region is on screen, so playback may request the next.
-
-        napari's playback is debounced on the render for exactly this reason; wiring our load
-        into that gate is what stops a 10 fps timer queueing ten mosaic loads per completed one.
-        """
-        if self._region_slider is not None:
-            self._region_slider.frame_done()
-
-    # -- the analysis operator: spot detection on what pane 2 is showing -------------------
-
-    #: Processing-layer key the spot-detection result layers are filed under. A DISTINCT op from
-    #: "raw"/"stitched" so the layer tree groups the analysis overlays on their own and
-    #: ``show_op`` never has to choose between the mosaic and the mask drawn over it.
-    #: Read off ``_spots.LAYER_KEY`` rather than restated, so the UI and the engine registry
-    #: cannot drift apart on the spelling.
-    SPOTS_OP = _SPOTS_LAYER_KEY
-
-    def _spot_source_layer(self):
-        """The (channel, layer) the count will be run on: the first VISIBLE mosaic channel.
-
-        Returns ``(None, None)`` when there is nothing to count. Deliberately reads the CANVAS
-        rather than the metadata: the number in the readout has to describe the picture the user
-        is looking at, or the two disagree and the readout is the one that lies.
-        """
-        pane = getattr(self, "_mosaic_pane", None)
-        if pane is None or not getattr(pane, "ok", False) or pane.mosaic is None:
-            return None, None
-        op = pane.mosaic.visible_op()
-        if op is None or op == self.SPOTS_OP:
-            return None, None
-        # CHANNEL-AWARE: if the "Detect on" dropdown names a channel, that is authoritative -- the
-        # user picked the channel that carries the signal, which need not be the visible one (405
-        # is blank on the tissue set). Segmentation reads layer.data, so visibility is irrelevant.
-        combo = getattr(pane, "detect_channel", None)
-        chosen = combo.currentText().strip() if combo is not None and combo.count() else ""
-        if chosen:
-            layer = pane.mosaic.find(op, chosen)
-            if layer is not None:
-                return chosen, layer
-        # fallback: the first VISIBLE channel, as before.
-        for channel in pane.mosaic.channels(op):
-            layer = pane.mosaic.find(op, channel)
-            if layer is not None and getattr(layer, "visible", False):
-                return channel, layer
-        return None, None
-
-    def _current_z_index(self):
-        """Which z napari is showing, or None for a 2-D layer. napari OWNS the z slider."""
-        pane = getattr(self, "_mosaic_pane", None)
-        try:
-            dims = pane.mosaic.model.dims
-            if dims.ndim < 3:
-                return None
-            return int(dims.current_step[0])
-        except Exception:                            # noqa: BLE001 - absence is not a failure
-            return None
-
-    def _on_detect_nuclei(self):
-        """Run spot detection on the visible channel. Returns IMMEDIATELY; the work is off-thread."""
-        pane = getattr(self, "_mosaic_pane", None)
-        region = getattr(self, "_mosaic_region", None)
-        channel, layer = self._spot_source_layer()
-        if pane is None or region is None or layer is None:
-            if pane is not None:
-                pane.say("nothing to count: no region mosaic is visible in this pane yet.")
-            return
-
-        prior = getattr(self, "_spot_worker", None)
-        if prior is not None and prior.isRunning():
-            # A second click CANCELS the run in flight rather than queueing another one. Two
-            # segmentations racing to write the same layer is the "two representations of one
-            # truth" defect with a thread attached.
-            prior.stop()
-            pane.say(f"{region}/{channel}: cancelling the run in flight…")
-            return
-
-        bbox_um = None
-        try:
-            from squidmip._mosaic_source import mosaic_bbox_um
-
-            bbox_um = mosaic_bbox_um(self._meta, region)
-        except Exception as exc:                     # noqa: BLE001 - said, not swallowed
-            pane.say(f"{region}: mosaic placement unavailable ({exc}); the overlay will be "
-                     "drawn in pixel coordinates and will NOT line up with the mosaic.")
-
-        w = _SpotWorker(region, channel, layer.data, self._current_z_index(), bbox_um,
-                        parent=self)
-        w.ready.connect(self._on_spots_ready)
-        w.problem.connect(lambda msg: pane.say(msg))
-        w.stageChanged.connect(
-            lambda name: pane.say(f"{region}/{channel}: counting nuclei — {name}…"))
-        w.cancelled.connect(lambda: pane.say(f"{region}/{channel}: spot detection cancelled."))
-        w.finished_count.connect(self._on_spots_done)
-        w.finished.connect(self._on_spot_worker_finished)
-        self._spot_worker = w
-        pane.say(f"{region}/{channel}: counting nuclei…")
-        w.start()
-
-    def _on_spot_worker_finished(self):
-        """Re-enable the button however the run ended — ok, failed, or cancelled."""
-        pane = getattr(self, "_mosaic_pane", None)
-        btn = getattr(pane, "detect_button", None) if pane is not None else None
-        if btn is not None:
-            btn.setEnabled(True)
-
-    def _on_spots_ready(self, region, channel, labels, centroids, bbox_um, count):
-        """The result landed. Put it ON THE CANVAS as real napari layers."""
-        pane = getattr(self, "_mosaic_pane", None)
-        if pane is None or not getattr(pane, "ok", False):
-            return
-        if getattr(self, "_mosaic_region", None) != region:
-            return                                   # the user moved on; drop a stale result
-        from squidmip._spots import centroid_layer_name, mask_layer_name
-
-        # The MASK: a real Labels layer, so napari gives it its own label colormap, transparent
-        # background and click-to-pick. add_image would render it as a near-black gradient.
-        pane.mosaic.add_labels(self.SPOTS_OP, mask_layer_name(channel), labels,
-                               bbox_um=bbox_um)
-        # The CENTROIDS: a Points layer, with the per-object record (Fractal's feature-table
-        # contract) riding on `features`, keyed by label value.
-        pane.mosaic.add_points(
-            self.SPOTS_OP, centroid_layer_name(channel), centroids,
-            bbox_um=bbox_um, shape=labels.shape,
-            features={"label": np.arange(1, len(centroids) + 1, dtype=np.int32)},
-        )
-
-    def _on_spots_done(self, region, channel, count):
-        """The NUMBER — per region, in the status readout, which is what Spencer asked for."""
-        pane = getattr(self, "_mosaic_pane", None)
-        if pane is not None:
-            pane.say(f"{region} · {channel}: {count} nuclei")
-        counts = getattr(self, "_spot_counts", None)
-        if counts is None:
-            counts = self._spot_counts = {}
-        counts[(region, channel)] = int(count)       # per-region tally, for the plate readout
-        self._readout.setText(f"{region} · {channel} · {count} nuclei detected")
-
-    def _bind_napari_contrast(self):
-        """Bind EVERY open window's napari pane to the plate's follow path (Task 8.1).
-
-        This used to point at ``self._mosaic_pane``, the one central napari pane. The
-        decentralization deleted that pane and left this method's first guard permanently true, so
-        the plate followed nothing: contrast, eye icons and colormaps in a window changed the
-        window and nothing else, and the requirement quoted below sat inside a method that could
-        not run. The sources are now the per-region windows in ``ViewerManager``, so that is what
-        this binds to. Idempotent, so calling it again after a window opens is free.
-        """
-        mgr = getattr(self, "_viewer_manager", None)
-        if mgr is None:
-            return
-        for win in mgr.windows:
-            self._bind_window_contrast(win)
+    # NO MOSAIC LOAD, NO SPOT DETECTION, ON THE PLATE (2026-08-06).
+    #
+    # ``_load_mosaic``, ``_on_mosaic_plane``, ``_on_mosaic_done``, ``_region_frame_done``, the four
+    # napari-dims helpers (``_napari_dims`` / ``_napari_z_axis`` / ``_napari_dims_step`` /
+    # ``_restore_dims_step``), ``_adopt_centre_view`` and the whole spot-detection chain
+    # (``SPOTS_OP``, ``_spot_source_layer``, ``_current_z_index``, ``_on_detect_nuclei``,
+    # ``_on_spot_worker_finished``, ``_on_spots_ready``, ``_on_spots_done``) lived here. Every one
+    # of them opened by resolving ``self._mosaic_pane``, which has been unconditionally ``None``
+    # since 2b8fbc5 (2026-07-23), so every one of them returned at its first line. Measured on the
+    # real fixture through ``OpenAcquisition``: 2 of 2 ``_load_mosaic`` calls returned at the guard,
+    # 0 ``_MosaicWorker`` objects were built, and the 140 ms debounce QTimer that fed it armed 3
+    # times into a slot that could only return. The timer went with them.
+    #
+    # ``_on_detect_nuclei`` had no call site at all: its only entry point was the pane's own
+    # ``detect_button``. The live homes for both jobs are ``RegionViewer._load_mosaic`` and
+    # ``RegionViewer._detect_nuclei``, each on a window that actually has napari layers.
+    #
+    # ``_bind_napari_contrast`` went with them for the same reason at one remove: it swept every
+    # open window and re-offered it to ``_bind_window_contrast`` below, and its only caller was
+    # ``_on_mosaic_done``. The LIVE binding is ``ViewerManager.windowOpened`` -> that method,
+    # connected in ``__init__``, which is the one that has been doing the work.
 
     def _bind_window_contrast(self, win):
         """Make the plate a SINK of ONE window's napari pane (contrast, eye icons, colormap).
@@ -3237,18 +2833,16 @@ class PlateWindow(QMainWindow):
         # ...and PULL what this window has ALREADY resolved. No sink can ever report it.
         self._adopt_window_view(mosaic, index_of)
         bound.add(wid)
-        self._napari_contrast_bound = True
 
     def _adopt_window_view(self, mosaic, index_of):
         """Take the LUT a window is ALREADY showing, at the moment the plate starts following it.
 
-        ``_adopt_centre_view`` below does exactly this and CANNOT RUN. It is gated on
-        ``self._mosaic_pane``, which the decentralization pinned to ``None`` permanently (see the
-        "NO CENTRAL VIEWER" note in ``__init__``) and never assigns again -- so the fix that method
-        carries, written for Julio's "Look at contrast difference between napari window and plate
-        view", was orphaned the day the central pane was removed. The plate went back to painting
-        from its own running histogram while every spawned window painted from napari's autoscale,
-        and nothing said so.
+        THE ONLY IMPLEMENTATION OF THIS. There used to be a second, ``_adopt_centre_view``, which
+        did the same pull off the plate's own central pane; it was gated on ``self._mosaic_pane``
+        and so could not run, and it was deleted on 2026-08-06 rather than reconciled. That is the
+        answer to "is contrast implemented twice" for this pair: it was, one of the two was dead,
+        and dead is not duplicated. Julio's "Look at contrast difference between napari window and
+        plate view" is fixed HERE, per window, and nowhere else.
 
         An EVENT tells you about a CHANGE; the initial state is not a change. ``on_user_contrast``
         deliberately filters napari's own autoscale out (treating it as a user gesture is what
@@ -3302,41 +2896,6 @@ class PlateWindow(QMainWindow):
         self._op_stack.toggle(layer_key, on)
         self._apply_layers()             # -> set_active_layer + title + loupe source
         self._refresh_layers_tab()       # the tab's checkboxes must not lie about the stack
-
-    def _adopt_centre_view(self):
-        """PULL what napari resolved for every channel, and make the plate show the same.
-
-        Julio, with a screenshot: "Look at contrast difference between napari window and plate
-        view." This is why they differed, and it is not the event sink being broken.
-
-        The sink (`on_user_contrast`) only reports a USER gesture -- deliberately, because napari
-        autoscales on every `add_image` and treating that as a gesture latched every channel
-        MANUAL before anyone had touched anything. But that filter also swallows the ONE moment
-        that matters most: the window napari picks when a region is first shown. So the plate kept
-        painting from its own running percentile histogram, napari painted from its autoscale, and
-        the two panes disagreed from the first frame until the user happened to drag a slider.
-
-        An EVENT tells you about a change; the initial state is not a change. So this pulls the
-        current value instead of waiting to be told, at the one point where the layers are known
-        to exist. It lands in the FOLLOW path, so it still is not a user latch, and the same is
-        done for the colormap -- napari resolves the LUT per layer and the plate must tint to
-        match it, not to its own copy of `display_color`.
-        """
-        pane = getattr(self, "_mosaic_pane", None)
-        if pane is None or not getattr(pane, "ok", False) or self._meta is None:
-            return
-        if self._overview is None:
-            return
-        for i, c in enumerate(self._meta["channels"]):
-            window = pane.mosaic.contrast(c["name"])
-            if window is not None:
-                self._overview.follow_channel_window(i, float(window[0]), float(window[1]))
-            rgb = pane.mosaic.channel_rgb(c["name"])
-            if rgb is not None:
-                self._overview.set_channel_color(i, rgb)
-            visible = pane.mosaic.channel_visible(c["name"])
-            if visible is not None:
-                self._overview.set_channel_visible(i, bool(visible))
 
     def _return_to_raw(self):
         """Stop previewing/processing and restore the raw downsampled view across the whole plate."""
@@ -3934,7 +3493,7 @@ class PlateWindow(QMainWindow):
         """An operator's FULL-RESOLUTION pixels -> a toggleable napari LAYER GROUP (Defect 3).
 
         Julio: "what if we want to see stitched AND deconvolved AND background subed. That's
-        why we need the toggles." Before this, no operator's output reached pane 2's napari at
+        why we need the toggles." Before this, no operator's output reached any napari at
         all: every result went to ``_on_push`` -> ``register_array``, the ndviewer slider, and
         that was the whole of "the result is visible". The group toggle UI (``_layer_tree``)
         was already built and mounted; it had nothing to show.
@@ -3995,7 +3554,7 @@ class PlateWindow(QMainWindow):
         self._deliver_operator_result(op, result)
 
     def _result_regions(self) -> set:
-        """Every region a surface is SHOWING right now: the plate's own pane, and each open window.
+        """Every region a surface is SHOWING right now: one entry per open window.
 
         This is the memory bound on ``_result_accs`` and on the layers themselves. Holding
         full-resolution mosaics for every well of a plate run would be gigabytes of layers nobody
@@ -4003,13 +3562,11 @@ class PlateWindow(QMainWindow):
         accumulated -- the same rule the raw path follows, for the same reason. The honest bound is
         no longer "one region" but "one per open window", because that is how many regions the user
         can actually be looking at.
+
+        The plate window itself is NOT a surface and contributes nothing here. It used to add
+        ``_mosaic_region`` when its own pane was ok, and that pane was never ok.
         """
         regions: set = set()
-        pane = getattr(self, "_mosaic_pane", None)
-        if pane is not None and getattr(pane, "ok", False):
-            here = getattr(self, "_mosaic_region", None)
-            if here:
-                regions.add(str(here))
         mgr = getattr(self, "_viewer_manager", None)
         for win in (mgr.windows if mgr is not None else []):
             try:
@@ -4089,8 +3646,10 @@ class PlateWindow(QMainWindow):
         ``None`` since the decentralization. So the run happened, the pixels were written, and the
         window that asked for them gained nothing.
 
-        One declaration, several sinks. The ``Result`` is built once and handed to the plate's pane
-        (where one exists) and to every open window, so no sink re-derives what the result is.
+        One declaration, several sinks. The ``Result`` is built once and handed to every open
+        window, so no sink re-derives what the result is. ``_add_result_layers`` -- the branch that
+        painted the plate's own pane -- was deleted on 2026-08-06 along with the pane it needed;
+        the windows are the sinks, and they always were.
         """
         result = self._as_result(op_result)
         if result is None:
@@ -4108,11 +3667,7 @@ class PlateWindow(QMainWindow):
         from squidmip._recipe import acquisition_version, cache_operator_result
 
         cache_operator_result(op, result, acquisition_version(self._reader))
-        added = 0
-        if getattr(self, "_mosaic_pane", None) is not None:
-            self._add_result_layers(op, result)
-            added += len(result.channels)
-        added += self._deliver_to_views(op, result)
+        added = self._deliver_to_views(op, result)
         if added:
             self._readout.setText(
                 f"{op} · {result.region_id} — {added} layer(s) added; toggle it against raw in "
@@ -4152,41 +3707,6 @@ class PlateWindow(QMainWindow):
                 log.warning("view %s could not take the %s result for %s: %s",
                             getattr(win, "window_id", "?"), op, result.region_id, exc)
         return added
-
-    def _add_result_layers(self, op: str, result):
-        """One layer per channel THE RESULT DECLARES, under the operator's group, over raw.
-
-        ``add_mosaic`` keys the group off *op*. It also SEEDS this layer's contrast from the
-        operator's OWN pixels, so the result arrives individually legible -- which is how you tell
-        whether decon used the right iteration count. It does NOT arrive on raw's window:
-        ``_register_channel`` links contrast per CHANNEL, and napari's ``link_layers`` connects
-        events without equalising values, so raw and this operator stay on their own stretches
-        until somebody writes one. Flipping between them is therefore two pictures until the user
-        asks for a comparison -- "Match raw contrast" (``MosaicLayers.match_contrast_to``), which
-        copies raw's window onto every operator peer.
-
-        ``bbox_um`` is the raw mosaic's own bbox, from the one placement rule, so the layers land
-        in register.
-        """
-        from squidmip._mosaic_source import mosaic_bbox_um
-        from squidmip._napari_pane import _colormap_for
-
-        pane = self._mosaic_pane
-        if pane is None:
-            return
-        bbox = mosaic_bbox_um(self._meta, result.region_id)
-        dz = (self._meta or {}).get("dz_um")
-        for channel in result.channels:
-            # `add_result`, not `add_mosaic`: the RESULT's own declaration picks the layer type.
-            # A segmentation went down the add_image path here and arrived auto-windowed as if its
-            # label ids were photons.
-            pane.mosaic.add_result(
-                result.kind, op, channel, result.plane(channel),
-                colormap=_colormap_for(channel),
-                bbox_um=bbox,
-                # Only a result that DECLARES depth gets a z scale, the same rule the windows use.
-                z_scale_um=(dz if int(result.z_depth) > 1 else None),
-            )
 
     def _run_readout(self, text: str):
         """Set the run's status line. Kept as its own method because every run-status caller goes
@@ -4494,9 +4014,9 @@ class PlateWindow(QMainWindow):
         if well_id not in self._fov_index:
             return
         self._current_fov = fov_index                  # the FOV ON SCREEN (IMA-250 (b))
-        # ONE move. The cursor drives the red frame, the region slider and pane 2's mosaic
-        # together, so they cannot disagree. This used to be three statements on three different
-        # code paths, and it returned before ANY of them ran.
+        # ONE move. The cursor drives the red frame and everything else that reads it, together,
+        # so they cannot disagree. This used to be three statements on three different code paths,
+        # and it returned before ANY of them ran.
         try:
             self._cursor.activate(well_id)
         except KeyError:
@@ -4529,27 +4049,6 @@ class PlateWindow(QMainWindow):
         if not (0 <= ch < n_ch):
             return          # ndv drew a channel the plate does not have (RGB mode, or a re-ingest)
         self._overview.follow_channel_window(ch, float(lo), float(hi))
-
-    def _populate_detect_channels(self):
-        """Fill the 'Detect on' dropdown with this acquisition's channels, defaulting to the one
-        most likely to carry nuclei. Channel-aware cellpose: the user segments the channel that has
-        signal, not whatever happens to be visible (405 is blank on the tissue set)."""
-        pane = getattr(self, "_mosaic_pane", None)
-        combo = getattr(pane, "detect_channel", None) if pane is not None else None
-        if combo is None:
-            return
-        names = [c["name"] for c in (self._meta or {}).get("channels", [])]
-        prev = combo.currentText()
-        combo.blockSignals(True)
-        combo.clear()
-        combo.addItems(names)
-        # Prefer a previously chosen channel if it still exists, else a 405/nuclei/DAPI-looking one.
-        pick = prev if prev in names else next(
-            (n for n in names if any(t in n.lower() for t in ("405", "dapi", "hoechst", "nuclei"))),
-            names[0] if names else "")
-        if pick:
-            combo.setCurrentText(pick)
-        combo.blockSignals(False)
 
     # NO reference-plane chain here. `_focus_reference_plane`, `_on_focus_problem`,
     # `_on_reference_plane` and `_set_z_index` were removed on 2026-07-29: the only entry
@@ -4630,34 +4129,13 @@ class PlateWindow(QMainWindow):
                 pass
         self._retired.clear()
 
-    def _stop_mosaic_worker(self):
-        """Stop the pane-2 fuse and WAIT for it, before the window that owns it is destroyed.
-
-        This one is not like the others: ``_retire`` lets a thread drain in the background, which
-        is right for a worker whose owner outlives it. ``_MosaicWorker`` is parented to this
-        window, so when Qt destroys the window it destroys a QThread that is still running and
-        the process ABORTS. Only the replace path in ``_load_mosaic`` ever stopped it, so a close
-        (or a second ingest) mid-fuse killed the app. It went unnoticed while a fuse was fast;
-        the multiscale pyramid made the fuse long enough to still be running on close.
-        """
-        workers = [getattr(self, "_mosaic_worker", None)]
-        # ...and one per EXPLORATION TAB. Each tab fuses its own subset with its own worker, and
-        # like pane 2's it was only ever stopped when REPLACED. They accumulate: one per tab per
-        # region visited, all parented to this window, all still running when it is destroyed.
-        for tab in list(getattr(self, "_op_tabs", {}).values()):
-            workers.append(getattr(tab, "mosaic_worker", None))
-        for w in workers:
-            if w is None:
-                continue
-            try:
-                w.stop()
-                w.wait(2000)
-            except RuntimeError:      # already destroyed by Qt; nothing left to join
-                pass
-        self._mosaic_worker = None
-        for tab in list(getattr(self, "_op_tabs", {}).values()):
-            if getattr(tab, "mosaic_worker", None) is not None:
-                tab.mosaic_worker = None
+    # NO MOSAIC WORKER TO JOIN. ``_stop_mosaic_worker`` lived here: it joined ``self._mosaic_worker``
+    # (written only by the deleted ``_load_mosaic``) plus one ``tab.mosaic_worker`` per exploration
+    # tab, and the exploration pane went in ae6217e. Nothing in this process assigns either
+    # attribute any more, so it joined two empty slots on every ingest and every close. The fuse
+    # this window can still cause is ``RegionViewer``'s, which each window joins in its own
+    # ``closeEvent``. Do not add a plate-owned QThread back without a join: an unjoined QThread
+    # parented to a window aborts the process when Qt destroys it.
 
     def showEvent(self, e):
         """Take a GUI slot the moment this window becomes VISIBLE.
@@ -4678,28 +4156,18 @@ class PlateWindow(QMainWindow):
                 QTimer.singleShot(0, self.close)   # unwind out of showEvent first, then close
                 return
         super().showEvent(e)
-    def _stop_spots(self):
-        self._retire(getattr(self, "_spot_worker", None))
-        self._spot_worker = None
 
     def closeEvent(self, e):
+        # NO REGION DEBOUNCE TO DISARM. A single-shot QTimer used to be armed here for 140 ms by
+        # `_on_region_changed` and stopped at this point, because a pending one fires into a
+        # torn-down window (measured: a segfault a window later). Both the timer and the
+        # `_load_mosaic` it fired are gone; the hazard is gone with them. Any timer added to this
+        # window in future must be stopped HERE, the way `PlateOverview.hideEvent` stops its own.
         release_gui_slot(getattr(self, "_gui_slot", None))   # let the next window open
         self._gui_slot = None
-        timer = getattr(self, "_region_load_timer", None)
-        if timer is not None:
-            # A PENDING SINGLE-SHOT MUST NOT OUTLIVE THE CLOSE. The region-slider debounce is armed
-            # for 140 ms and nothing disarmed it, so a window closed within that window kept a live
-            # timer whose timeout called back into a torn-down window -- measured directly: with
-            # windows built, opened, closed and dropped in a loop, ``_load_mosaic`` was observed
-            # running on an already-closed window, and the process segfaulted a window later.
-            # ``PlateOverview.hideEvent`` already stops its own coalescing timer for exactly this
-            # reason; this one was simply missed.
-            timer.stop()
         self._stop_worker()          # stop the run cleanly; nothing on disk to clean up (no cache)
         self._stop_preview()
-        self._stop_mosaic_worker()   # JOINED, not drained: it is parented to this window
-        self._join_retired()         # ...and so is everything _retire deferred
-        self._stop_spots()           # never leave the segmentation thread running at teardown
+        self._join_retired()         # everything _retire deferred
         self._stop_minerva()         # files already written stay; only the launch poll is abandoned
         ov = getattr(self, "_overview", None)
         if ov is not None:

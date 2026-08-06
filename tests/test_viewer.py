@@ -4663,7 +4663,42 @@ def test_the_mosaic_worker_reads_exactly_the_coarsest_level_at_one_z(qapp):
     assert MS._PLANE_CACHE.nbytes > 0, "the seed's decode must be cached, not thrown away"
 
 
-def test_on_mosaic_plane_tells_napari_the_data_is_multiscale(qapp):
+# --- the mosaic reaches napari as a PYRAMID, with the worker's seed ---------------------------
+#
+# RETARGETED 2026-08-06, from ``PlateWindow._on_mosaic_plane`` to ``RegionViewer._on_plane``.
+# These two used to install a fake pane on ``PlateWindow._mosaic_pane`` and call the plate's slot;
+# that attribute has been unconditionally ``None`` since 2b8fbc5, so the slot returned at its first
+# line in the app and was deleted. ``_on_plane`` is the surviving implementation of the same three
+# rules and had no test of its own for them. The method is called UNBOUND on a duck shell, exactly
+# as the ``PlateWindow`` tests above are: what is under test is the slot, not the widget.
+
+
+class _PlaneView:
+    """A ``RegionViewer`` reduced to what ``_on_plane`` reads."""
+
+    _roi_bbox = None
+    open_clock = None
+    window_id = 1
+
+    def __init__(self, pane, meta, region):
+        from squidmip._region_nav import RegionCursor
+
+        self._pane = pane
+        self._meta = meta
+        self._cursor = RegionCursor()
+        self._cursor.set_order([region])
+        self._cursor.activate(region)
+
+    def _say(self, msg):
+        pass
+
+    def on_plane(self, *a, **kw):
+        from squidmip._region_viewer import RegionViewer
+
+        return RegionViewer._on_plane(self, *a, **kw)
+
+
+def test_on_plane_tells_napari_the_data_is_multiscale(qapp):
     """A pyramid passed WITHOUT ``multiscale=True`` is just a list napari cannot use — it would
     either error or take level 0 and render exactly as slowly as before."""
     calls = []
@@ -4679,38 +4714,28 @@ def test_on_mosaic_plane_tells_napari_the_data_is_multiscale(qapp):
         def say(self, msg):
             pass
 
-    win = _plate_window_shell()
-    win._mosaic_pane = _Pane()
-    # _mosaic_region is a read-only PROPERTY over the cursor now (one owner, no second copy to
-    # drift), so the region is set by moving the cursor -- which is what production does too.
-    from squidmip._region_nav import RegionCursor
-    win._cursor = RegionCursor()
-    win._cursor.set_order(["A1"])
-    win._cursor.activate("A1")
-    win._meta = _pyr_meta()
+    view = _PlaneView(_Pane(), _pyr_meta(), "A1")
 
     levels = [np.zeros((4, 64, 48), "uint16"), np.zeros((4, 32, 24), "uint16")]
-    V.PlateWindow._on_mosaic_plane(win, "raw", "A1", "488", levels, (0.0, 0.0, 10.0, 8.0),
-                                   (12.0, 345.0))
+    view.on_plane("A1", "488", levels, (0.0, 0.0, 10.0, 8.0), (12.0, 345.0))
 
     assert len(calls) == 1
-    op, ch, data, kw = calls[0]
+    _op, _ch, data, kw = calls[0]
     assert kw.get("multiscale") is True, "napari must be told the data is a pyramid"
     assert data is levels
     # THE WORKER'S CONTRAST SEED IS PASSED THROUGH, unchanged.
     #
-    # This used to assert `"contrast_limits" not in kw` under the heading "napari OWNS contrast",
-    # and the second half of that was never what the code did: `add_mosaic` treats a missing /
-    # None window as "derive one" and derives `_contrast.auto_contrast` from the pixels, on the
-    # calling thread. The window is the same window; the only thing that moved is which thread
-    # samples for it (`_MosaicWorker.run`). What napari still owns is contrast FROM HERE ON --
-    # this is a seed and nothing recomputes it behind the user.
+    # `add_mosaic` treats a missing / None window as "derive one" and derives
+    # `_contrast.auto_contrast` from the pixels, on the calling thread. The window is the same
+    # window either way; what moved off the UI thread is which thread samples for it
+    # (`_MosaicWorker.run`). What napari still owns is contrast FROM HERE ON -- this is a seed and
+    # nothing recomputes it behind the user.
     assert kw.get("contrast_limits") == (12.0, 345.0)
     # the z scale commit 19cd491 established must survive the pyramid
     assert kw.get("z_scale_um") == 1.5
 
 
-def test_on_mosaic_plane_without_a_window_still_lets_add_mosaic_derive_one():
+def test_on_plane_without_a_window_still_lets_add_mosaic_derive_one(qapp):
     """``window=None`` means "derive one", which is what a missing argument always meant.
 
     Guards the degrade path: `_auto_window_for` returns None for a blank or unreadable plane, and
@@ -4730,17 +4755,11 @@ def test_on_mosaic_plane_without_a_window_still_lets_add_mosaic_derive_one():
         def say(self, msg):
             pass
 
-    win = _plate_window_shell()
-    win._mosaic_pane = _Pane()
-    from squidmip._region_nav import RegionCursor
-    win._cursor = RegionCursor()
-    win._cursor.set_order(["A1"])
-    win._cursor.activate("A1")
-    win._meta = _pyr_meta()
-
-    V.PlateWindow._on_mosaic_plane(win, "raw", "A1", "488",
-                                   [np.zeros((4, 64, 48), "uint16")], (0.0, 0.0, 10.0, 8.0), None)
+    view = _PlaneView(_Pane(), _pyr_meta(), "A1")
+    view.on_plane("A1", "488", [np.zeros((4, 64, 48), "uint16")], (0.0, 0.0, 10.0, 8.0), None)
     assert calls and calls[0].get("contrast_limits") is None
+
+
 # ---------------------------------------------- Defect 4: ONE contract across the two registries
 #
 # _OPERATIONS (the card table) and runnable_operators() (the engine registry) are two lists that
@@ -5002,161 +5021,25 @@ def test_operator_label_falls_back_to_the_key_for_a_cardless_operator():
 
 
 
-# -------------------------------- the mosaic worker's signal must reach the slot it is wired to
+# --- these two moved to the WINDOW, which is the only thing that draws a mosaic ----------------
 #
-# This bit TWICE in one day and the suite never saw it, because every other test calls
-# `_on_mosaic_plane` DIRECTLY. `_MosaicWorker.ready` lost an argument, the lambda in
-# `_load_mosaic` kept five parameters, and nothing failed until the GUI ran -- PyQt raises
-# inside emit(), the region never loads, and the only symptom is a black pane. A test that
-# bypasses the CONNECTION cannot see a connection that is wrong, so this one goes through it.
-
-def test_the_mosaic_workers_signal_actually_reaches_on_mosaic_plane(qapp, monkeypatch):
-    """Drive the real `_load_mosaic` wiring, then emit the real signal down it.
-
-    MUTATION: give the lambda in `_load_mosaic` a parameter the signal does not emit (which is
-    exactly what the pyramid merge left behind) and this stops passing -- verified. It goes
-    down as an ABORT rather than an assertion, because that is literally what PyQt does with an
-    exception raised inside emit(); the point is that it is no longer green.
-    """
-    landed = []
-
-    class _Mosaic:
-        model = None            # no napari model here; `_napari_dims` reads through it
-
-        def add_mosaic(self, *a, **kw):
-            pass
-
-        def remove_op(self, op):
-            return []
-
-    class _Pane:
-        ok = True
-        mosaic = _Mosaic()
-
-        def say(self, msg):
-            pass
-
-    # _MosaicWorker is constructed with `parent=self`, and a QObject parent must be a live
-    # QObject -- which the __new__ shell is not. Build a REAL window and this test passes, but
-    # it also leaves a napari/GL window behind that segfaults a later test in the same process.
-    # So: keep the shell, and drop only the Qt parentage. Everything under test -- the signal,
-    # the lambda, the slot -- is untouched by that.
-    class _NoParentWorker(V._MosaicWorker):
-        def __init__(self, *a, parent=None, **k):
-            super().__init__(*a, parent=None, **k)
-
-    monkeypatch.setattr(V, "_MosaicWorker", _NoParentWorker)
-
-    win = _plate_window_shell()
-    win._mosaic_pane = _Pane()
-    win._reader = _PyrReader()
-    win._meta = _pyr_meta()
-    win._mosaic_worker = None
-    win._pending_dims_step = None
-    # `_load_mosaic` grew a `self._stop_spots()` call, and `_stop_spots` reads `_spot_worker`
-    # through `getattr(self, ..., None)`. On a `__new__` shell whose C++ half was never built,
-    # PyQt raises RuntimeError("super-class __init__() ... was never called") out of that lookup
-    # instead of returning the default — so the shell has to carry every attribute the path
-    # touches. Seeding it None is also what a real window has before any segmentation run.
-    win._spot_worker = None
-    # Same rule, one more attribute: `_load_mosaic` now reads `self.time_point` so the worker
-    # fuses the timepoint the window is showing rather than always timepoint 0, and that property
-    # goes through `getattr(self, "_time_point_bar", None)`. None is what a real window has before
-    # its bar is built.
-    win._time_point_bar = None
-    from squidmip._region_nav import RegionCursor
-    win._cursor = RegionCursor()
-    win._cursor.set_order(["A1"])
-    win._cursor.activate("A1")
-    monkeypatch.setattr(V.PlateWindow, "_napari_z_axis", lambda self: None)
-    monkeypatch.setattr(V.PlateWindow, "_on_mosaic_plane",
-                        lambda self, *a: landed.append(a))
-    monkeypatch.setattr(V._MosaicWorker, "start", lambda self: None)   # no thread; wiring only
-    # _load_mosaic now calls self._stop_spots() (added with spot detection), which retires the
-    # segmentation worker via self._retire(...) -- a real QObject method the __new__ shell cannot
-    # service ("super-class __init__ ... was never called"). It is unrelated to the mosaic-signal
-    # wiring under test, so stub it out like the Qt-touching calls above.
-    monkeypatch.setattr(V.PlateWindow, "_stop_spots", lambda self: None)
-
-    V.PlateWindow._load_mosaic(win, region="A1")
-    worker = win._mosaic_worker
-    assert worker is not None, "_load_mosaic built no worker"
-
-    # Emit exactly what the worker emits in `run()`. A lambda that does not match this
-    # raises inside PyQt's emit and the mosaic silently never arrives.
-    levels = [np.zeros((4, 8, 8), "uint16")]
-    worker.ready.emit("A1", "488", levels, (0.0, 0.0, 8.0, 8.0), (10.0, 200.0))
-
-    assert landed, "the ready signal never reached _on_mosaic_plane"
-    op, region, channel, got_levels, bbox, window = landed[0]
-    assert (op, region, channel) == ("raw", "A1", "488")
-    assert got_levels is levels
-    assert window == (10.0, 200.0), "the worker's contrast seed must survive the connection"
-
-
-def test_the_plate_adopts_napari_s_window_the_moment_a_region_lands(qapp, monkeypatch):
-    """Julio, with a screenshot: "Look at contrast difference between napari window and plate view."
-
-    The event sink was not broken. `on_user_contrast` reports a USER gesture and deliberately
-    filters napari's own autoscale -- otherwise every channel latches MANUAL before anyone touches
-    anything. But that filter also swallows the window napari picks when a region is FIRST shown,
-    so the plate painted from its running percentile histogram, napari from its autoscale, and the
-    panes disagreed from frame one until the user happened to drag a slider.
-
-    An event tells you about a CHANGE; the initial state is not a change. So the plate pulls.
-
-    MUTATION: drop the `_adopt_centre_view()` call in `_on_mosaic_done` and this goes red.
-    """
-    class _Mosaic:
-        def show_op(self, op):
-            pass
-
-        model = type("M", (), {"reset_view": lambda self: None})()
-
-        def contrast(self, ch):
-            return {"488": (11.0, 222.0), "561": (33.0, 444.0)}.get(ch)
-
-        def channel_rgb(self, ch):
-            return {"488": (0.0, 1.0, 0.0), "561": (1.0, 1.0, 0.0)}.get(ch)
-
-        def channel_visible(self, ch):
-            return True
-
-    class _Pane:
-        ok = True
-        mosaic = _Mosaic()
-
-        def say(self, msg):
-            pass
-
-    followed, tinted = [], []
-
-    class _Overview:
-        _labels = ["488", "561"]
-
-        def follow_channel_window(self, ch, lo, hi):
-            followed.append((ch, lo, hi))
-
-        def set_channel_color(self, ch, rgb):
-            tinted.append((ch, tuple(rgb)))
-
-        def set_channel_visible(self, ch, on):
-            pass
-
-    win = _plate_window_shell()
-    win._mosaic_pane = _Pane()
-    win._overview = _Overview()
-    win._meta = {"channels": [{"name": "488"}, {"name": "561"}]}
-    monkeypatch.setattr(V.PlateWindow, "_restore_dims_step", lambda self: None)
-    monkeypatch.setattr(V.PlateWindow, "_bind_napari_contrast", lambda self: None)
-    monkeypatch.setattr(V.PlateWindow, "_region_frame_done", lambda self: None)
-
-    V.PlateWindow._on_mosaic_done(win, "raw", "A1", 2)
-
-    assert followed == [(0, 11.0, 222.0), (1, 33.0, 444.0)], (
-        f"the plate did not adopt napari's windows on arrival: {followed}")
-    assert tinted == [(0, (0.0, 1.0, 0.0)), (1, (1.0, 1.0, 0.0))], (
-        f"the plate did not adopt napari's colours on arrival: {tinted}")
+# ``test_the_mosaic_workers_signal_actually_reaches_on_mosaic_plane`` and
+# ``test_the_plate_adopts_napari_s_window_the_moment_a_region_lands`` lived here. Both drove
+# ``PlateWindow._load_mosaic`` / ``_on_mosaic_done`` through a hand-installed ``_mosaic_pane``,
+# and that attribute has been unconditionally ``None`` since 2b8fbc5: in the app neither method
+# got past its first line. Deleted with the methods on 2026-08-06.
+#
+# Neither concern is lost, and neither is now untested:
+#
+# * the SIGNAL-TO-SLOT ARITY (a lambda that does not match ``_MosaicWorker.ready`` raises inside
+#   PyQt's emit and the region silently never loads) is exercised on the live path by
+#   ``tests/test_time_point_playback.py``, whose ``_shape_worker_class`` emits a real
+#   ``Signal(str, str, object, object, object)`` down ``RegionViewer._load_mosaic``'s own lambda.
+# * the PLATE ADOPTING NAPARI'S RESOLVED WINDOW on arrival -- Julio's "look at the contrast
+#   difference between napari window and plate view" -- is ``_adopt_window_view``, called from
+#   ``_bind_window_contrast``, and pinned with its own mutation note in
+#   ``tests/test_plate_follows_windows.py``. ``_adopt_centre_view``, the pane-flavoured twin this
+#   test drove, was the dead one of the pair.
 
 
 def test_the_plate_is_restored_even_while_the_raw_preview_streams(qapp,
@@ -5255,11 +5138,58 @@ class _RecordingPane:
         pass
 
 
+class _ResultView:
+    """A ``RegionViewer`` reduced to what the RESULT SINK reads, running the REAL sink.
+
+    RETARGETED 2026-08-06. These tests used to install a ``_RecordingPane`` on the plate's own
+    ``_mosaic_pane`` and assert against ``PlateWindow._add_result_layers``. That pane has been
+    unconditionally ``None`` since 2b8fbc5, so the method under test could not run in the app and
+    the branch calling it could not be taken; both were deleted. The live sink is
+    ``RegionViewer.deliver_result``, reached through ``_deliver_to_views``, and it applies the same
+    three rules (``mosaic_bbox_um`` placement, ``add_result`` kind dispatch, a z scale only when
+    the result declares depth). So the sink moved and the assertions did not have to.
+
+    ``deliver_result`` is CALLED UNBOUND off the real class rather than reimplemented, for the
+    same reason ``_RecordingMosaic`` borrows ``add_result``: a fake that restates the rule can
+    agree with itself while disagreeing with the app.
+    """
+
+    _roi_bbox = None
+    window_id = 1
+
+    def __init__(self, meta, region):
+        self._pane = _RecordingPane()
+        self._meta = meta
+        self._region = region
+        self._result_region = None
+
+    @property
+    def mosaic(self):
+        return self._pane.mosaic
+
+    def current_region(self):
+        return self._region
+
+    def _say(self, msg):
+        pass
+
+    def deliver_result(self, op, result, *, visible):
+        from squidmip._region_viewer import RegionViewer
+
+        return RegionViewer.deliver_result(self, op, result, visible=visible)
+
+
+class _ResultManager:
+    """The one seam ``_deliver_to_views`` and ``_result_regions`` read: ``mgr.windows``."""
+
+    def __init__(self, *views):
+        self.windows = list(views)
+
+
 def _result_win(op="bgsub", region="A1", channels=("405", "488")):
     from squidmip._region_nav import RegionCursor
 
     win = _plate_window_shell()
-    win._mosaic_pane = _RecordingPane()
     win._cursor = RegionCursor()
     win._cursor.set_order([region])
     win._cursor.activate(region)
@@ -5284,6 +5214,8 @@ def _result_win(op="bgsub", region="A1", channels=("405", "488")):
         "channels": [{"name": c} for c in channels],
         "dz_um": 1.0,
     }
+    win._view = _ResultView(win._meta, region)
+    win._viewer_manager = _ResultManager(win._view)
     return win
 
 
@@ -5292,7 +5224,7 @@ def test_a_plane_op_result_becomes_a_layer_group_one_layer_per_channel(qapp):
     win = _result_win("bgsub")
     for fov in (0, 1):
         V.PlateWindow._on_result(win, "A1", fov, np.full((2, 8, 8), 7, "uint16"))
-    mos = win._mosaic_pane.mosaic
+    mos = win._view.mosaic
     assert mos.ops() == ["bgsub"]                    # one GROUP, keyed by the operator
     assert [c[1] for c in mos.group("bgsub")] == ["405", "488"]   # one LAYER per channel
 
@@ -5302,7 +5234,7 @@ def test_the_layer_group_is_not_drawn_until_the_region_is_whole(qapp):
     something the operator did."""
     win = _result_win("bgsub")
     V.PlateWindow._on_result(win, "A1", 0, np.zeros((2, 8, 8), "uint16"))
-    assert win._mosaic_pane.mosaic.calls == []
+    assert win._view.mosaic.calls == []
 
 
 def test_the_operator_layer_lands_in_the_raw_mosaic_s_frame(qapp):
@@ -5313,7 +5245,7 @@ def test_the_operator_layer_lands_in_the_raw_mosaic_s_frame(qapp):
     win = _result_win("bgsub")
     for fov in (0, 1):
         V.PlateWindow._on_result(win, "A1", fov, np.zeros((2, 8, 8), "uint16"))
-    kw = win._mosaic_pane.mosaic.group("bgsub")[0][3]
+    kw = win._view.mosaic.group("bgsub")[0][3]
     assert kw["bbox_um"] == mosaic_bbox_um(win._meta, "A1")
 
 
@@ -5326,7 +5258,7 @@ def test_two_operators_make_TWO_groups_so_both_can_be_toggled(qapp):
     win._active_op_key = "decon"
     for fov in (0, 1):
         V.PlateWindow._on_result(win, "A1", fov, np.zeros((2, 8, 8), "uint16"))
-    assert win._mosaic_pane.mosaic.ops() == ["bgsub", "decon"]
+    assert win._view.mosaic.ops() == ["bgsub", "decon"]
 
 
 def test_a_result_for_a_region_that_is_not_on_screen_is_dropped_not_accumulated(qapp):
@@ -5335,7 +5267,7 @@ def test_a_result_for_a_region_that_is_not_on_screen_is_dropped_not_accumulated(
     win = _result_win("bgsub")
     for fov in (0, 1):
         V.PlateWindow._on_result(win, "B7", fov, np.zeros((2, 8, 8), "uint16"))
-    assert win._mosaic_pane.mosaic.calls == []
+    assert win._view.mosaic.calls == []
 
 
 def test_a_result_that_cannot_be_placed_SAYS_SO_instead_of_vanishing(qapp):
@@ -5344,7 +5276,7 @@ def test_a_result_that_cannot_be_placed_SAYS_SO_instead_of_vanishing(qapp):
     win = _result_win("bgsub")
     V.PlateWindow._on_result(win, "A1", 0, np.zeros((1, 8, 8), "uint16"))
     assert "not shown as a layer" in win._readout.text()
-    assert win._mosaic_pane.mosaic.calls == []
+    assert win._view.mosaic.calls == []
 
 
 def test_a_region_operator_s_fused_mosaic_is_added_whole_not_re_tiled(qapp):
@@ -5352,15 +5284,19 @@ def test_a_region_operator_s_fused_mosaic_is_added_whole_not_re_tiled(qapp):
     tile a mosaic as if it were a FOV."""
     win = _result_win("stitch")
     V.PlateWindow._on_result(win, "A1", 0, np.full((2, 20, 30), 3, "uint16"))
-    layers = win._mosaic_pane.mosaic.group("stitch")
+    layers = win._view.mosaic.group("stitch")
     assert len(layers) == 2
     assert layers[0][2].shape == (20, 30)
 
 
-def test_no_napari_pane_means_the_ndviewer_path_still_stands(qapp):
-    """A window without napari must not raise out of the result slot."""
+def test_no_open_window_means_the_result_slot_still_stands(qapp):
+    """A plate with nothing open must not raise out of the result slot.
+
+    Retargeted from ``_mosaic_pane = None`` (which was the only value that attribute ever held) to
+    the condition that can actually differ today: no window is open to deliver into.
+    """
     win = _result_win("bgsub")
-    win._mosaic_pane = None
+    win._viewer_manager = _ResultManager()
     V.PlateWindow._on_result(win, "A1", 0, np.zeros((2, 8, 8), "uint16"))
 
 

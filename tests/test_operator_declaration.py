@@ -498,13 +498,17 @@ def test_write_plate_refuses_kwargs_only_for_an_operator_that_declares_none(squi
 
 
 # ==============================================================================================
-# 6. THE TWO SINKS BOTH READ THE DECLARATION
+# 6. THE ONE SINK READS THE DECLARATION
 # ==============================================================================================
 #
-# There are exactly two places an operator result becomes a layer: the plate window's own pane
-# (`PlateWindow._add_result_layers`) and every open region window (`RegionViewer.deliver_result`).
-# Both used to call `add_mosaic` unconditionally. Both are driven here, because a fix applied to
-# one of two sinks is the shape of half this codebase's reported defects.
+# There is exactly ONE place an operator result becomes a layer: an open region window
+# (`RegionViewer.deliver_result`). It used to call `add_mosaic` unconditionally, and so did a
+# SECOND sink -- `PlateWindow._add_result_layers`, which painted the plate window's own napari
+# pane. That pane (`_mosaic_pane`) was pinned to None on 2026-07-23 and the only branch calling the
+# method read `if self._mosaic_pane is not None`, so the second sink could never run; both were
+# deleted on 2026-08-06. "A fix applied to one of two sinks" is the shape of half this codebase's
+# reported defects, and the cleanest way to keep two sinks in agreement turned out to be to stop
+# having two.
 
 class _RecordingMosaic:
     """Records the TERMINAL layer calls and borrows the REAL kind dispatch off ``MosaicLayers``.
@@ -548,23 +552,8 @@ def _meta_for(region="A1", channels=("405", "488")):
     }
 
 
-def test_the_plate_pane_draws_a_labels_result_as_labels():
-    """``PlateWindow._add_result_layers``, driven with a labels result."""
-    from squidmip import _viewer as V
-
-    pane = type("P", (), {"ok": True})()
-    pane.mosaic = _RecordingMosaic()
-    win = type("W", (), {})()
-    win._mosaic_pane = pane
-    win._meta = _meta_for()
-
-    V.PlateWindow._add_result_layers(win, "spot", _label_result("spot"))
-    assert [c[1] for c in pane.mosaic.labels] == ["405", "488"]
-    assert pane.mosaic.images == [], "a label image was drawn as an Image layer"
-
-
 def test_a_region_window_draws_a_labels_result_as_labels():
-    """``RegionViewer.deliver_result``, the OTHER sink, driven the same way."""
+    """``RegionViewer.deliver_result``, the sink, driven with a labels result."""
     from squidmip import _region_viewer as RV
 
     pane = type("P", (), {"ok": True})()
@@ -581,32 +570,25 @@ def test_a_region_window_draws_a_labels_result_as_labels():
     assert pane.mosaic.images == [], "a label image was drawn as an Image layer"
 
 
-def test_an_intensity_result_still_goes_to_the_image_path_in_both_sinks():
-    """The other direction, so the sinks are not simply drawing everything as labels now."""
+def test_an_intensity_result_still_goes_to_the_image_path():
+    """The other direction, so the sink is not simply drawing everything as labels now."""
     from squidmip._address import Extent
     from squidmip._region_viewer import RegionViewer
     from squidmip._result import Result
-    from squidmip._viewer import PlateWindow
 
     plane = np.full((8, 8), 500, dtype=np.uint16)
     result = Result.of(Extent(region_id="A1"), [plane, plane], channels=("405", "488"),
                        z_depth=1, pixel_size_um=1.0, dtype="uint16")
-    for driver in ("plate", "region"):
-        pane = type("P", (), {"ok": True})()
-        pane.mosaic = _RecordingMosaic()
-        if driver == "plate":
-            win = type("W", (), {})()
-            win._mosaic_pane, win._meta = pane, _meta_for()
-            PlateWindow._add_result_layers(win, "mip", result)
-        else:
-            win = type("W", (), {"window_id": "w1", "_roi_bbox": None, "_meta": _meta_for(),
-                                 "_result_region": None,
-                                 "current_region": lambda self: "A1",
-                                 "_say": lambda self, m: None})()
-            win._pane = pane
-            RegionViewer.deliver_result(win, "mip", result, visible=True)
-        assert [c[1] for c in pane.mosaic.images] == ["405", "488"], driver
-        assert pane.mosaic.labels == [], driver
+    pane = type("P", (), {"ok": True})()
+    pane.mosaic = _RecordingMosaic()
+    win = type("W", (), {"window_id": "w1", "_roi_bbox": None, "_meta": _meta_for(),
+                         "_result_region": None,
+                         "current_region": lambda self: "A1",
+                         "_say": lambda self, m: None})()
+    win._pane = pane
+    RegionViewer.deliver_result(win, "mip", result, visible=True)
+    assert [c[1] for c in pane.mosaic.images] == ["405", "488"]
+    assert pane.mosaic.labels == []
 
 
 # ==============================================================================================

@@ -1,8 +1,30 @@
-"""The plate's channel bar carries NO contrast control surface.
+"""The plate carries NO contrast control surface. There is no channel bar to carry one.
 
-Deliberately imports NO napari. Constructing a napari canvas in the same process loads a second
-Qt binding on top of _viewer's PyQt5, and the resulting clash ABORTS the interpreter rather than
-failing a test.
+RETARGETED 2026-08-06, from ``_viewer._ChannelBar`` to the real window.
+
+WHAT CHANGED. ``_ChannelBar`` was a per-channel strip under the plate: a colour dot, a name, and a
+contrast READOUT. Every test in this file built one directly and asserted it had no sliders, no
+checkboxes and no buttons. The window stopped constructing it in ``8b0cbfc`` (2026-07-22) and never
+constructed it again, so for two weeks this file proved a property of an object no user could see,
+and the same interval is exactly when ``tools/gates.py``'s mutation self-test was patching
+``_ChannelBar.__init__`` to inject a duplicate control -- a mutation that ran zero times and let
+the gate print PASS against a codebase it had not mutated. The class was deleted on 2026-08-06.
+
+WHAT DID NOT CHANGE. The requirement, which is Julio's, three rounds running:
+
+    "Make sure there's no knowledge duplication in the GUI. I can still see the duplicated
+    sliders."
+    "there shouldn't be any controls for the plate view. It just reacts to toggles and contrast
+    adjustments in napari."
+
+Contrast has ONE owner -- each window's napari -- and the plate is a SINK: it follows through
+``PlateWindow._on_detail_contrast`` -> ``PlateOverview.follow_channel_window``. Two widgets that
+can move one value is what this file exists to fail the build for, so the assertions moved onto the
+surface a user actually gets rather than being deleted with the widget.
+
+Deliberately imports NO napari. Constructing a napari canvas in the same process loads a second Qt
+binding on top of ``_viewer``'s, and the resulting clash ABORTS the interpreter rather than failing
+a test.
 """
 
 from __future__ import annotations
@@ -18,94 +40,80 @@ pytest.importorskip("qtpy")
 if "PySide6" in sys.modules or "PySide2" in sys.modules:
     pytest.skip("PySide already loaded - Qt binding conflict", allow_module_level=True)
 
+from qtpy.QtWidgets import (  # noqa: E402
+    QAbstractButton, QApplication, QCheckBox, QSlider,
+)
 
-class _StubOverview:
-    """Just enough PlateOverview for _ChannelBar: it is the BAR under test, not the plate."""
-
-    def __init__(self, n=3):
-        self._contrast = type("C", (), {"dmax": 65535.0})()
-        self._labels = [f"ch{i}" for i in range(n)]
-
-    def channel_windows(self):
-        return [(0.0, 1000.0)] * len(self._labels)
-
-    def set_channel_visible(self, i, on):
-        pass
+import squidmip._viewer as V  # noqa: E402
 
 
-_APP = None
+@pytest.fixture(scope="module")
+def qapp():
+    app = QApplication.instance() or QApplication([])
+    app.setProperty("_squidmip_test", True)
+    return app
 
 
-def _bar():
-    import numpy as np
-    from qtpy.QtWidgets import QApplication
-
-    from squidmip._viewer import _ChannelBar
-
-    # Keep a REFERENCE. `QApplication.instance() or QApplication([])` as an expression binds
-    # nothing, so the app is garbage-collected immediately and the next QWidget aborts the
-    # interpreter with no Python-level error.
-    global _APP
-    _APP = QApplication.instance() or QApplication([])
-    ov = _StubOverview()
-    colors = np.tile(np.array([[1.0, 1.0, 1.0]]), (len(ov._labels), 1))
-    return _ChannelBar(ov._labels, colors, ov)
+@pytest.fixture
+def plate(qapp, squid_dataset):
+    """A REAL ingested plate window. The point of this file is what a user is handed."""
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    qapp.processEvents()
+    yield win
+    win.close()
+    qapp.processEvents()
 
 
-def test_the_plate_carries_no_contrast_slider_or_auto_button():
-    """Julio, three rounds running: 'Make sure there\'s no knowledge duplication in the GUI. I
-    can still see the duplicated sliders.' Contrast has ONE owner — the central array viewer —
-    and two widgets that can move one value is what the IMA-268 gate fails the build for.
+def test_there_is_no_channel_bar_class_to_reintroduce():
+    """The strip is gone as a TYPE, not merely unbuilt.
+
+    An unbuilt class is what this whole file was testing, and what let a gate's mutation target
+    something no window contains. If it comes back it has to come back with a call site.
+    """
+    assert not hasattr(V, "_ChannelBar"), (
+        "_ChannelBar is back; if the plate is to have a channel strip again it needs a call site "
+        "in PlateWindow, or this file is testing an object no user can see")
+
+
+def test_the_plate_view_carries_no_contrast_control_at_all(plate):
+    """MUTATION: mount a QSlider on ``PlateOverview`` wired to ``set_channel_window`` and this
+    goes red. That is exactly the duplicate ``tools/gates.py`` re-injects for its self-test.
 
     Measured with that gate on a real window: origin/main carried 8 sliders + 4 auto buttons in
-    the plate view; here it reports 'contrast: 0 sliders, 0 auto buttons in the plate view'.
+    the plate view; here it reports 0 and 0.
     """
-    from qtpy.QtWidgets import QPushButton, QSlider
-
-    bar = _bar()
-    assert bar.findChildren(QSlider) == []
-    assert [b for b in bar.findChildren(QPushButton) if b.text() == "auto"] == []
-
-
-def test_the_bar_still_REPORTS_the_window_the_owner_resolved():
-    """A readout is not a control. The plate must still show the window so the two panes can be
-    seen to agree — it just must not be a second way to SET it."""
-    bar = _bar()
-    bar.set_window(1, 12.0, 3400.0)
-    assert "12" in bar._rows[1][1].text()
-    assert "3400" in bar._rows[1][1].text()
+    ov = plate._overview
+    assert ov.findChildren(QSlider) == [], "the plate view grew a contrast slider again"
+    assert ov.findChildren(QCheckBox) == [], "the plate view grew a channel checkbox again"
+    assert ov.findChildren(QAbstractButton) == [], "the plate view grew a control again"
 
 
-def test_the_plate_strip_carries_NO_CONTROLS_AT_ALL():
-    """Julio: "there shouldn't be any controls for the plate view. It just reacts to toggles and
-    contrast adjustments in napari."
+def test_the_only_slider_on_the_window_is_the_TIMEPOINT_slider(plate):
+    """A slider is allowed on the window when it moves a different QUANTITY.
 
-    This strip used to own per-channel checkboxes, on the argument that plate visibility and
-    napari layer visibility were "two controls, two values". They are not two values -- they are
-    one question ("is this channel on screen") asked twice, and the two answers drifted. The
-    checkboxes are gone; visibility arrives from napari's eye icons through `on_user_visibility`.
-
-    MUTATION: put any QCheckBox / QSlider / QPushButton back on the strip and this goes red.
+    The timepoint bar's slider selects WHICH timepoint is shown; it is not a second owner of any
+    value napari owns. Named rather than merely tolerated, so a contrast slider cannot arrive here
+    and pass as "the window has always had a slider".
     """
-    from qtpy.QtWidgets import QAbstractButton, QCheckBox, QSlider
+    from squidmip._time_point import TimePointBar
 
-    bar = _bar()
-    assert bar.findChildren(QCheckBox) == []
-    assert bar.findChildren(QSlider) == []
-    assert bar.findChildren(QAbstractButton) == [], "the plate strip grew a control again"
-
-
-def test_the_strip_reports_napari_visibility_without_being_able_to_change_it():
-    bar = _bar()
-    bar.set_visible_state(1, False)          # napari's eye icon went off
-    bar.set_visible_state(1, True)           # ...and back on; a readout, not a toggle
-    assert not hasattr(bar, "set_channel_visible"), (
-        "the strip must not expose a way to SET visibility; it is a sink"
-    )
+    for slider in plate.findChildren(QSlider):
+        owner = slider.parent()
+        while owner is not None and not isinstance(owner, TimePointBar):
+            owner = owner.parent()
+        assert owner is not None, (
+            f"a slider on the plate window that is not the timepoint bar's: {slider!r}")
 
 
-def test_a_window_for_a_channel_the_plate_does_not_have_is_ignored():
-    """The owner can broadcast a channel index the plate has no row for (RGB mode, a re-ingest).
-    Indexing blindly would raise inside a signal handler, where it is easy to lose."""
-    bar = _bar()
-    bar.set_window(99, 0.0, 1.0)
+def test_the_plate_follows_contrast_and_cannot_set_it(plate):
+    """The plate is a SINK. It has the entry point a window's napari pushes into, and no widget
+    the user can drag to push into it themselves."""
+    ov = plate._overview
+    # the sink exists...
+    assert callable(getattr(ov, "follow_channel_window", None))
+    assert callable(getattr(ov, "set_channel_visible", None))
+    # ...and the plate reaches it only from a window's gesture, never from its own control.
+    assert callable(getattr(plate, "_on_detail_contrast", None))
+    assert ov.findChildren(QAbstractButton) == []

@@ -62,8 +62,13 @@ however that window was constructed.
 
 BUG 3: THE REGION DEBOUNCE LEFT ARMED ACROSS THE CLOSE
 ------------------------------------------------------
+(The timer itself was deleted on 2026-08-06 along with the ``_load_mosaic`` it debounced -- see
+``test_no_timer_on_the_plate_window_survives_its_close`` below, which keeps the rule this bug
+established without depending on the particular timer that taught it. The account stays because it
+is the evidence for that rule, not because the object still exists.)
+
 Found while bisecting bug 2, in a standalone loop where the QApplication was already safe.
-``PlateWindow._on_region_changed`` debounces the expensive mosaic fuse behind a single-shot
+``PlateWindow._on_region_changed`` debounced the expensive mosaic fuse behind a single-shot
 ``QTimer`` armed for 140 ms, and NOTHING disarmed it. Two consequences, each independently
 sufficient to corrupt the heap:
 
@@ -171,24 +176,42 @@ def test_many_windows_can_be_built_and_destroyed_in_one_process(qapp):
         del win          # the trigger: PyQt deletes the C++ object here
 
 
-def test_the_region_debounce_is_disarmed_and_owns_no_closure_over_the_window(qapp,
-                                                                            squid_dataset):
-    """Bug 3, both halves, asserted directly rather than only through a crash.
+def test_no_timer_on_the_plate_window_survives_its_close(qapp, squid_dataset):
+    """Bug 3, generalised, after its specific instance was deleted.
 
-    A pending single-shot that survives the close will call back into a torn-down window, and a
-    ``self``-capturing lambda on a timer parented to that same window is a reference cycle Python's
-    collector cannot even see, because the link that closes it lives in C++.
+    The instance was ``_region_load_timer``: a 140 ms single-shot armed by ``_on_region_changed``
+    to debounce ``_load_mosaic``. Both went on 2026-08-06 -- ``_load_mosaic`` read the plate's
+    ``_mosaic_pane``, which has been unconditionally ``None`` since 2b8fbc5, so the debounce fired
+    into a slot that could only return. Asserting on that timer by name would now be asserting on
+    nothing, so this asserts the RULE instead: whatever timers this window owns, none of them may
+    still be running once it is closed.
+
+    That is the half of the hazard the close is responsible for. A pending single-shot calls back
+    into a torn-down window; observed directly on the deleted timer, as a segfault a window later.
+    The other half -- a ``self``-capturing lambda on a child timer, a cycle whose closing link
+    lives in C++ where Python's collector cannot see it -- is a rule about how a timer is
+    CONNECTED, and there is no longer a timer here to connect. Add one and connect a bound method.
+
+    SCOPED TO THE WINDOW'S OWN TIMERS, i.e. ``t.parent() is win``, which is exactly what
+    ``QTimer(self)`` in ``PlateWindow`` produces and what the deleted one was. It deliberately does
+    NOT sweep grandchildren: ``ViewerManager._mem_timer`` is a 2 s repeating poll that is still
+    armed after this close today, and it belongs to the manager's lifetime rather than the
+    window's (tests that build a manager directly stop it themselves). That is pre-existing and is
+    named here rather than quietly excluded by a filter with no explanation.
     """
+    from qtpy.QtCore import QTimer
+
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     try:
         assert win.commands.execute(OpenAcquisition(path=str(root))).ok
-        timer = win._region_load_timer
-        assert timer.isActive(), "the region debounce never armed; this test proves nothing"
-        assert win._fire_region_load.__self__ is win, \
-            "the debounce slot must be a bound method, not a closure over the window"
+        qapp.processEvents()
         win.close()
-        assert not timer.isActive(), "closeEvent left the region debounce armed past the close"
+        qapp.processEvents()
+        still_running = [repr(t) for t in win.findChildren(QTimer)
+                         if t.parent() is win and t.isActive()]
+        assert not still_running, (
+            f"closeEvent left {len(still_running)} timer(s) armed past the close: {still_running}")
     finally:
         win.close()
 

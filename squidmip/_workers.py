@@ -561,12 +561,18 @@ class _MosaicWorker(QThread):
     problem = Signal(str)
     finished_count = Signal(int)
 
-    def __init__(self, reader, meta, region, channels, z_index=0, parent=None, t=0):
+    def __init__(self, reader, meta, region, channels, parent=None, t=0):
         super().__init__(parent)
         self._reader, self._meta = reader, meta
         self._region = region
         self._channels = list(channels)
-        self._z_index = int(z_index)
+        #: NO ``z_index``. This took one and stored it as ``self._z_index``, and ``run`` never read
+        #: it: every level of the pyramid it emits keeps the full z axis, and WHICH z is on screen
+        #: is napari's dims slider, decided after the layer exists. Its only non-zero caller was
+        #: ``PlateWindow._load_mosaic``, deleted on 2026-08-06 with the pane it drew into; the one
+        #: remaining caller passed 0. A parameter that cannot reach the pixels is a lie about what
+        #: the worker can be asked for.
+        #:
         #: WHICH TIMEPOINT this mosaic is of. It used to be nothing at all: ``run`` called
         #: ``fuse_region_pyramid`` without a ``t`` and the signature defaults it to 0, so a window
         #: whose timepoint slider said 3 rendered timepoint 0, and moving that slider re-read the
