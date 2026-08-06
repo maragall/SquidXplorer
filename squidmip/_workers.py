@@ -55,7 +55,7 @@ from pathlib import Path
 import numpy as np
 from qtpy.QtCore import QThread, Signal
 
-from squidmip import _explore
+from squidmip import _run_scope
 from squidmip._engine import _default_workers
 from squidmip._logpane import capture_stdout_to_log, get_logger
 from squidmip._measure import (
@@ -141,12 +141,19 @@ class _OperatorWorker(QThread):
         self._regions = regions          # None = whole plate; a list = subset preview (those wells only)
         self._save = save                # False = PREVIEW: compute + push to the viewer, write NOTHING
         self._n_fovs = n_fovs            # None = every FOV per well -> coordinate-placed mosaic tiles
-        # Per-run parameters for a REGION operator (registration on/off, registration channel,
-        # feather width, blunder thresholds, channel subset) -- the stitcher panel in pane 1
-        # sets these. Carried on BOTH branches of run(): a setting tuned on a preview and then
-        # dropped on the save would be thrown away at exactly the moment it is written to disk.
-        # A projector has no equivalent seam (its parameters are baked in at registration), and
-        # write_plate refuses these for one by name rather than accepting and dropping them.
+        # Per-run parameters for the operator, whichever table it is in -- a REGION operator's
+        # (registration on/off, registration channel, feather width, blunder thresholds, channel
+        # subset) from the stitcher panel, or a PROJECTOR's declared `params` from the panel
+        # `_param_panel` builds out of them. Carried on BOTH branches of run(): a setting tuned on
+        # a preview and then dropped on the save would be thrown away at exactly the moment it is
+        # written to disk, and a setting dropped on the PREVIEW is worse still -- the preview is
+        # where the value is judged.
+        #
+        # The second half of that used to read "a projector has no equivalent seam (its parameters
+        # are baked in at registration)", and the preview branch of run() matched it by omitting
+        # these. `Operator.params` / `Operator.factory` ended that, and an operator declaring four
+        # parameters (spot, cellpose) then ran at its defaults while everything on screen said
+        # otherwise.
         self._operator_kwargs = dict(operator_kwargs or {})
         # Per-region FOV boxes inside the _CELL thumbnail (IMA-187). Computed ONCE up front from
         # the reader's stage positions, because every arriving FOV needs its box and the geometry
@@ -315,7 +322,7 @@ class _OperatorWorker(QThread):
         # GUI's own operator-run path, into the same METRICS log — so the comparison table sees
         # both surfaces' runs and the one line per run reaches the log panel (measure_run logs at
         # INFO to the root logger, which the panel is a sink of). One measurement, three consumers.
-        target = _explore.describe_run_target(self._regions, total=self._total) or self._operator
+        target = _run_scope.describe_run_target(self._regions, total=self._total) or self._operator
         # CAPTURE print() FOR THE DURATION OF THE RUN. tilefusion says what it is doing with bare
         # print (registration.py:274, optimization.py:254, distortion.py:245, fusion.py:358), not
         # through its loggers, so the panel showed none of it while maragall/stitcher's own GUI
@@ -402,9 +409,17 @@ class _OperatorWorker(QThread):
                 else:
                     from squidmip import project_plate
 
+                    # operator_kwargs ON THE PREVIEW TOO. This call used to omit it while the SAVE
+                    # branch above passed it and this class's docstring claimed both branches
+                    # carried it. It was true when written -- a projector's parameters were baked
+                    # in at registration and only a REGION operator took kwargs -- and it stopped
+                    # being true the moment `Operator.params`/`factory` landed. The symptom is the
+                    # worst shape there is: the panel says min_area_px=400, the console line says
+                    # min_area_px=400, and the pixels are the ones min_area_px=30 produces.
                     stream = project_plate(self._reader, workers=_VIEWER_WORKERS, projector=projector,
                                            n_fovs=self._n_fovs, on_error=self._on_error,
-                                           regions=self._regions)
+                                           regions=self._regions,
+                                           operator_kwargs=self._operator_kwargs or None)
                 try:
                     for region, fov, image in stream:
                         if self._stop.is_set():
@@ -1042,7 +1057,7 @@ class _PreviewWorker(QThread):
     """
 
     tileReady = Signal(int, int, str, object, object)   # (ri, ci, well_id, tile, box|None)
-    #: This is the raw fill, not an operator run. ``_explore.operator_busy`` reads it so a retired
+    #: This is the raw fill, not an operator run. ``_run_scope.operator_busy`` reads it so a retired
     #: preview still draining cannot make the next operator run refuse itself.
     IS_PREVIEW = True
 
@@ -1065,13 +1080,21 @@ class _PreviewWorker(QThread):
     #                                                 half-grey, indistinguishable from "loading".
 
     def __init__(self, reader, meta, fov_index: dict, order: list, mosaic: bool = True,
-                 cache=_CACHE_AUTO):
+                 cache=_CACHE_AUTO, t: int = 0):
         super().__init__()
         self._reader, self._meta = reader, meta
         self._fov_index, self._order = fov_index, order
         self._channels = [c["name"] for c in meta["channels"]]
         self._dtype = np.dtype(meta["dtype"])
         self._mosaic = bool(mosaic)
+        #: WHICH TIMEPOINT this preview is of, the same argument ``_MosaicWorker`` takes for the
+        #: same reason. ``load`` called ``reader.read(...)`` with no ``t`` and the signature
+        #: defaults it to 0, so the plate showed frame 0 whatever its bar said -- and unlike the
+        #: region window, the plate could not even be MADE to re-read, because its cells were
+        #: cached under a key with no timepoint in it. Both halves are needed: threading ``t``
+        #: through a cache keyed without it would have served t=0's pixels under a t=1 label,
+        #: which is worse than not moving at all. See ``_platecache.PlateCellCache``.
+        self._t = max(0, int(t))
         self._stop = threading.Event()
         # The persisted plate cells (_platecache). A sentinel default rather than None so a caller
         # can say "no cache" explicitly and mean it, which is what the uncached-path tests need.
@@ -1080,8 +1103,18 @@ class _PreviewWorker(QThread):
         # care whether caching is available.
         from squidmip._platecache import PlateCellCache
 
-        self._cache = (PlateCellCache.for_reader(reader, meta, cell_px=_CELL)
+        self._cache = (PlateCellCache.for_reader(reader, meta, cell_px=_CELL,
+                                                 time_point=self._t)
                        if cache is _CACHE_AUTO else cache)
+        # A caller that hands in its own cache must hand in one for the timepoint this pass reads.
+        # Reconciling them silently (taking t from the cache, or overwriting the cache's t) is how
+        # a cell read at one timepoint gets published under another, and it would be invisible:
+        # both objects would look correct on their own. Loud, at construction, before a read.
+        if (self._cache is not None
+                and getattr(self._cache, "time_point", self._t) != self._t):
+            raise ValueError(
+                f"_PreviewWorker(t={self._t}) was handed a cache for timepoint "
+                f"{self._cache.time_point}: its cells would be published under the wrong frame.")
         self._pending: dict = {}      # region -> the cell being accumulated for the cache
         self.cache_hits = 0           # regions served from the cache, for the status line and tests
         self.cache_reads = 0          # regions actually read from the acquisition
@@ -1157,8 +1190,8 @@ class _PreviewWorker(QThread):
             self.cache_hits += 1
         self.cache_reads = len(by_region) - self.cache_hits
         # Said out loud, because a cache nobody can see is indistinguishable from a fast disk.
-        log.info("plate preview: %d of %d wells served from the cell cache (%s)",
-                 self.cache_hits, len(by_region), self._cache)
+        log.info("plate preview at t=%d: %d of %d wells served from the cell cache (%s)",
+                 self._t, self.cache_hits, len(by_region), self._cache)
         return remaining
 
     def _remember(self, region: str, box, tile: np.ndarray, expected: int) -> None:
@@ -1234,7 +1267,11 @@ class _PreviewWorker(QThread):
                 region, fov, box = item
                 h, w = (_CELL, _CELL) if box is None else (box[2], box[3])
                 fit = _fit_cell if box is None else (lambda a: _fit_box(a, h, w))
-                return region, box, [fit(self._reader.read(region, fov, ch, z_mid)
+                # `t=self._t`, not the signature's default 0: this is the line that made the plate
+                # ignore its own timepoint bar. `_MosaicWorker` takes the same argument for the
+                # same reason, and `docs/plate-contract.md` records why "the signature takes a t"
+                # is not the same claim as "a t is passed".
+                return region, box, [fit(self._reader.read(region, fov, ch, z_mid, t=self._t)
                                          .astype(np.float32)) for ch in self._channels]
 
             with ThreadPoolExecutor(max_workers=_VIEWER_WORKERS) as ex:

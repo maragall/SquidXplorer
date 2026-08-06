@@ -17,7 +17,7 @@ refusal was a traceback. The consequences are the ones ``docs/NAUTILUS.md`` reco
   the user uses. "It works from the CLI" has never been evidence that the button works.
 * Every new operator had to be wired twice, and the two wirings drifted. This codebase has already
   shipped that exact defect at a smaller scale — two operator registries, different labels,
-  different ``save`` defaults, drifted in production (see ``_explore.RUN_SCOPES``).
+  different ``save`` defaults, drifted in production (see ``_run_scope.RUN_SCOPES``).
 
 So there is one layer. The GUI is a CALLER of it and so is the CLI.
 
@@ -37,7 +37,7 @@ EVERY COMMAND NAMES ITS TARGET
 ------------------------------
 Acquisition, regions, operator, parameters — explicitly, on the command. The established
 convention "nothing selected = everything" is preserved exactly, and it is preserved by CALLING
-:func:`squidmip._explore.resolve_run_scope`, which is the existing owner of scope resolution.
+:func:`squidmip._run_scope.resolve_run_scope`, which is the existing owner of scope resolution.
 There is no second resolver in this module. A command carries either an explicit ``regions`` list
 or a ``scope`` NAME, and the executor hands the live state (selection, current region, parked
 subset) to the one resolver that already knows the rules.
@@ -73,7 +73,7 @@ from typing import Any, ClassVar, Literal, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from squidmip import _explore
+from squidmip import _run_scope
 
 from squidmip._logpane import get_logger
 
@@ -125,7 +125,7 @@ UNKNOWN_OPERATOR = "unknown_operator"    # not in the engine registry (the answe
 UNAVAILABLE_OPERATOR = "unavailable_operator"
 UNKNOWN_REGION = "unknown_region"        # a named region is not in this acquisition
 EMPTY_SCOPE = "empty_scope"              # the scope resolved to nothing — never widen it silently
-BAD_SCOPE = "bad_scope"                  # not one of _explore.RUN_SCOPES
+BAD_SCOPE = "bad_scope"                  # not one of _run_scope.RUN_SCOPES
 BUSY = "busy"                            # a run is already in flight — RETRYABLE
 NO_RUN = "no_run"                        # asked to stop nothing
 NOT_SUPPORTED_HERE = "not_supported_here"   # this executor cannot express this command
@@ -265,8 +265,8 @@ class RunOperator(Command):
 
     * ``regions`` — an explicit list wins over everything. This is the ONE way to express a
       subset, and it is what a reproducible/agent-issued command should carry.
-    * ``scope`` — otherwise a scope NAME from :data:`squidmip._explore.RUN_SCOPES`, resolved
-      against the caller's live state by ``_explore.resolve_run_scope``. The default
+    * ``scope`` — otherwise a scope NAME from :data:`squidmip._run_scope.RUN_SCOPES`, resolved
+      against the caller's live state by ``_run_scope.resolve_run_scope``. The default
       ``"selected wells"`` keeps the established convention exactly: nothing selected = everything.
     """
 
@@ -277,8 +277,8 @@ class RunOperator(Command):
     """A name from ``list_operators`` — a projector ("mip", "bgsub") or a region operator
     ("stitch"). Refused BY NAME against the engine registry if it is not one."""
 
-    scope: str = _explore.SCOPE_SELECTION
-    """How to resolve the target when ``regions`` is not given. One of ``_explore.RUN_SCOPES``."""
+    scope: str = _run_scope.SCOPE_SELECTION
+    """How to resolve the target when ``regions`` is not given. One of ``_run_scope.RUN_SCOPES``."""
 
     regions: Optional[list[str]] = None
     """Explicit wells, in this order. ``None`` defers to ``scope``. An empty LIST is not the same
@@ -443,11 +443,11 @@ class CommandBus:
 # --- scope, resolved ONCE, by the existing owner -------------------------------------------------
 
 def resolve_target(command: "RunOperator", *, selection=None, current_region=None,
-                   parked_subset=None, known_regions=None, total: Optional[int] = None):
+                   known_regions=None, total: Optional[int] = None):
     """Turn a :class:`RunOperator`'s target declaration into ``(regions, refusal_or_None)``.
 
     The ONLY place a command's target is worked out, and it does not re-implement any of it:
-    ``_explore.resolve_run_scope`` owns the scope rules and ``_explore.describe_run_target`` owns
+    ``_run_scope.resolve_run_scope`` owns the scope rules and ``_run_scope.describe_run_target`` owns
     the sentence. This function adds exactly two things the resolver does not do — an explicit
     ``regions`` list wins, and a named region that is not in the acquisition is refused by name
     rather than becoming a bare ``KeyError`` several frames later.
@@ -463,11 +463,10 @@ def resolve_target(command: "RunOperator", *, selection=None, current_region=Non
                                  "an empty region list is not 'everything' — say so with "
                                  "regions=null or scope='whole dataset' if that is what you mean")
     else:
-        regions, problem = _explore.resolve_run_scope(
-            command.scope, selection=selection, current_region=current_region,
-            parked_subset=parked_subset)
+        regions, problem = _run_scope.resolve_run_scope(
+            command.scope, selection=selection, current_region=current_region)
         if problem:
-            code = BAD_SCOPE if command.scope not in _explore.RUN_SCOPES else EMPTY_SCOPE
+            code = BAD_SCOPE if command.scope not in _run_scope.RUN_SCOPES else EMPTY_SCOPE
             return None, _refuse(kind, code, problem)
     if regions is not None and known_regions is not None:
         known = set(str(r) for r in known_regions)
@@ -588,8 +587,8 @@ class EngineExecutor:
                      pixel_size_um=meta.get("pixel_size_um"),
                      wellplate_format=str(meta.get("wellplate_format", "")),
                      selection=list(self.selection),
-                     current_region=None, parked_subset=[],
-                     scopes=list(_explore.RUN_SCOPES))
+                     current_region=None,
+                     scopes=list(_run_scope.RUN_SCOPES))
 
     def do_metrics(self, cmd: Metrics) -> CommandResult:
         from squidmip._measure import METRICS, compare, compare_table
@@ -654,7 +653,7 @@ class EngineExecutor:
                                           known_regions=all_regions, total=len(all_regions))
         if refusal is not None:
             return refusal
-        target = _explore.describe_run_target(regions, total=len(all_regions))
+        target = _run_scope.describe_run_target(regions, total=len(all_regions))
         n_targets = len(all_regions) if regions is None else len(regions)
 
         out_dir = None

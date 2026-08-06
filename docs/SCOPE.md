@@ -47,13 +47,13 @@ demo is attention, not memory: what must never happen is a pane that looks froze
 | ii.2 | **Live stitching** | **PARTIAL.** The stitch operator runs (tilefusion) and the stitcher's own controls are in pane 1. Registration now always runs on the registration channel — that was a real soundness bug: selecting a channel subset silently moved registration to channel 0, so one region stitched to DIFFERENT offsets depending on the selection. Not yet proven end-to-end on a real tissue mosaic. |
 | ii.3 | **Migrate ndv -> napari** | **DONE.** napari is the default and is EMBEDDED in our window. The ndviewer_light fallback still exists and is meant to be deleted. |
 | ii.4 | **One layer per operation** — e.g. the stitching before -> after toggle | **DONE.** Processing layer -> channels, group identity in `layer.metadata` (never parsed out of the layer name), and the toggle is a visibility flip over a group. napari has no layer groups (`LayerList` is flat; upstream #2229 open since 2021), so the tree is synthesised. |
-| ii.5 | **napari over odon**, so gallery view and fractal analysis can follow | Recorded. Gallery view is the one that does not fit the current operator model: it needs a "result" type the pipeline has no concept of — the same missing abstraction that makes background subtraction invisible in napari. |
-| ii.6 | **Exploration pane** — a third vertical pane to view and process FOV subsets in **tabs** | **DONE.** Each tab is a real viewer on its subset, built by pane 2's own constructor (never a second viewer implementation), with a region slider under it. |
+| ii.5 | **napari over odon**, so gallery view and fractal analysis can follow | **DONE for gallery view.** The recorded blocker — "the operator model has no result type for a gallery to be made of" — was already stale when it was written down: `_op_result.OperatorResult` is that type. It turned out not to be on the path anyway. A gallery is a LOOK, not an operator run: `squidmip/_gallery.py` fuses one cell per (Region, channel) at preview placement through the raw mosaic's own `_placement` helpers, and `_gallery_window.GalleryWindow` tiles them. It is subset-native — its scope is the same `{region: [fov, ...]}` mapping `stitch_plate(regions=…)` takes, fed by the plate selection that already existed (`selected_region_fovs`). Fractal analysis is still recorded only. |
+| ii.6 | **Exploration pane** — a third vertical pane to view and process FOV subsets in **tabs** | **REMOVED 2026-08-05, superseded by INDEPENDENT WINDOWS.** It was built (a real viewer per subset with a region slider under it), then 2b8fbc5 decentralized the GUI: a Shift-drag opens its own napari window over the boxed regions, which is the same capability without a pane locked inside the root window. The pane survived in code with no gesture left to fill it, and its tab bar spent six weeks in no layout at all — the decon QC result was published into it and shown to nobody. Deleted along with its tab, slider, subset scope and Minerva button. |
 | ii.7 | Open **minerva-author** with the selected FOVs | **DESCOPED** — see i.8. |
-| ii.8 | **Shift/ctrl** to open an exploration tab with the selected FOV subset | **DONE.** |
+| ii.8 | **Shift/ctrl** to open an exploration tab with the selected FOV subset | **DONE, REBOUND.** A Shift-drag opens an independent window over the boxed regions (`ViewerManager.open`) rather than a tab in a pane; Shift-click still refines the selection and opens nothing. |
 | ii.9 | **Per-channel plate preview** — toggle and contrast adjustment swap the plate composite | **DONE, and now correct.** The plate has NO controls of its own: napari owns contrast, channel visibility and colormap, and the plate is a pure sink of all three. Per-region contrast is deleted — it resolved with `follow=False`, i.e. it deliberately ignored napari's window, which is why contrast would not sync however often the sink was repaired. |
 | ii.10 | **Benchmark live stitching** against ASHLAR, MCmicro, BigStitcher | **PARTIAL.** `squidmip/_bench_stitchers.py` names all three with citations and what each needs (BigStitcher needs a headless Fiji). `squidmip/_oracle.py` is the acceptance criterion: cut a known image into tiles at known positions, grade how far off a stitcher puts them back. Not yet run against the three. |
-| ii.11 | **Drag a tab out** into a free-floating exploration window | **DONE.** |
+| ii.11 | **Drag a tab out** into a free-floating exploration window | **DONE.** Any operator tab drags out of the bar into a `_FloatWindow` and re-docks (`_detach_tab`). Viewing a subset is now a window of its own from the start, so the drag-out is about the CONTROLS. |
 | ii.12 | **Press-and-hold loupe** on the plate grid | **DONE.** |
 
 ---
@@ -67,7 +67,7 @@ orchestrate well-known libraries and add the interface; these are the named ones
 |---|---|---|
 | **[vitessce](https://github.com/vitessce/vitessce)** | The candidate for 3D exploration and storytelling *instead of* Minerva Author. "I'm sure it'd look prettier for customers to view a volume in Vitessce rather than in napari's 3D renderer." Web-native and OME-Zarr-first, which also lines up with the eventual web host + cloud compute. | **NOT STARTED.** Nothing read, nothing prototyped. |
 | **[napari-ome-zarr-navigator](https://github.com/fractal-napari-plugins-collection/napari-ome-zarr-navigator)** | Part of the Fractal plugin collection. It is a napari plugin that navigates an OME-Zarr HCS PLATE — well selection, region loading, label layers. This is the closest existing implementation of what pane 1 + pane 2 do together, and it is the "OME-Zarr interactive editor" Spencer posted. | **NOT STARTED.** Must be read before more plate-navigation UI is written. |
-| **[gallery-view](https://github.com/jsschwrz/gallery-view)** | The CSO's own gallery view. Gallery view is ii.5's open problem — the operator model has no "result" type for it. Read his implementation before designing ours. | **NOT STARTED.** |
+| **[gallery-view](https://github.com/hongquanli/gallery-view)** | The CSO's own gallery view. (The URL here read `jsschwrz/gallery-view`, which is not where it lives; the clone's own remote is `hongquanli`.) | **READ, AND PORTED TWICE.** Its 3-D recipe is `squidmip/_napari3d.py`; its Region view ("Add Region view: stitched per-region MIPs", #7) is `squidmip/_gallery.py` + `_gallery_window.py`. Adapted, never imported: it pins napari <0.6 and we run 0.6.6. Both modules state which of its decisions were taken and which were diverged from. |
 | **Cellpose** (and StarDist) | The model for "iterating operators" (i.6), named independently by both parties. | **NOT STARTED.** |
 | **Fractal** (fractal-analytics-platform) | The task/operator model we are closest to and should not reinvent (i.7). | Surveyed only. |
 
@@ -140,7 +140,7 @@ named command surface, where every command is observable and every algorithm is 
 
 | # | Item | Status |
 |---|---|---|
-| v.1 | **Logger**, bottom-right, below the exploration pane. "shows them that the GUI is actually doing something rather than staying idle." | **CORE LANDED**, not yet mounted. `squidmip/_logpane.py` + 9 tests. Attaches to the stdlib ROOT logger, so tilefusion/petakit/bgsub/Cellpose appear WITHOUT being wired up - the same plug-and-play property v.3 asks for. Bounded at `MAX_LINES`. Widget not yet placed in the window. |
+| v.1 | **Logger**, bottom-right, under the operator tabs. "shows them that the GUI is actually doing something rather than staying idle." | **CORE LANDED**, not yet mounted. `squidmip/_logpane.py` + 9 tests. Attaches to the stdlib ROOT logger, so tilefusion/petakit/bgsub/Cellpose appear WITHOUT being wired up - the same plug-and-play property v.3 asks for. Bounded at `MAX_LINES`. Widget not yet placed in the window. |
 | v.2 | **API an agent can drive** | **NOT STARTED.** One command surface shared by the GUI, the CLI and a script - not three. |
 | v.3 | **Layers/data model that accept new algorithms** | **PARTIAL.** `add_segmenter(name, fn, requires=...)` exists on the spot-detect branch and is the right shape. The gap is the RESULT type - see ii.5 and the bgsub hole. |
 | v.4 | **CLI** | Exists and shares the engine. Not yet aligned with v.2 as one surface. |
@@ -181,10 +181,15 @@ logger."
 
 ```
 PlateWindow (ours, the HOST)
-├── PANE 1  plate view + the OPERATOR INTERFACES     (no view controls: it is a sink)
-├── PANE 2  the embedded napari window               (OWNS contrast, visibility, colormap, z/t)
-└── PANE 3  exploration pane: the same viewer on a SUBSET, in tabs
+├── THE PLATE, on top, full width                    (no view controls: it is a sink)
+└── THE BAND, under it:  Window Navigator | Operators over the Log
+
+...and one INDEPENDENT napari window per view       (OWNS contrast, visibility, colormap, z/t)
 ```
+
+The three-pane deck the quote above was written about is gone (2b8fbc5 decentralized it, and the
+exploration pane went on 2026-08-05). The rule it served did not change: napari is nested in our
+GUI, one window per view, and the plate subscribes.
 
 The single rule everything serves: **every fact has exactly ONE owner; every other widget showing
 it SUBSCRIBES.** Two objects holding one fact and hand-syncing it is this project's dominant defect

@@ -1,4 +1,4 @@
-"""The log panel WIDGET — mounted bottom-right, below the exploration pane.
+"""The log panel WIDGET — mounted bottom-right, under the operator tabs.
 
 The seam's rules (bounded, colour, third-party appears) are tested in ``test_logpane.py`` without
 Qt. These tests are about the WIDGET: that it is bounded in practice, colours by level, shows the

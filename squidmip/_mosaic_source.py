@@ -445,6 +445,22 @@ class MemoryBoundedLRUCache:
 _PLANE_CACHE = MemoryBoundedLRUCache(PYRAMID_CACHE_BYTES)
 
 
+def plane_cache() -> MemoryBoundedLRUCache:
+    """THE process-wide preview cache, by name, for producers outside this module.
+
+    ``_gallery`` fuses region cells that this module's own pyramid cannot express (a FOV *subset*
+    of a region has its own geometry), but a second cache would mean a second byte budget and the
+    two would evict against each other on the same machine. So the gallery keys into this one.
+    See ``squidmip._gallery.cell_cache_key`` for the namespace it uses.
+    """
+    return _PLANE_CACHE
+
+
+def source_token(reader: Any) -> str:
+    """Public name for :func:`_source_token` — see there. Raises when a reader has no identity."""
+    return _source_token(reader)
+
+
 def _source_token(reader: Any) -> str:
     """Stable identity of the acquisition a reader reads, for cache keys.
 

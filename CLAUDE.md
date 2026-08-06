@@ -44,8 +44,24 @@ step inside a chain** (`reference` — its z is solved on raw planes outside the
 **repeated step** (namespaced params would be ambiguous). A bare name still resolves to the exact
 registry object, so nothing existing routes through composition.
 
-**Not supported, do not build against it**: GUI panels generated from `params` (`_op_panels.py` is
-hand-written per operator). Named in the template README so a contributor is not misled.
+**GUI panels ARE generated from `params`** (2026-08-05). `squidmip/_param_panel.py` builds one
+widget per declared `Param`, choosing it from the TYPE OF THE DEFAULT — `bool` a check box, `int`
+a spin, `float` a decimal spin, `str` a text field, the `blurb` its tooltip. Any other type is
+**refused by name**; a guessed widget is how a value the user typed becomes a value the run did
+not receive. It is the FALLBACK for an operator with no hand-written panel, reached from
+**Process well-plates -> From their declaration** (built off `runnable_operators()`, so a plugin
+appears with no edit here). A chain's params arrive namespaced (`spot.min_area_px`) and are drawn
+as one group per step. `_viewer._activate_operator` opens that panel or states a refusal; it used
+to be a silent no-op for any key the card table did not know.
+
+The bespoke panels stay: `StitcherPanel` and `DeconQCPanel` do things a parameter form cannot.
+`STITCH_DEFAULTS` is **not** derived from a declaration and cannot be — `add_region_operator`
+carries no `params=` at all — but it no longer mirrors private `_stitch` constants either: it reads
+`stitch_region`'s own signature (`_op_panels._stitch_default`).
+
+Measured while building it: `_workers._OperatorWorker`'s PREVIEW branch called `project_plate`
+without `operator_kwargs` while the save branch passed them, so a panel value reached the console
+line and not the pixels (57 labels vs 57 at `min_area_px` 30/400; 57 vs 44 once fixed).
 
 ## 3D is capped at DRAWING time, and renders in-window
 
@@ -74,6 +90,42 @@ tile Y and X only, so a volume keeps every acquired plane and cannot read as fla
 Bricking (many textures + GL `max` compositing + a 1-voxel halo) is the mechanism underneath and is
 pixel-exact, but it is NOT what a drawn ROI takes any more. Do not route a whole region through it
 expecting interaction — see the measured cost in the contract.
+
+## Two producers of a region's pixels, and they are not interchangeable
+
+`stitch_plate()` is the mosaic **of record**: registration, fusion, native resolution, ~0.9 GB per
+27-FOV well. `_mosaic_source` / `_gallery` produce **preview placement**: FOVs pasted at their stage
+coordinates, later-overwrites-earlier, decimated on read. Both go through the SAME `_placement`
+helpers, so they are one geometry at two resolutions — never two implementations. Anything that is a
+LOOK (pane 2's mosaic, the plate cells, Gallery View) takes the preview path; anything that is a
+RESULT takes `stitch_plate`. Adding a third placement rule is the defect shape this repo has the
+most of, because the error renders as a plausible image.
+
+A **FOV subset of a region** is expressed one way everywhere: the mapping `{region: [fov, ...]}`,
+which is `stitch_plate(regions=…)`'s own parameter and `GalleryScope.fovs`. It is produced by
+`PlateWindow.selected_region_fovs()` from the plate selection (marquee, shift-click, Cmd/Ctrl-A).
+Do not build a second selection mechanism; `_placement.fov_offsets_px` normalises whatever FOV set
+it is handed, so the crop needs no cropping code.
+
+## Nothing decodes on the Qt thread — including the contrast seed
+
+The contrast seed is the one that keeps getting missed, because it does not look like a read.
+`_contrast.sample_plane` already picks the COARSEST pyramid level, so it looks free — but every
+level of a raw-preview pyramid is fused from the FOV TIFFs at its own decimation, so materialising
+even the smallest rung decodes every FOV of the region. Measured twice, on two different paths:
+128 ms of frozen UI per region on the mosaic path (493–604 ms on the reporting machine), and the
+same shape of cost per cell for a gallery, which is N regions and would have been N freezes.
+
+Both are fixed the same way and it is now the rule: whatever computes the pixels computes the
+window, on the worker thread, and the UI receives `(lo, hi)` as data. See `_MosaicWorker`
+(`_workers.py`, `_auto_window_for` on the worker) and `_gallery_window.GalleryWorker`. Results
+arrive per unit so the first one paints while the rest are still being read.
+`tests/test_gallery.py::test_the_gallery_never_reads_a_plane_on_the_qt_thread` pins it by recording
+the thread ident of every `reader.read`, so a later refactor cannot quietly reintroduce it.
+
+Caches are shared, not per-feature: `_mosaic_source.plane_cache()`, `_platecache.PlateCellCache`,
+both bounded by `_budget.cache_budget()`. A feature-private cache spends the same budget twice and
+the two evict against each other.
 
 ## Agent skills
 

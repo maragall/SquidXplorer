@@ -14,7 +14,7 @@ DEDUPLICATED. Two windows holding B6 contribute one B6 to the run. So the per-wi
 sum to what runs, and printing only one of the two numbers is how a user comes to believe a region
 was processed twice, or that one was skipped. The reconciliation line prints both and names the
 overlap, and the print and the run are derived from ONE flattener
-(``_explore.distinct_view_regions``) so they cannot disagree.
+(``_run_scope.distinct_view_regions``) so they cannot disagree.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")  # headless Qt; must prece
 
 import pytest  # noqa: E402
 
-from squidmip._explore import describe_view_target, distinct_view_regions  # noqa: E402
+from squidmip._run_scope import describe_view_target, distinct_view_regions  # noqa: E402
 
 
 class _View:
@@ -240,7 +240,7 @@ def test_the_print_and_the_run_cannot_disagree(qapp, stub_detail, squid_dataset)
         regions = win._open_views_regions()
         assert regions == ["B2", "B3"], "the flattener changed order or stopped deduplicating"
 
-        block = V._explore.describe_view_target(win._open_view_targets(), action="Run decon")
+        block = V._run_scope.describe_view_target(win._open_view_targets(), action="Run decon")
         assert block.splitlines()[0] == "Run decon on 2 windows, 2 regions"
         assert _line(block, "region slots") == (
             "3 region slots across 2 windows, 2 distinct regions")

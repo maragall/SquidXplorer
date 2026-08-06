@@ -250,7 +250,7 @@ def test_an_roi_childs_parent_reference_keeps_pointing_at_the_id(qapp, manager):
 
 def test_the_view_name_is_the_label_without_the_bracket(qapp, manager):
     """``View.name`` used to carry ``windowTitle()``, bracket included, and that was safe only while
-    nothing read it. ``_explore.describe_view_target`` now does, so the id lives in ``window_id``
+    nothing read it. ``_run_scope.describe_view_target`` now does, so the id lives in ``window_id``
     and the printer composes the two -- an id inside a string field is an id that can drift from
     the one beside it."""
     win = manager.open([REGIONS[0]])

@@ -67,9 +67,11 @@ so a future session doesn't rediscover it from zero.
 - **Cons:** Slightly more design up front than "add a modifier check"; needs agreement across three backlog tickets.
 - **Context:** Today `mousePressEvent` unconditionally arms pan state on LeftButton. Shift-drag must branch BEFORE that. The loupe (IMA-208) wants press-and-hold, which competes with the same 3px pan threshold on the time axis rather than the modifier axis — so a modifier check alone won't settle it. `_sel` is currently a single `(ri,ci)` (:548) painted as one red box (:752-756); marquee select needs it to become a set with a multi-cell paint path.
 - **Depends on / blocked by:** IMA-221 owns the selection gesture; coordinate with IMA-208 before either lands.
-- **Status (IMA-205 rebase):** the MODIFIER axis is settled — Shift owns selection (`mousePressEvent` branches before pan arms), Shift+drag now also opens the exploration tab (`marqueeSelected` -> `_on_marquee_selected`), Shift+click stays a refine-one-well toggle that deliberately opens nothing. The TIME axis is still open: IMA-208's press-and-hold loupe competes with the plain-drag 3px pan threshold, not with a modifier, so it still needs a policy.
+- **Status (IMA-205 rebase):** the MODIFIER axis is settled — Shift owns selection (`mousePressEvent` branches before pan arms), Shift+drag opens an independent window over the boxed regions (`marqueeSelected` -> `_on_marquee_selected`; it opened an exploration tab until that pane was removed), Shift+click stays a refine-one-well toggle that deliberately opens nothing. The TIME axis is still open: IMA-208's press-and-hold loupe competes with the plain-drag 3px pan threshold, not with a modifier, so it still needs a policy.
 
-## Exploration-tab persistence across acquisitions → post-IMA-205
+## Exploration-tab persistence across acquisitions → CLOSED (feature removed)
+- **CLOSED 2026-08-05:** the exploration pane was removed. There are no exploration tabs to persist. A view is an independent window now, and
+whether WINDOWS survive a re-ingest is a different question against `ViewerManager`.
 - **What:** Decide whether exploration tabs survive re-ingesting a different acquisition, and if so how their region sets are revalidated.
 - **Why:** `ingest()` (:1493-1505) resets reader/`_fov_index`/`_overview` but never `_op_tabs`. The eng-review fix closes exploration tabs on ingest (the safe default), but the richer behavior — reopen the same selection on a re-ingest of the SAME acquisition — is a real workflow for anyone iterating on one plate.
 - **Pros:** Users re-open the same plate constantly while tuning operators; losing their exploration set every time is friction.
@@ -79,7 +81,7 @@ so a future session doesn't rediscover it from zero.
 
 ## Partial `.hcs` cleanup after a stopped save run → fast-follow after IMA-205
 - **What:** Clean up (or mark as partial) the `.hcs` output directory when a `save=True` operator run is stopped mid-flight.
-- **Why:** IMA-205 makes stopping routine (closing an exploration tab stops its run). A stopped save leaves a partial plate that `resolve_plate_root` will later happily recognize as a real plate, so the user can re-open a half-written result as if it were complete.
+- **Why:** stopping is routine (a stopped run, a re-ingest, app close). A stopped save leaves a partial plate that `resolve_plate_root` will later happily recognize as a real plate, so the user can re-open a half-written result as if it were complete.
 - **Pros:** Prevents silently trusting a truncated plate; complements the resume/checkpoint TODO already filed against IMA-184.
 - **Cons:** Needs a "complete output" definition — the same definition the resume/checkpoint item needs, so the two should be designed together.
 - **Context:** Before IMA-205, stopping only happened on app close (`closeEvent:1970`) or re-ingest, both of which end the session anyway. Making close-tab stop a run turns a rare path into a common one. Surfaced by the /plan-eng-review outside voice (2026-07-20).
@@ -257,20 +259,22 @@ so a future session doesn't rediscover it from zero.
 - **Context:** IMA-209 eng review D6 (2026-07-20). All re-dock LOGIC already exists as `_redock(key)`; only the gesture would be new. Wait for Nick to actually miss the drag before paying for it.
 - **Depends on / blocked by:** IMA-209 landed; real user demand.
 
-## IMA-205 exploration tab: verify it registers via _open_op_tab → IMA-205
+## IMA-205 exploration tab: verify it registers via _open_op_tab → CLOSED (feature removed)
+- **CLOSED 2026-08-05:** the exploration pane was removed. It did register through `_open_op_tab` and inherited detach/float/re-dock; the
+constraint is worth keeping for any NEW tab, and it is stated at `_open_op_tab` itself.
 - **What:** When the exploration pane lands, open it through `_open_op_tab(key, title, builder)` so it inherits detach/float/re-dock for free.
 - **Why:** IMA-209 made detach a property of the tab container (eng review D2); any tab bypassing the registry won't detach and won't be cleaned up by `_dispose_tab_widget`.
 - **Pros:** Zero extra work in 205 to get the Nick float behavior.
 - **Cons:** None — this is a one-line integration constraint.
 - **Context:** Registry + cleanup contract in `squidmip/_viewer.py` (`_op_tabs`/`_floating`/`_dispose_tab_widget`).
 - **Depends on / blocked by:** IMA-205 design.
-## Viewport tiling / LOD for deep zoom → exploration-pane ticket
+## Viewport tiling / LOD for deep zoom → region-window ticket
 - **What:** `viewport(bbox, zoom) -> tiles` with level-of-detail selection and frustum culling, so a single well can be zoomed into without fetching the whole mosaic.
 - **Why:** Cut from IMA-187 during /plan-eng-review (2026-07-21). The plate overview does not need it: `PlateOverview` is a fixed-resolution bitmap montage (`_viewer.py:533` allocates `QImage(nc*88, nr*88)`, `:588` blits 88x88 blocks, `:697-701` smooth-scales the one bitmap), so a 36-FOV mosaic occupies 88 px at every zoom and there is nothing to cull.
-- **Pros:** Unlocks true deep-zoom navigation into a well, which is what the exploration pane is for.
+- **Pros:** Unlocks true deep-zoom navigation into a well, which is what a region window is for.
 - **Cons:** The IMA-187 draft specified it as "framework-neutral (pyqtgraph now, Viv later)" — but pyqtgraph appears nowhere in the repo or `pyproject.toml`, and Viv is an explicit non-goal. Designing it before a real consumer exists means guessing the interface.
-- **Context:** IMA-187 composites at *thumbnail* scale into the existing 88 px cell instead. Deep zoom was consciously deferred here, not forgotten. The outside voice argued tiling is what makes coordinate placement pay off at all, which is a reason to sequence the exploration pane sooner rather than to build tiling early.
-- **Depends on / blocked by:** The exploration-pane ticket, which supplies the first real consumer and therefore the right interface shape.
+- **Context:** IMA-187 composites at *thumbnail* scale into the existing 88 px cell instead. Deep zoom was consciously deferred here, not forgotten. The outside voice argued tiling is what makes coordinate placement pay off at all, which is a reason to sequence the region window's deep zoom sooner rather than to build tiling early.
+- **Depends on / blocked by:** a real consumer, which today is the region window (`_region_viewer`), to supply the right interface shape.
 
 ## Freeform / manual-region layout (tissue, slide carrier) → own ticket
 - **What:** A second layout mode so non-wellplate acquisitions (tissue, slide carrier, freeform ROIs) can be written and rendered by stage coordinate rather than row/column.
@@ -280,7 +284,7 @@ so a future session doesn't rediscover it from zero.
 - **Context:** IMA-187's coordinate placement is deliberately layout-agnostic (offsets derive purely from stage mm), so this ticket inherits the placement math for free and only owns the writer/viewer layout modes. Do NOT soften the `_output.py` raise to a warning as a shortcut — it exists to stop silent directory mislabeling.
 - **Depends on / blocked by:** A real tissue acquisition to validate against; IMA-187's placement math (landing first).
 
-## Per-FOV hit-testing on plate double-click → exploration-pane ticket
+## Per-FOV hit-testing on plate double-click → region-window ticket
 - **What:** Make double-clicking a mosaic cell open the FOV actually under the cursor, instead of always FOV 0.
 - **Why:** `_viewer.py:682` hardcodes `self.wellActivated.emit(c["well_id"], 0)`. Once a cell shows 36 FOVs, "which one did I click" becomes the obvious user expectation and is arguably the real payoff of the mosaic.
 - **Pros:** Turns the mosaic from a picture into a navigation surface.
@@ -365,10 +369,11 @@ so a future session doesn't rediscover it from zero.
 - **Why:** `project_plate` (`_engine.py:131-139`) already parallelises and accepts `regions=`, so the machinery exists. A 50-FOV selection exported serially would be a visibly slow button.
 - **Pros:** Reuses a tested parallel path instead of hand-rolling threads; large selections stop being a wait.
 - **Cons:** `project_plate` picks FOVs through `select_fovs(metadata, n_fovs)`, which cannot express an arbitrary `(region, fov)` list — the semantics genuinely do not match a user selection today, so adopting it needs a new entry point, not a swap.
-- **Context:** IMA-228 deliberately chose the sequential loop: selections are 1 FOV today (`n_fovs=1`, `_viewer.py:853`), each FOV is a few hundred ms, and explicit beat clever. Revisit when IMA-205's exploration pane makes multi-FOV selections real and someone can measure an actual slow export. Do not pre-optimise this on speculation.
-- **Depends on / blocked by:** IMA-187 (multi-FOV), IMA-205 (exploration pane).
+- **Context:** IMA-228 deliberately chose the sequential loop: selections are 1 FOV today (`n_fovs=1`, `_viewer.py:853`), each FOV is a few hundred ms, and explicit beat clever. Revisit when someone can measure an actual slow export on a real multi-FOV selection. Do not pre-optimise this on speculation.
+- **Depends on / blocked by:** IMA-187 (multi-FOV).
 
-## Pane 3 width is not remembered across a collapse → follow-up after IMA-237
+## Pane 3 width is not remembered across a collapse → CLOSED (pane removed)
+- **CLOSED 2026-08-05:** the exploration pane was removed. There is no pane 3 and no `_sync_explore_pane`.
 - **What:** Persist the exploration pane's width so closing its last tab and re-opening one restores the width the user dragged the splitter to, instead of recomputing 22% of the window.
 - **Why:** `_sync_explore_pane` hands pane 3's width back to the VIEWER pane on collapse and recomputes it on the next reveal. A user who deliberately widens pane 3, closes their last subset, then Shift-drags again silently loses that adjustment.
 - **Pros:** Small — one remembered int, set from `_split.sizes()` at collapse time.
@@ -376,7 +381,9 @@ so a future session doesn't rediscover it from zero.
 - **Context:** IMA-237 (2026-07-21). The reveal deliberately takes its width from the VIEWER pane, never the plate pane (requirement 5), and that rule must survive whatever remembering is added. `_sync_explore_pane` is the single place both directions live.
 - **Depends on / blocked by:** nothing; IMA-237 landed.
 
-## Drag a tab BETWEEN panes 1 and 3 → follow-up after IMA-237
+## Drag a tab BETWEEN panes 1 and 3 → CLOSED (there is one bar)
+- **CLOSED 2026-08-05:** the exploration pane was removed. There is only one tab bar left, so there is nowhere to drag a tab TO. The
+generalised `_detach_tab(index, tabs)` seam survives if a second bar ever appears.
 - **What:** Let a tab dragged out of pane 1 be dropped into pane 3's bar and vice versa, rather than only floating out and re-docking to its origin.
 - **Why:** IMA-237 generalized `_detach_tab`/`_redock` to take a source tab-widget, so both bars already route through one implementation and a float remembers its home bar (`_home_tabs`). Cross-pane docking is now a gesture question, not an architecture one.
 - **Pros:** The architecture is already paid for; this is the drop-target half.

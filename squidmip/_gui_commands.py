@@ -36,7 +36,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from squidmip import _explore
+from squidmip import _run_scope
 from squidmip._command import (
     BUSY,
     CommandResult,
@@ -108,12 +108,11 @@ class WindowExecutor:
                      frame_shape=list(meta["frame_shape"]),
                      pixel_size_um=meta.get("pixel_size_um"),
                      wellplate_format=str(meta.get("wellplate_format", "")),
-                     # the THREE live pieces a run's scope is resolved from — the same state the
+                     # the live pieces a run's scope is resolved from — the same state the
                      # scope selector reads, exposed so an agent can build a target it can predict
                      selection=list(getattr(w, "_selected_regions", []) or []),
                      current_region=getattr(w, "_current_well", None),
-                     parked_subset=list(w.parked_subset()) if hasattr(w, "parked_subset") else [],
-                     scopes=list(_explore.RUN_SCOPES),
+                     scopes=list(_run_scope.RUN_SCOPES),
                      busy=self._busy())
 
     # -- opening -----------------------------------------------------------------------
@@ -131,7 +130,7 @@ class WindowExecutor:
 
     # -- running -----------------------------------------------------------------------
     def _busy(self) -> bool:
-        return _explore.operator_busy(getattr(self._window, "_worker", None),
+        return _run_scope.operator_busy(getattr(self._window, "_worker", None),
                                       getattr(self._window, "_retired", []) or [])
 
     def do_run_operator(self, cmd: RunOperator) -> CommandResult:
@@ -175,7 +174,6 @@ class WindowExecutor:
         regions, refusal = resolve_target(
             cmd, selection=getattr(w, "_selected_regions", []),
             current_region=getattr(w, "_current_well", None),
-            parked_subset=w.parked_subset() if hasattr(w, "parked_subset") else [],
             known_regions=all_regions, total=len(all_regions))
         if refusal is not None:
             return refusal
@@ -185,7 +183,7 @@ class WindowExecutor:
         run_regions = all_regions if regions is None else regions
 
         label = operator_label(cmd.operator)
-        target = _explore.describe_run_target(regions, total=len(all_regions))
+        target = _run_scope.describe_run_target(regions, total=len(all_regions))
 
         worker_before = getattr(w, "_worker", None)
         # save=True needs an output_folder — the window would otherwise raise a file dialog, which

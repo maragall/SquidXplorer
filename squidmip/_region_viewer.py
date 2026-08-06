@@ -111,7 +111,7 @@ class View:
 
     ``name`` carries the window's LABEL WITHOUT the ``[wid]`` bracket (2026-08-03). It used to carry
     ``windowTitle()``, bracket included, and that was safe only while nothing read it. Now that
-    ``_explore.describe_view_target`` prints it, an id living inside a string field is an id that
+    ``_run_scope.describe_view_target`` prints it, an id living inside a string field is an id that
     can drift from ``window_id`` sitting beside it, so the printer composes ``[{window_id}] {name}``
     from the two fields and neither one spells the other."""
     id: str

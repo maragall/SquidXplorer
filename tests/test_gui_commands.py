@@ -14,7 +14,7 @@ import pytest
 from qtpy.QtWidgets import QApplication
 
 import squidmip._viewer as V
-from squidmip import _explore
+from squidmip import _run_scope
 from tests.test_viewer import _StubDetail   # the proven ndviewer stub (no offscreen-GL segfault)
 from squidmip._command import (
     BUSY,
@@ -90,9 +90,9 @@ def test_open_then_describe_reports_the_windows_regions_and_scope_state(open_win
     d = open_win.commands.execute(Describe()).data
     assert d["surface"] == "gui"
     assert d["regions"] and d["n_regions"] == len(d["regions"])
-    # the three live pieces a run's scope is resolved from are all exposed
-    assert "selection" in d and "current_region" in d and "parked_subset" in d
-    assert list(_explore.RUN_SCOPES) == d["scopes"]
+    # the live pieces a run's scope is resolved from are all exposed
+    assert "selection" in d and "current_region" in d
+    assert list(_run_scope.RUN_SCOPES) == d["scopes"]
 
 
 def test_opening_a_written_plate_is_refused_with_the_windows_own_sentence(win, tmp_path):
@@ -115,22 +115,22 @@ def test_running_with_nothing_open_is_refused(win):
 def test_a_run_STARTS_a_thread_rather_than_blocking(open_win, qapp):
     """A GUI run must not block the event loop, so the honest thing the command returns is that the
     run BEGAN — status 'started', not 'completed'."""
-    r = open_win.commands.execute(RunOperator(operator="mip", scope=_explore.SCOPE_PLATE,
+    r = open_win.commands.execute(RunOperator(operator="mip", scope=_run_scope.SCOPE_PLATE,
                                               save=False))
     assert r.ok and r.status == "started", r.message
     assert open_win._worker is not None, "no worker thread was started"
     # let it finish so teardown is clean
     for _ in range(500):
         qapp.processEvents()
-        if not _explore.operator_busy(open_win._worker, open_win._retired):
+        if not _run_scope.operator_busy(open_win._worker, open_win._retired):
             break
 
 
 def test_a_second_run_while_one_is_in_flight_is_refused_as_busy(open_win, qapp, monkeypatch):
     """Two runs at once is a named refusal, not a silent overwrite."""
     # make the worker look perpetually alive for the duration of the check
-    monkeypatch.setattr(_explore, "operator_busy", lambda *a, **k: True)
-    r = open_win.commands.execute(RunOperator(operator="mip", scope=_explore.SCOPE_PLATE))
+    monkeypatch.setattr(_run_scope, "operator_busy", lambda *a, **k: True)
+    r = open_win.commands.execute(RunOperator(operator="mip", scope=_run_scope.SCOPE_PLATE))
     assert r.refusal == BUSY
 
 
@@ -145,7 +145,7 @@ def test_a_running_operator_is_measured_and_lands_in_the_shared_metrics(open_win
     from squidmip._measure import METRICS
 
     before = len(METRICS)
-    open_win.commands.execute(RunOperator(operator="mip", scope=_explore.SCOPE_PLATE, save=False))
+    open_win.commands.execute(RunOperator(operator="mip", scope=_run_scope.SCOPE_PLATE, save=False))
     ok = False
     for _ in range(1000):
         qapp.processEvents()
@@ -160,7 +160,7 @@ def test_a_running_operator_is_measured_and_lands_in_the_shared_metrics(open_win
 def test_the_run_scope_is_resolved_by_the_shared_resolver_from_window_state(open_win, qapp,
                                                                             monkeypatch):
     """A run scoped to 'selected wells' resolves against the window's OWN selection, through the
-    same _explore.resolve_run_scope the headless surface uses — not a second GUI-only resolver."""
+    same _run_scope.resolve_run_scope the headless surface uses — not a second GUI-only resolver."""
     seen = {}
     orig = open_win.run_operator
 
@@ -172,7 +172,7 @@ def test_the_run_scope_is_resolved_by_the_shared_resolver_from_window_state(open
     monkeypatch.setattr(open_win, "run_operator", spy)
     regions = open_win.commands.execute(Describe()).data["regions"][:1]
     open_win._selected_regions = list(regions)
-    open_win.commands.execute(RunOperator(operator="mip", scope=_explore.SCOPE_SELECTION))
+    open_win.commands.execute(RunOperator(operator="mip", scope=_run_scope.SCOPE_SELECTION))
     assert seen["regions"] == regions, "the GUI did not resolve 'selected wells' from its selection"
 
 
@@ -268,7 +268,7 @@ def test_a_plate_run_opens_AND_closes_a_started_done_pair_in_the_console(open_wi
         open_win.run_operator("mip", regions=list(regions), save=False)
         for _ in range(2000):
             qapp.processEvents()
-            if not _explore.operator_busy(open_win._worker, open_win._retired):
+            if not _run_scope.operator_busy(open_win._worker, open_win._retired):
                 break
         for _ in range(50):
             qapp.processEvents()          # let the queued finished slot land
@@ -286,12 +286,12 @@ def test_a_plate_run_opens_AND_closes_a_started_done_pair_in_the_console(open_wi
 def test_a_run_shows_up_as_activity_in_the_log_panel_header(open_win, qapp, monkeypatch):
     """The activity registry the panel's header reads is fed by the run — this is what makes 'the
     GUI is doing something' visible. Freeze the run as busy and check the header lit up."""
-    open_win.commands.execute(RunOperator(operator="mip", scope=_explore.SCOPE_PLATE, save=False))
+    open_win.commands.execute(RunOperator(operator="mip", scope=_run_scope.SCOPE_PLATE, save=False))
     # the activity was started synchronously in run_operator, before the worker thread does anything
     assert open_win._activity.busy or open_win._activity.sentence() != "", \
         "the run did not register any activity"
     # drain to clean teardown
     for _ in range(1000):
         qapp.processEvents()
-        if not _explore.operator_busy(open_win._worker, open_win._retired):
+        if not _run_scope.operator_busy(open_win._worker, open_win._retired):
             break

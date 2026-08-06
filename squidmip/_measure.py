@@ -151,7 +151,7 @@ class RunMetrics:
 
     ``target`` is a SENTENCE naming what the run was aimed at, not a count, because "41 s" means
     nothing without it — the same operator over 4 wells and over 1536 is the comparison people
-    actually get wrong. It is produced by ``_explore.describe_run_target``, the existing owner of
+    actually get wrong. It is produced by ``_run_scope.describe_run_target``, the existing owner of
     that sentence, so the log line and the pre-run confirmation cannot disagree.
     """
 
