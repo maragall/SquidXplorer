@@ -54,17 +54,32 @@ os.environ.setdefault("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-TISSUE = ("/Users/julioamaragall/Downloads/"
-          "test_10x_laser_af_z_stack_2025-10-28_13-40-43.939945 yy")
-PLATE = "/Users/julioamaragall/Downloads/synthetic_2x2_wellplate"
+#: ``~/Downloads/synthetic_2x2_wellplate`` until 2026-08-06, when that folder no longer existed
+#: and ``main()`` answered "dataset absent, cannot run" with exit code 2. Rebuild the replacement:
+#:   python tools/make_5d_fixture.py ~/Downloads/sim_2x2_36fov_96wp --fovs 36 --nz 1 --nt 1 \
+#:       --well-pitch-mm 9.0 --declared-format "384 well plate"
+#: ``SQUIDMIP_FIXTURE_PLATE`` overrides it, which is how CI runs this gate (and its --self-test)
+#: for real rather than watching it skip: the fixture is generated, so a runner can make one.
+PLATE = os.environ.get("SQUIDMIP_FIXTURE_PLATE") or \
+    "/Users/julioamaragall/Downloads/sim_2x2_36fov_96wp"
 
 _APP = None
 _MISSING = object()      # "this attribute was inherited, not the class's own" — see monkey()
 
 
 def _app():
+    """The QApplication, on THE BINDING THE APP SHIPS -- decided by importing `squidmip` first.
+
+    Nine import sites in this file said ``PyQt5`` until 2026-08-06, which is the same defect
+    commit 6b51793 fixed in ``tools/walkthrough.py`` and did not carry here. ``squidmip/__init__``
+    pins ``QT_API=pyqt6``, so this constructed a Qt5 application around Qt6 widgets, loaded both
+    frameworks into one process, and aborted on "QWidget: Must construct a QApplication before a
+    QWidget" before the gate looked at anything. Dead since the Qt6 migration (10b8348, f7f9b28,
+    ce5605c); nothing in CI ran it, so nothing said so.
+    """
     global _APP
-    from PyQt5.QtWidgets import QApplication
+    import squidmip  # noqa: F401  -- sets QT_API before qtpy resolves a binding
+    from qtpy.QtWidgets import QApplication
     _APP = QApplication.instance() or QApplication([])
     return _APP
 
@@ -100,8 +115,13 @@ def _probe_active_layer(w):
     return {"active layer": w._overview._active}
 
 
-def _probe_scope(w):
-    return {"contrast scope": w._overview._scope}
+    # `_probe_scope` was here. Contrast SCOPE (global vs per-region) was deleted from the product
+    # on 2026-07-22 (8b0cbfc): "the contrast should be only global, I don't understand why there's
+    # a per region contrast". `PlateOverview._scope` went with it, so this probe raised
+    # AttributeError on every snapshot -- and `_snapshot` swallowed it, so the concern simply never
+    # appeared and the table's "contrast scope: 1" reported PASS over a probe that had not run
+    # since July. That swallow is fixed below; the probe itself is deleted, because there is no
+    # scope to probe.
 
 
 def _probe_selection(w):
@@ -117,11 +137,12 @@ def _probe_zoom(w):
     return {"zoom / viewport": (round(ov._cd, 4), round(ov._ox, 4), round(ov._oy, 4))}
 
 
-def _probe_fov(w):
-    d = getattr(w, "_detail", None)
-    sl = getattr(d, "_fov_slider", None)
-    return {"fov / plane index": (None if sl is None else sl.value(),
-                                  getattr(d, "_current_fov_idx", None))}
+    # `_probe_fov` was here. It read `w._detail._fov_slider`, and `PlateWindow._detail` has been
+    # unconditionally None since 19cd491 (2026-07-22); the central array viewer was removed
+    # outright by 2b8fbc5 (2026-07-23, "Decentralize GUI"). The probe therefore returned the
+    # constant `(None, None)` on every snapshot -- it could not change, so no widget could ever be
+    # reported as moving it, and "fov / plane index: 1" was a PASS over a value nothing read.
+    # A probe that cannot vary is not a weak probe, it is a decoration.
 
 
 def _probe_colormap(w):
@@ -131,8 +152,8 @@ def _probe_colormap(w):
     return {f"channel colour / LUT[{i}]": tuple(row) for i, row in enumerate(cols.tolist())}
 
 
-PROBES = (_probe_contrast, _probe_visibility, _probe_active_layer, _probe_scope,
-          _probe_selection, _probe_current_well, _probe_zoom, _probe_fov, _probe_colormap)
+PROBES = (_probe_contrast, _probe_visibility, _probe_active_layer,
+          _probe_selection, _probe_current_well, _probe_zoom, _probe_colormap)
 
 
 def _concern_of(key: str) -> str:
@@ -140,13 +161,27 @@ def _concern_of(key: str) -> str:
     return key.split("[", 1)[0].strip()
 
 
+#: Probes that raised while snapshotting, as ``{probe name: "TypeName: message"}``. Reported, not
+#: swallowed -- see :func:`_snapshot`.
+BROKEN_PROBES: dict[str, str] = {}
+
+
 def _snapshot(w):
+    """Every probe's reading, and a RECORD of any probe that could not take one.
+
+    This used to ``except Exception: continue``. That is the failure mode this whole gate exists
+    to prevent, turned on itself: two probes (``_probe_scope``, ``_probe_fov``) had been reading
+    attributes deleted in July, raised on every snapshot, and were dropped in silence -- so their
+    concerns never appeared in the results, ``by_concern.get(concern, {})`` returned ``{}``, and
+    the gate printed "at most 0 control surfaces (expected at most 1) -- PASS". A gate cannot
+    both skip a check and call it green.
+    """
     out = {}
     for p in PROBES:
         try:
             out.update(p(w))
-        except Exception:
-            continue
+        except Exception as exc:                       # noqa: BLE001 - recorded, then reported
+            BROKEN_PROBES[p.__name__] = f"{type(exc).__name__}: {exc}"
     return out
 
 
@@ -158,15 +193,26 @@ def _snapshot(w):
 # "0" means the plate must not own this at all — contrast belongs to the array viewer.
 
 EXPECTED = {
-    "contrast":              1,   # exactly one owner. The array viewer's LUT row (IMA-261).
-    "visibility":            1,   # the channel bar's checkbox
-    "active layer":          1,   # the Layers tab
-    "contrast scope":        1,   # the scope combo
-    "plate selection":       1,   # click/marquee on the plate
-    "current well":          1,   # double-click on the plate
-    "zoom / viewport":       1,   # the wheel over the plate
-    "fov / plane index":     1,   # the array viewer's FOV slider
-    "channel colour / LUT":  1,   # resolved from the acquisition, not user-set on the plate
+    # Rewritten 2026-08-06 against the window as it stands. Every one of these was 1 and every one
+    # of them measured 0, because the controls the numbers described are in a napari RegionViewer
+    # window now (2b8fbc5, "Decentralize GUI") or are MOUSE GESTURES on the plate rather than
+    # widgets -- and this sweep only actuates widgets. Leaving them at 1 made nine PASS lines that
+    # could not fail, which is the same "832 green tests" shape the docstring above is about.
+    #
+    # 0 is not "unchecked": the gate fails the moment ANY widget starts moving one of these, which
+    # is exactly the event worth catching -- a control creeping back onto the root window beside
+    # the one that already owns the value elsewhere.
+    "contrast":              0,   # napari's LUT row owns it, in the region window (IMA-261)
+    "visibility":            0,   # napari's eye icon; the plate's checkboxes went in 8b0cbfc
+    "channel colour / LUT":  0,   # napari's colormap picker; the plate follows it
+    "active layer":          0,   # the Layers tree, which is a tree item and not a control widget
+    # click / marquee are gestures, not widgets. "Select all" IS a widget and DOES move this, and
+    # it is the one EXEMPT entry -- verified live 2026-08-06 by emptying EXEMPT, which turned this
+    # line red with "Select all [QPushButton in PlateWindow]". So the 0 here is a measurement, not
+    # an absence of measurement.
+    "plate selection":       0,
+    "current well":          0,   # double-click: a gesture, no widget
+    "zoom / viewport":       0,   # the wheel: a gesture, no widget
 }
 
 # Controls that legitimately move a probe as a SIDE EFFECT of doing something else, and are not a
@@ -208,7 +254,7 @@ def _where(wdg) -> str:
 
 def interactive_widgets(root):
     """Every widget in the tree a user can act on, in a stable order."""
-    from PyQt5.QtWidgets import (
+    from qtpy.QtWidgets import (
         QAbstractButton, QAbstractSlider, QAbstractSpinBox, QComboBox,
     )
     kinds = (QAbstractSlider, QAbstractSpinBox, QComboBox, QAbstractButton)
@@ -232,7 +278,7 @@ def _actuate(wdg):
     and cannot be un-clicked, which is why the baseline is re-read before every widget rather than
     once at the start.
     """
-    from PyQt5.QtWidgets import (
+    from qtpy.QtWidgets import (
         QAbstractButton, QAbstractSlider, QAbstractSpinBox, QComboBox,
     )
     if not (wdg.isEnabled() and wdg.isVisible()):
@@ -275,7 +321,7 @@ def _neutralise(win, monkey):
     no-op first. This is a safety harness, NOT an exemption: the neutralised calls are still
     observed, they simply do not run.
     """
-    from PyQt5.QtWidgets import QFileDialog, QMessageBox
+    from qtpy.QtWidgets import QFileDialog, QMessageBox
     import squidmip._viewer as V
 
     called = []
@@ -332,7 +378,7 @@ def find_duplicate_controls(win, verbose=False):
 
 
 def _is_button(wdg):
-    from PyQt5.QtWidgets import QAbstractButton
+    from qtpy.QtWidgets import QAbstractButton
     return isinstance(wdg, QAbstractButton)
 
 
@@ -345,24 +391,60 @@ def contrast_surfaces(win):
     contrast slider" must hold even for a slider that is currently disabled or hidden — a
     hide()-den control is a second owner waiting to be un-hidden, and the sweep only actuates what
     a user could actuate today.
+
+    SCOPED TO THE PLATE WIDGET, not to ``win._channel_bar``, since 2026-08-06. That attribute has
+    not existed since 8b0cbfc (2026-07-22) deleted the plate's channel bar outright, so this
+    returned ``([], [])`` from the very first line and reported "PASS contrast: 0 sliders, 0 auto
+    buttons" without looking at a single widget. The claim was over-satisfied and the check was
+    dead, which look identical in the output and are not the same thing at all.
     """
-    from PyQt5.QtWidgets import QAbstractSlider, QPushButton
-    bar = getattr(win, "_channel_bar", None)
-    if bar is None:
+    from qtpy.QtWidgets import QAbstractSlider, QPushButton
+    plate = getattr(win, "_overview", None)
+    if plate is None:
         return [], []
-    sliders = [f"{_label(s)} [{type(s).__name__}]" for s in bar.findChildren(QAbstractSlider)]
-    autos = [f"{_label(b)} [auto button]" for b in bar.findChildren(QPushButton)
+    sliders = [f"{_label(s)} [{type(s).__name__}]" for s in plate.findChildren(QAbstractSlider)]
+    autos = [f"{_label(b)} [auto button]" for b in plate.findChildren(QPushButton)
              if "auto" in b.text().lower()]
     return sliders, autos
 
 
 # --- the gate ----------------------------------------------------------------------------------
 
-def gate_no_duplicated_controllers(dataset=PLATE, verbose=False):
-    """Returns (ok, list of human-readable findings)."""
+def _drain_preview(win, timeout_s=180):
+    """Block until the plate's background preview stream has finished.
+
+    QUIESCENCE IS PART OF THE MEASUREMENT. The plate's contrast is a RUNNING percentile: every
+    tile the preview worker delivers moves ``channel_windows()``. Sweeping while that stream is
+    live means the before/after snapshots straddle an update nothing on screen caused, and the
+    widget that happened to be under the cursor at that moment is recorded as its owner. Measured
+    2026-08-06: the gate reported "contrast[0] <- QScrollBar [QScrollBar in PlateWindow]" -- the
+    LOG PANEL's scrollbar accused of owning channel 0's contrast window. A false duplicate is
+    worse than no gate, because it is the finding people learn to ignore.
+    """
+    import time
+    app = _app()
+    t0 = time.time()
+    while time.time() - t0 < timeout_s:
+        p = getattr(win, "_preview", None)
+        if p is None or not p.isRunning():
+            break
+        app.processEvents()
+        time.sleep(0.02)
+    for _ in range(20):            # let the queued tileReady slots actually run
+        app.processEvents()
+        time.sleep(0.01)
+
+
+def gate_no_duplicated_controllers(dataset=PLATE, verbose=False, mutate=None):
+    """Returns (ok, list of human-readable findings).
+
+    *mutate*, when given, is called with the shown, ingested window before the sweep. It is how
+    ``--self-test`` mounts a duplicate control; see :func:`self_test`.
+    """
     import squidmip._viewer as V
     app = _app()
     findings, ok = [], True
+    BROKEN_PROBES.clear()
 
     win = V.PlateWindow(None)
     win.resize(1600, 900)
@@ -372,6 +454,10 @@ def gate_no_duplicated_controllers(dataset=PLATE, verbose=False):
     app.processEvents()
     if win._reader is None:
         return False, [f"FAIL  could not open {dataset}: {win._readout.text()!r}"]
+    _drain_preview(win)            # the plate must be STILL before anything is attributed to it
+    if mutate is not None:
+        mutate(win)
+        app.processEvents()
 
     # 1. the structural half: the plate must own no contrast control at all.
     sliders, autos = contrast_surfaces(win)
@@ -436,6 +522,14 @@ def gate_no_duplicated_controllers(dataset=PLATE, verbose=False):
                 findings.append(f"FAIL  {key}: UNDECLARED concern with {len(got)} control "
                                 f"surfaces — add it to EXPECTED and pick an owner: {got}")
 
+    # 4. a probe that could not read is a CHECK THAT DID NOT RUN, and it fails rather than
+    #    disappearing. Two probes had been raising since July and were swallowed; their concerns
+    #    then reported "at most 0 control surfaces — PASS" while measuring nothing.
+    for name, why in sorted(BROKEN_PROBES.items()):
+        ok = False
+        findings.append(f"FAIL  {name}: the probe itself raised, so its concern was NOT "
+                        f"checked — {why}")
+
     win.close()
     app.processEvents()
     return ok, findings
@@ -443,14 +537,44 @@ def gate_no_duplicated_controllers(dataset=PLATE, verbose=False):
 
 # --- mutation check: prove the gate can fail ---------------------------------------------------
 
+def _mount_contrast_duplicate(win):
+    """Bolt a second, independently draggable owner of the contrast window onto the plate.
+
+    Exactly the control IMA-261 deleted, put back where a user would see it: on the root window,
+    beside the value's real owner. Mounted on the SHOWN, INGESTED window rather than by patching
+    ``_ChannelBar.__init__`` (which is what this did until 2026-08-06) -- the channel bar was
+    deleted in 8b0cbfc on 2026-07-22 and is never constructed, so that patch ran zero times and
+    the self-test reported "a duplicate contrast slider was added and the gate stayed GREEN"
+    about a duplicate that was never added. A mutation test that cannot mutate is worth less than
+    no mutation test, because it reads as evidence.
+    """
+    from qtpy.QtCore import Qt
+    from qtpy.QtWidgets import QSlider
+    ov = win._overview
+    for c_i in range(len(ov.channel_windows() or [])):
+        s = QSlider(Qt.Orientation.Horizontal, win)     # SCOPED: Qt.Horizontal is Qt5-only
+        s.setRange(0, 65535)
+        s.setValue(30000)
+        s.valueChanged.connect(lambda v, i=c_i: ov.set_channel_window(i, 0.0, float(v)))
+        win.statusBar().addWidget(s)
+        s.show()
+
+
+def _mount_visibility_duplicate(win):
+    """A second owner of ``visibility[0]``, in a concern the gate was never specifically taught."""
+    from qtpy.QtWidgets import QCheckBox
+    ov = win._overview
+    box = QCheckBox("show ch0", win)
+    box.setChecked(True)
+    box.toggled.connect(lambda on: ov.set_channel_visible(0, on))
+    win.statusBar().addWidget(box)
+    box.show()
+
+
 def self_test(dataset=PLATE):
     """Reintroduce the duplicate, require the gate to bite, remove it, require the gate to pass."""
-    import squidmip._viewer as V
-    from PyQt5.QtCore import Qt
-    from PyQt5.QtWidgets import QSlider
-
     print("=" * 100)
-    print("SELF-TEST 1/2: the gate must PASS on the tree as it stands")
+    print("SELF-TEST 1/3: the gate must PASS on the tree as it stands")
     ok, findings = gate_no_duplicated_controllers(dataset)
     for f in findings:
         print("   ", f)
@@ -459,42 +583,20 @@ def self_test(dataset=PLATE):
         return 1
 
     print("=" * 100)
-    print("SELF-TEST 2/2: reintroducing a per-channel contrast slider on the plate —")
+    print("SELF-TEST 2/3: reintroducing a per-channel contrast slider on the plate —")
     print("               the gate MUST now fail, or it is decorative.")
-    original = V._ChannelBar.__init__
-
-    def mutant_init(self, labels, colors, overview):
-        original(self, labels, colors, overview)
-        # exactly the duplicate IMA-261 deleted: a second, independently draggable owner of the
-        # contrast window, sitting on the plate next to the array viewer's own.
-        for c_i in range(len(self._rows)):
-            s = QSlider(Qt.Horizontal, self)
-            s.setRange(0, 65535)
-            s.setValue(30000)
-            s.valueChanged.connect(
-                lambda v, i=c_i: overview.set_channel_window(i, 0.0, float(v)))
-            self.layout().addWidget(s)
-            s.show()
-
-    V._ChannelBar.__init__ = mutant_init
-    try:
-        ok_mut, findings_mut = gate_no_duplicated_controllers(dataset)
-    finally:
-        V._ChannelBar.__init__ = original
+    ok_mut, findings_mut = gate_no_duplicated_controllers(
+        dataset, mutate=_mount_contrast_duplicate)
     for f in findings_mut:
         print("   ", f)
     if ok_mut:
         print("\nSELF-TEST FAILED: a duplicate contrast slider was added and the gate stayed "
               "GREEN. The gate does not work.")
         return 1
-    print("\n    the gate bit, as it must.")
-
-    print("=" * 100)
-    print("SELF-TEST: mutation removed; confirming the gate is green again")
-    ok_back, _ = gate_no_duplicated_controllers(dataset)
-    if not ok_back:
-        print("SELF-TEST FAILED: the gate did not recover after the mutation was removed.")
+    if not any(f.startswith("FAIL") and "contrast" in f for f in findings_mut):
+        print("\nSELF-TEST FAILED: the gate failed, but not on contrast.")
         return 1
+    print("\n    the gate bit, as it must.")
 
     # A gate that only knows about contrast is a hard-coded assertion about the bug we happen to
     # have just fixed. The point of IMA-268 is the NEXT duplicate, in a concern nobody is looking
@@ -502,21 +604,8 @@ def self_test(dataset=PLATE):
     print("=" * 100)
     print("SELF-TEST 3/3: duplicating a control in a DIFFERENT concern (channel visibility) —")
     print("               the gate must generalise, not just know about contrast.")
-    from PyQt5.QtWidgets import QCheckBox
-
-    def mutant_vis_init(self, labels, colors, overview):
-        original(self, labels, colors, overview)
-        box = QCheckBox("show ch0", self)          # a second owner of visibility[0]
-        box.setChecked(True)
-        box.toggled.connect(lambda on: overview.set_channel_visible(0, on))
-        self.layout().addWidget(box)
-        box.show()
-
-    V._ChannelBar.__init__ = mutant_vis_init
-    try:
-        ok_vis, findings_vis = gate_no_duplicated_controllers(dataset)
-    finally:
-        V._ChannelBar.__init__ = original
+    ok_vis, findings_vis = gate_no_duplicated_controllers(
+        dataset, mutate=_mount_visibility_duplicate)
     for f in findings_vis:
         if f.startswith("FAIL"):
             print("   ", f)
@@ -530,6 +619,13 @@ def self_test(dataset=PLATE):
               "detect the duplicate it was given.")
         return 1
     print("\n    the gate bit on a concern it was never specifically taught. It generalises.")
+
+    print("=" * 100)
+    print("SELF-TEST: mutation removed; confirming the gate is green again")
+    ok_back, _ = gate_no_duplicated_controllers(dataset)
+    if not ok_back:
+        print("SELF-TEST FAILED: the gate did not recover after the mutations were removed.")
+        return 1
 
     print("\nSELF-TEST PASSED: the gate passes clean, fails on a reintroduced contrast duplicate, "
           "fails on an unrelated duplicate, and recovers.")
@@ -545,9 +641,16 @@ def main():
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
 
-    if not os.path.exists(args.dataset):
-        print(f"dataset absent, cannot run: {args.dataset}")
-        return 2
+    if not os.path.isdir(args.dataset):
+        # SKIP, not a failure, and with the exact command that makes the fixture. This gate needs
+        # a real acquisition to have a real widget tree; on a machine (or a CI runner) without one
+        # there is nothing to be wrong about.
+        print(f"SKIP  dataset absent on this machine, cannot run: {args.dataset}")
+        if args.dataset == PLATE:
+            print('      rebuild it with: python tools/make_5d_fixture.py '
+                  f'"{PLATE}" --fovs 36 --nz 1 --nt 1 --well-pitch-mm 9.0 '
+                  '--declared-format "384 well plate"')
+        return 0
     if args.self_test:
         return self_test(args.dataset)
 
@@ -567,4 +670,10 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    rc = main()
+    # os._exit, NOT sys.exit. Measured 2026-08-06: the gate printed its full verdict and the
+    # process then died with SIGSEGV (139) unwinding Qt at interpreter shutdown. A gate whose exit
+    # code is decided by a teardown crash gates nothing.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(rc)

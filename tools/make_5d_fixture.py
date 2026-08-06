@@ -27,6 +27,11 @@ Usage::
 
     python tools/make_5d_fixture.py ~/Downloads/sim_5d_2x2_t3
     python tools/make_5d_fixture.py OUT --regions A1,A2,B1,B2 --fovs 4 --nz 3 --nt 3 --size 256
+
+    # the plate `tools/walkthrough.py` drives: a 96-well pitch under a 384 declaration, so
+    # build_plate's measured-beats-declared precedence has something to be right about.
+    python tools/make_5d_fixture.py ~/Downloads/sim_2x2_36fov_96wp \\
+        --fovs 36 --nz 1 --nt 1 --well-pitch-mm 9.0 --declared-format "384 well plate"
 """
 
 from __future__ import annotations
@@ -50,14 +55,18 @@ _DZ_UM = 1.5
 _STEP_FRAC = 0.75
 
 
-def _frame(size: int, fov: int, z: int, nz: int, c: int, t: int, nt: int) -> np.ndarray:
+def _frame(size: int, fov: int, per_side: int, z: int, nz: int, c: int, t: int,
+           nt: int) -> np.ndarray:
     """One plane. Every axis changes it, each in a way a human can name on sight."""
     yy, xx = np.mgrid[0:size, 0:size].astype(np.float32)
 
     # Texture keyed on ABSOLUTE stage position, so the overlap between neighbouring FOVs really
-    # is the same tissue -- which is what makes registration meaningful here.
-    ox = (fov % 2) * size * _STEP_FRAC
-    oy = (fov // 2) * size * _STEP_FRAC
+    # is the same tissue -- which is what makes registration meaningful here. *per_side* is the
+    # SAME number build() lays the coordinates out with; it said a literal 2 until 2026-08-06,
+    # so at any --fovs other than 4 the texture and the stage coordinates disagreed and the
+    # "neighbours share content in the seam" promise above was simply untrue.
+    ox = (fov % per_side) * size * _STEP_FRAC
+    oy = (fov // per_side) * size * _STEP_FRAC
     gx, gy = xx + ox, yy + oy
     texture = (
         np.sin(gx / (7.0 + 3.0 * c)) * np.cos(gy / (11.0 - 2.0 * c))
@@ -81,7 +90,8 @@ def _frame(size: int, fov: int, z: int, nz: int, c: int, t: int, nt: int) -> np.
     return np.clip(img, 0, 65535).astype(np.uint16)
 
 
-def build(out: Path, regions, n_fovs: int, nz: int, nt: int, size: int) -> Path:
+def build(out: Path, regions, n_fovs: int, nz: int, nt: int, size: int,
+          well_pitch_mm: float = 10.0, declared_format: str = "glass slide") -> Path:
     out.mkdir(parents=True, exist_ok=True)
     per_side = int(np.ceil(np.sqrt(n_fovs)))
     step_mm = size * _STEP_FRAC * _PIXEL_UM / 1000.0
@@ -92,8 +102,9 @@ def build(out: Path, regions, n_fovs: int, nz: int, nt: int, size: int) -> Path:
         tdir.mkdir(exist_ok=True)
         rows = ["region,fov,z_level,x (mm),y (mm),z (um),time"]
         for r_i, region in enumerate(regions):
-            # Wells sit far apart so they read as distinct regions, not one mosaic.
-            rx, ry = (r_i % 2) * 10.0, (r_i // 2) * 10.0
+            # Wells sit a real WELL PITCH apart, so they read as distinct regions and so
+            # `_plate.measure_region_pitch_um` has a physical number to recognise the carrier by.
+            rx, ry = (r_i % 2) * well_pitch_mm, (r_i // 2) * well_pitch_mm
             for fov in range(n_fovs):
                 x_mm = rx + (fov % per_side) * step_mm
                 y_mm = ry + (fov // per_side) * step_mm
@@ -101,7 +112,7 @@ def build(out: Path, regions, n_fovs: int, nz: int, nt: int, size: int) -> Path:
                     for c_i, ch in enumerate(_CHANNELS):
                         tifffile.imwrite(
                             tdir / f"{region}_{fov}_{z}_{ch}.tiff",
-                            _frame(size, fov, z, nz, c_i, t, nt),
+                            _frame(size, fov, per_side, z, nz, c_i, t, nt),
                         )
                     stamp = (t0 + timedelta(minutes=30 * t, seconds=fov + z)).strftime(
                         "%Y-%m-%d_%H-%M-%S.%f")
@@ -115,7 +126,7 @@ def build(out: Path, regions, n_fovs: int, nz: int, nt: int, size: int) -> Path:
         "  magnification: 20.0\n"
         "  sensor_pixel_size_um: 15.04\n"
         "sample:\n"
-        "  wellplate_format: glass slide\n"
+        f"  wellplate_format: {declared_format}\n"
         "z_stack:\n"
         f"  nz: {nz}\n"
         f"  delta_z_mm: {_DZ_UM / 1000.0}\n"
@@ -151,12 +162,20 @@ def main() -> None:
     ap.add_argument("--nz", type=int, default=3)
     ap.add_argument("--nt", type=int, default=3)
     ap.add_argument("--size", type=int, default=256)
+    ap.add_argument("--well-pitch-mm", type=float, default=10.0,
+                    help="centre-to-centre spacing of the regions. 9.0 is a 96-well plate, "
+                         "4.5 a 384; the default 10.0 matches no vendored carrier, which is what "
+                         "makes build_plate fall back to the declaration.")
+    ap.add_argument("--declared-format", default="glass slide",
+                    help="what acquisition.yaml CLAIMS the carrier is. Set it to something the "
+                         "pitch contradicts to exercise measured-beats-declared.")
     a = ap.parse_args()
     regions = [r.strip() for r in a.regions.split(",") if r.strip()]
     bad = [r for r in regions if "_" in r]
     if bad:
         ap.error(f"region names may not contain '_' (reader.py:160 _STEM_RE): {bad}")
-    out = build(a.out, regions, a.fovs, a.nz, a.nt, a.size)
+    out = build(a.out, regions, a.fovs, a.nz, a.nt, a.size,
+                well_pitch_mm=a.well_pitch_mm, declared_format=a.declared_format)
     n = len(regions) * a.fovs * a.nz * len(_CHANNELS) * a.nt
     print(f"wrote {n} planes to {out}")
     print(f"  {len(regions)} regions x {a.fovs} FOV x {a.nz} z x {len(_CHANNELS)} ch x {a.nt} t")
