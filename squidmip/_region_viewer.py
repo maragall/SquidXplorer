@@ -2711,9 +2711,11 @@ class RegionViewer(QMainWindow):
         srcs: dict = {}
         for ch in mosaic.channels(op):
             layer = mosaic.find(op, ch)
-            data = getattr(layer, "data", None) if layer is not None else None
-            if isinstance(data, (list, tuple)):
-                data = data[0]                           # level 0 of a pyramid: the finest rung
+            # level 0 of a pyramid: the finest rung. THE one pyramid rule and not an isinstance
+            # check -- napari's `MultiScaleData` is neither a list nor a tuple, so that branch was
+            # False for every real pyramid and the whole thing travelled on as the brick source,
+            # where indexing it walks the LEVELS instead of the z planes.
+            data = full_res_level(getattr(layer, "data", None) if layer is not None else None)
             if data is None or getattr(data, "ndim", 0) < 3 or int(data.shape[0]) < 2:
                 continue
             try:
