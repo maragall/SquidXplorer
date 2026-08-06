@@ -29,6 +29,7 @@ the frozen bundle against a real acquisition, so an exclude that breaks the app 
 caught rather than shipped. See the ticket report for the measured number.
 """
 
+import importlib.util
 import os
 import sys
 
@@ -116,7 +117,23 @@ _EXCLUDES = [
     "imageio", "imageio_ffmpeg",   # 48 MB (a bundled ffmpeg); skimage.io only
     "mypy",                # a type checker, in a shipped GUI
     "lxml", "cryptography",
-    "matplotlib",          # skimage.io plugins + pandas.plotting reference it; the app plots nothing
+    # matplotlib is NOT unconditionally excluded any more (2026-08-05). The old note said "the app
+    # plots nothing", and that has stopped being true: squidmip/_decon_qc.py does
+    # `import matplotlib` / `matplotlib.use("Agg")` / `import matplotlib.pyplot` inside
+    # turbo_rgb() and write_montage(), and squidmip/_op_panels.py calls straight into them
+    # (turbo_rgb, qc_composite, halo_verdict) to draw the decon QC panel.
+    #
+    # It is still excluded in the DEFAULT build, and the reason is reachability rather than taste:
+    # that panel only exists downstream of the `decon` operator, `decon` declares
+    # requires=("petakit",), and petakit is an optional extra that is not installed in a plain
+    # `.[gui]` build environment. With petakit absent the operator refuses by name and no code
+    # path can reach matplotlib, so excluding it is correct and saves ~50 MB.
+    #
+    # Build with decon (`pip install ".[gui,decon]"`) and the exclusion INVERTS -- otherwise the
+    # QC panel would raise ModuleNotFoundError in the frozen app only, which is precisely the
+    # class of bug that shipped napari-less bundles. Tying the exclude to the same package the
+    # operator's `requires=` names keeps the two from drifting apart.
+] + ([] if importlib.util.find_spec("petakit") else ["matplotlib"]) + [
     "tkinter",             # Tk is a second, unused GUI toolkit
     "IPython", "jupyter_core", "notebook", "ipykernel", "ipywidgets",
     "pytest", "_pytest", "pytest_qt",
