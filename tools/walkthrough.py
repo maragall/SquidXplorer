@@ -599,13 +599,20 @@ def run_all():
         for kind in (QAbstractSlider, QAbstractSpinBox, QComboBox, QAbstractButton):
             controls += [f"{type(c).__name__}({c.text() if hasattr(c, 'text') else ''})"
                          for c in ov.findChildren(kind)]
-        bars = w.findChildren(V._ChannelBar)
+        # The CLASS is gone as of 2026-08-05, not merely unmounted: it had not been constructed
+        # since 8b0cbfc (2026-07-22) and was deleted with the rest of the dead central-pane paths.
+        # So `V._ChannelBar` is now an AttributeError, and this check asserts the stronger fact --
+        # the type does not exist to be mounted. Written as a getattr rather than a bare access
+        # because the reason this line changed is exactly the reason it must not raise: a harness
+        # that dies on the change it is meant to VERIFY reports a red for a green event.
+        bar_cls = getattr(V, "_ChannelBar", None)
+        bars = w.findChildren(bar_cls) if bar_cls is not None else []
         attr = hasattr(w, "_channel_bar")
         w.close()
         assert not controls, f"the plate pane carries {len(controls)} control(s): {controls}"
         assert not bars, f"{len(bars)} _ChannelBar still mounted under the window"
         assert not attr, "PlateWindow still has a _channel_bar attribute"
-        return ("0 interactive controls under the plate, 0 _ChannelBar instances, no "
+        return ("0 interactive controls under the plate, no _ChannelBar type at all, no "
                 "_channel_bar attribute - the plate reports contrast, it does not set it")
 
     # THREE IMA-261 CHECKS WERE HERE AND ARE GONE, all of them drivers of an `ndv_clims_slider`

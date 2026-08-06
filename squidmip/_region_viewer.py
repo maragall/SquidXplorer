@@ -776,6 +776,14 @@ class RegionViewer(QMainWindow):
         # tools: it is a WINDOW action, not something you do to the mosaic.
         self._btn_plate = self._chip("▣ plate", "Bring the plate window to the front — it ends up "
                                      "buried under the views opened from it.", self._raise_plate)
+        # ▣ plate's twin, and deliberately next to it: same journey back to the plate, but it also
+        # opens the tab for the operator THIS window is showing, so the thing you came back to
+        # change is already in front of you. Julio: "so that we can tweak, say the iterations".
+        self._btn_controls = self._chip(
+            "⚙ controls", "Bring the plate window forward AND open the controls for the operator "
+            "this window is showing, so its parameters (iterations, thresholds) are one click "
+            "away. Says so when the window is showing raw pixels, which have none.",
+            self._show_operator_controls)
         # RECORD. A window shows ONE index of T and ONE of Z at a time, so the only way to look at
         # a time series or a focus sweep today is to drag a slider and remember. This exports the
         # sweep as a file — the axis the acquisition actually has (T if it is a time series, else
@@ -791,6 +799,7 @@ class RegionViewer(QMainWindow):
         r1.addWidget(self._btn_2d); r1.addWidget(self._btn_3d); r1.addWidget(self._btn_focus)
         r1.addWidget(self._btn_record)
         r1.addWidget(self._btn_plate)
+        r1.addWidget(self._btn_controls)     # beside ▣ plate: both are the way BACK to the plate
         r1.addStretch(1)
         self._refresh_record_chip()
         vv.addLayout(r1)
@@ -1035,6 +1044,54 @@ class RegionViewer(QMainWindow):
         """
         if self._manager is None or not self._manager.raise_plate():
             self._say("there is no plate window to raise from here.")
+
+    def _show_operator_controls(self) -> None:
+        """Raise the plate AND open the controls for the operator THIS window is showing.
+
+        Julio, 2026-08-05: "Show controls button basically works as the 'plate' one in the window
+        that it brings the plate to front. But this one brings the plate window to front and opens
+        a tab with respective operator controls, so that we can tweak, say the iterations."
+
+        Two halves, and the second is the point. Raising the plate is what `▣ plate` already does;
+        without it the tab opens in a window that is still buried. Opening the TAB is what turns
+        "I can see a decon result" into "I can change the iteration count", which today costs a
+        hunt through a menu in a different window.
+
+        WHICH operator comes off `visible_op()` -- the same declaration-driven answer 3D uses to
+        pick its volume, never a name comparison (`tests/test_operator_declaration.py` fails the
+        build on one). So this needs no edit when an operator is added, and a plugin's operator
+        gets the button for free: `_activate_operator` falls back to a panel generated from the
+        declared `params`, which is exactly where an iteration count lives.
+
+        Refuses out loud in all three cases it can fail -- no plate, no operator layer shown, or a
+        plate that cannot build a panel. A chip that looks alive and does nothing is the failure
+        this project keeps naming.
+        """
+        mosaic = getattr(self._pane, "mosaic", None) if self._pane is not None else None
+        op = None
+        if mosaic is not None:
+            try:
+                op = mosaic.visible_op()
+            except Exception:                            # noqa: BLE001 - treat as "nothing shown"
+                op = None
+        if not op or op == _RAW_OP:
+            self._say("controls: this window is showing raw pixels, which have no operator to "
+                      "tune. Run an operator, or switch to its layer, and click again.")
+            return
+        if self._manager is None or not self._manager.raise_plate():
+            self._say(f"controls: no plate window to open {op!r}'s controls in.")
+            return
+        plate = self._manager.parent()
+        activate = getattr(plate, "_activate_operator", None)
+        if activate is None:
+            self._say(f"controls: this plate cannot open operator tabs, so {op!r} has none.")
+            return
+        try:
+            activate(op)
+        except Exception as exc:                         # noqa: BLE001 - named, never a dead click
+            self._say(f"controls: could not open {op!r}'s controls ({exc}).")
+            return
+        self._say(f"controls: {op!r} — its panel is open on the plate window.")
 
     # -- movie export: this view's T (or Z) sweep, as a file ------------------------------
     def _refresh_record_chip(self) -> None:
@@ -2547,6 +2604,11 @@ class RegionViewer(QMainWindow):
                 viewer, self._reader, self._meta, region, window,
                 channels=names, scale=(dz, px, px), origin_um=roi_origin,
                 limit=max_tex, budget_bytes=budget,
+                # `source` is the operator `_volume_source` chose off the DECLARATION, never off a
+                # name. Handing it down is what lets each brick declare its identity, which is what
+                # puts the volume inside the layer tree at all -- see `BrickedVolume._op`. It was
+                # already computed here and spent only on a sentence in the log.
+                op=source,
                 contrast_by=contrast_by or None, colormap_by=colormap_by or None,
                 say=self._say, parent=self, read=read,
             )))

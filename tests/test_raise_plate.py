@@ -180,3 +180,84 @@ def test_clicking_it_raises_the_plate(qapp, manager):
 
     assert plate.raised == before + 1, "the button did not reach the plate"
     assert plate.activated >= 1
+
+
+# --------------------------------------------------- ⚙ controls: the plate AND the operator tab
+#
+# Julio, 2026-08-05: "Show controls button basically works as the 'plate' one in the window that it
+# brings the plate to front. But this one brings the plate window to front and opens a tab with
+# respective operator controls, so that we can tweak, say the iterations."
+#
+# So it is ▣ plate's twin and it is tested beside it. Both halves are asserted -- raising without
+# opening the tab leaves you in front of the right window with the wrong thing on it, and opening
+# the tab without raising puts the panel behind the view you clicked from. Which operator comes off
+# `visible_op()`, so this stays true when an operator is added.
+
+
+def _controls_button(win) -> QPushButton:
+    found = [b for b in win.findChildren(QPushButton) if "controls" in b.text()]
+    assert len(found) == 1, f"expected one controls button, found {[b.text() for b in found]}"
+    return found[0]
+
+
+def _show(win, op):
+    """Make the window report *op* as the layer it is showing, the way the pane would."""
+    class _Mosaic:
+        def visible_op(self):
+            return op
+    win._pane.mosaic = _Mosaic()
+
+
+def test_every_child_window_carries_the_controls_button(qapp, manager):
+    win = manager.open([REGIONS[0]])
+    assert win is not None
+    assert _controls_button(win).text() == "⚙ controls"
+
+
+def test_clicking_it_raises_the_plate_AND_opens_that_operator_s_tab(qapp, manager):
+    """Button -> handler -> registry -> plate -> `_activate_operator(op)`. Clicked, not called."""
+    win = manager.open([REGIONS[0]])
+    assert win is not None
+    plate = manager._test_plate
+    plate.activated_ops = []
+    plate._activate_operator = plate.activated_ops.append
+    _show(win, "decon")
+    before = plate.raised
+
+    _controls_button(win).click()
+
+    assert plate.raised == before + 1, "the controls button did not raise the plate"
+    assert plate.activated_ops == ["decon"], (
+        f"the operator's tab was not opened: {plate.activated_ops}")
+
+
+def test_it_opens_the_operator_the_window_is_actually_showing(qapp, manager):
+    """Not a fixed operator, and not the first one registered: whatever this window is showing."""
+    win = manager.open([REGIONS[0]])
+    plate = manager._test_plate
+    plate.activated_ops = []
+    plate._activate_operator = plate.activated_ops.append
+
+    for op in ("bgsub", "stitch", "cellpose"):
+        _show(win, op)
+        _controls_button(win).click()
+    assert plate.activated_ops == ["bgsub", "stitch", "cellpose"]
+
+
+def test_a_window_showing_raw_refuses_out_loud_and_opens_nothing(qapp, manager):
+    """Raw pixels have no operator to tune. A chip that looks alive and does nothing is the
+    failure this project keeps naming, so it must SAY so -- and must not raise the plate either,
+    because moving the user's focus for a refusal is worse than not moving it."""
+    win = manager.open([REGIONS[0]])
+    plate = manager._test_plate
+    plate.activated_ops = []
+    plate._activate_operator = plate.activated_ops.append
+    _show(win, "raw")
+    before, said_before = plate.raised, len(win._pane.said)
+
+    _controls_button(win).click()
+
+    assert plate.activated_ops == [], "raw has no operator, so nothing should have been opened"
+    assert plate.raised == before, "a refusal must not steal focus to the plate"
+    said = " ".join(win._pane.said[said_before:]).lower()
+    assert "raw" in said and "operator" in said, f"the refusal did not say why: {said!r}"

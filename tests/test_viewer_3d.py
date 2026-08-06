@@ -241,3 +241,90 @@ class TestThe3DPopoutDoesNotPileUp:
         assert len(opened) == 2, f"a stuck popout blocked the new one: {pane.said}"
         assert w._native3d is opened[1]
         shutdown_plate_window(qapp, win)
+
+
+# -- the 3D volume must live INSIDE the layer-visibility model ---------------------------------
+#
+# Julio, driving the real build 2026-08-05: "in 3d rendering, when all layers are off there is
+# still a rendered image, unlike 2d that it's a black canvas since all layers are off ... there is
+# still a layer that looks beautiful but that I can't control so then other controlled layers are
+# overlayed".
+#
+# One root cause, both symptoms. `_brick_view._add_layer` created every brick with no
+# `layer.metadata`, so `key_of` returned None and the layer tree classed the whole volume as a
+# FOREIGN layer -- which it "deliberately tolerates and IGNORES". No group, no checkbox, nothing to
+# switch off. Meanwhile `BrickedVolume.open()` force-hides the 2-D layers but leaves their
+# checkboxes live, so switching one back on drew it over an uncontrollable volume.
+#
+# This asserts the OBSERVABLE the tree depends on -- `key_of` recovers (op, channel) -- rather than
+# that a kwarg was passed. It also asserts the grouping property that makes one checkbox drive the
+# whole volume: every brick of a channel must answer with the SAME key.
+
+class _RecordingViewer:
+    """The narrowest napari stand-in `_add_layer` needs: it records what was added."""
+
+    class _Layer:
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+            self.visible = True
+            self.events = None          # _link_contrast is try/except'd; None exercises that path
+
+    def __init__(self):
+        self.layers = []
+
+    def add_image(self, arr, **kwargs):
+        layer = self._Layer(data=arr, **kwargs)
+        self.layers.append(layer)
+        return layer
+
+
+def _bricked(op, channels=("c0", "c1")):
+    from squidmip._brick_view import BrickedVolume
+
+    viewer = _RecordingViewer()
+    vol = BrickedVolume(
+        viewer, reader=None, meta={}, region="A1", window_px=(0, 8, 0, 8),
+        channels=list(channels), scale=(1.5, 0.75, 0.75), origin_um=(0.0, 0.0, 0.0),
+        limit=2048, budget_bytes=1 << 30, op=op,
+    )
+    return viewer, vol
+
+
+@pytest.mark.parametrize("op", ["raw", "decon", "bgsub"])
+def test_every_brick_declares_the_operator_whose_volume_it_is(op):
+    """Without this the tree cannot see the volume at all, whatever the operator."""
+    import numpy as np
+
+    from squidmip._napari_view import key_of
+
+    viewer, vol = _bricked(op)
+    for ch in ("c0", "c1"):
+        for tile in ((0, 0), (0, 1), (1, 0)):
+            vol._add_layer((ch, tile), ch, np.zeros((2, 4, 4), np.uint16),
+                           (1.5, 0.75, 0.75), (0.0, 0.0, 0.0))
+
+    assert len(viewer.layers) == 6
+    keys = [key_of(ly) for ly in viewer.layers]
+    assert all(k is not None for k in keys), (
+        "a brick with no metadata is a FOREIGN layer: no group, no checkbox, cannot be switched "
+        f"off. keys={keys}")
+    assert {k.op for k in keys} == {op}, f"bricks claim the wrong operator: {[k.op for k in keys]}"
+    # ONE group per channel, so ONE checkbox drives the whole volume -- the bricks ARE one volume.
+    assert len({(k.op, k.channel) for k in keys}) == 2, (
+        "bricks of a channel must share one key, or the tree grows a row per brick")
+
+
+def test_the_bricks_claim_the_same_identity_a_2d_mosaic_layer_would():
+    """The tree must not need to know a brick from a mosaic: same op, same channel, same group.
+
+    If these two disagreed, turning off 'decon / c0' would hide the 2-D layer and leave the volume
+    lit -- which is the reported bug wearing a different hat.
+    """
+    import numpy as np
+
+    from squidmip._napari_view import MosaicKey, key_of
+
+    viewer, vol = _bricked("decon", channels=("c0",))
+    vol._add_layer(("c0", (0, 0)), "c0", np.zeros((2, 4, 4), np.uint16),
+                   (1.5, 0.75, 0.75), (0.0, 0.0, 0.0))
+    assert key_of(viewer.layers[0]) == MosaicKey("decon", "c0")

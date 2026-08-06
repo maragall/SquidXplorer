@@ -246,6 +246,9 @@ def _where(wdg) -> str:
         if p is None:
             break
         chain.append(type(p).__name__)
+    # `_ChannelBar` and `LightweightViewer` are gone (2026-07-22 and 2026-08-05). Kept in this
+    # list on purpose: it names what a control's ANCESTOR might be, and a stale name here costs
+    # nothing while a missing one makes a re-introduced widget report its owner as "?".
     for interesting in ("_ChannelBar", "PlateOverview", "LightweightViewer", "PlateWindow"):
         if interesting in chain:
             return interesting
