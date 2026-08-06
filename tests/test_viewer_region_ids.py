@@ -47,18 +47,15 @@ from .test_viewer import qapp  # noqa: E402,F401  (fixtures)
 
 # WHERE THESE NOW POINT (decentralization, 2026-07-23).
 #
-# `PlateWindow._detail` is permanently None: there is no central viewer any more, and
-# `_make_detail_viewer` (which the `stub_detail` fixture patches) has zero production call sites, so
-# the stub records a viewer nobody builds. Both defects below outlived that change, they just moved:
+# There is no central viewer any more, and its remains (`PlateWindow._detail`,
+# `_make_detail_viewer`, the `stub_detail` fixture) were deleted on 2026-08-05. Both defects below
+# outlived that change, they just moved:
 #
 #   (a) the region id is still passed through verbatim, now to `ViewerManager.open`, which spawns an
 #       independent window over exactly that id;
 #   (b) the autofocus is now `_region_viewer.RegionViewer._focus_reference_plane`, which picks the
 #       region's CENTRE FOV (`_napari3d._center_fov`) rather than `fovs_per_region[region][0]`, and
 #       moves THAT window's napari z slider.
-#
-# `stub_detail` is kept on the signatures because `PlateWindow` still builds against the seam and a
-# real ndviewer under offscreen GL segfaults; nothing here reads the stub any more.
 
 
 def _spy_focus_worker(monkeypatch, answer_z=1, note=""):

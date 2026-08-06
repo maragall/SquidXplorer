@@ -586,7 +586,6 @@ class PlateWindow(QMainWindow):
         # `_left_tabs` (see `publish_qc_result`), which is on screen.
 
         # the band's right column: the process console (build the home tab first — it owns
-        # self._readout, which _make_detail_viewer writes to if ndviewer is unavailable).
         self._left_tabs = _DetachTabs(self._detach_tab)
         # Dark the tab widget's own canvas (the strip behind/beside the tabs rendered white in macOS
         # light mode). Scope a Fusion style + dark palette to THIS widget subtree only — NOT the app,
