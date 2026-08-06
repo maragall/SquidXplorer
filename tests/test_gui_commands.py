@@ -15,7 +15,6 @@ from qtpy.QtWidgets import QApplication
 
 import squidmip._viewer as V
 from squidmip import _run_scope
-from tests.test_viewer import _StubDetail   # the proven ndviewer stub (no offscreen-GL segfault)
 from squidmip._command import (
     BUSY,
     CommandBus,
@@ -39,12 +38,7 @@ def qapp():
 
 
 @pytest.fixture
-def stub_detail(monkeypatch):
-    monkeypatch.setattr(V.PlateWindow, "_make_detail_viewer", lambda self: _StubDetail())
-
-
-@pytest.fixture
-def win(qapp, stub_detail):
+def win(qapp):
     w = V.PlateWindow(None)
     yield w
     w.close()                    # stops + joins any run, uninstalls the log bus

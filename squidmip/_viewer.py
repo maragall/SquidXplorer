@@ -175,10 +175,10 @@ from squidmip._plate_overview import (  # noqa: F401 (re-exports)
     _LOUPE_PX, _LOUPE_SLOP, _LOUPE_WIN_LOCK, _PAD, _PCT, _PLATE_DIMS, _PUSH_PX, _TILE_CACHE_BYTES,
     _TILE_QUEUE_MAX, _VIEW_WASH, _FRAME_MIN_GRID, _SEL_FRAME,
     PlateOverview, _LoupeSource, _LoupeWorker, _RawLoupeSource, _RunningContrast, _TileFetcher,
-    _ZarrLoupeSource, _box_union, _deep_zoom_enabled, _fit_box, _fit_cell, _fit_letterboxed,
+    _ZarrLoupeSource, _box_union, _deep_zoom_enabled, _fit_box, _fit_cell,
     _fmt_um, _fov_of_well, _mosaic_boxes, _nice_scale_um, _pct_window, _plate_grid, _row_letter,
     cells_in_rect, content_box, frames_for_grid, loupe_clamp_crop, loupe_crop_px, loupe_decimation,
-    loupe_level, loupe_scale, loupe_um_per_screen_px, push_shape_for, region_mosaic_extent_px,
+    loupe_level, loupe_scale, loupe_um_per_screen_px,
     resolve_plate_root, selection_frame_pen_px, well_at,
 )
 
@@ -229,7 +229,6 @@ _CONTROL_BLUE = _qtstyle.CONTROL_BLUE
 
 
 _STATUS = _qtstyle.STATUS   # processing-status hue coding; see squidmip/_qtstyle.py
-_NDV_DARK = _qtstyle.NDV_DARK
 _TABS_DARK = _qtstyle.TABS_DARK
 _CARD_QSS = _qtstyle.CARD_QSS
 _BTN_QSS = _qtstyle.BTN_QSS
@@ -473,7 +472,6 @@ class PlateWindow(QMainWindow):
         self._spot_counts = {}        # (region, channel) -> nuclei counted. PER-REGION, not global.
         self._fov_index = {}
         self._selected_regions = []   # wells picked on the plate (IMA-221); scopes an operator run
-        self._pushed = set()          # wells whose raw z-stack is already registered in the detail viewer
 
         # DECENTRALIZED VIEWER (Spencer, 2026-07-23 call). The plate is the ROOT; a selection opens
         # an INDEPENDENT napari window that floats on the desktop, tracked by ID in the Open View
@@ -558,14 +556,7 @@ class PlateWindow(QMainWindow):
         self._floating = {}           # key -> _FloatWindow holding that operator's UI detached
                                       # (a key lives in exactly ONE of the two dicts, never both)
         self._gallery = None          # the ONE open GalleryWindow, or None (see _open_gallery_view)
-        self._push_index = None       # global plate idx -> current run's slider position (None = identity)
-        # IMA-245: the (h, w) canvas the array viewer was last declared with, and the sticky reason
-        # a push could not be shown. None = no array canvas declared (the raw path registers file
-        # paths, not arrays), which is the signal for _on_push to skip the shape check.
-        self._push_shape = None
-        self._push_problem = None
         self._readout_base = ""
-        self._dropped_pushes = 0
         self._tabs_muted = False      # suppress _on_tab_changed during bulk teardown (ingest)
         self._run_out_dir = None      # output dir of the in-flight SAVE run (for partial cleanup)
         self._run_label = ""          # the in-flight run's operator label, and where it is going —
@@ -657,7 +648,6 @@ class PlateWindow(QMainWindow):
         # Idempotent, so eight windows in one process still attach one sink; and it writes under
         # the per-user cache root, which the test suite already redirects.
         _measure.persist_runs()
-        self._detail = None
         self._right_widget = None
 
         # THE PLATE, on top and full width (drop target until an acquisition opens). Its FIXED
@@ -1572,16 +1562,14 @@ class PlateWindow(QMainWindow):
         if self._reader is None or self._overview is None or self._tabs_muted:
             return
         if _run_scope.operator_busy(self._worker, self._retired):
-            # Defer for an OPERATOR RUN only. Never for the raw preview: `_setup_raw_detail`
-            # re-scopes and restarts the preview itself, so a streaming preview is not a reason
-            # to postpone -- and postponing on it is what stranded the restore. See
-            # _run_scope.operator_busy: this is the third gate that was asking "is any producer
-            # alive" when the question is "is a RUN alive".
-            self._request_resync()   # never retarget the slider a live run is pushing into — LATER
+            # Defer for an OPERATOR RUN only, never for the raw preview: postponing on a streaming
+            # preview is what stranded the restore. See _run_scope.operator_busy -- this is the
+            # third gate that was asking "is any producer alive" when the question is "is a RUN
+            # alive".
+            self._request_resync()
             return
         if not force:
             return                   # a plain tab selection: the plate is already plate-wide
-        self._setup_raw_detail(order=None)
         self._overview.set_all_status("empty")
         self._overview.set_active_layer(self._active_op_key or "raw")
 
@@ -2581,23 +2569,6 @@ class PlateWindow(QMainWindow):
         if menu is not None:                       # the uncarded operators gate on the same flag
             menu.setEnabled(flag)
 
-    def _make_detail_viewer(self):
-        try:
-            from ndviewer_light.core import LightweightViewer
-            v = LightweightViewer(None)   # empty -> push mode (we register raw z-planes on demand)
-            v.setStyleSheet(_NDV_DARK)    # ndviewer defaults to light; match the plate view
-            # Use ndviewer's OWN FOV slider as the scan navigator (upstreamed control — no external
-            # slider). Its valueChanged drives the red box (_on_fov_slider), and the plate's double-click
-            # drives it back (go_to_well_fov); both stay in sync. Hide only the "n per well" subset
-            # control (an IMA-191 extra that would just clutter the z-stack detail here).
-            sub = getattr(v, "_subset_container", None)
-            if sub is not None:
-                sub.hide()
-            return v
-        except Exception as e:
-            self._readout.setText(f"ndviewer_light unavailable: {e}")
-            return None
-
     # -- drag & drop --
     def _open_acquisition_dialog(self):
         """File > Open: pick a Squid acquisition folder (the reliable alternative to drag-drop)."""
@@ -2637,11 +2608,9 @@ class PlateWindow(QMainWindow):
         self._stop_mosaic_worker()   # it holds the OLD reader, and it is joined, not drained
         # Exploration tabs belong to the acquisition they were opened from: their region sets and
         # layer keys point at a _fov_index that is about to be rebuilt for a different plate.
-        self._push_index = None
         self._reader = self._meta = None
         self._fov_index = {}
         self._selected_regions = []   # wells picked on the plate (IMA-221); scopes an operator run
-        self._pushed = set()
         self._current_well = None
         self._current_fov = 0
         self._enable_operators(False)
@@ -2724,7 +2693,6 @@ class PlateWindow(QMainWindow):
         self._left_l.addWidget(self._overview, 1)   # fills the pane and self-fits — no scrollbars
         self._declare_channel_axis(meta["channels"], meta["dtype"])
 
-        self._setup_raw_detail()
         # Hand the plate's region order to the SINGLE OWNER. Announcing it is what puts the red
         # ROI frame on region 0, sizes the region slider, and loads pane 2's mosaic — one move,
         # not three calls that could each be forgotten on some path.
@@ -2761,8 +2729,7 @@ class PlateWindow(QMainWindow):
 
         # fast RAW preview: fill the plate with downsampled thumbnails immediately (grey dots),
         # in the SAME row-major order the operator will later process them in.
-        self._start_preview(reader, meta, order)   # (the detail already landed on order[0] via
-        #                                             _setup_raw_detail)
+        self._start_preview(reader, meta, order)
         # top-left = STATUS (what's happening / what's shown); the plate name is the pane title.
         # "live" is retired from user-facing copy: this is POST-ACQUISITION review, and calling
         # a loaded plate "live" reads as a running scope. The phrasing is operator/stitcher
@@ -3372,71 +3339,6 @@ class PlateWindow(QMainWindow):
             if visible is not None:
                 self._overview.set_channel_visible(i, bool(visible))
 
-    def _setup_raw_detail(self, order: Optional[list] = None):
-        """Point the detail viewer at the RAW acquisition: full z-stack, full frame, FOV slider.
-
-        ``order=None`` is the whole plate (open / 'Return to raw view'); *order* names a region
-        subset so the slider lists exactly those wells.
-        Registers each well's raw plane PATHS up front (cheap — paths only, no image I/O) so
-        scrubbing shows a real (lazily read + cached) image per well instead of black."""
-        if self._detail is None or self._reader is None:
-            return
-        meta, reader = self._meta, self._reader
-        order = self._order if order is None else list(order)
-        h, w = meta["frame_shape"]
-        channels = [c["name"] for c in meta["channels"]]
-        # pixel_size_um/dz_um are what make ndv's 3D button render this z-stack with the
-        # right geometry (IMA-255). This is the ONLY call site that declares a real n_z —
-        # the processed/mosaic ones below declare n_z=1, where a volume is meaningless — so
-        # it is the only one that needs them. Omitting them renders the stack isotropic:
-        # on the tissue set that is dz 1.5um against pixel 0.752um, i.e. 2x squashed in z.
-        # Passed positionally-by-keyword and NOT guarded: a stale ndviewer_light without
-        # these parameters must fail loudly here rather than silently drop back to
-        # isotropic. See tests/test_viewer_3d.py.
-        self._detail.start_acquisition(channels, meta["n_z"], h, w, [f"{r}:0" for r in order],
-                                       pixel_size_um=meta.get("pixel_size_um"),
-                                       dz_um=meta.get("dz_um"))
-        self._push_shape = None       # raw mode registers PATHS, not arrays — no array canvas here
-        self._push_problem = None
-        # Re-scope the RAW preview to the same wells the slider now lists. Without this the
-        # producer (a full-plate _PreviewWorker) and the consumer (_push_index, built from
-        # `order`) describe different well lists, and every push outside the subset is discarded.
-        # That is the bug that made the FOV slider stop advancing when it was scoped to a
-        # subset: the slider showed only the well that had already loaded.
-        if getattr(self, "_preview", None) is not None and order != getattr(self, "_preview_order", None):
-            self._stop_preview()
-            self._start_preview(reader, meta, order)
-        self._pushed = set()
-        # The raw slider is 1:1 with `order`, so pushes must map into THAT, not the plate index.
-        # Identity when the slider IS the whole plate; a subset map otherwise.
-        #
-        # REGRESSION GUARD (found on the live GUI): this map is consumed by _on_push, which DROPS
-        # any push it cannot translate. That is correct for a stale run, but it silently de-scoped
-        # the main view: scoping the slider to one well left _push_index == {0: 0} while
-        # the full-plate preview kept emitting global indices 1..N-1, so every other well was
-        # discarded and the FOV slider stopped advancing past the well that was clicked. The map
-        # and the producer must describe the SAME well list, so record it and re-scope the raw
-        # preview to match rather than leaving the two to disagree.
-        self._push_order = list(order)
-        self._push_index = (None if order == self._order
-                            else {self._fov_index[r]["idx"]: pos for pos, r in enumerate(order)})
-        if hasattr(self._detail, "register_images_bulk"):
-            entries = []
-            for pos, well in enumerate(order):
-                w_idx = pos            # position IN THIS SLIDER (== plate idx only for a full plate)
-                fov = meta["fovs_per_region"][well][0]
-                for z_i, z in enumerate(meta["z_levels"]):
-                    for ch in channels:
-                        try:
-                            path, page = reader.plane_ref(well, fov, ch, z)   # (file, page) — OME-safe
-                            entries.append((0, w_idx, z_i, ch, path, page))
-                        except (KeyError, IndexError, OSError):
-                            continue
-            self._detail.register_images_bulk(entries)
-            self._pushed.update(order)   # every well is registered; double-click just navigates
-        if order:                        # land on the first well so the viewer isn't blank
-            self.activate_well(order[0], 0)
-
     def _return_to_raw(self):
         """Stop previewing/processing and restore the raw downsampled view across the whole plate."""
         if self._reader is None or self._overview is None:
@@ -3456,7 +3358,6 @@ class PlateWindow(QMainWindow):
         for rc in list(self._overview._status):
             self._overview.set_status(*rc, "empty")
         self._refresh_layers_tab()
-        self._setup_raw_detail()
         # resume the raw thumbnail fill — the operator run stopped the preview partway, so re-run it to
         # finish downsampling every well's raw tile (idempotent: it just re-renders the raw layer).
         self._stop_preview()
@@ -3546,9 +3447,6 @@ class PlateWindow(QMainWindow):
         self._meta = {"channels": channels, "z_levels": [0], "n_z": 1, "n_t": 1,
                       "pixel_size_um": px_um,
                       "regions": [f"{rows[w['rowIndex']]}{cols[w['columnIndex']]}" for w in wells_meta]}
-        # a computed plate replaces the whole session: go back to identity push indexing over
-        # the full plate.
-        self._push_index = None
         wells_rc, self._fov_index, self._order, worker_wells = {}, {}, [], []
         well_paths, well_fovs = {}, {}
         for idx, w in enumerate(wells_meta):
@@ -3590,13 +3488,6 @@ class PlateWindow(QMainWindow):
         self._declare_channel_axis(channels, np.uint16)
         self._enable_operators(False)             # no raw data -> operators stay disabled
 
-        if self._detail is not None:
-            self._detail.start_acquisition([c["name"] for c in channels], 1, _PUSH_PX, _PUSH_PX,
-                                           [f"{w}:0" for w in self._order])
-        # A written plate is read back per FOV, so its pushes are frames at the push square.
-        self._push_shape = (_PUSH_PX, _PUSH_PX)
-        self._push_problem = None
-        self._dropped_pushes = 0
         # One or more wells could not declare their own image id, so they fell back to well 0's. On
         # a uniform plate that is harmless; on a heterogeneous one the loupe would magnify the wrong
         # field. We cannot tell which from here, so NAME it rather than hide it. It rides the success
@@ -3620,11 +3511,9 @@ class PlateWindow(QMainWindow):
             str(zroot), path_of=well_paths.get, fov_of=well_fovs.get,
             levels=levels, well_px=_well_px, pixel_size_um=px_um, written=None))
         coarse_lvl = levels[-1]                                   # coarsest -> tiny thumbnail
-        push_lvl = levels[min(3, len(levels) - 1)]                # ~512px level for the detail slider
-        self._worker = _ComputedPlateWorker(str(zroot), worker_wells, coarse_lvl, push_lvl,
+        self._worker = _ComputedPlateWorker(str(zroot), worker_wells, coarse_lvl,
                                            np.uint16, self.time_point)
         self._worker.tileReady.connect(self._on_tile)
-        self._worker.pushReady.connect(self._on_push)
         self._worker.streamEnded.connect(lambda: self._recomposite("computed"))
         self._worker.progress.connect(
             lambda i, n: self._readout.setText(f"loading computed plate — {i}/{n} wells"))
@@ -3851,41 +3740,15 @@ class PlateWindow(QMainWindow):
         else:
             self._drop_loupe_source(layer_key)
         self._refresh_layers_tab()
-        # switch the detail to processed mode: z collapsed (nz=1 -> ndv drops the z-slider), frames at
-        # the push size. The slider lists THIS RUN's regions — for a subset that is the subset, not the
-        # whole plate (it used to always be self._order, so a subset preview built a 1536-entry slider
-        # of which 4 were ever filled).
-        run_order = self._order if regions is None else regions
-        # _OperatorWorker emits the GLOBAL plate index (fov_index[region]["idx"]) with every push.
-        # The slider we just built is indexed 0..len(run_order)-1, so translate on the way in —
-        # without this every push on a subset run lands at the wrong slot or out of range.
-        self._push_index = (None if regions is None
-                            else {self._fov_index[r]["idx"]: pos for pos, r in enumerate(run_order)})
         # n_fovs=None = EVERY FOV in each well (IMA-187). Anything else (the historical 1) makes
         # `_boxes` empty in the worker and the plate falls back to one thumbnail per well, which is
         # the whole feature not rendering. The overview then adopts the worker's boxes so a
         # double-click on a mosaic cell resolves the FOV under the cursor instead of always 0.
-        # Built BEFORE start_acquisition (IMA-245): the worker owns this run's push geometry and the
-        # viewer's canvas is declared from it, so there is one rectangle, not two that agree by luck.
+        run_order = self._order if regions is None else regions
         self._worker = _OperatorWorker(key, self._reader, self._meta, self._fov_index,
                                        str(out_dir) if out_dir else "", regions=regions, save=save,
                                        n_fovs=None, operator_kwargs=operator_kwargs)
         self._overview.set_mosaic_boxes(self._worker.mosaic_boxes)
-        # IMA-245: size the array viewer to what this run actually pushes. A REGION operator
-        # (stitch, coordinate) pushes one FUSED MOSAIC per region, so the canvas is the mosaic
-        # extent — declaring the frame square here handed the viewer a rectangle the mosaic does
-        # not have, and the reported symptom was a black central viewer with no error anywhere.
-        self._push_shape = self._worker.push_shape
-        self._push_problem = None                            # sticky readout warning (see _on_push)
-        self._dropped_pushes = 0                             # per RUN: this run's unrouted pushes
-        if self._worker.push_shape_estimated:
-            self._note_push_problem(
-                "no stage positions / pixel size — the array viewer is sized as a frame, so the "
-                "fused mosaic is shown squashed to that shape")
-        if self._detail is not None:
-            ph, pw = self._push_shape
-            self._detail.start_acquisition([c["name"] for c in self._meta["channels"]], 1,
-                                           ph, pw, [f"{r}:0" for r in run_order])
         self._run_out_dir = str(out_dir) if (save and out_dir) else None   # for partial-output cleanup
         # A re-run must not composite on top of the LAST run's pixels: with a mosaic, a run that
         # lands fewer FOVs would otherwise leave the previous run's fields standing in the same
@@ -3898,7 +3761,6 @@ class PlateWindow(QMainWindow):
         # lambda so the status line and the log read the same two facts.
         self._run_label, self._run_dest = label, dest
         self._worker.tileReady.connect(self._on_tile)
-        self._worker.pushReady.connect(self._on_push)
         self._worker.resultReady.connect(self._on_result)
         self._worker.progress.connect(self._on_progress)
         self._worker.runProgress.connect(self._on_unit_progress)
@@ -4327,73 +4189,12 @@ class PlateWindow(QMainWindow):
                 z_scale_um=(dz if int(result.z_depth) > 1 else None),
             )
 
-    def _on_push(self, fov_idx, planes):
-        """A computed result's bounded planes -> the array viewer (in-memory register_array, LRU
-        bounded). z collapsed (nz=1). One push per FOV for a per-FOV operator, one per REGION —
-        the fused mosaic — for a region operator (IMA-245).
-
-        ``fov_idx`` is the GLOBAL plate index. The slider is built from the CURRENT RUN's regions,
-        so for a subset run it is only len(regions) long and the global index has to be translated
-        (``_push_index``). Dropping an untranslatable push is deliberate: a push whose position we
-        cannot resolve belongs to a run whose slider is gone, and guessing would paint one well's
-        image onto another well's slot.
-
-        NOTHING here is dropped silently (IMA-245). Every way a push can fail to land — no viewer,
-        a viewer with no ``register_array``, an index this run's slider has no slot for, a plane
-        whose shape is not the canvas we declared, or a rejection from the viewer itself — counts
-        into ``_dropped_pushes`` AND says so in the readout. A black viewer with no error is what
-        made the reported defect take a human to find; the swallowed ``except Exception: pass``
-        below it was the last place that could have spoken and did not."""
-        if self._detail is None:
-            self._drop_push("there is no array viewer in this window to show the result in")
-            return
-        if not hasattr(self._detail, "register_array"):
-            # The routine cause: an ndviewer_light build without the register_array push API. Every
-            # computed result is then unshowable, which looks exactly like a viewer that is black.
-            self._drop_push("this ndviewer_light build has no register_array — computed results "
-                            "cannot reach the array viewer (upgrade ndviewer_light)")
-            return
-        pos = fov_idx if self._push_index is None else self._push_index.get(fov_idx)
-        if pos is None:
-            self._drop_push(f"a result for plate index {fov_idx} has no slot in this run's "
-                            f"viewer — it belongs to a run whose slider is gone")
-            return
-        want = getattr(self, "_push_shape", None)
-        channels = [c["name"] for c in self._meta["channels"]]
-        for c_i, plane in enumerate(planes):
-            got = tuple(np.asarray(plane).shape)
-            if want is not None and got != tuple(want):
-                # The producer and the declared canvas disagree — the defect class this whole file
-                # keeps meeting. Say which two numbers disagree; do not push a plane the viewer
-                # will reject without telling anyone.
-                self._drop_push(f"the result is {got[0]}x{got[1]} but the array viewer was "
-                                f"declared {want[0]}x{want[1]}")
-                return
-            try:
-                self._detail.register_array(0, pos, 0, channels[c_i], plane)
-            except Exception as e:      # one bad push must not break the run — but it must be said
-                self._drop_push(f"the array viewer rejected the result: {type(e).__name__}: {e}")
-                return
-
-    def _drop_push(self, why: str):
-        """Count an unrouted push and put the reason in the readout (IMA-245)."""
-        self._dropped_pushes = getattr(self, "_dropped_pushes", 0) + 1
-        self._note_push_problem(why)
-
-    def _note_push_problem(self, why: str):
-        """Make ``why`` a STICKY suffix on this run's readout, so a later progress/success line
-        cannot overwrite it. A run that finished computing but could not display its result is not
-        a success, and the '✓' must not be the last word on it."""
-        if getattr(self, "_push_problem", None) == why:
-            return
-        self._push_problem = why
-        self._run_readout(getattr(self, "_readout_base", self._readout.text()))
-
     def _run_readout(self, text: str):
-        """Set the run's status line, re-appending any push problem this run has hit."""
+        """Set the run's status line. Kept as its own method because every run-status caller goes
+        through it; it used to re-append a sticky push-failure suffix, and the only producer of one
+        was the array-viewer feed that no window has had since ndviewer_light was removed."""
         self._readout_base = text
-        why = getattr(self, "_push_problem", None)
-        self._readout.setText(text + (f"   ·   ⚠ {why}" if why else ""))
+        self._readout.setText(text)
 
     def _on_failed(self, msg):
         # Remember WHY, for the requester's ``operator_failed`` line. ``_on_run_drained`` fires on
@@ -4430,18 +4231,6 @@ class PlateWindow(QMainWindow):
         # A readout that duplicates a control surface is still duplication; it just cannot be
         # clicked. The channel axis is still declared above -- that is the plate's data, not a
         # widget.
-        # A fresh plate must ALREADY agree with the array viewer, not merely agree from the next
-        # gesture on: the viewer keeps whatever window it had, and a plate that waited for the
-        # user to touch the slider would open showing a different window from the one on screen.
-        self._adopt_detail_contrast()
-
-    def _adopt_detail_contrast(self):
-        """Pull the array viewer's CURRENT per-channel windows onto the plate (IMA-261)."""
-        get = getattr(self._detail, "channel_windows", None) if self._detail is not None else None
-        if get is None:
-            return
-        for ch, (lo, hi) in get().items():
-            self._on_detail_contrast(ch, lo, hi)
 
     # -- navigation links --
     # -- selection (IMA-221): the widget picks wells, THIS window knows what a well contains ----
@@ -4695,89 +4484,28 @@ class PlateWindow(QMainWindow):
         base = f"{self._acq_name or 'well plate'}   ·   {self._plate_mode}"
         self._plate_title.setText(f"{base}   ·   {text}" if text else base)
 
-    def _slider_pos(self, well_id: str) -> Optional[int]:
-        """Where ``well_id`` sits in the detail's CURRENT FOV slider, or None if it isn't in it.
-
-        The slider is whole-plate by default (position == plate index) but a run over a subset
-        scopes it to that subset, where the two diverge. Everything that hands ndviewer an index —
-        register_image, register_array, go-to — has to translate through here."""
-        info = self._fov_index.get(well_id)
-        if info is None:
-            return None
-        if self._push_index is None:
-            return info["idx"]
-        return self._push_index.get(info["idx"])
-
     def activate_well(self, well_id: str, fov_index: int):
-        """Double-click -> show the well in the ndviewer. In RAW mode (no operator run yet) push the
-        well's raw z-stack lazily (the true z-stack, zero bytes copied). In PROCESSED mode (an operator
-        has run, the slider already holds the results) just navigate the slider to that well."""
+        """Double-click a well -> open ONE independent window on that region.
+
+        The single-region case of the shift-drag gesture. It used to have a second half — register
+        the well's raw z-planes into an embedded ndviewer_light and move its FOV slider — and that
+        half has been unreachable since the module was deleted on 2026-07-30 (`self._detail` was
+        assigned `None` once and never anything else), so it is gone with it.
+        """
         if well_id not in self._fov_index:
-            return
-        # Resolve the slider position BEFORE moving anything. The red frame says "this is the well
-        # you are looking at"; if the detail's slider does not contain the well (a subset run
-        # scopes it) we cannot show it, and moving the frame anyway is how you get a red
-        # frame on one well and another well's pixels beside it — silently.
-        idx = self._slider_pos(well_id) if self._detail is not None else None
-        if self._detail is not None and idx is None:
-            self._readout.setText(
-                f"{well_id} is not in this tab's subset — switch to 'Process wells' to open it")
             return
         self._current_fov = fov_index                  # the FOV ON SCREEN (IMA-250 (b))
         # ONE move. The cursor drives the red frame, the region slider and pane 2's mosaic
         # together, so they cannot disagree. This used to be three statements on three different
-        # code paths, and under napari (`_detail is None`) it returned before ANY of them ran:
-        # a double-click loaded the mosaic and left the red frame on the previous region.
+        # code paths, and it returned before ANY of them ran.
         try:
             self._cursor.activate(well_id)
         except KeyError:
             self._readout.setText(f"{well_id} is not in the current region order")
             return
-        if self._detail is None:
-            # Decentralized root: double-click opens ONE independent window on this region (the
-            # single-region case of the shift-drag gesture). Many regions -> shift-drag a box.
-            win = self._viewer_manager.open([well_id])
-            if win is None:
-                self._readout.setText("Open an acquisition before opening a view.")
-            return
-        if self._active_op_key is not None or self._reader is None:   # processed/computed: already pushed
-            self._detail.go_to_well_fov(well_id, fov_index)
-            return
-        if well_id not in self._pushed:
-            fov = self._meta["fovs_per_region"][well_id][0]
-            for z_i, z in enumerate(self._meta["z_levels"]):
-                for ch in (c["name"] for c in self._meta["channels"]):
-                    try:
-                        path, page = self._reader.plane_ref(well_id, fov, ch, z)
-                        self._detail.register_image(0, idx, z_i, ch, path, page)
-                    except (KeyError, IndexError, OSError, RuntimeError):
-                        continue   # a genuinely-missing plane / closed viewer shouldn't block the rest
-            self._pushed.add(well_id)
-        # Region ids are not necessarily well ids: a slide carrier's are freeform ("R2C3",
-        # "region_A", "tissue-1"). This used to rebuild the id as f"{row}{col}" from
-        # parse_well_id, which RAISES on all of those, inside a bare except that swallowed it -
-        # so a double-click moved the red box and never navigated, silently. The id is only a
-        # label for the detail viewer's well/FOV combo, so it is passed through untouched.
-        self._detail.go_to_well_fov(well_id, fov_index)
-
-    def _on_fov_slider(self, flat_idx: int):
-        """ndviewer_light's own slider moved -> move the CURSOR (which moves the red frame).
-
-        This is the FALLBACK viewer's slider; under napari the navigation control is
-        ``_region_slider``. Both land in the same cursor, so there is still exactly one owner.
-
-        The labels are ``f"{region}:0"`` in raw mode (IMA-270's ``r:0``), so the region id is
-        everything before the colon. The label is a DISPLAY string and this is the only place it
-        is read back; nothing downstream parses it.
-        """
-        if self._detail is None or self._overview is None:
-            return
-        labels = getattr(self._detail, "_fov_labels", None)
-        if not labels or not (0 <= flat_idx < len(labels)):
-            return
-        region = labels[flat_idx].split(":")[0]
-        if self._cursor.position_of(region) is not None:
-            self._cursor.set_region(region)
+        win = self._viewer_manager.open([well_id])
+        if win is None:
+            self._readout.setText("Open an acquisition before opening a view.")
 
     def _on_detail_contrast(self, ch: int, lo: float, hi: float):
         """The CENTRAL ARRAY VIEWER re-windowed channel *ch*. Make the plate show that window.

@@ -43,7 +43,7 @@ from qtpy.QtCore import QObject, Signal  # noqa: E402
 from squidmip import _viewer as V  # noqa: E402
 
 from .conftest import shutdown_plate_window  # noqa: E402
-from .test_viewer import qapp, stub_detail  # noqa: E402,F401  (fixtures)
+from .test_viewer import qapp  # noqa: E402,F401  (fixtures)
 
 # WHERE THESE NOW POINT (decentralization, 2026-07-23).
 #
@@ -113,7 +113,7 @@ def _slide_acquisition(root, region: str):
 # activate_well can fix, and not what this test is pinning.
 @pytest.mark.parametrize("region", ["R2C3", "tissue-1", "scan 3"])
 def test_activate_well_opens_a_window_on_a_freeform_region_id_verbatim(
-        qapp, stub_detail, napari_pane_stub, tmp_path, region):
+        qapp, napari_pane_stub, tmp_path, region):
     """(a) A region id that is not <letters><digits> must still open its view.
 
     The id is passed through UNCHANGED. Rebuilding it from parse_well_id raised on every one
@@ -142,7 +142,7 @@ def test_activate_well_opens_a_window_on_a_freeform_region_id_verbatim(
 
 
 def test_window_autofocus_ranks_a_representative_fov_not_the_regions_first(
-        qapp, stub_detail, napari_pane_stub, squid_dataset, monkeypatch):
+        qapp, napari_pane_stub, squid_dataset, monkeypatch):
     """(b) Autofocus must rank a REPRESENTATIVE field, not `fovs_per_region[region][0]`.
 
     It is a per-FOV autofocus, so ranking field 0 while the user is looking elsewhere reports the
@@ -184,7 +184,7 @@ def test_window_autofocus_ranks_a_representative_fov_not_the_regions_first(
 
 
 def test_window_autofocus_works_without_a_double_click(
-        qapp, stub_detail, napari_pane_stub, squid_dataset, monkeypatch):
+        qapp, napari_pane_stub, squid_dataset, monkeypatch):
     """The button must act on the region the window is SHOWING.
 
     It used to demand ``_current_well``, which is only set by a double-click, and under napari
@@ -211,7 +211,7 @@ def test_window_autofocus_works_without_a_double_click(
 
 
 def test_focus_reference_plane_on_a_single_plane_acquisition_says_so(
-        qapp, stub_detail, napari_pane_stub, squid_dataset, monkeypatch):
+        qapp, napari_pane_stub, squid_dataset, monkeypatch):
     """A refusal must be a sentence. Silently doing nothing is the failure being removed.
 
     Re-pointed at the WINDOW (2026-07-29). This used to live on `PlateWindow`, reachable only

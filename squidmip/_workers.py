@@ -28,7 +28,7 @@ WHAT IS DELIBERATELY NOT IN HERE
 --------------------------------
 ``_LoupeWorker`` and ``_TileFetcher``, the plate overview's own two threads, live in
 :mod:`squidmip._plate_overview` beside their only caller. They are the reason the arrows point the
-way they do: this module IMPORTS the plate geometry (``_fit_cell``, ``_CELL``, ``push_shape_for``)
+way they do: this module IMPORTS the plate geometry (``_fit_cell``, ``_CELL``, ``content_box``)
 to fill its tiles, so filing PlateOverview's threads here would have made the two modules import
 each other. A cycle is a worse outcome than two threads sitting next to their owner.
 
@@ -65,8 +65,7 @@ from squidmip._measure import (
 from squidmip._montage import _area_downsample
 from squidmip._operations import operator_label
 from squidmip._plate_overview import (
-    _CELL, _PUSH_PX, _box_union, _fit_box, _fit_cell, _fit_letterboxed, _mosaic_boxes,
-    content_box, push_shape_for, region_mosaic_extent_px,
+    _CELL, _box_union, _fit_box, _fit_cell, _mosaic_boxes, content_box,
 )
 from squidmip._progress import FOV_UNIT, PREVIEW_LABEL, RunProgress, unit_plan
 from squidmip._tsctx import HANDLES
@@ -120,11 +119,9 @@ class _OperatorWorker(QThread):
     streamEnded = Signal()                      # every well landed -> recomposite the whole plate
     writtenReady = Signal(str)                  # path of the written plate.ome.zarr
     wellFailed = Signal(int, int)               # (ri, ci) of a well SKIPPED on a read error
-    pushReady = Signal(int, object)             # (fov_idx, [per-channel ~512px plane]) for the slider
-    # FULL-RESOLUTION result pixels, per FOV, for the napari layer group (Defect 3). Separate
-    # from pushReady because that one is the ~512px ndviewer slider feed: a downsampled,
-    # letterboxed preview. A processing LAYER has to be the operator's actual output, in the
-    # raw mosaic's frame, or the before/after toggle compares a thumbnail against a pyramid.
+    # FULL-RESOLUTION result pixels, per FOV, for the napari layer group (Defect 3). The
+    # operator's actual output in the raw mosaic's frame -- there used to be a second, downsampled
+    # `pushReady` feed beside it for ndviewer_light's slider, and it went with that viewer.
     resultReady = Signal(str, int, object)      # (region, fov, (C, Y, X) native dtype)
     failed = Signal(str)                        # whole-run failure (not a per-well skip)
     finished_ok = Signal()
@@ -165,17 +162,6 @@ class _OperatorWorker(QThread):
 
         self._region_op = is_region_operator(self._operator)
         self._boxes = {} if (self._region_op or n_fovs == 1) else _mosaic_boxes(meta)
-        # IMA-245: the shape of what this run PUSHES to the array viewer. A region operator pushes
-        # a whole-region mosaic, so the surface is the mosaic extent (aspect preserved), not the
-        # frame. Computed here, once, and read back by the window through `push_shape` — the window
-        # declares the viewer's canvas from the SAME number the worker fills, so the producer and
-        # the consumer cannot describe two different rectangles.
-        self._push_shape = push_shape_for(meta, self._region_op, regions)
-        # True when a region run wanted the mosaic extent and could not derive it (no stage
-        # positions / no pixel size), so the push falls back to the square frame surface. The
-        # window turns this into a readout line: a squashed mosaic must not look like a correct one.
-        self._push_shape_estimated = bool(self._region_op
-                                          and region_mosaic_extent_px(meta, regions) is None)
         self._total = len(regions) if regions is not None else len(meta["regions"])
         # The ENGINE's unit and its total, known here because the iteration is known here:
         # project_plate walks (region, fov) pairs and stitch_plate walks regions, and both draw
@@ -202,22 +188,6 @@ class _OperatorWorker(QThread):
         second chance to disagree, and a disagreement opens a different FOV than the one clicked.
         """
         return self._boxes
-
-    @property
-    def push_shape(self) -> tuple:
-        """``(h, w)`` of every plane this run pushes to the array viewer (IMA-245).
-
-        Read by the window to size ``start_acquisition``. Same reasoning as ``mosaic_boxes``:
-        recomputing it there would be a second chance to disagree, and a disagreement here is a
-        black viewer — the push is rejected for the wrong shape and the rejection is invisible.
-        """
-        return self._push_shape
-
-    @property
-    def push_shape_estimated(self) -> bool:
-        """True when a REGION run could not derive its mosaic extent and fell back to the square
-        frame surface. The window reports it; a squashed mosaic must not pass for a correct one."""
-        return self._push_shape_estimated
 
     @property
     def landed(self) -> int:
@@ -290,15 +260,6 @@ class _OperatorWorker(QThread):
         self.tileReady.emit(ri, ci, well_id, raw, box)
         self.progress.emit(done, self._total)
         self.runProgress.emit(report)
-        # feed the ndviewer growing slider: one ~512px plane per channel, in memory (register_array),
-        # so scrubbing the processed wells is instant and z-collapsed (nz=1). Downsampled -> bounded.
-        # ...at `push_shape`: the frame square for a per-FOV operator, the aspect-preserved mosaic
-        # extent for a REGION operator (IMA-245). Squashing a region mosaic into the frame square
-        # is what put a whole-well stitch into the array viewer as an unreadable rectangle.
-        ph, pw = self._push_shape
-        push = [_fit_letterboxed(well[c_i], ph, pw, self._dtype)
-                for c_i in range(len(self._channels))]
-        self.pushReady.emit(info["idx"], push)
         # The operator's own pixels, undownsampled. `well` is a view into `image`; the slot
         # copies what it keeps and drops the rest, so a plate-wide run does not accumulate.
         self.resultReady.emit(region, fov, well)
@@ -1242,27 +1203,28 @@ class _PreviewWorker(QThread):
 class _ComputedPlateWorker(QThread):
     """Read a previously-written OME-Zarr plate back into the viewer (no recompute).
 
-    Streams each well from disk: a coarse pyramid level -> the plate thumbnail, and a ~512px level ->
-    the ndviewer slider (register_array). Bounded (one well in flight); reads via tensorstore off the
-    GUI thread so opening a big computed plate never freezes the window. Emits per-channel tiles, so
+    Streams each well from disk: a coarse pyramid level -> the plate thumbnail. Bounded (one well
+    in flight); reads via tensorstore off the GUI thread so opening a big computed plate never
+    freezes the window. It used to read a SECOND, ~512px level per well as well, to feed
+    ndviewer_light's slider -- one extra tensorstore read and one letterbox resample per well,
+    landing nowhere from the day that viewer was deleted. Emits per-channel tiles, so
     a reopened plate is windowed GLOBALLY by the widget's running contrast exactly like a live run —
     it used to take percentiles per well, which made a dim well and a bright well look identical and
     silently broke the one thing a plate overview is for (comparing wells at a glance)."""
 
     tileReady = Signal(int, int, str, object, object)   # (ri, ci, well_id, (C, h, w) native tile,
     #                                                          box=(top, left, h, w) in cell px)
-    pushReady = Signal(int, object)             # (fov_idx, [per-channel ~512px plane])
     progress = Signal(int, int)
     streamEnded = Signal()                      # plate fully loaded -> recomposite globally
     finished_ok = Signal()
     failed = Signal(str)
 
-    def __init__(self, base, wells, coarse_lvl, push_lvl, dtype, time_point: int = 0):
+    def __init__(self, base, wells, coarse_lvl, dtype, time_point: int = 0):
         self._time_point = int(time_point)   # which timepoint the plate is showing
         super().__init__()
         self._base = base                 # plate.ome.zarr path
         self._wells = wells               # [(well_id, wellpath, fov, ri, ci, flat_idx)]
-        self._coarse, self._push = coarse_lvl, push_lvl
+        self._coarse = coarse_lvl
         self._dtype = dtype
         self._stop = threading.Event()
 
@@ -1284,7 +1246,7 @@ class _ComputedPlateWorker(QThread):
     def run(self):
         try:
             n = len(self._wells)
-            for i, (wid, wpath, fov, ri, ci, idx) in enumerate(self._wells, 1):
+            for i, (wid, wpath, fov, ri, ci, _idx) in enumerate(self._wells, 1):
                 if self._stop.is_set():
                     return
                 coarse = self._read(wpath, fov, self._coarse, self._time_point)   # thumbnail (C,y,x)
@@ -1297,12 +1259,6 @@ class _ComputedPlateWorker(QThread):
                 _, _, bh, bw = box
                 tile = np.stack([_fit_box(plane.astype(np.float32), bh, bw) for plane in coarse])
                 self.tileReady.emit(ri, ci, wid, tile.astype(self._dtype), box)
-                push_src = self._read(wpath, fov, self._push, self._time_point)   # slider src (C,Y,X)
-                # ...at the declared push canvas exactly (IMA-245): a pyramid level smaller than
-                # _PUSH_PX used to be pushed at its own size, which the viewer silently refused.
-                push = [_fit_letterboxed(push_src[c], _PUSH_PX, _PUSH_PX, self._dtype)
-                        for c in range(push_src.shape[0])]
-                self.pushReady.emit(idx, push)
                 self.progress.emit(i, n)
             if not self._stop.is_set():
                 self.streamEnded.emit()   # every well in the store -> one global-window recomposite

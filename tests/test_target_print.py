@@ -203,7 +203,7 @@ from qtpy.QtWidgets import QComboBox, QPushButton  # noqa: E402
 
 from squidmip import _viewer as V  # noqa: E402
 
-from .test_viewer import qapp, stub_detail  # noqa: E402,F401  (fixtures)
+from .test_viewer import qapp  # noqa: E402,F401  (fixtures)
 
 
 class _FakeWindow:
@@ -227,7 +227,7 @@ def _plate(squid_dataset, *wins):
     return win
 
 
-def test_the_print_and_the_run_cannot_disagree(qapp, stub_detail, squid_dataset):
+def test_the_print_and_the_run_cannot_disagree(qapp, squid_dataset):
     """The one real hazard in printing this: if the block computed the distinct-region count with a
     second dedup, it could disagree with what runs, which is worse than not printing. Both come out
     of ``_open_views``, through ``distinct_view_regions``, once.
@@ -249,7 +249,7 @@ def test_the_print_and_the_run_cannot_disagree(qapp, stub_detail, squid_dataset)
         win._stop_worker(); win.close()
 
 
-def test_choosing_open_views_prints_the_block_before_anything_runs(qapp, stub_detail,
+def test_choosing_open_views_prints_the_block_before_anything_runs(qapp,
                                                                   squid_dataset, caplog):
     """Printed when the target is PICKED, not only when Run is pressed. A plate-scale run is minutes
     of compute, so a print that arrives at launch arrives after the decision.
@@ -278,7 +278,7 @@ def test_choosing_open_views_prints_the_block_before_anything_runs(qapp, stub_de
         win._stop_worker(); win.close()
 
 
-def test_pressing_run_prints_it_again_as_the_record_of_what_ran(qapp, stub_detail, squid_dataset,
+def test_pressing_run_prints_it_again_as_the_record_of_what_ran(qapp, squid_dataset,
                                                                caplog, monkeypatch):
     """The state can move between picking the target and pressing Run (a window closes), so the log
     records what was actually aimed at, and the regions handed to the operator are the ones the
@@ -307,7 +307,7 @@ def test_pressing_run_prints_it_again_as_the_record_of_what_ran(qapp, stub_detai
         win._stop_worker(); win.close()
 
 
-def test_open_views_with_no_windows_still_refuses_in_a_sentence(qapp, stub_detail, squid_dataset):
+def test_open_views_with_no_windows_still_refuses_in_a_sentence(qapp, squid_dataset):
     """The pre-existing refusal survives: a cheerful zero-window block would be worse than the
     sentence it replaced."""
     win = _plate(squid_dataset)
@@ -319,7 +319,7 @@ def test_open_views_with_no_windows_still_refuses_in_a_sentence(qapp, stub_detai
         win._stop_worker(); win.close()
 
 
-def test_windows_that_hold_no_regions_say_so_rather_than_claiming_none_are_open(qapp, stub_detail,
+def test_windows_that_hold_no_regions_say_so_rather_than_claiming_none_are_open(qapp,
                                                                                 squid_dataset):
     """"No windows are open" would be a lie with three windows on screen, and it would send the user
     to open a fourth."""

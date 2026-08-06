@@ -39,7 +39,7 @@ if "PySide6" in sys.modules or "PySide2" in sys.modules:
 from squidmip import _viewer as V  # noqa: E402
 
 from .conftest import shutdown_plate_window  # noqa: E402
-from .test_viewer import _drain_until, qapp, stub_detail  # noqa: E402,F401  (fixtures)
+from .test_viewer import _drain_until, qapp  # noqa: E402,F401  (fixtures)
 
 
 class _FakeDims:
@@ -81,7 +81,7 @@ def _open_window(win, regions):
 
 
 def test_a_spawned_window_builds_a_region_slider_bound_to_its_own_cursor(
-        qapp, stub_detail, napari_pane_stub, squid_dataset):
+        qapp, napari_pane_stub, squid_dataset):
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
@@ -99,7 +99,7 @@ def test_a_spawned_window_builds_a_region_slider_bound_to_its_own_cursor(
 
 
 def test_moving_a_windows_region_slider_reloads_that_windows_mosaic(
-        qapp, stub_detail, napari_pane_stub, squid_dataset):
+        qapp, napari_pane_stub, squid_dataset):
     """Requirement 2, end to end, on the window that now owns the slider."""
     root, _ = squid_dataset
     win = V.PlateWindow(None)
@@ -130,7 +130,7 @@ def test_moving_a_windows_region_slider_reloads_that_windows_mosaic(
 
 
 def test_double_clicking_the_plate_opens_a_window_on_that_region_and_moves_the_red_frame(
-        qapp, stub_detail, napari_pane_stub, squid_dataset):
+        qapp, napari_pane_stub, squid_dataset):
     """The other direction. The plate and the navigation must move together BOTH ways.
 
     A double-click used to move the root's own region slider. It now opens (or is answered by) an
@@ -158,7 +158,7 @@ def test_double_clicking_the_plate_opens_a_window_on_that_region_and_moves_the_r
     shutdown_plate_window(qapp, win)
 
 
-def test_there_is_no_second_copy_of_the_current_region(qapp, stub_detail, squid_dataset):
+def test_there_is_no_second_copy_of_the_current_region(qapp, squid_dataset):
     """``_mosaic_region`` and ``_current_well`` must be VIEWS, not fields.
 
     A field can be assigned behind the cursor's back and then drift; that is precisely how the
@@ -174,7 +174,7 @@ def test_there_is_no_second_copy_of_the_current_region(qapp, stub_detail, squid_
 
 
 def test_opening_a_plate_shows_a_region_without_claiming_the_user_opened_it(
-        qapp, stub_detail, squid_dataset):
+        qapp, squid_dataset):
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
@@ -189,7 +189,7 @@ def test_opening_a_plate_shows_a_region_without_claiming_the_user_opened_it(
 # The z slider is GLOBAL: it is napari's, and it survives a region change
 # --------------------------------------------------------------------------------------
 
-def test_z_axis_is_derived_from_the_dims_rank_not_hard_coded(qapp, stub_detail, squid_dataset,
+def test_z_axis_is_derived_from_the_dims_rank_not_hard_coded(qapp, squid_dataset,
                                                              monkeypatch):
     root, _ = squid_dataset
     win = V.PlateWindow(None)
@@ -204,7 +204,7 @@ def test_z_axis_is_derived_from_the_dims_rank_not_hard_coded(qapp, stub_detail, 
     win.close()
 
 
-def test_the_z_position_survives_a_region_change(qapp, stub_detail, squid_dataset, monkeypatch):
+def test_the_z_position_survives_a_region_change(qapp, squid_dataset, monkeypatch):
     """Requirement 4's architecture note: the z slider is GLOBAL across the plate.
 
     Replacing the layers resets napari's dims to 0, so without this the z you were inspecting
@@ -225,7 +225,7 @@ def test_the_z_position_survives_a_region_change(qapp, stub_detail, squid_datase
     win.close()
 
 
-def test_restoring_z_refuses_a_step_the_new_region_does_not_have(qapp, stub_detail,
+def test_restoring_z_refuses_a_step_the_new_region_does_not_have(qapp,
                                                                 squid_dataset, monkeypatch):
     """A region with fewer planes must not be driven to a z that does not exist."""
     root, _ = squid_dataset
@@ -258,7 +258,7 @@ def test_restoring_z_refuses_a_step_the_new_region_does_not_have(qapp, stub_deta
 # had to be built on `RegionViewer`, which had neither guard, so the guards moved with the button
 # rather than being dropped along with the dead code.
 
-def test_focus_moves_the_windows_own_z_slider(qapp, stub_detail, napari_pane_stub, squid_dataset):
+def test_focus_moves_the_windows_own_z_slider(qapp, napari_pane_stub, squid_dataset):
     """The answer must land on THIS window's napari dims, z being the leading axis of (z, y, x)."""
     root, _ = squid_dataset
     win = V.PlateWindow(None)
@@ -273,7 +273,7 @@ def test_focus_moves_the_windows_own_z_slider(qapp, stub_detail, napari_pane_stu
     shutdown_plate_window(qapp, win)
 
 
-def test_focus_reports_when_no_z_slider_could_be_moved(qapp, stub_detail, napari_pane_stub,
+def test_focus_reports_when_no_z_slider_could_be_moved(qapp, napari_pane_stub,
                                                        squid_dataset):
     """A 'focused' message printed over a slider that never moved is the silent failure.
 
@@ -295,7 +295,7 @@ def test_focus_reports_when_no_z_slider_could_be_moved(qapp, stub_detail, napari
     shutdown_plate_window(qapp, win)
 
 
-def test_a_single_plane_stack_is_also_no_z_slider(qapp, stub_detail, napari_pane_stub,
+def test_a_single_plane_stack_is_also_no_z_slider(qapp, napari_pane_stub,
                                                   squid_dataset):
     """One step on the leading axis is a z axis that cannot move. Reporting a plane over it is the
     same lie as reporting one over a 2D layer, so it takes the same refusal."""
@@ -312,7 +312,7 @@ def test_a_single_plane_stack_is_also_no_z_slider(qapp, stub_detail, napari_pane
 
 
 def test_the_answer_is_clamped_to_the_stack_this_window_is_showing(
-        qapp, stub_detail, napari_pane_stub, squid_dataset):
+        qapp, napari_pane_stub, squid_dataset):
     """A z index past the end of the layer is a crash or a no-op depending on the napari version.
     Clamp it, so the slider lands on the last plane and the window still says what it did."""
     root, _ = squid_dataset
@@ -327,7 +327,7 @@ def test_the_answer_is_clamped_to_the_stack_this_window_is_showing(
     shutdown_plate_window(qapp, win)
 
 
-def test_focus_never_reports_a_plane_when_nothing_could_be_read(qapp, stub_detail,
+def test_focus_never_reports_a_plane_when_nothing_could_be_read(qapp,
                                                                 squid_dataset):
     """Returning z=0 by default would report a 'sharpest plane' for pixels never examined."""
     root, _ = squid_dataset
@@ -355,7 +355,7 @@ def test_focus_never_reports_a_plane_when_nothing_could_be_read(qapp, stub_detai
 # Copy
 # --------------------------------------------------------------------------------------
 
-def test_the_status_line_does_not_call_a_loaded_plate_live(qapp, stub_detail, squid_dataset):
+def test_the_status_line_does_not_call_a_loaded_plate_live(qapp, squid_dataset):
     """This is POST-ACQUISITION review. "live" reads as a running scope."""
     root, _ = squid_dataset
     win = V.PlateWindow(None)
