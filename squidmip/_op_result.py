@@ -111,8 +111,17 @@ class RegionResultAccumulator:
         unrecognised FOV placed at the origin, produces a layer that looks like the operator's
         output and is not -- and a wrong picture in a scientific viewer is unrecoverable in a
         way a loud refusal is not.
+
+        ``asanyarray``, NEVER ``asarray``. A region operator hands back a
+        :class:`squidmip._placement.PlacedArray`, which carries the :class:`Placement` that
+        produced those pixels -- the whole point of that subclass is that "a consumer cannot
+        receive the array and miss the geometry". ``np.asarray`` returns a base ``ndarray`` and
+        drops it, after which :meth:`_bbox` has nothing to read and falls back to re-deriving the
+        footprint from the PREVIEW's rule. Measured on the real 10x set, region ``manual0``: the
+        preview's extent is 11462 x 9587 px and the stitch's own canvas is 11463 x 9587, so the
+        stitched layer was drawn into a box one row shorter than its own pixels.
         """
-        arr = np.asarray(planes)
+        arr = np.asanyarray(planes)
         if arr.ndim != 3:
             raise ValueError(
                 f"{self.op!r} region {self.region!r} FOV {fov}: expected a (C, Y, X) stack, "
@@ -149,7 +158,10 @@ class RegionResultAccumulator:
                 f"refusing to draw a mosaic with holes in it")
         if self._region_operator:
             stack = next(iter(self._planes.values()))
-            planes = tuple(np.asarray(stack[i]) for i in range(len(self.channels)))
+            # asanyarray again: the plane keeps the `Placement` that fused it all the way to the
+            # surface that draws it, which is the only reason a surface can place a stitched mosaic
+            # by its own canvas instead of by the raw preview's. See `_bbox`.
+            planes = tuple(np.asanyarray(stack[i]) for i in range(len(self.channels)))
         else:
             planes = tuple(self._fuse(i) for i in range(len(self.channels)))
         return OperatorResult(
@@ -187,6 +199,27 @@ class RegionResultAccumulator:
         return fused[0]
 
     def _bbox(self):
+        """The stage-µm footprint of THESE pixels.
+
+        A region operator's pixels arrive carrying their own :class:`~squidmip._placement.Placement`
+        -- the canvas ``stitch_region`` actually fused into -- and that is what places them. The
+        fallback is ``mosaic_bbox_um``, which is the RAW PREVIEW's footprint: right for a per-FOV
+        operator, because ``_fuse`` builds those pixels with the preview's own placement code, and
+        wrong for a stitch, because the two do not agree.
+
+        They do not agree in two measured ways. **Shape**: the preview rounds each tile origin to a
+        whole pixel and the stitch keeps it fractional, so their canvases differ -- on the real 10x
+        acquisition, ``manual0`` is 11462 x 9587 px as a preview and 11463 x 9587 as a stitch, and
+        163 of its 351 FOV pairs disagree the same way. **Extent**: ``stitch_plate`` accepts a FOV
+        SUBSET of a region (``regions={region: [fov, ...]}``) and fuses only those fields, while
+        ``mosaic_bbox_um`` always spans the whole region -- on the synthetic 1536 plate, A1 fovs
+        [0, 1] fuse to 2084 x 3157 px and were then stretched over the full 1177.11 x 1177.11 µm
+        well, a 1.515x vertical stretch of two fields drawn across four fields' worth of stage.
+        """
         from squidmip._mosaic_source import mosaic_bbox_um
 
+        if self._region_operator and self._planes:
+            placement = getattr(next(iter(self._planes.values())), "placement", None)
+            if placement is not None:
+                return placement.bbox_um
         return mosaic_bbox_um(self._meta, self.region)

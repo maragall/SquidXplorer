@@ -756,13 +756,25 @@ def _mosaic_geometry(
     chunk padding (that exists to align a Zarr write; there is no store here). Origins stay
     fractional so ``fuse_plane`` can honour the sub-pixel registration instead of truncating
     it — truncation to whole pixels is exactly the misalignment registration just removed.
+
+    THE TILE SIZE IS ADDED IN PIXELS, NEVER ROUND-TRIPPED THROUGH MICROMETRES. The canvas must
+    cover ``max(origin) + tile``, and because *tile* is already an integer number of pixels that
+    is ``ceil(span_px) + tile`` exactly. Written the other way — ``ceil((max + Y*py - min) / py)``
+    — the tile's height goes to µm and back around a stage coordinate of order 1e5 µm, and the
+    cancellation costs enough precision to land one ULP above the integer. MEASURED on the real
+    10x acquisition (stage x from 96813.688 µm, py 0.752, 2084 px tiles): every one of its 55
+    single-FOV stitches came back 2085 px on an axis that is exactly 2084 px of data, and
+    ``manual1`` fovs [0, 1] came back (2085, 3960) against a true (2084, 3960). The extra row is
+    all zeros — a black seam line along the bottom/right of the stitched mosaic that the raw
+    preview of the same region does not have, and a mosaic one pixel taller than the box it is
+    placed in (``_op_result`` places it by ``mosaic_bbox_um``, which is derived in whole pixels).
     """
     pos = np.asarray(positions_yx_um, dtype=np.float64)
     py, px = pixel_size
-    Y, X = tile_shape
+    Y, X = int(tile_shape[0]), int(tile_shape[1])
     min_y, min_x = pos.min(axis=0)
-    h = int(np.ceil((pos[:, 0].max() + Y * py - min_y) / py))
-    w = int(np.ceil((pos[:, 1].max() + X * px - min_x) / px))
+    h = int(np.ceil((pos[:, 0].max() - min_y) / py)) + Y
+    w = int(np.ceil((pos[:, 1].max() - min_x) / px)) + X
     origins = [((y - min_y) / py, (x - min_x) / px) for y, x in pos]
     return (h, w), origins
 
