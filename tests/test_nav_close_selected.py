@@ -183,6 +183,45 @@ def test_it_ignores_the_focus_rectangle_and_obeys_the_selection(qapp):
     assert a.closes == 0, "the button closed the CURRENT row instead of the selected one"
 
 
+# ------------------------------------- a button with nothing to act on must not look alive
+#
+# Measured by ``tools/gates.py --inventory`` on 2026-08-06: with no view open, "Close selected
+# views" and "Collapse all" were the ONLY two controls in either window that a click left with no
+# observable outcome anywhere — no state change, no message, no log line. Enabled, captioned, and
+# inert. Same shape as every entry in ``tools/walkthrough.py``'s docstring, and the fix is the one
+# ``RegionViewer._refresh_record_chip`` already uses: grey it out and say which reason applies.
+
+
+def _collapse_button(nav) -> QPushButton:
+    found = [b for b in nav.findChildren(QPushButton) if b.text().startswith("Collapse")]
+    assert len(found) == 1
+    return found[0]
+
+
+def test_close_is_greyed_out_until_something_is_selected_and_says_why(qapp):
+    a = _FakeWindow(1, "[1] A1")
+    _, nav = _nav(a)
+    btn = _close_button(nav)
+
+    nav._tree.clearSelection()
+    assert not btn.isEnabled(), "a button with nothing to close looked clickable"
+    assert "nothing to close" in btn.toolTip(), btn.toolTip()
+
+    _select_only(nav, 1)
+    assert btn.isEnabled(), "the button stayed dead after a row was selected"
+    assert "shift/ctrl-click" in btn.toolTip()
+
+
+def test_collapse_all_is_greyed_out_when_no_view_is_open_and_says_why(qapp):
+    _, empty = _nav()
+    btn = _collapse_button(empty)
+    assert not btn.isEnabled()
+    assert "nothing to minimise" in btn.toolTip(), btn.toolTip()
+
+    _, one = _nav(_FakeWindow(1, "[1] A1"))
+    assert _collapse_button(one).isEnabled()
+
+
 def test_it_closes_nothing_when_nothing_is_selected(qapp):
     """An empty selection is not "fall back to whatever is current". With no rows selected the
     button has nothing to act on, and doing something anyway is how the deselected-row case above

@@ -75,8 +75,10 @@ here, at the producer, and the metadata key is ``fov_positions_um``.
 from __future__ import annotations
 
 import bisect
+import contextlib
 import json
 import re
+import threading
 import warnings
 from pathlib import Path
 from typing import Optional, Protocol, runtime_checkable
@@ -181,6 +183,57 @@ _TAG_PAGE_NAME = 285
 # grayscale (RGB formats are color -> ndim>2, rejected separately). We preserve the native
 # dtype but refuse anything outside this set so a non-raw stack can't be silently projected.
 _SUPPORTED_DTYPES = (np.dtype("uint8"), np.dtype("uint16"))
+
+
+class _TiffHandles:
+    """Cached ``tifffile.TiffFile`` handles, and THE LOCK that makes reading one of them safe.
+
+    A ``TiffFile`` is a file OBJECT: ``pages[p].asarray()`` seeks and reads. Two threads decoding
+    two different pages of the SAME cached handle move one seek position under each other, so one
+    of them reads the middle of a strip as if it were an IFD header.
+
+    MEASURED, 2026-08-06, on the 10x acquisition (``manual0`` FOV 17, 4 channels x 1 z):
+
+        serial   (8 reads):  0 errors
+        threaded (24 reads): 11 errors — ``TiffFileError('suspicious number of tags 38866')``,
+                             ``ValueError('failed to read 8686112 bytes, got 0')``
+
+    Those exceptions surfaced as PER-FIELD SKIPS in the GUI's operator run: an intermittent
+    ``1 well(s) skipped`` whose accumulator then never completed, so the region's layer was never
+    drawn at all while both status lines reported success. `_engine`'s per-well fault isolation was
+    doing its job over a fault that should not exist.
+
+    ONE LOCK PER FILE, not one per reader: the parallelism that matters is across FOVs and each
+    FOV is its own file, so serialising within a file costs nothing measurable while making a
+    read of it atomic. ``read()`` is a context manager so the handle cannot be handed out
+    unguarded — the previous ``_tif(path)`` accessor returned the shared object and every caller
+    was then on its own.
+    """
+
+    def __init__(self) -> None:
+        self._handles: dict = {}                # Path -> tifffile.TiffFile
+        self._locks: dict = {}                  # Path -> threading.Lock
+        self._guard = threading.Lock()          # guards the two dicts, never held during a read
+
+    def _entry(self, path: Path):
+        with self._guard:
+            tif = self._handles.get(path)
+            if tif is None:
+                tif = self._handles[path] = tifffile.TiffFile(path)
+                self._locks[path] = threading.Lock()
+            return tif, self._locks[path]
+
+    @contextlib.contextmanager
+    def read(self, path: Path):
+        """Yield the ``TiffFile`` for *path* with its lock held. Decode inside the block."""
+        tif, lock = self._entry(path)
+        with lock:
+            yield tif
+
+    def page(self, path: Path, index: int):
+        """One decoded IFD page, validated. The whole of what every caller here wanted."""
+        with self.read(path) as tif:
+            return _validate_plane(np.asarray(tif.pages[int(index)].asarray()), path)
 
 
 def _validate_plane(arr, path: Path):
@@ -1081,7 +1134,9 @@ class SquidMultiPageTiffReader:
         self._indexes: dict[int, dict] = {}     # t -> {(region, fov, z, channel): (Path, page)}
         self._positions_mm: dict = {}           # {(region, fov): (x_mm, y_mm)} from t=0
         self._meta: Optional[dict] = None
-        self._handles: dict = {}                # Path -> tifffile.TiffFile (cached)
+        #: Cached handles AND their per-file locks. `read()`/`page()` are the only accessors;
+        #: see `_TiffHandles` for the measured thread-safety fault that made it a class.
+        self._handles = _TiffHandles()
 
     # -- discovery ---------------------------------------------------------
     def _discover_time_folders(self) -> list[Path]:
@@ -1089,12 +1144,6 @@ class SquidMultiPageTiffReader:
             self._time_folders_cache = _time_folders(self._path)
         return self._time_folders_cache
 
-    def _tif(self, path: Path):
-        tif = self._handles.get(path)
-        if tif is None:
-            tif = tifffile.TiffFile(path)
-            self._handles[path] = tif
-        return tif
 
     def _index_for(self, t: int) -> dict:
         """``{(region, fov, z, channel): (path, page_index)}`` for one timepoint folder."""
@@ -1108,8 +1157,9 @@ class SquidMultiPageTiffReader:
             m = _STACK_STEM_RE.match(f.stem)
             # FILE_ID_PADDING is a deployment setting; int() reads whatever width was written.
             region, fov = m["region"], int(m["fov"])
-            tif = self._tif(f)
-            for page_index, page in enumerate(tif.pages):
+            with self._handles.read(f) as tif:
+                pages = list(enumerate(tif.pages))
+            for page_index, page in pages:
                 payload = _page_json(page, f, page_index)
                 channel = _page_channel(page, payload, f, page_index)
                 z = int(payload["z_level"])
@@ -1232,8 +1282,7 @@ class SquidMultiPageTiffReader:
     def read(self, region, fov, channel, z, t=0):
         """Return one plane as a 2D array in its native dtype (decodes exactly one IFD page)."""
         path, page_index = self._locate(region, fov, channel, z, t)
-        page = self._tif(path).pages[page_index]
-        return _validate_plane(np.asarray(page.asarray()), path)
+        return self._handles.page(path, page_index)
 
     def plane_path(self, region, fov, channel, z, t=0) -> Path:
         """The stack file holding this plane. Unlike the individual-TIFF reader's one-file-per-
@@ -1268,7 +1317,9 @@ class SquidOMEReader:
         self._files: Optional[dict] = None      # {(region, fov): Path}
         self._meta: Optional[dict] = None
         self._axes: Optional[str] = None        # non-spatial axes order, e.g. "TZC"
-        self._handles: dict = {}                # Path -> tifffile.TiffFile (cached)
+        #: Cached handles AND their per-file locks. `read()`/`page()` are the only accessors;
+        #: see `_TiffHandles` for the measured thread-safety fault that made it a class.
+        self._handles = _TiffHandles()
 
     def _discover(self) -> dict:
         if self._files is not None:
@@ -1287,19 +1338,14 @@ class SquidOMEReader:
         self._files = files
         return files
 
-    def _tif(self, path: Path):
-        tif = self._handles.get(path)
-        if tif is None:
-            tif = tifffile.TiffFile(path)
-            self._handles[path] = tif
-        return tif
 
     @property
     def metadata(self) -> dict:
         if self._meta is not None:
             return self._meta
         files = self._discover()
-        sample = self._tif(next(iter(files.values()))).series[0]
+        with self._handles.read(next(iter(files.values()))) as _tif:
+            sample = _tif.series[0]
         dims = dict(zip(sample.axes, sample.shape))     # e.g. {'T':2,'Z':3,'C':2,'Y':64,'X':80}
         n_t, n_z, n_c = dims.get("T", 1), dims.get("Z", 1), dims.get("C", 1)
         self._axes = "".join(a for a in sample.axes if a in "TZC")   # non-spatial order for paging
@@ -1314,7 +1360,8 @@ class SquidOMEReader:
         names = list(yaml_map.keys())
         if len(names) != n_c:
             # yaml disagrees with the file — fall back to the OME channel names, else generic labels.
-            ome_names = _ome_channel_names(self._tif(next(iter(files.values()))))
+            with self._handles.read(next(iter(files.values()))) as _tif:
+                ome_names = _ome_channel_names(_tif)
             names = [_normalize_local(n) for n in ome_names] if len(ome_names) == n_c \
                 else [f"C{i}" for i in range(n_c)]
         channels = resolve_channels(names, yaml_map)
@@ -1363,8 +1410,7 @@ class SquidOMEReader:
         if key not in files:
             raise KeyError(f"No such well/FOV region={region!r} fov={fov}. Known: {sorted(files)[:8]}")
         p = self._page_index(int(t), int(z), self._channel_index(channel))
-        tif = self._tif(files[key])
-        return _validate_plane(np.asarray(tif.pages[p].asarray()), files[key])
+        return self._handles.page(files[key], p)
 
     def plane_ref(self, region, fov, channel, z, t=0) -> tuple:
         """(filepath, page_index) for one plane — the viewer registers this (with the page) into

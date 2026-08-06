@@ -268,6 +268,34 @@ def test_the_plate_COMES_FORWARD_even_when_the_window_holds_no_operator(qapp, ma
     assert "run" in said or "nothing" in said, f"it did not say what was missing: {said!r}"
 
 
+def test_it_reads_the_operators_off_the_LAYERS_the_window_really_holds(qapp, manager):
+    """No ``_holds``: the layers arrive the way a finished run delivers them, and the chip has to
+    find them through the production ``_window_operators`` -> ``mosaic.ops()`` path.
+
+    Every other test in this section replaces ``win._pane.mosaic`` with a hand-written object that
+    has an ``ops()``, because the shared ``StubMosaic`` had none — so ``_window_operators``'s
+    ``except Exception: return []`` swallowed an AttributeError and every one of them was really
+    testing the replacement. The stub answers ``ops()`` now; this is the test that needed it.
+    """
+    import numpy as np
+
+    from squidmip._result import Extent, Result
+
+    win = manager.open([REGIONS[0]])
+    plate = _wired(manager)
+    plane = np.zeros((4, 4), "uint16")
+    for op in ("decon", "bgsub"):
+        win.deliver_result(op, Result.of(Extent(region_id=win.current_region()), [plane],
+                                         channels=("405",), z_depth=1, pixel_size_um=1.0,
+                                         dtype=plane.dtype, kind="intensity"), visible=True)
+    assert win._window_operators() == ["decon", "bgsub"]
+
+    _controls_button(win).click()
+
+    assert plate.activated_ops == ["decon", "bgsub"], (
+        f"the chip did not find the layers the window holds: {plate.activated_ops}")
+
+
 def test_one_failing_panel_does_not_swallow_the_others(qapp, manager):
     """Opening is per-operator, so a panel that raises must not cost the window its other tabs."""
     win = manager.open([REGIONS[0]])

@@ -1061,7 +1061,15 @@ class RegionViewer(QMainWindow):
             return []
         try:
             return [op for op in mosaic.ops() if op and op != _RAW_OP]
-        except Exception:                                # noqa: BLE001 - treat as "none yet"
+        except Exception as exc:                         # noqa: BLE001 - "none yet", but SAID
+            # NAMED. This was a bare swallow, and what it swallowed was not "no operators yet": it
+            # was `AttributeError: 'StubMosaic' object has no attribute 'ops'` against the shared
+            # test double, which is why every ⚙ controls test had to replace `pane.mosaic` with a
+            # hand-written object and none of them ever exercised this line. An empty answer and an
+            # unanswerable question look identical from the caller, so the difference has to be
+            # said somewhere.
+            log.warning("view %s could not read its layers' operators: %s: %s",
+                        self.window_id, type(exc).__name__, exc)
             return []
 
     def _show_operator_controls(self) -> None:
@@ -3486,16 +3494,15 @@ class OpenViewList(QWidget):
         # "views", plural, because the tree is ExtendedSelection and the button closes all of it.
         # The old label said "Close view" while the handler read currentItem(), so the name and the
         # behaviour agreed with each other and BOTH disagreed with the surface they sat on.
-        close_btn = QPushButton("Close selected views")
-        close_btn.setToolTip("Close every view selected here (shift/ctrl-click to select several).")
-        close_btn.clicked.connect(self._close_selected)
-        collapse_btn = QPushButton("Collapse all")
-        collapse_btn.setToolTip("Minimise every open window (click a row to bring one back).")
-        collapse_btn.clicked.connect(self._manager.collapse_all)
-        row.addWidget(close_btn)
-        row.addWidget(collapse_btn)
+        self._close_btn = QPushButton("Close selected views")
+        self._close_btn.clicked.connect(self._close_selected)
+        self._collapse_btn = QPushButton("Collapse all")
+        self._collapse_btn.clicked.connect(self._manager.collapse_all)
+        row.addWidget(self._close_btn)
+        row.addWidget(self._collapse_btn)
         row.addStretch(1)
         lay.addLayout(row)
+        self._refresh_nav_buttons()
 
         self._mem_label = QLabel("Memory")
         self._mem_label.setStyleSheet("color:#8b949e;font-size:11px;border:none;")
@@ -3623,6 +3630,10 @@ class OpenViewList(QWidget):
                     item.setSelected(True)
         finally:
             self._syncing = False
+        # AFTER the guard is released and the tree is rebuilt: both buttons answer to what is in
+        # it now. Inside the `finally` and not in the `try`, so a rebuild that raises cannot leave
+        # a button claiming it can act on a tree that was never filled.
+        self._refresh_nav_buttons()
 
     def _on_selection_changed(self) -> None:
         """Row selection IS the wash and the operator target set (Linux multi-select): the plate
@@ -3631,6 +3642,7 @@ class OpenViewList(QWidget):
             return
         ids = [int(i) for i in (it.data(0, Qt.UserRole) for it in self._tree.selectedItems())
                if i is not None]
+        self._refresh_nav_buttons()         # "Close selected views" needs a selection to close
         self._manager.set_selected(ids)     # plate wash for every selected view
         self._manager.raise_views(ids)      # and bring the selected window(s) to the front
 
@@ -3676,6 +3688,31 @@ class OpenViewList(QWidget):
         if not ok:
             return False
         return self._manager.rename(int(window_id), text)
+
+    def _refresh_nav_buttons(self) -> None:
+        """Enable each navigator button only when it has something to act on, and SAY WHY not.
+
+        Both of these were live, enabled and completely silent with no view open: clicking them
+        did nothing, said nothing, and logged nothing. Measured by ``tools/gates.py --inventory``
+        on 2026-08-06, which reported them as the only two controls in either window with no
+        observable outcome at all.
+
+        Disabled-with-a-reason rather than a message on click, because that is the pattern this
+        codebase already uses for exactly this shape — see ``RegionViewer._refresh_record_chip``,
+        which greys the movie chip and says in its tooltip which of the two possible reasons
+        applies. A control that cannot work should not look like one that can.
+        """
+        n = len(self._manager.windows)
+        selected = len(self._tree.selectedItems())
+        self._close_btn.setEnabled(bool(selected))
+        self._close_btn.setToolTip(
+            "Close every view selected here (shift/ctrl-click to select several)." if selected
+            else ("No view is selected, so there is nothing to close. Click a row above first."
+                  if n else "No view is open."))
+        self._collapse_btn.setEnabled(bool(n))
+        self._collapse_btn.setToolTip(
+            "Minimise every open window (click a row to bring one back)." if n
+            else "No view is open, so there is nothing to minimise.")
 
     def _close_selected(self) -> None:
         """Close EVERY selected row, not just the current one.

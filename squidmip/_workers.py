@@ -319,7 +319,19 @@ class _OperatorWorker(QThread):
 
     def _on_error(self, region, fov, exc):
         """A well's projection failed (corrupt/missing plane): SKIP it, mark its dot failed, keep the
-        run alive. One bad file must not abort a whole-plate run."""
+        run alive. One bad file must not abort a whole-plate run.
+
+        NAMED, since 2026-08-06. This body was three lines with no logging at all, so the ONLY
+        trace a skipped field left was a red dot on a plate cell -- and on a multi-FOV region the
+        cell is a mosaic, so two skipped fields out of 27 do not visibly change it. Measured on
+        Julio's own 10x acquisition: FOVs 17 and 19 of ``manual0`` raise
+        ``TiffFileError('suspicious number of tags')`` on every single run, and in six weeks
+        nothing in the product has ever said which files they are. A per-field fault that is
+        isolated must still be REPORTED; isolation is about not aborting the run, not about
+        keeping the cause to itself.
+        """
+        log.warning("%s: region %s FOV %s was skipped — %s: %s",
+                    self._operator, region, fov, type(exc).__name__, exc)
         with self._lock:
             self._failed_regions.add(region)
         info = self._fov_index.get(region)

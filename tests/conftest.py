@@ -772,6 +772,22 @@ def _stub_pane_classes():
             self.shown = []
             self._layers = {}
 
+        def ops(self):
+            """The processing layers this pane holds, in insertion order — `MosaicLayers.ops`.
+
+            It was MISSING, and its absence was invisible in exactly the way this file's other
+            stub notes describe. ``RegionViewer._window_operators`` calls it inside a bare
+            ``except Exception: return []``, so against this stub every window reported holding NO
+            operators — and `⚙ controls`'s whole plural-tab behaviour could only be tested by
+            replacing ``pane.mosaic`` with a hand-written object that had one. The stub agreed
+            with the tests and neither of them touched the production accessor.
+            """
+            seen = []
+            for op, _channel in self._layers:
+                if op not in seen:
+                    seen.append(op)
+            return seen
+
         def remove_op(self, op):
             self.removed.append(op)
             for key in [k for k in self._layers if k[0] == op]:

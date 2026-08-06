@@ -187,6 +187,60 @@ def open_window(path, size=(1600, 900)):
     return win
 
 
+def open_view(win, region):
+    """Open a REAL ``RegionViewer`` on *region*, through the window's own manager.
+
+    The napari canvas is the one seam that needs a GL context, so it is replaced by a pane whose
+    ``mosaic`` is a real :class:`squidmip._napari_view.MosaicLayers` over a real Qt-free
+    ``napari.components.ViewerModel``. Everything a window does to its layers — an operator result
+    landing, a contrast write, a visibility toggle, ``ops()`` — is therefore the production class.
+    What is NOT covered, and is not claimed: vispy actually painting them.
+
+    Same substitution ``tools/gates.py`` makes; it is spelled out in both places rather than
+    shared, because a harness that imports another harness fails in a way neither one reports.
+    """
+    from qtpy.QtWidgets import QWidget
+
+    from napari.components import ViewerModel
+
+    import squidmip._napari_pane as napari_pane
+    from squidmip._napari_view import MosaicLayers
+
+    class ModelPane(QWidget):
+        ok = True
+
+        def __init__(self):
+            super().__init__()
+            self._viewer = ViewerModel()
+            self.mosaic = MosaicLayers(self._viewer)
+            self.detect_channel = None
+            self.detect_button = None
+            self.said = []
+
+        def say(self, text):
+            self.said.append(text)
+
+    napari_pane.make_pane = lambda *a, **k: (ModelPane(), "napari", "")
+    view = win._viewer_manager.open([region])
+    _app().processEvents()
+    return view
+
+
+def drain_operator(win, timeout_s=600):
+    """Block until the plate's operator worker has exited and its queued slots have run."""
+    import time
+    t0 = time.time()
+    while time.time() - t0 < timeout_s:
+        w = getattr(win, "_worker", None)
+        if w is None or not w.isRunning():
+            break
+        _app().processEvents()
+        time.sleep(0.05)
+    for _ in range(50):
+        _app().processEvents()
+        time.sleep(0.02)
+
+
 def settle(ms=4000):
     """Let the async preview stream finish before grabbing pixels.
 
@@ -879,6 +933,88 @@ def run_all():
                     f"decoded back {len(back)}, min consecutive diff {min(diffs):.2f}")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
+    @check("IMA-controls", "⚙ controls: run an operator, and the chip opens ITS tab on the plate")
+    def _():
+        """Julio, 2026-08-06: "The controls now brings plate view, but doesn't open the operator
+        tab." The whole journey, clicked: open a region window, run an operator on it from the
+        plate, then press the chip and look at the plate's tab bar.
+
+        Every step of this was already covered by a unit test and the journey was still broken,
+        because the break was between the steps: the run reported success and delivered no layer,
+        so ``_window_operators()`` was honestly empty and the chip had nothing to open. That is
+        why this check asserts the LAYER and the TAB, not the click.
+        """
+        from qtpy.QtWidgets import QPushButton
+
+        w = open_window(need(TISSUE))
+        region = list(w._reader.metadata["regions"])[0]
+        view = open_view(w, region)
+        assert view is not None, "no region window opened"
+        drain_preview(w)
+
+        w.run_operator("mip", regions=[region], save=False, requester=view)
+        drain_operator(w)
+        held = view._window_operators()
+
+        before = w._left_tabs.count()
+        chip = [b for b in view.findChildren(QPushButton) if "controls" in b.text()][0]
+        chip.click()
+        _app().processEvents()
+        titles = [w._left_tabs.tabText(i) for i in range(w._left_tabs.count())]
+        opened = list(w._op_tabs)
+        current = w._left_tabs.tabText(w._left_tabs.currentIndex())
+        said = " ".join(view._pane.said[-3:])
+        w._viewer_manager.close_all()
+        w.close()
+
+        assert held == ["mip"], (
+            f"the run reported success and the window holds {held} — the layer never landed, so "
+            f"the chip has nothing to open. Window said: {said!r}")
+        assert opened == ["mip"], f"the chip opened {opened}, not the operator the window holds"
+        assert current in titles and current != "Operators", (
+            f"the tab was added but not brought to the front: current={current!r} of {titles}")
+        return (f"ran mip on {region} -> window holds {held}; ⚙ controls -> "
+                f"{before} tab(s) becomes {len(titles)}, focused {current!r}")
+
+    @check("IMA-controls", "One reader, many threads: a plane read is not corrupted by a sibling")
+    def _():
+        """The engine reads FOVs from a thread pool through ONE reader object, and the reader
+        cached one ``tifffile.TiffFile`` per file and handed it out unguarded. Two threads decoding
+        two pages of the same file moved one seek position under each other.
+
+        It surfaced as an intermittent per-field skip -- ``TiffFileError('suspicious number of
+        tags')`` -- which the engine's per-well fault isolation absorbed, so a run could quietly
+        lose fields and then fail to draw the region's layer at all.
+        """
+        import concurrent.futures as cf
+
+        r = read(need(TISSUE))
+        m = r.metadata
+        region = list(m["regions"])[0]
+        # SEVERAL FOVs and SEVERAL passes. The race is a seek moved between one thread's header
+        # read and its strip read, so it is a probability, not a certainty: the first FOV alone,
+        # read once per channel, came out clean against the unlocked reader. Mutation-checked at
+        # this size — removing the lock in `_TiffHandles.read` turns this red.
+        fovs = sorted(m["fovs_per_region"][region])[:3]
+        channels = [c["name"] for c in m["channels"]]
+        jobs = [(f, c, z) for f in fovs for c in channels
+                for z in range(int(m.get("nz") or 1))] * 4
+
+        def one(job):
+            f, c, z = job
+            try:
+                r.read(region, f, c, z, 0)
+                return None
+            except Exception as exc:                 # noqa: BLE001 - the measurement
+                return f"{type(exc).__name__}: {exc}"
+
+        with cf.ThreadPoolExecutor(8) as ex:
+            errs = [e for e in ex.map(one, jobs) if e]
+        assert not errs, (f"{len(errs)} of {len(jobs)} concurrent reads of one file failed — the "
+                          f"reader is not thread-safe: {errs[:2]}")
+        return (f"{len(jobs)} concurrent reads of {region} FOVs {fovs} on 8 threads, "
+                f"0 corrupted")
 
     # ---------- the one real write, disk-guarded and cleaned up -----------------------
     @check("IMA-222", "A stitched well SAVES end to end (then is deleted)")
