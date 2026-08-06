@@ -23,4 +23,14 @@ dependencies:
       # produces the exact silent split this migration exists to end: the pin falls back, the
       # app runs Qt5, and nothing says so.
       - PyQt6
-      - "."          # squidmip itself (run `conda env create` from the repo root)
+      # `".[gui]"`, not `"."`, as of 2026-08-05. This file's own header promises
+      # `squidmip-view <acquisition>` works after one command, and with a bare `"."` it did not:
+      # `.` installs the headless CLI only, so `conda env create -f environment.yml` produced an
+      # environment with NO NAPARI -- the exact "every view window says napari viewer
+      # unavailable" failure that pyproject's [gui] comment documents as a FIXED bug. It was
+      # fixed in pyproject and left broken here, so the one-command setup path shipped it.
+      #
+      # PyQt6 above is now redundant (the [gui] extra pins it) and is kept deliberately: it
+      # states the binding at the point a reader is choosing an environment, and a conda env that
+      # resolves PyQt5 while the package pins pyqt6 is the silent split this migration ended.
+      - ".[gui]"     # squidmip + the desktop app (run `conda env create` from the repo root)

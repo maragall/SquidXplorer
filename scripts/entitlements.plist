@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Hardened Runtime entitlements for the notarised macOS build. See SIGNING.md.
+
+  THIS FILE IS UNUSED UNLESS $SQUIDMIP_CODESIGN_IDENTITY IS SET. With no identity the bundle is
+  ad-hoc signed (which is what macOS already requires of any arm64 binary) and entitlements are
+  meaningless, so scripts/hcs-viewer.spec passes entitlements_file=None in that case.
+
+  UNVERIFIED, and it has to be said rather than implied: this file has NEVER been used in a real
+  signing run, because signing needs an Apple Developer ID that is not on this machine. It is a
+  STARTING POINT derived from what a frozen CPython + Qt application generally needs under the
+  Hardened Runtime, not a tested result.
+
+  LEAST PRIVILEGE, and how to actually get there. Every entitlement below is a hole in the
+  Hardened Runtime, so the correct procedure is to REMOVE them, not to trust them:
+
+    1. Comment out all three, sign, notarise, and run the app on a machine that has never seen it.
+    2. Add back ONLY the one whose absence produced a real, reproduced crash, and write the crash
+       down next to it.
+    3. Ship the shortest list that works.
+
+  Do not skip step 1 because the app is large. An app that ships with
+  disable-library-validation it did not need has permanently widened its own attack surface to
+  save one build cycle.
+
+  There is deliberately NO com.apple.security.app-sandbox key here. This app opens an acquisition
+  folder ANYWHERE on the user's disk, chosen at runtime, and a sandboxed app cannot do that
+  without security-scoped bookmarks the code does not implement. Notarisation does not require the
+  sandbox; only the Mac App Store does, and this app is not distributed that way.
+-->
+<plist version="1.0">
+<dict>
+    <!-- CPython writes and then executes code in memory in several places (ctypes closures, and
+         any JIT in the dependency set). Without this, the Hardened Runtime kills the process. -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+
+    <!-- vispy/PyOpenGL compile shaders at runtime and Qt's QML/JS engines JIT. Try removing this
+         one FIRST: it is the likeliest of the three to be unnecessary for this app, which uses
+         Qt Widgets rather than QML. -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+
+    <!-- PyInstaller's onedir layout dlopen()s ~2000 bundled .so/.dylib files at runtime. When
+         every one of them is signed with the SAME Developer ID (which `codesign --deep` or a
+         per-binary signing pass does), library validation is satisfied and THIS KEY SHOULD BE
+         DELETED. Keep it only if you have measured a "code signature ... not valid for use in
+         process" abort with it removed. It is the widest of the three. -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+</dict>
+</plist>

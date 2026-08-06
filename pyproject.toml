@@ -7,8 +7,22 @@ name = "squidmip"
 version = "0.1.0"
 description = "High-throughput z-stack maximum-intensity projection for Squid well-plate acquisitions"
 readme = "README.md"
-requires-python = ">=3.10"
-license = { text = "BSD-3-Clause" }
+# ">=3.11", not ">=3.10", as of 2026-08-05. This was a FALSE claim and CI proved it: the `test
+# (3.10)` leg of .github/workflows/ci.yml failed at INSTALL, not at test time, with
+#     ERROR: Could not find a version that satisfies the requirement zarr>=3.0 (from squidmip)
+#     ERROR: No matching distribution found for zarr>=3.0
+# because every zarr 3.x release declares Requires-Python >=3.11. `zarr>=3.0` is a hard runtime
+# dependency below, so this package has been uninstallable on 3.10 since that pin landed while
+# still advertising 3.10 support. The metadata now matches what actually resolves.
+requires-python = ">=3.11"
+# SPDX string form + license-files, matching the stitcher (tilefusion) pyproject.toml:10 rather
+# than the deprecated `{ text = ... }` table. The change that matters is `license-files`: this
+# metadata claimed BSD-3-Clause from the first commit while the repo had NO LICENSE FILE AT ALL,
+# so the claim was unbacked and every wheel and every .app shipped without the terms it names.
+# LICENSE is now the stitcher's file verbatim (year bumped to 2026), and naming it here is what
+# makes `pip install` and the frozen bundle actually carry it.
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
 authors = [{ name = "Cephla" }]
 dependencies = [
     "numpy>=1.24",
@@ -37,10 +51,18 @@ dependencies = [
     #                             reimplemented; also the cross-check reference for IMA-223.
 ]
 
-# No tilefusion dependency: IMA-189 ingest is self-contained (see docs/ima-189-eng-review.md).
-# tilefusion's OME-zarr writer is vendored (squidmip/_zarr_store.py), not imported, at IMA-184:
-# importing tilefusion runs its heavy __init__ (numba/GPU/basicpy). The vendored piece is the
-# ~40-line tensorstore store-config wrapper; tensorstore is the only new runtime dep.
+# CORRECTED 2026-08-05. The line that stood here said "No tilefusion dependency" and that was
+# FALSE, measured: `squidmip/_stitch.py` imports `tilefusion.{registration,optimization,fusion,
+# flatfield,distortion,utils}` at 7 call sites and `squidmip/_flatfield.py` at 3 more. The claim
+# was true of IMA-189 ingest and was never revised when stitching landed on top of it.
+#
+# What IS still true, and is the reason the false line was believable: the OME-zarr WRITER is
+# vendored (squidmip/_zarr_store.py), not imported, because importing tilefusion runs its heavy
+# __init__ (numba's threading-layer pin, GPU/cupy probes, basicpy). That vendoring is why the
+# reader/writer path installs without tilefusion. The STITCH path does not, and never did.
+#
+# So tilefusion is a real dependency of a real feature, and it now lives in the `stitch` extra
+# below rather than being denied here.
 
 [project.optional-dependencies]
 # ome-zarr-models: official OME-NGFF v0.5 pydantic schema — validates written plate metadata
@@ -93,13 +115,62 @@ gui = [
     "psutil>=5.9",
 ]
 
+# ---------------------------------------------------------------------------------------------
+# OPERATOR EXTRAS (added 2026-08-05). One extra per operator family, named for the operator, not
+# for the package, because the operator is what a user asks for.
+#
+# Until today these three packages were imported by shipped code and declared NOWHERE, so
+# `pip install .[gui]` produced an app whose stitch, decon and segment operators could not run.
+# `requires=` (see CLAUDE.md) made that failure honest -- the operator is LISTED and REFUSES BY
+# NAME instead of silently producing nothing -- but a named refusal is a safety net, not a fix.
+# These extras are the fix: they make the working install expressible.
+#
+# NOT ON PyPI, and this is the important caveat. `tilefusion` is maragall/stitcher and `petakit`
+# is maragall/deconvolution; both are public GitHub repos with no PyPI release, so they can only
+# be named as PEP 508 direct references. Consequences, stated rather than discovered:
+#   * `[tool.hatch.metadata] allow-direct-references` has to be back on (see below).
+#   * a wheel built from this project cannot be uploaded to PyPI. It is not published there, so
+#     nothing is lost, but do not be surprised by the twine error if that ever changes.
+#   * `pip install .[stitch]` needs git on PATH and network access to github.com.
+#
+# UNPINNED, said plainly: neither direct reference names a tag or commit, so both track their
+# default branch. That is what the code has always assumed -- squidmip calls tilefusion private
+# helpers (`_edges_from_pairwise_metrics`, `_check_connectivity`), which is a tighter coupling
+# than a version range can express anyway. Pin them to a SHA the first time an upstream change
+# breaks a build; do not pre-emptively pin to a tag that does not exist.
+stitch = [
+    # squidmip/_stitch.py (7 import sites) + squidmip/_flatfield.py (3). Registration,
+    # optimization, fusion, distortion and BaSiC flat-fielding are all tilefusion's, called in
+    # TileFusion.run()'s own order on in-memory arrays.
+    "tilefusion @ git+https://github.com/maragall/stitcher",
+]
+decon = [
+    # squidmip/_decon.py -> `import petakit` (PetaKit5D's Richardson-Lucy port). Declared on the
+    # registry as `requires=("petakit",)` for the `decon` and `decon3d` projectors.
+    # psfmodels is deliberately NOT listed here: squidmip never imports it, petakit does. It is
+    # petakit's dependency to declare, and adding it here would be this file guessing at another
+    # package's requirements.
+    "petakit @ git+https://github.com/maragall/deconvolution",
+]
+segment = [
+    # squidmip/_cellpose.py and squidmip/_spots.py -> `from cellpose import models`.
+    # The only one of the three that is a normal PyPI install.
+    "cellpose>=3.0",
+]
+
 [project.scripts]
 squidmip = "squidmip._cli:main"           # headless CLI (IMA-186): MIP a plate from the terminal
 squidmip-view = "squidmip._viewer:main"   # the MIP tool desktop app
 
 [tool.hatch.metadata]
-# allow-direct-references was here ONLY for the ndviewer_light git+ URL, which is gone.
-# Every [gui] dependency is now a plain PyPI release, so a wheel build needs no exemption.
+# Every [gui] dependency is still a plain PyPI release -- that part of the note this replaces
+# was correct, and `pip install .[gui]` needs no exemption.
+#
+# RESTORED 2026-08-05 for the operator extras, NOT for ndviewer_light (that git+ URL is gone for
+# good; it imported PyQt5 at module scope). `stitch` and `decon` name tilefusion and petakit by
+# git URL because neither has a PyPI release, and hatchling refuses a direct reference in ANY
+# dependency table -- optional-dependencies included -- unless this is true.
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["squidmip"]
