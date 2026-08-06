@@ -328,3 +328,106 @@ def test_the_bricks_claim_the_same_identity_a_2d_mosaic_layer_would():
     vol._add_layer(("c0", (0, 0)), "c0", np.zeros((2, 4, 4), np.uint16),
                    (1.5, 0.75, 0.75), (0.0, 0.0, 0.0))
     assert key_of(viewer.layers[0]) == MosaicKey("decon", "c0")
+
+
+# -- while 3D is up, the VOLUME owns the identity; the flat mosaic surrenders it ----------------
+#
+# Julio, 2026-08-05, after the first fix shipped: "When I turn on raw it overlays some probably
+# downsampled copy of raw over an already full res version of raw that can't be controlled by the
+# napari layer. Channel controls for 3D viewing not working well."
+#
+# The "downsampled copy" is the 2D mosaic layer -- a multiscale pyramid whose level 0 is capped to
+# _MAX_FUSED_PX, so it really is coarser than the bricks. `open()` hid it but left it in the TREE
+# with a live checkbox, so one click laid a flat coarse plane across the volume.
+#
+# Stamping the bricks ALONE would have made raw worse: brick and mosaic would then share one
+# (op, channel) key, so the single group checkbox would light both at once. The identity has to be
+# EXCLUSIVE while 3D is up.
+
+
+class _Layer2D:
+    """A pane mosaic layer as the tree sees it: identity in metadata, visible, multiscale."""
+
+    def __init__(self, op="raw", channel="c0", visible=True):
+        from squidmip._napari_view import MosaicKey
+        self.metadata = dict(MosaicKey(op, channel).as_metadata())
+        self.visible = visible
+
+
+class _SceneViewer(_RecordingViewer):
+    def __init__(self, existing):
+        super().__init__()
+        self.layers = list(existing)
+
+    class _Dims:
+        ndisplay = 2
+    dims = _Dims()
+
+
+def _open_over(existing, op="raw"):
+    """A BrickedVolume over *existing* pane layers, with the three things that need a live Qt
+    event loop stubbed out: the loader THREAD, the camera framing and the first refresh.
+
+    Starting a real QThread with no QApplication aborts the interpreter, and none of the three is
+    what these tests are about -- the subject is which layer owns the `(op, channel)` identity
+    while 3D is up. `open()`'s own layer bookkeeping runs for real.
+    """
+    from squidmip._brick_view import BrickedVolume
+
+    viewer = _SceneViewer(existing)
+    vol = BrickedVolume(
+        viewer, reader=None, meta={}, region="A1", window_px=(0, 8, 0, 8),
+        channels=["c0"], scale=(1.5, 0.75, 0.75), origin_um=(0.0, 0.0, 0.0),
+        limit=2048, budget_bytes=1 << 30, op=op,
+    )
+    vol._loader.start = lambda *a, **k: None
+    vol._loader.stop = lambda *a, **k: None
+    vol._loader.wait = lambda *a, **k: True
+    vol._frame_camera = lambda *a, **k: None
+    vol.refresh = lambda *a, **k: None
+    return viewer, vol
+
+
+def test_the_flat_mosaic_leaves_the_tree_while_3d_is_up():
+    """It must be FOREIGN, not merely hidden: a hidden layer still has a checkbox."""
+    from squidmip._napari_view import key_of
+
+    shown, already_hidden = _Layer2D(visible=True), _Layer2D(channel="c1", visible=False)
+    viewer, vol = _open_over([shown, already_hidden])
+    vol.open()
+
+    assert key_of(shown) is None, "the 2D mosaic can still be switched on over the volume"
+    # The already-hidden one too: it is just as clickable in the tree as a shown one.
+    assert key_of(already_hidden) is None, "a hidden mosaic layer keeps its checkbox"
+    assert shown.visible is False
+
+
+def test_the_mosaic_gets_its_identity_and_visibility_BACK_on_close():
+    from squidmip._napari_view import MosaicKey, key_of
+
+    shown = _Layer2D(op="decon", channel="c1", visible=True)
+    viewer, vol = _open_over([shown], op="decon")
+    vol.open()
+    assert key_of(shown) is None
+    vol.close()
+
+    assert key_of(shown) == MosaicKey("decon", "c1"), "2D never got its tree row back"
+    assert shown.visible is True, "2D never came back on"
+
+
+def test_the_volume_is_the_only_thing_holding_that_key_while_3d_is_up():
+    """THE REPORTED BUG. If both hold it, one group checkbox lights the volume AND a flat coarser
+    plane across it -- which is what 'overlays a downsampled copy over the full res version' is."""
+    import numpy as np
+
+    from squidmip._napari_view import MosaicKey, key_of
+
+    shown = _Layer2D(op="raw", channel="c0")
+    viewer, vol = _open_over([shown], op="raw")
+    vol.open()
+    vol._add_layer(("c0", (0, 0)), "c0", np.zeros((2, 4, 4), np.uint16),
+                   (1.5, 0.75, 0.75), (0.0, 0.0, 0.0))
+
+    holders = [ly for ly in viewer.layers if key_of(ly) == MosaicKey("raw", "c0")]
+    assert len(holders) == 1, f"{len(holders)} layers answer to raw/c0; exactly the brick should"
+    assert holders[0] is not shown, "the flat mosaic still owns the key the volume needs"
