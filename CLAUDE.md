@@ -181,6 +181,28 @@ Three numbers decide whether a volume "looks downsampled", and all three are enf
 ratio), zooming in must **monotonically refine to stride 1**, and **z is never strided** — bricks
 tile Y and X only, so a volume keeps every acquired plane and cannot read as flattened.
 
+**TWO pitches exist and they are not interchangeable** (2026-08-06, `tests/test_roi_pitch.py`):
+
+* `meta["pixel_size_um"]` is the **acquisition's**, and it is the unit of LEVEL-0 MOSAIC PIXELS —
+  what `_placement.fov_offsets_px` lays FOVs out in, what `_napari3d.roi_window_px` converts an
+  ROI box into, what `_bricks.plan` tiles, and what `read_brick` hands back reading off the reader;
+* the **displayed** pitch is what the mosaic on screen has. `fuse_region_pyramid` decimates
+  (`step = ceil(mosaic_px / _MAX_FUSED_PX)` — 2 on the 10x set), and the layer records the truth in
+  its own `scale`, because `add_mosaic` places it from `bbox_um / shape`: 1.504 against 0.752.
+
+**A path that renders the LAYER's pixels takes the layer's pitch; a path that reads the READER's
+takes the acquisition's.** `RegionViewer._displayed_pitch_um` reads the former off `layer.scale`
+and refuses by name rather than falling back. `_render_roi_volume` was pushing `scale=(dz, px, px)`
+for decimated pixels — a **1.99 z:xy aspect where it should be 1.00** — and is fixed.
+
+The clamp is the other way round and was **already right**: `_clamp_last_roi`, `_roi_cost_line` and
+`_bricks.ceiling_line` count in acquisition pixels because a drawn ROI's 3D goes
+`_open_roi_3d` -> `BrickedVolume` -> `read_brick`, which reads whole FOV planes off the reader.
+Measured: the shipped 1540 um clamp is a 2048 px level-0 window, `fits_single_texture` True, and
+`read_brick` returns 0.7520 um/voxel. Clamping at the displayed pitch instead gives 4096 px, 16
+bricks, 4x the read — under a sentence promising one texture. `_bricks.py` is untouched; do not
+"fix" it.
+
 Bricking (many textures + GL `max` compositing + a 1-voxel halo) is the mechanism underneath and is
 pixel-exact, but it is NOT what a drawn ROI takes any more. Do not route a whole region through it
 expecting interaction — see the measured cost in the contract.
