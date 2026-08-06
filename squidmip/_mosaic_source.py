@@ -40,6 +40,11 @@ from typing import Any, Optional, Sequence
 import numpy as np
 
 from squidmip._budget import cache_budget
+from squidmip._logpane import get_logger
+
+# Carries no Qt (`_command` imports the same helper and is the module that states "No Qt"), so a
+# fuser can say what it could not read without dragging the GUI into a headless run.
+_log = get_logger("mosaic")
 
 # Level 0 of a full plate mosaic can be far larger than RAM, so the zarr path stays lazy and the
 # raw path is bounded by _MAX_FUSED_PX below.
@@ -140,8 +145,15 @@ def fuse_region_mosaic(
     the same "not derivable, do not guess" signal ``_mosaic_boxes`` returns ``{}`` for — a
     mosaic without positions would be a wrong picture, not a rough one.
 
-    A FOV that fails to read is left as zeros and counted, never silently skipped: the caller
-    reports the count. Six confirmed silent failures in this project say a hole must be visible.
+    A FOV that fails to read is left as ZEROS — the hole stays where the FOV was, so no later FOV
+    slides over by a frame (``tests/test_mosaic_source.py`` pins that). It is also **logged by
+    name**, region / channel / fov / exception, which is the half this docstring used to claim
+    somebody else did: it said "counted, never silently skipped: the caller reports the count",
+    and there was no count in the return value and no counting in any of the five callers. A
+    corrupt or missing TIFF therefore painted a black rectangle into a well and said nothing, and
+    a black rectangle in a fluorescence mosaic reads as "no signal there" — which is a wrong
+    answer about the sample rather than a visible gap in the data. Six confirmed silent failures
+    in this project say a hole must be visible; this is the line that makes it so.
     """
     from squidmip._placement import fov_offsets_px, mosaic_extent_px
 
@@ -172,9 +184,14 @@ def fuse_region_mosaic(
         row, col = offsets[fov]
         try:
             frame = reader.read(region, fov, channel, z, t)
-        except Exception:
-            continue          # leave zeros; the caller counts and reports the gap
+        except Exception as exc:                 # noqa: BLE001 - one bad FOV must not lose a well
+            _log.warning("mosaic %s/%s: FOV %s could not be read (%s: %s) — it is a BLACK HOLE in "
+                         "this mosaic, not an empty field.", region, channel, fov,
+                         type(exc).__name__, exc)
+            continue          # leave zeros: the hole stays put, and the line above says it is one
         if frame is None:
+            _log.warning("mosaic %s/%s: FOV %s read as None — it is a BLACK HOLE in this mosaic, "
+                         "not an empty field.", region, channel, fov)
             continue
         frame = np.asarray(frame)
         if frame.ndim != 2:

@@ -584,26 +584,37 @@ def compare(metrics: Optional[MetricsLog] = None, operators: Optional[Sequence[s
     of the operator, assuming you're using the registry and relations to scale to n algorithms".
     The registry says WHICH algorithms exist; this says what each of them cost.
 
-    Rows are ``{"operator", "runs", "median_seconds", "best_seconds", "peak_rss", "failures"}``,
-    sorted by median wall clock (fastest first) so the table reads as a ranking. MEDIAN and not
-    mean: one cold-cache first run doubles a mean over three runs and is not what anybody is
-    trying to learn.
+    Rows are ``{"operator", "runs", "timed", "median_seconds", "best_seconds", "peak_rss",
+    "failures"}``, sorted by median wall clock (fastest first) so the table reads as a ranking.
+    MEDIAN and not mean: one cold-cache first run doubles a mean over three runs and is not what
+    anybody is trying to learn.
 
-    Only runs that produced something are timed — a ``failed`` run's duration is how long it took
-    to break, which is not a speed. They are counted in ``failures`` instead, because an operator
-    that is fast and fails half the time must not out-rank a slow one that works.
+    ONLY AN ``ok`` RUN IS TIMED, because only an ``ok`` run did the whole job it was asked for —
+    a duration is a speed only when it is the duration of the work. A ``failed`` run's duration is
+    how long it took to break; a ``partial`` one skipped some or all of its wells (``produced
+    nothing — all 4 target(s) skipped`` takes milliseconds and writes no pixels); a ``stopped`` one
+    is however far Ctrl-C let it get. All three are counted in ``runs``, none of them in ``timed``,
+    and only ``failed`` in ``failures``, because an operator that is fast and does not finish must
+    not out-rank a slow one that works. This excluded ``failed`` alone until 2026-08-06, and one
+    real empty run measured 2 ms against a 255 ms working run — so the fastest row in the table was
+    the one that wrote nothing.
+
+    ``peak_rss`` is the worst peak over the TIMED runs, for the same reason: a memory budget is
+    sized off runs that actually did the work.
     """
     log = metrics if metrics is not None else METRICS
     rows: dict[str, dict] = {}
     for m in log:
         if operators is not None and m.operator not in operators:
             continue
-        row = rows.setdefault(m.operator, {"operator": m.operator, "runs": 0, "failures": 0,
-                                           "_secs": [], "peak_rss": None})
+        row = rows.setdefault(m.operator, {"operator": m.operator, "runs": 0, "timed": 0,
+                                           "failures": 0, "_secs": [], "peak_rss": None})
         row["runs"] += 1
         if m.outcome == FAILED:
             row["failures"] += 1
+        if m.outcome != OK:
             continue
+        row["timed"] += 1
         row["_secs"].append(float(m.seconds))
         if m.peak_rss is not None and (row["peak_rss"] is None or m.peak_rss > row["peak_rss"]):
             row["peak_rss"] = m.peak_rss
@@ -627,15 +638,21 @@ def _median(values: Sequence[float]) -> Optional[float]:
 
 
 def compare_table(metrics: Optional[MetricsLog] = None) -> str:
-    """:func:`compare` as fixed-width text, for a terminal and for the log panel."""
+    """:func:`compare` as fixed-width text, for a terminal and for the log panel.
+
+    ``timed`` is its own column beside ``runs`` because they differ: the difference is the runs
+    that finished without doing the job, and a median over 1 of 3 runs must not read like a median
+    over 3.
+    """
     rows = compare(metrics)
     if not rows:
         return "no operator runs recorded yet"
-    head = f"{'operator':<16}{'runs':>6}{'fail':>6}{'median':>12}{'best':>12}{'peak RSS':>14}"
+    head = (f"{'operator':<16}{'runs':>6}{'timed':>6}{'fail':>6}"
+            f"{'median':>12}{'best':>12}{'peak RSS':>14}")
     lines = [head, "-" * len(head)]
     for r in rows:
         lines.append(
-            f"{r['operator']:<16}{r['runs']:>6}{r['failures']:>6}"
+            f"{r['operator']:<16}{r['runs']:>6}{r['timed']:>6}{r['failures']:>6}"
             f"{(human_seconds(r['median_seconds']) if r['median_seconds'] is not None else '—'):>12}"
             f"{(human_seconds(r['best_seconds']) if r['best_seconds'] is not None else '—'):>12}"
             f"{human_bytes(r['peak_rss']):>14}"

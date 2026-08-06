@@ -23,12 +23,13 @@ import pytest
 from squidmip import available_projectors, project, project_well, operator_consumes
 from squidmip._flatfield import (
     FlatfieldProfile,
-    active_profile,
+    active_profiles,
     clear_profile,
     correct_flatfield,
     estimate_profile,
     flatfield_op,
     set_profile,
+    set_profiles,
 )
 from squidmip.projection import PLANE_OP
 from squidmip.reader import open_reader
@@ -275,11 +276,21 @@ def test_the_registered_operator_fails_loud_and_actionable_with_no_profile_set()
 def test_set_profile_activates_the_registered_operator():
     from squidmip._engine import _resolve_operator
     ff = _vignette(32)
-    set_profile(FlatfieldProfile(ff))
-    assert active_profile() is not None
+    set_profile(FlatfieldProfile(ff), channel="Fluorescence_405_nm_Ex")
+    assert list(active_profiles()) == ["Fluorescence_405_nm_Ex"]
     raw = (np.float32(1000) * ff).astype(np.uint16)
     out = _resolve_operator("flatfield").fn([raw])
     assert np.allclose(out, 1000, atol=2)
+
+
+def test_a_profile_cannot_be_installed_without_saying_which_channel_measured_it():
+    """The defect, made unsayable. ``set_profile(profile)`` used to install ONE gain field that
+    every channel was then corrected by — 99.8% of pixels wrong by up to 1799 counts on the 10x
+    set. The channel is keyword-only and required, so that call no longer type-checks at all."""
+    with pytest.raises(TypeError):
+        set_profile(FlatfieldProfile(_vignette(8)))          # type: ignore[call-arg]
+    with pytest.raises(ValueError, match="CHANNEL NAME"):
+        set_profile(FlatfieldProfile(_vignette(8)), channel="")
 
 
 def test_flatfield_op_refuses_a_whole_z_stack():
@@ -295,3 +306,163 @@ def test_project_well_with_flatfield_keeps_z_at_full_depth(squid_dataset):
     out = project_well(reader, "B2", 0, reduce=flatfield_op(FlatfieldProfile(ff)))
     assert out.shape[2] == len(reader.metadata["z_levels"])
     assert out.dtype == reader.metadata["dtype"]
+
+
+# ==============================================================================================
+# PER CHANNEL — the declaration seam, and the defect whose absence from this file let it live
+# ==============================================================================================
+#
+# Every test above this line uses ONE channel, which is exactly why the registered operator could
+# correct all four of a real acquisition with channel 0's gain field for a day with the suite
+# green. The file on disk is (C, Y, X) and its fields are genuinely different (0.645–1.102 for
+# 488 against 0.974–1.020 for 405 on the 10x set), so "one profile" is not a simplification of
+# the truth, it is a different measurement.
+
+def _sloped(shape, slope: float) -> np.ndarray:
+    """A gain field with a known, per-channel-distinguishable tilt, normalised to mean 1."""
+    ny, nx = shape
+    yy, xx = np.mgrid[0:ny, 0:nx].astype(np.float32)
+    field = 1.0 + slope * ((yy + xx) / max(1.0, float(ny + nx - 2)) - 0.5)
+    return (field / field.mean()).astype(np.float32)
+
+
+def _fields_per_channel(reader) -> dict:
+    """One DIFFERENT gain field per channel of *reader*, keyed by channel name."""
+    shape = tuple(reader.metadata["frame_shape"])
+    names = [c["name"] for c in reader.metadata["channels"]]
+    return {n: FlatfieldProfile(_sloped(shape, 0.4 + 0.5 * i)) for i, n in enumerate(names)}
+
+
+def test_every_channel_is_corrected_by_its_own_gain_field(squid_dataset):
+    """THE CENTREPIECE. Run the registered operator the way the engine runs it — through
+    ``project_well``, which specialises it per channel via ``for_channel`` — and check every
+    (channel, z) plane against THAT CHANNEL's field.
+
+    The second assertion is what makes the first one worth its green: another channel's field
+    must give a different answer on this fixture, so a broadcast cannot pass by coincidence.
+    """
+    from squidmip._engine import _resolve_operator
+
+    root, _ = squid_dataset
+    reader = open_reader(root)
+    meta = reader.metadata
+    names = [c["name"] for c in meta["channels"]]
+    assert len(names) > 1, "a one-channel fixture cannot see this defect at all"
+    profiles = _fields_per_channel(reader)
+    set_profiles(profiles)
+
+    out = project_well(reader, "B2", 0, reduce=_resolve_operator("flatfield").fn)
+
+    for c_i, name in enumerate(names):
+        other = names[(c_i + 1) % len(names)]
+        for z_i, z in enumerate(meta["z_levels"]):
+            raw = reader.read("B2", 0, name, z, 0)
+            mine = correct_flatfield(raw, profiles[name])
+            theirs = correct_flatfield(raw, profiles[other])
+            assert not np.array_equal(mine, theirs), (
+                f"the fixture cannot tell {name} and {other} apart — the assertion below would "
+                "pass for an operator that used either field")
+            got = out[0, c_i, z_i]
+            assert np.array_equal(got, mine), (
+                f"{name} (z={z}) was NOT corrected by its own gain field: got mean "
+                f"{got.mean():.2f}, its own field gives {mine.mean():.2f}, and {other}'s field "
+                f"gives {theirs.mean():.2f} — {100.0 * (got != mine).mean():.1f}% of pixels "
+                f"differ from the right answer by up to "
+                f"{np.abs(got.astype(np.int64) - mine.astype(np.int64)).max()}")
+
+
+def test_a_channel_with_no_installed_profile_is_refused_by_name(squid_dataset):
+    """Install ONE channel's field — what the GUI's auto-estimate does, because the worker reads
+    one channel's tiles — and the OTHER channel must stop the run, named, listing what is
+    installed. Correcting it with the field beside it is not a degraded answer, it is a different
+    measurement, and it is the one that shipped."""
+    from squidmip._engine import _resolve_operator
+
+    root, _ = squid_dataset
+    reader = open_reader(root)
+    names = [c["name"] for c in reader.metadata["channels"]]
+    profiles = _fields_per_channel(reader)
+    set_profile(profiles[names[0]], channel=names[0])
+
+    with pytest.raises(ValueError) as exc:
+        project_well(reader, "B2", 0, reduce=_resolve_operator("flatfield").fn)
+    message = str(exc.value)
+    assert names[1] in message, (
+        f"the refusal does not name the channel it has no profile for: {message!r}")
+    assert names[0] in message, (
+        f"the refusal does not say which channel(s) DO have one: {message!r}")
+
+    # ...and the channel that HAS one still binds and corrects, so this is a refusal aimed at one
+    # channel, not a dead operator.
+    from squidmip.projection import bind_channel
+
+    raw = reader.read("B2", 0, names[0], reader.metadata["z_levels"][0], 0)
+    bound = bind_channel(_resolve_operator("flatfield").fn, str(root), names[0])
+    assert np.array_equal(np.asarray(bound([raw])),
+                          correct_flatfield(raw, profiles[names[0]]))
+
+
+def test_nothing_installed_still_refuses_loud_and_actionable():
+    """Unchanged claim, kept: an identity field would silently do nothing while the UI said
+    'flat-field applied'."""
+    from squidmip._engine import _resolve_operator
+
+    op = _resolve_operator("flatfield")
+    with pytest.raises(ValueError, match="no flat-field profile"):
+        op.fn([np.ones((8, 8), np.uint16)])
+    with pytest.raises(ValueError, match="no flat-field profile"):
+        op.fn.for_channel(None, "Fluorescence_488_nm_Ex")
+
+
+def test_the_unbound_operator_refuses_to_choose_between_several_channels():
+    """Called with no channel bound and four fields installed, the operator must not pick one.
+
+    ``project_well`` always binds, so this is the direct-``fn`` path the registry conformance
+    suite uses. With exactly one profile installed there is no choice to make and it applies it;
+    with several, choosing is the defect."""
+    from squidmip._engine import _resolve_operator
+
+    op = _resolve_operator("flatfield").fn
+    set_profiles({"a": FlatfieldProfile(_vignette(8)), "b": FlatfieldProfile(_vignette(8, 0.2))})
+    with pytest.raises(ValueError, match="without being told which channel"):
+        op([np.ones((8, 8), np.uint16)])
+
+
+@pytest.mark.integration
+def test_per_channel_correction_on_the_real_stored_profile(laser_af_dataset, capsys):
+    """The measurement itself, on the acquisition's OWN ``(4, 2084, 2084)`` profile.
+
+    Prints the WRONG(one profile) vs RIGHT(per channel) table the fix was built against. 405 is
+    channel 0 of that file, so the channel anyone looks at first was bit-identical either way —
+    which is why nobody saw it.
+    """
+    from squidmip._engine import _resolve_operator
+    from squidmip.projection import bind_channel
+
+    npy = laser_af_dataset / f"{laser_af_dataset.name}_flatfield.npy"
+    if not npy.exists():
+        pytest.skip("this acquisition carries no stored flat-field profile")
+    reader = open_reader(laser_af_dataset)
+    meta = reader.metadata
+    names = [c["name"] for c in meta["channels"]]
+    region = meta["regions"][0]
+    fov = meta["fovs_per_region"][region][0]
+    z = meta["z_levels"][len(meta["z_levels"]) // 2]
+
+    profiles = FlatfieldProfile.per_channel_from_npy(npy, names)
+    set_profiles(profiles)
+    op = _resolve_operator("flatfield").fn
+
+    print(f"\n[per-channel flat-field] {npy.name}")
+    for i, name in enumerate(names):
+        raw = reader.read(region, fov, name, z, 0)
+        got = np.asarray(bind_channel(op, str(laser_af_dataset), name)([raw]))
+        right = correct_flatfield(raw, FlatfieldProfile.from_npy(npy, channel=i))
+        wrong = correct_flatfield(raw, FlatfieldProfile.from_npy(npy, channel=0))
+        d = np.abs(wrong.astype(np.int64) - right.astype(np.int64))
+        print(f"  {name:30s} one-profile mean {wrong.mean():9.2f}  per-channel mean "
+              f"{right.mean():9.2f}  differing {100.0 * (d > 0).mean():7.3f}%  max {d.max()}")
+        assert np.array_equal(got, right), (
+            f"{name} was corrected by the wrong field: {100.0 * (got != right).mean():.3f}% of "
+            f"pixels differ, by up to "
+            f"{np.abs(got.astype(np.int64) - right.astype(np.int64)).max()}")

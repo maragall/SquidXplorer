@@ -320,24 +320,32 @@ def _check_output(out_dir: Path, overwrite: bool) -> None:
         f"Pass --overwrite to do it anyway, or aim --output-folder somewhere else.")
 
 
-def _progress(n_targets: int):
+class _Progress:
     """A thread-safe ``on_well`` that says a well landed. Runs on WRITER threads (several at once).
 
     The reason this exists: ``write_plate`` has taken ``on_well`` since IMA-230 and the headless
     surface passed None, so a multi-hour plate printed one line at the start and one at the end.
-    """
-    counter = itertools.count(1)
-    lock = threading.Lock()
 
-    def on_well(region, fov, _image) -> None:
-        with lock:
-            n = next(counter)
+    It also keeps ``wells`` — the set of regions that produced at least one field — because this
+    callback is the ONLY place the CLI can learn it. The manifest counts fields written
+    (``n_fields_written``) against wells targeted (``n_wells``), two different units, and printing
+    one over the other is how ``16/4 wells written`` reached the console.
+    """
+
+    def __init__(self, n_targets: int) -> None:
+        self.n_targets = int(n_targets)
+        self.wells: set = set()
+        self._counter = itertools.count(1)
+        self._lock = threading.Lock()
+
+    def __call__(self, region, fov, _image) -> None:
+        with self._lock:
+            n = next(self._counter)
+            self.wells.add(str(region))
         # n counts FIELDS, not wells (a multi-FOV run writes several per well), so the target is
         # named as wells rather than pretending to be a percentage it cannot compute.
         logger.info("  [%d] wrote %s fov %s%s", n, region, fov,
-                    f" (target: {n_targets} well(s))" if n_targets else "")
-
-    return on_well
+                    f" (target: {self.n_targets} well(s))" if self.n_targets else "")
 
 
 def run(params: ProcessParameters, *, stop=None) -> dict:
@@ -395,8 +403,9 @@ def run(params: ProcessParameters, *, stop=None) -> dict:
     # CLI turns it into a clean SystemExit instead of a traceback, the same failure the GUI shows
     # as a status-line sentence. `on_well`/`stop` are the surface's own, not command fields: a
     # command is serialisable and a callback is not.
+    progress = _Progress(n_targets)
     bus = CommandBus(EngineExecutor(params.input_folder, reader=reader,
-                                    on_well=_progress(n_targets), stop=stop))
+                                    on_well=progress, stop=stop))
     result = bus.execute(RunOperator(
         operator=params.projector, regions=regions, save=True,
         output_folder=str(out_parent), n_fovs=n_fovs, workers=params.workers, tiff=params.tiff,
@@ -417,11 +426,20 @@ def run(params: ProcessParameters, *, stop=None) -> dict:
     manifest["outcome"] = outcome
     manifest["detail"] = detail
     manifest["n_targets"] = int(result.data.get("n_targets") or 0)
+    # Wells that produced at least one field, counted by the callback that saw each one land. The
+    # manifest cannot answer this: `n_wells` is how many wells the run TARGETED.
+    manifest["n_wells_written"] = len(progress.wells)
 
     # SAY WHICH ONE IT WAS. "done:" over an empty plate is the line this whole exit-code change
     # exists to stop printing, so the verdict picks the level and the word.
-    line = ("%s (%d/%d wells written, %d pyramid level(s))%s" % (
-        manifest["plate"], manifest["n_fields_written"], manifest["n_wells"], manifest["levels"],
+    #
+    # EACH COUNT AGAINST ITS OWN TOTAL. This printed `n_fields_written`/`n_wells` — FIELDS over
+    # WELLS — labelled "wells written", so a healthy 4-well 4-FOV plate read "16/4 wells written"
+    # and a run that lost a quarter of the plate read "12/4", a numerator above its denominator.
+    # `_progress` carries the same warning ten lines up and this line did the pretending anyway.
+    line = ("%s (%d/%d fields written across %d/%d wells, %d pyramid level(s))%s" % (
+        manifest["plate"], manifest["n_fields_written"], manifest["n_fields"],
+        manifest["n_wells_written"], manifest["n_wells"], manifest["levels"],
         f"  + TIFFs at {manifest['tiff']}" if manifest["tiff"] else ""))
     if outcome == "ok":
         logger.info("done: %s", line)

@@ -106,13 +106,23 @@ class TestRawPushCarriesVoxelSize:
     def test_the_3d_volume_push_carries_the_full_voxel_scale(
         self, qapp, napari_pane_stub, squid_dataset, monkeypatch  # noqa: F811
     ):
-        """dz_um / pixel_size_um is the z stretch the renderer applies, and it must be
+        """dz_um over the DISPLAYED pitch is the z stretch the renderer applies, and it must be
         computable from the pushed values alone, and finite and positive.
 
-        The 3D push declares all three axes at once as `scale=(dz, px, px)`, so the aspect is
+        The 3D push declares all three axes at once as `scale=(dz, py, px)`, so the aspect is
         recoverable as scale[0] / scale[1].
 
-        MUTATION: pass `scale=(1.0, px, px)` (or omit it) -> aspect 1 -> red.
+        The y/x half was asserted as ``== meta["pixel_size_um"]`` until 2026-08-06, and that is
+        the acquisition's pitch, not these pixels'. This renders the 2D LAYER's pixels, which come
+        from ``fuse_region_pyramid`` and are decimated (step 2 on the 10x set: 1.504 um/px against
+        0.752) -- so the assertion pinned a volume half as wide and half as deep as its own z,
+        i.e. the wrong aspect ratio, which is the exact thing this test exists to catch. The layer
+        knows the true pitch in its own ``scale`` (``placement_for`` = bbox / shape); that is the
+        number, and on this fixture (step 1) it differs from ``pixel_size_um`` only in the 13th
+        digit, which is why exact equality was green and honest equality is the assertion now.
+
+        MUTATION: pass `scale=(1.0, py, px)` (or omit it) -> aspect 1 -> red. Pass
+        `meta["pixel_size_um"]` for y/x -> red on the layer's own scale.
         """
         import squidmip._napari3d as napari3d
 
@@ -135,10 +145,15 @@ class TestRawPushCarriesVoxelSize:
         scale = kw["scale"]
         assert len(scale) == 3, scale
         assert scale[0] == win._meta["dz_um"]
-        assert scale[1] == scale[2] == win._meta["pixel_size_um"]
+        raw = pane.mosaic.find("raw", win._meta["channels"][0]["name"])
+        pitch = tuple(float(v) for v in raw.scale[-2:])
+        assert (scale[1], scale[2]) == pitch, (
+            f"pushed {scale[1:]} um/px, but the layer being rendered is placed at {pitch} um/px "
+            f"(meta pixel_size_um is {win._meta['pixel_size_um']}, which is NOT this layer's pitch "
+            f"whenever the mosaic was fused decimated)")
         aspect = scale[0] / scale[1]
         assert aspect > 0
-        assert aspect == pytest.approx(win._meta["dz_um"] / win._meta["pixel_size_um"])
+        assert aspect == pytest.approx(win._meta["dz_um"] / pitch[0])
         shutdown_plate_window(qapp, win)
 
     def test_the_raw_mosaic_declares_the_full_z_stack(

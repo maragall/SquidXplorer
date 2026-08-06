@@ -29,6 +29,18 @@ def _break_well(root, region: str) -> None:
     raise AssertionError(f"no planes to break for {region}")
 
 
+def _break_every_fov(root, region: str) -> None:
+    """Delete one plane of EVERY fov of *region*, so the whole well produces nothing.
+
+    `_break_well` breaks the first plane it finds, which is ONE fov — under `--n-fovs 0` the
+    well's remaining FOVs still read, so the well is not actually lost.
+    """
+    planes = sorted((Path(root) / "0").glob(f"{region}_*"))
+    assert planes, f"no planes to break for {region}"
+    for fov in sorted({p.name.split("_")[1] for p in planes}):
+        next(iter(sorted((Path(root) / "0").glob(f"{region}_{fov}_*")))).unlink()
+
+
 # --- the model ----------------------------------------------------------------------------------
 
 def test_input_folder_validator_rejects_missing(tmp_path):
@@ -73,10 +85,29 @@ def test_wells_parses_to_the_commands_regions_list(squid_dataset):
 
 
 def test_help_lists_every_operators_declared_parameters():
-    # Generated from the registry, not hand-written per operator: a plugin operator installed from
-    # another package is documented here with no edit to _cli.py.
+    """Generated from the registry, not hand-written per operator: a plugin operator installed
+    from another package is documented here with no edit to _cli.py.
+
+    Checked AGAINST THE REGISTRY rather than against a copy of today's declarations. This test
+    used to spell out ``cellpose(sigma_px=2.0`` and ``min_area_px=30``, which made it a second
+    place that recorded what cellpose takes — and when the real declaration turned out to be
+    wrong (three of those four parameters never reached a pixel), this assertion was one of the
+    things holding it in place. A test that restates a declaration cannot notice the declaration
+    is wrong; one that compares the help against the declaration still catches the help drifting,
+    which is all it was ever for.
+    """
+    from squidmip._engine import operator_params
+    from squidmip._operations import runnable_operators
+
     described = ProcessParameters.model_fields["param"].description
-    assert "cellpose(sigma_px=2.0" in described and "min_area_px=30" in described
+    for name in runnable_operators():
+        params = operator_params(name)
+        expected = f"{name}({', '.join(f'{p.name}={p.default!r}' for p in params)})"
+        if params:
+            assert expected in described, (
+                f"--param help must document {name} exactly as it is declared; expected "
+                f"{expected!r} in the help text"
+            )
     assert "stitch(" in described                  # region operators are listed too
     assert "mip()" in described                    # ...and an operator with no parameters says so
 
@@ -282,6 +313,59 @@ def test_run_reports_every_well_as_it_lands(squid_dataset, tmp_path, caplog):
     progress = [r.getMessage() for r in caplog.records if "wrote" in r.getMessage()]
     assert len(progress) == 2                      # one line per well, not silence for hours
     assert any("B2" in line for line in progress)
+
+
+def _summary_line(caplog) -> str:
+    """The one line ``run()`` ends on — the ``done:`` / ``PARTIAL`` / ``STOPPED`` verdict."""
+    lines = [r.getMessage() for r in caplog.records if "pyramid level(s)" in r.getMessage()]
+    assert len(lines) == 1, f"expected exactly one summary line, got {lines}"
+    return lines[0]
+
+
+def test_the_summary_line_counts_fields_and_wells_each_against_its_own_total(squid_dataset,
+                                                                            tmp_path, caplog):
+    """FIELDS over WELLS, labelled "wells written", is not a fraction — it is two units.
+
+    The fixture is 2 wells x 2 FOVs, so a whole-plate `--n-fovs 0` run writes 4 fields into 2
+    wells. `n_fields_written` (4) over `n_wells` (2) printed "4/2 wells written"; on the real
+    ~/Downloads/sim_5d_2x2_t3 (4 wells x 4 FOVs) the same line read "16/4 wells written".
+    `_Progress` already carries the warning in a comment — "n counts FIELDS, not wells" — and the
+    summary forty lines below did the pretending anyway.
+    """
+    import logging
+
+    root, _ = squid_dataset
+    with caplog.at_level(logging.INFO, logger="squid.xplorer"):
+        manifest = run(ProcessParameters(input_folder=str(root), output_folder=str(tmp_path),
+                                         n_fovs=0))
+    assert manifest["outcome"] == "ok"
+    assert (manifest["n_fields_written"], manifest["n_fields"]) == (4, 4)
+    assert (manifest["n_wells_written"], manifest["n_wells"]) == (2, 2)
+    assert "4/4 fields written across 2/2 wells" in _summary_line(caplog), (
+        f"each count must be against its OWN total; got {_summary_line(caplog)!r} "
+        "(the old line said '4/2 wells written' — 4 FIELDS over 2 WELLS)")
+
+
+def test_the_summary_line_counts_only_the_wells_that_actually_landed(squid_dataset, tmp_path,
+                                                                     caplog):
+    """A run that lost a well must not report a numerator larger than its denominator.
+
+    With B3 unreadable, 2 of 4 fields land, in 1 of 2 wells. The old line divided fields by wells
+    and printed "2/2 wells written" — a plate missing half its fields described as whole; on the
+    real 4-well set it printed "12/4 wells written" on a run that had just lost a quarter of it.
+    """
+    import logging
+
+    root, _ = squid_dataset
+    _break_every_fov(root, "B3")
+    with caplog.at_level(logging.INFO, logger="squid.xplorer"):
+        manifest = run(ProcessParameters(input_folder=str(root), output_folder=str(tmp_path),
+                                         n_fovs=0))
+    assert manifest["outcome"] != "ok"
+    assert manifest["n_wells_written"] == 1, "only B2 produced a field"
+    assert "2/4 fields written across 1/2 wells" in _summary_line(caplog), (
+        f"a lost well must show in BOTH counts; got {_summary_line(caplog)!r} "
+        "(the old line said '2/2 wells written' over a plate missing half its fields)")
 
 
 def test_stop_cuts_the_run_and_the_store_says_it_is_incomplete(squid_dataset, tmp_path):

@@ -26,7 +26,7 @@ from squidmip._flatfield import (
     FlatfieldProfile,
     clear_profile,
     correct_flatfield,
-    set_profile,
+    set_profiles,
 )
 from squidmip._stitch import stitch_region
 from squidmip.projection import PLANE_OP, plane_op
@@ -247,7 +247,9 @@ def test_the_flatfield_correction_is_not_idempotent(master):
 def test_stitching_the_flatfield_operator_with_read_path_correction_refuses(master):
     """The guard. Both corrections on = refuse, by name of both escapes."""
     reader = _ZReader(master)
-    set_profile(_vignette_profile())
+    # ONE PER CHANNEL: project_well specialises the operator per channel (for_channel), so a run
+    # over this acquisition needs every channel's field installed.
+    set_profiles({c: _vignette_profile() for c in CHANNELS})
     try:
         with pytest.raises(ValueError, match="not idempotent"):
             stitch_region(reader, "A1", list(range(GRID * GRID)), projector="flatfield",
@@ -289,7 +291,7 @@ def test_each_single_correction_path_stays_available_and_corrects_exactly_once(m
     profile = _vignette_profile()
     fovs = list(range(GRID * GRID))
 
-    set_profile(profile)
+    set_profiles({c: profile for c in CHANNELS})
     try:
         # (a) correction in the OPERATOR, read path off.
         by_operator = np.asarray(stitch_region(_ZReader(master), "A1", fovs, projector="flatfield",

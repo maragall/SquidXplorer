@@ -82,13 +82,14 @@ def _flatfield_profile():
     this file is the declaration, not the correction."""
     from squidmip import _flatfield
 
-    before = _flatfield.active_profile()
-    _flatfield.set_profile(_flatfield.FlatfieldProfile(np.ones((64, 64), dtype=np.float32)))
+    before = _flatfield.active_profiles()
+    _flatfield.set_profiles(
+        {"405": _flatfield.FlatfieldProfile(np.ones((64, 64), dtype=np.float32))})
     yield
-    if before is None:
+    if not before:
         _flatfield.clear_profile()
     else:
-        _flatfield.set_profile(before)
+        _flatfield.set_profiles(before)
 
 
 def _run(name: str, plane: np.ndarray) -> np.ndarray:
@@ -409,8 +410,69 @@ def test_cellpose_declares_the_same_three_things_the_generic_path_reads():
 
     assert operator_consumes(OPERATOR_NAME) == frozenset(), "z must survive a segmentation"
     assert operator_produces(OPERATOR_NAME) == "labels"
-    assert [p.name for p in operator_params(OPERATOR_NAME)] == [
-        "sigma_px", "min_area_px", "min_distance_px", "split_touching"]
+    # ONE parameter, not the four ``SpotParams`` has. ``cellpose_nuclei`` reads
+    # ``min_distance_px`` (as the diameter) and nothing else; this used to declare all four, so
+    # ``_param_panel`` drew four spin boxes for it and three could not change the answer.
+    # Measured on synthetic_1536_wellplate A1 / 405 nm, 1024 px crop: ``min_area_px`` 30 and 4000
+    # both returned the SAME 42 masks, byte for byte, where the parameter's documented meaning
+    # would have left 2.
+    assert [p.name for p in operator_params(OPERATOR_NAME)] == ["min_distance_px"]
+
+
+def test_cellpose_refuses_the_parameters_it_cannot_honour_instead_of_ignoring_them():
+    """The user-visible half of the fix, and the reason a narrower declaration is the right one.
+
+    ``Operator.bind`` refuses an undeclared parameter BY NAME, so ``--param min_area_px=80`` (or
+    the same key from a saved recipe, or a script) is now an error the caller reads rather than a
+    number the run drops. Before this, that command completed, reported ``min_area_px=80`` in the
+    console line and the recipe, and segmented at Cellpose's own defaults.
+    """
+    from squidmip._cellpose import OPERATOR_NAME
+    from squidmip._engine import bind_operator
+
+    for dead in ("sigma_px", "min_area_px", "split_touching"):
+        with pytest.raises(ValueError) as excinfo:
+            bind_operator(OPERATOR_NAME, {dead: 4000})
+        assert dead in str(excinfo.value) and "min_distance_px" in str(excinfo.value), (
+            f"{dead!r} must be refused by name, and the refusal must say what CAN be set; "
+            f"got {excinfo.value}"
+        )
+    bind_operator(OPERATOR_NAME, {"min_distance_px": 20})       # the honoured one still binds
+
+
+def test_every_parameter_a_segmentation_operator_DECLARES_changes_its_pixels():
+    """A declared parameter that cannot change the answer is a control that does nothing.
+
+    This is the test whose absence let ``cellpose`` ship four widgets for one working knob. It is
+    run over ``spot``, whose segmenter is fast enough to evaluate once per parameter; the same
+    property for ``cellpose`` is held by construction — its ``params`` are FILTERED by
+    ``_spots.segmenter_honours``, the one declaration ``cellpose_nuclei`` is written against —
+    and by the refusal test above.
+    """
+    import numpy as np
+
+    from squidmip._engine import bind_operator
+
+    rng = np.random.default_rng(0)
+    plane = np.zeros((256, 256), np.uint16)
+    yy, xx = np.mgrid[0:256, 0:256]
+    for cy, cx in ((60, 60), (66, 70), (170, 60), (60, 175), (180, 180), (186, 190)):
+        plane[(yy - cy) ** 2 + (xx - cx) ** 2 <= 64] = 4000        # touching and isolated blobs
+    plane = np.clip(plane + rng.integers(0, 200, plane.shape), 0, 65535).astype(np.uint16)
+
+    base = np.asarray(bind_operator("spot", {})(plane[None, ...]))
+    probes = {"sigma_px": 9.0, "min_area_px": 400, "min_distance_px": 40, "split_touching": False}
+    declared = [p.name for p in operator_params("spot")]
+    assert sorted(probes) == sorted(declared), (
+        f"this test must probe every declared parameter; spot declares {declared}"
+    )
+    for name, value in probes.items():
+        got = np.asarray(bind_operator("spot", {name: value})(plane[None, ...]))
+        assert not np.array_equal(got, base), (
+            f"'spot' declares {name!r}, so a run at {name}={value!r} must not return the label "
+            f"image the defaults return — it returned a byte-identical one, which is a control "
+            f"the panel offers and the pixels never see"
+        )
 
 
 def test_registering_cellpose_does_not_import_torch():

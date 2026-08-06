@@ -215,6 +215,15 @@ _VENDORED_MM = {
 # a LAYOUT approximation, not a measured calibration, and are only used to place cells on the art.
 _VENDORED_MM[FOUR_SLIDE_CARRIER] = (14.0, 20.0, 50, 0, 25.0, 27.0, 0, 1, 4)
 
+# The WELLPLATE formats: the vendored table minus the slide holders. :func:`format_from_pitch_um`
+# matches a measured stage pitch against THIS, never against the whole table, and the distinction
+# is load-bearing rather than tidy. The carrier's 27 000 um slot pitch is a mere 1.038x a 12-well
+# plate's 26 000 um, so with the carrier in the candidate set EVERY 12-well plate matched two
+# formats and was refused as ambiguous -- measured: ``format_from_pitch_um(26000.0, 26000.0)`` ->
+# None, and ``build_plate`` then kept a yaml that lied ("24 well plate") with no warning at all, at
+# 0.7423x the true scale. Derived from the table so a format added above joins it automatically.
+_WELLPLATE_FORMATS = tuple(n for n in _VENDORED_MM if n not in _SLIDE_FORMATS)
+
 # Squid NavigationViewer.update_display_properties: mm/px of each background PNG, and the PNG name.
 # Filenames are copied from upstream's image_paths dict -- NEVER constructed -- so a missing
 # checkout yields None instead of a plausible-but-wrong path.
@@ -232,9 +241,13 @@ _ART = {
 # Upstream hardcodes the art origin for the two slide holders instead of deriving it from a1.
 _ART_ORIGIN_PX = {GLASS_SLIDE: (200.0, 120.0), FOUR_SLIDE_CARRIER: (50.0, 0.0)}
 
-# Fractional slack when matching a measured pitch to a standard one. The closest pair of standard
-# pitches is 96wp/384wp at 2.0x apart, so 5% is loose enough for stage noise and nowhere near
-# ambiguous.
+# Fractional slack when matching a measured pitch to a standard one. Two formats become ambiguous
+# -- one pitch inside both windows -- once they are within (1 + t) / (1 - t) = 1.105x of each other.
+# The closest pair of WELLPLATE pitches is 12wp/24wp at 26 000 / 19 300 = 1.347x apart (96wp/384wp,
+# which this comment used to name, are 2.0x), so 5% is loose enough for stage noise and nowhere near
+# ambiguous. That holds over :data:`_WELLPLATE_FORMATS` and is enumerated in
+# ``test_no_two_wellplate_pitches_are_within_the_matching_tolerance``; it did NOT hold over the
+# whole vendored table, which is why the slide holders are not candidates.
 _PITCH_TOL = 0.05
 
 
@@ -1146,12 +1159,20 @@ def format_from_pitch_um(pitch_x_um: Optional[float], pitch_y_um: Optional[float
     Both axes must land on the SAME format (a real plate is square-pitched), so a measurement where
     x reads 96wp and y reads 384wp is refused rather than resolved by picking one -- that would be
     inventing a plate. A single measurable axis is accepted, since a one-row scan still pins the
-    pitch and the pitches of all Squid formats are distinct by more than the tolerance.
+    pitch and the wellplate pitches are distinct by more than the tolerance.
+
+    The candidates are :data:`_WELLPLATE_FORMATS`, NOT the whole vendored table: a slide holder is
+    not a wellplate, and the 4-up carrier's 27 000 um slot pitch sits 1.038x from a 12-well plate's
+    26 000 um -- inside any tolerance loose enough for stage noise. While it was a candidate every
+    12-well plate matched two formats, was refused as ambiguous, and ``build_plate`` fell through to
+    an unchallenged declaration (measured: a lying yaml laid a 12-well plate out at 0.7423x scale
+    with zero warnings). Only a wellplate can be measured here anyway: a carrier's regions are
+    freeform ids, and ``measure_region_pitch_um`` already returns ``(None, None)`` for those.
     """
     def _match(p):
         if p is None or p <= 0:
             return None
-        hits = [name for name, g in ((n, PlateGeometry.vendored(n)) for n in _VENDORED_MM)
+        hits = [name for name, g in ((n, PlateGeometry.vendored(n)) for n in _WELLPLATE_FORMATS)
                 if g.pitch_x_um > 0 and abs(p - g.pitch_x_um) <= tolerance * g.pitch_x_um]
         return hits[0] if len(hits) == 1 else None
 

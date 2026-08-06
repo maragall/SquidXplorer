@@ -378,7 +378,7 @@ def _flatfield_npy_path(reader):
 
 
 def _selected_profiles(names: Sequence[str]) -> Optional[dict]:
-    """The profile the USER selected in the GUI, as ``{channel_name: profile}``, or ``None``.
+    """The profiles the USER selected in the GUI, as ``{channel_name: profile}``, or ``None``.
 
     THE ONE OWNER OF "the profile the user chose". ``squidmip._flatfield``'s module global
     (``set_profile``/``active_profile``) was read by exactly one consumer — the registered
@@ -399,17 +399,42 @@ def _selected_profiles(names: Sequence[str]) -> Optional[dict]:
     to every region). The GUI selection beats the file on disk because the user chose it after the
     file was already there.
 
-    The global is a SINGLE ``FlatfieldProfile``, not one per channel — the plane-op seam has no
-    channel identity (see ``squidmip._flatfield``'s module docstring) — so it applies to every
-    channel of the run, which is what the plane-op already does with it. That is stated in the log
-    line rather than left to be discovered.
-    """
-    from squidmip._flatfield import active_profile
+    PER CHANNEL, AND ALL-OR-NOTHING (2026-08-06). The global used to be a SINGLE
+    ``FlatfieldProfile`` and this function broadcast it over every name — so loading a plate's own
+    ``(4, 2084, 2084)`` ``.npy`` through the GUI made stitching correct 488, 561 and 638 with the
+    405 gain field, while loading the SAME FILE through ``resolve_flatfield``'s own lookup gave
+    each channel its own (measured: identical for 405, max|d| 0.3335 / 0.0237 / 0.1411 for the
+    other three). One file, two mosaics, depending on whether the user had clicked "Load
+    illumination profile". The global is now ``{channel: profile}`` and this is a lookup.
 
-    profile = active_profile()
-    if profile is None:
+    THE PARTIAL-COVERAGE RULE, one rule for every caller: the GUI selection is used only when it
+    covers EVERY channel of the run. Partial coverage (the auto-estimate installs the ONE channel
+    it estimated) returns ``None`` and is logged by name, so the run falls through to this
+    acquisition's stored ``.npy`` or its own estimate — for all channels, from one provenance.
+    The alternative, mixing a GUI field for one channel with file fields for the others, makes a
+    mosaic whose channels were corrected by two different measurements with nothing in the
+    artifact to say which; and it would have to be decided the same way at BOTH callers
+    (:func:`resolve_flatfield` per region and :func:`stitch_plate` plate-wide) or the two disagree,
+    which is the shape of the defect being removed. Silence is what is forbidden here, not
+    falling through: the log names exactly which channels were covered and which were not.
+    """
+    from squidmip._flatfield import active_profiles
+
+    installed = active_profiles()
+    if not installed:
         return None
-    return {str(n): profile for n in names}
+    names = [str(n) for n in names]
+    picked = {n: installed[n] for n in names if n in installed}
+    if len(picked) < len(names):
+        _log.warning(
+            "Flatfield: the profile(s) selected in the GUI cover %d of this acquisition's %d "
+            "channel(s) (%s); %s have none. Using this acquisition's stored or estimated profile "
+            "for EVERY channel instead, so one measurement corrects the whole run. Estimate or "
+            "load the missing channel(s) in the flat-field tab to use the selection.",
+            len(picked), len(names), ", ".join(sorted(picked)) or "none",
+            ", ".join(n for n in names if n not in picked))
+        return None
+    return picked
 
 
 def resolve_flatfield(reader, region: str, fovs: Sequence[int], *, channels=None,
@@ -421,8 +446,14 @@ def resolve_flatfield(reader, region: str, fovs: Sequence[int], *, channels=None
     the data. So flat-fielding is on by default there, and it is compute-ONCE: the second run of
     the same acquisition reads the file the first run wrote, and so does the standalone.
 
-    Ahead of all of that sits the profile the user selected in the GUI, if there is one — see
-    :func:`_selected_profiles` for the precedence and for why the global is read here.
+    Ahead of all of that sit the profiles the user selected in the GUI, when they cover every
+    channel of this acquisition — see :func:`_selected_profiles` for the precedence, for the
+    partial-coverage rule, and for why the global is read here.
+
+    Either way the answer is ONE PROFILE PER CHANNEL. It has to be: the stored ``.npy`` is
+    ``(C, Y, X)`` and its four fields are genuinely different (0.645–1.102 for 488 against
+    0.974–1.020 for 405 on the 10x set), so a map that carried one field for every channel
+    disagreed with the very file it was loaded from.
 
     Saving is best-effort, exactly as the standalone's is (it wraps its own save in try/except and
     logs the failure): an acquisition on a read-only share must still stitch. Failing to persist
@@ -436,15 +467,16 @@ def resolve_flatfield(reader, region: str, fovs: Sequence[int], *, channels=None
 
     selected = _selected_profiles(names)
     if selected is not None:
-        _log.info("Flatfield: using the profile selected in the GUI (%dx%d), applied to all %d "
-                  "channel(s). Clear it to fall back to this acquisition's stored profile.",
-                  *next(iter(selected.values())).shape, len(names))
+        _log.info("Flatfield: using the profile(s) selected in the GUI — one %dx%d field per "
+                  "channel for all %d channel(s) (%s). Clear them to fall back to this "
+                  "acquisition's stored profile.",
+                  *next(iter(selected.values())).shape, len(names), ", ".join(names))
         return selected
 
     if path is not None and path.exists():
         _log.info("Flatfield: loading the stored profile from %s…", path.name)
         try:
-            profiles = {n: FlatfieldProfile.from_npy(path, channel=i) for i, n in enumerate(names)}
+            profiles = FlatfieldProfile.per_channel_from_npy(path, names)
             _log.info("Flatfield: loaded %d channel profile(s) from %s.", len(profiles), path.name)
             return profiles
         except Exception as exc:
@@ -1523,17 +1555,26 @@ def stitch_plate(
                 # by the same gain field instead of by two independently resolved ones. See
                 # _selected_profiles for the full precedence.
                 operator_kwargs["flatfield"] = selected
-                _log.info("Flatfield: using the profile selected in the GUI (%dx%d) for the whole "
-                          "plate, applied to all %d channel(s).",
-                          *next(iter(selected.values())).shape, len(names))
+                # ONE PROFILE PER CHANNEL, and the line says so. It used to say "applied to all
+                # %d channel(s)", which was an accurate description of a defect: `_selected_profiles`
+                # broadcast a single field over every channel. It now returns a per-channel map or
+                # nothing at all, so there is no longer a case this sentence could describe.
+                _log.info("Flatfield: using the profile selected in the GUI for the whole plate — "
+                          "%d channel(s), one %dx%d gain field each.",
+                          len(selected), *next(iter(selected.values())).shape)
             elif path is not None and path.exists():
                 # The acquisition already carries a profile -- ours from a previous run, or the
                 # standalone's. Reuse beats re-deriving: it is what makes this compute-once, and
                 # it is the only way the two tools agree on the SAME gain field rather than two
                 # independently estimated ones.
                 _log.info("Flatfield: loading the stored plate-wide profile from %s…", path.name)
-                operator_kwargs["flatfield"] = {
-                    n: FlatfieldProfile.from_npy(path, channel=i) for i, n in enumerate(names)}
+                # `per_channel_from_npy`, not a second `from_npy(channel=i)` loop. Mapping a
+                # channel NAME to a plane INDEX of the stored (C, Y, X) file is exactly one rule,
+                # and it lived open-coded in two places here and in `resolve_flatfield` while the
+                # GUI's own "Load illumination profile" had a third answer (plane 0, for every
+                # channel). One reader is what stops the plate-wide stitch, the per-region stitch
+                # and the GUI disagreeing about which gain field a channel gets.
+                operator_kwargs["flatfield"] = FlatfieldProfile.per_channel_from_npy(path, names)
                 _log.info("Flatfield: loaded %d plate-wide profile(s) from %s.",
                           len(names), path.name)
             else:

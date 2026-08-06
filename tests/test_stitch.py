@@ -1301,12 +1301,14 @@ def test_the_gui_selected_profile_reaches_stitching(master):
     lookup and estimated its own field. Two owners of "which gain field is this plate corrected
     by", and the user's choice was the one with no effect.
     """
-    from squidmip._flatfield import clear_profile, set_profile
+    from squidmip._flatfield import clear_profile, set_profiles
     from squidmip._stitch import resolve_flatfield
 
     reader = _FakeReader(master)
     chosen = _nonunit_profile()
-    set_profile(chosen)
+    # ONE PER CHANNEL. The global was a single profile and this function broadcast it, which is
+    # what made the GUI and the stored .npy disagree; the selection now has to cover the run.
+    set_profiles({c: chosen for c in CHANNELS})
     try:
         resolved = resolve_flatfield(reader, "A1", list(range(4)))
         assert all(p is chosen for p in resolved.values()), (
@@ -1323,6 +1325,71 @@ def test_the_gui_selected_profile_reaches_stitching(master):
             "the explicit flatfield= argument was overridden by the GUI-selected global")
     finally:
         clear_profile()
+
+
+def test_loading_the_stored_profile_in_the_gui_does_not_change_the_stitch(master, tmp_path):
+    """ONE FILE, ONE ANSWER. ``resolve_flatfield`` loaded the acquisition's ``(C, Y, X)`` ``.npy``
+    per channel, while ``_selected_profiles`` broadcast the GUI's single global over every
+    channel — so loading THAT SAME FILE through "Load illumination profile" changed the mosaic:
+    identical for channel 0 and different for every other one (measured on the 10x set: max|d|
+    0.3335 / 0.0237 / 0.1411 for 488 / 561 / 638). Same data, two answers, decided by whether the
+    user had clicked a button.
+    """
+    pytest.importorskip("tilefusion.flatfield")
+    from tilefusion.flatfield import save_flatfield
+
+    from squidmip._flatfield import FlatfieldProfile, clear_profile, set_profiles
+    from squidmip._stitch import _flatfield_npy_path, resolve_flatfield
+
+    reader = _FakeReader(master)
+    reader._path = tmp_path                      # give the acquisition a home for its profile
+    path = _flatfield_npy_path(reader)
+    fields = []
+    for i in range(len(CHANNELS)):               # one GENUINELY different field per channel
+        f = np.ones((TILE, TILE), dtype=np.float32)
+        f[: TILE // 2] = 1.5 + 0.75 * i
+        fields.append((f / f.mean()).astype(np.float32))
+    save_flatfield(path, np.stack(fields), None)
+
+    clear_profile()
+    from_file = resolve_flatfield(reader, "A1", list(range(4)))
+    set_profiles(FlatfieldProfile.per_channel_from_npy(path, CHANNELS))
+    try:
+        with_selection = resolve_flatfield(reader, "A1", list(range(4)))
+    finally:
+        clear_profile()
+
+    assert set(from_file) == set(with_selection) == set(CHANNELS)
+    for name in CHANNELS:
+        a = from_file[name].flatfield
+        b = with_selection[name].flatfield
+        assert np.array_equal(a, b), (
+            f"{name}: the stitch corrects by a different gain field once the SAME file is loaded "
+            f"in the GUI — max|d| {float(np.abs(a - b).max()):.4f} (file mean {a.mean():.4f} "
+            f"range {a.min():.3f}-{a.max():.3f} vs selection range {b.min():.3f}-{b.max():.3f})")
+
+
+def test_a_partial_gui_selection_is_named_in_the_log_and_never_broadcast(master, caplog):
+    """The GUI's auto-estimate installs the ONE channel it estimated. That is not a licence to
+    correct the others with it — and it must not be dropped in silence either."""
+    import logging
+
+    from squidmip._flatfield import FlatfieldProfile, clear_profile, set_profile
+    from squidmip._stitch import _selected_profiles
+
+    clear_profile()
+    ff = np.ones((TILE, TILE), dtype=np.float32)
+    set_profile(FlatfieldProfile(ff), channel=CHANNELS[0])
+    try:
+        with caplog.at_level(logging.WARNING, logger="squidmip"):
+            picked = _selected_profiles(CHANNELS)
+    finally:
+        clear_profile()
+    assert picked is None, (
+        f"a selection covering {1} of {len(CHANNELS)} channels was used for all of them: {picked}")
+    text = caplog.text
+    assert CHANNELS[0] in text and CHANNELS[1] in text, (
+        f"the partial selection was dropped without naming the channels: {text!r}")
 
 
 def test_the_flatfield_stage_says_what_it_is_doing_before_it_does_it(master, monkeypatch, caplog):

@@ -45,13 +45,38 @@ Prior art: reused, not reimplemented
   darkfield BEFORE the multiplicative divide, which is the order the physics has
   (``(raw - dark) / gain``) and the order that leaves no residual gradient.
 
-The one seam limitation, stated loud
-------------------------------------
-A plane-op's callable shape is ``Iterable[plane] -> plane``: it never sees which CHANNEL the
-plane came from. Illumination profiles are per-channel in reality (and ``tilefusion`` stores
-them as ``(C, Y, X)``), so :meth:`FlatfieldProfile.from_npy` takes an explicit ``channel=``
-index and the active profile applies to every channel of a run. Per-channel dispatch needs the
-operator signature to carry channel identity, which is an IMA-210 change, not this ticket.
+PER-CHANNEL, through ``for_channel`` (2026-08-06)
+-------------------------------------------------
+This section used to say the opposite — that a plane-op's ``Iterable[plane] -> plane`` shape
+"never sees which CHANNEL the plane came from", so one profile applied to every channel of a
+run and per-channel dispatch was somebody else's ticket. That stopped being true when ``decon``
+hit the identical defect (all four channels deconvolved with the 488 line's PSF) and was fixed
+with a THIRD declaration on the callable: ``for_channel(acquisition_path, channel) -> operator``,
+read by :func:`squidmip.projection.bind_channel` and called by ``project_well`` ONCE PER CHANNEL
+before the (t, z) loops. Flat-field was left behind on those rails for a day, and the comment
+promising a limitation the seam no longer had is what hid it.
+
+What it cost, measured on ``test_10x_laser_af_z_stack_2025-10-28_13-40-43.939945 yy`` (whose own
+stored ``…_flatfield.npy`` is ``(4, 2084, 2084)`` with four genuinely different fields: c0
+0.974–1.020, c1 0.645–1.102, c3 0.840–1.096) — one profile from ``from_npy(path)`` versus each
+channel's own, region ``manual0`` fov 0 at the middle z::
+
+                              WRONG(one profile)   RIGHT(per channel)   differing   mean|d|   max
+    Fluorescence_405_nm_Ex        799.76               799.76             0.000%      0.00      0
+    Fluorescence_488_nm_Ex       3128.63              3120.88            99.792%    155.68   1799
+    Fluorescence_561_nm_Ex        792.53               792.54            88.684%      2.89     20
+    Fluorescence_638_nm_Ex       2118.68              2129.37            99.578%     67.32   1307
+
+405 is channel 0 of that file, so the channel anyone looks at first was bit-identical and the
+three that were wrong were wrong by up to 1799 counts, silently.
+
+So the active profile is a MAP KEYED BY CHANNEL NAME (:func:`set_profiles`,
+:func:`active_profiles`), :func:`set_profile` REQUIRES the channel it was measured from — a gain
+field with no channel attached is the defect above, made unsayable — and the registered operator
+carries ``for_channel``, which hands back that channel's profile or refuses BY NAME, listing the
+channels that do have one. The ``.npy`` is still ``(C, Y, X)``; :meth:`FlatfieldProfile.from_npy`
+still takes a ``channel=`` INDEX into it, and :meth:`FlatfieldProfile.per_channel_from_npy` is
+the one place that maps channel NAMES onto those planes.
 """
 
 from __future__ import annotations
@@ -114,8 +139,9 @@ class FlatfieldProfile:
         dict with ``(C, Y, X)`` ``flatfield``/``darkfield``). Reused verbatim — including its
         numpy-1.x pickle compatibility shim, which real Squid-era profiles need.
 
-        *channel* selects the plane of a multi-channel profile; see the module docstring's note
-        on why the plane-op seam cannot pick it automatically.
+        *channel* is an INDEX into the file's ``(C, Y, X)`` stack, not a channel name — the
+        ``.npy`` carries no names. :meth:`per_channel_from_npy` is what turns an acquisition's
+        channel names into those indices, and it is the only place that mapping is written.
         """
         from tilefusion.flatfield import load_flatfield   # lazy: heavy package __init__
 
@@ -132,6 +158,24 @@ class FlatfieldProfile:
         if abs(mean) > _MIN_GAIN:
             ff = ff / mean          # tolerate a profile stored un-normalised; never silently scale
         return cls(ff, None if df is None else np.asarray(df, dtype=np.float32))
+
+    @classmethod
+    def per_channel_from_npy(cls, path, names: Iterable[str]) -> dict[str, "FlatfieldProfile"]:
+        """``{channel_name: profile}`` for *names*, in order, from one ``(C, Y, X)`` ``.npy``.
+
+        THE ONE PLACE a channel NAME becomes a plane INDEX of the stored profile. It was written
+        out longhand in ``_stitch.resolve_flatfield`` and nowhere else, so every other route to a
+        stored profile — the GUI's "Load illumination profile", which is the one a user clicks —
+        took plane 0 for all four channels and corrected 488, 561 and 638 with the 405 field.
+        The mapping is positional because the file has no names in it: ``tilefusion``'s
+        ``save_flatfield`` writes the acquisition's channels in the acquisition's own order, and
+        both tools read ``reader.metadata["channels"]`` in that same order.
+
+        A single-channel (``(Y, X)``) file gives every name the same field: there is one
+        measurement in it and no per-channel claim to get wrong.
+        """
+        names = [str(n) for n in names]
+        return {n: cls.from_npy(path, channel=i) for i, n in enumerate(names)}
 
     def to_npy(self, path) -> None:
         """Write this profile in the stitcher's format, so the two tools read each other's files."""
@@ -255,7 +299,7 @@ def flatfield_op(profile: FlatfieldProfile) -> Callable[[Iterable[np.ndarray]], 
 CORRECTS_ILLUMINATION = "corrects_illumination"
 
 
-# --- the ACTIVE profile, for the registry entry ------------------------------------------------
+# --- the ACTIVE profiles, ONE PER CHANNEL, for the registry entry -------------------------------
 #
 # STILL TRUE, BUT NO LONGER FORCED (2026-08-03). A registry entry can now declare its own
 # ``params`` and be run with them (``_engine.Param`` / ``Operator.bind``), so "selected by name,
@@ -266,63 +310,164 @@ CORRECTS_ILLUMINATION = "corrects_illumination"
 # declared parameter is what deletes them, and it is deliberately NOT done here: it changes how the
 # GUI's auto-estimate worker hands its result to a run, which is a separate change.
 #
-# WHO READS IT (2026-08-04). No longer only the plane-op below. ``_stitch._selected_profiles``
+# WHAT CHANGED (2026-08-06): it is a MAP, ``{channel name: profile}``, and there is no way left to
+# install a gain field without saying which channel measured it. It was ONE ``FlatfieldProfile``,
+# and every consumer of it therefore corrected every channel with one channel's field — 99.8% of
+# pixels wrong by up to 1799 counts on the 10x set (the table in the module docstring), and
+# ``_stitch._selected_profiles`` broadcast the same single field over the stitcher's per-channel
+# dict while the file on disk held four different ones. A dict cannot express that mistake.
+#
+# WHO READS IT (2026-08-04, still true). Not only the operator below: ``_stitch._selected_profiles``
 # reads it too, so a profile chosen in the GUI's flat-field tab is also the one STITCHING corrects
 # by — it used to have zero effect there, because ``resolve_flatfield`` went straight to the
-# ``.npy`` and estimated its own. This global is now the single owner of "the profile the user
-# chose"; the per-call ``stitch_region(flatfield=...)`` argument still outranks it. Keep it that
-# way: a second place that remembers a chosen profile is the defect that was just removed.
+# ``.npy`` and estimated its own. This global is the single owner of "the profiles the user chose";
+# the per-call ``stitch_region(flatfield=...)`` argument still outranks it. Keep it that way: a
+# second place that remembers a chosen profile is the defect that was removed then.
 #
-# The registered ``flatfield`` operator is selected by NAME (``project_plate(projector=...)``),
-# so it cannot take a profile argument — and unlike decon's sigma or bgsub's radius, a flat-field
-# has no sane default: an identity field would silently do nothing while the UI said "flat-field
-# applied". So the profile is set once (from a file or an estimate) and the named operator reads
-# it, failing LOUD and actionable when it is unset. Guarded by a lock because ``project_plate``
-# runs the operator on a thread pool.
+# The registered ``flatfield`` operator is selected by NAME (``project_plate(projector=...)``), so
+# it cannot take a profile argument — and unlike decon's sigma or bgsub's radius, a flat-field has
+# no sane default: an identity field would silently do nothing while the UI said "flat-field
+# applied". So the profiles are set once (from a file or an estimate), the named operator's
+# ``for_channel`` picks THIS channel's out of the map, and anything it cannot answer fails LOUD and
+# actionable. Guarded by a lock because ``project_plate`` runs the operator on a thread pool.
 _lock = threading.Lock()
-_active: Optional[FlatfieldProfile] = None
+_active: dict[str, FlatfieldProfile] = {}
 
 
-def set_profile(profile: FlatfieldProfile) -> None:
-    """Install the profile the registered ``flatfield`` operator will use."""
-    global _active
+def set_profile(profile: FlatfieldProfile, *, channel: str) -> None:
+    """Install *profile* as the gain field for ONE *channel*, by name.
+
+    ``channel`` is keyword-only and REQUIRED. Installing a gain field without saying which
+    channel measured it is exactly how every channel came to be corrected by channel 0's field;
+    the argument makes that unsayable rather than merely discouraged.
+    """
     if not isinstance(profile, FlatfieldProfile):
         raise ValueError(f"set_profile needs a FlatfieldProfile, got {type(profile).__name__}")
+    if not isinstance(channel, str) or not channel:
+        raise ValueError(
+            f"set_profile needs the CHANNEL NAME the profile was measured from, got {channel!r}. "
+            "An illumination profile belongs to one channel of one optical path; applying it to "
+            "the others is a different measurement, not a degraded one."
+        )
     with _lock:
-        _active = profile
+        _active[channel] = profile
 
 
-def active_profile() -> Optional[FlatfieldProfile]:
-    """The installed profile, or ``None``."""
+def set_profiles(mapping: dict) -> None:
+    """Install a whole ``{channel name: profile}`` map, REPLACING what was installed.
+
+    The normal case: a stored ``.npy`` holds one field per channel
+    (``FlatfieldProfile.per_channel_from_npy``), and installing them one at a time would leave a
+    half-installed map visible to a run that started in between.
+    """
+    clean = {}
+    for channel, profile in dict(mapping).items():
+        if not isinstance(profile, FlatfieldProfile):
+            raise ValueError(f"set_profiles needs FlatfieldProfile values; channel {channel!r} "
+                             f"got {type(profile).__name__}")
+        if not isinstance(channel, str) or not channel:
+            raise ValueError(f"set_profiles needs channel NAMES as keys; got {channel!r}")
+        clean[channel] = profile
     with _lock:
-        return _active
+        _active.clear()
+        _active.update(clean)
+
+
+def active_profiles() -> dict:
+    """A copy of the installed ``{channel name: profile}`` map; ``{}`` when nothing is installed.
+
+    A copy, and no singular ``active_profile()`` beside it: the one-value query is what every
+    caller collapsed the four fields through.
+    """
+    with _lock:
+        return dict(_active)
 
 
 def clear_profile() -> None:
-    """Uninstall the profile (the named operator goes back to failing loud)."""
-    global _active
+    """Uninstall every channel's profile (the named operator goes back to failing loud)."""
     with _lock:
-        _active = None
+        _active.clear()
+
+
+def _profile_for(channel: str) -> FlatfieldProfile:
+    """THIS channel's installed profile, or a refusal that names the channel and what is installed.
+
+    The refusal is the whole point of the per-channel map: a channel with no measured field must
+    stop the run, not borrow another channel's. Two distinguishable messages, because the fixes
+    differ — nothing installed at all is "load or estimate one"; something installed for other
+    channels is "that file/estimate does not cover this one".
+    """
+    profiles = active_profiles()
+    if not profiles:
+        raise ValueError(
+            f"no flat-field profile is loaded, so 'flatfield' has nothing to apply to channel "
+            f"{channel!r}. Load an acquisition's stored profile with "
+            "squidmip._flatfield.set_profiles(FlatfieldProfile.per_channel_from_npy(path, names)) "
+            "or estimate one from tiles with estimate_profile(planes) and install it with "
+            "set_profile(profile, channel=...). (A flat-field has no meaningful default: an "
+            "identity field would silently do nothing.)"
+        )
+    if channel not in profiles:
+        raise ValueError(
+            f"no flat-field profile is installed for channel {channel!r}; the installed "
+            f"profile(s) are for {sorted(profiles)}. Refusing to correct {channel!r} with another "
+            "channel's gain field — that is a different measurement, not a degraded one. Install "
+            f"one with set_profile(profile, channel={channel!r}), or load the acquisition's "
+            "stored per-channel profile with set_profiles(per_channel_from_npy(path, names))."
+        )
+    return profiles[channel]
 
 
 def _correct_with_active(plane: np.ndarray) -> np.ndarray:
-    profile = active_profile()
-    if profile is None:
+    """The UNBOUND path: the operator run without ``bind_channel`` ever telling it a channel.
+
+    ``project_well`` binds every channel before its (t, z) loops, so nothing in the engine, the
+    GUI or the stitcher reaches this — it is what a direct ``_resolve_operator('flatfield').fn(…)``
+    call gets, which is how the registry conformance suite runs every operator over one plane.
+
+    With NOTHING installed it refuses, as it always did. With SEVERAL channels installed it
+    refuses too, naming them: picking one of four measured fields for a plane whose channel was
+    never stated is the defect this module was rebuilt to make unsayable. With exactly ONE
+    installed it applies it, because then there is no choice being made — one profile is the whole
+    of what the caller installed, and refusing it would only mean no caller could run the operator
+    without going through the engine.
+    """
+    profiles = active_profiles()
+    if len(profiles) == 1:
+        return correct_flatfield(plane, next(iter(profiles.values())))
+    if not profiles:
         raise ValueError(
-            "no flat-field profile is loaded, so 'flatfield' has nothing to apply. Load one "
-            "with squidmip._flatfield.set_profile(FlatfieldProfile.from_npy(path)) or estimate "
-            "one from tiles with estimate_profile(planes). (A flat-field has no meaningful "
-            "default: an identity field would silently do nothing.)"
+            "no flat-field profile is loaded, so 'flatfield' has nothing to apply. Load an "
+            "acquisition's stored profile with squidmip._flatfield.set_profiles("
+            "FlatfieldProfile.per_channel_from_npy(path, names)) or estimate one from tiles with "
+            "estimate_profile(planes) and install it with set_profile(profile, channel=...). "
+            "(A flat-field has no meaningful default: an identity field would silently do "
+            "nothing.)"
         )
-    return correct_flatfield(plane, profile)
+    raise ValueError(
+        f"'flatfield' was handed a plane without being told which channel it is, and profiles "
+        f"for {sorted(profiles)} are installed. Refusing to pick one of them: correcting a "
+        "channel with another channel's gain field is a different measurement, not a degraded "
+        "one. Run it through project_well/project_plate (which specialises the operator per "
+        "channel via for_channel), or call flatfield_op(profile) with the profile you mean."
+    )
 
 
 LAYER_KEY: str = "flatfield"
 LAYER_LABEL: str = "flat-field correction"
 
-# The whole registration. No engine edit — the IMA-210 seam working as designed.
+# The whole registration. No engine edit — the IMA-210 seam working as designed, and the
+# per-channel profile rides the same rails ``decon``'s per-channel PSF does: a declaration on the
+# callable (``for_channel``), read by ``projection.bind_channel``, called by ``project_well`` once
+# per channel before the (t, z) loops. Nothing branches on the string "flatfield" to get here.
 _ACTIVE_OP = plane_op(_correct_with_active)
 _ACTIVE_OP.corrects_illumination = True    # see CORRECTS_ILLUMINATION above
+# The specialised operator comes from ``flatfield_op``, which stamps ``corrects_illumination``
+# itself — so the double-apply guard in ``_stitch.stitch_region`` still sees a corrected-pixels
+# declaration after binding, which is when it actually matters. The acquisition path is unused:
+# unlike an emission wavelength, a gain field cannot be derived from metadata; it is measured, and
+# what is installed is what there is.
+_ACTIVE_OP.for_channel = lambda path, channel: flatfield_op(_profile_for(str(channel)))
 # `requires=("tilefusion",)` states what every route to a profile actually imports: `from_npy`
 # loads one through `tilefusion.flatfield.load_flatfield` and `estimate_profile` derives one
 # through `estimate_flatfield_channel`. tilefusion is not in [project.dependencies], so on a stock
