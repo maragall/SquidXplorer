@@ -176,9 +176,17 @@ def measure(root: Path, fps_list, seconds: float, blocking: bool) -> int:
 
     print()
     print(f"{'req fps':>8} {'steps':>6} {'drop':>5} {'queued':>7} {'interval ms':>22} "
-          f"{'achieved fps':>13} {'UI p95/worst ms':>17}")
+          f"{'achieved fps':>13} {'UI p95/worst ms':>17}  note")
     rss0 = _rss_mb()
     for fps in fps_list:
+        # THE WINDOW MUST BE ACTIVE OR IT STOPS ITSELF. `RegionViewer.set_active(False)` halts
+        # playback when the window is not the one the user is touching (Spencer's memory brief),
+        # so a measurement run that quietly lost focus reads as "playback degraded" when it is
+        # the halt working exactly as designed. Take focus back, and say so in the row when it
+        # was lost anyway.
+        win.raise_()
+        win.activateWindow()
+        app.processEvents()
         requested.clear()
         stepped.clear()
         landed.clear()
@@ -186,6 +194,7 @@ def measure(root: Path, fps_list, seconds: float, blocking: bool) -> int:
         watch.start()
         bar.play(fps=fps)
         _pump(app, seconds)
+        still_playing = bar.is_playing
         bar.stop()
         _pump(app, 0.3)
         watch.stop()
@@ -195,8 +204,9 @@ def measure(root: Path, fps_list, seconds: float, blocking: bool) -> int:
         interval = (f"{statistics.median(gaps) * 1e3:7.0f} med  {min(gaps) * 1e3:5.0f}-"
                     f"{max(gaps) * 1e3:5.0f}" if gaps else "        (none landed)")
         achieved = f"{1.0 / statistics.median(gaps):12.2f}" if gaps else "           -"
+        note = "" if still_playing else "  window lost focus: playback halted itself"
         print(f"{fps:>8} {n_step:>6} {max(0, n_req - n_step):>5} {inflight['queued']:>7} "
-              f"{interval:>22} {achieved} {watch.p95_ms:>8.0f} /{watch.worst_ms:>7.0f}")
+              f"{interval:>22} {achieved} {watch.p95_ms:>8.0f} /{watch.worst_ms:>7.0f}{note}")
 
     # MEMORY OVER A FULL LOOP, SAMPLED. A single before/after pair cannot tell a cache filling to
     # its bound from a leak; a trace can, because a bounded cache PLATEAUS and a leak does not.
