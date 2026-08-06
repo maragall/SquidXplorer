@@ -53,6 +53,10 @@ def test_available_projectors_exact_list():
         "decon",
         "decon3d",
         "flatfield",
+        # The identity plane-op (2026-08-06). It is the ONLY way to say "keep every z plane and
+        # change no pixel", which is what makes `stitch_region(projector="keepz")` fuse a volume
+        # rather than one collapsed plane -- see `_engine._OPERATORS`.
+        "keepz",
         "mip",
         "reference",
         "spot",

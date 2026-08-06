@@ -2900,6 +2900,34 @@ class PlateWindow(QMainWindow):
             log.debug("window layer %r has no plate layer to follow (plate has %s)",
                       layer_key, [ly.key for ly in self._op_stack.layers()])
             return
+        # A REGION OPERATOR'S LAYER IS REFUSED HERE, BY DECLARATION, NOT SHOWN AS BLACK.
+        #
+        # Having a layer in `_op_stack` and the PLATE having its pixels are two different facts,
+        # and this followed the first while rendering the second. A region operator
+        # (`consumes={"fov"}` -- stitch) hands back ONE fused mosaic per well, delivered to the
+        # window that asked; there are no per-FOV tiles, so nothing is ever pushed into
+        # `PlateOverview._store` and nothing ever will be. Switching `_active` onto it left the
+        # plate rendering an empty canvas -- Julio, 2026-08-06: *"Right now, I can see all my
+        # windows showing tissue, yet my plate view shows black."*
+        #
+        # THE DECLARATION, not `has_pixels`. "No pixels yet" and "no pixels ever" are different
+        # answers and only the second is a reason to refuse: a projector's tiles stream in over
+        # the course of a run, so a has-them-right-now test would refuse the plate its own layer
+        # for as long as the first well took, and then leave it refused if the user toggled during
+        # that window. `is_region_operator` asks the registry the question that is actually being
+        # asked, and never compares a name (`tests/test_operator_declaration.py` fails the build
+        # on one).
+        #
+        # Only the SWITCH-ON is refused. Turning a layer off must always be honoured, or a plate
+        # left on a layer could never be brought back to raw.
+        from squidmip import is_region_operator
+        from squidmip._operations import operator_name
+
+        if on and is_region_operator(operator_name(layer_key)):
+            log.debug("plate stays on %r: %r is a region operator, so its result is one fused "
+                      "mosaic delivered to the window that asked and the plate has no per-well "
+                      "tiles for it", self._overview._active, layer_key)
+            return
         self._op_stack.toggle(layer_key, on)
         self._apply_layers()             # -> set_active_layer + title + loupe source
         self._refresh_layers_tab()       # the tab's checkboxes must not lie about the stack

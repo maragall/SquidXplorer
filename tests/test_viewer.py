@@ -274,21 +274,37 @@ def test_channel_toggle_removes_only_that_channel(qapp):
     np.testing.assert_array_equal(_rgb(ov), both)
 
 
-def test_all_channels_off_is_black_and_does_not_crash(qapp):
+def test_the_last_lit_channel_cannot_be_turned_off(qapp):
+    """The plate NEVER goes black. Julio, 2026-08-06: *"I can't afford the plate being black...
+    There should be at least one channel turned on in my plate view."*
+
+    This file used to assert the opposite -- that masking every channel produced an all-zero
+    composite -- and it was an honest description of a mask that was purely mechanical. What it
+    could not see is that the plate has NO CONTROLS OF ITS OWN: it is a pure sink of whichever
+    window the user last gestured in, so a user who switches every channel off in a window empties
+    the plate and has nowhere to fill it back in from. A sink that can be driven into a state it
+    cannot be driven out of is a trap, and a black grid tells you nothing about which wells hold
+    tissue -- which is the plate's whole job.
+
+    Every other toggle still lands: only the LAST lit one is refused.
+    """
     ov = _overview(qapp)
     ov.add_tile(0, 0, "A1", _tile([1000, 1000]))
-    for ch in (0, 1):
-        ov.set_channel_visible(ch, False)
-    assert _rgb(ov).sum() == 0
+    ov.set_channel_visible(0, False)
+    assert list(ov._mask) == [False, True], "the first toggle must land"
+    ov.set_channel_visible(1, False)
+    assert list(ov._mask) == [False, True], "the last lit channel must survive"
+    assert _rgb(ov).sum() > 0, "the plate must still be showing something"
 
 
-def test_single_channel_acquisition_toggles_to_black(qapp):
-    # C=1: turning the only channel off is allowed (a mask, not an exclusive swap) and is black.
+def test_a_single_channel_acquisition_stays_lit(qapp):
+    """C=1: the only channel IS the last lit one, so the floor holds there too -- and this is the
+    acquisition where the old behaviour was most costly, since one click emptied the whole plate."""
     ov = _overview(qapp, n_ch=1)
     ov.add_tile(0, 0, "A1", _tile([1000]))
     assert _rgb(ov).max() > 0
     ov.set_channel_visible(0, False)
-    assert _rgb(ov).sum() == 0
+    assert _rgb(ov).max() > 0
 
 
 def test_rewindow_repaints_without_touching_the_store(qapp):
@@ -4973,6 +4989,11 @@ CLI_ONLY_OPERATORS = {
     "coordinate": "the unregistered CONTROL for `stitch` (stage coordinates, no registration). "
                   "It exists to be the baseline a stitch is graded against in the benchmark, "
                   "not to be offered as a thing to run.",
+    "keepz": "the IDENTITY plane-op: every z plane, no pixel changed. There is nothing to run it "
+             "FOR on its own -- projecting an acquisition to itself writes a copy of the input. "
+             "It exists so that `stitch_region(projector=\'keepz\')` can fuse a VOLUME instead "
+             "of one collapsed plane, and it is offered exactly there: the stitcher panel's "
+             "Z-handling combo, which is built from `available_projectors()`.",
 }
 
 
@@ -5711,20 +5732,32 @@ def test_the_selection_frame_stroke_is_clamped_at_both_ends(qapp):
     assert V.selection_frame_pen_px(200.0) == 3.0        # ceiling
 
 
-def test_the_red_current_fov_box_still_outranks_the_blue_selection_frame(qapp):
-    """Two boxes now share the boundary. ``_sel`` (red, the well the detail viewer is showing) is
-    painted last and must stay on top: it is the transient 'you are here', and it was already a
-    box, so it is the one indication the bounding-box change must not have swallowed."""
+def test_the_red_current_fov_box_is_gone(qapp):
+    """The red current-well box is NOT drawn any more. Julio, 2026-08-06: *"the red frambox from
+    the old code should be out."*
+
+    It dates from the single-detail-viewer era, when exactly one well was "the one being looked
+    at". Viewing decentralized into independent `RegionViewer` windows on 2026-07-23, so there are
+    now N wells being looked at, and the per-view HUE FRAMES are what says which is which -- in
+    each window's own colour, which one red box cannot do. Two marks for one fact, one of them
+    unable to express it.
+
+    `_sel` and `select()` survive as the model and are deliberately still exercised here: what was
+    deleted is a second drawing of them, not the state. So `_sel` is SET, and the cell it names
+    must carry no red ink -- the box, if it were still painted, is painted last and over
+    everything, so its absence there is unambiguous.
+
+    The blue selection frame is present on the same cell throughout, which is the point: the mark
+    that survived is the one that can tell views apart.
+    """
     ov = _fitted_plate(32, 48)
     rc = (5, 5)
     ov.highlight_regions([ov._by_rc[rc]])
-    blue = _grab_rgb(ov).copy()
     ov._sel = rc
     ov.update()
-    red = _grab_rgb(ov)
 
-    assert _carries_ink(red, _cell(ov, rc), V._RED), "the red current-FOV box was covered"
-    assert not np.array_equal(blue, red)
+    assert not _carries_ink(_grab_rgb(ov), _cell(ov, rc), V._RED), (
+        "the red current-well box is still drawn")
 
 
 def test_the_1536_fixture_opens_and_reports_1536_wells(sim_1536wp):

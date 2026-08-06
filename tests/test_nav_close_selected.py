@@ -103,9 +103,18 @@ def _nav(*wins):
 
 
 def _close_button(nav) -> QPushButton:
-    """The button as the USER finds it: by its face, not by a private attribute."""
-    found = [b for b in nav.findChildren(QPushButton) if b.text().startswith("Close")]
-    assert len(found) == 1, f"expected one Close button, found {[b.text() for b in found]}"
+    """The SELECTION close button as the USER finds it: by its face, not by a private attribute.
+
+    Matched on the exact label rather than on the "Close" prefix. The navigator gained a second
+    close control on 2026-08-06 -- "Close all", which ignores the selection entirely (Julio:
+    *"There should be a 'close all' button in the navigator"*) -- and a prefix match then made
+    every test in this file assert about whichever of the two Qt happened to return first. These
+    tests are ALL about the selection button, so they have to name it.
+    """
+    found = [b for b in nav.findChildren(QPushButton) if b.text() == "Close selected views"]
+    assert len(found) == 1, (
+        f"expected one 'Close selected views' button, found "
+        f"{[b.text() for b in nav.findChildren(QPushButton)]}")
     return found[0]
 
 

@@ -420,19 +420,45 @@ class StitcherPanel(_Panel):
         # Two representations of one truth, which is this project's dominant defect shape. The
         # run selector is the owner because it is the one that reads the selection LIVE.
 
-        # -- what to reduce z with before fusing ---------------------------------------
-        self.v.addWidget(_head("Z REDUCTION"))
+        # -- what happens to z before fusing -------------------------------------------
+        #
+        # "Z HANDLING", not "Z REDUCTION". `stitch_region` has fused PER PLANE since IMA-277 --
+        # the pose graph is solved once and every plane is fused from those same origins -- so
+        # reduction is one of the two things that can happen here, not the only one.
+        self.v.addWidget(_head("Z HANDLING"))
+        self._n_z = int(((getattr(host, "_meta", None) or {}).get("n_z")) or 1)
         self.projector_combo = QComboBox()
         from squidmip import available_projectors
 
         for name in sorted(available_projectors()):
             self.projector_combo.addItem(name)
-        self.projector_combo.setCurrentText("mip")
+        # ALL OF Z when the acquisition HAS z. Julio, 2026-08-06: *"stitcher is running on only
+        # one z-level when I do it in 3D"* -- correct, and it was the default doing it: `mip`
+        # declares `consumes={"z"}`, so the fused result is one plane and there is no volume left
+        # for 3D to render. A viewer whose 3D path exists cannot default to throwing z away on a
+        # z-stack. A single-plane acquisition keeps `mip`, where the two are the same picture and
+        # `mip` is the name everything else already says.
+        self.projector_combo.setCurrentText("keepz" if self._n_z > 1 else "mip")
         self.projector_combo.setToolTip(
-            "Each FOV's z-stack is reduced to one plane before registration. Only a "
-            "z-REDUCER can be stitched; a plane-op is refused with a reason.")
+            "What each FOV's z-stack becomes before registration.\n\n"
+            "A z-REDUCER (mip, reference) collapses it to one plane, so the well fuses to one "
+            "image. A PLANE-OP (keepz, bgsub, decon, flatfield) keeps every plane, and the well "
+            "fuses to a volume: the pose graph is solved ONCE and every plane is fused from those "
+            "same origins, so the planes cannot drift apart.\n\n"
+            "keepz is the identity — every plane, no pixel changed.")
         self.projector_combo.currentTextChanged.connect(self._check_projector)
-        self.v.addLayout(_row(QLabel("Reduce z with:"), self.projector_combo))
+        self.v.addLayout(_row(QLabel("Z handling:"), self.projector_combo))
+
+        # THE Z-PLANE COUNT, ON SCREEN, BEFORE THE RUN. Julio: *"there should be an indicator of
+        # how many z-levels are stitching, so that they know we're running maragall/stitcher on
+        # each z-level independently."* The number is not derivable by looking at this panel --
+        # it comes from the chosen operator's `consumes` declaration crossed with the
+        # acquisition's own n_z -- and it is the single fact that decides whether the result can
+        # be opened in 3D at all. Updated by `_check_projector`, which every change routes
+        # through, so it cannot fall out of step with the combo.
+        self.z_note = QLabel("")
+        self.z_note.setWordWrap(True)
+        self.v.addWidget(self.z_note)
 
         # -- registration --------------------------------------------------------------
         self.v.addWidget(_head("REGISTRATION"))
@@ -581,6 +607,34 @@ class StitcherPanel(_Panel):
         why = stitch_refusal(name)
         self.run_btn.setEnabled(why is None)
         self.say("" if why is None else why)
+        self.z_note.setText(self._z_line(name))
+
+    def _z_line(self, name: str) -> str:
+        """How many z-levels this run will stitch, read off the operator's own declaration.
+
+        `consumes` is the whole answer -- a Z_REDUCER fuses one plane whatever the acquisition
+        holds, a plane-op fuses `n_z` of them -- so this is a READ of the declaration, never a
+        name comparison (`tests/test_operator_declaration.py` fails the build on one).
+
+        The sentence names maragall/stitcher on purpose: the per-plane loop is the thing a user
+        cannot see and would otherwise have to trust. It is one solve and `n_z` fusions, not `n_z`
+        independent solves, and saying so is what stops "independently" being read as "the planes
+        may drift apart".
+        """
+        from squidmip._engine import Z_REDUCER, operator_consumes
+
+        try:
+            reduces = bool(operator_consumes(name) & Z_REDUCER)
+        except Exception as exc:                      # noqa: BLE001 - an unknown name, SAID
+            return f"cannot say how many z-levels {name!r} would stitch: {exc}"
+        if reduces:
+            return (f"z: {self._n_z} acquired plane(s) → 1 fused plane. {name!r} collapses z, so "
+                    f"the result is flat and cannot be opened in 3D.")
+        if self._n_z <= 1:
+            return "z: this acquisition has 1 plane, so there is one plane to fuse."
+        return (f"z: all {self._n_z} planes. maragall/stitcher runs on each z-level "
+                f"independently — the pose graph is solved ONCE and every plane is fused from "
+                f"those same origins, so the planes cannot drift apart. Renderable in 3D.")
 
     def kwargs(self) -> dict:
         """The panel's settings as ``stitch_region`` keyword arguments."""

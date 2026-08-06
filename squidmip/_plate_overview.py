@@ -1807,10 +1807,27 @@ class PlateOverview(QWidget):
 
     def set_channel_visible(self, ch: int, on: bool):
         """Toggle a channel in/out of the plate composite. Recomposites from the RETAINED store —
-        no reader I/O, no re-projection (that is the whole point of keeping the channel axis)."""
+        no reader I/O, no re-projection (that is the whole point of keeping the channel axis).
+
+        THE LAST CHANNEL CANNOT BE TURNED OFF. Julio, 2026-08-06: *"I can't afford the plate being
+        black... There should be at least one channel turned on in my plate view."*
+
+        This is a floor, not a preference. The plate is a NAVIGATOR: it is how you find the well
+        you want, and a plate with every channel masked off is a black grid that says nothing about
+        which wells hold tissue. It is also the one surface with no controls of its own (it is a
+        pure sink of whatever window the user last gestured in), so a user who empties it by
+        switching channels in a window has no way to fill it back in from the plate itself. A sink
+        that can be driven into a state it cannot be driven out of is a trap; refusing the last
+        one keeps the navigator legible while every other toggle still lands.
+        """
         if self._mask is None or not (0 <= ch < len(self._mask)):
             return
-        self._mask[ch] = bool(on)
+        on = bool(on)
+        if not on and not any(bool(v) for i, v in enumerate(self._mask) if i != ch):
+            log.debug("plate: keeping channel %d on — it is the last one lit, and a plate with "
+                      "no channels is a black navigator", ch)
+            return
+        self._mask[ch] = on
         self._refresh()
 
     def set_channel_window(self, ch: int, lo: float, hi: float):
@@ -2776,13 +2793,28 @@ class PlateOverview(QWidget):
                 # else: has an image on the active layer -> no dot
         p.setBrush(Qt.NoBrush)
 
-        if self._view_hues:           # PER-VIEW HUES (under the focus wash): each open window/thread
-            p.setPen(Qt.NoPen)         # tints its wells in its own colour, so views are told apart.
+        if self._view_hues:
+            # PER-VIEW MARKS: each open window's wells get a FRAME in that window's own hue.
+            #
+            # A frame, never a wash. Julio, 2026-08-06: *"there shouldn't be translucent highlights
+            # of the selected windows in the plate. They should be colored frame-boxes."* Same
+            # argument the SELECTION frame already won below: a translucent fill is drawn OVER the
+            # well's own pixels, so it changes the colour of the tissue the user is reading. On a
+            # plate whose whole job is "which wells have signal", a mark that tints the signal is
+            # a mark that lies. The boundary carries the same information and touches none of it.
+            #
+            # Opaque at full alpha for the same reason -- `_view_hue` hands back a wash-alpha
+            # colour, which as a 3 px stroke is nearly invisible against the grid.
+            w = selection_frame_pen_px(cd)
             for rcs, color in self._view_hues:
-                p.setBrush(color)
+                pen_colour = QColor(color)
+                pen_colour.setAlpha(255)
+                p.setPen(QPen(pen_colour, w))
+                p.setBrush(Qt.NoBrush)
                 for ri, ci in rcs:
                     rx, ry, rw, rh = self._cell_rect(ri, ci)
-                    p.drawRect(int(rx), int(ry), int(rw), int(rh))
+                    p.drawRect(QRectF(rx + w / 2, ry + w / 2,
+                                      max(rw - w, 1.0), max(rh - w, 1.0)))
             p.setBrush(Qt.NoBrush)
 
         if self._selection and not frames_for_grid(nr, nc):
@@ -2864,11 +2896,15 @@ class PlateOverview(QWidget):
                     if r is not None:
                         p.drawRect(QRectF(*r))
             p.setBrush(Qt.NoBrush)
-        if self._sel is not None:          # the CURRENT well in the detail viewer = a red BOX
-            p.setPen(QPen(_RED, 2))
-            p.setBrush(Qt.NoBrush)
-            sx, sy, sw, sh = self._cell_rect(*self._sel)
-            p.drawRect(int(sx), int(sy), int(sw), int(sh))
+        # THE RED CURRENT-WELL BOX IS GONE (2026-08-06). Julio: *"the red frambox from the old code
+        # should be out."* It dates from the single-detail-viewer era, when exactly one well was
+        # "the one being looked at" and a red box was the honest name for it. Viewing decentralized
+        # into independent `RegionViewer` windows on 2026-07-23, so there are now N wells being
+        # looked at and the per-view hue frames above are what says which is which -- in each
+        # window's OWN colour, which the one red box cannot do. Two marks for one fact, one of them
+        # unable to express it, is the duplicate-indication defect this file has removed twice
+        # before. `self._sel` and `select()` stay: they are the model, and the FOV slider still
+        # moves them; what is deleted is a second, colour-blind drawing of it.
         if self._hover is not None:        # where the cursor is, moving around the plate = a red DOT
             ri, ci = self._hover           # SAME geometry as the status dots -> overlays them exactly
             x0, y0, hw, hh = self._cell_rect(ri, ci)

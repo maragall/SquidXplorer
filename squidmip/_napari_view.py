@@ -1089,8 +1089,12 @@ class MosaicLayers:
 
         # Everything here is OUR write, not the user's. Subscribers must be able to tell the
         # difference or the plate latches manual on open and kills per-region contrast.
+        # The pane's dimensionality BEFORE this layer lands. A layer that introduces an axis the
+        # pane did not have has to say where that axis should be parked -- see `_park_new_axes`.
+        ndim_before = int(getattr(getattr(self._model, "dims", None), "ndim", 0) or 0)
         with self.programmatic():
             layer = self._model.add_image(data, **kwargs)
+            self._park_new_axes(ndim_before)
 
             # The slider must span the DTYPE, not the window we seeded. napari sizes
             # contrast_limits_range from the data it sampled, so a tight seed leaves the user
@@ -1138,6 +1142,58 @@ class MosaicLayers:
         # result arriving lit is exactly the moment raw's slider stops describing the picture.
         self._present_z_axis()
         return layer
+
+    def _park_new_axes(self, ndim_before: int) -> None:
+        """Park an axis this pane did not have until now on its OPENING plane, not on index 0.
+
+        napari CENTRES a dimension slider when it sizes the world, but it does not re-centre an
+        axis it PREPENDS to an existing `Dims`: `current_step` is padded with zeros. So the first
+        3-D layer to reach a pane that was 2-D lands with z at the BOTTOM of the stack.
+
+        That is the stitched-mosaic bug. Julio, 2026-08-06: *"the initial delivery brings the
+        layers and it's obvious that stitching did work, but toggling the stitch layer shows a
+        black canvas ... which I know that they are correct because when I instantiate a new window
+        and go back, then I can see that the layer was well constructed."* Exactly right, and the
+        second half is the tell: a window's raw mosaic is a stack of 2-D planes, so the pane has no
+        z axis at all until a REGION operator's `(Nz, Y, X)` volume arrives (`_result_pixels`,
+        which stopped throwing 9 of 10 planes away on 2026-08-06). Measured on a bare
+        `ViewerModel`: 2-D pane, `current_step == (31, 31)`; add one 10-plane volume and it becomes
+        `(0, 31, 31)` -- y and x centred, z pinned to plane 0. Re-opening the window builds the
+        pane with the volume already in it, so napari centres it there and the layer looks fine,
+        which is why the SAME pixels read as broken once and correct the next time.
+
+        Plane 0 of a z-stack is the bottom of the sweep and routinely out of focus or empty, and
+        `_auto_window_for` seeds the contrast from :func:`~squidmip._contrast.opening_z` -- the
+        MIDDLE plane. So the window describes one plane while the canvas shows another, which is
+        the exact disagreement `opening_z` exists to prevent; it is stated there as one rule and
+        this is the third place that has to obey it.
+
+        Only axes that are NEW are touched. An axis the user has already moved is theirs, and a
+        later layer must not yank the stack back to the middle under them.
+        """
+        from squidmip._contrast import opening_z
+
+        dims = getattr(self._model, "dims", None)
+        if dims is None:
+            return
+        try:
+            ndim = int(getattr(dims, "ndim", 0) or 0)
+            if ndim <= int(ndim_before):
+                return                           # nothing was prepended: nothing to park
+            step = list(dims.current_step)
+            moved = False
+            for axis in range(ndim - int(ndim_before)):   # napari prepends, so the new ones lead
+                lo, hi, pitch = (float(v) for v in tuple(dims.range[axis])[:3])
+                if pitch <= 0:
+                    continue
+                want = opening_z(int(round((hi - lo) / pitch)) + 1)
+                if int(step[axis]) != want:
+                    step[axis] = want
+                    moved = True
+            if moved:
+                dims.current_step = tuple(step)
+        except Exception as exc:                 # noqa: BLE001 - presentation, never fatal
+            log.warning("could not park the new display axis: %s: %s", type(exc).__name__, exc)
 
     def _reuse_layer(self, layer: Any, data: Any, *, bbox_um, z_scale_um, multiscale, visible):
         """Point an EXISTING layer at new pixels, keeping everything the user owns.

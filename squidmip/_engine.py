@@ -187,6 +187,7 @@ from squidmip.projection import (
     normalise_consumes,
     normalise_produces,
     normalise_requires,
+    plane_op,
     project,
     project_reference,
     project_well,
@@ -375,6 +376,23 @@ _NOT_A_WELL_FAULT = (ImportError, MissingDependency)
 _OPERATORS: dict[str, Operator] = {
     "mip": Operator("mip", project, Z_REDUCER),
     "reference": Operator("reference", project_reference, Z_REDUCER),
+    # KEEP EVERY PLANE, CHANGE NO PIXEL. The identity plane-op.
+    #
+    # `consumes=frozenset()` is the whole of it: the engine's loop calls a plane-op once per
+    # acquired plane, so an operator that returns its plane unchanged yields `Nz = n_z`. That is
+    # the ONLY way to express "stitch all of z, unprocessed" -- and until now it could not be
+    # said. Every z-PRESERVING operator on the table (`bgsub`, `decon`, `flatfield`, `spot`,
+    # `cellpose`) alters the pixels, and every operator that leaves them alone (`mip`,
+    # `reference`) collapses z. So `stitch_region`, whose `projector=` defaults to `mip`, could
+    # only ever hand back one fused plane. Julio, 2026-08-06: *"stitcher is running on only one
+    # z-level when I do it in 3D"* -- measured on `sim_5d_2x2_t3` (n_t 3, C 2, n_z 3),
+    # `stitch_plate` yielded `(3, 2, 1, 449, 449)`: Nz 1 of 3.
+    #
+    # It is not a no-op operator for its own sake. `stitch_region` solves the pose graph ONCE and
+    # fuses each plane from those origins, so `projector="keepz"` is what makes "we run
+    # maragall/stitcher on every z-level independently" a thing the user can actually ask for --
+    # and what gives `_result_pixels` a `(C, Nz, Y, X)` volume with a real Nz to render in 3D.
+    "keepz": Operator("keepz", plane_op(lambda plane: plane), PLANE_OP),
 }
 
 

@@ -3596,7 +3596,16 @@ class OpenViewList(QWidget):
         self._close_btn.clicked.connect(self._close_selected)
         self._collapse_btn = QPushButton("Collapse all")
         self._collapse_btn.clicked.connect(self._manager.collapse_all)
+        # CLOSE ALL (Julio, 2026-08-06). Not a shortcut for "select everything then close": the
+        # close button above is driven by the tree SELECTION, and the desktop state that actually
+        # needs this -- a dozen windows over each other with the navigator behind them -- is the
+        # one where selecting them all is the tedious part. `Collapse all` next to it already
+        # answers the milder version of the same problem, so the pair reads as "get them out of
+        # the way" / "get rid of them".
+        self._close_all_btn = QPushButton("Close all")
+        self._close_all_btn.clicked.connect(self._close_all)
         row.addWidget(self._close_btn)
+        row.addWidget(self._close_all_btn)
         row.addWidget(self._collapse_btn)
         row.addStretch(1)
         lay.addLayout(row)
@@ -3807,10 +3816,26 @@ class OpenViewList(QWidget):
             "Close every view selected here (shift/ctrl-click to select several)." if selected
             else ("No view is selected, so there is nothing to close. Click a row above first."
                   if n else "No view is open."))
+        self._close_all_btn.setEnabled(bool(n))
+        self._close_all_btn.setToolTip(
+            f"Close all {n} open view(s), selected or not." if n
+            else "No view is open, so there is nothing to close.")
         self._collapse_btn.setEnabled(bool(n))
         self._collapse_btn.setToolTip(
             "Minimise every open window (click a row to bring one back)." if n
             else "No view is open, so there is nothing to minimise.")
+
+    def _close_all(self) -> None:
+        """Close every open view, whatever is selected.
+
+        Ids are collected BEFORE the first close for the reason ``_close_selected`` states at
+        length: closing a window fires ``windowsChanged`` -> ``refresh()``, which clears the tree
+        and destroys every item in it. This reads the MANAGER rather than the tree, so it is not
+        exposed to that at all -- and it is also the honest source, since the tree is a drawing of
+        the manager and this button's promise is about the windows, not about the rows.
+        """
+        for wid in [int(w.window_id) for w in self._manager.windows]:
+            self._manager.close(wid)             # a no-op for an id a parent already took with it
 
     def _close_selected(self) -> None:
         """Close EVERY selected row, not just the current one.
