@@ -33,8 +33,7 @@ WHAT IS PINNED HERE
    method, the handler and the z-slider helper it fed all had exactly one entry point between them
    and it was the orphan's ``clicked``.
 3. A widget handed to ``publish_qc_result`` ends up INSIDE the shown window and VISIBLE, not
-   merely inside a tab bar. The existing test for that seam
-   (``test_a_decon_qc_result_opens_as_a_tab_in_pane_3``) asserted ``_explore_tabs.indexOf(view)
+   merely inside a tab bar. The old test for that seam asserted ``_explore_tabs.indexOf(view)
    >= 0`` and stayed green for six weeks while the pane holding those tabs was in no layout at
    all. Membership of a container is not reachability; ancestry up to the window, plus
    ``isVisible()`` on a really-shown window, is.
@@ -46,13 +45,15 @@ above is what holds them to that.
 
 THE OTHER HALF OF THE SAME COIN (2026-08-03)
 
-An orphan that never shows is not automatically harmless, and ``_explore_pane`` — the
-``QStackedWidget`` this docstring used to list above as a benign hidden orphan — is the proof.
-``publish_qc_result`` posts the deconvolution QC result into its tab bar, so for six weeks that
+An orphan that never shows is not automatically harmless, and the exploration pane — a
+``QStackedWidget`` this docstring once listed as a benign hidden orphan — is the proof.
+``publish_qc_result`` posted the deconvolution QC result into its tab bar, so for six weeks that
 result was built, tabbed and shown to nobody: invisible instead of floating, which is why it never
 tripped rule 1 and why nobody filed it as a stray window. Rule 3 below is the mirror of rule 1: a
 widget the code hands to the USER must be REACHABLE, not merely constructed. Both failures are the
-same missing question — is this thing parented into the window? — asked from opposite ends.
+same missing question — is this thing parented into the window? — asked from opposite ends. The
+pane was removed on 2026-08-05 and the QC result now opens in ``_left_tabs``; rule 3 is what says
+so about wherever it goes next.
 """
 from __future__ import annotations
 
@@ -130,14 +131,15 @@ def test_a_published_qc_result_is_really_inside_the_window_and_really_visible(
         qapp, stub_detail, squid_dataset):
     """Rule 3. The decon QC view is the picture the whole iterate-and-look loop exists for.
 
-    Between 2b8fbc5 (which took pane 3 out of the layout) and this commit, `publish_qc_result`
-    put it in `_explore_tabs`, `_explore_tabs` sat in `_explore_pane`, and `_explore_pane` had
-    no parent and was never shown — so the tab existed and the picture did not reach a screen.
-    Julio asked for the feature he had already paid for: "we should be able to toggle the turbo
-    colormap mini-gui where we click on there image".
+    Between 2b8fbc5 (which took the exploration pane out of the layout) and 2026-08-05,
+    `publish_qc_result` put it in that pane's tab bar and the pane had no parent and was never
+    shown — so the tab existed and the picture did not reach a screen. Julio asked for the
+    feature he had already paid for: "we should be able to toggle the turbo colormap mini-gui
+    where we click on there image". It goes to `_left_tabs` now, beside the controls that ask
+    for it.
 
-    MUTATION: drop `body.addWidget(self._explore_pane)` from `PlateWindow.__init__` -> the
-    ancestry assertion fails with the view's chain ending at a top-level QStackedWidget -> red.
+    MUTATION: give `publish_qc_result` a bar that is not in the layout -> the ancestry assertion
+    fails with the view's chain ending at a top level -> red.
     """
     from squidmip._op_panels import DeconQCResultView
 
@@ -167,43 +169,14 @@ def test_a_published_qc_result_is_really_inside_the_window_and_really_visible(
     # 2. VISIBILITY: on a shown window, every link in that chain is shown too. `isVisible()` is
     #    False for a widget inside a hidden pane, which is exactly the state this bug was in.
     assert view.isVisible(), (
-        "the QC result is parented but not on screen — pane 3 is hidden with a tab in it")
+        "the QC result is parented but not on screen — it is in a bar nothing shows")
     assert view.width() > 0 and view.height() > 0, "the QC result has no geometry"
 
-    # 3. ...and pane 3 STANDS DOWN again when its last tab goes, rather than leaving a strip of
-    #    example copy where the plate used to be.
-    win._close_op_tab(win._explore_tabs.indexOf(view), win._explore_tabs)
-    qapp.processEvents()
-    assert not win._explore_pane.isVisible(), (
-        "pane 3 kept the plate's room after its last tab closed")
+    # 3. ...and it is the bar the OPERATOR CONTROLS are in, which is the whole of the rehoming:
+    #    the picture opens where the user already is when they press Run.
+    assert win._left_tabs.indexOf(view) >= 0, (
+        "the QC result did not land in the operator tab bar")
 
-    shutdown_plate_window(qapp, win)
-
-
-def test_a_preview_run_s_exploration_tab_does_not_drag_napari_back_under_the_plate(
-        qapp, stub_detail, squid_dataset):
-    """The reveal is scoped ON PURPOSE, and the scope is stated here so it cannot drift.
-
-    `_open_preview_tab` still opens an `_ExplorationTab` in the same bar, and that tab embeds a
-    second napari mosaic. Taking the embedded viewer out of the root window is exactly what the
-    decentralization did, so showing the QC result must not smuggle it back in. Those tabs stay
-    where 2b8fbc5 left them; making them visible again is a separate decision for someone who
-    can watch it happen on a screen.
-    """
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.resize(900, 900)
-    win.show()
-    win.ingest(str(root))
-
-    tab = V._ExplorationTab(["B2"], "exp:test")
-    win._open_op_tab("exp:test", "B2", lambda: tab, tabs=win._explore_tabs)
-    qapp.processEvents()
-
-    assert win._explore_tabs.indexOf(tab) >= 0, "the fixture did not open the tab it meant to"
-    assert not win._explore_pane.isVisible(), (
-        "an exploration/preview tab pulled pane 3 open — the deck shows QC results, not a "
-        "second embedded viewer")
     shutdown_plate_window(qapp, win)
 
 

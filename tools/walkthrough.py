@@ -245,7 +245,7 @@ def run_all():
             assert len(tiles) < 60, f"{label}: fit-to-plate wanted {len(tiles)} tiles"
         return " | ".join(f"{k}: {v} tiles at fit-to-plate" for k, v in counts.items())
 
-    # ---------- selection -> exploration -> panes ------------------------------------
+    # ---------- selection -> windows -> tabs -----------------------------------------
     @check("IMA-221", "Shift-drag marquee selects the right (region, fov) pairs")
     def _():
         # A real drag through the widget's own event handlers - not a direct call to the
@@ -274,76 +274,16 @@ def run_all():
         assert len(sel) == 144, f"expected 144 (region, fov) pairs, got {len(sel)}"
         return f"drag over the whole plate -> {wells}, {len(sel)} (region, fov) pairs"
 
-    @check("IMA-260", "Three panes on OPEN, and the empty one teaches by example")
-    def _():
-        # IMA-237 shipped pane 3 collapsed until a Shift-drag revealed it; IMA-260 reverses that,
-        # because a pane that is not there cannot be discovered. Pane 3 now opens at a real width
-        # showing EXAMPLE USAGE, and the copy stands down only while it holds content.
-        w = open_window(PLATE)
-        outer = w._split
-        before = outer.sizes()
-        if outer.count() != 3:
-            w.close(); raise AssertionError(f"outer splitter has {outer.count()} children, want 3")
-        empty_before = w.explore_empty_text()
-        live_w = w._explore_pane.width()
-        key = w.open_exploration_tab(["A1", "A2"])
-        _app().processEvents()
-        after = outer.sizes()
-        empty_after = w.explore_empty_text()
-        n_tabs = w._explore_tabs.count()
-        # ...and it comes back when the pane empties again
-        for i in range(w._explore_tabs.count() - 1, -1, -1):
-            w._close_op_tab(i, w._explore_tabs)
-        _app().processEvents()
-        empty_again = w.explore_empty_text()
-        w.close()
-        assert before[2] > 0, f"pane 3 opened collapsed: {before}"
-        assert live_w > 0, "pane 3 has no real width on the shown window"
-        low = empty_before.lower()
-        assert "right-click" in low and "control well" in low, f"no example usage: {empty_before!r}"
-        assert "hold shift" in low and "for example" in low, f"not framed as an example: {low!r}"
-        assert key, f"open_exploration_tab returned {key!r}: {w._readout.text()!r}"
-        assert empty_after == "", "the example copy stayed up behind real content"
-        assert after == before, f"opening a tab moved a divider: {before} -> {after}"
-        assert empty_again.strip(), "the example never came back when the pane emptied"
-        return (f"panes {before} (pane 3 live {live_w}px); tab {key!r} in pane 3 "
-                f"({n_tabs} tab(s)); example copy on -> off -> on")
 
-    @check("IMA-248", "Control Well: right-click sets ONE reference, pinned first in pane 3")
-    def _():
-        w = open_window(PLATE)
-        w.set_control_well("A2")
-        _app().processEvents()
-        first = (w.control_well(), w._overview.control_well(), w._explore_tabs.tabText(0))
-        from PyQt5.QtWidgets import QTabBar
-        pinned = w._explore_tabs.tabBar().tabButton(0, QTabBar.RightSide) is None
-        w.set_control_well("B1")            # a second control RELEASES the first
-        _app().processEvents()
-        agree = (w.control_well(), w._overview.control_well())
-        n_control = sum(1 for i in range(w._explore_tabs.count())
-                        if w._explore_tabs.tabText(i).startswith("Control"))
-        w.set_control_well(None)
-        _app().processEvents()
-        cleared = (w.control_well(), w._overview.control_well(), w._explore_tabs.count())
-        back = w.explore_empty_text().strip() != ""
-        w.close()
-        assert first[0] == first[1] == "A2", f"plate and window disagree: {first}"
-        assert "A2" in first[2], f"control tab not pinned first: {first[2]!r}"
-        assert pinned, "the control tab is closable — it is supposed to be pinned"
-        assert agree == ("B1", "B1"), f"a second control did not take over cleanly: {agree}"
-        assert n_control == 1, f"{n_control} control tabs after re-setting — one is stale"
-        assert cleared == (None, None, 0), f"clearing left something behind: {cleared}"
-        assert back, "clearing the control did not restore the example copy"
-        return f"set A2 -> {first[2]!r}, re-set to B1 (1 pinned tab), cleared -> example copy back"
 
     @check("IMA-209", "Drag-out floating window, and Re-dock (dead until today)")
     def _():
         w = open_window(PLATE)
-        key = w.open_exploration_tab(["A1"])
-        assert key, "no exploration tab to detach"
+        w._activate_operator("mip")          # any user-opened tab: the home tab never detaches
         _app().processEvents()
-        tabs = w._explore_tabs
+        tabs = w._left_tabs
         idx = tabs.count() - 1
+        key = next(k for k, v in w._op_tabs.items() if v is tabs.widget(idx))
         float_win = w._detach_tab(idx, tabs)
         _app().processEvents()
         n_float = len(getattr(w, "_floating", {}))
@@ -352,7 +292,7 @@ def run_all():
         w._redock(key)
         _app().processEvents()
         n_after = len(getattr(w, "_floating", {}))
-        back = w._explore_tabs.count()
+        back = w._left_tabs.count()
         w.close()
         assert detached, "_detach_tab returned None"
         assert n_float == 1, f"expected 1 floating window, tracked {n_float}"
@@ -731,22 +671,6 @@ def run_all():
         assert worst < 1e-6, f"corner disagreement {worst} um"
         return f"{len(recs)} ROIs in {region}, {n} compared, max corner disagreement {worst:.2e} um"
 
-    @check("IMA-205", "Exploration tab is SCOPED to the selected subset")
-    def _():
-        w = open_window(PLATE)
-        key = w.open_exploration_tab(["A1", "A2"])
-        _app().processEvents()
-        assert key, f"no tab: {w._readout.text()!r}"
-        tab = w._explore_tabs.widget(w._explore_tabs.count() - 1)
-        label = w._explore_tabs.tabText(w._explore_tabs.count() - 1)
-        # The scope must be the SUBSET, not the whole plate: an exploration tab that quietly
-        # operates on all four wells looks identical on screen and is the bug worth catching.
-        scope = w._current_exploration() if callable(getattr(w, "_current_exploration", None)) \
-            else getattr(w, "_current_exploration", key)
-        w.close()
-        assert "A1" in label and "A2" in label, f"tab label {label!r} does not name the subset"
-        assert tab is not None
-        return f"tab {label!r} (key {key!r}), scope={scope!r}, 2 of 4 wells"
 
     @check("IMA-217", "Pyramid ladder is coarse-to-fine and never widens")
     def _():

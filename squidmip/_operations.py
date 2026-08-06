@@ -26,7 +26,7 @@ WHAT IS IN HERE
 * :class:`Operation`, the declaration of one operator: its key, its card copy, and the name of the
   ``_build_<x>_tab`` method that gathers its parameters.
 * ``_OPERATIONS`` and ``_OPERATIONS_BY_KEY``, the declared set and its index.
-* ``_SAVE_OPERATOR``, which operator the "Save this subset to disk" button runs. Named rather than
+* ``_SAVE_OPERATOR``, which operator a "save this to disk" button runs. Named rather than
   spelled ``_OPERATIONS[0].key``, so reordering the CARDS cannot silently change what RUNS.
 * ``_TO_BE_ADDED``, the roadmap cards.
 * :func:`operator_layer_key`, :func:`runnable_operators`, :func:`operator_label` and
@@ -119,9 +119,13 @@ _OPERATIONS = (
 )
 _OPERATIONS_BY_KEY = {op.key: op for op in _OPERATIONS}
 
-# The operator "Save this subset to disk…" runs. This used to be spelled `_OPERATIONS[0].key`,
+# The operator a "save this to disk" button runs. This used to be spelled `_OPERATIONS[0].key`,
 # which made a PRESENTATION edit (reordering the cards) silently change which operator the save
 # button RUNS. Named, so the two cannot be confused.
+#
+# NO BUTTON READS IT TODAY: its one caller was the exploration tab's "Save this subset to disk…",
+# removed with that pane on 2026-08-05. Kept as the named default for the next such button, and
+# because the rule it records ("never spell it positionally") is what the test beside it pins.
 _SAVE_OPERATOR = "mip"
 
 # Roadmap cards shown under "TO BE ADDED", as (label, blurb). Empty: everything currently on the
@@ -133,10 +137,14 @@ _TO_BE_ADDED: list = []
 def operator_layer_key(op_key: str, tab_key: Optional[str]) -> str:
     """Layer id an operator's results are filed under.
 
-    Plate-wide runs keep the bare operator key ("mip") so existing behaviour is byte-identical.
-    A run scoped to an exploration tab gets "<op>@<tab_key>" — without this, two tabs running
-    the same operator both write into PlateOverview._op_canvas["mip"] and silently overwrite
-    each other's tiles."""
+    Plate-wide runs keep the bare operator key ("mip"). A run scoped to a CONTAINER gets
+    "<op>@<tab_key>" — without that, two containers running the same operator both write into
+    PlateOverview._op_canvas["mip"] and silently overwrite each other's tiles.
+
+    NO CALLER NAMESPACES TODAY: the exploration tab was the only one and it was removed on
+    2026-08-05, so `_viewer.run_operator` passes ``None``. The pair is kept rather than inlined
+    because ``operator_name`` below (its inverse) is what every registry lookup goes through, and
+    a layer key that MIGHT carry a namespace needs one spelling of the rule, not two."""
     return f"{op_key}@{tab_key}" if tab_key else op_key
 
 

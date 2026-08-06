@@ -1,4 +1,4 @@
-"""The two HAND-WRITTEN operator interfaces in PANE 1: the stitcher's controls and decon's QC loop.
+"""The two HAND-WRITTEN operator interfaces: the stitcher's controls and decon's QC loop.
 
 THESE TWO, AND ONLY THESE TWO (2026-08-05). Every other operator's panel is BUILT FROM ITS
 ``params`` DECLARATION by :mod:`squidmip._param_panel`, which asks the registry what an operator
@@ -11,7 +11,7 @@ The two below stay hand-written because they do things a parameter FORM cannot, 
 to gain uniformity would delete real behaviour: :class:`StitcherPanel` converts a percentage to a
 fraction, greys out the knobs that provably do nothing with registration off, and refuses a
 labels operator with a sentence before the run starts; :class:`DeconQCPanel` runs an iterative
-semi-convergence loop and publishes a picture into pane 3. ``_viewer._activate_operator`` prefers a
+semi-convergence loop and publishes a picture as a tab of its own. ``_viewer._activate_operator`` prefers a
 hand-written panel and falls back to the generic one, so adding an operator needs no edit here.
 
 Julio: "Right now I'm blocked in testing the post-processing because Stitcher doesn't have
@@ -21,26 +21,26 @@ the iterations."
 
 WHERE THINGS LIVE, AND WHY
 --------------------------
-* Every CONTROL is in pane 1. Pane 3 gets no operator launcher. A UI audit found two
-  operator registries (``_OPERATIONS`` and ``runnable_operators()``) launching the same
-  operators from panes 1 and 3 with different labels and different ``save`` defaults, and a
-  comment in ``_viewer.py`` records that they diverged in production. So "run this on the
-  subset parked in pane 3" is a SCOPE VALUE on pane 1's run selector,
-  not a second set of buttons. This module adds no third caller to either registry.
+* Every CONTROL is on the ONE operator panel. A UI audit found two operator registries
+  (``_OPERATIONS`` and ``runnable_operators()``) launching the same operators from two
+  different panes with different labels and different ``save`` defaults, and a comment in
+  ``_viewer.py`` records that they diverged in production. A target is a SCOPE VALUE on the
+  one run selector, not a second set of buttons somewhere else. This module adds no third
+  caller to either registry.
 * The deconvolution RESULT - the 2-D image in turbo with the x-z and y-z strips concatenated
-  to it - is a TAB IN PANE 3 (:class:`DeconQCResultView`). That is where a preview result is
-  looked at, and it is big: it needs the room.
+  to it - is a TAB (:class:`DeconQCResultView`) opened beside these controls. That is where a
+  preview result is looked at, and it is big: it needs the room.
 
-THE SEAM WITH PANE 3, STATED NARROWLY
--------------------------------------
-This module never touches pane 3's tab bar. It calls exactly one method on its host::
+THE SEAM WITH THE WINDOW, STATED NARROWLY
+-----------------------------------------
+This module never touches a tab bar. It calls exactly one method on its host::
 
-    host.publish_qc_result(widget, title)   # -> pane 3 shows `widget` as a tab called `title`
+    host.publish_qc_result(widget, title)   # -> shows `widget` as a tab called `title`
 
-``PlateWindow`` implements that with its EXISTING ``_open_op_tab(key, title, builder,
-tabs=self._explore_tabs)`` - the same mechanism exploration tabs already use, so no new tab
-API is introduced and the pane-3 owner has nothing to merge. If a host does not implement
-it, the panel SAYS SO in the readout; the picture is never computed and then dropped.
+``PlateWindow`` implements that with its EXISTING ``_open_op_tab``, so no new tab API is
+introduced. If a host does not implement it, the panel SAYS SO in the readout; the picture is
+never computed and then dropped. It used to land in the exploration pane, which between
+2b8fbc5 and 2026-08-05 was not in any layout — computed, tabbed, and shown to nobody.
 
 WHAT WAS PORTED FROM maragall/stitcher, AND WHAT WAS NOT
 --------------------------------------------------------
@@ -283,7 +283,7 @@ def _qss():
     """The window's OWN button/combo/checkbox styles, imported lazily.
 
     Not a second dark theme: `_viewer` already owns these three strings and every other
-    control in pane 1 is drawn with them. Screenshotting the first build is what caught
+    control in the operator panel is drawn with them. Screenshotting the first build is what caught
     this -- unstyled QPushButtons render as flat text on this background and do not read as
     clickable at all. Lazy so this module stays importable without pulling in the 6k-line
     viewer, and so a Qt-free test of the policy functions above costs nothing.
@@ -294,7 +294,7 @@ def _qss():
 
 
 def _apply_qss(root: QWidget) -> None:
-    """Style every control in *root* the way the rest of pane 1 is styled."""
+    """Style every control in *root* the way the rest of the operator panel is styled."""
     btn, combo, check = _qss()
     for w in root.findChildren(QPushButton):
         w.setStyleSheet(btn)
@@ -353,7 +353,7 @@ class _Panel(QWidget):
 
         # A SCROLL AREA, because these are tall control stacks in a narrow pane. The
         # stitcher's alone is scope + z-reduction + registration + fusion + channels + run,
-        # and pane 1 also has to hold the plate view. Without this the bottom controls are
+        # and the window also has to hold the plate view. Without this the bottom controls are
         # simply unreachable at ordinary window heights -- and "the canvas squeezed to a
         # 140 px sliver" is the precedent for trusting a screenshot over a layout argument.
         outer = QVBoxLayout(self)
@@ -403,7 +403,7 @@ class StitcherPanel(_Panel):
         names = _channel_names(host)
 
         # SCOPE IS NOT HERE, DELIBERATELY (Defect 2). It belongs to the RUN, not to the
-        # operator, and pane 1's "run on" selector owns it. This panel used to carry a second
+        # operator, and the window's "run on" selector owns it. This panel used to carry a second
         # scope combo, and it was wrong in both of its states:
         #
         #   * it was built ONCE and cached by _open_op_tab, from a selection read at build
@@ -862,7 +862,7 @@ class DeconQCResultView(QWidget):
 
 
 class DeconQCPanel(_Panel):
-    """PANE 1. Pick an iteration count, run it, judge the picture in pane 3, add one more."""
+    """Pick an iteration count, run it, judge the picture in the tab beside this, add one more."""
 
     def __init__(self, host):
         super().__init__(
@@ -870,7 +870,7 @@ class DeconQCPanel(_Panel):
             "Richardson-Lucy is SEMI-CONVERGENT: the halo tightens for a few iterations and "
             "then a disc around the core starts growing back as the algorithm fits noise. "
             "There is no universally correct count, so run one, look at the turbo x-z / y-z "
-            "view in pane 3, then add ONE more and look again.")
+            "view in the tab it opens, then add ONE more and look again.")
         from squidmip._decon import QC_START_ITERATIONS
         from squidmip._decon_qc import DEFAULT_CROP_HALF, DEFAULT_VIEW_HALF
 
@@ -933,7 +933,7 @@ class DeconQCPanel(_Panel):
         self.v.addWidget(self.progress)
         self.v.addWidget(self.status)
 
-        note = _wrapped("The result opens as a tab in pane 3. Nothing is written next to "
+        note = _wrapped("The result opens as a tab beside this one. Nothing is written next to "
                         "the acquisition; the datasets are opened read only.", _SUB)
         self.v.addWidget(note)
         self.v.addStretch(1)
@@ -956,8 +956,8 @@ class DeconQCPanel(_Panel):
             return
         if not hasattr(self.host, "publish_qc_result"):
             self.say("this window cannot show a QC result: it does not implement "
-                     "publish_qc_result(widget, title), which is how pane 3 is handed a "
-                     "result tab. Refusing to deconvolve and then drop the picture.")
+                     "publish_qc_result(widget, title), which is how it is handed a result "
+                     "tab. Refusing to deconvolve and then drop the picture.")
             return
 
         iterations = self.iter_spin.value()

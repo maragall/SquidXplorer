@@ -101,7 +101,7 @@ def test_step_wraps_so_playback_can_loop():
 
 
 def test_reordering_keeps_you_on_the_same_region_when_it_survives():
-    """An exploration tab re-scopes the plate order. Landing back on index 0 would silently
+    """A subset run re-scopes the plate order. Landing back on index 0 would silently
     move the red frame off the region the user was looking at."""
     c = RegionCursor()
     c.set_order(["A1", "A2", "B1", "B2"])

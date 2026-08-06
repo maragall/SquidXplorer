@@ -28,13 +28,13 @@ from squidmip._op_panels import (
 # ---------------------------------------------------------------------------------------
 #
 # This block used to test `scope_options`, a per-panel scope combo. It is deleted, and so is
-# the function. Scope belongs to the RUN, not to the operator: `_explore.resolve_run_scope`
+# the function. Scope belongs to the RUN, not to the operator: `_run_scope.resolve_run_scope`
 # is the single owner and pane 1's "run on" selector is its control. The panel combo was
 # wrong in both of its states -- always stale (built once, from an empty selection) and, in
 # its only reachable state, mislabeled (it said "Whole dataset" while sending regions=None,
 # which run_operator hands to the run selector anyway).
 #
-# What replaces the coverage: tests/test_explore.py's resolve_run_scope and
+# What replaces the coverage: tests/test_run_scope.py's resolve_run_scope and
 # describe_run_target tests, plus test_the_panel_does_not_carry_its_own_scope below.
 
 # ---------------------------------------------------------------------------------------
@@ -242,9 +242,6 @@ class _Host:
 
     def run_operator(self, key, **kw):
         self.calls.append((key, kw))
-
-    def explore_scopes(self):
-        return []
 
     def say(self, text):
         self.said.append(text)
