@@ -34,7 +34,12 @@ if "PySide6" in sys.modules or "PySide2" in sys.modules:
 
 from squidmip import _viewer as V  # noqa: E402
 
-from .conftest import shutdown_plate_window  # noqa: E402
+from .conftest import (  # noqa: E402
+    _scene_stack,
+    build_flat_scene,
+    build_volume_scene,
+    shutdown_plate_window,
+)
 from .test_viewer import _drain_until, qapp  # noqa: E402,F401  (fixtures)
 
 # WHERE THE VOXEL SIZE NOW GOES (decentralization, 2026-07-23).
@@ -285,68 +290,244 @@ class TestThe3DPopoutDoesNotPileUp:
         shutdown_plate_window(qapp, win)
 
 
-# -- the 3D volume must live INSIDE the layer-visibility model ---------------------------------
+# ==============================================================================================
+# ONE LAYER MODEL, 2D AND 3D
+# ==============================================================================================
 #
-# Julio, driving the real build 2026-08-05: "in 3d rendering, when all layers are off there is
-# still a rendered image, unlike 2d that it's a black canvas since all layers are off ... there is
-# still a layer that looks beautiful but that I can't control so then other controlled layers are
-# overlayed".
+# Julio: "why is the layering of 2d and 3d different in the same place?"
 #
-# One root cause, both symptoms. `_brick_view._add_layer` created every brick with no
-# `layer.metadata`, so `key_of` returned None and the layer tree classed the whole volume as a
-# FOREIGN layer -- which it "deliberately tolerates and IGNORES". No group, no checkbox, nothing to
-# switch off. Meanwhile `BrickedVolume.open()` force-hides the 2-D layers but leaves their
-# checkboxes live, so switching one back on drew it over an uncontrollable volume.
+# It was different because 2D assumed an identity IS a layer -- one `add_image` per
+# (op, channel) -- and a volume is not: `_brick_view` tiles it into one Image layer per brick.
+# Every rule the app enforces was written against the 2D assumption, so in 3D each one was either
+# absent or re-implemented partially inside `BrickedVolume`. Four user-visible defects came out of
+# that in one evening: a volume with no checkbox at all, a coarse 2D mosaic drawable over it, one
+# checkbox reaching one brick, and a second contrast model.
 #
-# This asserts the OBSERVABLE the tree depends on -- `key_of` recovers (op, channel) -- rather than
-# that a kwarg was passed. It also asserts the grouping property that makes one checkbox drive the
-# whole volume: every brick of a channel must answer with the SAME key.
+# The model now declares the fact instead of branching on it: AN IDENTITY MAY BE RENDERED BY MORE
+# THAN ONE LAYER, AND EVERY PROPERTY THAT BELONGS TO THE IDENTITY HOLDS ONE VALUE ACROSS ALL OF
+# THEM (`MosaicLayers.IDENTITY_PROPS` / `layers_for` / `adopt` / `_mirror_identity`).
+#
+# So the tests below are PARAMETRIZED over the two scenes. Each one states a rule once and asks it
+# of a flat mosaic and of a bricked volume, against a real `napari.components.ViewerModel` with
+# real layers and real events -- so a future divergence cannot pass by being written on only one
+# side. Where a scene is built out of several bricks, it is built out of SEVERAL: a rule that only
+# holds for a single-brick volume is the bug wearing a disguise.
 
-class _RecordingViewer:
-    """The narrowest napari stand-in `_add_layer` needs: it records what was added."""
+@pytest.fixture
+def mosaic():
+    """The app's layer model over a bare, Qt-free ``ViewerModel``.
 
-    class _Layer:
-        def __init__(self, **kw):
-            self.__dict__.update(kw)
-            self.visible = True
-            self.events = None          # _link_contrast is try/except'd; None exercises that path
+    A `RegionViewer` cannot be built headless (the napari pane needs a GL context), but everything
+    under test here is the layer model, and `ViewerModel` gives it real napari layers with real
+    evented properties -- which is what makes the mirror, the contrast link and the identity
+    bookkeeping assertable for real rather than through a stub that agrees by construction.
+    """
+    from napari.components import ViewerModel
 
-    def __init__(self):
-        self.layers = []
+    from squidmip._napari_view import MosaicLayers
 
-    def add_image(self, arr, **kwargs):
-        layer = self._Layer(data=arr, **kwargs)
-        self.layers.append(layer)
-        return layer
+    return MosaicLayers(ViewerModel())
 
 
-def _bricked(op, channels=("c0", "c1")):
-    from squidmip._brick_view import BrickedVolume
+#: The two scenes one rule is asked of, built by ONE definition shared with
+#: ``tests/test_layer_tree.py`` (``tests/conftest.py``). Every test below reaches the layers
+#: through `MosaicLayers`, never through the builder's return value, because "what the model can
+#: see" is the property under test.
+SCENES = [
+    pytest.param(build_flat_scene, id="2D-flat-mosaic"),
+    pytest.param(build_volume_scene, id="3D-bricked-volume"),
+]
 
-    viewer = _RecordingViewer()
-    vol = BrickedVolume(
-        viewer, reader=None, meta={}, region="A1", window_px=(0, 8, 0, 8),
-        channels=list(channels), scale=(1.5, 0.75, 0.75), origin_um=(0.0, 0.0, 0.0),
-        limit=2048, budget_bytes=1 << 30, op=op,
-    )
-    return viewer, vol
+OP, CHANNELS = "raw", ("488", "561")
+
+
+@pytest.mark.parametrize("build", SCENES)
+def test_the_model_shows_one_group_with_one_row_per_channel(build, mosaic):
+    """THE TREE'S SHAPE. `MosaicTreeModel.refresh` is built out of exactly these two calls, so a
+    volume that answered per brick would grow one row per brick instead of one per channel.
+
+    MUTATION: drop the `MosaicLayers.adopt` call in `BrickedVolume._add_layer` -> the bricks are
+    foreign layers, `ops()` is empty and the tree shows nothing -> red.
+    """
+    build(mosaic, OP, CHANNELS)
+    assert mosaic.ops() == [OP]
+    assert mosaic.channels(OP) == list(CHANNELS)
+
+
+@pytest.mark.parametrize("build", SCENES)
+def test_switching_a_channel_off_darkens_EVERY_layer_rendering_it(build, mosaic):
+    """Julio: "Turning off one layer doesn't turn the other like in the 2D view."
+
+    The layer tree writes `mosaic.find(op, channel).visible`, and `find` is ONE layer. In 2D that
+    is the whole identity; in 3D it was one brick out of many, so the checkbox switched off part
+    of the volume and the rest stayed lit with no control left to reach it.
+
+    MUTATION: delete the `_connect_identity_mirror` call in `_register_channel` -> the other
+    bricks stay visible -> red.
+    """
+    build(mosaic, OP, CHANNELS)
+    rendering = mosaic.layers_for(OP, CHANNELS[0])
+    assert rendering, "the scene rendered nothing"
+
+    mosaic.find(OP, CHANNELS[0]).visible = False
+
+    assert [ly.visible for ly in rendering] == [False] * len(rendering)
+    # ...and the OTHER channel is untouched: this is a channel toggle, not a group toggle.
+    assert all(ly.visible for ly in mosaic.layers_for(OP, CHANNELS[1]))
+
+
+@pytest.mark.parametrize("build", SCENES)
+def test_the_group_toggle_reaches_every_layer_of_every_channel(build, mosaic):
+    """What the processing-layer row does: `show_op` is the group toggle's rule.
+
+    MUTATION, and it takes TWO: have `show_op` write `find(op, ch).visible` instead of walking
+    `ours()` AND drop "visible" from `IDENTITY_PROPS`. Either alone stays green, because
+    `show_op` writes every MEMBER of the group and the mirror keeps every SURFACE of a member
+    equal -- two different rules that overlap on this gesture. The test asserts the outcome.
+    """
+    build(mosaic, OP, CHANNELS)
+    mosaic.show_op(OP)
+    assert all(ly.visible for ly in mosaic.ours())
+
+    for ly in mosaic.ours():
+        ly.visible = False
+    assert mosaic.visible_op() is None
+    assert not any(ly.visible for ly in mosaic.ours())
+
+
+@pytest.mark.parametrize("build", SCENES)
+def test_ONE_contrast_window_per_channel_whatever_renders_it(build, mosaic):
+    """"there is exactly ONE contrast value per channel in the whole application" -- the module
+    docstring of `_napari_view`. It was true of flat mosaics and false of volumes, where
+    `BrickedVolume` kept its own `_contrast_by` dict and its own propagator.
+
+    Asserted as the WINDOW APPLIED to each layer, not as a call: a slider that moves one brick
+    makes the joins step in brightness, which is what the user sees.
+
+    MUTATION: drop "contrast_limits" from `MosaicLayers.IDENTITY_PROPS` -> only the layer that was
+    written moves -> red.
+    """
+    build(mosaic, OP, CHANNELS)
+    rendering = mosaic.layers_for(OP, CHANNELS[0])
+
+    mosaic.find(OP, CHANNELS[0]).contrast_limits = (11.0, 2222.0)
+
+    for ly in rendering:
+        assert tuple(ly.contrast_limits) == (11.0, 2222.0), (
+            f"{ly.name} is windowed at {tuple(ly.contrast_limits)}")
+    assert mosaic.contrast(CHANNELS[0]) == (11.0, 2222.0)
+
+
+@pytest.mark.parametrize("build", SCENES)
+def test_ONE_colormap_per_channel_whatever_renders_it(build, mosaic):
+    """The same rule for the LUT. A volume tinted per brick is a volume with visible seams.
+
+    MUTATION: drop "colormap" from `IDENTITY_PROPS` -> the other bricks keep the old tint -> red.
+    """
+    build(mosaic, OP, CHANNELS)
+    rendering = mosaic.layers_for(OP, CHANNELS[0])
+
+    mosaic.find(OP, CHANNELS[0]).colormap = "magenta"
+
+    names = {getattr(ly.colormap, "name", None) for ly in rendering}
+    assert names == {"magenta"}, f"the identity is tinted {names}"
+
+
+@pytest.mark.parametrize("build", SCENES)
+def test_a_result_delivered_over_this_scene_darkens_it_and_can_be_switched_back(build, mosaic):
+    """ONE OPERATOR PER CHANNEL ON SCREEN, in both modes.
+
+    `_connect_exclusive_op` exists because every mosaic is added `additive`, so the same channel on
+    screen twice is that channel's signal summed with itself. A volume that was outside the rule
+    kept adding to whatever the user switched on over it -- Julio: "there is still a layer that
+    looks beautiful but that I can't control so then other controlled layers are overlayed".
+
+    MUTATION: skip `_register_channel` in `adopt` -> the volume is not in `_by_channel`, the
+    arriving result does not darken it -> red.
+    """
+    build(mosaic, OP, CHANNELS)
+    ch = CHANNELS[0]
+    scene_layers = mosaic.layers_for(OP, ch)
+
+    mosaic.add_mosaic("decon", ch, _scene_stack(99, (4, 16, 16)), bbox_um=(0.0, 0.0, 16.0, 16.0))
+
+    assert [ly.visible for ly in scene_layers] == [False] * len(scene_layers), (
+        "the arriving result is summing with the scene it was supposed to replace")
+    assert mosaic.find("decon", ch).visible is True
+
+    # ...and switching the scene back on darkens the result, from either direction.
+    mosaic.find(OP, ch).visible = True
+    assert all(ly.visible for ly in scene_layers)
+    assert mosaic.find("decon", ch).visible is False
+
+
+@pytest.mark.parametrize("build", SCENES)
+def test_removing_an_identity_removes_every_layer_that_rendered_it(build, mosaic):
+    """`remove_op` took `find`, i.e. one layer. A volume left the rest of its bricks on screen as
+    FOREIGN layers -- lit, unlabelled and with no tree row to switch them off, which is exactly
+    the defect the bricks were given an identity to end.
+
+    MUTATION: have `remove_op_channel` drop `find(op, channel)` alone -> layers survive -> red.
+    """
+    build(mosaic, OP, CHANNELS)
+    assert len(list(mosaic.model.layers)) >= len(CHANNELS)
+
+    mosaic.remove_op(OP)
+
+    assert mosaic.layers_for(OP, CHANNELS[0]) == []
+    assert mosaic.ours() == [], f"{len(mosaic.ours())} layers of {OP} outlived their identity"
+
+
+@pytest.mark.parametrize("build", SCENES)
+def test_the_units_on_every_layer_are_micrometres(build, mosaic):
+    """The scale bar reads the LAYER's units, so a layer with none silently reports pixels.
+    `_place` labels a flat mosaic; a brick was placed in micrometres and never labelled.
+
+    MUTATION: delete the `_label_units` call in `adopt` -> the bricks report napari's default
+    -> red.
+    """
+    build(mosaic, OP, CHANNELS)
+    assert mosaic.ours()
+    for ly in mosaic.ours():
+        # napari normalises "um" to a pint unit, so compare against what it made of a labelled
+        # axis rather than against the string we handed it.
+        assert {str(u) for u in ly.units} == {"micrometer"}, (
+            f"{ly.name} is labelled {ly.units}, so the scale bar reports pixels")
+
+
+# -- the facts that are TRUE OF VOLUMES, declared in the shared model rather than branched on ----
+
+
+def test_a_volume_is_MANY_layers_under_ONE_identity(mosaic):
+    """The premise the parametrized rules above rest on: the 3D scene really is several layers.
+
+    Without this the whole file could pass against a one-brick volume and prove nothing about the
+    case that actually broke.
+    """
+    from squidmip._napari_view import MosaicKey, key_of
+
+    build_volume_scene(mosaic, OP, CHANNELS, bricks=3)
+
+    rendering = mosaic.layers_for(OP, CHANNELS[0])
+    assert len(rendering) == 3, f"the volume rendered as {len(rendering)} layer(s)"
+    assert {key_of(ly) for ly in rendering} == {MosaicKey(OP, CHANNELS[0])}
+    # ...and `find` is one of them, the representative every control reads and writes.
+    assert mosaic.find(OP, CHANNELS[0]) is rendering[0]
 
 
 @pytest.mark.parametrize("op", ["raw", "decon", "bgsub"])
-def test_every_brick_declares_the_operator_whose_volume_it_is(op):
-    """Without this the tree cannot see the volume at all, whatever the operator."""
-    import numpy as np
+def test_every_brick_declares_the_operator_whose_volume_it_is(op, mosaic):
+    """Without this the tree cannot see the volume at all, whatever the operator.
 
+    The operator is never compared by name anywhere: it is carried from
+    `RegionViewer._volume_source`, which picks it off the registry declaration.
+    """
     from squidmip._napari_view import key_of
 
-    viewer, vol = _bricked(op)
-    for ch in ("c0", "c1"):
-        for tile in ((0, 0), (0, 1), (1, 0)):
-            vol._add_layer((ch, tile), ch, np.zeros((2, 4, 4), np.uint16),
-                           (1.5, 0.75, 0.75), (0.0, 0.0, 0.0))
+    build_volume_scene(mosaic, op, ("c0", "c1"), bricks=3)
 
-    assert len(viewer.layers) == 6
-    keys = [key_of(ly) for ly in viewer.layers]
+    keys = [key_of(ly) for ly in mosaic.model.layers]
+    assert len(keys) == 6
     assert all(k is not None for k in keys), (
         "a brick with no metadata is a FOREIGN layer: no group, no checkbox, cannot be switched "
         f"off. keys={keys}")
@@ -362,21 +543,72 @@ def test_the_bricks_claim_the_same_identity_a_2d_mosaic_layer_would():
     If these two disagreed, turning off 'decon / c0' would hide the 2-D layer and leave the volume
     lit -- which is the reported bug wearing a different hat.
     """
-    import numpy as np
+    from napari.components import ViewerModel
 
-    from squidmip._napari_view import MosaicKey, key_of
+    from squidmip._napari_view import MosaicKey, MosaicLayers, key_of
 
-    viewer, vol = _bricked("decon", channels=("c0",))
-    vol._add_layer(("c0", (0, 0)), "c0", np.zeros((2, 4, 4), np.uint16),
-                   (1.5, 0.75, 0.75), (0.0, 0.0, 0.0))
-    assert key_of(viewer.layers[0]) == MosaicKey("decon", "c0")
+    flat = MosaicLayers(ViewerModel())
+    build_flat_scene(flat, "decon", ("c0",))
+    volume = MosaicLayers(ViewerModel())
+    build_volume_scene(volume, "decon", ("c0",), bricks=1)
+
+    assert key_of(flat.model.layers[0]) == MosaicKey("decon", "c0")
+    assert key_of(volume.model.layers[0]) == key_of(flat.model.layers[0])
+
+
+def test_a_brick_that_arrives_LATE_takes_the_identity_it_is_joining(mosaic):
+    """A volume is delivered brick by brick as the camera moves, so "join an identity" happens
+    over and over while the user is looking at it. A brick that arrived with its own defaults
+    repainted part of the volume back to a state the user had left -- lit after they switched it
+    off, and at a different window than its neighbours.
+
+    MUTATION: delete the sibling-copy block in `MosaicLayers.adopt` -> the late brick arrives
+    visible and unwindowed -> red.
+    """
+    vol = build_volume_scene(mosaic, OP, ("c0",), bricks=1)
+
+    mosaic.find(OP, "c0").contrast_limits = (7.0, 900.0)
+    mosaic.find(OP, "c0").colormap = "magenta"
+    mosaic.find(OP, "c0").visible = False
+
+    vol._add_layer(("c0", (0, 9)), "c0", _scene_stack(77, (4, 8, 8)),
+                   (1.5, 0.75, 0.75), (0.0, 0.0, 60.0))
+
+    late = mosaic.layers_for(OP, "c0")[-1]
+    assert late.visible is False, "a brick of a switched-off volume arrived lit"
+    assert tuple(late.contrast_limits) == (7.0, 900.0), (
+        f"a late brick arrived at {tuple(late.contrast_limits)}, so the joins step in brightness")
+    assert getattr(late.colormap, "name", None) == "magenta"
+
+
+def test_evicting_one_brick_leaves_the_identity_and_its_other_bricks_alone(mosaic):
+    """The camera evicts bricks constantly. Dropping one must not take the group's row with it,
+    and must not leave napari holding a contrast link onto a dead layer.
+
+    MUTATION: have `_drop` call `viewer.layers.remove` again -> the model still lists the dead
+    layer in `_by_channel` and re-links it -> red.
+    """
+    vol = build_volume_scene(mosaic, OP, ("c0",), bricks=3)
+    doomed = mosaic.layers_for(OP, "c0")[1]
+
+    vol._drop(("c0", (0, 1)))
+
+    survivors = mosaic.layers_for(OP, "c0")
+    assert len(survivors) == 2
+    assert doomed not in survivors
+    assert doomed not in (mosaic._by_channel.get("c0") or []), (
+        "an evicted brick is still a peer of its channel")
+    assert mosaic.channels(OP) == ["c0"], "the group lost its row when one brick left"
+
+    # ...and the surviving bricks still move together.
+    mosaic.find(OP, "c0").contrast_limits = (3.0, 33.0)
+    assert all(tuple(ly.contrast_limits) == (3.0, 33.0) for ly in survivors)
 
 
 # -- while 3D is up, the VOLUME owns the identity; the flat mosaic surrenders it ----------------
 #
-# Julio, 2026-08-05, after the first fix shipped: "When I turn on raw it overlays some probably
-# downsampled copy of raw over an already full res version of raw that can't be controlled by the
-# napari layer. Channel controls for 3D viewing not working well."
+# Julio, 2026-08-05: "When I turn on raw it overlays some probably downsampled copy of raw over an
+# already full res version of raw that can't be controlled by the napari layer."
 #
 # The "downsampled copy" is the 2D mosaic layer -- a multiscale pyramid whose level 0 is capped to
 # _MAX_FUSED_PX, so it really is coarser than the bricks. `open()` hid it but left it in the TREE
@@ -387,39 +619,14 @@ def test_the_bricks_claim_the_same_identity_a_2d_mosaic_layer_would():
 # EXCLUSIVE while 3D is up.
 
 
-class _Layer2D:
-    """A pane mosaic layer as the tree sees it: identity in metadata, visible, multiscale."""
-
-    def __init__(self, op="raw", channel="c0", visible=True):
-        from squidmip._napari_view import MosaicKey
-        self.metadata = dict(MosaicKey(op, channel).as_metadata())
-        self.visible = visible
-
-
-class _SceneViewer(_RecordingViewer):
-    def __init__(self, existing):
-        super().__init__()
-        self.layers = list(existing)
-
-    class _Dims:
-        ndisplay = 2
-    dims = _Dims()
-
-
-def _open_over(existing, op="raw"):
-    """A BrickedVolume over *existing* pane layers, with the three things that need a live Qt
-    event loop stubbed out: the loader THREAD, the camera framing and the first refresh.
-
-    Starting a real QThread with no QApplication aborts the interpreter, and none of the three is
-    what these tests are about -- the subject is which layer owns the `(op, channel)` identity
-    while 3D is up. `open()`'s own layer bookkeeping runs for real.
-    """
+def _open_over_flat(mosaic, op="raw", channels=("c0",)):
+    """A `BrickedVolume` opened over a scene that already holds flat mosaics of the same op."""
     from squidmip._brick_view import BrickedVolume
 
-    viewer = _SceneViewer(existing)
+    build_flat_scene(mosaic, op, channels)
     vol = BrickedVolume(
-        viewer, reader=None, meta={}, region="A1", window_px=(0, 8, 0, 8),
-        channels=["c0"], scale=(1.5, 0.75, 0.75), origin_um=(0.0, 0.0, 0.0),
+        mosaic, reader=None, meta={}, region="A1", window_px=(0, 8, 0, 8),
+        channels=list(channels), scale=(1.5, 0.75, 0.75), origin_um=(0.0, 0.0, 0.0),
         limit=2048, budget_bytes=1 << 30, op=op,
     )
     vol._loader.start = lambda *a, **k: None
@@ -427,15 +634,16 @@ def _open_over(existing, op="raw"):
     vol._loader.wait = lambda *a, **k: True
     vol._frame_camera = lambda *a, **k: None
     vol.refresh = lambda *a, **k: None
-    return viewer, vol
+    return vol
 
 
-def test_the_flat_mosaic_leaves_the_tree_while_3d_is_up():
+def test_the_flat_mosaic_leaves_the_tree_while_3d_is_up(mosaic):
     """It must be FOREIGN, not merely hidden: a hidden layer still has a checkbox."""
     from squidmip._napari_view import key_of
 
-    shown, already_hidden = _Layer2D(visible=True), _Layer2D(channel="c1", visible=False)
-    viewer, vol = _open_over([shown, already_hidden])
+    vol = _open_over_flat(mosaic, "raw", ("c0", "c1"))
+    shown, already_hidden = mosaic.find("raw", "c0"), mosaic.find("raw", "c1")
+    already_hidden.visible = False
     vol.open()
 
     assert key_of(shown) is None, "the 2D mosaic can still be switched on over the volume"
@@ -444,11 +652,11 @@ def test_the_flat_mosaic_leaves_the_tree_while_3d_is_up():
     assert shown.visible is False
 
 
-def test_the_mosaic_gets_its_identity_and_visibility_BACK_on_close():
+def test_the_mosaic_gets_its_identity_and_visibility_BACK_on_close(mosaic):
     from squidmip._napari_view import MosaicKey, key_of
 
-    shown = _Layer2D(op="decon", channel="c1", visible=True)
-    viewer, vol = _open_over([shown], op="decon")
+    vol = _open_over_flat(mosaic, "decon", ("c1",))
+    shown = mosaic.find("decon", "c1")
     vol.open()
     assert key_of(shown) is None
     vol.close()
@@ -457,19 +665,17 @@ def test_the_mosaic_gets_its_identity_and_visibility_BACK_on_close():
     assert shown.visible is True, "2D never came back on"
 
 
-def test_the_volume_is_the_only_thing_holding_that_key_while_3d_is_up():
+def test_the_volume_is_the_only_thing_holding_that_key_while_3d_is_up(mosaic):
     """THE REPORTED BUG. If both hold it, one group checkbox lights the volume AND a flat coarser
     plane across it -- which is what 'overlays a downsampled copy over the full res version' is."""
-    import numpy as np
-
     from squidmip._napari_view import MosaicKey, key_of
 
-    shown = _Layer2D(op="raw", channel="c0")
-    viewer, vol = _open_over([shown], op="raw")
+    vol = _open_over_flat(mosaic, "raw", ("c0",))
+    shown = mosaic.find("raw", "c0")
     vol.open()
-    vol._add_layer(("c0", (0, 0)), "c0", np.zeros((2, 4, 4), np.uint16),
+    vol._add_layer(("c0", (0, 0)), "c0", _scene_stack(5, (4, 8, 8)),
                    (1.5, 0.75, 0.75), (0.0, 0.0, 0.0))
 
-    holders = [ly for ly in viewer.layers if key_of(ly) == MosaicKey("raw", "c0")]
+    holders = [ly for ly in mosaic.model.layers if key_of(ly) == MosaicKey("raw", "c0")]
     assert len(holders) == 1, f"{len(holders)} layers answer to raw/c0; exactly the brick should"
     assert holders[0] is not shown, "the flat mosaic still owns the key the volume needs"

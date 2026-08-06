@@ -105,6 +105,46 @@ Bricking (many textures + GL `max` compositing + a 1-voxel halo) is the mechanis
 pixel-exact, but it is NOT what a drawn ROI takes any more. Do not route a whole region through it
 expecting interaction — see the measured cost in the contract.
 
+## ONE layer model, 2D and 3D: an identity may be rendered by several layers
+
+Julio: *"why is the layering of 2d and 3d different in the same place?"*
+
+Because 2D assumed **an identity IS a layer**. A flat mosaic is one `add_image` per
+`(op, channel)`, so `MosaicLayers.find` was the whole model and every rule was written against it.
+A VOLUME is not: `_brick_view.BrickedVolume` tiles it into one Image layer per BRICK, all of them
+the same operator's same channel. 3D therefore either LOST each rule or grew a partial private
+copy of it, and that one divergence produced four user-visible defects in one evening (a volume
+with no checkbox, a coarse 2D mosaic drawable over it, a channel checkbox reaching one brick, a
+second contrast model).
+
+**The fact is now declared in the shared model, not branched on in a caller**
+(`squidmip/_napari_view.py`):
+
+| | |
+|---|---|
+| `find(op, channel)` | the **representative** — the layer a control reads and writes |
+| `layers_for(op, channel)` | **every** layer rendering that identity, derived, never cached |
+| `IDENTITY_PROPS` | `visible`, `contrast_limits`, `colormap`, `gamma`, `opacity` — the properties that belong to the IDENTITY, i.e. exactly what napari's layer controls expose. `blending` is deliberately absent: it is a rendering choice a volume legitimately makes differently |
+| `_mirror_identity` | the ONE mechanism keeping those equal across surfaces. A no-op when an identity has one layer, so every 2D path is untouched by construction |
+| `adopt(op, channel, layer)` | THE way a layer built elsewhere becomes an app layer: stamps identity, **takes the identity's current values**, labels micrometres, registers the channel |
+| `drop_layer(layer)` | one surface leaves; the identity survives while another holds it |
+
+`BrickedVolume` now takes **`MosaicLayers`, not a bare viewer**, and every brick is added through
+`adopt` and removed through `drop_layer`. Deleted with that: `BrickedVolume._link_contrast` and
+`_propagating`, the second contrast propagator. `_contrast_by` survives as the SEED for the first
+brick of a channel only. `remove_op_channel` removes the identity — every holder — because
+removing the representative alone left the rest on screen as foreign layers.
+
+The napari contrast **link set stays one layer per identity** (`_link_set`): `link_layers` connects
+every ordered pair, so linking bricks would be quadratic in the brick count and leave a link record
+behind every eviction. Surfaces follow the representative through the mirror instead, and the
+answer is unchanged: one contrast value per channel in the whole application.
+
+Pinned by tests parametrized over the two scenes (`tests/conftest.py::build_flat_scene` /
+`build_volume_scene`, used by `test_viewer_3d.py` and `test_layer_tree.py`), against a real
+`ViewerModel` with several bricks — a rule that only holds for a one-brick volume is the bug
+wearing a disguise.
+
 ## The plate window owns no viewer, and contrast is not implemented twice
 
 **The plate has no napari surface of its own.** `PlateWindow._mosaic_pane` was pinned to `None` on

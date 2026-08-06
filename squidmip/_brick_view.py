@@ -145,14 +145,19 @@ class BrickedVolume:
     them while 3D is up, and it puts every one of them back on ``close``.
     """
 
-    def __init__(self, viewer: Any, reader: Any, meta: dict, region: str,
+    def __init__(self, mosaic: Any, reader: Any, meta: dict, region: str,
                  window_px: Sequence[int], *, channels: Sequence[str], scale: Sequence[float],
                  origin_um: Sequence[float], limit: int, budget_bytes: int,
                  contrast_by: Optional[dict] = None, colormap_by: Optional[dict] = None,
                  op: str = "raw",
                  say: Optional[Callable[[str], None]] = None, parent: Any = None,
                  read: Optional[Callable] = None) -> None:
-        self._viewer = viewer
+        #: THE LAYER MODEL, not a bare viewer. Every brick is added, adopted and dropped through
+        #: `MosaicLayers`, which is what makes a volume obey the same visibility, contrast,
+        #: colormap and grouping rules a flat mosaic does. Adding straight to the viewer is how
+        #: 3D came to have its own partial copy of those rules -- see `_add_layer`.
+        self._mosaic = mosaic
+        self._viewer = mosaic.model
         self._meta = meta
         #: WHICH operator's volume this is, held so every brick can DECLARE it.
         #:
@@ -166,11 +171,13 @@ class BrickedVolume:
         #: layer, which the tree "deliberately tolerates and ignores". Bricks carried no metadata
         #: at all, so the entire volume was foreign: no group, no checkbox, nothing to switch off
         #: -- while the 2-D layers `open()` had force-hidden kept their checkboxes and could be
-        #: switched back ON TOP of it. Stamping the bricks puts the volume inside the same
-        #: visibility model as everything else, and all bricks of one channel collapse into ONE
-        #: group row. That is the right control surface rather than a compromise: the bricks ARE
-        #: one volume, so a per-brick toggle would only be a way to punch holes in it by hand --
-        #: the same reason `_link_contrast` below refuses to give each brick its own contrast.
+        #: switched back ON TOP of it. `MosaicLayers.adopt(self._op, channel, layer)` puts the
+        #: volume inside the same layer model as everything else, and all bricks of one channel
+        #: collapse into ONE group row. That is the right control surface rather than a compromise:
+        #: the bricks ARE one volume, so a per-brick toggle -- or a per-brick contrast slider --
+        #: would only be a way to punch holes in it by hand. That is exactly what the model's
+        #: IDENTITY_PROPS mirror now guarantees cannot happen, for every property at once and for
+        #: 2D and 3D alike, instead of the one-property propagator that used to live here.
         self._op = str(op)
         self._channels = list(channels)
         self._scale = tuple(float(v) for v in scale)          # (dz, py, px) micrometres
@@ -208,7 +215,6 @@ class BrickedVolume:
         #: the reasoning in `open`.
         self._surrendered: list = []
         self._closed = False
-        self._propagating = False
         self._t_open: Optional[float] = None
         self._t_first: Optional[float] = None
         self._t_settled: Optional[float] = None
@@ -486,17 +492,24 @@ class BrickedVolume:
         self._note_first_pixels()
 
     def _add_layer(self, key, channel: str, arr, scale, translate) -> None:
+        """Build ONE brick and hand it to the layer model to adopt.
+
+        THE SPLIT, and it is the whole point of this method: everything about HOW a brick is drawn
+        -- the stride-carrying scale, the mip rendering mode, the pinned GL ``max`` equation that
+        makes the halos composite without seams -- is 3D knowledge and lives here. Everything about
+        WHAT the layer IS -- its identity, its contrast, its colormap, its visibility, its group in
+        the tree -- is the app's layer model and lives in `MosaicLayers.adopt`.
+
+        Stamping the metadata here was the previous shape, and it was a COPY of one line of
+        `add_mosaic` with none of the rest: the brick got an identity and still had no contrast
+        link, no eye-icon fan-out, no one-operator-per-channel exclusivity and no micrometre units,
+        so `BrickedVolume` grew a private contrast propagator to cover part of the gap. One
+        `adopt` call replaces the line AND the propagator.
+        """
         from squidmip._napari3d import pin_max_compositing
-        from squidmip._napari_view import MosaicKey
 
         kwargs = {
             "name": f"{channel} ▪ {key[1][0]},{key[1][1]}",
-            # IDENTITY, not decoration. `key_of` reads exactly this to decide whether a layer
-            # belongs to the app's layer tree; without it a brick is a foreign layer with no
-            # checkbox, which is how a 3-D volume came to be unswitchable-off. Every brick of a
-            # channel carries the SAME (op, channel), so the tree groups them into one row and one
-            # toggle drives the whole volume. See `self._op`.
-            "metadata": MosaicKey(self._op, channel).as_metadata(),
             "scale": scale,
             "translate": translate,
             "rendering": "mip",
@@ -509,15 +522,21 @@ class BrickedVolume:
         cmap = self._colormap_by.get(channel)
         if cmap is not None:
             kwargs["colormap"] = cmap
+        # THE SEED only. Once the layer is adopted, the CHANNEL owns its window -- an identity that
+        # already has a brick on screen hands this one its value, and a drag on any brick moves
+        # every brick and the channel's flat mosaic with it. What this covers is the FIRST brick of
+        # a channel, which has nobody to copy from: the window carried in from 2D, else the
+        # channel's own if the pane already has one, else the fluorescence rule applied once and
+        # remembered. Deriving it per brick would give every brick its own autoscale and the joins
+        # would step in brightness -- the bricks are one volume and must be windowed as one.
         clim = self._contrast_by.get(channel)
+        if clim is None:
+            clim = self._mosaic.contrast(channel)
         if clim is None:
             from squidmip._napari3d import _auto_clim
 
             clim = _auto_clim(arr)
             if clim is not None:
-                # ONE window per channel for the whole volume. Deriving it per brick would give
-                # every brick its own autoscale and the joins would step in brightness -- the
-                # bricks are one volume and must be windowed as one.
                 self._contrast_by[channel] = clim
         if clim is not None:
             kwargs["contrast_limits"] = tuple(clim)
@@ -527,37 +546,9 @@ class BrickedVolume:
             self._say(f"3D: brick {key[1][0]},{key[1][1]} could not be added: {exc}")
             return
         pin_max_compositing(self._viewer, layer)
-        self._link_contrast(layer, channel)
+        self._mosaic.adopt(self._op, channel, layer)
         self._layers[key] = layer
         self._steps[key] = max(1, int(round(scale[1] / self._scale[1])))
-
-    def _link_contrast(self, layer: Any, channel: str) -> None:
-        """One contrast drag moves every brick of that channel.
-
-        The bricks are ONE volume, so a per-brick contrast slider is not a feature, it is a way to
-        make the joins visible by hand. napari's own ``link_layers`` is not used because membership
-        changes constantly here (bricks are added and evicted as the camera moves) and a link set
-        that outlives its layers is a leak; propagating on the event handles that for free.
-        """
-        def _propagate(event=None, src=layer, ch=channel) -> None:
-            if self._propagating or self._closed:
-                return
-            self._propagating = True
-            try:
-                value = tuple(src.contrast_limits)
-                self._contrast_by[ch] = value
-                for (c, _bk), other in self._layers.items():
-                    if c == ch and other is not src:
-                        other.contrast_limits = value
-            except Exception:                           # noqa: BLE001 - contrast is cosmetic
-                pass
-            finally:
-                self._propagating = False
-
-        try:
-            layer.events.contrast_limits.connect(_propagate)
-        except Exception:                               # noqa: BLE001
-            pass
 
     def _drop(self, key) -> None:
         layer = self._layers.pop(key, None)
@@ -571,7 +562,11 @@ class BrickedVolume:
             data = getattr(layer, "data", None)
             if isinstance(data, np.ndarray):
                 layer.data = np.zeros((1, 1, 1), dtype=data.dtype)
-            self._viewer.layers.remove(layer)
+            # Through the model, not `viewer.layers.remove`: one surface of an identity leaves and
+            # the identity survives as long as another brick holds it, with its contrast link and
+            # its tree row intact. Removing behind the model's back is what leaves napari holding
+            # a link callback onto a dead layer.
+            self._mosaic.drop_layer(layer)
         except Exception:                               # noqa: BLE001 - already gone
             pass
 

@@ -2611,8 +2611,12 @@ class RegionViewer(QMainWindow):
         if not names:
             self._say("this acquisition declares no channels to render in 3D.")
             return
-        viewer = self._napari_viewer()
-        if viewer is None:
+        # THE LAYER MODEL, not the bare viewer. A brick is an app layer like any other, so it is
+        # created, adopted and dropped through the same `MosaicLayers` a flat mosaic is -- that is
+        # what makes one checkbox, one contrast window and one group mean the same thing in 3D as
+        # in 2D. See `MosaicLayers.adopt`.
+        mosaic = getattr(self._pane, "mosaic", None) if self._pane is not None else None
+        if mosaic is None or getattr(mosaic, "model", None) is None:
             self._say("3D needs this window's napari canvas, which isn't available here.")
             return
         from squidmip import _bricks
@@ -2646,7 +2650,7 @@ class RegionViewer(QMainWindow):
         budget = _brick_budget_bytes()
         try:
             self._replace_native3d(lambda: _started(BrickedVolume(
-                viewer, self._reader, self._meta, region, window,
+                mosaic, self._reader, self._meta, region, window,
                 channels=names, scale=(dz, px, px), origin_um=roi_origin,
                 limit=max_tex, budget_bytes=budget,
                 # `source` is the operator `_volume_source` chose off the DECLARATION, never off a

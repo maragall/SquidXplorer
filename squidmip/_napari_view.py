@@ -52,6 +52,14 @@ and ``LayerList`` is flat. The hierarchy is therefore built here, out of three p
   label; the metadata is the truth.
 * **A processing-layer toggle is a visibility flip over one group** — the before/after
   stitching toggle.
+* **An identity is ``(op, channel)``, and it may be rendered by MORE THAN ONE layer.** A flat
+  mosaic is one ``add_image``; a 3D volume is one Image layer per BRICK (``_brick_view``), and
+  every brick is the same operator's same channel. So ``find`` names the REPRESENTATIVE that
+  controls read and write, ``layers_for`` names them all, ``IDENTITY_PROPS`` says which properties
+  belong to the identity rather than to a layer object, and ``_mirror_identity`` keeps those equal
+  across every surface. This is the one place the fact is written down: before it, each rule below
+  was written against "an identity IS a layer" and 3D either lost the rule or grew a private copy
+  of it.
 * **Per-channel contrast is shared across processing layers via ``LayerList.link_layers``**,
   keyed on CHANNEL. This is what makes contrast survive the before->after toggle, and it means
   there is exactly ONE contrast value per channel in the whole application. That is a
@@ -429,6 +437,12 @@ class MosaicLayers:
         #: single 3D texture larger than this per axis, so the 3D swap targets the level that fills
         #: it rather than a bigger volume napari would silently downsample.
         self._max_3d_texture: int = _DEFAULT_MAX_3D_TEXTURE
+        #: ``(op, channel, property)`` triples currently being mirrored across an identity's
+        #: surfaces, so a write this class makes does not re-enter through the event it raises.
+        #: Keyed rather than a single flag: darkening one identity happens INSIDE the mirror of
+        #: another (``_connect_exclusive_op``), and a global flag would swallow that second
+        #: identity's own mirror and leave half a volume lit.
+        self._mirroring: set = set()
 
     # -- who moved the contrast: us, or the user? ---------------------------------------
     @contextmanager
@@ -488,10 +502,227 @@ class MosaicLayers:
         return out
 
     def find(self, op: str, channel: str) -> Optional[Any]:
+        """The REPRESENTATIVE layer of one identity — the one a control reads and writes.
+
+        An identity is ``(op, channel)``. Usually exactly one layer renders it, and then this is
+        that layer. See :meth:`layers_for` for the case where several do.
+        """
         for ly in self.ours():
             if key_of(ly) == MosaicKey(op, channel):
                 return ly
         return None
+
+    # -- ONE identity, possibly SEVERAL layers -------------------------------------------
+    #
+    # Julio: "why is the layering of 2d and 3d different in the same place?"
+    #
+    # Because 2D assumed an identity is a layer. A flat mosaic is one ``add_image`` per
+    # (op, channel), so ``find`` was the whole model and every rule below was written against it.
+    # A VOLUME is not: `_brick_view.BrickedVolume` tiles it into one Image layer per brick, and
+    # every one of those bricks is the same operator's same channel. That is a fact about volumes,
+    # not about any particular operator, so it is declared HERE, once, instead of branching in the
+    # layer tree, in the eye-icon tap or in the 3D renderer -- which is what produced four separate
+    # user-visible defects in one evening (a volume with no checkbox, a coarse 2D mosaic drawable
+    # over it, one checkbox reaching one brick, and a second contrast model in 3D).
+    #
+    # The declared property is: **an identity may be rendered by more than one layer, and every
+    # property that belongs to the identity holds ONE value across all of them.** ``find`` names
+    # the representative, ``layers_for`` names them all, ``IDENTITY_PROPS`` says which properties
+    # are the identity's rather than the layer object's, and ``_mirror_identity`` is the single
+    # mechanism that keeps them equal. With one layer per identity -- every 2D case -- the mirror
+    # finds no siblings and returns at its first branch, so 2D behaviour is untouched by
+    # construction rather than by inspection.
+
+    #: The properties that belong to the IDENTITY rather than to a layer object. These are exactly
+    #: the ones napari's own layer controls expose, which is the point: a user dragging the contrast
+    #: slider or clicking an eye is addressing "raw · 488", not "the third brick of raw · 488".
+    #:
+    #: ``blending`` is deliberately absent. It is a RENDERING choice that legitimately differs
+    #: between a flat mosaic and a volume (``_brick_view`` pins the GL ``max`` equation on its
+    #: bricks so their halos composite without seams), and it is not a control the user drives.
+    IDENTITY_PROPS: tuple = ("visible", "contrast_limits", "colormap", "gamma", "opacity")
+
+    def layers_for(self, op: str, channel: str) -> list[Any]:
+        """EVERY layer rendering one identity, representative first.
+
+        One layer for a flat mosaic; one per brick for a volume. Derived from the layer list on
+        every call and never cached -- a cached membership is the drift this project keeps
+        deleting, and the tree's own group state is derived for the same reason.
+        """
+        want = MosaicKey(str(op), str(channel))
+        return [ly for ly in self.ours() if key_of(ly) == want]
+
+    def adopt(self, op: str, channel: str, layer: Any) -> Any:
+        """Bring a layer BUILT ELSEWHERE into the model, under identity ``(op, channel)``.
+
+        THE one way a layer that this class did not construct becomes an app layer. 3D bricks are
+        built by ``_brick_view`` -- which knows about strides, halos and GL compositing, none of
+        which belongs here -- and were then added straight to the viewer, so they were app layers
+        in appearance and foreign objects to every rule: no contrast link, no eye-icon fan-out, no
+        one-operator-per-channel exclusivity, no micrometre units, and a private contrast
+        propagator in ``BrickedVolume`` that was the second implementation of a job this class
+        already did.
+
+        Joining an identity means TAKING ITS VALUES: a brick that arrives while its volume is
+        switched off must arrive dark, and one that arrives after the user has moved the contrast
+        must arrive at that window. Otherwise every camera move repaints part of the volume back to
+        a state the user left. Copied inside ``programmatic()`` -- this is our write, not a gesture.
+        """
+        key = MosaicKey(str(op), str(channel))
+        siblings = self.layers_for(key.op, key.channel)
+        meta = dict(getattr(layer, "metadata", None) or {})
+        meta.update(key.as_metadata())
+        layer.metadata = meta
+        if siblings:
+            with self.programmatic():
+                for prop in self.IDENTITY_PROPS:
+                    try:
+                        self._set_identity_prop(layer, prop, getattr(siblings[0], prop))
+                    except AttributeError:       # a layer type without this property
+                        continue
+        self._label_units(layer)                 # micrometres on every axis, as `_place` does
+        self._register_channel(key.channel, layer)
+        if not siblings and bool(getattr(layer, "visible", False)):
+            # A FIRST surface arriving lit is the same gesture as one the user lights, exactly as
+            # in `add_mosaic`. A later surface of an identity already on screen is not a gesture at
+            # all -- it took its visibility from its siblings above.
+            self._darken_other_ops(key.channel, layer)
+        return layer
+
+    def drop_layer(self, layer: Any) -> None:
+        """Take ONE layer out of the model and out of the viewer, leaving its identity alive.
+
+        :meth:`remove_op_channel` removes an IDENTITY. This removes one of the layers rendering it,
+        which is what a volume needs as the camera evicts bricks: the group keeps its tree row and
+        its checkbox for as long as any brick of it is still on screen.
+
+        Unlinks BEFORE removing, for the reason ``remove_op_channel`` states: a linked layer
+        destroyed while still linked leaves napari holding a callback onto a dead layer.
+        """
+        for channel, peers in self._by_channel.items():
+            if layer not in peers:
+                continue
+            try:
+                self._model.layers.unlink_layers([layer], ("contrast_limits",))
+            except Exception:                    # noqa: BLE001 - never linked, or already gone
+                pass
+            peers.remove(layer)
+            linkable = self._link_set(channel)
+            if len(linkable) > 1:
+                self._model.layers.link_layers(linkable, ("contrast_limits",))
+            break
+        try:
+            self._model.layers.remove(layer)
+        except Exception:                        # noqa: BLE001 - already removed
+            pass
+
+    def _link_set(self, channel: str) -> list[Any]:
+        """The layers of *channel* that napari's ``link_layers`` connects: ONE per identity.
+
+        Contrast is linked across the PROCESSING LAYERS of a channel, which is a handful of layers.
+        Linking every SURFACE too would be quadratic in the brick count (napari links each ordered
+        pair) and would leave a link record per pair behind every eviction. The surfaces of one
+        identity are kept equal by :meth:`_mirror_identity` instead, so the link set stays exactly
+        what it has always been and the answer is the same: one contrast value per channel.
+
+        A layer with no identity keeps its own slot rather than collapsing with the other
+        identity-less layers -- while 3D is up the flat mosaics have SURRENDERED theirs
+        (``BrickedVolume.open``) and they must not stop being linked to each other because of it.
+        """
+        seen: set = set()
+        out: list[Any] = []
+        for ly in self._by_channel.get(channel) or []:
+            k = key_of(ly)
+            ident = (k.op, k.channel) if k is not None else id(ly)
+            if ident in seen:
+                continue
+            seen.add(ident)
+            out.append(ly)
+        return out
+
+    @staticmethod
+    def _set_identity_prop(layer: Any, prop: str, value: Any) -> bool:
+        """Write one identity property onto one layer. Returns whether it moved.
+
+        The contrast RANGE is widened first when needed: napari clamps ``contrast_limits`` to
+        ``contrast_limits_range``, which each layer sizes from the pixels it was built with, so a
+        brick sampled off a dim corner would silently clip the window its siblings hold -- the same
+        trap ``add_mosaic`` widens the range for after seeding.
+        """
+        try:
+            current = getattr(layer, prop)
+        except Exception:                        # noqa: BLE001 - a layer type without this property
+            return False
+        try:
+            if bool(current == value):
+                return False
+        except Exception:                        # noqa: BLE001 - unorderable value: write it
+            pass
+        if prop == "contrast_limits":
+            try:
+                lo, hi = float(value[0]), float(value[1])
+                r0, r1 = (float(v) for v in layer.contrast_limits_range)
+                layer.contrast_limits_range = (min(r0, lo), max(r1, hi))
+            except Exception:                    # noqa: BLE001 - no range to widen; write anyway
+                pass
+        try:
+            setattr(layer, prop, value)
+        except Exception:                        # noqa: BLE001 - one odd surface is skipped
+            return False
+        return True
+
+    def _connect_identity_mirror(self, layer: Any) -> None:
+        """Wire one layer into its identity's property mirror.
+
+        Connected FIRST in ``_register_channel``, before the fan-out taps, so that a subscriber
+        asking "is this processing layer on screen" is answered by an identity that already agrees
+        with itself.
+        """
+        events = getattr(layer, "events", None)
+        if events is None:
+            return
+        for prop in self.IDENTITY_PROPS:
+            emitter = getattr(events, prop, None)
+            if emitter is None:
+                continue
+
+            def _fire(event=None, _prop=prop, _src=layer) -> None:
+                self._mirror_identity(_prop, _src)
+
+            try:
+                emitter.connect(_fire)
+            except Exception:                    # noqa: BLE001 - a stub layer with no emitter
+                continue
+
+    def _mirror_identity(self, prop: str, src: Any) -> None:
+        """Give every OTHER layer of *src*'s identity the value *src* just took.
+
+        The identity is read off the layer at delivery, never captured at connect time: while 3D is
+        up the flat mosaics surrender theirs, and a layer that has no identity right now speaks for
+        no group.
+
+        NOT wrapped in ``programmatic()``: the user really did move this property, and the plate is
+        a sink that has to be told. The taps' own value-based echo filters collapse the copies.
+        """
+        key = key_of(src)
+        if key is None:
+            return
+        token = (key.op, key.channel, prop)
+        if token in self._mirroring:
+            return
+        others = [ly for ly in self.layers_for(key.op, key.channel) if ly is not src]
+        if not others:
+            return                               # one layer IS the identity: every 2D case
+        try:
+            value = getattr(src, prop)
+        except Exception:                        # noqa: BLE001 - nothing to mirror
+            return
+        self._mirroring.add(token)
+        try:
+            for ly in others:
+                self._set_identity_prop(ly, prop, value)
+        finally:
+            self._mirroring.discard(token)
 
     # -- 2D pyramid <-> 3D full resolution ----------------------------------------------
     def render_max_res_3d(self, on: bool) -> None:
@@ -1066,6 +1297,10 @@ class MosaicLayers:
     def _register_channel(self, channel: str, layer: Any) -> None:
         peers = self._by_channel.setdefault(channel, [])
         peers.append(layer)
+        # FIRST, before any tap: the surfaces of one identity must already agree by the time a
+        # subscriber is told anything about it. A no-op for a layer that is the only surface of
+        # its identity, which is every 2D mosaic.
+        self._connect_identity_mirror(layer)
         # Subscribe THIS layer to the channel's user-contrast fan-out.
         #
         # This is the Defect 5 fix. on_user_contrast used to walk _by_channel once, at
@@ -1099,8 +1334,9 @@ class MosaicLayers:
         # result has to be individually legible on arrival or you cannot judge whether it used
         # the right iteration count. When the user wants the flip to be a real comparison
         # instead, `match_contrast_to` equalises them on demand ("Match raw contrast").
-        if len(peers) > 1:
-            self._model.layers.link_layers(peers, ("contrast_limits",))
+        linkable = self._link_set(channel)
+        if len(linkable) > 1:
+            self._model.layers.link_layers(linkable, ("contrast_limits",))
 
     def match_contrast_to(self, op: str) -> int:
         """Copy *op*'s contrast window onto every OTHER processing layer of the same channel.
@@ -1136,21 +1372,21 @@ class MosaicLayers:
         return matched
 
     def remove_op_channel(self, op: str, channel: str) -> bool:
-        layer = self.find(op, channel)
-        if layer is None:
+        """Remove an IDENTITY: every layer rendering ``(op, channel)``, not just the first.
+
+        A volume's bricks all answer to one key, and removing the representative alone would leave
+        the rest on screen with no tree row to switch them off -- a foreign layer nobody can
+        control, which is the defect the bricks were given an identity to end.
+        """
+        holders = self.layers_for(op, channel)
+        if not holders:
             return False
-        peers = self._by_channel.get(channel, [])
-        if layer in peers:
-            # Unlink BEFORE removal: a linked layer that is destroyed while still linked leaves
-            # napari holding a callback onto a dead layer.
-            if len(peers) > 1:
-                self._model.layers.unlink_layers(peers, ("contrast_limits",))
-            peers.remove(layer)
-            if len(peers) > 1:
-                self._model.layers.link_layers(peers, ("contrast_limits",))
-            # No re-tap needed: the tap lives on EVERY layer of the channel, not on a lead, so
+        for layer in holders:
+            # `drop_layer` unlinks BEFORE removal: a linked layer that is destroyed while still
+            # linked leaves napari holding a callback onto a dead layer. No re-tap is needed
+            # either way -- the tap lives on EVERY layer of the channel, not on a lead, so
             # removing one cannot leave the channel untapped.
-        self._model.layers.remove(layer)
+            self.drop_layer(layer)
         return True
 
     def remove_op(self, op: str) -> list[str]:
