@@ -164,6 +164,28 @@ One widget CLASS for both, so the two can never disagree about what a timepoint 
 separate INSTANCE each, because a window navigates independently: a shared position would make
 comparing two wells at different timepoints impossible.
 
+**Playback, 2026-08-05, and only in a window.** `TimePointBar(playback=True)` walks the timepoints
+with napari's own play button, fps popup, loop modes and off-thread `AnimationThread` — the same
+`_region_nav.AxisPlayback` the region slider uses, with the axis passed in. Two properties are
+load-bearing and both are inherited rather than written:
+
+* **The frame gate.** napari's playback is debounced on the render (`QtDims._set_frame` drops a
+  frame while `dims._play_ready` is False). A frame here costs a mosaic load, so the gate is closed
+  by the step and opened by `RegionViewer._frame_done` when the picture is on screen. Playback
+  therefore self-limits to the rate the data can be read at; measured on `sim_5d_2x2_t3`, 10 fps
+  requested yields ~4.4 fps achieved with the rest DROPPED and none queued.
+* **Superseded loads are dropped, not waited for.** Every load carries a generation
+  (`RegionViewer._load_gen`); a result from an older one is ignored on arrival. The region check
+  cannot do this job, because a timepoint change keeps the region and differs only in `t`.
+
+**The plate does NOT play, and that is a decision.** `_PreviewWorker`'s persistent cell cache is
+keyed `(token, region)` with no timepoint (`_platecache.PlateCellCache.get/put`), so a plate
+animating the time axis would serve timepoint 0's cells under a moving label — the same lie the
+loupe's well-keyed cache told before it was re-keyed to `(well, timepoint)`. Re-keying the cell
+cache is the price of a plate play button, and until somebody pays it the plate's bar is built with
+`playback=False` and has no play button to press. `TimePointBar.play()` on it raises rather than
+no-ops.
+
 **The shape of the bug that was here, worth remembering.** The plate overview and the loupe read
 `arr[0, :, 0]` unconditionally, so a 40-timepoint plate looked exactly like a 1-timepoint plate.
 No error, no warning, nothing wrong on screen. It survived because **every fixture in the suite was
