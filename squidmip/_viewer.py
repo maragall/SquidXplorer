@@ -1946,7 +1946,13 @@ class PlateWindow(QMainWindow):
         Only a USER gesture reaches here: TimePointBar does not echo its own programmatic moves,
         which is what stops this looping when we set the bar from an ingest.
         """
-        self._say(f"time_point {time_point + 1} of {self._time_point_bar.count}")
+        # `say`, not `_say`. There is no `_say` on this window and there never was, so THIS LINE
+        # RAISED AttributeError ON EVERY USER DRAG of the timepoint bar — the first statement in
+        # the only slot the bar calls, so nothing below it ran either: the plate never re-read at
+        # the new timepoint and the exception surfaced out of Qt's slot dispatch. Caught 2026-08-05
+        # while proving the Minerva export follows the slider; the export could not follow a bar
+        # that could not be moved.
+        self.say(f"time_point {time_point + 1} of {self._time_point_bar.count}")
         # Tell the PLATE, which is what the loupe reads its timepoint from. This comment used to
         # claim the loupe needed no invalidation "because it caches coarse tiles per (well,
         # timepoint)" — true of the cache and irrelevant, because nothing passed a timepoint in:
@@ -2715,9 +2721,13 @@ class PlateWindow(QMainWindow):
         one file. All this decides is WHAT is exported, and the answer is what this pane is
         showing — not whatever happens to be highlighted on the plate.
         """
+        ov = getattr(self, "_overview", None)
         try:
             selection = _explore.subset_selection(
-                tab.regions, (self._meta or {}).get("fovs_per_region"))
+                tab.regions, (self._meta or {}).get("fovs_per_region"),
+                # A field box drawn on the plate crops this export too. The tab owns WHICH
+                # regions; the plate is the only place that can say which fields inside one.
+                ov.fov_subsets() if ov is not None else None)
         except ValueError as exc:                     # named, in the status line, nothing exported
             self._readout.setText(f"cannot export to Minerva: {exc}")
             return
@@ -2745,17 +2755,29 @@ class PlateWindow(QMainWindow):
     def _build_minerva_tab(self) -> QWidget:
         """Minerva Author hand-off (IMA-228): export the SELECTION, then open Author on it.
 
-        Scope comes from :meth:`minerva_selection` — the plate's selected FOVs/wells, else the
-        well open in the detail viewer, which means every FOV of it. One file pair per FOV
-        (Minerva opens one 2D image at a time and SquidMIP has no stitcher).
+        Scope comes from :meth:`minerva_selection` — the plate's selected wells (all of their
+        FOVs, or the fields a Shift+Alt box picked inside a mosaic), else the well open in the
+        detail viewer, which means every FOV of it.
+
+        ONE FILE PAIR PER REGION, not per FOV. This docstring said "one file pair per FOV
+        (Minerva opens one 2D image at a time and SquidMIP has no stitcher)" long after both
+        halves of that stopped being true: there IS a stitcher (the region-operator seam
+        ``export_selection`` fuses through), and a region's FOVs become ONE mosaic because
+        Minerva lays out exactly one image (``"Layout": {"Grid": [["i0"]]}``, hardcoded) and
+        opens only ``series[0]``. A FOV subset is that mosaic CROPPED, still one file.
+
+        The timepoint is the one the window is showing — ``run_minerva_export`` reads
+        ``self.time_point`` — so there is no control for it here and none is missing.
         """
         op = _OPERATIONS_BY_KEY["minerva"]
         w, v = self._op_tab_shell(
             op.label,
-            "Writes an OME-TIFF plus a Minerva story for every selected region, then starts "
-            "Minerva Author. Author’s editor cannot be pointed at a file, so pick the .story.json "
-            "below in its “Select File” dialog - the colours and contrast are already applied. "
-            "To skip that step entirely, render a viewer instead (button below the paths).",
+            "Writes an OME-TIFF plus a Minerva story for every selected region, at the timepoint "
+            "the plate is showing, then starts Minerva Author. Zoom into a well and Shift+Alt-drag "
+            "a box to export only the fields inside it - the mosaic is cropped to them. Author’s "
+            "editor cannot be pointed at a file, so pick the .story.json below in its “Select "
+            "File” dialog - the colours and contrast are already applied. To skip that step "
+            "entirely, render a viewer instead (button below the paths).",
         )
         state = {"dir": None, "pairs": []}
 
@@ -2823,6 +2845,12 @@ class PlateWindow(QMainWindow):
         def on_exported(pairs):
             state["pairs"] = pairs
             if not pairs:
+                # An export that wrote NOTHING must not leave the previous one's paths on screen
+                # with live Copy / Show in folder / Render buttons under them. `state["pairs"]` was
+                # already emptied above, so the buttons had quietly become no-ops while still
+                # naming files — a control that looks armed and does nothing.
+                path_lbl.setText("")
+                copy_btn.hide(); reveal_btn.hide(); render_btn.hide()
                 return
             path_lbl.setText("\n".join(str(story) for _, story in pairs))
             copy_btn.show(); reveal_btn.show(); render_btn.show()
@@ -2843,7 +2871,10 @@ class PlateWindow(QMainWindow):
 
         pick_btn = QPushButton("Choose output folder…"); pick_btn.setStyleSheet(_BTN_QSS)
         pick_btn.clicked.connect(pick)
-        run = QPushButton("Export the selected FOVs"); run.setStyleSheet(_BTN_QSS)
+        # Named for the UNIT that lands: one fused mosaic per selected region, cropped to the
+        # fields you boxed. "Export the selected FOVs" promised N files and wrote one per region.
+        run = QPushButton("Export the selection (one mosaic per region)")
+        run.setStyleSheet(_BTN_QSS)
         run.clicked.connect(lambda: self.run_minerva_export(
             out_dir=state["dir"], projector=proj.currentText(),
             launch=launch_cb.isChecked(), on_exported=on_exported,
@@ -2884,6 +2915,11 @@ class PlateWindow(QMainWindow):
         Note the unit. The pairs are ``(region, fov)`` but the export groups them BY REGION and
         fuses each into one mosaic — a region is a mosaic containing an array of FOVs, never a
         FOV. Selecting a whole region yields all its FOVs here and one fused mosaic downstream.
+
+        A region the user boxed only PART of yields only those FOVs, and downstream that is the
+        same one mosaic CROPPED to them. Nothing here decides that: ``selected_region_fovs``
+        reads the plate's own FOV subsets, and this method's job is only to fall back to the
+        detail viewer's well when the plate has no selection at all.
 
         Nothing selected returns ``[]`` — the caller says so rather than exporting fov 0 of 36
         and calling it "the selected well".
@@ -2942,7 +2978,7 @@ class PlateWindow(QMainWindow):
         return luts or None
 
     def run_minerva_export(self, out_dir=None, projector: str = "mip", launch: bool = True,
-                           on_exported=None, t: int = 0, selection=None, luts=None):
+                           on_exported=None, t=None, selection=None, luts=None):
         """Export the user's selection for Minerva Author and (optionally) open it.
 
         Runs off the GUI thread: projecting a well is real I/O plus compute, and starting
@@ -2952,10 +2988,17 @@ class PlateWindow(QMainWindow):
         exactly as before this parameter existed. Deciding whether to match the screen belongs to
         the caller (the Minerva tab's checkbox calls :meth:`on_screen_luts`), not here - so this
         method has no opinion and stays trivially testable in both states.
+
+        *t* is ``None`` by default, meaning THE TIMEPOINT THE WINDOW IS SHOWING. It used to
+        default to the literal ``0`` and both GUI call sites took the default, so a
+        multi-timepoint acquisition exported frame 0 whatever the timepoint bar said — the pixels
+        on screen and the pixels in the OME-TIFF were different images, and nothing said so. An
+        explicit *t* still wins, which is what keeps the CLI and the tests able to name one.
         """
         if self._reader is None or self._meta is None:
             self._readout.setText("open an acquisition first")
             return
+        t = self.time_point if t is None else int(t)
         if self._minerva is not None and self._minerva.isRunning():
             self._readout.setText("already exporting — let the current export finish first")
             return
@@ -2969,8 +3012,14 @@ class PlateWindow(QMainWindow):
 
         # The export unit is a REGION (one fused mosaic each), so count regions, not FOVs.
         regions = list(dict.fromkeys(r for r, _ in sel))
+        # ...but a region can now be CROPPED to some of its fields, and that changes the file that
+        # lands. Say how many are cropped rather than letting "3 mosaics" mean either thing.
+        per = (self._meta.get("fovs_per_region") or {})
+        cropped = [r for r in regions
+                   if 0 < len({f for rr, f in sel if rr == r}) < len(per.get(r) or [])]
         what = (f"{len(regions)} mosaic{'s' if len(regions) != 1 else ''} "
-                f"({', '.join(regions)}, {len(sel)} FOVs)")
+                f"({', '.join(regions)}, {len(sel)} FOVs"
+                + (f", {len(cropped)} cropped" if cropped else "") + ")")
         n_t = self._meta.get("n_t", 1) or 1
         t_note = f" (t={t} of {n_t})" if n_t > 1 else ""
         self._minerva = w = _MinervaWorker(
@@ -2998,9 +3047,15 @@ class PlateWindow(QMainWindow):
                 return
             done = regions[: len(pairs)]
             note = "" if len(pairs) == len(regions) else f" of {len(regions)} (stopped)"
+            # The SUCCESS line says a mosaic was cropped, not just the in-flight one. This is the
+            # line that stays on screen and the only one a user reads after the export, and a crop
+            # that reads identically to a whole region is the same silent difference the filename
+            # suffix (`_2fov`) exists to prevent on disk.
+            crop = [r for r in cropped if r in done]
+            crop_note = (f", {len(crop)} cropped to the FOVs you boxed" if crop else "")
             self._readout.setText(
                 f"✓ exported {len(pairs)} mosaic{'s' if len(pairs) != 1 else ''}{note} from "
-                f"{', '.join(done)}{t_note} → {Path(pairs[0][0]).parent}")
+                f"{', '.join(done)}{t_note}{crop_note} → {Path(pairs[0][0]).parent}")
 
         w.progress.connect(
             lambda d, n: self._readout.setText(f"● Minerva export · {d}/{n} mosaics"))
@@ -5191,17 +5246,33 @@ class PlateWindow(QMainWindow):
         self._update_selection_label()
 
     def _update_selection_label(self):
-        """Show the current selection in the Selection bar ("run on selected wells")."""
+        """Show the current selection in the Selection bar ("run on selected wells").
+
+        A partly-boxed well is NAMED as one — ``A1 (4/27 FOVs)`` — because a Shift+Alt box inside
+        a mosaic changes what an export writes, and a label that reads the same either way makes
+        a crop indistinguishable from a whole region until the file lands.
+        """
         lbl = getattr(self, "_selection_label", None)
         if lbl is None:
             return
         sel = self._selected_regions
+        ov = getattr(self, "_overview", None)
+        subsets = ov.fov_subsets() if ov is not None else {}
+        per = (self._meta or {}).get("fovs_per_region", {})
+
+        def name(region):
+            fovs = subsets.get(region)
+            if not fovs:
+                return str(region)
+            return f"{region} ({len(fovs)}/{len(per.get(region) or fovs)} FOVs)"
+
         if not sel:
             lbl.setText("none — click wells, or Select all")
         elif len(sel) <= 6:
-            lbl.setText(f"{', '.join(sel)}  ({len(sel)})")
+            lbl.setText(f"{', '.join(name(r) for r in sel)}  ({len(sel)})")
         else:
-            lbl.setText(f"{', '.join(sel[:6])}, +{len(sel) - 6}  ({len(sel)})")
+            lbl.setText(
+                f"{', '.join(name(r) for r in sel[:6])}, +{len(sel) - 6}  ({len(sel)})")
 
     def _select_all_wells(self):
         if self._overview is not None:
@@ -5382,9 +5453,26 @@ class PlateWindow(QMainWindow):
             self._readout.setText("Open an acquisition before opening a view.")
 
     def selected_region_fovs(self) -> list:
-        """The current selection as (region, fov) pairs — the payload IMA-205 will consume."""
+        """The current selection as (region, fov) pairs — the payload IMA-205 will consume.
+
+        A region the user boxed only PART of contributes only those fields. That is the whole of
+        "run on a subset of the acquisition": the engine has always cropped to the FOVs it is
+        handed (``stitch_plate(regions={region: [fov, ...]})`` derives the mosaic canvas from
+        those positions alone), and this method was the place that threw the finer answer away by
+        expanding every selected well to all of its fields before anyone downstream could see it.
+
+        ``PlateOverview.fov_subsets`` is the only source of a subset and it publishes STRICT ones
+        only, so the fallback below is not a guess: a region absent from it is selected whole.
+        ``or [0]`` still covers an acquisition whose metadata lists no FOVs for a region at all.
+        """
         per = (self._meta or {}).get("fovs_per_region", {})
-        return [(r, f) for r in self._selected_regions for f in (per.get(r) or [0])]
+        ov = getattr(self, "_overview", None)
+        subsets = ov.fov_subsets() if ov is not None else {}
+        out = []
+        for r in self._selected_regions:
+            fovs = subsets.get(r) or per.get(r) or [0]
+            out.extend((r, f) for f in fovs)
+        return out
 
     def _on_hover(self, text: str):
         # BOTTOM-LEFT plate title bar: "<acq>  ·  <mode>" (mode = raw / the operator that processed it),
