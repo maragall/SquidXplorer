@@ -29,6 +29,7 @@ the frozen bundle against a real acquisition, so an exclude that breaks the app 
 caught rather than shipped. See the ticket report for the measured number.
 """
 
+import importlib.util
 import os
 import sys
 
@@ -48,11 +49,45 @@ _BINARIES = []
 # Packages whose submodules are resolved at RUNTIME (registries, entry points, lazy
 # loaders), which static analysis therefore cannot see. Each one is here because it is
 # a known PyInstaller blind spot, not defensively:
-#   ndviewer_light / ndv / vispy - the detail viewer picks its canvas backend by string
+#   napari + npe2/app_model/... - THE RENDERER. See the block below; this was the bug.
+#   vispy                        - the GPU canvas picks its backend by string
 #   tensorstore                  - compiled extension + driver registry (the zarr reader)
 #   zarr / numcodecs             - codec registry keyed by the codec name in zarr.json
 #   skimage                      - lazy submodule loader (restoration.rolling_ball)
-for _pkg in ("ndviewer_light", "ndv", "vispy", "tensorstore", "zarr", "numcodecs", "skimage"):
+#
+# NAPARI WAS MISSING FROM THIS LIST UNTIL 2026-08-05, and it is the single reason the first
+# frozen bundle was not shippable. MEASURED, not theorised: the built .app launched, painted the
+# plate shell and read the acquisition ("2 wells loaded, 2 multi-FOV region(s)"), and then every
+# view window rendered a dark-red panel reading
+#
+#     napari viewer unavailable - NapariBindingError: napari's API has moved under us ...
+#     Missing or de-exported: napari.components (import failed: FileNotFoundError(2, 'No such
+#     file or directory')), napari.qt, napari._qt.layer_controls ... There is no mosaic.
+#
+# `find hcs-viewer.app -name napari.yaml` returned NOTHING and there was no `napari/` directory
+# anywhere in the bundle, while `vispy/` was present -- because vispy was on this list and napari
+# never had been. napari is not a submodule blind spot like the others; it was simply ABSENT.
+#
+# This is exactly the failure mode this spec's own excludes note predicted: invisible to the test
+# suite (which imports the real napari from site-packages) and visible ONLY in the frozen app.
+# `verify_napari_bindings()` caught it and refused loudly rather than rendering garbage, which is
+# why it reads as a clean error panel instead of a crash -- the guard worked, the packaging did not.
+#
+# The ecosystem packages are here for the same reason as napari itself: npe2/app_model read YAML
+# and JSON manifests off disk at import, and a manifest that is not collected is a FileNotFoundError
+# at runtime, not a missing-module warning at build time.
+#
+# ndviewer_light and ndv were REMOVED from this list on the same day: both were dropped as
+# dependencies (ce5605c) because ndviewer_light imports PyQt5 at module scope, so `collect_all`
+# was being asked for packages that are not installed and silently contributed nothing.
+#
+# napari_console is deliberately NOT in this list. It is the in-viewer IPython console, and
+# IPython/jupyter_core/ipykernel are excluded below; collecting the console while excluding its
+# interpreter would trade one runtime ImportError for another. This app is a plate viewer, not a
+# notebook, and nothing on the demo path opens a console.
+for _pkg in ("napari", "napari_svg", "npe2", "app_model", "magicgui",
+             "superqt", "psygnal", "in_n_out", "vispy", "tensorstore", "zarr", "numcodecs",
+             "skimage"):
     _d, _b, _h = collect_all(_pkg)
     _DATAS += _d
     _BINARIES += _b
@@ -82,7 +117,23 @@ _EXCLUDES = [
     "imageio", "imageio_ffmpeg",   # 48 MB (a bundled ffmpeg); skimage.io only
     "mypy",                # a type checker, in a shipped GUI
     "lxml", "cryptography",
-    "matplotlib",          # skimage.io plugins + pandas.plotting reference it; the app plots nothing
+    # matplotlib is NOT unconditionally excluded any more (2026-08-05). The old note said "the app
+    # plots nothing", and that has stopped being true: squidmip/_decon_qc.py does
+    # `import matplotlib` / `matplotlib.use("Agg")` / `import matplotlib.pyplot` inside
+    # turbo_rgb() and write_montage(), and squidmip/_op_panels.py calls straight into them
+    # (turbo_rgb, qc_composite, halo_verdict) to draw the decon QC panel.
+    #
+    # It is still excluded in the DEFAULT build, and the reason is reachability rather than taste:
+    # that panel only exists downstream of the `decon` operator, `decon` declares
+    # requires=("petakit",), and petakit is an optional extra that is not installed in a plain
+    # `.[gui]` build environment. With petakit absent the operator refuses by name and no code
+    # path can reach matplotlib, so excluding it is correct and saves ~50 MB.
+    #
+    # Build with decon (`pip install ".[gui,decon]"`) and the exclusion INVERTS -- otherwise the
+    # QC panel would raise ModuleNotFoundError in the frozen app only, which is precisely the
+    # class of bug that shipped napari-less bundles. Tying the exclude to the same package the
+    # operator's `requires=` names keeps the two from drifting apart.
+] + ([] if importlib.util.find_spec("petakit") else ["matplotlib"]) + [
     "tkinter",             # Tk is a second, unused GUI toolkit
     "IPython", "jupyter_core", "notebook", "ipykernel", "ipywidgets",
     "pytest", "_pytest", "pytest_qt",
@@ -133,8 +184,36 @@ exe = EXE(
     # M-series; the released macOS artifact is Apple Silicon, like odon's. Only macOS
     # understands target_arch, and CI freezes this same spec on Linux and Windows.
     target_arch="arm64" if sys.platform == "darwin" else None,
-    codesign_identity=None,
-    entitlements_file=None,
+    # SIGNING (2026-08-05). Both of these were hardcoded None, and the note that belongs here is
+    # what was MEASURED on the resulting bundle rather than what is usually assumed:
+    #
+    #   codesign -dv   ->  Signature=adhoc, TeamIdentifier=not set
+    #   codesign --verify --deep --strict  ->  exit 0 (the bundle is internally consistent)
+    #   spctl -a -vv   ->  REJECTED
+    #
+    # So the bundle was ALREADY ad-hoc signed with codesign_identity=None: PyInstaller ad-hoc
+    # signs arm64 binaries itself, because macOS will not execute an unsigned arm64 Mach-O at all.
+    # Ad-hoc signing is therefore not the missing piece and never was, and setting it explicitly
+    # here would change nothing. `spctl` rejects an ad-hoc bundle no matter how it was produced:
+    # Gatekeeper wants a Developer ID signature plus notarisation, and NEITHER can be produced
+    # without the owner's Apple Developer credentials. See SIGNING.md.
+    #
+    # What is new is that both are now OVERRIDABLE from the environment, so the owner signs by
+    # exporting two variables and re-running the same build command, with no edit to this file:
+    #
+    #   export SQUIDMIP_CODESIGN_IDENTITY="Developer ID Application: <Name> (TEAMID)"
+    #   python scripts/build_app.py --dataset /path/to/acquisition
+    #
+    # Unset (the default, and what CI does) reproduces today's behaviour exactly: ad-hoc, and
+    # honest about it. NOTHING here disables or weakens a security control -- the fallback is the
+    # same ad-hoc signature macOS already required, not an unsigned binary.
+    codesign_identity=os.environ.get("SQUIDMIP_CODESIGN_IDENTITY") or None,
+    # Only meaningful together with a real identity + --options runtime (Hardened Runtime), which
+    # notarisation requires. scripts/entitlements.plist is the starting point; SIGNING.md explains
+    # why it is a starting point and not a final answer.
+    entitlements_file=(os.environ.get("SQUIDMIP_ENTITLEMENTS")
+                       or (os.path.join(SPECPATH, "entitlements.plist")  # noqa: F821
+                           if os.environ.get("SQUIDMIP_CODESIGN_IDENTITY") else None)),
 )
 
 coll = COLLECT(

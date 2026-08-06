@@ -482,11 +482,38 @@ def test_the_template_readme_states_the_contract_the_viewer_depends_on():
 def test_the_template_names_what_it_does_not_support():
     """The unsupported list is real and stays stated: a template that implies a feature exists sends
     a contributor to build against a hole. (Composition WAS on this list. It is now §2.6, because it
-    executes — see ``squidmip/_compose.py`` and ``tests/test_compose.py``.)"""
+    executes — see ``squidmip/_compose.py`` and ``tests/test_compose.py``.)
+
+    A GUI PANEL FROM ``params`` WAS ALSO ON THIS LIST, and it was the weakest link in the whole
+    contract: §2.4 told a contributor to declare parameters into a GUI that ignored them. It is
+    now built (``squidmip/_param_panel.py``), so what stays unsupported is the narrower and true
+    thing — a panel with BEHAVIOUR of its own, which lives in SquidXplorer.
+    """
     readme = (_TEMPLATE / "README.md").read_text()
 
     assert "does NOT support" in readme
-    assert "hand-written per operator" in readme        # the GUI panel, still not generated
+    assert "A HAND-WRITTEN GUI panel" in readme
+    assert "a plugin cannot add one" in readme
+
+
+def test_the_template_states_how_a_declared_param_becomes_a_widget():
+    """§2.4 is a public contract, so the mapping rule a contributor's default is read by has to be
+    IN it. Without the rule, "declare params" is advice with an invisible acceptance test: a
+    parameter defaulting to None looks identical in the README to one defaulting to 30, and only
+    one of them gets a widget."""
+    readme = (_TEMPLATE / "README.md").read_text()
+
+    for fact in (
+        "squidmip/_param_panel.py",          # where the rule lives
+        "TYPE OF YOUR\nDEFAULT",             # what the widget is chosen from
+        "a check box",                       # bool
+        "an integer spin",                   # int
+        "a decimal spin",                    # float
+        "a text field",                      # str
+        "refused by name",                   # anything else
+        "From\ntheir declaration",           # where it shows up in the app
+    ):
+        assert fact in readme, f"templates/operator/README.md does not state: {fact!r}"
 
 
 def test_the_template_states_how_a_contributed_operator_composes():
