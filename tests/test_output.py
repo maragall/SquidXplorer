@@ -388,6 +388,11 @@ def test_a_failed_field_publishes_nothing_and_marks_the_plate_incomplete(tmp_pat
     plate = out / "plate.ome.zarr"
     assert is_incomplete(plate)                       # the store announces it is not finished
     # every field directory that DOES exist is a complete one (no half-written stragglers)
+    # -- and there IS one. Three `continue` filters deep, a plate with no field directories at all
+    # passed "every field that exists is complete" while proving nothing; `boom` fires on the
+    # second write, so exactly one field survives.
+    fields = [f for f in plate.glob("*/*/*") if f.is_dir() and (f / "zarr.json").exists()]
+    assert len(fields) == 1, [str(f) for f in fields]
     for row in plate.iterdir():
         if not row.is_dir():
             continue
@@ -531,9 +536,14 @@ def test_partial_tiffs_are_never_published(tmp_path, monkeypatch):
     out = tmp_path / "run"
     with pytest.raises(OSError):
         write_from_stream(_meta(), _stream(images), out, n_fovs=1, tiff=True, write_workers=1)
-    for tif in (out / "tiff").rglob("*"):
-        if tif.is_file():
-            assert not tif.name.endswith(".tiff") or tif.stat().st_size > 100
+    # Vacuous three ways over: `rglob` on a directory that was never created yields nothing, the
+    # `if` skips every non-file, and `not X or Y` is trivially true of anything that is not a
+    # .tiff. Publishing ZERO tiffs -- the opposite failure -- was green. One write succeeded
+    # before the second raised, so exactly one .tiff must survive.
+    published = sorted(p for p in (out / "tiff").rglob("*.tiff") if p.is_file())
+    assert len(published) == 1, [str(p) for p in published]
+    for tif in published:
+        assert tif.stat().st_size > 100, (tif, tif.stat().st_size)
 
 
 # --- IMA-231: FOV_ROI_table (Fractal / ngio convention) ---------------------------------------

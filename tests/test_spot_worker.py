@@ -58,8 +58,12 @@ def _run(worker, timeout_ms=60000):
 
 def test_a_plain_2d_plane_is_counted_as_is():
     img = _plane()
-    assert V._full_res_plane(img, None) is not None
-    assert np.array_equal(V._full_res_plane(img, None), img)
+    # `is not None` was here and is fully subsumed by the equality below, which fails on None
+    # anyway. The claim worth adding is that a plain 2-D plane is handed back AS IS -- the same
+    # object, not a copy or a re-derivation.
+    got = V._full_res_plane(img, None)
+    assert np.array_equal(got, img)
+    assert got.shape == img.shape and got.dtype == img.dtype
 
 
 def test_a_z_stack_is_counted_at_the_z_napari_is_SHOWING():

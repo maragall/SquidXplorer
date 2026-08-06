@@ -810,6 +810,77 @@ def _stub_pane_classes():
                     seen.append(op)
             return seen
 
+        def channels(self, op):
+            """`MosaicLayers.channels` — the channels of ONE processing layer, in insertion order.
+
+            Missing, like `ops` was, and missing in the same invisible way: it is read at
+            `_region_viewer._volume_source` immediately after `visible_op`, inside the same bare
+            `except Exception` that answers "raw" for anything that raises.
+            """
+            out = []
+            for layer_op, channel in self._layers:
+                if layer_op == op and channel not in out:
+                    out.append(channel)
+            return out
+
+        def visible_op(self):
+            """WHICH processing layer is on screen — `MosaicLayers.visible_op`.
+
+            It was MISSING, and `RegionViewer._volume_source` calls it inside
+            ``try: ... except Exception: return None, _RAW_OP, None``. So against this stub every
+            window answered RAW, unconditionally, and the whole operator branch below that call
+            -- `_reduces_z`'s refusal of a z-reducer's single plane, and the per-operator channel
+            list -- was unreachable from any window test. `tests/test_roi_pitch.py`'s
+            "no operator is displayed, so this is the reader" then asserted an answer the stub
+            could not have given any other way.
+            """
+            for (op, _channel), layer in self._layers.items():
+                if getattr(layer, "visible", True):
+                    return op
+            return None
+
+        @staticmethod
+        def _reduces_z(op):
+            """The DECLARATION, exactly as `MosaicLayers._reduces_z` reads it — never the name."""
+            from squidmip._engine import Z_REDUCER, operator_consumes
+            from squidmip._operations import operator_name
+
+            try:
+                return operator_consumes(operator_name(str(op))) == Z_REDUCER
+            except Exception:                        # noqa: BLE001 - not a registered operator
+                return False
+
+        def set_channel_visible(self, channel, visible):
+            """Show/hide one channel across the VISIBLE processing layer only.
+
+            Missing, and `RegionViewer._apply_view_settings` calls it inside
+            ``except Exception: pass  # a missing channel is skipped``, so restoring a saved
+            channel visibility was a total no-op under test while `_apply_luts` -- the call on the
+            line above it, over members this stub does have -- was honestly covered.
+            """
+            current = self.visible_op()
+            if current is None:
+                return
+            for (op, ch), layer in self._layers.items():
+                if op == current and ch == channel:
+                    layer.visible = bool(visible)
+
+        def channel_visible(self, channel):
+            peers = [ly for (_op, ch), ly in self._layers.items() if ch == channel]
+            if not peers:
+                return None
+            return any(bool(getattr(p, "visible", False)) for p in peers)
+
+        def channel_rgb(self, channel):
+            for (_op, ch), layer in self._layers.items():
+                if ch == channel:
+                    return getattr(layer, "colormap", None)
+            return None
+
+        def layers_for(self, op, channel):
+            layer = self._layers.get((op, channel))
+            return [layer] if layer is not None else []
+
         def remove_op(self, op):
             self.removed.append(op)
             for key in [k for k in self._layers if k[0] == op]:

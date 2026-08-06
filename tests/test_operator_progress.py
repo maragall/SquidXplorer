@@ -283,6 +283,44 @@ def test_the_plate_stops_talking_to_a_requester_once_its_run_has_drained(qapp, p
     assert second.reports
 
 
+def test_only_the_window_that_ASKED_gets_the_result_visible(qapp, plate):
+    """``_deliver_to_views`` passes ``visible=(win is requester)``, and nothing pinned WHICH window
+    that is.
+
+    `_Requester` above is never in ``mgr.windows`` -- it is handed to `run_operator` and the
+    delivery loop walks the manager -- so the condition was False for every window in this suite
+    and inverting it broke nothing. Julio's rule is the whole point of the flag: "a result reaching
+    a window that did NOT ask for it arrives dark; the window that ASKED gets it visible, because
+    asking is the consent." Two windows, one of them the requester, asserted on the flag each was
+    handed.
+    """
+    seen = {}
+
+    class _Win:
+        def __init__(self, name):
+            self.window_id = name
+
+        def deliver_result(self, op, result, *, visible):
+            seen[self.window_id] = visible
+            return 1
+
+    asked, other = _Win("asked"), _Win("other")
+
+    class _Mgr:
+        windows = [asked, other]
+
+    plate._run_requester = asked
+    plate._viewer_manager, saved = _Mgr(), plate._viewer_manager
+    try:
+        added = plate._deliver_to_views("mip", object())
+    finally:
+        plate._viewer_manager = saved
+        plate._run_requester = None
+
+    assert added == 2, added
+    assert seen == {"asked": True, "other": False}, seen
+
+
 # --------------------------------------------------------------------------------------
 # The bar itself, on a real RegionViewer.
 # --------------------------------------------------------------------------------------

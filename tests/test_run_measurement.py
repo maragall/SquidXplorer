@@ -200,7 +200,11 @@ def test_every_line_is_one_json_object(tmp_path):
     for _ in range(3):
         _run(metrics)
 
-    for line in path.read_text().splitlines():
+    lines = path.read_text().splitlines()
+    # Three runs were driven. Without this the loop iterates zero times when `persist_runs` writes
+    # nothing at all -- the worse failure -- and the test is green.
+    assert len(lines) == 3, lines
+    for line in lines:
         assert isinstance(json.loads(line), dict)
 
 

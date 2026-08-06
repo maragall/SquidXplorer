@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+import qtpy
 
 from squidmip._napari_view import (
     META_KEY,
@@ -721,9 +722,14 @@ def test_the_canvas_stays_inside_the_embedded_napari_window(tmp_path):
     # let Qt pick the real platform: on a machine with a display this actually verifies, and on
     # a headless one it fails cleanly into the skip below with the reason attached.
     env.pop("QT_QPA_PLATFORM", None)
-    # Both PyQt5 and PySide6 are installed here. squidmip imports PyQt5, so qtpy (and napari
-    # through it) must resolve to the same binding or the process aborts before asserting.
-    env["QT_API"] = "pyqt5"
+    # Pin the CHILD to the binding the PARENT is using. This hardcoded "pyqt5" with the comment
+    # "squidmip imports PyQt5", which stopped being true on 2026-07-31 when the package pinned
+    # PyQt6 (`squidmip/__init__.py`): the child then ran Qt5 while the parent ran Qt6, so this
+    # harness verified a binding the app no longer runs on. `tests/test_layer_tree.py` fixed the
+    # identical line and this one was left behind -- two guards for one thing that disagreed.
+    # What the original comment was right about is why the pin exists: unpinned, qtpy here
+    # defaults to PySide6 and two bindings in one process abort before any assertion runs.
+    env["QT_API"] = os.environ.get("QT_API") or qtpy.API_NAME.lower()
 
     proc = subprocess.run(
         [sys.executable, str(script)],

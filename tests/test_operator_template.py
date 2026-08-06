@@ -266,8 +266,14 @@ def test_every_region_operator_declares_its_requirements():
     a region operator is a record in the ONE table, so it carries its own ``requires`` and there is
     nothing left to disagree with it. What is checked now is that the declaration is READABLE
     through the same function every other operator's is."""
-    for name in s.available_region_operators():
+    names = s.available_region_operators()
+    assert names, "no region operator is registered at all"
+    for name in names:
         assert isinstance(s.operator_requires(name), tuple)
+    # `isinstance(..., tuple)` alone is the declared return type of the function under test: it
+    # holds for `()` on every operator, so a registry that stopped carrying `requires` at all was
+    # green. `stitch` reaches tilefusion one call deep and must SAY so, by name.
+    assert "tilefusion" in s.operator_requires("stitch"), s.operator_requires("stitch")
 
 
 def test_region_operators_declare_and_refuse_the_same_way(small_reader):
@@ -291,24 +297,49 @@ def test_region_operators_declare_and_refuse_the_same_way(small_reader):
 # ==============================================================================================
 
 class _FakeEntryPoint:
-    """Enough of an ``importlib.metadata.EntryPoint`` for the loader. ``load()`` is the seam."""
+    """Enough of an ``importlib.metadata.EntryPoint`` for the loader. ``load()`` is the seam.
+
+    Carries a ``group``, because the real one does and the loader FILTERS on it. Without it the
+    stand-in below ignored ``group=`` entirely, so `_plugins.load_operator_plugins` could have
+    passed the wrong group string -- or dropped the argument -- and every one of these tests
+    stayed green while every published plugin became invisible in production.
+    """
 
     dist = None
 
-    def __init__(self, name, value, loader):
+    def __init__(self, name, value, loader, group=GROUP):
         self.name = name
         self.value = value
+        self.group = group
         self._loader = loader
 
     def load(self):
         return self._loader()
 
 
+#: An entry point in SOMEBODY ELSE'S group. Every `_with_entry_points` call plants one, so a
+#: loader that stopped filtering would load it and be caught by name.
+_OFF_GROUP = _FakeEntryPoint(
+    "not_ours", "somebody_else:register",
+    lambda: (_ for _ in ()).throw(AssertionError(
+        "the loader loaded an entry point from another package's group")),
+    group="some.other.group",
+)
+
+
 def _with_entry_points(monkeypatch, entry_points):
     """Patch the METADATA source, not our own helper — so the loader's sorting, its group filter
-    and its error handling are all still under test."""
-    monkeypatch.setattr("importlib.metadata.entry_points",
-                        lambda group=None: list(entry_points))
+    and its error handling are all still under test.
+
+    The lambda used to be ``lambda group=None: list(entry_points)``, i.e. it accepted the argument
+    and threw it away. It now FILTERS, which is what makes `group=` load-bearing under test.
+    """
+    planted = list(entry_points) + [_OFF_GROUP]
+
+    def _entry_points(group=None):
+        return [ep for ep in planted if group is None or ep.group == group]
+
+    monkeypatch.setattr("importlib.metadata.entry_points", _entry_points)
 
 
 def test_the_group_name_is_the_documented_one():

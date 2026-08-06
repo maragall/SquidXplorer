@@ -55,6 +55,7 @@ def test_offsets_halve_when_pixel_size_doubles():
     pos = _grid_positions(n=2, pitch_um=50.0)
     fine = fov_offsets_px(pos, "A1", [0, 1, 2, 3], PX_UM)
     coarse = fov_offsets_px(pos, "A1", [0, 1, 2, 3], PX_UM * 2)
+    assert set(fine) == {0, 1, 2, 3}, sorted(fine)
     for fov in fine:
         assert coarse[fov] == (fine[fov][0] // 2, fine[fov][1] // 2)
 

@@ -382,6 +382,9 @@ def test_switching_a_channel_off_darkens_EVERY_layer_rendering_it(build, mosaic)
     """
     build(mosaic, OP, CHANNELS)
     rendering = mosaic.layers_for(OP, CHANNELS[0])
+    # `layers_for` returns [] when nothing matches, and a loop over [] asserts nothing:
+    # a scene that rendered nothing would pass every claim below.
+    assert rendering, "the scene rendered nothing"
     assert rendering, "the scene rendered nothing"
 
     mosaic.find(OP, CHANNELS[0]).visible = False
@@ -424,6 +427,9 @@ def test_ONE_contrast_window_per_channel_whatever_renders_it(build, mosaic):
     """
     build(mosaic, OP, CHANNELS)
     rendering = mosaic.layers_for(OP, CHANNELS[0])
+    # `layers_for` returns [] when nothing matches, and a loop over [] asserts nothing:
+    # a scene that rendered nothing would pass every claim below.
+    assert rendering, "the scene rendered nothing"
 
     mosaic.find(OP, CHANNELS[0]).contrast_limits = (11.0, 2222.0)
 
@@ -441,6 +447,9 @@ def test_ONE_colormap_per_channel_whatever_renders_it(build, mosaic):
     """
     build(mosaic, OP, CHANNELS)
     rendering = mosaic.layers_for(OP, CHANNELS[0])
+    # `layers_for` returns [] when nothing matches, and a loop over [] asserts nothing:
+    # a scene that rendered nothing would pass every claim below.
+    assert rendering, "the scene rendered nothing"
 
     mosaic.find(OP, CHANNELS[0]).colormap = "magenta"
 
@@ -524,6 +533,9 @@ def test_a_volume_is_MANY_layers_under_ONE_identity(mosaic):
     build_volume_scene(mosaic, OP, CHANNELS, bricks=3)
 
     rendering = mosaic.layers_for(OP, CHANNELS[0])
+    # `layers_for` returns [] when nothing matches, and a loop over [] asserts nothing:
+    # a scene that rendered nothing would pass every claim below.
+    assert rendering, "the scene rendered nothing"
     assert len(rendering) == 3, f"the volume rendered as {len(rendering)} layer(s)"
     assert {key_of(ly) for ly in rendering} == {MosaicKey(OP, CHANNELS[0])}
     # ...and `find` is one of them, the representative every control reads and writes.

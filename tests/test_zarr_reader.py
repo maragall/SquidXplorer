@@ -191,8 +191,7 @@ def test_v05_plate_round_trips_pixels_exactly(tmp_path):
 
 def test_v05_fixture_is_a_valid_ngff_plate(tmp_path):
     """The layout we read is the one the official OME schema accepts — not an invented one."""
-    ome_zarr_models = pytest.importorskip("ome_zarr_models")
-    assert ome_zarr_models
+    pytest.importorskip("ome_zarr_models")
     from tests.ngff_check import assert_valid_ngff_plate
 
     _write_v05_plate(tmp_path / "out")

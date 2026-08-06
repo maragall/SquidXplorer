@@ -101,7 +101,12 @@ def test_a_run_reports_a_peak_at_or_above_where_it_started(log):
         del block
     m = log.last()
     assert m.peak_rss is not None and m.start_rss is not None
-    assert m.peak_over_start is not None and m.peak_over_start >= 0
+    # `>= 0` restates `_measure.py`'s own `max(0, peak_rss - start_rss)`. The block above is
+    # 64 MiB, touched every page so it is really resident, so a sampler that sampled reports tens
+    # of megabytes and one that never sampled reports exactly 0 -- which used to pass.
+    assert m.peak_over_start is not None
+    assert m.peak_over_start > (16 << 20), (
+        f"peak_over_start {m.peak_over_start} did not see a resident 64 MiB allocation")
 
 
 def test_a_run_shorter_than_one_sample_interval_still_reports_a_peak(log):

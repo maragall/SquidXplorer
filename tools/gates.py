@@ -37,10 +37,21 @@ That is a definition of "duplicate" that does not care what the widget is called
 lives in, or which repo it came from — so a NEW duplicate is caught on the day it is added, which
 a hand-written "there must be no sliders in the channel bar" assertion never would be.
 
-MUTATION-CHECKED. `tools/gates.py --self-test` reintroduces a duplicate contrast slider on the
-plate, runs the gate, and requires it to FAIL — then removes it and requires it to pass. A gate
+MUTATION-CHECKED, four ways. `tools/gates.py --self-test` reintroduces a duplicate contrast
+slider on the plate, duplicates a control in an unrelated concern, and FREEZES A PROBE'S VALUE TO
+A CONSTANT, requiring the gate to fail on each — then removes them and requires it to pass. A gate
 that cannot fail is worth nothing: this project already shipped 832 passing tests over a model
 error, because every fixture had one FOV and one region.
+
+THE PROBES ARE CHECKED TOO, and that is the part that was missing. Every concern in ``EXPECTED``
+is 0 — the plate is meant to own none of them — so every GATE 2 line reads "at most 0 (expected at
+most 0) — PASS" and the whole gate rests on the probes being able to SEE a change. ``_snapshot``
+catches a probe that RAISES (``_probe_scope`` and ``_probe_fov`` both did, from July, and were
+swallowed). Nothing caught a probe that goes QUIET: ``_probe_fov``'s last weeks were spent reading
+``w._detail``, which was unconditionally None, so it returned the same constant forever and its
+concern passed over a value nothing read. :func:`dead_probes` now drives the model under every
+probe and requires the reading to move; the comment where that probe used to be states the lesson
+and there was no mechanism behind the sentence.
 
 GATE 3 — NO DEAD CONTROLS
 =========================
@@ -208,6 +219,156 @@ def _snapshot(w):
         except Exception as exc:                       # noqa: BLE001 - recorded, then reported
             BROKEN_PROBES[p.__name__] = f"{type(exc).__name__}: {exc}"
     return out
+
+
+#: Probes whose reading did not move when the MODEL underneath them was moved by hand, as
+#: ``{probe name: "what was driven"}``. See :func:`dead_probes`.
+FROZEN_PROBES: dict[str, str] = {}
+
+#: Controls whose ACTUATION raised during GATE 2's sweep, as ``{description: "TypeName: message"}``.
+#: Reported, not swallowed -- see :func:`find_duplicate_controls`.
+RAISING_CONTROLS: dict[str, str] = {}
+
+
+def _drive_the_model(w):
+    """One model-level mutation per probe, as ``{probe name: (what, apply)}``.
+
+    Deliberately writes the MODEL, never a widget: this is not asking "can a user move it", which
+    is GATE 2's own question, but the prior one — "can this reading move at all".
+
+    Every driver RESTORES what it moved, and that is not tidiness. Measured while writing this:
+    bumping ``PlateOverview._cd`` off its fit baseline and leaving it there made the next repaint
+    snap it back, so the sweep afterwards reported "Select all" as a second controller of
+    ``zoom / viewport`` — a FAIL invented by the instrument. ``apply()`` returns an undo callable,
+    or ``None`` when the model has nothing here to move.
+    """
+    ov = w._overview
+
+    def _flip_visibility():
+        if ov._mask is None or not len(ov._mask):
+            return None
+        was = bool(ov._mask[0])
+        ov.set_channel_visible(0, not was)
+        return lambda: ov.set_channel_visible(0, was)
+
+    def _move_contrast():
+        windows = list(ov.channel_windows() or [])
+        if not windows:
+            return None
+        lo, hi = windows[0]
+        ov.set_channel_window(0, 12345.0, 23456.0)
+        return lambda: ov.set_channel_window(0, float(lo), float(hi))
+
+    def _move_colour():
+        if ov._colors is None or not len(ov._colors):
+            return None
+        was = tuple(ov._colors[0].tolist())
+        ov.set_channel_color(0, (0.125, 0.25, 0.375))
+        return lambda: ov.set_channel_color(0, was)
+
+    def _move_active():
+        was = ov._active
+        ov.set_active_layer("a layer no operator is called")
+        return lambda: ov.set_active_layer(was)
+
+    def _move_selection():
+        was = set(ov._selection)
+        if was:
+            ov.clear_selection()
+        else:
+            ov.select_all()
+
+        def undo():
+            ov._selection = set(was)
+            ov.selectionChanged.emit(ov.selected_wells())
+            ov.update()
+        return undo
+
+    def _move_current_well():
+        # `PlateWindow._current_well` is a PROPERTY over `self._cursor`, not an overview
+        # attribute: it has to be driven where it lives.
+        regions = list(getattr(w, "_order", None) or (w._meta or {}).get("regions") or [])
+        if not regions:
+            return None
+        was = w._current_well
+        w._current_well = regions[-1] if was == regions[0] else regions[0]
+        return lambda: setattr(w, "_current_well", was)
+
+    def _move_zoom():
+        was = float(ov._cd)
+        ov._cd = was + 7.0
+        return lambda: setattr(ov, "_cd", was)
+
+    return {
+        "_probe_visibility":    ("PlateOverview.set_channel_visible(0, ...)", _flip_visibility),
+        "_probe_contrast":      ("PlateOverview.set_channel_window(0, ...)", _move_contrast),
+        "_probe_colormap":      ("PlateOverview.set_channel_color(0, ...)", _move_colour),
+        "_probe_active_layer":  ("PlateOverview.set_active_layer(...)", _move_active),
+        "_probe_selection":     ("PlateOverview.select_all() / clear_selection()", _move_selection),
+        "_probe_current_well":  ("PlateWindow._current_well = <another region>", _move_current_well),
+        "_probe_zoom":          ("PlateOverview._cd += 7", _move_zoom),
+    }
+
+
+def dead_probes(w):
+    """Every probe whose reading CANNOT MOVE, checked by moving the model underneath it.
+
+    THE MISSING MECHANISM. ``_snapshot`` catches a probe that RAISES, and this file records two
+    that did (``_probe_scope``, ``_probe_fov``, both reading attributes deleted in July). It
+    catches nothing about a probe that returns a CONSTANT — and ``_probe_fov`` was exactly that
+    for the last part of its life: ``w._detail`` was unconditionally None, so it answered
+    ``(None, None)`` every time, no widget could ever be reported as moving it, and
+    "fov / plane index: 1" was a PASS over a value nothing read. The comment where that probe used
+    to be states the lesson — "a probe that cannot vary is not a weak probe, it is a decoration" —
+    and there was no mechanism behind the sentence, so the next one would go the same way.
+
+    Every concern in ``EXPECTED`` is currently 0, so EVERY GATE 2 line is "at most 0 (expected at
+    most 0) — PASS". That is a defensible specification (the plate is meant to own none of these)
+    but it means the whole gate rests on the probes being able to see a change at all. This is the
+    check that they can.
+
+    Returns ``{probe name: why it is dead}``.
+    """
+    app = _app()
+    dead: dict[str, str] = {}
+    drivers = _drive_the_model(w)
+    for p in PROBES:
+        name = p.__name__
+        if name in BROKEN_PROBES:
+            continue                       # already reported, and louder
+        what, apply = drivers.get(name, (None, None))
+        if apply is None:
+            dead[name] = "no liveness driver in _drive_the_model: this probe is UNCHECKED"
+            continue
+        try:
+            keys = list(p(w))
+        except Exception:                   # noqa: BLE001 - already in BROKEN_PROBES
+            continue
+        if not keys:
+            dead[name] = "the probe read NO slots at all on this acquisition"
+            continue
+        before = _snapshot(w)
+        try:
+            undo = apply()
+        except Exception as exc:            # noqa: BLE001 - the driver itself is a finding
+            dead[name] = f"driving {what} raised {type(exc).__name__}: {exc}"
+            continue
+        if undo is None:
+            dead[name] = (f"the model has nothing for it to read here ({what} found no channel / "
+                          f"no value), so this probe measured nothing on this acquisition")
+            continue
+        app.processEvents()
+        after = _snapshot(w)
+        try:
+            undo()
+            app.processEvents()
+        except Exception as exc:            # noqa: BLE001 - a driver that cannot undo is a finding
+            dead[name] = f"undoing {what} raised {type(exc).__name__}: {exc}"
+            continue
+        if not [k for k in keys if k in before and k in after and after[k] != before[k]]:
+            dead[name] = (f"{what} changed nothing this probe reads — it cannot vary, so no "
+                          f"widget could ever be reported as moving it")
+    return dead
 
 
 # --- the expected table: how many CONTROL SURFACES each concern is allowed ---------------------
@@ -413,7 +574,14 @@ def find_duplicate_controls(win, verbose=False):
         before = _snapshot(win)
         try:
             undo = _actuate(wdg)
-        except Exception:
+        except Exception as exc:                       # noqa: BLE001 - recorded, then reported
+            # RECORDED, not swallowed. This was a bare `continue`: a control whose actuation
+            # raises simply vanished from GATE 2's evidence, so it could never be reported as a
+            # second owner of anything -- and the raise itself, which GATE 3 reports as its own
+            # verdict, was invisible here. Same defect the docstring of `_snapshot` describes,
+            # left standing one function away from the fix.
+            RAISING_CONTROLS[f"{_label(wdg)} [{type(wdg).__name__} in {_where(wdg)}]"] = \
+                f"{type(exc).__name__}: {exc}"
             continue
         if undo is None and not _is_button(wdg):
             continue
@@ -529,7 +697,13 @@ def gate_no_duplicated_controllers(dataset=PLATE, verbose=False, mutate=None):
     else:
         findings.append("PASS  contrast: 0 sliders, 0 auto buttons in the plate view")
 
-    # 2. the empirical half: actuate everything, group by the state it moved.
+    # 2. THE PROBES THEMSELVES, before anything is actuated. `_probe_selection` is the reason
+    #    this runs first: the sweep clicks "Select all", so a liveness driver running afterwards
+    #    would find the selection already full and report its own no-op as a frozen probe.
+    FROZEN_PROBES.clear()
+    FROZEN_PROBES.update(dead_probes(win))
+
+    # 3. the empirical half: actuate everything, group by the state it moved.
     patches = []
 
     def monkey(obj, name, value):
@@ -571,7 +745,7 @@ def gate_no_duplicated_controllers(dataset=PLATE, verbose=False, mutate=None):
             findings.append(f"PASS  {concern}: at most {worst} control surface(s) over any one "
                             f"value (expected at most {expected})")
 
-    # 3. anything the table has never heard of. A key that appears here is a NEW piece of state
+    # 4. anything the table has never heard of. A key that appears here is a NEW piece of state
     #    that two or more widgets can move and nobody has decided who owns — which is exactly the
     #    fifth instance of this defect arriving, so it fails rather than warns.
     for concern, slots in sorted(by_concern.items()):
@@ -583,13 +757,34 @@ def gate_no_duplicated_controllers(dataset=PLATE, verbose=False, mutate=None):
                 findings.append(f"FAIL  {key}: UNDECLARED concern with {len(got)} control "
                                 f"surfaces — add it to EXPECTED and pick an owner: {got}")
 
-    # 4. a probe that could not read is a CHECK THAT DID NOT RUN, and it fails rather than
+    # 5. a probe that could not read is a CHECK THAT DID NOT RUN, and it fails rather than
     #    disappearing. Two probes had been raising since July and were swallowed; their concerns
     #    then reported "at most 0 control surfaces — PASS" while measuring nothing.
     for name, why in sorted(BROKEN_PROBES.items()):
         ok = False
         findings.append(f"FAIL  {name}: the probe itself raised, so its concern was NOT "
                         f"checked — {why}")
+
+    # 6. a control whose ACTUATION raised never reached step 3 at all, so it could not be reported
+    #    as a second owner of anything. That is a check that did not run, on the same argument as
+    #    step 5, and it used to be a bare `continue`.
+    for desc, why in sorted(RAISING_CONTROLS.items()):
+        ok = False
+        findings.append(f"FAIL  {desc}: actuating it raised, so it was NOT measured against any "
+                        f"concern — {why}")
+
+    # 7. A PROBE THAT CANNOT VARY IS A DECORATION. Every line in step 3 reads "at most 0 (expected
+    #    at most 0)", which is the right specification and is also the reason the whole gate rests
+    #    on the probes being able to see a change at all. Step 4 catches a probe that raises;
+    #    nothing caught `_probe_fov`, which for the last part of its life read an attribute that
+    #    was unconditionally None and answered the same constant forever.
+    for name, why in sorted(FROZEN_PROBES.items()):
+        ok = False
+        findings.append(f"FAIL  {name}: the probe cannot VARY, so its concern was NOT "
+                        f"checked — {why}")
+    if not FROZEN_PROBES and not BROKEN_PROBES:
+        findings.append(f"PASS  every probe ({len(PROBES)}) reads a value that moves when the "
+                        f"model under it moves")
 
     win.close()
     app.processEvents()
@@ -1349,6 +1544,36 @@ def _mount_visibility_duplicate(win):
     box.show()
 
 
+def _freeze_a_probe(win):
+    """Make ONE probe's value a CONSTANT — the exact shape ``_probe_fov`` died in.
+
+    ``_probe_fov`` read ``w._detail._fov_slider``, and ``PlateWindow._detail`` had been
+    unconditionally None since 2026-07-22: it answered ``(None, None)`` on every snapshot, so no
+    widget could ever be reported as moving it, and "fov / plane index: 1" was a PASS over a value
+    nothing read. Nothing in this gate could tell that apart from "there really is one owner".
+    Steps 4 and 5 catch a probe that RAISES; this is the mutation for the one that goes quiet.
+
+    Patched on the CLASS, because ``_current_well`` is a property, and UNDONE by
+    :func:`_unfreeze_a_probe` — a self-test that leaves the product mutated proves nothing about
+    the recovery run that follows it.
+    """
+    import squidmip._viewer as V
+
+    _FROZEN_PROBE_ORIGINAL.append(V.PlateWindow._current_well)
+    V.PlateWindow._current_well = property(lambda self: None, lambda self, value: None)
+
+
+#: The real ``PlateWindow._current_well`` descriptor while ``_freeze_a_probe`` is in effect.
+_FROZEN_PROBE_ORIGINAL: list = []
+
+
+def _unfreeze_a_probe():
+    import squidmip._viewer as V
+
+    while _FROZEN_PROBE_ORIGINAL:
+        V.PlateWindow._current_well = _FROZEN_PROBE_ORIGINAL.pop()
+
+
 def _mount_dead_button(win):
     """Bolt a chip that LOOKS alive and is wired to nothing onto the plate.
 
@@ -1434,7 +1659,7 @@ def self_test_dead_controls(dataset=PLATE):
 def self_test(dataset=PLATE):
     """Reintroduce the duplicate, require the gate to bite, remove it, require the gate to pass."""
     print("=" * 100)
-    print("SELF-TEST 1/3: the gate must PASS on the tree as it stands")
+    print("SELF-TEST 1/4: the gate must PASS on the tree as it stands")
     ok, findings = gate_no_duplicated_controllers(dataset)
     for f in findings:
         print("   ", f)
@@ -1443,7 +1668,7 @@ def self_test(dataset=PLATE):
         return 1
 
     print("=" * 100)
-    print("SELF-TEST 2/3: reintroducing a per-channel contrast slider on the plate —")
+    print("SELF-TEST 2/4: reintroducing a per-channel contrast slider on the plate —")
     print("               the gate MUST now fail, or it is decorative.")
     ok_mut, findings_mut = gate_no_duplicated_controllers(
         dataset, mutate=_mount_contrast_duplicate)
@@ -1462,7 +1687,7 @@ def self_test(dataset=PLATE):
     # have just fixed. The point of IMA-268 is the NEXT duplicate, in a concern nobody is looking
     # at — so duplicate a DIFFERENT control and require the same failure.
     print("=" * 100)
-    print("SELF-TEST 3/3: duplicating a control in a DIFFERENT concern (channel visibility) —")
+    print("SELF-TEST 3/4: duplicating a control in a DIFFERENT concern (channel visibility) —")
     print("               the gate must generalise, not just know about contrast.")
     ok_vis, findings_vis = gate_no_duplicated_controllers(
         dataset, mutate=_mount_visibility_duplicate)
@@ -1479,6 +1704,31 @@ def self_test(dataset=PLATE):
               "detect the duplicate it was given.")
         return 1
     print("\n    the gate bit on a concern it was never specifically taught. It generalises.")
+
+    # A probe that cannot vary is invisible to everything above: its concern reports
+    # "at most 0 control surfaces (expected at most 0) -- PASS" while measuring nothing, which is
+    # how `_probe_fov` and `_probe_scope` survived from July. Mutation-check the mechanism that
+    # was added for it, or that mechanism goes the same way as the sentence it replaced.
+    print("=" * 100)
+    print("SELF-TEST 4/4: freezing a probe's value to a CONSTANT (the _probe_fov shape) —")
+    print("               the gate must NAME the probe, not report its concern as clean.")
+    try:
+        ok_frozen, findings_frozen = gate_no_duplicated_controllers(
+            dataset, mutate=_freeze_a_probe)
+    finally:
+        _unfreeze_a_probe()
+    for f in findings_frozen:
+        if f.startswith("FAIL"):
+            print("   ", f)
+    if ok_frozen:
+        print("\nSELF-TEST FAILED: a probe was frozen to a constant and the gate stayed green — "
+              "its concern reported 'at most 0 surfaces' over a value that cannot move, which is "
+              "exactly what _probe_fov did for six weeks.")
+        return 1
+    if not any("_probe_current_well" in f and f.startswith("FAIL") for f in findings_frozen):
+        print("\nSELF-TEST FAILED: the gate failed, but did not name the frozen probe.")
+        return 1
+    print("\n    the gate named the dead probe instead of passing its concern.")
 
     print("=" * 100)
     print("SELF-TEST: mutation removed; confirming the gate is green again")

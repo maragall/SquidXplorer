@@ -150,6 +150,10 @@ def test_layout_places_tissues_inside_their_slide_and_fits_the_SLIDES_to_the_gri
              "manual1": (97937.0, 21113.0, 7209.0, 8619.0)}
     tissues, slides = SA.slide_layout(boxes, rows=2, cols=1, geometry=None)
 
+    # Two regions on one slide each: `slide_layout` returning nothing would make both loops
+    # below iterate zero times and the whole containment claim vacuous.
+    assert len(slides) >= 1, slides
+    assert set(tissues) == {"manual0", "manual1"}, sorted(tissues)
     for rect in slides:                             # every slide inside the declared grid box
         assert rect[0] >= -1e-9 and rect[1] >= -1e-9
         assert rect[0] + rect[2] <= 1 + 1e-9

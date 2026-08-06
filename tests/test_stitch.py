@@ -618,7 +618,15 @@ def test_write_plate_forwards_operator_kwargs_to_stitch_plate(monkeypatch):
         return iter(())
 
     monkeypatch.setattr(st, "stitch_plate", _fake_stitch_plate)
-    monkeypatch.setattr(out_mod, "write_from_stream", lambda *a, **k: {"written": 0})
+    # The real `write_from_stream` returns the manifest `write_plate` forwards verbatim and
+    # `_command` reads with `.get()`. `{"written": 0}` is a key that exists NOWHERE, so a
+    # real run through this stub would report "landed 0 of N" and nothing here would see it.
+    def _fake_write_from_stream(meta, stream, out, **kw):
+        fields = sum(1 for _ in stream)          # DRAIN it: the real one consumes the stream
+        return {"plate": str(out), "tiff": None, "n_wells": 0, "n_fields": fields,
+                "n_fields_written": fields, "levels": 1, "complete": True, "stopped": False}
+
+    monkeypatch.setattr(out_mod, "write_from_stream", _fake_write_from_stream)
     out_mod.write_plate(_MetaOnlyReader(), "/tmp/does-not-matter", projector="stitch",
                         operator_kwargs={"blend_px": 64, "rel_thresh": 0.25, "register": False})
     assert seen["blend_px"] == 64

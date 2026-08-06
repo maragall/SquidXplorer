@@ -72,8 +72,47 @@ app.processEvents()
 out: dict = {"dataset": os.path.basename(path.rstrip("/"))}
 
 
-def report(code=0):
+#: The six checks in the docstring, as ``{key in `out`: what a False means}``. THE VERDICT.
+#:
+#: Until 2026-08-06 this file computed every one of them, printed them in a JSON blob, and called
+#: ``report(0)`` at the end regardless: only the three EARLY refusals (ingest failed,
+#: `ViewerManager.open` returned None, the pane is not napari) could produce a non-zero exit. So a
+#: run that painted NO PIXELS, or one where napari's contrast no longer repainted the plate,
+#: exited 0 with the failure sitting in a field of the report. A human reading the whole blob might
+#: notice; nothing else could -- and this is a harness whose entire reason for existing is that
+#: nobody notices.
+#:
+#: A key that is absent, or None, is UNMEASURED and does not fail the run: ``layers`` may
+#: legitimately be empty on a dataset with no mosaic, and check 6 says so in words rather than
+#: with a False.
+VERDICT = {
+    "pane_is_napari": "the region window fell back: napari did not build a canvas",
+    "canvas_painted_pixels": "the canvas framebuffer is blank or uniform: no pixels were painted",
+    "is_a_mosaic_not_one_fov": "the layer covers no more stage than a single FOV: not a mosaic",
+    "placed_in_stage_um": "the layer is at scale 1.0: it was not placed in stage micrometres",
+    "z_slider_present": "the viewer has no z axis, so the stack cannot be navigated",
+    "plate_follows_napari_contrast": "dragging napari's contrast did not repaint the plate "
+                                     "(IMA-261)",
+}
+
+
+def _verdict():
+    """``(exit code, [failure sentences])`` read off *out*, never off the intent."""
+    checks = dict(VERDICT)
+    if int(out.get("n_z_in_meta") or 1) <= 1:
+        checks.pop("z_slider_present", None)     # a single-plane acquisition owes no slider
+    bad = [why for key, why in checks.items() if out.get(key) is False]
+    return (1 if bad else 0), bad
+
+
+def report(code=None):
+    if code is None:
+        code, bad = _verdict()
+        out["failed_checks"] = bad
+        out["verdict"] = "PASS" if code == 0 else "FAIL"
     print("VERIFY " + json.dumps(out, indent=1))
+    for why in out.get("failed_checks") or []:
+        print("VERIFY FAIL: " + why)
     sys.stdout.flush()
     # os._exit: unwinding napari + Qt at interpreter shutdown segfaults on this machine, and a
     # verdict decided by a teardown crash is not a verdict.
@@ -189,6 +228,7 @@ try:
     out["canvas_painted_pixels"] = bool(len(np.unique(arr)) > 8)
 except Exception as exc:
     out["screenshot_error"] = f"{type(exc).__name__}: {exc}"
+    out["canvas_painted_pixels"] = False        # unmeasurable is not the same as fine
 
 # ---- 6. IMA-261: napari's contrast in THIS window repaints the PLATE ------------------------
 #
@@ -222,4 +262,4 @@ else:
     out["plate_follows_napari_contrast"] = bool(
         out["plate_window_took_it"] and out["plate_pixels_changed"])
 
-report(0)
+report()

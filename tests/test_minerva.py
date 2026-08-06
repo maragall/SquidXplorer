@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import threading
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -135,7 +136,7 @@ def test_export_goes_through_the_region_operator_seam(squid_dataset, tmp_path):
     squidmip.add_region_operator(name, spy)
     try:
         pairs = export_selection(
-            open_reader(root := squid_dataset[0]), [("B2", 0), ("B2", 1)], tmp_path,
+            open_reader(squid_dataset[0]), [("B2", 0), ("B2", 1)], tmp_path,
             operator=name,
         )
     finally:
@@ -143,7 +144,13 @@ def test_export_goes_through_the_region_operator_seam(squid_dataset, tmp_path):
 
     assert calls == [("B2", (0, 1))], "the whole region reached the operator in one call"
     assert len(pairs) == 1 and name in pairs[0][0].name
-    assert root  # the fixture root was used
+    # `assert root` was here: a non-empty Path is always truthy, so it pinned nothing. The claim
+    # worth pinning is that the export LANDED -- the operator seam produced a file on disk under
+    # the directory it was given, not merely a pair in a list.
+    written, out = pairs[0][0], Path(tmp_path)
+    assert written.is_file(), f"{written} was reported but not written"
+    assert out in written.parents, f"{written} escaped {out}"
+    assert written.stat().st_size > 0, f"{written} is empty"
 
 
 @pytest.mark.parametrize("label, build", [(w[0], w[1]) for w in _WRITERS])

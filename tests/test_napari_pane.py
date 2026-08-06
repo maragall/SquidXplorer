@@ -199,8 +199,15 @@ def test_headless_says_there_is_no_viewer_rather_than_crashing(monkeypatch):
 def test_an_unknown_viewer_name_does_not_silently_disable_the_viewer(monkeypatch):
     """A typo must cost you nothing. It resolves to napari, exactly as an empty value does."""
     monkeypatch.setenv("SQUIDMIP_VIEWER", "wat")
+    # `in ("napari", "unavailable")` accepted the very outcome the test name forbids, and those
+    # two are the whole domain of `mode`. The claim is that a TYPO takes the SAME branch an unset
+    # value takes -- so it is measured against that, not against a list of everything possible.
     _widget, mode, msg = make_pane()
-    assert mode in ("napari", "unavailable")
+    monkeypatch.delenv("SQUIDMIP_VIEWER", raising=False)
+    _dwidget, default_mode, default_msg = make_pane()
+    assert mode == default_mode, (
+        f"a typo resolved to {mode!r} where no value at all resolves to {default_mode!r}")
+    assert (msg == "") == (default_msg == "")
     if mode == "unavailable":
         assert msg, "no viewer, and no reason given"
 

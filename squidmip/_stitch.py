@@ -1363,8 +1363,18 @@ def _coordinate_region(reader, region, fovs, **kwargs):
 # `_REGION_REQUIRES` sidecar shadowing it.
 RegionOperator = Callable[..., np.ndarray]
 
-add_region_operator("stitch", stitch_region)
-add_region_operator("coordinate", _coordinate_region)
+# `requires=("tilefusion",)` on BOTH, 2026-08-06. `stitch_region` opens with
+# `from tilefusion.fusion import fuse_plane` -- unconditionally, before any argument is looked at
+# -- and `_coordinate_region` is `stitch_region(register=False)`, so it takes the same import.
+# Neither declared it, so the two region operators were the last operators in this package to
+# reach a package outside `[project.dependencies]` while claiming to need nothing. That is the
+# defect `requires=` was added to close on 2026-08-05 for `decon`, `decon3d` and `flatfield`; the
+# region registrar grew the keyword in the same commit and these two call sites were not updated.
+# Without it the failure is a raw `ModuleNotFoundError` from nine frames down instead of
+# `Operator.bind`'s refusal naming the package, and `available_region_operators()` advertises an
+# operator that cannot run.
+add_region_operator("stitch", stitch_region, requires=("tilefusion",))
+add_region_operator("coordinate", _coordinate_region, requires=("tilefusion",))
 
 
 def _accepts_kwarg(fn, name: str) -> bool:

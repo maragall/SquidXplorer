@@ -136,16 +136,19 @@ def test_estimate_profile_normalises_a_field_the_constructor_would_have_refused(
     def stub(stack, use_darkfield=False):
         return off_by.copy(), None
 
-    real = None
+    # The `try` used to span `F.estimate_profile` as well as the import, so an ImportError raised
+    # one call deep INSIDE production -- exactly what `_engine._NOT_A_WELL_FAULT` exists to refuse
+    # to absorb -- reported as "tilefusion not installed" and the seam went untested while green.
+    # Only the import may skip.
     try:
         import tilefusion.flatfield as tff
-        real, tff.estimate_flatfield_channel = tff.estimate_flatfield_channel, stub
-        est = F.estimate_profile(np.zeros((2, 8, 8), dtype=np.uint16))
     except ImportError:                    # no tilefusion: the seam is what is under test
         pytest.skip("tilefusion not installed")
+    real, tff.estimate_flatfield_channel = tff.estimate_flatfield_channel, stub
+    try:
+        est = F.estimate_profile(np.zeros((2, 8, 8), dtype=np.uint16))
     finally:
-        if real is not None:
-            tff.estimate_flatfield_channel = real
+        tff.estimate_flatfield_channel = real
 
     assert abs(float(est.flatfield.mean()) - 1.0) < 1e-6
     # The SHAPE of the correction is what a gain field is; only its scale moved.

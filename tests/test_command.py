@@ -356,8 +356,13 @@ def test_a_preview_runs_with_the_parameters_it_was_given_not_the_defaults(squid_
 def test_every_run_is_measured_and_the_result_carries_the_metrics(open_bus):
     r = open_bus.execute(RunOperator(operator="mip", scope=_run_scope.SCOPE_PLATE))
     m = r.data["metrics"]
-    assert m["operator"] == "mip" and m["seconds"] >= 0
-    assert m["outcome"] in ("ok", "partial")
+    # `>= 0` is guaranteed by `_measure.py`'s own `max(0.0, perf_counter() - t0)`, so it asserted
+    # the production floor back at itself. A run whose clock never started reports exactly 0.0.
+    assert m["operator"] == "mip"
+    assert m["seconds"] > 0, "the run was measured as taking no time at all"
+    # `in ("ok", "partial")` accepted "produced nothing" alongside success; only "failed" could
+    # fail it. A plate-wide mip over the fixture completes every well.
+    assert m["outcome"] == "ok", m
     assert m["target"], "a duration with no target named is not comparable to anything"
 
 

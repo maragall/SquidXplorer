@@ -807,9 +807,12 @@ def test_the_blurb_becomes_the_tooltip(qapp):
 
     blurbs = {param.name: param.blurb for param in operator_params("spot")}
     p = GenericOperatorPanel(_Host(), "spot")
+    # `if blurbs[name]:` meant an operator that LOST its blurb skipped the assertion instead of
+    # failing it. All four `spot` params carry one, so require that first and then compare.
+    assert p.widgets, "the panel drew no widgets"
     for name, widget in p.widgets.items():
-        if blurbs[name]:
-            assert widget.toolTip() == blurbs[name]
+        assert blurbs[name], f"{name} declares no blurb, so the tooltip claim is untested"
+        assert widget.toolTip() == blurbs[name]
 
 
 def test_a_value_read_back_keeps_the_declared_type(qapp):

@@ -77,11 +77,20 @@ def test_register_challengers_is_idempotent_and_keeps_stitch():
 def test_challengers_are_only_registered_when_importable():
     """A stitcher that is not installed must be absent, never a stub that would produce a
     fabricated row."""
+    # The only assertion used to live inside the `except`, so on a machine where every adapter
+    # imports cleanly ZERO assertions ran. Both directions are asserted now, and the count says
+    # the loop was not empty.
+    registered = bs.register_challengers()
+    checked = 0
     for name in bs.CHALLENGERS:
         try:
             bs._probe(name)
         except Exception:
-            assert name not in bs.register_challengers()
+            assert name not in registered, f"{name} is registered but does not import"
+        else:
+            assert name in registered, f"{name} imports cleanly but was not registered"
+        checked += 1
+    assert checked == len(bs.CHALLENGERS) and checked > 0, checked
 
 
 def test_every_unavailable_stitcher_states_need_reason_and_cost():
