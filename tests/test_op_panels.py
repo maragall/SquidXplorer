@@ -735,6 +735,14 @@ def test_a_bare_operator_s_parameters_are_one_unnamed_group():
 
 def test_a_parameterised_operator_is_not_refused():
     assert panel_refusal("spot") is None
+    # cellpose is the [segment] extra, which `.[gui,test]` does NOT install -- so on CI, and in any
+    # clean venv, `panel_refusal("cellpose")` correctly answers "needs cellpose, which is not
+    # installed (pip install cellpose)". That is the PRODUCT being right; asserting None
+    # unconditionally was the TEST being wrong, and it was one of exactly two failures in the first
+    # clean-venv run of this suite (2026-08-05, napari 0.8.0 / numpy 2.4.6). Guarded rather than
+    # deleted: when the extra is installed, "an operator whose requires= is satisfied still gets a
+    # panel" is worth pinning, and `spot` alone does not reach the requires= branch at all.
+    pytest.importorskip("cellpose")
     assert panel_refusal("cellpose") is None
 
 

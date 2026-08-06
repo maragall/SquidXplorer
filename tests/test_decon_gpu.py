@@ -464,7 +464,15 @@ def test_an_unknown_env_value_fails_loud_rather_than_guessing(monkeypatch):
 
 def test_a_volume_too_large_for_a_tiler_less_backend_is_declined(monkeypatch):
     """petakit answers an oversized volume by tiling along z; this backend must answer by
-    declining, never by allocating something that does not fit."""
+    declining, never by allocating something that does not fit.
+
+    NEEDS TORCH, which is not a squidmip dependency -- the test below this one calls its absence
+    "the normal case on a clean install". With no GPU device to size against, `describe` answers
+    "CPU (no torch GPU device)" and never reaches the size reasoning asserted here, so on CI and in
+    any clean venv this failure was about the environment and not about the backend. It was one of
+    exactly two failures in the first clean-venv run of this suite (2026-08-05).
+    """
+    pytest.importorskip("torch")
     monkeypatch.setattr(_decon_gpu, "_free_bytes", lambda: 1e9)
     assert not _decon_gpu.fits_in_memory((64, 4096, 4096))
     assert _decon_gpu.select_device((64, 4096, 4096)) is None
