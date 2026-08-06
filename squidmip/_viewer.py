@@ -3512,7 +3512,15 @@ class PlateWindow(QMainWindow):
         # view id alone. Task 2, where a cached result carries its OWN extent, is where the set
         # belongs: the run's answer is one extent per cell, not one extent for the run.
         self._run_action = f"{_action_label(key, operator_kwargs)} · {scope}"
-        self._run_address = (Extent(region_id=regions[0])
+        # `next(iter(...))`, NOT `regions[0]`. `regions` has three shapes and one of them is the
+        # mapping `{region: [fov, ...]}` an ROI window sends (see `projection.scope_wells`), where
+        # integer indexing is a KeyError on the key `0`. It surfaced as the whole run refusing with
+        # `could not start Stitch (register + fuse): 0` -- a bare `KeyError(0)` whose str() is the
+        # key, so the sentence named the exception and said nothing about the cause.
+        #
+        # `len()` and iteration are the operations that mean the same thing for both shapes; the
+        # subscript is the only one that does not, which is why it is the one that broke.
+        self._run_address = (Extent(region_id=next(iter(regions)))
                              if regions is not None and len(regions) == 1 else None)
         self._run_began = time.monotonic()
         # THE REQUESTER IS NOW ACTUALLY HELD. ``requester=`` has been in this signature, and in its
