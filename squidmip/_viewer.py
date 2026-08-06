@@ -62,8 +62,8 @@ from qtpy.QtCore import (  # QThread/Signal: kept for tests that build a stub wo
 )
 from qtpy.QtGui import QColor, QPalette
 from qtpy.QtWidgets import (
-    QAction, QApplication, QCheckBox, QComboBox, QDockWidget, QFileDialog, QFrame, QHBoxLayout, QLabel,
-    QMainWindow, QMenu, QPlainTextEdit, QPushButton, QScrollArea, QSpinBox,
+    QAction, QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel,
+    QMainWindow, QPlainTextEdit, QPushButton, QScrollArea, QSpinBox,
     QSplitter, QStyleFactory, QTabBar, QVBoxLayout, QWidget,
 )
 
@@ -162,7 +162,7 @@ from squidmip._qtstyle import hline as _hline
 from squidmip._qtstyle import operator_card as _operator_card
 from squidmip._time_point import TimePointBar
 from squidmip._terminal import _CmdEdit, _ProcTerminal, _Terminal  # noqa: F401 (re-export)
-from squidmip._region_nav import RegionCursor, RegionSlider
+from squidmip._region_nav import RegionCursor   # RegionSlider went with `_make_region_slider`
 
 # The PLATE OVERVIEW and the plate geometry under it moved to `squidmip._plate_overview` (gap 6,
 # 2026-07-29): 2,459 lines, cut along the seam this file already had a comment for. Re-exported
@@ -181,7 +181,11 @@ from squidmip._plate_overview import (  # noqa: F401 (re-exports)
     loupe_level, loupe_scale, loupe_um_per_screen_px,
     resolve_plate_root, selection_frame_pen_px, well_at,
 )
-from squidmip._plate_shape import row_letter  # noqa: F401 (re-export: the ONE row alphabet)
+# Row letters: ONE definition, `_plate._row_letter`, which is what `WellPlate.row_labels` and
+# `cell_id` use. `_plate_overview` carried a byte-identical second copy (plus a `_PLATE_DIMS` /
+# `_plate_grid` pair, both unreachable and one of them disagreeing with the live format table);
+# they were deleted on 2026-08-06 and this alias keeps `V._row_letter` pointing at the survivor.
+from squidmip._plate import _row_letter  # noqa: F401 (re-export)
 
 # The eight QThread workers moved to `squidmip._workers` (gap 6, 2026-07-29): 949 lines whose only
 # common property is the Qt threading rule, that a background thread may not touch a widget, which
@@ -201,9 +205,11 @@ from squidmip._workers import (  # noqa: F401 (re-exports)
 #  leftovers that could only ever disagree with it. Deleted rather than left as a second opinion.)
 
 # The operator REGISTRY moved to `squidmip._operations` (gap 6, 2026-07-29): 117 lines with no Qt in
-# them, which is why they could be lifted whole. Re-exported here under their historical names.
-# `squidmip._gui_commands` currently reaches back into this module inside a function body for
-# `operator_label` and `runnable_operators`; it can point at `_operations` directly now, and should.
+# them, which is why they could be lifted whole. Re-exported here under their historical names for
+# THIS module's own call sites only. `_gui_commands` used to reach back through here inside a
+# function body for `operator_label` / `runnable_operators`, which imported PyQt5, napari and a
+# QMainWindow to answer "what is this operator called"; it points at `_operations` directly as of
+# 2026-08-06. Nothing outside `_viewer` should import an operator name from `_viewer` again.
 from squidmip._operations import (  # noqa: F401 (re-exports)
     _OPERATIONS, _OPERATIONS_BY_KEY, _SAVE_OPERATOR, _TO_BE_ADDED, Operation, _action_label,
     operator_label, operator_layer_key, operator_name, result_kind, runnable_operators,
@@ -681,12 +687,18 @@ class PlateWindow(QMainWindow):
         # drawn on that plate. Under napari there was previously no navigation control on screen
         # at all: the FOV slider belonged to ndviewer_light, which is not constructed when napari
         # is the viewer.
-        # NO region slider on the root plate. The deck puts the region slider ("<> A1, B6, C3") in
-        # each spawned WINDOW, not on the plate — navigation is per window now. Building napari's
-        # QtDims here also loaded napari icons with no napari viewer registered, which is the
-        # "theme_dark:/playback-forward.svg not found" warning spam. Playback/frame_done paths
-        # guard on None, so leaving it unbuilt is safe.
-        self._region_slider = None
+        # NO region slider on the root plate, and NO ATTRIBUTE FOR ONE. The deck puts the region
+        # slider ("<> A1, B6, C3") in each spawned WINDOW, not on the plate — navigation is per
+        # window now. Building napari's QtDims here also loaded napari icons with no napari viewer
+        # registered, which is the "theme_dark:/playback-forward.svg not found" warning spam.
+        #
+        # It was `self._region_slider = None` until 2026-08-06, with `_make_region_slider` (the only
+        # thing that could ever produce a non-None one) called from nowhere, a tooltip branch in
+        # `_on_region_changed` guarding on it, and a `_region_slider_failure` string written in two
+        # places and read in none. That is `_mosaic_pane` again, one release later and one
+        # attribute over: a `None` that reads as "the feature is off right now" when the truth is
+        # "there is no feature". `tests/test_nav_wiring.py` pins the ABSENCE of the attribute for
+        # the same reason `tests/test_plate_follows_windows.py` pins `_mosaic_pane`'s.
 
         # NO "Focus reference plane" button here. It was a control UNDER the old central viewer,
         # kept on as a "hidden orphan" so its setEnabled callers would still resolve — and a
@@ -2667,23 +2679,6 @@ class PlateWindow(QMainWindow):
             f"{len(self._fov_index)} wells loaded · double-click a well, or Shift-drag to open "
             f"several{note}")
 
-    def _make_region_slider(self):
-        """Build the region slider, or say why there is none. NEVER a silent absence.
-
-        It is napari's own dims slider (play button, fps popup, loop modes and an animation
-        thread), driven from a napari ``Dims`` model that carries only the region axis — see
-        ``_region_nav`` for why the region is not an axis of the image array instead.
-        """
-        try:
-            slider = RegionSlider(self)
-        except Exception as exc:                     # noqa: BLE001 - reported, never swallowed
-            self._region_slider_failure = f"{type(exc).__name__}: {exc}"
-            return None
-        self._region_slider_failure = None
-        slider.bind(self._cursor)
-        slider.on_problem(lambda msg: self._readout.setText(msg))
-        return slider
-
     # -- the current region: ONE value, three views ------------------------------------------
     #
     # `_mosaic_region` and `_current_well` are properties over `self._cursor` rather than fields.
@@ -2723,10 +2718,6 @@ class PlateWindow(QMainWindow):
             info = self._fov_index.get(region)
             if info is not None:
                 self._overview.select(*info["rc"])          # THE RED FRAME
-        if self._region_slider is not None:
-            self._region_slider.setToolTip(
-                f"region {index + 1} of {self._cursor.count}: {region}\n"
-                "Press play to walk the regions; right-click play for frames per second.")
 
     # NO MOSAIC LOAD, NO SPOT DETECTION, ON THE PLATE (2026-08-06).
     #

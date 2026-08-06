@@ -6,9 +6,11 @@ silently not run headless, so the inference contract is pinned here instead.
 
 import pytest
 
+from squidmip._plate import _row_letter
 from squidmip._plate_shape import (
     GLASS_SLIDE,
     PlateShapeError,
+    _row_index,
     infer_plate_format,
     normalize_plate_format,
     plate_dims,
@@ -16,14 +18,9 @@ from squidmip._plate_shape import (
     well_span,
 )
 
-
-def _row_letter(i: int) -> str:
-    """0->A, 25->Z, 26->AA (a local copy — _viewer's is behind a PyQt5 import)."""
-    s, i = "", i + 1
-    while i:
-        i, r = divmod(i - 1, 26)
-        s = chr(65 + r) + s
-    return s
+# The row alphabet is IMPORTED, not restated. This file used to carry a third copy of it,
+# justified by "_viewer's is behind a PyQt5 import" — a claim about a function that no longer
+# exists, guarding a test whose whole subject is which row a letter names.
 
 
 def _full_plate(rows, cols):
@@ -106,40 +103,44 @@ def test_resolve_prefers_declared_then_infers():
     assert resolve_plate_format(declared, override="96") == "96 well plate"   # override beats both
 
 
-# --- ONE row alphabet ----------------------------------------------------------------------------
+
+
+# --- ONE row alphabet, wherever it lives ---------------------------------------------------------
 #
-# `row_letter` was two byte-identical private copies (`_plate._row_letter`,
-# `_plate_overview._row_letter`), and the comment on one of them justified the copy with a PyQt
-# import the other module does not have. `row_index` was two copies that were NOT identical:
-# `_plate`'s refused a non-letter, this module's did not, and `ord(ch) - 64` is a number for every
-# character. That is the copy that drifted, and this is what it answered.
+# `_row_letter` was two byte-identical copies (`_plate`, `_plate_overview`) and `_row_index` was
+# two copies that were NOT identical: `_plate`'s refused a non-letter, `_plate_shape`'s did not,
+# and `ord(ch) - 64` is a number for every character. Both collapsed on 2026-08-06. These pin the
+# COUNT, not the module, so the two independent collapses of the same duplication agree.
 
-def test_row_index_refuses_anything_that_is_not_a_row_letter():
-    from squidmip._plate_shape import row_index
-
-    for bad, was in (("A1", 10), ("manual0", 4034554195), ("1", -16)):
-        with pytest.raises(KeyError):
-            row_index(bad)                       # the copy this replaced answered `was`, silently
-        assert was  # documents the wrong answer next to the assertion that now prevents it
-
-
-def test_row_letter_and_row_index_are_inverses_over_every_plate_row():
-    from squidmip._plate_shape import row_index, row_letter
-
-    for i in range(0, 703):                      # 0..ZZ, well past a 1536wp's 32 rows (AF)
-        assert row_index(row_letter(i)) == i
-
-
-def test_the_row_alphabet_is_defined_once():
-    """Structural: a private `_row_letter`/`_row_index` anywhere is the copy coming back."""
+def _defs(name: str) -> list:
     import pathlib
 
     import squidmip
 
     pkg = pathlib.Path(squidmip.__file__).parent
-    offenders = sorted(str(p.relative_to(pkg)) for p in pkg.rglob("*.py")
-                       if "def _row_letter" in p.read_text() or "def _row_index" in p.read_text())
-    assert not offenders, (
-        f"{offenders} define a private row alphabet; `_plate_shape.row_letter` / `row_index` are "
-        "the ones, and the copies disagreed on every input that was not a row letter"
-    )
+    return sorted(str(p.relative_to(pkg)) for p in pkg.rglob("*.py")
+                  if f"def {name}(" in p.read_text())
+
+
+def test_row_index_refuses_anything_that_is_not_a_row_letter():
+    """The un-guarded copy answered these, silently, and the answers are in the message."""
+    for bad, was in (("A1", 10), ("manual0", 4034554195), ("1", -16)):
+        with pytest.raises(KeyError):
+            _row_index(bad)
+        assert isinstance(was, int)      # documents the wrong answer beside the refusal
+
+
+def test_row_letter_and_row_index_are_inverses_over_every_plate_row():
+    for i in range(0, 703):              # 0..ZZ, well past a 1536wp's 32 rows (AF)
+        assert _row_index(_row_letter(i)) == i
+
+
+@pytest.mark.parametrize("name", ["_row_letter", "_row_index"])
+def test_the_row_alphabet_is_defined_exactly_once(name):
+    """Structural: a second definition anywhere is the copy coming back.
+
+    Text-level on purpose -- the deleted `_row_letter`s were byte-identical bodies, so only a
+    grep would ever have caught a third being added, and nothing did for the second.
+    """
+    found = _defs(name)
+    assert len(found) == 1, f"{name} is defined in {found}; there must be exactly one"

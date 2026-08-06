@@ -98,7 +98,7 @@ def well_span(well_ids) -> Optional[tuple[int, int]]:
         m = _WELL_RE.match(str(region))
         if not m or int(m.group(2)) < 1:
             return None                     # freeform/tissue id — not a well plate at all
-        max_row = max(max_row, row_index(m.group(1)) + 1)
+        max_row = max(max_row, _row_index(m.group(1)) + 1)
         max_col = max(max_col, int(m.group(2)))
     if not max_row:
         return None                         # empty id set
@@ -158,28 +158,23 @@ def resolve_plate_format(metadata, override=None) -> str:
     return infer_plate_format(metadata.get("regions") or [])
 
 
-def row_letter(i: int) -> str:
-    """0->"A", 25->"Z", 26->"AA", ... — a plate row index as its label. Bijective base-26.
+def _row_index(letters: str) -> int:
+    """"A"->0, "Z"->25, "AA"->26, ... — the inverse of :func:`squidmip._plate._row_letter`.
 
-    THE one spelling of it. This module is the lowest layer that knows what shape a plate is and
-    is Qt-free, so `_plate` (the model) and `_plate_overview` (the widget) both reach it without
-    either importing the other; they used to hold byte-identical private copies, and the comment
-    on one of them justified the copy with a PyQt import the other one does not have.
-    """
-    s, i = "", int(i) + 1
-    while i:
-        i, r = divmod(i - 1, 26)
-        s = chr(65 + r) + s
-    return s
+    THE one of these, and it lives HERE because this is the lower layer: ``_plate`` imports this
+    module, so the arrow can only run one way. ``_row_letter`` was collapsed to one function on
+    2026-08-06 and its docstrings were corrected; this half was left as two bodies that were not
+    identical, and correcting the comment on a live duplication is how it survived the sweep.
 
+    Raises ``KeyError`` on anything that is not letters, which is the whole difference between the
+    two copies and the reason the guarded one won: ``ord(ch) - 64`` is a number for every
+    character, so the un-guarded body answered ``_row_index("A1")`` with **10**,
+    ``_row_index("1")`` with **-16** and ``_row_index("manual0")`` with **4034554195** — silently,
+    where the other raised. A row index nobody can check is a plate laid out at the wrong place.
 
-def row_index(letters: str) -> int:
-    """"A"->0, "Z"->25, "AA"->26, ... — the inverse of :func:`row_letter`.
-
-    Raises ``KeyError`` on anything that is not letters. That refusal is the whole reason there is
-    one of these rather than two: the un-guarded copy this replaced answered ``row_index("A1")``
-    with **10** and ``row_index("manual0")`` with **4034554195**, silently, because ``ord(ch) - 64``
-    is a number for every character. A row index nobody can check is a plate laid out wrongly.
+    Not reachable through ``well_span`` today, because ``_WELL_RE`` filters the input first. That
+    is what "latent" means, not what "harmless" means: the guard is one line and it is the
+    difference between a refusal and a four-billion-row plate.
     """
     n = 0
     for ch in str(letters).upper():

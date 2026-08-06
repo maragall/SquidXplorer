@@ -21,10 +21,8 @@ WHAT IS IN HERE, IN THE ORDER THE FILE HAD IT
 ---------------------------------------------
 * **plate geometry**, Qt-free and unit-testable: :func:`well_at`, :func:`cells_in_rect`,
   :func:`_fit_cell`, :func:`_fit_box`, :func:`_box_union`, :func:`resolve_plate_root`, and the
-  mosaic-box geometry (:func:`_mosaic_boxes`, :func:`content_box`). The row-label alphabet and
-  the well-count -> (rows, cols) table are NOT here: both live one layer down, in
-  :mod:`squidmip._plate_shape` and :mod:`squidmip._plate`, and this module had a second copy of
-  each.
+  mosaic-box geometry (:func:`_mosaic_boxes`, :func:`content_box`). Row letters and the
+  well-count -> (rows, cols) table are NOT here: see the note where they used to be.
 * **contrast over a streaming plate**: :class:`_RunningContrast` and :func:`_pct_window`, the
   during-run histogram approximation and the exact percentile window the final render uses.
 * **the loupe** (IMA-208): the magnification math, and the three sources it can read real pixels
@@ -75,7 +73,6 @@ from squidmip._budget import cache_budget
 from squidmip._logpane import get_logger
 from squidmip._montage import _area_downsample, composite
 from squidmip._plate import display_well_id
-from squidmip._plate_shape import row_letter
 from squidmip._tiling import TileDescriptor
 from squidmip.contract import field_levels, field_path
 
@@ -249,6 +246,25 @@ def _box_union(a, b):
     bottom = max(a[0] + a[2], b[0] + b[2])
     right = max(a[1] + a[3], b[1] + b[3])
     return (int(top), int(left), int(bottom - top), int(right - left))
+
+
+# NO PLATE-FORMAT TABLE HERE, AND NO ROW LETTERS (2026-08-06).
+#
+# `_PLATE_DIMS` (well count -> (rows, cols)), `_plate_grid` and `_row_letter` lived here with ZERO
+# callers -- `_plate_grid` was `_row_letter`'s only reader and nothing read `_plate_grid`. The grid
+# a plate is actually drawn on comes from `_plate.WellPlate.row_labels` / `col_labels` via
+# `build_plate` (`_viewer._build_plate` -> `plate.viewer_grid()`), off `_plate_shape`'s
+# `_STANDARD_FORMATS`.
+#
+# It was not merely dead, it DISAGREED with the live table: `_PLATE_DIMS` mapped 4 -> (2, 2), a
+# format `_plate_shape` deliberately rejects (`tests/test_plate_shape.py` asserts
+# `plate_dims("4 well plate") is None`). A third table for the one question "how is this plate laid
+# out", unreachable and already wrong, is the shape that gets copied by the next person who greps
+# for a plate format. `_plate_grid` also re-derived `normalize_plate_format`'s digit regex inline
+# rather than calling it.
+#
+# Row letters are ONE function, `_plate._row_letter`, which `WellPlate` uses. `_viewer` re-exports
+# it under the historical name for the tests that reach in through `V._row_letter`.
 
 
 def resolve_plate_root(path) -> tuple[Path, bool]:
