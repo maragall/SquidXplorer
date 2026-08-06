@@ -188,6 +188,7 @@ from squidmip.projection import (
     normalise_produces,
     normalise_requires,
     plane_op,
+    scope_wells,
     project,
     project_reference,
     project_well,
@@ -838,10 +839,10 @@ def project_plate(
 
     # Warm the reader's lazy index/time-folders/metadata single-threaded BEFORE fan-out.
     meta = reader.metadata
-    wells = select_fovs(meta, n_fovs=n_fovs)
-    if regions is not None:   # subset preview: keep only the requested wells (in their given order)
-        keep = list(dict.fromkeys(regions))
-        wells = {r: wells[r] for r in keep if r in wells}
+    # ONE resolver, shared with stitch_plate. This used to be `list(dict.fromkeys(regions))`, which
+    # over a MAPPING yields its keys -- so `{region: [fov, ...]}`, the way this application spells a
+    # FOV subset everywhere else, silently ran every field of each named well. See `scope_wells`.
+    wells = scope_wells(meta, n_fovs, regions)
     tasks: Iterator[tuple[str, int]] = (
         (region, fov) for region, fovs in wells.items() for fov in fovs
     )

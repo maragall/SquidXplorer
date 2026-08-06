@@ -438,7 +438,18 @@ class StitcherPanel(_Panel):
         # for 3D to render. A viewer whose 3D path exists cannot default to throwing z away on a
         # z-stack. A single-plane acquisition keeps `mip`, where the two are the same picture and
         # `mip` is the name everything else already says.
-        self.projector_combo.setCurrentText("keepz" if self._n_z > 1 else "mip")
+        # `mip` STAYS THE DEFAULT, even on a z-stack. This defaulted to `keepz` for a few hours on
+        # 2026-08-06 and it was wrong: Julio, on the full-region stitch, *"When stitching finish on
+        # the full region layer, it shows a black canvas. Before it was showing the stitched layer
+        # well."* Right -- a `keepz` stitch of a 27-FOV 10x well is a (10, 9587, 11463) single-scale
+        # volume, ~2.2 GB, and the 2-D canvas then shows ONE plane of it with no pyramid under it.
+        # The flat mosaic is what a 2-D window is for.
+        #
+        # Julio's own framing is the rule: *"The MIP stitch is a 2D operation."* So z handling
+        # follows the WINDOW'S MODE rather than the acquisition's depth -- `RegionViewer.
+        # _z_kwargs_for_mode` switches to `keepz` when the window is in 3D, which is the moment a
+        # volume is actually asked for. The combo remains the explicit override for either.
+        self.projector_combo.setCurrentText("mip")
         self.projector_combo.setToolTip(
             "What each FOV's z-stack becomes before registration.\n\n"
             "A z-REDUCER (mip, reference) collapses it to one plane, so the well fuses to one "

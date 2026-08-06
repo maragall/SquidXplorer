@@ -112,6 +112,7 @@ from squidmip.projection import (
     normalise_requires,
     project_well,
     requirement_refusal,
+    scope_wells,
     select_fovs,
 )
 
@@ -1522,23 +1523,11 @@ def stitch_plate(
     # Warm the reader's lazy index/metadata single-threaded BEFORE fan-out, exactly as
     # project_plate does, so concurrent read() only touches immutable state.
     meta = reader.metadata
-    wells = select_fovs(meta, n_fovs=n_fovs)
-    if isinstance(regions, Mapping):
-        # Explicit per-region FOV lists: the caller has already decided which FOVs of each
-        # well to fuse, so n_fovs does not apply. Intersect with what the acquisition actually
-        # has (order and duplicates as given by the caller, minus the ones that don't exist)
-        # rather than trusting the request — a selection can outlive the acquisition it came
-        # from. Each surviving region is still exactly one task, hence exactly one mosaic.
-        available = meta["fovs_per_region"]
-        wells = {}
-        for region in dict.fromkeys(regions):
-            if region not in available:
-                continue
-            have = set(available[region])
-            wells[region] = [int(f) for f in dict.fromkeys(regions[region]) if int(f) in have]
-    elif regions is not None:  # subset preview: keep only the requested wells, in their order
-        keep = list(dict.fromkeys(regions))
-        wells = {r: wells[r] for r in keep if r in wells}
+    # The three `regions` shapes, resolved by the ONE resolver `project_plate` also uses. The body
+    # that used to be here was the ORIGINAL of that rule and the only correct copy of it; extracting
+    # it is what let `project_plate` stop dropping FOV lists. Each surviving region is still exactly
+    # one task here, hence exactly one mosaic.
+    wells = scope_wells(meta, n_fovs, regions)
     tasks: Iterator[tuple[str, list[int]]] = iter(
         [(region, list(fovs)) for region, fovs in wells.items() if fovs]
     )

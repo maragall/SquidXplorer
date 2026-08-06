@@ -761,6 +761,55 @@ def select_fovs(metadata: dict, n_fovs: Optional[int] = 1) -> dict[str, list[int
     return selected
 
 
+def scope_wells(metadata: dict, n_fovs: Optional[int], regions) -> "dict[str, list[int]]":
+    """``{region: [fov, ...]}`` for a run, from whichever of the three shapes *regions* is.
+
+    THE ONE RESOLVER, shared by :func:`squidmip.project_plate` and :func:`squidmip.stitch_plate`,
+    because "which fields does this run touch" is one question and the two engines were answering
+    it differently:
+
+    ================================  ==============================================================
+    ``regions``                       what it means
+    ================================  ==============================================================
+    ``None``                          the whole acquisition, ``n_fovs`` per well
+    a **sequence** of names           those wells, in that order, ``n_fovs`` per well
+    a **mapping** ``{region: fovs}``  exactly those fields of each well; ``n_fovs`` does not apply
+    ================================  ==============================================================
+
+    The mapping is how this application spells a FOV subset everywhere else -- ``GalleryScope.fovs``,
+    ``PlateWindow.selected_region_fovs()``, ``RegionViewer._run_scope`` -- and ``stitch_plate`` has
+    honoured it since IMA-228. ``project_plate`` did not: it ran ``list(dict.fromkeys(regions))``,
+    which over a dict yields its KEYS, so the field lists were silently dropped and every FOV of
+    each named well ran. Measured on ``sim_5d_2x2_t3``, ``project_plate(regions={"A1": [0]})``
+    yielded ``[('A1', 0), ('A1', 1), ('A1', 2), ('A1', 3)]`` -- four fields for a one-field request,
+    with no error and no warning, so the run was simply four times the work it was asked for.
+
+    That is what makes an ROI run cheap or not. Julio, 2026-08-06: *"we're accelerating the compute
+    because we are getting a subset of the dataset just for the current window, that will make
+    decon, stitching, etc very very fast."* Stitching already was; decon, bgsub, spot and cellpose
+    -- every per-FOV operator, i.e. the expensive ones -- were not.
+
+    INTERSECTED WITH WHAT THE ACQUISITION HAS, never trusted: a selection can outlive the
+    acquisition it came from. Order and duplicates follow the caller, minus what does not exist.
+    """
+    from collections.abc import Mapping
+
+    wells = select_fovs(metadata, n_fovs=n_fovs)
+    if isinstance(regions, Mapping):
+        available = metadata["fovs_per_region"]
+        out: "dict[str, list[int]]" = {}
+        for region in dict.fromkeys(regions):
+            if region not in available:
+                continue
+            have = set(available[region])
+            out[region] = [int(f) for f in dict.fromkeys(regions[region]) if int(f) in have]
+        return out
+    if regions is None:
+        return wells
+    keep = list(dict.fromkeys(regions))
+    return {r: wells[r] for r in keep if r in wells}
+
+
 def resolve_n_fovs(metadata: dict, n_fovs: Optional[int]) -> int:
     """Concrete FOV-per-well count for callers that need an int, resolving ``None`` to the max.
 
