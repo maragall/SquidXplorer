@@ -11,17 +11,47 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12"]
+        # 3.10 REMOVED 2026-08-05. It was not a policy choice, it never worked: the `test (3.10)`
+        # leg failed at INSTALL with "No matching distribution found for zarr>=3.0", because every
+        # zarr 3.x wheel declares Requires-Python >=3.11 and `zarr>=3.0` is a hard dependency.
+        # pyproject's `requires-python` now says ">=3.11" to match, so this matrix and that
+        # declaration agree instead of one of them being aspirational.
+        python-version: ["3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      # Clean-room install: resolves deps from PyPI only (no ambient conda env, no
-      # tilefusion). Proves the build is reproducible off the dev machine.
+      # Qt6 links libEGL even under QT_QPA_PLATFORM=offscreen and the ubuntu runner image does not
+      # ship it. Same three libraries as build.yml's jobs, for the same reason: this is a MISSING
+      # SYSTEM LIBRARY, and no amount of pip solves it.
+      - name: System Qt libraries
+        run: sudo apt-get update && sudo apt-get install -y libegl1 libgl1 libxkbcommon-x11-0 libdbus-1-3
+      # `.[gui,test]`, not `.[test]`, as of 2026-08-05. The old line installed the headless extra
+      # only, and then ran the WHOLE suite against it -- so the 3.11 and 3.12 legs died in
+      # COLLECTION with 8 errors, all of them:
+      #     ModuleNotFoundError: No module named 'qtpy'
+      # from tests/test_gui_commands.py, test_layer_tree.py, test_logpanel.py, test_op_panels.py
+      # and friends, which import qtpy at module scope. The comment that stood here called this a
+      # "clean-room install ... proves the build is reproducible off the dev machine", and that
+      # intent is real, but it was being proved against a test suite that is 40% GUI. A clean-room
+      # install of the CLI is still proved -- by `pip install .` resolving the base dependency set
+      # in this same step -- while the suite now gets the extra it actually needs.
       - name: Install
-        run: python -m pip install --upgrade pip && pip install .[test]
-      # Integration tests need the real hongquan dataset, which isn't on CI -> deselect.
-      - name: Test
-        run: pytest -m "not integration" -v
+        run: |
+          python -m pip install --upgrade pip
+          pip install ".[gui,test]"
+      # CHUNKED, for the same measured reason as build.yml: ~2500 tests in one process exhausts it
+      # on the accumulated Qt worker objects and the process aborts (exit 134) with no test having
+      # failed. tools/run_suite_chunked.py runs ~100 tests per process and exits non-zero on any
+      # failure OR any chunk that died mid-run, so a crash cannot be mistaken for a pass.
+      #
+      # `-m "not integration"` is gone: it was here because the integration tests need the real
+      # hongquan dataset, and they still do -- but they are marked `integration` and their fixtures
+      # skip themselves when the data is absent, which is what the 26 deselected / 32 skipped in
+      # the old logs already showed. The chunked runner collects the whole suite by design.
+      - name: Test (chunked)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python tools/run_suite_chunked.py
