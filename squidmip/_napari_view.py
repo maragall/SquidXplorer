@@ -443,6 +443,72 @@ class MosaicLayers:
         #: another (``_connect_exclusive_op``), and a global flag would swallow that second
         #: identity's own mirror and leave half a volume lit.
         self._mirroring: set = set()
+        # napari leaves a HIDDEN layer's slice contradicting its own slice input across a 2D/3D
+        # flip; see `_reslice_hidden_layers`. Connected once, here, so every flip is covered --
+        # ours and napari's own 2D/3D button alike.
+        try:
+            model.dims.events.ndisplay.connect(self._reslice_hidden_layers)
+        except Exception:                        # noqa: BLE001 - a stub model with no dims events
+            pass
+
+    # -- napari will not re-slice a hidden layer, but it WILL update its slice input ------
+    def _reslice_hidden_layers(self, event=None) -> None:
+        """Bring every hidden layer's SLICE back into agreement with its own slice INPUT.
+
+        MEASURED, on the real 10x acquisition, raw multiscale ``(10, 5731, 4794)``: open a 3-D
+        volume (``_brick_view.BrickedVolume.open`` hides the pane's mosaics, then flips the pane to
+        ``ndisplay=3``) and drag the contrast. Both ``MosaicLayers.set_contrast`` and napari's own
+        slider raise ``RuntimeError: sequence argument must have length equal to input rank``.
+
+        WHY. ``Layer._slice_dims`` assigns ``self._slice_input`` unconditionally and then calls
+        ``_refresh_sync``, which returns at its first line for an invisible layer
+        (``napari/layers/base/base.py``: ``if not (self.visible or force): return``). So a hidden
+        layer ends the flip claiming ``_slice_input.ndisplay == 3`` while holding the 2-D slice and
+        2-D thumbnail it had in 2D. ``Image._update_thumbnail`` — which every ``contrast_limits``
+        write calls, with no visibility guard — then reads that stale thumbnail and does
+        ``np.max(image, axis=0)`` because the slice input says 3D. A 2-D thumbnail becomes 1-D, and
+        ``ndi.zoom`` is handed a 2-element zoom for a rank-1 array.
+
+        BOTH DIRECTIONS, measured: 3 -> 2 leaves a stale 3-D thumbnail under a 2-D slice input and
+        raises the same way, which is why this is on the EVENT and not at one call site. A layer
+        hidden before the flip and never re-shown is repaired here too; ``BrickedVolume.close``
+        only re-shows what it hid.
+
+        Reachable in the app only since bricks became real model layers: ``adopt`` registers them,
+        so ``_link_set`` links a brick to the hidden flat mosaics of its channel and a contrast
+        drag on the volume reaches them. It is a real crash on a real gesture, not a test artifact.
+
+        ``ndim > 2`` is the exact precondition of napari's branch, not an optimisation: a 2-D layer
+        never takes the ``np.max`` above and cannot hold a stale 3-D thumbnail either.
+
+        Ordering is measured rather than assumed: this subscriber is connected after napari's own,
+        so by the time it runs the layers already carry the NEW ``_slice_input`` — asserted by
+        ``tests/test_stitch_in_3d.py``. ``refresh(force=True)`` is napari's own public opt-out of
+        the visibility guard, so this asks for exactly the work that was skipped.
+        """
+        for ly in self._all_ours():
+            try:
+                if bool(getattr(ly, "visible", False)) or int(getattr(ly, "ndim", 0)) <= 2:
+                    continue
+                ly.refresh(force=True)
+            except Exception as exc:             # noqa: BLE001 - one odd layer is not the pane
+                log.warning("could not re-slice %s after a 2D/3D flip: %s",
+                            getattr(ly, "name", "layer"), exc)
+
+    def _all_ours(self) -> list[Any]:
+        """Every layer THIS pane made, whether or not it currently carries an identity.
+
+        ``ours()`` reads ``key_of``, and while 3D is up the flat mosaics have SURRENDERED their
+        identity (``BrickedVolume.open``) -- which is precisely the set that needs repairing above.
+        ``_by_channel`` is the membership that survives that, exactly as ``_link_set`` relies on it
+        for the same reason. Foreign layers a plugin added are left alone.
+        """
+        out: list[Any] = list(self.ours())
+        for peers in self._by_channel.values():
+            for ly in peers:
+                if ly not in out:
+                    out.append(ly)
+        return out
 
     # -- who moved the contrast: us, or the user? ---------------------------------------
     @contextmanager

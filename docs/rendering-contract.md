@@ -82,9 +82,23 @@ Measured on the real 10x set, second 3D click over a `bgsub` layer with the clos
 the source was one 512 px brick, **1 of 9 bricks** of the ROI yielded voxels, and the harvested
 window came back `(0.0, 1.0)` against the `(120, 900)` on screen.
 
-Corollary, same reason: a `(op, channel)` key is **one-to-many**. `MosaicLayers.find_all` is what
-anything that DRIVES the pair uses (a visibility checkbox, a selection); `find` returns the first
-and is for anything that only needs *a* layer (a thumbnail, an icon).
+Corollary, same reason: a `(op, channel)` key is **one-to-many**. `MosaicLayers.layers_for` is what
+anything that DRIVES the pair uses (a visibility checkbox, a selection); `find` returns the
+representative and is for anything that only needs *a* layer (a thumbnail, an icon).
+
+Second corollary, and it is a CRASH rather than a wrong picture: **napari will not re-slice a
+hidden layer, but it will still update that layer's slice INPUT.** `Layer._slice_dims` assigns
+`_slice_input` unconditionally and then calls `_refresh_sync`, which returns at
+`if not (self.visible or force)`. `open()` hides the pane's mosaics and then flips to
+`ndisplay = 3`, so they end the flip claiming 3-D while holding a 2-D thumbnail — and
+`Image._update_thumbnail`, which every `contrast_limits` write calls with no visibility guard,
+then does `np.max(image, axis=0)` on it and hands `scipy.ndimage.zoom` a 2-element zoom for a
+rank-1 array. Measured on the real 10x set against a multiscale raw `(10, 5731, 4794)`: a contrast
+drag with the volume up raises `RuntimeError: sequence argument must have length equal to input
+rank`, in both flip directions, through `MosaicLayers.set_contrast` and a bare layer write alike.
+`MosaicLayers._reslice_hidden_layers` is subscribed to `dims.events.ndisplay` — one place, so
+napari's own 2D/3D button is covered as well as ours — and calls `refresh(force=True)`, napari's
+own public opt-out of that guard. 4.5 ms on the real pyramid, once per flip.
 
 **Bricking** (`_bricks`, `_brick_view`) remains the mechanism underneath, and it is exact: a
 volume over the cap is tiled into textures that each fit, placed with `translate`, composited with
