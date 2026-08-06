@@ -54,9 +54,15 @@ IDENTITY IS (op, channel), NEVER A LAYER OBJECT AND NEVER A PARSED NAME
 keeps them for a timepoint change; see ``_region_viewer.py``). A subscription bound to layer
 objects therefore dies silently on the next region -- that is precisely how the contrast sync was
 lost (``MosaicLayers.on_user_contrast``).
-Every row here resolves its layer through ``MosaicLayers.find(op, channel)`` at read time, and
+Every row here resolves its layers through ``MosaicLayers.find_all(op, channel)`` at read time, and
 identity comes from ``layer.metadata`` via ``key_of``. Names are labels; ian-stitcher's
 ``extractWavelength(layer.name)`` and petakit's unparseable channel names are why.
+
+``find_all`` and not ``find``, because a key is one-to-MANY and is meant to be: a 3-D volume is
+many brick layers sharing one ``(op, channel)`` so that a hundred textures collapse into one row
+(``_brick_view.BrickedVolume._op``). Resolving a channel row to the FIRST match made its checkbox
+drive one brick of a hundred -- Julio, 2026-08-06: "Turning off one layer doesn't turn the other
+like in the 2D view."
 """
 
 from __future__ import annotations
@@ -90,6 +96,22 @@ def _resolve_napari_roles() -> dict:
 
 
 _NAPARI_ROLES: dict = _resolve_napari_roles()
+
+
+def _check_state(layers) -> Any:
+    """A row's check state DERIVED from the layers it stands for. Never stored.
+
+    One rule for both levels of the tree, because both are one-to-MANY: a processing-layer row
+    stands for its channels, and a channel row stands for every layer holding that ``(op, channel)``
+    -- one for a mosaic, one per brick for a 3-D volume. See the module docstring on
+    ``GroupLayer._visible`` for why this is derived rather than kept.
+    """
+    visible = [bool(getattr(ly, "visible", False)) for ly in layers]
+    if all(visible):
+        return Qt.Checked
+    if not any(visible):
+        return Qt.Unchecked
+    return Qt.PartiallyChecked
 
 
 class _GroupItem:
@@ -282,10 +304,13 @@ class MosaicTreeModel(QAbstractItemModel):
                 if index.row() >= len(self._rows):
                     return None
                 return self._group_state(self._rows[index.row()][0])
-            layer = self._mosaic.find(*key)
-            if layer is None:
+            # EVERY layer of the pair, by the same derived rule the group row uses. A channel is
+            # one layer for a mosaic and N bricks for a 3-D volume; reading only the first drew a
+            # cleared checkbox over a volume that was still lit.
+            layers = self._mosaic.find_all(*key)
+            if not layers:
                 return None
-            return Qt.Checked if layer.visible else Qt.Unchecked
+            return _check_state(layers)
 
         # --- the roles napari's own LayerDelegate paints from -------------------------------
         #
@@ -347,12 +372,7 @@ class MosaicTreeModel(QAbstractItemModel):
         group = self._mosaic.group(op)
         if not group:
             return Qt.Unchecked
-        visible = [bool(ly.visible) for ly in group]
-        if all(visible):
-            return Qt.Checked
-        if not any(visible):
-            return Qt.Unchecked
-        return Qt.PartiallyChecked
+        return _check_state(group)
 
     def setData(self, index=QModelIndex(), value=None, role=Qt.EditRole) -> bool:
         if not index.isValid() or role != Qt.CheckStateRole:
@@ -361,10 +381,14 @@ class MosaicTreeModel(QAbstractItemModel):
         key = self._key_at(index)
 
         if key is not None:
-            layer = self._mosaic.find(*key)
-            if layer is None:
+            # ALL of them, for the reason spelled out in `MosaicLayers.find_all`: a channel row is
+            # one layer for a mosaic and every brick of a channel for a 3-D volume, and a checkbox
+            # that drives one of a hundred is a control that does not control.
+            layers = self._mosaic.find_all(*key)
+            if not layers:
                 return False
-            layer.visible = want
+            for layer in layers:
+                layer.visible = want
             self.dataChanged.emit(index, index, [role])
             # The parent's state is derived from this leaf; repaint it too.
             parent = self.parent(index)
@@ -518,7 +542,7 @@ class MosaicTree(QTreeView):
         if model is None or not current.isValid():
             return
         key = model._key_at(current)
-        layers = ([model._mosaic.find(*key)] if key is not None
+        layers = (model._mosaic.find_all(*key) if key is not None
                   else model._mosaic.group(model._rows[current.row()][0])
                   if current.row() < len(model._rows) else [])
         layers = [ly for ly in layers if ly is not None]

@@ -72,6 +72,20 @@ makes a Z_REDUCER say plainly that it has one plane and no volume, rather than d
 degenerate single-slice "volume". `tests/test_operator_declaration.py` fails the build on a name
 comparison, which is why this goes through the registry.
 
+**While a volume is up, `MosaicLayers` is not describing the mosaic — so nothing may ask it what
+is on screen until the volume is DOWN.** `BrickedVolume.open()` moves the `(op, channel)` identity
+off the pane's 2-D layers and onto its bricks, deliberately: it is what puts the volume in the
+layer tree and what stops a flat, coarser mosaic being switched on across it. The cost is that
+`find`, `channels` and `visible_op` then answer about BRICKS. So `RegionViewer._open_3d` calls
+`_close_native3d()` **before** it reads the scene, not merely before it builds the new view.
+Measured on the real 10x set, second 3D click over a `bgsub` layer with the close happening later:
+the source was one 512 px brick, **1 of 9 bricks** of the ROI yielded voxels, and the harvested
+window came back `(0.0, 1.0)` against the `(120, 900)` on screen.
+
+Corollary, same reason: a `(op, channel)` key is **one-to-many**. `MosaicLayers.find_all` is what
+anything that DRIVES the pair uses (a visibility checkbox, a selection); `find` returns the first
+and is for anything that only needs *a* layer (a thumbnail, an icon).
+
 **Bricking** (`_bricks`, `_brick_view`) remains the mechanism underneath, and it is exact: a
 volume over the cap is tiled into textures that each fit, placed with `translate`, composited with
 the **GL `max` blend equation** (`_napari3d.pin_max_compositing`). MIP is a maximum, and a maximum
@@ -157,6 +171,14 @@ Carry the on-screen LUT (per channel `contrast_limits` + colormap) into 3D so it
 channel has no carried LUT, derive one with the maragall fluorescence rule (`_contrast.auto_contrast`
 — background mode + 2σ to black, 99.9th pct on top), never napari's raw full-range autoscale (which
 renders fluorescence washed out). See `_napari3d._auto_clim`.
+
+**From the layer being RENDERED** (`RegionViewer._on_screen_luts(source)`, called where
+`_volume_source` has just decided what that is), not from raw. Where raw and an operator both have
+a layer for a channel it makes no difference — contrast is linked per channel, so they hold one
+value — and where raw does NOT (a channel only the operator produced), reading raw carries nothing
+and the derived window above takes over: the contrast changing under a user who set it. A channel
+the rendered layer has no entry for stays ABSENT rather than being filled in from raw; raw's window
+over an operator's pixels is a different wrong answer, not a safer one.
 
 ## Operators over the abstractions
 

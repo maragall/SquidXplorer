@@ -63,7 +63,9 @@ class OperatorResult:
     bbox_um: Optional[tuple[float, float, float, float]] = None
 
     def plane(self, channel: str) -> np.ndarray:
-        """The 2-D plane for *channel*, by NAME.
+        """This result's pixels for *channel*, by NAME -- ``(Y, X)``, or ``(Nz, Y, X)`` when the
+        producer kept its depth (a region operator's per-plane fusion; see
+        :meth:`RegionResultAccumulator.add`).
 
         By name and not by index on purpose: the channel ORDER at the operator is not
         guaranteed to be the channel order at the layer, and an index would resolve silently
@@ -105,17 +107,28 @@ class RegionResultAccumulator:
 
     # -- collecting --------------------------------------------------------------------
     def add(self, fov: int, planes: Any) -> None:
-        """Record one FOV's output: a ``(C, Y, X)`` stack, channel-major.
+        """Record one unit's output: ``(C, Y, X)``, or ``(C, Nz, Y, X)`` from a region operator.
 
         Refuses rather than reshaping. A channel-count mismatch broadcast into place, or an
         unrecognised FOV placed at the origin, produces a layer that looks like the operator's
         output and is not -- and a wrong picture in a scientific viewer is unrecoverable in a
         way a loud refusal is not.
+
+        THE DEPTH IS ALLOWED ONLY WHERE IT CAN BE KEPT. A region operator arrives already fused,
+        so its ``(C, Nz, Y, X)`` volume passes straight through :meth:`result` and reaches the
+        layer with every acquired plane -- which is what makes a stitched mosaic renderable in 3D
+        (IMA-277 fuses per plane; ``_workers._OperatorWorker._result_pixels`` is the producer). The
+        per-FOV path re-fuses through :meth:`_fuse`, one plane per call, so a depth there would
+        have to be fused ``Nz`` times over tiles this object is holding; it is refused by shape
+        rather than silently indexed, and the producer sends one plane.
         """
         arr = np.asarray(planes)
-        if arr.ndim != 3:
+        allowed = (3, 4) if self._region_operator else (3,)
+        if arr.ndim not in allowed:
+            expected = ("a (C, Y, X) or (C, Nz, Y, X) stack" if self._region_operator
+                        else "a (C, Y, X) stack")
             raise ValueError(
-                f"{self.op!r} region {self.region!r} FOV {fov}: expected a (C, Y, X) stack, "
+                f"{self.op!r} region {self.region!r} FOV {fov}: expected {expected}, "
                 f"got shape {arr.shape}")
         if arr.shape[0] != len(self.channels):
             raise ValueError(

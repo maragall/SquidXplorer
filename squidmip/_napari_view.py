@@ -488,10 +488,28 @@ class MosaicLayers:
         return out
 
     def find(self, op: str, channel: str) -> Optional[Any]:
+        """ONE layer answering to ``(op, channel)`` — the first. See :meth:`find_all`."""
         for ly in self.ours():
             if key_of(ly) == MosaicKey(op, channel):
                 return ly
         return None
+
+    def find_all(self, op: str, channel: str) -> list[Any]:
+        """EVERY layer answering to ``(op, channel)``: one for a mosaic, N for a 3-D volume.
+
+        A key is not unique and is not meant to be. ``_brick_view.BrickedVolume`` stamps the SAME
+        ``(op, channel)`` on every brick on purpose, so the tree groups a hundred textures into one
+        row and one toggle drives the whole volume — and while 3D is up the pane's own 2-D layers
+        surrender that identity, so the bricks are the only holders.
+
+        :meth:`find` answers "a layer for this pair", which is what a thumbnail or a napari-controls
+        selection wants. Anything that DRIVES the pair — a visibility checkbox, a contrast write —
+        must reach all of them. Julio, 2026-08-06: *"Turning off one layer doesn't turn the other
+        like in the 2D view."* The layer tree wrote ``find(...).visible``, so unchecking a channel
+        hid ONE brick of a hundred and left the volume lit under a cleared checkbox.
+        """
+        key = MosaicKey(str(op), str(channel))
+        return [ly for ly in self.ours() if key_of(ly) == key]
 
     # -- 2D pyramid <-> 3D full resolution ----------------------------------------------
     def render_max_res_3d(self, on: bool) -> None:
