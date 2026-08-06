@@ -2817,13 +2817,17 @@ class PlateOverview(QWidget):
                                       max(rw - w, 1.0), max(rh - w, 1.0)))
             p.setBrush(Qt.NoBrush)
 
-        if self._selection and not frames_for_grid(nr, nc):
-            p.setPen(Qt.NoPen)         # SMALL PLATE (<=3x3): keep the light blue wash. Cells are
-            p.setBrush(_VIEW_WASH)     # huge here and the wash reads as selection, not as a change
-            for ri, ci in self._selection:   # to the data. Frames take over above 3x3 — see below.
-                rx, ry, rw, rh = self._cell_rect(ri, ci)
-                p.drawRect(int(rx), int(ry), int(rw), int(rh))
-            p.setBrush(Qt.NoBrush)
+        # NO SELECTION WASH, AT ANY PLATE SIZE (2026-08-06). Julio: *"You should also take out the
+        # blue selection translucent overlay on the regions."*
+        #
+        # A small plate (<=3x3) used to keep a light blue fill because its cells are large. That
+        # was the wrong axis to decide on: a translucent fill is painted OVER the well's own
+        # pixels, so it changes the colour of the tissue the user is reading -- and the bigger the
+        # cell, the more tissue it recolours. Every other mark on this widget is already a
+        # boundary for exactly that reason (the selection frame below, and the per-view hue frames
+        # above since this morning); this was the last fill left, and it was the one over the
+        # largest area. `frames_for_grid` now decides nothing about the wash; it still decides the
+        # frame, which is drawn after the grid lines a few lines down.
 
         if self._layout is None:
             p.setPen(QPen(_GRID, 3))   # black grid lines between wells (multi-FOV mosaics sit INSIDE a cell)
@@ -2861,7 +2865,7 @@ class PlateOverview(QWidget):
                 continue
             p.setPen(_ACCENT if hov else _MUTED)
             p.drawText(int(self._ox), int(ay + r * cd), _HDR, int(cd), Qt.AlignCenter, str(self._rows[r]))
-        if self._selection and frames_for_grid(nr, nc):
+        if self._selection:
             # SELECTED wells on a plate bigger than 3x3 = a BOUNDING BOX, not a wash: the thumbnail
             # keeps its own pixels, LUT and contrast, and the mark is on the boundary. Drawn HERE,
             # after the grid lines, because the 3 px black grid is painted between the wells and
@@ -2886,7 +2890,11 @@ class PlateOverview(QWidget):
             # cannot trust. Drawn after the whole-well frame so it reads as a refinement of it.
             pen = QPen(_SEL_FRAME, max(1.0, selection_frame_pen_px(cd) * 0.6))
             p.setPen(pen)
-            p.setBrush(_VIEW_WASH)
+            # A frame here too, for the reason the region wash was removed: a translucent fill is
+            # painted over the tissue it marks, and the fields are where the user is actually
+            # reading pixels. A thinner stroke than the whole-well frame, so it reads as a
+            # refinement of it rather than competing with it.
+            p.setBrush(Qt.NoBrush)
             for ri, ci in self._selection:
                 for fov in subsets.get(self._by_rc.get((ri, ci)), ()):
                     box = self._boxes.get((self._by_rc[(ri, ci)], fov))

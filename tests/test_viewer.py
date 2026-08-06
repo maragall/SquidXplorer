@@ -5707,23 +5707,28 @@ def test_the_selection_box_is_a_frame_and_not_a_filled_rectangle(qapp):
         f"rectangle, not a frame on the boundary")
 
 
-def test_a_3x3_or_smaller_plate_keeps_the_wash_because_frames_were_scoped_to_bigger_plates(qapp):
-    """"Do for > 3x3 wellplate": at that size the cells are huge, one or two are selected at a
-    time, and the wash is unambiguous rather than confusing. Changing it was not asked for."""
-    assert not V.frames_for_grid(3, 3) and not V.frames_for_grid(1, 2)
-    assert V.frames_for_grid(3, 4) and V.frames_for_grid(4, 3) and V.frames_for_grid(32, 48)
+def test_no_plate_size_keeps_a_selection_wash(qapp):
+    """The blue translucent selection fill is gone at EVERY plate size (2026-08-06). Julio: *"You
+    should also take out the blue selection translucent overlay on the regions."*
 
-    ov = _fitted_plate(3, 3, 600, 600)
+    A 3x3 plate used to keep it, on the reasoning that its cells are large enough for a wash to
+    read as selection. That was the wrong axis: a translucent fill is painted OVER the well's own
+    pixels, so it recolours the tissue being read -- and the larger the cell, the more of it. The
+    frame carries the same information and touches none of the data, which is why every other mark
+    on this widget already is one.
+
+    Asserted as "the selection changes only the BOUNDARY": the cell's interior must be untouched
+    while its edge is not.
+    """
+    ov = _fitted_plate(3, 3)
     rc = (1, 1)
-    ov.add_tile(*rc, ov._by_rc[rc], _tile([3000]))
-    ov.recomposite(quick=True)
     before = _grab_rgb(ov).copy()
     ov.highlight_regions([ov._by_rc[rc]])
     after = _grab_rgb(ov)
 
-    assert not np.array_equal(before[_cell(ov, rc, 40)], after[_cell(ov, rc, 40)]), \
-        "the 3x3 plate lost its wash; frames were scoped to plates BIGGER than 3x3"
-
+    inner = _cell_slices(ov, rc, inset_frac=0.25)      # well inside any frame stroke
+    np.testing.assert_array_equal(before[inner], after[inner])
+    assert not np.array_equal(before, after), "the selection left no mark at all"
 
 def test_the_selection_frame_stroke_is_clamped_at_both_ends(qapp):
     """Visible at 1536wp density (~25 px cells), not a slab on a 4-well plate (~200 px cells)."""

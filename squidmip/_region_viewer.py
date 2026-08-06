@@ -1068,6 +1068,46 @@ class RegionViewer(QMainWindow):
         """The plate window, or None. The plate owns every operator panel; this window borrows."""
         return None if self._manager is None else self._manager.parent()
 
+    def _run_scope(self):
+        """WHERE a run from this window goes: its regions, narrowed to the ROI's own FOVs.
+
+        Julio, 2026-08-06: *"If I draw an ROI in the middle of 4 FOVs ... if I click stitching on
+        that ROI window, then it will just get those 4 full fovs, stitch them and then reflect the
+        result on the sub fov render."*
+
+        Returned as the mapping ``{region: [fov, ...]}``, which is ALREADY how this application
+        spells a FOV subset -- it is ``stitch_plate(regions=…)``'s own second accepted shape and
+        ``GalleryScope.fovs``, and it is what ``PlateWindow.selected_region_fovs()`` produces from
+        a plate marquee. No new selection mechanism, and no new argument on the run: a plain list
+        of regions still means "all of each", so a window with no ROI is untouched by construction.
+
+        WHOLE FIELDS. The subset is fields, not a crop: registration phase-correlates a field
+        against its neighbours and half a field has half the overlap to do it with. The crop is
+        what the window already does to everything it draws (`_crop_levels_to_bbox`), so the fused
+        four-field mosaic lands under the ROI box the user drew.
+
+        Falls back to the whole region whenever the question cannot be answered -- an acquisition
+        with no stage positions, a box that overlaps nothing. Running on a silently empty set is
+        the one outcome that must not happen: it looks exactly like a run that found no signal.
+        """
+        regions = list(self._regions)
+        if self._roi_bbox is None or not regions:
+            return regions
+        from squidmip._mosaic_source import fovs_overlapping_bbox
+
+        scoped: "dict[str, list[int]]" = {}
+        for region in regions:
+            fovs = fovs_overlapping_bbox(self._meta or {}, region, self._roi_bbox)
+            if not fovs:
+                return regions           # one unanswerable region: run them all, honestly
+            scoped[region] = fovs
+        total = sum(len((self._meta or {}).get("fovs_per_region", {}).get(r) or []) for r in regions)
+        picked = sum(len(v) for v in scoped.values())
+        if picked >= total:
+            return regions               # the ROI spans everything: say it the simple way
+        self._say(f"ROI: running on {picked} of {total} field(s) — the ones your box touches.")
+        return scoped
+
     def _plate_operator_kwargs(self, key: str) -> dict:
         """What *key*'s panel on the plate is currently set to. ``{}`` = its declared defaults.
 
@@ -1441,7 +1481,7 @@ class RegionViewer(QMainWindow):
         if not key:
             self._say("no operator selected.")
             return
-        regions = list(self._regions)
+        regions = self._run_scope()
         # SAVE OFF by default = preview (see how it looks); ON persists an OME-Zarr (Spencer huddle).
         save = bool(self._save_chk.isChecked()) if getattr(self, "_save_chk", None) is not None else False
         # THE PANEL'S CURRENT VALUES, plus this window's own 2D/3D choice. This used to pass

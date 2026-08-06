@@ -722,3 +722,64 @@ def mosaic_bbox_um(meta: dict, region: str) -> Optional[tuple[float, float, floa
     ys = [float(positions[(region, f)][1]) for f in fovs]
     x0, y0 = min(xs), min(ys)
     return (x0, y0, x0 + w * float(pixel_size), y0 + h * float(pixel_size))
+
+
+def fovs_overlapping_bbox(meta: dict, region: str,
+                          bbox_um: "Optional[tuple]") -> "Optional[list[int]]":
+    """The FOVs of *region* whose own footprint overlaps *bbox_um*, in acquisition order.
+
+    Julio, 2026-08-06: *"do we now compute only on the FOVs that are inside my ROI? If I draw an
+    ROI in the middle of 4 FOVs, then I will have a seam of 4 sub fovs but if I click stitching on
+    that ROI window, then it will just get those 4 full fovs, stitch them and then reflect the
+    result on the sub fov render."*
+
+    Exactly that, and the whole of it: WHOLE FOVs, never cropped ones. A FOV is the unit the
+    reader decodes and the unit registration solves on -- half a field has half the overlap to
+    phase-correlate against its neighbour -- so an ROI selects fields, and the crop happens
+    afterwards, on the fused result (``_crop_levels_to_bbox``, which the window already applies to
+    everything it draws).
+
+    ONE GEOMETRY. The boxes are built from :func:`~squidmip._placement.fov_offsets_px` and the
+    region origin that :func:`mosaic_bbox_um` uses, so this asks the same placement rule that drew
+    the pixels the user boxed. A second derivation of "where is FOV 7" is how a subset comes out
+    plausible and wrong -- the defect shape this file's own docstring warns about most.
+
+    Returns ``None`` when the question cannot be answered (no positions, no pixel size, an unknown
+    region) or when no field overlaps at all, so a caller falls back to the whole region rather
+    than running on a silently empty set: "the user drew a box outside the data" is not the same
+    statement as "run on nothing".
+    """
+    from squidmip._placement import fov_offsets_px
+
+    if bbox_um is None:
+        return None
+    positions = meta.get("fov_positions_um") or {}
+    pixel_size = meta.get("pixel_size_um")
+    if not positions or pixel_size in (None, 0):
+        return None
+    fovs = list((meta.get("fovs_per_region") or {}).get(region) or [])
+    if not fovs:
+        return None
+    try:
+        offsets = fov_offsets_px(positions, region, fovs, pixel_size)
+        fh, fw = (int(v) for v in meta["frame_shape"])
+    except (KeyError, ValueError, TypeError):
+        return None
+    x0 = min(float(positions[(region, f)][0]) for f in fovs)
+    y0 = min(float(positions[(region, f)][1]) for f in fovs)
+    p = float(pixel_size)
+
+    rx0, ry0, rx1, ry1 = (float(v) for v in bbox_um)
+    rx0, rx1 = min(rx0, rx1), max(rx0, rx1)
+    ry0, ry1 = min(ry0, ry1), max(ry0, ry1)
+
+    hit = []
+    for fov in fovs:
+        row, col = offsets[fov]
+        fx0, fy0 = x0 + col * p, y0 + row * p
+        # Half-open on the far edge: a box that stops exactly on a seam belongs to the field it is
+        # inside, not to both. Two adjacent fields would otherwise BOTH be selected by a zero-width
+        # box on the boundary between them.
+        if fx0 < rx1 and (fx0 + fw * p) > rx0 and fy0 < ry1 and (fy0 + fh * p) > ry0:
+            hit.append(int(fov))
+    return hit or None

@@ -602,6 +602,30 @@ class PlateWindow(QMainWindow):
         _tb.setContentsMargins(0, 0, 12, 0)
         _tb.setSpacing(8)
         _tb.addWidget(self._plate_title, 1)
+        # THE VIEW COMBO: which layer the plate draws. Inline in the title bar, deliberately --
+        # Julio, 2026-08-06: *"we have a little 'view' dropdown in the plate master window to
+        # select if we want to view the plate raw, stitched, decon etc. But it is tiny, like don't
+        # add more rows of buttons."*
+        #
+        # It exists because of the shelving one message earlier. A copied LUT is a LOOK, not
+        # pixels, so the plate stays on raw until something is bulk-processed over it -- and once
+        # something has been, the user needs a way to say so. That used to be answered implicitly,
+        # by whichever window last toggled a layer; with the live follow gone, it needs a control,
+        # and this is the smallest honest one. Populated from the plate's own `_op_stack` (see
+        # `_refresh_view_combo`), which is the same stack the Layers tab draws, so it can only
+        # offer layers this plate really holds pixels for.
+        self._view_combo = QComboBox()
+        self._view_combo.setStyleSheet(
+            "QComboBox{background:#0b0e14;color:#8b949e;border:1px solid #232b3a;"
+            "border-radius:4px;padding:1px 6px;font-size:11px;}"
+            "QComboBox::drop-down{border:none;width:14px;}")
+        self._view_combo.setToolTip(
+            "Which layer the plate thumbnails draw. Only layers this plate has actually "
+            "processed appear here — a result computed in one window is that window's, and does "
+            "not give the plate pixels for its other wells.")
+        self._view_combo.currentIndexChanged.connect(self._on_view_combo)
+        _tb.addWidget(QLabel("view:"))
+        _tb.addWidget(self._view_combo)
         self._drop = QLabel("Drop a Squid acquisition folder here\n\n"
                             "then pick an operator in  Process wells")
         self._drop.setAlignment(Qt.AlignCenter)
@@ -1604,6 +1628,51 @@ class PlateWindow(QMainWindow):
         else:
             self._tell_requester(requester, "operator_done", action, float(elapsed))
 
+    def _refresh_view_combo(self) -> None:
+        """Offer exactly the layers this plate HOLDS PIXELS FOR, raw first.
+
+        Derived from ``_op_stack`` on every call and never bookkept: the stack is the same thing
+        the Layers tab draws and the same thing ``_apply_layers`` renders from, so the combo cannot
+        offer a layer the plate cannot show. A run that has not happened yet contributes nothing,
+        which is the honest answer -- and the reason it is populated from the stack rather than
+        from ``runnable_operators()``, which would list every operator the build can run and make
+        the plate look broken for the ones nobody has run.
+        """
+        combo = getattr(self, "_view_combo", None)
+        if combo is None:
+            return
+        keys = ["raw"] + [ly.key for ly in self._op_stack.layers() if ly.key != "raw"]
+        current = self._overview._active if self._overview is not None else "raw"
+        blocked = combo.blockSignals(True)
+        try:
+            combo.clear()
+            for key in keys:
+                combo.addItem(operator_label(key) if key != "raw" else "raw", key)
+            idx = keys.index(current) if current in keys else 0
+            combo.setCurrentIndex(idx)
+        finally:
+            combo.blockSignals(blocked)
+        combo.setEnabled(len(keys) > 1)
+
+    def _on_view_combo(self, _index: int) -> None:
+        """The user picked a layer to look at. Routed through the stack, not straight to the pane.
+
+        ``_apply_layers`` is what decides which layer is drawn (the topmost ENABLED one), and it is
+        also what the Layers tab writes through. Setting ``_active`` here instead would be a second
+        surface racing the first over one quantity -- the defect this file names most often.
+        """
+        combo = getattr(self, "_view_combo", None)
+        if combo is None or self._overview is None:
+            return
+        key = combo.currentData()
+        if not key:
+            return
+        for layer in self._op_stack.layers():
+            if layer.key != "raw":
+                self._op_stack.toggle(layer.key, layer.key == key)
+        self._apply_layers()
+        self._refresh_layers_tab()
+
     def operator_kwargs_for(self, key: str) -> dict:
         """THE parameters an operator would run with RIGHT NOW, off its live panel.
 
@@ -2405,6 +2474,11 @@ class PlateWindow(QMainWindow):
         return w
 
     def _refresh_layers_tab(self):
+        # THE VIEW COMBO IS THE SAME JOB, so it is refreshed here rather than at each of the eight
+        # call sites: both are surfaces over one `_op_stack`, and a surface that only agrees with
+        # the stack at the sites somebody remembered to update is the drift this method exists to
+        # prevent. Called first, so it still happens for a window with no Layers tab built yet.
+        self._refresh_view_combo()
         box = getattr(self, "_layers_box", None)
         if self._layers_tab is None or box is None:
             return
