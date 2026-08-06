@@ -2426,9 +2426,14 @@ class PlateWindow(QMainWindow):
         ``self._loupe_sources = {}`` (which _open_computed did) only forgets the sources: the
         _LoupeWorker QThread lives on the OVERVIEW, so the old overview walked off with a running
         thread and its ~35 MB plane cache on every plate open — confirmed still isRunning() after
-        the overview was replaced. Only PlateOverview.set_loupe_source(None) stops and joins it."""
+        the overview was replaced. Only PlateOverview.shutdown() stops and joins it.
+
+        It goes through ``shutdown()`` rather than ``set_loupe_source(None)`` because the overview
+        owns TWO threads and the loupe worker is only one of them: this method's own sentence
+        above ("the one call every 'the plate is being replaced' path must make") was true of the
+        loupe and false of the tile fetcher, which outlived two of the three replacement paths."""
         if self._overview is not None:
-            self._overview.set_loupe_source(None)
+            self._overview.shutdown()
         self._loupe_sources = {}
 
     def _set_loupe_source(self, layer_key, source):
@@ -2562,7 +2567,7 @@ class PlateWindow(QMainWindow):
         self._current_fov = 0
         self._enable_operators(False)
         if self._overview is not None:
-            self._release_loupe_sources()   # join the read thread BEFORE dropping its owner
+            self._release_loupe_sources()   # BOTH read threads, before dropping their owner
             self._overview.setParent(None)
             self._overview.deleteLater()
             self._overview = None
@@ -3038,6 +3043,7 @@ class PlateWindow(QMainWindow):
             worker_wells.append((wid, w["path"], fov, ri, ci, idx))
 
         if self._overview is not None:
+            self._overview.shutdown()   # both read threads; a deleteLater on a live one aborts
             self._overview.setParent(None); self._overview.deleteLater()
         self._overview = PlateOverview(rows, cols, wells_rc)
         # A written plate carries no stage coordinates and no declared format, so build_plate falls
@@ -4161,6 +4167,20 @@ class PlateWindow(QMainWindow):
             # run's outcome depend on when the superseded preview happened to stop.
             w.finished.connect(lambda w=w: self._on_run_drained(w))
 
+    def _stop_flatfield(self):
+        """Retire both flat-field estimators. Neither was joined anywhere before 2026-08-06.
+
+        Two slots — ``_flatfield_worker`` (the toolbar's "estimate from plate") and
+        ``_ff_est_worker`` (the auto-estimate a `flatfield` run does for you) — both parented to
+        this window and both absent from `closeEvent`. A BaSiC solve is seconds-to-minutes
+        (`_FlatfieldWorker`'s own docstring), so closing the plate during one destroyed a running,
+        parented QThread: SIGABRT. They can go through `_retire` now only because
+        `_FlatfieldWorker` grew a `stop()`; `_retire` calls it.
+        """
+        for slot in ("_flatfield_worker", "_ff_est_worker"):
+            self._retire(getattr(self, slot, None))
+            setattr(self, slot, None)
+
     def _stop_worker(self):
         self._retire(self._worker)
         self._worker = None
@@ -4239,6 +4259,7 @@ class PlateWindow(QMainWindow):
         self._gui_slot = None
         self._stop_worker()          # stop the run cleanly; nothing on disk to clean up (no cache)
         self._stop_preview()
+        self._stop_flatfield()       # BEFORE _join_retired, so its threads are in that list
         self._join_retired()         # everything _retire deferred
         self._stop_minerva()         # files already written stay; only the launch poll is abandoned
         ov = getattr(self, "_overview", None)

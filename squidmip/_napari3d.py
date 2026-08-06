@@ -18,6 +18,7 @@ for a path-traced, whole-region volume.
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any, Optional, Sequence
 
 import numpy as np
@@ -335,18 +336,27 @@ def _plane_cache():
     afterwards: ``_volume.release`` is a no-op on Windows (``madvise(MADV_DONTNEED)`` is POSIX), so
     a design that leaned on it would hold more resident there than here. A cache hit is a cache hit
     on every platform.
+
+    Built under a lock, because every caller is a ``_BrickLoader`` QThread and a 3D window per
+    region means several of them. Two loaders that both see ``None`` build two caches, so the
+    byte bound this function exists to enforce is silently DOUBLED, and every ``put`` from the
+    losing thread lands in an object nothing will ever read again — a cache with a 0% hit rate,
+    paid for in full. The cache object itself is already internally locked; this guards only the
+    check-then-act that publishes it.
     """
     global _PLANES
-    if _PLANES is None:
-        from squidmip._budget import cache_budget
-        from squidmip._mosaic_source import MemoryBoundedLRUCache
+    with _PLANES_LOCK:
+        if _PLANES is None:
+            from squidmip._budget import cache_budget
+            from squidmip._mosaic_source import MemoryBoundedLRUCache
 
-        _PLANES = MemoryBoundedLRUCache(max(64 << 20, int(cache_budget()) // 2))
-    return _PLANES
+            _PLANES = MemoryBoundedLRUCache(max(64 << 20, int(cache_budget()) // 2))
+        return _PLANES
 
 
 #: Built on first use so importing this module costs no memory measurement. See ``_plane_cache``.
 _PLANES: Any = None
+_PLANES_LOCK = threading.Lock()
 
 
 def _read_plane(reader: Any, region: str, fov: int, channel: str, z: int) -> np.ndarray:

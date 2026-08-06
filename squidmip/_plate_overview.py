@@ -777,8 +777,13 @@ class _ZarrLoupeSource(_LoupeSource):
         self.well_px = int(well_px)
         self.pixel_size_um = pixel_size_um
         self._written = written                # None = every well (a plate opened from disk)
-        self._handles: dict[tuple, object] = {}
-        self._coarse: dict[str, np.ndarray] = {}
+        self._coarse: dict[tuple, np.ndarray] = {}
+        # Guards `_coarse` AND the `_levels`/`n_levels` publish in `_resolve_levels`. Both are
+        # touched from a `_LoupeWorker` QThread, and there can be two of them at once: when
+        # `set_loupe_source`'s `wait(2000)` times out the outgoing worker is detached (see
+        # `_detach`) and keeps reading from this same source object while the new one starts.
+        # Its sibling `_RawLoupeSource._planes` has always been locked; this one was not.
+        self._lock = threading.RLock()
 
     def mark_written(self, well_id):
         """A well just landed on disk. Availability grows DURING a run — which is exactly when
@@ -798,30 +803,38 @@ class _ZarrLoupeSource(_LoupeSource):
 
         Deferred because a run that is still writing hasn't declared its levels yet — and how
         many there are depends on the field size (_PYRAMID_MIN_YX collapses small fields to a
-        single level, which is exactly what the test fixtures hit)."""
-        if self._levels is not None:
+        single level, which is exactly what the test fixtures hit).
+
+        Under the lock because it publishes TWO attributes, ``_levels`` and ``n_levels``, and
+        ``coarse()`` reads ``n_levels`` to pick its level. Two loupe workers (see ``_detach``) can
+        both arrive here; unguarded, the second could read a ``n_levels`` that does not yet match
+        the ``_levels`` the first is about to store, and magnify the wrong rung."""
+        with self._lock:
+            if self._levels is not None:
+                return self._levels
+            # Through the contract, not a hand-parse. This block used to reconstruct the field path
+            # by f-string and read multiscales -> datasets[*].path itself behind a bare `except
+            # Exception`, i.e. a private copy of the layout plus an unwritten fallback. Both now
+            # have one home: squidmip/contract, and docs/plate-contract.md says the pyramid is
+            # OPTIONAL and that level "0" is what its absence falls back to.
+            self._levels = field_levels(
+                field_path(self._base, self._path_of(well_id), self._fov_of(well_id)))
+            self.n_levels = max(1, len(self._levels))
             return self._levels
-        # Through the contract, not a hand-parse. This block used to reconstruct the field path by
-        # f-string and read multiscales -> datasets[*].path itself behind a bare `except
-        # Exception`, i.e. a private copy of the layout plus an unwritten fallback. Both now have
-        # one home: squidmip/contract, and docs/plate-contract.md says the pyramid is OPTIONAL and
-        # that level "0" is what its absence falls back to.
-        self._levels = field_levels(
-            field_path(self._base, self._path_of(well_id), self._fov_of(well_id)))
-        self.n_levels = max(1, len(self._levels))
-        return self._levels
 
     def _open(self, well_id, level, fov=None):
         levels = self._resolve_levels(well_id)
         level = max(0, min(int(level), len(levels) - 1))
         f = self._fov_of(well_id) if fov is None else int(fov)
-        key = (well_id, f, level)
-        if key not in self._handles:
-            import tensorstore as ts
-            path = field_path(self._base, self._path_of(well_id), f, levels[level])
-            self._handles[key] = ts.open(
-                {"driver": "zarr3", "kvstore": {"driver": "file", "path": path}}).result()
-        return self._handles[key]
+        # Through the shared, LOCKED, bounded handle cache — not a private dict.
+        # This was the last raw `ts.open` on a read path in the package, and `_tsctx`'s own
+        # docstring names "the loupe source" as one of the four unbounded unlocked handle dicts it
+        # was written to replace; it was the one that never got converted. Unbounded mattered: a
+        # 1536-well plate browsed at three levels is 4608 open stores that nothing ever evicted.
+        from squidmip._tsctx import HANDLES
+
+        return HANDLES.get(field_path(self._base, self._path_of(well_id), f, levels[level]),
+                           open_only=True)
 
     def read_crop(self, well_id, level, y0, x0, h, w, time_point: int = 0, fov=None):
         arr = self._open(well_id, level, fov)
@@ -844,11 +857,62 @@ class _ZarrLoupeSource(_LoupeSource):
         # read at one timepoint every later timepoint got that same picture back. A cache that
         # answers the wrong question quickly is worse than no cache.
         key = (well_id, int(time_point))
-        if key not in self._coarse:
-            arr = self._open(well_id, self.n_levels - 1)          # coarsest level = cheapest
-            t_idx = max(0, min(int(time_point), arr.shape[0] - 1))
-            self._coarse[key] = np.asarray(arr[t_idx, :, 0].read().result())
-        return self._coarse[key]
+        with self._lock:
+            hit = self._coarse.get(key)
+        if hit is not None:
+            return hit
+        # The READ is outside the lock on purpose: it is a whole coarse plane and holding the lock
+        # across it would serialise two loupe workers reading two different wells. Two threads
+        # racing the same key both compute and the second store wins — identical bytes, one wasted
+        # read. What must not race is the dict itself.
+        arr = self._open(well_id, self.n_levels - 1)          # coarsest level = cheapest
+        t_idx = max(0, min(int(time_point), arr.shape[0] - 1))
+        plane = np.asarray(arr[t_idx, :, 0].read().result())
+        with self._lock:
+            return self._coarse.setdefault(key, plane)
+
+
+#: Workers that outlived the join that asked them to stop. Parking one here is the whole
+#: mechanism behind :func:`_detach`; see its docstring for why a set and not a `wait()`.
+_DETACHED: "set" = set()
+
+
+def _detach(worker) -> None:
+    """Cut a still-running worker loose instead of destroying it. The ownership rule.
+
+    A ``QThread`` whose C++ half is destroyed while ``isRunning()`` calls ``qFatal`` — the process
+    aborts, with no Python traceback and no chance to report anything. Measured here on 2026-08-06
+    with a 20-line script (`QThread` parented to a `QWidget`, started, parent dropped, `gc.collect`):
+    ``QThread: Destroyed while thread is still running``, exit code 134.
+
+    That was reachable from this widget two ways, and both are closed by this function rather than
+    by a longer timeout — a longer wait is a bet, and the losing side of the bet is the whole
+    process:
+
+    * ``_TileFetcher`` used to be PARENTED to the overview, so Qt deleted it whenever the widget
+      was destroyed, whether or not anyone had stopped it. Three call sites destroy the overview
+      and only one of them joined the thread first. It is now unparented, so Qt cannot;
+    * ``_LoupeWorker`` is unparented but its ONLY reference was the ``_loupe_worker`` slot, which
+      was overwritten on a ``wait()`` timeout — dropping the last reference to a running thread,
+      which is the same crash by the other door.
+
+    So: a worker that will not stop in time is *reparented to nobody and kept referenced* until it
+    finishes on its own, at which point it removes itself. The cost of a straggler is one idle
+    thread and its buffers for as long as its current read takes; the cost of the alternative is
+    SIGABRT. Nothing waits on this set — waiting is what we are declining to do.
+    """
+    if worker is None:
+        return
+    try:
+        if not worker.isRunning():
+            return
+        worker.setParent(None)          # Qt must not delete it on our behalf
+    except RuntimeError:                # C++ half already gone: nothing of ours to keep alive
+        return
+    _DETACHED.add(worker)
+    log.warning("%s did not stop in time; detached rather than destroyed (it is still reading)",
+                type(worker).__name__)
+    worker.finished.connect(lambda w=worker: _DETACHED.discard(w))
 
 
 class _LoupeWorker(QThread):
@@ -1170,7 +1234,9 @@ class PlateOverview(QWidget):
             self._ladder = self._tile_src = None
             return False
         self._tile_cache = TileCache(budget_bytes=_TILE_CACHE_BYTES)
-        self._tile_fetch = _TileFetcher(self._tile_src, self)
+        # UNPARENTED on purpose: a QThread parented to this widget is deleted by Qt when the
+        # widget is destroyed, running or not, and that is an abort. See _detach.
+        self._tile_fetch = _TileFetcher(self._tile_src)
         self._tile_fetch.ready.connect(self._on_tile_ready)
         self._tile_fetch.start()
         return True
@@ -1179,10 +1245,24 @@ class PlateOverview(QWidget):
         """Stop and forget the tile machinery. Idempotent; safe on a half-built state."""
         if self._tile_fetch is not None:
             self._tile_fetch.stop()
-            self._tile_fetch.wait(1500)
+            if not self._tile_fetch.wait(1500):
+                _detach(self._tile_fetch)   # mid-decode: never drop the last reference
             self._tile_fetch = None
         self._ladder = self._tile_src = self._tile_cache = None
         self._tile_level = None
+
+    def shutdown(self) -> None:
+        """Stop BOTH threads this widget owns. Idempotent; the one call a destroyer must make.
+
+        There are two of them and they were stopped in two different places by two different
+        owners: ``PlateWindow.closeEvent`` called ``clear_tile_source()`` for one and
+        ``_release_loupe_sources()`` for the other. Every other path that destroys an overview —
+        re-ingesting a new acquisition, opening a computed plate — called neither, so a
+        ``deleteLater()`` landed on a widget with two live threads. One name now covers both, so a
+        destroyer has one thing to remember rather than two.
+        """
+        self.clear_tile_source()
+        self.set_loupe_source(None)
 
     def _on_tile_ready(self, desc, arr) -> None:
         if self._tile_cache is None:
@@ -1323,7 +1403,8 @@ class PlateOverview(QWidget):
         self._dismiss_loupe()
         if self._loupe_worker is not None:
             self._loupe_worker.stop()
-            self._loupe_worker.wait(2000)
+            if not self._loupe_worker.wait(2000):
+                _detach(self._loupe_worker)  # inside read_crop/window(): a full-plane decode
             self._loupe_worker = None
         self._loupe_src = source
         self._loupe_colors = colors
