@@ -30,9 +30,22 @@ Per-well fault isolation now refuses to absorb `ImportError` / `MissingDependenc
 A broken plugin aborts the import, NAMED; `SQUIDMIP_NO_PLUGINS=1` is the escape hatch. The
 hardcoded built-in imports in `squidmip/__init__.py` stay — discovery is additive.
 
-**Not supported, do not build against it**: composition (`_recipe.RecipeChain` documents chaining
-and nothing executes it), and GUI panels generated from `params` (`_op_panels.py` is hand-written
-per operator). Both are named in the template README so a contributor is not misled.
+**Composition** (2026-08-05): a chain is written wherever a name is —
+`projector="flatfield + decon + mip"`, accepted by `project_plate`, `write_plate`, `stitch_region`,
+the CLI's `--projector` and the `run_operator` command with no new argument on any of them. The
+expression IS `RecipeChain.label()`, and `RecipeChain.parse()` is its inverse, so the words a
+console prints are the words that run. `squidmip/_compose.py` derives the composed operator's four
+declarations from its parts (`consumes` union, `produces` last, `params` namespaced
+`<step>.<param>`, `requires` union) and carries `corrects_illumination` / `for_channel` through.
+
+Refused by declaration, never by name, never reordered: a **z-reducer that is not last** (no stack
+left), a **`produces="labels"` step that is not last** (arithmetic on object ids), a **z-SELECTING
+step inside a chain** (`reference` — its z is solved on raw planes outside the operator), and a
+**repeated step** (namespaced params would be ambiguous). A bare name still resolves to the exact
+registry object, so nothing existing routes through composition.
+
+**Not supported, do not build against it**: GUI panels generated from `params` (`_op_panels.py` is
+hand-written per operator). Named in the template README so a contributor is not misled.
 
 ## Agent skills
 

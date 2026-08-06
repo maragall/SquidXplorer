@@ -102,11 +102,17 @@ class ProcessParameters(BaseModel, use_attribute_docstrings=True):
         # Validate UP FRONT: otherwise the name is only resolved lazily inside project_plate, after
         # write_plate has already written an empty plate skeleton to disk, then crashes with a raw
         # traceback. A clean CLI error before any output is the safe behavior.
-        from squidmip import available_projectors
+        #
+        # Resolved rather than merely looked up, so `--projector 'bgsub+mip'` -- an operator CHAIN,
+        # which is a legal projector everywhere else -- is validated here too, including the
+        # combinations `_compose` refuses. A membership test against `available_projectors()` would
+        # have rejected every chain at the CLI while the same string ran fine from Python.
+        from squidmip._engine import _resolve_projector
 
-        avail = available_projectors()
-        if v not in avail:
-            raise ValueError(f"unknown projector {v!r}; available: {sorted(avail)}")
+        try:
+            _resolve_projector(v)
+        except (KeyError, TypeError) as exc:
+            raise ValueError(str(exc).strip('"')) from None
         return v
 
 
