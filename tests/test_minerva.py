@@ -422,6 +422,35 @@ def test_story_points_at_the_ome_with_an_absolute_path(squid_dataset, tmp_path):
         assert key in data, "api_import hard-indexes these keys"
 
 
+def test_the_story_says_which_timepoint_and_which_fovs_these_pixels_are(squid_dataset, tmp_path):
+    """``sample_info.text`` is what an OME-TIFF carries once the log that described it is gone.
+
+    Both facts became variable in the same change and neither was recorded: the exported
+    timepoint used to be hardcoded to 0 and a FOV subset was not expressible from any GUI path,
+    so "the mosaic of region B2" was unambiguous. It no longer is — the same acquisition now
+    yields a different file per timepoint and per box — and a crop that does not SAY it is a
+    crop is a measurement waiting to be made on the wrong extent.
+    """
+    root, _ = squid_dataset
+    reader = open_reader(root)
+    all_fovs = reader.metadata["fovs_per_region"]["B2"]
+    assert len(all_fovs) > 1, "fixture cannot express a crop"
+
+    (_, whole), = export_selection(reader, [("B2", f) for f in all_fovs], tmp_path / "whole")
+    (_, crop), = export_selection(reader, [("B2", all_fovs[0])], tmp_path / "crop")
+
+    whole_text = json.loads(whole.read_text())["sample_info"]["text"]
+    crop_text = json.loads(crop.read_text())["sample_info"]["text"]
+
+    assert "region B2" in whole_text and "timepoint t=0" in whole_text
+    assert f"all {len(all_fovs)} FOV(s)" in whole_text
+    assert "CROPPED" not in whole_text, "a whole region must not claim to be a crop"
+    assert f"CROPPED to 1 of {len(all_fovs)} FOV(s)" in crop_text, crop_text
+    # The registration timepoint is a DIFFERENT number and is still reported separately, so the
+    # story can never read as though the pixels came from the timepoint the geometry was solved on.
+    assert "flat-field" in crop_text
+
+
 def test_story_groups_carry_our_channel_colours(squid_dataset, tmp_path):
     """OV1: Minerva ignores OME-TIFF channel colours entirely and colours by index. The
     story groups are the ONLY path for our colours, so this is the assertion that matters."""

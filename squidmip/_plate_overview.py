@@ -2752,7 +2752,12 @@ class PlateOverview(QWidget):
             for ri, ci in self._selection:
                 rx, ry, rw, rh = self._cell_rect(ri, ci)
                 p.drawRect(QRectF(rx + w / 2, ry + w / 2, max(rw - w, 1.0), max(rh - w, 1.0)))
-        subsets = self.fov_subsets()
+        # `self._fov_selection` first, and it is not redundant with the `if subsets` below: this
+        # runs on EVERY repaint, including every hover, and `fov_subsets()` walks `_boxes` once
+        # per selected region. A plate where nobody has drawn a field box — the overwhelmingly
+        # common one — must pay one dict truth-test, not a scan. Same reasoning as `_cell_region`'s
+        # cache a few methods up: hover repaints are where this widget's responsiveness lives.
+        subsets = self.fov_subsets() if self._fov_selection else {}
         if subsets:
             # A PARTLY selected well: outline the fields the box actually picked. Without this the
             # subset is invisible — the well's frame says "selected" whether four of its 27 fields

@@ -2845,6 +2845,12 @@ class PlateWindow(QMainWindow):
         def on_exported(pairs):
             state["pairs"] = pairs
             if not pairs:
+                # An export that wrote NOTHING must not leave the previous one's paths on screen
+                # with live Copy / Show in folder / Render buttons under them. `state["pairs"]` was
+                # already emptied above, so the buttons had quietly become no-ops while still
+                # naming files — a control that looks armed and does nothing.
+                path_lbl.setText("")
+                copy_btn.hide(); reveal_btn.hide(); render_btn.hide()
                 return
             path_lbl.setText("\n".join(str(story) for _, story in pairs))
             copy_btn.show(); reveal_btn.show(); render_btn.show()
@@ -3041,9 +3047,15 @@ class PlateWindow(QMainWindow):
                 return
             done = regions[: len(pairs)]
             note = "" if len(pairs) == len(regions) else f" of {len(regions)} (stopped)"
+            # The SUCCESS line says a mosaic was cropped, not just the in-flight one. This is the
+            # line that stays on screen and the only one a user reads after the export, and a crop
+            # that reads identically to a whole region is the same silent difference the filename
+            # suffix (`_2fov`) exists to prevent on disk.
+            crop = [r for r in cropped if r in done]
+            crop_note = (f", {len(crop)} cropped to the FOVs you boxed" if crop else "")
             self._readout.setText(
                 f"✓ exported {len(pairs)} mosaic{'s' if len(pairs) != 1 else ''}{note} from "
-                f"{', '.join(done)}{t_note} → {Path(pairs[0][0]).parent}")
+                f"{', '.join(done)}{t_note}{crop_note} → {Path(pairs[0][0]).parent}")
 
         w.progress.connect(
             lambda d, n: self._readout.setText(f"● Minerva export · {d}/{n} mosaics"))

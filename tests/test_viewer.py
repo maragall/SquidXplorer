@@ -3400,7 +3400,9 @@ def _zoom_onto(ov, qapp, region):
     return r, c
 
 
-def _drag(qapp, ov, x0, y0, x1, y1, mods):
+def _drag_px(qapp, ov, x0, y0, x1, y1, mods):
+    """Press-move-release in WIDGET px. Distinct from `_drag` above, which takes QPointF cell
+    corners: a FOV box is smaller than a cell and is addressed in raw px, not in cell units."""
     for kind, x, y, buttons in (
         (QEvent.MouseButtonPress, x0, y0, Qt.LeftButton),
         (QEvent.MouseMove, (x0 + x1) / 2, (y0 + y1) / 2, Qt.LeftButton),
@@ -3442,7 +3444,7 @@ def test_a_shift_alt_box_inside_a_mosaic_selects_fovs_not_the_whole_well(
     # A box over the FIRST field only.
     x, y, w, h = ov._block_rect(r, c, *ov._boxes[(region, fovs[0])])
     mods = Qt.ShiftModifier | Qt.AltModifier
-    _drag(qapp, ov, x + w * 0.2, y + h * 0.2, x + w * 0.8, y + h * 0.8, mods)
+    _drag_px(qapp, ov, x + w * 0.2, y + h * 0.2, x + w * 0.8, y + h * 0.8, mods)
 
     assert ov.selected_wells() == [region]
     assert ov.fov_subsets() == {region: [fovs[0]]}
@@ -3454,7 +3456,7 @@ def test_a_shift_alt_box_inside_a_mosaic_selects_fovs_not_the_whole_well(
 
     # A SECOND box completing the region is back to "the whole region", with no special case.
     x2, y2, w2, h2 = ov._block_rect(r, c, *ov._boxes[(region, fovs[-1])])
-    _drag(qapp, ov, x2 + w2 * 0.2, y2 + h2 * 0.2, x2 + w2 * 0.8, y2 + h2 * 0.8, mods)
+    _drag_px(qapp, ov, x2 + w2 * 0.2, y2 + h2 * 0.2, x2 + w2 * 0.8, y2 + h2 * 0.8, mods)
     assert ov.fov_subsets() == {}, "a box over every field is the whole region, not a subset"
     assert win.minerva_selection() == [(region, f) for f in fovs]
 
@@ -3464,7 +3466,7 @@ def test_a_shift_alt_box_inside_a_mosaic_selects_fovs_not_the_whole_well(
     qapp.processEvents()
     cd = ov._cd
     ax, ay = ov._ox + V._HDR, ov._oy + V._COLH
-    _drag(qapp, ov, ax + c * cd + 2, ay + r * cd + 2,
+    _drag_px(qapp, ov, ax + c * cd + 2, ay + r * cd + 2,
           ax + (c + 1) * cd - 2, ay + (r + 1) * cd - 2, mods)
     assert ov.selected_wells() == [region]
     assert ov.fov_subsets() == {}
@@ -3493,7 +3495,7 @@ def test_a_boxed_fov_subset_exports_a_smaller_mosaic_than_the_whole_region(
     fovs = win._meta["fovs_per_region"][region]
     r, c = _zoom_onto(ov, qapp, region)
     x, y, w, h = ov._block_rect(r, c, *ov._boxes[(region, fovs[0])])
-    _drag(qapp, ov, x + w * 0.2, y + h * 0.2, x + w * 0.8, y + h * 0.8,
+    _drag_px(qapp, ov, x + w * 0.2, y + h * 0.2, x + w * 0.8, y + h * 0.8,
           Qt.ShiftModifier | Qt.AltModifier)
     assert ov.fov_subsets() == {region: [fovs[0]]}
 
@@ -3537,7 +3539,12 @@ def test_a_user_drag_of_the_timepoint_bar_does_not_raise(qapp, stub_detail,
     qapp.processEvents()
 
     assert win.time_point == 1
-    assert "time_point 2 of 3" in win._readout.text()
+    # ...and the statements BELOW the raising line ran. That is the whole claim: an
+    # AttributeError on the slot's first statement is invisible in `time_point` (the bar moved
+    # itself) and shows up only as the plate never being told. The readout is NOT asserted on:
+    # `_return_to_raw()` at the end of the same slot legitimately overwrites it with "raw view".
+    assert win._overview._time_point == 1, (
+        "the slot died before it reached the plate — the timepoint moved on the bar only")
     win.close()
 
 
@@ -3556,6 +3563,9 @@ def test_the_exported_timepoint_is_the_one_the_plate_is_showing(
     win = V.PlateWindow(None)
     win.ingest(str(root))
     region = win._meta["regions"][0]
+    win.activate_well(region, 0)                     # the user's selection; without one the
+    #                                                  export is a message, not an export
+    assert win.minerva_selection(), "the fixture region never became a selection"
 
     seen = []
     real = V._MinervaWorker
