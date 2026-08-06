@@ -89,7 +89,7 @@ from typing import Callable, Iterable, Optional
 import numpy as np
 
 from squidmip._engine import add_projector
-from squidmip.projection import plane_op
+from squidmip.projection import cast_like, plane_op
 
 # A gain below this is treated as 1.0 rather than dividing by ~0 and exploding a dead pixel to
 # the dtype ceiling. Same threshold as tilefusion.flatfield.apply_flatfield, deliberately.
@@ -243,19 +243,7 @@ def correct_flatfield(plane: np.ndarray, profile: FlatfieldProfile) -> np.ndarra
     if profile.darkfield is not None:
         values -= profile.darkfield
     values /= gain
-    return _cast_like(values, plane.dtype)
-
-
-def _cast_like(values: np.ndarray, dtype: np.dtype) -> np.ndarray:
-    """Cast to the acquisition dtype, ROUNDING and clipping integers (never truncate, never wrap).
-
-    Both operations are monotone non-decreasing, which is exactly why they do not break the
-    commutation with the MIP — the property people assume breaks here and it does not.
-    """
-    if np.issubdtype(dtype, np.integer):
-        info = np.iinfo(dtype)
-        values = np.clip(np.rint(values), info.min, info.max)
-    return values.astype(dtype, copy=False)
+    return cast_like(values, plane.dtype)
 
 
 def flatfield_op(profile: FlatfieldProfile) -> Callable[[Iterable[np.ndarray]], np.ndarray]:

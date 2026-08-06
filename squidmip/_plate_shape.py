@@ -98,7 +98,7 @@ def well_span(well_ids) -> Optional[tuple[int, int]]:
         m = _WELL_RE.match(str(region))
         if not m or int(m.group(2)) < 1:
             return None                     # freeform/tissue id — not a well plate at all
-        max_row = max(max_row, _row_index(m.group(1)) + 1)
+        max_row = max(max_row, row_index(m.group(1)) + 1)
         max_col = max(max_col, int(m.group(2)))
     if not max_row:
         return None                         # empty id set
@@ -158,9 +158,32 @@ def resolve_plate_format(metadata, override=None) -> str:
     return infer_plate_format(metadata.get("regions") or [])
 
 
-def _row_index(letters: str) -> int:
-    """"A"->0, "Z"->25, "AA"->26, ... — the inverse of the viewer's ``_row_letter``."""
+def row_letter(i: int) -> str:
+    """0->"A", 25->"Z", 26->"AA", ... — a plate row index as its label. Bijective base-26.
+
+    THE one spelling of it. This module is the lowest layer that knows what shape a plate is and
+    is Qt-free, so `_plate` (the model) and `_plate_overview` (the widget) both reach it without
+    either importing the other; they used to hold byte-identical private copies, and the comment
+    on one of them justified the copy with a PyQt import the other one does not have.
+    """
+    s, i = "", int(i) + 1
+    while i:
+        i, r = divmod(i - 1, 26)
+        s = chr(65 + r) + s
+    return s
+
+
+def row_index(letters: str) -> int:
+    """"A"->0, "Z"->25, "AA"->26, ... — the inverse of :func:`row_letter`.
+
+    Raises ``KeyError`` on anything that is not letters. That refusal is the whole reason there is
+    one of these rather than two: the un-guarded copy this replaced answered ``row_index("A1")``
+    with **10** and ``row_index("manual0")`` with **4034554195**, silently, because ``ord(ch) - 64``
+    is a number for every character. A row index nobody can check is a plate laid out wrongly.
+    """
     n = 0
-    for ch in letters.upper():
+    for ch in str(letters).upper():
+        if not ch.isalpha():
+            raise KeyError(letters)
         n = n * 26 + (ord(ch) - 64)
     return n - 1

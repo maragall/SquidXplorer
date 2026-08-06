@@ -254,8 +254,9 @@ def test_the_fused_write_rounds_to_the_dtype_instead_of_truncating(master, monke
 
     A plain slice assignment truncates toward zero, which is a half-count systematic dimming of
     every pixel of the mosaic. Every other operator in this codebase routes its write through
-    ``_cast_like`` for exactly that reason (``_background``/``_decon``/``_flatfield`` all say so
-    in as many words); stitch was the one that did not, and now shares the same helper.
+    ``projection.cast_like`` for exactly that reason; stitch was the one that did not, and now
+    shares the same one function that ``_background``, ``_decon``, ``_flatfield``, ``_output``
+    and ``_tilesource`` do.
 
     Pinned on NUMBERS, not on which function was called: the fuse kernel is replaced by one that
     hands ``write_block`` a block of known fractional values, and the assertion is on what lands

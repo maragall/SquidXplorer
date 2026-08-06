@@ -47,8 +47,9 @@ from squidmip.contract.version import (
 STABLE_AXES = ["t", "c", "z", "y", "x"]
 
 #: Written by ``_output`` from the first byte of a plate write to the last. Its presence means the
-#: run did not finish, so the store may be missing wells that the plate metadata promises.
-_INCOMPLETE_MARKER = ".squidmip-incomplete"
+#: run did not finish, so the store may be missing wells that the plate metadata promises. IMPORTED,
+#: never re-spelled: two copies of a filename are two different files the moment one is edited.
+from squidmip._output import INCOMPLETE_MARKER as _INCOMPLETE_MARKER
 
 #: UDUNITS-2 length units the reader can convert to micrometres (``reader._UNIT_TO_UM``). A unit
 #: outside this set cannot be converted, so a physical value taken from the store would reach a

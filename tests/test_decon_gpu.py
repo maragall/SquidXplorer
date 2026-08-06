@@ -22,7 +22,7 @@ WHY THE TOLERANCE IS WHAT IT IS. Two assertions are made, in increasing strength
    handful of pixels.** This is the assertion that matters to a user, and it is the one the
    measurement supports, not the stronger "identical" claim it is tempting to write. Run here:
    ``6 of 65536 pixels (0.009%) differ, all by exactly 1``. Those are pixels whose float value
-   sat within a part-per-million of a ``.5`` boundary, so ``_cast_like``'s ``rint`` rounded them
+   sat within a part-per-million of a ``.5`` boundary, so ``cast_like``'s ``rint`` rounded them
    opposite ways; that is the arithmetic of quantisation, not drift in the deconvolution. The
    test therefore pins BOTH the magnitude (<= 1 count, i.e. the quantisation step itself) and
    the population (< 0.1% of pixels). Real algorithmic drift moves whole structures by percent
@@ -35,7 +35,8 @@ import numpy as np
 import pytest
 
 from squidmip import _decon_gpu
-from squidmip._decon import DEFAULT_OPTICS, METHOD, _cast_like, make_psf, make_psf_2d
+from squidmip._decon import DEFAULT_OPTICS, METHOD, make_psf, make_psf_2d
+from squidmip.projection import cast_like
 
 petakit = pytest.importorskip("petakit")
 
@@ -115,9 +116,9 @@ def test_the_uint16_planes_the_two_backends_write_agree_to_the_quantisation_step
     psf = make_psf_2d(DEFAULT_OPTICS)
     volume = _phantom((1, SIZE, SIZE), seed=3)
 
-    cpu = _cast_like(petakit.deconvolve(volume, psf, method=METHOD,
+    cpu = cast_like(petakit.deconvolve(volume, psf, method=METHOD,
                                         iterations=ITERATIONS, gpu=False)[0], np.dtype(np.uint16))
-    gpu = _cast_like(_decon_gpu.rl(volume, psf, ITERATIONS, device)[0], np.dtype(np.uint16))
+    gpu = cast_like(_decon_gpu.rl(volume, psf, ITERATIONS, device)[0], np.dtype(np.uint16))
 
     _assert_quantised_agreement(gpu, cpu)
 

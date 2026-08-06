@@ -153,6 +153,8 @@ from ._plate_shape import (
     PlateShapeError,
     infer_plate_format,
     normalize_plate_format,
+    row_index,
+    row_letter,
     well_span,
 )
 
@@ -626,24 +628,6 @@ class Plate(ABC):
 
 # --------------------------------------------------------------------------- WellPlate
 
-def _row_letter(i: int) -> str:
-    """0->A, 25->Z, 26->AA. Local copy: the viewer's lives behind a PyQt5 import."""
-    s, i = "", i + 1
-    while i:
-        i, r = divmod(i - 1, 26)
-        s = chr(65 + r) + s
-    return s
-
-
-def _row_index(letters: str) -> int:
-    n = 0
-    for ch in letters.upper():
-        if not ch.isalpha():
-            raise KeyError(letters)
-        n = n * 26 + (ord(ch) - 64)
-    return n - 1
-
-
 def display_well_id(cell_id: str) -> str:
     """Numeric well id from the alphabet-encoded well: ``<row letter's 1-based index><column>``.
 
@@ -665,7 +649,7 @@ def display_well_id(cell_id: str) -> str:
     # through untouched rather than being encoded into a meaningless number.
     if not letters or not digits.isdigit() or not letters.isupper() or len(letters) > 2:
         return s
-    return f"{_row_index(letters) + 1}{digits}"
+    return f"{row_index(letters) + 1}{digits}"
 
 
 # --- fixed-width integer id: the flat-cache scope + the logger's numeric id -------------------
@@ -700,7 +684,7 @@ def well_code(cell_id: str) -> "Optional[int]":
     letters, digits = s[:i], s[i:]
     if not letters or not digits.isdigit() or not letters.isupper() or len(letters) > 2:
         return None
-    row = _row_index(letters)                 # 0-based row from the letter(s)
+    row = row_index(letters)                 # 0-based row from the letter(s)
     col = int(digits) - 1                      # 0-based column
     if not (0 <= row <= 99 and 0 <= col <= 99):
         return None
@@ -748,7 +732,7 @@ class WellPlate(Plate):
 
     @property
     def row_labels(self) -> list[str]:
-        return [_row_letter(i) for i in range(self.rows)]
+        return [row_letter(i) for i in range(self.rows)]
 
     @property
     def col_labels(self) -> list[str]:
@@ -757,7 +741,7 @@ class WellPlate(Plate):
     def cell_id(self, row: int, col: int) -> str:
         if not (0 <= row < self.rows and 0 <= col < self.cols):
             raise KeyError((row, col))
-        return f"{_row_letter(row)}{col + 1}"
+        return f"{row_letter(row)}{col + 1}"
 
     def cell_index(self, cell_id: str) -> tuple[int, int]:
         s = str(cell_id)
@@ -766,7 +750,7 @@ class WellPlate(Plate):
             i += 1
         if i == 0 or i == len(s) or not s[i:].isdigit():
             raise KeyError(cell_id)
-        row, col = _row_index(s[:i]), int(s[i:]) - 1
+        row, col = row_index(s[:i]), int(s[i:]) - 1
         if not (0 <= row < self.rows and 0 <= col < self.cols):
             raise KeyError(cell_id)
         return row, col

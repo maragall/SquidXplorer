@@ -79,7 +79,14 @@ from squidmip._engine import _default_workers, project_plate
 from squidmip._volume import release as release_pages
 from squidmip._zarr_store import create_array, write_group
 from squidmip.contract import contract_stamp
-from squidmip.projection import INTENSITY, LABELS, RESULT_KINDS, resolve_n_fovs, select_fovs
+from squidmip.projection import (
+    INTENSITY,
+    LABELS,
+    RESULT_KINDS,
+    cast_like,
+    resolve_n_fovs,
+    select_fovs,
+)
 
 # The OME-NGFF SPEC version of the metadata payload. It says which published schema the
 # ``attributes.ome`` blocks conform to, and it belongs to OME. It is NOT a statement about
@@ -133,7 +140,12 @@ _DISK_MIN_FREE_BYTES = 256 * 1024 ** 2   # ...and never less than this, however 
 #                                          A percentage alone lets an almost-full disk approve a
 #                                          write that lands it at a few MB free, where everything
 #                                          else on the machine then fails. Both are overridable.
-_INCOMPLETE_MARKER = ".squidmip-incomplete"
+#: The ONE name for "this store did not finish writing", and the ONE place the question is
+#: answered (:func:`is_incomplete`). Public because three surfaces ask it -- the CLI's ``--check``,
+#: :mod:`squidmip.contract.validate`, and the GUI's "Open a computed .hcs plate" -- and a second
+#: marker file in a second directory is how the third of them came to open a plate with a third of
+#: its fields missing while the other two refused it.
+INCOMPLETE_MARKER = ".squidmip-incomplete"
 _PARTIAL_PREFIX = "."               # in-progress field dirs are ".{fov}.partial" — a leading dot
 #                                     keeps them out of ndviewer's digit-named field discovery.
 _PARTIAL_SUFFIX = ".partial"
@@ -296,16 +308,16 @@ def check_disk_space(out_dir, required_bytes: int, *, headroom: Optional[float] 
 
 def is_incomplete(plate_dir) -> bool:
     """True while a plate store is mid-write, or if the write that made it never finished."""
-    return (Path(plate_dir) / _INCOMPLETE_MARKER).exists()
+    return (Path(plate_dir) / INCOMPLETE_MARKER).exists()
 
 
 def _mark_incomplete(plate_dir: Path, info: dict) -> None:
-    (plate_dir / _INCOMPLETE_MARKER).write_text(json.dumps(info, indent=2))
+    (plate_dir / INCOMPLETE_MARKER).write_text(json.dumps(info, indent=2))
 
 
 def _clear_incomplete(plate_dir: Path) -> None:
     try:
-        (plate_dir / _INCOMPLETE_MARKER).unlink()
+        (plate_dir / INCOMPLETE_MARKER).unlink()
     except FileNotFoundError:
         pass
 
@@ -428,11 +440,7 @@ def _downsample_yx(image: np.ndarray) -> np.ndarray:
     x = (image.shape[-1] // fx) * fx
     cropped = image[..., :y, :x]
     ds = cropped.reshape(*cropped.shape[:-2], y // fy, fy, x // fx, fx).mean(axis=(-3, -1), dtype=np.float32)
-    if np.issubdtype(image.dtype, np.integer):
-        info = np.iinfo(image.dtype)
-        np.rint(ds, out=ds)                       # round + clip IN PLACE — no extra float buffers
-        np.clip(ds, info.min, info.max, out=ds)
-    return ds.astype(image.dtype)
+    return cast_like(ds, image.dtype, copy=False)   # in place: `ds` is ours, and this is per level
 
 
 def _subsample_yx(image: np.ndarray) -> np.ndarray:

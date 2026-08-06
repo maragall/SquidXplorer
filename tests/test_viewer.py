@@ -13,6 +13,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import sys
+from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")  # headless Qt; must precede the PyQt import
 
@@ -1488,43 +1489,69 @@ def test_check_disk_scales_with_subset_size(qapp, squid_dataset, tmp_path):
     win.close()
 
 
-def test_note_partial_output_marks_a_stopped_plate(qapp, squid_dataset, tmp_path):
-    """A save run that is stopped mid-write leaves a real-looking plate.ome.zarr holding only some
-    wells. Mark it, so 'Open a computed MIP' can refuse it instead of showing a truncated plate as
-    a finished one."""
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    out = tmp_path / "acq.hcs"
-    (out / "plate.ome.zarr").mkdir(parents=True)
-    win._run_out_dir = str(out)
-    win._note_partial_output()
-    assert (out / "INCOMPLETE").exists()
-    assert win._run_out_dir is None                     # consumed, so it can't leak to a later run
-    win.close()
+def test_the_window_asks_the_store_whether_it_is_incomplete_and_nothing_else(qapp, tmp_path,
+                                                                            monkeypatch):
+    """ONE marker answers "did this write finish", and it is the writer's own.
 
+    Until 2026-08-06 this window wrote and read a SECOND marker -- a file named `INCOMPLETE` in the
+    parent `.hcs` directory, dropped best-effort from a Qt teardown slot -- while `_output` wrote
+    `.squidmip-incomplete` INSIDE `plate.ome.zarr` before the first byte. The two were blind to
+    each other and did not answer the same question: the store's marker means *every field this
+    run owed is on disk*, the window's meant only *somebody pressed stop*.
 
-def test_open_computed_refuses_an_incomplete_plate(qapp, tmp_path, monkeypatch):
+    Measured on a `write_from_stream` that put 2 of 3 fields on disk: `_output.is_incomplete` said
+    True and this window's predicate said False, so "Open a computed .hcs plate" opened a plate
+    with a third of its wells missing, silently, while its own plate metadata still advertised
+    them.
+    """
+    from squidmip._output import INCOMPLETE_MARKER
+
     base = tmp_path / "acq.hcs"
-    (base / "plate.ome.zarr").mkdir(parents=True)
-    (base / "plate.ome.zarr" / "zarr.json").write_text("{}")
-    (base / "INCOMPLETE").write_text("stopped\n")
+    zroot = base / "plate.ome.zarr"
+    zroot.mkdir(parents=True)
+    (zroot / "zarr.json").write_text("{}")
+    (zroot / INCOMPLETE_MARKER).write_text('{"fields": 3, "fields_written": 2}')
+
     win = V.PlateWindow(None)
     monkeypatch.setattr(V.QFileDialog, "getExistingDirectory", lambda *a, **k: str(base))
     win._open_computed()
-    assert "incomplete" in win._readout.text().lower()
+    assert "incomplete" in win._readout.text().lower(), (
+        f"a store carrying its own {INCOMPLETE_MARKER} opened without a word; the window was "
+        "reading a second marker in a different directory, which only a GUI stop ever wrote"
+    )
     win.close()
+
+
+def test_there_is_no_second_incomplete_marker(qapp):
+    """Structural: re-introducing the window's private marker would break this.
+
+    `_note_partial_output` and `_run_out_dir` were the whole of it. They are gone because the
+    store already knew, earlier and more accurately, and a second file in a second place is how
+    one surface came to disagree with the other two.
+    """
+    assert not hasattr(V.PlateWindow, "_note_partial_output"), (
+        "the window is writing its own incomplete marker again; ask `_output.is_incomplete`"
+    )
+    src = Path(V.__file__).read_text()
+    assert '"INCOMPLETE"' not in src and "'INCOMPLETE'" not in src, (
+        "a bare INCOMPLETE filename is back in _viewer.py; the ONE name is "
+        "`_output.INCOMPLETE_MARKER`"
+    )
 
 
 def test_completed_save_run_is_not_marked_incomplete(qapp, squid_dataset, tmp_path):
     """The other half of the invariant: a run that finishes must NOT be flagged."""
+    from squidmip._output import is_incomplete
+
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
     win.run_operator("mip", out_parent=str(tmp_path), regions=["B2", "B3"], save=True)
     assert _drain_until(qapp, lambda: not win._busy(), timeout=90)
     out = tmp_path / f"{win._acq_name}.hcs"
-    assert not (out / "INCOMPLETE").exists(), "a completed plate must not be flagged incomplete"
+    assert not is_incomplete(out / "plate.ome.zarr"), (
+        "a completed plate must not be flagged incomplete"
+    )
     win.close()
 
 
@@ -5551,7 +5578,7 @@ def _grab_rgb(ov) -> np.ndarray:
 
 def _fitted_plate(nrows, ncols, w=1400, h=900):
     """An nrows x ncols overview, fitted to (w, h), one channel declared."""
-    rows = [V._row_letter(i) for i in range(nrows)]
+    rows = [V.row_letter(i) for i in range(nrows)]
     cols = [str(i + 1) for i in range(ncols)]
     by_rc = {(r, c): f"{rows[r]}{cols[c]}" for r in range(nrows) for c in range(ncols)}
     ov = V.PlateOverview(rows, cols, by_rc)

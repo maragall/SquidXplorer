@@ -148,7 +148,8 @@ from squidmip._minerva import NEEDS_INTERNET_NOTE as _MINERVA_INTERNET_NOTE
 from squidmip._minerva import MINERVA_URL as _MINERVA_URL
 from squidmip._gallery import GalleryScope as _GalleryScope
 from squidmip._montage import _hex_to_rgb01
-from squidmip._output import parse_well_id
+from squidmip._output import INCOMPLETE_MARKER as _INCOMPLETE_MARKER
+from squidmip._output import is_incomplete, parse_well_id
 from squidmip._activity import ActivityLog
 from squidmip._address import Extent
 from squidmip._logpane import LogBus, ViewLog
@@ -171,15 +172,16 @@ from squidmip._region_nav import RegionCursor, RegionSlider
 # alias the same single definition in `squidmip._qtstyle`, which is where they belong.)
 from squidmip._plate_overview import (  # noqa: F401 (re-exports)
     _CELL, _CLICK_SLOP, _COLH, _HDR, _LOUPE_CACHE, _LOUPE_HOLD_MS, _LOUPE_MAG, _LOUPE_MAX_CROP,
-    _LOUPE_PX, _LOUPE_SLOP, _LOUPE_WIN_LOCK, _PAD, _PCT, _PLATE_DIMS, _PUSH_PX, _TILE_CACHE_BYTES,
+    _LOUPE_PX, _LOUPE_SLOP, _LOUPE_WIN_LOCK, _PAD, _PCT, _PUSH_PX, _TILE_CACHE_BYTES,
     _TILE_QUEUE_MAX, _VIEW_WASH, _FRAME_MIN_GRID, _SEL_FRAME,
     PlateOverview, _LoupeSource, _LoupeWorker, _RawLoupeSource, _RunningContrast, _TileFetcher,
     _ZarrLoupeSource, _box_union, _deep_zoom_enabled, _fit_box, _fit_cell,
-    _fmt_um, _fov_of_well, _mosaic_boxes, _nice_scale_um, _pct_window, _plate_grid, _row_letter,
+    _fmt_um, _fov_of_well, _mosaic_boxes, _nice_scale_um, _pct_window,
     cells_in_rect, content_box, frames_for_grid, loupe_clamp_crop, loupe_crop_px, loupe_decimation,
     loupe_level, loupe_scale, loupe_um_per_screen_px,
     resolve_plate_root, selection_frame_pen_px, well_at,
 )
+from squidmip._plate_shape import row_letter  # noqa: F401 (re-export: the ONE row alphabet)
 
 # The eight QThread workers moved to `squidmip._workers` (gap 6, 2026-07-29): 949 lines whose only
 # common property is the Qt threading rule, that a background thread may not touch a widget, which
@@ -474,7 +476,6 @@ class PlateWindow(QMainWindow):
         self._gallery = None          # the ONE open GalleryWindow, or None (see _open_gallery_view)
         self._readout_base = ""
         self._tabs_muted = False      # suppress _on_tab_changed during bulk teardown (ingest)
-        self._run_out_dir = None      # output dir of the in-flight SAVE run (for partial cleanup)
         self._run_label = ""          # the in-flight run's operator label, and where it is going —
         self._run_dest = ""           # one source for the status line
         self._pending_resync = False  # a tab switch was deferred because a run was live (IMA-205 bugs)
@@ -1310,23 +1311,6 @@ class PlateWindow(QMainWindow):
         self._op_tabs[key] = w
         tabs.addTab(w, title)
         tabs.setCurrentWidget(w)
-
-    def _note_partial_output(self):
-        """A save run stopped mid-write leaves a partial `.hcs`. Drop an INCOMPLETE marker in it so
-        a later 'Open a computed MIP…' can refuse it instead of presenting a truncated plate as a
-        finished one (resolve_plate_root only looks for plate.ome.zarr, which a partial still has)."""
-        out = self._run_out_dir
-        self._run_out_dir = None
-        if not out:
-            return
-        try:
-            p = Path(out)
-            if p.exists():
-                (p / "INCOMPLETE").write_text(
-                    "This plate was stopped mid-write and is NOT complete.\n"
-                    "Re-run the operator to produce a full plate.\n")
-        except OSError:
-            pass       # best-effort: never let cleanup bookkeeping break teardown
 
     def _on_progress(self, done: int, total: int):
         """A run advanced by a WELL. Feeds the log panel's activity header.
@@ -2966,12 +2950,14 @@ class PlateWindow(QMainWindow):
         if not (zroot / "zarr.json").exists():
             self._readout.setText("not an .hcs plate — pick a folder containing plate.ome.zarr")
             return
-        # A run stopped mid-write leaves a real-looking plate.ome.zarr with only some wells in it.
-        # Refuse it by name rather than silently presenting a truncated plate as a finished one.
-        if (base / "INCOMPLETE").exists():
+        # A run that did not put every field it owed on disk leaves a real-looking plate.ome.zarr
+        # with only some wells in it. Refuse it by name rather than silently presenting a truncated
+        # plate as a finished one -- and ask the STORE, which is the only thing that knows. See
+        # `_output.is_incomplete`.
+        if is_incomplete(zroot):
             self._readout.setText(
-                f"{base.name} was stopped mid-write and is incomplete — re-run the operator "
-                f"(delete the INCOMPLETE marker to open it anyway)")
+                f"{base.name} did not finish writing and is incomplete — re-run the operator "
+                f"(delete its {_INCOMPLETE_MARKER} marker to open it anyway)")
             return
         try:
             plate = json.loads((zroot / "zarr.json").read_text())["attributes"]["ome"]["plate"]
@@ -3339,7 +3325,6 @@ class PlateWindow(QMainWindow):
                                        str(out_dir) if out_dir else "", regions=regions, save=save,
                                        n_fovs=None, operator_kwargs=operator_kwargs)
         self._overview.set_mosaic_boxes(self._worker.mosaic_boxes)
-        self._run_out_dir = str(out_dir) if (save and out_dir) else None   # for partial-output cleanup
         # A re-run must not composite on top of the LAST run's pixels: with a mosaic, a run that
         # lands fewer FOVs would otherwise leave the previous run's fields standing in the same
         # cell, blended into the new ones. Drop this layer's store before the first tile arrives.
@@ -3377,9 +3362,6 @@ class PlateWindow(QMainWindow):
                     f"✓ {label} · {scope}{dest}" + ("  (re-openable OME-Zarr)" if save else ""))
 
         self._worker.finished_ok.connect(_done_msg)
-        # a run that FINISHED wrote a complete plate — forget the path so a later stop can never
-        # retroactively flag it incomplete
-        self._worker.finished_ok.connect(lambda: setattr(self, "_run_out_dir", None))
         # QThread.finished (not finished_ok): it fires for a FAILED or STOPPED run too, and a tab
         # switch deferred during any of those still has to be delivered. _retire only disconnects
         # the worker's own signals, so this survives a stop.

@@ -104,3 +104,42 @@ def test_resolve_prefers_declared_then_infers():
     absent = {"wellplate_format": None, "regions": ["A1", "A2", "B1", "B2"]}
     assert resolve_plate_format(absent) == "6 well plate"           # fallback: inference
     assert resolve_plate_format(declared, override="96") == "96 well plate"   # override beats both
+
+
+# --- ONE row alphabet ----------------------------------------------------------------------------
+#
+# `row_letter` was two byte-identical private copies (`_plate._row_letter`,
+# `_plate_overview._row_letter`), and the comment on one of them justified the copy with a PyQt
+# import the other module does not have. `row_index` was two copies that were NOT identical:
+# `_plate`'s refused a non-letter, this module's did not, and `ord(ch) - 64` is a number for every
+# character. That is the copy that drifted, and this is what it answered.
+
+def test_row_index_refuses_anything_that_is_not_a_row_letter():
+    from squidmip._plate_shape import row_index
+
+    for bad, was in (("A1", 10), ("manual0", 4034554195), ("1", -16)):
+        with pytest.raises(KeyError):
+            row_index(bad)                       # the copy this replaced answered `was`, silently
+        assert was  # documents the wrong answer next to the assertion that now prevents it
+
+
+def test_row_letter_and_row_index_are_inverses_over_every_plate_row():
+    from squidmip._plate_shape import row_index, row_letter
+
+    for i in range(0, 703):                      # 0..ZZ, well past a 1536wp's 32 rows (AF)
+        assert row_index(row_letter(i)) == i
+
+
+def test_the_row_alphabet_is_defined_once():
+    """Structural: a private `_row_letter`/`_row_index` anywhere is the copy coming back."""
+    import pathlib
+
+    import squidmip
+
+    pkg = pathlib.Path(squidmip.__file__).parent
+    offenders = sorted(str(p.relative_to(pkg)) for p in pkg.rglob("*.py")
+                       if "def _row_letter" in p.read_text() or "def _row_index" in p.read_text())
+    assert not offenders, (
+        f"{offenders} define a private row alphabet; `_plate_shape.row_letter` / `row_index` are "
+        "the ones, and the copies disagreed on every input that was not a row letter"
+    )

@@ -97,7 +97,7 @@ from typing import Callable, Iterable, Optional
 import numpy as np
 
 from squidmip._engine import add_projector
-from squidmip.projection import plane_op
+from squidmip.projection import cast_like, plane_op
 
 # The methods this operator knows, in one greppable place (the error message quotes it).
 METHODS: tuple[str, ...] = ("rolling_ball", "gaussian", "sep")
@@ -232,7 +232,7 @@ def subtract_background(
     place this transform loses information; :func:`clipped_fraction` measures how much.
     """
     background = estimate_background(plane, params)
-    return _cast_like(plane.astype(np.float32, copy=False) - background, plane.dtype)
+    return cast_like(plane.astype(np.float32, copy=False) - background, plane.dtype)
 
 
 def restore(corrected: np.ndarray, background: np.ndarray, dtype=None) -> np.ndarray:
@@ -243,7 +243,7 @@ def restore(corrected: np.ndarray, background: np.ndarray, dtype=None) -> np.nda
     statement of "the raw is recoverable"; :func:`clipped_fraction` names the exception.
     """
     dtype = corrected.dtype if dtype is None else np.dtype(dtype)
-    return _cast_like(corrected.astype(np.float32, copy=False) + background, dtype)
+    return cast_like(corrected.astype(np.float32, copy=False) + background, dtype)
 
 
 def clipped_fraction(plane: np.ndarray, params: Optional[BackgroundParams] = None) -> float:
@@ -255,26 +255,6 @@ def clipped_fraction(plane: np.ndarray, params: Optional[BackgroundParams] = Non
     residual = np.rint(plane.astype(np.float32, copy=False) - background)
     info = np.iinfo(plane.dtype)
     return float(np.mean((residual < info.min) | (residual > info.max)))
-
-
-def _cast_like(values: np.ndarray, dtype: np.dtype) -> np.ndarray:
-    """Cast to the acquisition dtype, ROUNDING and clipping integers rather than truncating
-    and wrapping them.
-
-    Both halves are load-bearing:
-
-    * **round, not truncate.** ``astype`` truncates toward zero, which biases every pixel of
-      every plane down by half a count — a systematic dimming applied to the whole dataset.
-      Rounding is also what makes the layer invertible: with ``c = round(raw - bg)`` the
-      residual error is < 0.5 count, so ``round(c + bg) == raw`` exactly (:func:`restore`).
-      Truncation loses that, and the raw stops being recoverable by one count everywhere.
-    * **clip, not wrap.** An unsigned wrap turns the dimmest pixels of the frame into the
-      brightest ones.
-    """
-    if np.issubdtype(dtype, np.integer):
-        info = np.iinfo(dtype)
-        values = np.clip(np.rint(values), info.min, info.max)
-    return values.astype(dtype, copy=False)
 
 
 def bgsub_op(

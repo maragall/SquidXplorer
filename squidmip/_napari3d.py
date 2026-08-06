@@ -159,58 +159,6 @@ def _wire_close_to_release_memory(viewer: Any) -> None:
     qt_window.closeEvent = _close_and_release
 
 
-def native_roi_volume(reader: Any, meta: dict, region: str,
-                      roi_bbox_um: Sequence[float],
-                      channels: Sequence[str]) -> dict:
-    """Fuse the FOVs a ROI overlaps at NATIVE resolution (step 1), all z, cropped to the ROI box ->
-    ``{channel: (z, H, W)}``. This is the exact ROI subarray ACROSS FOV seams.
-
-    Placement is identical to the 2D mosaic: each FOV is pasted at its stage-pixel offset
-    (``_placement.fov_offsets_px``, ``{fov: (row_px, col_px)}`` from the region's top-left origin),
-    and the mosaic origin in um is ``(min x, min y)`` of the FOV positions -- the same origin
-    ``mosaic_bbox_um`` uses -- so the ROI box (in stage um) maps to the same pixels 2D shows. Overlaps
-    are last-writer paste (what the 2D fuse does too); registration/blending is a later refinement."""
-    from squidmip._placement import fov_offsets_px
-
-    positions = meta.get("fov_positions_um") or {}
-    px = float(meta.get("pixel_size_um") or 1.0)
-    fovs = list((meta.get("fovs_per_region") or {}).get(region) or [])
-    if not fovs or not positions or px <= 0:
-        return {}
-    fh, fw = (int(v) for v in meta["frame_shape"])
-    x0 = min(float(positions[(region, f)][0]) for f in fovs)
-    y0 = min(float(positions[(region, f)][1]) for f in fovs)
-    offsets = fov_offsets_px(positions, region, fovs, px)   # {fov: (row_px, col_px)}
-    rx0, ry0, rx1, ry1 = (float(v) for v in roi_bbox_um)
-    c0, c1 = int(round((rx0 - x0) / px)), int(round((rx1 - x0) / px))
-    r0, r1 = int(round((ry0 - y0) / px)), int(round((ry1 - y0) / px))
-    if c1 <= c0 or r1 <= r0:
-        return {}
-    H, W = r1 - r0, c1 - c0
-    z_levels = list(meta.get("z_levels") or [0])
-    nz = len(z_levels)
-    out: dict = {}
-    for ch in channels:
-        vol = None
-        for f in fovs:
-            fr, fc = offsets[f]                             # FOV top-left in mosaic pixels
-            ir0, ir1 = max(r0, fr), min(r1, fr + fh)        # FOV window ∩ ROI window (mosaic px)
-            ic0, ic1 = max(c0, fc), min(c1, fc + fw)
-            if ir1 <= ir0 or ic1 <= ic0:
-                continue
-            for zi, z in enumerate(z_levels):
-                frame = np.asarray(reader.read(region, int(f), ch, int(z)))
-                if frame.ndim != 2:
-                    frame = frame.reshape(frame.shape[-2:])
-                if vol is None:
-                    vol = np.zeros((nz, H, W), dtype=frame.dtype)
-                vol[zi, ir0 - r0:ir1 - r0, ic0 - c0:ic1 - c0] = frame[ir0 - fr:ir1 - fr,
-                                                                       ic0 - fc:ic1 - fc]
-        if vol is not None:
-            out[ch] = vol
-    return out
-
-
 def pin_max_compositing(viewer: Any, layer: Any) -> bool:
     """Composite this layer into the canvas with the GL **max** equation, and KEEP it there.
 

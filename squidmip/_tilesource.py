@@ -91,6 +91,7 @@ from squidmip._montage import _area_downsample
 from squidmip._mosaic_source import MemoryBoundedLRUCache
 from squidmip._output import _PYRAMID_MAX_LEVELS, _PYRAMID_MIN_YX, pyramid_shapes
 from squidmip._tiling import Geometry, Level, TileDescriptor
+from squidmip.projection import cast_like
 
 # Plate-rung tile size in pixels. 512 matches the store's 1024 px chunking closely enough that a
 # coarse composite touches few chunks, and keeps one uint16 tile at 512 KB — small enough that a
@@ -397,11 +398,8 @@ def _paste_field(dst: np.ndarray, dst_bbox_um: tuple, scale_um_per_px: float,
     sy1 = int(np.clip(round((iy1 - fy0) / px_um_y), sy0 + 1, sh))
 
     resampled = _resample(plane[sy0:sy1, sx0:sx1], dy1 - dy0, dx1 - dx0)
-    if np.issubdtype(dst.dtype, np.integer):
-        info = np.iinfo(dst.dtype)
-        np.rint(resampled, out=resampled)
-        np.clip(resampled, info.min, info.max, out=resampled)
-    dst[dy0:dy1, dx0:dx1] = resampled.astype(dst.dtype, copy=False)
+    # in place: `_resample` always hands back a fresh float32 array, and this runs per tile
+    dst[dy0:dy1, dx0:dx1] = cast_like(resampled, dst.dtype, copy=False)
     return True
 
 
