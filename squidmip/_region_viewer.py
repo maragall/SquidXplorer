@@ -1045,53 +1045,78 @@ class RegionViewer(QMainWindow):
         if self._manager is None or not self._manager.raise_plate():
             self._say("there is no plate window to raise from here.")
 
-    def _show_operator_controls(self) -> None:
-        """Raise the plate AND open the controls for the operator THIS window is showing.
+    def _window_operators(self) -> list:
+        """THE OPERATORS FOR THIS WINDOW: every processing layer it holds, raw excluded.
 
-        Julio, 2026-08-05: "Show controls button basically works as the 'plate' one in the window
-        that it brings the plate to front. But this one brings the plate window to front and opens
-        a tab with respective operator controls, so that we can tweak, say the iterations."
-
-        Two halves, and the second is the point. Raising the plate is what `▣ plate` already does;
-        without it the tab opens in a window that is still buried. Opening the TAB is what turns
-        "I can see a decon result" into "I can change the iteration count", which today costs a
-        hunt through a menu in a different window.
-
-        WHICH operator comes off `visible_op()` -- the same declaration-driven answer 3D uses to
-        pick its volume, never a name comparison (`tests/test_operator_declaration.py` fails the
-        build on one). So this needs no edit when an operator is added, and a plugin's operator
-        gets the button for free: `_activate_operator` falls back to a panel generated from the
-        declared `params`, which is exactly where an iteration count lives.
-
-        Refuses out loud in all three cases it can fail -- no plate, no operator layer shown, or a
-        plate that cannot build a panel. A chip that looks alive and does nothing is the failure
-        this project keeps naming.
+        `mosaic.ops()` is the whole answer and it is derived, not tracked -- it walks the layers
+        this pane owns and reads each one's declared `(op, channel)` identity. So a window that has
+        had decon and bgsub run on it lists both, in the order they arrived, and a window that has
+        had nothing run lists none. No bookkeeping to fall out of step with what is on screen.
         """
         mosaic = getattr(self._pane, "mosaic", None) if self._pane is not None else None
-        op = None
-        if mosaic is not None:
-            try:
-                op = mosaic.visible_op()
-            except Exception:                            # noqa: BLE001 - treat as "nothing shown"
-                op = None
-        if not op or op == _RAW_OP:
-            self._say("controls: this window is showing raw pixels, which have no operator to "
-                      "tune. Run an operator, or switch to its layer, and click again.")
+        if mosaic is None:
+            return []
+        try:
+            return [op for op in mosaic.ops() if op and op != _RAW_OP]
+        except Exception:                                # noqa: BLE001 - treat as "none yet"
+            return []
+
+    def _show_operator_controls(self) -> None:
+        """Raise the plate AND open the controls for the operators THIS WINDOW has.
+
+        Julio, 2026-08-05, correcting the first cut of this: *"the controls is actually for the
+        'operators for this window'. And it is not bringing up the plateview window."*
+
+        Both corrections are the same mistake. The first version asked `visible_op()` -- ONE
+        operator, the one whose layer is lit -- and, worse, made **raising the plate conditional on
+        finding it**. So on a window showing raw, or with the operator layer toggled off, the chip
+        did nothing at all: no tab, and not even the trip back to the plate that `▣ plate` gives
+        you unconditionally. A gate that swallows the half that always works is worse than no gate.
+
+        Now:
+
+        * **The plate comes forward FIRST, always.** It is the same journey `▣ plate` makes and it
+          cannot depend on what is loaded. Whatever else this chip does or declines to do, the
+          window you are going back to is in front of you.
+        * **Then every operator this window holds gets its tab** (`_window_operators`, which reads
+          the layers' own declared identity). Plural, because that is what the window has: a window
+          with decon and bgsub run on it opens both, last one focused. `_activate_operator` chooses
+          a hand-written panel or one generated from the declared `params`, so an iteration count,
+          a threshold, or a plugin operator's parameters all arrive with no edit here and no name
+          comparison (`tests/test_operator_declaration.py` fails the build on one).
+        * **A window with no operator results still raises**, and says what is missing rather than
+          looking broken.
+        """
+        raised = self._manager is not None and self._manager.raise_plate()
+        if not raised:
+            self._say("controls: there is no plate window to open operator controls in.")
             return
-        if self._manager is None or not self._manager.raise_plate():
-            self._say(f"controls: no plate window to open {op!r}'s controls in.")
+
+        ops = self._window_operators()
+        if not ops:
+            self._say("controls: nothing has been run on this window yet, so it has no operator "
+                      "controls. The plate is in front; run an operator from there.")
             return
+
         plate = self._manager.parent()
         activate = getattr(plate, "_activate_operator", None)
         if activate is None:
-            self._say(f"controls: this plate cannot open operator tabs, so {op!r} has none.")
+            self._say(f"controls: this plate cannot open operator tabs, so {', '.join(ops)} "
+                      "cannot be tuned from here.")
             return
-        try:
-            activate(op)
-        except Exception as exc:                         # noqa: BLE001 - named, never a dead click
-            self._say(f"controls: could not open {op!r}'s controls ({exc}).")
-            return
-        self._say(f"controls: {op!r} — its panel is open on the plate window.")
+
+        opened, failed = [], []
+        for op in ops:
+            try:
+                activate(op)
+                opened.append(op)
+            except Exception as exc:                     # noqa: BLE001 - named, never a dead click
+                failed.append(f"{op} ({exc})")
+        if opened:
+            self._say(f"controls: {', '.join(opened)} — open on the plate window."
+                      + (f" Could not open {'; '.join(failed)}." if failed else ""))
+        else:
+            self._say(f"controls: could not open {'; '.join(failed)}.")
 
     # -- movie export: this view's T (or Z) sweep, as a file ------------------------------
     def _refresh_record_chip(self) -> None:
