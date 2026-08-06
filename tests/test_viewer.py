@@ -4915,8 +4915,13 @@ def test_gallery_view_is_a_view_menu_command_and_not_an_operator(qapp):
     axis and produces no pixels. It was never in `_OPERATIONS`, but it sat in the operator card
     stack wearing the same card, which is what made it read as one.
 
-    It is also NOT IMPLEMENTED, and this pins that it says so instead of describing a plan in the
-    present tense. Delete this half of the test when the assembly actually lands.
+    It is BUILT now (2026-08-05, `squidmip/_gallery.py` + `_gallery_window.py`), and the half of
+    this test that pinned the "not implemented" status line is gone with the stub -- see
+    `tests/test_gallery.py` for what it does instead. What survives here is the half that was never
+    about the stub: Gallery View is a View-menu command, it is not a runnable operator, and it has
+    no card. The remaining assertion below is the one the stub's status line stood in for: with NO
+    acquisition open the command must say so and open nothing, rather than raising or opening an
+    empty grid.
     """
     win = V.PlateWindow(None)
     try:
@@ -4934,8 +4939,10 @@ def test_gallery_view_is_a_view_menu_command_and_not_an_operator(qapp):
         assert act.isEnabled() is True
 
         act.trigger()
-        assert "not implemented" in win._readout.text().lower(), (
-            "Gallery View reports a plan rather than saying it is unbuilt")
+        assert win._gallery is None, "Gallery View opened a window with no acquisition to tile"
+        assert "open an acquisition" in win._readout.text().lower(), (
+            f"Gallery View with nothing open said {win._readout.text()!r}, which does not name "
+            "the missing acquisition as the reason")
     finally:
         win.close()
 

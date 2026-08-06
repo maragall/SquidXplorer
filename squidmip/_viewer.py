@@ -146,6 +146,7 @@ from squidmip._minerva import MINERVA_HOME_ENV as _MINERVA_HOME_ENV
 # here so the GUI cannot drift from it.
 from squidmip._minerva import NEEDS_INTERNET_NOTE as _MINERVA_INTERNET_NOTE
 from squidmip._minerva import MINERVA_URL as _MINERVA_URL
+from squidmip._gallery import GalleryScope as _GalleryScope
 from squidmip._montage import _hex_to_rgb01
 from squidmip._output import parse_well_id
 from squidmip._activity import ActivityLog
@@ -556,6 +557,7 @@ class PlateWindow(QMainWindow):
         self._op_tabs = {}            # key -> operator-UI widget currently open as a tab in _left_tabs
         self._floating = {}           # key -> _FloatWindow holding that operator's UI detached
                                       # (a key lives in exactly ONE of the two dicts, never both)
+        self._gallery = None          # the ONE open GalleryWindow, or None (see _open_gallery_view)
         self._push_index = None       # global plate idx -> current run's slider position (None = identity)
         # IMA-245: the (h, w) canvas the array viewer was last declared with, and the sticky reason
         # a push could not be shown. None = no array canvas declared (the raw path registers file
@@ -975,9 +977,11 @@ class PlateWindow(QMainWindow):
         self._log_float_act.triggered.connect(self._float_log)
         view_menu.addAction(self._log_float_act)
         view_menu.addSeparator()
-        # Gallery View lives HERE, not in the Operators stack: it arranges WINDOWS, it does not
-        # transform pixels, so it is not gated on an acquisition either. See _open_gallery_view for
-        # what it does and does not yet do.
+        # Gallery View lives HERE, not in the Operators stack: it does not transform pixels and
+        # writes nothing, so it is not a runnable operator and has no card. It IS gated on an
+        # acquisition in the only way that matters -- with none open it says so and opens nothing
+        # (the action stays enabled so the menu does not go silently grey on a window-management
+        # command). See _open_gallery_view.
         self._gallery_act = QAction("&Gallery View…", self)
         self._gallery_act.triggered.connect(self._open_gallery_view)
         view_menu.addAction(self._gallery_act)
@@ -1107,21 +1111,64 @@ class PlateWindow(QMainWindow):
         v.addWidget(scroll, 1)
         return pane
 
-    def _open_gallery_view(self):
-        """NOT IMPLEMENTED, and it says so. Slide 2 asks for "a gallery view instance using the
-        selected Napari windows, with current views"; nothing here arranges any window.
+    def gallery_scope(self):
+        """The scope a gallery would open on RIGHT NOW: the plate selection, else the whole thing.
 
-        This is the whole of Gallery View: a status line. It never opened a gallery, and the old
-        copy ("N open window(s) WILL be arranged…") described a future, not this click, which is
-        how it came to be reported as a control that "doesn't open or do anything". It is also
-        ii.5's open problem (docs/SCOPE.md): the pipeline has no "result" type for a gallery to be
-        made of. Implementing it means reading hongquanli/gallery-view first, not writing a grid
-        layout here. Until then the honest thing is to name itself as unbuilt, in the console as
-        well as the status bar, rather than to report a plan in the present tense.
+        The selection plumbing is the one that already exists — ``selected_region_fovs()``, which is
+        fed by ``PlateOverview.selected_wells()`` through ``_on_selection_changed`` and by the
+        shift-drag marquee. A gallery therefore inherits the marquee, Cmd/Ctrl-A, and shift-click
+        refinement for free, and there is no second selection mechanism to keep in step. The pairs
+        it returns are ``(region, fov)``, which is exactly the ``{region: [fov, ...]}`` mapping
+        ``stitch_plate(regions=...)`` takes — so a cropped well stays cropped all the way through.
+
+        Returns ``None`` (never an empty gallery) when no acquisition is open.
         """
-        n = len(self._viewer_manager.windows) if hasattr(self, "_viewer_manager") else 0
-        msg = (f"Gallery View is not implemented yet — {n} viewer window(s) are open and none of "
-               "them will be moved. Tracked as ii.5 in docs/SCOPE.md.")
+        if self._meta is None:
+            return None
+        sel = self.selected_region_fovs()
+        if sel:
+            return _GalleryScope.from_region_fovs(self._meta, sel, t=self.time_point)
+        return _GalleryScope.whole(self._meta, t=self.time_point)
+
+    def _open_gallery_view(self):
+        """Tile the selected Regions side by side, one row each, one column per channel.
+
+        The port of hongquanli/gallery-view's Region view ("Add Region view: stitched per-region
+        MIPs", #7), adapted rather than imported for the same reason ``_napari3d`` adapts its 3-D
+        recipe: gallery-view pins napari <0.6 and we run 0.6.6. See :mod:`squidmip._gallery` for
+        which of its decisions were taken and which two were diverged from.
+
+        SUBSET-NATIVE, and that is the whole design rather than an option on it: the scope is
+        :meth:`gallery_scope`, i.e. the plate selection when there is one and the whole acquisition
+        when there is not. One code path, two scopes.
+
+        ONE gallery at a time. A second click RESCOPES and raises the open one instead of stacking
+        a second window on the first, because "gallery of the current selection" is a question with
+        one answer, and two galleries side by side is what the gallery itself is for.
+        """
+        scope = self.gallery_scope()
+        if scope is None:
+            self._readout.setText("Open an acquisition before opening the Gallery View.")
+            return
+        if scope.is_empty():
+            self._readout.setText(
+                "Gallery View: this acquisition has no regions with FOVs to tile.")
+            return
+
+        from squidmip._gallery_window import GalleryWindow
+
+        title = self._acq_name or "acquisition"
+        win = getattr(self, "_gallery", None)
+        if win is not None and win.isVisible():
+            win.rescope(scope, title=title)
+        else:
+            win = GalleryWindow(self._reader, self._meta, scope, title=title, parent=None)
+            self._gallery = win
+            win.resize(min(1400, 220 + 180 * max(1, len(scope.channels))), 900)
+            win.show()
+        win.raise_()
+        win.activateWindow()
+        msg = f"Gallery View: {scope.describe(self._meta)}"
         self._readout.setText(msg)
         self.log.info("%s", msg)
 
@@ -4950,6 +4997,15 @@ class PlateWindow(QMainWindow):
             if w is not None:
                 self._dispose_tab_widget(w)
             win.close()
+        gallery = getattr(self, "_gallery", None)
+        if gallery is not None:
+            # A gallery is a top-level of its own with a LIVE QThread fusing cells into it. Left
+            # open it would be a window drawing into a closed plate's reader; left running it would
+            # be a QThread at teardown, which is the one thing this method exists to prevent. It is
+            # swept here with the log float rather than treated as a peer window: see the note
+            # above for what to-do/2026-08-03-window-lifetime-design.md may later change.
+            self._gallery = None
+            gallery.close()
         self._release_loupe_sources()   # joins the loupe read thread
         for w in list(self._op_tabs.values()):
             if hasattr(w, "shutdown"):

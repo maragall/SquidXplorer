@@ -60,6 +60,11 @@ GUI_MODULES = frozenset({
     #                      canvas. The Qt-free half of bricking is `_bricks` (geometry, stride and
     #                      budget policy) and it stays below this boundary so the decisions that
     #                      cannot be probed without a GL context are still testable headless.
+    "_gallery_window",   # Gallery View's WINDOW: the grid of QLabels, its worker, its controls.
+    #                      Its producer is `_gallery`, which is Qt-free and stays on the other side
+    #                      of this boundary — that split is the point, not an accident: the scope,
+    #                      the crop, the fuse and the contrast are all testable without a window,
+    #                      and the window holds nothing but layout.
     "_layer_tree",       # the grouped layer tree (a QTreeView over napari's item model)
     "_logpanel",         # the log PANEL (the Qt widget). `_logpane`, no 'l', is the Qt-free bus.
     "_napari_pane",

@@ -91,6 +91,42 @@ Bricking (many textures + GL `max` compositing + a 1-voxel halo) is the mechanis
 pixel-exact, but it is NOT what a drawn ROI takes any more. Do not route a whole region through it
 expecting interaction — see the measured cost in the contract.
 
+## Two producers of a region's pixels, and they are not interchangeable
+
+`stitch_plate()` is the mosaic **of record**: registration, fusion, native resolution, ~0.9 GB per
+27-FOV well. `_mosaic_source` / `_gallery` produce **preview placement**: FOVs pasted at their stage
+coordinates, later-overwrites-earlier, decimated on read. Both go through the SAME `_placement`
+helpers, so they are one geometry at two resolutions — never two implementations. Anything that is a
+LOOK (pane 2's mosaic, the plate cells, Gallery View) takes the preview path; anything that is a
+RESULT takes `stitch_plate`. Adding a third placement rule is the defect shape this repo has the
+most of, because the error renders as a plausible image.
+
+A **FOV subset of a region** is expressed one way everywhere: the mapping `{region: [fov, ...]}`,
+which is `stitch_plate(regions=…)`'s own parameter and `GalleryScope.fovs`. It is produced by
+`PlateWindow.selected_region_fovs()` from the plate selection (marquee, shift-click, Cmd/Ctrl-A).
+Do not build a second selection mechanism; `_placement.fov_offsets_px` normalises whatever FOV set
+it is handed, so the crop needs no cropping code.
+
+## Nothing decodes on the Qt thread — including the contrast seed
+
+The contrast seed is the one that keeps getting missed, because it does not look like a read.
+`_contrast.sample_plane` already picks the COARSEST pyramid level, so it looks free — but every
+level of a raw-preview pyramid is fused from the FOV TIFFs at its own decimation, so materialising
+even the smallest rung decodes every FOV of the region. Measured twice, on two different paths:
+128 ms of frozen UI per region on the mosaic path (493–604 ms on the reporting machine), and the
+same shape of cost per cell for a gallery, which is N regions and would have been N freezes.
+
+Both are fixed the same way and it is now the rule: whatever computes the pixels computes the
+window, on the worker thread, and the UI receives `(lo, hi)` as data. See `_MosaicWorker`
+(`_workers.py`, `_auto_window_for` on the worker) and `_gallery_window.GalleryWorker`. Results
+arrive per unit so the first one paints while the rest are still being read.
+`tests/test_gallery.py::test_the_gallery_never_reads_a_plane_on_the_qt_thread` pins it by recording
+the thread ident of every `reader.read`, so a later refactor cannot quietly reintroduce it.
+
+Caches are shared, not per-feature: `_mosaic_source.plane_cache()`, `_platecache.PlateCellCache`,
+both bounded by `_budget.cache_budget()`. A feature-private cache spends the same budget twice and
+the two evict against each other.
+
 ## Agent skills
 
 ### Issue tracker
