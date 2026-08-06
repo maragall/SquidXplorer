@@ -923,3 +923,59 @@ def napari_pane_stub(monkeypatch):
 
     monkeypatch.setattr(napari_pane, "make_pane", _make_pane)
     return panes
+
+
+# ---------------------------------------------------------------------------------------------
+# THE TWO SCENES ONE RULE IS ASKED OF: a flat mosaic and a bricked volume
+# ---------------------------------------------------------------------------------------------
+#
+# Julio: "why is the layering of 2d and 3d different in the same place?"
+#
+# Every rule about layers -- what the tree shows, what a checkbox reaches, what one contrast
+# window covers -- has to hold for both, so the tests that pin those rules are parametrized over
+# these two builders. They live HERE rather than in one of the two test files that use them
+# (`test_viewer_3d.py`, `test_layer_tree.py`) so that "what a 3D scene is" has one definition: a
+# second copy is how the two modes drifted apart in the first place.
+#
+# Both build into a real `napari.components.ViewerModel`, which is Qt-free, so a scene is real
+# napari layers with real evented properties rather than a stub that agrees by construction.
+
+def _scene_stack(seed=0, shape=(4, 16, 16)):
+    import numpy as np
+
+    return np.random.default_rng(seed).integers(0, 4000, shape, dtype=np.uint16)
+
+
+def build_flat_scene(mosaic, op="raw", channels=("488", "561")):
+    """THE 2D SCENE: one mosaic layer per (op, channel), as a region window builds it."""
+    for i, ch in enumerate(channels):
+        mosaic.add_mosaic(op, ch, _scene_stack(i, (4, 16, 16)), bbox_um=(0.0, 0.0, 16.0, 16.0))
+    return mosaic
+
+
+def build_volume_scene(mosaic, op="raw", channels=("488", "561"), bricks=3):
+    """THE 3D SCENE: a bricked volume of the same op and channels, in the same viewer.
+
+    Goes through the real `BrickedVolume._add_layer`, so what is exercised is the production path
+    -- the brick kwargs, `pin_max_compositing` and `MosaicLayers.adopt` -- and not a re-statement
+    of it. The loader thread is the one thing stubbed: starting a real QThread with no
+    QApplication aborts the interpreter, and reading pixels is not what these rules are about.
+
+    SEVERAL bricks by default. A rule that only holds for a one-brick volume is the bug wearing a
+    disguise: one brick and one mosaic layer are the same shape, and the shape is the problem.
+    """
+    from squidmip._brick_view import BrickedVolume
+
+    vol = BrickedVolume(
+        mosaic, reader=None, meta={}, region="A1", window_px=(0, 8, 0, 8),
+        channels=list(channels), scale=(1.5, 0.75, 0.75), origin_um=(0.0, 0.0, 0.0),
+        limit=2048, budget_bytes=1 << 30, op=op,
+    )
+    vol._loader.start = lambda *a, **k: None
+    vol._loader.stop = lambda *a, **k: None
+    vol._loader.wait = lambda *a, **k: True
+    for ch_i, ch in enumerate(channels):
+        for b in range(bricks):
+            vol._add_layer((ch, (0, b)), ch, _scene_stack(10 + ch_i * 10 + b, (4, 8, 8)),
+                           (1.5, 0.75, 0.75), (0.0, 0.0, float(b) * 6.0))
+    return vol

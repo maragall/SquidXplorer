@@ -370,6 +370,102 @@ def test_toggling_one_channel_writes_that_layer_only(tree, mosaic):
     assert [ly.visible for ly in mosaic.group("stitched")] == [True, True, False, True]
 
 
+# -- THE SAME TREE OVER A FLAT MOSAIC AND OVER A VOLUME ----------------------------------------
+#
+# Julio: "why is the layering of 2d and 3d different in the same place?" and, on the same window,
+# "Turning off one layer doesn't turn the other like in the 2D view."
+#
+# The tree is one widget over one model, but a 3D volume is not one layer per (op, channel) -- it
+# is one layer per BRICK. So `rowCount`, the group toggle and the channel checkbox were all
+# written against an assumption that only held in 2D, and in 3D a checkbox reached one brick out
+# of several. The three tests below ask the tree the same questions of both scenes; the scene
+# builders are shared with `test_viewer_3d.py` (`tests/conftest.py`) so there is one definition of
+# what a 3D scene is.
+
+from .conftest import build_flat_scene, build_volume_scene  # noqa: E402
+
+SCENES = [
+    pytest.param(build_flat_scene, id="2D-flat-mosaic"),
+    pytest.param(build_volume_scene, id="3D-bricked-volume"),
+]
+SCENE_OP, SCENE_CHANNELS = "raw", ("488", "561")
+
+
+@pytest.fixture
+def scene_tree(qapp, request):
+    """``(tree, mosaic)`` for whichever scene the test was parametrized with."""
+    from napari.components import ViewerModel
+
+    m = MosaicLayers(ViewerModel())
+    request.param(m, SCENE_OP, SCENE_CHANNELS)
+    return MosaicTree(m), m
+
+
+@pytest.mark.parametrize("scene_tree", SCENES, indirect=True)
+def test_the_tree_shows_one_group_with_one_row_per_channel_in_both_modes(scene_tree):
+    """A volume that answered per brick would grow one row per brick, and the user would be asked
+    to switch off six checkboxes to darken two channels.
+
+    MUTATION: give each brick its own key (append the tile to the channel) -> six channel rows
+    -> red.
+    """
+    tree, _mosaic = scene_tree
+    m = tree.model()
+    assert m.rowCount() == 1, "one processing layer is on screen, so one group row"
+    group = _op_index_of(tree, SCENE_OP)
+    assert m.rowCount(group) == len(SCENE_CHANNELS)
+    assert {m.data(m.index(r, 0, group), Qt.DisplayRole)
+            for r in range(m.rowCount(group))} == set(SCENE_CHANNELS)
+
+
+@pytest.mark.parametrize("scene_tree", SCENES, indirect=True)
+def test_the_group_checkbox_reaches_every_layer_in_both_modes(scene_tree):
+    """The processing-layer row is the before/after toggle, and it has to darken the whole scene.
+
+    MUTATION, and it takes TWO because two independent things carry the rule here: dedupe
+    `MosaicLayers.group` to one layer per identity AND drop "visible" from `IDENTITY_PROPS` ->
+    the volume's later bricks stay lit -> red. Either alone stays green (measured), because the
+    tree writes every MEMBER of the group and the mirror keeps every SURFACE of a member equal.
+    Those are two different rules that happen to overlap on this gesture, not one rule enforced
+    twice, and the test asserts the outcome rather than the route.
+    """
+    tree, mosaic = scene_tree
+    m = tree.model()
+    group = _op_index_of(tree, SCENE_OP)
+
+    m.setData(group, Qt.Unchecked, Qt.CheckStateRole)
+    assert not any(ly.visible for ly in mosaic.ours()), (
+        "part of the scene is still lit with the group switched off")
+    assert m.data(group, Qt.CheckStateRole) == Qt.Unchecked
+
+    m.setData(group, Qt.Checked, Qt.CheckStateRole)
+    assert all(ly.visible for ly in mosaic.ours())
+    assert m.data(group, Qt.CheckStateRole) == Qt.Checked
+
+
+@pytest.mark.parametrize("scene_tree", SCENES, indirect=True)
+def test_a_channel_checkbox_reaches_every_layer_of_that_channel_in_both_modes(scene_tree):
+    """THE REPORTED BUG. `setData` writes `MosaicLayers.find(op, channel).visible`, which is ONE
+    layer -- the whole identity in 2D, one brick of several in 3D. The rest stayed on screen with
+    no row left to reach them, and the group row then read PartiallyChecked forever.
+
+    MUTATION: drop "visible" from `MosaicLayers.IDENTITY_PROPS` -> the other bricks stay lit and
+    the group reads PartiallyChecked -> red.
+    """
+    tree, mosaic = scene_tree
+    m = tree.model()
+    off, on = SCENE_CHANNELS[0], SCENE_CHANNELS[1]
+
+    m.setData(_ch_index_of(tree, SCENE_OP, off), Qt.Unchecked, Qt.CheckStateRole)
+
+    assert not any(ly.visible for ly in mosaic.layers_for(SCENE_OP, off)), (
+        f"{off} is still partly on screen after its checkbox was cleared")
+    assert all(ly.visible for ly in mosaic.layers_for(SCENE_OP, on)), (
+        "clearing one channel darkened another")
+    assert m.data(_ch_index_of(tree, SCENE_OP, off), Qt.CheckStateRole) == Qt.Unchecked
+    assert m.data(_op_index_of(tree, SCENE_OP), Qt.CheckStateRole) == Qt.PartiallyChecked
+
+
 def test_the_tree_survives_layers_being_destroyed_and_recreated(tree, mosaic, qapp):
     """RegionViewer._load_mosaic destroys and recreates every layer on each region change.
     That already killed the contrast sync silently, because the subscription was bound to layer
