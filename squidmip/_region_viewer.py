@@ -1681,6 +1681,26 @@ class RegionViewer(QMainWindow):
         added = 0
         for channel in result.channels:
             plane = result.plane(channel)
+            # A DEPTH OF ONE IS NOT A Z AXIS. `_result_pixels` hands a REGION operator its full
+            # `(C, Nz, Y, X)` volume so a stitched mosaic can be rendered in 3D (it used to index
+            # `[0, :, 0]` and throw 9 of 10 planes away). But a z-REDUCING stitch -- `mip`, the
+            # default, and the whole of a 2-D stitch -- comes back with `Nz == 1`, so `plane` is
+            # `(1, Y, X)`: a three-dimensional array describing a flat picture.
+            #
+            # napari does not broadcast a length-1 axis. It draws such a layer only while the
+            # slider is at 0 and NOTHING anywhere else, so on a pane whose z slider was already
+            # somewhere else -- a 10-plane acquisition parks it in the middle -- the stitched
+            # mosaic was invisible while every thumbnail in the tree showed signal. Julio, twice:
+            # *"When stitching finish on the full region layer, it shows a black canvas"*, and
+            # *"This problem only happens when the stitching layer first appears ... Subsequent
+            # windows I can see it"* -- a new window's dims are built from the result alone, so
+            # its slider has one stop and lands on it.
+            #
+            # The RESULT'S OWN DECLARATION decides, never the array's ndim: `z_depth` is what
+            # `z_scale_um` is already read off two lines below, and this is the same question
+            # asked of the same field. A real volume keeps every plane.
+            if int(result.z_depth) <= 1 and getattr(plane, "ndim", 0) == 3 and plane.shape[0] == 1:
+                plane = plane[0]
             placement = getattr(plane, "placement", None)
             bbox = region_bbox = (placement.bbox_um if placement is not None else preview_bbox)
             # AN ROI CHILD CROPS, through the same helper that crops its raw pyramid, so the
