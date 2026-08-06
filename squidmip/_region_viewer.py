@@ -365,7 +365,10 @@ _RAW_OP = "raw"
 
 #: The Apple floor for GL_MAX_3D_TEXTURE_SIZE, used only until the live canvas can be asked. Not a
 #: second literal: it is the one ``_napari_view`` owns.
-from squidmip._napari_view import _DEFAULT_MAX_3D_TEXTURE      # noqa: E402  (kept beside its use)
+from squidmip._napari_view import (                            # noqa: E402  (kept beside its use)
+    _DEFAULT_MAX_3D_TEXTURE,
+    full_res_level,
+)
 
 
 def _brick_budget_bytes() -> int:
@@ -2708,9 +2711,11 @@ class RegionViewer(QMainWindow):
         srcs: dict = {}
         for ch in mosaic.channels(op):
             layer = mosaic.find(op, ch)
-            data = getattr(layer, "data", None) if layer is not None else None
-            if isinstance(data, (list, tuple)):
-                data = data[0]                           # level 0 of a pyramid: the finest rung
+            # level 0 of a pyramid: the finest rung. THE one pyramid rule and not an isinstance
+            # check -- napari's `MultiScaleData` is neither a list nor a tuple, so that branch was
+            # False for every real pyramid and the whole thing travelled on as the brick source,
+            # where indexing it walks the LEVELS instead of the z planes.
+            data = full_res_level(getattr(layer, "data", None) if layer is not None else None)
             if data is None or getattr(data, "ndim", 0) < 3 or int(data.shape[0]) < 2:
                 continue
             try:
@@ -2770,8 +2775,11 @@ class RegionViewer(QMainWindow):
             layer = mosaic.find(_RAW_OP, name)
             if layer is None:
                 continue
-            data = layer.data
-            level0 = data[0] if isinstance(data, (list, tuple)) else data   # the ROI-cropped rung
+            # THE one pyramid rule (`_napari_view.full_res_level`), not an isinstance check:
+            # napari's `MultiScaleData` is neither a list nor a tuple, so this used to hand the
+            # whole pyramid on unchanged — and `np.asarray` on it below yields the COARSEST
+            # level, i.e. the blocky volume this docstring promises it is not rendering.
+            level0 = full_res_level(layer.data)                              # the ROI-cropped rung
             if getattr(level0, "ndim", 0) < 3 or int(level0.shape[0]) < 2:
                 self._say("3D needs a z-stack; this ROI has a single z plane.")
                 return

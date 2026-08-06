@@ -229,3 +229,115 @@ def test_the_stage_denominator_is_not_a_second_copy_of_the_stage_list():
     from squidmip._spots import STAGES
 
     assert V._spot_stages() is STAGES
+
+
+# ------------------------------------------------- what napari actually hands back
+#
+# Every test above builds the pyramid as a plain Python list, which is what a CALLER passes IN.
+# It is not what comes back out: napari wraps a multiscale layer's data in its own
+# `MultiScaleData`, a Sequence that is neither a list nor a tuple and that reports level 0's
+# `ndim`/`shape`/`dtype` as its own. `RegionViewer._detect_nuclei` hands the worker exactly
+# `layer.data`, so that container -- not a list -- is what production has always passed here.
+#
+# Julio, from the running GUI on the real 10x acquisition: "multiscale data has no attribute max".
+# Reproduced verbatim on `manual0` / 405 nm before the fix:
+#
+#     manual0/Fluorescence_405_nm_Ex: spot detection failed
+#         — AttributeError: 'MultiScaleData' object has no attribute 'max'
+#
+# raised at `_workers._full_res_mip`'s `data.max(axis=0)`, because the pyramid check one line
+# above it was `isinstance(data, (list, tuple))` and missed the container entirely.
+
+
+def _pyramid_layer(levels):
+    """A REAL napari layer over *levels*, so ``.data`` is whatever napari decides it is."""
+    from napari.components import ViewerModel
+
+    from squidmip._napari_view import MosaicLayers
+
+    mosaic = MosaicLayers(ViewerModel())
+    mosaic.add_mosaic("raw", "405", levels, multiscale=True, bbox_um=(0.0, 0.0, 128.0, 128.0))
+    return mosaic, mosaic.find("raw", "405")
+
+
+def _stand_in_segmenter(monkeypatch, boxes=((2, 22), (60, 80))):
+    """Replace the preferred segmenter with one that stamps KNOWN object ids.
+
+    A stand-in, and deliberately so: the defect is in what this app does with a label image, not
+    in how cellpose finds one, and real cellpose on this machine takes ~6.6 s for a 256x256 plane
+    (measured) with a nondeterministic count.
+    """
+    import dataclasses
+
+    from squidmip import _spots as SP
+
+    def _fn(plane, params, *, on_stage=None, should_stop=None):
+        if on_stage is not None:
+            on_stage("stand-in", 1, 1)
+        lab = np.zeros(np.asarray(plane).shape, dtype=np.int32)
+        for i, (a, b) in enumerate(boxes, start=1):
+            lab[a:b, a:b] = i
+        return SP.result_from_labels(lab)
+
+    name = SP.preferred_segmenter()
+    monkeypatch.setitem(SP._SEGMENTERS, name,
+                        dataclasses.replace(SP._SEGMENTERS[name], fn=_fn))
+    return name
+
+
+def test_a_napari_pyramids_own_data_reaches_the_viewer_as_a_labels_layer(qapp, monkeypatch):
+    """THE cellpose crash, end to end: a real multiscale layer's ``data`` -> a Labels layer.
+
+    Asserts the OUTCOME -- a napari Labels layer carrying the object ids the segmenter produced,
+    at level-0 resolution -- rather than that any function was called. Before the fix the worker
+    emitted ``problem`` instead of ``ready``, so no labels layer reached the viewer at all.
+
+    MUTATION: put ``isinstance(data, (list, tuple))`` back in front of ``_full_res_mip``'s
+    ``data.max(axis=0)`` -> AttributeError on ``MultiScaleData`` -> red.
+    """
+    _stand_in_segmenter(monkeypatch)
+    lv0 = np.stack([_plane() for _ in range(5)])            # (z, y, x), 128x128 planes
+    mosaic, layer = _pyramid_layer([lv0, lv0[:, ::2, ::2], lv0[:, ::4, ::4]])
+    assert not isinstance(layer.data, (list, tuple)), (
+        "napari handed the pyramid back as a list; this test no longer covers the container "
+        f"production actually sees ({type(layer.data).__name__})")
+
+    w = V._SpotWorker("manual0", "405", layer.data, None, (0.0, 0.0, 128.0, 128.0))
+    rec = _run(w)
+
+    assert rec["problem"] == [], rec["problem"]
+    assert len(rec["ready"]) == 1, "no result reached the viewer"
+    _region, channel, labels, _centroids, bbox, count = rec["ready"][0]
+    assert labels.shape == lv0.shape[1:], "the mask is not at level-0 resolution"
+    assert count == 2
+
+    # ...and the layer the window would build out of it.
+    mosaic.add_result("labels", "cellpose", channel, labels, bbox_um=bbox)
+    lay = mosaic.find("cellpose", channel)
+    assert type(lay).__name__ == "Labels", type(lay).__name__
+    assert sorted(np.unique(np.asarray(lay.data)).tolist()) == [0, 1, 2]
+    assert np.asarray(lay.data).shape == lv0.shape[1:]
+
+
+def test_a_2d_napari_pyramid_is_counted_at_LEVEL_ZERO_not_the_coarsest_level(qapp, monkeypatch):
+    """The silent half of the same defect, and the more dangerous one.
+
+    A 2-D pyramid never reaches ``.max(axis=0)``, so it did not crash -- it fell through to
+    ``np.asarray(data)``, and ``MultiScaleData.__array__`` returns the COARSEST level. Nuclei were
+    counted on a 4x-downsampled picture, which merges touching nuclei and under-reports, with
+    nothing on screen to say so.
+
+    MUTATION: return ``np.asarray(data)`` from ``full_res_level`` for a pyramid -> the mask comes
+    back 32x32 -> red.
+    """
+    _stand_in_segmenter(monkeypatch)
+    full = _plane()                                         # (128, 128)
+    mosaic, layer = _pyramid_layer([full, full[::2, ::2], full[::4, ::4]])
+
+    w = V._SpotWorker("manual0", "405", layer.data, None, None)
+    rec = _run(w)
+
+    assert rec["problem"] == [], rec["problem"]
+    labels = rec["ready"][0][2]
+    assert labels.shape == full.shape, (
+        f"segmented a downsampled pyramid level: {labels.shape} against level 0 {full.shape}")

@@ -63,6 +63,7 @@ from squidmip._measure import (
     STOPPED as _MEASURE_STOPPED, measure_run,
 )
 from squidmip._montage import _area_downsample
+from squidmip._napari_view import full_res_level
 from squidmip._operations import operator_label
 from squidmip._plate_overview import (
     _CELL, _box_union, _fit_box, _fit_cell, _mosaic_boxes, content_box,
@@ -931,23 +932,19 @@ def _full_res_plane(data, z_index):
     A napari layer's ``data`` is one of three things here, and counting cells on the wrong one
     gives a wrong number that looks entirely plausible:
 
-    * a **list of pyramid levels** (a multiscale mosaic — level 0 is full resolution, and every
-      later level has fewer, larger-looking nuclei). ALWAYS level 0: counting a 4x-downsampled
-      level would merge touching nuclei and silently under-report.
+    * a **pyramid** (a multiscale mosaic — level 0 is full resolution, and every later level has
+      fewer, larger-looking nuclei). ALWAYS level 0: counting a 4x-downsampled level would merge
+      touching nuclei and silently under-report.
     * a **(z, y, x) stack** — take the z the user is actually looking at.
     * a plain **(y, x)** plane.
 
     Only the ONE plane asked for is ever materialised; a lazy pyramid stays lazy until the
     ``np.asarray`` at the end.
     """
-    # A pyramid arrives as a list/tuple whose ELEMENTS are arrays (level 0 is full resolution). A
-    # plain nested Python list whose elements are lists/scalars is NOT a pyramid — it merely
-    # encodes one array — so it is converted whole. `ndim` on the first element is the
-    # discriminator: >=2 means "element is an array" (pyramid); otherwise it is a nested list.
-    if isinstance(data, (list, tuple)):
-        if not data:
-            raise ValueError("the layer holds an EMPTY multiscale pyramid — nothing to count.")
-        data = data[0] if getattr(data[0], "ndim", 0) >= 2 else np.asarray(data)
+    # THE one pyramid rule, shared with every other reader of a layer's data. It recognises
+    # napari's own `MultiScaleData` as well as the list we handed in; an `isinstance(..., list)`
+    # check here indexed the LEVELS as if they were z planes. See `_napari_view.pyramid_levels`.
+    data = full_res_level(data)
 
     # Trust ``.ndim`` when present (keeps a lazy dask/zarr level lazy until the final asarray). When
     # it is ABSENT — a container whose ndim defaulted to 2 is exactly what let a (z, y, x) stack
@@ -981,11 +978,14 @@ def _full_res_mip(data):
 
     Level 0 always (a downsampled level merges touching nuclei). A (z, y, x) stack is reduced by
     max over z; a plain (y, x) plane IS its own MIP. The max stays lazy on a dask level until the
-    final asarray, so only the 2-D result is materialised, not the whole stack at once."""
-    if isinstance(data, (list, tuple)):
-        if not data:
-            raise ValueError("the layer holds an EMPTY multiscale pyramid — nothing to count.")
-        data = data[0] if getattr(data[0], "ndim", 0) >= 2 else np.asarray(data)
+    final asarray, so only the 2-D result is materialised, not the whole stack at once.
+
+    THE PYRAMID IS TAKEN APART BEFORE THE MAX, and it has to be: the `.max(axis=0)` below is the
+    line that raised ``AttributeError: 'MultiScaleData' object has no attribute 'max'`` in the
+    running GUI, because the pyramid check here was an ``isinstance(data, (list, tuple))`` and
+    napari hands a multiscale layer's data back in its own container. See
+    ``_napari_view.pyramid_levels``."""
+    data = full_res_level(data)
     ndim = getattr(data, "ndim", None)
     if ndim is None:
         data = np.asarray(data)

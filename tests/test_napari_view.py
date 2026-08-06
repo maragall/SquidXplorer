@@ -1540,3 +1540,76 @@ def test_show_op_moves_the_z_axis_too(layers):
 
     layers.show_op("raw")
     assert layers.model.dims.ndim == 3
+
+
+# ------------------------------------------- a layer's data is NOT the list that went in
+#
+# napari wraps a multiscale layer's data in `napari.layers._multiscale_data.MultiScaleData`, a
+# Sequence of levels that is neither a list nor a tuple. Every `isinstance(data, (list, tuple))`
+# pyramid check in this codebase was therefore False for EVERY pyramid in the app, and each one
+# failed differently: `_workers._full_res_mip` raised `AttributeError: 'MultiScaleData' object has
+# no attribute 'max'` (the crash Julio hit running cellpose), while the two below failed silently.
+# `_napari_view.pyramid_levels` is the one rule they all read now.
+
+
+def test_the_3d_swap_actually_swaps_a_pyramid_napari_handed_back(layers):
+    """``render_max_res_3d`` was a SILENT NO-OP on every real mosaic.
+
+    Its first line was ``if not isinstance(ly.data, (list, tuple)): return`` -- "already
+    single-scale, nothing to swap" -- and a layer built with ``multiscale=True`` never satisfies
+    it, so the method returned before touching anything and napari went on dropping the layer to
+    its COARSEST level in 3D. That blocky volume is the exact thing this method exists to prevent.
+
+    MUTATION: put the isinstance check back -> the layer stays multiscale -> red.
+    """
+    raw = layers.add_mosaic("raw", "405", _z_stack_pyramid(), multiscale=True,
+                            bbox_um=_Z_BBOX, z_scale_um=2.0)
+    assert not isinstance(raw.data, (list, tuple)), (
+        f"napari returned a plain {type(raw.data).__name__}; this test no longer covers the "
+        "container production sees")
+
+    layers.render_max_res_3d(True)
+
+    assert raw.multiscale is False, "the 3D swap never ran: the layer is still multiscale"
+    assert np.asarray(raw.data).shape == (10, 64, 64), (
+        "3D got a coarser level than the texture budget allows")
+
+    layers.render_max_res_3d(False)
+    assert raw.multiscale is True, "the pyramid did not come back for 2D"
+    assert [tuple(np.asarray(lv).shape) for lv in raw.data] == [(10, 64, 64), (10, 32, 32)]
+
+
+def test_full_res_level_takes_level_zero_off_napari_s_own_container():
+    """``np.asarray(MultiScaleData)`` is the COARSEST level -- ``__array__`` returns ``_data[-1]``.
+
+    So "it is not a list, treat it as an array" is not a harmless miss: it is a silent
+    substitution of the smallest picture for the largest one.
+
+    MUTATION: make ``pyramid_levels`` return None for a non-list Sequence -> the coarsest level
+    comes back -> red.
+    """
+    from napari.components import ViewerModel
+
+    from squidmip._napari_view import full_res_level, pyramid_levels
+
+    lv0 = np.arange(64 * 64, dtype=np.uint16).reshape(64, 64)
+    data = ViewerModel().add_image([lv0, lv0[::2, ::2], lv0[::4, ::4]], multiscale=True).data
+
+    assert np.asarray(data).shape == (16, 16), (
+        "napari no longer coerces a pyramid to its coarsest level; this test's premise is stale")
+    assert [tuple(lv.shape) for lv in pyramid_levels(data)] == [(64, 64), (32, 32), (16, 16)]
+    assert np.array_equal(np.asarray(full_res_level(data)), lv0)
+
+
+def test_a_plain_array_and_a_nested_list_are_not_pyramids():
+    """The discriminator is the ELEMENT, not the container: ``[[1, 2], [3, 4]]`` encodes ONE array
+    and must not be read as two levels."""
+    from squidmip._napari_view import full_res_level, pyramid_levels
+
+    arr = np.zeros((4, 4), np.uint16)
+    assert pyramid_levels(arr) is None
+    assert full_res_level(arr) is arr
+    assert pyramid_levels([[1, 2], [3, 4]]) is None
+    assert pyramid_levels("not an image at all") is None
+    with pytest.raises(ValueError, match="EMPTY multiscale"):
+        pyramid_levels([])
