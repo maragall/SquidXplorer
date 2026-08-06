@@ -61,9 +61,6 @@ GUI_MODULES = frozenset({
     #                      budget policy) and it stays below this boundary so the decisions that
     #                      cannot be probed without a GL context are still testable headless.
     "_layer_tree",       # the grouped layer tree (a QTreeView over napari's item model)
-    "_legend",           # Task 3: the mixed-recipe legend painted on the plate. A deliberate
-    #                      GUI addition: it exists to say on the plate's FACE that more than one
-    #                      recipe is present, so it cannot live below the Qt boundary.
     "_logpanel",         # the log PANEL (the Qt widget). `_logpane`, no 'l', is the Qt-free bus.
     "_napari_pane",
     "_op_panels",

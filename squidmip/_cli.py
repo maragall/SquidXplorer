@@ -89,11 +89,17 @@ def operator_params(operator: str) -> dict:
     none today, so their kwargs pass through to ``stitch_plate`` unchecked and an unknown one is
     refused there.
     """
-    from squidmip import available_projectors, projector_params
+    from squidmip import projector_params
 
-    if operator not in set(available_projectors()):
+    # ASKED, not looked up: an operator CHAIN ('bgsub+spot') is not a table key, and it declares
+    # its parts' parameters namespaced `<step>.<param>` — so `--param spot.min_area_px=80` has to
+    # be checkable here or the chain would be runnable with parameters the CLI called unknown. A
+    # region operator is not in the projector table at all and falls out here as `{}`, which is
+    # what it was: its kwargs pass through to `stitch_plate` and an unknown one is refused there.
+    try:
+        return {p.name: p.default for p in projector_params(operator)}
+    except (KeyError, TypeError, ValueError):
         return {}
-    return {p.name: p.default for p in projector_params(operator)}
 
 
 def _operator_catalogue() -> str:
@@ -223,8 +229,23 @@ class ProcessParameters(BaseModel, use_attribute_docstrings=True):
         # fronts: `--projector stitch` was refused as "unknown" by a CLI whose executor accepts it
         # and whose write_plate dispatches on it.
         runnable = runnable_operators()
-        if v not in runnable:
-            raise ValueError(f"unknown operator {v!r}; this application can run: {runnable}")
+        if v in runnable:
+            return v
+        # Not a registered name, and it may still be an operator CHAIN ('bgsub+mip') — a legal
+        # projector everywhere the engine takes one. So the engine is asked to RESOLVE it, exactly
+        # as `EngineExecutor.do_run_operator` does, and for the same reason: a membership test
+        # against the two tables is not the whole answer, and deciding otherwise here would make
+        # the CLI narrower than the command layer it fronts a second time. The chain refusals
+        # (`_compose`: a z-reducer that is not last, a repeated step) arrive with their own
+        # sentence, which names the fix.
+        from squidmip._engine import _resolve_projector
+
+        try:
+            _resolve_projector(v)
+        except (KeyError, TypeError):
+            raise ValueError(
+                f"unknown operator {v!r}; this application can run: {runnable}, or a chain of "
+                "those joined with '+' (e.g. 'bgsub+mip')") from None
         return v
 
     @model_validator(mode="after")

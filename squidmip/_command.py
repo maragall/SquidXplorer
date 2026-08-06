@@ -620,9 +620,22 @@ class EngineExecutor:
                            "nothing is open — run open_acquisition first")
         runnable = sorted(set(available_projectors()) | set(available_region_operators()))
         if cmd.operator not in runnable:
-            return _refuse(cmd.kind, UNKNOWN_OPERATOR,
-                           f"{cmd.operator!r} is not a runnable operator — this application can "
-                           f"run: {', '.join(runnable)}", available=runnable)
+            # Not a registered name. It may still be an operator CHAIN ('bgsub+mip'), which is a
+            # legal projector everywhere the engine takes one, so ask the engine to resolve it
+            # rather than deciding here that the table is the whole answer. The two refusals stay
+            # distinct: a name nobody registered is UNKNOWN_OPERATOR and lists what exists; a chain
+            # of real operators that cannot mean anything (a z-reducer that is not last, a repeated
+            # step) is a BAD_COMMAND carrying `_compose`'s own reason, which names the fix.
+            from squidmip._engine import _resolve_projector
+
+            try:
+                _resolve_projector(cmd.operator)
+            except (KeyError, TypeError):
+                return _refuse(cmd.kind, UNKNOWN_OPERATOR,
+                               f"{cmd.operator!r} is not a runnable operator — this application can "
+                               f"run: {', '.join(runnable)}", available=runnable)
+            except ValueError as exc:
+                return _refuse(cmd.kind, BAD_COMMAND, str(exc), operator=cmd.operator)
         # REGISTERED but not INSTALLABLE. A separate question with a separate answer: the operator
         # exists and is spelled correctly, and the machine cannot run it. Asked here, before the
         # target is resolved and before an output directory is named, so the refusal is the whole
