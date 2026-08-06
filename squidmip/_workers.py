@@ -141,12 +141,19 @@ class _OperatorWorker(QThread):
         self._regions = regions          # None = whole plate; a list = subset preview (those wells only)
         self._save = save                # False = PREVIEW: compute + push to the viewer, write NOTHING
         self._n_fovs = n_fovs            # None = every FOV per well -> coordinate-placed mosaic tiles
-        # Per-run parameters for a REGION operator (registration on/off, registration channel,
-        # feather width, blunder thresholds, channel subset) -- the stitcher panel in pane 1
-        # sets these. Carried on BOTH branches of run(): a setting tuned on a preview and then
-        # dropped on the save would be thrown away at exactly the moment it is written to disk.
-        # A projector has no equivalent seam (its parameters are baked in at registration), and
-        # write_plate refuses these for one by name rather than accepting and dropping them.
+        # Per-run parameters for the operator, whichever table it is in -- a REGION operator's
+        # (registration on/off, registration channel, feather width, blunder thresholds, channel
+        # subset) from the stitcher panel, or a PROJECTOR's declared `params` from the panel
+        # `_param_panel` builds out of them. Carried on BOTH branches of run(): a setting tuned on
+        # a preview and then dropped on the save would be thrown away at exactly the moment it is
+        # written to disk, and a setting dropped on the PREVIEW is worse still -- the preview is
+        # where the value is judged.
+        #
+        # The second half of that used to read "a projector has no equivalent seam (its parameters
+        # are baked in at registration)", and the preview branch of run() matched it by omitting
+        # these. `Operator.params` / `Operator.factory` ended that, and an operator declaring four
+        # parameters (spot, cellpose) then ran at its defaults while everything on screen said
+        # otherwise.
         self._operator_kwargs = dict(operator_kwargs or {})
         # Per-region FOV boxes inside the _CELL thumbnail (IMA-187). Computed ONCE up front from
         # the reader's stage positions, because every arriving FOV needs its box and the geometry
@@ -402,9 +409,17 @@ class _OperatorWorker(QThread):
                 else:
                     from squidmip import project_plate
 
+                    # operator_kwargs ON THE PREVIEW TOO. This call used to omit it while the SAVE
+                    # branch above passed it and this class's docstring claimed both branches
+                    # carried it. It was true when written -- a projector's parameters were baked
+                    # in at registration and only a REGION operator took kwargs -- and it stopped
+                    # being true the moment `Operator.params`/`factory` landed. The symptom is the
+                    # worst shape there is: the panel says min_area_px=400, the console line says
+                    # min_area_px=400, and the pixels are the ones min_area_px=30 produces.
                     stream = project_plate(self._reader, workers=_VIEWER_WORKERS, projector=projector,
                                            n_fovs=self._n_fovs, on_error=self._on_error,
-                                           regions=self._regions)
+                                           regions=self._regions,
+                                           operator_kwargs=self._operator_kwargs or None)
                 try:
                     for region, fov, image in stream:
                         if self._stop.is_set():

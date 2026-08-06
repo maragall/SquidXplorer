@@ -5489,6 +5489,92 @@ def test_the_save_button_names_its_operator_instead_of_taking_the_first_card():
     assert V._SAVE_OPERATOR in V._OPERATIONS_BY_KEY
 
 
+def test_a_cardless_operator_opens_a_panel_built_from_its_declaration(qapp, stub_detail,
+                                                                     squid_dataset):
+    """`_activate_operator` used to end at `if op is not None:` and do NOTHING for a key the card
+    table did not know: no tab, no error, no line in the readout. Silence was the bug.
+
+    `spot` is the case: a registered projector with four declared parameters, no card, and
+    therefore no way to reach any of them from the GUI. It now opens the generic panel, and the
+    panel's widgets ARE the declaration.
+    """
+    from squidmip._engine import projector_params
+    from squidmip._param_panel import GenericOperatorPanel
+
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    assert "spot" not in V._OPERATIONS_BY_KEY, "spot has gained a card; pick another cardless one"
+    win._activate_operator("spot")
+    panel = win._op_tabs.get("spot")
+    assert panel is not None, f"no panel opened; readout said {win._readout.text()!r}"
+    assert isinstance(panel, GenericOperatorPanel)
+    assert sorted(panel.widgets) == sorted(p.name for p in projector_params("spot"))
+    win.close()
+
+
+def test_a_key_that_has_no_panel_at_all_is_refused_by_name_never_silently(qapp, stub_detail,
+                                                                         squid_dataset):
+    """The other half: a key with neither a card nor a readable declaration must SAY SO. A click
+    that lands on nothing is indistinguishable from one that is still working."""
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    before = dict(win._op_tabs)
+    win._activate_operator("stitch_but_misspelled")
+    assert win._op_tabs == before, "a refused operator must not open a tab"
+    assert "stitch_but_misspelled" in win._readout.text()
+    win.close()
+
+
+def test_the_preview_path_carries_operator_kwargs_to_the_engine(qapp, squid_dataset, monkeypatch):
+    """MEASURED, not read: `_OperatorWorker`'s PREVIEW branch called `project_plate` WITHOUT
+    `operator_kwargs` while the save branch passed them and the class's own docstring said both
+    branches carried them. It was true when written -- a projector's parameters were baked in at
+    registration -- and stopped being true the moment `Operator.params`/`factory` landed.
+
+    The symptom is the worst shape there is: the panel says min_area_px=400, the console line
+    (`_action_label`) says min_area_px=400, and the pixels are the ones min_area_px=30 produces.
+    Verified end to end on a real acquisition (57 labels vs 44 at min_area_px 30/400); this is the
+    unit that keeps it from coming back.
+    """
+    import squidmip
+    from squidmip.reader import open_reader
+
+    root, _ = squid_dataset
+    reader = open_reader(str(root))
+    meta = reader.metadata
+    seen = {}
+
+    def fake_project_plate(_reader, **kw):
+        seen.update(kw)
+        return iter(())
+
+    monkeypatch.setattr(squidmip, "project_plate", fake_project_plate)
+    fov_index = {r: {"rc": (0, i), "idx": i, "well_id": r}
+                 for i, r in enumerate(meta["regions"])}
+    worker = V._OperatorWorker("spot", reader, meta, fov_index, "", regions=meta["regions"][:1],
+                               save=False, n_fovs=None,
+                               operator_kwargs={"min_area_px": 400})
+    worker.run()
+    assert seen.get("operator_kwargs") == {"min_area_px": 400}, (
+        "the preview branch dropped the panel's parameters on the floor: "
+        f"project_plate was called with {sorted(seen)}")
+
+
+def test_every_uncarded_runnable_operator_is_offered_in_the_declaration_submenu(qapp):
+    """A card is presentation and the engine is capability, and the gap between them used to be a
+    capability the GUI could not reach AT ALL. The submenu is built off `runnable_operators()`, so
+    an operator added by a plugin appears without an edit here."""
+    win = V.PlateWindow(None)
+    offered = {a.text() for a in win._declared_menu.actions()}
+    expected = {V.operator_label(k) for k in V.runnable_operators()
+                if k not in V._OPERATIONS_BY_KEY}
+    assert offered == expected
+    assert "spot" in offered and "cellpose" in offered
+    win.close()
+
+
 def test_operator_label_falls_back_to_the_key_for_a_cardless_operator():
     # `spot` is a registered projector with no card. It must still name itself rather than
     # raising a bare KeyError out of the event loop. (`reference` was this example until it

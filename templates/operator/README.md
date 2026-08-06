@@ -138,14 +138,34 @@ A `Param` has a name, a default and one line of prose. Deliberately **no type, n
 hint**: the moment it carries a widget hint it has become the GUI's schema and two places own the
 same fact.
 
-**How parameters reach the GUI, stated honestly.** `squidmip.projector_params("<name>")` is the
-public accessor, and `list_operators` reports every parameter with its default, so an **agent or
-script driving the app can set them today**. The desktop GUI, as of 2026-08-05, **does not yet
-build widgets from this declaration** — it hand-writes a panel class per operator in
-`squidmip/_op_panels.py`, and an operator with no hand-written panel gets no widgets and runs at
-its declared defaults. Your operator therefore *runs* from the GUI at its defaults, and is *tuned*
-from the CLI, the command surface, or a script. A generic panel driven by `projector_params()` is a
-known, named gap in SquidXplorer, not something your package can fix.
+**How parameters reach the GUI.** `squidmip.projector_params("<name>")` is the public accessor,
+and `list_operators` reports every parameter with its default, so an agent or script driving the
+app can set them. The desktop GUI reads the same accessor: **your declared parameters become
+widgets, with no code in SquidXplorer that knows your operator's name.**
+`squidmip/_param_panel.py` builds the panel, and the widget is chosen from the TYPE OF YOUR
+DEFAULT — which is why `Param` needs no widget hint:
+
+| your default | the widget you get |
+|---|---|
+| `bool` | a check box |
+| `int` | an integer spin |
+| `float` | a decimal spin |
+| `str` | a text field |
+
+Your `blurb` becomes the widget's tooltip. A default of any other type (`None`, a tuple, an array)
+is **refused by name**: the panel says which parameter and which type rather than guessing a
+widget, because a guessed widget is how a value the user typed becomes a value the run did not
+receive. Give such a parameter a default of a type in the table above, or keep it CLI-only.
+
+The panel is the FALLBACK: an operator SquidXplorer ships a hand-written panel for (`stitch`,
+`decon`) keeps it, because those do things a parameter form cannot. Yours will not have one, so
+yours gets the generic panel. It reaches the plate exactly the way a hand-written panel's values
+do — through `operator_kwargs` — and your operator appears under **Process well-plates -> From
+their declaration** without an edit anywhere in SquidXplorer.
+
+Before 2026-08-05 this paragraph documented the opposite, and it was the weakest link in this
+whole contract: this README told you to declare `params` into a GUI that ignored them, so
+`spot` and `cellpose` declared four parameters each and not one was settable from any panel.
 
 **What a `Param` cannot be: a channel.** The engine calls you per `(t, c, z-group)` and hands you
 planes only, so a value bound at registration never learns which channel it is looking at. If your
@@ -231,15 +251,17 @@ Refusals name both operators and say what to do instead; nothing is ever silentl
 
 Stated so you do not build against something that is not there.
 
-* **A GUI panel from your declaration.** See §2.4. Parameters are reachable from code and from the
-  command surface today; the desktop panel is hand-written per operator.
+* **A HAND-WRITTEN GUI panel.** You get the generic one built from your `params` (§2.4), which is
+  a form. A panel with behaviour of its own — unit conversions, controls that grey each other out,
+  an iterative QC loop that publishes a picture — lives in SquidXplorer and a plugin cannot add one.
 * **Inter-FOV work through this table.** See §2.2 — `add_region_operator` instead. Be warned that
   it is a WEAKER contract than the one this README documents: a region operator can declare
   `requires=`, and nothing else. `consumes` is implicitly `{"fov"}`, `produces` is hardcoded to
   `"intensity"` by every reader of that table, and its parameters are undeclared `**kwargs` that
-  nothing validates and no UI can enumerate (`_op_panels.STITCH_DEFAULTS` mirrors `stitch`'s by
-  hand, from private constants). Adding an inter-FOV operator is possible and it is not yet this
-  template's contract.
+  nothing validates and no UI can enumerate — so the generic panel of §2.4 **refuses a region
+  operator by name**, and `stitch`'s controls are hand-written (`_op_panels.StitcherPanel`, whose
+  defaults are read off `stitch_region`'s signature because there is no declaration to read).
+  Adding an inter-FOV operator is possible and it is not yet this template's contract.
 * **Registering into the viewer's card table.** The card list (label, blurb, ordering) lives in
   SquidXplorer and a plugin cannot add to it. Your operator is *runnable* and *listed* without a
   card; `operator_label()` falls back to the registry name. A card is presentation, the engine is
