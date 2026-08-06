@@ -37,6 +37,13 @@ import logging
 from typing import Optional
 
 from squidmip import _run_scope
+# The operator vocabulary comes from the Qt-free registry, NOT from the window. `_operations` was
+# cut out of `_viewer` in gap 6 for exactly this reader, and `_viewer`'s own comment above its
+# re-export block said this module "can point at `_operations` directly now, and should" — it just
+# never did. Answering "what is this operator called" used to import PyQt5, napari and a
+# QMainWindow, inside a function body, on the surface whose whole claim is that an agent, a test or
+# a script can drive the GUI the way it drives the CLI.
+from squidmip._operations import operator_label, runnable_operators
 from squidmip._command import (
     BUSY,
     CommandResult,
@@ -141,8 +148,6 @@ class WindowExecutor:
         selector — one resolution, not two. A whole-dataset run becomes the full ordered region
         list, which the engine treats as the whole plate.
         """
-        from squidmip._viewer import operator_label, runnable_operators
-
         w = self._window
         if not self._has_acquisition():
             return _refuse(cmd.kind, NO_ACQUISITION,

@@ -627,7 +627,13 @@ class Plate(ABC):
 # --------------------------------------------------------------------------- WellPlate
 
 def _row_letter(i: int) -> str:
-    """0->A, 25->Z, 26->AA. Local copy: the viewer's lives behind a PyQt5 import."""
+    """0->A, 25->Z, 26->AA. THE definition — `_plate_shape._row_index` is its inverse.
+
+    It was called a "local copy" of one in the viewer that lived "behind a PyQt5 import". That
+    other copy was byte-identical, had no caller but its own dead `_plate_grid`, and was deleted on
+    2026-08-06; `_viewer` now re-exports THIS one under the historical name. (The import was qtpy,
+    not PyQt5, and had not been the reason for a while.)
+    """
     s, i = "", i + 1
     while i:
         i, r = divmod(i - 1, 26)
