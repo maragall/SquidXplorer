@@ -372,6 +372,22 @@ class Placement:
             )
 
     @property
+    def bbox_um(self) -> tuple[float, float, float, float]:
+        """``(x0, y0, x1, y1)`` stage micrometres these pixels cover — X FIRST.
+
+        The one conversion from this value object into the box every display placement rule takes
+        (``_napari_view.scale_translate_from_bbox_um``, which flips X-first to napari's Y-first).
+        It is a property here rather than arithmetic at each call site because the two things it
+        joins -- ``origin_um``, which is ``(y, x)``, and ``bbox_um``, which is ``(x, y, x, y)`` --
+        are in OPPOSITE axis orders, and an unflipped copy of this transposes a mosaic without
+        raising.
+        """
+        y0, x0 = self.origin_um
+        h, w = self.shape
+        p = float(self.pixel_size_um)
+        return (float(x0), float(y0), float(x0) + w * p, float(y0) + h * p)
+
+    @property
     def registered(self) -> bool:
         """Whether a solve ran — read off ``reg_channel``, NOT off the offsets.
 

@@ -3559,7 +3559,10 @@ class PlateWindow(QMainWindow):
             )
             accs[str(region)] = acc
         try:
-            acc.add(int(fov), np.asarray(planes))
+            # asanyarray: a region operator's pixels arrive as a `PlacedArray` carrying the
+            # `Placement` that fused them, and `asarray` would return a base ndarray and drop it
+            # one call before the accumulator reads it. See `RegionResultAccumulator._bbox`.
+            acc.add(int(fov), np.asanyarray(planes))
         except ValueError as exc:
             # NO SILENT FAILURES: a result that cannot be placed is said out loud. It must not
             # abort the run -- the pixels are still written and still on the slider.
