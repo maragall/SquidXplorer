@@ -721,11 +721,35 @@ def _stub_pane_classes():
     """Build the stub classes lazily: conftest must import without the [gui] extra."""
     from qtpy.QtWidgets import QWidget
 
+    def _as_napari_data(data, multiscale):
+        """What napari would hand BACK for *data*, which is not always what went in.
+
+        A multiscale layer's ``.data`` is ``napari.layers._multiscale_data.MultiScaleData`` -- a
+        Sequence of levels that is neither a list nor a tuple, and that reports level 0's ndim,
+        shape and dtype as its own while ``np.asarray`` of it yields the COARSEST level.
+
+        This stub used to hand back the plain list it was given, and that lie is why three
+        production sites drifted into ``isinstance(data, (list, tuple))`` pyramid checks that are
+        False for every real pyramid: ``_workers._full_res_mip`` (AttributeError: 'MultiScaleData'
+        object has no attribute 'max' -- Julio, running cellpose on the 10x set),
+        ``MosaicLayers._swap_layer_scale`` (a silent no-op) and
+        ``RegionViewer._render_roi_volume`` (silently the coarsest level). A stub that answers
+        differently from the production object cannot catch any of them.
+        """
+        if not multiscale or not isinstance(data, (list, tuple)):
+            return data
+        try:
+            from napari.layers._multiscale_data import MultiScaleData
+
+            return MultiScaleData(data)
+        except Exception:                    # noqa: BLE001 - napari is a [gui] extra
+            return data
+
     class StubLayer:
-        """A napari image layer as RegionViewer reads it back: `.data` is the level list."""
+        """A napari image layer as RegionViewer reads it back."""
 
         def __init__(self, data, kw):
-            self.data = data
+            self.data = _as_napari_data(data, kw.get("multiscale"))
             self.scale = kw.get("scale")
             self.translate = kw.get("translate")
             self.contrast_limits = None

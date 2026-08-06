@@ -74,6 +74,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Sequence as _SequenceABC
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional, Sequence
@@ -527,8 +528,13 @@ class MosaicLayers:
             meta = dict(getattr(ly, "metadata", None) or {})
         try:
             if full_res:
-                data = ly.data
-                if not isinstance(data, (list, tuple)):
+                # `pyramid_levels` and not `isinstance(ly.data, (list, tuple))`: napari hands a
+                # multiscale layer's data back as its own `MultiScaleData`, so that check was
+                # False for EVERY pyramid in the app and this swap returned at its first line —
+                # a silent no-op, leaving napari to drop the layer to its coarsest level in 3D,
+                # which is exactly the blocky volume this method exists to prevent.
+                data = pyramid_levels(ly.data)
+                if data is None:
                     return                       # already single-scale, nothing to swap
                 meta["_pyramid"] = data          # stash the pyramid so 2D can restore it
                 ly.metadata = meta
@@ -1494,6 +1500,61 @@ def _first_level(data: Any, multiscale: bool) -> Any:
 def _first_level_shape(data: Any, multiscale: bool) -> Sequence[int]:
     """Shape of the full-resolution plane, whether or not ``data`` is a pyramid."""
     return _first_level(data, multiscale).shape
+
+
+# -- what comes BACK off a layer ------------------------------------------------------------
+#
+# The two helpers above describe data on its way INTO napari, where the caller already knows
+# whether it built a pyramid. These two describe the return trip, where it does not — and that
+# is a different question with a trap in it.
+#
+# `layer.data` for a multiscale layer is NOT the list that was handed in. napari wraps it in
+# `napari.layers._multiscale_data.MultiScaleData`, a `Sequence` of levels that is neither a list
+# nor a tuple, and that presents level 0's `ndim`, `shape`, `dtype` and `size` as its own. So an
+# `isinstance(data, (list, tuple))` pyramid check misses it and every line after that check runs
+# on the WRONG object:
+#
+#   * `data[z]` walks the LEVELS, not the z planes (IndexError, or a coarser level);
+#   * `data.max(axis=0)` raises `AttributeError: 'MultiScaleData' object has no attribute 'max'`
+#     — the crash Julio hit running cellpose from the running GUI, at `_workers._full_res_mip`;
+#   * `np.asarray(data)` silently returns `MultiScaleData.__array__`, which is the COARSEST
+#     level. That one is the dangerous half: a nuclei count on a 4x-downsampled level merges
+#     touching nuclei and under-reports, and nothing on screen says so.
+#
+# `MosaicLayers._collapse_layer_z` learned this in 2026-08 and wrote it in a comment; the four
+# other sites that read `layer.data` did not. So the knowledge lives here now, once, and every
+# reader of a layer's data goes through it.
+
+
+def pyramid_levels(data: Any) -> Optional[list]:
+    """The levels of *data* when it is a MULTISCALE PYRAMID, else None. Highest resolution first.
+
+    Recognises every container napari's multiscale contract can produce — the ``list``/``tuple``
+    handed to ``add_image(..., multiscale=True)``, and the ``MultiScaleData`` that comes back out
+    of ``layer.data``. The discriminator for "is this a pyramid at all" is that it is a
+    ``Sequence`` (``numpy``/``dask``/``zarr`` arrays are not) whose FIRST ELEMENT is itself an
+    array. A plain nested Python list encodes ONE array and is not a pyramid, which is why the
+    element's ``ndim`` is checked rather than the container's type alone.
+
+    Raises on an EMPTY sequence rather than returning None: "the layer holds no levels" is a
+    broken layer, not a single-scale one, and returning None would hand the caller a container it
+    would then index.
+    """
+    if isinstance(data, (str, bytes)) or not isinstance(data, _SequenceABC):
+        return None
+    if len(data) == 0:
+        raise ValueError("the layer holds an EMPTY multiscale pyramid — nothing to read.")
+    return list(data) if int(getattr(data[0], "ndim", 0)) >= 2 else None
+
+
+def full_res_level(data: Any) -> Any:
+    """The FULL-RESOLUTION array behind a napari layer's ``data``, pyramid or not.
+
+    Level 0 for a pyramid, the array itself otherwise. Never materialises anything: a lazy
+    dask/zarr level is returned lazy, so the caller decides what to compute.
+    """
+    levels = pyramid_levels(data)
+    return data if levels is None else levels[0]
 
 
 # --------------------------------------------------------------------------------------

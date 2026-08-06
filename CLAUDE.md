@@ -178,6 +178,30 @@ and `[test]`. It is probed by `_video.encoder_problem()` before anything is writ
 greys out naming what is missing. Both packages are in `scripts/hcs-viewer.spec`'s `collect_all`
 list, not its excludes — the same package-data blind spot napari has there.
 
+## A layer's `data` is not the list that went in
+
+`layer.data` for a `multiscale=True` layer is `napari.layers._multiscale_data.MultiScaleData`, a
+`Sequence` of levels that is **neither a list nor a tuple** and that reports level 0's `ndim`,
+`shape`, `dtype` and `size` as its own — while `np.asarray()` of it returns the **coarsest** level
+(`__array__` is `_data[-1]`). So `isinstance(data, (list, tuple))` as a pyramid check is False for
+every real pyramid in this app, and each site that used it failed differently:
+
+| site | how it failed |
+|---|---|
+| `_workers._full_res_mip` | `AttributeError: 'MultiScaleData' object has no attribute 'max'` — Julio, running cellpose on the 10x set. Loud. |
+| `_workers._full_res_plane` | `data[z]` walked the LEVELS, not the z planes |
+| `MosaicLayers._swap_layer_scale` | returned at its first line: the 3D full-res swap was a **silent no-op**, so napari kept dropping the layer to its coarsest level in 3D |
+| `RegionViewer._render_roi_volume` | passed the pyramid on, and `np.asarray` picked the coarsest rung: a blocky volume with no message |
+
+**`_napari_view.pyramid_levels()` / `full_res_level()` are the one rule**, and every reader of a
+layer's data goes through them. The discriminator is `Sequence` (numpy/dask/zarr arrays are not)
+whose FIRST ELEMENT is an array, so a plain nested list still reads as one array. Do not add a
+fifth `isinstance` check; `MosaicLayers._collapse_layer_z` already knew this and wrote it in a
+comment, and a comment is not a mechanism.
+
+`tests/conftest.py`'s `StubLayer` now wraps a multiscale add in a real `MultiScaleData`. It used to
+hand the plain list back, and that lie is why four sites drifted with the suite green.
+
 ## Nothing decodes on the Qt thread — including the contrast seed
 
 The contrast seed is the one that keeps getting missed, because it does not look like a read.

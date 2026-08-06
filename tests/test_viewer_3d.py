@@ -166,6 +166,48 @@ class TestRawPushCarriesVoxelSize:
                 f"{op}/{channel} declared {level0.shape[0]} planes, not {n_z}")
         shutdown_plate_window(qapp, win)
 
+    def test_the_3d_volume_is_LEVEL_ZERO_and_not_the_coarsest_pyramid_rung(
+        self, qapp, napari_pane_stub, squid_dataset, monkeypatch  # noqa: F811
+    ):
+        """``_render_roi_volume``'s own docstring promises level 0; it took the pyramid.
+
+        The rung was picked with ``data[0] if isinstance(data, (list, tuple)) else data``, and
+        napari hands a multiscale layer's data back as ``MultiScaleData``, which is neither. So the
+        whole pyramid went into the volume dict and ``np.asarray`` on it -- ``__array__`` returns
+        ``_data[-1]`` -- silently substituted the COARSEST level. A blocky volume, no message.
+
+        MUTATION: restore the isinstance branch in ``_render_roi_volume`` -> the pushed volume
+        comes back at the smallest rung's shape -> red.
+        """
+        import squidmip._napari3d as napari3d
+
+        root, _ = squid_dataset
+        win = V.PlateWindow(None)
+        win.ingest(str(root))
+        w = _open_window(win, ["B3"])
+        pane = napari_pane_stub[-1]
+        added = _wait_for_layers(qapp, pane)
+
+        levels_by_channel = {ch: lv for _op, ch, lv, _kw in added}
+        assert any(isinstance(lv, (list, tuple)) and len(lv) > 1
+                   for lv in levels_by_channel.values()), (
+            "the fixture produced a single-rung pyramid, so this asserts nothing")
+
+        pushes = []
+        monkeypatch.setattr(
+            napari3d, "open_native_3d_volume",
+            lambda volumes, **kw: pushes.append(volumes) or object())
+
+        w._render_roi_volume(pane.mosaic, {}, {})
+
+        assert pushes, f"nothing was pushed in 3D: {pane.said}"
+        for channel, volume in pushes[-1].items():
+            levels = levels_by_channel[channel]
+            level0 = levels[0] if isinstance(levels, (list, tuple)) else levels
+            assert volume.shape == tuple(level0.shape), (
+                f"{channel} was rendered at {volume.shape}, not level 0's {tuple(level0.shape)}")
+        shutdown_plate_window(qapp, win)
+
 
 class TestThe3DPopoutDoesNotPileUp:
     """Julio: "consider changing the 3D interaction so clicking 3D reuses the current window
