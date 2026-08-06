@@ -454,18 +454,11 @@ def cached_operator_results(region: str, version: Any = 0) -> "list[tuple[str, R
     return [(str(e.chain.recipes[0].name), e.result) for e in RESULTS.entries()
             if e.scope == scope and e.version == version and e.chain.recipes]
 
-#: The copy/paste buffer for a recipe chain (generalises the contrast-only _LUT_CLIPBOARD). "Copy"
-#: puts a chain here (and its script); "Paste" applies it to a view / the plate / everything.
-CLIPBOARD: "dict[str, RecipeChain]" = {"chain": RecipeChain()}
-
-
-def copy_chain(chain: RecipeChain) -> str:
-    """Put *chain* on the clipboard and return its script (what a Copy action shows / stores)."""
-    CLIPBOARD["chain"] = chain
-    return chain.to_script()
-
-
-def paste_chain() -> RecipeChain:
-    """The chain currently on the clipboard (empty chain if nothing was copied)."""
-    return CLIPBOARD.get("chain") or RecipeChain()
+# There is no chain clipboard here. `CLIPBOARD` / `copy_chain` / `paste_chain` lived at the bottom
+# of this module until 2026-08-06 with ZERO callers in the package, the tests, the tools or the
+# CLI, described as generalising `_region_viewer._LUT_CLIPBOARD` -- which is still the module-level
+# dict that both Copy LUTs and Paste LUTs actually use. A second, unwired copy/paste buffer sitting
+# in the recipe module is the "what the user last chose, owned twice" shape wearing a plausible
+# name: the next person to add Copy Recipe would reasonably wire it here and end up with two
+# clipboards. Copy/paste of a chain belongs wherever the LUT clipboard is when it is built.
 

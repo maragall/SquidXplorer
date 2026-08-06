@@ -231,9 +231,15 @@ def _action_label(key: str, operator_kwargs: Optional[dict] = None) -> str:
     The REGISTRY key, not the card's human label, and the parameters spelled out. A console line
     has to be enough to reproduce the run from, and "Deconvolution" is not: two runs at different
     sigmas would print identically, which is precisely the mixed-recipe plate Task 3 is about.
-    Sorted so the same call always renders the same string, i.e. so it can be compared by eye.
+
+    DELEGATES to :meth:`squidmip._recipe.Recipe.label`, which is the ONE renderer for a recipe in
+    this application. ``Recipe.label``'s docstring has asserted that delegation since it was
+    written -- "``_action_label`` ... delegates here. Two spellings for one transform is the drift
+    the naming law exists to stop" -- and until 2026-08-06 it was not true: this function carried a
+    character-for-character copy of the same ``", ".join(f"{k}={d[k]}" for k in sorted(d))``. A
+    legend row and a console line rendering the same run through two copies is exactly the pair
+    that drifts, and the comment claiming otherwise is how it would go unnoticed.
     """
-    if not operator_kwargs:
-        return str(key)
-    args = ", ".join(f"{k}={operator_kwargs[k]}" for k in sorted(operator_kwargs))
-    return f"{key}({args})"
+    from squidmip._recipe import Recipe
+
+    return Recipe.operator(str(key), **(operator_kwargs or {})).label()
