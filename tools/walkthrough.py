@@ -789,6 +789,90 @@ def run_all():
     # Its own docstring already named the replacement, and that replacement exists:
     # `tests/test_viewer_3d.py` asserts napari's voxel scale.
 
+    # ---------- the two features that landed on 2026-08-05 ----------------------------
+    #
+    # Added the same day they merged. This file's contract is "drive EVERY shipped feature", and a
+    # feature that ships without a check here is exactly how the 25 above came to exist.
+
+    @check("IMA-ii.5", "Gallery View fuses one comparable cell per (region, channel)")
+    def _():
+        """A gallery is a LOOK, not an operator run: one fused cell per region per channel, at a
+        common decimation, with contrast SHARED per channel so a dim well and a bright well do not
+        both come out looking mid-grey. Both halves are asserted -- the pixels and the sharing."""
+        from squidmip._gallery import _channel_names, fuse_gallery_cell, shared_windows
+
+        r = read(PLATE)
+        m = r.metadata
+        regions = sorted(m["regions"])[:2]
+        ch = _channel_names(m, None)[0]
+        cells = [fuse_gallery_cell(r, m, rg, sorted(m["fovs_per_region"][rg]), ch, target_px=256)
+                 for rg in regions]
+        assert all(c is not None for c in cells), f"a region produced no cell: {regions}"
+        for c in cells:
+            assert c.image.size and float(c.image.std()) > 0, \
+                f"{c.region}/{c.channel} fused to a flat cell"
+            assert c.n_fovs > 1, f"{c.region} is one field, not a mosaic ({c.n_fovs})"
+            assert c.covered is not None and bool(c.covered.any()), "no covered pixels"
+        # comparable: same channel, same decimation, so two wells are read against each other
+        assert len({c.step for c in cells}) == 1, \
+            f"cells decimated differently ({[c.step for c in cells]}) -- not comparable"
+        win = shared_windows(cells)
+        assert ch in win and win[ch][1] > win[ch][0], f"no shared window for {ch}: {win}"
+        return (f"{len(cells)} cells over {regions} ch={ch}, "
+                f"{cells[0].n_fovs} FOVs each at 1/{cells[0].step}, "
+                f"shared window {win[ch][0]:.0f}-{win[ch][1]:.0f}")
+
+    @check("IMA-video", "The mp4 recorder writes a movie whose frames actually DIFFER")
+    def _():
+        """The defect this feature can have is a movie every frame of which is identical -- which
+        looks like a working feature until someone plays it. So the mp4 is DECODED BACK and the
+        frames compared, on the axis `default_axis` picks for this acquisition."""
+        from squidmip import _video as V
+
+        why = V.encoder_problem()
+        if why:
+            raise SkipCheck(f"no encoder here: {why}")
+        if free_gb() < MIN_FREE_GB:
+            raise SkipCheck(f"only {free_gb():.1f} GB free; refusing to write")
+
+        src = TISSUE if os.path.isdir(TISSUE) else PLATE
+        r = read(src)
+        m = r.metadata
+        if not V.can_record(m):
+            raise SkipCheck(f"{os.path.basename(src)} has no t or z axis to sweep")
+        axis = V.default_axis(m)
+        region = sorted(m["regions"])[0]
+
+        tmp = tempfile.mkdtemp(prefix="walkthrough_movie_")
+        try:
+            frames = list(V.region_movie_frames(r, m, region, axis=axis))
+            path, n = V.write_mp4(frames, os.path.join(tmp, "m.mp4"))
+            size = os.path.getsize(path)
+            assert n > 1 and size > 0, f"{n} frame(s), {size} B"
+
+            import imageio.v3 as iio
+            back = list(iio.imiter(path))
+            assert len(back) == n, f"encoded {n} frames, decoded {len(back)}"
+            diffs = [float(np.abs(back[i].astype(int) - back[i + 1].astype(int)).mean())
+                     for i in range(len(back) - 1)]
+            # NOT `> 0`. Feeding the encoder the SAME frame ten times does not decode back to ten
+            # byte-identical frames -- H.264 leaves compression noise, measured at 0.0000007 to
+            # 0.0046 mean abs difference per pair, and only one pair of nine came back exactly 0.
+            # So `> 0` would have passed a completely static movie whenever the encoder happened
+            # not to produce an exact tie. The real signal is two orders of magnitude away: 1.61
+            # minimum on this z-stack, 13.93 on the 3-timepoint fixture. 0.1 sits 16x below the
+            # smallest real motion and 20x above the largest artifact.
+            assert diffs and min(diffs) > 0.1, (
+                f"consecutive frames are effectively IDENTICAL on the {axis} axis "
+                f"(min {min(diffs):.4f}, floor 0.1): {[round(d, 4) for d in diffs]}")
+            # the standing rule: an operator never writes into the acquisition
+            assert not os.path.realpath(path).startswith(os.path.realpath(src)), \
+                "the recorder wrote inside the acquisition folder"
+            return (f"{n} frames on '{axis}' from {region}, {size/1e6:.2f} MB, "
+                    f"decoded back {len(back)}, min consecutive diff {min(diffs):.2f}")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
     # ---------- the one real write, disk-guarded and cleaned up -----------------------
     @check("IMA-222", "A stitched well SAVES end to end (then is deleted)")
     def _():
