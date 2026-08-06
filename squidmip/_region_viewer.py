@@ -1444,11 +1444,26 @@ class RegionViewer(QMainWindow):
         from an array's ``ndim``: that is the whole point of a self-describing result, and this is
         its first consumer that renders one.
 
-        PLACEMENT IS NOT CARRIED IN THE RESULT, deliberately. The layer is placed by
-        ``mosaic_bbox_um`` -- the SAME one rule that placed the raw mosaic in this window -- so
-        flipping between raw and the result is a comparison rather than two differently-framed
-        pictures. ``Extent.bbox_um`` means "the ROI a request was narrowed to" and putting a
-        region's own footprint in it would give that one field two meanings.
+        PLACEMENT COMES FROM THE PIXELS, and only falls back to ``mosaic_bbox_um``. A per-FOV
+        operator's planes are fused by ``_op_result._fuse``, which IS the raw preview's placement
+        code, so the preview's footprint is exactly right for them and flipping between raw and the
+        result is a comparison rather than two differently-framed pictures. A REGION operator's
+        planes are not: ``stitch_region`` fuses onto its own canvas and hands back a
+        :class:`~squidmip._placement.PlacedArray` carrying the :class:`~squidmip._placement.Placement`
+        that produced them, so the plane is placed by that.
+
+        The two disagree, measured. The preview rounds every tile origin to a whole pixel and the
+        stitch keeps it fractional: on the real 10x set ``manual0`` is 11462 x 9587 px as a preview
+        and 11463 x 9587 as a stitch, so the stitched layer used to be squeezed into a box one row
+        shorter than its own pixels -- Julio: "the stitched view is not exactly the same as that of
+        raw". And ``stitch_plate`` accepts a FOV subset of a region, whose mosaic spans only those
+        fields while ``mosaic_bbox_um`` always spans the whole well: on the synthetic 1536 plate,
+        A1 fovs [0, 1] fuse to 2084 x 3157 px and were stretched 1.515x vertically across all four
+        fields' worth of stage.
+
+        ``Extent.bbox_um`` is still not the carrier -- it means "the ROI a request was narrowed to",
+        and a second meaning for it is how the address model starts to drift. The geometry rides on
+        the ARRAY, which is what ``PlacedArray`` exists for.
         """
         pane = self._pane
         mosaic = getattr(pane, "mosaic", None) if (pane is not None
@@ -1467,11 +1482,13 @@ class RegionViewer(QMainWindow):
         from squidmip._mosaic_source import mosaic_bbox_um
         from squidmip._napari_pane import _colormap_for
 
-        region_bbox = mosaic_bbox_um(self._meta, region)
+        preview_bbox = mosaic_bbox_um(self._meta, region)
         dz = (self._meta or {}).get("dz_um")
         added = 0
         for channel in result.channels:
-            plane, bbox = result.plane(channel), region_bbox
+            plane = result.plane(channel)
+            placement = getattr(plane, "placement", None)
+            bbox = region_bbox = (placement.bbox_um if placement is not None else preview_bbox)
             # AN ROI CHILD CROPS, through the same helper that crops its raw pyramid, so the
             # operator layer covers exactly the boxed tissue the raw layer under it covers.
             if self._roi_bbox is not None and region_bbox is not None:
