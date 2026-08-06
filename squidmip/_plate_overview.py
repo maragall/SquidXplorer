@@ -3035,8 +3035,8 @@ def content_box(shape, h: int = _CELL, w: int = _CELL) -> tuple[int, int, int, i
     region's FOVs in, so a FUSED mosaic and the RAW mosaic of the same region land in the same
     place, at the same size, in the same cell.
 
-    That identity is the point. Every consumer of a plate cell — the deep-zoom overlay
-    (``_worldview.fit_preserving_aspect``), the montage blit (``_viewer._cell_source``), the loupe —
+    That identity is the point. Every consumer of a plate cell — the deep-zoom overlay, the
+    montage blit (:meth:`PlateOverview._cell_source`), the loupe —
     recovers the letterbox from the cell rect and the mosaic's aspect ratio alone. A cell painted
     corner-to-corner by a fit that ignores aspect breaks all three at once, on top of drawing the
     subject stretched.
