@@ -137,6 +137,24 @@ def test_params_are_namespaced_per_step_and_reach_that_step():
         f"{ADD} + spot(min_area_px=77)"
 
 
+def test_a_namespaced_parameter_changes_what_that_step_actually_does():
+    """The name check above proves the chain was REBUILT; this proves the value ARRIVED.
+
+    Two objects, 16 px and 625 px. ``spot.min_area_px`` decides how many survive, so a parameter
+    that was accepted and dropped — the failure ``Operator.bind`` refuses by name for a single
+    operator — is a different COUNT here and not a different string.
+    """
+    plane = np.zeros((64, 64), np.uint16)
+    plane[10:14, 10:14] = 5000        # 16 px
+    plane[30:55, 30:55] = 5000        # 625 px
+
+    big_only = bind_projector(f"{ADD}+spot", {"spot.min_area_px": 500})([plane])
+    both = bind_projector(f"{ADD}+spot", {"spot.min_area_px": 4})([plane])
+
+    assert sorted(np.unique(big_only).tolist()) == [0, 1]
+    assert sorted(np.unique(both).tolist()) == [0, 1, 2]
+
+
 def test_an_unknown_parameter_is_refused_naming_what_the_chain_does_accept():
     with pytest.raises(ValueError, match=r"has no parameter 'spot.nope'"):
         bind_projector(f"{ADD}+spot", {"spot.nope": 1})
