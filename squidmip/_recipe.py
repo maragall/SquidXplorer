@@ -15,11 +15,29 @@ carries its own extent and its own substance, so a plate built from several runs
 from that cell's declaration instead of comparing cells and special-casing the disagreement. Bare
 arrays are refused. See :mod:`squidmip._result` for why comparison is the wrong shape.
 
-:func:`census` (Task 3, 2026-07-29) is the read half: it groups cache entries by chain and returns
-``{chain: [address]}``, the plurality chain and the divergent cells. It is HERE and not in the
-viewer because "what is on this plate" is a question about the cache. :meth:`Recipe.label` and
-:meth:`RecipeChain.label` are the one renderer that turns a chain into words a legend can show, so
-a legend never has to show a hash.
+THE CHAIN NOW RUNS (2026-08-05)
+-------------------------------
+:class:`RecipeChain` documented ``mip + decon(sigma=2.0)`` and the rule that order matters, and for
+two weeks **nothing executed it**: it was a cache key and a label renderer, and every reader of this
+module concluded the application could chain operators when it could not. That is the worse half of
+dead code -- not unused, but actively misleading -- and it is closed by making the label the
+EXPRESSION rather than by building a second syntax beside it:
+
+    RecipeChain.label()  ->  "flatfield + decon + mip"   the words a human reads
+    RecipeChain.parse()  <-  the exact inverse, so a legend line can be pasted back into a run
+
+:func:`squidmip._compose.compose_operator` turns a parsed chain into ONE
+:class:`squidmip._engine.Operator` whose ``consumes``/``produces``/``params``/``requires`` are
+derived from its parts, so ``project_plate(projector="flatfield+mip")`` and
+``stitch_region(projector=...)`` take a chain wherever they take a name, with no new call shape.
+One spelling for the label, the cache key, the paste script and the run.
+
+What was REMOVED in the same commit, for the same reason: ``census`` / ``PlateCensus`` /
+``ChainCensus`` grouped cache entries by chain for a plate legend (``squidmip/_legend.py``) that was
+never constructed by anything and whose docstring cited a test file that does not exist. Two dead
+halves of one feature, documented as if live. If the mixed-recipe plate legend is built, this is the
+grouping it wants and ``git log`` has it; a module that describes a feature nobody can reach is not
+an asset.
 
 This module is pure Python, no Qt, no numpy: the model, testable in isolation. The GUI layer builds
 recipes from what a window shows and applies them by registering keys the cache computes lazily.
@@ -27,19 +45,30 @@ recipes from what a window shows and applies them by registering keys the cache 
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from squidmip._address import Address
-from squidmip._result import Result, composite_channels
+from squidmip._result import Result
 
 #: Recipe kinds. OPERATOR is a data transform (mip, stitch, decon, ...); LUT is a contrast transform
 #: (per-channel contrast_limits + colormap). Both are transforms, so both flow through one path.
 OPERATOR = "operator"
 LUT = "lut"
+
+#: What separates two steps of a chain, in the ONE spelling that is both read and written. It is
+#: ``+`` and not ``->`` for the reason :meth:`RecipeChain.label` gives (an arrow in a 596 px legend
+#: pane reads as a control rather than as prose), and now that the label is also the expression the
+#: engine accepts, that choice binds both directions.
+CHAIN_SEPARATOR = "+"
+
+#: What an EMPTY chain is called. Already this application's word for the untransformed layer
+#: (``PlateOverview._active`` starts at ``"raw"``), so :meth:`RecipeChain.parse` accepts it and
+#: label -> parse -> label round-trips for every chain including the empty one.
+RAW = "raw"
 
 
 @dataclass(frozen=True)
@@ -105,10 +134,92 @@ class Recipe:
         return Recipe(LUT, "contrast", {"per_channel": dict(per_channel)})
 
 
+# --- reading a chain back out of its own label ---------------------------------------------------
+#
+# A hand-rolled splitter rather than a grammar, because the language is two characters wide and a
+# parser generator would be more machinery than the thing it parses. It tracks parenthesis DEPTH so
+# a separator inside an argument list is not a separator: ``decon(shape=(4, 4)) + mip`` splits into
+# two steps and not four, and ``bgsub(scale=1e+5)`` is one step and not two.
+
+
+def _split_top_level(text: str, separator: str, whole: str) -> "list[str]":
+    """Split *text* on *separator*, ignoring separators nested inside parentheses.
+
+    *whole* is the full expression, quoted in any refusal: a caller who mistyped one step needs to
+    see what they typed, not the fragment this function happened to be looking at.
+    """
+    parts: "list[str]" = []
+    depth, buf = 0, []
+    for char in text:
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth < 0:
+                raise ValueError(f"unbalanced ')' in operator chain {whole!r}")
+        if char == separator and depth == 0:
+            parts.append("".join(buf))
+            buf = []
+        else:
+            buf.append(char)
+    if depth:
+        raise ValueError(f"unbalanced '(' in operator chain {whole!r}")
+    parts.append("".join(buf))
+    return parts
+
+
+def _literal(text: str):
+    """A parameter value: a Python literal when it is one, otherwise the bare string it looks like.
+
+    The fallback is not laxness, it is what makes the round trip hold. :meth:`Recipe.label` renders
+    a value with ``str``, so a string parameter comes out UNQUOTED (``segmenter=cellpose``) and a
+    parser that insisted on quotes could not read back the label it is the inverse of.
+    """
+    try:
+        return ast.literal_eval(text)
+    except (ValueError, SyntaxError):
+        return text
+
+
+def _parse_step(step: str, whole: str) -> Recipe:
+    """One step of a chain: ``mip``, or ``spot(min_area_px=80, split_touching=False)``."""
+    step = step.strip()
+    if not step:
+        raise ValueError(
+            f"empty step in operator chain {whole!r}; every '{CHAIN_SEPARATOR}' separates two "
+            "operators, so a trailing or doubled separator has nothing to run")
+    if not step.endswith(")"):
+        if "(" in step:
+            raise ValueError(f"unbalanced '(' in operator chain {whole!r}")
+        return Recipe.operator(step)
+
+    name, _, arguments = step.partition("(")
+    name = name.strip()
+    if not name:
+        raise ValueError(f"a step of operator chain {whole!r} has arguments but no operator name")
+
+    params: dict = {}
+    for argument in _split_top_level(arguments[:-1], ",", whole):
+        argument = argument.strip()
+        if not argument:
+            continue                      # a trailing comma is a typo, not a refusal
+        key, assigned, value = argument.partition("=")
+        if not assigned:
+            raise ValueError(
+                f"argument {argument!r} of {name!r} in operator chain {whole!r} is not "
+                "name=value; an operator's parameters are named, never positional")
+        params[key.strip()] = _literal(value.strip())
+    return Recipe.operator(name, **params)
+
+
 @dataclass(frozen=True)
 class RecipeChain:
     """An ORDERED list of recipes. Order matters (stitch then decon != decon then stitch), so the
-    chain key folds the recipe keys in sequence. The chain is the cache key and the paste script."""
+    chain key folds the recipe keys in sequence. The chain is the cache key and the paste script.
+
+    Since 2026-08-05 it is also the RUN: :meth:`parse` reads a chain back out of :meth:`label`, and
+    :func:`squidmip._compose.compose_operator` turns the result into one registry-shaped operator.
+    See this module's docstring for why the label and the expression are deliberately one string."""
 
     recipes: tuple = ()
 
@@ -135,10 +246,46 @@ class RecipeChain:
         cell that had nothing applied to it is a real thing to say in a legend, and saying it in the
         word already on screen beats inventing a second one for the same state.
         """
-        return " + ".join(r.label() for r in self.recipes) if self.recipes else "raw"
+        if not self.recipes:
+            return RAW
+        return f" {CHAIN_SEPARATOR} ".join(r.label() for r in self.recipes)
 
     def __str__(self) -> str:
         return self.label()
+
+    @staticmethod
+    def parse(text: str) -> "RecipeChain":
+        """``"flatfield + decon + mip"`` -> the chain. The inverse of :meth:`label`.
+
+        THE EXPRESSION AND THE LABEL ARE ONE STRING. A second syntax for "the same chain, but for
+        the engine" would be two spellings of one fact, which is the drift the naming law (see
+        :mod:`squidmip._address`) exists to stop -- and it would put a legend row and a runnable
+        command one transcription error apart. So the words a legend shows are exactly the words
+        ``project_plate(projector=...)`` accepts, and ``parse(chain.label()) == chain`` for every
+        chain this application builds, the empty one (:data:`RAW`) included.
+
+        Whitespace around the separator and inside the argument list is free. Parameter VALUES go
+        through :func:`ast.literal_eval`, so ``iterations=15`` is an int, ``sigma=2.0`` a float and
+        ``gpu=False`` a bool; a value that is not a Python literal is taken as the bare string it
+        looks like (``segmenter=cellpose``), which is what :meth:`Recipe.label` writes for a string
+        parameter and therefore what round-tripping requires.
+
+        Every step is an OPERATOR recipe. A LUT is not an engine operator and has no place in a
+        run's projector expression; contrast travels with the view, not with the pixels.
+
+        Raises
+        ------
+        ValueError
+            On unbalanced parentheses, an empty step (``"mip + + decon"``), a step with no name, or
+            an argument that is not ``name=value``. Every one of them names the offending text: a
+            chain is typed by a human into a CLI flag or a command, so the refusal has to say which
+            character was wrong rather than that "the chain" was.
+        """
+        raw = str(text).strip()
+        if not raw or raw == RAW:
+            return RecipeChain()
+        return RecipeChain(tuple(
+            _parse_step(step, raw) for step in _split_top_level(raw, CHAIN_SEPARATOR, raw)))
 
     def to_script(self) -> str:
         """A tiny, human-readable, re-loadable JSON script. "Copy an operator" yields this string;
@@ -159,10 +306,11 @@ class RecipeChain:
 class Entry:
     """One cache entry, with everything needed to say what it is WITHOUT a second lookup.
 
-    Task 3's plate census walks these. It needs the ``chain`` OBJECT and not just the hash the key
-    carries, because the legend it builds must read ``mip + decon sigma 2.0`` and never a hash, and
-    a hash cannot be un-hashed back into recipes. So the chain is kept beside the result rather
-    than only folded into the key.
+    The ``chain`` OBJECT is kept beside the result, not just folded into the key, because a hash
+    cannot be un-hashed back into recipes and anything reporting what produced a cell must read
+    ``flatfield + decon + mip`` rather than ``a3f9c1``. :func:`cached_operator_results` is the
+    reader that depends on it today; it is also what would let a chain be re-RUN from a cache entry,
+    now that :meth:`RecipeChain.label` is an expression the engine accepts.
     """
 
     scope: str
@@ -232,9 +380,9 @@ class ResultCache:
         return self._k(scope, chain, version) in self._d
 
     def entries(self) -> "list[Entry]":
-        """Every entry, least-recently-used first. What a plate census reads.
+        """Every entry, least-recently-used first. What :func:`cached_operator_results` reads.
 
-        A snapshot list rather than a live view: a census that walked the OrderedDict directly
+        A snapshot list rather than a live view: a caller that walked the OrderedDict directly
         would see it reorder under it on the first ``get``, since ``get`` is what marks an entry
         most-recently-used.
         """
@@ -321,144 +469,3 @@ def paste_chain() -> RecipeChain:
     """The chain currently on the clipboard (empty chain if nothing was copied)."""
     return CLIPBOARD.get("chain") or RecipeChain()
 
-
-# --- the plate census: which recipes made this plate, and which cells diverge --------------------
-#
-# Task 3 (2026-07-29): combine two runs in one plate view. The workflow it serves is real and
-# ordinary -- dial parameters on A1 alone, run the other 95 with what you learned, look at the whole
-# plate -- and Julio's decision was PER-CELL IDENTITY: a mixed-recipe plate is legal.
-#
-# THIS LIVES IN THE MODEL, NOT IN THE PAINTER. "What is on this plate" is a question about the
-# CACHE: the entries are already keyed (scope, version, chain), so two runs are already two keys
-# under one node and the answer is a GROUPING of what is there. A painter asking it would have to
-# hold plate state to answer, and holding it is how the disclosure ends up bolted to the paint.
-#
-# IT GROUPS. IT DOES NOT COMPARE. Grouping asks each entry which bucket it belongs in; comparing
-# asks two entries whether they agree. An earlier draft of Task 3 proposed the second thing --
-# detect a mixed plate, warn about it -- and Julio banned it, because the next divergence (z depth,
-# pixel size, dtype) would need its own comparison, its own warning and its own test. Every channel
-# set below is read from a cell's own Substance via composite_channels; nothing here holds two
-# results at once, and tests/test_result.py asserts that over this module's AST.
-
-@dataclass(frozen=True)
-class ChainCensus:
-    """One chain's share of a plate: what it is, which cells it made, what those cells carry.
-
-    Exactly the three things the plan says a legend row must show, and no more: a HUMAN label
-    (:meth:`label`, from the recipes, never a hash), a cell count, and a channel set read from the
-    cells' declarations.
-    """
-
-    chain: RecipeChain
-    addresses: "tuple" = ()      # the cells this chain produced, first-seen order, deduplicated
-    channels: "tuple" = ()       # the UNION of what those cells declare (composite_channels)
-    diverges: bool = False       # this is NOT the plurality chain, so its cells carry the mark
-
-    @property
-    def key(self) -> str:
-        """The chain's content hash. For identity only. It must never reach a legend."""
-        return self.chain.key()
-
-    @property
-    def count(self) -> int:
-        """Cells, not entries. Two runs of one chain over one cell are one cell."""
-        return len(self.addresses)
-
-    def label(self) -> str:
-        """``mip + decon(sigma=2.0)``. See :meth:`RecipeChain.label`."""
-        return self.chain.label()
-
-    def __str__(self) -> str:
-        return f"{self.label()}  {self.count} cell(s)  {','.join(self.channels)}"
-
-
-@dataclass(frozen=True)
-class PlateCensus:
-    """What a plate is made of. The three things Task 3 asks for, in one object.
-
-    ``{chain: [address]}`` is :attr:`by_chain`, keyed by the chain's KEY rather than by the chain
-    object, for a blunt reason: ``Recipe.params`` is a dict, so a ``Recipe`` (and therefore a
-    ``RecipeChain``) is unhashable and cannot be a dict key. The chain OBJECT is not lost -- it is
-    on every :class:`ChainCensus` in :attr:`groups`, which is what lets a legend read words instead
-    of a hash.
-    """
-
-    groups: "tuple" = ()                          # ChainCensus per chain, first-seen order
-    plurality: "Optional[ChainCensus]" = None     # the chain that made the most cells
-    divergent: "tuple" = ()                       # cells a NON-plurality chain made
-
-    @property
-    def by_chain(self) -> dict:
-        """``{chain key: (address, ...)}``, the shape the plan specifies."""
-        return {g.key: g.addresses for g in self.groups}
-
-    @property
-    def is_mixed(self) -> bool:
-        """More than one chain is present, so the plate must SAY SO ON ITS FACE.
-
-        The legend's visibility is this, and nothing else. Earned expensively on 2026-07-28, when a
-        tooltip promised a "3D view (AGAVE)..." button the app did not have and a passing test held
-        that phantom in place for weeks: a plate that is showing two recipes discloses it in the
-        window, not in a hover.
-        """
-        return len(self.groups) > 1
-
-    def __str__(self) -> str:
-        return " | ".join(str(g) for g in self.groups) if self.groups else "empty"
-
-
-def census(source: "Any" = None) -> PlateCensus:
-    """Group *source*'s entries by chain: ``{chain: [address]}``, the plurality, the divergent set.
-
-    *source* is a :class:`ResultCache` or any iterable of :class:`Entry` -- a window censuses the
-    process-wide cache filtered to ITS OWN cells (``e.result.region_id in self._fov_index``), which
-    is a membership test on one entry and never a comparison of two.
-
-    An address is ``Address(region_id)``: on a plate a CELL IS A REGION, so that is the granularity
-    the legend counts and the granularity a border can be drawn around. An ROI inside a cell is a
-    ``bbox_um`` on an extent and is not a cell (see :mod:`squidmip._address`).
-
-    PLURALITY is the chain with the most cells, ties broken by which was seen first. A tie is
-    stable rather than meaningful, and that is stated rather than hidden: on a 50/50 plate the
-    marked half is the second-seen one, and the legend still lists both chains with both counts, so
-    nothing is being concealed by the choice.
-
-    DIVERGENT is every cell some non-plurality chain produced. A cell that carries BOTH the
-    plurality chain's result and another one IS divergent: it holds something the rest of the plate
-    does not, which is the whole reason a mark exists.
-    """
-    entries = source.entries() if hasattr(source, "entries") else list(source or ())
-
-    grouped: "OrderedDict[str, dict]" = OrderedDict()
-    for entry in entries:
-        bucket = grouped.setdefault(
-            entry.chain.key(), {"chain": entry.chain, "cells": OrderedDict(), "results": []})
-        bucket["cells"].setdefault(Address(entry.result.region_id), None)
-        bucket["results"].append(entry.result)
-
-    counted = tuple(
-        ChainCensus(chain=b["chain"], addresses=tuple(b["cells"]),
-                    channels=composite_channels(b["results"]))
-        for b in grouped.values())
-
-    # max() returns the FIRST maximal element, which is what makes the tie rule "first seen wins".
-    biggest = max(counted, key=lambda g: g.count, default=None)
-    plurality_key = None if biggest is None else biggest.key
-
-    # ``diverges`` is decided HERE, once, so that the legend and the plate's border read the same
-    # fact rather than each deciding what "divergent" means. A painter that re-derived it is a
-    # second definition, and two definitions of one word is how the two disagree by one cell.
-    groups = tuple(
-        ChainCensus(chain=g.chain, addresses=g.addresses, channels=g.channels,
-                    diverges=(plurality_key is not None and g.key != plurality_key))
-        for g in counted)
-    plurality = next((g for g in groups if not g.diverges), None) if groups else None
-
-    divergent: "OrderedDict[Address, None]" = OrderedDict()
-    for group in groups:
-        if not group.diverges:
-            continue
-        for address in group.addresses:
-            divergent.setdefault(address, None)
-
-    return PlateCensus(groups=groups, plurality=plurality, divergent=tuple(divergent))

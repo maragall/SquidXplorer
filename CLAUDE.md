@@ -30,9 +30,50 @@ Per-well fault isolation now refuses to absorb `ImportError` / `MissingDependenc
 A broken plugin aborts the import, NAMED; `SQUIDMIP_NO_PLUGINS=1` is the escape hatch. The
 hardcoded built-in imports in `squidmip/__init__.py` stay — discovery is additive.
 
-**Not supported, do not build against it**: composition (`_recipe.RecipeChain` documents chaining
-and nothing executes it), and GUI panels generated from `params` (`_op_panels.py` is hand-written
-per operator). Both are named in the template README so a contributor is not misled.
+**Composition** (2026-08-05): a chain is written wherever a name is —
+`projector="flatfield + decon + mip"`, accepted by `project_plate`, `write_plate`, `stitch_region`,
+the CLI's `--projector` and the `run_operator` command with no new argument on any of them. The
+expression IS `RecipeChain.label()`, and `RecipeChain.parse()` is its inverse, so the words a
+console prints are the words that run. `squidmip/_compose.py` derives the composed operator's four
+declarations from its parts (`consumes` union, `produces` last, `params` namespaced
+`<step>.<param>`, `requires` union) and carries `corrects_illumination` / `for_channel` through.
+
+Refused by declaration, never by name, never reordered: a **z-reducer that is not last** (no stack
+left), a **`produces="labels"` step that is not last** (arithmetic on object ids), a **z-SELECTING
+step inside a chain** (`reference` — its z is solved on raw planes outside the operator), and a
+**repeated step** (namespaced params would be ambiguous). A bare name still resolves to the exact
+registry object, so nothing existing routes through composition.
+
+**Not supported, do not build against it**: GUI panels generated from `params` (`_op_panels.py` is
+hand-written per operator). Named in the template README so a contributor is not misled.
+
+## 3D is capped at DRAWING time, and renders in-window
+
+`docs/rendering-contract.md` is the contract; this is the rule that binds every render path.
+
+**An ROI rectangle is clamped to the live `GL_MAX_3D_TEXTURE_SIZE` as it is drawn**
+(`_bricks.clamp_bbox_um` <- `RegionViewer._clamp_last_roi`). So *anything drawable is renderable,
+at full native resolution, from one texture* — the limit is felt while drawing instead of being a
+refusal afterwards. **Query the ceiling, never hardcode it**: 2048 px (1540 um) on Apple, commonly
+16384 px (12321 um) on desktop NVIDIA, which is 512x the volume. `_bricks.ceiling_line` states it
+in the window so better hardware visibly lifts it.
+
+**3D paints into the window's own napari canvas** (`_brick_view.BrickedVolume`), never a fresh
+`napari.Viewer`. Adding our own layers to the pane is fine; what was never allowed is rendering the
+pane's fused PYRAMID in 3D, whose level 0 is capped to `_MAX_FUSED_PX`.
+
+**Which layer 3D shows comes off the declaration** — `MosaicLayers.visible_op()` picks it and
+`_reduces_z` (i.e. the registry's `consumes`) refuses a Z_REDUCER's single plane with a reason.
+Never compare an operator name; `tests/test_operator_declaration.py` fails the build on it.
+
+Three numbers decide whether a volume "looks downsampled", and all three are enforced in
+`_bricks`, not asserted: voxels per screen pixel must stay **>= 1** (`uniform_step` floors the
+ratio), zooming in must **monotonically refine to stride 1**, and **z is never strided** — bricks
+tile Y and X only, so a volume keeps every acquired plane and cannot read as flattened.
+
+Bricking (many textures + GL `max` compositing + a 1-voxel halo) is the mechanism underneath and is
+pixel-exact, but it is NOT what a drawn ROI takes any more. Do not route a whole region through it
+expecting interaction — see the measured cost in the contract.
 
 ## Agent skills
 

@@ -35,6 +35,7 @@ SEL_FILL = QColor(88, 166, 255, 90)
 #: The CONTROL WELL's persistent frame (IMA-248/IMA-260). Light blue, and deliberately NOT RED:
 #: the red box is the transient current-FOV, the blue frame is a pinned reference.
 CONTROL_BLUE = QColor("#7fd4ff")
+
 #: Processing-status hue coding, adopted from Hongquan Li's record-zstack-viewer plate navigator.
 #: Deliberately colorblind-safe (blue/amber, never red/green) with a shape cue for failure (the x).
 STATUS = {

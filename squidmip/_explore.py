@@ -468,7 +468,8 @@ def subset_layer_op(op_label: str, region: str) -> str:
 
 # --- the Minerva subset ------------------------------------------------------------------------
 
-def subset_selection(regions: Sequence, fovs_per_region: Optional[dict]) -> list:
+def subset_selection(regions: Sequence, fovs_per_region: Optional[dict],
+                     fov_subsets: Optional[dict] = None) -> list:
     """``[(region, fov), ...]`` for every FOV of every region in this tab's subset.
 
     This is what pane 3 hands to ``_minerva.export_selection``, which groups it back by region
@@ -477,13 +478,22 @@ def subset_selection(regions: Sequence, fovs_per_region: Optional[dict]) -> list
     exploration tab's "Open in Minerva" button is scoped to, which is the tab's own subset
     rather than whatever happens to be selected on the plate.
 
+    *fov_subsets* is ``{region: [fov, ...]}`` for the regions the user boxed only PART of on the
+    plate (``PlateOverview.fov_subsets``). A region present there contributes only those fields,
+    so the tab's export crops the same way the plate's does; a region absent from it expands to
+    all of its fields exactly as before. Omitting the argument keeps the old behaviour whole,
+    which is what the CLI and the tests want.
+
     Refuses, by name, any region it cannot expand. Exporting three of the four regions a tab
     displays and saying nothing is precisely the silent failure this project has shipped six of.
+    A boxed subset is validated against the acquisition too: a field the plate offers that the
+    metadata does not is a disagreement, not something to quietly export.
     """
     regs = _uniq(regions)
     if not regs:
         raise ValueError("this tab has no regions to export")
     per = fovs_per_region or {}
+    picked = fov_subsets or {}
     out: list = []
     for region in regs:
         fovs = per.get(region)
@@ -491,5 +501,11 @@ def subset_selection(regions: Sequence, fovs_per_region: Optional[dict]) -> list
             raise ValueError(
                 f"region {region!r} has no fields of view in this acquisition, so it cannot be "
                 "fused into a mosaic for Minerva. Nothing was exported.")
-        out.extend((region, int(f)) for f in fovs)
+        chosen = [int(f) for f in (picked.get(region) or fovs)]
+        unknown = [f for f in chosen if f not in set(int(x) for x in fovs)]
+        if unknown:
+            raise ValueError(
+                f"region {region!r} has no field(s) {unknown} in this acquisition. Nothing was "
+                "exported.")
+        out.extend((region, f) for f in chosen)
     return out

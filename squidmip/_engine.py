@@ -106,10 +106,24 @@ The same word, spelled once, is now on all three registrars: ``add_projector``,
 a contributor reads, and ``squidmip/_plugins.py`` is how an operator in SOMEBODY ELSE'S package
 reaches this table without editing ``squidmip/__init__.py``.
 
-NOTE for plane-ops: ``write_plate`` accepts ``Nz > 1`` (IMA-277). It used to reject it LOUD, which
-is what made a plane-op stream correctly out of ``project_plate`` and then fail at save; that
-restriction is gone and ``_validate_image`` now only refuses a non-5-D array, an empty axis, or a
-channel count that disagrees with the metadata. A plane-op keeps z at full depth end to end.
+COMPOSITION (2026-08-05) is the same rule ONE more time, and it is why the four declarations above
+had to be declarations. ``squidmip._compose`` builds ONE ``Operator`` out of several and derives its
+four declarations from theirs — ``consumes`` union, ``produces`` last, ``params`` namespaced
+``<step>.<param>``, ``requires`` union — so a chain arrives at the loop as an operator and the loop
+is untouched::
+
+    project_plate(reader, projector="flatfield + decon + mip")   # (T, C, 1, Y, X)
+    project_plate(reader, projector="flatfield + decon")         # (T, C, Nz, Y, X)
+
+``_resolve_projector`` is where a chain becomes an operator, and it is the door every ``projector=``
+already arrived at, which is why ``write_plate``, ``stitch_region``, the CLI and the ``run_operator``
+command gained composition without one new argument between them. ``consumes`` decides what can
+follow what (a z-reducer is the last step or the only one), ``produces`` decides the same for labels,
+and both refusals are arithmetic on the declarations — nothing here learned an operator's name.
+
+NOTE for plane-ops: ``write_plate`` accepts ``Nz > 1`` since IMA-277 taught ``_validate_image`` that
+a plane-op's full-depth result is a real result and per-plane fusion taught ``stitch_region`` to fuse
+every z. So a plane-op — and a composed chain of them — streams, persists and stitches.
 
 Prior art (what established pipelines declare, and what IMA-210 took from each)
 ------------------------------------------------------------------------------
@@ -152,6 +166,8 @@ from typing import TYPE_CHECKING, Any, Callable, Iterable, Iterator, Optional, S
 
 import numpy as np
 
+from squidmip._compose import CHAIN_CHARS, compose_operator, is_chain_expression
+from squidmip._recipe import CHAIN_SEPARATOR, RecipeChain
 from squidmip.projection import (
     INTENSITY,
     PLANE_OP,
@@ -285,6 +301,21 @@ class Operator:
         ok, why = self.available()
         if not ok:
             raise MissingOperatorDependency(why)
+        return self.with_params(operator_kwargs)
+
+    def with_params(self, operator_kwargs: Optional[dict] = None) -> Projector:
+        """The callable *operator_kwargs* names, WITHOUT the availability check :meth:`bind` makes.
+
+        Split out for composition (:mod:`squidmip._compose`), which builds a chain's steps before
+        anything asks whether the chain can run: a composed entry declares the UNION of its parts'
+        ``requires`` and refuses once, by name, naming every missing package — so checking each part
+        here would raise about one step of a chain the caller never asked about individually, and
+        would make ``projector_consumes("flatfield+mip")`` raise on a machine without tilefusion
+        when it is a question about shape and not about the environment.
+
+        Every caller that RUNS an operator goes through :meth:`bind`. This one only resolves the
+        parameters.
+        """
         if not operator_kwargs:
             return self.fn
         if self.factory is None:
@@ -402,6 +433,14 @@ def add_projector(name: str, projector: Projector, *, consumes=None, produces=No
     """
     if not name:
         raise ValueError("projector name must be a non-empty string")
+    reserved = sorted(set(name) & set(CHAIN_CHARS))
+    if reserved:
+        raise ValueError(
+            f"projector name {name!r} contains {reserved[0]!r}, which is chain punctuation: "
+            f"'{CHAIN_CHARS}' spell a COMPOSITION ('flatfield + decon + mip', "
+            "see squidmip._compose). A name carrying one would read as an expression everywhere a "
+            "chain is written down — in a console line, a CLI flag, a pasted recipe script — so it "
+            "is refused here rather than left to be ambiguous there.")
     if not callable(projector):
         raise ValueError(f"projector for {name!r} is not callable: {projector!r}")
     if name in _PROJECTORS:
@@ -459,9 +498,14 @@ def operator_available(name: str) -> tuple[bool, str]:
     before offering a run; :func:`bind_projector` enforces it regardless, so a caller that does not
     ask still cannot get a silent no-op.
     """
-    op = _PROJECTORS.get(name)
-    if op is None:
-        return False, f"unknown projector {name!r}; available: {available_projectors()}"
+    try:
+        op = _resolve_projector(name)
+    except (KeyError, TypeError, ValueError) as exc:
+        # An unknown name, an unrunnable CHAIN and a wrong type are all "you cannot run this", and
+        # a caller offering a row has one place to put the reason. Resolving rather than looking up
+        # is what makes a chain answerable here at all: it is not a table key, so the membership
+        # test this used to be reported every chain as unknown.
+        return False, str(exc).strip('"')
     return op.available()
 
 
@@ -509,15 +553,50 @@ def bind_projector(name: str, operator_kwargs: Optional[dict] = None) -> Project
     return _resolve_projector(name).bind(operator_kwargs)
 
 
-def _resolve_projector(name: str) -> Operator:
-    """Look up an operator by name, failing loud (named) on an unknown key."""
-    try:
-        return _PROJECTORS[name]
-    except KeyError:
-        raise KeyError(
-            f"unknown projector {name!r}; available: {available_projectors()}. "
-            "Add new modes with squidmip.add_projector(name, fn)."
-        ) from None
+def _resolve_projector(name) -> Operator:
+    """Look up an operator by name OR by chain, failing loud (named) on an unknown key.
+
+    THE ONE DOOR. Every caller that takes a ``projector=`` — :func:`project_plate`,
+    :func:`squidmip._output.write_plate`, :func:`squidmip._stitch.stitch_region`, the CLI, the
+    ``run_operator`` command — arrives here, which is why composition needed no new argument on any
+    of them: a chain is resolved into one :class:`Operator` and the rest of the run cannot tell.
+
+    Three shapes, in this order:
+
+    * a REGISTERED NAME wins, always, before any parsing. ``projector="mip"`` returns the exact
+      object the table has held since IMA-188, so no existing run changes by a pixel or a lookup.
+    * a CHAIN EXPRESSION (``"flatfield + decon + mip"``, or a bare name with
+      parameters) is parsed and composed — see :mod:`squidmip._compose` for what it derives and
+      which combinations it refuses.
+    * a :class:`~squidmip._recipe.RecipeChain` is composed directly, for a caller holding the
+      structure rather than its label (a pasted recipe script, ``paste_chain()``).
+
+    Anything else is refused by TYPE, naming the chain spelling. That refusal is here because the
+    shape people actually reached for, ``projector=["flatfield", "mip"]``, used to surface as
+    ``TypeError: unhashable type: 'list'`` from a dict lookup — an error about a dict, raised at a
+    caller who was asking about operators.
+    """
+    if isinstance(name, RecipeChain):
+        return compose_operator(name, _resolve_projector)
+    if isinstance(name, (list, tuple)):
+        spelled = f" {CHAIN_SEPARATOR} ".join(str(part) for part in name)
+        raise TypeError(
+            f"a projector is named by one string, got {type(name).__name__} {name!r}. A chain is "
+            f"written as a string too: projector={spelled!r}. See squidmip._compose.")
+    if not isinstance(name, str):
+        raise TypeError(
+            f"a projector is named by a string or a RecipeChain, got {type(name).__name__}: "
+            f"{name!r}.")
+    operator = _PROJECTORS.get(name)
+    if operator is not None:
+        return operator
+    if is_chain_expression(name):
+        return compose_operator(name, _resolve_projector)
+    raise KeyError(
+        f"unknown projector {name!r}; available: {available_projectors()}. "
+        "Add new modes with squidmip.add_projector(name, fn), or chain registered ones with "
+        "'+' (e.g. 'flatfield+decon+mip')."
+    )
 
 
 def project_plate(

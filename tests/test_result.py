@@ -258,7 +258,11 @@ def test_a_divergence_in_z_depth_or_pixel_size_needs_NO_new_code():
 DECLARED_FIELDS = {"channels", "dtype", "z_depth", "pixel_size_um", "substance", "extent",
                    "region_id"}
 
-#: The modules that know what a Result is. Task 3 adds its census and its legend: ADD THEM HERE.
+#: The modules that know what a Result is. ADD A NEW ONE HERE: the no-comparison property below is
+#: asserted over exactly this list, so a module that learns about Results and is not listed is a
+#: module the property stopped covering. (Task 3's census and legend were listed here as future
+#: entries; both were removed on 2026-08-05 -- nothing ever constructed the legend -- so the list
+#: is the two modules that actually hold one.)
 KNOWS_ABOUT_RESULTS = ("squidmip._result", "squidmip._recipe")
 
 

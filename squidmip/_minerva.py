@@ -340,7 +340,9 @@ def write_story(story_path, ome_path, groups: list[dict], pixels_per_micron: flo
     return story_path
 
 
-def _provenance_text(image, projector: str, operator: str) -> str:
+def _provenance_text(image, projector: str, operator: str, *, region: str = "",
+                     t: Optional[int] = None, fovs: Optional[Sequence[int]] = None,
+                     n_fovs: Optional[int] = None) -> str:
     """One line saying what produced these pixels, for the story's ``sample_info.text``.
 
     Reads the :class:`~squidmip._placement.Placement` riding on the fused array rather than
@@ -348,8 +350,27 @@ def _provenance_text(image, projector: str, operator: str) -> str:
     operator names when the array carries no placement (a plain ndarray from a custom region
     operator), because a partial record is still better than none and a raise here would fail an
     export over a caption.
+
+    WHICH REGION, WHICH TIMEPOINT AND WHICH FIELDS are named here as of 2026-08-05, because both
+    of them became things a user can change and neither was recorded. The exported timepoint used
+    to be hardcoded to 0 and a FOV subset was not expressible at all, so "the mosaic" was
+    unambiguous; now the same acquisition yields a different file per timepoint and per box, and
+    an OME-TIFF outlives the log line that described it. The filename carries ``_t1_`` and
+    ``_2fov`` — this is the same two facts spelled out in the story, where Minerva shows them.
+
+    ``p.reg_t`` stays and is NOT the same number: it is the timepoint the geometry was SOLVED on,
+    which is deliberately fixed while the exported one moves. Naming only one of the two would
+    make the story read as though the pixels came from the registration timepoint.
     """
     parts = [f"squidmip {operator}/{projector}"]
+    if region:
+        parts.append(f"region {region}")
+    if t is not None:
+        parts.append(f"timepoint t={int(t)}")
+    if fovs is not None:
+        got = len(list(fovs))
+        parts.append(f"all {got} FOV(s)" if n_fovs in (None, got)
+                     else f"CROPPED to {got} of {n_fovs} FOV(s): {sorted(fovs)}")
     p = getattr(image, "placement", None)
     if p is not None:
         if p.registered:
@@ -532,7 +553,9 @@ def export_selection(
             ome_path,
             auto_groups(img_cyx, names, colors, label=label, luts=luts),
             pixels_per_micron=ppm,
-            provenance=_provenance_text(image, projector, operator),
+            provenance=_provenance_text(
+                image, projector, operator, region=region, t=t, fovs=fovs,
+                n_fovs=len(fovs_per_region.get(region, []) or []) or None),
         )
         written[region] = (ome_path, story_path)
         del image, img_cyx
