@@ -7,18 +7,26 @@ MODULES = [
     "squidmip._output", "squidmip._zarr_store", "squidmip._montage", "squidmip._cli",
     "squidmip._viewer",                              # _viewer needs the gui extra
     "numpy", "tifffile", "tensorstore", "pydantic_settings",
-    # `squidmip._video`, `imageio` and `imageio_ffmpeg` were dropped on 2026-07-31. They were in
-    # this list from its first commit (03c5246), and `squidmip/_video.py` was deleted the same day
-    # by the other half of IMA-185 (c25d84d, "remove recording from viewer" -- recording belongs to
-    # Squid, not to a post-acquisition viewer). So this gate has asserted a module the project
-    # deliberately deleted ever since, and `imageio_ffmpeg` was only ever here to encode its .mp4s
-    # and is not a declared dependency of this package at all.
+    # `squidmip._video`, `imageio` and `imageio_ffmpeg` are BACK, 2026-08-05, and so is the
+    # feature. They were in this list from its first commit (03c5246), were dropped on 2026-07-31
+    # when `squidmip/_video.py` was deleted by the other half of IMA-185 (c25d84d, "remove
+    # recording from viewer"), and the line that stood here said flatly: "Recording lives on in
+    # maragall/SimpleXplorer ... it is not coming back here."
     #
-    # The cost was not cosmetic: `smoke` fails on ALL THREE OSes, and `freeze` has `needs: smoke`,
-    # so the PyInstaller build has been SKIPPED on every run rather than failing visibly. A red gate
-    # that never produced the artifact it guards is indistinguishable from one nobody asked for.
-    # Recording lives on in maragall/SimpleXplorer, which restored `_video.py` on its freeze
-    # branch; it is not coming back here.
+    # THAT CLAIM WAS ABOUT THE WRONG THING, and it is corrected rather than quietly dropped.
+    # c25d84d's rationale -- "users record at acquisition time, not here" -- is about CAMERA
+    # CAPTURE, which does belong to Squid. `_video.py`'s own first paragraph explicitly disclaims
+    # camera capture: it assembles an ALREADY-ACQUIRED axis (T, or Z) of data already on disk into
+    # an .mp4, which is a post-acquisition export and is exactly what this viewer is for. The
+    # deletion answered a question the module was not asking, and it took the only way to see a
+    # time series or a focus sweep as motion with it.
+    #
+    # The 2026-07-31 removal was still right at the time and its cost is worth keeping written
+    # down: this gate asserted a module the project had deleted, so `smoke` failed on ALL THREE
+    # OSes and `freeze` (which has `needs: smoke`) was SKIPPED on every run rather than failing
+    # visibly. Both packages are now declared -- `squidmip[video]`, pulled in by `[gui]` and
+    # `[test]` -- so this gate is asserting something the project installs on purpose.
+    "squidmip._video", "imageio", "imageio_ffmpeg",
     # The Qt binding is imported through qtpy, never by name, and squidmip/__init__ pins it to
     # pyqt6 before qtpy loads -- so importing `PyQt5.QtWidgets` here proved that a binding the
     # app no longer uses is installed. `qtpy.QtWidgets` is the import the app actually performs,

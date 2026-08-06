@@ -191,8 +191,8 @@ from squidmip._plate_overview import (  # noqa: F401 (re-exports)
 from squidmip._workers import (  # noqa: F401 (re-exports)
     _CACHE_AUTO, _MIN_PREVIEW_BOX_PX, _VIEWER_WORKERS,
     _ComputedPlateWorker, _FlatfieldWorker, _FocusWorker, _MinervaRenderWorker, _MinervaWorker,
-    _MosaicWorker, _OperatorWorker, _PreviewWorker, _SpotWorker, _full_res_mip, _full_res_plane,
-    _spot_stages,
+    _MosaicWorker, _OperatorWorker, _PreviewWorker, _SpotWorker, _VideoWorker, _full_res_mip,
+    _full_res_plane, _spot_stages,
 )
 
 # (`_SUPPORTED_PLATES` and `resolve_plate_format` used to live here. `build_plate` (IMA-214) is now

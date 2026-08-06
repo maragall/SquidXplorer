@@ -96,8 +96,14 @@ def test_the_plate_is_on_top_and_takes_about_half_the_window(qapp, monkeypatch, 
         assert share >= 48.0, (
             f"the plate is {share:.1f}% of a {size[0]}x{size[1]} window; Spencer asked for ~50%")
         # ON TOP: above the band, in the same parent, so the comparison is meaningful.
+        #
+        # The band is asserted to be LAST, not to sit at a literal index. It stood at index 2 while
+        # the exploration pane occupied index 1; that pane was deleted on 2026-08-05 and the
+        # constant went stale the moment it was, which is exactly the failure mode a hard-coded
+        # sibling count has. "Last" is the property the layout actually promises, and the mutation
+        # the test is for -- band and plate swapped -- still fails it.
         assert win._body.indexOf(plate_host) == 0
-        assert win._body.indexOf(win._band_host) == 2
+        assert win._body.indexOf(win._band_host) == win._body.count() - 1
         assert plate_host.geometry().bottom() <= win._band_host.geometry().top()
     finally:
         win.close()

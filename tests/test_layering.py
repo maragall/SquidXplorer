@@ -69,12 +69,10 @@ GUI_MODULES = frozenset({
     "_logpanel",         # the log PANEL (the Qt widget). `_logpane`, no 'l', is the Qt-free bus.
     "_napari_pane",
     "_op_panels",
-    "_param_panel",      # the GENERATED operator panel: one widget per declared `Param`. It is a
-    #                      Qt module and always was — `feat/generic-operator-panel` landed it
-    #                      without adding it here, so this gate has been red on main since. What
-    #                      stays below the boundary is the DECLARATION it reads (`_engine.Param`),
-    #                      which is what lets the headless pipeline answer "what does this operator
-    #                      take" without a display.
+    "_param_panel",      # the panel BUILT FROM an operator's `params` declaration. Qt-facing by
+    #                      nature: it is one widget per declared Param. The declaration itself
+    #                      (`_engine.Param`) stays Qt-free, which is what lets the CLI, the recipe
+    #                      writer and the composer read the same record headless.
     "_plate_overview",   # gap 6 step 1: the plate navigator and its geometry
     "_qt_tabs",
     "_qtstyle",

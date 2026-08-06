@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Optional, Sequence
 
 import numpy as np
@@ -31,6 +32,7 @@ from qtpy.QtWidgets import (
     QButtonGroup,
     QCheckBox,
     QComboBox,
+    QFileDialog,
     QFrame,
     QHBoxLayout,
     QInputDialog,
@@ -458,6 +460,7 @@ class RegionViewer(QMainWindow):
         self._native3d = None      # THE 3D popout of this window; see _replace_native3d
         self._spot_worker = None   # nuclei detection (Cellpose) on this view's MIP, off-thread
         self._focus_worker = None  # Tenengrad reference-plane autofocus, off-thread
+        self._video_worker = None  # .mp4 export of this view's T (or Z) sweep, off-thread
         # OPERATOR CONTROLS AT EACH LEVEL (the deck: "Operators for this window"; Julio, 2026-07-23:
         # "I don't see operator controls like the powerpoint specified at each level"). This is not a
         # contradiction of "operators work on Views" -- it IS that: the window's operator control runs
@@ -773,9 +776,23 @@ class RegionViewer(QMainWindow):
         # tools: it is a WINDOW action, not something you do to the mosaic.
         self._btn_plate = self._chip("▣ plate", "Bring the plate window to the front — it ends up "
                                      "buried under the views opened from it.", self._raise_plate)
+        # RECORD. A window shows ONE index of T and ONE of Z at a time, so the only way to look at
+        # a time series or a focus sweep today is to drag a slider and remember. This exports the
+        # sweep as a file — the axis the acquisition actually has (T if it is a time series, else
+        # Z), the region on screen, the channels that are visible, the contrast that is set.
+        #
+        # ENABLED WHEN `n_t > 1 or n_z > 1`, which is `_video.can_record`, and the disabled tooltip
+        # says which. Gating on n_t alone would hide the button on every acquisition on this
+        # machine (all n_t=1) — see the rationale in `squidmip/_video.py`'s docstring.
+        self._btn_record = self._chip(
+            "⏺ movie", "Export what this window is showing as an .mp4, sweeping the acquisition's "
+            "time axis (or its z axis when there is no time series). Runs off the UI thread; "
+            "click again to cancel.", self._record_movie)
         r1.addWidget(self._btn_2d); r1.addWidget(self._btn_3d); r1.addWidget(self._btn_focus)
+        r1.addWidget(self._btn_record)
         r1.addWidget(self._btn_plate)
         r1.addStretch(1)
+        self._refresh_record_chip()
         vv.addLayout(r1)
         r2 = QHBoxLayout(); r2.setSpacing(4)
         r2.addWidget(self._chip("▭ new", "Draw an ROI rectangle inside the mosaic.", self._new_roi))
@@ -1018,6 +1035,158 @@ class RegionViewer(QMainWindow):
         """
         if self._manager is None or not self._manager.raise_plate():
             self._say("there is no plate window to raise from here.")
+
+    # -- movie export: this view's T (or Z) sweep, as a file ------------------------------
+    def _refresh_record_chip(self) -> None:
+        """Enable the record chip only when there is a movie to make, and SAY WHY when there is not.
+
+        Two separate refusals, kept separate because they have different fixes: an acquisition with
+        one timepoint and one z plane has no axis to sweep, and a machine with no ffmpeg cannot
+        encode anything. A single greyed-out button with one tooltip would collapse them.
+        """
+        from squidmip._video import axis_length, can_record, default_axis, encoder_problem
+
+        btn = getattr(self, "_btn_record", None)
+        if btn is None:
+            return
+        meta = self._meta or {}
+        if not can_record(meta):
+            btn.setEnabled(False)
+            btn.setToolTip("This acquisition has a single timepoint and a single z plane, so "
+                           "there is no axis to sweep into a movie.")
+            return
+        problem = encoder_problem()
+        if problem:
+            btn.setEnabled(False)
+            btn.setToolTip(f"No mp4 encoder on this machine — {problem}")
+            return
+        axis = default_axis(meta)
+        n = axis_length(meta, axis)
+        btn.setEnabled(True)
+        btn.setToolTip(
+            f"Export what this window is showing as an .mp4: {n} frames along the "
+            f"{'time' if axis == 't' else 'z'} axis of the region on screen, with the channels "
+            f"that are visible and the contrast that is set. Runs off the UI thread; click again "
+            f"to cancel.")
+
+    def _visible_channels(self) -> "list[str]":
+        """The channels the user can actually SEE, in acquisition order.
+
+        A movie of a hidden channel is a movie of something not on screen. Falls back to every
+        channel when the pane has no mosaic to ask (a window that has not painted yet), because
+        "all of them" is the state napari starts in.
+        """
+        pane = self._pane
+        mosaic = getattr(pane, "mosaic", None) if pane is not None else None
+        names = [c["name"] for c in (self._meta or {}).get("channels", [])]
+        if mosaic is None:
+            return names
+        visible = []
+        for name in names:
+            layer = mosaic.find(_RAW_OP, name)
+            if layer is None or bool(getattr(layer, "visible", True)):
+                visible.append(name)
+        return visible or names
+
+    def _record_movie(self) -> None:
+        """Export this view's sweep to an .mp4. Second click cancels the run in flight.
+
+        THE UI THREAD DOES A DIALOG AND NOTHING ELSE. No plane is read and no frame is encoded
+        here: both go to :class:`_VideoWorker`. Measured, this handler costs well under a
+        millisecond outside the modal dialog, against ~4 s of work on the real 10x region.
+        """
+        from squidmip._video import DEFAULT_FPS, axis_length, can_record, default_axis
+
+        worker = self._video_worker
+        if worker is not None and worker.isRunning():
+            worker.stop()
+            self._say("cancelling the movie export…")
+            return
+        if self._reader is None or self._meta is None:
+            self._say("open a region first, then export a movie.")
+            return
+        if not can_record(self._meta):
+            self._say("this acquisition has a single timepoint and a single z plane, so there is "
+                      "no axis to sweep into a movie.")
+            return
+        region = self.current_region()
+        axis = default_axis(self._meta)
+        channels = self._visible_channels()
+        # The CONTRAST ON SCREEN, latched for the whole movie. Read off the layers rather than
+        # recomputed, for the same reason `current_settings` does: the user drags contrast in
+        # napari's own controls and the layers are the only thing that knows where it ended up.
+        luts = self._per_channel_luts()
+        windows = [luts[ch]["clim"] for ch in channels
+                   if luts.get(ch, {}).get("clim") is not None]
+        if len(windows) != len(channels):
+            windows = None          # partial is not a window set; let the recorder derive one
+        rgb = {ch: luts[ch]["rgb"] for ch in channels if luts.get(ch, {}).get("rgb") is not None}
+
+        default_name = f"{region}_{axis}.mp4"
+        path, _ = QFileDialog.getSaveFileName(
+            self, f"Save the {axis.upper()}-axis movie of {region}", default_name, "Movie (*.mp4)")
+        if not path:
+            return
+        if not str(path).lower().endswith(".mp4"):
+            path = f"{path}.mp4"
+
+        from squidmip._viewer import _VideoWorker
+
+        n = axis_length(self._meta, axis)
+        w = _VideoWorker(self._reader, self._meta, region, path, axis=axis, fps=DEFAULT_FPS,
+                         channels=channels, windows=windows, rgb_by_channel=rgb,
+                         z=self._z_slider_index(), t=self.time_point, parent=self)
+        w.progress.connect(lambda d, total: self._show_progress(
+            int(100 * d / max(1, total)), f"movie: frame {d} of {total}"))
+        w.done.connect(self._on_movie_done)
+        w.problem.connect(self._on_movie_failed)
+        w.cancelled.connect(self._on_movie_cancelled)
+        w.finished.connect(lambda: self._forget_video_worker(w))
+        self._video_worker = w
+        self._show_progress(0, f"movie: 0 of {n} frames")
+        self._say(f"exporting {n} {axis}-axis frames of {region} to {path}…")
+        w.start()
+
+    def _z_slider_index(self) -> int:
+        """Which z plane this window is showing, or 0 when it has no z slider.
+
+        Only the T path uses it (a time-lapse is recorded AT a focus); the Z path sweeps every
+        plane and ignores it.
+        """
+        v = self._napari_viewer()
+        try:
+            dims = v.dims
+            nsteps = tuple(int(x) for x in (getattr(dims, "nsteps", ()) or ()))
+            if len(nsteps) < 3 or nsteps[0] < 2:
+                return 0
+            return int(dims.current_step[0])
+        except Exception:                            # noqa: BLE001 - no slider is z=0, not a crash
+            return 0
+
+    def _forget_video_worker(self, worker) -> None:
+        if self._video_worker is worker:
+            self._video_worker = None
+        try:
+            worker.deleteLater()
+        except RuntimeError:
+            pass            # already gone
+
+    def _on_movie_done(self, path: str, frames: int, seconds: float) -> None:
+        self._hide_progress()
+        size_mb = 0.0
+        try:
+            size_mb = Path(path).stat().st_size / 1e6
+        except OSError:
+            pass
+        self._say(f"movie: {frames} frames -> {path} ({size_mb:.1f} MB) in {seconds:.1f}s.")
+
+    def _on_movie_failed(self, reason: str) -> None:
+        self._hide_progress()
+        self._say(f"movie export failed: {reason}")
+
+    def _on_movie_cancelled(self) -> None:
+        self._hide_progress()
+        self._say("movie export cancelled.")
 
     def _make_default(self) -> None:
         """Make THIS window's settings the default for windows opened FROM NOW ON.
@@ -2649,6 +2818,15 @@ class RegionViewer(QMainWindow):
             if self._focus_worker is not None and self._focus_worker.isRunning():
                 self._focus_worker.stop()
                 self._focus_worker.wait(2000)
+        except Exception:                            # noqa: BLE001
+            pass
+        try:
+            # An export polls its stop flag before each frame, and a frame on the real 10x region
+            # is ~0.4 s, so 2 s is the same generous cap every other worker here gets. A QThread
+            # destroyed while running aborts the process; this is the join that prevents it.
+            if self._video_worker is not None and self._video_worker.isRunning():
+                self._video_worker.stop()
+                self._video_worker.wait(2000)
         except Exception:                            # noqa: BLE001
             pass
         try:
