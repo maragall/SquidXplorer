@@ -151,6 +151,7 @@ from ._placement import (
 from ._plate_shape import (
     GLASS_SLIDE,
     PlateShapeError,
+    _row_index,
     infer_plate_format,
     normalize_plate_format,
     well_span,
@@ -639,15 +640,6 @@ def _row_letter(i: int) -> str:
         i, r = divmod(i - 1, 26)
         s = chr(65 + r) + s
     return s
-
-
-def _row_index(letters: str) -> int:
-    n = 0
-    for ch in letters.upper():
-        if not ch.isalpha():
-            raise KeyError(letters)
-        n = n * 26 + (ord(ch) - 64)
-    return n - 1
 
 
 def display_well_id(cell_id: str) -> str:

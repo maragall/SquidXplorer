@@ -542,3 +542,59 @@ def test_n_equals_1_mip_is_byte_identical(tmp_path):
     out = project_well(reader, "A1", 0)
     for c_i, ch in enumerate([c["name"] for c in reader.metadata["channels"]]):
         np.testing.assert_array_equal(out[0, c_i, 0], reader.read("A1", 0, ch, 0, 0))
+
+
+# --- ONE dtype-cast rule -------------------------------------------------------------------------
+#
+# `cast_like` was three byte-identical private copies (`_background._cast_like`,
+# `_decon._cast_like`, `_flatfield._cast_like`, each with a different docstring arguing a
+# different third of the same reason) plus two inline `rint`-then-`clip` loops in `_output` and
+# `_tilesource`. `_stitch` already imported one of the copies, which is what a stalled collapse
+# looks like. There is one now, and these tests are what a sixth would have to survive.
+
+def test_cast_like_rounds_and_clips_instead_of_truncating_and_wrapping():
+    from squidmip.projection import cast_like
+
+    got = cast_like(np.array([-3.0, 10.5, 11.5, 12.7, 70000.0], dtype=np.float32), np.uint16)
+    # rint is half-to-EVEN: 10.5 -> 10, 11.5 -> 12. Truncation would give 10, 11, 12; an unsigned
+    # wrap would turn -3 into 65533 and 70000 into 4464 -- the frame's darkest pixel becoming its
+    # brightest, which is the defect the clip half exists for.
+    np.testing.assert_array_equal(got, np.array([0, 10, 12, 13, 65535], dtype=np.uint16))
+    assert got.dtype == np.uint16
+
+
+def test_cast_like_in_place_gives_the_same_answer_as_the_copying_form():
+    """`copy=False` is an allocation choice, never a different rule."""
+    from squidmip.projection import cast_like
+
+    values = np.array([-3.0, 10.5, 11.5, 12.7, 70000.0], dtype=np.float32)
+    np.testing.assert_array_equal(cast_like(values.copy(), np.uint16),
+                                  cast_like(values.copy(), np.uint16, copy=False))
+
+
+def test_cast_like_in_place_refuses_an_integer_buffer_by_name():
+    """`np.rint(int_array, out=int_array)` is a silent no-op, so the wrong buffer must raise."""
+    from squidmip.projection import cast_like
+
+    with pytest.raises(ValueError, match="floating-point buffer"):
+        cast_like(np.array([1, 2, 3], dtype=np.uint16), np.uint16, copy=False)
+
+
+def test_no_module_carries_a_second_dtype_cast():
+    """Structural: a private `_cast_like`, anywhere, is the copy coming back.
+
+    Text-level on purpose. The three deleted copies were byte-identical bodies; nothing but a
+    grep would have caught the fourth being added, and nothing did for three of them.
+    """
+    import pathlib
+
+    import squidmip
+
+    pkg = pathlib.Path(squidmip.__file__).parent
+    offenders = [str(p.relative_to(pkg)) for p in sorted(pkg.rglob("*.py"))
+                 if "def _cast_like" in p.read_text()]
+    assert not offenders, (
+        f"{offenders} define a private dtype cast; there is one, `projection.cast_like`, and it "
+        "is what `_background`, `_decon`, `_flatfield`, `_stitch`, `_output` and `_tilesource` "
+        "all call"
+    )

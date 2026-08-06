@@ -3365,7 +3365,7 @@ class PlateWindow(QMainWindow):
 
         self._worker.finished_ok.connect(_done_msg)
         # Whether the plate this run is writing ended up whole is NOT tracked here. `write_plate`
-        # settles it on the store itself (`_output._INCOMPLETE_MARKER`, kept unless every field
+        # settles it on the store itself (`_output.INCOMPLETE_MARKER`, kept unless every field
         # this run owed landed) as the last act of the write, which is the only place that knows
         # the answer -- a GUI flag set from `finished_ok` cannot see a well the engine skipped, and
         # cannot be set at all by a process that was killed. See `_open_computed`.

@@ -13,6 +13,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import sys
+from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")  # headless Qt; must precede the PyQt import
 
@@ -1520,7 +1521,6 @@ def _write_plate_for_open(out, *, stop_after=None):
 
     return write_from_stream(meta, stream(), out, n_fovs=None, check_disk=False,
                              stop=(None if stop_after is None else stop))
-
 
 def test_open_computed_refuses_the_plate_a_stopped_write_actually_leaves(
         qapp, tmp_path, monkeypatch):
@@ -5903,3 +5903,34 @@ def test_an_operator_tile_downsamples_every_channel_on_its_own(qapp, tmp_path):
         assert [int(round(float(tile[c].mean()))) for c in range(tile.shape[0])] \
             == _expected_levels(), (
             "a channel of the operator's plate cell came from another channel's pixels")
+
+
+def test_there_is_no_second_incomplete_marker(qapp):
+    """Structural: re-introducing the window's private marker would break this.
+
+    Kept from `chore/one-idea-one-implementation` when its half of this fix was resolved away in
+    favour of `_output.incomplete_reason`. That branch and `fix/incomplete-and-timepoint` found the
+    SAME defect from opposite ends -- one hunting duplication, one hunting silent data corruption --
+    and agreed on the diagnosis: `_note_partial_output` and `PlateWindow._run_out_dir` were a second
+    name for a fact the store already knew, earlier and more accurately. Measured while they were
+    both live: `_output.is_incomplete` said True on a stopped write while the window's own predicate
+    said False, so the window opened a plate missing a third of its wells and announced "4 wells".
+
+    The assertion is structural rather than behavioural on purpose: the behavioural tests nearby
+    prove the CURRENT reader is right, and this one prevents the second writer coming back.
+    """
+    from pathlib import Path as _Path
+
+    assert not hasattr(V.PlateWindow, "_note_partial_output"), (
+        "the window is writing its own incomplete marker again; ask `_output.incomplete_reason`")
+    # AST, not grep. A grep over the source also matches the COMMENT that explains why this
+    # guard exists, so the check would fail on its own explanation -- which is the same species of
+    # mistake as a test that cannot fail: one that cannot pass.
+    import ast as _ast
+
+    tree = _ast.parse(_Path(V.__file__).read_text())
+    literals = [n.value for n in _ast.walk(tree)
+                if isinstance(n, _ast.Constant) and n.value == "INCOMPLETE"]
+    assert not literals, (
+        "a bare INCOMPLETE filename is back in _viewer.py as a real string; the ONE name is "
+        "`_output.INCOMPLETE_MARKER`")

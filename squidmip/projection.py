@@ -264,6 +264,44 @@ def normalise_consumes(consumes) -> frozenset[str]:
     return axes
 
 
+def cast_like(values: np.ndarray, dtype, *, copy: bool = True) -> np.ndarray:
+    """Cast a float result back to the acquisition dtype, ROUNDING and clipping integers rather
+    than truncating and wrapping them. THE one rule for that; do not write a second.
+
+    Three properties are load-bearing, and each one was written down at a different call site
+    before they were collapsed here:
+
+    * **round, not truncate.** ``astype`` truncates toward zero, which biases every pixel of
+      every plane down by half a count -- a systematic dimming applied to the whole dataset.
+      Rounding is also what makes a correction invertible: with ``c = round(raw - bg)`` the
+      residual error is < 0.5 count, so ``round(c + bg) == raw`` exactly
+      (``_background.restore``).
+    * **clip, not wrap.** An unsigned wrap turns the dimmest pixels of the frame into the
+      brightest ones.
+    * **both operations are monotone non-decreasing**, which is why they do not break the
+      commutation with the MIP -- the property people assume breaks here and it does not.
+
+    ``copy=False`` does the same arithmetic IN PLACE, for the two resampling loops that already
+    own a fresh float buffer and pay for every temporary (``_output._downsample_yx`` over a whole
+    5-D field, ``_tilesource._paste_field`` per tile). It refuses a non-float array by name: an
+    in-place ``rint`` into an integer buffer would silently do nothing at all.
+    """
+    dtype = np.dtype(dtype)
+    if np.issubdtype(dtype, np.integer):
+        info = np.iinfo(dtype)
+        if copy:
+            values = np.clip(np.rint(values), info.min, info.max)
+        elif not np.issubdtype(values.dtype, np.floating):
+            raise ValueError(
+                f"cast_like(copy=False) needs a floating-point buffer to round in place; got "
+                f"{values.dtype}. In-place rounding of an integer array is a silent no-op."
+            )
+        else:
+            np.rint(values, out=values)
+            np.clip(values, info.min, info.max, out=values)
+    return values.astype(dtype, copy=False)
+
+
 def plane_op(fn: Callable[[np.ndarray], np.ndarray]) -> Callable[[Iterable[np.ndarray]], np.ndarray]:
     """Lift a natural ``plane -> plane`` function into the engine's ``Iterable[plane] -> plane`` shape.
 

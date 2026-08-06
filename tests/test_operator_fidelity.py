@@ -42,14 +42,14 @@ pytest.importorskip("bgsub")
 #   * bgsub.core._run_sep(img, R) -> (img_f32 - bg, bg), both float32, UNCLIPPED.
 #   * bgsub.core._process_frame_worker (the CLI's on-disk path) writes
 #         np.clip(fg, info.min, info.max).astype(dtype)      # clip, then TRUNCATE
-#   * squidmip.subtract_background casts with _cast_like:
+#   * squidmip.subtract_background casts with cast_like:
 #         np.clip(np.rint(fg), info.min, info.max).astype(dtype)   # clip, then ROUND
 #
 #   So on a FLOAT plane (the LAYER contract — non-destructive, nothing thrown away) squidmip is
 #   byte-identical to _run_sep's foreground. On an INTEGER plane squidmip rounds where the CLI
 #   truncates: same clip, different rounding. That is faithful-by-design, not a bug — rounding
 #   avoids the half-count systematic dimming that truncation imposes on every pixel, and it is
-#   exactly what makes the layer invertible (see _background.py's _cast_like docstring).
+#   exactly what makes the layer invertible (see _background.py's cast_like docstring).
 
 
 def _synthetic_plane_f32():

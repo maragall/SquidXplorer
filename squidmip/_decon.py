@@ -153,7 +153,7 @@ from squidmip import _decon_gpu
 from squidmip._acquisition import load_acquisition_metadata, load_objective_na
 from squidmip._channels import excitation_nm
 from squidmip._engine import add_projector
-from squidmip.projection import plane_op
+from squidmip.projection import cast_like, plane_op
 
 # RL iterations. Julio's working point on this instrument, not a textbook default.
 #
@@ -482,7 +482,7 @@ def deconvolve_plane(
 
     optics = optics or active_optics()
     out = _run(plane[None, ...], make_psf_2d(optics), iterations, gpu)[0]
-    return _cast_like(out, plane.dtype)
+    return cast_like(out, plane.dtype)
 
 
 def deconvolve_stack(
@@ -514,18 +514,7 @@ def deconvolve_stack(
         optics = OpticsParams(optics.na, optics.wavelength_um, optics.dxy_um,
                               optics.dz_um, int(stack.shape[0]), optics.ni)
     out = _run(stack, make_psf(optics), iterations, gpu)
-    return _cast_like(out.max(axis=0), dtype)
-
-
-def _cast_like(values: np.ndarray, dtype: np.dtype) -> np.ndarray:
-    """Cast back to the acquisition dtype, ROUNDING and clipping integers rather than
-    truncating and wrapping them. ``astype`` alone truncates toward zero (half a count of
-    systematic dimming on every pixel) and wraps on overflow (the brightest pixel in the frame
-    becomes the darkest)."""
-    if np.issubdtype(dtype, np.integer):
-        info = np.iinfo(dtype)
-        values = np.clip(np.rint(values), info.min, info.max)
-    return values.astype(dtype, copy=False)
+    return cast_like(out.max(axis=0), dtype)
 
 
 # --- the OVERRIDE optics ------------------------------------------------------------------------

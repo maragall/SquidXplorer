@@ -189,7 +189,7 @@ def test_every_plane_is_fused_with_the_same_solved_offsets(master):
     # the seams, which is where a stack shears.
     #
     # Tolerance is 1 count and it is arithmetic, not slack: fuse_plane blends in float32 and
-    # _cast_like rounds back to uint16, so a value landing on .5 can round either way. A moved seam
+    # cast_like rounds back to uint16, so a value landing on .5 can round either way. A moved seam
     # is worth hundreds of counts on this texture (its dynamic range is ~40000), so 1 does not hide
     # one.
     p0 = out[0, 0, 0].astype(np.int32)

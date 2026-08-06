@@ -94,7 +94,7 @@ from typing import TYPE_CHECKING, Callable, Iterator, Optional, Sequence
 
 import numpy as np
 
-from squidmip._background import _cast_like
+from squidmip.projection import cast_like
 from squidmip._engine import (
     _NOT_A_WELL_FAULT,
     MissingOperatorDependency,
@@ -1317,15 +1317,15 @@ def stitch_region(
                     # ROUND back to the acquisition dtype, never truncate. `arr` is the numba
                     # kernel's float32 feathered blend and `out` is native (uint16 on this data),
                     # so a plain slice assignment would truncate toward zero and bias every pixel
-                    # of the mosaic down by half a count -- the exact defect _cast_like was written
+                    # of the mosaic down by half a count -- the exact defect cast_like was written
                     # for in _background/_decon/_flatfield. Stitch was the one operator writing
                     # around it. Same helper, not a second copy of it: one answer to "what does
                     # casting back to the acquisition dtype do".
                     #
                     # No clipping is at stake here (the blend is a convex combination of the tiles,
-                    # so it cannot exceed their range), but _cast_like clips anyway and that costs
+                    # so it cannot exceed their range), but cast_like clips anyway and that costs
                     # nothing on values already in range.
-                    out[_t, :, _z, y0:y1, x0:x1] = _cast_like(arr, out.dtype)
+                    out[_t, :, _z, y0:y1, x0:x1] = cast_like(arr, out.dtype)
 
                 fuse_plane(
                     read_tile=read_tile,
