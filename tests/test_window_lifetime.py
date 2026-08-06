@@ -124,13 +124,6 @@ _N_WINDOWS = 25
 _N_TEARDOWNS = 30
 
 
-class _StubDetail:
-    """The detail viewer is a heavy third-party pane and is not what this test is about."""
-
-    def __getattr__(self, _name):
-        return lambda *a, **k: None
-
-
 @pytest.fixture(scope="module")
 def qapp():
     # Deliberately written the UNSAFE way, the way every other GUI test module writes it: the
@@ -141,12 +134,7 @@ def qapp():
     return app
 
 
-@pytest.fixture
-def stub_detail(monkeypatch):
-    monkeypatch.setattr(V.PlateWindow, "_make_detail_viewer", lambda self: _StubDetail())
-
-
-def test_the_fusion_style_outlives_any_single_window(qapp, stub_detail):
+def test_the_fusion_style_outlives_any_single_window(qapp):
     """The style must not be per-window state, or its lifetime is tied to the wrong object."""
     first = V.PlateWindow(None)
     style_a = first._fusion_style
@@ -160,7 +148,7 @@ def test_the_fusion_style_outlives_any_single_window(qapp, stub_detail):
         second.close()
 
 
-def test_the_qapplication_is_pinned_for_the_process_not_by_the_caller(qapp, stub_detail):
+def test_the_qapplication_is_pinned_for_the_process_not_by_the_caller(qapp):
     """Building a window must take the application out of the caller's hands.
 
     The concrete failure this prevents: pytest drops the module-scoped ``qapp`` fixture at the last
@@ -174,7 +162,7 @@ def test_the_qapplication_is_pinned_for_the_process_not_by_the_caller(qapp, stub
         win.close()
 
 
-def test_many_windows_can_be_built_and_destroyed_in_one_process(qapp, stub_detail):
+def test_many_windows_can_be_built_and_destroyed_in_one_process(qapp):
     """Bug 1: dropping the last reference to a window used to corrupt the heap."""
     for i in range(_N_WINDOWS):
         win = V.PlateWindow(None)
@@ -183,7 +171,7 @@ def test_many_windows_can_be_built_and_destroyed_in_one_process(qapp, stub_detai
         del win          # the trigger: PyQt deletes the C++ object here
 
 
-def test_the_region_debounce_is_disarmed_and_owns_no_closure_over_the_window(qapp, stub_detail,
+def test_the_region_debounce_is_disarmed_and_owns_no_closure_over_the_window(qapp,
                                                                             squid_dataset):
     """Bug 3, both halves, asserted directly rather than only through a crash.
 
@@ -211,7 +199,7 @@ def test_the_region_debounce_is_disarmed_and_owns_no_closure_over_the_window(qap
 # ``item.funcargs = None`` more than once and passed happily while the module still segfaulted.
 
 @pytest.fixture
-def win(qapp, stub_detail):
+def win(qapp):
     w = V.PlateWindow(None)
     yield w
     w.close()

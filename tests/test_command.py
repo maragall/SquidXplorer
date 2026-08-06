@@ -171,13 +171,13 @@ def test_list_operators_reports_the_consumed_axis_so_a_caller_knows_the_output_s
 def test_a_newly_registered_operator_appears_with_no_command_layer_edit(bus):
     """The registry scales to n algorithms; the command surface must scale with it for free."""
     from squidmip import add_projector
-    from squidmip._engine import _PROJECTORS
+    from squidmip._engine import _OPERATORS
 
     add_projector("test_only_op", lambda planes: next(iter(planes)))
     try:
         assert "test_only_op" in bus.execute(ListOperators()).data["names"]
     finally:
-        _PROJECTORS.pop("test_only_op", None)
+        _OPERATORS.pop("test_only_op", None)
 
 
 def test_describe_refuses_by_name_before_anything_is_open(bus):

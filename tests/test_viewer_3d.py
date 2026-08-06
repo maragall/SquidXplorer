@@ -35,7 +35,7 @@ if "PySide6" in sys.modules or "PySide2" in sys.modules:
 from squidmip import _viewer as V  # noqa: E402
 
 from .conftest import shutdown_plate_window  # noqa: E402
-from .test_viewer import _drain_until, qapp, stub_detail  # noqa: E402,F401  (fixtures)
+from .test_viewer import _drain_until, qapp  # noqa: E402,F401  (fixtures)
 
 # WHERE THE VOXEL SIZE NOW GOES (decentralization, 2026-07-23).
 #
@@ -78,7 +78,7 @@ class TestRawPushCarriesVoxelSize:
     where a volume means anything — and the only one that must carry the voxel size."""
 
     def test_a_window_declares_the_acquisitions_voxel_depth_to_napari(
-        self, qapp, stub_detail, napari_pane_stub, squid_dataset  # noqa: F811
+        self, qapp, napari_pane_stub, squid_dataset  # noqa: F811
     ):
         """Every raw mosaic a window adds carries the acquisition's dz, in micrometres.
 
@@ -104,7 +104,7 @@ class TestRawPushCarriesVoxelSize:
         shutdown_plate_window(qapp, win)
 
     def test_the_3d_volume_push_carries_the_full_voxel_scale(
-        self, qapp, stub_detail, napari_pane_stub, squid_dataset, monkeypatch  # noqa: F811
+        self, qapp, napari_pane_stub, squid_dataset, monkeypatch  # noqa: F811
     ):
         """dz_um / pixel_size_um is the z stretch the renderer applies, and it must be
         computable from the pushed values alone, and finite and positive.
@@ -142,7 +142,7 @@ class TestRawPushCarriesVoxelSize:
         shutdown_plate_window(qapp, win)
 
     def test_the_raw_mosaic_declares_the_full_z_stack(
-        self, qapp, stub_detail, napari_pane_stub, squid_dataset  # noqa: F811
+        self, qapp, napari_pane_stub, squid_dataset  # noqa: F811
     ):
         """A volume needs more than one plane; the raw mosaic must not collapse z.
 
@@ -178,7 +178,7 @@ class TestThe3DPopoutDoesNotPileUp:
     """
 
     def test_a_second_3D_click_CLOSES_the_first_popout(
-        self, qapp, stub_detail, napari_pane_stub, squid_dataset, monkeypatch  # noqa: F811
+        self, qapp, napari_pane_stub, squid_dataset, monkeypatch  # noqa: F811
     ):
         """MUTATION: assign self._native3d directly instead of going through
         _replace_native3d -> the first popout is never closed -> red."""
@@ -213,7 +213,7 @@ class TestThe3DPopoutDoesNotPileUp:
         shutdown_plate_window(qapp, win)
 
     def test_a_popout_that_REFUSES_to_close_does_not_block_the_new_one(
-        self, qapp, stub_detail, napari_pane_stub, squid_dataset, monkeypatch  # noqa: F811
+        self, qapp, napari_pane_stub, squid_dataset, monkeypatch  # noqa: F811
     ):
         """A stale window whose close() raises (already destroyed, no Qt window) must not be the
         reason the user cannot open the view they asked for."""

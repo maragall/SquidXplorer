@@ -62,89 +62,11 @@ def _needs(pkg: str):
         reason=f"{pkg} not installed: this operator path is UNTESTED here, not passing")
 
 
-class _StubDetail(QWidget):
-    """Stand-in for the embedded ndviewer_light detail viewer.
-
-    Records the push API (start_acquisition / register_image / go_to_well_fov) so we can assert
-    the seam WITHOUT constructing ndviewer's real vispy/GL widget — which segfaults offscreen
-    under pytest's PySide6/napari-loaded environment (a Qt-binding conflict, not a code bug).
-    """
-
-    # THE contrast window this viewer renders a channel with (IMA-261). The stub carries the
-    # signal because the real ndviewer_light does: a stub that omits it would let the plate's
-    # `contrastChanged` connection rot unobserved, which is precisely the class of dead wiring
-    # this file exists to catch.
-    contrastChanged = Signal(int, float, float)
-
-    def __init__(self):
-        super().__init__()
-        self._fov_labels = []
-        self._fov_slider = QSlider(Qt.Horizontal, self)
-        self._windows = {}        # ch -> (lo, hi), exactly as ndv would have resolved them
-        self.registered = []
-        # (t, idx, z, ch, (h, w)) of every register_array push. The SHAPE is recorded because
-        # IMA-245 is a shape defect: the handler was called with the right index and the wrong
-        # rectangle, and a recorder that keeps only the index cannot tell those two apart.
-        self.arrays = []
-        self.nav = []
-        self.acquisitions = []    # one entry per start_acquisition — the slider's label list
-        self.canvases = []        # (h, w) declared by each start_acquisition
-        # (pixel_size_um, dz_um) per start_acquisition. The real viewer needs both to give
-        # ndv's 3D button the right voxel aspect (IMA-255); recording them is what lets
-        # tests/test_viewer_3d.py prove the metadata actually reaches the seam.
-        self.voxel_um = []
-
-    def start_acquisition(self, channels, nz, h, w, labels,
-                          pixel_size_um=None, dz_um=None):
-        self._fov_labels = list(labels)
-        self._fov_slider.setMaximum(max(0, len(labels) - 1))
-        self.acquisitions.append(list(labels))
-        self.canvases.append((h, w))
-        self.voxel_um.append((pixel_size_um, dz_um))
-
-    def register_image(self, t, idx, z, ch, path, page_idx=0):
-        self.registered.append((t, idx, z, ch, path))
-
-    def register_array(self, t, idx, z, ch, plane):
-        """Record computed-well pushes. The real ndviewer indexes its slider by ``idx``, so a push
-        whose idx exceeds the current label list would land out of range — recording it here is what
-        makes the global->subset remap assertable at all (the push path was previously unobserved).
-
-        IMA-245: a real ndviewer canvas is fixed by ``start_acquisition``, so a plane of the wrong
-        SHAPE is as undisplayable as a push that never arrives. Refuse it here for the same reason
-        the real viewer would, so a test cannot pass on a push the GUI would show as black."""
-        shape = tuple(np.asarray(plane).shape)
-        want = self.canvases[-1] if self.canvases else None
-        if want is not None and shape != want:
-            raise ValueError(f"plane {shape} does not fit the declared canvas {want}")
-        self.arrays.append((t, idx, z, ch, shape))
-
-    def go_to_well_fov(self, well_id, fov):
-        self.nav.append((well_id, fov))
-        return True
-
-    # -- contrast: this viewer OWNS it and publishes it; the plate only follows (IMA-261) --
-    def channel_windows(self):
-        return dict(self._windows)
-
-    def drag_contrast(self, ch, lo, hi):
-        """What ndv does when its clim slider moves: record, then broadcast. Tests call THIS,
-        never PlateWindow._on_detail_contrast, so the signal/slot connection is under test."""
-        self._windows[ch] = (float(lo), float(hi))
-        self.contrastChanged.emit(int(ch), float(lo), float(hi))
-
-
 @pytest.fixture(scope="module")
 def qapp():
     app = QApplication.instance() or QApplication([])
     app.setProperty("_squidmip_test", True)  # main() won't call exec_/exit under test
     return app
-
-
-@pytest.fixture
-def stub_detail(monkeypatch):
-    """Swap the real ndviewer for a recording stub (avoids the offscreen-GL segfault)."""
-    monkeypatch.setattr(V.PlateWindow, "_make_detail_viewer", lambda self: _StubDetail())
 
 
 def _drain_until(app, pred, timeout=60):
@@ -599,7 +521,7 @@ def test_the_base_never_shows_through_itself(qapp):
 
 # --- GUI behavior (offscreen; embedded viewer stubbed) --------------------------------------
 
-def test_ingest_bad_folder_does_not_crash(qapp, stub_detail, tmp_path):
+def test_ingest_bad_folder_does_not_crash(qapp, tmp_path):
     win = V.PlateWindow(None)
     bad = tmp_path / "not_squid"
     bad.mkdir()
@@ -608,7 +530,7 @@ def test_ingest_bad_folder_does_not_crash(qapp, stub_detail, tmp_path):
     win.close()
 
 
-def test_ingest_loads_plate_and_previews_without_processing(qapp, stub_detail, squid_dataset):
+def test_ingest_loads_plate_and_previews_without_processing(qapp, squid_dataset):
     root, _ = squid_dataset          # tiny real acquisition (B2, B3)
     win = V.PlateWindow(None)
     win.ingest(str(root))
@@ -623,7 +545,7 @@ def test_ingest_loads_plate_and_previews_without_processing(qapp, stub_detail, s
     win.close()
 
 
-def test_ingest_non_wellplate_region_opens_as_a_slide_carrier(qapp, stub_detail, tmp_path):
+def test_ingest_non_wellplate_region_opens_as_a_slide_carrier(qapp, tmp_path):
     # IMA-214 INVERTED THIS TEST. It used to assert that a readable acquisition whose region is
     # not a well id ("R2C3", "manual0", a glass slide) was REFUSED with "not a well-plate".
     # That refusal is exactly what blocked the real 18 GB tissue dataset from ever opening.
@@ -661,7 +583,7 @@ def test_ingest_non_wellplate_region_opens_as_a_slide_carrier(qapp, stub_detail,
     win.close(); win2.close()
 
 
-def test_run_operator_persists_via_write_plate(qapp, stub_detail, squid_dataset, monkeypatch, tmp_path):
+def test_run_operator_persists_via_write_plate(qapp, squid_dataset, monkeypatch, tmp_path):
     # run_operator now PERSISTS: it drives write_plate with the SELECTED projector, and the GUI must
     # NOT write the uncompressed individual-TIFF copy (tiff=False) — that would double disk use.
     import squidmip
@@ -692,7 +614,7 @@ def test_run_operator_persists_via_write_plate(qapp, stub_detail, squid_dataset,
     win._stop_worker(); win.close()
 
 
-def test_run_operator_fills_tiles_and_hue_status(qapp, stub_detail, squid_dataset, tmp_path):
+def test_run_operator_fills_tiles_and_hue_status(qapp, squid_dataset, tmp_path):
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
@@ -713,7 +635,7 @@ def test_run_operator_fills_tiles_and_hue_status(qapp, stub_detail, squid_datase
     win.close()
 
 
-def test_double_click_opens_an_independent_window_on_that_region(qapp, stub_detail, squid_dataset):
+def test_double_click_opens_an_independent_window_on_that_region(qapp, squid_dataset):
     """RE-POINTED by commit 2b8fbc5 (was test_double_click_pushes_raw_zstack).
 
     A double-click used to push the well's raw z-stack into the EMBEDDED ndviewer
@@ -1005,7 +927,7 @@ def test_clear_selection_emits_empty(qapp):
 
 # --- window level: expansion to (region, fov) + run-on-selection ----------------------------
 
-def test_selection_expands_to_region_fov_pairs(qapp, stub_detail, squid_dataset):
+def test_selection_expands_to_region_fov_pairs(qapp, squid_dataset):
     """PlateOverview is display-only (it has no metadata), so PlateWindow does the expansion."""
     root, _ = squid_dataset
     win = V.PlateWindow(None)
@@ -1018,7 +940,7 @@ def test_selection_expands_to_region_fov_pairs(qapp, stub_detail, squid_dataset)
     win.close()
 
 
-def test_run_operator_on_selection_only_processes_selected(qapp, stub_detail, squid_dataset,
+def test_run_operator_on_selection_only_processes_selected(qapp, squid_dataset,
                                                            monkeypatch, tmp_path):
     """The Accept gate: a selection SCOPES the operator run to just those wells."""
     import squidmip
@@ -1043,7 +965,7 @@ def test_run_operator_on_selection_only_processes_selected(qapp, stub_detail, sq
     win._stop_worker(); win.close()
 
 
-def test_selection_clears_on_second_ingest(qapp, stub_detail, squid_dataset):
+def test_selection_clears_on_second_ingest(qapp, squid_dataset):
     """A stale selection must never point at wells from the previous acquisition."""
     root, _ = squid_dataset
     win = V.PlateWindow(None)
@@ -1077,7 +999,7 @@ def _open_stub_tab(win, key="stub", title="Stub"):
     return w
 
 
-def test_detach_moves_widget_to_float_and_registry(qapp, stub_detail):
+def test_detach_moves_widget_to_float_and_registry(qapp):
     win = V.PlateWindow(None)
     w = _open_stub_tab(win)
     fl = win._detach_tab(win._left_tabs.indexOf(w))
@@ -1088,14 +1010,14 @@ def test_detach_moves_widget_to_float_and_registry(qapp, stub_detail):
     win.close()
 
 
-def test_detach_home_tab_refused(qapp, stub_detail):
+def test_detach_home_tab_refused(qapp):
     win = V.PlateWindow(None)
     assert win._detach_tab(0) is None                        # 'Process wells' never detaches
     assert win._left_tabs.count() >= 1 and win._left_tabs.widget(0) is not None
     win.close()
 
 
-def test_open_op_tab_focuses_float_not_duplicate(qapp, stub_detail):
+def test_open_op_tab_focuses_float_not_duplicate(qapp):
     # REGRESSION (eng review D4): with the key moved to _floating, an unpatched _open_op_tab
     # would rebuild the UI — for the CLI, a SECOND live shell. The opener must focus the float.
     win = V.PlateWindow(None)
@@ -1108,7 +1030,7 @@ def test_open_op_tab_focuses_float_not_duplicate(qapp, stub_detail):
     win.close()
 
 
-def test_close_float_disposes_widget(qapp, stub_detail):
+def test_close_float_disposes_widget(qapp):
     win = V.PlateWindow(None)
     w = _open_stub_tab(win)
     fl = win._detach_tab(win._left_tabs.indexOf(w))
@@ -1121,7 +1043,7 @@ def test_close_float_disposes_widget(qapp, stub_detail):
     win.close()
 
 
-def test_redock_returns_same_widget(qapp, stub_detail):
+def test_redock_returns_same_widget(qapp):
     win = V.PlateWindow(None)
     w = _open_stub_tab(win)
     win._detach_tab(win._left_tabs.indexOf(w))
@@ -1133,7 +1055,7 @@ def test_redock_returns_same_widget(qapp, stub_detail):
     win.close()
 
 
-def test_main_close_with_float_open_shuts_down(qapp, stub_detail):
+def test_main_close_with_float_open_shuts_down(qapp):
     win = V.PlateWindow(None)
     w = _open_stub_tab(win)
     win._detach_tab(win._left_tabs.indexOf(w))
@@ -1142,7 +1064,7 @@ def test_main_close_with_float_open_shuts_down(qapp, stub_detail):
     assert not win._floating                                 # ...no orphan window blocking exit
 
 
-def test_detached_layers_keeps_refreshing_until_dispose(qapp, stub_detail):
+def test_detached_layers_keeps_refreshing_until_dispose(qapp):
     win = V.PlateWindow(None)
     win._open_op_tab("layers", "Layers", win._build_layers_tab)
     lw = win._op_tabs["layers"]
@@ -1155,7 +1077,7 @@ def test_detached_layers_keeps_refreshing_until_dispose(qapp, stub_detail):
     win.close()
 
 
-def test_float_survives_second_ingest(qapp, stub_detail, squid_dataset):
+def test_float_survives_second_ingest(qapp, squid_dataset):
     # Floats follow docked-tab semantics across a plate swap: they persist (staleness of op tabs
     # on re-ingest is a pre-existing, tab-wide behavior — tracked in TODOS.md, not 209's scope).
     root, _ = squid_dataset
@@ -1170,7 +1092,7 @@ def test_float_survives_second_ingest(qapp, stub_detail, squid_dataset):
     win.close()
 
 
-def test_channel_toggle_after_preview_reads_nothing(qapp, stub_detail, squid_dataset):
+def test_channel_toggle_after_preview_reads_nothing(qapp, squid_dataset):
     # OV10 defines "no recompute": no reader I/O and no projection. Assert it with a SPY on the
     # reader, not by timing — the toggle must recomposite purely from the retained store.
     root, _ = squid_dataset
@@ -1193,7 +1115,7 @@ def test_channel_toggle_after_preview_reads_nothing(qapp, stub_detail, squid_dat
     win.close()
 
 
-def test_napari_visibility_drives_the_plate_and_the_strip_only_reports_it(qapp, stub_detail,
+def test_napari_visibility_drives_the_plate_and_the_strip_only_reports_it(qapp,
                                                                           squid_dataset):
     """Julio: "there shouldn't be any controls for the plate view. It just reacts to toggles and
     contrast adjustments in napari."
@@ -1254,7 +1176,7 @@ def test_napari_visibility_drives_the_plate_and_the_strip_only_reports_it(qapp, 
 # `follow_channel_window` from `_on_mosaic_done`.
 
 
-def test_following_a_viewer_window_never_latches_the_plate_manual(qapp, stub_detail, squid_dataset):
+def test_following_a_viewer_window_never_latches_the_plate_manual(qapp, squid_dataset):
     """THE regression this nearly shipped with.
 
     A viewer autoscales on its own — at open, and again on every data change — so the first
@@ -1288,7 +1210,7 @@ def test_following_a_viewer_window_never_latches_the_plate_manual(qapp, stub_det
     win.close()
 
 
-def test_a_user_latch_still_outranks_the_viewer(qapp, stub_detail, squid_dataset):
+def test_a_user_latch_still_outranks_the_viewer(qapp, squid_dataset):
     """`resolve` is still ONE precedence rule, now over three inputs:
 
         user latch  >  the owning viewer's window  >  whatever the caller computed.
@@ -1314,7 +1236,7 @@ def test_a_user_latch_still_outranks_the_viewer(qapp, stub_detail, squid_dataset
     win.close()
 
 
-def test_a_channel_the_plate_does_not_have_is_ignored_not_a_crash(qapp, stub_detail, squid_dataset):
+def test_a_channel_the_plate_does_not_have_is_ignored_not_a_crash(qapp, squid_dataset):
     """A viewer drawing RGB mode, or re-ingesting, can report a channel index the plate lacks.
 
     RE-POINTED by 2b8fbc5 onto `follow_channel_window`, which carries the same range guard.
@@ -1368,7 +1290,7 @@ def test_a_contrast_change_keeps_the_thumbnail_but_new_pixels_drop_it(qapp):
         "the newly added well never appeared — the plate composited a stale thumbnail")
 
 
-def test_channel_store_survives_an_operator_run(qapp, stub_detail, squid_dataset, tmp_path):
+def test_channel_store_survives_an_operator_run(qapp, squid_dataset, tmp_path):
     # D3: the store lives in the widget, so the toggle works on the operator layer too — not just
     # on the raw preview. Both layers keep their own (C, H, W) store.
     root, _ = squid_dataset
@@ -1416,7 +1338,7 @@ def test_operator_layer_key_namespaces_only_when_scoped():
 
 
 
-def test_run_operator_rejects_empty_and_unknown_regions(qapp, stub_detail, squid_dataset, tmp_path):
+def test_run_operator_rejects_empty_and_unknown_regions(qapp, squid_dataset, tmp_path):
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
@@ -1434,15 +1356,11 @@ def test_run_operator_rejects_empty_and_unknown_regions(qapp, stub_detail, squid
 #   test_whole_plate_run_keeps_identity_indexing
 #
 # Both assert the GLOBAL-plate-index -> subset-slider-position remap by reading back what landed in
-# the embedded ndviewer (`_detail.arrays`, i.e. `register_array` pushes) and how its FOV slider was
-# scoped (`_detail._fov_labels`). There is no embedded viewer: `_detail` is unconditionally None,
-# `_setup_raw_detail` early-returns before it can scope anything, and `_on_push` drops every push
-# at `if self._detail is None` before the remap is ever consulted. The remap therefore has no
-# observable effect left to assert. `run_operator` still builds `_push_index` (it is cheap and
-# inert), which is why a stale map is not itself a defect.
+# the embedded ndviewer. There is no embedded viewer and, as of 2026-08-05, no remap either: the
+# whole feed it belonged to was deleted with the viewer it fed.
 
 
-def test_preview_spinner_still_runs_first_n_wells(qapp, stub_detail, squid_dataset, monkeypatch):
+def test_preview_spinner_still_runs_first_n_wells(qapp, squid_dataset, monkeypatch):
     """REGRESSION for the preview_limit -> regions= collapse: the shipped spinner call site."""
     root, _ = squid_dataset
     win = V.PlateWindow(None)
@@ -1484,7 +1402,7 @@ def test_a_preview_that_cannot_read_names_the_failure_instead_of_freezing_the_pl
     assert ended                                     # the plate still recomposites what it has
 
 
-def test_operator_tab_opened_twice_is_one_tab(qapp, stub_detail, squid_dataset):
+def test_operator_tab_opened_twice_is_one_tab(qapp, squid_dataset):
     """REGRESSION: an operator tab is a SINGLETON — opening it twice focuses the one tab."""
     root, _ = squid_dataset
     win = V.PlateWindow(None)
@@ -1502,7 +1420,7 @@ def test_operator_tab_opened_twice_is_one_tab(qapp, stub_detail, squid_dataset):
 
 
 
-def test_home_tab_is_never_closable(qapp, stub_detail, squid_dataset):
+def test_home_tab_is_never_closable(qapp, squid_dataset):
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
@@ -1512,7 +1430,7 @@ def test_home_tab_is_never_closable(qapp, stub_detail, squid_dataset):
     win.close()
 
 
-def test_busy_guard_covers_retired_workers(qapp, stub_detail, squid_dataset, tmp_path):
+def test_busy_guard_covers_retired_workers(qapp, squid_dataset, tmp_path):
     """_stop_worker clears self._worker while the retired thread drains — the guard must still
     refuse a new run, or closing a tab lets two workers hit the same reader at once."""
     root, _ = squid_dataset
@@ -1534,14 +1452,13 @@ def test_busy_guard_covers_retired_workers(qapp, stub_detail, squid_dataset, tmp
 # REMOVED BY commit 2b8fbc5 ("Decentralize GUI"):
 # test_subset_tab_registers_raw_paths_at_subset_positions. It asserted that the raw bulk-register
 # path indexed the embedded ndviewer's slider by SUBSET position rather than global plate index.
-# `_setup_raw_detail` (the only caller of `register_images_bulk`) returns at
-# `if self._detail is None` before registering anything, so there is no slider to index and no
-# registration to observe.
+# `_setup_raw_detail`, its only caller, was unreachable and was deleted on 2026-08-05 with the
+# rest of the embedded viewer: there is no slider to index and no registration to observe.
 
 
 
 
-def test_subset_save_is_disk_guarded(qapp, stub_detail, squid_dataset, monkeypatch, tmp_path):
+def test_subset_save_is_disk_guarded(qapp, squid_dataset, monkeypatch, tmp_path):
     """The guard used to be skipped entirely for subsets (`if not ok and regions is None`)."""
     root, _ = squid_dataset
     win = V.PlateWindow(None)
@@ -1556,7 +1473,7 @@ def test_subset_save_is_disk_guarded(qapp, stub_detail, squid_dataset, monkeypat
     win.close()
 
 
-def test_check_disk_scales_with_subset_size(qapp, stub_detail, squid_dataset, tmp_path):
+def test_check_disk_scales_with_subset_size(qapp, squid_dataset, tmp_path):
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
@@ -1571,7 +1488,7 @@ def test_check_disk_scales_with_subset_size(qapp, stub_detail, squid_dataset, tm
     win.close()
 
 
-def test_note_partial_output_marks_a_stopped_plate(qapp, stub_detail, squid_dataset, tmp_path):
+def test_note_partial_output_marks_a_stopped_plate(qapp, squid_dataset, tmp_path):
     """A save run that is stopped mid-write leaves a real-looking plate.ome.zarr holding only some
     wells. Mark it, so 'Open a computed MIP' can refuse it instead of showing a truncated plate as
     a finished one."""
@@ -1587,7 +1504,7 @@ def test_note_partial_output_marks_a_stopped_plate(qapp, stub_detail, squid_data
     win.close()
 
 
-def test_open_computed_refuses_an_incomplete_plate(qapp, stub_detail, tmp_path, monkeypatch):
+def test_open_computed_refuses_an_incomplete_plate(qapp, tmp_path, monkeypatch):
     base = tmp_path / "acq.hcs"
     (base / "plate.ome.zarr").mkdir(parents=True)
     (base / "plate.ome.zarr" / "zarr.json").write_text("{}")
@@ -1599,7 +1516,7 @@ def test_open_computed_refuses_an_incomplete_plate(qapp, stub_detail, tmp_path, 
     win.close()
 
 
-def test_completed_save_run_is_not_marked_incomplete(qapp, stub_detail, squid_dataset, tmp_path):
+def test_completed_save_run_is_not_marked_incomplete(qapp, squid_dataset, tmp_path):
     """The other half of the invariant: a run that finishes must NOT be flagged."""
     root, _ = squid_dataset
     win = V.PlateWindow(None)
@@ -1612,7 +1529,7 @@ def test_completed_save_run_is_not_marked_incomplete(qapp, stub_detail, squid_da
 
 
 def test_open_computed_names_a_well_that_cannot_read_its_own_image_id(
-        qapp, stub_detail, squid_dataset, tmp_path, monkeypatch):
+        qapp, squid_dataset, tmp_path, monkeypatch):
     """A well whose own group metadata is unreadable falls back to well 0's image id. On this
     uniform plate that still reads correct pixels, but on a heterogeneous plate the loupe would
     magnify the WRONG field — so the substitution must be NAMED, never silent."""
@@ -1655,7 +1572,7 @@ def test_operation_stack_remove_and_remove_suffix():
     assert st.remove("mip") is False
 
 
-def test_second_ingest_resets_state(qapp, stub_detail, squid_dataset, tmp_path):
+def test_second_ingest_resets_state(qapp, squid_dataset, tmp_path):
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
@@ -1680,7 +1597,7 @@ def test_second_ingest_resets_state(qapp, stub_detail, squid_dataset, tmp_path):
 # rebase cannot silently drop the feature again.
 
 def test_operator_worker_is_constructed_for_multi_fov_not_defaulted_to_one(
-        qapp, stub_detail, squid_dataset, tmp_path, monkeypatch):
+        qapp, squid_dataset, tmp_path, monkeypatch):
     """run_operator must hand the worker a multi-FOV n_fovs, or the mosaic is unreachable."""
     seen = {}
     real_init = V._OperatorWorker.__init__
@@ -1708,7 +1625,7 @@ def test_operator_worker_is_constructed_for_multi_fov_not_defaulted_to_one(
 
 
 def test_set_mosaic_boxes_is_actually_called_by_the_viewer(
-        qapp, stub_detail, squid_dataset, tmp_path, monkeypatch):
+        qapp, squid_dataset, tmp_path, monkeypatch):
     """PlateOverview.set_mosaic_boxes exists but nothing calls it -- boxes never reach paint."""
     calls = []
     monkeypatch.setattr(V.PlateOverview, "set_mosaic_boxes",
@@ -1736,7 +1653,7 @@ def test_set_mosaic_boxes_is_actually_called_by_the_viewer(
 # raise, they draw a plausible-but-wrong picture. So these drive the REAL widget and assert on
 # geometry and on rendered pixels.
 
-def test_mosaic_places_each_fov_at_its_own_stage_offset(qapp, stub_detail, squid_dataset,
+def test_mosaic_places_each_fov_at_its_own_stage_offset(qapp, squid_dataset,
                                                         tmp_path):
     """FOVs must occupy DISTINCT boxes derived from stage coords, not pile up at the origin.
 
@@ -1776,7 +1693,7 @@ def _cell_of(img, ri, ci):
     return a[ri * V._CELL:(ri + 1) * V._CELL, ci * V._CELL:(ci + 1) * V._CELL].astype(int)
 
 
-def test_mosaic_cell_composites_real_structured_pixels(qapp, stub_detail, squid_dataset, tmp_path):
+def test_mosaic_cell_composites_real_structured_pixels(qapp, squid_dataset, tmp_path):
     """Drive the real widget and LOOK at the acquired cell: it must hold real, varying imagery.
 
     Measured on the MONTAGE (``_active_source``), one cell of which is exactly _CELL x _CELL, and
@@ -2021,7 +1938,7 @@ def _freeze(ov, cd=20.0):
     return ov
 
 
-def test_shift_click_refines_the_selection_without_opening_anything(qapp, stub_detail,
+def test_shift_click_refines_the_selection_without_opening_anything(qapp,
                                                                     squid_dataset):
     """Only the DRAG opens a window. Shift+click is the refine-one-well gesture, and opening one
     window per corrective click would bury the one the user meant."""
@@ -2041,7 +1958,7 @@ def test_shift_click_refines_the_selection_without_opening_anything(qapp, stub_d
 
 
 def test_shift_drag_over_empty_plate_opens_nothing_and_says_nothing(
-        qapp, stub_detail, squid_dataset):
+        qapp, squid_dataset):
     """A miss is a miss: nothing opens, and no 'empty selection' text stomps the readout."""
     root, _ = squid_dataset
     win = V.PlateWindow(None)
@@ -2083,10 +2000,6 @@ class _BlockingWorker(V.QThread):
         super().__init__()
         import threading
         self.mosaic_boxes = {}
-        # IMA-245: the window declares the array viewer's canvas from the worker's push geometry,
-        # so a worker double has to carry it too — the frame square is what a per-FOV run reports.
-        self.push_shape = (V._PUSH_PX, V._PUSH_PX)
-        self.push_shape_estimated = False
         self._go = threading.Event()
 
     def run(self):
@@ -2325,7 +2238,7 @@ def test_fov_seam_is_single_fov():
 
 # -- gesture state machine --
 
-def test_hold_raises_loupe_and_release_dismisses(qapp, stub_detail, squid_dataset):
+def test_hold_raises_loupe_and_release_dismisses(qapp, squid_dataset):
     root, _ = squid_dataset
     win = _loupe_win(qapp, root)
     ov = win._overview
@@ -2343,7 +2256,7 @@ def test_hold_raises_loupe_and_release_dismisses(qapp, stub_detail, squid_datase
     win.close()
 
 
-def test_loupe_follows_cursor_and_coalesces_to_newest(qapp, stub_detail, squid_dataset):
+def test_loupe_follows_cursor_and_coalesces_to_newest(qapp, squid_dataset):
     root, _ = squid_dataset
     win = _loupe_win(qapp, root)
     ov = win._overview
@@ -2364,7 +2277,7 @@ def test_loupe_follows_cursor_and_coalesces_to_newest(qapp, stub_detail, squid_d
     win.close()
 
 
-def test_moving_before_the_dwell_pans_and_never_loupes(qapp, stub_detail, squid_dataset):
+def test_moving_before_the_dwell_pans_and_never_loupes(qapp, squid_dataset):
     """REGRESSION: drag-to-pan must survive the loupe."""
     root, _ = squid_dataset
     win = _loupe_win(qapp, root)
@@ -2386,7 +2299,7 @@ def test_moving_before_the_dwell_pans_and_never_loupes(qapp, stub_detail, squid_
     win.close()
 
 
-def test_slow_pan_stays_a_pan(qapp, stub_detail, squid_dataset):
+def test_slow_pan_stays_a_pan(qapp, squid_dataset):
     """REGRESSION: press, dwell PAST the timer, then drag — the classic deliberate pan.
 
     The obvious 'pan still works' test (press + immediate drag) passes even if this breaks,
@@ -2412,7 +2325,7 @@ def test_slow_pan_stays_a_pan(qapp, stub_detail, squid_dataset):
     win.close()
 
 
-def test_double_click_cancels_the_hold_and_still_opens_the_well(qapp, stub_detail, squid_dataset):
+def test_double_click_cancels_the_hold_and_still_opens_the_well(qapp, squid_dataset):
     """REGRESSION: Qt sends press/release/dblclick, so the second press re-arms the timer.
     Without the cancel, one double-click both opens the detail viewer AND raises a loupe."""
     root, _ = squid_dataset
@@ -2433,7 +2346,7 @@ def test_double_click_cancels_the_hold_and_still_opens_the_well(qapp, stub_detai
     win.close()
 
 
-def test_press_off_plate_never_arms(qapp, stub_detail, squid_dataset):
+def test_press_off_plate_never_arms(qapp, squid_dataset):
     root, _ = squid_dataset
     win = _loupe_win(qapp, root)
     ov = win._overview
@@ -2447,7 +2360,7 @@ def test_press_off_plate_never_arms(qapp, stub_detail, squid_dataset):
     win.close()
 
 
-def test_leaving_the_widget_dismisses_a_live_loupe(qapp, stub_detail, squid_dataset):
+def test_leaving_the_widget_dismisses_a_live_loupe(qapp, squid_dataset):
     """Release may never arrive if the cursor leaves the widget mid-hold."""
     root, _ = squid_dataset
     win = _loupe_win(qapp, root)
@@ -2465,7 +2378,7 @@ def test_leaving_the_widget_dismisses_a_live_loupe(qapp, stub_detail, squid_data
     win.close()
 
 
-def test_unavailable_well_reports_instead_of_showing_other_pixels(qapp, stub_detail, squid_dataset):
+def test_unavailable_well_reports_instead_of_showing_other_pixels(qapp, squid_dataset):
     """A well the run hasn't written must say so — never magnify some other well's pixels."""
     root, _ = squid_dataset
     win = _loupe_win(qapp, root)
@@ -2486,7 +2399,7 @@ def test_unavailable_well_reports_instead_of_showing_other_pixels(qapp, stub_det
     win.close()
 
 
-def test_no_source_means_the_gesture_never_arms(qapp, stub_detail, squid_dataset):
+def test_no_source_means_the_gesture_never_arms(qapp, squid_dataset):
     root, _ = squid_dataset
     win = _loupe_win(qapp, root)
     ov = win._overview
@@ -2501,7 +2414,7 @@ def test_no_source_means_the_gesture_never_arms(qapp, stub_detail, squid_dataset
 
 # -- source wiring --
 
-def test_raw_layer_gets_a_loupe_source_on_ingest(qapp, stub_detail, squid_dataset):
+def test_raw_layer_gets_a_loupe_source_on_ingest(qapp, squid_dataset):
     """The loupe works before ANY operator run — raw mode is where users actually are."""
     root, _ = squid_dataset
     win = _loupe_win(qapp, root)
@@ -2512,7 +2425,7 @@ def test_raw_layer_gets_a_loupe_source_on_ingest(qapp, stub_detail, squid_datase
     win.close()
 
 
-def test_raw_source_reads_real_acquisition_pixels(qapp, stub_detail, squid_dataset):
+def test_raw_source_reads_real_acquisition_pixels(qapp, squid_dataset):
     root, arrays = squid_dataset
     win = _loupe_win(qapp, root)
     src = win._loupe_sources["raw"]
@@ -2526,7 +2439,7 @@ def test_raw_source_reads_real_acquisition_pixels(qapp, stub_detail, squid_datas
     win.close()
 
 
-def test_raw_source_clamps_a_negative_crop_origin(qapp, stub_detail, squid_dataset):
+def test_raw_source_clamps_a_negative_crop_origin(qapp, squid_dataset):
     """THE bug (IMA-208): raw is the DEFAULT source on every folder open, and it did not clamp.
 
     A crop centred anywhere in the upper-left of a well starts at a negative origin, and
@@ -2546,7 +2459,7 @@ def test_raw_source_clamps_a_negative_crop_origin(qapp, stub_detail, squid_datas
     win.close()
 
 
-def test_loupe_shows_pixels_in_every_quadrant_of_a_well(qapp, stub_detail, squid_dataset):
+def test_loupe_shows_pixels_in_every_quadrant_of_a_well(qapp, squid_dataset):
     """The user-visible contract, driven through the widget: hold anywhere in a well and pixels
     appear. Quadrant-by-quadrant because the failure was positional, not total."""
     root, _ = squid_dataset
@@ -2765,7 +2678,7 @@ def test_the_loupe_paints_with_the_plates_own_colours(qapp):
         "channel 0 was recoloured blue and the inset is still painting it red")
 
 
-def test_the_loupe_reads_the_timepoint_the_plate_is_showing(qapp, stub_detail, squid_dataset):
+def test_the_loupe_reads_the_timepoint_the_plate_is_showing(qapp, squid_dataset):
     """The sources have taken a ``time_point`` since 2026-07-29 (docs/plate-contract.md pins the
     signatures) and NOTHING passed one, so every read defaulted to frame 0. Move the plate's
     timepoint and the inset went on magnifying the first frame, silently.
@@ -2803,7 +2716,7 @@ def test_the_loupe_reads_the_timepoint_the_plate_is_showing(qapp, stub_detail, s
         win.close()
 
 
-def test_switching_the_active_layer_repoints_the_loupe(qapp, stub_detail, squid_dataset, tmp_path):
+def test_switching_the_active_layer_repoints_the_loupe(qapp, squid_dataset, tmp_path):
     """The plate follows which operator layer a window is showing (``set_active_layer``). The
     loupe's source is chosen BY that layer, and four of the six call sites happened to re-point it
     afterwards while the tab-change handler did not -- so clicking onto a window's tab moved the
@@ -2827,7 +2740,7 @@ def test_switching_the_active_layer_repoints_the_loupe(qapp, stub_detail, squid_
         win.close()
 
 
-def test_loupe_read_stays_bounded_when_the_source_has_no_pyramid(qapp, stub_detail, squid_dataset):
+def test_loupe_read_stays_bounded_when_the_source_has_no_pyramid(qapp, squid_dataset):
     """Raw has n_levels == 1, so level selection cannot shrink the read: at plate fit the rect
     IS the whole field. What crosses to the GUI thread must still be inset-sized."""
     root, _ = squid_dataset
@@ -2846,7 +2759,7 @@ def test_loupe_read_stays_bounded_when_the_source_has_no_pyramid(qapp, stub_deta
     win.close()
 
 
-def test_raw_plane_cache_is_safe_across_threads(qapp, stub_detail, squid_dataset):
+def test_raw_plane_cache_is_safe_across_threads(qapp, squid_dataset):
     """Two wells, many threads: a crop must never carry another well's pixels.
 
     ``_planes`` memoises ONE well and was mutated from both the loupe worker (read_crop) and the
@@ -2872,7 +2785,7 @@ def test_raw_plane_cache_is_safe_across_threads(qapp, stub_detail, squid_dataset
     win.close()
 
 
-def test_opening_another_plate_joins_the_previous_loupe_thread(qapp, stub_detail, squid_dataset):
+def test_opening_another_plate_joins_the_previous_loupe_thread(qapp, squid_dataset):
     """A _LoupeWorker QThread hangs off the OVERVIEW, so replacing the overview without stopping
     it leaked one thread (plus its plane cache) per plate open — _open_computed cleared
     ``_loupe_sources`` directly and never went near the thread."""
@@ -2889,7 +2802,7 @@ def test_opening_another_plate_joins_the_previous_loupe_thread(qapp, stub_detail
     assert not second.isRunning()                  # ...and closing joins the current one too
 
 
-def test_dragging_off_the_widget_dismisses_a_live_loupe(qapp, stub_detail, squid_dataset):
+def test_dragging_off_the_widget_dismisses_a_live_loupe(qapp, squid_dataset):
     """Qt GRABS the mouse for the duration of a press, so no leaveEvent is delivered while the
     button is down — dragging off-widget mid-hold left the inset pinned on stale pixels. The
     move events keep coming (that is what the grab means), with coordinates outside rect()."""
@@ -2909,7 +2822,7 @@ def test_dragging_off_the_widget_dismisses_a_live_loupe(qapp, stub_detail, squid
     win.close()
 
 
-def test_preview_run_gets_no_loupe_source(qapp, stub_detail, squid_dataset, tmp_path):
+def test_preview_run_gets_no_loupe_source(qapp, squid_dataset, tmp_path):
     """An unsaved preview writes nothing, so its layer must NOT inherit a zarr source — this is
     the stale-run trap: OperationStack dedupes by key, so the layer name alone proves nothing."""
     root, _ = squid_dataset
@@ -2921,7 +2834,7 @@ def test_preview_run_gets_no_loupe_source(qapp, stub_detail, squid_dataset, tmp_
     win._stop_worker(); win.close()
 
 
-def test_saved_run_registers_zarr_source_and_grows_written_set(qapp, stub_detail, squid_dataset, tmp_path):
+def test_saved_run_registers_zarr_source_and_grows_written_set(qapp, squid_dataset, tmp_path):
     root, _ = squid_dataset
     win = _loupe_win(qapp, root)
     win.run_operator("mip", out_parent=str(tmp_path))
@@ -2932,7 +2845,7 @@ def test_saved_run_registers_zarr_source_and_grows_written_set(qapp, stub_detail
     win._stop_worker(); win.close()
 
 
-def test_switching_back_to_raw_switches_the_source(qapp, stub_detail, squid_dataset, tmp_path):
+def test_switching_back_to_raw_switches_the_source(qapp, squid_dataset, tmp_path):
     root, _ = squid_dataset
     win = _loupe_win(qapp, root)
     win.run_operator("mip", out_parent=str(tmp_path))
@@ -2997,7 +2910,7 @@ def test_zarr_source_crop_read_against_a_real_pyramid(qapp, pyramid_dataset, tmp
     assert edge.shape[1] <= 32 and edge.size > 0
 
 
-def test_computed_plate_open_wires_a_loupe_source(qapp, stub_detail, pyramid_dataset, tmp_path, monkeypatch):
+def test_computed_plate_open_wires_a_loupe_source(qapp, pyramid_dataset, tmp_path, monkeypatch):
     """Opening a written plate: every well is on disk, so the loupe covers the whole plate."""
     import squidmip
     from squidmip.reader import open_reader
@@ -3026,7 +2939,7 @@ def test_ambiguous_unit_pixel_size_is_treated_as_unknown():
     assert V.loupe_um_per_screen_px(None, 0.5) is None
 
 
-def test_loupe_geometry_maps_cursor_to_the_right_well_and_crop(qapp, stub_detail, squid_dataset):
+def test_loupe_geometry_maps_cursor_to_the_right_well_and_crop(qapp, squid_dataset):
     """The cursor -> image-coordinate mapping: right well, crop centred where the user pointed,
     and a level chosen for the CURRENT zoom (coarse when zoomed out, level 0 when near native)."""
     root, _ = squid_dataset
@@ -3083,7 +2996,7 @@ def test_minerva_is_a_registered_operation():
     assert hasattr(V.PlateWindow, op.build_tab)
 
 
-def test_minerva_tab_builds_and_lists_projectors(qapp, stub_detail, squid_dataset):
+def test_minerva_tab_builds_and_lists_projectors(qapp, squid_dataset):
     """The projector choice must be real: squid2minerva's convert.py offers --mip/--z, so a
     hardcoded projection here would be a capability regression."""
     from qtpy.QtWidgets import QComboBox
@@ -3105,7 +3018,7 @@ def test_minerva_tab_builds_and_lists_projectors(qapp, stub_detail, squid_datase
 
 @_needs("tilefusion")
 def test_run_minerva_export_writes_one_fused_mosaic_for_the_selected_region(
-        qapp, stub_detail, squid_dataset, tmp_path):
+        qapp, squid_dataset, tmp_path):
     """Selecting a region must export ONE fused mosaic of it, not one file per FOV.
 
     Two bugs are pinned here, in the order they were found. The first was the GUI building its
@@ -3167,7 +3080,7 @@ def _drag_px(qapp, ov, x0, y0, x1, y1, mods):
 
 
 def test_a_shift_alt_box_inside_a_mosaic_selects_fovs_not_the_whole_well(
-        qapp, stub_detail, squid_dataset):
+        qapp, squid_dataset):
     """THE gesture that makes a FOV subset expressible, driven as a real drag.
 
     ``stitch_plate(regions={region: [fov, ...]})`` has always cropped — it derives the mosaic
@@ -3230,7 +3143,7 @@ def test_a_shift_alt_box_inside_a_mosaic_selects_fovs_not_the_whole_well(
 
 @_needs("tilefusion")
 def test_a_boxed_fov_subset_exports_a_smaller_mosaic_than_the_whole_region(
-        qapp, stub_detail, squid_dataset, tmp_path):
+        qapp, squid_dataset, tmp_path):
     """...and it lands as ONE cropped mosaic, not N files and not the whole region.
 
     The end of the chain the test above starts: gesture -> selection -> export. Measured on the
@@ -3276,7 +3189,7 @@ def test_a_boxed_fov_subset_exports_a_smaller_mosaic_than_the_whole_region(
     win._stop_minerva(); win.close()
 
 
-def test_a_user_drag_of_the_timepoint_bar_does_not_raise(qapp, stub_detail,
+def test_a_user_drag_of_the_timepoint_bar_does_not_raise(qapp,
                                                          multi_time_point_dataset):
     """``_on_time_point_changed`` called ``self._say`` — a method that does not exist on this
     window and never did. It is the FIRST statement of the only slot the bar calls, so every
@@ -3304,7 +3217,7 @@ def test_a_user_drag_of_the_timepoint_bar_does_not_raise(qapp, stub_detail,
 
 @_needs("tilefusion")
 def test_the_exported_timepoint_is_the_one_the_plate_is_showing(
-        qapp, stub_detail, multi_time_point_dataset, tmp_path, monkeypatch):
+        qapp, multi_time_point_dataset, tmp_path, monkeypatch):
     """``run_minerva_export`` took ``t: int = 0`` and BOTH GUI call sites took the default, so a
     multi-timepoint acquisition always exported frame 0 whatever the bar said — the pixels on
     screen and the pixels in the OME-TIFF were different images and nothing said so.
@@ -3353,7 +3266,7 @@ def test_the_exported_timepoint_is_the_one_the_plate_is_showing(
     win.close()
 
 
-def test_run_minerva_export_with_nothing_selected_says_so(qapp, stub_detail, squid_dataset, tmp_path):
+def test_run_minerva_export_with_nothing_selected_says_so(qapp, squid_dataset, tmp_path):
     """No selection must be a message, not a silent export of fov 0 of the first well."""
     root, _ = squid_dataset
     win = V.PlateWindow(None)
@@ -3368,7 +3281,7 @@ def test_run_minerva_export_with_nothing_selected_says_so(qapp, stub_detail, squ
     win.close()
 
 
-def test_minerva_selection_reads_the_window_not_the_overview(qapp, stub_detail, squid_dataset):
+def test_minerva_selection_reads_the_window_not_the_overview(qapp, squid_dataset):
     """The selection has ONE owner: ``PlateWindow``.
 
     ``PlateOverview`` is display-only — it maps grid cells to well ids and emits them; the
@@ -3401,7 +3314,7 @@ def test_minerva_selection_reads_the_window_not_the_overview(qapp, stub_detail, 
     win.close()
 
 
-def test_a_real_plate_gesture_is_what_minerva_exports(qapp, stub_detail, squid_dataset):
+def test_a_real_plate_gesture_is_what_minerva_exports(qapp, squid_dataset):
     """IMA-221 <-> IMA-228, end to end through ACTUAL gestures — no stubbed selection API.
 
     Both halves shipped on separate branches and nothing joined them: IMA-221's per-FOV payload
@@ -3475,7 +3388,7 @@ def test_a_real_plate_gesture_is_what_minerva_exports(qapp, stub_detail, squid_d
     win.close()
 
 
-def test_ingest_stops_a_running_minerva_export(qapp, stub_detail, squid_dataset, tmp_path):
+def test_ingest_stops_a_running_minerva_export(qapp, squid_dataset, tmp_path):
     """Re-ingesting mid-export used to leave the worker running against the OLD reader."""
     root, _ = squid_dataset
     win = V.PlateWindow(None)
@@ -3491,7 +3404,7 @@ def test_ingest_stops_a_running_minerva_export(qapp, stub_detail, squid_dataset,
     win._stop_worker(); win._stop_preview(); win.close()
 
 
-def test_run_minerva_export_refuses_a_second_concurrent_run(qapp, stub_detail, squid_dataset, tmp_path):
+def test_run_minerva_export_refuses_a_second_concurrent_run(qapp, squid_dataset, tmp_path):
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
@@ -3508,14 +3421,14 @@ def test_run_minerva_export_refuses_a_second_concurrent_run(qapp, stub_detail, s
     win.close()
 
 
-def test_run_minerva_export_without_an_acquisition_is_a_message_not_a_crash(qapp, stub_detail):
+def test_run_minerva_export_without_an_acquisition_is_a_message_not_a_crash(qapp):
     win = V.PlateWindow(None)
     win.run_minerva_export(launch=False)
     assert "open an acquisition" in win._readout.text()
     win.close()
 
 
-def test_minerva_export_failure_surfaces_in_the_readout(qapp, stub_detail, squid_dataset, monkeypatch, tmp_path):
+def test_minerva_export_failure_surfaces_in_the_readout(qapp, squid_dataset, monkeypatch, tmp_path):
     """A worker never raises across the thread boundary; the user must still see why."""
     from squidmip import _minerva
 
@@ -3534,7 +3447,7 @@ def test_minerva_export_failure_surfaces_in_the_readout(qapp, stub_detail, squid
 
 
 @_needs("tilefusion")
-def test_minerva_reports_when_author_is_not_installed(qapp, stub_detail, squid_dataset, monkeypatch, tmp_path):
+def test_minerva_reports_when_author_is_not_installed(qapp, squid_dataset, monkeypatch, tmp_path):
     """The export still succeeded — a missing sibling checkout must not read as a failure."""
     from squidmip import _minerva
 
@@ -3559,11 +3472,11 @@ def test_signal_names_discovers_every_worker_signal():
     assert {"progress", "exported", "launched", "failed", "finished_ok"} <= names
     assert "finished" not in names and "started" not in names   # QThread's own — never torn down
     # the pre-existing worker keeps full coverage too
-    assert {"tileReady", "pushReady", "streamEnded", "writtenReady", "wellFailed"} <= set(
+    assert {"tileReady", "resultReady", "streamEnded", "writtenReady", "wellFailed"} <= set(
         V._signal_names(V._OperatorWorker))
 
 
-def test_retire_disconnects_every_declared_signal(qapp, stub_detail, squid_dataset, tmp_path):
+def test_retire_disconnects_every_declared_signal(qapp, squid_dataset, tmp_path):
     """_signal_names being right is worthless unless _retire USES it: this test failed to notice
     the loop being emptied, so it now drives _retire itself and emits every signal afterwards.
     Nothing may reach a handler connected before the retire."""
@@ -3589,7 +3502,7 @@ def test_retire_disconnects_every_declared_signal(qapp, stub_detail, squid_datas
     win._stop_worker(); win._stop_preview(); win.close()
 
 
-def test_closing_mid_export_disconnects_the_worker(qapp, stub_detail, squid_dataset, tmp_path):
+def test_closing_mid_export_disconnects_the_worker(qapp, squid_dataset, tmp_path):
     """Close the window mid-export: no signal may reach the (now dead) window afterward."""
     root, _ = squid_dataset
     win = V.PlateWindow(None)
@@ -3633,7 +3546,7 @@ def test_closing_mid_export_disconnects_the_worker(qapp, stub_detail, squid_data
 
 
 
-def test_the_operators_home_tab_never_detaches(qapp, stub_detail, squid_dataset):
+def test_the_operators_home_tab_never_detaches(qapp, squid_dataset):
     """The home-tab guard is a property of the bar, not of _detach_tab in general: index 0 is the
     Operators tab and it cannot be dragged out, while everything above it can.
 
@@ -3650,7 +3563,7 @@ def test_the_operators_home_tab_never_detaches(qapp, stub_detail, squid_dataset)
 
 
 
-def test_the_redock_BUTTON_works_not_just_the_method(qapp, stub_detail):
+def test_the_redock_BUTTON_works_not_just_the_method(qapp):
     """REGRESSION (found by IMA-237 driving the real widget): QPushButton.clicked passes
     `checked=False`, which bound to the `k=key` default of the on_redock lambda — so clicking
     Re-dock called _redock(False), missed _floating entirely, and did nothing. Every existing test
@@ -3669,7 +3582,7 @@ def test_the_redock_BUTTON_works_not_just_the_method(qapp, stub_detail):
 
 # --- IMA-223/224/225: the three plane-op cards -------------------------------------------------
 
-def test_the_plane_op_cards_build_and_are_preview_only(qapp, stub_detail, squid_dataset):
+def test_the_plane_op_cards_build_and_are_preview_only(qapp, squid_dataset):
     """DRIVEN, not read: open each plane-op tab through the real _open_op_tab path and inspect
     the widgets it actually produced. The card offers Preview and NO Save/destination half. That
     began as a consequence of _validate_image accepting Z == 1 only; IMA-277 lifted that, so what
@@ -3699,7 +3612,7 @@ def test_the_plane_op_cards_build_and_are_preview_only(qapp, stub_detail, squid_
     win.close()
 
 
-def test_flatfield_card_gates_preview_on_a_profile(qapp, stub_detail, squid_dataset):
+def test_flatfield_card_gates_preview_on_a_profile(qapp, squid_dataset):
     """Flat-field is the one plane-op with no sane default: an identity field would silently do
     nothing while the UI said 'corrected'. So its Preview stays disabled until a profile loads,
     and decon/bgsub - which need no argument - are enabled from the start."""
@@ -3722,7 +3635,7 @@ def test_flatfield_card_gates_preview_on_a_profile(qapp, stub_detail, squid_data
 
 # --- IMA-decon-stitch-ui: the two operator INTERFACES in pane 1 --------------------------
 
-def test_the_decon_card_is_the_iteration_qc_panel_not_a_bare_preview(qapp, stub_detail,
+def test_the_decon_card_is_the_iteration_qc_panel_not_a_bare_preview(qapp,
                                                                     squid_dataset):
     """Julio: "The deconvolution is not showing the XZ/YZ strips on the turbo colormap ... so
     that we can choose the iterations." The card must therefore carry an iteration count and a
@@ -3745,7 +3658,7 @@ def test_the_decon_card_is_the_iteration_qc_panel_not_a_bare_preview(qapp, stub_
     win.close()
 
 
-def test_the_stitch_card_is_the_stitcher_control_surface(qapp, stub_detail, squid_dataset):
+def test_the_stitch_card_is_the_stitcher_control_surface(qapp, squid_dataset):
     """The blocking item: maragall/stitcher's Settings group, in the top-left subpane."""
     from squidmip._op_panels import StitcherPanel
 
@@ -3763,7 +3676,7 @@ def test_the_stitch_card_is_the_stitcher_control_surface(qapp, stub_detail, squi
     win.close()
 
 
-def test_the_stitcher_panel_kwargs_reach_the_worker(qapp, stub_detail, squid_dataset):
+def test_the_stitcher_panel_kwargs_reach_the_worker(qapp, squid_dataset):
     """End to end through the REAL run_operator: a setting made in pane 1 has to survive into
     the object that actually runs the fuse. This is the seam a typo would break silently."""
     root, _ = squid_dataset
@@ -3785,7 +3698,7 @@ def test_the_stitcher_panel_kwargs_reach_the_worker(qapp, stub_detail, squid_dat
 
 
 def test_an_impossible_feather_is_refused_in_the_readout_not_at_the_end_of_a_fuse(
-        qapp, stub_detail, squid_dataset):
+        qapp, squid_dataset):
     """No silent failure and no half-run: a ramp wider than the tile stops the run BEFORE it
     starts, with the reason in the status line."""
     root, _ = squid_dataset
@@ -3802,7 +3715,7 @@ def test_an_impossible_feather_is_refused_in_the_readout_not_at_the_end_of_a_fus
     win.close()
 
 
-def test_panel_kwargs_reach_stitch_plate_on_the_PREVIEW_path(qapp, stub_detail, squid_dataset,
+def test_panel_kwargs_reach_stitch_plate_on_the_PREVIEW_path(qapp, squid_dataset,
                                                              monkeypatch):
     """Not just "the worker stored them" -- they must reach the function that fuses.
 
@@ -3827,7 +3740,7 @@ def test_panel_kwargs_reach_stitch_plate_on_the_PREVIEW_path(qapp, stub_detail, 
     win._stop_worker(); win.close()
 
 
-def test_panel_kwargs_reach_write_plate_on_the_SAVE_path(qapp, stub_detail, squid_dataset,
+def test_panel_kwargs_reach_write_plate_on_the_SAVE_path(qapp, squid_dataset,
                                                         monkeypatch, tmp_path):
     """The save path is the one that matters most: a registration tuned on a preview and then
     silently dropped is thrown away at exactly the moment it is written to disk."""
@@ -3850,7 +3763,7 @@ def test_panel_kwargs_reach_write_plate_on_the_SAVE_path(qapp, stub_detail, squi
     win._stop_worker(); win.close()
 
 
-def test_a_decon_qc_result_opens_as_a_tab_beside_the_operators(qapp, stub_detail, squid_dataset):
+def test_a_decon_qc_result_opens_as_a_tab_beside_the_operators(qapp, squid_dataset):
     """The seam, driven: publish_qc_result must put the widget in the operator tab bar, and
     re-publishing the same title must reuse its tab.
 
@@ -3888,7 +3801,7 @@ def test_a_decon_qc_result_opens_as_a_tab_beside_the_operators(qapp, stub_detail
 # RE-POINTED by commit 2b8fbc5 ("Decentralize GUI"). This section used to assert TWO destinations
 # per run: the plate canvas AND the embedded ndviewer's slider (`_detail.arrays`, the
 # `register_array` pushes). The embedded viewer is gone — `_detail` is unconditionally None and
-# `_on_push` drops every push at its first guard — so the slider half has no destination to reach
+# and its feed was deleted with it on 2026-08-05 — so the slider half has no destination to reach
 # and is not asserted any more. The plate half is untouched, is the half IMA-226 was really about
 # ("every operator the ENGINE can run must reach the plate canvas through the same
 # _OperatorWorker"), and is not covered anywhere else, so these are re-pointed rather than removed.
@@ -3916,7 +3829,7 @@ def _run_live(qapp, win, key, regions=("B3",)):
     "bgsub",
     pytest.param("coordinate", marks=_needs("tilefusion")),
 ])
-def test_every_operator_streams_live_to_the_plate(qapp, stub_detail, squid_dataset, key):
+def test_every_operator_streams_live_to_the_plate(qapp, squid_dataset, key):
     """IMA-226. Not 'MIP streams and the rest are TODO': every operator the ENGINE can run must
     reach the plate canvas through the same _OperatorWorker.
 
@@ -3943,7 +3856,7 @@ def test_every_operator_streams_live_to_the_plate(qapp, stub_detail, squid_datas
     win._stop_worker(); win.close()
 
 
-def test_flatfield_streams_live_once_a_profile_is_installed(qapp, stub_detail, squid_dataset):
+def test_flatfield_streams_live_once_a_profile_is_installed(qapp, squid_dataset):
     """The last operator: flat-field cannot run without a profile, so with one installed it must
     stream exactly like the rest — and without one it must SAY it produced nothing.
 
@@ -3995,7 +3908,7 @@ def test_flatfield_streams_live_once_a_profile_is_installed(qapp, stub_detail, s
     win._stop_worker(); win.close()
 
 
-def test_run_operator_refuses_a_non_operator_by_name(qapp, stub_detail, squid_dataset):
+def test_run_operator_refuses_a_non_operator_by_name(qapp, squid_dataset):
     """`minerva` is a CARD, not an operator — it is an export hand-off. Before IMA-226 the
     exploration tab built it a '(preview)' button from _OPERATIONS and clicking it handed
     'minerva' to the engine, which died with a raw KeyError printed into the status line. That tab
@@ -4049,7 +3962,7 @@ def _layer_rows(win):
     return rows
 
 
-def test_layer_toggle_gives_back_raw_mip_and_stitched(qapp, stub_detail, squid_dataset):
+def test_layer_toggle_gives_back_raw_mip_and_stitched(qapp, squid_dataset):
     """IMA-227, driven through the real checkboxes: every operator is a LAYER, and the raw is
     recoverable by toggling — never destroyed. Measured on the montage, cropped.
 
@@ -4098,7 +4011,7 @@ def test_layer_toggle_gives_back_raw_mip_and_stitched(qapp, stub_detail, squid_d
     win.close()
 
 
-def test_the_base_layer_can_be_neither_disabled_nor_reordered(qapp, stub_detail, squid_dataset):
+def test_the_base_layer_can_be_neither_disabled_nor_reordered(qapp, squid_dataset):
     """The raw must ALWAYS remain recoverable. Two ways it used not to be:
 
     - ``toggle('raw', False)`` was accepted, so unticking every box left top_enabled() == None and
@@ -4134,7 +4047,7 @@ def test_the_base_layer_can_be_neither_disabled_nor_reordered(qapp, stub_detail,
     win.close()
 
 
-def test_layer_reorder_changes_what_the_plate_shows(qapp, stub_detail, squid_dataset):
+def test_layer_reorder_changes_what_the_plate_shows(qapp, squid_dataset):
     """Reorder, not just toggle: the plate renders the TOPMOST enabled layer, so moving one up
     must change the pixels on screen — driven through the real ↑ button."""
     root, _ = squid_dataset
@@ -4160,7 +4073,7 @@ def test_layer_reorder_changes_what_the_plate_shows(qapp, stub_detail, squid_dat
 
 
 
-def test_previewing_a_subset_leaves_the_wells_outside_it_showing(qapp, stub_detail, squid_dataset):
+def test_previewing_a_subset_leaves_the_wells_outside_it_showing(qapp, squid_dataset):
     """END TO END, through the real run: preview MIP on B2 alone and B3 must keep its thumbnail.
 
     Julio: "when I preview an operator on a window, which contains a region subset, the plate view
@@ -4182,7 +4095,7 @@ def test_previewing_a_subset_leaves_the_wells_outside_it_showing(qapp, stub_deta
     win._stop_worker(); win.close()
 
 
-def test_dropping_a_layer_frees_its_store_and_composite(qapp, stub_detail, squid_dataset):
+def test_dropping_a_layer_frees_its_store_and_composite(qapp, squid_dataset):
     """~95 MB per layer lives in _store/_final_arr. Dropping a layer must release BOTH — dropping
     only the canvas looks like a fix and leaks the majority of the memory."""
     root, _ = squid_dataset
@@ -4286,41 +4199,21 @@ def nonsquare_mosaic_dataset(tmp_path):
 # Both measure the RECTANGLE a fused mosaic arrives in AT THE CENTRAL ARRAY VIEWER: they read
 # `_detail.canvases[-1]` (what `start_acquisition` declared) and the shape recorded by
 # `_detail.register_array`. There is no central array viewer — `_detail` is unconditionally None,
-# `start_acquisition` is never called, and `_on_push` drops at `if self._detail is None` — so
-# neither number exists to compare.
+# `start_acquisition` was never called and the push feed was deleted on 2026-08-05 — so neither
+# number exists to compare.
+
+
+# REMOVED with the array-viewer feed (ndviewer_light rot, 2026-08-05):
 #
-# The half of IMA-245 that is NOT about the viewer survives untouched and is still asserted by
-# test_ima245_every_region_operator_is_sized_as_a_region_not_a_frame below: every region operator
-# sizes its push from the REGION MOSAIC extent and every per-FOV projector from the FRAME, checked
-# by category over `available_region_operators()` / `available_projectors()` rather than by name.
-# That is the assertion an `if operator == "stitch"` branch fails, and it is the durable one.
-
-
-def test_ima245_every_region_operator_is_sized_as_a_region_not_a_frame(
-        qapp, stub_detail, nonsquare_mosaic_dataset):
-    """The category, not the name. Every operator in ``available_region_operators()`` yields a
-    region mosaic, so every one of them sizes the viewer from the mosaic extent — and every
-    per-FOV projector still sizes it from the frame. An `if operator == "stitch"` branch would
-    pass the test above and fail this one."""
-    from squidmip import available_projectors, available_region_operators
-
-    root, region, frame_px, (mh, mw) = nonsquare_mosaic_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    mosaic = V.push_shape_for(win._meta, True, [region])
-    frame = V.push_shape_for(win._meta, False, [region])
-    assert mosaic != frame, "the region and per-FOV surfaces are the same rectangle"
-    assert abs(mosaic[0] / mosaic[1] - mh / mw) < 0.01
-
-    for op in available_region_operators():
-        w = V._OperatorWorker(op, win._reader, win._meta, win._fov_index, "",
-                              regions=[region], save=False, n_fovs=None)
-        assert w.push_shape == mosaic, f"region operator {op!r} is sized {w.push_shape}, not {mosaic}"
-    for op in available_projectors():
-        w = V._OperatorWorker(op, win._reader, win._meta, win._fov_index, "",
-                              regions=[region], save=False, n_fovs=None)
-        assert w.push_shape == frame, f"projector {op!r} is sized {w.push_shape}, not {frame}"
-    win.close()
+#   test_ima245_every_region_operator_is_sized_as_a_region_not_a_frame
+#
+# It asserted that `_OperatorWorker.push_shape` sized a REGION operator's push from the mosaic
+# extent and a per-FOV projector's from the frame. `push_shape`, `push_shape_for` and
+# `region_mosaic_extent_px` existed only to size ndviewer_light's canvas, and every plane they
+# sized was letterboxed on the worker thread and dropped at `_on_push`'s first guard. They are
+# gone; there is no rectangle left to be right about. The part of IMA-245 that is about the PLATE
+# CELL -- a fused mosaic landing exactly where the raw mosaic does -- is `content_box`, which
+# stays and is asserted below.
 
 
 # --- the plate cell is ONE rectangle, whichever producer fills it ------------------------------
@@ -4337,7 +4230,7 @@ def test_ima245_every_region_operator_is_sized_as_a_region_not_a_frame(
 # missing registration). Same cell, same size, two geometries.
 
 def test_a_stitched_cell_lands_exactly_where_the_raw_cell_does(
-        qapp, stub_detail, nonsquare_mosaic_dataset):
+        qapp, nonsquare_mosaic_dataset):
     """A region operator's cell must be the SAME rectangle the raw preview draws for that well."""
     from functools import reduce
 
@@ -4382,61 +4275,19 @@ def test_content_box_is_a_no_op_on_a_square_field(qapp):
     # Wider than tall -> full width, centred vertically. Never taller than the cell.
     top, left, h, w = V.content_box((100, 400))
     assert (left, w) == (0, V._CELL) and h == V._CELL // 4 and top == (V._CELL - h) // 2
-    # ...and the letterbox canvas puts its content in exactly that box.
-    canvas = V._fit_letterboxed(np.ones((100, 400), np.float32), V._CELL, V._CELL, np.float32)
-    filled = np.argwhere(canvas > 0)
-    assert (filled[:, 0].min(), filled[:, 1].min()) == (top, left)
-    assert (filled[:, 0].max() + 1, filled[:, 1].max() + 1) == (top + h, left + w)
 
 
-def test_ima245_an_unshowable_push_is_counted_and_said_out_loud(
-        qapp, stub_detail, nonsquare_mosaic_dataset):
-    """A push that cannot be shown must never be silent. An ndviewer build with no
-    ``register_array`` (the installed 0.1.0 has none) discarded every computed result at a
-    ``hasattr`` guard: no counter, no message, a black viewer, and a human to find it.
-
-    RE-POINTED by commit 2b8fbc5. The COUNTER and the SPOKEN reason are both still right and both
-    still exercised. What is gone is the SPECIFIC copy the last two cases used to produce: with
-    `_detail` unconditionally None, `_on_push` now drops at its very first guard ("there is no
-    array viewer in this window to show the result in"), so the "no slot in this run's viewer"
-    and "the result is HxW but the viewer was declared HxW" branches below it are unreachable
-    from a real window and their wording is no longer assertable. Their guards are untouched in
-    `_on_push`; they are simply behind a gate that never opens in the decentralized root.
-    """
-    root, region, _frame, _extent = nonsquare_mosaic_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    win._push_shape = (16, 16)
-    win._push_index = None
-    win._push_problem = None
-    win._dropped_pushes = 0
-
-    class _NoArrays:                       # an older ndviewer: no register_array at all
-        pass
-
-    detail, win._detail = win._detail, _NoArrays()
-    win._on_push(0, [np.zeros((16, 16), np.uint16)])
-    assert win._dropped_pushes == 1
-    assert "register_array" in win._readout.text() and "⚠" in win._readout.text()
-
-    # THE CASE THE DECENTRALIZED ROOT ACTUALLY HITS: there is no array viewer at all. It must be
-    # counted and said out loud exactly like the others, never swallowed.
-    win._detail, win._push_problem, win._dropped_pushes = detail, None, 0
-    assert win._detail is None, "the root window grew a central viewer back"
-    win._on_push(7, [np.zeros((16, 16), np.uint16)])
-    assert win._dropped_pushes == 1, "a push with nowhere to go was dropped silently"
-    assert "no array viewer" in win._readout.text() and "⚠" in win._readout.text()
-
-    # ...and a success line must not be able to bury the warning (the sticky suffix, unchanged).
-    win._run_readout("✓ done")
-    assert win._readout.text().startswith("✓ done") and "no array viewer" in win._readout.text()
-
-    # ...and the counter is PER RUN, not cumulative for the life of the window.
-    win._dropped_pushes, win._push_problem = 0, None
-    win._on_push(3, [np.zeros((16, 16), np.uint16)])
-    win._on_push(4, [np.zeros((16, 16), np.uint16)])
-    assert win._dropped_pushes == 2
-    win.close()
+# REMOVED with the array-viewer feed (ndviewer_light rot, 2026-08-05):
+#
+#   test_ima245_an_unshowable_push_is_counted_and_said_out_loud
+#
+# It asserted that a push nobody could show was COUNTED and said out loud rather than swallowed.
+# That was the right answer while the destination could exist. It could not: `_detail` had been
+# unconditionally None since ndviewer_light was deleted, so `_on_push` dropped EVERY push at its
+# first guard and every operator run ended with a sticky "⚠ there is no array viewer in this
+# window to show the result in" on its readout. The producer, the router and the counter are all
+# gone; the results themselves reach napari through `resultReady`, which is a different signal and
+# was never part of this.
 
 
 # ============================================================================ IMA-253 / IMA-249
@@ -4462,7 +4313,7 @@ def _region_crop(ov, region):
 
 
 def test_ima253_real_tissue_previews_both_regions_as_mosaics_before_any_operator_runs(
-        qapp, stub_detail, real_dataset):
+        qapp, real_dataset):
     """The acceptance number: 55 boxes and two composited mosaics, with nothing run.
 
     27 + 28 FOVs. Before the fix ``boxes on ov`` was 0 and each region showed ONE frame stretched
@@ -4490,7 +4341,7 @@ def test_ima253_real_tissue_previews_both_regions_as_mosaics_before_any_operator
 
 
 def test_ima253_preview_plan_reads_every_fov_of_a_region_but_only_one_of_a_single_fov_well(
-        qapp, stub_detail, real_dataset, squid_dataset):
+        qapp, real_dataset, squid_dataset):
     """Cost is driven by the REAL FOV COUNT PER REGION -- the reason 1536x1 cannot get slower."""
     from squidmip import open_reader
 
@@ -4509,7 +4360,7 @@ def test_ima253_preview_plan_reads_every_fov_of_a_region_but_only_one_of_a_singl
 
 
 def test_ima253_real_tissue_regions_are_laid_out_by_geometry_in_even_non_overlapping_cells(
-        qapp, stub_detail, real_dataset):
+        qapp, real_dataset):
     """REWRITTEN for commit 2b8fbc5. The RULE changed; the two properties worth guarding did not.
 
     This used to assert the STAGE-PROPORTIONAL layout: manual0 spans stage y 10186..17238 and
@@ -4563,7 +4414,7 @@ def test_ima253_real_tissue_regions_are_laid_out_by_geometry_in_even_non_overlap
     win.close()
 
 
-def test_ima253_shuffling_the_region_names_does_not_move_anything(qapp, stub_detail, real_dataset):
+def test_ima253_shuffling_the_region_names_does_not_move_anything(qapp, real_dataset):
     """MUTATION-CHECK. This is the assertion that proves placement follows GEOMETRY.
 
     Reverse the order the acquisition reports its regions in. A layout driven by enumeration
@@ -4579,7 +4430,7 @@ def test_ima253_shuffling_the_region_names_does_not_move_anything(qapp, stub_det
     assert flipped.occupied_map == ref.occupied_map
 
 
-def test_ima253_the_default_paint_path_loads_no_carrier_png(qapp, stub_detail, squid_dataset,
+def test_ima253_the_default_paint_path_loads_no_carrier_png(qapp, squid_dataset,
                                                             monkeypatch):
     """Art available or not, the plate renders IDENTICALLY -- because art is never consulted.
 
@@ -4610,7 +4461,7 @@ def test_ima253_the_default_paint_path_loads_no_carrier_png(qapp, stub_detail, s
     win.close(); win2.close()
 
 
-def test_ima253_empty_slots_are_visibly_distinct_from_occupied_ones(qapp, stub_detail):
+def test_ima253_empty_slots_are_visibly_distinct_from_occupied_ones(qapp):
     """Julio said the photograph was poor at exactly this, so it is now drawn and measured."""
     from squidmip._plate import SlideCarrier
 
@@ -4901,26 +4752,23 @@ def test_on_mosaic_plane_without_a_window_still_lets_add_mosaic_derive_one():
 # These pin the contract instead of restating it in prose.
 
 
-def test_every_card_declares_whether_it_is_a_runnable_operator():
-    """A card key that is not in the engine registry must be DECLARED non-runnable.
+def test_a_cards_runnability_is_the_engines_answer_and_cannot_go_stale():
+    """`Operation.runnable` used to be a hand-written bool, and this test checked it still agreed.
 
-    `minerva` is the honest case: an export hand-off, not an operator - handing its key to the
-    engine dies with a raw KeyError. That is fine, but it has to be said out loud, because the
-    same shape produced by a typo'd key is a button that silently does nothing.
+    That is the shape of the defect this whole change removes: a second table restating a fact the
+    first one owns, plus a test to catch it drifting. It is a property over `runnable_operators()`
+    now, so the only thing left to check is that the derivation is live -- register an operator
+    named after a card and the card becomes runnable with no edit to `_OPERATIONS`.
     """
-    runnable = set(V.runnable_operators())
-    for op in V._OPERATIONS:
-        if op.runnable:
-            assert op.key in runnable, (
-                f"card {op.key!r} declares runnable=True but the engine cannot run it "
-                f"(engine has: {sorted(runnable)}). Either it is not an operator - set "
-                "runnable=False - or its key is a typo."
-            )
-        else:
-            assert op.key not in runnable, (
-                f"card {op.key!r} declares runnable=False but the engine CAN run it; "
-                "the declaration is stale."
-            )
+    from squidmip import add_projector, plane_op
+
+    assert V._OPERATIONS_BY_KEY["minerva"].runnable is False   # nobody registered it
+    assert V._OPERATIONS_BY_KEY["mip"].runnable is True
+
+    card = V.Operation("card_only_key", "Card only", "no engine entry", "_build_mip_tab")
+    assert card.runnable is False
+    add_projector("card_only_key", plane_op(lambda p: p))
+    assert card.runnable is True, "runnable is stale; it must be read, not stored"
 
 
 def test_gallery_view_is_a_view_menu_command_and_not_an_operator(qapp):
@@ -5055,7 +4903,7 @@ def test_the_save_button_names_its_operator_instead_of_taking_the_first_card():
     assert V._SAVE_OPERATOR in V._OPERATIONS_BY_KEY
 
 
-def test_a_cardless_operator_opens_a_panel_built_from_its_declaration(qapp, stub_detail,
+def test_a_cardless_operator_opens_a_panel_built_from_its_declaration(qapp,
                                                                      squid_dataset):
     """`_activate_operator` used to end at `if op is not None:` and do NOTHING for a key the card
     table did not know: no tab, no error, no line in the readout. Silence was the bug.
@@ -5064,7 +4912,7 @@ def test_a_cardless_operator_opens_a_panel_built_from_its_declaration(qapp, stub
     therefore no way to reach any of them from the GUI. It now opens the generic panel, and the
     panel's widgets ARE the declaration.
     """
-    from squidmip._engine import projector_params
+    from squidmip._engine import operator_params
     from squidmip._param_panel import GenericOperatorPanel
 
     root, _ = squid_dataset
@@ -5075,11 +4923,11 @@ def test_a_cardless_operator_opens_a_panel_built_from_its_declaration(qapp, stub
     panel = win._op_tabs.get("spot")
     assert panel is not None, f"no panel opened; readout said {win._readout.text()!r}"
     assert isinstance(panel, GenericOperatorPanel)
-    assert sorted(panel.widgets) == sorted(p.name for p in projector_params("spot"))
+    assert sorted(panel.widgets) == sorted(p.name for p in operator_params("spot"))
     win.close()
 
 
-def test_a_key_that_has_no_panel_at_all_is_refused_by_name_never_silently(qapp, stub_detail,
+def test_a_key_that_has_no_panel_at_all_is_refused_by_name_never_silently(qapp,
                                                                          squid_dataset):
     """The other half: a key with neither a card nor a readable declaration must SAY SO. A click
     that lands on nothing is indistinguishable from one that is still working."""
@@ -5311,7 +5159,7 @@ def test_the_plate_adopts_napari_s_window_the_moment_a_region_lands(qapp, monkey
         f"the plate did not adopt napari's colours on arrival: {tinted}")
 
 
-def test_the_plate_is_restored_even_while_the_raw_preview_streams(qapp, stub_detail,
+def test_the_plate_is_restored_even_while_the_raw_preview_streams(qapp,
                                                                   squid_dataset):
     """THE root cause of a ~50% flake, pinned as behaviour rather than as timing.
 
@@ -5322,7 +5170,7 @@ def test_the_plate_is_restored_even_while_the_raw_preview_streams(qapp, stub_det
     exiting. The view stayed scoped to a subset until some unrelated thread happened to finish.
 
     It read as a flake because it depended on whether the preview happened to still be running.
-    It is not a flake: deferring on the preview is simply wrong. `_setup_raw_detail` re-scopes
+    It is not a flake: deferring on the preview is simply wrong. The restore path re-scopes
     and restarts the preview itself, so a streaming preview is never a reason to postpone.
 
     MUTATION: change any of the three gates back to `self._busy()` and this goes red — the sync
@@ -5519,7 +5367,7 @@ def test_no_napari_pane_means_the_ndviewer_path_still_stands(qapp):
 # --- Minerva: the on-screen LUTs, and the second destination ----------------------------------
 
 def test_the_minerva_export_hands_the_on_screen_luts_to_the_exporter(
-        qapp, stub_detail, squid_dataset, tmp_path, monkeypatch):
+        qapp, squid_dataset, tmp_path, monkeypatch):
     """Julio: "channels need to be set to specific colors". The colours are on SCREEN, and the
     export defaults (acquisition display_color + 1/99.9 percentiles) do not know about them.
 
@@ -5547,7 +5395,7 @@ def test_the_minerva_export_hands_the_on_screen_luts_to_the_exporter(
 
 
 def test_the_minerva_export_defaults_to_no_luts_so_the_plate_path_is_unchanged(
-        qapp, stub_detail, squid_dataset, tmp_path, monkeypatch):
+        qapp, squid_dataset, tmp_path, monkeypatch):
     """The plate has no window and therefore no on-screen LUTs. Passing nothing must reach the
     exporter as nothing, so the percentile behaviour every existing caller relies on stands."""
     root, _ = squid_dataset
@@ -5565,7 +5413,7 @@ def test_the_minerva_export_defaults_to_no_luts_so_the_plate_path_is_unchanged(
     win.close()
 
 
-def test_on_screen_luts_is_none_when_no_view_window_is_open(qapp, stub_detail, squid_dataset):
+def test_on_screen_luts_is_none_when_no_view_window_is_open(qapp, squid_dataset):
     """Not a failure: it IS the plate-level export, and the percentile defaults are right for it
     precisely because there is no screen to match."""
     root, _ = squid_dataset
@@ -5575,7 +5423,7 @@ def test_on_screen_luts_is_none_when_no_view_window_is_open(qapp, stub_detail, s
     win.close()
 
 
-def test_on_screen_luts_reaches_a_focused_window(qapp, stub_detail, squid_dataset):
+def test_on_screen_luts_reaches_a_focused_window(qapp, squid_dataset):
     """The None path was pinned and the returns-something path was not, which is exactly where the
     bug lived: ``focused_id`` and ``windows`` are PROPERTIES on ViewerManager and were called with
     parentheses. The resulting TypeError was swallowed by a broad except, so this returned None
@@ -5616,7 +5464,7 @@ def test_on_screen_luts_reaches_a_focused_window(qapp, stub_detail, squid_datase
 
 
 def test_the_render_destination_refuses_an_empty_export_instead_of_starting_a_worker(
-        qapp, stub_detail, squid_dataset):
+        qapp, squid_dataset):
     """render.py takes minutes. Starting it on nothing would spend them and produce nothing."""
     root, _ = squid_dataset
     win = V.PlateWindow(None)
@@ -5628,7 +5476,7 @@ def test_the_render_destination_refuses_an_empty_export_instead_of_starting_a_wo
 
 
 def test_a_render_worker_is_retired_with_the_export_worker(
-        qapp, stub_detail, squid_dataset, tmp_path):
+        qapp, squid_dataset, tmp_path):
     """closeEvent joins these threads. A render left connected is a MEASURED 132 s hold on the
     close for one real region, which is worse than the 90 s port poll that motivated
     ``_stop_minerva`` in the first place."""
@@ -5853,7 +5701,7 @@ def _gated_preview_on(win, qapp):
 
 
 def test_a_subset_operator_run_leaves_the_thumbnail_downsample_pass_running(
-        qapp, stub_detail, squid_dataset, blocking_worker):
+        qapp, squid_dataset, blocking_worker):
     """THE reported defect. A run over SOME wells must not stop the pass that fills the rest."""
     root, _ = squid_dataset
     win = V.PlateWindow(None)
@@ -5882,7 +5730,7 @@ def test_a_subset_operator_run_leaves_the_thumbnail_downsample_pass_running(
 
 
 def test_a_plate_wide_run_still_supersedes_the_downsample_pass(
-        qapp, stub_detail, squid_dataset, blocking_worker):
+        qapp, squid_dataset, blocking_worker):
     """The other direction, so the fix is a scope and not a deletion. A plate-wide run gives every
     well an operator tile, so continuing to read the same planes twice is pure cost."""
     root, _ = squid_dataset

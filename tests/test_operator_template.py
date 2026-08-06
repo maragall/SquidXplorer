@@ -83,7 +83,7 @@ def test_a_bare_string_requires_is_read_as_one_module_not_eight_letters():
     """The tuple-comma trap. ``requires="cellpose"`` must mean one module."""
     s.add_projector("tpl_bare_string", _passthrough, requires="cellpose")
 
-    assert s.projector_requires("tpl_bare_string") == ("cellpose",)
+    assert s.operator_requires("tpl_bare_string") == ("cellpose",)
 
 
 def test_a_requirement_that_is_not_a_module_name_is_refused_at_registration():
@@ -95,7 +95,7 @@ def test_declaring_nothing_keeps_the_pre_existing_contract_exactly():
     """Every registration written before this feature keeps its exact meaning."""
     s.add_projector("tpl_no_requires", _passthrough)
 
-    assert s.projector_requires("tpl_no_requires") == ()
+    assert s.operator_requires("tpl_no_requires") == ()
     assert s.operator_available("tpl_no_requires") == (True, "")
 
 
@@ -141,7 +141,7 @@ def test_availability_is_reported_with_a_reason_and_the_install_command(unavaila
 
 def test_binding_refuses_by_name_before_any_work(unavailable):
     with pytest.raises(MissingOperatorDependency, match=ABSENT):
-        s.bind_projector(unavailable)
+        s.bind_operator(unavailable)
 
 
 def test_the_refusal_is_a_missing_dependency_so_a_runner_can_tell_it_from_a_data_fault(unavailable):
@@ -156,9 +156,9 @@ def test_the_refusal_is_a_missing_dependency_so_a_runner_can_tell_it_from_a_data
 
 def test_reading_an_unavailable_operators_declaration_still_works(unavailable):
     """A UI must be able to describe a row it is greying out. Only RUNNING is refused."""
-    assert s.projector_consumes(unavailable) == frozenset({"z"})
-    assert s.projector_produces(unavailable) == "intensity"
-    assert s.projector_params(unavailable) == ()
+    assert s.operator_consumes(unavailable) == frozenset({"z"})
+    assert s.operator_produces(unavailable) == "intensity"
+    assert s.operator_params(unavailable) == ()
 
 
 def test_an_unknown_name_and_an_unavailable_one_are_different_answers():
@@ -167,7 +167,7 @@ def test_an_unknown_name_and_an_unavailable_one_are_different_answers():
     ok_unknown, why_unknown = s.operator_available("no_such_operator_at_all")
 
     assert not ok_unknown
-    assert "unknown projector" in why_unknown
+    assert "unknown operator" in why_unknown
 
 
 # ==============================================================================================
@@ -254,33 +254,33 @@ def test_list_operators_reports_availability_without_filtering_the_list(unavaila
 def test_the_built_in_operators_with_heavyweight_lazy_imports_declare_them():
     """The three that were measured advertising themselves and producing nothing. Pinned by name
     HERE, in a test, rather than left to be rediscovered on the next clean install."""
-    assert s.projector_requires("decon") == ("petakit",)
-    assert s.projector_requires("decon3d") == ("petakit",)
-    assert s.projector_requires("flatfield") == ("tilefusion",)
-    assert s.projector_requires("cellpose") == ("cellpose",)
+    assert s.operator_requires("decon") == ("petakit",)
+    assert s.operator_requires("decon3d") == ("petakit",)
+    assert s.operator_requires("flatfield") == ("tilefusion",)
+    assert s.operator_requires("cellpose") == ("cellpose",)
 
 
 def test_every_region_operator_declares_its_requirements():
-    """The region table keeps ``requires`` in a SIDECAR dict (``_REGION_REQUIRES``) rather than on
-    a record, because ``_REGION_OPERATORS`` maps a name straight to a callable and promoting it to
-    an ``Operator``-style record would touch every consumer of ``_resolve_region_operator``. A
-    sidecar is only safe while the two are written together — this is the guard that says so, and
-    the reason the table wants unifying."""
-    from squidmip._stitch import _REGION_OPERATORS, _REGION_REQUIRES
-
-    assert set(_REGION_REQUIRES) == set(_REGION_OPERATORS)
+    """``requires`` used to live in a SIDECAR dict (``_stitch._REGION_REQUIRES``) shadowing a
+    second table, and this test existed to pin that the two were written together. Both are gone:
+    a region operator is a record in the ONE table, so it carries its own ``requires`` and there is
+    nothing left to disagree with it. What is checked now is that the declaration is READABLE
+    through the same function every other operator's is."""
+    for name in s.available_region_operators():
+        assert isinstance(s.operator_requires(name), tuple)
 
 
 def test_region_operators_declare_and_refuse_the_same_way(small_reader):
-    """The parallel table gets the same word and the same behaviour, so a contributor learns the
-    contract once."""
-    from squidmip._stitch import add_region_operator, region_operator_available
-
-    add_region_operator("tpl_region_unavailable", lambda reader, region, fovs, **kw: None,
-                        requires=(ABSENT,))
+    """The same word, the same registrar family and the same behaviour, so a contributor learns
+    the contract once. ``operator_available`` is now literally the same function for both kinds —
+    it used to answer "unknown projector 'stitch'" about a shipped operator, which is why every
+    caller had to guard it with a membership test against the other table first."""
+    s.add_region_operator("tpl_region_unavailable", lambda reader, region, fovs, **kw: None,
+                          requires=(ABSENT,))
 
     assert "tpl_region_unavailable" in s.available_region_operators()
-    ok, why = region_operator_available("tpl_region_unavailable")
+    assert "tpl_region_unavailable" in s.runnable_operators()
+    ok, why = s.operator_available("tpl_region_unavailable")
     assert not ok and ABSENT in why
     with pytest.raises(MissingOperatorDependency, match=ABSENT):
         list(s.stitch_plate(small_reader, operator="tpl_region_unavailable"))
@@ -369,7 +369,7 @@ def test_a_plugin_that_collides_with_a_built_in_name_is_refused_not_allowed_to_c
 
     with pytest.raises(OperatorPluginError, match="already"):
         load_operator_plugins()
-    assert s.bind_projector("mip") is not _passthrough
+    assert s.bind_operator("mip") is not _passthrough
 
 
 def test_a_module_entry_point_registers_by_import_side_effect(monkeypatch):
@@ -540,13 +540,13 @@ def test_the_template_package_imports_and_registers_in_a_clean_interpreter():
         "import squidmip, squidmip_operator_template as t\n"
         "t.register()\n"
         "assert t.OPERATOR_NAME in squidmip.available_projectors()\n"
-        "assert squidmip.projector_consumes(t.OPERATOR_NAME) == frozenset({'z'})\n"
-        "assert squidmip.projector_produces(t.OPERATOR_NAME) == 'intensity'\n"
-        "assert squidmip.projector_requires(t.OPERATOR_NAME) == ('scipy',)\n"
-        "assert {p.name for p in squidmip.projector_params(t.OPERATOR_NAME)} == "
+        "assert squidmip.operator_consumes(t.OPERATOR_NAME) == frozenset({'z'})\n"
+        "assert squidmip.operator_produces(t.OPERATOR_NAME) == 'intensity'\n"
+        "assert squidmip.operator_requires(t.OPERATOR_NAME) == ('scipy',)\n"
+        "assert {p.name for p in squidmip.operator_params(t.OPERATOR_NAME)} == "
         "{'smooth_sigma', 'ddof'}\n"
         "import numpy as np\n"
-        "out = squidmip.bind_projector(t.OPERATOR_NAME, {'smooth_sigma': 0.0})("
+        "out = squidmip.bind_operator(t.OPERATOR_NAME, {'smooth_sigma': 0.0})("
         "[np.full((4, 4), 10, np.uint16), np.full((4, 4), 20, np.uint16)])\n"
         "assert out.shape == (4, 4) and out.dtype == np.uint16 and out.max() == 5, out\n"
         "print('OK')\n"

@@ -116,7 +116,7 @@ from typing import TYPE_CHECKING, Iterable, Optional, Sequence
 import numpy as np
 import tifffile
 
-from squidmip._engine import _resolve_projector
+from squidmip._engine import _resolve_operator
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from squidmip.reader import SquidReader
@@ -505,7 +505,7 @@ def export_selection(
 
     meta = reader.metadata
     pixel_um = _require_pixel_size(meta)                  # refuse early — nothing written yet
-    _resolve_projector(projector)     # unknown projector: fail here, named, not mid-stitch
+    _resolve_operator(projector)     # unknown projector: fail here, named, not mid-stitch
 
     fovs_per_region = meta.get("fovs_per_region", {})
     for region, fovs in grouped.items():

@@ -255,10 +255,10 @@ def stitch_refusal(projector: str) -> Optional[str]:
     and only labels: feathering blends overlapping tiles by a weighted average, and the mean
     of label 12 and label 37 is label 24, an object that does not exist.
     """
-    from squidmip._stitch import LABELS, _resolve_projector
+    from squidmip._stitch import LABELS, _resolve_operator
 
     try:
-        op = _resolve_projector(projector)
+        op = _resolve_operator(projector)
     except Exception as exc:                       # unknown name -> name it, don't crash
         return (f"{projector!r} is not a projector this build knows: {exc}")
     if op.produces != LABELS:

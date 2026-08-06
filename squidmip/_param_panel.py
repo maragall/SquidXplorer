@@ -50,7 +50,7 @@ untested against a real operator and is pinned by a synthetic one in the tests.
 
 CHAINS
 ------
-``projector_params("bgsub + spot")`` returns the chain's parts' parameters NAMESPACED
+``operator_params("bgsub + spot")`` returns the chain's parts' parameters NAMESPACED
 ``<step>.<param>`` (``squidmip._compose``), so a chain arrives here as a flat tuple whose names
 carry the structure. :func:`group_params` splits on the first ``.`` and the panel draws one
 HEADED GROUP per step, in chain order. Nothing else changes: the values go back through
@@ -161,9 +161,10 @@ def panel_refusal(key: str) -> Optional[str]:
 
     Three refusals, and each one is read off a declaration rather than off the name:
 
-    * a REGION operator (``stitch``, ``coordinate``) — ``add_region_operator`` carries no
-      ``params`` declaration AT ALL, so there is nothing here to read. That asymmetry between the
-      two tables is exactly why ``_op_panels.STITCH_DEFAULTS`` still exists;
+    * an operator that declares NO parameters at all AND has no hand-written panel — there is
+      nothing for a form to show. ``stitch`` and ``coordinate`` are today's cases and they have
+      ``StitcherPanel``; a region operator that DOES declare ``params`` is drawn like any other,
+      which it could not be while region operators lived in a table with no ``params`` column;
     * the key does not resolve to an operator, or this machine cannot run it because a declared
       ``requires=`` package is missing — both in the registry's own words, via
       :func:`squidmip.operator_available`, which resolves a bare NAME and a CHAIN alike;
@@ -174,18 +175,18 @@ def panel_refusal(key: str) -> Optional[str]:
     launch that chain is a separate question the panel asks separately — see
     :meth:`GenericOperatorPanel._launch_refusal`.
     """
-    from squidmip import available_region_operators, operator_available
-    from squidmip._engine import projector_params
+    from squidmip import is_region_operator, operator_available
+    from squidmip._engine import operator_params
 
-    if key in available_region_operators():
-        return (f"'{key}' is a REGION operator, and that table declares no params= at all — there "
-                "is nothing for a generic panel to read. Its controls are hand-written in "
-                "squidmip._op_panels (StitcherPanel).")
+    if is_region_operator(key) and not operator_params(key):
+        return (f"'{key}' fuses a whole well and declares no params=, so there is nothing for a "
+                "generic form to show. Its controls are hand-written in squidmip._op_panels "
+                "(StitcherPanel). Declare params= on it and this panel draws them.")
     ok, why = operator_available(key)
     if not ok:
         return why
     try:
-        params = projector_params(key)
+        params = operator_params(key)
     except Exception as exc:                       # resolvable-but-unreadable: say it, don't crash
         return f"'{key}' declares no parameters this panel can read: {exc}"
     bad = unsupported_params(params)
@@ -205,19 +206,23 @@ def panel_refusal(key: str) -> Optional[str]:
 class GenericOperatorPanel(_Panel):
     """One operator's declared parameters, as widgets, plus the run that carries them.
 
-    Built from :func:`squidmip._engine.projector_params` and nothing else. The values leave through
+    Built from :func:`squidmip._engine.operator_params` and nothing else. The values leave through
     ``host.run_operator(key, ..., operator_kwargs=...)`` — the SAME argument
     :class:`~squidmip._op_panels.StitcherPanel` uses, which is what makes the value's journey to the
     pixels one already-tested path rather than a second one.
     """
 
     def __init__(self, host, key: str):
-        from squidmip._engine import projector_consumes, projector_params
+        from squidmip._engine import operator_consumes, operator_params
         from squidmip._operations import operator_label
 
         self.key = str(key)
-        params = projector_params(self.key)
-        self._reduces_z = bool(projector_consumes(self.key))
+        params = operator_params(self.key)
+        # CAN THIS BE WRITTEN AS A PLATE? Off `consumes`, never off the name: a z-reducer
+        # collapses z to 1 and a region operator fuses a well, and both have a per-field
+        # result the OME-Zarr writer accepts. A plane-op keeps z at full depth, which is why
+        # `_build_plane_op_tab` offers no save either.
+        self._can_save = bool(operator_consumes(self.key))
         super().__init__(
             host, operator_label(self.key),
             "Every control below is a parameter this operator DECLARES "
@@ -258,15 +263,11 @@ class GenericOperatorPanel(_Panel):
         self.run_btn.clicked.connect(self._preview)
         self.v.addWidget(self.run_btn)
 
-        # SAVE IS OFFERED OFF `consumes`, NEVER OFF THE NAME. A plane-op keeps z at full depth and
-        # the OME-Zarr writer's per-field contract is the reason `_build_plane_op_tab` offers no
-        # save either; a z-reducer collapses z to 1 and can be persisted. One declaration decides.
-        #
         # NOT BUILT AT ALL when it does not apply, rather than built and left out of the layout:
         # `_viewer._raw_btn` is the precedent -- an orphan QPushButton nobody parented POPPED UP AS
         # A FLOATING WINDOW ("a 'return to raw view' window pops up. That I don't get.").
         self.save_btn = None
-        if self._reduces_z:
+        if self._can_save:
             self.save_btn = QPushButton("Run on the whole plate and save…")
             self.save_btn.setCursor(Qt.PointingHandCursor)
             self.save_btn.setToolTip(

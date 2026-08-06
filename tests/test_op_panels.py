@@ -713,12 +713,12 @@ def test_a_chain_s_namespaced_parameters_are_split_the_way_compose_joins_them():
 
 
 def test_a_chain_is_grouped_by_step_in_chain_order_not_refused():
-    """Task 4: what does `projector_params()` return for a chain, and does the panel handle it?
+    """Task 4: what does `operator_params()` return for a chain, and does the panel handle it?
     It returns the parts' params namespaced, and this is the handling: one group per step, in the
     order the expression is written."""
-    from squidmip._engine import projector_params
+    from squidmip._engine import operator_params
 
-    params = projector_params("bgsub + spot")
+    params = operator_params("bgsub + spot")
     assert [p.name for p in params] == ["spot.sigma_px", "spot.min_area_px",
                                         "spot.min_distance_px", "spot.split_touching"]
     groups = group_params(params)
@@ -735,15 +735,23 @@ def test_a_bare_operator_s_parameters_are_one_unnamed_group():
 
 def test_a_parameterised_operator_is_not_refused():
     assert panel_refusal("spot") is None
+    # cellpose is the [segment] extra, which `.[gui,test]` does NOT install -- so on CI, and in any
+    # clean venv, `panel_refusal("cellpose")` correctly answers "needs cellpose, which is not
+    # installed (pip install cellpose)". That is the PRODUCT being right; asserting None
+    # unconditionally was the TEST being wrong, and it was one of exactly two failures in the first
+    # clean-venv run of this suite (2026-08-05, napari 0.8.0 / numpy 2.4.6). Guarded rather than
+    # deleted: when the extra is installed, "an operator whose requires= is satisfied still gets a
+    # panel" is worth pinning, and `spot` alone does not reach the requires= branch at all.
+    pytest.importorskip("cellpose")
     assert panel_refusal("cellpose") is None
 
 
-def test_a_region_operator_is_refused_because_its_table_declares_no_params():
-    """`add_region_operator` carries one callable and a `requires` tuple -- no `params=` at all.
-    That asymmetry between the two tables is exactly why `STITCH_DEFAULTS` still exists, so the
-    refusal says it rather than reporting `stitch` as an unknown projector."""
+def test_a_region_operator_that_declares_no_params_is_refused_for_that_reason():
+    """`stitch` declares no `params=`, so there is nothing for a form to show and StitcherPanel is
+    where its controls live. The refusal used to be by KIND -- every region operator, because that
+    table had no `params` column at all. It is one table now, so the refusal is about `stitch`."""
     why = panel_refusal("stitch")
-    assert why and "REGION operator" in why and "StitcherPanel" in why
+    assert why and "declares no params" in why and "StitcherPanel" in why
 
 
 def test_a_key_that_is_not_an_operator_is_refused_by_name():
@@ -768,36 +776,36 @@ def test_an_undrawable_parameter_refuses_the_whole_panel_naming_the_parameter():
         why = panel_refusal(name)
         assert why and "mask" in why and "NoneType" in why
     finally:
-        from squidmip._engine import _PROJECTORS
-        _PROJECTORS.pop(name, None)
+        from squidmip._engine import _OPERATORS
+        _OPERATORS.pop(name, None)
 
 
 # -- the Qt half ------------------------------------------------------------------------
 
 def test_the_panel_builds_one_widget_per_declared_parameter(qapp):
     """The defect itself, pinned: `spot` declares four parameters and had zero widgets."""
-    from squidmip._engine import projector_params
+    from squidmip._engine import operator_params
 
     p = GenericOperatorPanel(_Host(), "spot")
-    assert sorted(p.widgets) == sorted(param.name for param in projector_params("spot"))
+    assert sorted(p.widgets) == sorted(param.name for param in operator_params("spot"))
     assert len(p.widgets) == 4
 
 
 def test_each_widget_starts_at_the_declared_default(qapp):
     """An untouched panel must launch what the operator ships with, or the panel has become a
     second set of defaults -- the same rule `STITCH_DEFAULTS` is held to."""
-    from squidmip._engine import projector_params
+    from squidmip._engine import operator_params
 
     p = GenericOperatorPanel(_Host(), "spot")
-    declared = {param.name: param.default for param in projector_params("spot")}
+    declared = {param.name: param.default for param in operator_params("spot")}
     assert p.kwargs() == declared
 
 
 def test_the_blurb_becomes_the_tooltip(qapp):
     """`Param.blurb` is documented as 'the one line a UI shows'. Until now no UI showed it."""
-    from squidmip._engine import projector_params
+    from squidmip._engine import operator_params
 
-    blurbs = {param.name: param.blurb for param in projector_params("spot")}
+    blurbs = {param.name: param.blurb for param in operator_params("spot")}
     p = GenericOperatorPanel(_Host(), "spot")
     for name, widget in p.widgets.items():
         if blurbs[name]:
@@ -834,20 +842,20 @@ def test_every_kwarg_the_panel_emits_is_a_parameter_the_operator_accepts(qapp):
     """The panel's output has to survive `Operator.bind`, which refuses an unknown name LOUD.
     A panel emitting a key the operator does not declare would raise inside a worker thread,
     where the only symptom is a status line that stops updating."""
-    from squidmip import bind_projector
+    from squidmip import bind_operator
 
     host = _Host()
     p = GenericOperatorPanel(host, "spot")
     p.widgets["min_area_px"].setValue(80)
     p.run_btn.click()
-    bind_projector("spot", host.calls[0][1]["operator_kwargs"])   # raises if a name is wrong
+    bind_operator("spot", host.calls[0][1]["operator_kwargs"])   # raises if a name is wrong
 
 
 def test_a_plane_op_is_offered_preview_only_and_the_choice_comes_off_consumes(qapp):
     """`spot` keeps z at full depth, so there is no plate to save. Read off `consumes`, never off
     the name -- test_operator_declaration fails the build on a name comparison."""
     p = GenericOperatorPanel(_Host(), "spot")
-    assert p._reduces_z is False
+    assert p._can_save is False
     # Not built at all rather than built and left out of the layout: `_viewer._raw_btn` is the
     # precedent for an orphan QPushButton popping up as its own floating window.
     assert p.save_btn is None
@@ -855,7 +863,7 @@ def test_a_plane_op_is_offered_preview_only_and_the_choice_comes_off_consumes(qa
 
 def test_a_z_reducer_is_offered_the_save_run(qapp):
     p = GenericOperatorPanel(_Host(), "mip")
-    assert p._reduces_z is True
+    assert p._can_save is True
     assert p.save_btn is not None and p.save_btn.parent() is not None
 
 
@@ -882,10 +890,10 @@ def test_a_chain_panel_shows_the_form_and_greys_the_run_with_a_reason(qapp):
 def test_a_chain_panel_keeps_the_namespaced_names_bind_expects(qapp):
     """`Operator.bind` validates against the namespaced tuple this panel was built from, so the
     values go back under exactly the names they arrived with."""
-    from squidmip import bind_projector
+    from squidmip import bind_operator
 
     p = GenericOperatorPanel(_Host(), "bgsub + spot")
     p.widgets["spot.min_area_px"].setValue(400)
     kwargs = p.kwargs()
     assert kwargs["spot.min_area_px"] == 400
-    bind_projector("bgsub + spot", kwargs)        # raises if a namespaced name is wrong
+    bind_operator("bgsub + spot", kwargs)        # raises if a namespaced name is wrong

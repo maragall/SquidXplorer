@@ -20,7 +20,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from squidmip import available_projectors, project, project_well, projector_consumes
+from squidmip import available_projectors, project, project_well, operator_consumes
 from squidmip._flatfield import (
     FlatfieldProfile,
     active_profile,
@@ -260,25 +260,25 @@ def test_flatfield_commutes_with_the_mip_on_real_10x_data(laser_af_dataset, caps
 
 def test_flatfield_is_registered_as_a_plane_op():
     assert "flatfield" in available_projectors()
-    assert projector_consumes("flatfield") == PLANE_OP
+    assert operator_consumes("flatfield") == PLANE_OP
 
 
 def test_the_registered_operator_fails_loud_and_actionable_with_no_profile_set():
     """A flat-field with no profile has no sane default — an identity field would silently do
     nothing while the UI said 'flat-field applied'."""
-    from squidmip._engine import _resolve_projector
-    op = _resolve_projector("flatfield").fn
+    from squidmip._engine import _resolve_operator
+    op = _resolve_operator("flatfield").fn
     with pytest.raises(ValueError, match="no flat-field profile"):
         op([np.ones((8, 8), np.uint16)])
 
 
 def test_set_profile_activates_the_registered_operator():
-    from squidmip._engine import _resolve_projector
+    from squidmip._engine import _resolve_operator
     ff = _vignette(32)
     set_profile(FlatfieldProfile(ff))
     assert active_profile() is not None
     raw = (np.float32(1000) * ff).astype(np.uint16)
-    out = _resolve_projector("flatfield").fn([raw])
+    out = _resolve_operator("flatfield").fn([raw])
     assert np.allclose(out, 1000, atol=2)
 
 

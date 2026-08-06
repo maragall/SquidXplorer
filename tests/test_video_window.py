@@ -39,7 +39,7 @@ from squidmip._video import encoder_problem  # noqa: E402
 
 from .conftest import shutdown_plate_window  # noqa: E402
 from .test_video import _decode, _make_5d  # noqa: E402
-from .test_viewer import _drain_until, qapp, stub_detail  # noqa: E402,F401  (fixtures)
+from .test_viewer import _drain_until, qapp  # noqa: E402,F401  (fixtures)
 
 
 @pytest.fixture
@@ -121,7 +121,7 @@ def save_dialog(monkeypatch, tmp_path):
 # --- the chip -------------------------------------------------------------------------------
 
 def test_the_record_chip_is_enabled_on_an_acquisition_with_an_axis_to_sweep(
-        qapp, stub_detail, napari_pane_stub, five_d_root):
+        qapp, napari_pane_stub, five_d_root):
     win, w = _open_window(qapp, five_d_root)
     assert w._btn_record.isEnabled(), "the record chip is dead on a 3-timepoint acquisition"
     assert "3 frames along the time axis" in w._btn_record.toolTip(), w._btn_record.toolTip()
@@ -129,7 +129,7 @@ def test_the_record_chip_is_enabled_on_an_acquisition_with_an_axis_to_sweep(
 
 
 def test_the_record_chip_says_why_when_there_is_nothing_to_sweep(
-        qapp, stub_detail, napari_pane_stub, tmp_path):
+        qapp, napari_pane_stub, tmp_path):
     """n_t = 1 and one z plane: no axis, and the tooltip names that rather than going quiet."""
     root = tmp_path / "flat"
     _make_5d().build(root, ["A1"], n_fovs=1, nz=1, nt=1, size=64)
@@ -142,7 +142,7 @@ def test_the_record_chip_says_why_when_there_is_nothing_to_sweep(
 # --- what the handler hands over --------------------------------------------------------------
 
 def test_the_worker_is_given_the_region_the_window_is_actually_showing(
-        qapp, stub_detail, napari_pane_stub, five_d_root, spy_worker, save_dialog):
+        qapp, napari_pane_stub, five_d_root, spy_worker, save_dialog):
     """A movie of A1 taken while looking at A2 would pass any state-only assertion."""
     win, w = _open_window(qapp, five_d_root, region_index=1)
     assert w.current_region() == "A2", "the fixture did not move; this test asserts nothing"
@@ -159,7 +159,7 @@ def test_the_worker_is_given_the_region_the_window_is_actually_showing(
 
 
 def test_a_hidden_channel_is_left_out_of_the_movie(
-        qapp, stub_detail, napari_pane_stub, five_d_root, spy_worker, save_dialog):
+        qapp, napari_pane_stub, five_d_root, spy_worker, save_dialog):
     """Out of the view is out of the movie: the window passes the VISIBLE channels."""
     win, w = _open_window(qapp, five_d_root)
     _drain_until(qapp, lambda: len(w._pane.mosaic._layers) >= 2, timeout=20)
@@ -175,7 +175,7 @@ def test_a_hidden_channel_is_left_out_of_the_movie(
 
 
 def test_a_second_click_cancels_instead_of_starting_a_second_export(
-        qapp, stub_detail, napari_pane_stub, five_d_root, spy_worker, save_dialog):
+        qapp, napari_pane_stub, five_d_root, spy_worker, save_dialog):
     win, w = _open_window(qapp, five_d_root)
     w._record_movie()
     assert len(spy_worker.instances) == 1
@@ -190,7 +190,7 @@ def test_a_second_click_cancels_instead_of_starting_a_second_export(
 # --- the UI thread --------------------------------------------------------------------------
 
 def test_the_click_handler_does_not_read_or_encode_on_the_ui_thread(
-        qapp, stub_detail, napari_pane_stub, five_d_root, save_dialog, tmp_path):
+        qapp, napari_pane_stub, five_d_root, save_dialog, tmp_path):
     """The handler's own wall clock, with the REAL worker started.
 
     SELF-CALIBRATING, not a fixed millisecond budget. The same export is first run SYNCHRONOUSLY
@@ -227,7 +227,7 @@ def test_the_click_handler_does_not_read_or_encode_on_the_ui_thread(
 
 
 def test_the_export_never_reads_a_plane_on_the_qt_thread(
-        qapp, stub_detail, napari_pane_stub, five_d_root, save_dialog):
+        qapp, napari_pane_stub, five_d_root, save_dialog):
     """The rule CLAUDE.md now states, pinned the way the gallery pins it: by thread ident.
 
     The timing test above measures the CLICK; this measures every read of the whole export, so a
@@ -263,7 +263,7 @@ def test_the_export_never_reads_a_plane_on_the_qt_thread(
 @pytest.mark.skipif(encoder_problem() is not None,
                     reason=f"no mp4 encoder: {encoder_problem()}")
 def test_the_window_writes_a_real_movie_whose_frames_differ(
-        qapp, stub_detail, napari_pane_stub, five_d_root, save_dialog, tmp_path):
+        qapp, napari_pane_stub, five_d_root, save_dialog, tmp_path):
     """The whole chain, no stub in the recording path: chip -> _VideoWorker -> .mp4 -> decode."""
     win, w = _open_window(qapp, five_d_root)
     _drain_until(qapp, lambda: bool(w._pane.mosaic._layers), timeout=20)

@@ -14,7 +14,7 @@ mentions it by name.
    It is checkable over the AST, so it is checked rather than asserted in prose.
 
 WHY THE CONFORMANCE TEST RUNS THE OPERATOR instead of reading the registry twice. A test that
-asserts ``projector_produces("spot") == "labels"`` asserts that a line of code says what it says.
+asserts ``operator_produces("spot") == "labels"`` asserts that a line of code says what it says.
 The question worth asking is whether the pixels that come out satisfy the promise the declaration
 makes about them, and whether the delivery path then builds the layer type that promise names. So
 each operator is RUN on a fixture plane and the result is DELIVERED through the real
@@ -34,11 +34,11 @@ from squidmip import (
     available_projectors,
     available_region_operators,
     project_well,
-    projector_consumes,
-    projector_params,
-    projector_produces,
+    operator_consumes,
+    operator_params,
+    operator_produces,
 )
-from squidmip._engine import Param, _resolve_projector, add_projector, bind_projector
+from squidmip._engine import Param, _resolve_operator, add_projector, bind_operator
 from squidmip._spots import LAYER_KEY as SPOT_KEY, available_segmenters, segmenter_available
 
 napari = pytest.importorskip("napari")
@@ -97,8 +97,8 @@ def _run(name: str, plane: np.ndarray) -> np.ndarray:
     The grouping is derived from ``consumes`` — the engine's own rule — rather than from a table
     in this file, so a new axis in ``CONSUMABLE_AXES`` does not silently make this helper wrong.
     """
-    group = [plane, plane] if "z" in projector_consumes(name) else [plane]
-    return _resolve_projector(name).fn(group)
+    group = [plane, plane] if "z" in operator_consumes(name) else [plane]
+    return _resolve_operator(name).fn(group)
 
 
 def _is_a_label_image(arr: np.ndarray) -> bool:
@@ -146,7 +146,7 @@ def test_every_operator_delivers_the_result_kind_it_declares(name, mosaic):
     if _slow(name) and not segmenter_available(name)[0]:
         pytest.skip(f"{name} needs an optional package that is not installed")
 
-    kind = projector_produces(name)
+    kind = operator_produces(name)
     assert kind in mosaic._RESULT_ADDERS, (
         f"{name!r} declares produces={kind!r}, which no delivery adapter serves; "
         f"MosaicLayers can draw {sorted(mosaic._RESULT_ADDERS)}")
@@ -309,8 +309,8 @@ def test_one_entry_runs_at_a_value_the_registration_never_named():
     plumbing test.
     """
     plane = _four_nuclei()
-    loose = bind_projector(SPOT_KEY)([plane])
-    strict = bind_projector(SPOT_KEY, {"min_area_px": 5000})([plane])
+    loose = bind_operator(SPOT_KEY)([plane])
+    strict = bind_operator(SPOT_KEY, {"min_area_px": 5000})([plane])
     assert loose.max() == 4, f"the fixture should hold four nuclei, got {loose.max()}"
     assert strict.max() == 0, "min_area_px did not reach the segmenter"
 
@@ -322,23 +322,23 @@ def test_the_default_binding_is_the_object_the_table_holds():
     in the table would become a fresh closure per plate run, and ``project_plate``'s ``reduce=``
     would no longer be the thing ``available_projectors`` described.
     """
-    op = _resolve_projector(SPOT_KEY)
-    assert bind_projector(SPOT_KEY) is op.fn
-    assert bind_projector(SPOT_KEY, {}) is op.fn
-    assert bind_projector(SPOT_KEY, None) is op.fn
+    op = _resolve_operator(SPOT_KEY)
+    assert bind_operator(SPOT_KEY) is op.fn
+    assert bind_operator(SPOT_KEY, {}) is op.fn
+    assert bind_operator(SPOT_KEY, None) is op.fn
 
 
 def test_an_operator_that_declares_no_parameters_refuses_them_by_name():
     """Accept-and-drop would run the operator at its defaults while the console line, the recipe
     and the user all said otherwise."""
-    assert projector_params("mip") == ()
+    assert operator_params("mip") == ()
     with pytest.raises(ValueError, match="declares no parameters"):
-        bind_projector("mip", {"radius_px": 3})
+        bind_operator("mip", {"radius_px": 3})
 
 
 def test_an_undeclared_parameter_is_refused_naming_what_is_accepted():
     with pytest.raises(ValueError, match="no parameter 'diameter'"):
-        bind_projector(SPOT_KEY, {"diameter": 30})
+        bind_operator(SPOT_KEY, {"diameter": 30})
 
 
 def test_a_declared_parameter_defaults_to_the_dataclass_it_came_from():
@@ -346,7 +346,7 @@ def test_a_declared_parameter_defaults_to_the_dataclass_it_came_from():
     the knobs and their defaults are written down. A hand-copied list is how the two drift."""
     from squidmip._spots import DEFAULT_PARAMS
 
-    defaults = _resolve_projector(SPOT_KEY).defaults()
+    defaults = _resolve_operator(SPOT_KEY).defaults()
     assert defaults["min_area_px"] == DEFAULT_PARAMS.min_area_px
     assert defaults["sigma_px"] == DEFAULT_PARAMS.sigma_px
     assert set(defaults) == {"sigma_px", "min_area_px", "min_distance_px", "split_touching"}
@@ -364,8 +364,8 @@ def test_a_registered_factory_is_called_at_its_declared_defaults():
                   consumes=frozenset())
     assert seen["scale"] == 3, "the factory was not called with the declared default"
     plane = np.ones((4, 4), dtype=np.uint16)
-    assert bind_projector("_decl_test_scaled")([plane]).max() == 3
-    assert bind_projector("_decl_test_scaled", {"scale": 7})([plane]).max() == 7
+    assert bind_operator("_decl_test_scaled")([plane]).max() == 3
+    assert bind_operator("_decl_test_scaled", {"scale": 7})([plane]).max() == 7
 
 
 def test_a_duplicate_declared_parameter_is_refused():
@@ -407,9 +407,9 @@ def test_cellpose_is_in_the_engine_registry_not_only_the_segmenter_table():
 def test_cellpose_declares_the_same_three_things_the_generic_path_reads():
     from squidmip._cellpose import OPERATOR_NAME
 
-    assert projector_consumes(OPERATOR_NAME) == frozenset(), "z must survive a segmentation"
-    assert projector_produces(OPERATOR_NAME) == "labels"
-    assert [p.name for p in projector_params(OPERATOR_NAME)] == [
+    assert operator_consumes(OPERATOR_NAME) == frozenset(), "z must survive a segmentation"
+    assert operator_produces(OPERATOR_NAME) == "labels"
+    assert [p.name for p in operator_params(OPERATOR_NAME)] == [
         "sigma_px", "min_area_px", "min_distance_px", "split_touching"]
 
 

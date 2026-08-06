@@ -3,9 +3,9 @@
 ``squidmip._recipe.RecipeChain`` has documented ``mip + decon(sigma=2.0)`` and the rule that order
 matters since 2026-07-24, and until now **nothing executed it**. Every call shape people reached for
 was refused: ``projector=["flatfield", "mip"]`` raised ``TypeError: unhashable type: 'list'``,
-``"flatfield+mip"`` raised ``KeyError: unknown projector``, and ``bind_projector("mip", {"then":
+``"flatfield+mip"`` raised ``KeyError: unknown projector``, and ``bind_operator("mip", {"then":
 "decon"})`` raised ``ValueError: operator 'mip' declares no parameters``. The blocker was never a
-missing convenience API: ``_PROJECTORS`` is ``dict[str, Operator]`` and ``project_well`` applies
+missing convenience API: ``_OPERATORS`` is ``dict[str, Operator]`` and ``project_well`` applies
 exactly ONE ``reduce`` per ``(t, c, z_group)``, so there was no seam a second operator could sit in.
 
 WHAT THIS MODULE DOES, AND WHAT IT DELIBERATELY DOES NOT
@@ -127,7 +127,7 @@ def compose_operator(expression: Any, lookup: Callable[[str], Any]) -> Any:
 
     *lookup* resolves one bare operator NAME to its registry record. Passed in rather than reached
     for, so the resolution RULE ("a registered name wins, then a chain") lives in exactly one place
-    -- :func:`squidmip._engine._resolve_projector`, which is the door every ``projector=`` arrives
+    -- :func:`squidmip._engine._resolve_operator`, which is the door every ``projector=`` arrives
     at. A second copy of that rule here is how the CLI and the engine would come to disagree about
     what a string means.
 
@@ -192,6 +192,13 @@ def _refuse_impossible(parts: Sequence[tuple], label: str) -> None:
                 f"and step {position + 1}), so a parameter named '{recipe.name}.<x>' would address "
                 "both and neither. Run it once with the parameters you want.")
         seen[recipe.name] = position + 1
+
+        if "fov" in operator.consumes:
+            raise ValueError(
+                f"cannot compose {label!r}: {recipe.name!r} consumes fov — it takes a whole well "
+                "(reader, region, fovs) and returns its fused mosaic, so there are no planes to "
+                "hand the other steps and no plane stream to join it to. Run it on its own with "
+                "stitch_plate, then run the chain over the result.")
 
         if getattr(operator.fn, "select_index", None) is not None:
             raise ValueError(

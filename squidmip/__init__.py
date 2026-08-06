@@ -56,14 +56,18 @@ from squidmip._engine import (
     Operator,
     Param,
     add_projector,
+    add_region_operator,
     available_projectors,
-    bind_projector,
+    available_region_operators,
+    bind_operator,
+    is_region_operator,
     operator_available,
+    operator_consumes,
+    operator_params,
+    operator_produces,
+    operator_requires,
     project_plate,
-    projector_consumes,
-    projector_params,
-    projector_produces,
-    projector_requires,
+    runnable_operators,
 )
 from squidmip._minerva import export_selection, launch_minerva
 from squidmip._montage import build_montage
@@ -75,10 +79,6 @@ from squidmip._plugins import (
     load_operator_plugins,
 )
 from squidmip._stitch import (
-    add_region_operator,
-    available_region_operators,
-    region_operator_available,
-    region_operator_requires,
     solve_offsets_px,
     stitch_plate,
     stitch_region,
@@ -173,38 +173,39 @@ __all__ = [
     "add_projector",
     "available_projectors",
     # IMA-210 consumes-axis registry
-    "projector_consumes",
+    "operator_consumes",
     "Operator",
     "plane_op",
     "PLANE_OP",
     "Z_REDUCER",
     # The result-kind declaration and the per-entry parameters (cellpose-as-an-operator, 2026-08-03)
-    "projector_produces",
-    "projector_params",
-    "bind_projector",
+    "operator_produces",
+    "operator_params",
+    "bind_operator",
     "labels_op",
     "INTENSITY",
     "LABELS",
     "Param",
     # The operator TEMPLATE's contract (2026-08-05): declared dependencies and the discovery seam
     # that lets an operator live in somebody else's package. See templates/operator/.
-    "projector_requires",
+    "operator_requires",
     "operator_available",
     "MissingOperatorDependency",
-    "region_operator_available",
-    "region_operator_requires",
     "load_operator_plugins",
     "declared_operator_plugins",
     "OperatorPluginError",
     "OPERATOR_PLUGIN_GROUP",
     "write_plate",
     "build_montage",
-    # IMA-222 region operators (inter-FOV; the parallel table to the projectors)
+    # IMA-222 region operators (inter-FOV). Same table as the projectors since 2026-08-05; what
+    # tells them apart is the declaration `consumes={"fov"}` — see `is_region_operator`.
     "stitch_region",
     "stitch_plate",
     "solve_offsets_px",
     "add_region_operator",
     "available_region_operators",
+    "is_region_operator",
+    "runnable_operators",
     # IMA-216 tiler + IMA-217 sources
     "select_tiles",
     "Geometry",

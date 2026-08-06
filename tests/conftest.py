@@ -221,14 +221,11 @@ def _keep_test_windows_off_the_foreground() -> None:
 # during a test, and every registration in this suite happens inside a test function (nothing is
 # registered at module import or in a session/module fixture, which this would otherwise undo).
 # Being autouse is the point -- it covers registry-mutating tests nobody has written yet.
+# TWO, not four: `add_projector` and `add_region_operator` both write `_engine._OPERATORS`, and the
+# `_stitch._REGION_OPERATORS` / `_stitch._REGION_REQUIRES` pair they used to write instead is gone.
 _REGISTRIES = (
-    ("squidmip._engine", "_PROJECTORS"),
+    ("squidmip._engine", "_OPERATORS"),
     ("squidmip._spots", "_SEGMENTERS"),
-    ("squidmip._stitch", "_REGION_OPERATORS"),
-    # The region table's `requires=` sidecar (2026-08-05). Listed here for the same reason as the
-    # table it shadows: `add_region_operator` writes both, so restoring only one leaves a
-    # requirement behind for a name that no longer exists.
-    ("squidmip._stitch", "_REGION_REQUIRES"),
 )
 
 

@@ -204,7 +204,7 @@ def ashlar_region(
       for a reason that is ours, not ashlar's. Raise/lower via the operator kwarg.
     """
     from squidmip._placement import fov_offsets_px
-    from squidmip._stitch import _NullTimer, _pixel_size, _resolve_projector, _positions_yx_um
+    from squidmip._stitch import _NullTimer, _pixel_size, _resolve_operator, _positions_yx_um
     from squidmip.projection import project_well
 
     timer = timer or _NullTimer()
@@ -222,7 +222,7 @@ def ashlar_region(
     tile_shape = tuple(int(v) for v in meta["frame_shape"])
     dtype = np.dtype(meta["dtype"])
     n_t = int(meta["n_t"])
-    _op = _resolve_projector(projector)
+    _op = _resolve_operator(projector)
 
     with timer.stage("project"):
         tiles = np.empty((len(fovs), n_t, len(channels), *tile_shape), dtype=dtype)
@@ -340,7 +340,7 @@ def register_challengers() -> list[str]:
     be imported must show up as a MISSING ROW in the report, never as a fabricated one.
     Returns the names that were made available.
     """
-    from squidmip._stitch import add_region_operator, available_region_operators
+    from squidmip._engine import add_region_operator, available_region_operators
 
     added = []
     have = set(available_region_operators())

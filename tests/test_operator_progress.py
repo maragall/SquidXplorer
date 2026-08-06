@@ -157,7 +157,7 @@ if "PySide6" in sys.modules or "PySide2" in sys.modules:      # pragma: no cover
 import squidmip._viewer as V  # noqa: E402
 
 from .conftest import FOVS, REGIONS  # noqa: E402
-from .test_viewer import _drain_until, _StubDetail, qapp  # noqa: E402,F401  (fixture)
+from .test_viewer import _drain_until, qapp  # noqa: E402,F401  (fixture)
 
 
 class _Requester:
@@ -188,7 +188,6 @@ class _Requester:
 
 @pytest.fixture
 def plate(qapp, monkeypatch, squid_dataset):
-    monkeypatch.setattr(V.PlateWindow, "_make_detail_viewer", lambda self: _StubDetail())
     win = V.PlateWindow(None)
     root, _arrays = squid_dataset
     win.ingest(str(root))

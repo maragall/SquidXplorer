@@ -24,7 +24,7 @@ import pytest
 
 import squidmip
 from squidmip._compose import compose_operator
-from squidmip._engine import _PROJECTORS, _resolve_projector, add_projector, bind_projector
+from squidmip._engine import _OPERATORS, _resolve_operator, add_projector, bind_operator
 from squidmip._recipe import Recipe, RecipeChain
 from squidmip.projection import PLANE_OP, Z_REDUCER, plane_op
 
@@ -67,7 +67,7 @@ def _register_test_operators():
         yield
     finally:
         for name in (ADD, DOUBLE, COUNT):
-            _PROJECTORS.pop(name, None)
+            _OPERATORS.pop(name, None)
 
 
 def _planes(values, shape=(4, 4)):
@@ -90,7 +90,7 @@ def test_a_chain_is_written_the_way_it_is_printed():
 
     assert chain.label() == "flatfield + decon + spot(min_area_px=80)"
     assert RecipeChain.parse(chain.label()) == chain
-    assert _resolve_projector(chain.label()).name == chain.label()
+    assert _resolve_operator(chain.label()).name == chain.label()
 
 
 def test_the_same_chain_resolves_whether_it_is_a_string_or_a_RecipeChain():
@@ -98,7 +98,7 @@ def test_the_same_chain_resolves_whether_it_is_a_string_or_a_RecipeChain():
     render it to a string and have the engine parse it straight back."""
     chain = RecipeChain.parse(f"{ADD}+{DOUBLE}")
 
-    assert _resolve_projector(chain).name == _resolve_projector(f"{ADD}+{DOUBLE}").name
+    assert _resolve_operator(chain).name == _resolve_operator(f"{ADD}+{DOUBLE}").name
 
 
 # =================================================================================================
@@ -109,15 +109,15 @@ def test_the_same_chain_resolves_whether_it_is_a_string_or_a_RecipeChain():
 def test_consumes_is_the_union_so_the_engine_loop_and_the_output_shape_follow():
     """``consumes`` decides the loop and the output shape. A chain that did not derive it would
     make the engine group over the wrong axis, which is a silently reshaped result."""
-    assert squidmip.projector_consumes(f"{ADD}+{DOUBLE}") == PLANE_OP
-    assert squidmip.projector_consumes(f"{ADD}+{DOUBLE}+mip") == Z_REDUCER
+    assert squidmip.operator_consumes(f"{ADD}+{DOUBLE}") == PLANE_OP
+    assert squidmip.operator_consumes(f"{ADD}+{DOUBLE}+mip") == Z_REDUCER
 
 
 def test_produces_is_the_last_steps_so_the_viewer_picks_the_right_layer_type():
     """``produces`` decides the napari layer type. Only the LAST step can be non-intensity (see the
     refusal below), so the last step's answer is the chain's answer."""
-    assert squidmip.projector_produces(f"{ADD}+{DOUBLE}") == "intensity"
-    assert squidmip.projector_produces(f"{ADD}+spot") == "labels"
+    assert squidmip.operator_produces(f"{ADD}+{DOUBLE}") == "intensity"
+    assert squidmip.operator_produces(f"{ADD}+spot") == "labels"
 
 
 def test_params_are_namespaced_per_step_and_reach_that_step():
@@ -126,14 +126,14 @@ def test_params_are_namespaced_per_step_and_reach_that_step():
     ``spot.min_area_px`` rather than ``min_area_px``: two steps of one chain can declare the same
     parameter name, and a flat namespace would set both from one value with nothing saying so.
     """
-    declared = {p.name: p.default for p in squidmip.projector_params(f"{ADD}+spot")}
+    declared = {p.name: p.default for p in squidmip.operator_params(f"{ADD}+spot")}
     assert declared["spot.min_area_px"] == 30
 
     # a value written INTO the expression becomes that parameter's default...
-    assert {p.name: p.default for p in squidmip.projector_params(
+    assert {p.name: p.default for p in squidmip.operator_params(
         f"{ADD}+spot(min_area_px=99)")}["spot.min_area_px"] == 99
     # ...and operator_kwargs reaches the same place, by the same name.
-    assert bind_projector(f"{ADD}+spot", {"spot.min_area_px": 77}).__name__ == \
+    assert bind_operator(f"{ADD}+spot", {"spot.min_area_px": 77}).__name__ == \
         f"{ADD} + spot(min_area_px=77)"
 
 
@@ -148,8 +148,8 @@ def test_a_namespaced_parameter_changes_what_that_step_actually_does():
     plane[10:14, 10:14] = 5000        # 16 px
     plane[30:55, 30:55] = 5000        # 625 px
 
-    big_only = bind_projector(f"{ADD}+spot", {"spot.min_area_px": 500})([plane])
-    both = bind_projector(f"{ADD}+spot", {"spot.min_area_px": 4})([plane])
+    big_only = bind_operator(f"{ADD}+spot", {"spot.min_area_px": 500})([plane])
+    both = bind_operator(f"{ADD}+spot", {"spot.min_area_px": 4})([plane])
 
     assert sorted(np.unique(big_only).tolist()) == [0, 1]
     assert sorted(np.unique(both).tolist()) == [0, 1, 2]
@@ -157,14 +157,14 @@ def test_a_namespaced_parameter_changes_what_that_step_actually_does():
 
 def test_an_unknown_parameter_is_refused_naming_what_the_chain_does_accept():
     with pytest.raises(ValueError, match=r"has no parameter 'spot.nope'"):
-        bind_projector(f"{ADD}+spot", {"spot.nope": 1})
+        bind_operator(f"{ADD}+spot", {"spot.nope": 1})
 
 
 def test_requires_is_the_union_so_one_refusal_names_every_missing_package():
     """``requires`` is checked at BIND time, before a single well is read. A chain that dropped a
     step's requirement would reproduce the measured silent success it exists to end: an ImportError
     one call deep, filed by ``on_error`` as a per-well skip, and a green run that wrote nothing."""
-    assert squidmip.projector_requires("flatfield+decon+mip") == ("tilefusion", "petakit")
+    assert squidmip.operator_requires("flatfield+decon+mip") == ("tilefusion", "petakit")
 
 
 def test_a_bare_name_is_still_the_registry_entry_itself():
@@ -174,8 +174,8 @@ def test_a_bare_name_is_still_the_registry_entry_itself():
     IMA-188, so no existing run changes by a pixel — and so ``reference``'s ``select_index``, which
     a composition refuses to carry, is still reachable on its own.
     """
-    assert _resolve_projector("mip") is _PROJECTORS["mip"]
-    assert _resolve_projector("reference") is _PROJECTORS["reference"]
+    assert _resolve_operator("mip") is _OPERATORS["mip"]
+    assert _resolve_operator("reference") is _OPERATORS["reference"]
 
 
 # =================================================================================================
@@ -189,7 +189,7 @@ def test_a_z_reducer_that_is_not_last_is_refused_naming_both_operators_and_the_f
     that quietly ran ``decon+mip`` when the user typed ``mip+decon`` is a wrong result that looks
     right."""
     with pytest.raises(ValueError) as exc:
-        _resolve_projector(f"mip+{ADD}")
+        _resolve_operator(f"mip+{ADD}")
 
     message = str(exc.value)
     assert "'mip'" in message and f"'{ADD}'" in message
@@ -199,9 +199,9 @@ def test_a_z_reducer_that_is_not_last_is_refused_naming_both_operators_and_the_f
 
 def test_two_z_reducers_are_refused_by_the_same_rule_and_not_by_name():
     with pytest.raises(ValueError, match="consumes z"):
-        _resolve_projector("mip+mip")
+        _resolve_operator("mip+mip")
     with pytest.raises(ValueError, match="consumes z"):
-        _resolve_projector(f"{COUNT}+mip")
+        _resolve_operator(f"{COUNT}+mip")
 
 
 def test_a_labels_step_that_is_not_last_is_refused():
@@ -209,7 +209,7 @@ def test_a_labels_step_that_is_not_last_is_refused():
     arithmetic on names: the mean of label 12 and label 37 is label 24, an object that does not
     exist. Same argument ``stitch_region`` already makes when it refuses to feather labels."""
     with pytest.raises(ValueError) as exc:
-        _resolve_projector(f"spot+{ADD}")
+        _resolve_operator(f"spot+{ADD}")
 
     assert "labels" in str(exc.value) and "does not exist" in str(exc.value)
 
@@ -219,20 +219,31 @@ def test_a_z_selecting_step_is_refused_inside_a_chain():
     planes and shares that z across channels, OUTSIDE the operator — so a chain around it would
     never touch the planes it picks, and every other step would be silently dropped."""
     with pytest.raises(ValueError) as exc:
-        _resolve_projector(f"{ADD}+reference")
+        _resolve_operator(f"{ADD}+reference")
 
     assert "SELECTS one z" in str(exc.value)
 
 
 def test_a_repeated_step_is_refused_because_its_parameters_would_be_ambiguous():
     with pytest.raises(ValueError, match="appears twice"):
-        _resolve_projector(f"{ADD}+{ADD}")
+        _resolve_operator(f"{ADD}+{ADD}")
 
 
 def test_an_unknown_step_reads_exactly_like_an_unknown_name():
     """A typo inside a chain is a typo. It must not turn into a parser error about punctuation."""
-    with pytest.raises(KeyError, match="unknown projector 'noplease'"):
-        _resolve_projector(f"{ADD}+noplease")
+    with pytest.raises(KeyError, match="unknown operator 'noplease'"):
+        _resolve_operator(f"{ADD}+noplease")
+
+
+def test_a_region_operator_cannot_be_a_step_of_a_chain():
+    """`stitch` is in the one table now, so it RESOLVES inside a chain; the declaration refuses it.
+
+    It takes (reader, region, fovs) and returns a whole mosaic, so there is no plane stream to
+    join it to. Refused by `consumes`, with the operator named and the alternative stated — the
+    same shape as the z-reducer and labels refusals beside it.
+    """
+    with pytest.raises(ValueError, match="consumes fov"):
+        _resolve_operator("stitch + mip")
 
 
 def test_a_list_of_names_is_refused_by_type_naming_the_chain_spelling():
@@ -240,7 +251,7 @@ def test_a_list_of_names_is_refused_by_type_naming_the_chain_spelling():
     'list'`` from a dict lookup — an error about a dict, raised at a caller asking about
     operators."""
     with pytest.raises(TypeError) as exc:
-        _resolve_projector(["flatfield", "mip"])
+        _resolve_operator(["flatfield", "mip"])
 
     assert "projector='flatfield + mip'" in str(exc.value)
 
@@ -252,7 +263,7 @@ def test_a_registered_name_may_not_contain_chain_punctuation():
 
 def test_an_empty_chain_names_no_operator():
     with pytest.raises(ValueError, match="names no operator"):
-        compose_operator("raw", _resolve_projector)
+        compose_operator("raw", _resolve_operator)
 
 
 # =================================================================================================
@@ -262,8 +273,8 @@ def test_an_empty_chain_names_no_operator():
 
 def test_the_steps_run_left_to_right():
     """2p+20, not 2p+10. Order is the whole content of a chain."""
-    add_then_double = _resolve_projector(f"{ADD}+{DOUBLE}").fn
-    double_then_add = _resolve_projector(f"{DOUBLE}+{ADD}").fn
+    add_then_double = _resolve_operator(f"{ADD}+{DOUBLE}").fn
+    double_then_add = _resolve_operator(f"{DOUBLE}+{ADD}").fn
 
     assert add_then_double(_planes([5]))[0, 0] == (5 + 10) * 2
     assert double_then_add(_planes([5]))[0, 0] == 5 * 2 + 10
@@ -272,8 +283,8 @@ def test_the_steps_run_left_to_right():
 def test_a_plane_op_prefix_feeds_the_z_reducer_the_whole_stack():
     """plane-op -> z-reducer: the reducer consumes what the plane-ops produced, at full depth. The
     counting reducer makes "it only saw one plane" a numeric failure rather than an invisible one."""
-    assert _resolve_projector(f"{ADD}+{COUNT}").fn(_planes([1, 2, 3]))[0, 0] == 3
-    assert _resolve_projector(f"{ADD}+{DOUBLE}+mip").fn(_planes([1, 5, 3]))[0, 0] == (5 + 10) * 2
+    assert _resolve_operator(f"{ADD}+{COUNT}").fn(_planes([1, 2, 3]))[0, 0] == 3
+    assert _resolve_operator(f"{ADD}+{DOUBLE}+mip").fn(_planes([1, 5, 3]))[0, 0] == (5 + 10) * 2
 
 
 def test_the_plane_ops_are_applied_lazily_as_the_reducer_pulls():
@@ -297,9 +308,9 @@ def test_the_plane_ops_are_applied_lazily_as_the_reducer_pulls():
                 events.append("read")
                 yield np.full((4, 4), value, np.uint16)
 
-        _resolve_projector("compose_traced+mip").fn(_reading())
+        _resolve_operator("compose_traced+mip").fn(_reading())
     finally:
-        _PROJECTORS.pop("compose_traced", None)
+        _OPERATORS.pop("compose_traced", None)
 
     assert events == ["read", "op", "read", "op", "read", "op"]
 
@@ -309,7 +320,7 @@ def test_a_plane_op_chain_handed_a_stack_refuses_rather_than_dropping_planes():
     ``consumes``. Silently using the first plane is how "my background subtraction dropped all but
     one z" happens."""
     with pytest.raises(ValueError, match="more than one plane"):
-        _resolve_projector(f"{ADD}+{DOUBLE}").fn(_planes([1, 2]))
+        _resolve_operator(f"{ADD}+{DOUBLE}").fn(_planes([1, 2]))
 
 
 def test_a_chain_runs_over_a_real_acquisition_through_project_plate(squid_dataset):
@@ -404,12 +415,12 @@ def test_a_chain_containing_flatfield_does_not_defeat_the_double_apply_guard():
     from squidmip._stitch import stitch_region
 
     for chain in ("flatfield+mip", f"{ADD}+flatfield", f"flatfield+{ADD}+mip"):
-        assert getattr(_resolve_projector(chain).fn, "corrects_illumination", False), chain
+        assert getattr(_resolve_operator(chain).fn, "corrects_illumination", False), chain
         with pytest.raises(ValueError, match="flat-field corrects its input"):
             stitch_region(reader, "A1", fovs, projector=chain, register=False)
 
     # ...and a chain of operators that do NOT correct is untouched by the guard.
-    assert not getattr(_resolve_projector(f"{ADD}+mip").fn, "corrects_illumination", False)
+    assert not getattr(_resolve_operator(f"{ADD}+mip").fn, "corrects_illumination", False)
 
 
 def test_a_chain_ending_in_labels_is_refused_by_stitching_for_the_reason_labels_are():

@@ -82,7 +82,15 @@ dependencies = [
 video = ["imageio>=2.31", "imageio-ffmpeg>=0.4.9"]
 # ome-zarr-models: official OME-NGFF v0.5 pydantic schema — validates written plate metadata
 # in tests (test-time only; the runtime writer stays lean, no extra runtime dep).
-test = ["pytest>=7.0", "ome-zarr-models>=1.7", "squidmip[video]"]
+#
+# pytest-timeout is NOT optional here even though nothing imports it: `tools/run_suite_chunked.py`
+# -- the runner BOTH CI workflows invoke -- passes `-p pytest_timeout` explicitly, so without it
+# pytest dies during pre-parse with `ImportError: Error importing plugin "pytest_timeout"` and
+# collects ZERO tests. Measured 2026-08-05 in a clean venv built from this file: `pip install
+# ".[gui,test]"` then the runner, which is exactly CI's two lines, ended at
+# "SUITE COLLECTION FAILED: zero tests collected". The suite was green on this laptop the whole
+# time because the dev environment had the plugin from somewhere else, so nothing here could see it.
+test = ["pytest>=7.0", "pytest-timeout>=2.1", "ome-zarr-models>=1.7", "squidmip[video]"]
 # gui: the MIP tool desktop app. Qt (via qtpy) + napari. ndviewer_light was removed on
 # 2026-07-30: napari is the renderer and the second stack imported PyQt5 at module scope,
 # which cannot share a process with a Qt6 napari.
@@ -168,6 +176,21 @@ decon = [
     # psfmodels is deliberately NOT listed here: squidmip never imports it, petakit does. It is
     # petakit's dependency to declare, and adding it here would be this file guessing at another
     # package's requirements.
+    #
+    # KNOWN BROKEN ON macOS AND ON ANY MACHINE WITHOUT CUDA 12, and the fix is not ours to make.
+    # petakit's own pyproject lists `cupy-cuda12x` as a CORE dependency, and that wheel exists for
+    # no other platform, so `pip install ".[decon]"` on this laptop ends at
+    #
+    #     ERROR: Could not find a version that satisfies the requirement cupy-cuda12x (from petakit)
+    #
+    # -- measured 2026-08-05 in a clean venv. pip resolves a whole command atomically, so asking for
+    # `.[stitch,decon]` loses tilefusion too; `.[stitch]` alone installs fine. petakit does NOT need
+    # cupy at runtime for the path this package uses: the working install on this machine is
+    # editable with no cupy present at all, and every decon test passes. The declaration is simply
+    # wrong, and it belongs in petakit (`~/CEPHLA/projects/deconvolution`) as a one-line move of
+    # `cupy-cuda12x` into an optional `gpu` extra. Deliberately NOT worked around here -- pinning or
+    # patching another package's requirements from this file is how a dependency graph becomes two
+    # sources of truth. Raised as an action item; see AI-docs SquidXplorer/action-items.
     "petakit @ git+https://github.com/maragall/deconvolution",
 ]
 segment = [

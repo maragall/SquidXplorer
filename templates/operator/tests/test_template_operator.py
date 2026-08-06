@@ -122,10 +122,10 @@ def test_the_registry_records_exactly_what_this_operator_declares():
     import squidmip
 
     assert OPERATOR_NAME in squidmip.available_projectors()
-    assert squidmip.projector_consumes(OPERATOR_NAME) == frozenset({"z"})
-    assert squidmip.projector_produces(OPERATOR_NAME) == "intensity"
-    assert {p.name for p in squidmip.projector_params(OPERATOR_NAME)} == {"smooth_sigma", "ddof"}
-    assert squidmip.projector_requires(OPERATOR_NAME) == ("scipy",)
+    assert squidmip.operator_consumes(OPERATOR_NAME) == frozenset({"z"})
+    assert squidmip.operator_produces(OPERATOR_NAME) == "intensity"
+    assert {p.name for p in squidmip.operator_params(OPERATOR_NAME)} == {"smooth_sigma", "ddof"}
+    assert squidmip.operator_requires(OPERATOR_NAME) == ("scipy",)
 
 
 def test_the_declared_consumes_is_what_the_code_actually_does():
@@ -142,12 +142,12 @@ def test_operator_kwargs_reach_the_operator_through_the_registry():
     naming a parameter this operator does not declare is refused by name."""
     import squidmip
 
-    bound = squidmip.bind_projector(OPERATOR_NAME, {"smooth_sigma": 0.0})
+    bound = squidmip.bind_operator(OPERATOR_NAME, {"smooth_sigma": 0.0})
     stack = [np.full((4, 4), 10, np.uint16), np.full((4, 4), 20, np.uint16)]
     assert bound(stack).max() == 5          # std of {10, 20} = 5
 
     with pytest.raises(ValueError, match="no parameter"):
-        squidmip.bind_projector(OPERATOR_NAME, {"sigma": 1.0})
+        squidmip.bind_operator(OPERATOR_NAME, {"sigma": 1.0})
 
 
 # ==============================================================================================

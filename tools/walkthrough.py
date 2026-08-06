@@ -678,8 +678,9 @@ def run_all():
 
     @check("IMA-222", "Stitch registers real FOVs and improves seam agreement")
     def _():
-        from squidmip._stitch import _REGION_OPERATORS
-        assert "stitch" in _REGION_OPERATORS and "coordinate" in _REGION_OPERATORS
+        from squidmip import available_region_operators
+        region_ops = available_region_operators()
+        assert "stitch" in region_ops and "coordinate" in region_ops
         import squidmip._viewer as V
         keys = [o.key for o in V._OPERATIONS]
         assert "stitch" in keys, f"no stitch card in the GUI: {keys}"
