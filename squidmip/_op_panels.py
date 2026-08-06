@@ -656,7 +656,12 @@ class StitcherPanel(_Panel):
             register=self.register_cb.isChecked(),
             registration_channel=(self.reg_channel_combo.currentIndex()
                                   if self.register_cb.isChecked() else None),
-            channels=selected if self.channel_boxes else None,
+            # AN EMPTY SELECTION MEANS ALL, never none. `channels=[]` reaches `stitch_region` as
+            # "fuse these zero channels", so the run completes having produced nothing and reports
+            # `0 of 1 region` -- a green run with no output, which is the exact failure shape this
+            # project refuses everywhere else. Unticking every box is a state the panel lets you
+            # reach in two clicks.
+            channels=(selected or None) if self.channel_boxes else None,
             blend_px=self.blend_spin.value(),
             auto_blend=self.blend_auto_cb.isChecked(),
             correct_distortion=self.distortion_cb.isChecked(),

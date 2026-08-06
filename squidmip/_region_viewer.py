@@ -645,6 +645,17 @@ class RegionViewer(QMainWindow):
             self.setCentralWidget(central)
             return
         self._pane = pane
+        # CURSOR -> FOV, on the canvas. See `_mosaic_source.fov_at_point` for why this is a
+        # validation instrument and not a nicety: it makes the ROI-to-fields mapping the runs use
+        # visible at the seams, where being off by a field is otherwise invisible.
+        try:
+            model = getattr(getattr(pane, "mosaic", None), "_model", None)
+            if model is not None:
+                model.text_overlay.visible = True
+                model.text_overlay.font_size = 12
+                model.cursor.events.position.connect(self._on_cursor_position)
+        except Exception as exc:                          # noqa: BLE001 - a readout, never fatal
+            log.debug("view %s could not wire the FOV readout: %s", self.window_id, exc)
 
         # Wire the pane's OWN "Detect on: [channel] Detect nuclei" strip (the channel-aware Cellpose
         # picker). It was only connected for the old central pane, so in a window it was a dead
@@ -1477,6 +1488,36 @@ class RegionViewer(QMainWindow):
         self._say("these are now the defaults for windows opened from now on; windows already "
                   "open are unchanged.")
 
+    def _on_cursor_position(self, _event=None) -> None:
+        """Name the FOV under the cursor, on the canvas, as it crosses a seam.
+
+        Reads the SAME `_mosaic_source` geometry the ROI-to-fields mapping uses, so what is on
+        screen is what a run would select -- a readout derived from a second copy of the
+        arithmetic would agree with itself and with nothing else.
+
+        The cursor position is in WORLD micrometres, y-x ordered, and the trailing two axes are
+        the spatial ones whether or not a z axis is present.
+        """
+        pane = self._pane
+        model = getattr(getattr(pane, "mosaic", None), "_model", None) if pane is not None else None
+        if model is None:
+            return
+        try:
+            pos = tuple(model.cursor.position or ())
+            if len(pos) < 2:
+                return
+            y_um, x_um = float(pos[-2]), float(pos[-1])
+            region = self.current_region()
+            if not region:
+                return
+            from squidmip._mosaic_source import fov_at_point
+
+            fov = fov_at_point(self._meta or {}, region, x_um, y_um)
+            model.text_overlay.text = (
+                f"{region} · FOV {fov}" if fov is not None else f"{region} · off-mosaic")
+        except Exception:                                 # noqa: BLE001 - a readout, never fatal
+            return
+
     def _run_view_operator(self) -> None:
         """Run the operator picked in this window's dropdown on THIS view's regions — "select where to
         run stitching" = pick this view, Run. Uses the app's real engine (no reimplementation)."""
@@ -1501,6 +1542,13 @@ class RegionViewer(QMainWindow):
             # result rendered on the plate and 'raw' / 'flatfield' / 'stitched' were not
             # selectable in the window that asked for them (Julio, 2026-07-29). The plate calls
             # operator_started / operator_done / operator_failed and deliver_result on us.
+            # SAY WHAT IS ACTUALLY BEING RUN. A scoped run that comes back "0 of 1 region" is
+            # indistinguishable from one that never started, and the inputs that decide it -- which
+            # fields, which projector, which channels -- are assembled across three methods and
+            # were nowhere on screen. Logged, not shown, so it costs the user nothing until they
+            # go looking.
+            log.info("view %s running %s on %s with %s", self.window_id, key,
+                     (regions if isinstance(regions, dict) else list(regions)), kwargs)
             self._run_operator(key, regions=regions, save=save, requester=self,
                                operator_kwargs=kwargs)
             mode = "saving" if save else "previewing"
@@ -1834,7 +1882,32 @@ class RegionViewer(QMainWindow):
         action = f"nuclei(cellpose, {channel})"
         where = self.address()
         began = time.monotonic()
-        w = _SpotWorker(region, channel, layer.data, None, None, SpotParams(), parent=self)
+        # RUN ON THE BOX, NOT THE WELL. Julio, 2026-08-06: *"Do we have in-roi-only processing that
+        # will make things fast? It doesn't work for cellpose."*
+        #
+        # This method's own docstring claimed the ROI case was covered -- "on an ROI child the layer
+        # data is the ROI crop" -- and that is true and is a different situation. An ROI CHILD is a
+        # separate window whose layers were built cropped. A box drawn in THIS window is not: the
+        # layer under it still spans the whole region, so Detect nuclei segmented every field while
+        # the user was looking at four of them. On the 10x set that is 27 fields of work for a box
+        # over 4, and cellpose is the operator where that difference is minutes.
+        #
+        # Cropped through `_crop_levels_to_bbox`, the same helper `_on_plane` and `deliver_result`
+        # already use, so the mask lands on exactly the pixels the box shows. A box that overlaps
+        # nothing falls back to the whole region rather than segmenting an empty array.
+        data = layer.data
+        if self._roi_bbox is not None:
+            from squidmip._mosaic_source import mosaic_bbox_um
+            from squidmip._napari_view import pyramid_levels
+
+            region_bbox = mosaic_bbox_um(self._meta or {}, region)
+            if region_bbox is not None:
+                cropped = _crop_levels_to_bbox(list(pyramid_levels(data)), region_bbox,
+                                               self._roi_bbox)
+                if cropped is not None:
+                    data = cropped[0]
+                    self._say("detecting on the ROI only — the box you drew, not the whole well.")
+        w = _SpotWorker(region, channel, data, None, None, SpotParams(), parent=self)
         w.ready.connect(self._on_nuclei_ready)
         w.problem.connect(lambda m, a=action, d=where: self.log.failed(a, str(m), address=d))
         w.problem.connect(self._echo)

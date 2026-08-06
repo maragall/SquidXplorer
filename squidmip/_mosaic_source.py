@@ -783,3 +783,22 @@ def fovs_overlapping_bbox(meta: dict, region: str,
         if fx0 < rx1 and (fx0 + fw * p) > rx0 and fy0 < ry1 and (fy0 + fh * p) > ry0:
             hit.append(int(fov))
     return hit or None
+
+
+def fov_at_point(meta: dict, region: str, x_um: float, y_um: float) -> "Optional[int]":
+    """The FOV under one stage-micrometre point, or ``None`` off the mosaic.
+
+    THE SAME GEOMETRY AS :func:`fovs_overlapping_bbox`, asked with a zero-size box -- which is the
+    point of it being a readout. Julio, 2026-08-06: *"The way to validate this is that if I move my
+    cursor on top of the napari canvas, it tells me, besides the ever-moving napari coordinates,
+    what fov I'm on as I pass through the seams."*
+
+    That is the right instrument, because it makes the mapping falsifiable by eye: if the number
+    changes at the seam the user can see, the ROI-to-fields mapping the run uses is right; if it
+    changes early or late, it is off by exactly what he can then describe. A readout derived from a
+    SECOND copy of the arithmetic would validate nothing, so this deliberately calls the one the
+    run uses rather than recomputing.
+    """
+    hit = fovs_overlapping_bbox(meta, region, (float(x_um), float(y_um),
+                                               float(x_um), float(y_um)))
+    return None if not hit else hit[0]
