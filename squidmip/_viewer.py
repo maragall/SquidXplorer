@@ -3523,6 +3523,8 @@ class PlateWindow(QMainWindow):
         self._run_address = (Extent(region_id=next(iter(regions)))
                              if regions is not None and len(regions) == 1 else None)
         self._run_began = time.monotonic()
+        # Is this run only PART of each well? A mapping means explicit fields (see `_on_tile`).
+        self._run_is_partial = isinstance(regions, dict)
         # THE REQUESTER IS NOW ACTUALLY HELD. ``requester=`` has been in this signature, and in its
         # docstring, since the 2026-07-29 fix — and was dropped on the floor: nothing assigned
         # ``_run_requester``, so ``operator_started`` / ``operator_progress`` / ``operator_done`` /
@@ -3623,6 +3625,25 @@ class PlateWindow(QMainWindow):
         """A field landed. ``box`` is None for the single-tile producers (_ComputedPlateWorker emits
         a 4-arg signal, which PyQt matches against this default) and a sub-cell box for a mosaic."""
         if self._overview is None:
+            return
+        # A PARTIAL-REGION RESULT DOES NOT BECOME THE REGION'S THUMBNAIL. Julio, 2026-08-06:
+        # *"Just make sure that the thumbnail of the whole region stays after I stitch (replacing
+        # it by the ROI's thumbnail)."*
+        #
+        # A REGION operator emits ONE array per well and the plate pastes it as the whole cell, so
+        # an ROI-scoped stitch -- four fields of twenty-seven -- overwrote the well's thumbnail
+        # with a picture of one corner of it. That is a wrong answer about the sample, not a rough
+        # one: the plate is the NAVIGATOR, and a cell that shows a corner while claiming to be the
+        # well makes every other well unfindable by eye.
+        #
+        # The run knows: `regions` arrived as the mapping `{region: [fov, ...]}` (see
+        # `projection.scope_wells`), which is precisely the statement "this is part of a well".
+        # The window that asked still gets the layer -- `deliver_result` places it at its own
+        # bbox_um inside the region, which is where it belongs.
+        if getattr(self, "_run_is_partial", False) and self._worker is not None \
+                and not getattr(self._worker, "IS_PREVIEW", False):
+            log.debug("plate keeps %s's whole-region thumbnail: this run covers part of it",
+                      well_id)
             return
         layer = self._active_op_key or "raw"
         self._overview.add_tile(ri, ci, well_id, tile, layer=layer, box=box)
