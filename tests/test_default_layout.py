@@ -239,11 +239,18 @@ def test_the_view_is_placed_beside_the_plate(qapp, napari_pane_stub, squid_datas
         if screen is None:
             pytest.skip("no screen to place against")
         want = beside_rect(screen.availableGeometry(), win.frameGeometry())
-        got = view.geometry()
+        got = view.frameGeometry()
+        # THE FRAME, not the client rect. `beside_rect` measures from the plate's FRAME, so the
+        # thing that has to land on it is the view's frame — and `setGeometry` positions the
+        # CLIENT area, which is a title bar higher. Measured on the workstation before that was
+        # corrected: the plate's frame at y=0 and the view's at y=-29, its title bar off the top of
+        # the screen and the window undraggable. Offscreen the margins are only 2 px, so a test
+        # written against the client rect passed there and shipped the bug.
         assert got.left() == want.left(), "the view does not start where the plate ends"
         assert got.left() >= win.frameGeometry().right(), "the view overlaps the plate"
+        assert got.top() == want.top(), "the view's title bar is not level with the plate's"
         assert got.height() == want.height(), "the view is not the plate's height"
-        assert got.width() == max(want.width(), view.minimumWidth()), (
+        assert got.width() == max(want.width(), view.frameGeometry().width()), (
             "the view is neither the width asked for nor its own minimum")
     finally:
         shutdown_plate_window(qapp, win)

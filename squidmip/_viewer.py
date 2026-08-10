@@ -2957,13 +2957,31 @@ class PlateWindow(QMainWindow):
         """Put *win* in the screen the plate is on, filling everything to the right of it.
 
         AFTER the window is shown, not before: `_spawn` has already shown it, and a geometry set
-        before a window is mapped is discarded by some window managers.
+        before a window is mapped is discarded by some window managers. Being shown is also what
+        makes the frame margins below readable at all — Qt does not know them until the window
+        manager has decorated the window.
+
+        THE RECT IS THE FRAME'S, THE CALL SETS THE CLIENT'S. `setGeometry` positions the client
+        area, so handing it a rect measured from `frameGeometry` puts the title bar ABOVE the rect
+        by exactly the title bar's height. Measured on this machine before the correction: the
+        plate at y=0 and the view's frame at y=-29 — its title bar off the top of the screen, so
+        the window could not be dragged or even named. Subtracting the margins here is what makes
+        "fills the space beside the plate" true of the thing the user can actually see.
         """
         screen = window_screen(self)
         if screen is None:
             return
         try:
-            win.setGeometry(beside_rect(screen.availableGeometry(), self.frameGeometry()))
+            want = beside_rect(screen.availableGeometry(), self.frameGeometry())
+            frame, client = win.frameGeometry(), win.geometry()
+            left_m = client.left() - frame.left()
+            top_m = client.top() - frame.top()
+            win.setGeometry(
+                want.left() + left_m,
+                want.top() + top_m,
+                want.width() - (frame.width() - client.width()),
+                want.height() - (frame.height() - client.height()),
+            )
         except Exception:                     # noqa: BLE001 - a layout is never worth a crash
             pass
 
