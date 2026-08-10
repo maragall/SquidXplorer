@@ -703,7 +703,14 @@ def test_double_click_opens_an_independent_window_on_that_region(qapp, squid_dat
 #   Shift+Alt+drag   -> marquee, UNIONS into the batch selection (unchanged)
 #   Shift+click      -> toggles one well (unchanged)
 #   Cmd/Ctrl+click   -> toggles one well (Linux-file-manager add/remove)
-#   plain click      -> selects ONLY that well, or clears on an empty position (a REPLACE)
+#   plain click      -> depends on whether a view window is open (`set_click_navigates`):
+#                         no view open -> selects ONLY that well (a REPLACE), as before
+#                         a view open  -> NAVIGATES that view to the well and touches no selection
+#                       On an EMPTY position it clears the selection in BOTH modes: that is the
+#                       only click-driven deselect, so navigation does not take it away.
+#                       The tests here cover the no-view-open column, which is what a bare
+#                       `PlateOverview` reports; tests/test_plate_navigates_views.py covers the
+#                       other one, and pins that this column did not move.
 #   plain drag       -> pans (unchanged)      plain double-click -> opens the well (unchanged)
 
 

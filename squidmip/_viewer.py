@@ -416,6 +416,11 @@ class PlateWindow(QMainWindow):
         # viewFocused fires on open/raise; windowsChanged clears it when the focused view closes.
         self._viewer_manager.viewFocused.connect(lambda _regions: self._refresh_view_hues())
         self._viewer_manager.windowsChanged.connect(self._refresh_view_hues)
+        # THE PLATE IS A NAVIGATOR while a view is open: the same two signals say whether one is,
+        # so the mode is set from the same funnel that already re-tints the wash and cannot drift
+        # out of step with it.
+        self._viewer_manager.viewFocused.connect(lambda _regions: self._refresh_plate_navigation())
+        self._viewer_manager.windowsChanged.connect(self._refresh_plate_navigation)
         # THE PLATE FOLLOWS THE WINDOWS' napari (Task 8.1). Julio: "there shouldn't be any controls
         # for the plate view. It just reacts to toggles and contrast adjustments in napari." With no
         # central pane left, the napari the plate must react to is the one inside each window, so
@@ -2754,6 +2759,10 @@ class PlateWindow(QMainWindow):
         self._overview.wellActivated.connect(self.activate_well)
         self._overview.selectionChanged.connect(self._on_selection_changed)
         self._overview.marqueeSelected.connect(self._on_marquee_selected)
+        # THE OVERVIEW IS REBUILT ON EVERY INGEST, so a fresh one starts in select mode and has to
+        # be re-told: views opened over the previous acquisition can still be open right now.
+        self._overview.wellNavigated.connect(self._on_well_navigated)
+        self._refresh_plate_navigation()
         # The loupe's source is chosen by which layer the plate SHOWS, so it follows the plate
         # rather than being re-pointed by hand at each of the six places the layer moves.
         self._overview.activeLayerChanged.connect(lambda _k: self._update_loupe_source())
@@ -3160,6 +3169,12 @@ class PlateWindow(QMainWindow):
         self._overview.hovered.connect(self._on_hover)
         self._overview.wellActivated.connect(self.activate_well)
         self._overview.activeLayerChanged.connect(lambda _k: self._update_loupe_source())
+        # NAVIGATION BELONGS HERE TOO, even though this path deliberately omits selectionChanged
+        # and marqueeSelected: a view opened over the earlier RAW plate can outlive the switch to a
+        # computed one, and it is still a window the user can steer. `show_region` refuses a region
+        # this acquisition does not have, which is what keeps a mismatch honest rather than silent.
+        self._overview.wellNavigated.connect(self._on_well_navigated)
+        self._refresh_plate_navigation()
         self._overview.set_time_point(self.time_point)
         self._active_op_key = "computed"
         if getattr(self, "_raw_btn", None):
@@ -4106,10 +4121,14 @@ class PlateWindow(QMainWindow):
             f"pasted LUTs onto {applied} plate channel(s)"
             + (f", and {channels} channel on/off state(s)." if channels else "."))
 
-    def _highlight_view_regions(self, regions):
-        """A view was clicked/opened — move the plate's blue wash onto its regions."""
-        if self._overview is not None:
-            self._overview.highlight_regions(regions)
+    # ``_highlight_view_regions`` was here and is GONE, not merely unused. It had no callers at all
+    # — `_refresh_view_hues` below is what actually moves the wash, through `set_view_hues`, which
+    # writes only `_view_hues`. What the deleted method called, `PlateOverview.highlight_regions`,
+    # writes `_selection` and emits `selectionChanged`: the operator's batch. It was the obvious
+    # thing to reach for when wiring the plate to drive a view, and reaching for it would have
+    # collapsed the user's batch to one well on every navigation click — the exact behaviour
+    # `_on_well_navigated` is written to avoid. Deleted rather than left dead, and named here
+    # rather than deleted quietly, so the next person to want it knows why it is not there.
 
     def _refresh_view_hues(self):
         """Wash the plate for the SELECTED views in the navigator, each in its own hue (Linux
@@ -4257,6 +4276,50 @@ class PlateWindow(QMainWindow):
         # plus the hovered well when the cursor is over the plate.
         base = f"{self._acq_name or 'well plate'}   ·   {self._plate_mode}"
         self._plate_title.setText(f"{base}   ·   {text}" if text else base)
+
+    def _on_well_navigated(self, well_id: str):
+        """Plain left-click on a well -> show that region in the ACTIVE view window.
+
+        The plate as a NAVIGATOR (Spencer, 2026-08-10: "use the wellplate view to left-click on
+        wells to change the currently displayed region"). Clicking a well the window was not opened
+        over still works — it adopts it — because a navigator you can only steer inside a selection
+        you already made is not a navigator.
+
+        Reads the ACTIVE VIEW from the registry, never `isActiveWindow()`: the plate necessarily
+        takes activation when you click it, so asking the desktop would answer "the plate" every
+        single time. `ViewerManager.active_view` is the one place that question is answered.
+
+        The blue operator selection is deliberately neither read nor written here. Moving the
+        window you are looking at is not a change to the batch an operator will run on.
+        """
+        if well_id not in self._fov_index:
+            return
+        win = self._viewer_manager.active_view()
+        if win is None:
+            # Say so rather than silently selecting: with no view open the click already had a
+            # meaning, and the widget only sends this signal when it has been told one is open.
+            self._readout.setText("Open a view first — then clicking a well moves it.")
+            return
+        if not win.show_region(well_id):
+            return                                     # show_region already named the refusal
+        try:
+            # THE RED FRAME follows what the view is showing. `set_region`, NOT `activate`:
+            # `activate` means "the user explicitly opened this region" and scopes operator runs to
+            # it (`_current_well`), which navigating is not — pinned by test_nav_wiring.
+            self._cursor.set_region(well_id)
+        except KeyError:
+            pass                                       # a plate whose order does not carry it
+        self._readout.setText(f"view {win.window_id}: {well_id}")
+
+    def _refresh_plate_navigation(self):
+        """Tell the plate whether a plain click NAVIGATES or SELECTS. THE ONE WRITER of that mode.
+
+        Driven by the same two manager signals the hue refresh uses, which together are the "the
+        window set or the focus changed" funnel: closing the last view fires `windowsChanged` and
+        the plate goes back to selecting on its own.
+        """
+        if self._overview is not None:
+            self._overview.set_click_navigates(self._viewer_manager.active_view() is not None)
 
     def activate_well(self, well_id: str, fov_index: int):
         """Double-click a well -> open ONE independent window on that region.

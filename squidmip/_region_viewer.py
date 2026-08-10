@@ -402,6 +402,9 @@ class RegionViewer(QMainWindow):
     """
 
     closed = Signal(object)   # emits self, so the registry can drop it
+    regionsChanged = Signal(object)   # emits self: this window ADOPTED a region it was not opened
+                                          # over, so anything that published its region set — the
+                                          # navigator row, the plate's per-view wash — is now stale.
 
     #: The open half of this window's console pair, and the region its operator layers describe.
     #: CLASS defaults as well as ``__init__`` assignments, for the same reason
@@ -3326,6 +3329,44 @@ class RegionViewer(QMainWindow):
             return cursor.regions
         return list(getattr(self, "_seed_regions", []))
 
+    def show_region(self, region: str) -> bool:
+        """Point this window at *region*, ADOPTING it when this window did not already hold it.
+
+        The plate is a free navigator: clicking a well outside this window's original selection is
+        a request to look there, not a mistake. Adopting is a re-scope of the ONE cursor, and
+        ``RegionCursor.set_order`` is built for exactly this — it keeps you on the region you are
+        already looking at, announcing the new order without announcing a position, so the slider
+        resizes and NO second mosaic load is triggered. The single load then comes from
+        ``set_region`` below, through the ordinary ``_on_region_changed`` path.
+
+        The rendering contract is honoured with no new code: ``_load_mosaic`` already drops the
+        previous region's operator layers and removes the raw layers before adding any, because
+        ``_shown_region`` differs. That is the "different region -> remove first" rule, and
+        navigation is now simply a new way of entering it.
+
+        Returns False, having SAID why in this window's log, when the acquisition has no such
+        region — a navigator that silently does nothing is indistinguishable from one that is
+        broken.
+        """
+        region = str(region)
+        if self._cursor is None:
+            return False
+        if self._cursor.region == region:
+            return True                      # already here: no reload, no re-announce
+        if self._cursor.position_of(region) is None:
+            known = [str(r) for r in ((self._meta or {}).get("regions") or [])]
+            if known and region not in known:
+                self._say(f"{region} is not in this acquisition.")
+                return False
+            # Grow the order IN ACQUISITION ORDER rather than by appending, so the slider still
+            # reads left-to-right across the plate however the user wandered there.
+            want = set(self._cursor.regions) | {region}
+            order = [r for r in known if r in want] or (self._cursor.regions + [region])
+            self._cursor.set_order(order)
+            self.regionsChanged.emit(self)
+        self._cursor.set_region(region)
+        return True
+
     def current_region(self) -> str:
         """The region this window is SHOWING right now. A window can hold several and steps
         through them with its slider, so "which region" is a question about the cursor, not about
@@ -3738,6 +3779,7 @@ class ViewerManager(QObject):
         )
         win.open_clock = clock
         win.closed.connect(self._on_window_closed)
+        win.regionsChanged.connect(self._on_window_regions_changed)
         self._windows[wid] = win
         self._focused_id = wid
         self._selected_ids = [wid]
@@ -3809,6 +3851,17 @@ class ViewerManager(QObject):
         self._selected_ids = [int(i) for i in ids]
         self._focused_id = self._selected_ids[0] if self._selected_ids else None
         self.viewFocused.emit([])                        # triggers PlateWindow._refresh_view_hues
+
+    def _on_window_regions_changed(self, win: "RegionViewer") -> None:
+        """A window adopted a region. Re-publish it.
+
+        Nothing here recomputes anything: `_regions` reads through the cursor, so `views()` and the
+        `viewFocused` payload are already correct by the time this runs. What they are not is
+        ANNOUNCED — the navigator rebuilds on `windowsChanged` and the plate re-tints on
+        `viewFocused`, and neither has any way to notice a cursor moved inside a window.
+        """
+        self.windowsChanged.emit()
+        self.viewFocused.emit(list(win._regions))
 
     def note_focus(self, window_id: int) -> None:
         """The user activated this window THEMSELVES — its title bar, alt-tab, a click in its canvas.

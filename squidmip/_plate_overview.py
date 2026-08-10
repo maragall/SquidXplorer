@@ -66,7 +66,7 @@ from typing import Optional
 import numpy as np
 from qtpy.QtCore import Qt, QRectF, QThread, QTimer, Signal
 from qtpy.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap, QRegion
-from qtpy.QtWidgets import QWidget
+from qtpy.QtWidgets import QApplication, QWidget
 
 from squidmip import _qtstyle
 from squidmip._budget import cache_budget
@@ -1086,6 +1086,11 @@ class PlateOverview(QWidget):
                                            # at a time and deliberately does NOT fire it — otherwise
                                            # every corrective click spawns another tab.
     activeLayerChanged = Signal(str)   # the layer the plate is SHOWING changed (see set_active_layer)
+    wellNavigated = Signal(str)        # region id: a plain LEFT-CLICK, while a view window is open,
+                                           # asking the ACTIVE view to show this region. Deliberately
+                                           # not `wellActivated`: that is the DOUBLE-click and it OPENS
+                                           # a window. Navigating opens nothing and, unlike every other
+                                           # gesture on this widget, changes no selection.
 
     def __init__(self, rows, cols, wells: dict, layout: Optional[dict] = None):
         """``wells``: (row_index, col_index) -> well_id for every acquired well (drawn grey until
@@ -1156,6 +1161,12 @@ class PlateOverview(QWidget):
         # survive selecting, and selecting must survive scrubbing.
         self._selection: set = set()  # acquired (row_index, col_index) the user picked. A SET:
         #                               paintEvent membership-tests it once per cell, 1536x on a 1536wp.
+        # A THIRD concept, and it is a MODE rather than a set: while a view window is open, a plain
+        # left-click NAVIGATES that view instead of replacing _selection. The widget cannot work
+        # this out for itself — it can see the plate and not the window registry — so PlateWindow
+        # tells it, from one writer (`_refresh_plate_navigation`) so it cannot drift.
+        self._click_navigates = False
+        self._nav_well = None         # the well a pending navigation is for; see _emit_navigation
         self._view_hues: list = []    # [(rc_set, QColor)] per open view — plate colour-codes threads
         self._marquee = None          # (x0, y0, x1, y1) widget px while a Shift-drag is in flight
         self._marquee_add = False     # this drag unions (Shift+Alt) rather than replaces
@@ -1198,6 +1209,16 @@ class PlateOverview(QWidget):
         self._hold.setSingleShot(True)
         self._hold.setInterval(_LOUPE_HOLD_MS)
         self._hold.timeout.connect(self._arm_loupe)
+        # NAVIGATION IS DEFERRED BY ONE DOUBLE-CLICK INTERVAL, and cancelled by the double-click
+        # that may follow it. Qt delivers press/release/dblclick, so without the wait a double-click
+        # would navigate the ACTIVE view to the well and then open a SECOND window over it —
+        # leaving the window the user was working in moved off its region, with its operator layers
+        # dropped by the reload. `_hold` is deferred for the same reason one line up; this is the
+        # same shape and is cancelled in the same places. A BOUND METHOD, never a self-capturing
+        # lambda: a pending fire must not keep this widget alive past its teardown.
+        self._nav = QTimer(self)
+        self._nav.setSingleShot(True)
+        self._nav.timeout.connect(self._emit_navigation)
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.ClickFocus)   # so focusOutEvent can actually fire (see below)
         self.setMinimumSize(240, 200)
@@ -1267,6 +1288,12 @@ class PlateOverview(QWidget):
         """
         self.clear_tile_source()
         self.set_loupe_source(None)
+        # ...and the deferred gestures. A single-shot timer that fires into a widget its owner has
+        # already dropped is the shape `test_window_lifetime` exists for, and a navigation is the
+        # one of the two that reaches OUT of this widget when it lands.
+        self._hold.stop()
+        self._nav.stop()
+        self._nav_well = None
 
     def _on_tile_ready(self, desc, arr) -> None:
         if self._tile_cache is None:
@@ -1912,6 +1939,9 @@ class PlateOverview(QWidget):
 
     def hideEvent(self, e):
         self._full.stop()   # a plate on its way out must not repaint from a queued timer
+        self._hold.stop()   # ...nor raise a loupe over a plate that is no longer on screen
+        self._nav.stop()    # ...nor navigate a view from a well the user can no longer see
+        self._nav_well = None
         super().hideEvent(e)
 
     def reset_layer(self, layer: str):
@@ -2101,13 +2131,37 @@ class PlateOverview(QWidget):
     #                        │                  IDLE                     │
     #                        └───────────────────────────────────────────┘
     #
-    #    Two edges worth stating because they are easy to regress:
+    #    A clean release from ARMED (no pan, no loupe) is the PLAIN CLICK, and it forks on whether
+    #    a view window is open — a mode this widget is TOLD (`set_click_navigates`), because it can
+    #    see the plate and not the window registry:
+    #
+    #                        ┌───────────────────────────────────────────┐
+    #                        │            PLAIN CLICK on a well          │
+    #                        └───┬───────────────────────┬───────────────┘
+    #        no view open        │                       │   a view is open
+    #                            ▼                       ▼
+    #                  ┌──────────────────┐   ┌──────────────────────────┐
+    #                  │      SELECT      │   │        NAVIGATE          │
+    #                  │  selection := {  │   │  deferred one double-    │
+    #                  │  this well }     │   │  click interval, then    │
+    #                  │  (unchanged)     │   │  wellNavigated; SELECTION│
+    #                  └──────────────────┘   │  IS NOT TOUCHED          │
+    #                                         └──────────────────────────┘
+    #    A plain click on EMPTY SPACE clears the selection in BOTH modes — that is the only
+    #    click-driven deselect, and navigation must not cost the user their escape hatch.
+    #
+    #    Three edges worth stating because they are easy to regress:
     #      * SLOW PAN stays a pan. Press, dwell past the timer, then drag — the timer only runs
     #        while the cursor is still, and any move past the slop kills it. A press that has
     #        already become a loupe is dismissed on release, so the next drag pans normally.
     #      * DOUBLE-CLICK must cancel the timer. Qt delivers press/release/dblclick/release, and
     #        the second press re-arms; without the cancel you would open the detail viewer AND
     #        raise a loupe from one gesture.
+    #      * DOUBLE-CLICK must cancel the NAVIGATION too, and for a worse reason: the first release
+    #        already started one, so without the cancel a double-click would move the active view
+    #        off its region — dropping its operator layers on the reload — and then open a second
+    #        window over the same well. That cancellation is the entire reason navigation waits
+    #        instead of firing on release.
     def _cell(self, x, y):
         if self._layout is not None:
             return self._freeform_cell(x, y)
@@ -2264,6 +2318,23 @@ class PlateOverview(QWidget):
         self._view_hues = hues
         self.update()
 
+    def set_click_navigates(self, on: bool) -> None:
+        """Whether a plain left-click NAVIGATES the open view instead of replacing the selection.
+
+        A MODE, not a copy of state. This widget can see the plate and cannot see the window
+        registry, so it has to be told whether a view exists to navigate — and it is told by
+        exactly one writer, ``PlateWindow._refresh_plate_navigation``, so the answer cannot drift
+        away from the truth it stands for. With no view open the plate keeps its original meaning
+        entirely: a plain click selects one well.
+        """
+        self._click_navigates = bool(on)
+
+    def _emit_navigation(self) -> None:
+        """Fire the deferred navigation, unless a double-click cancelled it first."""
+        well, self._nav_well = self._nav_well, None
+        if well:
+            self.wellNavigated.emit(well)
+
     def wheelEvent(self, e):
         if self._marquee is not None:
             return          # a marquee owns the drag; zooming would slide the plate under the rect
@@ -2282,14 +2353,20 @@ class PlateOverview(QWidget):
     def mousePressEvent(self, e):
         if e.button() != Qt.LeftButton:
             return
+        self._nav.stop()          # a new press supersedes any navigation still waiting to fire
+        self._nav_well = None
         # Shift owns MULTI-well selection (IMA-221): Shift-drag opens the wells you box, Shift+Alt
-        # unions, Cmd/Ctrl-click toggles one. A plain click also selects, but it REPLACES rather
-        # than toggles (file-manager semantics, added in 2b8fbc5), which is what keeps double-click
-        # safe: Qt delivers press+release BEFORE mouseDoubleClickEvent, so a plain-click TOGGLE
-        # would silently flip a well every time you opened one. Replace is idempotent, toggle is
-        # not, and that difference is the whole reason this is safe.
+        # unions, Cmd/Ctrl-click toggles one. A plain click ALSO acts, and what it does depends on
+        # whether a view window is open (`_click_navigates`): with none it REPLACES the selection
+        # (file-manager semantics, 2b8fbc5); with one it navigates that view and leaves the
+        # selection alone. Both are idempotent, which is what keeps double-click safe: Qt delivers
+        # press+release BEFORE mouseDoubleClickEvent, so a plain-click TOGGLE would silently flip a
+        # well every time you opened one. Replace is idempotent, toggle is not, and navigation is
+        # deferred and then cancelled — see mouseDoubleClickEvent.
         # Corrected 2026-07-28: this comment still said "keeping selection off the plain click",
         # which the plain-click replace at the bottom of mouseReleaseEvent had already contradicted.
+        # Corrected again 2026-08-10: it said the plain click always replaces, which the navigate
+        # branch now contradicts. Two stale versions is two too many; keep this in step.
         # (Ctrl is out: on macOS Ctrl+click is right-click and Qt maps Cmd -> ControlModifier.)
         if e.modifiers() & Qt.ShiftModifier:
             self._marquee = (e.x(), e.y(), e.x(), e.y())
@@ -2423,24 +2500,39 @@ class PlateOverview(QWidget):
             self._panning = False
             self._dismiss_loupe()
             return
-        # Plain CLICK (no modifier, no pan, no loupe) = select ONLY this well, or clear on empty.
-        # This is the deselect path that was missing: without it a batch selection could never be
-        # dropped by clicking, so it "stayed selected forever". A plain DRAG still pans (guarded by
-        # _panning), and a hold that raised the loupe does not select (had_loupe).
+        # Plain CLICK (no modifier, no pan, no loupe). A plain DRAG still pans (guarded by
+        # _panning), and a hold that raised the loupe does neither (had_loupe).
         if (self._press is not None and not self._panning and not had_loupe
                 and e.button() == Qt.LeftButton):
             hit = self._cell(e.x(), e.y())
-            new_sel = {(hit["row_index"], hit["col_index"])} if hit and hit["well_id"] else set()
-            if new_sel != self._selection:
-                self._selection = new_sel
-                self.selectionChanged.emit(self.selected_wells())
-                self.update()
+            if self._click_navigates and hit and hit["well_id"]:
+                # WITH A VIEW OPEN, A CLICK ON A WELL NAVIGATES AND SELECTS NOTHING. The blue
+                # selection is the operator's batch; moving the window you are looking at is not a
+                # change of batch, and collapsing a six-click batch to one well as a side effect of
+                # looking somewhere would be a silent, expensive surprise.
+                #
+                # A click on EMPTY SPACE still clears, and that is not an inconsistency — it is the
+                # deselect path this branch was written for ("without it a batch selection could
+                # never be dropped by clicking, so it stayed selected forever"). Escape clears too
+                # (keyPressEvent), and Shift/Cmd-click still edit the selection well by well. So
+                # the escape hatch survives; only the meaning of clicking ON a well changes.
+                self._nav_well = hit["well_id"]
+                self._nav.start(QApplication.doubleClickInterval())
+            else:
+                new_sel = ({(hit["row_index"], hit["col_index"])}
+                           if hit and hit["well_id"] else set())
+                if new_sel != self._selection:
+                    self._selection = new_sel
+                    self.selectionChanged.emit(self.selected_wells())
+                    self.update()
         self._press = None
         self._panning = False
         self._dismiss_loupe()                        # release always dismisses
 
     def leaveEvent(self, e):
         self._hold.stop()                            # cursor left mid-hold: release may never come
+        self._nav.stop()                             # ...and a navigation the user walked away from
+        self._nav_well = None
         self._dismiss_loupe()
         self._hover = None
         # Drop any in-flight marquee too. If the grab is lost mid-drag (modal dialog, alt-tab) no
@@ -2693,6 +2785,12 @@ class PlateOverview(QWidget):
         # Qt sends press/release/dblclick — the second press already re-armed the hold timer, so
         # kill it here or one double-click both opens the well AND raises a loupe.
         self._hold.stop()
+        # ...and the SAME argument for navigation: the first release started a deferred navigate,
+        # and without this a double-click would move the active view off its region (dropping its
+        # operator layers on the reload) and THEN open a second window over the same well. This
+        # cancellation is the whole reason the navigation waits rather than firing on release.
+        self._nav.stop()
+        self._nav_well = None
         self._dismiss_loupe()
         c = self._cell(e.x(), e.y())
         if c and c["well_id"]:
