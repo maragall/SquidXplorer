@@ -1,5 +1,5 @@
-# Setup-Windows.ps1 - set up the MIP tool on Windows with a plain Python venv (NO conda) and put a
-# "MIP tool" shortcut on the Desktop.
+# Setup-Windows.ps1 - set up SquidXplorer on Windows with a plain Python venv (NO conda) and put a
+# "SquidXplorer" shortcut on the Desktop.
 #
 # Run once, from the repo root, in Windows PowerShell:
 #     powershell -ExecutionPolicy Bypass -File scripts\Setup-Windows.ps1
@@ -10,8 +10,9 @@
 # NOTE: not using -ErrorAction Stop globally, because native tools (py, pip) legitimately write to
 # stderr and that would otherwise abort the script. We check exit codes explicitly and Die on failure.
 $ErrorActionPreference = "Continue"
-$AppName = "MIP tool"
-$Module  = "squidmip._viewer"
+# The Desktop icon's name. Was "MIP tool", which the README had already stopped calling it; the
+# launcher below owns the module name now, so there is no $Module here any more.
+$AppName = "SquidXplorer"
 $repo = Split-Path $PSScriptRoot -Parent
 
 function Die($msg) { Write-Host ""; Write-Host ("ERROR: " + $msg) -ForegroundColor Red; exit 1 }
@@ -47,7 +48,7 @@ if (-not (Test-Path $vpy)) {
 }
 
 # 3. Install the app + GUI deps. First run downloads a few packages.
-Write-Host "Installing the MIP tool and its dependencies (first time takes a few minutes) ..."
+Write-Host "Installing SquidXplorer and its dependencies (first time takes a few minutes) ..."
 & $vpy -m pip install --upgrade pip
 # EDITABLE install of the app: after this, a `git pull` in the repo takes effect on the next launch
 # with no reinstall (only the pinned deps below are a fixed snapshot).
@@ -56,19 +57,41 @@ if ($LASTEXITCODE -ne 0) {
     Die "pip install failed (see the errors above). This usually means a package has no wheel for this Python version; tell Julio the error and we'll pin a version."
 }
 
-# 4. Desktop shortcut -> venv python.exe -m module. Uses python.exe (NOT pythonw) ON PURPOSE so a
-#    console window opens alongside the app, showing logs/errors + the [footprint] lines. Close that
-#    window to quit the app.
+# 4. Install the launcher + icon NEXT TO the venv, not in the checkout. The shortcut points at the
+#    installed copy, so a branch switch, `git clean`, or an upstream sync inside the repo can never
+#    delete or revert what the Desktop icon runs. __REPO__ is stamped with this checkout's path.
+$launcherSrc = Join-Path $PSScriptRoot "launch-squidxplorer.cmd"
+$iconSrc     = Join-Path $PSScriptRoot "squidxplorer.ico"
+$appDir      = Join-Path $env:LOCALAPPDATA "squidmip"
+$launcher    = Join-Path $appDir "launch-squidxplorer.cmd"
+$icon        = Join-Path $appDir "squidxplorer.ico"
+
+if (-not (Test-Path $launcherSrc)) { Die ("Missing " + $launcherSrc) }
+(Get-Content $launcherSrc -Raw).Replace("__REPO__", $repo) |
+    Set-Content $launcher -Encoding ASCII
+if (Test-Path $iconSrc) { Copy-Item $iconSrc $icon -Force }
+
+# 5. Desktop shortcut -> the launcher. It runs python.exe (NOT pythonw) ON PURPOSE so a console
+#    window opens alongside the app with the logs/errors + [footprint] lines, and the launcher holds
+#    that window open when the app exits nonzero so a traceback cannot flash past.
+#
+#    Because the target is a .cmd taking %*, you can also DRAG AN ACQUISITION FOLDER ONTO THE ICON
+#    to open it directly, quoting intact.
 $desktop = [Environment]::GetFolderPath("Desktop")
 $lnk = Join-Path $desktop ($AppName + ".lnk")
 $shell = New-Object -ComObject WScript.Shell
 $sc = $shell.CreateShortcut($lnk)
-$sc.TargetPath = $vpy
-$sc.Arguments = "-m " + $Module
-$sc.WorkingDirectory = $env:USERPROFILE
-$sc.IconLocation = $vpy + ",0"
-$sc.Description = $AppName
+$sc.TargetPath = $launcher
+$sc.WorkingDirectory = $repo
+if (Test-Path $icon) { $sc.IconLocation = $icon + ",0" } else { $sc.IconLocation = $vpy + ",0" }
+$sc.Description = "SquidXplorer - local viewer for Squid HCS acquisitions"
+$sc.WindowStyle = 1
 $sc.Save()
 
+# Retire the pre-rename icon so the Desktop does not keep two that do the same thing.
+$stale = Join-Path $desktop "MIP tool.lnk"
+if (($stale -ne $lnk) -and (Test-Path $stale)) { Remove-Item $stale -Force -ErrorAction SilentlyContinue }
+
 Write-Host ""
-Write-Host ("Done. '" + $AppName + "' is on your Desktop - double-click it, then drop an acquisition folder.")
+Write-Host ("Done. '" + $AppName + "' is on your Desktop - double-click it, or drag an acquisition")
+Write-Host "folder straight onto the icon to open that acquisition."
