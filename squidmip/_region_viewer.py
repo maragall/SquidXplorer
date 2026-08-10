@@ -3393,7 +3393,14 @@ class RegionViewer(QMainWindow):
         from qtpy.QtCore import QEvent
 
         if event.type() == QEvent.ActivationChange:
-            self.set_active(self.isActiveWindow())
+            active = self.isActiveWindow()
+            self.set_active(active)                  # halt playback in a window nobody is watching
+            # ...AND TELL THE REGISTRY WHO IS IN FRONT. Only on the way IN: deactivation is not
+            # "no view is focused", it is usually the user clicking the plate, and the plate is
+            # how you drive the focused view — clearing the focus here would mean the plate lost
+            # its target the instant you reached for it.
+            if active and self._manager is not None:
+                self._manager.note_focus(self.window_id)
         super().changeEvent(event)
 
     def resizeEvent(self, e):                        # noqa: N802 - Qt naming
@@ -3803,10 +3810,49 @@ class ViewerManager(QObject):
         self._focused_id = self._selected_ids[0] if self._selected_ids else None
         self.viewFocused.emit([])                        # triggers PlateWindow._refresh_view_hues
 
+    def note_focus(self, window_id: int) -> None:
+        """The user activated this window THEMSELVES — its title bar, alt-tab, a click in its canvas.
+
+        The passive half of :meth:`focus`. Until this existed, ``_focused_id`` was written only by
+        the app moving focus (``_spawn``, ``focus``, ``set_selected``, ``clear_focus``), never by
+        the user moving it, so clicking a view's title bar changed nothing: the plate kept washing
+        the previously focused window, and ``PlateWindow.on_screen_luts`` — whose docstring already
+        calls ``focused_id`` "the window the user is looking at" — exported the wrong window's
+        contrast. It was a lie about the user, told by a registry that only watched itself.
+
+        RECORDS AND RE-PUBLISHES. It must never raise or activate: ``focus`` calls
+        ``activateWindow()``, which fires ``changeEvent``, which lands here — and a raise from here
+        would be an infinite ping-pong with the window manager. The unchanged-id early return is
+        the second guard on that, and it is why ``focus`` sets ``_focused_id`` BEFORE it activates.
+        """
+        wid = int(window_id)
+        win = self._windows.get(wid)
+        if win is None or self._focused_id == wid:
+            return
+        self._focused_id = wid
+        if wid not in self._selected_ids:
+            # Mirrors _spawn: the plate washes the SELECTED views, so a window the user brought
+            # forward has to be in that set or focusing it would move no hue at all.
+            self._selected_ids = [wid]
+        self.viewFocused.emit(list(win._regions))
+
+    def active_view(self) -> "Optional[RegionViewer]":
+        """The window a plate click drives: the focused one, or None when no view is open.
+
+        ONE answer to "which window is active", so the plate, the LUT export and the navigator
+        cannot disagree about it. Anything asking that question must come here rather than ask a
+        window ``isActiveWindow()`` — a window can be the active TOP-LEVEL without being the view
+        the user is working in (the plate itself takes activation on every click), and once views
+        can be tabbed there is no longer one window per view at all.
+        """
+        if self._focused_id is None:
+            return None
+        return self._windows.get(self._focused_id)
+
     def focus(self, window_id: int) -> None:
         win = self._windows.get(int(window_id))
         if win is not None:
-            self._focused_id = int(window_id)
+            self._focused_id = int(window_id)       # BEFORE activateWindow(); see note_focus
             win.showNormal()
             win.raise_()
             win.activateWindow()

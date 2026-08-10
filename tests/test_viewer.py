@@ -5545,6 +5545,14 @@ def test_on_screen_luts_reaches_a_focused_window(qapp, squid_dataset):
 
     The stub declares both as @property ON PURPOSE. A stub exposing them as methods would pass
     against the broken code and would pin nothing.
+
+    The lookup has since moved INTO the manager, as ``active_view()``, so ``on_screen_luts`` no
+    longer touches either property and that particular mistake is now unmakeable here — there is
+    one implementation of "which window is the user in" and every caller shares it. The stub keeps
+    both properties anyway: they are what the real ``active_view`` reads, so a stub that dropped
+    them would stop describing the thing it stands in for. What this test pins is unchanged and is
+    the part that matters — the focused window's LUTs reach the exporter, rather than a swallowed
+    exception quietly returning None.
     """
     root, _ = squid_dataset
     win = V.PlateWindow(None)
@@ -5566,6 +5574,11 @@ def test_on_screen_luts_reaches_a_focused_window(qapp, squid_dataset):
         @property
         def windows(self):
             return [_Win()]
+
+        def active_view(self):
+            """Built from the two properties above, the way the real one is — so the stub still
+            fails if a caller reaches past it and calls those with parentheses."""
+            return next((w for w in self.windows if w.window_id == self.focused_id), None)
 
         def set_run_progress(self, report):
             """The raw preview is still running while this test builds; the plate publishes its
