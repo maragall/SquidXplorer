@@ -4081,14 +4081,33 @@ class PlateWindow(QMainWindow):
         if ov is None:
             return
         applied = channels = 0
+        skipped: list = []
         for i, name in enumerate(self._plate_channels()):
             lut = _LUT_CLIPBOARD.get(name)
             if not lut:
                 continue
             if lut.get("clim") is not None:
-                lo, hi = lut["clim"]
+                lo, hi = float(lut["clim"][0]), float(lut["clim"][1])
+                # A DEGENERATE WINDOW IS NOT PASTED. Julio, 2026-08-06: *"when I copy luts, my
+                # thumbnails saturate the yellow channel."*
+                #
+                # `_contrast.auto_contrast` returns hi <= lo for a BLANK channel, deliberately --
+                # `add_mosaic` states the rule in full: "A degenerate window is passed through, NOT
+                # widened, because widening it to (lo, lo+1) renders a blank channel as full white,
+                # i.e. as signal." The plate's `_RunningContrast.set_manual` does exactly that
+                # widening (`max(hi, lo + 1)`), because a running histogram must never divide by
+                # zero. Both are right on their own side of the seam; what was missing is that a
+                # channel with no signal in the WINDOW must not be latched onto the plate at all.
+                # On the 10x set 561 is the empty channel -- its thumbnail is black in the window --
+                # so a paste handed the plate a one-count window and every tile went full yellow.
+                #
+                # Skipped and SAID, not silently widened: the user asked for a paste and one
+                # channel did not take it.
+                if hi <= lo:
+                    skipped.append(name)
+                    continue
                 try:
-                    ov.set_channel_window(i, float(lo), float(hi))
+                    ov.set_channel_window(i, lo, hi)
                     applied += 1
                 except Exception:                        # noqa: BLE001 - one bad channel is skipped
                     pass
@@ -4105,7 +4124,9 @@ class PlateWindow(QMainWindow):
                     pass
         self._readout.setText(
             f"pasted LUTs onto {applied} plate channel(s)"
-            + (f", and {channels} channel on/off state(s)." if channels else "."))
+            + (f", and {channels} channel on/off state(s)" if channels else "")
+            + (f" — {', '.join(skipped)} has no signal in that window, so its contrast was left "
+               f"alone rather than pasted as a one-count window." if skipped else "."))
 
     def _highlight_view_regions(self, regions):
         """A view was clicked/opened — move the plate's blue wash onto its regions."""
