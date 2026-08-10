@@ -420,6 +420,11 @@ class RegionViewer(QMainWindow):
     #: rule: ``_on_plane`` and ``_on_done`` are slots and fire on windows a test built directly,
     #: which never went through ``_spawn`` and so are honestly unmeasured rather than broken.
     open_clock: Any = None
+    #: Has :meth:`dispose` already run? Same class-default rule, and here it is load-bearing rather
+    #: than defensive: ``dispose`` is reachable from ``closeEvent`` on a window whose ``__init__``
+    #: raised partway, and a bare read of a missing attribute there would replace the real error
+    #: with an attribute error out of Qt's machinery.
+    _disposed: bool = False
 
     def __init__(
         self,
@@ -3373,7 +3378,26 @@ class RegionViewer(QMainWindow):
         rescale_fonts(self)
 
     # -- teardown -----------------------------------------------------------------------
-    def closeEvent(self, event):                     # noqa: N802 - Qt naming
+    def dispose(self) -> None:
+        """Everything that must happen before this view stops existing, WHEREVER it lives.
+
+        Extracted from ``closeEvent`` because that conflates two jobs — *join my threads* and *tell
+        the registry I am gone* — and only a top-level window ever gets a close event. A view that
+        stops existing some other way (removed from a container, dropped by a caller that never
+        showed it) skipped every join and every deregistration silently.
+
+        IDEMPOTENT, and that is not decoration: a window can be disposed by its owner and then still
+        receive a ``closeEvent``, and joining a QThread twice or closing a napari Viewer twice is
+        exactly the shape that aborts the interpreter rather than raising.
+
+        Each step is wrapped separately, on purpose. These are independent teardowns and one that
+        throws must not strand the ones after it — a QThread left running past destruction aborts
+        the process ("QThread: Destroyed while thread is still running"), which is a far worse
+        outcome than the error being swallowed.
+        """
+        if self._disposed:
+            return
+        self._disposed = True
         try:
             if self._worker is not None and self._worker.isRunning():
                 self._worker.stop()
@@ -3430,7 +3454,22 @@ class RegionViewer(QMainWindow):
                 worker.wait(2000)
             except Exception:                        # noqa: BLE001
                 pass
+        # THE NAPARI VIEWER. Nothing called this before: `MosaicPane.shutdown` had zero callers in
+        # squidmip/, tests/ or tools/, while its own docstring said "every owner of a pane calls
+        # this before deleteLater()". deleteLater() on the Qt wrapper does NOT close the Viewer --
+        # napari keeps every Viewer in its own instance registry -- so one GL context and tens of
+        # MB leaked per window CLOSED, and the docstring already records where that ends: "killed a
+        # session after twenty of them". It goes last because it tears down the surface the workers
+        # above draw into, so they are joined first.
+        try:
+            if self._pane is not None:
+                self._pane.shutdown()
+        except Exception:                            # noqa: BLE001
+            pass
         self.closed.emit(self)
+
+    def closeEvent(self, event):                     # noqa: N802 - Qt naming
+        self.dispose()
         super().closeEvent(event)
 
 
