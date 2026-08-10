@@ -445,7 +445,12 @@ class RegionViewer(QMainWindow):
         super().__init__(parent)
         self._reader = reader
         self._meta = meta
-        self._regions = [str(r) for r in regions]
+        #: WHAT THIS WINDOW WAS OPENED OVER. Historical and immutable — not "where it can go now",
+        #: which is the cursor's order and is read through the ``_regions`` property below. The two
+        #: were one field until the plate became a navigator: a window can now ADOPT a region it was
+        #: not opened over, and a field kept in step with the cursor by hand is the second copy that
+        #: ``_region_nav``'s "one cursor, no second copy" rule exists to forbid.
+        self._seed_regions = [str(r) for r in regions]
         self.window_id = int(window_id)
         self._worker = None
         #: Which mosaic load this window is waiting for. Bumped by every `_load_mosaic`, carried
@@ -516,7 +521,11 @@ class RegionViewer(QMainWindow):
         # is NOT user-editable: it is the only visible join between a log line ("[3] A1 fov 2 ...",
         # `_logpane._address_prefix`) and a window on the desktop, and `_address.py`'s naming law
         # makes that join the point.
-        self._derived_name = title or self._region_label(self._regions)
+        # THE SEED, not the live set: this runs before ``_build`` makes the cursor, and the name a
+        # window is born with describes what it was OPENED over. Keeping it derived from the live
+        # set would rename the window under the user the first time the plate navigated it
+        # somewhere new, and the title is the only visible join between a log line and a window.
+        self._derived_name = title or self._region_label(self._seed_regions)
         if self._roi_bbox is not None:
             self._derived_name = f"ROI · {self._derived_name}"
         self._display_name = self._derived_name
@@ -712,9 +721,12 @@ class RegionViewer(QMainWindow):
 
         self.setCentralWidget(central)
 
-        # Seed the cursor: this announces region 0 to the loader, so the first mosaic loads now.
-        self._cursor.set_order(self._regions)
-        if self._cursor.index is None and self._regions:
+        # SEED the cursor: this announces region 0 to the loader, so the first mosaic loads now.
+        # Reads ``_seed_regions`` and not ``_regions``, because ``_regions`` reads back OUT of the
+        # cursor — at this instant it would be answering from the empty order it is about to be
+        # given, and seeding a cursor from itself is a no-op that leaves the window blank.
+        self._cursor.set_order(self._seed_regions)
+        if self._cursor.index is None and self._seed_regions:
             self._cursor.set_index(0)
 
     # -- the deck's per-window top row --------------------------------------------------
@@ -3292,6 +3304,28 @@ class RegionViewer(QMainWindow):
             self._say(f"ROI 3D could not open: {exc}")
 
     # -- where this window is, in the acquisition ----------------------------------------
+    @property
+    def _regions(self) -> "list[str]":
+        """Every region this window can REACH — the cursor's order, never a field.
+
+        A property rather than the field it replaces, because the set is no longer fixed at
+        construction: the plate can point an open window at a region it was not opened over, which
+        re-scopes the cursor. Anything that cached the answer in a second field would go stale on
+        that re-scope, silently, and the things that read this are the ones that would show it
+        wrong — ``ViewerManager.views()`` and the ``viewFocused`` payload that paints the plate.
+        Reading THROUGH the cursor means there is nothing to keep in step.
+
+        Falls back to the seed for the window between ``__init__`` starting and the cursor being
+        built (``_build`` runs several statements later, and ``_derived_name`` is computed in
+        between), and ``getattr`` rather than a bare read for the documented reason the class
+        defaults above exist: on a QObject whose ``__init__`` has not finished, a missing attribute
+        raises out of Qt's own machinery instead of answering.
+        """
+        cursor = getattr(self, "_cursor", None)
+        if cursor is not None and cursor.regions:
+            return cursor.regions
+        return list(getattr(self, "_seed_regions", []))
+
     def current_region(self) -> str:
         """The region this window is SHOWING right now. A window can hold several and steps
         through them with its slider, so "which region" is a question about the cursor, not about
