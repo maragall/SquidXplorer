@@ -4018,9 +4018,20 @@ class ViewerManager(QObject):
 
         deck = ViewDeck(index=len(self._decks) + 1)
         deck.pageActivated.connect(self.note_focus)
-        deck.destroyed.connect(lambda *_: self._forget_dead_decks())
+        # A BOUND METHOD, NEVER A SELF-CAPTURING LAMBDA. PyQt keeps a lambda alive in a slot proxy
+        # parented to the SENDER, so `destroyed` -- which fires while the deck is being torn down --
+        # would call into this manager whether or not the manager still exists. Connected as a
+        # bound method, PyQt weak-references the receiver and drops the connection when it goes.
+        # Measured: the lambda aborted the process (0xC0000409) during fixture teardown in
+        # test_raise_plate, where the manager is parented to a fake plate that dies first. It is
+        # the same rule test_window_lifetime states for timers, and it applies to every deferred
+        # call, not only to QTimer.
+        deck.destroyed.connect(self._on_deck_destroyed)
         self._decks.append(deck)
         return deck
+
+    def _on_deck_destroyed(self, *_args) -> None:
+        self._forget_dead_decks()
 
     def _forget_dead_decks(self) -> None:
         self._decks = [d for d in self._decks if _alive(d)]
