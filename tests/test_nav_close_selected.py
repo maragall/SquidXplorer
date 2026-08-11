@@ -92,6 +92,25 @@ class _FakeWindow:
     def activateWindow(self) -> None:       # noqa: N802 - Qt naming
         pass
 
+    # A view is now either a top-level window or a tab in a deck, and the manager asks the VIEW
+    # which — so these three are part of the contract a stand-in has to honour. `host = None` says
+    # "I am my own window", which is what this double has always been pretending to be.
+    host = None
+
+    def reveal(self) -> None:
+        """What `raise_views`/`focus` call instead of showNormal + raise_ + activateWindow."""
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def collapse(self) -> None:
+        pass
+
+    def request_close(self) -> None:
+        """What `ViewerManager.close` calls. A tab cannot be `close()`d — it never gets a close
+        event — so closing goes through the view, which knows which kind of thing it is."""
+        self.close()
+
 
 def _nav(*wins):
     """A real manager holding *wins*, and a navigator over it."""

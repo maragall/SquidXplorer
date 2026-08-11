@@ -4732,18 +4732,31 @@ class PlateWindow(QMainWindow):
         # FIRST, before any teardown below: `_confirm_close_all` can cancel, and cancelling has to
         # leave the window exactly as it was. Every line under this point retires threads and
         # uninstalls the log bus, none of which is reversible.
+        # TWO DIFFERENT QUESTIONS, and they were briefly the same variable. What to WARN about is
+        # the views the user opened; what to CLOSE is every view there is. Once `_open_view_count`
+        # started excluding the auto-opened default view, guarding the close loop with it meant a
+        # session where the user opened nothing left that view behind — a plateless remainder still
+        # holding the single-instance flock, which is precisely the bug the comment above records.
         views = self._open_view_count()
         if not self._confirm_close_all(views):
             e.ignore()
             return
-        if views:
-            mgr = self._viewer_manager
-            for wid in [int(w.window_id) for w in mgr.windows]:
-                try:
-                    mgr.close(wid)               # a no-op for an id a parent already took with it
-                except Exception as exc:         # noqa: BLE001 - one view must not block the quit
-                    log.warning("view %s did not close with the plate: %s: %s",
-                                wid, type(exc).__name__, exc)
+        mgr = self._viewer_manager
+        for wid in [int(w.window_id) for w in mgr.windows]:
+            try:
+                mgr.close(wid)                   # a no-op for an id a parent already took with it
+            except Exception as exc:             # noqa: BLE001 - one view must not block the quit
+                log.warning("view %s did not close with the plate: %s: %s",
+                            wid, type(exc).__name__, exc)
+        # AND THE DECKS. A deck is a top-level too, so an empty one left standing keeps the process
+        # alive with nothing on screen — the same argument, one container out. Swept here beside
+        # the gallery for the same reason it is.
+        for deck in mgr.decks():
+            try:
+                deck.close()
+            except Exception as exc:             # noqa: BLE001
+                log.warning("a view deck did not close with the plate: %s: %s",
+                            type(exc).__name__, exc)
         # NO REGION DEBOUNCE TO DISARM. A single-shot QTimer used to be armed here for 140 ms by
         # `_on_region_changed` and stopped at this point, because a pending one fires into a
         # torn-down window (measured: a segfault a window later). Both the timer and the

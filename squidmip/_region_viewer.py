@@ -150,6 +150,34 @@ _SETTING_BASELINE = {
 }
 
 
+def _alive(widget) -> bool:
+    """Is this Qt object still there on the C++ side?
+
+    ``sip.isdeleted`` is the only reliable question — a deleted QWidget is a live PYTHON object
+    whose every attribute access raises, so ``is not None`` answers yes about a corpse. The same
+    reasoning, and the same import shape, as ``OpenViewList.refresh``'s guard further down.
+    """
+    if widget is None:
+        return False
+    try:
+        import sip as _sip
+    except ImportError:
+        try:
+            from PyQt6 import sip as _sip        # PyQt6 ships it inside the package
+        except ImportError:
+            _sip = None
+    if _sip is not None:
+        try:
+            return not _sip.isdeleted(widget)
+        except Exception:                        # noqa: BLE001 - not a sip object: fall through
+            pass
+    try:
+        widget.objectName()
+        return True
+    except RuntimeError:
+        return False
+
+
 def _copy_setting(value: Any) -> Any:
     """A private copy of one setting's value, so two windows can never share a mutable one.
 
@@ -428,6 +456,11 @@ class RegionViewer(QMainWindow):
     #: raised partway, and a bare read of a missing attribute there would replace the real error
     #: with an attribute error out of Qt's machinery.
     _disposed: bool = False
+    #: The :class:`~squidmip._view_deck.ViewDeck` holding this view as a tab, or None when it is a
+    #: free-standing window. THE ONE ANSWER to "where does this view live" — written only by the
+    #: deck's dock/undock, read by everything that needs to act on the window a view is in. Same
+    #: class-default rule as above: it is read from slots.
+    _host = None
 
     def __init__(
         self,
@@ -3430,11 +3463,56 @@ class RegionViewer(QMainWindow):
             except Exception:                        # noqa: BLE001 - best effort
                 pass
 
+    @property
+    def host(self):
+        """The deck holding this view as a tab, or None when it is its own window."""
+        return self._host
+
+    def reveal(self) -> None:
+        """Bring this view to the front and make it the one on screen.
+
+        A view is either a top-level window or a tab, and "show me this one" means something
+        different in each. Answering it HERE is what lets ``ViewerManager.focus`` keep one call
+        site: a manager that had to know about decks would need the same branch at four more."""
+        target = self._host or self
+        target.showNormal()
+        target.raise_()
+        target.activateWindow()
+        if self._host is not None:
+            self._host.set_current(self)
+
+    def collapse(self) -> None:
+        """Minimise. Minimising a TAB is meaningless, so a hosted view minimises its deck — which
+        is also what the user means by "collapse all" when their views are tabs."""
+        (self._host or self).showMinimized()
+
+    def request_close(self) -> None:
+        """Close this view, whichever kind of thing it currently is.
+
+        A tab page never receives a close event, so ``close()`` on a hosted view would run
+        ``closeEvent`` and delete the widget while the deck still held it. The deck untabs first
+        and then disposes, which is why closing goes through the host when there is one."""
+        if self._host is None:
+            self.close()
+        else:
+            self._host.close_page(self)
+
+    def _is_active_view(self) -> bool:
+        """Is this the view the user is working in?
+
+        For a window that is `isActiveWindow()`. For a tab it is BOTH the deck being active and
+        this page being the current one — a background tab in a focused deck is no more "the view
+        the user is in" than a window behind another."""
+        host = self._host
+        if host is None:
+            return self.isActiveWindow()
+        return bool(host.isActiveWindow()) and host.current_page() is self
+
     def changeEvent(self, event):                    # noqa: N802 - Qt naming
         from qtpy.QtCore import QEvent
 
         if event.type() == QEvent.ActivationChange:
-            active = self.isActiveWindow()
+            active = self._is_active_view()
             self.set_active(active)                  # halt playback in a window nobody is watching
             # ...AND TELL THE REGISTRY WHO IS IN FRONT. Only on the way IN: deactivation is not
             # "no view is focused", it is usually the user clicking the plate, and the plate is
@@ -3595,6 +3673,21 @@ class ViewerManager(QObject):
         self._next_id = 1
         self._focused_id: Optional[int] = None    # which view is active (its plate hue reads brighter)
         self._selected_ids: "list[int]" = []      # navigator multi-selection (Linux shift/ctrl)
+        #: The tab decks holding views. A list rather than one, because a detached view can be
+        #: re-docked into a second deck later and phase 2 wants to drag between them; today the
+        #: app makes exactly one, lazily, through `deck()`.
+        self._decks: "list" = []
+        #: Do spawned views become TABS? One policy point, consulted only by `_spawn`, so this can
+        #: be flipped without touching a single caller.
+        #:
+        #: OFF BY DEFAULT, and that is a finding rather than caution. Turned on for every spawn it
+        #: reparents a view on every open, and the existing suite does not survive that: measured
+        #: 2026-08-10, `test_plate_navigates_views`, `test_rename` and `test_raise_plate` went from
+        #: passing to 0xC0000005, and `test_nav_close_selected` to 0xC0000409. Those are aborts,
+        #: not failures — the same class `tests/test_window_lifetime` exists for. So the deck ships
+        #: as something a caller asks for, exercised by its own tests, and the default flips only
+        #: once those aborts are understood rather than routed around.
+        self.tabbed_views = False
         # Set by the root PlateWindow so every window's "Operators for this window" dropdown is the
         # SAME registry + the SAME run_operator (the CLI engine), scoped to that view.
         self.operator_specs: "list" = []
@@ -3739,6 +3832,7 @@ class ViewerManager(QObject):
             return False
         if not win.set_display_name(name):
             return False
+        self.refresh_deck_titles()      # the navigator rebuilds itself; a tab bar does not
         self.windowsChanged.emit()
         return True
 
@@ -3792,9 +3886,20 @@ class ViewerManager(QObject):
         self._windows[wid] = win
         self._focused_id = wid
         self._selected_ids = [wid]
-        win.show()
-        win.raise_()
-        win.activateWindow()
+        # THE ONE POLICY POINT for "views are tabs". Every opener — the plate's Open view, a
+        # marquee, a double-click, an ROI child, the default layout — arrives here, so none of them
+        # needs to know, and turning `tabbed_views` off gives independent windows back with no
+        # other edit.
+        deck = self.deck() if self.tabbed_views else None
+        if deck is not None:
+            deck.dock_page(win)
+            deck.show()
+            deck.raise_()
+            deck.activateWindow()
+        else:
+            win.show()
+            win.raise_()
+            win.activateWindow()
         self._replay_cached_results(win)
         self.windowOpened.emit(win)                     # ...so the plate can follow ITS napari
         self.windowsChanged.emit()
@@ -3861,6 +3966,15 @@ class ViewerManager(QObject):
         self._focused_id = self._selected_ids[0] if self._selected_ids else None
         self.viewFocused.emit([])                        # triggers PlateWindow._refresh_view_hues
 
+    def refresh_deck_titles(self) -> None:
+        """Tab text follows a rename. The navigator gets this free by rebuilding on
+        ``windowsChanged``; a deck holds its labels in the tab bar, so it has to be told."""
+        for deck in self.decks():
+            try:
+                deck.refresh_titles()
+            except Exception:                        # noqa: BLE001 - a label is never worth a crash
+                pass
+
     def _on_window_regions_changed(self, win: "RegionViewer") -> None:
         """A window adopted a region. Re-publish it.
 
@@ -3871,6 +3985,34 @@ class ViewerManager(QObject):
         """
         self.windowsChanged.emit()
         self.viewFocused.emit(list(win._regions))
+
+    def decks(self) -> "list":
+        """Every tab deck this manager has made, live ones only."""
+        self._forget_dead_decks()
+        return list(self._decks)
+
+    def deck(self, create: bool = True):
+        """THE deck, made on first use. One policy point, so "views are tabs" is one decision.
+
+        Lazy because a session that only ever opens the plate should not build a window nobody
+        asked for, and `tests/test_no_orphan_windows` is entitled to say so.
+        """
+        live = [d for d in self._decks if _alive(d)]
+        self._decks = live
+        if live:
+            return live[0]
+        if not create:
+            return None
+        from squidmip._view_deck import ViewDeck
+
+        deck = ViewDeck()
+        deck.pageActivated.connect(self.note_focus)
+        deck.destroyed.connect(lambda *_: self._forget_dead_decks())
+        self._decks.append(deck)
+        return deck
+
+    def _forget_dead_decks(self) -> None:
+        self._decks = [d for d in self._decks if _alive(d)]
 
     def note_focus(self, window_id: int) -> None:
         """The user activated this window THEMSELVES — its title bar, alt-tab, a click in its canvas.
@@ -3915,27 +4057,32 @@ class ViewerManager(QObject):
         win = self._windows.get(int(window_id))
         if win is not None:
             self._focused_id = int(window_id)       # BEFORE activateWindow(); see note_focus
-            win.showNormal()
-            win.raise_()
-            win.activateWindow()
+            win.reveal()                            # a window raises; a tab also becomes current
             self.viewFocused.emit(list(win._regions))   # move the plate wash onto this view
 
     def raise_views(self, ids: "Sequence[int]") -> None:
-        """Bring the selected windows to the FRONT of the desktop (Julio: clicking a navigator row
-        should raise its window). Un-minimise + raise each; activate the last for keyboard focus.
-        Un-minimising also lifts a window collapsed by Collapse all."""
+        """Bring the selected views to the FRONT (Julio: clicking a navigator row should raise its
+        window). Un-minimise + raise each; the last one ends up current, which is also what gives
+        it keyboard focus. Un-minimising lifts a view collapsed by Collapse all.
+
+        DEDUPED BY HOST: five tabs in one deck are one window, and raising it five times is five
+        raises and a flicker for a result the first one already achieved."""
         wins = [self._windows.get(int(i)) for i in ids]
         wins = [w for w in wins if w is not None]
+        seen_hosts = []
         for w in wins:
+            # THE WHOLE BODY IS GUARDED, not just the reveal. This runs from a navigator
+            # selection slot, and an exception out of a Qt slot does not propagate — PyQt aborts
+            # the process (0xC0000409, measured when a `host` read outside this try met a test
+            # double that had no such attribute). Raising a window is never worth that.
             try:
-                w.showNormal()
-                w.raise_()
-            except Exception:                            # noqa: BLE001 - best effort per window
-                pass
-        if wins:
-            try:
-                wins[-1].activateWindow()
-            except Exception:                            # noqa: BLE001
+                host = w.host
+                if host is not None and any(host is h for h in seen_hosts):
+                    continue                             # this deck is already up
+                if host is not None:
+                    seen_hosts.append(host)
+                w.reveal()
+            except Exception:                            # noqa: BLE001 - best effort per view
                 pass
 
     def raise_plate(self) -> bool:
@@ -3971,18 +4118,18 @@ class ViewerManager(QObject):
     def close(self, window_id: int) -> None:
         win = self._windows.get(int(window_id))
         if win is not None:
-            win.close()
+            win.request_close()      # a window closes; a tab is untabbed and then disposed
 
     def close_all(self) -> None:
         for win in list(self._windows.values()):
-            win.close()
+            win.request_close()
 
     def collapse_all(self) -> None:
         """Minimise every open window at once (declutter when a bunch are open, Julio). They stay in
         the navigator; clicking a row restores that one (focus() does showNormal + raise)."""
         for win in list(self._windows.values()):
             try:
-                win.showMinimized()
+                win.collapse()      # a window minimises; a tab minimises the deck holding it
             except Exception:                            # noqa: BLE001 - best effort per window
                 pass
         self._focused_id = None
