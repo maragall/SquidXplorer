@@ -274,6 +274,92 @@ def test_a_detach_that_fires_after_teardown_is_ignored(qapp, napari_pane_stub, s
         shutdown_plate_window(qapp, win)
 
 
+# --- what the first use of it asked for --------------------------------------------------------
+
+def test_every_tab_carries_its_own_close_button(qapp, napari_pane_stub, squid_dataset):
+    """Spencer, on first use: "we could use a more obvious close tab button."
+
+    Closing a view was reachable from the navigator's "Close selected views" — in the OTHER window
+    — or from the deck's title bar, which closes all of them. Asserted through the SIGNAL rather
+    than a click, because a close button is a Qt-drawn sub-control with no widget of its own to
+    press offscreen; what matters is that the request lands on the same `close_page` everything
+    else uses, so a view closed here is disposed and deregistered rather than merely untabbed."""
+    root, _ = squid_dataset
+    win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=2)
+    victim = views[0]
+    pane = victim._pane
+    try:
+        assert deck._tabs.tabsClosable(), "tabs have no close button"
+        deck._tabs.tabCloseRequested.emit(deck._tabs.indexOf(victim))
+        qapp.processEvents()
+        assert victim._disposed, "the close button untabbed without disposing"
+        assert pane.shutdowns == 1, "the close button leaked a napari pane"
+        assert victim.window_id not in [w.window_id for w in mgr.windows]
+        assert deck.count() == 1
+    finally:
+        shutdown_plate_window(qapp, win)
+
+
+def test_the_navigator_says_which_window_each_view_is_in(qapp, napari_pane_stub, squid_dataset):
+    """Spencer, on first use: the navigator "should now have an indication of what window a tab is
+    in."
+
+    Once a view can be a tab this list stops being a list of windows: two rows can name the same
+    window, and a detached row names one that is on the desktop on its own. The location goes in a
+    SECOND COLUMN because `test_rename` asserts column 0 is the window title exactly — that text is
+    the `[id] name` join to the log and must stay parseable."""
+    from squidmip._region_viewer import OpenViewList
+
+    root, _ = squid_dataset
+    win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=2)
+    nav = OpenViewList(mgr)
+    try:
+        rows = {}
+        for i in range(nav._tree.topLevelItemCount()):
+            item = nav._tree.topLevelItem(i)
+            rows[int(item.data(0, 0x0100))] = item      # Qt.UserRole
+        assert all(rows[v.window_id].text(1) == "views" for v in views), (
+            "a tabbed view does not say which window it is in")
+        deck.undock_page(views[0])
+        qapp.processEvents()
+        nav.refresh()
+        for i in range(nav._tree.topLevelItemCount()):
+            item = nav._tree.topLevelItem(i)
+            if int(item.data(0, 0x0100)) == views[0].window_id:
+                assert item.text(1) == "window", "a detached view still claims to be a tab"
+    finally:
+        views[0].close()
+        nav.deleteLater()
+        shutdown_plate_window(qapp, win)
+
+
+def test_switching_tabs_moves_the_navigator_highlight(qapp, napari_pane_stub, squid_dataset):
+    """Spotted on first use: the deck showed one view while the navigator highlighted another.
+
+    A tab switch changes WHICH view is current without changing which views exist, so
+    `windowsChanged` never fires and the list kept its previous highlight — two lists in one app
+    disagreeing about where the user is. It follows the focus now, selection only: rebuilding a
+    tree whose contents did not change would also drop the user's multi-selection."""
+    from squidmip._region_viewer import OpenViewList
+
+    root, _ = squid_dataset
+    win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=2)
+    nav = OpenViewList(mgr)
+    a, b = views
+    try:
+        deck.set_current(a)
+        qapp.processEvents()
+        selected = {int(i.data(0, 0x0100)) for i in nav._tree.selectedItems()}
+        assert selected == {a.window_id}, f"navigator highlights {selected}, deck shows {a.window_id}"
+        deck.set_current(b)
+        qapp.processEvents()
+        selected = {int(i.data(0, 0x0100)) for i in nav._tree.selectedItems()}
+        assert selected == {b.window_id}, "the highlight did not follow the tab switch"
+    finally:
+        nav.deleteLater()
+        shutdown_plate_window(qapp, win)
+
+
 # --- the cost, said out loud ------------------------------------------------------------------
 
 def test_the_deck_names_the_memory_once_there_are_many_views(qapp, napari_pane_stub,

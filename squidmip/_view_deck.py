@@ -56,9 +56,14 @@ class ViewDeck(QMainWindow):
     #: deliberately does not reach into the registry itself.
     pageActivated = Signal(int)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, index: int = 1):
         super().__init__(parent)
-        self.setWindowTitle("SquidXplorer views")
+        #: 1-based, and part of how a view says WHERE it lives. One deck is just "views"; a second
+        #: one has to be tellable from the first, which is what the navigator's location column
+        #: reads. Phase 2 (dragging tabs between decks) is the case this exists for.
+        self.deck_index = int(index)
+        self.setWindowTitle("SquidXplorer views" if self.deck_index == 1
+                            else f"SquidXplorer views {self.deck_index}")
         #: True from the first moment of teardown. `_DetachTabBar` fires its detach through
         #: ``QTimer.singleShot(0, lambda: ...)`` — a self-capturing lambda on a process-global
         #: timer — so a press that lands just before this window closes would otherwise call into
@@ -70,6 +75,12 @@ class ViewDeck(QMainWindow):
         self._tabs = _DetachTabs(self._detach_page, first_detachable=0)
         self._tabs.setDocumentMode(True)
         self._tabs.setMovable(True)
+        # A CLOSE BUTTON ON EVERY TAB. Spencer, on first use: "we could use a more obvious close
+        # tab button." Closing a view was reachable only from the navigator's "Close selected
+        # views" or the deck's own title bar — one of which is in the other window and the other of
+        # which closes everything. The affordance belongs where the thing being closed is.
+        self._tabs.setTabsClosable(True)
+        self._tabs.tabCloseRequested.connect(self._on_tab_close_requested)
         self._tabs.currentChanged.connect(self._on_current_changed)
         self.setCentralWidget(self._tabs)
         self.setStatusBar(QStatusBar())
@@ -200,6 +211,21 @@ class ViewDeck(QMainWindow):
                 if active:
                     self.pageActivated.emit(int(page.window_id))
         super().changeEvent(event)
+
+    def short_name(self) -> str:
+        """How a view names this deck when asked where it lives. Short on purpose: it sits in a
+        column beside a window title that is already long."""
+        return "views" if self.deck_index == 1 else f"views {self.deck_index}"
+
+    def _on_tab_close_requested(self, index: int) -> None:
+        """The tab's own close button. Goes through `close_page`, which is the same path the
+        navigator and the plate use — so a view closed here is disposed and deregistered exactly
+        as one closed anywhere else, rather than merely removed from a tab bar."""
+        if self._closing or not (0 <= index < self._tabs.count()):
+            return
+        page = self._tabs.widget(index)
+        if page is not None:
+            self.close_page(page)
 
     def _detach_page(self, index: int, tabs) -> None:
         """The drag-out gesture. Guarded first, because the bar defers this through a

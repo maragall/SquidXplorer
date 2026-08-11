@@ -366,7 +366,8 @@ class PlateWindow(QMainWindow):
     _default_view_id = None
     _layout_applied = False
 
-    def __init__(self, initial_path: Optional[str] = None, *, default_layout: bool = False):
+    def __init__(self, initial_path: Optional[str] = None, *, default_layout: bool = False,
+                 tabbed_views: bool = False):
         """*default_layout*: open the WORKING LAYOUT once a plate loads — this window sized to a
         share of the screen, and a view window over every well filling the rest.
 
@@ -382,6 +383,10 @@ class PlateWindow(QMainWindow):
         """
         super().__init__()
         self.default_layout = bool(default_layout)
+        #: Held until the manager exists a few lines down. Same opt-in shape as `default_layout`
+        #: and for a sharper reason: with tabs on for every spawn, four existing test files go from
+        #: passing to ABORTING, so this cannot be the default until that is understood.
+        self._want_tabbed_views = bool(tabbed_views)
         #: A plate loaded before this window was shown; the view opens from `showEvent`. `_spawn`
         #: shows the view it creates, so opening one from inside `__init__` would put a view on
         #: screen before the plate that owns it.
@@ -436,6 +441,7 @@ class PlateWindow(QMainWindow):
         # shares this one stateless reader/meta — nothing reopens the dataset. See _region_viewer.
         from squidmip._region_viewer import ViewerManager
         self._viewer_manager = ViewerManager(parent=self)
+        self._viewer_manager.tabbed_views = self._want_tabbed_views
         # Operator controls appear AT EACH LEVEL (the deck; Julio 2026-07-23: "I don't see operator
         # controls like the powerpoint specified at each level"). Every window's "Operators for this
         # window" dropdown is the SAME registry + run_operator (the CLI engine), scoped to that view,
@@ -2971,6 +2977,10 @@ class PlateWindow(QMainWindow):
         screen = window_screen(self)
         if screen is None:
             return
+        # PLACE THE WINDOW, WHICH MAY NOT BE THE VIEW. Once views are tabs the thing beside the
+        # plate is the DECK, and the view is a page laid out inside it — setting geometry on a page
+        # is at best ignored and at worst fights the tab widget's own layout.
+        win = getattr(win, "host", None) or win
         try:
             want = beside_rect(screen.availableGeometry(), self.frameGeometry())
             frame, client = win.frameGeometry(), win.geometry()
@@ -5073,7 +5083,7 @@ def main(dataset_path: str = None):
     splash = _startup_splash(app)
     # THE LAUNCHER ASKS FOR THE WORKING LAYOUT: this window narrow and full height, a view window
     # over every well filling the rest. Only here — a library caller gets a bare window.
-    win = PlateWindow(path, default_layout=True)
+    win = PlateWindow(path, default_layout=True, tabbed_views=True)
     _install_footprint_monitor(app, win)
     win._gui_slot = slot                  # the reservation lives as long as the window
 

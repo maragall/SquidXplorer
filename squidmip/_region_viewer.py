@@ -27,6 +27,7 @@ from typing import Any, Optional, Sequence
 
 import numpy as np
 from qtpy.QtCore import QObject, Qt, QTimer, Signal
+from qtpy.QtGui import QBrush, QColor
 from qtpy.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
@@ -45,6 +46,7 @@ from qtpy.QtWidgets import (
     QSizePolicy,
     QTreeWidget,
     QTreeWidgetItem,
+    QTreeWidgetItemIterator,
     QVBoxLayout,
     QWidget,
 )
@@ -150,6 +152,22 @@ _SETTING_BASELINE = {
 }
 
 
+def _where(win) -> str:
+    """Where this view lives, for the navigator's location column.
+
+    "views" when it is a tab in the deck (numbered once there is more than one), "window" when it
+    is standing on its own — which is what a detached tab becomes, and what every view was before
+    decks existed.
+    """
+    host = getattr(win, "host", None)
+    if host is None:
+        return "window"
+    try:
+        return host.short_name()
+    except Exception:                            # noqa: BLE001 - a label is never worth a crash
+        return "views"
+
+
 def _alive(widget) -> bool:
     """Is this Qt object still there on the C++ side?
 
@@ -159,20 +177,13 @@ def _alive(widget) -> bool:
     """
     if widget is None:
         return False
-    try:
-        import sip as _sip
-    except ImportError:
-        try:
-            from PyQt6 import sip as _sip        # PyQt6 ships it inside the package
-        except ImportError:
-            _sip = None
-    if _sip is not None:
+    if _sip is not None:                         # the module-level handle, resolved once at import
         try:
             return not _sip.isdeleted(widget)
         except Exception:                        # noqa: BLE001 - not a sip object: fall through
             pass
     try:
-        widget.objectName()
+        widget.objectName()                      # PySide, or a non-sip object: ask Qt directly
         return True
     except RuntimeError:
         return False
@@ -4005,7 +4016,7 @@ class ViewerManager(QObject):
             return None
         from squidmip._view_deck import ViewDeck
 
-        deck = ViewDeck()
+        deck = ViewDeck(index=len(self._decks) + 1)
         deck.pageActivated.connect(self.note_focus)
         deck.destroyed.connect(lambda *_: self._forget_dead_decks())
         self._decks.append(deck)
@@ -4193,6 +4204,16 @@ class OpenViewList(QWidget):
 
         self._tree = QTreeWidget(self)
         self._tree.setHeaderHidden(True)
+        # A SECOND COLUMN SAYING WHERE THE VIEW IS. Spencer, on first use of the deck: the
+        # navigator "should now have an indication of what window a tab is in". Once a view can be
+        # a tab, this list is no longer a list of windows — two rows can name the same window, and
+        # a row can name a window that is not on the desktop at all.
+        #
+        # A COLUMN and not a suffix on the title: `test_rename` asserts `item.text(0)` matches the
+        # window title exactly, and rightly — that text IS the `[id] name` join to the log. Widening
+        # it with decoration would make the join something you have to parse back out.
+        self._tree.setColumnCount(2)
+        self._tree.header().setStretchLastSection(False)
         # NESTED HIERARCHY with expand/collapse ARROWS (Julio: "arrows for the window object
         # hierarchy like Blender") — ROI children nest under their parent window. Linux-style
         # shift/ctrl MULTI-SELECT so operators can target several views at once.
@@ -4280,6 +4301,11 @@ class OpenViewList(QWidget):
         lay.addWidget(self._work_bar)
 
         manager.windowsChanged.connect(self.refresh)
+        # A FOCUS CHANGE IS NOT A SET CHANGE. Switching tabs moves which view is current without
+        # opening or closing anything, so `windowsChanged` never fires and this list would keep
+        # highlighting the row it was left on. Selection-only, so a tab switch does not rebuild a
+        # tree whose contents did not change.
+        manager.viewFocused.connect(lambda _regions: self.sync_selection())
         manager.memoryChanged.connect(self._on_memory)
         manager.runProgressChanged.connect(self._on_run_progress)
         # A navigator built mid-run must not wait for the next unit to find out (see
@@ -4355,8 +4381,10 @@ class OpenViewList(QWidget):
             # Place parents before children: a window whose parent isn't open yet lands at the root.
             for win in sorted(windows, key=lambda w: int(w.window_id)):
                 wid = int(win.window_id)
-                item = QTreeWidgetItem([win.windowTitle()])
+                item = QTreeWidgetItem([win.windowTitle(), _where(win)])
                 item.setData(0, Qt.UserRole, wid)
+                item.setForeground(1, QBrush(QColor("#8b949e")))   # subordinate to the name
+                item.setTextAlignment(1, Qt.AlignRight | Qt.AlignVCenter)
                 pid = getattr(win, "parent_id", None)
                 parent_item = items.get(int(pid)) if pid is not None and int(pid) in by_id else None
                 if parent_item is not None:
@@ -4374,6 +4402,35 @@ class OpenViewList(QWidget):
         # AFTER the guard is released and the tree is rebuilt: both buttons answer to what is in
         # it now. Inside the `finally` and not in the `try`, so a rebuild that raises cannot leave
         # a button claiming it can act on a tree that was never filled.
+        self._refresh_nav_buttons()
+
+    def sync_selection(self) -> None:
+        """Follow a focus change that did NOT come from this list — a tab switch, most of all.
+
+        Switching tabs moved the focus and the plate wash but left this list highlighting whichever
+        row was selected last, so two lists in the same app disagreed about which view you were in.
+        Reported on first use of the deck and it is the right complaint: the navigator is supposed
+        to be a view of the registry, and a stale highlight makes it a second opinion.
+
+        Selection only, not a rebuild: `windowsChanged` already rebuilds this tree wholesale, and
+        a tab switch changes nothing about WHICH views exist. `_syncing` guards the programmatic
+        selection from re-entering `_on_selection_changed`, which would raise the window we are
+        merely reflecting.
+        """
+        if self._syncing or (_sip is not None and _sip.isdeleted(self)):
+            return
+        selected = set(self._manager.selected_ids)
+        self._syncing = True
+        try:
+            it = QTreeWidgetItemIterator(self._tree)
+            while it.value():
+                item = it.value()
+                wid = item.data(0, Qt.UserRole)
+                if wid is not None:
+                    item.setSelected(int(wid) in selected)
+                it += 1
+        finally:
+            self._syncing = False
         self._refresh_nav_buttons()
 
     def _on_selection_changed(self) -> None:
