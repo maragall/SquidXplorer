@@ -155,7 +155,7 @@ class ViewDeck(QMainWindow):
             finally:
                 self._muted = False
         page._host = None
-        page.setParent(None)
+        page.setParent(None)        # removeTab does NOT reparent; see undock_page
         page.dispose()
         page.deleteLater()
         self._refresh_status()
@@ -258,7 +258,14 @@ class ViewDeck(QMainWindow):
     def _close_if_empty(self) -> None:
         """A deck with no views is furniture. It is also a TOP-LEVEL, and a top-level that outlives
         the plate is how the process survives with nothing on screen still holding the
-        single-instance lock — the bug `PlateWindow.closeEvent` documents."""
+        single-instance lock — the bug `PlateWindow.closeEvent` documents.
+
+        HIDDEN rather than destroyed, and reused if another view opens: Qt's quit-on-last-window
+        rule counts VISIBLE windows, so hiding settles the lifetime question, and tearing down a
+        container to rebuild it is the churn this codebase's segfault history is made of. Destroying
+        it here was tried against the tabbed-teardown abort and changed nothing, so the cheaper
+        behaviour stands.
+        """
         if not self._closing and self._tabs.count() == 0:
             self.close()
 
