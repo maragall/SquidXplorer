@@ -49,13 +49,23 @@ Results are OME-Zarr layers you toggle on and off; the raw data on disk is never
 - Open PowerShell in the tool folder and run:
   `powershell -ExecutionPolicy Bypass -File scripts\Setup-Windows.ps1`
 - This puts a **SquidXplorer** shortcut on your Desktop.
-- To update later: `git pull` in the folder, then open the icon again.
+- To update later: `git pull` in the folder, then open the icon again. The app is installed
+  *editable*, so a pull applies on the next launch with no reinstall, and the icon keeps working
+  across any code change.
 
 ## Open an acquisition
 
-- Launch SquidXplorer. A small console opens beside it; that is normal and shows progress.
-- **File, then Open acquisition folder**, and pick the acquisition (the folder holding the `0`
-  folder and/or the `ome_tiff` folder).
+Three ways in, and the fastest is the first:
+
+- **Drag an acquisition folder straight onto the Desktop icon.** It opens that acquisition
+  directly, with no File menu and no second step. Paths with spaces are handled correctly.
+- Double-click the icon, then **drop the folder onto the plate area** of the window.
+- Double-click the icon, then **File, then Open acquisition folder**.
+
+Pick the folder holding the `0` folder and/or the `ome_tiff` folder — that is the acquisition.
+
+- A small console opens beside the app; that is normal and shows progress. It stays open if the app
+  exits with an error, so a traceback cannot flash past before you can read it.
 - It reads both Squid formats (individual TIFFs and OME-TIFF), on 384 and 1536 plates.
 - The first open downsamples every well to build the plate view; **opening the same acquisition
   again is a cache read** (measured: 15.2 s to 0.08 s on a 1536-well plate). Those thumbnails go
