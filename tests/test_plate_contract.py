@@ -47,8 +47,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from squidmip import _output
-from squidmip.contract import (
+from squidxplorer import _output
+from squidxplorer.contract import (
     PLATE_CONTRACT_VERSION,
     PlateContractError,
     compare_contract_version,
@@ -57,8 +57,8 @@ from squidmip.contract import (
     field_path,
     read_contract_version,
 )
-from squidmip.contract.validate import validate_plate
-from squidmip.reader import SquidZarrReader
+from squidxplorer.contract.validate import validate_plate
+from squidxplorer.reader import SquidZarrReader
 
 
 # --- fixtures: the smallest real plate that satisfies the stable contract -----------------------
@@ -70,13 +70,13 @@ def _write_plate(tmp_path, *, translation=True, omero=True, version=None, n_t=1)
     hand: a fixture that spells the layout itself would pass while the writer drifted, which is
     the failure mode this whole file is about.
     """
-    from squidmip._zarr_store import create_array, write_array, write_group
+    from squidxplorer._zarr_store import create_array, write_array, write_group
 
     plate_dir = tmp_path / "plate.ome.zarr"
     regions = ["A1", "B2"]
     attributes = contract_stamp()
     if version is not None:
-        attributes = {"squidmip": {"plate_contract_version": version}}
+        attributes = {"squidxplorer": {"plate_contract_version": version}}
     write_group(plate_dir, _output.plate_metadata(regions, field_count=1), attributes=attributes)
 
     channels = [{"name": "BF", "display_name": "BF", "display_color": "#FFFFFF"}]
@@ -112,8 +112,8 @@ def test_the_stamp_lives_outside_the_ome_namespace(tmp_path):
     """attributes.ome belongs to OME. A private key goes beside it, or a schema we did not write fails."""
     plate_dir = _write_plate(tmp_path)
     attrs = json.loads((plate_dir / "zarr.json").read_text())["attributes"]
-    assert "squidmip" in attrs and "plate_contract_version" in attrs["squidmip"]
-    assert "squidmip" not in attrs["ome"]
+    assert "squidxplorer" in attrs and "plate_contract_version" in attrs["squidxplorer"]
+    assert "squidxplorer" not in attrs["ome"]
     assert "plate_contract_version" not in attrs["ome"]
 
 
@@ -130,7 +130,7 @@ def test_write_then_read_carries_the_version_end_to_end(tmp_path):
     """The real writer, the real reader, no fixture in between. This is the round trip that counts."""
     from tests.test_output import REGIONS, _image, _meta, _stream
 
-    from squidmip._output import write_from_stream
+    from squidxplorer._output import write_from_stream
 
     images = {r: _image(i) for i, r in enumerate(REGIONS)}
     manifest = write_from_stream(_meta(), _stream(images), tmp_path, n_fovs=1)
@@ -182,7 +182,7 @@ def test_an_unstamped_store_is_read_without_complaint(tmp_path):
     """Every plate written before this landed, and every third-party NGFF store, is unstamped."""
     plate_dir = _write_plate(tmp_path)
     doc = json.loads((plate_dir / "zarr.json").read_text())
-    doc["attributes"].pop("squidmip")
+    doc["attributes"].pop("squidxplorer")
     (plate_dir / "zarr.json").write_text(json.dumps(doc))
 
     assert read_contract_version(plate_dir) is None
@@ -258,7 +258,7 @@ def test_a_single_level_field_is_a_WARNING_and_names_level_zero(tmp_path):
 def test_an_incomplete_marker_is_a_WARNING(tmp_path):
     """A store mid-write is readable; what it promises may simply not all be there yet."""
     plate_dir = _write_plate(tmp_path)
-    (plate_dir / ".squidmip-incomplete").write_text("{}")
+    (plate_dir / ".squidxplorer-incomplete").write_text("{}")
     report = validate_plate(plate_dir)
     assert report.ok
     assert any("did not finish" in w for w in report.warnings), report.summary()
@@ -299,7 +299,7 @@ def test_the_validator_still_runs_without_ome_zarr_models(tmp_path, monkeypatch)
 
 def test_the_validator_is_runnable_by_a_user_on_a_plate_they_were_handed(tmp_path, capsys):
     """It was promoted out of tests/ for exactly this. An entry point with no CLI is still test-only."""
-    from squidmip.contract.validate import main
+    from squidxplorer.contract.validate import main
 
     assert main([str(_write_plate(tmp_path))]) == 0
     assert "OK" in capsys.readouterr().out
@@ -342,7 +342,7 @@ def test_field_path_is_the_only_place_that_knows_the_layout():
     (``wells[].path`` -> ``well.images[].path``), which reads every name instead of assuming it,
     and docs/plate-contract.md names that as the other legitimate route.
     """
-    root = Path(__file__).resolve().parent.parent / "squidmip"
+    root = Path(__file__).resolve().parent.parent / "squidxplorer"
     joined = re.compile(r'f"\{[^"{}]+\}/\{[^"{}]+\}/\{[^"{}]+\}')
     offenders = []
     for path in sorted(root.rglob("*.py")):
@@ -352,7 +352,7 @@ def test_field_path_is_the_only_place_that_knows_the_layout():
             if joined.search(line):
                 offenders.append(f"{path.relative_to(root)}:{i}: {line.strip()}")
     assert not offenders, (
-        "a plate path is being reconstructed outside squidmip/contract again:\n"
+        "a plate path is being reconstructed outside squidxplorer/contract again:\n"
         + "\n".join(offenders))
 
 
@@ -360,7 +360,7 @@ def test_the_viewer_read_paths_go_through_the_seam():
     """The four sites the review counted. A call, not a mention."""
     import inspect
 
-    from squidmip import _viewer
+    from squidxplorer import _viewer
 
     for func in (_viewer._ZarrLoupeSource._resolve_levels,
                  _viewer._ZarrLoupeSource._open,
@@ -406,8 +406,8 @@ def test_every_documented_read_site_takes_a_timepoint():
     """
     import inspect
 
-    from squidmip._plate_overview import _ZarrLoupeSource
-    from squidmip._workers import _ComputedPlateWorker
+    from squidxplorer._plate_overview import _ZarrLoupeSource
+    from squidxplorer._workers import _ComputedPlateWorker
 
     for func in (_ComputedPlateWorker._read, _ZarrLoupeSource.coarse, _ZarrLoupeSource.read_crop):
         src = inspect.getsource(func)
@@ -431,9 +431,9 @@ def test_the_timepoint_control_is_one_class_for_plate_and_windows():
 
     That is worse than having no control: you would compare two frames and be told they were one.
     """
-    from squidmip._region_viewer import RegionViewer
-    from squidmip._time_point import TimePointBar
-    from squidmip import _viewer
+    from squidxplorer._region_viewer import RegionViewer
+    from squidxplorer._time_point import TimePointBar
+    from squidxplorer import _viewer
 
     for mod in (_viewer, RegionViewer.__module__ and __import__(RegionViewer.__module__,
                                                                fromlist=["_"])):
@@ -455,7 +455,7 @@ def test_the_contract_is_written_down_and_split_in_two():
 
 def test_the_reader_no_longer_says_the_writer_emits_no_translation():
     """The live defect. Two places said the opposite of what _output.py does, inside contract prose."""
-    from squidmip import reader
+    from squidxplorer import reader
 
     src = Path(reader.__file__).read_text()
     for i, line in enumerate(src.splitlines(), 1):

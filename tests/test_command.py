@@ -10,8 +10,8 @@ import json
 
 import pytest
 
-from squidmip import _run_scope
-from squidmip._command import (
+from squidxplorer import _run_scope
+from squidxplorer._command import (
     BAD_COMMAND,
     BAD_SCOPE,
     CommandBus,
@@ -83,7 +83,7 @@ def test_a_command_describes_its_target_before_anything_runs():
 
 
 def test_every_command_kind_is_registered_and_carries_its_discriminator():
-    from squidmip._command import COMMANDS
+    from squidxplorer._command import COMMANDS
 
     samples = {
         "open_acquisition": OpenAcquisition(path="/x"),
@@ -155,7 +155,7 @@ def test_raise_for_refusal_is_opt_in_for_scripts(bus):
 def test_list_operators_answers_off_the_engine_registry_not_a_card_table(bus):
     r = bus.execute(ListOperators())
     assert r.ok
-    from squidmip import available_projectors, available_region_operators
+    from squidxplorer import available_projectors, available_region_operators
 
     assert set(r.data["names"]) == set(available_projectors()) | set(available_region_operators())
     assert "mip" in r.data["names"] and "stitch" in r.data["names"]
@@ -170,8 +170,8 @@ def test_list_operators_reports_the_consumed_axis_so_a_caller_knows_the_output_s
 
 def test_a_newly_registered_operator_appears_with_no_command_layer_edit(bus):
     """The registry scales to n algorithms; the command surface must scale with it for free."""
-    from squidmip import add_projector
-    from squidmip._engine import _OPERATORS
+    from squidxplorer import add_projector
+    from squidxplorer._engine import _OPERATORS
 
     add_projector("test_only_op", lambda planes: next(iter(planes)))
     try:
@@ -198,20 +198,20 @@ def test_nothing_selected_means_everything_the_established_convention(open_bus, 
     """``scope='selected wells'`` with nothing selected IS the whole dataset — byte-for-byte the
     behaviour that existed before a selector existed."""
     seen = {}
-    import squidmip._command as mod
+    import squidxplorer._command as mod
 
     def fake_project_plate(reader, **kw):
         seen["regions"] = kw.get("regions")
         return iter(())
 
-    monkeypatch.setattr("squidmip.project_plate", fake_project_plate)
+    monkeypatch.setattr("squidxplorer.project_plate", fake_project_plate)
     open_bus.execute(RunOperator(operator="mip"))
     assert seen["regions"] is None, "None is the whole-plate path; a list would be a subset"
 
 
 def test_an_explicit_region_list_wins_over_the_scope(open_bus, monkeypatch):
     seen = {}
-    monkeypatch.setattr("squidmip.project_plate",
+    monkeypatch.setattr("squidxplorer.project_plate",
                         lambda reader, **kw: (seen.update(kw), iter(()))[1])
     regions = open_bus.execute(Describe()).data["regions"][:1]
     open_bus.execute(RunOperator(operator="mip", scope=_run_scope.SCOPE_PLATE, regions=regions))
@@ -240,7 +240,7 @@ def test_the_selection_drives_the_selected_wells_scope(open_bus, monkeypatch):
     """The headless surface resolves 'selected wells' through the SAME
     ``_run_scope.resolve_run_scope`` the GUI does — there is not a second resolver."""
     seen = {}
-    monkeypatch.setattr("squidmip.project_plate",
+    monkeypatch.setattr("squidxplorer.project_plate",
                         lambda reader, **kw: (seen.update(kw), iter(()))[1])
     regions = open_bus.execute(Describe()).data["regions"][:1]
     open_bus.executor.selection = list(regions)
@@ -322,8 +322,8 @@ def test_a_preview_runs_with_the_parameters_it_was_given_not_the_defaults(squid_
     """
     import numpy as np
 
-    from squidmip import add_projector
-    from squidmip._engine import Param, _OPERATORS
+    from squidxplorer import add_projector
+    from squidxplorer._engine import Param, _OPERATORS
 
     def _factory(fill=7):
         return lambda planes: np.full_like(np.asarray(next(iter(planes))), fill)
@@ -374,7 +374,7 @@ def test_the_result_names_the_target_set_it_resolved(open_bus):
 def test_a_run_that_produced_nothing_is_partial_not_ok(open_bus, monkeypatch):
     """A run where every well raised still returns politely — the per-well fault isolation is what
     keeps one bad file from aborting a plate. It is not a success."""
-    monkeypatch.setattr("squidmip.project_plate", lambda reader, **kw: iter(()))
+    monkeypatch.setattr("squidxplorer.project_plate", lambda reader, **kw: iter(()))
     r = open_bus.execute(RunOperator(operator="mip", scope=_run_scope.SCOPE_PLATE))
     assert r.data["metrics"]["outcome"] == "partial"
     assert "produced nothing" in r.data["metrics"]["detail"]
@@ -394,7 +394,7 @@ def test_a_result_is_serialisable_so_an_agent_can_read_it(open_bus):
 
 
 def test_a_refusal_always_carries_a_code_and_a_sentence(bus):
-    from squidmip._command import REFUSALS
+    from squidxplorer._command import REFUSALS
 
     for payload in ({"kind": "nope"}, Describe(), StopRun(), RunOperator(operator="mip")):
         r = bus.execute(payload)

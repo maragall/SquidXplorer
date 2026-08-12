@@ -91,7 +91,7 @@ jobs:
   # WHY THIS IS A SEPARATE JOB AND NOT A MATRIX LEG. Windows fails this suite for a reason that is
   # documented, reproducible only on Windows, and NOT fixed here:
   #
-  #   an access violation in squidmip/_montage.py:302 `_composite_band`
+  #   an access violation in squidxplorer/_montage.py:302 `_composite_band`
   #   (`gray[ch] = table[plane.reshape(-1)]`), reached from :262 inside concurrent.futures
   #   worker threads.
   #

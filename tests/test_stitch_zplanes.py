@@ -21,15 +21,15 @@ import pytest
 pytest.importorskip("tilefusion", reason="tilefusion (maragall/stitcher) not installed: the stitch "
                                          "adapter is UNTESTED here, which is not the same as passing")
 
-from squidmip._engine import _OPERATORS, add_projector
-from squidmip._flatfield import (
+from squidxplorer._engine import _OPERATORS, add_projector
+from squidxplorer._flatfield import (
     FlatfieldProfile,
     clear_profile,
     correct_flatfield,
     set_profiles,
 )
-from squidmip._stitch import stitch_region
-from squidmip.projection import PLANE_OP, plane_op
+from squidxplorer._stitch import stitch_region
+from squidxplorer.projection import PLANE_OP, plane_op
 
 from tests.test_stitch import CHANNELS, GRID, TILE, _FakeReader, _master
 
@@ -164,7 +164,7 @@ def test_every_plane_is_fused_with_the_same_solved_offsets(master):
     reader = _ZReader(_master(), error_px=error)
 
     calls = []
-    import squidmip._stitch as stitch_mod
+    import squidxplorer._stitch as stitch_mod
     real_solve = stitch_mod.solve_offsets_px
 
     def _spy(*a, **kw):
@@ -268,7 +268,7 @@ def test_the_guard_catches_an_operator_registered_under_another_name(master):
     `== "flatfield"` guard — which this package does have, in two other places — would miss every
     one of them, and the double-apply would be back with no test failing.
     """
-    from squidmip._flatfield import flatfield_op
+    from squidxplorer._flatfield import flatfield_op
 
     name = "flatfield_under_another_name"
     add_projector(name, flatfield_op(_vignette_profile()))
@@ -336,7 +336,7 @@ def test_stitching_a_label_operator_refuses_rather_than_averaging_object_ids(mas
 
 
 def test_project_well_z_selects_exactly_one_acquisition_plane(master):
-    from squidmip.projection import project_well
+    from squidxplorer.projection import project_well
 
     reader = _ZReader(master)
     whole = project_well(reader, "A1", 0, reduce=plane_op(_passthrough), consumes=PLANE_OP)
@@ -350,7 +350,7 @@ def test_project_well_z_selects_exactly_one_acquisition_plane(master):
 
 def test_project_well_refuses_a_single_plane_for_a_z_reducer(master):
     """"The MIP of one plane" would be a different result wearing the same operator name."""
-    from squidmip.projection import project, project_well
+    from squidxplorer.projection import project, project_well
 
     reader = _ZReader(master)
     with pytest.raises(ValueError, match="only meaningful for a plane-op"):

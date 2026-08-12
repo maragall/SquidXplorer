@@ -1,19 +1,19 @@
-"""The transform-recipe + content-addressed result cache (squidmip._recipe).
+"""The transform-recipe + content-addressed result cache (squidxplorer._recipe).
 
 The window tree is navigation; results live in a flat cache keyed by (scope, op-chain). A recipe is
 the copy/paste unit (an operator or a LUT). These tests pin the three properties the design relies
 on: content-addressing (same transform -> same key), order sensitivity of a chain, and the cache's
 sharing + LRU bound.
 
-Task 2 (2026-07-29) changed what the cache STORES: a :class:`squidmip._result.Result` rather than a
+Task 2 (2026-07-29) changed what the cache STORES: a :class:`squidxplorer._result.Result` rather than a
 bare array. The three cache tests below therefore store results, and what they pin is unchanged --
 sharing, versioning and the LRU bound are properties of the KEY, and the key did not move. What a
 result is and why it has to describe itself lives in ``tests/test_result.py``.
 """
 
-from squidmip._address import Extent
-from squidmip._recipe import LUT, OPERATOR, Recipe, RecipeChain, ResultCache
-from squidmip._result import Result, Substance
+from squidxplorer._address import Extent
+from squidxplorer._recipe import LUT, OPERATOR, Recipe, RecipeChain, ResultCache
+from squidxplorer._result import Result, Substance
 
 
 def _result(region: str, channel: str = "DAPI") -> Result:
@@ -169,12 +169,12 @@ def test_the_cache_refuses_a_bare_array():
 # The two PRODUCTION doors onto RESULTS.
 #
 # Until 2026-08-05 `RESULTS` was instantiated, documented, and exercised only by this file: it had
-# no writer and no reader anywhere in `squidmip/`. A second window opening a region that another
+# no writer and no reader anywhere in `squidxplorer/`. A second window opening a region that another
 # window had already computed therefore showed nothing, and the only way to get the layer was to
 # run the operator again over the same pixels.
 
 def test_a_result_filed_by_one_caller_is_found_by_another_for_the_same_region():
-    from squidmip import _recipe
+    from squidxplorer import _recipe
 
     _recipe.RESULTS.clear()
     result = _result("B7", "DAPI")
@@ -193,7 +193,7 @@ def test_the_lookup_is_scoped_to_its_region_its_operator_and_its_acquisition():
     ``B7``, so with the historical constant ``version=0`` a second acquisition ingested into the
     same process would replay the first one's ``B7`` into a window showing a different plate.
     """
-    from squidmip import _recipe
+    from squidxplorer import _recipe
 
     _recipe.RESULTS.clear()
     mine = _result("B7", "DAPI")
@@ -212,7 +212,7 @@ def test_the_lookup_is_scoped_to_its_region_its_operator_and_its_acquisition():
 def test_a_tab_scoped_run_is_a_different_entry_from_the_plate_wide_one():
     """``op`` is the LAYER KEY. A subset run filed under ``mip`` would be replayed into a window
     as if it were the whole-plate ``mip``, which is a mosaic with holes wearing the wrong name."""
-    from squidmip import _recipe
+    from squidxplorer import _recipe
 
     _recipe.RESULTS.clear()
     whole = _result("B7", "DAPI")

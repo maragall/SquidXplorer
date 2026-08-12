@@ -36,7 +36,7 @@ pytest.importorskip("qtpy")
 if "PySide6" in sys.modules or "PySide2" in sys.modules:
     pytest.skip("PySide already loaded — Qt binding conflict", allow_module_level=True)
 
-from squidmip import _plate_overview as PO  # noqa: E402
+from squidxplorer import _plate_overview as PO  # noqa: E402
 
 from .test_viewer import qapp  # noqa: E402,F401  (fixture)
 

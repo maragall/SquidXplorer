@@ -3,7 +3,7 @@
 
 This file is now ONLY the command line. The measurement (:func:`halo_core_ratio`,
 :func:`recommend`), the structure picking and the turbo rendering live in
-``squidmip._decon_qc``, because the GUI's deconvolution panel needs exactly the same
+``squidxplorer._decon_qc``, because the GUI's deconvolution panel needs exactly the same
 functions and a package cannot import a script directory. One implementation, two front
 ends - see that module's docstring.
 
@@ -26,12 +26,12 @@ from pathlib import Path
 
 import numpy as np
 
-# Run from anywhere: import the repo this file lives in, not whatever `squidmip` happens
+# Run from anywhere: import the repo this file lives in, not whatever `squidxplorer` happens
 # to be installed. The mac filesystem is case-insensitive, so an invoker sitting in
 # .../CEPHLA/ instead of .../Cephla/ otherwise resolves a different tree.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from squidmip._decon_qc import (            # noqa: E402  (path pin must come first)
+from squidxplorer._decon_qc import (            # noqa: E402  (path pin must come first)
     DEFAULT_CROP_HALF,
     DEFAULT_MAX_ITERATIONS,
     DEFAULT_VIEW_HALF,
@@ -69,7 +69,7 @@ def parse_args(argv=None):
 
 def main(argv=None) -> int:
     args = parse_args(argv)
-    from squidmip._decon import DEFAULT_ITERATIONS, METHOD, OpticsParams, _run, make_psf
+    from squidxplorer._decon import DEFAULT_ITERATIONS, METHOD, OpticsParams, _run, make_psf
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)

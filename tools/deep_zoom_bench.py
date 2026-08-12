@@ -21,9 +21,9 @@ import warnings
 
 import numpy as np
 
-from squidmip._tiling import select_tiles
-from squidmip._tilesource import ReaderTileSource, _paste_field, plate_ladder
-from squidmip.reader import open_reader
+from squidxplorer._tiling import select_tiles
+from squidxplorer._tilesource import ReaderTileSource, _paste_field, plate_ladder
+from squidxplorer.reader import open_reader
 
 
 def _render(src, ladder, geometry, channel, bbox, level, out_px):

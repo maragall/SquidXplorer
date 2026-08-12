@@ -20,8 +20,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from squidmip import available_projectors, project, project_well, operator_consumes
-from squidmip._flatfield import (
+from squidxplorer import available_projectors, project, project_well, operator_consumes
+from squidxplorer._flatfield import (
     FlatfieldProfile,
     active_profiles,
     clear_profile,
@@ -31,8 +31,8 @@ from squidmip._flatfield import (
     set_profile,
     set_profiles,
 )
-from squidmip.projection import PLANE_OP
-from squidmip.reader import open_reader
+from squidxplorer.projection import PLANE_OP
+from squidxplorer.reader import open_reader
 
 pytest.importorskip("scipy.ndimage")
 
@@ -125,7 +125,7 @@ def test_estimate_profile_normalises_a_field_the_constructor_would_have_refused(
     Pinned through the SEAM rather than the estimator, because the claim is about what
     ``estimate_profile`` guarantees its caller, not about what BaSiC happens to return today.
     """
-    import squidmip._flatfield as F
+    import squidxplorer._flatfield as F
 
     off_by = np.full((8, 8), 1.0, dtype=np.float32)
     off_by[0, 0] = 1.32                    # mean 1.005 — the failing magnitude, deterministic
@@ -270,14 +270,14 @@ def test_flatfield_is_registered_as_a_plane_op():
 def test_the_registered_operator_fails_loud_and_actionable_with_no_profile_set():
     """A flat-field with no profile has no sane default — an identity field would silently do
     nothing while the UI said 'flat-field applied'."""
-    from squidmip._engine import _resolve_operator
+    from squidxplorer._engine import _resolve_operator
     op = _resolve_operator("flatfield").fn
     with pytest.raises(ValueError, match="no flat-field profile"):
         op([np.ones((8, 8), np.uint16)])
 
 
 def test_set_profile_activates_the_registered_operator():
-    from squidmip._engine import _resolve_operator
+    from squidxplorer._engine import _resolve_operator
     ff = _vignette(32)
     set_profile(FlatfieldProfile(ff), channel="Fluorescence_405_nm_Ex")
     assert list(active_profiles()) == ["Fluorescence_405_nm_Ex"]
@@ -344,7 +344,7 @@ def test_every_channel_is_corrected_by_its_own_gain_field(squid_dataset):
     The second assertion is what makes the first one worth its green: another channel's field
     must give a different answer on this fixture, so a broadcast cannot pass by coincidence.
     """
-    from squidmip._engine import _resolve_operator
+    from squidxplorer._engine import _resolve_operator
 
     root, _ = squid_dataset
     reader = open_reader(root)
@@ -379,7 +379,7 @@ def test_a_channel_with_no_installed_profile_is_refused_by_name(squid_dataset):
     one channel's tiles — and the OTHER channel must stop the run, named, listing what is
     installed. Correcting it with the field beside it is not a degraded answer, it is a different
     measurement, and it is the one that shipped."""
-    from squidmip._engine import _resolve_operator
+    from squidxplorer._engine import _resolve_operator
 
     root, _ = squid_dataset
     reader = open_reader(root)
@@ -397,7 +397,7 @@ def test_a_channel_with_no_installed_profile_is_refused_by_name(squid_dataset):
 
     # ...and the channel that HAS one still binds and corrects, so this is a refusal aimed at one
     # channel, not a dead operator.
-    from squidmip.projection import bind_channel
+    from squidxplorer.projection import bind_channel
 
     raw = reader.read("B2", 0, names[0], reader.metadata["z_levels"][0], 0)
     bound = bind_channel(_resolve_operator("flatfield").fn, str(root), names[0])
@@ -408,7 +408,7 @@ def test_a_channel_with_no_installed_profile_is_refused_by_name(squid_dataset):
 def test_nothing_installed_still_refuses_loud_and_actionable():
     """Unchanged claim, kept: an identity field would silently do nothing while the UI said
     'flat-field applied'."""
-    from squidmip._engine import _resolve_operator
+    from squidxplorer._engine import _resolve_operator
 
     op = _resolve_operator("flatfield")
     with pytest.raises(ValueError, match="no flat-field profile"):
@@ -423,7 +423,7 @@ def test_the_unbound_operator_refuses_to_choose_between_several_channels():
     ``project_well`` always binds, so this is the direct-``fn`` path the registry conformance
     suite uses. With exactly one profile installed there is no choice to make and it applies it;
     with several, choosing is the defect."""
-    from squidmip._engine import _resolve_operator
+    from squidxplorer._engine import _resolve_operator
 
     op = _resolve_operator("flatfield").fn
     set_profiles({"a": FlatfieldProfile(_vignette(8)), "b": FlatfieldProfile(_vignette(8, 0.2))})
@@ -439,8 +439,8 @@ def test_per_channel_correction_on_the_real_stored_profile(laser_af_dataset, cap
     channel 0 of that file, so the channel anyone looks at first was bit-identical either way —
     which is why nobody saw it.
     """
-    from squidmip._engine import _resolve_operator
-    from squidmip.projection import bind_channel
+    from squidxplorer._engine import _resolve_operator
+    from squidxplorer.projection import bind_channel
 
     npy = laser_af_dataset / f"{laser_af_dataset.name}_flatfield.npy"
     if not npy.exists():

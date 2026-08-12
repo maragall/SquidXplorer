@@ -34,7 +34,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 
-from squidmip._logpane import LOG_FORMAT, format_console, format_record
+from squidxplorer._logpane import LOG_FORMAT, format_console, format_record
 
 #: The root window's default width. A console line has to be readable at this width.
 _ROOT_WIDTH_PX = 596
@@ -45,7 +45,7 @@ _CHARS_THAT_FIT = 78
 
 
 def _record(msg="[3] A1 fov 2  decon(sigma=2.0)  done in 1.4 s", name="squid.xplorer.viewer"):
-    r = logging.LogRecord(name, logging.INFO, "/x/squidmip/_viewer.py", 1234, msg, None, None)
+    r = logging.LogRecord(name, logging.INFO, "/x/squidxplorer/_viewer.py", 1234, msg, None, None)
     r.funcName = "run_operator"
     return r
 
@@ -120,7 +120,7 @@ def test_no_height_is_swapped_in_and_out_behind_the_users_back():
     of the plate reaching 50%.
     """
     pytest.importorskip("qtpy")
-    import squidmip._viewer as V
+    import squidxplorer._viewer as V
 
     assert not hasattr(V, "_TOP_ROW_READING_PX"), "the second height is back"
     assert not hasattr(V.PlateWindow, "_sync_top_row_height"), "the tab-driven height swap is back"

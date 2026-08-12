@@ -1,12 +1,12 @@
 # The plate contract: what SquidXplorer writes, and what it promises about it
 
-`plate.ome.zarr` is written by `squidmip/_output.py` and read by `squidmip/reader.py`,
-`squidmip/_tilesource.py` and `squidmip/_viewer.py`. We are both producer and consumer, which is
+`plate.ome.zarr` is written by `squidxplorer/_output.py` and read by `squidxplorer/reader.py`,
+`squidxplorer/_tilesource.py` and `squidxplorer/_viewer.py`. We are both producer and consumer, which is
 exactly why this document exists: an internal convention that nobody wrote down drifts, and the
 drift is not visible until something renders wrong.
 
 It drifted. From IMA-217 until 2026-07-29 the reader's own contract prose said, in two places,
-that "SquidMIP's writer emits no translation". The writer had been emitting one for months, and
+that "SquidXplorer's writer emits no translation". The writer had been emitting one for months, and
 `translation` is the PRIMARY mechanism that places every FOV on the plate. A maintainer reading
 those lines would have concluded the live mechanism was dead. That is the defect that pulled this
 document into v1 scope (Julio, 2026-07-28), rather than leaving it until a second implementation
@@ -20,17 +20,17 @@ The document is split in two, and the split is the useful part:
   in code before this document; none was written down as a guarantee, which is how one of them
   ended up implemented as a bare `except Exception` in `_viewer.py`.
 
-Machine-checkable half: `squidmip/contract/`. Validate any plate with
+Machine-checkable half: `squidxplorer/contract/`. Validate any plate with
 
-    python -m squidmip.contract.validate /path/to/plate.ome.zarr
+    python -m squidxplorer.contract.validate /path/to/plate.ome.zarr
 
 If this document and that code ever disagree, this document is the contract and the code is the
 bug.
 
 ## The version
 
-`squidmip/contract/version.py` holds `PLATE_CONTRACT_VERSION`. It is stamped ONCE, on the plate
-group, at `zarr.json -> attributes -> squidmip -> plate_contract_version`, deliberately outside
+`squidxplorer/contract/version.py` holds `PLATE_CONTRACT_VERSION`. It is stamped ONCE, on the plate
+group, at `zarr.json -> attributes -> squidxplorer -> plate_contract_version`, deliberately outside
 OME's `attributes.ome` namespace (that namespace belongs to the spec and is what
 `ome-zarr-models` validates).
 
@@ -81,7 +81,7 @@ alphanumeric field path; use the listed paths, do not assume a range.
    `multiscales[0].datasets[].path`. Every name is read, none is assumed. `_montage._PlateLayout`
    and `_tilesource.plate_layout_from_store` do this, and it is why they cope with FOV ids and
    level names they have never seen.
-2. **Call `squidmip.contract.field_path(base, wellpath, fov, level)`** when you already hold the
+2. **Call `squidxplorer.contract.field_path(base, wellpath, fov, level)`** when you already hold the
    parts, which is the case on every read path in the viewer.
 
 Before 2026-07-29 the path was reconstructed by f-string at four sites in `_viewer.py`, three of
@@ -91,7 +91,7 @@ makes the version gate above enforceable rather than decorative.
 
 One shortcut survives and is worth knowing about: `_montage` and `_tilesource` open a level by
 `field_dir / str(level_index)` rather than by the recorded `datasets[].path`. That is correct for
-every store SquidMIP writes (it names levels `"0"`, `"1"`, ...) and would break on a conforming
+every store SquidXplorer writes (it names levels `"0"`, `"1"`, ...) and would break on a conforming
 store that names them otherwise. It is a NAME per the spec, not an index.
 
 ### Axis order: TCZYX
@@ -159,7 +159,7 @@ extent, so a stale slider position cannot index off the end of a shorter re-inge
 | `_workers._ComputedPlateWorker._read` | takes `time_point`, clamped |
 | `_plate_overview` loupe source (`read_crop`, `coarse`) | takes `time_point`, clamped |
 
-`TimePointBar` (`squidmip/_time_point.py`) is the control, mounted on the plate and in every window.
+`TimePointBar` (`squidxplorer/_time_point.py`) is the control, mounted on the plate and in every window.
 One widget CLASS for both, so the two can never disagree about what a timepoint control is, and a
 separate INSTANCE each, because a window navigates independently: a shared position would make
 comparing two wells at different timepoints impossible.
@@ -214,7 +214,7 @@ run back to back:
 
 The before column is the whole bug in one row: the second step was the FASTEST of the three,
 because it answered t=1 with frame 0's cells. "A full plate re-read per tick" turned out to be true
-only of an uncached plate (`SQUIDMIP_PLATE_CACHE=0`); warm, every tick after the first was a replay
+only of an uncached plate (`SQUIDXPLORER_PLATE_CACHE=0`); warm, every tick after the first was a replay
 of the first frame. After, a NEW timepoint costs a plate read, which is honest work, and a
 REVISITED one is a cache hit — the property a play button would need.
 
@@ -279,7 +279,7 @@ timepoint (`PlateOverview.set_time_point`), the worker carries it (including in 
 `tests/test_viewer.py::test_the_loupe_reads_the_timepoint_the_plate_is_showing` drives it through
 the widget rather than inspecting a signature.
 
-`python -m squidmip.contract.validate` still warns when a plate carries more than one timepoint.
+`python -m squidxplorer.contract.validate` still warns when a plate carries more than one timepoint.
 That warning was the only thing saying so out loud while the gap existed; it is now belt and braces.
 
 **The next axis, found the same day: the FIELD.** The Time section closes by naming the part that
@@ -331,7 +331,7 @@ other while breaking the "levels share an origin" assumption every mosaic compos
 
 ### Dataset `translation` falls back to a sibling `coordinates.csv`
 
-`translation` is the only position mechanism the NGFF spec defines, and SquidMIP's writer **does**
+`translation` is the only position mechanism the NGFF spec defines, and SquidXplorer's writer **does**
 emit it (IMA-217). Three cases legitimately carry none: an acquisition with no recorded stage
 positions, a store written before IMA-217, and Squid's 6-D layout, where one translation covers a
 whole region and therefore cannot be a per-FOV position.
@@ -360,12 +360,12 @@ passing it off as acquisition truth.
 Fields at or below 256 px in Y and X are written single-level on purpose
 (`_output._PYRAMID_MIN_YX`), and a foreign store may carry one level for any reason.
 
-**Fallback:** level `"0"`, which a field always has. `squidmip.contract.field_levels` is the one
+**Fallback:** level `"0"`, which a field always has. `squidxplorer.contract.field_levels` is the one
 place that reads `multiscales[0].datasets[*].path` and applies this fallback. Consequence, not a
 defect: navigation pays full resolution for a thumbnail, and the loupe's level selection cannot
 bound the read, so it strides in TensorStore instead.
 
-### `.squidmip-incomplete` marks a store mid-write
+### `.squidxplorer-incomplete` marks a store mid-write
 
 Written from a plate write's first byte to its last (IMA-230) and removed as the write's last act.
 Its presence means the run did not finish and wells the plate metadata promises may be absent.

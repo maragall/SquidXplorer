@@ -15,7 +15,7 @@ import sys
 
 import pytest
 
-from squidmip._logpane import (
+from squidxplorer._logpane import (
     MAX_LINES,
     STDOUT_LOGGER,
     LogBus,
@@ -25,7 +25,7 @@ from squidmip._logpane import (
 )
 
 
-def _record(msg="hello", level=logging.INFO, name="squidmip", args=()):
+def _record(msg="hello", level=logging.INFO, name="squidxplorer", args=()):
     return logging.LogRecord(name=name, level=level, pathname=__file__, lineno=1,
                              msg=msg, args=args, exc_info=None)
 
@@ -60,7 +60,7 @@ def test_a_THIRD_PARTY_library_appears_without_being_told_about_us(bus):
     Cellpose or StarDist. None of them will ever emit OUR signal, and all of them already use
     `logging`. So a library nobody has wired up must still show up.
 
-    MUTATION: install on "squidmip" instead of the root logger and this goes red.
+    MUTATION: install on "squidxplorer" instead of the root logger and this goes red.
     """
     seen = []
     bus.subscribe(lambda level, line: seen.append(line))
@@ -81,7 +81,7 @@ def test_installing_twice_does_not_double_every_line(bus):
     bus.install()
     bus.install()
 
-    logging.getLogger("squidmip.test").info("once")
+    logging.getLogger("squidxplorer.test").info("once")
     assert len([ln for ln in seen if "once" in ln]) == 1, f"line was duplicated: {seen}"
 
 
@@ -90,7 +90,7 @@ def test_debug_is_dropped_but_warnings_and_errors_are_not(bus):
     bus.subscribe(lambda level, line: seen.append((level, line)))
     bus.install()
 
-    log = logging.getLogger("squidmip.test")
+    log = logging.getLogger("squidxplorer.test")
     log.debug("noise for a terminal")
     log.info("something happened")
     log.warning("something is off")
@@ -133,7 +133,7 @@ def test_a_subscriber_that_raises_does_not_stop_the_others(bus):
     bus.subscribe(lambda level, line: good.append(line))
     bus.install()
 
-    logging.getLogger("squidmip.test").info("reaches the second sink")
+    logging.getLogger("squidxplorer.test").info("reaches the second sink")
     assert any("reaches the second sink" in ln for ln in good), (
         "one raising subscriber silenced the whole panel"
     )
@@ -144,9 +144,9 @@ def test_uninstall_stops_delivery(bus):
     seen = []
     bus.subscribe(lambda level, line: seen.append(line))
     bus.install()
-    logging.getLogger("squidmip.test").info("before")
+    logging.getLogger("squidxplorer.test").info("before")
     bus.uninstall()
-    logging.getLogger("squidmip.test").info("after")
+    logging.getLogger("squidxplorer.test").info("after")
 
     assert any("before" in ln for ln in seen)
     assert not any("after" in ln for ln in seen), "records kept arriving after uninstall"
@@ -318,7 +318,7 @@ def test_the_RAW_PREVIEW_captures_print_into_the_log(tmp_path):
     pytest.importorskip("qtpy")
     from qtpy.QtWidgets import QApplication
 
-    import squidmip._viewer as V
+    import squidxplorer._viewer as V
 
     QApplication.instance() or QApplication([])
     (tmp_path / "acq").mkdir()
@@ -343,7 +343,7 @@ def test_the_capture_is_handed_BACK_after_a_preview_too(tmp_path):
     pytest.importorskip("qtpy")
     from qtpy.QtWidgets import QApplication
 
-    import squidmip._viewer as V
+    import squidxplorer._viewer as V
 
     QApplication.instance() or QApplication([])
     (tmp_path / "acq").mkdir()

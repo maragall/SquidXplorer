@@ -1,4 +1,4 @@
-"""Bricking geometry and policy (squidmip._bricks) + the per-brick read (squidmip._napari3d).
+"""Bricking geometry and policy (squidxplorer._bricks) + the per-brick read (squidxplorer._napari3d).
 
 These are the decisions that cannot be checked by looking at the screen: whether the tiles COVER
 the volume exactly, whether a brick lands on the world micrometre it claims, and whether the stride
@@ -11,8 +11,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from squidmip import _bricks
-from squidmip._napari3d import read_brick, region_origin_um, roi_window_px
+from squidxplorer import _bricks
+from squidxplorer._napari3d import read_brick, region_origin_um, roi_window_px
 
 
 # -- plan: the tiles must COVER, and never overlap --------------------------------------
@@ -216,7 +216,7 @@ class _Reader:
     ``t`` is in the signature because the READER PROTOCOL has it (`reader.read(region, fov,
     channel, z, t=0)`, pinned across all four real readers by `tests/test_reader_protocol.py`).
     It was absent here, so this double could not be handed a timepoint at all -- and the whole
-    3D/brick path in `squidmip/_napari3d.py` calls `reader.read(region, fov, channel, z)` with no
+    3D/brick path in `squidxplorer/_napari3d.py` calls `reader.read(region, fov, channel, z)` with no
     ``t``, i.e. it is HARDCODED TO TIMEPOINT 0 while the same window passes `t=self.time_point`
     to its mosaic worker and its video worker. That is a live defect (see the note in the report
     for this change); the point here is that the double no longer LOCKS IT IN: threading ``t``

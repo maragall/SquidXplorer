@@ -55,7 +55,7 @@ because that is exactly what the crash destroys:
     pin every funcarg EXCEPT the QApplication                0 / 12
 
 Bisected down to that one object: pinning the whole funcargs dict fixed it, pinning all of it but
-the app did not, pinning the app alone did. The fix is ``squidmip._viewer.qt_app()``, which holds
+the app did not, pinning the app alone did. The fix is ``squidxplorer._viewer.qt_app()``, which holds
 the QApplication in a module global for the life of the process, exactly as ``_fusion_style()``
 holds the style. ``PlateWindow.__init__`` calls it, so every window pins its own application
 however that window was constructed.
@@ -114,8 +114,8 @@ pytest.importorskip("qtpy")
 
 from qtpy.QtWidgets import QApplication  # noqa: E402
 
-import squidmip._viewer as V  # noqa: E402
-from squidmip._command import OpenAcquisition  # noqa: E402
+import squidxplorer._viewer as V  # noqa: E402
+from squidxplorer._command import OpenAcquisition  # noqa: E402
 
 
 #: Comfortably past the 6-window failure point measured on macOS, so a reintroduction segfaults
@@ -135,7 +135,7 @@ def qapp():
     # library must survive a caller who keeps the application only in a fixture cache. Pinning it
     # here would test the fixture instead of the fix.
     app = QApplication.instance() or QApplication([])
-    app.setProperty("_squidmip_test", True)
+    app.setProperty("_squidxplorer_test", True)
     return app
 
 

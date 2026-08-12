@@ -18,7 +18,7 @@ so the repo's own type annotation asserted the thing that is not true.
 
 WHAT IS PINNED HERE
 -------------------
-* All four reader classes satisfy :class:`squidmip.reader.SquidAcquisitionReader`, exercised
+* All four reader classes satisfy :class:`squidxplorer.reader.SquidAcquisitionReader`, exercised
   through every one of the six writer fixtures rather than through whichever acquisition happens
   to be on this machine.
 * The Protocol describes what the four ALREADY do. Its member set is the intersection, asserted:
@@ -34,7 +34,7 @@ WHAT IS PINNED HERE
   and it is why Squid's own live-acquisition reader (fed by ``signal_zarr_frame_written``) can be
   a ``SquidAcquisitionReader`` without a dependency pointing the wrong way.
 * The name is exported from the package root and listed in ``__all__``, because "Squid can import
-  it" is the entire point and a name reachable only as ``squidmip.reader.X`` is a weaker promise.
+  it" is the entire point and a name reachable only as ``squidxplorer.reader.X`` is a weaker promise.
 
 NOT pinned, deliberately: that ``isinstance`` is a real check. It is a smoke test. The docstring on
 the Protocol says so, and the signature test above is what actually holds the four to the contract.
@@ -48,9 +48,9 @@ import re
 import numpy as np
 import pytest
 
-import squidmip
-from squidmip import open_reader
-from squidmip.reader import (
+import squidxplorer
+from squidxplorer import open_reader
+from squidxplorer.reader import (
     SquidAcquisitionReader,
     SquidMultiPageTiffReader,
     SquidOMEReader,
@@ -212,6 +212,6 @@ def test_a_class_missing_a_member_does_not_satisfy_it():
 # --- reachable from another repo ----------------------------------------------------------------
 
 def test_the_name_is_exported_from_the_package_root():
-    """``from squidmip import SquidAcquisitionReader``. That sentence is the deliverable."""
-    assert squidmip.SquidAcquisitionReader is SquidAcquisitionReader
-    assert "SquidAcquisitionReader" in squidmip.__all__
+    """``from squidxplorer import SquidAcquisitionReader``. That sentence is the deliverable."""
+    assert squidxplorer.SquidAcquisitionReader is SquidAcquisitionReader
+    assert "SquidAcquisitionReader" in squidxplorer.__all__

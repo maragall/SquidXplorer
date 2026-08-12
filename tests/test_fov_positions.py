@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from squidmip.reader import _fov_positions_um_or_empty, load_fov_positions_um, open_reader
+from squidxplorer.reader import _fov_positions_um_or_empty, load_fov_positions_um, open_reader
 
 
 def _csv(rows, header="region,x (mm),y (mm),z (mm)"):
@@ -214,7 +214,7 @@ def test_placement_consumes_um_without_rescaling(squid_dataset):
     0.5 mm = 500 µm at 0.5 µm/px is exactly 1000 px. If either side still converted, this
     would be 1 px or 1_000_000 px — both of which render as a plausible picture.
     """
-    from squidmip._placement import fov_offsets_px
+    from squidxplorer._placement import fov_offsets_px
 
     root, _ = squid_dataset
     meta = open_reader(root).metadata
@@ -333,7 +333,7 @@ def test_degradation_does_not_swallow_unexpected_errors(squid_dataset, monkeypat
     calls: the per-region cross-check moved into it so one truncated well stops costing the
     whole plate its mosaic. The property under test is unchanged.
     """
-    import squidmip.reader as reader_mod
+    import squidxplorer.reader as reader_mod
 
     def boom(*_a, **_k):
         raise RuntimeError("disk on fire")

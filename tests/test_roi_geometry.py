@@ -20,11 +20,11 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from squidmip._napari3d import region_origin_um, roi_window_px
-from squidmip._napari_view import scale_translate_from_bbox_um
-from squidmip._placement import Placement, PlacedArray, fov_offsets_px, mosaic_extent_px
-from squidmip._stitch import _mosaic_geometry
-from squidmip._tilesource import fov_bboxes_um, plate_ladder
+from squidxplorer._napari3d import region_origin_um, roi_window_px
+from squidxplorer._napari_view import scale_translate_from_bbox_um
+from squidxplorer._placement import Placement, PlacedArray, fov_offsets_px, mosaic_extent_px
+from squidxplorer._stitch import _mosaic_geometry
+from squidxplorer._tilesource import fov_bboxes_um, plate_ladder
 
 # The real 10x tissue set.
 STAGE_X0_UM = 96813.688
@@ -156,8 +156,8 @@ def test_a_stitched_fov_subset_is_not_stretched_over_the_whole_well():
     stretch, and Julio's "the stitched view is not exactly the same as that of raw (detected 2 FOVs
     instead of 4)".
     """
-    from squidmip._mosaic_source import mosaic_bbox_um
-    from squidmip._op_result import RegionResultAccumulator
+    from squidxplorer._mosaic_source import mosaic_bbox_um
+    from squidxplorer._op_result import RegionResultAccumulator
 
     meta = _subset_meta()
     subset = [0, 1]
@@ -186,8 +186,8 @@ def test_a_stitched_fov_subset_is_not_stretched_over_the_whole_well():
 def test_a_per_fov_operator_still_uses_the_preview_footprint():
     """The fallback is not dead: a per-FOV operator's planes ARE fused by the preview's own code,
     so the preview's footprint is exactly right for them and must not change."""
-    from squidmip._mosaic_source import mosaic_bbox_um
-    from squidmip._op_result import RegionResultAccumulator
+    from squidxplorer._mosaic_source import mosaic_bbox_um
+    from squidxplorer._op_result import RegionResultAccumulator
 
     meta = _subset_meta()
     acc = RegionResultAccumulator("bgsub", "A1", meta, ["c0"])

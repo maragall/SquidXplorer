@@ -15,7 +15,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from squidmip._contrast import auto_contrast, dtype_range, sample_plane
+from squidxplorer._contrast import auto_contrast, dtype_range, sample_plane
 
 
 def _fluorescence(bg=500.0, bg_noise=30.0, signal=8000.0, frac=0.02, shape=(256, 256), seed=0):

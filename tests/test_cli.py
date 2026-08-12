@@ -3,7 +3,7 @@
 Headless, no Qt. Uses the shared tiny `squid_dataset` fixture (a real 2-well acquisition on disk).
 
 The thing most of these tests are actually about is the EXIT CODE. A batch surface whose failure
-mode is `exit 0` is not a batch surface: `for d in */; do squidmip "$d"; done` cannot tell a
+mode is `exit 0` is not a batch surface: `for d in */; do squidxplorer "$d"; done` cannot tell a
 finished plate from one where every well was skipped, and that is exactly what this CLI did — the
 `partial` verdict was computed in the command layer and then discarded by an unconditional
 `_done(...)`. So `main()` is tested through its RETURN VALUE (the console script does
@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from squidmip._cli import (EXIT_INTERRUPTED, EXIT_NOTHING, EXIT_OK, EXIT_PARTIAL, EXIT_USAGE,
+from squidxplorer._cli import (EXIT_INTERRUPTED, EXIT_NOTHING, EXIT_OK, EXIT_PARTIAL, EXIT_USAGE,
                            ProcessParameters, exit_code, main, run)
 
 
@@ -96,8 +96,8 @@ def test_help_lists_every_operators_declared_parameters():
     is wrong; one that compares the help against the declaration still catches the help drifting,
     which is all it was ever for.
     """
-    from squidmip._engine import operator_params
-    from squidmip._operations import runnable_operators
+    from squidxplorer._engine import operator_params
+    from squidxplorer._operations import runnable_operators
 
     described = ProcessParameters.model_fields["param"].description
     for name in runnable_operators():
@@ -232,10 +232,10 @@ def test_a_freeform_slide_acquisition_is_not_refused(real_dataset, tmp_path):
 
 
 def test_wellplate_format_override_is_honoured(squid_dataset, tmp_path, monkeypatch):
-    # _plate_shape documents SQUIDMIP_WELLPLATE_FORMAT as the override "for headless / CLI runs".
+    # _plate_shape documents SQUIDXPLORER_WELLPLATE_FORMAT as the override "for headless / CLI runs".
     # The CLI ignored it entirely; now it resolves through the same helper, so it applies.
     root, _ = squid_dataset
-    monkeypatch.setenv("SQUIDMIP_WELLPLATE_FORMAT", "96")
+    monkeypatch.setenv("SQUIDXPLORER_WELLPLATE_FORMAT", "96")
     assert run(ProcessParameters(input_folder=str(root), output_folder=str(tmp_path)))["n_wells"] == 2
 
 
@@ -262,7 +262,7 @@ def test_an_incomplete_plate_is_refused_as_INPUT(squid_dataset, tmp_path):
     opener has to read that. (The GUI's `Open a computed .hcs plate` had the same hole and looked
     for a marker no writer produces.)
     """
-    from squidmip._output import _mark_incomplete
+    from squidxplorer._output import _mark_incomplete
 
     root, _ = squid_dataset
     done = run(ProcessParameters(input_folder=str(root), output_folder=str(tmp_path)))
@@ -391,7 +391,7 @@ def test_the_summary_line_counts_only_the_wells_that_actually_landed(squid_datas
 
 
 def test_stop_cuts_the_run_and_the_store_says_it_is_incomplete(squid_dataset, tmp_path):
-    from squidmip._output import is_incomplete
+    from squidxplorer._output import is_incomplete
 
     root, _ = squid_dataset
     manifest = run(ProcessParameters(input_folder=str(root), output_folder=str(tmp_path)),

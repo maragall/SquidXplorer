@@ -38,10 +38,10 @@ if "PySide6" in sys.modules or "PySide2" in sys.modules:
         allow_module_level=True,
     )
 
-from squidmip import _bricks  # noqa: E402
-from squidmip._address import Extent  # noqa: E402
-from squidmip._result import Result  # noqa: E402
-from squidmip import _viewer as V  # noqa: E402
+from squidxplorer import _bricks  # noqa: E402
+from squidxplorer._address import Extent  # noqa: E402
+from squidxplorer._result import Result  # noqa: E402
+from squidxplorer import _viewer as V  # noqa: E402
 
 from .conftest import shutdown_plate_window  # noqa: E402
 from .test_viewer import _drain_until, qapp  # noqa: E402,F401  (fixtures)
@@ -85,7 +85,7 @@ class TestTheVolumeIsPushedAtThePitchItsPixelsHave:
         ``scale=(dz, px, px)`` -> pushes 0.325 against a layer at 0.650 -> red, with both numbers
         in the message.
         """
-        import squidmip._napari3d as napari3d
+        import squidxplorer._napari3d as napari3d
 
         root, _ = squid_dataset
         win, w, pane = _window_with_layers(qapp, napari_pane_stub, root)
@@ -123,7 +123,7 @@ class TestTheVolumeIsPushedAtThePitchItsPixelsHave:
 
         MUTATION: ``z_step_um(meta, px, ...)`` -> z comes back 0.325 against xy 0.650 -> red.
         """
-        import squidmip._napari3d as napari3d
+        import squidxplorer._napari3d as napari3d
 
         root, _ = squid_dataset
         win, w, pane = _window_with_layers(qapp, napari_pane_stub, root)
@@ -157,7 +157,7 @@ class TestTheVolumeIsPushedAtThePitchItsPixelsHave:
 
         MUTATION: ``pitch = pitch or (px, px)`` -> a volume is pushed -> red.
         """
-        import squidmip._napari3d as napari3d
+        import squidxplorer._napari3d as napari3d
 
         root, _ = squid_dataset
         win, w, pane = _window_with_layers(qapp, napari_pane_stub, root)

@@ -22,7 +22,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from squidmip._odon import (
+from squidxplorer._odon import (
     SAMPLESHEET_COLUMNS,
     check_odon,
     find_odon,
@@ -30,7 +30,7 @@ from squidmip._odon import (
     launch_odon,
     write_samplesheet,
 )
-from squidmip._output import write_from_stream
+from squidxplorer._output import write_from_stream
 
 CH = [
     {"name": "Fluorescence_638_nm_-_Penta", "display_name": "638", "display_color": "#FF0000"},
@@ -234,7 +234,7 @@ def test_macos_app_bundle_fallback(tmp_path, monkeypatch):
     binary = _fake_binary(bundle)
     monkeypatch.delenv("ODON_BIN", raising=False)
     monkeypatch.setattr("shutil.which", lambda name: None)
-    monkeypatch.setattr("squidmip._odon._platform_default", lambda: binary)
+    monkeypatch.setattr("squidxplorer._odon._platform_default", lambda: binary)
     assert find_odon() == binary
 
 
@@ -250,7 +250,7 @@ def test_linux_arm64_says_no_build_exists(monkeypatch):
 def test_not_found_names_the_release_url(tmp_path, monkeypatch):
     monkeypatch.delenv("ODON_BIN", raising=False)
     monkeypatch.setattr("shutil.which", lambda name: None)
-    monkeypatch.setattr("squidmip._odon._platform_default", lambda: tmp_path / "absent")
+    monkeypatch.setattr("squidxplorer._odon._platform_default", lambda: tmp_path / "absent")
     with pytest.raises(FileNotFoundError, match="github.com/alexcoulton/odon/releases"):
         find_odon()
 
@@ -324,7 +324,7 @@ def test_immediate_nonzero_exit_warns_instead_of_dying_silently(tmp_path, monkey
 
 def test_cli_default_writes_no_samplesheet(squid_dataset, tmp_path):
     """No behaviour change for existing users."""
-    from squidmip._cli import ProcessParameters, run
+    from squidxplorer._cli import ProcessParameters, run
 
     root, _ = squid_dataset
     manifest = run(ProcessParameters(input_folder=str(root), output_folder=str(tmp_path)))
@@ -333,8 +333,8 @@ def test_cli_default_writes_no_samplesheet(squid_dataset, tmp_path):
 
 
 def test_cli_odon_flag_writes_sheet_and_launches(squid_dataset, tmp_path, monkeypatch):
-    from squidmip import _odon
-    from squidmip._cli import ProcessParameters, run
+    from squidxplorer import _odon
+    from squidxplorer._cli import ProcessParameters, run
 
     launched = {}
     monkeypatch.setattr(_odon, "launch_odon", lambda sheet, **kw: launched.update(sheet=sheet))
@@ -352,8 +352,8 @@ def test_cli_odon_without_binary_exits_clearly_but_still_wrote_the_plate(
     squid_dataset, tmp_path, monkeypatch
 ):
     """CRITICAL: a missing optional viewer must not cost the user their plate."""
-    from squidmip import _odon
-    from squidmip._cli import ProcessParameters, run
+    from squidxplorer import _odon
+    from squidxplorer._cli import ProcessParameters, run
 
     def _absent(*a, **kw):
         raise FileNotFoundError("odon not found. Install it from https://github.com/alexcoulton/odon/releases")

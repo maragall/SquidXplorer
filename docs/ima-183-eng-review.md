@@ -22,7 +22,7 @@
 
 The enriched `.spec/open/ima-183.md` (15 KB) is **gitignored by project convention**
 (`.gitignore:1: .spec/`), so it does not appear in the diff. It is mirrored in
-`~/.gstack/projects/maragall-SquidMIP/`. This doc is the tracked, reviewable substitute.
+`~/.gstack/projects/maragall-SquidXplorer/`. This doc is the tracked, reviewable substitute.
 
 ---
 
@@ -49,7 +49,7 @@ SquidReader.read(region, fov, channel, z, t=0) -> (Y,X) native-dtype, exact
     # KeyError on unknown (region,fov,z,channel); IndexError on bad t;
     # raises on non-2D or dtype outside {uint8, uint16}
 ```
-_(Verified against merged `squidmip/reader.py`. NOTE: `positions`/`coordinates.csv`
+_(Verified against merged `squidxplorer/reader.py`. NOTE: `positions`/`coordinates.csv`
 were **dropped** in the locked 189 — one FOV/well needs no per-FOV XY; plate layout
 comes from the well ID + `wellplate_format`. Iterate `z_levels` (may be sparse), not
 `range(n_z)`.)_
@@ -76,7 +76,7 @@ either D9 option.
 **C4 — Packaging is already done by IMA-189, and there is NO tilefusion dependency.** My
 Issue 1 said "declare tilefusion in pyproject.toml." Locked IMA-189 is a standalone package
 (deps: numpy, tifffile, pandas, pyyaml; **no tilefusion**) and adds `pyproject.toml` +
-CI itself. IMA-183 adds nothing to packaging; it just imports `squidmip`. (tilefusion re-enters
+CI itself. IMA-183 adds nothing to packaging; it just imports `squidxplorer`. (tilefusion re-enters
 only at IMA-184 for the OME-zarr writer.)
 
 **C5 — coordinates.csv is not IMA-183's concern at all.** My Issue 5 (DRY: don't re-parse
@@ -197,7 +197,7 @@ No failure is silent AND untested AND unhandled → no critical gaps.
 
 ## 7. Implementation tasks
 
-- [ ] **T1 (P1)** — verify `squidmip` imports (packaging from IMA-189); add nothing unless 189 didn't. [C4]
+- [ ] **T1 (P1)** — verify `squidxplorer` imports (packaging from IMA-189); add nothing unless 189 didn't. [C4]
 - [ ] **T2 (P1)** — `select_fovs(metadata, n_fovs=1) -> dict[well, list[fov]]`; positional; over-count error. [Issues 4,5; D10,D11; IMA-187 fold; C1,C5]
 - [ ] **T3 (P1)** — `project_well` via `reader.read(...)`, streaming running-max, native dtype, `mip` isolated callable. [D9→C2,C3; Issue 7; IMA-188 seam]
 - [ ] **T4 (P1)** — fail-loud on missing/unreadable plane, located. [Issue 6]
@@ -224,8 +224,8 @@ Intent asserted on the Notion "Squid MIP" page (IMA-183 section).
 
 ## 9. What shipped + test results
 
-Public surface (added to `squidmip/__init__`): `select_fovs`, `project`, `project_well`.
-- `squidmip/projection.py` — the three functions + module ASCII data-flow docstring.
+Public surface (added to `squidxplorer/__init__`): `select_fovs`, `project`, `project_well`.
+- `squidxplorer/projection.py` — the three functions + module ASCII data-flow docstring.
 - `tests/test_projection.py` — unit tests (project primitive, project_well, select_fovs;
   non-contiguous-z, multi-timepoint) + `tests/test_acquisition.py` dead-attribute guard.
 - `tests/test_integration.py` — the shared cross-slot ("cross commit") file, one section per
@@ -301,7 +301,7 @@ Reading:
 Assumes 188's output entry point (188 finalizes its exact public API; contract below is stable).
 
 ```
-You are the IMA-184 slot in the SquidMIP build. SquidMIP is a high-throughput z-stack
+You are the IMA-184 slot in the SquidXplorer build. SquidXplorer is a high-throughput z-stack
 maximum-intensity-projection tool for Squid well-plate acquisitions, built as a review-first
 state machine — one git worktree per ticket, landed in dependency order. You are in the
 ima-184 worktree, in your own independent context.
@@ -311,11 +311,11 @@ ima-184 worktree, in your own independent context.
    page: the state-machine model, the "Cross commit" rule, and the completed IMA-189 / 183 /
    188 sections. Your section goes under a new "IMA-184" header.
 2. On main: docs/ima-189-eng-review.md, docs/ima-183-eng-review.md, docs/ima-188-eng-review.md,
-   and the squidmip/ package. `git -C <this-worktree> merge origin/main` so you have the
+   and the squidxplorer/ package. `git -C <this-worktree> merge origin/main` so you have the
    reader + projection + parallel engine.
 
 ━━━ WHAT IS ALREADY DONE (state you inherit — 189 + 183 + 188, on main) ━━━
-    from squidmip import open_reader, select_fovs, project_well   # + 188's parallel engine
+    from squidxplorer import open_reader, select_fovs, project_well   # + 188's parallel engine
     - open_reader(path).metadata: regions, fovs_per_region, channels[{name, display_name,
       display_color, ex}], n_z, z_levels, dz_um, pixel_size_um, wellplate_format, frame_shape,
       dtype, n_t.  acquisition.yaml is REQUIRED (JSON removed) -> pixel_size_um and
@@ -331,7 +331,7 @@ ima-184 worktree, in your own independent context.
       opens in ndviewer_light.
     - Per-well TIFF export (Nick's ask): one <well>.tif per well for external analysis software.
     - VENDOR the tilefusion OME-zarr writer (copy create_zarr_store / write_ome / colors.py into
-      squidmip; do NOT import tilefusion — heavy __init__. See the IMA-184 writer notes in the
+      squidxplorer; do NOT import tilefusion — heavy __init__. See the IMA-184 writer notes in the
       project memory).
     - Standalone deps only (add zarr / tensorstore etc. to pyproject as needed).
     - Streaming / bounded memory: write each well as it is projected; never hold the whole plate.
@@ -345,7 +345,7 @@ ima-184 worktree, in your own independent context.
     green before merge. A slot isn't done until its cross commit is green.
 
 ━━━ CLEAN-CODING CONVENTIONS (every slot — read as one hand) ━━━
-    - Thin public surface in squidmip/__init__; logic in private modules; ASCII data-flow
+    - Thin public surface in squidxplorer/__init__; logic in private modules; ASCII data-flow
       docstring on the main module. No cross-repo imports (vendor, don't import).
     - Preserve native dtype; fail LOUD; no dead/unused attributes. Bounded memory; lazy.
     - Tests: unit (mocked seam) AND the cross commit above; CI clean-room

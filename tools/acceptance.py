@@ -18,8 +18,8 @@ So: run this after every land, on both real datasets, before believing anything.
 Exit code is 0 only if every case passes. Both env vars are required: without
 PYTEST_DISABLE_PLUGIN_AUTOLOAD the Qt tests silently skip against a second binding.
 
-THE BINDING. Every Qt import here goes through ``qtpy`` AFTER ``import squidmip``, because
-``squidmip/__init__`` pins ``QT_API=pyqt6`` and that pin has to be set before qtpy resolves
+THE BINDING. Every Qt import here goes through ``qtpy`` AFTER ``import squidxplorer``, because
+``squidxplorer/__init__`` pins ``QT_API=pyqt6`` and that pin has to be set before qtpy resolves
 anything. This file said ``from PyQt5.QtWidgets import QApplication`` at three sites until
 2026-08-06 -- the same defect commit 6b51793 fixed in ``tools/walkthrough.py``, left behind here:
 the widgets under test were Qt6 while the application was Qt5, both frameworks loaded into one
@@ -36,7 +36,7 @@ import traceback
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
 
-# Run from anywhere: import the repo this file lives in, not whatever `squidmip`
+# Run from anywhere: import the repo this file lives in, not whatever `squidxplorer`
 # happens to be installed. The mac filesystem is case-insensitive, so an invoker
 # sitting in .../CEPHLA/ instead of .../Cephla/ otherwise resolves a different tree.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -50,10 +50,10 @@ TISSUE = ("/Users/julioamaragall/Downloads/"
 # built by a script rather than found, so a machine without it can make it:
 #   python tools/make_5d_fixture.py ~/Downloads/sim_2x2_36fov_96wp --fovs 36 --nz 1 --nt 1 \
 #       --well-pitch-mm 9.0 --declared-format "384 well plate"
-# ``SQUIDMIP_FIXTURE_PLATE`` overrides it, which is how CI runs this case for real: the fixture is
+# ``SQUIDXPLORER_FIXTURE_PLATE`` overrides it, which is how CI runs this case for real: the fixture is
 # generated, so a runner can make one and point here. TISSUE has no override — it is a real
 # acquisition nothing can synthesise, and it skips by name off this machine.
-PLATE = os.environ.get("SQUIDMIP_FIXTURE_PLATE") or \
+PLATE = os.environ.get("SQUIDXPLORER_FIXTURE_PLATE") or \
     "/Users/julioamaragall/Downloads/sim_2x2_36fov_96wp"
 
 # (label, path, expected regions, expected fov_positions_um entries)
@@ -61,7 +61,7 @@ PLATE = os.environ.get("SQUIDMIP_FIXTURE_PLATE") or \
 # ``None`` for the count means "one position per (region, fov) the acquisition declares, however
 # many that is". TISSUE is a fixed real acquisition and keeps its literal 55. The plate case had a
 # literal 144, which is a property of ONE fixture rather than of the product: point the case at a
-# smaller generated plate (which is exactly what SQUIDMIP_FIXTURE_PLATE is for) and a correct
+# smaller generated plate (which is exactly what SQUIDXPLORER_FIXTURE_PLATE is for) and a correct
 # reader reported "fov_positions_um has 36 entries, expected 144" -- a red gate over a fixture
 # swap. ``None`` compares the CSV parser's output against the filename scan's `fovs_per_region`,
 # which are two different producers, so it is a real cross-check and not a tautology.
@@ -77,7 +77,7 @@ _APP = None
 def _app():
     """The QApplication, on THE BINDING THE APP SHIPS. See the module docstring."""
     global _APP
-    import squidmip  # noqa: F401  -- sets QT_API before qtpy resolves a binding
+    import squidxplorer  # noqa: F401  -- sets QT_API before qtpy resolves a binding
     from qtpy.QtWidgets import QApplication
     # Keep a module-level reference: a QApplication with no Python owner is garbage
     # collected, and the next QWidget aborts with 'Must construct a QApplication first'.
@@ -86,7 +86,7 @@ def _app():
 
 
 def check(label, path, want_regions, want_positions):
-    import squidmip._viewer as V
+    import squidxplorer._viewer as V
 
     _app()
     win = V.PlateWindow(None)
@@ -165,12 +165,12 @@ def check_one_writer(label, root, reader_cls):
     """
     import numpy as np
 
-    import squidmip
+    import squidxplorer
     from tests.writer_fixtures import expected_arrays, FOVS, REGIONS, _FOV_MM
 
     fails, notes = [], []
     try:
-        reader = squidmip.open_reader(root)
+        reader = squidxplorer.open_reader(root)
     except Exception:
         return ["open_reader raised:\n" + traceback.format_exc()], notes
 
@@ -216,7 +216,7 @@ def check_one_writer(label, root, reader_cls):
             break
 
     # Then the widget, which is the whole reason this file is not a pytest module.
-    import squidmip._viewer as V
+    import squidxplorer._viewer as V
 
     _app()
     win = V.PlateWindow(None)
@@ -226,12 +226,12 @@ def check_one_writer(label, root, reader_cls):
         if win._reader is None:
             if "already a written plate" in readout:
                 # NAMED, not swallowed. _viewer.resolve_plate_root treats any folder containing
-                # plate.ome.zarr as "a plate SquidMIP already wrote", but that is byte-for-byte
+                # plate.ome.zarr as "a plate SquidXplorer already wrote", but that is byte-for-byte
                 # the shape SaveZarrJob's HCS mode produces — so the viewer refuses raw Squid HCS
                 # acquisitions. The reader serves them correctly (asserted above); the widget
                 # gate does not, and _viewer.py is owned elsewhere while IMA-254 is in flight.
                 notes.append("widget ingest refused: _viewer.resolve_plate_root cannot tell a "
-                             "raw Squid HCS acquisition from a SquidMIP-written plate "
+                             "raw Squid HCS acquisition from a SquidXplorer-written plate "
                              "(_viewer.py:701). Reader contract verified; widget path is a "
                              "separate, named defect — file it against _viewer.py.")
             else:
@@ -264,7 +264,7 @@ def check_writers():
     from tests.writer_fixtures import WRITERS
 
     results = []
-    with tempfile.TemporaryDirectory(prefix="squidmip_writers_") as tmp:
+    with tempfile.TemporaryDirectory(prefix="squidxplorer_writers_") as tmp:
         for label, builder, reader_cls, _records_positions in WRITERS:
             slug = "".join(c if c.isalnum() else "_" for c in label)
             try:

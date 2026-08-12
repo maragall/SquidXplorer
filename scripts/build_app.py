@@ -107,7 +107,7 @@ def main() -> int:
 
     tmp = None
     if args.distpath is None or args.workpath is None:
-        tmp = tempfile.mkdtemp(prefix="squidmip-pyi-")
+        tmp = tempfile.mkdtemp(prefix="squidxplorer-pyi-")
     distpath = Path(args.distpath or Path(tmp) / "dist")
     workpath = Path(args.workpath or Path(tmp) / "build")
 

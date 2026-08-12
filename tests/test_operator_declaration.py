@@ -29,8 +29,8 @@ import pathlib
 import numpy as np
 import pytest
 
-import squidmip
-from squidmip import (
+import squidxplorer
+from squidxplorer import (
     available_projectors,
     available_region_operators,
     project_well,
@@ -38,8 +38,8 @@ from squidmip import (
     operator_params,
     operator_produces,
 )
-from squidmip._engine import Param, _resolve_operator, add_projector, bind_operator
-from squidmip._spots import LAYER_KEY as SPOT_KEY, available_segmenters, segmenter_available
+from squidxplorer._engine import Param, _resolve_operator, add_projector, bind_operator
+from squidxplorer._spots import LAYER_KEY as SPOT_KEY, available_segmenters, segmenter_available
 
 napari = pytest.importorskip("napari")
 
@@ -70,7 +70,7 @@ def _four_nuclei(shape=(64, 64)) -> np.ndarray:
 def mosaic():
     from napari.components import ViewerModel
 
-    from squidmip._napari_view import MosaicLayers
+    from squidxplorer._napari_view import MosaicLayers
 
     return MosaicLayers(ViewerModel())
 
@@ -80,7 +80,7 @@ def _flatfield_profile():
     """``flatfield`` refuses to run with no profile installed, on purpose (an identity field would
     silently do nothing). Install an identity one so the operator can be RUN here — the point of
     this file is the declaration, not the correction."""
-    from squidmip import _flatfield
+    from squidxplorer import _flatfield
 
     before = _flatfield.active_profiles()
     _flatfield.set_profiles(
@@ -231,12 +231,12 @@ def test_a_labels_declaration_over_float_pixels_is_refused_naming_the_operator(m
 #: An entry here is a debt, not a licence. Adding one requires a reason in this dict, which is the
 #: point: the decision has to be made out loud.
 KNOWN_NAME_BRANCHES = {
-    ("squidmip/_viewer.py", "flatfield"):
+    ("squidxplorer/_viewer.py", "flatfield"):
         "run_operator auto-estimates an illumination profile before running flatfield. It is a "
         "PRECONDITION expressed as a name because the registry could not carry the profile as a "
         "parameter; _flatfield.set_profile is a module-level global behind a lock for the same "
         "reason.",
-    ("squidmip/_benchmark.py", "flatfield"):
+    ("squidxplorer/_benchmark.py", "flatfield"):
         "_prepare installs the same profile outside the timed window. Its own docstring says why: "
         "'it is selected by name, so it cannot take a profile argument'.",
 }
@@ -252,7 +252,7 @@ def _name_branches() -> list:
     """
     known = set(available_projectors()) | set(available_region_operators())
     found = []
-    for path in sorted((_REPO / "squidmip").rglob("*.py")):
+    for path in sorted((_REPO / "squidxplorer").rglob("*.py")):
         tree = ast.parse(path.read_text(), str(path))
         for node in ast.walk(tree):
             if not isinstance(node, ast.Compare):
@@ -345,7 +345,7 @@ def test_an_undeclared_parameter_is_refused_naming_what_is_accepted():
 def test_a_declared_parameter_defaults_to_the_dataclass_it_came_from():
     """``SPOT_PARAMS`` is derived from ``SpotParams``' fields, so the dataclass stays the one place
     the knobs and their defaults are written down. A hand-copied list is how the two drift."""
-    from squidmip._spots import DEFAULT_PARAMS
+    from squidxplorer._spots import DEFAULT_PARAMS
 
     defaults = _resolve_operator(SPOT_KEY).defaults()
     assert defaults["min_area_px"] == DEFAULT_PARAMS.min_area_px
@@ -395,9 +395,9 @@ def test_cellpose_is_in_the_engine_registry_not_only_the_segmenter_table():
     operator dropdown, no benchmark row, no plate-scale run: the analysis feature bolted on BESIDE
     the operator system instead of into it.
     """
-    from squidmip._cellpose import OPERATOR_NAME
+    from squidxplorer._cellpose import OPERATOR_NAME
 
-    from squidmip._operations import runnable_operators
+    from squidxplorer._operations import runnable_operators
 
     assert OPERATOR_NAME in available_projectors()
     assert OPERATOR_NAME in available_segmenters(), "the two tables disagree about the spelling"
@@ -406,7 +406,7 @@ def test_cellpose_is_in_the_engine_registry_not_only_the_segmenter_table():
 
 
 def test_cellpose_declares_the_same_three_things_the_generic_path_reads():
-    from squidmip._cellpose import OPERATOR_NAME
+    from squidxplorer._cellpose import OPERATOR_NAME
 
     assert operator_consumes(OPERATOR_NAME) == frozenset(), "z must survive a segmentation"
     assert operator_produces(OPERATOR_NAME) == "labels"
@@ -427,8 +427,8 @@ def test_cellpose_refuses_the_parameters_it_cannot_honour_instead_of_ignoring_th
     number the run drops. Before this, that command completed, reported ``min_area_px=80`` in the
     console line and the recipe, and segmented at Cellpose's own defaults.
     """
-    from squidmip._cellpose import OPERATOR_NAME
-    from squidmip._engine import bind_operator
+    from squidxplorer._cellpose import OPERATOR_NAME
+    from squidxplorer._engine import bind_operator
 
     for dead in ("sigma_px", "min_area_px", "split_touching"):
         with pytest.raises(ValueError) as excinfo:
@@ -451,7 +451,7 @@ def test_every_parameter_a_segmentation_operator_DECLARES_changes_its_pixels():
     """
     import numpy as np
 
-    from squidmip._engine import bind_operator
+    from squidxplorer._engine import bind_operator
 
     rng = np.random.default_rng(0)
     plane = np.zeros((256, 256), np.uint16)
@@ -480,7 +480,7 @@ def test_registering_cellpose_does_not_import_torch():
 
     It does not, and this pins that. Building the entry's default binding is a closure over a
     dataclass and a string; the ``from cellpose import models`` lives one call deeper, inside the
-    segmenter, and runs when a plane is actually segmented. Measured: ``import squidmip`` 0.146 s,
+    segmenter, and runs when a plane is actually segmented. Measured: ``import squidxplorer`` 0.146 s,
     ``import cellpose`` 0.52 s (torch alone 0.498 s), so eager importing here would multiply app
     start-up by roughly four for a feature most sessions never touch.
 
@@ -492,8 +492,8 @@ def test_registering_cellpose_does_not_import_torch():
 
     out = subprocess.run(
         [sys.executable, "-c",
-         "import squidmip, sys; "
-         "assert 'cellpose' in squidmip.available_projectors(), 'not registered'; "
+         "import squidxplorer, sys; "
+         "assert 'cellpose' in squidxplorer.available_projectors(), 'not registered'; "
          "print('torch' in sys.modules, 'cellpose' in sys.modules)"],
         cwd=str(_REPO), capture_output=True, text=True, timeout=300)
     assert out.returncode == 0, out.stderr
@@ -519,7 +519,7 @@ def test_a_labels_operator_is_written_to_a_plate_as_a_real_z_stack(squid_dataset
     """
     import numpy as np
     import tensorstore as ts
-    from squidmip import open_reader, write_plate
+    from squidxplorer import open_reader, write_plate
 
     root, _ = squid_dataset
     reader = open_reader(str(root))
@@ -549,7 +549,7 @@ def test_write_plate_refuses_kwargs_only_for_an_operator_that_declares_none(squi
     it is REGISTERED". Now a projector that declares parameters takes them, and one that does not
     still refuses — from its own entry, before any output directory is made.
     """
-    from squidmip import open_reader, write_plate
+    from squidxplorer import open_reader, write_plate
 
     root, _ = squid_dataset
     reader = open_reader(str(root))
@@ -580,7 +580,7 @@ class _RecordingMosaic:
     """
 
     def __init__(self):
-        from squidmip._napari_view import MosaicLayers
+        from squidxplorer._napari_view import MosaicLayers
 
         self._RESULT_ADDERS = MosaicLayers._RESULT_ADDERS
         self.add_result = MosaicLayers.add_result.__get__(self)
@@ -596,8 +596,8 @@ class _RecordingMosaic:
 
 def _label_result(op: str, channels=("405", "488")):
     """A finished ``Result`` whose substance declares labels — what a segmentation run produces."""
-    from squidmip._address import Extent
-    from squidmip._result import Result
+    from squidxplorer._address import Extent
+    from squidxplorer._result import Result
 
     plane = np.zeros((8, 8), dtype=np.uint16)
     plane[1:3, 1:3] = 1
@@ -616,7 +616,7 @@ def _meta_for(region="A1", channels=("405", "488")):
 
 def test_a_region_window_draws_a_labels_result_as_labels():
     """``RegionViewer.deliver_result``, the sink, driven with a labels result."""
-    from squidmip import _region_viewer as RV
+    from squidxplorer import _region_viewer as RV
 
     pane = type("P", (), {"ok": True})()
     pane.mosaic = _RecordingMosaic()
@@ -634,9 +634,9 @@ def test_a_region_window_draws_a_labels_result_as_labels():
 
 def test_an_intensity_result_still_goes_to_the_image_path():
     """The other direction, so the sink is not simply drawing everything as labels now."""
-    from squidmip._address import Extent
-    from squidmip._region_viewer import RegionViewer
-    from squidmip._result import Result
+    from squidxplorer._address import Extent
+    from squidxplorer._region_viewer import RegionViewer
+    from squidxplorer._result import Result
 
     plane = np.full((8, 8), 500, dtype=np.uint16)
     result = Result.of(Extent(region_id="A1"), [plane, plane], channels=("405", "488"),
@@ -661,7 +661,7 @@ def test_a_result_carries_the_kind_its_operator_declared():
     """``_as_result`` is the ONE place the registry is consulted on the display side. If the kind
     did not ride on the ``Result`` from there, every sink would have to take a possibly-scoped
     layer key apart and ask again, and two sinks asking twice is two chances to disagree."""
-    from squidmip._operations import operator_name, result_kind
+    from squidxplorer._operations import operator_name, result_kind
 
     assert operator_name("spot@tab2") == "spot"
     assert operator_name("mip") == "mip"
@@ -678,7 +678,7 @@ def test_the_kind_round_trips_and_an_old_declaration_still_reads():
     judgement the plate contract makes about an unstamped ``plate_contract_version``. Those results
     are intensities, because intensity is all this path could produce.
     """
-    from squidmip._result import Substance
+    from squidxplorer._result import Substance
 
     sub = Substance(channels=("405",), z_depth=1, dtype="uint16", pixel_size_um=0.3, kind="labels")
     assert Substance.from_dict(sub.to_dict()).kind == "labels"
@@ -720,7 +720,7 @@ def _register_halving(name: str) -> None:
 
 def test_a_parameterised_projector_reaches_the_pixels_through_project_plate(squid_dataset):
     """End to end through the ENGINE: ``operator_kwargs`` has to survive the thread pool."""
-    from squidmip import open_reader, project_plate
+    from squidxplorer import open_reader, project_plate
 
     _register_halving("_decl_test_halve")
     root, _ = squid_dataset
@@ -750,8 +750,8 @@ def test_a_parameterised_projector_reaches_the_pixels_through_write_plate(squid_
     """
     import zarr
 
-    from squidmip import open_reader, write_plate
-    from squidmip.contract import field_path
+    from squidxplorer import open_reader, write_plate
+    from squidxplorer.contract import field_path
 
     _register_halving("_decl_test_halve_w")
     root, _ = squid_dataset

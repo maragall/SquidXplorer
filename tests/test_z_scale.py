@@ -19,7 +19,7 @@ import logging
 
 import pytest
 
-from squidmip._napari3d import z_step_um
+from squidxplorer._napari3d import z_step_um
 
 PX = 0.752                      # 10x objective, 7.52 um sensor pixel
 DZ = 1.5                        # the acquisition's real z step

@@ -1,6 +1,6 @@
 """The layering rules, enforced by reading the imports rather than by remembering them.
 
-Gap 6 of the GUI backlog plan (2026-07-29), step 4 of the split of ``squidmip/_viewer.py``.
+Gap 6 of the GUI backlog plan (2026-07-29), step 4 of the split of ``squidxplorer/_viewer.py``.
 
 WHY THIS FILE EXISTS
 --------------------
@@ -16,7 +16,7 @@ by the time you want it gone there are call sites depending on what it dragged i
 read the AST of every module in the package and check four properties of the import graph. None of
 them is a style preference; each one is load-bearing:
 
-1. **napari is never imported at module scope.** This is why ``pip install squidmip`` without the
+1. **napari is never imported at module scope.** This is why ``pip install squidxplorer`` without the
    ``[gui]`` extra gives a working headless CLI. napari costs seconds to import and pulls in a Qt
    binding; if any module reached for it on import, the pipeline would depend on the GUI stack.
 2. **napari appears only in the modules whose job is napari.** The rule the plan asks for. It has
@@ -25,7 +25,7 @@ them is a style preference; each one is load-bearing:
    engine, operators, fusion, output, cache) is genuinely Qt-free today. A test is what keeps it
    that way when someone needs "just a QTimer" in the engine.
 4. **The modules cut out of ``_viewer.py`` do not import it back.** A re-export makes a back-edge
-   invisible: ``from squidmip._viewer import X`` inside a function body would compile, pass every
+   invisible: ``from squidxplorer._viewer import X`` inside a function body would compile, pass every
    test, and quietly restore the cycle the split existed to remove.
 
 These are checked with ``ast``, not by importing the modules, so the test costs milliseconds and
@@ -39,9 +39,9 @@ import pathlib
 
 import pytest
 
-import squidmip
+import squidxplorer
 
-PKG = pathlib.Path(squidmip.__file__).parent
+PKG = pathlib.Path(squidxplorer.__file__).parent
 
 #: The Qt bindings, by top-level module name. Membership is what "imports Qt" means below.
 QT_BINDINGS = frozenset({"PyQt5", "PyQt6", "PySide2", "PySide6", "qtpy"})
@@ -182,7 +182,7 @@ def test_napari_belongs_to_the_napari_modules(path):
 def test_only_the_gui_layer_imports_qt(path):
     """Everything outside GUI_MODULES is Qt-free, deferred imports included.
 
-    ``squidmip/_operations.py`` (gap 6 step 3) is the newest member of the Qt-free side and the
+    ``squidxplorer/_operations.py`` (gap 6 step 3) is the newest member of the Qt-free side and the
     reason this test was written when it was: it is the operator registry, one dataclass and four
     pure functions, and it spent its life inside a QMainWindow module where nothing could tell.
     """
@@ -212,11 +212,11 @@ def test_every_gui_exemption_is_still_earned(stem):
     """A name in GUI_MODULES must exist, and must still import Qt. Otherwise delete the entry."""
     path = PKG / f"{stem}.py"
     assert path.is_file(), (
-        f"GUI_MODULES names {stem!r} and squidmip/{stem}.py does not exist. The exemption outlived "
+        f"GUI_MODULES names {stem!r} and squidxplorer/{stem}.py does not exist. The exemption outlived "
         f"the module: delete the entry.")
     imports = sorted({name for name, _ in _imports(path) if _top(name) in QT_BINDINGS})
     assert imports, (
-        f"squidmip/{stem}.py is exempted from the Qt boundary and imports no Qt at all any more. "
+        f"squidxplorer/{stem}.py is exempted from the Qt boundary and imports no Qt at all any more. "
         f"It is Qt-free now: remove {stem!r} from GUI_MODULES so the boundary starts covering it.")
 
 
@@ -225,10 +225,10 @@ def test_every_napari_exemption_is_still_earned(stem):
     """The same rule for the napari list, which is two names and so the easier one to forget."""
     path = PKG / f"{stem}.py"
     assert path.is_file(), (
-        f"NAPARI_EXCEPTIONS names {stem!r} and squidmip/{stem}.py does not exist.")
+        f"NAPARI_EXCEPTIONS names {stem!r} and squidxplorer/{stem}.py does not exist.")
     imports = sorted({name for name, _ in _imports(path) if _top(name) == "napari"})
     assert imports, (
-        f"squidmip/{stem}.py is on NAPARI_EXCEPTIONS and imports no napari any more. Remove "
+        f"squidxplorer/{stem}.py is on NAPARI_EXCEPTIONS and imports no napari any more. Remove "
         f"{stem!r} from the list so the `_napari_*` rule starts covering it.")
 
 
@@ -237,7 +237,7 @@ def test_what_was_cut_out_of_the_viewer_does_not_import_it_back(stem):
     """No back-edge to ``_viewer``, at module scope or deferred.
 
     ``_viewer`` re-exports every one of these names, so a back-edge is invisible at the call site:
-    ``from squidmip._viewer import _fit_cell`` inside a method body would work today and would put
+    ``from squidxplorer._viewer import _fit_cell`` inside a method body would work today and would put
     the cycle straight back. This is the one test that actually keeps the split split.
     """
     path = PKG / f"{stem}.py"

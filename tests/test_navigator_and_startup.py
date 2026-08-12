@@ -27,7 +27,7 @@ pytest.importorskip("qtpy")
 
 from qtpy.QtWidgets import QApplication, QLabel, QWidget  # noqa: E402
 
-from squidmip._fontscale import rescale_fonts  # noqa: E402
+from squidxplorer._fontscale import rescale_fonts  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -81,7 +81,7 @@ def test_the_child_window_class_actually_rescales_on_resize():
     """
     import inspect
 
-    from squidmip._region_viewer import RegionViewer
+    from squidxplorer._region_viewer import RegionViewer
 
     assert hasattr(RegionViewer, "resizeEvent"), "the child window never rescales"
     assert "rescale_fonts" in inspect.getsource(RegionViewer.resizeEvent)
@@ -92,13 +92,13 @@ def test_the_child_window_class_actually_rescales_on_resize():
 
 def test_the_splash_is_skipped_when_nobody_can_see_it(qapp):
     """Headless and under tests it returns None, rather than a dummy that must be humoured."""
-    from squidmip._viewer import _startup_splash
+    from squidxplorer._viewer import _startup_splash
 
-    qapp.setProperty("_squidmip_test", True)
+    qapp.setProperty("_squidxplorer_test", True)
     try:
         assert _startup_splash(qapp) is None
     finally:
-        qapp.setProperty("_squidmip_test", False)
+        qapp.setProperty("_squidxplorer_test", False)
 
 
 def test_the_splash_never_stops_the_app_opening():
@@ -107,7 +107,7 @@ def test_the_splash_never_stops_the_app_opening():
     MUTATION: drop the try/except in `_startup_splash` -> red. A decoration that can prevent
     launch is worse than no decoration.
     """
-    from squidmip._viewer import _startup_splash
+    from squidxplorer._viewer import _startup_splash
 
     class Hostile:
         def property(self, _name):
@@ -124,7 +124,7 @@ def test_the_splash_is_shown_before_the_slow_constructor():
     """
     import inspect
 
-    from squidmip import _viewer
+    from squidxplorer import _viewer
 
     # CODE lines only: the comment above the call names PlateWindow, so a raw string index
     # finds the prose before the statement and the assertion passes or fails for the wrong reason.
@@ -148,7 +148,7 @@ def test_windows_share_gl_contexts():
     """
     import inspect
 
-    from squidmip import _viewer
+    from squidxplorer import _viewer
 
     src = inspect.getsource(_viewer.enable_hidpi)
     assert "AA_ShareOpenGLContexts" in src, (
@@ -177,7 +177,7 @@ def test_the_navigator_tree_can_take_keyboard_focus():
     """
     import inspect
 
-    from squidmip._region_viewer import OpenViewList
+    from squidxplorer._region_viewer import OpenViewList
 
     src = inspect.getsource(OpenViewList.__init__)
     assert "setFocusPolicy" in src, "the navigator tree cannot take keyboard focus"
@@ -189,7 +189,7 @@ def test_opening_the_navigator_does_not_reorder_the_users_windows():
     reshuffles every open window in front of the user."""
     import inspect
 
-    from squidmip._region_viewer import OpenViewList
+    from squidxplorer._region_viewer import OpenViewList
 
     src = inspect.getsource(OpenViewList.showEvent)
     assert "_syncing" in src, "showEvent selects without the guard, so it raises windows"

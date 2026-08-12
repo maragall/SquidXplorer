@@ -22,7 +22,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from squidmip._op_result import OperatorResult, RegionResultAccumulator
+from squidxplorer._op_result import OperatorResult, RegionResultAccumulator
 
 CHANNELS = ("Fluorescence_405_nm_Ex", "Fluorescence_488_nm_Ex")
 
@@ -67,7 +67,7 @@ def test_the_operator_mosaic_lands_in_THE_SAME_FRAME_as_the_raw_mosaic():
 
     So this asserts against the raw path's own geometry helpers, not against a number I
     typed in: same offsets, same extent, one source of truth."""
-    from squidmip._placement import fov_offsets_px, mosaic_extent_px
+    from squidxplorer._placement import fov_offsets_px, mosaic_extent_px
 
     meta = _meta()
     offsets = fov_offsets_px(meta["fov_positions_um"], "A1", [0, 1], 1.0)
@@ -138,7 +138,7 @@ def test_an_unknown_fov_is_refused_rather_than_placed_at_the_origin():
 def test_the_result_carries_the_bbox_so_napari_places_it_over_the_raw_layer():
     """add_mosaic takes bbox_um; without it the operator group would sit at the origin in
     stage space and the toggle would jump."""
-    from squidmip._mosaic_source import mosaic_bbox_um
+    from squidxplorer._mosaic_source import mosaic_bbox_um
 
     meta = _meta()
     acc = RegionResultAccumulator("bgsub", "A1", meta, CHANNELS)

@@ -26,8 +26,8 @@ from __future__ import annotations
 
 import pytest
 
-from squidmip._mosaic_source import fovs_overlapping_bbox, mosaic_bbox_um
-from squidmip.projection import scope_wells
+from squidxplorer._mosaic_source import fovs_overlapping_bbox, mosaic_bbox_um
+from squidxplorer.projection import scope_wells
 
 
 def _meta(n=2, frame=64, pitch=1.0):
@@ -116,7 +116,7 @@ def test_BOTH_engines_call_the_one_resolver():
     """
     import inspect
 
-    from squidmip import _engine, _stitch
+    from squidxplorer import _engine, _stitch
 
     for module in (_engine, _stitch):
         src = inspect.getsource(module)
@@ -130,7 +130,7 @@ def test_BOTH_engines_call_the_one_resolver():
 def test_project_plate_really_runs_only_the_requested_fields(squid_dataset):
     """The measurement that named the bug. A per-FOV operator is where the time goes, so this is
     the assertion that says an ROI run is CHEAP rather than merely correct."""
-    from squidmip import open_reader, project_plate
+    from squidxplorer import open_reader, project_plate
 
     root, _ = squid_dataset
     reader = open_reader(str(root))
@@ -155,7 +155,7 @@ def test_run_operator_does_not_widen_a_mapping_back_to_whole_wells():
     """
     import inspect
 
-    from squidmip import _viewer
+    from squidxplorer import _viewer
 
     src = inspect.getsource(_viewer.PlateWindow.run_operator)
     assert "names = list(regions)" in src, (

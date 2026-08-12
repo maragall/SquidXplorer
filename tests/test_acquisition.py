@@ -2,7 +2,7 @@
 
 import pytest
 
-from squidmip._acquisition import load_acquisition_metadata
+from squidxplorer._acquisition import load_acquisition_metadata
 
 _ACQ_YAML = """\
 objective:

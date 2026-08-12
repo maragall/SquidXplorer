@@ -118,7 +118,7 @@ Neither blocks the synthetic harness, which runs today.
 
 Two things landed on this branch. Both run today; neither waits on the laser-AF fix.
 
-**`squidmip/_oracle.py` + 26 tests — the acceptance gate.** It grades a stitcher without
+**`squidxplorer/_oracle.py` + 26 tests — the acceptance gate.** It grades a stitcher without
 containing one: cut a known image into overlapping tiles at known positions, hand the tiles to a
 stitcher, check whether it puts them back. Deliberately no registration inside it — a grader that
 reimplements the thing it grades is circular. numpy only, so it costs the shipped package nothing.

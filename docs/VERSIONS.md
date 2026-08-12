@@ -51,7 +51,7 @@ grew four subsystems that read as dead.** Where that objection does not apply, b
 | Live acquisition following (an event-log tailer or file-watch engine) | The first time SquidXplorer is pointed at a folder that is still being written. |
 | `filled_extent(axis)` and `is_extent_exact()` on the reader: how much of this store is really written, and do I know that exactly | The first read of a partially written store, **or** a decision to support damaged and partial acquisitions. |
 | Revalidating store handles on open rather than per read | Same trigger. It exists for stores that grow. |
-| ~~A machine-checked on-disk contract with a compared `format_version`~~ | **BUILT, 2026-07-29, full scope.** Not deferred at all in the end: `docs/plate-contract.md`, `squidmip/contract/` (a stamped-and-compared `PLATE_CONTRACT_VERSION`, one `field_path` seam, an errors-versus-warnings validator a user can run on a plate they were handed). Its absence had already produced a live defect, and the deferral argument (a contract pays off once a second implementation reads our output) was withdrawn by Julio on 2026-07-28. |
+| ~~A machine-checked on-disk contract with a compared `format_version`~~ | **BUILT, 2026-07-29, full scope.** Not deferred at all in the end: `docs/plate-contract.md`, `squidxplorer/contract/` (a stamped-and-compared `PLATE_CONTRACT_VERSION`, one `field_path` seam, an errors-versus-warnings validator a user can run on a plate they were handed). Its absence had already produced a live defect, and the deferral argument (a contract pays off once a second implementation reads our output) was withdrawn by Julio on 2026-07-28. |
 | A shared server-side or object-store thumbnail tier | Compute or storage moving off the local workstation. The **reasoning** ports (never write into the experiment folder), the **location** does not. |
 | Qt6 migration | A napari upgrade past 0.7, or a rendering defect traced to the Qt5 binding. Note this is **not** blocked on and no longer motivated by AGAVE, which is cancelled. |
 
@@ -59,7 +59,7 @@ grew four subsystems that read as dead.** Where that objection does not apply, b
 
 **AGAVE will never be implemented** (Julio, 2026-07-28). It is not waiting on the Qt6 migration
 and it is not waiting on anything else. Full-resolution 3D is served by the texture-bounded
-native volume (`squidmip/_napari3d.py`), which is the **top tier**, not a preview below a better
+native volume (`squidxplorer/_napari3d.py`), which is the **top tier**, not a preview below a better
 renderer that is coming later. The real constraint is honest and explainable: napari renders 3D
 from a single GL texture capped near 2048, so full native resolution needs a crop, and the ROI
 child window is how you take one.

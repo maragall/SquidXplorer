@@ -12,7 +12,7 @@ import urllib.request
 
 import pytest
 
-from squidmip import _odon_bench as ob
+from squidxplorer import _odon_bench as ob
 
 
 @pytest.fixture
@@ -77,7 +77,7 @@ def test_benchmark_odon_skips_cleanly_with_a_reason(plate, monkeypatch):
     def _missing():
         raise FileNotFoundError("odon not found. Looked at $ODON_BIN, PATH, ...")
 
-    monkeypatch.setattr("squidmip._odon.find_odon", _missing)
+    monkeypatch.setattr("squidxplorer._odon.find_odon", _missing)
     result = ob.benchmark_odon(plate / "A" / "1" / "0")
     assert result.available is False
     assert "odon not found" in result.reason
@@ -86,13 +86,13 @@ def test_benchmark_odon_skips_cleanly_with_a_reason(plate, monkeypatch):
 
 
 def test_odon_remote_probe_skips_cleanly(monkeypatch):
-    monkeypatch.setattr("squidmip._odon.find_odon",
+    monkeypatch.setattr("squidxplorer._odon.find_odon",
                         lambda: (_ for _ in ()).throw(FileNotFoundError("nope")))
     assert ob.odon_remote_probe("http://127.0.0.1:1/x")["available"] is False
 
 
 def test_run_states_what_did_not_run_when_odon_is_absent(plate, monkeypatch):
-    monkeypatch.setattr("squidmip._odon.find_odon",
+    monkeypatch.setattr("squidxplorer._odon.find_odon",
                         lambda: (_ for _ in ()).throw(FileNotFoundError("nope")))
     report = ob.run(plate, limit=4, workers=2, repeats=1)
     assert report.transport, "the transport half must still run without odon"
@@ -104,7 +104,7 @@ def test_run_states_what_did_not_run_when_odon_is_absent(plate, monkeypatch):
 
 
 def test_format_report_never_invents_an_odon_number(plate, monkeypatch):
-    monkeypatch.setattr("squidmip._odon.find_odon",
+    monkeypatch.setattr("squidxplorer._odon.find_odon",
                         lambda: (_ for _ in ()).throw(FileNotFoundError("nope")))
     text = ob.format_report(ob.run(plate, limit=4, workers=2, repeats=1))
     odon_section = text.split("ODON:")[1].split("NOT MEASURED")[0]
@@ -118,7 +118,7 @@ def test_run_reports_a_refusal_verbatim(plate, monkeypatch):
     monkeypatch.setattr(ob, "_run_odon", lambda binary, target: (
         (0.01, "OK: loaded tile level 4 path '4'", 0) if not str(target).startswith("http")
         else (0.01, 'Error: failed to canonicalize dataset root: "%s"' % target, 1)))
-    monkeypatch.setattr("squidmip._odon.find_odon", lambda: "/fake/odon")
+    monkeypatch.setattr("squidxplorer._odon.find_odon", lambda: "/fake/odon")
     report = ob.run(plate, limit=4, workers=2, repeats=2)
     assert report.odon.local_ok is True
     assert report.odon.remote_ok is False
@@ -136,14 +136,14 @@ def test_format_report_separates_cold_from_warm(plate, monkeypatch):
         return ((0.2 if calls["n"] == 1 else 0.01), "OK: loaded tile level 4", 0)
 
     monkeypatch.setattr(ob, "_run_odon", fake)
-    monkeypatch.setattr("squidmip._odon.find_odon", lambda: "/fake/odon")
+    monkeypatch.setattr("squidxplorer._odon.find_odon", lambda: "/fake/odon")
     text = ob.format_report(ob.run(plate, limit=4, workers=2, repeats=4))
     assert "cold (run 1)" in text and "warm (median)" in text
     assert "OK: loaded tile" in text
 
 
 def test_write_json_round_trips(plate, tmp_path, monkeypatch):
-    monkeypatch.setattr("squidmip._odon.find_odon",
+    monkeypatch.setattr("squidxplorer._odon.find_odon",
                         lambda: (_ for _ in ()).throw(FileNotFoundError("nope")))
     report = ob.run(plate, limit=4, workers=2, repeats=1)
     payload = json.loads(ob.write_json(report, tmp_path / "r.json").read_text())

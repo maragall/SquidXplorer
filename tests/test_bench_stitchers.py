@@ -18,8 +18,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from squidmip import _bench_stitchers as bs
-from squidmip import _engine, _stitch
+from squidxplorer import _bench_stitchers as bs
+from squidxplorer import _engine, _stitch
 
 
 @pytest.fixture(autouse=True)
@@ -63,7 +63,7 @@ def test_array_reader_returns_the_requested_plane():
 
 
 def test_register_challengers_is_idempotent_and_keeps_stitch():
-    from squidmip._engine import available_region_operators
+    from squidxplorer._engine import available_region_operators
 
     first = bs.register_challengers()
     second = bs.register_challengers()

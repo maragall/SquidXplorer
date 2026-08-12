@@ -44,13 +44,13 @@ from qtpy.QtWidgets import (  # noqa: E402
     QAbstractButton, QApplication, QCheckBox, QSlider,
 )
 
-import squidmip._viewer as V  # noqa: E402
+import squidxplorer._viewer as V  # noqa: E402
 
 
 @pytest.fixture(scope="module")
 def qapp():
     app = QApplication.instance() or QApplication([])
-    app.setProperty("_squidmip_test", True)
+    app.setProperty("_squidxplorer_test", True)
     return app
 
 
@@ -97,7 +97,7 @@ def test_the_only_slider_on_the_window_is_the_TIMEPOINT_slider(plate):
     value napari owns. Named rather than merely tolerated, so a contrast slider cannot arrive here
     and pass as "the window has always had a slider".
     """
-    from squidmip._time_point import TimePointBar
+    from squidxplorer._time_point import TimePointBar
 
     for slider in plate.findChildren(QSlider):
         owner = slider.parent()

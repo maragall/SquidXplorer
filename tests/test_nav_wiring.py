@@ -36,7 +36,7 @@ if "PySide6" in sys.modules or "PySide2" in sys.modules:
         allow_module_level=True,
     )
 
-from squidmip import _viewer as V  # noqa: E402
+from squidxplorer import _viewer as V  # noqa: E402
 
 from .conftest import shutdown_plate_window  # noqa: E402
 from .test_viewer import _drain_until, qapp  # noqa: E402,F401  (fixtures)
@@ -62,7 +62,7 @@ class _FakeDims:
 #
 # THE REGION SLIDER MOVED OFF THE ROOT PLATE (decentralization, 2026-07-23). `_viewer.py`:
 # "NO region slider on the root plate. The deck puts the region slider in each spawned WINDOW."
-# The real slider is built in `squidmip/_region_viewer.py` (`RegionViewer._build`) from the same
+# The real slider is built in `squidxplorer/_region_viewer.py` (`RegionViewer._build`) from the same
 # `RegionCursor` / `RegionSlider` pair, one per window.
 #
 # Until 2026-08-06 the plate still carried `self._region_slider = None`, a `_make_region_slider`

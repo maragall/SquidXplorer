@@ -39,13 +39,13 @@ import numpy as np
 #: the product. Its replacement is REPRODUCIBLE rather than found, which is the point: the command
 #: in ``PLATE_RECIPE`` rebuilds it byte-for-byte, and the SKIP message prints that command.
 #:
-#: ``SQUIDMIP_FIXTURE_PLATE`` points ``PLATE`` somewhere else. That is what lets CI run this file
+#: ``SQUIDXPLORER_FIXTURE_PLATE`` points ``PLATE`` somewhere else. That is what lets CI run this file
 #: for real instead of watching it skip: the plate fixture is GENERATED (0.1 s, 2.5 MB at CI size),
 #: so a runner can make one and hand over the path. TISSUE and PLATE1536 have no override because
 #: they are real acquisitions nothing can synthesise -- they skip off this machine, by name.
 TISSUE = ("/Users/julioamaragall/Downloads/"
           "test_10x_laser_af_z_stack_2025-10-28_13-40-43.939945 yy")
-PLATE = os.environ.get("SQUIDMIP_FIXTURE_PLATE") or \
+PLATE = os.environ.get("SQUIDXPLORER_FIXTURE_PLATE") or \
     "/Users/julioamaragall/Downloads/sim_2x2_36fov_96wp"
 PLATE1536 = "/Users/julioamaragall/Downloads/synthetic_1536_wellplate"
 MIN_FREE_GB = 4.0
@@ -61,20 +61,20 @@ _RESULTS: list[tuple[str, str, str, str]] = []      # (ticket, title, verdict, d
 
 
 def _app():
-    """The QApplication, on THE BINDING THE APP SHIPS -- which is decided by importing `squidmip`.
+    """The QApplication, on THE BINDING THE APP SHIPS -- which is decided by importing `squidxplorer`.
 
     This said ``from PyQt5.QtWidgets import QApplication`` until 2026-08-05. After the Qt6
     migration (10b8348, f7f9b28, ce5605c) it did not merely test the wrong thing, it could not run
-    at all: `squidmip/__init__` pins ``QT_API=pyqt6``, so the widgets under test are Qt6 while this
+    at all: `squidxplorer/__init__` pins ``QT_API=pyqt6``, so the widgets under test are Qt6 while this
     constructed a Qt5 application, both frameworks loaded into one process, and the harness aborted
     on ``QWidget: Must construct a QApplication before a QWidget`` before the first check.
 
     The one harness whose whole purpose is to catch GUI wiring that no unit test can see was itself
-    dead, silently, for five days. Importing `squidmip` FIRST is the point, not tidiness: the pin
+    dead, silently, for five days. Importing `squidxplorer` FIRST is the point, not tidiness: the pin
     lives in its ``__init__`` and has to be set before qtpy resolves a binding.
     """
     global _APP
-    import squidmip  # noqa: F401  -- sets QT_API before qtpy resolves a binding
+    import squidxplorer  # noqa: F401  -- sets QT_API before qtpy resolves a binding
     from qtpy.QtWidgets import QApplication
     _APP = QApplication.instance() or QApplication([])
     return _APP
@@ -170,7 +170,7 @@ def close_windows():
 
 
 def open_window(path, size=(1600, 900)):
-    import squidmip._viewer as V
+    import squidxplorer._viewer as V
     need(path)
     _app()
     win = V.PlateWindow(None)
@@ -191,7 +191,7 @@ def open_view(win, region):
     """Open a REAL ``RegionViewer`` on *region*, through the window's own manager.
 
     The napari canvas is the one seam that needs a GL context, so it is replaced by a pane whose
-    ``mosaic`` is a real :class:`squidmip._napari_view.MosaicLayers` over a real Qt-free
+    ``mosaic`` is a real :class:`squidxplorer._napari_view.MosaicLayers` over a real Qt-free
     ``napari.components.ViewerModel``. Everything a window does to its layers — an operator result
     landing, a contrast write, a visibility toggle, ``ops()`` — is therefore the production class.
     What is NOT covered, and is not claimed: vispy actually painting them.
@@ -203,8 +203,8 @@ def open_view(win, region):
 
     from napari.components import ViewerModel
 
-    import squidmip._napari_pane as napari_pane
-    from squidmip._napari_view import MosaicLayers
+    import squidxplorer._napari_pane as napari_pane
+    from squidxplorer._napari_view import MosaicLayers
 
     class ModelPane(QWidget):
         ok = True
@@ -305,11 +305,11 @@ def free_gb():
 # ======================================================================================
 def run_all():
     # Both off the package, not off `_stitch`: the one-operator-registry change (2026-08-05)
-    # deleted `_stitch._REGION_OPERATORS` and moved `available_region_operators` onto `squidmip`
+    # deleted `_stitch._REGION_OPERATORS` and moved `available_region_operators` onto `squidxplorer`
     # as a filter over the single `_engine._OPERATORS` table. This module-level import still said
-    # `from squidmip._stitch import ...` after the merge and would have taken the whole file down
+    # `from squidxplorer._stitch import ...` after the merge and would have taken the whole file down
     # with an ImportError before the first check.
-    from squidmip import available_projectors, available_region_operators, open_reader
+    from squidxplorer import available_projectors, available_region_operators, open_reader
 
     def read(ds):
         """``open_reader``, but an absent dataset SKIPs the check instead of raising."""
@@ -374,7 +374,7 @@ def run_all():
     # ---------- mosaic + geometry ---------------------------------------------------
     @check("IMA-187", "Each well is a coordinate-placed MOSAIC, not one thumbnail")
     def _():
-        from squidmip._viewer import _mosaic_boxes
+        from squidxplorer._viewer import _mosaic_boxes
         m = read(PLATE).metadata
         boxes = _mosaic_boxes(m)
         per_well: dict = {}
@@ -393,7 +393,7 @@ def run_all():
 
     @check("IMA-187", "Y-sign: larger stage y maps to a LARGER row (no mirroring)")
     def _():
-        from squidmip._placement import fov_offsets_px
+        from squidxplorer._placement import fov_offsets_px
         m = read(PLATE).metadata
         off = fov_offsets_px(m["fov_positions_um"], "A1",
                              m["fovs_per_region"]["A1"], m["pixel_size_um"])
@@ -406,8 +406,8 @@ def run_all():
 
     @check("IMA-216", "Viewport is O(screen), not O(plate)")
     def _():
-        from squidmip._tilesource import plate_ladder
-        from squidmip._tiling import select_tiles
+        from squidxplorer._tilesource import plate_ladder
+        from squidxplorer._tiling import select_tiles
         counts = {}
         for name, ds in (("plate", PLATE), ("tissue", TISSUE)):
             m = read(ds).metadata
@@ -536,7 +536,7 @@ def run_all():
         if free_gb() < MIN_FREE_GB + 1:
             raise SkipCheck(f"only {free_gb():.1f} GB free; refusing to write")
         import tifffile
-        from squidmip._minerva import export_selection
+        from squidxplorer._minerva import export_selection
         reader = read(PLATE)
         fovs = reader.metadata["fovs_per_region"]["A1"][:4]      # a subset: the crop path
         if len(fovs) < 4:
@@ -569,7 +569,7 @@ def run_all():
         w = open_window(PLATE)
         ov = w._overview
         rendered(ov)
-        from squidmip._viewer import _RawLoupeSource
+        from squidxplorer._viewer import _RawLoupeSource
         m = w._reader.metadata
         src = _RawLoupeSource(w._reader, m, lambda region: m["fovs_per_region"][region][0])
         crop = src.read_crop("A1", 0, -256, -256, 512, 512)
@@ -646,7 +646,7 @@ def run_all():
         than naming an attribute is the point: this keeps holding whatever the bar is next called.
         """
         from qtpy.QtWidgets import QAbstractButton, QAbstractSlider, QAbstractSpinBox, QComboBox
-        import squidmip._viewer as V
+        import squidxplorer._viewer as V
         w = open_window(PLATE)
         ov = w._overview
         controls = []
@@ -700,7 +700,7 @@ def run_all():
         longer exists. Two renderers is now the whole population, and the check says so rather
         than quietly measuring fewer things than its title claims.
         """
-        import squidmip._viewer as V
+        import squidxplorer._viewer as V
         w = open_window(PLATE)
         ov = w._overview
         settle()
@@ -730,7 +730,7 @@ def run_all():
 
     @check("IMA-225", "Flatfield commutes with MIP (monotone f: max(f(a),f(b))==f(max(a,b)))")
     def _():
-        from squidmip._flatfield import FlatfieldProfile, correct_flatfield
+        from squidxplorer._flatfield import FlatfieldProfile, correct_flatfield
         rng = np.random.default_rng(0)
         planes = [rng.integers(0, 4000, (64, 64), dtype=np.uint16) for _ in range(10)]
         gain = np.linspace(0.5, 1.5, 64 * 64).reshape(64, 64)
@@ -745,14 +745,14 @@ def run_all():
     def _():
         region_ops = available_region_operators()
         assert "stitch" in region_ops and "coordinate" in region_ops
-        import squidmip._viewer as V
+        import squidxplorer._viewer as V
         keys = [o.key for o in V._OPERATIONS]
         assert "stitch" in keys, f"no stitch card in the GUI: {keys}"
         return f"registered + GUI card present; operation cards={keys}"
 
     @check("IMA-230", "Storage guard refuses up front and names both numbers")
     def _():
-        from squidmip._output import InsufficientDiskSpaceError, check_disk_space
+        from squidxplorer._output import InsufficientDiskSpaceError, check_disk_space
         try:
             check_disk_space("/tmp", 10 ** 15, what="an impossible write")
         except InsufficientDiskSpaceError as e:
@@ -763,7 +763,7 @@ def run_all():
 
     @check("IMA-230", "Region-operator estimate is overlap-aware, not frame-counted")
     def _():
-        from squidmip._output import estimate_write_bytes
+        from squidxplorer._output import estimate_write_bytes
         m = read(PLATE).metadata
         proj = estimate_write_bytes(m, n_fovs=None)
         stit = estimate_write_bytes(m, n_fovs=None, region_operator=True)
@@ -772,8 +772,8 @@ def run_all():
 
     @check("IMA-231", "ROI table corners agree with the tile ladder")
     def _():
-        from squidmip._output import fov_roi_records_um
-        from squidmip._tilesource import fov_bboxes_um
+        from squidxplorer._output import fov_roi_records_um
+        from squidxplorer._tilesource import fov_bboxes_um
         m = read(PLATE).metadata
         region = m["regions"][0]
         fovs = m["fovs_per_region"][region]
@@ -797,7 +797,7 @@ def run_all():
 
     @check("IMA-217", "Pyramid ladder is coarse-to-fine and never widens")
     def _():
-        from squidmip._tilesource import plate_ladder
+        from squidxplorer._tilesource import plate_ladder
         m = read(PLATE).metadata
         lad = plate_ladder(m)
         geo = lad.geometry if hasattr(lad, "geometry") else lad
@@ -814,7 +814,7 @@ def run_all():
         if free_gb() < MIN_FREE_GB + 1:
             raise SkipCheck(f"only {free_gb():.1f} GB free")
         import inspect
-        from squidmip import open_reader as _open, write_plate       # _open: the Zarr we wrote
+        from squidxplorer import open_reader as _open, write_plate       # _open: the Zarr we wrote
         tmp = tempfile.mkdtemp(prefix="walkthrough_zarr_")
         try:
             # One well, one FOV: enough to prove the round trip, kilobytes on disk.
@@ -860,7 +860,7 @@ def run_all():
         """A gallery is a LOOK, not an operator run: one fused cell per region per channel, at a
         common decimation, with contrast SHARED per channel so a dim well and a bright well do not
         both come out looking mid-grey. Both halves are asserted -- the pixels and the sharing."""
-        from squidmip._gallery import _channel_names, fuse_gallery_cell, shared_windows
+        from squidxplorer._gallery import _channel_names, fuse_gallery_cell, shared_windows
 
         r = read(PLATE)
         m = r.metadata
@@ -888,7 +888,7 @@ def run_all():
         """The defect this feature can have is a movie every frame of which is identical -- which
         looks like a working feature until someone plays it. So the mp4 is DECODED BACK and the
         frames compared, on the axis `default_axis` picks for this acquisition."""
-        from squidmip import _video as V
+        from squidxplorer import _video as V
 
         why = V.encoder_problem()
         if why:
@@ -1021,8 +1021,8 @@ def run_all():
     def _():
         if free_gb() < MIN_FREE_GB + 2:
             raise SkipCheck(f"only {free_gb():.1f} GB free; refusing to write")
-        from squidmip import write_plate
-        from squidmip._output import estimate_write_bytes
+        from squidxplorer import write_plate
+        from squidxplorer._output import estimate_write_bytes
         m = read(PLATE).metadata
         est = estimate_write_bytes(m, n_fovs=None, regions=["A1"], region_operator=True)
         tmp = tempfile.mkdtemp(prefix="walkthrough_stitch_")

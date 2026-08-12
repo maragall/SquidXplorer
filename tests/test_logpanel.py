@@ -15,9 +15,9 @@ import pytest
 
 from qtpy.QtWidgets import QApplication
 
-from squidmip._activity import ActivityLog
-from squidmip._logpane import LogBus, color_for
-from squidmip._logpanel import LogPanel, memory_line
+from squidxplorer._activity import ActivityLog
+from squidxplorer._logpane import LogBus, color_for
+from squidxplorer._logpanel import LogPanel, memory_line
 
 
 @pytest.fixture(scope="module")
@@ -44,7 +44,7 @@ def panel(qapp, bus):
 
 def test_a_logged_line_reaches_the_panel(panel, bus):
     bus.install()
-    logging.getLogger("squidmip.test").info("hello from a run")
+    logging.getLogger("squidxplorer.test").info("hello from a run")
     assert "hello from a run" in panel.text()
 
 
@@ -193,7 +193,7 @@ def test_the_panel_actually_PAINTS_without_raising(qapp, bus):
 def test_a_measured_run_line_flows_through_the_panel(panel, bus):
     """The measurement's one-line-per-run reaches the panel with no extra wiring, because
     ``measure_run`` logs at INFO to the root logger and the panel is a sink of the root logger."""
-    from squidmip._measure import MetricsLog, measure_run
+    from squidxplorer._measure import MetricsLog, measure_run
 
     bus.install()
     with measure_run("mip", "2 regions", metrics=MetricsLog()):

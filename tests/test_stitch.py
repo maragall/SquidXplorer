@@ -19,7 +19,7 @@ import pytest
 # tilefusion (maragall/stitcher) is the library this module ADAPTS, and it is deliberately not a
 # dependency: pyproject says so in as many words ("No tilefusion dependency ... importing
 # tilefusion runs its heavy __init__ (numba/GPU/basicpy)"), and only the ~40-line store-config
-# wrapper is vendored. `squidmip._stitch` therefore imports it lazily, so this file COLLECTS
+# wrapper is vendored. `squidxplorer._stitch` therefore imports it lazily, so this file COLLECTS
 # without it and only fails mid-test with ModuleNotFoundError -- which is what it did on every CI
 # runner, as hard failures for a package CI was never asked to install.
 #
@@ -30,12 +30,12 @@ import pytest
 pytest.importorskip("tilefusion", reason="tilefusion (maragall/stitcher) not installed: the stitch "
                                          "adapter is UNTESTED here, which is not the same as passing")
 
-from squidmip._engine import (
+from squidxplorer._engine import (
     _OPERATORS,
     add_region_operator,
     available_region_operators,
 )
-from squidmip._stitch import (
+from squidxplorer._stitch import (
     _mosaic_geometry,
     _positions_yx_um,
     solve_offsets_px,
@@ -501,7 +501,7 @@ def test_stitching_a_plane_op_fuses_every_plane_instead_of_keeping_only_z0(maste
     The deep behaviour (one solved geometry for every plane, the flat-field double-apply guard,
     the memory bound) is in tests/test_stitch_zplanes.py.
     """
-    from squidmip._stitch import _resolve_operator, stitch_region
+    from squidxplorer._stitch import _resolve_operator, stitch_region
 
     plane_ops = [n for n in ("bgsub", "decon", "flatfield")
                  if not _resolve_operator(n).consumes]
@@ -554,7 +554,7 @@ def _tiles_and_positions(master):
 
 def test_solve_defaults_are_tilefusion_run_s_own_thresholds(master, monkeypatch):
     """Unset, the solve must behave EXACTLY as it did: TileFusion.run()'s 0.5 / 2.0."""
-    from squidmip._stitch import _ABS_THRESH, _REL_THRESH
+    from squidxplorer._stitch import _ABS_THRESH, _REL_THRESH
 
     seen = _spy_two_round(monkeypatch)
     tiles, positions = _tiles_and_positions(master)
@@ -609,8 +609,8 @@ class _MetaOnlyReader:
 
 
 def test_write_plate_forwards_operator_kwargs_to_stitch_plate(monkeypatch):
-    import squidmip._output as out_mod
-    import squidmip._stitch as st
+    import squidxplorer._output as out_mod
+    import squidxplorer._stitch as st
 
     seen = {}
 
@@ -645,7 +645,7 @@ def test_write_plate_refuses_operator_kwargs_an_operator_does_not_declare():
     is a strictly better answer to the same question: ``mip`` genuinely takes no ``blend_px``,
     whereas the old message would have refused a parameter the operator really did have.
     """
-    import squidmip._output as out_mod
+    import squidxplorer._output as out_mod
 
     with pytest.raises(ValueError, match="declares no parameters"):
         out_mod.write_plate(_MetaOnlyReader(), "/tmp/does-not-matter", projector="mip",
@@ -886,7 +886,7 @@ def test_distortion_off_does_not_call_the_engine_at_all(master, monkeypatch):
 
 def test_the_distortion_adapter_exposes_everything_tilefusion_reads_off_a_TileFusion(
         master, monkeypatch):
-    """squidmip runs tilefusion's pieces on IN-MEMORY arrays, so there is no TileFusion
+    """squidxplorer runs tilefusion's pieces on IN-MEMORY arrays, so there is no TileFusion
     instance to hand build_seam_corrections. It is duck-typed on exactly six members; this
     pins the adapter against that surface, so a tilefusion upgrade that reaches for a seventh
     fails HERE rather than at a user's plate."""
@@ -1052,7 +1052,7 @@ def test_auto_blend_width_is_measured_from_the_real_overlap(master):
     is dangerous -- a ramp wider than the overlap never reaches full weight and dims the seam
     -- and this is the control that removes the guess. Formula is the reference tool's:
     median seam overlap x 2, floored at 10."""
-    from squidmip._stitch import _BLEND_PX, auto_blend_px
+    from squidxplorer._stitch import _BLEND_PX, auto_blend_px
 
     # Spacing chosen so the ANSWER IS NOT THE DEFAULT: a 100 px overlap -> 200 px ramp, while
     # _BLEND_PX is 128. With the module fixture's 64 px overlap the measurement happens to
@@ -1072,7 +1072,7 @@ def test_auto_blend_reaches_the_feather_profile(master, monkeypatch):
     seen = []
     monkeypatch.setattr(utils, "make_1d_profile",
                         lambda n, b, *a, **kw: seen.append(b) or real(n, b, *a, **kw))
-    from squidmip._stitch import auto_blend_px
+    from squidxplorer._stitch import auto_blend_px
 
     reader = _FakeReader(master)
     positions = _positions_yx_um(reader.metadata, "A1", list(range(GRID * GRID)))
@@ -1098,7 +1098,7 @@ def test_an_explicit_blend_width_still_wins_over_auto(master, monkeypatch):
 def test_auto_blend_falls_back_when_nothing_overlaps(master):
     """A sparse/freeform acquisition legitimately has isolated FOVs -- the same case
     solve_offsets_px degrades to stage placement for. Auto must not divide by an empty set."""
-    from squidmip._stitch import auto_blend_px
+    from squidxplorer._stitch import auto_blend_px
 
     far = [(0.0, 0.0), (10000.0, 0.0), (0.0, 10000.0), (10000.0, 10000.0)]
     assert auto_blend_px(far, (PIXEL_UM, PIXEL_UM), (TILE, TILE)) > 0
@@ -1203,7 +1203,7 @@ def test_a_tile_that_registered_against_nothing_is_placed_by_the_affine_not_left
     gets, so nothing downstream could tell the two apart. Measured on the real 10x tissue set,
     region manual1: FOV 3 registers against nothing and TileFusion places it 34.4 px away.
     """
-    from squidmip._stitch import _place_unconstrained_tiles
+    from squidxplorer._stitch import _place_unconstrained_tiles
 
     # 3x3 grid at a 100 um pitch, 1 um/px. Tile 8 (the corner) is the isolated one.
     step, n = 100.0, 3
@@ -1240,7 +1240,7 @@ def test_a_tile_that_registered_against_nothing_is_placed_by_the_affine_not_left
 
 def _nonunit_profile(gain: float = 2.0):
     """A profile with a KNOWN, non-unit gain: the top half is dimmer, mean forced to 1.0."""
-    from squidmip._flatfield import FlatfieldProfile
+    from squidxplorer._flatfield import FlatfieldProfile
 
     ff = np.ones((TILE, TILE), dtype=np.float32)
     ff[: TILE // 2] = gain
@@ -1252,12 +1252,12 @@ def test_the_flatfield_wrapper_corrects_every_plane_it_hands_back(master):
     """The wrapper IS the mechanism, and its position is the feature.
 
     maragall/stitcher corrects inside _read_tile_region -- the reader feeding the registration
-    strips -- so phase correlation runs on corrected pixels. Wrapping the READER puts squidmip in
+    strips -- so phase correlation runs on corrected pixels. Wrapping the READER puts squidxplorer in
     the same place, and unlike correcting the projector's OUTPUT it holds for a non-monotone
     z-reducer too, because the reducer never sees uncorrected data.
     """
-    from squidmip._flatfield import correct_flatfield
-    from squidmip._stitch import _FlatfieldReader
+    from squidxplorer._flatfield import correct_flatfield
+    from squidxplorer._stitch import _FlatfieldReader
 
     inner = _FakeReader(master)
     profile = _nonunit_profile()
@@ -1310,8 +1310,8 @@ def test_the_gui_selected_profile_reaches_stitching(master):
     lookup and estimated its own field. Two owners of "which gain field is this plate corrected
     by", and the user's choice was the one with no effect.
     """
-    from squidmip._flatfield import clear_profile, set_profiles
-    from squidmip._stitch import resolve_flatfield
+    from squidxplorer._flatfield import clear_profile, set_profiles
+    from squidxplorer._stitch import resolve_flatfield
 
     reader = _FakeReader(master)
     chosen = _nonunit_profile()
@@ -1347,8 +1347,8 @@ def test_loading_the_stored_profile_in_the_gui_does_not_change_the_stitch(master
     pytest.importorskip("tilefusion.flatfield")
     from tilefusion.flatfield import save_flatfield
 
-    from squidmip._flatfield import FlatfieldProfile, clear_profile, set_profiles
-    from squidmip._stitch import _flatfield_npy_path, resolve_flatfield
+    from squidxplorer._flatfield import FlatfieldProfile, clear_profile, set_profiles
+    from squidxplorer._stitch import _flatfield_npy_path, resolve_flatfield
 
     reader = _FakeReader(master)
     reader._path = tmp_path                      # give the acquisition a home for its profile
@@ -1383,14 +1383,14 @@ def test_a_partial_gui_selection_is_named_in_the_log_and_never_broadcast(master,
     correct the others with it — and it must not be dropped in silence either."""
     import logging
 
-    from squidmip._flatfield import FlatfieldProfile, clear_profile, set_profile
-    from squidmip._stitch import _selected_profiles
+    from squidxplorer._flatfield import FlatfieldProfile, clear_profile, set_profile
+    from squidxplorer._stitch import _selected_profiles
 
     clear_profile()
     ff = np.ones((TILE, TILE), dtype=np.float32)
     set_profile(FlatfieldProfile(ff), channel=CHANNELS[0])
     try:
-        with caplog.at_level(logging.WARNING, logger="squidmip"):
+        with caplog.at_level(logging.WARNING, logger="squidxplorer"):
             picked = _selected_profiles(CHANNELS)
     finally:
         clear_profile()
@@ -1410,7 +1410,7 @@ def test_the_flatfield_stage_says_what_it_is_doing_before_it_does_it(master, mon
     """
     import logging
 
-    import squidmip._flatfield as ff_mod
+    import squidxplorer._flatfield as ff_mod
 
     log_at_entry = []
 
@@ -1420,7 +1420,7 @@ def test_the_flatfield_stage_says_what_it_is_doing_before_it_does_it(master, mon
 
     monkeypatch.setattr(ff_mod, "estimate_profile", _fake_estimate)
     caplog.set_level(logging.INFO)
-    from squidmip._stitch import estimate_region_flatfield
+    from squidxplorer._stitch import estimate_region_flatfield
 
     estimate_region_flatfield(_FakeReader(master), "A1", list(range(4)), channels=[0, 1], z=0)
 
@@ -1439,7 +1439,7 @@ def test_the_affine_fallback_refuses_to_guess_from_too_few_pairs():
     Degrading to the stage position is the honest outcome here — it is what the caller had
     before — and it must not be dressed up as a solve.
     """
-    from squidmip._stitch import _place_unconstrained_tiles
+    from squidxplorer._stitch import _place_unconstrained_tiles
 
     positions = [(0.0, 0.0), (0.0, 100.0), (100.0, 0.0), (500.0, 500.0)]
     metrics = {(0, 1): (0.0, 100.0, 0.9), (0, 2): (100.0, 0.0, 0.9)}

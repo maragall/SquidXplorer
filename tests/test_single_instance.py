@@ -19,7 +19,7 @@ import sys
 
 import pytest
 
-from squidmip._viewer import (
+from squidxplorer._viewer import (
     GuiAlreadyOpen,
     acquire_gui_slot,
     gui_slot_limit,
@@ -41,8 +41,8 @@ requires_flock = pytest.mark.skipif(
 @pytest.fixture
 def slots(tmp_path, monkeypatch):
     """Point the guard at a private lock dir so a real GUI on this machine is untouched."""
-    monkeypatch.setenv("SQUIDMIP_GUI_LOCK_DIR", str(tmp_path))
-    monkeypatch.delenv("SQUIDMIP_MAX_GUI", raising=False)
+    monkeypatch.setenv("SQUIDXPLORER_GUI_LOCK_DIR", str(tmp_path))
+    monkeypatch.delenv("SQUIDXPLORER_MAX_GUI", raising=False)
     return tmp_path
 
 
@@ -72,7 +72,7 @@ def test_releasing_frees_the_slot_for_the_next_window(slots):
 
 @requires_flock
 def test_the_cap_is_configurable(slots, monkeypatch):
-    monkeypatch.setenv("SQUIDMIP_MAX_GUI", "2")
+    monkeypatch.setenv("SQUIDXPLORER_MAX_GUI", "2")
     assert gui_slot_limit() == 2
 
     a = acquire_gui_slot()
@@ -95,7 +95,7 @@ def test_the_refusal_names_the_limit_and_how_to_override(slots):
         release_gui_slot(first)
 
     msg = str(exc.value)
-    assert "SQUIDMIP_MAX_GUI" in msg, "the refusal must say how to raise the cap"
+    assert "SQUIDXPLORER_MAX_GUI" in msg, "the refusal must say how to raise the cap"
     assert "1" in msg, "the refusal must say what the cap is"
 
 
@@ -106,10 +106,10 @@ def test_a_window_built_directly_still_takes_a_slot(slots, monkeypatch):
     pytest.importorskip("qtpy")
     from qtpy.QtWidgets import QApplication
 
-    import squidmip._viewer as V
+    import squidxplorer._viewer as V
 
     app = QApplication.instance() or QApplication([])
-    app.setProperty("_squidmip_test", True)
+    app.setProperty("_squidxplorer_test", True)
     monkeypatch.setattr(V, "_gui_cap_applies", lambda: True)   # offscreen is exempt; force the cap
 
     first = V.PlateWindow(None)

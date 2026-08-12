@@ -3,13 +3,13 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "squidmip"
+name = "squidxplorer"
 version = "0.1.0"
 description = "High-throughput z-stack maximum-intensity projection for Squid well-plate acquisitions"
 readme = "README.md"
 # ">=3.11", not ">=3.10", as of 2026-08-05. This was a FALSE claim and CI proved it: the `test
 # (3.10)` leg of .github/workflows/ci.yml failed at INSTALL, not at test time, with
-#     ERROR: Could not find a version that satisfies the requirement zarr>=3.0 (from squidmip)
+#     ERROR: Could not find a version that satisfies the requirement zarr>=3.0 (from squidxplorer)
 #     ERROR: No matching distribution found for zarr>=3.0
 # because every zarr 3.x release declares Requires-Python >=3.11. `zarr>=3.0` is a hard runtime
 # dependency below, so this package has been uninstallable on 3.10 since that pin landed while
@@ -36,7 +36,7 @@ dependencies = [
     #                             anndata itself is NOT a dependency — the encoding is a documented
     #                             on-disk contract and the table is nine columns wide.
     "pillow>=10.0",
-    "platformdirs>=3.0",        # Gap 1: the persistent plate-cell cache (squidmip/_platecache.py)
+    "platformdirs>=3.0",        # Gap 1: the persistent plate-cell cache (squidxplorer/_platecache.py)
     #                             needs the per-OS user cache directory. It is a hard dependency
     #                             and not a lazy import, because the alternative to knowing where
     #                             the cache belongs is writing beside the acquisition, and this
@@ -52,12 +52,12 @@ dependencies = [
 ]
 
 # CORRECTED 2026-08-05. The line that stood here said "No tilefusion dependency" and that was
-# FALSE, measured: `squidmip/_stitch.py` imports `tilefusion.{registration,optimization,fusion,
-# flatfield,distortion,utils}` at 7 call sites and `squidmip/_flatfield.py` at 3 more. The claim
+# FALSE, measured: `squidxplorer/_stitch.py` imports `tilefusion.{registration,optimization,fusion,
+# flatfield,distortion,utils}` at 7 call sites and `squidxplorer/_flatfield.py` at 3 more. The claim
 # was true of IMA-189 ingest and was never revised when stitching landed on top of it.
 #
 # What IS still true, and is the reason the false line was believable: the OME-zarr WRITER is
-# vendored (squidmip/_zarr_store.py), not imported, because importing tilefusion runs its heavy
+# vendored (squidxplorer/_zarr_store.py), not imported, because importing tilefusion runs its heavy
 # __init__ (numba's threading-layer pin, GPU/cupy probes, basicpy). That vendoring is why the
 # reader/writer path installs without tilefusion. The STITCH path does not, and never did.
 #
@@ -65,7 +65,7 @@ dependencies = [
 # below rather than being denied here.
 
 [project.optional-dependencies]
-# video: the .mp4 movie export (squidmip/_video.py). imageio drives imageio-ffmpeg, whose wheel
+# video: the .mp4 movie export (squidxplorer/_video.py). imageio drives imageio-ffmpeg, whose wheel
 # carries its OWN ffmpeg binary for Linux, Windows and macOS — so this works on a laptop with no
 # system ffmpeg on PATH, which is the portability property the feature needs and the reason no
 # other backend was chosen (PyAV needs a compiler or a platform wheel; OpenCV is 110 MB and was
@@ -90,7 +90,7 @@ video = ["imageio>=2.31", "imageio-ffmpeg>=0.4.9"]
 # ".[gui,test]"` then the runner, which is exactly CI's two lines, ended at
 # "SUITE COLLECTION FAILED: zero tests collected". The suite was green on this laptop the whole
 # time because the dev environment had the plugin from somewhere else, so nothing here could see it.
-test = ["pytest>=7.0", "pytest-timeout>=2.1", "ome-zarr-models>=1.7", "squidmip[video]"]
+test = ["pytest>=7.0", "pytest-timeout>=2.1", "ome-zarr-models>=1.7", "squidxplorer[video]"]
 # gui: the MIP tool desktop app. Qt (via qtpy) + napari. ndviewer_light was removed on
 # 2026-07-30: napari is the renderer and the second stack imported PyQt5 at module scope,
 # which cannot share a process with a Qt6 napari.
@@ -102,7 +102,7 @@ test = ["pytest>=7.0", "pytest-timeout>=2.1", "ome-zarr-models>=1.7", "squidmip[
 # CI's install lines, so a clean `.[gui]` install produced an app whose every view window showed
 # "napari viewer unavailable (NapariBindingError)" while the plate shell looked fine -- a failure
 # that reads as a platform bug and is not one. Verified against napari 0.8.0 on Windows via
-# squidmip._napari_view.verify_napari_bindings(), which is the guard that was firing.
+# squidxplorer._napari_view.verify_napari_bindings(), which is the guard that was firing.
 #
 # psutil is what _rss_mb() and _region_viewer's memory bar actually want. Without it they fall
 # back to `resource`, which does not exist on Windows, so the footprint readout sat at 0 MB
@@ -117,7 +117,7 @@ gui = [
     # PyQt6, not PyQt5, as of 2026-07-31. The code migration landed weeks ago (10b8348, f7f9b28,
     # ce5605c) but this line still asked for Qt5, so every fresh `.[gui]` install produced a
     # PyQt5-only environment and qtpy -- whose preference order starts at PyQt5 -- ran the
-    # "migrated" app on Qt5. The declaration and `squidmip/__init__.py`'s pin have to agree or
+    # "migrated" app on Qt5. The declaration and `squidxplorer/__init__.py`'s pin have to agree or
     # one of them is a lie; they now do.
     #
     # Qt6 is not cosmetic here. It scales fractional-DPI displays correctly by default, which is
@@ -138,7 +138,7 @@ gui = [
     "psutil>=5.9",
     # The movie export is a window feature, so the desktop app always has its encoder. Declared
     # by reference rather than duplicated: two copies of a version range drift.
-    "squidmip[video]",
+    "squidxplorer[video]",
 ]
 
 # ---------------------------------------------------------------------------------------------
@@ -160,20 +160,20 @@ gui = [
 #   * `pip install .[stitch]` needs git on PATH and network access to github.com.
 #
 # UNPINNED, said plainly: neither direct reference names a tag or commit, so both track their
-# default branch. That is what the code has always assumed -- squidmip calls tilefusion private
+# default branch. That is what the code has always assumed -- squidxplorer calls tilefusion private
 # helpers (`_edges_from_pairwise_metrics`, `_check_connectivity`), which is a tighter coupling
 # than a version range can express anyway. Pin them to a SHA the first time an upstream change
 # breaks a build; do not pre-emptively pin to a tag that does not exist.
 stitch = [
-    # squidmip/_stitch.py (7 import sites) + squidmip/_flatfield.py (3). Registration,
+    # squidxplorer/_stitch.py (7 import sites) + squidxplorer/_flatfield.py (3). Registration,
     # optimization, fusion, distortion and BaSiC flat-fielding are all tilefusion's, called in
     # TileFusion.run()'s own order on in-memory arrays.
     "tilefusion @ git+https://github.com/maragall/stitcher",
 ]
 decon = [
-    # squidmip/_decon.py -> `import petakit` (PetaKit5D's Richardson-Lucy port). Declared on the
+    # squidxplorer/_decon.py -> `import petakit` (PetaKit5D's Richardson-Lucy port). Declared on the
     # registry as `requires=("petakit",)` for the `decon` and `decon3d` projectors.
-    # psfmodels is deliberately NOT listed here: squidmip never imports it, petakit does. It is
+    # psfmodels is deliberately NOT listed here: squidxplorer never imports it, petakit does. It is
     # petakit's dependency to declare, and adding it here would be this file guessing at another
     # package's requirements.
     #
@@ -194,14 +194,14 @@ decon = [
     "petakit @ git+https://github.com/maragall/deconvolution",
 ]
 segment = [
-    # squidmip/_cellpose.py and squidmip/_spots.py -> `from cellpose import models`.
+    # squidxplorer/_cellpose.py and squidxplorer/_spots.py -> `from cellpose import models`.
     # The only one of the three that is a normal PyPI install.
     "cellpose>=3.0",
 ]
 
 [project.scripts]
-squidmip = "squidmip._cli:main"           # headless CLI (IMA-186): MIP a plate from the terminal
-squidmip-view = "squidmip._viewer:main"   # the MIP tool desktop app
+squidxplorer = "squidxplorer._cli:main"           # headless CLI (IMA-186): MIP a plate from the terminal
+squidxplorer-view = "squidxplorer._viewer:main"   # the MIP tool desktop app
 
 [tool.hatch.metadata]
 # Every [gui] dependency is still a plain PyPI release -- that part of the note this replaces
@@ -214,12 +214,12 @@ squidmip-view = "squidmip._viewer:main"   # the MIP tool desktop app
 allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
-packages = ["squidmip"]
+packages = ["squidxplorer"]
 
 [tool.pytest.ini_options]
 # THIS repo's suite is tests/. Stated explicitly as of 2026-08-05, because it stopped being the
 # only answer: `templates/operator/` is a standalone example PACKAGE with its own pyproject and
-# its own tests, and those tests import `squidmip_operator_template`, which is only importable
+# its own tests, and those tests import `squidxplorer_operator_template`, which is only importable
 # when a contributor has installed the template. Collected from the repo root they are an import
 # error in a suite that has nothing to do with them. Run them where they belong:
 #     pip install -e templates/operator && pytest templates/operator/tests

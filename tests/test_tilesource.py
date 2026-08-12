@@ -21,9 +21,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from squidmip._output import pyramid_shapes, write_from_stream
-from squidmip._tiling import Geometry, TileCache, select_tiles
-from squidmip._tilesource import (
+from squidxplorer._output import pyramid_shapes, write_from_stream
+from squidxplorer._tiling import Geometry, TileCache, select_tiles
+from squidxplorer._tilesource import (
     DEFAULT_TILE_PX,
     InMemoryMultiscale,
     PlateLadder,
@@ -73,7 +73,7 @@ def test_pyramid_shapes_matches_the_written_levels():
 
 
 def test_pyramid_shapes_agrees_with_the_actual_downsample():
-    from squidmip._output import _pyramid
+    from squidxplorer._output import _pyramid
     img = np.zeros((1, 1, 1, 600, 401), np.uint16)
     assert [lv.shape[-2:] for lv in _pyramid(img)] == [tuple(s) for s in pyramid_shapes((600, 401))]
 
@@ -263,7 +263,7 @@ def test_in_ram_multiscale_dirty_tiles_drive_tilecache_invalidate():
 
     coarse = pv.levels[0]
     key = ladder.geometry.levels[coarse].keys[0]
-    from squidmip._tiling import TileDescriptor
+    from squidxplorer._tiling import TileDescriptor
     desc = TileDescriptor(coarse, key, "0", ladder.cell_bbox_um(coarse, key), 0)
     cache.insert(desc, pv.read_tile(desc))          # a black tile, cached before the field lands
     assert not cache.get(desc).any()
@@ -340,7 +340,7 @@ def test_zarr_source_composites_a_plate_tile_from_many_fovs(tmp_path):
     src = ZarrPyramidSource(plate)
     coarse = len(src.ladder.geometry) - 1
     key = src.ladder.geometry.levels[coarse].keys[0]
-    from squidmip._tiling import TileDescriptor
+    from squidxplorer._tiling import TileDescriptor
     bbox = src.ladder.cell_bbox_um(coarse, key)
     tile = src.read_tile(TileDescriptor(coarse, key, src.channels[0], bbox, 0))
     assert tile.dtype == np.uint16

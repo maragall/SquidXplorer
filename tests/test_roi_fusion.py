@@ -14,8 +14,8 @@ time (see the three regression tests at the bottom). It had no caller outside th
 import numpy as np
 import pytest
 
-from squidmip import _napari3d
-from squidmip._napari3d import read_brick, roi_window_px
+from squidxplorer import _napari3d
+from squidxplorer._napari3d import read_brick, roi_window_px
 
 
 class _FakeReader:

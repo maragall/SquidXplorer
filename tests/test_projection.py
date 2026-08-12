@@ -18,8 +18,8 @@ import numpy as np
 import pytest
 import tifffile
 
-from squidmip import open_reader, plane_op, project, project_well, select_fovs
-from squidmip.projection import project_reference, select_reference_z
+from squidxplorer import open_reader, plane_op, project, project_well, select_fovs
+from squidxplorer.projection import project_reference, select_reference_z
 
 
 # --------------------------------------------------------------------------------------
@@ -311,7 +311,7 @@ def test_project_reference_picks_sharpest_plane():
     # Reference-plane reduction returns the single sharpest z-plane by Tenengrad focus (streaming,
     # bounded). A high-gradient plane beats flat/dim ones; the exact plane is returned unchanged.
     import numpy as np
-    from squidmip.projection import project_reference
+    from squidxplorer.projection import project_reference
     rng = np.random.default_rng(1)
     flat = (np.ones((48, 48)) * 800).astype(np.uint16)
     sharp = rng.integers(0, 4000, (48, 48)).astype(np.uint16)
@@ -319,8 +319,8 @@ def test_project_reference_picks_sharpest_plane():
     out = project_reference(iter([flat, dim, sharp]))
     assert np.array_equal(out, sharp)
     # registered as a pluggable projector, so the engine/CLI can select it by name
-    import squidmip
-    assert "reference" in squidmip.available_projectors()
+    import squidxplorer
+    assert "reference" in squidxplorer.available_projectors()
 
 
 # ======================================================================================
@@ -553,7 +553,7 @@ def test_n_equals_1_mip_is_byte_identical(tmp_path):
 # looks like. There is one now, and these tests are what a sixth would have to survive.
 
 def test_cast_like_rounds_and_clips_instead_of_truncating_and_wrapping():
-    from squidmip.projection import cast_like
+    from squidxplorer.projection import cast_like
 
     got = cast_like(np.array([-3.0, 10.5, 11.5, 12.7, 70000.0], dtype=np.float32), np.uint16)
     # rint is half-to-EVEN: 10.5 -> 10, 11.5 -> 12. Truncation would give 10, 11, 12; an unsigned
@@ -565,7 +565,7 @@ def test_cast_like_rounds_and_clips_instead_of_truncating_and_wrapping():
 
 def test_cast_like_in_place_gives_the_same_answer_as_the_copying_form():
     """`copy=False` is an allocation choice, never a different rule."""
-    from squidmip.projection import cast_like
+    from squidxplorer.projection import cast_like
 
     values = np.array([-3.0, 10.5, 11.5, 12.7, 70000.0], dtype=np.float32)
     np.testing.assert_array_equal(cast_like(values.copy(), np.uint16),
@@ -574,7 +574,7 @@ def test_cast_like_in_place_gives_the_same_answer_as_the_copying_form():
 
 def test_cast_like_in_place_refuses_an_integer_buffer_by_name():
     """`np.rint(int_array, out=int_array)` is a silent no-op, so the wrong buffer must raise."""
-    from squidmip.projection import cast_like
+    from squidxplorer.projection import cast_like
 
     with pytest.raises(ValueError, match="floating-point buffer"):
         cast_like(np.array([1, 2, 3], dtype=np.uint16), np.uint16, copy=False)
@@ -588,9 +588,9 @@ def test_no_module_carries_a_second_dtype_cast():
     """
     import pathlib
 
-    import squidmip
+    import squidxplorer
 
-    pkg = pathlib.Path(squidmip.__file__).parent
+    pkg = pathlib.Path(squidxplorer.__file__).parent
     offenders = [str(p.relative_to(pkg)) for p in sorted(pkg.rglob("*.py"))
                  if "def _cast_like" in p.read_text()]
     assert not offenders, (

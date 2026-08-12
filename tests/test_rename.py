@@ -49,8 +49,8 @@ if "PySide6" in sys.modules or "PySide2" in sys.modules:
 from qtpy.QtCore import Qt  # noqa: E402
 from qtpy.QtWidgets import QApplication  # noqa: E402
 
-from squidmip._logpane import VIEW_FIELD  # noqa: E402
-from squidmip._region_viewer import OpenViewList, ViewerManager  # noqa: E402
+from squidxplorer._logpane import VIEW_FIELD  # noqa: E402
+from squidxplorer._region_viewer import OpenViewList, ViewerManager  # noqa: E402
 
 from .conftest import REGIONS  # noqa: E402
 
@@ -58,7 +58,7 @@ from .conftest import REGIONS  # noqa: E402
 @pytest.fixture(scope="module")
 def qapp():
     app = QApplication.instance() or QApplication([])
-    app.setProperty("_squidmip_test", True)
+    app.setProperty("_squidxplorer_test", True)
     return app
 
 
@@ -70,7 +70,7 @@ def manager(qapp, napari_pane_stub, squid_dataset):
     it hands out set ``WA_DeleteOnClose``, so ``close()`` only SCHEDULES deletion and the collect
     has to happen here, with the app alive.
     """
-    from squidmip import open_reader
+    from squidxplorer import open_reader
 
     root, _arrays = squid_dataset
     reader = open_reader(str(root))

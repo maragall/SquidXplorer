@@ -6,7 +6,7 @@ calling the standalone repo directly** — or, where it deliberately differs, th
 pinned exactly and justified in a comment.
 
 Everything here runs on synthetic in-memory numpy only; no dataset is read, nothing is written
-to disk, and no squidmip source is modified. CPU is forced everywhere a backend choice exists
+to disk, and no squidxplorer source is modified. CPU is forced everywhere a backend choice exists
 (``gpu=False``) so the comparison is deterministic.
 
 Per-operator verdicts (see each test for the exact assertion):
@@ -35,18 +35,18 @@ pytest.importorskip("bgsub")
 # 1. bgsub  (maragall/background_subtraction) — HIGHEST PRIORITY
 # ======================================================================================
 #
-# squidmip._background.estimate_background(method="sep") calls bgsub.core._run_sep verbatim and
+# squidxplorer._background.estimate_background(method="sep") calls bgsub.core._run_sep verbatim and
 # returns its background. subtract_background then does raw - background and casts back.
 #
 # THE DIVERGENCE, pinned precisely:
 #   * bgsub.core._run_sep(img, R) -> (img_f32 - bg, bg), both float32, UNCLIPPED.
 #   * bgsub.core._process_frame_worker (the CLI's on-disk path) writes
 #         np.clip(fg, info.min, info.max).astype(dtype)      # clip, then TRUNCATE
-#   * squidmip.subtract_background casts with cast_like:
+#   * squidxplorer.subtract_background casts with cast_like:
 #         np.clip(np.rint(fg), info.min, info.max).astype(dtype)   # clip, then ROUND
 #
-#   So on a FLOAT plane (the LAYER contract — non-destructive, nothing thrown away) squidmip is
-#   byte-identical to _run_sep's foreground. On an INTEGER plane squidmip rounds where the CLI
+#   So on a FLOAT plane (the LAYER contract — non-destructive, nothing thrown away) squidxplorer is
+#   byte-identical to _run_sep's foreground. On an INTEGER plane squidxplorer rounds where the CLI
 #   truncates: same clip, different rounding. That is faithful-by-design, not a bug — rounding
 #   avoids the half-count systematic dimming that truncation imposes on every pixel, and it is
 #   exactly what makes the layer invertible (see _background.py's cast_like docstring).
@@ -62,7 +62,7 @@ def _synthetic_plane_f32():
 
 
 def test_bgsub_background_estimate_is_byte_identical_to_run_sep():
-    from squidmip._background import estimate_background, BackgroundParams
+    from squidxplorer._background import estimate_background, BackgroundParams
     from bgsub.core import _run_sep
 
     plane = _synthetic_plane_f32()
@@ -77,9 +77,9 @@ def test_bgsub_background_estimate_is_byte_identical_to_run_sep():
 
 
 def test_bgsub_float_subtraction_is_the_unclipped_standalone_foreground():
-    """The LAYER path. On a float plane squidmip == bgsub._run_sep foreground, byte-for-byte,
+    """The LAYER path. On a float plane squidxplorer == bgsub._run_sep foreground, byte-for-byte,
     UNCLIPPED — a faithful non-destructive layer (no photons discarded, fully invertible)."""
-    from squidmip._background import subtract_background, BackgroundParams
+    from squidxplorer._background import subtract_background, BackgroundParams
     from bgsub.core import _run_sep
 
     plane = _synthetic_plane_f32()
@@ -93,9 +93,9 @@ def test_bgsub_float_subtraction_is_the_unclipped_standalone_foreground():
 
 
 def test_bgsub_integer_subtraction_diverges_from_cli_by_round_vs_truncate():
-    """The on-disk/integer path. squidmip ROUNDS where the CLI worker TRUNCATES — same clip,
+    """The on-disk/integer path. squidxplorer ROUNDS where the CLI worker TRUNCATES — same clip,
     different rounding. This test pins BOTH sides of that exact, justified divergence."""
-    from squidmip._background import subtract_background, BackgroundParams
+    from squidxplorer._background import subtract_background, BackgroundParams
     from bgsub.core import _run_sep
 
     plane = _synthetic_plane_f32()
@@ -109,7 +109,7 @@ def test_bgsub_integer_subtraction_diverges_from_cli_by_round_vs_truncate():
     cli_worker = np.clip(fg_standalone, info.min, info.max).astype(np.uint16)   # truncate
     squid_expected = np.clip(np.rint(fg_standalone), info.min, info.max).astype(np.uint16)  # round
 
-    # squidmip == round(clip(fg)); it is NOT the CLI's truncate(clip(fg)).
+    # squidxplorer == round(clip(fg)); it is NOT the CLI's truncate(clip(fg)).
     assert np.array_equal(sub_squid, squid_expected)
     assert not np.array_equal(sub_squid, cli_worker)
     # The divergence is real and non-trivial (many pixels differ by exactly the rounding), but
@@ -122,7 +122,7 @@ def test_bgsub_integer_subtraction_diverges_from_cli_by_round_vs_truncate():
 # 2. flatfield  (maragall/stitcher — tilefusion.flatfield)
 # ======================================================================================
 #
-# squidmip._flatfield.estimate_profile wraps tilefusion.flatfield.estimate_flatfield_channel and
+# squidxplorer._flatfield.estimate_profile wraps tilefusion.flatfield.estimate_flatfield_channel and
 # stores its output in a FlatfieldProfile (no re-normalisation). correct_flatfield applies
 # (raw - dark)/gain with the SAME _MIN_GAIN guard as tilefusion.flatfield.apply_flatfield.
 
@@ -135,7 +135,7 @@ def _synthetic_tile_stack():
 
 
 def test_flatfield_profile_is_byte_identical_to_estimate_flatfield_channel():
-    from squidmip._flatfield import estimate_profile
+    from squidxplorer._flatfield import estimate_profile
     from tilefusion.flatfield import estimate_flatfield_channel
 
     stack = _synthetic_tile_stack()
@@ -153,7 +153,7 @@ def test_flatfield_corrected_plane_matches_apply_flatfield():
     """Corrected float plane is byte-identical to tilefusion.flatfield.apply_flatfield on the
     same profile. Float in / float out involves no integer rounding, so np.array_equal holds;
     the tolerance-free equality is the strongest statement available here."""
-    from squidmip._flatfield import estimate_profile, correct_flatfield
+    from squidxplorer._flatfield import estimate_profile, correct_flatfield
     from tilefusion.flatfield import estimate_flatfield_channel, apply_flatfield
 
     stack = _synthetic_tile_stack()
@@ -173,13 +173,13 @@ def test_flatfield_corrected_plane_matches_apply_flatfield():
 # 3. decon  (maragall/deconvolution — petakit)
 # ======================================================================================
 #
-# squidmip._decon builds the in-focus plane of petakit's vectorial PSF (make_psf_2d) and calls
+# squidxplorer._decon builds the in-focus plane of petakit's vectorial PSF (make_psf_2d) and calls
 # petakit.deconvolve(method="rl") — NOT the "omw" default. Both the PSF and the RL result are
 # checked against calling petakit directly. Runs end-to-end on CPU, so no xfail is needed.
 
 
 def _optics():
-    from squidmip._decon import OpticsParams
+    from squidxplorer._decon import OpticsParams
 
     # Tiny nz keeps generate_psf cheap; real optics values (NA 0.3, 10x, 0.752 um/px).
     return OpticsParams(na=0.3, wavelength_um=0.525, dxy_um=0.752, dz_um=1.5, nz=3)
@@ -187,9 +187,9 @@ def _optics():
 
 def test_decon_in_focus_psf_is_byte_identical_to_petakit_generate_psf():
     """make_psf_2d == in-focus plane of petakit.generate_psf, sized by petakit.compute_psf_size,
-    renormalised to sum 1 — recomputed INDEPENDENTLY here, not read back from squidmip."""
+    renormalised to sum 1 — recomputed INDEPENDENTLY here, not read back from squidxplorer."""
     import petakit
-    from squidmip._decon import make_psf_2d
+    from squidxplorer._decon import make_psf_2d
 
     op = _optics()
     ni = op.immersion_index
@@ -207,12 +207,12 @@ def test_decon_in_focus_psf_is_byte_identical_to_petakit_generate_psf():
 
 
 def test_decon_plane_is_byte_identical_to_petakit_rl():
-    """squidmip.deconvolve_plane == petakit.deconvolve(method="rl") with the same PSF/params.
+    """squidxplorer.deconvolve_plane == petakit.deconvolve(method="rl") with the same PSF/params.
 
     This pins the WIRING (method='rl', not the 'omw' default; same PSF; same iterations) AND the
     numeric result. On a float plane there is no integer cast, so the two are byte-identical."""
     import petakit
-    from squidmip._decon import deconvolve_plane, make_psf_2d, METHOD
+    from squidxplorer._decon import deconvolve_plane, make_psf_2d, METHOD
 
     assert METHOD == "rl"  # never inherit petakit's "omw" default (returns all-zero on this data)
 
@@ -233,7 +233,7 @@ def test_decon_plane_is_byte_identical_to_petakit_rl():
 # 4. stitch  (maragall/stitcher — tilefusion.registration + optimization)
 # ======================================================================================
 #
-# squidmip._stitch.solve_offsets_px is exactly four tilefusion.registration calls followed by
+# squidxplorer._stitch.solve_offsets_px is exactly four tilefusion.registration calls followed by
 # the pose-graph solve. We run the identical raw pipeline here and assert the per-tile offsets
 # are byte-identical, AND that a KNOWN injected residual is recovered sub-pixel.
 
@@ -255,7 +255,7 @@ def _two_fov_overlap(inject_dx=3):
 
 
 def test_stitch_offsets_are_byte_identical_to_raw_tilefusion_pipeline():
-    from squidmip._stitch import solve_offsets_px
+    from squidxplorer._stitch import solve_offsets_px
     from tilefusion.registration import (
         find_adjacent_pairs, rotation_aware_max_shift, compute_pair_bounds,
         register_pairs_batched,
@@ -286,7 +286,7 @@ def test_stitch_offsets_are_byte_identical_to_raw_tilefusion_pipeline():
 def test_stitch_recovers_the_injected_residual():
     """Sanity that the solve is doing real work: a +3 px injected content shift is recovered to
     sub-pixel (phase correlation upsamples), which is what 'the offsets match' is worth."""
-    from squidmip._stitch import solve_offsets_px
+    from squidxplorer._stitch import solve_offsets_px
 
     tiles, positions, psize, tshape, inject_dx = _two_fov_overlap(inject_dx=3)
     offsets = solve_offsets_px(

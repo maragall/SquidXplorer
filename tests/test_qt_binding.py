@@ -24,13 +24,13 @@ import sys
 import pytest
 
 
-def test_importing_squidmip_pins_the_qt_binding_to_qt6():
+def test_importing_squidxplorer_pins_the_qt_binding_to_qt6():
     """Importing the package must decide the binding, and must decide it as Qt6 where Qt6 exists.
 
     Asserted through a CHILD PROCESS with a clean environment, because this one has long since
     imported qtpy: by the time any test runs, the binding is settled and re-importing proves
-    nothing. The child imports squidmip FIRST, which is the real entry point's order
-    (`python -m squidmip._viewer` runs the package __init__ before anything else).
+    nothing. The child imports squidxplorer FIRST, which is the real entry point's order
+    (`python -m squidxplorer._viewer` runs the package __init__ before anything else).
     """
     if importlib.util.find_spec("PyQt6") is None:
         pytest.skip("PyQt6 is not installed here; the pin is conditional on it by design")
@@ -38,7 +38,7 @@ def test_importing_squidmip_pins_the_qt_binding_to_qt6():
     env = {k: v for k, v in os.environ.items() if k != "QT_API"}
     env["QT_QPA_PLATFORM"] = "offscreen"
     out = subprocess.run(
-        [sys.executable, "-c", "import squidmip, qtpy; print(qtpy.API_NAME)"],
+        [sys.executable, "-c", "import squidxplorer, qtpy; print(qtpy.API_NAME)"],
         capture_output=True, text=True, env=env, timeout=300,
     )
     assert out.returncode == 0, out.stderr
@@ -48,14 +48,14 @@ def test_importing_squidmip_pins_the_qt_binding_to_qt6():
 
 def test_an_explicit_binding_in_the_environment_still_wins():
     """The pin is a default, not a lock. Anyone whose machine misbehaves under Qt6 needs
-    ``QT_API=pyqt5 squidmip-view`` to keep working, so the demo is never one bad GPU driver away
+    ``QT_API=pyqt5 squidxplorer-view`` to keep working, so the demo is never one bad GPU driver away
     from having no viewer at all."""
     if importlib.util.find_spec("PyQt5") is None:
         pytest.skip("PyQt5 is not installed here, so there is no second binding to fall back to")
 
     env = dict(os.environ, QT_API="pyqt5", QT_QPA_PLATFORM="offscreen")
     out = subprocess.run(
-        [sys.executable, "-c", "import squidmip, qtpy; print(qtpy.API_NAME)"],
+        [sys.executable, "-c", "import squidxplorer, qtpy; print(qtpy.API_NAME)"],
         capture_output=True, text=True, env=env, timeout=300,
     )
     assert out.returncode == 0, out.stderr
@@ -67,12 +67,12 @@ def test_the_event_loop_is_entered_with_a_spelling_that_exists_on_qt6():
     that call is an AttributeError there and the app dies immediately after painting its window.
 
     This is asserted by SOURCE, not by running it, and that is the point. ``main()`` returns the
-    window without entering the loop whenever ``_squidmip_test`` is set, which every GUI test
+    window without entering the loop whenever ``_squidxplorer_test`` is set, which every GUI test
     sets -- so this statement is the one line in the app that no test can ever execute. A source
     assertion is the only coverage available for it, and something had to cover it: the migration
     left this call behind and 1073 passing tests did not notice.
     """
-    from squidmip import _viewer
+    from squidxplorer import _viewer
 
     # Comment lines are stripped first: the fix is DOCUMENTED in a comment that names the broken
     # spelling, and a naive substring search finds the explanation and calls it the defect.
@@ -88,7 +88,7 @@ def test_fractional_display_scaling_is_passed_through_not_rounded():
     it is invisible on macOS because Retina is exactly 2x and rounds to itself. Source-asserted
     for the same reason as above: ``enable_hidpi`` must run BEFORE a QApplication exists, so a
     test that has already built one cannot observe its effect."""
-    from squidmip import _viewer
+    from squidxplorer import _viewer
 
     src = inspect.getsource(_viewer.enable_hidpi)
     assert "HighDpiScaleFactorRoundingPolicy" in src

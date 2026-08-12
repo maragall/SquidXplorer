@@ -1,6 +1,6 @@
 """Playback on the TIME axis: the picture must actually move, and never run ahead of the read.
 
-`squidmip/_time_point.py` said, from the day the timepoint bar landed, that "there is no
+`squidxplorer/_time_point.py` said, from the day the timepoint bar landed, that "there is no
 time-reduction operator … the real operation on that axis is playback and export". This file is
 the playback half, and it is written against the two ways it can be wrong RATHER THAN against the
 happy path, because both have live precedent in this repo:
@@ -37,8 +37,8 @@ import pytest
 pytest.importorskip("qtpy")
 pytest.importorskip("napari", reason="playback is napari's own dims playback")
 
-from squidmip import open_reader                                        # noqa: E402
-from squidmip._time_point import NoPlaybackError, TimePointBar          # noqa: E402
+from squidxplorer import open_reader                                        # noqa: E402
+from squidxplorer._time_point import NoPlaybackError, TimePointBar          # noqa: E402
 from tests.conftest import (                                            # noqa: E402
     N_TIME_POINTS,
     TIME_SERIES_CHANNELS,
@@ -293,7 +293,7 @@ def test_playing_a_window_renders_a_DIFFERENT_frame_per_timepoint(
     window that navigated timepoints perfectly and rendered timepoint 0 every time. Playback that
     paints the same frame three times fails here and passes every test that only watches state.
     """
-    from squidmip._region_viewer import ViewerManager
+    from squidxplorer._region_viewer import ViewerManager
 
     root, _planes = multi_time_point_dataset
     reader = open_reader(root)
@@ -338,7 +338,7 @@ def test_a_superseded_load_cannot_repaint_the_window_with_its_own_timepoint(
     window shows the older frame under the newer label — the same class of silent divergence as
     the bug this axis already had once.
     """
-    from squidmip._region_viewer import ViewerManager
+    from squidxplorer._region_viewer import ViewerManager
 
     root, _planes = multi_time_point_dataset
     reader = open_reader(root)
@@ -377,7 +377,7 @@ def test_a_superseded_load_does_not_open_the_playback_gate(
     would go back to queueing — which is the failure the gate exists to prevent, arriving through
     the back door.
     """
-    from squidmip._region_viewer import ViewerManager
+    from squidxplorer._region_viewer import ViewerManager
 
     root, _planes = multi_time_point_dataset
     reader = open_reader(root)
@@ -408,7 +408,7 @@ def test_a_reload_reuses_the_layers_instead_of_destroying_them(
     rebuild, against a 10-13 ms read. That is the difference between ~0.75 fps and ~4.5 fps, and
     between an 800 ms freeze per frame and a 400 ms one.
     """
-    from squidmip._region_viewer import _RAW_OP, ViewerManager
+    from squidxplorer._region_viewer import _RAW_OP, ViewerManager
 
     root, _planes = multi_time_point_dataset
     reader = open_reader(root)
@@ -463,7 +463,7 @@ def test_a_reload_reuses_the_layers_instead_of_destroying_them(
 def _real_mosaic():
     from napari.components import ViewerModel
 
-    from squidmip._napari_view import MosaicLayers
+    from squidxplorer._napari_view import MosaicLayers
 
     return MosaicLayers(ViewerModel())
 
@@ -544,8 +544,8 @@ def test_a_region_change_never_hands_napari_a_layer_of_another_shape(
     and this fails on the first transition with napari's own IndexError. That is the whole reason
     the removal is conditional rather than gone.
     """
-    from squidmip import _viewer as V
-    from squidmip._region_viewer import ViewerManager
+    from squidxplorer import _viewer as V
+    from squidxplorer._region_viewer import ViewerManager
 
     root, _planes = multi_time_point_dataset
     reader = open_reader(root)
@@ -594,8 +594,8 @@ def test_a_timepoint_change_keeps_the_very_same_layer_object(
     to the layer alive — contrast, visibility and colormap all subscribe to layer objects, and
     each of those has already broken once when a reload destroyed the object underneath them.
     """
-    from squidmip import _viewer as V
-    from squidmip._region_viewer import ViewerManager
+    from squidxplorer import _viewer as V
+    from squidxplorer._region_viewer import ViewerManager
 
     root, _planes = multi_time_point_dataset
     reader = open_reader(root)
@@ -635,7 +635,7 @@ def test_a_load_that_produces_nothing_DOES_drop_the_stale_layers(
     what is on screen belongs to another timepoint and is now sitting under this one's label,
     which is the exact class of silent lie this axis already had once.
     """
-    from squidmip._region_viewer import _RAW_OP, ViewerManager
+    from squidxplorer._region_viewer import _RAW_OP, ViewerManager
 
     root, _planes = multi_time_point_dataset
     reader = open_reader(root)
@@ -665,7 +665,7 @@ def test_the_camera_is_not_re_framed_on_every_frame(
     stage coordinates, so re-framing drags the user's zoom back to fit on every frame. You
     cannot watch a blob move at 1:1 if the camera keeps pulling out.
     """
-    from squidmip._region_viewer import ViewerManager
+    from squidxplorer._region_viewer import ViewerManager
 
     class _Camera:
         def __init__(self):
@@ -710,7 +710,7 @@ def test_a_finished_mosaic_worker_is_released_rather_than_piling_up(
     diagnosed as the reason this suite cannot run in one process — and playback turns "one per
     navigation" into "one per frame".
     """
-    from squidmip._region_viewer import ViewerManager
+    from squidxplorer._region_viewer import ViewerManager
 
     root, _planes = multi_time_point_dataset
     reader = open_reader(root)
@@ -746,7 +746,7 @@ def test_the_window_does_not_block_the_ui_thread_to_supersede_a_load(
     """
     import inspect
 
-    from squidmip._region_viewer import RegionViewer
+    from squidxplorer._region_viewer import RegionViewer
 
     src = inspect.getsource(RegionViewer._load_mosaic)
     assert ".wait(" not in src, (

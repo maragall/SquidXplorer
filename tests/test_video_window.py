@@ -34,8 +34,8 @@ pytest.importorskip("qtpy")
 if "PySide6" in sys.modules or "PySide2" in sys.modules:
     pytest.skip("PySide already loaded — Qt binding conflict", allow_module_level=True)
 
-from squidmip import _viewer as V  # noqa: E402
-from squidmip._video import encoder_problem  # noqa: E402
+from squidxplorer import _viewer as V  # noqa: E402
+from squidxplorer._video import encoder_problem  # noqa: E402
 
 from .conftest import shutdown_plate_window  # noqa: E402
 from .test_video import _decode, _make_5d  # noqa: E402
@@ -203,7 +203,7 @@ def test_the_click_handler_does_not_read_or_encode_on_the_ui_thread(
     Measured on the real 10x acquisition (27 FOVs x 4 channels x 10 z), which is the size this
     guard exists for: 0.91 ms in the handler against 4.20 s of export.
     """
-    from squidmip._video import record_region
+    from squidxplorer._video import record_region
 
     win, w = _open_window(qapp, five_d_root)
     _drain_until(qapp, lambda: bool(w._pane.mosaic._layers), timeout=20)

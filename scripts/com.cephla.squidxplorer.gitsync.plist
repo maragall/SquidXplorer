@@ -4,8 +4,8 @@
 
   ============================ EDIT BEFORE USING ============================
   Replace the TWO placeholders below with absolute paths on this machine:
-    __REPO_PATH__     e.g. /Users/julioamaragall/CEPHLA/projects/SquidMIP
-    __SCRIPT_PATH__   e.g. /Users/julioamaragall/CEPHLA/projects/SquidMIP/scripts/git-sync-watchdog.sh
+    __REPO_PATH__     e.g. /Users/julioamaragall/CEPHLA/projects/SquidXplorer
+    __SCRIPT_PATH__   e.g. /Users/julioamaragall/CEPHLA/projects/SquidXplorer/scripts/git-sync-watchdog.sh
   (Both usually share the same repo root; __SCRIPT_PATH__ is __REPO_PATH__/scripts/git-sync-watchdog.sh)
   ==========================================================================
 

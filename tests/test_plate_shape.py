@@ -6,8 +6,8 @@ silently not run headless, so the inference contract is pinned here instead.
 
 import pytest
 
-from squidmip._plate import _row_letter
-from squidmip._plate_shape import (
+from squidxplorer._plate import _row_letter
+from squidxplorer._plate_shape import (
     GLASS_SLIDE,
     PlateShapeError,
     _row_index,
@@ -77,7 +77,7 @@ def test_manual_override_beats_inference():
 
 
 def test_manual_override_via_environment(monkeypatch):
-    monkeypatch.setenv("SQUIDMIP_WELLPLATE_FORMAT", "384 well plate")
+    monkeypatch.setenv("SQUIDXPLORER_WELLPLATE_FORMAT", "384 well plate")
     assert infer_plate_format(["A1", "A2", "B1", "B2"]) == "384 well plate"
 
 
@@ -115,9 +115,9 @@ def test_resolve_prefers_declared_then_infers():
 def _defs(name: str) -> list:
     import pathlib
 
-    import squidmip
+    import squidxplorer
 
-    pkg = pathlib.Path(squidmip.__file__).parent
+    pkg = pathlib.Path(squidxplorer.__file__).parent
     return sorted(str(p.relative_to(pkg)) for p in pkg.rglob("*.py")
                   if f"def {name}(" in p.read_text())
 

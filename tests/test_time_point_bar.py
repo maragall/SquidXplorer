@@ -29,7 +29,7 @@ pytest.importorskip("qtpy")
 
 from qtpy.QtWidgets import QApplication  # noqa: E402
 
-from squidmip._time_point import TimePointBar  # noqa: E402
+from squidxplorer._time_point import TimePointBar  # noqa: E402
 
 
 @pytest.fixture(scope="module")

@@ -1,6 +1,6 @@
 """Operator + projector integration tests.
 
-End-to-end wiring checks over the public ``squidmip`` operator surface: the projector /
+End-to-end wiring checks over the public ``squidxplorer`` operator surface: the projector /
 region-operator registries, the consumes-axis contract (z-reducer vs plane-op), upstream
 fidelity (petakit / tilefusion / bgsub really back the operators), and small synthetic
 end-to-end runs for bgsub, flatfield, mip/reference, and decon.
@@ -17,13 +17,13 @@ import pytest
 
 # These tests exercise Julio's standalone repos, which the clean-room CI install (PyPI only) does
 # NOT have. Skip the whole module when any is absent so CI stays green; they run in full on the dev
-# machine (and any CI that installs the repos). `import squidmip` itself is lazy-safe without them.
+# machine (and any CI that installs the repos). `import squidxplorer` itself is lazy-safe without them.
 pytest.importorskip("petakit")
 pytest.importorskip("tilefusion")
 pytest.importorskip("bgsub")
 
-import squidmip as s
-from squidmip._engine import _resolve_operator
+import squidxplorer as s
+from squidxplorer._engine import _resolve_operator
 
 
 # --------------------------------------------------------------------------------------
@@ -109,7 +109,7 @@ def test_decon_module_wires_petakit():
     """
     import importlib
 
-    importlib.import_module("squidmip._decon")
+    importlib.import_module("squidxplorer._decon")
     for name in ("decon", "decon3d"):
         assert "petakit" in s.operator_requires(name), (name, s.operator_requires(name))
 
@@ -120,7 +120,7 @@ def test_background_module_wires_bgsub():
     """
     import importlib
 
-    bg = importlib.import_module("squidmip._background")
+    bg = importlib.import_module("squidxplorer._background")
     import bgsub.core
 
     calls = []

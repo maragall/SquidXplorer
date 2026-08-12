@@ -10,7 +10,7 @@ that costs bytes, and ``write_plate``'s own ``check_disk_space`` gate stays on.
 
 The honest part is in the output, not this docstring: whatever cannot actually be
 executed on this machine is printed under "NOT MEASURED" with the reason, and no number
-is produced for it. See ``squidmip/_odon_bench.py``.
+is produced for it. See ``squidxplorer/_odon_bench.py``.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from squidmip._odon_bench import format_report, run, write_json  # noqa: E402
+from squidxplorer._odon_bench import format_report, run, write_json  # noqa: E402
 
 DATASET = "/Users/julioamaragall/Downloads/synthetic_2x2_wellplate"
 
@@ -32,7 +32,7 @@ def main() -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dataset", default=DATASET, help="raw acquisition to MIP into a plate")
     ap.add_argument("--hcs-dir", default=None,
-                    help="an EXISTING squidmip output dir (skips writing a plate)")
+                    help="an EXISTING squidxplorer output dir (skips writing a plate)")
     ap.add_argument("--out", default=None, help="where to write the plate (default: a temp dir)")
     ap.add_argument("--regions", default=None, help="comma-separated wells to write")
     ap.add_argument("--n-fovs", type=int, default=1)
@@ -50,7 +50,7 @@ def main() -> int:
     if hcs_dir is None:
         import tempfile
 
-        from squidmip import open_reader, write_plate
+        from squidxplorer import open_reader, write_plate
 
         out = args.out or tempfile.mkdtemp(prefix="odon-bench-")
         written = out

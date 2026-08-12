@@ -15,7 +15,7 @@ pytest.importorskip("qtpy")
 from qtpy.QtCore import QCoreApplication                       # noqa: E402
 from qtpy.QtWidgets import QApplication                        # noqa: E402
 
-import squidmip._viewer as V                                    # noqa: E402
+import squidxplorer._viewer as V                                    # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -230,7 +230,7 @@ def test_the_worker_declares_a_stop_so_teardown_can_retire_it(qapp):
 
 
 def test_the_stage_denominator_is_not_a_second_copy_of_the_stage_list():
-    from squidmip._spots import STAGES
+    from squidxplorer._spots import STAGES
 
     assert V._spot_stages() is STAGES
 
@@ -257,7 +257,7 @@ def _pyramid_layer(levels):
     """A REAL napari layer over *levels*, so ``.data`` is whatever napari decides it is."""
     from napari.components import ViewerModel
 
-    from squidmip._napari_view import MosaicLayers
+    from squidxplorer._napari_view import MosaicLayers
 
     mosaic = MosaicLayers(ViewerModel())
     mosaic.add_mosaic("raw", "405", levels, multiscale=True, bbox_um=(0.0, 0.0, 128.0, 128.0))
@@ -273,7 +273,7 @@ def _stand_in_segmenter(monkeypatch, boxes=((2, 22), (60, 80))):
     """
     import dataclasses
 
-    from squidmip import _spots as SP
+    from squidxplorer import _spots as SP
 
     def _fn(plane, params, *, on_stage=None, should_stop=None):
         if on_stage is not None:

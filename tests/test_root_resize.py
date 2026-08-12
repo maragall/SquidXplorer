@@ -22,7 +22,7 @@ import re
 
 import pytest
 
-from squidmip._viewer import _scale_qss_fonts
+from squidxplorer._viewer import _scale_qss_fonts
 
 QSS = "QPushButton{background:#161b22;color:#c9d1d9;font-size:12px;padding:3px 10px;}"
 
@@ -67,7 +67,7 @@ def test_a_sheet_with_no_font_size_is_returned_unchanged():
 
 @pytest.fixture
 def root(qapp_or_skip):
-    from squidmip._viewer import PlateWindow
+    from squidxplorer._viewer import PlateWindow
 
     win = PlateWindow(None)
     yield win
@@ -80,7 +80,7 @@ def qapp_or_skip():
     from qtpy.QtWidgets import QApplication
 
     app = QApplication.instance() or QApplication([])
-    app.setProperty("_squidmip_test", True)
+    app.setProperty("_squidxplorer_test", True)
     return app
 
 

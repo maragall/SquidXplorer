@@ -11,7 +11,7 @@ WHAT IS ACTUALLY UNDER TEST
 ---------------------------
 Two halves, tested at two different heights, and neither at the height of a screenshot.
 
-* The arithmetic (:mod:`squidmip._progress`) is pure Python and is tested as such: which unit a
+* The arithmetic (:mod:`squidxplorer._progress`) is pure Python and is tested as such: which unit a
   run counts, whether the total is knowable, and when a time-remaining estimate is honest enough
   to show. This is the half that can be silently WRONG, so it is the half with the small tests.
 
@@ -34,7 +34,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")   # headless Qt; must prec
 
 import pytest
 
-from squidmip._progress import (
+from squidxplorer._progress import (
     FOV_UNIT,
     REGION_UNIT,
     ProgressReport,
@@ -84,7 +84,7 @@ def test_no_fov_table_means_no_total_rather_than_a_guess():
 
 
 def test_an_unknown_total_never_produces_a_percentage():
-    """squidmip._activity's rule, enforced on the report the widget actually reads: a progress bar
+    """squidxplorer._activity's rule, enforced on the report the widget actually reads: a progress bar
     that invents a denominator is a lie that gets believed."""
     r = ProgressReport("decon", done=7, total=None, unit=FOV_UNIT)
     assert r.percent is None and r.determinate is False
@@ -154,7 +154,7 @@ if "PySide6" in sys.modules or "PySide2" in sys.modules:      # pragma: no cover
         allow_module_level=True,
     )
 
-import squidmip._viewer as V  # noqa: E402
+import squidxplorer._viewer as V  # noqa: E402
 
 from .conftest import FOVS, REGIONS  # noqa: E402
 from .test_viewer import _drain_until, qapp  # noqa: E402,F401  (fixture)
@@ -233,7 +233,7 @@ def test_progress_climbs_monotonically_to_every_unit_of_the_run(qapp, plate):
 def test_a_failed_run_closes_the_pair_so_the_bar_cannot_be_left_running(qapp, plate):
     """The safety property. A bar taken down only on success is a bar left sweeping over a dead
     run, which teaches the user the indicator lies."""
-    import squidmip
+    import squidxplorer
 
     def _boom(*_a, **_kw):
         raise RuntimeError("no such plane")
@@ -242,7 +242,7 @@ def test_a_failed_run_closes_the_pair_so_the_bar_cannot_be_left_running(qapp, pl
     # the outcome and emits `failed`. Breaking the worker's own run loop instead would test an
     # unhandled QThread exception, which is not a case this path claims to survive.
     with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(squidmip, "project_plate", _boom)
+        mp.setattr(squidxplorer, "project_plate", _boom)
         r = _Requester()
         plate.run_operator("mip", regions=[REGIONS[0]], save=False, requester=r)
         assert _drain_until(qapp, lambda: bool(r.failed or r.done), timeout=60)
@@ -327,8 +327,8 @@ def test_only_the_window_that_ASKED_gets_the_result_visible(qapp, plate):
 
 @pytest.fixture
 def region_window(qapp, napari_pane_stub, squid_dataset):
-    from squidmip import open_reader
-    from squidmip._region_viewer import ViewerManager
+    from squidxplorer import open_reader
+    from squidxplorer._region_viewer import ViewerManager
 
     root, _arrays = squid_dataset
     reader = open_reader(str(root))
@@ -412,7 +412,7 @@ def navigator(qapp):
     Deliberately dataset-free: the bar is a pure function of the report it is handed, and giving it
     an acquisition would only add a way for the test to fail for an unrelated reason.
     """
-    from squidmip._region_viewer import OpenViewList, ViewerManager
+    from squidxplorer._region_viewer import OpenViewList, ViewerManager
 
     mgr = ViewerManager()
     mgr._mem_timer.stop()                       # no polling: this test is not about memory
@@ -463,7 +463,7 @@ def test_clearing_the_channel_takes_the_work_bar_down(navigator):
 def test_a_navigator_built_MID_RUN_shows_the_bar_without_waiting_for_the_next_unit(qapp):
     """On decon one unit is minutes, so "wait for the next report" is most of the run. The manager
     holds the last report precisely so a late subscriber does not have to."""
-    from squidmip._region_viewer import OpenViewList, ViewerManager
+    from squidxplorer._region_viewer import OpenViewList, ViewerManager
 
     mgr = ViewerManager()
     mgr._mem_timer.stop()
@@ -572,7 +572,7 @@ def test_the_previews_bar_is_DETERMINATE_from_its_first_frame(qapp, tmp_path):
 def test_the_preview_names_itself_so_the_one_bar_says_WHICH_work_is_running(qapp, tmp_path):
     """One bar, two kinds of work. CONTEXT.md's word for the raw fill is "preview", and the label
     is the only field that distinguishes it from an operator run on the wire."""
-    from squidmip._progress import PREVIEW_LABEL
+    from squidxplorer._progress import PREVIEW_LABEL
 
     worker = _preview_worker(tmp_path)
     got = []
@@ -591,7 +591,7 @@ def test_a_CACHED_well_is_not_counted_as_work_the_preview_still_has_to_do(qapp, 
     """
     import numpy as np
 
-    from squidmip._platecache import PlateCellCache
+    from squidxplorer._platecache import PlateCellCache
 
     exp = tmp_path / "acq"
     exp.mkdir(exist_ok=True)

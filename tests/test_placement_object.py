@@ -18,7 +18,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from squidmip._placement import Placement, PlacedArray
+from squidxplorer._placement import Placement, PlacedArray
 
 
 def _p(**over):

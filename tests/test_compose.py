@@ -22,11 +22,11 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-import squidmip
-from squidmip._compose import compose_operator
-from squidmip._engine import _OPERATORS, _resolve_operator, add_projector, bind_operator
-from squidmip._recipe import Recipe, RecipeChain
-from squidmip.projection import PLANE_OP, Z_REDUCER, plane_op
+import squidxplorer
+from squidxplorer._compose import compose_operator
+from squidxplorer._engine import _OPERATORS, _resolve_operator, add_projector, bind_operator
+from squidxplorer._recipe import Recipe, RecipeChain
+from squidxplorer.projection import PLANE_OP, Z_REDUCER, plane_op
 
 # --- two plane-ops that do NOT commute, so order is a numeric fact and not a comment -------------
 #
@@ -109,15 +109,15 @@ def test_the_same_chain_resolves_whether_it_is_a_string_or_a_RecipeChain():
 def test_consumes_is_the_union_so_the_engine_loop_and_the_output_shape_follow():
     """``consumes`` decides the loop and the output shape. A chain that did not derive it would
     make the engine group over the wrong axis, which is a silently reshaped result."""
-    assert squidmip.operator_consumes(f"{ADD}+{DOUBLE}") == PLANE_OP
-    assert squidmip.operator_consumes(f"{ADD}+{DOUBLE}+mip") == Z_REDUCER
+    assert squidxplorer.operator_consumes(f"{ADD}+{DOUBLE}") == PLANE_OP
+    assert squidxplorer.operator_consumes(f"{ADD}+{DOUBLE}+mip") == Z_REDUCER
 
 
 def test_produces_is_the_last_steps_so_the_viewer_picks_the_right_layer_type():
     """``produces`` decides the napari layer type. Only the LAST step can be non-intensity (see the
     refusal below), so the last step's answer is the chain's answer."""
-    assert squidmip.operator_produces(f"{ADD}+{DOUBLE}") == "intensity"
-    assert squidmip.operator_produces(f"{ADD}+spot") == "labels"
+    assert squidxplorer.operator_produces(f"{ADD}+{DOUBLE}") == "intensity"
+    assert squidxplorer.operator_produces(f"{ADD}+spot") == "labels"
 
 
 def test_params_are_namespaced_per_step_and_reach_that_step():
@@ -126,11 +126,11 @@ def test_params_are_namespaced_per_step_and_reach_that_step():
     ``spot.min_area_px`` rather than ``min_area_px``: two steps of one chain can declare the same
     parameter name, and a flat namespace would set both from one value with nothing saying so.
     """
-    declared = {p.name: p.default for p in squidmip.operator_params(f"{ADD}+spot")}
+    declared = {p.name: p.default for p in squidxplorer.operator_params(f"{ADD}+spot")}
     assert declared["spot.min_area_px"] == 30
 
     # a value written INTO the expression becomes that parameter's default...
-    assert {p.name: p.default for p in squidmip.operator_params(
+    assert {p.name: p.default for p in squidxplorer.operator_params(
         f"{ADD}+spot(min_area_px=99)")}["spot.min_area_px"] == 99
     # ...and operator_kwargs reaches the same place, by the same name.
     assert bind_operator(f"{ADD}+spot", {"spot.min_area_px": 77}).__name__ == \
@@ -164,7 +164,7 @@ def test_requires_is_the_union_so_one_refusal_names_every_missing_package():
     """``requires`` is checked at BIND time, before a single well is read. A chain that dropped a
     step's requirement would reproduce the measured silent success it exists to end: an ImportError
     one call deep, filed by ``on_error`` as a per-well skip, and a green run that wrote nothing."""
-    assert squidmip.operator_requires("flatfield+decon+mip") == ("tilefusion", "petakit")
+    assert squidxplorer.operator_requires("flatfield+decon+mip") == ("tilefusion", "petakit")
 
 
 def test_a_bare_name_is_still_the_registry_entry_itself():
@@ -330,15 +330,15 @@ def test_a_chain_runs_over_a_real_acquisition_through_project_plate(squid_datase
     the chain's own derived ``consumes`` — which is the same dispatch a single operator gets.
     """
     root, _arrays = squid_dataset
-    reader = squidmip.open_reader(root)
+    reader = squidxplorer.open_reader(root)
     n_z = len(reader.metadata["z_levels"])
     n_c = len(reader.metadata["channels"])
 
     planes = dict(((region, fov), image) for region, fov, image
-                  in squidmip.project_plate(reader, n_fovs=1, workers=1,
+                  in squidxplorer.project_plate(reader, n_fovs=1, workers=1,
                                             projector=f"{ADD}+{DOUBLE}"))
     reduced = dict(((region, fov), image) for region, fov, image
-                   in squidmip.project_plate(reader, n_fovs=1, workers=1,
+                   in squidxplorer.project_plate(reader, n_fovs=1, workers=1,
                                              projector=f"{ADD}+{DOUBLE}+mip"))
 
     assert planes and set(planes) == set(reduced)
@@ -359,16 +359,16 @@ def test_a_composed_chain_reaches_write_plate_and_the_store_keeps_its_depth(squi
     ``_validate_image`` to accept Nz>1; this asserts a composed plane-op chain gets through it and
     lands with the acquisition's full depth rather than a silently flattened one."""
     root, _arrays = squid_dataset
-    reader = squidmip.open_reader(root)
+    reader = squidxplorer.open_reader(root)
     n_z = len(reader.metadata["z_levels"])
 
-    manifest = squidmip.write_plate(reader, tmp_path / "out", n_fovs=1, workers=1,
+    manifest = squidxplorer.write_plate(reader, tmp_path / "out", n_fovs=1, workers=1,
                                     projector=f"{ADD}+{DOUBLE}", check_disk=False)
 
-    written = squidmip.open_reader(manifest["plate"])
+    written = squidxplorer.open_reader(manifest["plate"])
     assert len(written.metadata["z_levels"]) == n_z
     # and the pixels are the chain's, not one step's
-    plain = squidmip.open_reader(root)
+    plain = squidxplorer.open_reader(root)
     region, fov = written.metadata["regions"][0], 0
     raw = plain.read(region, fov, plain.metadata["channels"][0]["name"], 0, 0).astype(np.int32)
     got = written.read(region, fov, written.metadata["channels"][0]["name"], 0, 0)
@@ -389,7 +389,7 @@ def test_a_composed_plane_op_chain_stitches_every_z_plane():
     composition needs no edit there — and a chain that got its ``consumes`` wrong would show up as
     a mosaic with the wrong depth."""
     reader, fovs, n_z = _stitch_fixtures()
-    from squidmip._stitch import stitch_region
+    from squidxplorer._stitch import stitch_region
 
     out = np.asarray(stitch_region(reader, "A1", fovs, projector=f"{ADD}+{DOUBLE}",
                                    register=False, correct_illumination=False))
@@ -412,7 +412,7 @@ def test_a_chain_containing_flatfield_does_not_defeat_the_double_apply_guard():
     declare, and this asserts it on the guard itself.
     """
     reader, fovs, _n_z = _stitch_fixtures()
-    from squidmip._stitch import stitch_region
+    from squidxplorer._stitch import stitch_region
 
     for chain in ("flatfield+mip", f"{ADD}+flatfield", f"flatfield+{ADD}+mip"):
         assert getattr(_resolve_operator(chain).fn, "corrects_illumination", False), chain
@@ -427,7 +427,7 @@ def test_a_chain_ending_in_labels_is_refused_by_stitching_for_the_reason_labels_
     """The composition inherits the last step's ``produces``, so the fusion refusal that already
     exists finds it — without ``_stitch`` learning that compositions are a thing."""
     reader, fovs, _n_z = _stitch_fixtures()
-    from squidmip._stitch import stitch_region
+    from squidxplorer._stitch import stitch_region
 
     with pytest.raises(ValueError, match="label images"):
         stitch_region(reader, "A1", fovs, projector=f"{ADD}+spot", register=False,
@@ -443,7 +443,7 @@ def test_the_command_surface_runs_a_chain_and_explains_an_impossible_one(squid_d
     """``run_operator`` refused everything not in the registry, which is every chain. It now asks
     the engine to resolve, so the two refusals stay DISTINCT: a name nobody registered lists what
     exists, an unrunnable chain of real operators carries ``_compose``'s own reason."""
-    from squidmip._command import CommandBus, EngineExecutor, OpenAcquisition, RunOperator
+    from squidxplorer._command import CommandBus, EngineExecutor, OpenAcquisition, RunOperator
 
     root, _arrays = squid_dataset
     executor = CommandBus(EngineExecutor())
@@ -466,7 +466,7 @@ def test_the_cli_validates_a_chain_before_it_writes_anything(tmp_path):
     alternative is a plate skeleton on disk and then a traceback."""
     import pydantic
 
-    from squidmip._cli import ProcessParameters
+    from squidxplorer._cli import ProcessParameters
 
     (tmp_path / "acq").mkdir()
     common = dict(input_folder=str(tmp_path / "acq"), output_folder=str(tmp_path / "out"))
@@ -488,8 +488,8 @@ def test_operator_available_answers_for_a_chain_rather_than_calling_it_unknown()
     """A caller offering a row (``list_operators``, the viewer) has ONE place to put the reason. A
     membership test against the table reported every chain as unknown, which is the same answer it
     gives a typo."""
-    ok, why = squidmip.operator_available(f"{ADD}+{DOUBLE}")
+    ok, why = squidxplorer.operator_available(f"{ADD}+{DOUBLE}")
     assert ok and why == ""
 
-    ok, why = squidmip.operator_available(f"mip+{ADD}")
+    ok, why = squidxplorer.operator_available(f"mip+{ADD}")
     assert not ok and "consumes z" in why

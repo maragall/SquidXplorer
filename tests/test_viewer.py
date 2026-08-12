@@ -38,8 +38,8 @@ from qtpy.QtWidgets import (  # noqa: E402
     QApplication, QCheckBox, QPushButton, QSlider, QSpinBox, QWidget,
 )
 
-from squidmip import _viewer as V  # noqa: E402
-from squidmip._napari_view import MosaicLayers as _MosaicLayers  # noqa: E402
+from squidxplorer import _viewer as V  # noqa: E402
+from squidxplorer._napari_view import MosaicLayers as _MosaicLayers  # noqa: E402
 
 from .conftest import CH_IN_YAML  # noqa: E402
 
@@ -66,7 +66,7 @@ def _needs(pkg: str):
 @pytest.fixture(scope="module")
 def qapp():
     app = QApplication.instance() or QApplication([])
-    app.setProperty("_squidmip_test", True)  # main() won't call exec_/exit under test
+    app.setProperty("_squidxplorer_test", True)  # main() won't call exec_/exit under test
     return app
 
 
@@ -603,7 +603,7 @@ def test_ingest_non_wellplate_region_opens_as_a_slide_carrier(qapp, tmp_path):
 def test_run_operator_persists_via_write_plate(qapp, squid_dataset, monkeypatch, tmp_path):
     # run_operator now PERSISTS: it drives write_plate with the SELECTED projector, and the GUI must
     # NOT write the uncompressed individual-TIFF copy (tiff=False) — that would double disk use.
-    import squidmip
+    import squidxplorer
     captured = {}
 
     def fake_write_plate(reader, out_dir, *, n_fovs=1, workers=None, projector="mip",
@@ -617,7 +617,7 @@ def test_run_operator_persists_via_write_plate(qapp, squid_dataset, monkeypatch,
         captured.update(projector=projector, tiff=tiff, out_dir=str(out_dir), regions=regions,
                         operator_kwargs=operator_kwargs)
         return {"plate": str(out_dir), "levels": 1}      # no wells — we only assert the dispatch
-    monkeypatch.setattr(squidmip, "write_plate", fake_write_plate)
+    monkeypatch.setattr(squidxplorer, "write_plate", fake_write_plate)
 
     root, _ = squid_dataset
     win = V.PlateWindow(None)
@@ -960,13 +960,13 @@ def test_selection_expands_to_region_fov_pairs(qapp, squid_dataset):
 def test_run_operator_on_selection_only_processes_selected(qapp, squid_dataset,
                                                            monkeypatch, tmp_path):
     """The Accept gate: a selection SCOPES the operator run to just those wells."""
-    import squidmip
+    import squidxplorer
     captured = {}
 
     def fake_write_plate(reader, out_dir, **kw):
         captured.update(regions=kw.get("regions"))
         return {"plate": str(out_dir), "levels": 1}
-    monkeypatch.setattr(squidmip, "write_plate", fake_write_plate)
+    monkeypatch.setattr(squidxplorer, "write_plate", fake_write_plate)
 
     root, _ = squid_dataset                       # B2, B3
     win = V.PlateWindow(None)
@@ -1512,7 +1512,7 @@ def _write_plate_for_open(out, *, stop_after=None):
     plate window tested a marker no writer produces, so a test that plants the file the reader
     expects proves nothing about a run: both halves have to be the shipped code.
     """
-    from squidmip._output import write_from_stream
+    from squidxplorer._output import write_from_stream
 
     regions = ["A1", "A2", "B1", "B2"]
     meta = {
@@ -1579,7 +1579,7 @@ def test_open_computed_accepts_a_write_that_finished(qapp, tmp_path, monkeypatch
 
 def test_a_finished_save_run_leaves_no_incomplete_marker(qapp, squid_dataset, tmp_path):
     """A real GUI save run that finishes leaves a store that says so."""
-    from squidmip._output import incomplete_reason
+    from squidxplorer._output import incomplete_reason
 
     root, _ = squid_dataset
     win = V.PlateWindow(None)
@@ -1622,7 +1622,7 @@ def test_open_computed_names_a_well_that_cannot_read_its_own_image_id(
 
 
 def test_operation_stack_remove_and_remove_suffix():
-    from squidmip._layers import OperationStack
+    from squidxplorer._layers import OperationStack
     st = OperationStack()
     st.add("mip@exp:a", "MIP · a")
     st.add("mip@exp:b", "MIP · b")
@@ -1900,7 +1900,7 @@ def test_running_contrast_flat_channel_yields_degenerate_window():
     dead or saturated well rendered FULL WHITE and read as signal. Blank wells are normal on a
     partially acquired plate, so this was on screen constantly.
     """
-    from squidmip._montage import _window
+    from squidxplorer._montage import _window
 
     rc = V._RunningContrast(1, float(np.iinfo(np.uint16).max))
     flat = np.full((8, 8), 500.0, dtype=np.float32)
@@ -1912,7 +1912,7 @@ def test_running_contrast_flat_channel_yields_degenerate_window():
 
 def test_running_contrast_saturated_channel_renders_black():
     """The same guard at the top of the range: a fully saturated well is flat too."""
-    from squidmip._montage import _window
+    from squidxplorer._montage import _window
 
     dmax = float(np.iinfo(np.uint16).max)
     rc = V._RunningContrast(1, dmax)
@@ -2051,7 +2051,7 @@ class _BlockingWorker(V.QThread):
     pushReady = V.Signal(int, object)
     resultReady = V.Signal(str, int, object)     # full-res result -> napari layer group
     progress = V.Signal(int, int)
-    runProgress = V.Signal(object)               # the engine-unit report (squidmip._progress)
+    runProgress = V.Signal(object)               # the engine-unit report (squidxplorer._progress)
     finalReady = V.Signal(object)
     writtenReady = V.Signal(str)
     wellFailed = V.Signal(int, int)
@@ -2256,7 +2256,7 @@ def test_loupe_um_per_screen_px_refuses_to_guess():
 def test_composite_rgb_matches_manual_windowing():
     # IMA-242: the loupe's private `_composite_rgb` is gone; `composite` is the one compositor and
     # the loupe goes through it, so this asserts against the survivor.
-    from squidmip._montage import composite
+    from squidxplorer._montage import composite
     planes = np.array([[[0.0, 10.0]], [[5.0, 5.0]]])
     colors = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
     wins = [(0.0, 10.0), (0.0, 10.0)]
@@ -2938,12 +2938,12 @@ def test_zarr_source_crop_read_against_a_real_pyramid(qapp, pyramid_dataset, tmp
 
     Uses `pyramid_dataset` because the 4x4 fixture writes a single level (_PYRAMID_MIN_YX),
     which would make level selection untestable."""
-    import squidmip
-    from squidmip.reader import open_reader
+    import squidxplorer
+    from squidxplorer.reader import open_reader
 
     root, region, size = pyramid_dataset
     out = tmp_path / "out.hcs"
-    squidmip.write_plate(open_reader(str(root)), str(out), tiff=False)
+    squidxplorer.write_plate(open_reader(str(root)), str(out), tiff=False)
     base = out / "plate.ome.zarr"
     assert base.is_dir()
 
@@ -2987,12 +2987,12 @@ def test_zarr_source_crop_read_against_a_real_pyramid(qapp, pyramid_dataset, tmp
 
 def test_computed_plate_open_wires_a_loupe_source(qapp, pyramid_dataset, tmp_path, monkeypatch):
     """Opening a written plate: every well is on disk, so the loupe covers the whole plate."""
-    import squidmip
-    from squidmip.reader import open_reader
+    import squidxplorer
+    from squidxplorer.reader import open_reader
 
     root, region, size = pyramid_dataset
     out = tmp_path / "out.hcs"
-    squidmip.write_plate(open_reader(str(root)), str(out), tiff=False)
+    squidxplorer.write_plate(open_reader(str(root)), str(out), tiff=False)
 
     win = V.PlateWindow(None)
     monkeypatch.setattr(V.QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: str(out)))
@@ -3075,7 +3075,7 @@ def test_minerva_tab_builds_and_lists_projectors(qapp, squid_dataset):
     """The projector choice must be real: squid2minerva's convert.py offers --mip/--z, so a
     hardcoded projection here would be a capability regression."""
     from qtpy.QtWidgets import QComboBox
-    from squidmip import available_projectors
+    from squidxplorer import available_projectors
 
     root, _ = squid_dataset
     win = V.PlateWindow(None)
@@ -3504,7 +3504,7 @@ def test_run_minerva_export_without_an_acquisition_is_a_message_not_a_crash(qapp
 
 def test_minerva_export_failure_surfaces_in_the_readout(qapp, squid_dataset, monkeypatch, tmp_path):
     """A worker never raises across the thread boundary; the user must still see why."""
-    from squidmip import _minerva
+    from squidxplorer import _minerva
 
     def boom(*a, **k):
         raise ValueError("no objective pixel size")
@@ -3523,7 +3523,7 @@ def test_minerva_export_failure_surfaces_in_the_readout(qapp, squid_dataset, mon
 @_needs("tilefusion")
 def test_minerva_reports_when_author_is_not_installed(qapp, squid_dataset, monkeypatch, tmp_path):
     """The export still succeeded — a missing sibling checkout must not read as a failure."""
-    from squidmip import _minerva
+    from squidxplorer import _minerva
 
     monkeypatch.setattr(_minerva, "is_running", lambda timeout=1.0: False)
     monkeypatch.setattr(_minerva, "minerva_home", lambda: None)
@@ -3667,7 +3667,7 @@ def test_the_plane_op_cards_build_and_are_preview_only(qapp, squid_dataset):
     the generic preview button -- the generic tab gave no way to choose an iteration count at
     all, which is what Julio was blocked on. See the decon-specific test below.
     """
-    from squidmip import available_projectors
+    from squidxplorer import available_projectors
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
@@ -3716,7 +3716,7 @@ def test_loading_a_profile_installs_one_field_per_channel_not_plane_zero(qapp, s
     pytest.importorskip("tilefusion.flatfield")
     from tilefusion.flatfield import save_flatfield
 
-    import squidmip._flatfield as FF
+    import squidxplorer._flatfield as FF
 
     root, _ = squid_dataset
     win = V.PlateWindow(None)
@@ -3762,8 +3762,8 @@ def test_the_decon_card_is_the_iteration_qc_panel_not_a_bare_preview(qapp,
     """Julio: "The deconvolution is not showing the XZ/YZ strips on the turbo colormap ... so
     that we can choose the iterations." The card must therefore carry an iteration count and a
     way to add one, and must NOT have grown a profile chooser or a second contrast control."""
-    from squidmip._decon import QC_START_ITERATIONS
-    from squidmip._op_panels import DeconQCPanel
+    from squidxplorer._decon import QC_START_ITERATIONS
+    from squidxplorer._op_panels import DeconQCPanel
 
     root, _ = squid_dataset
     win = V.PlateWindow(None)
@@ -3782,7 +3782,7 @@ def test_the_decon_card_is_the_iteration_qc_panel_not_a_bare_preview(qapp,
 
 def test_the_stitch_card_is_the_stitcher_control_surface(qapp, squid_dataset):
     """The blocking item: maragall/stitcher's Settings group, in the top-left subpane."""
-    from squidmip._op_panels import StitcherPanel
+    from squidxplorer._op_panels import StitcherPanel
 
     root, _ = squid_dataset
     win = V.PlateWindow(None)
@@ -3844,14 +3844,14 @@ def test_panel_kwargs_reach_stitch_plate_on_the_PREVIEW_path(qapp, squid_dataset
     Storing a dict on the worker and then not forwarding it is invisible to any assertion
     made on the worker itself, so this spies on the engine call instead.
     """
-    import squidmip
+    import squidxplorer
     seen = {}
 
     def fake_stitch_plate(reader, **kw):
         seen.update(kw)
         return iter(())
 
-    monkeypatch.setattr(squidmip, "stitch_plate", fake_stitch_plate)
+    monkeypatch.setattr(squidxplorer, "stitch_plate", fake_stitch_plate)
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
@@ -3866,14 +3866,14 @@ def test_panel_kwargs_reach_write_plate_on_the_SAVE_path(qapp, squid_dataset,
                                                         monkeypatch, tmp_path):
     """The save path is the one that matters most: a registration tuned on a preview and then
     silently dropped is thrown away at exactly the moment it is written to disk."""
-    import squidmip
+    import squidxplorer
     seen = {}
 
     def fake_write_plate(reader, out_dir, **kw):
         seen.update(kw)
         return {"plate": str(out_dir), "levels": 1}
 
-    monkeypatch.setattr(squidmip, "write_plate", fake_write_plate)
+    monkeypatch.setattr(squidxplorer, "write_plate", fake_write_plate)
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
@@ -3892,7 +3892,7 @@ def test_a_decon_qc_result_opens_as_a_tab_beside_the_operators(qapp, squid_datas
     It went to the exploration pane's bar until 2026-08-05, and that bar spent six weeks in no
     layout: the result was tabbed and shown to nobody. `tests/test_no_orphan_windows.py` pins the
     reachability half; this pins the identity and the reuse."""
-    from squidmip._op_panels import DeconQCResultView
+    from squidxplorer._op_panels import DeconQCResultView
 
     root, _ = squid_dataset
     win = V.PlateWindow(None)
@@ -3984,9 +3984,9 @@ def test_flatfield_streams_live_once_a_profile_is_installed(qapp, squid_dataset)
 
     RE-POINTED by 2b8fbc5 to the plate only; see the section note above.
     """
-    from squidmip import FlatfieldProfile
-    from squidmip._flatfield import set_profiles
-    import squidmip._flatfield as FF
+    from squidxplorer import FlatfieldProfile
+    from squidxplorer._flatfield import set_profiles
+    import squidxplorer._flatfield as FF
 
     root, _ = squid_dataset
     win = V.PlateWindow(None)
@@ -4359,7 +4359,7 @@ def test_a_stitched_cell_lands_exactly_where_the_raw_cell_does(
     """A region operator's cell must be the SAME rectangle the raw preview draws for that well."""
     from functools import reduce
 
-    from squidmip import available_region_operators
+    from squidxplorer import available_region_operators
 
     root, region, _frame_px, (mh, mw) = nonsquare_mosaic_dataset
     win = V.PlateWindow(None)
@@ -4468,7 +4468,7 @@ def test_ima253_real_tissue_previews_both_regions_as_mosaics_before_any_operator
 def test_ima253_preview_plan_reads_every_fov_of_a_region_but_only_one_of_a_single_fov_well(
         qapp, real_dataset, squid_dataset):
     """Cost is driven by the REAL FOV COUNT PER REGION -- the reason 1536x1 cannot get slower."""
-    from squidmip import open_reader
+    from squidxplorer import open_reader
 
     meta = open_reader(str(real_dataset)).metadata
     idx = {r: {"rc": (i, 0), "idx": i} for i, r in enumerate(meta["regions"])}
@@ -4490,7 +4490,7 @@ def test_ima253_real_tissue_regions_are_laid_out_by_geometry_in_even_non_overlap
 
     This used to assert the STAGE-PROPORTIONAL layout: manual0 spans stage y 10186..17238 and
     manual1 21113..28165 (no overlap), while their x ranges overlap heavily, so the cells had to
-    stack vertically and overlap in x. `even_carrier_layout` (squidmip/_plate.py:831, wired at
+    stack vertically and overlap in x. `even_carrier_layout` (squidxplorer/_plate.py:831, wired at
     :1060) deliberately replaced that, for the reason recorded in its docstring: true relative
     size and position "stacked two tissues into a tall, tiny, uneven column and wasted the
     viewer's horizontal space". Two regions now land in an EQUAL, landscape-biased 1x2 grid.
@@ -4506,7 +4506,7 @@ def test_ima253_real_tissue_regions_are_laid_out_by_geometry_in_even_non_overlap
          the property the old geometry violated in the other direction ("a bunch of squares
          overlapped with each other under different regions").
     """
-    from squidmip._plate import even_carrier_layout, region_stage_boxes_um
+    from squidxplorer._plate import even_carrier_layout, region_stage_boxes_um
 
     win = V.PlateWindow(None)
     win.ingest(str(real_dataset))
@@ -4545,8 +4545,8 @@ def test_ima253_shuffling_the_region_names_does_not_move_anything(qapp, real_dat
     Reverse the order the acquisition reports its regions in. A layout driven by enumeration
     order flips; one driven by ``fov_positions_um`` cannot notice.
     """
-    from squidmip import open_reader
-    from squidmip._plate import build_plate
+    from squidxplorer import open_reader
+    from squidxplorer._plate import build_plate
 
     meta = open_reader(str(real_dataset)).metadata
     ref = build_plate(meta)
@@ -4564,7 +4564,7 @@ def test_ima253_the_default_paint_path_loads_no_carrier_png(qapp, squid_dataset,
     wells were simply drawn in the wrong place. The registry is kept in ``_plate`` as an optional
     skin, so this asserts it is OFF the path, not that it is gone.
     """
-    import squidmip._plate as P
+    import squidxplorer._plate as P
 
     root, _ = squid_dataset
     win = V.PlateWindow(None)
@@ -4588,7 +4588,7 @@ def test_ima253_the_default_paint_path_loads_no_carrier_png(qapp, squid_dataset,
 
 def test_ima253_empty_slots_are_visibly_distinct_from_occupied_ones(qapp):
     """Julio said the photograph was poor at exactly this, so it is now drawn and measured."""
-    from squidmip._plate import SlideCarrier
+    from squidxplorer._plate import SlideCarrier
 
     plate = SlideCarrier.from_format("4 slide carrier", occupancy={"manual0": [0]},
                                      cell_ids=["manual0"])
@@ -4723,7 +4723,7 @@ def test_the_mosaic_worker_derives_the_contrast_seed_ITSELF(qapp):
     that it is EXACTLY the window the UI thread used to derive. The second is what makes this a
     move rather than a second contrast rule — this project's most-repeated defect shape.
     """
-    from squidmip._napari_view import _auto_window_for
+    from squidxplorer._napari_view import _auto_window_for
 
     meta = _pyr_meta()
     got, problems = [], []
@@ -4756,8 +4756,8 @@ def test_the_mosaic_worker_reads_exactly_the_coarsest_level_at_one_z(qapp):
     The plane cache is process-wide and keyed on the reader's path, so a stale entry from another
     test would make this pass while reading nothing. It is cleared first, deliberately.
     """
-    from squidmip import _mosaic_source as MS
-    from squidmip._contrast import opening_z
+    from squidxplorer import _mosaic_source as MS
+    from squidxplorer._contrast import opening_z
 
     reads = []
 
@@ -4806,7 +4806,7 @@ class _PlaneView:
     window_id = 1
 
     def __init__(self, pane, meta, region):
-        from squidmip._region_nav import RegionCursor
+        from squidxplorer._region_nav import RegionCursor
 
         self._pane = pane
         self._meta = meta
@@ -4818,7 +4818,7 @@ class _PlaneView:
         pass
 
     def on_plane(self, *a, **kw):
-        from squidmip._region_viewer import RegionViewer
+        from squidxplorer._region_viewer import RegionViewer
 
         return RegionViewer._on_plane(self, *a, **kw)
 
@@ -4904,7 +4904,7 @@ def test_a_cards_runnability_is_the_engines_answer_and_cannot_go_stale():
     now, so the only thing left to check is that the derivation is live -- register an operator
     named after a card and the card becomes runnable with no edit to `_OPERATIONS`.
     """
-    from squidmip import add_projector, plane_op
+    from squidxplorer import add_projector, plane_op
 
     assert V._OPERATIONS_BY_KEY["minerva"].runnable is False   # nobody registered it
     assert V._OPERATIONS_BY_KEY["mip"].runnable is True
@@ -4923,7 +4923,7 @@ def test_gallery_view_is_a_view_menu_command_and_not_an_operator(qapp):
     axis and produces no pixels. It was never in `_OPERATIONS`, but it sat in the operator card
     stack wearing the same card, which is what made it read as one.
 
-    It is BUILT now (2026-08-05, `squidmip/_gallery.py` + `_gallery_window.py`), and the half of
+    It is BUILT now (2026-08-05, `squidxplorer/_gallery.py` + `_gallery_window.py`), and the half of
     this test that pinned the "not implemented" status line is gone with the stub -- see
     `tests/test_gallery.py` for what it does instead. What survives here is the half that was never
     about the stub: Gallery View is a View-menu command, it is not a runnable operator, and it has
@@ -5061,8 +5061,8 @@ def test_a_cardless_operator_opens_a_panel_built_from_its_declaration(qapp,
     therefore no way to reach any of them from the GUI. It now opens the generic panel, and the
     panel's widgets ARE the declaration.
     """
-    from squidmip._engine import operator_params
-    from squidmip._param_panel import GenericOperatorPanel
+    from squidxplorer._engine import operator_params
+    from squidxplorer._param_panel import GenericOperatorPanel
 
     root, _ = squid_dataset
     win = V.PlateWindow(None)
@@ -5101,8 +5101,8 @@ def test_the_preview_path_carries_operator_kwargs_to_the_engine(qapp, squid_data
     Verified end to end on a real acquisition (57 labels vs 44 at min_area_px 30/400); this is the
     unit that keeps it from coming back.
     """
-    import squidmip
-    from squidmip.reader import open_reader
+    import squidxplorer
+    from squidxplorer.reader import open_reader
 
     root, _ = squid_dataset
     reader = open_reader(str(root))
@@ -5113,7 +5113,7 @@ def test_the_preview_path_carries_operator_kwargs_to_the_engine(qapp, squid_data
         seen.update(kw)
         return iter(())
 
-    monkeypatch.setattr(squidmip, "project_plate", fake_project_plate)
+    monkeypatch.setattr(squidxplorer, "project_plate", fake_project_plate)
     fov_index = {r: {"rc": (0, i), "idx": i, "well_id": r}
                  for i, r in enumerate(meta["regions"])}
     worker = V._OperatorWorker("spot", reader, meta, fov_index, "", regions=meta["regions"][:1],
@@ -5312,7 +5312,7 @@ class _ResultView:
         pass
 
     def deliver_result(self, op, result, *, visible):
-        from squidmip._region_viewer import RegionViewer
+        from squidxplorer._region_viewer import RegionViewer
 
         return RegionViewer.deliver_result(self, op, result, visible=visible)
 
@@ -5325,7 +5325,7 @@ class _ResultManager:
 
 
 def _result_win(op="bgsub", region="A1", channels=("405", "488")):
-    from squidmip._region_nav import RegionCursor
+    from squidxplorer._region_nav import RegionCursor
 
     win = _plate_window_shell()
     win._cursor = RegionCursor()
@@ -5417,7 +5417,7 @@ def test_settling_a_run_with_every_region_complete_is_a_no_op(qapp):
 def test_the_operator_layer_lands_in_the_raw_mosaic_s_frame(qapp):
     """bbox_um is what puts the group ON TOP of raw. Without it the toggle would jump, and
     every difference the user saw would be misregistration, not the operator."""
-    from squidmip._mosaic_source import mosaic_bbox_um
+    from squidxplorer._mosaic_source import mosaic_bbox_um
 
     win = _result_win("bgsub")
     for fov in (0, 1):
@@ -5496,7 +5496,7 @@ def test_the_minerva_export_hands_the_on_screen_luts_to_the_exporter(
         seen.update(kw)
         return []
 
-    monkeypatch.setattr("squidmip._minerva.export_selection", spy)
+    monkeypatch.setattr("squidxplorer._minerva.export_selection", spy)
     luts = {"ch": {"clim": (3.0, 4.0), "rgb": (9, 9, 9)}}
 
     win.run_minerva_export(out_dir=str(tmp_path), launch=False, selection=[("B2", 0)], luts=luts)
@@ -5515,7 +5515,7 @@ def test_the_minerva_export_defaults_to_no_luts_so_the_plate_path_is_unchanged(
     win = V.PlateWindow(None)
     win.ingest(str(root))
     seen = {}
-    monkeypatch.setattr("squidmip._minerva.export_selection",
+    monkeypatch.setattr("squidxplorer._minerva.export_selection",
                         lambda reader, selection, out_dir, **kw: (seen.update(kw), [])[1])
 
     win.run_minerva_export(out_dir=str(tmp_path), launch=False, selection=[("B2", 0)])
@@ -5771,7 +5771,7 @@ def test_the_1536_fixture_opens_and_reports_1536_wells(sim_1536wp):
     ``open_reader`` is what fails first when the plate is hollow -- it refuses with "contains no
     {region}_{fov}_{z}_{channel}.tiff" -- so this is the cheapest statement that the plate-scale
     data the selection work was validated on is really there."""
-    from squidmip import open_reader
+    from squidxplorer import open_reader
 
     meta = open_reader(str(sim_1536wp)).metadata
     assert len(meta["regions"]) == 1536, f"{len(meta['regions'])} regions, not 1536"

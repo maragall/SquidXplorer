@@ -8,7 +8,7 @@ the carrier art's absolute origin (which `_plate` itself documents as an approxi
 import pytest
 from qtpy.QtWidgets import QApplication
 
-from squidmip import _slide_art as SA
+from squidxplorer import _slide_art as SA
 
 
 @pytest.fixture(scope="module")
@@ -36,7 +36,7 @@ def test_footprint_prefers_the_carrier_geometry_over_the_constant():
 
     MUTATION: return the constant unconditionally -> red.
     """
-    from squidmip._plate import PlateGeometry
+    from squidxplorer._plate import PlateGeometry
 
     g = PlateGeometry(name="x", rows=1, cols=4, a1_x_um=0, a1_y_um=0,
                       pitch_x_um=27000.0, pitch_y_um=27000.0, cell_size_um=18000.0)
@@ -49,7 +49,7 @@ def test_a_zero_cell_size_falls_back_rather_than_drawing_a_zero_width_slide():
 
     MUTATION: drop the `> 0` guard -> a zero-width slide -> red.
     """
-    from squidmip._plate import PlateGeometry
+    from squidxplorer._plate import PlateGeometry
 
     g = PlateGeometry(name="glass slide", rows=1, cols=1, a1_x_um=0, a1_y_um=0,
                       pitch_x_um=0.0, pitch_y_um=0.0, cell_size_um=0.0)
@@ -205,7 +205,7 @@ def test_overview_layout_from_a_real_slide_carrier():
 
     MUTATION: stop passing stage_boxes_um into SlideCarrier -> (None, None) -> red.
     """
-    from squidmip._plate import build_plate
+    from squidxplorer._plate import build_plate
 
     meta = {
         "regions": ["manual0", "manual1"],
@@ -228,7 +228,7 @@ def test_overview_layout_is_none_for_a_well_plate():
 
     MUTATION: drop the SlideCarrier isinstance guard -> a well plate gets slide art -> red.
     """
-    from squidmip._plate import build_plate
+    from squidxplorer._plate import build_plate
 
     wells = ["A1", "A2", "B1"]
     plate = build_plate({"regions": wells, "fovs_per_region": {w: [0] for w in wells},
@@ -240,7 +240,7 @@ def test_overview_layout_is_none_without_stage_coordinates():
     """A carrier placed by report order (no coordinates) has nothing to draw a true-size slide
     from, so it keeps its nominal grid rather than inventing a scale.
     """
-    from squidmip._plate import SlideCarrier
+    from squidxplorer._plate import SlideCarrier
 
     c = SlideCarrier.from_format("4 slide carrier", cell_ids=["manual0", "manual1"])
     assert SA.overview_slide_layout(c) == (None, None)
@@ -281,8 +281,8 @@ def test_paint_slides_with_nothing_to_draw_is_a_no_op(qapp):
 
 def _slide_overview(qapp):
     """A PlateOverview wired exactly as PlateWindow wires it, for the real tissue metadata."""
-    from squidmip import _viewer as V
-    from squidmip._plate import build_plate
+    from squidxplorer import _viewer as V
+    from squidxplorer._plate import build_plate
 
     meta = {
         "regions": ["manual0", "manual1"],

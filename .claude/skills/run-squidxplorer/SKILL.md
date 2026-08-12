@@ -11,12 +11,12 @@ recipe below was cold-started and verified on Windows 11 / Python 3.12.
 **Always use the venv `Setup-Windows.ps1` created — never bare `python`.**
 
 ```
-C:\Users\<user>\AppData\Local\squidmip\venv\Scripts\python.exe
+C:\Users\<user>\AppData\Local\squidxplorer\venv\Scripts\python.exe
 ```
 
 The repo checkout is installed into it editable (`pip install -e .[gui]`), so a
 `git pull` applies live with no reinstall. Bare `python` on this machine fails at
-`import squidmip` with `ModuleNotFoundError: No module named 'tensorstore'`.
+`import squidxplorer` with `ModuleNotFoundError: No module named 'tensorstore'`.
 
 Note `sys.executable` reports the venv path while `sys.base_prefix` is the system
 Python312. Launching produces **two OS processes** — the venv redirector and the
@@ -26,8 +26,8 @@ Kill both when stopping.
 ## Launch
 
 ```powershell
-$v = Join-Path $env:LOCALAPPDATA 'squidmip\venv\Scripts\python.exe'
-$p = Start-Process -FilePath $v -ArgumentList '-m','squidmip._viewer' `
+$v = Join-Path $env:LOCALAPPDATA 'squidxplorer\venv\Scripts\python.exe'
+$p = Start-Process -FilePath $v -ArgumentList '-m','squidxplorer._viewer' `
      -WorkingDirectory 'C:\Users\<user>\Desktop\SquidXplorer' `
      -RedirectStandardOutput out.txt -RedirectStandardError err.txt -PassThru
 ```
@@ -77,7 +77,7 @@ rest of the shell works — an easy failure to misread as a Windows bug.
 Verify the API surface without launching anything:
 
 ```powershell
-& $v -c "from squidmip._napari_view import verify_napari_bindings; verify_napari_bindings(); print('OK')"
+& $v -c "from squidxplorer._napari_view import verify_napari_bindings; verify_napari_bindings(); print('OK')"
 ```
 
 `psutil` is also undeclared. Without it `_rss_mb()` falls back to the POSIX-only
@@ -121,7 +121,7 @@ virtual coordinates.
 
 ```powershell
 Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
-  Where-Object { $_.CommandLine -like '*squidmip*' } |
+  Where-Object { $_.CommandLine -like '*squidxplorer*' } |
   ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
 ```
 

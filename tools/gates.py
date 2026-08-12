@@ -94,9 +94,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 #: and ``main()`` answered "dataset absent, cannot run" with exit code 2. Rebuild the replacement:
 #:   python tools/make_5d_fixture.py ~/Downloads/sim_2x2_36fov_96wp --fovs 36 --nz 1 --nt 1 \
 #:       --well-pitch-mm 9.0 --declared-format "384 well plate"
-#: ``SQUIDMIP_FIXTURE_PLATE`` overrides it, which is how CI runs this gate (and its --self-test)
+#: ``SQUIDXPLORER_FIXTURE_PLATE`` overrides it, which is how CI runs this gate (and its --self-test)
 #: for real rather than watching it skip: the fixture is generated, so a runner can make one.
-PLATE = os.environ.get("SQUIDMIP_FIXTURE_PLATE") or \
+PLATE = os.environ.get("SQUIDXPLORER_FIXTURE_PLATE") or \
     "/Users/julioamaragall/Downloads/sim_2x2_36fov_96wp"
 
 _APP = None
@@ -104,17 +104,17 @@ _MISSING = object()      # "this attribute was inherited, not the class's own" �
 
 
 def _app():
-    """The QApplication, on THE BINDING THE APP SHIPS -- decided by importing `squidmip` first.
+    """The QApplication, on THE BINDING THE APP SHIPS -- decided by importing `squidxplorer` first.
 
     Nine import sites in this file said ``PyQt5`` until 2026-08-06, which is the same defect
-    commit 6b51793 fixed in ``tools/walkthrough.py`` and did not carry here. ``squidmip/__init__``
+    commit 6b51793 fixed in ``tools/walkthrough.py`` and did not carry here. ``squidxplorer/__init__``
     pins ``QT_API=pyqt6``, so this constructed a Qt5 application around Qt6 widgets, loaded both
     frameworks into one process, and aborted on "QWidget: Must construct a QApplication before a
     QWidget" before the gate looked at anything. Dead since the Qt6 migration (10b8348, f7f9b28,
     ce5605c); nothing in CI ran it, so nothing said so.
     """
     global _APP
-    import squidmip  # noqa: F401  -- sets QT_API before qtpy resolves a binding
+    import squidxplorer  # noqa: F401  -- sets QT_API before qtpy resolves a binding
     from qtpy.QtWidgets import QApplication
     _APP = QApplication.instance() or QApplication([])
     return _APP
@@ -531,7 +531,7 @@ _EARLY_STUBS = ("run_operator", "run_minerva_export")
 
 def _neutralise_early(monkey, called, detail=None):
     """The stubs that have to be in place before the plate window exists. See :data:`_EARLY_STUBS`."""
-    import squidmip._viewer as V
+    import squidxplorer._viewer as V
 
     rec = _recorder(called, detail)
     for m in _EARLY_STUBS:
@@ -548,7 +548,7 @@ def _neutralise(win, monkey, called=None):
     observed, they simply do not run.
     """
     from qtpy.QtWidgets import QFileDialog, QMessageBox
-    import squidmip._viewer as V
+    import squidxplorer._viewer as V
 
     called = [] if called is None else called
     rec = _recorder(called)
@@ -670,7 +670,7 @@ def gate_no_duplicated_controllers(dataset=PLATE, verbose=False, mutate=None):
     *mutate*, when given, is called with the shown, ingested window before the sweep. It is how
     ``--self-test`` mounts a duplicate control; see :func:`self_test`.
     """
-    import squidmip._viewer as V
+    import squidxplorer._viewer as V
     app = _app()
     findings, ok = [], True
     BROKEN_PROBES.clear()
@@ -845,7 +845,7 @@ class _LogSpy:
     def __init__(self) -> None:
         import logging
 
-        from squidmip._logpane import XPLORER_ROOT
+        from squidxplorer._logpane import XPLORER_ROOT
 
         self.records: list[str] = []
         outer = self
@@ -1323,7 +1323,7 @@ def _model_pane_class():
 
     from napari.components import ViewerModel
 
-    from squidmip._napari_view import MosaicLayers
+    from squidxplorer._napari_view import MosaicLayers
 
     class ModelPane(QWidget):
         __doc__ = _ModelPane.__doc__
@@ -1358,7 +1358,7 @@ def _watch_window_stacking(monkey, seen):
     """
     from qtpy.QtWidgets import QWidget
 
-    import squidmip._viewer as V
+    import squidxplorer._viewer as V
 
     def wrap(name):
         real = getattr(QWidget, name)
@@ -1379,7 +1379,7 @@ def _neutralise_view(monkey, called):
     handler" is still measured — it is the handler's blast radius that is contained. Appends into
     the caller's *called* list so one recorder covers the plate's entry points and this window's.
     """
-    from squidmip import _region_viewer as RV
+    from squidxplorer import _region_viewer as RV
 
     def rec(name):
         def f(*a, **k):
@@ -1398,8 +1398,8 @@ def gate_no_dead_controls(dataset=PLATE, mutate_plate=None, mutate_view=None, ve
 
     Returns ``(ok, findings, rows)``; *rows* is the inventory, which ``--inventory`` prints.
     """
-    import squidmip._napari_pane as napari_pane
-    import squidmip._viewer as V
+    import squidxplorer._napari_pane as napari_pane
+    import squidxplorer._viewer as V
 
     app = _app()
     patches = []
@@ -1557,7 +1557,7 @@ def _freeze_a_probe(win):
     :func:`_unfreeze_a_probe` — a self-test that leaves the product mutated proves nothing about
     the recovery run that follows it.
     """
-    import squidmip._viewer as V
+    import squidxplorer._viewer as V
 
     _FROZEN_PROBE_ORIGINAL.append(V.PlateWindow._current_well)
     V.PlateWindow._current_well = property(lambda self: None, lambda self, value: None)
@@ -1568,7 +1568,7 @@ _FROZEN_PROBE_ORIGINAL: list = []
 
 
 def _unfreeze_a_probe():
-    import squidmip._viewer as V
+    import squidxplorer._viewer as V
 
     while _FROZEN_PROBE_ORIGINAL:
         V.PlateWindow._current_well = _FROZEN_PROBE_ORIGINAL.pop()

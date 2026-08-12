@@ -6,7 +6,7 @@
 **Status:** CODE LOCKED — merged `--no-ff` to main; 188↔183 cross commit green on both datasets.
 
 > The working plan lives at `.spec/open/ima-188.md` (gitignored). This doc is the tracked,
-> reviewable record. IMA-188 adds `squidmip/_engine.py`, three public names, and one
+> reviewable record. IMA-188 adds `squidxplorer/_engine.py`, three public names, and one
 > cross-commit section — the whole diff is self-contained.
 
 ---
@@ -23,7 +23,7 @@ changing a single pixel**. Two walls the naive plate loop hits, and what IMA-188
 IMA-188 is **throughput, not correctness**. It does not touch the MIP math. It runs `project_well`
 across wells, streams the results, and makes the z-reduction pluggable.
 
-## 2. Inherited seam (verified against merged `squidmip/`)
+## 2. Inherited seam (verified against merged `squidxplorer/`)
 
 ```
 project(planes: Iterable) -> ndarray        # bounded-memory running-max; the projector primitive
@@ -61,7 +61,7 @@ project_plate(reader, *, n_fovs=1, workers=None, projector="mip")
 - `workers=None` → adaptive default. `projector` names a table entry (default `"mip"`).
 - **Fail-loud:** a corrupt/missing plane raises through the iterator; 184 does not need to handle
   partial wells (that's 186/resume).
-- Public surface: `from squidmip import project_plate, add_projector, available_projectors`.
+- Public surface: `from squidxplorer import project_plate, add_projector, available_projectors`.
 
 ## 5. Testing (unit → cross commit on both datasets)
 
@@ -105,11 +105,11 @@ Single-thread baseline (183 §10, this machine, cache-warm): **~0.42 s/well**, p
 ## 7. Verification figures (saved to `~/Downloads` — drag each PNG in to embed)
 
 - **Byte-identical:** single-thread `project_well` vs `project_plate` on real pixels, `|diff| = 0`.
-  `[ drag squidmip_ima188_parallel_byte_identical.png here ]`
+  `[ drag squidxplorer_ima188_parallel_byte_identical.png here ]`
 - **Throughput vs workers** (warm sim), against the §10 single-thread line — shows the ~1.55×
-  bandwidth-bound plateau. `[ drag squidmip_ima188_scaling_vs_workers.png here ]`
+  bandwidth-bound plateau. `[ drag squidxplorer_ima188_scaling_vs_workers.png here ]`
 - **Peak memory flat in wells consumed** (workers=6) vs the "if materialized" line — proves the
-  bounded window. `[ drag squidmip_ima188_memory_flat.png here ]`
+  bounded window. `[ drag squidxplorer_ima188_memory_flat.png here ]`
 
 ## 8. Block-by-block review feedback applied
 
@@ -125,7 +125,7 @@ Single-thread baseline (183 §10, this machine, cache-warm): **~0.42 s/well**, p
 ## 9. IMA-184 handoff (full — pasteable)
 
 ```
-You are the IMA-184 slot in the SquidMIP build. SquidMIP is a high-throughput z-stack
+You are the IMA-184 slot in the SquidXplorer build. SquidXplorer is a high-throughput z-stack
 maximum-intensity-projection tool for Squid well-plate acquisitions, built as a review-first
 state machine — one git worktree per ticket, landed in dependency order. You are in the
 ima-184 worktree, in your own independent context. You are slot #4 (189 → 183(+187) → 188 → 184).
@@ -135,15 +135,15 @@ ima-184 worktree, in your own independent context. You are slot #4 (189 → 183(
    the state-machine model, the "Cross commit" rule, and the completed IMA-189 / 183 / 188
    sections. Your section goes under a new "IMA-184" header.
 2. On main: docs/ima-189-eng-review.md, docs/ima-183-eng-review.md, docs/ima-188-eng-review.md,
-   and the squidmip/ package. `git -C <this-worktree> merge origin/main` so you have the reader +
+   and the squidxplorer/ package. `git -C <this-worktree> merge origin/main` so you have the reader +
    projection + parallel engine.
-3. READ THE SCRIPTS, not just the docs: squidmip/_engine.py (project_plate, the stream you
-   consume), squidmip/projection.py (project_well output shape), squidmip/reader.py (metadata:
+3. READ THE SCRIPTS, not just the docs: squidxplorer/_engine.py (project_plate, the stream you
+   consume), squidxplorer/projection.py (project_well output shape), squidxplorer/reader.py (metadata:
    pixel_size_um, wellplate_format, channels[].display_color), tests/test_integration.py (append
    your "SECTION: IMA-184 ↔ 188/183" block BELOW the 188 section, do not edit it).
 
 ━━━ WHAT IS ALREADY DONE (state you inherit — 189 + 183 + 188, on main) ━━━
-    from squidmip import open_reader, select_fovs, project_well, project_plate, add_projector
+    from squidxplorer import open_reader, select_fovs, project_well, project_plate, add_projector
     - open_reader(path).metadata: regions, fovs_per_region, channels[{name, display_name,
       display_color, ex}], n_z, z_levels, dz_um, pixel_size_um, wellplate_format, frame_shape,
       dtype, n_t. acquisition.yaml REQUIRED -> pixel_size_um and wellplate_format GUARANTEED present.
@@ -159,7 +159,7 @@ ima-184 worktree, in your own independent context. You are slot #4 (189 → 183(
       pixel_size_um as physical scale, channels[].display_color as omero rendering (opens in
       ndviewer_light). Per-well TIFF export (Nick's ask): one <well>.tif per well.
     - VENDOR the tilefusion OME-zarr writer (copy create_zarr_store / write_ome / colors.py into
-      squidmip; do NOT import tilefusion — heavy __init__). See the IMA-184 writer memory notes.
+      squidxplorer; do NOT import tilefusion — heavy __init__). See the IMA-184 writer memory notes.
     - Consume project_plate lazily: stream each (region, fov, image) straight to disk, bounded memory.
     - Out of scope: parallel projection (188), UI/montage (185), CLI (186).
 
@@ -172,7 +172,7 @@ ima-184 worktree, in your own independent context. You are slot #4 (189 → 183(
     @pytest.mark.integration, green before merge. A slot isn't done until its cross commit is green.
 
 ━━━ CLEAN-CODING CONVENTIONS (every slot — read as one hand) ━━━
-    Thin public surface in squidmip/__init__; logic in a private module with an ASCII data-flow
+    Thin public surface in squidxplorer/__init__; logic in a private module with an ASCII data-flow
     docstring. No cross-repo imports (vendor, don't import). Preserve native dtype; fail LOUD; no
     dead attributes; bounded/streaming memory. Tests: unit (mocked seam) AND the cross commit;
     CI clean-room `pip install .[test]` + `pytest -m "not integration"`. Encode intent a-priori.

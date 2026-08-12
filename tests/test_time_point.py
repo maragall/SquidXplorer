@@ -15,9 +15,9 @@ correctly: `reader.read(region, fov, channel, z, t)` takes `t`, `reader.metadata
 `(T, C, 1, Y, X)` array. The plate we write to disk is TCZYX and holds every frame. Then every
 consumer throws all but the first frame away by indexing `[0, :, 0]`:
 
-    squidmip/_viewer.py:1108   `_ZarrLoupeSource.coarse`
-    squidmip/_viewer.py:3087   `_ComputedPlateWorker._on_well`  (`well = image[0, :, 0]`)
-    squidmip/_viewer.py:3866   `_ComputedPlateWorker._read`
+    squidxplorer/_viewer.py:1108   `_ZarrLoupeSource.coarse`
+    squidxplorer/_viewer.py:3087   `_ComputedPlateWorker._on_well`  (`well = image[0, :, 0]`)
+    squidxplorer/_viewer.py:3866   `_ComputedPlateWorker._read`
 
 and `project_plate(...) -> (region, fov, array)` never mentions `t` in its signature, so nothing
 between the engine and the screen has a timepoint to pass. A 40-timepoint plate therefore looks
@@ -50,10 +50,10 @@ import numpy as np
 import pytest
 import tensorstore as ts
 
-from squidmip import open_reader
-from squidmip._engine import project_plate
-from squidmip._output import parse_well_id, write_plate
-from squidmip.contract import field_path
+from squidxplorer import open_reader
+from squidxplorer._engine import project_plate
+from squidxplorer._output import parse_well_id, write_plate
+from squidxplorer.contract import field_path
 from tests.conftest import (
     N_TIME_POINTS,
     TIME_SERIES_CHANNELS,
@@ -81,7 +81,7 @@ def qapp():
     from qtpy.QtWidgets import QApplication
 
     app = QApplication.instance() or QApplication([])
-    app.setProperty("_squidmip_test", True)
+    app.setProperty("_squidxplorer_test", True)
     return app
 
 
@@ -226,7 +226,7 @@ def test_the_engine_keeps_all_three_timepoints(multi_time_point_dataset):
 
 def test_the_region_mosaic_fuses_the_timepoint_it_is_asked_for(multi_time_point_dataset, qapp):
     """t=1 must render DIFFERENT pixels from t=0, and specifically timepoint 1's own pixels."""
-    from squidmip._workers import _MosaicWorker
+    from squidxplorer._workers import _MosaicWorker
 
     root, _planes = multi_time_point_dataset
     reader = open_reader(root)
@@ -265,8 +265,8 @@ def test_a_region_window_fuses_the_timepoint_its_own_bar_shows(
     it was that nobody passed the window's timepoint to it. A test that calls the worker with an
     explicit ``t`` cannot see a call site that never supplies one.
     """
-    from squidmip import _viewer as V
-    from squidmip._region_viewer import ViewerManager
+    from squidxplorer import _viewer as V
+    from squidxplorer._region_viewer import ViewerManager
 
     root, _planes = multi_time_point_dataset
     reader = open_reader(root)

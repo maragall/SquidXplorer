@@ -10,7 +10,7 @@ The rule these tests enforce, stated once:
 
     the ONLY edit is the ``add_projector`` / ``add_region_operator`` call.
 
-Nothing in ``squidmip`` is touched, no card is added, no allowlist, no dict. Every assertion below
+Nothing in ``squidxplorer`` is touched, no card is added, no allowlist, no dict. Every assertion below
 is an OBSERVABLE OUTCOME — a widget that exists, a run that yields pixels, a CLI parameter that
 validates, a menu item with a label — never "a dict has a key". A test that asserted membership
 would pass on the state this change was made to remove: there were two dicts, and a name in one of
@@ -20,7 +20,7 @@ WHY A REGION OPERATOR IS HALF OF THIS FILE. It is the case that could not be don
 operators lived in ``_stitch._REGION_OPERATORS`` with a ``_REGION_REQUIRES`` sidecar and no
 ``produces``, no ``params`` and no ``consumes`` column at all, so:
 
-  * ``squidmip.operator_available("stitch")`` answered ``(False, "unknown projector 'stitch'")``;
+  * ``squidxplorer.operator_available("stitch")`` answered ``(False, "unknown projector 'stitch'")``;
   * a region operator's parameters were undeclared ``**kwargs`` that no UI could enumerate and the
     CLI could not check;
   * the generic panel refused every region operator by kind.
@@ -39,8 +39,8 @@ import sys
 import numpy as np
 import pytest
 
-import squidmip as s
-from squidmip._engine import Param
+import squidxplorer as s
+from squidxplorer._engine import Param
 
 # The GUI half needs a Qt binding and the same PySide guard the other GUI test modules use.
 if "PySide6" in sys.modules or "PySide2" in sys.modules:   # pragma: no cover
@@ -188,7 +188,7 @@ def test_it_is_saved_to_a_plate_with_no_edit_to_the_writer(declared_operators, r
 
 def test_the_cli_accepts_the_name_and_checks_the_declared_parameters(declared_operators):
     """`--projector <name> --param <declared>=v` validates; an undeclared one is refused BY NAME."""
-    from squidmip._cli import ProcessParameters
+    from squidxplorer._cli import ProcessParameters
 
     params = ProcessParameters(input_folder=".", projector=PLANE_OP_NAME, param=["offset=5"])
     assert params.projector == PLANE_OP_NAME
@@ -199,7 +199,7 @@ def test_the_cli_accepts_the_name_and_checks_the_declared_parameters(declared_op
 
 def test_the_cli_help_lists_the_operator_with_its_declared_defaults(declared_operators):
     """`--help` is a consumer too: an operator nobody can discover is not reachable."""
-    from squidmip._cli import _operator_catalogue
+    from squidxplorer._cli import _operator_catalogue
 
     catalogue = _operator_catalogue()
     assert f"{PLANE_OP_NAME}(offset=11, gain=1.0)" in catalogue
@@ -207,7 +207,7 @@ def test_the_cli_help_lists_the_operator_with_its_declared_defaults(declared_ope
 
 
 def test_the_cli_names_a_region_operator_too(declared_operators):
-    from squidmip._cli import ProcessParameters
+    from squidxplorer._cli import ProcessParameters
 
     assert ProcessParameters(input_folder=".",
                              projector=REGION_OP_NAME).projector == REGION_OP_NAME
@@ -220,7 +220,7 @@ def test_the_cli_names_a_region_operator_too(declared_operators):
 def test_list_operators_describes_it_from_the_declaration(declared_operators):
     """Every column of the row is a declaration read off the record, so a new operator arrives in
     `ops list` fully described. The region operator used to get three of them hardcoded."""
-    from squidmip._command import CommandBus, EngineExecutor, ListOperators
+    from squidxplorer._command import CommandBus, EngineExecutor, ListOperators
 
     bus = CommandBus(EngineExecutor())
     rows = {row["name"]: row for row in bus.execute(ListOperators()).data["operators"]}
@@ -240,7 +240,7 @@ def test_list_operators_describes_it_from_the_declaration(declared_operators):
 def test_the_gui_offers_it_in_the_operator_menu_with_no_card(declared_operators, qapp):
     """The window's 'From their declaration' submenu is built off the registry, so an operator
     added anywhere — including in somebody else's installed package — appears in it."""
-    import squidmip._viewer as V
+    import squidxplorer._viewer as V
 
     win = V.PlateWindow(None)
     try:
@@ -254,7 +254,7 @@ def test_the_gui_offers_it_in_the_operator_menu_with_no_card(declared_operators,
 def test_its_params_become_widgets_seeded_at_the_declared_defaults(declared_operators, qapp):
     """One widget per declared `Param`, chosen from the type of its default, seeded at it. An
     untouched panel must launch what the operator ships with, or it is a second set of defaults."""
-    from squidmip._param_panel import GenericOperatorPanel, panel_refusal
+    from squidxplorer._param_panel import GenericOperatorPanel, panel_refusal
     from tests.test_op_panels import _Host
 
     assert panel_refusal(PLANE_OP_NAME) is None
@@ -269,7 +269,7 @@ def test_a_region_operator_that_declares_params_gets_a_panel_too(declared_operat
     """The case that was refused by KIND until the tables were one. `stitch` still has no generic
     panel — because it declares no params, which is a fact about `stitch` and not about region
     operators."""
-    from squidmip._param_panel import GenericOperatorPanel, panel_refusal
+    from squidxplorer._param_panel import GenericOperatorPanel, panel_refusal
     from tests.test_op_panels import _Host
 
     assert panel_refusal(REGION_OP_NAME) is None
@@ -285,7 +285,7 @@ def test_a_region_operator_that_declares_params_gets_a_panel_too(declared_operat
 def test_the_gui_run_path_dispatches_it_to_the_right_engine_loop(declared_operators, reader):
     """`_OperatorWorker` picks `project_plate` or `stitch_plate` off `is_region_operator`, which is
     the declaration. It used to be a membership test against the table that no longer exists."""
-    from squidmip._workers import _OperatorWorker
+    from squidxplorer._workers import _OperatorWorker
 
     meta = reader.metadata
     fov_index = {r: {"rc": (0, i), "idx": i, "well_id": r}

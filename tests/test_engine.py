@@ -18,8 +18,8 @@ import time
 import numpy as np
 import pytest
 
-import squidmip._engine as engine
-from squidmip import (
+import squidxplorer._engine as engine
+from squidxplorer import (
     add_projector,
     available_projectors,
     plane_op,
@@ -283,7 +283,7 @@ def test_shipped_projectors_declare_the_z_axis():
 
 
 def test_consumes_is_orthogonal_to_select_index():
-    from squidmip.projection import project as mip, project_reference
+    from squidxplorer.projection import project as mip, project_reference
     assert getattr(mip, "select_index", None) is None
     assert getattr(project_reference, "select_index", None) is not None
     # ...yet they declare the SAME consumed axis.

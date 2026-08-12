@@ -28,8 +28,8 @@ pytest.importorskip("tensorstore")
 import numpy as np  # noqa: E402
 import tensorstore as ts  # noqa: E402
 
-from squidmip import _tsctx  # noqa: E402
-from squidmip._budget import cache_budget  # noqa: E402
+from squidxplorer import _tsctx  # noqa: E402
+from squidxplorer._budget import cache_budget  # noqa: E402
 
 
 def _write_store(path, shape=(1, 1, 1, 4, 4)):
@@ -122,7 +122,7 @@ def test_the_plate_scrub_goes_through_the_pool():
     """The regression that matters: _ComputedPlateWorker must not call ts.open directly again."""
     import inspect
 
-    from squidmip import _viewer
+    from squidxplorer import _viewer
 
     src = inspect.getsource(_viewer._ComputedPlateWorker._read)
     assert "HANDLES.get" in src, "the plate scrub stopped using the shared pool"

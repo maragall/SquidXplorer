@@ -1,5 +1,5 @@
 """OperationStack: ordered, toggleable layer stack (pure model)."""
-from squidmip._layers import OperationStack
+from squidxplorer._layers import OperationStack
 
 
 def test_stack_add_toggle_top_and_reset():

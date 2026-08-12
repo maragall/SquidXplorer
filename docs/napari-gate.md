@@ -119,7 +119,7 @@ the design was validated by probe *before* being built on:
 
 | need | mechanism | public? |
 |---|---|---|
-| group identity | `layer.metadata["squidmip"] = {"op", "channel"}` | yes |
+| group identity | `layer.metadata["squidxplorer"] = {"op", "channel"}` | yes |
 | before/after toggle | `layer.visible` flipped over one op group | yes |
 | contrast shared per channel | `LayerList.link_layers(peers, ("contrast_limits",))` | yes |
 | contrast notifications | `layer.events.contrast_limits` | yes |
@@ -153,7 +153,7 @@ contrast model.
   Free in napari: voxel scale, anisotropy, 3D toggle. Needs porting: nothing conceptual.
   Lost: nothing, but the tests must be rewritten rather than migrated.
 - **Our tiling survives untouched.** `_tiling.py` and `_tilesource.py` import only stdlib +
-  numpy + squidmip internals — no viewer import of any kind. Both already speak stage
+  numpy + squidxplorer internals — no viewer import of any kind. Both already speak stage
   micrometres, which is napari's world convention, so `bbox_um` maps onto `scale`/`translate`
   with only an axis flip (`(x0,y0,x1,y1)` -> `(row,col)`), pinned by a test. `DEFAULT_TILE_PX =
   512` already equals the OME-Zarr chunk size IMA-217 writes, so one tile read is one chunk
@@ -161,7 +161,7 @@ contrast model.
 
 ## Wired in — verified on the real datasets
 
-napari is now pane 2, the central viewer, and `SQUIDMIP_VIEWER` defaults to `napari`.
+napari is now pane 2, the central viewer, and `SQUIDXPLORER_VIEWER` defaults to `napari`.
 Verified with a real GL context (`tools/verify_napari_mosaic.py`, which deliberately refuses the
 offscreen platform):
 

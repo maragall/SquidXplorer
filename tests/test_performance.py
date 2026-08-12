@@ -18,7 +18,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from squidmip import open_reader, project_well
+from squidxplorer import open_reader, project_well
 
 # The `sim_1536wp` fixture lives in tests/conftest.py and is auto-discovered. The local copy that
 # used to sit here checked only that the directory EXISTS, which is not the same as it being

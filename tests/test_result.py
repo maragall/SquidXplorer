@@ -2,7 +2,7 @@
 
 WHAT WAS WRONG
 --------------
-``squidmip._recipe.ResultCache`` stored BARE ARRAYS. An entry could not say which channels it
+``squidxplorer._recipe.ResultCache`` stored BARE ARRAYS. An entry could not say which channels it
 carried, how deep in z it was, what dtype it was, or what one pixel measured. Everything a consumer
 needed in order to draw it had to come from somewhere else, and the only "somewhere else" available
 was the acquisition the whole plate was assumed to share.
@@ -48,9 +48,9 @@ import pathlib
 import numpy as np
 import pytest
 
-from squidmip._address import Address, Extent
-from squidmip._recipe import Recipe, RecipeChain, ResultCache
-from squidmip._result import (
+from squidxplorer._address import Address, Extent
+from squidxplorer._recipe import Recipe, RecipeChain, ResultCache
+from squidxplorer._result import (
     Result,
     Substance,
     composite_channels,
@@ -263,7 +263,7 @@ DECLARED_FIELDS = {"channels", "dtype", "z_depth", "pixel_size_um", "substance",
 #: module the property stopped covering. (Task 3's census and legend were listed here as future
 #: entries; both were removed on 2026-08-05 -- nothing ever constructed the legend -- so the list
 #: is the two modules that actually hold one.)
-KNOWS_ABOUT_RESULTS = ("squidmip._result", "squidmip._recipe")
+KNOWS_ABOUT_RESULTS = ("squidxplorer._result", "squidxplorer._recipe")
 
 
 def _equality_on_a_declaration(module_name: str) -> "list[str]":
@@ -305,7 +305,7 @@ def test_NO_code_path_compares_two_results():
     assert hits == [], (
         "a result's declaration is being compared against something. Two runs with different "
         "channel sets are not a mismatch to detect; each cell declares what it is and the plate "
-        "draws that. See the module docstring of squidmip/_result.py.\n  " + "\n  ".join(hits))
+        "draws that. See the module docstring of squidxplorer/_result.py.\n  " + "\n  ".join(hits))
 
 
 def test_two_results_are_not_comparable_BY_CONSTRUCTION():

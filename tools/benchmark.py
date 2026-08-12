@@ -7,7 +7,7 @@
 Speed, footprint and quality for every operator in the registry, measured with Julio's
 own profiling suite (``profiling/`` in the stitcher repo — StageTimer, assign_stages,
 RSSSampler, AllocationSampler, compute_ranking, harness._collect). See
-``squidmip/_benchmark.py`` for exactly which functions are adapted and why.
+``squidxplorer/_benchmark.py`` for exactly which functions are adapted and why.
 
 Nothing is written unless you ask for --csv/--json, and neither is large. The run itself
 is storage- and memory-guarded before it starts: see ``_benchmark.guard_memory`` and
@@ -25,7 +25,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from squidmip._benchmark import (  # noqa: E402
+from squidxplorer._benchmark import (  # noqa: E402
     DEFAULT_OPERATORS,
     benchmark_dataset,
     format_allocations,
@@ -83,7 +83,7 @@ def main() -> int:
         # Same harness, same seam, same fixtures — the challengers are just region
         # operators. That is the point: a separate stitcher suite would measure a
         # different thing and has already produced wrong numbers on this project once.
-        from squidmip._bench_stitchers import availability_report, register_challengers
+        from squidxplorer._bench_stitchers import availability_report, register_challengers
 
         added = register_challengers()
         if args.operators == ",".join(DEFAULT_OPERATORS):

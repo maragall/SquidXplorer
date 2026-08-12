@@ -14,7 +14,7 @@ from pathlib import Path
 import numpy as np
 import tensorstore as ts
 
-from squidmip._output import (
+from squidxplorer._output import (
     parse_well_id,
     plate_metadata,
     split_well,
@@ -280,7 +280,7 @@ def test_writer_memory_is_bounded_in_well_count(tmp_path):
 
 import pytest
 
-from squidmip._output import (
+from squidxplorer._output import (
     InsufficientDiskSpaceError,
     estimate_write_bytes,
     free_bytes,
@@ -304,7 +304,7 @@ def _big_meta(n_regions=4, n_fovs=9, y=2048, x=2048, n_t=1):
 
 def test_pyramid_factor_is_the_exact_level_sum_not_a_guess():
     # 2048 -> 1024 -> 512 -> 256 : the ladder pyramid_shapes() would write, exactly.
-    from squidmip._output import pyramid_shapes
+    from squidxplorer._output import pyramid_shapes
 
     shapes = pyramid_shapes((2048, 2048))
     y0, x0 = shapes[0]
@@ -336,7 +336,7 @@ def test_free_bytes_uses_nearest_existing_ancestor(tmp_path):
 
 def test_refuses_up_front_and_writes_nothing(tmp_path, monkeypatch):
     """The whole point of IMA-230: die BEFORE the first byte, not 94% through."""
-    monkeypatch.setattr("squidmip._output.free_bytes", lambda p: 10 * 1024 ** 2)  # 10 MB free
+    monkeypatch.setattr("squidxplorer._output.free_bytes", lambda p: 10 * 1024 ** 2)  # 10 MB free
     meta = _big_meta()
     out = tmp_path / "run"
     with pytest.raises(InsufficientDiskSpaceError) as ei:
@@ -351,7 +351,7 @@ def test_headroom_is_configurable_and_reserves_the_last_of_the_disk(tmp_path, mo
     meta = _meta()
     est = estimate_write_bytes(meta, n_fovs=1)
     # exactly the estimate free: fits arithmetically, but leaves the disk at zero -> refuse
-    monkeypatch.setattr("squidmip._output.free_bytes", lambda p: int(est))
+    monkeypatch.setattr("squidxplorer._output.free_bytes", lambda p: int(est))
     with pytest.raises(InsufficientDiskSpaceError):
         write_from_stream(meta, iter([]), tmp_path / "a", n_fovs=1)
     # a caller who insists can dial the headroom down
@@ -361,14 +361,14 @@ def test_headroom_is_configurable_and_reserves_the_last_of_the_disk(tmp_path, mo
 
 
 def test_guard_can_be_disabled(tmp_path, monkeypatch):
-    monkeypatch.setattr("squidmip._output.free_bytes", lambda p: 1)
+    monkeypatch.setattr("squidxplorer._output.free_bytes", lambda p: 1)
     write_from_stream(_meta(), iter([]), tmp_path / "c", n_fovs=1, check_disk=False)
     assert (tmp_path / "c" / "plate.ome.zarr").exists()
 
 
 def test_a_failed_field_publishes_nothing_and_marks_the_plate_incomplete(tmp_path, monkeypatch):
     """A killed/failed write must not leave a field that later reads as a valid one."""
-    import squidmip._output as O
+    import squidxplorer._output as O
 
     real = O._write_field
     calls = {"n": 0}
@@ -440,10 +440,10 @@ def test_a_run_that_lost_a_well_does_not_declare_the_store_trustworthy(tmp_path)
         f"reported complete={manifest['complete']}"
     )
     assert is_incomplete(plate), (
-        "the store deleted its .squidmip-incomplete marker after losing a well, so it reports "
+        "the store deleted its .squidxplorer-incomplete marker after losing a well, so it reports "
         "itself trustworthy with 1 of 3 fields missing"
     )
-    marker = json.loads((plate / ".squidmip-incomplete").read_text())
+    marker = json.loads((plate / ".squidxplorer-incomplete").read_text())
     assert marker["fields"] == 3 and marker["fields_written"] == 2, (
         f"the marker must record the shortfall on disk, got {marker}"
     )
@@ -468,7 +468,7 @@ def test_a_labels_result_is_coarsened_by_nearest_because_object_ids_are_not_numb
 
     manifest = write_from_stream(meta, iter([("B2", 0, field)]), tmp_path, n_fovs=1,
                                  regions=["B2"], produces="labels")
-    from squidmip._output import _pyramid
+    from squidxplorer._output import _pyramid
 
     coarse = _pyramid(field, min_yx=2, produces="labels")[1]
     present = set(np.unique(field).tolist())
@@ -489,7 +489,7 @@ def test_a_labels_result_is_coarsened_by_nearest_because_object_ids_are_not_numb
 
 def test_a_pyramid_refuses_a_result_kind_it_does_not_know_how_to_coarsen(tmp_path):
     """No default reduction. Guessing one is how a label image came to be block-averaged."""
-    from squidmip._output import _pyramid
+    from squidxplorer._output import _pyramid
 
     with pytest.raises(ValueError) as excinfo:
         _pyramid(np.zeros((1, 1, 1, 8, 8), np.uint16), min_yx=2, produces="phase")
@@ -519,7 +519,7 @@ def test_the_channel_wavelength_on_disk_is_labelled_excitation_because_that_is_w
 
 def test_partial_tiffs_are_never_published(tmp_path, monkeypatch):
     """The 8-byte .ome.tiff that read as a real file: TIFFs land by atomic rename or not at all."""
-    import squidmip._output as O
+    import squidxplorer._output as O
 
     real_imwrite = O.tifffile.imwrite
     seen = {"n": 0}
@@ -548,7 +548,7 @@ def test_partial_tiffs_are_never_published(tmp_path, monkeypatch):
 
 # --- IMA-231: FOV_ROI_table (Fractal / ngio convention) ---------------------------------------
 
-from squidmip._output import (
+from squidxplorer._output import (
     _NGIO_COLUMN,
     _ROI_INDEX_KEY,
     field_origin_um,
@@ -591,7 +591,7 @@ def _read_table(table_dir: Path):
 
 
 def test_um_to_ngio_map_is_a_rename_not_a_conversion():
-    """Every SquidMIP key ends _um, every ngio column ends _micrometer, same unit both sides."""
+    """Every SquidXplorer key ends _um, every ngio column ends _micrometer, same unit both sides."""
     for ours, theirs in _NGIO_COLUMN.items():
         assert ours.endswith("_um"), ours
         # ngio spells the unit "micrometer" (and puts _original AFTER it) — same unit, our _um
@@ -621,7 +621,7 @@ def test_records_use_the_field_origin_corner_not_the_centre():
 
 def test_roi_boxes_agree_with_tilesource_field_origin_exactly():
     """IMA-217's tile source and IMA-231's ROI table must place a field at the SAME corner."""
-    from squidmip._tilesource import fov_bboxes_um
+    from squidxplorer._tilesource import fov_bboxes_um
 
     boxes = fov_bboxes_um({("B2", f): p for f, p in ROI_POS.items()}, ROI_FRAME, ROI_PX)
     recs = {r["path_in_well"]: r for r in
@@ -698,7 +698,7 @@ def test_millimetres_in_a_um_key_are_refused(tmp_path):
 
 
 def test_roi_table_reads_back_under_anndata_if_available(tmp_path):
-    """Independent reader check: anndata itself, when the environment has it (not a squidmip dep)."""
+    """Independent reader check: anndata itself, when the environment has it (not a squidxplorer dep)."""
     anndata = pytest.importorskip("anndata")
     recs = fov_roi_records_um([0, 1], ROI_POS, ROI_FRAME, ROI_PX, dz_um=2.0, n_z=5)
     table = write_fov_roi_table(tmp_path / "img", recs)

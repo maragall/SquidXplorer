@@ -10,7 +10,7 @@ Built on an M-series Mac from `scripts/hcs-viewer.spec` with no credentials set:
 
 ```
 $ codesign -dv dist/hcs-viewer.app
-Identifier=com.cephla.squidmip.hcsviewer
+Identifier=com.cephla.squidxplorer.hcsviewer
 Format=app bundle with Mach-O thin (arm64)
 CodeDirectory v=20400 flags=0x2(adhoc) hashes=2038+3
 Signature=adhoc
@@ -61,8 +61,8 @@ today (ad-hoc, no entitlements). Set, it signs properly. No edit to any tracked 
 
 | variable | effect |
 |---|---|
-| `SQUIDMIP_CODESIGN_IDENTITY` | the Developer ID passed to `codesign`; also switches the entitlements file on |
-| `SQUIDMIP_ENTITLEMENTS` | override the default `scripts/entitlements.plist` |
+| `SQUIDXPLORER_CODESIGN_IDENTITY` | the Developer ID passed to `codesign`; also switches the entitlements file on |
+| `SQUIDXPLORER_ENTITLEMENTS` | override the default `scripts/entitlements.plist` |
 
 `scripts/entitlements.plist` exists and is commented. It has never been used in a real signing run,
 and it lists three entitlements you should try to **delete** before you trust them — read its
@@ -87,14 +87,14 @@ You want the line that reads `Developer ID Application: <Name> (TEAMID)`. A *Mac
 Security → App-Specific Passwords), then:
 
 ```
-xcrun notarytool store-credentials squidmip-notary \
+xcrun notarytool store-credentials squidxplorer-notary \
   --apple-id "you@cephla.com" --team-id "TEAMID" --password "abcd-efgh-ijkl-mnop"
 ```
 
 **3. Build signed, with the Hardened Runtime.** Notarisation *requires* the Hardened Runtime.
 
 ```
-export SQUIDMIP_CODESIGN_IDENTITY="Developer ID Application: <Name> (TEAMID)"
+export SQUIDXPLORER_CODESIGN_IDENTITY="Developer ID Application: <Name> (TEAMID)"
 python scripts/build_app.py --dataset /path/to/an/acquisition
 ```
 
@@ -104,18 +104,18 @@ flag itself:
 ```
 codesign --force --deep --timestamp --options runtime \
   --entitlements scripts/entitlements.plist \
-  --sign "$SQUIDMIP_CODESIGN_IDENTITY" dist/hcs-viewer.app
+  --sign "$SQUIDXPLORER_CODESIGN_IDENTITY" dist/hcs-viewer.app
 ```
 
 **4. Notarise and staple.**
 
 ```
 ditto -c -k --keepParent dist/hcs-viewer.app /tmp/hcs-viewer.zip
-xcrun notarytool submit /tmp/hcs-viewer.zip --keychain-profile squidmip-notary --wait
+xcrun notarytool submit /tmp/hcs-viewer.zip --keychain-profile squidxplorer-notary --wait
 xcrun stapler staple dist/hcs-viewer.app
 ```
 
-If it is rejected, `xcrun notarytool log <submission-id> --keychain-profile squidmip-notary` gives
+If it is rejected, `xcrun notarytool log <submission-id> --keychain-profile squidxplorer-notary` gives
 the per-binary reason. The usual cause for a PyInstaller bundle is a nested `.so` that did not get
 the Hardened Runtime flag; `--deep` in step 3 is what handles that.
 

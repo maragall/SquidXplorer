@@ -1,7 +1,7 @@
 """IMA-229: Zarr input — OME-NGFF HCS plate + non-HCS image groups through the SAME reader seam.
 
 ``reader.py`` used to raise ``NotImplementedError`` for Zarr. Squid writes ``plate.ome.zarr``, and
-SquidMIP's own writer (``_output.py``) emits exactly that, so a MIP output was not re-openable by
+SquidXplorer's own writer (``_output.py``) emits exactly that, so a MIP output was not re-openable by
 the tool that produced it.
 
 The contract under test is *parity*, not a new API: ``metadata`` carries the same twelve keys with
@@ -16,7 +16,7 @@ Layout adopted (see the reader docstring for the spec citations):
     non-HCS  zarr/{region_id}/{level}                      a bare multiscales image group
 
 Fixtures here are TINY (4x4 to 8x8 px, a few KB) and live in ``tmp_path``. The v0.5 fixture is
-produced by SquidMIP's own writer, so this doubles as a round-trip test; the v0.4 fixture is
+produced by SquidXplorer's own writer, so this doubles as a round-trip test; the v0.4 fixture is
 hand-written zarr v2 (``.zgroup``/``.zattrs``), because the two NGFF versions put the metadata in
 different places and a reader that only handles one of them cannot open half the real stores.
 """
@@ -30,8 +30,8 @@ import numpy as np
 import pytest
 import tensorstore as ts
 
-from squidmip import open_reader
-from squidmip.reader import SquidZarrReader
+from squidxplorer import open_reader
+from squidxplorer.reader import SquidZarrReader
 
 _CH = [
     {"name": "Fluorescence_488_nm_-_Penta", "display_name": "Fluorescence 488 nm - Penta",
@@ -44,8 +44,8 @@ _CH = [
 # --- fixtures ---------------------------------------------------------------------------------
 
 def _write_v05_plate(out_dir, regions=("B2", "B3"), fovs=(0, 1), shape=(1, 2, 1, 8, 8)):
-    """A real v0.5 plate written by SquidMIP's own writer. Returns {(region, fov): array}."""
-    from squidmip._output import write_from_stream
+    """A real v0.5 plate written by SquidXplorer's own writer. Returns {(region, fov): array}."""
+    from squidxplorer._output import write_from_stream
 
     n_t, n_c, n_z, y, x = shape
     arrays = {}
@@ -302,7 +302,7 @@ def test_metadata_keys_identical_to_the_tiff_reader(tmp_path, squid_dataset):
 def test_read_signature_matches_the_tiff_reader(tmp_path):
     import inspect
 
-    from squidmip.reader import SquidOMEReader, SquidReader
+    from squidxplorer.reader import SquidOMEReader, SquidReader
 
     sig = inspect.signature(SquidZarrReader.read)
     assert sig.parameters.keys() == inspect.signature(SquidReader.read).parameters.keys()

@@ -44,8 +44,8 @@ if "PySide6" in sys.modules or "PySide2" in sys.modules:
 
 from qtpy.QtWidgets import QApplication                                   # noqa: E402
 
-from squidmip import _gallery as G                                        # noqa: E402
-from squidmip.reader import open_reader                                   # noqa: E402
+from squidxplorer import _gallery as G                                        # noqa: E402
+from squidxplorer.reader import open_reader                                   # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -59,7 +59,7 @@ def qapp():
     suite — which is exactly how this module first went red.
     """
     app = QApplication.instance() or QApplication([])
-    app.setProperty("_squidmip_test", True)   # main() won't call exec_/exit under test
+    app.setProperty("_squidxplorer_test", True)   # main() won't call exec_/exit under test
     return app
 
 
@@ -361,7 +361,7 @@ def test_a_gallery_cell_keys_into_the_shared_plane_cache_and_a_second_fuse_reads
         squid_dataset):
     """Reuse, not a new cache: ``_budget.cache_budget()`` already decided how much this machine
     can spend on preview pixels, and a gallery-private cache would spend it twice."""
-    from squidmip._mosaic_source import plane_cache, source_token
+    from squidxplorer._mosaic_source import plane_cache, source_token
 
     root, _arrays = squid_dataset
     inner = open_reader(root)
@@ -391,7 +391,7 @@ def test_a_cell_with_a_hole_in_it_is_not_cached(squid_dataset, monkeypatch):
     cache stores pixels only, so a hit would rebuild the cell with ``unreadable=()`` — the hole
     still on screen, the caption no longer saying so, which is worse than the hole.
     """
-    from squidmip._mosaic_source import plane_cache, source_token
+    from squidxplorer._mosaic_source import plane_cache, source_token
 
     root, _arrays = squid_dataset
     inner = open_reader(root)
@@ -438,7 +438,7 @@ def test_the_gallery_never_reads_a_plane_on_the_qt_thread(qapp, squid_dataset):
     that N times, as N freezes. Instrumenting the reader is the only way to keep that true through
     a later refactor that "just" fuses one cell inline to fix a repaint.
     """
-    from squidmip._gallery_window import GalleryWindow
+    from squidxplorer._gallery_window import GalleryWindow
 
     root, _arrays = squid_dataset
     reader = _RecordingReader(open_reader(root))
@@ -467,7 +467,7 @@ def test_cells_are_emitted_one_at_a_time_as_they_are_fused(qapp, squid_dataset):
     fast fixture before this was restructured. A flaky test is worse than no test, so the subject
     is the object whose contract this is, connected BEFORE ``start()``.
     """
-    from squidmip._gallery_window import GalleryWorker
+    from squidxplorer._gallery_window import GalleryWorker
 
     root, _arrays = squid_dataset
     reader, meta = _meta(root)
@@ -501,7 +501,7 @@ def test_cells_are_emitted_one_at_a_time_as_they_are_fused(qapp, squid_dataset):
 
 def test_every_cell_of_the_scope_ends_up_painted(qapp, squid_dataset):
     """The window half of the same property: nothing is left as an empty grey square."""
-    from squidmip._gallery_window import GalleryWindow
+    from squidxplorer._gallery_window import GalleryWindow
 
     root, _arrays = squid_dataset
     reader, meta = _meta(root)
@@ -522,7 +522,7 @@ def test_every_cell_of_the_scope_ends_up_painted(qapp, squid_dataset):
 def test_the_grid_is_regions_down_and_channels_across(qapp, squid_dataset):
     """gallery-view's table, not a reflowing grid: a channel has to stay in ONE column across
     regions or the two wells the user is comparing are not side by side."""
-    from squidmip._gallery_window import GalleryWindow
+    from squidxplorer._gallery_window import GalleryWindow
 
     root, _arrays = squid_dataset
     reader, meta = _meta(root)
@@ -555,7 +555,7 @@ def test_a_rescope_leaves_no_orphan_widgets_painting_over_the_new_grid(qapp, squ
     a lifetime bug. `tests/test_no_orphan_windows.py` is the same class one container up: a widget
     that is no longer wanted must stop being a CHILD, not merely stop being in a layout.
     """
-    from squidmip._gallery_window import GalleryWindow
+    from squidxplorer._gallery_window import GalleryWindow
 
     root, _arrays = squid_dataset
     reader, meta = _meta(root)
@@ -590,7 +590,7 @@ def test_a_column_header_never_overruns_its_column(qapp, squid_dataset):
     distinguishes the columns, where "Fluorescence_" is what they all share. The full name stays
     reachable as the tooltip, so this narrows the label and not the datum.
     """
-    from squidmip._gallery_window import GalleryWindow
+    from squidxplorer._gallery_window import GalleryWindow
 
     root, _arrays = squid_dataset
     reader, meta = _meta(root)
@@ -628,7 +628,7 @@ def test_a_repaint_is_budgeted_so_a_big_gallery_stutters_no_more_than_a_small_on
     has to hold is that a gallery of 4 regions and a gallery of 64 feel the same, so the work per
     tick is bounded by a budget rather than by how many regions are in scope.
     """
-    from squidmip import _gallery_window as GW
+    from squidxplorer import _gallery_window as GW
 
     root, _arrays = squid_dataset
     reader, meta = _meta(root)
@@ -670,7 +670,7 @@ def test_compositing_at_display_resolution_never_starves_the_label(qapp, squid_d
     label — `//` rounds down, so it is, and this says so rather than trusting the arithmetic. If
     the stride ever exceeded that, cells would go visibly soft and no other test would notice.
     """
-    from squidmip._gallery_window import GalleryWindow
+    from squidxplorer._gallery_window import GalleryWindow
 
     root, _arrays = squid_dataset
     reader, meta = _meta(root)
@@ -698,7 +698,7 @@ def test_compositing_at_display_resolution_never_starves_the_label(qapp, squid_d
 
 def test_a_size_change_re_renders_from_ram_and_reads_nothing(qapp, squid_dataset):
     """gallery-view's rule: display settings re-render the arrays already in RAM, never re-read."""
-    from squidmip._gallery_window import GalleryWindow
+    from squidxplorer._gallery_window import GalleryWindow
 
     root, _arrays = squid_dataset
     reader = _RecordingReader(open_reader(root))
@@ -721,7 +721,7 @@ def test_a_size_change_re_renders_from_ram_and_reads_nothing(qapp, squid_dataset
 def test_a_subset_gallery_shows_the_crop_on_the_row_label(qapp, squid_dataset):
     """Both a marquee'd corner and the whole well render as a picture. Only the label can tell
     them apart, so the label carries the FOV count in scope against the region's own."""
-    from squidmip._gallery_window import GalleryWindow
+    from squidxplorer._gallery_window import GalleryWindow
 
     root, _arrays = squid_dataset
     reader, meta = _meta(root)
@@ -739,7 +739,7 @@ def test_more_than_one_timepoint_gets_a_control_and_changing_it_changes_the_pixe
         qapp, multi_time_point_dataset):
     """The 5-D case. The bar is HIDDEN at n_t == 1 — a spin box pinned to 0..0 implies an axis the
     acquisition does not have — and shown, with real range, when there is a t axis to move on."""
-    from squidmip._gallery_window import GalleryWindow
+    from squidxplorer._gallery_window import GalleryWindow
 
     root, _planes = multi_time_point_dataset
     reader, meta = _meta(root)
@@ -766,7 +766,7 @@ def test_more_than_one_timepoint_gets_a_control_and_changing_it_changes_the_pixe
 
 
 def test_a_single_timepoint_acquisition_shows_no_timepoint_control(qapp, squid_dataset):
-    from squidmip._gallery_window import GalleryWindow
+    from squidxplorer._gallery_window import GalleryWindow
 
     root, _arrays = squid_dataset
     reader, meta = _meta(root)
@@ -781,7 +781,7 @@ def test_a_single_timepoint_acquisition_shows_no_timepoint_control(qapp, squid_d
 def test_the_gallery_reports_its_own_first_paint(qapp, squid_dataset):
     """CONTEXT.md's **first paint**: asking for the window to its first cell on screen, taken where
     the drawing happens. Distinct from the total, and the total is what the status line adds."""
-    from squidmip._gallery_window import GalleryWindow
+    from squidxplorer._gallery_window import GalleryWindow
 
     root, _arrays = squid_dataset
     reader, meta = _meta(root)
@@ -804,7 +804,7 @@ def test_the_view_menu_opens_a_gallery_on_the_selection_and_rescopes_on_a_second
         qapp, squid_dataset):
     """The subset plumbing that already existed, used rather than duplicated: the scope comes from
     ``selected_region_fovs()``, which is what the marquee and shift-click already feed."""
-    import squidmip._viewer as V
+    import squidxplorer._viewer as V
     from tests.conftest import shutdown_plate_window
 
     root, _arrays = squid_dataset
@@ -837,7 +837,7 @@ def test_the_view_menu_opens_a_gallery_on_the_selection_and_rescopes_on_a_second
 def test_closing_the_plate_closes_the_gallery_and_joins_its_thread(qapp, squid_dataset):
     """A gallery left open would draw into a closed plate's reader, and its QThread would be alive
     at teardown — which is the one thing ``PlateWindow.closeEvent`` exists to prevent."""
-    import squidmip._viewer as V
+    import squidxplorer._viewer as V
     from tests.conftest import shutdown_plate_window
 
     root, _arrays = squid_dataset

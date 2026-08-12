@@ -47,12 +47,12 @@ if "PySide6" in sys.modules or "PySide2" in sys.modules:
 from napari.components import ViewerModel                # noqa: E402
 from qtpy.QtCore import QObject                          # noqa: E402
 
-from squidmip import _bricks                             # noqa: E402
-from squidmip._napari3d import region_origin_um, roi_window_px   # noqa: E402
-from squidmip._napari_view import META_KEY, MosaicKey, MosaicLayers, key_of  # noqa: E402
-from squidmip._op_result import RegionResultAccumulator  # noqa: E402
-from squidmip._region_viewer import _RAW_OP, RegionViewer  # noqa: E402
-from squidmip._workers import _OperatorWorker            # noqa: E402
+from squidxplorer import _bricks                             # noqa: E402
+from squidxplorer._napari3d import region_origin_um, roi_window_px   # noqa: E402
+from squidxplorer._napari_view import META_KEY, MosaicKey, MosaicLayers, key_of  # noqa: E402
+from squidxplorer._op_result import RegionResultAccumulator  # noqa: E402
+from squidxplorer._region_viewer import _RAW_OP, RegionViewer  # noqa: E402
+from squidxplorer._workers import _OperatorWorker            # noqa: E402
 
 # -- a two-FOV region, small enough to hold in a test and shaped like the real one --------------
 N_Z, N_C = 4, 2
@@ -102,7 +102,7 @@ def _stitched_5d(h: int, w: int) -> np.ndarray:
 
 
 def _mosaic_hw(meta: dict) -> tuple:
-    from squidmip._placement import fov_offsets_px, mosaic_extent_px
+    from squidxplorer._placement import fov_offsets_px, mosaic_extent_px
 
     offsets = fov_offsets_px(meta["fov_positions_um"], REGION, [0, 1], PX_UM)
     return mosaic_extent_px(offsets, (FRAME, FRAME))
@@ -253,7 +253,7 @@ def _pane_with(meta: dict, *, op: str, result=None, raw_clim=(5.0, 9.0),
     operator produced, reading raw yields nothing at all and the brick derives its own with
     ``_auto_clim`` -- which is the contrast changing under the user.
     """
-    from squidmip._mosaic_source import mosaic_bbox_um
+    from squidxplorer._mosaic_source import mosaic_bbox_um
 
     model = ViewerModel()
     mos = MosaicLayers(model)
@@ -349,7 +349,7 @@ def stub_bricked(monkeypatch):
     framed without a canvas. ``open()``'s own layer bookkeeping — which is the subject — runs for
     real, and so does ``_add_layer``.
     """
-    import squidmip._brick_view as BV
+    import squidxplorer._brick_view as BV
 
     class _Stubbed(BV.BrickedVolume):
         def __init__(self, *a, **kw):
@@ -418,7 +418,7 @@ def test_a_SECOND_3d_open_reads_the_whole_ROI_and_not_one_brick_of_the_last_one(
     MUTATION: move `self._close_native3d()` in `_open_3d` to after `_open_roi_3d` returns (or
     delete it, leaving the close inside `_replace_native3d`) -> 1 of 9 bricks -> red.
     """
-    from squidmip._mosaic_source import mosaic_bbox_um
+    from squidxplorer._mosaic_source import mosaic_bbox_um
 
     meta = _meta()
     h, w = _mosaic_hw(meta)
@@ -447,7 +447,7 @@ def test_the_second_volumes_voxels_are_the_STITCHED_ones_at_full_extent(stub_bri
 
     MUTATION: as above -> the far bricks read None and the plane values never appear -> red.
     """
-    from squidmip._mosaic_source import mosaic_bbox_um
+    from squidxplorer._mosaic_source import mosaic_bbox_um
 
     meta = _meta()
     h, w = _mosaic_hw(meta)
@@ -481,7 +481,7 @@ def test_the_volume_opens_on_the_window_the_RENDERED_layer_is_showing(stub_brick
     MUTATION: pass `_RAW_OP` to `_on_screen_luts` in `_open_roi_3d` -> c1 has no entry -> KeyError
     -> red.
     """
-    from squidmip._mosaic_source import mosaic_bbox_um
+    from squidxplorer._mosaic_source import mosaic_bbox_um
 
     meta = _meta()
     h, w = _mosaic_hw(meta)
@@ -521,7 +521,7 @@ def test_a_contrast_set_IN_3D_survives_the_flip_and_the_next_volume_opens_on_it(
     MUTATION: pass `contrast_by=None` in `_open_roi_3d`'s `BrickedVolume(...)` call -> the volume
     derives its own with `_auto_clim` instead of adopting the screen's -> red.
     """
-    from squidmip._mosaic_source import mosaic_bbox_um
+    from squidxplorer._mosaic_source import mosaic_bbox_um
 
     meta = _meta()
     h, w = _mosaic_hw(meta)
@@ -607,7 +607,7 @@ def test_a_contrast_drag_ON_THE_VOLUME_does_not_raise(stub_bricked):
 
     MUTATION: make `_reslice_hidden_layers` a no-op -> RuntimeError -> red.
     """
-    from squidmip._mosaic_source import mosaic_bbox_um
+    from squidxplorer._mosaic_source import mosaic_bbox_um
 
     meta = _meta()
     h, w = _mosaic_hw(meta)
@@ -633,7 +633,7 @@ def test_taking_the_volume_down_puts_the_MOSAIC_back_in_charge_of_the_key(stub_b
 
     MUTATION: make `_close_native3d` a no-op -> `find` still answers with a brick -> red.
     """
-    from squidmip._mosaic_source import mosaic_bbox_um
+    from squidxplorer._mosaic_source import mosaic_bbox_um
 
     meta = _meta()
     h, w = _mosaic_hw(meta)

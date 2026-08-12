@@ -23,7 +23,7 @@ Single-context repo:
 ├── docs/adr/
 │   ├── 0001-<decision-slug>.md
 │   └── 0002-<decision-slug>.md
-└── squidmip/
+└── squidxplorer/
 ```
 
 ## These live in this repo, not in AI-docs
@@ -44,7 +44,7 @@ the areas they govern, and treat a contradiction the same way you'd treat an ADR
   Iterator, ReadAcquisition, PlateView, ArrayViewer). Note this is partly **aspirational**: some
   names in it have no class in the code. Verify against the tree before relying on one.
 
-Decisions also sit inside module docstrings (for example the argument at `squidmip/reader.py`
+Decisions also sit inside module docstrings (for example the argument at `squidxplorer/reader.py`
 for a structural `Protocol` with no base class). When one of those turns out to be load-bearing,
 promote it to `docs/adr/` rather than leaving it where only a reader of that file will find it.
 
