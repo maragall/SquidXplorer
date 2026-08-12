@@ -3,6 +3,23 @@
 Post-acquisition HCS plate viewer. Reads finished Squid well-plate data (T, C, Z, FOV already on
 disk); no live capture, no stage motion.
 
+## Domain-model v2 renames (2026-08-12)
+
+"Projector" was fossil naming for the engine loop, and the axis words now use Squid's spelling.
+Older prose in this file and in dated docs may still say "projector"; the code does not.
+
+| old | new |
+|---|---|
+| `project_plate` / `stitch_plate` | `run_plate` (one entry, dispatching off `consumes`; the loops are private) |
+| `add_projector` | `add_operator` (`add_region_operator` stays) |
+| `available_projectors()` | `available_plane_operators()` |
+| `projector=` / `--projector` | `operator=` / `--operator` |
+| stitch's inner z-handling `projector=` | `z_operator=` (it rides in `operator_kwargs`, so `operator=` would collide) |
+| reader `read(..., z, t=0)` | `read(..., z_level, time_point=0)` (`plane_ref` likewise; `project_well`, `TileDescriptor`, tile sources, caches, workers follow) |
+| `_acquisition.Channel` | `DisplayChannel` |
+
+On-disk / Acquisition contract keys are untouched: `n_t`, `n_z`, `z_levels`, `dz_um`.
+
 ## The operator contract
 
 `templates/operator/README.md` is the contract, and it is the public one: a complete, installable
