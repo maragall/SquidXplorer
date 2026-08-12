@@ -152,7 +152,7 @@ whether WINDOWS survive a re-ingest is a different question against `ViewerManag
   - **Reduction (free).** IMA-210's model generalises to time without a change: `consumes` is a
     frozenset, the output shape is already `(T, C, Z, Y, X)`, and a collapsed axis deliberately
     stays at size 1 rather than being dropped. So `consumes={"t"}` — max/mean over time — is
-    expressible as written. Two caveats before trusting it: `add_projector` defaults to
+    expressible as written. Two caveats before trusting it: `add_operator` defaults to
     `consumes={"z"}`, and `_engine.py:219` documents the return as "`frozenset()` or `{"z"}`",
     so sweep for branches that compare `== {"z"}` instead of testing membership the way
     `_benchmark.py:524` does.

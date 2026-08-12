@@ -6,7 +6,7 @@ disk); no live capture, no stage motion.
 ## Domain-model v2 renames (2026-08-12)
 
 "Projector" was fossil naming for the engine loop, and the axis words now use Squid's spelling.
-Older prose in this file and in dated docs may still say "projector"; the code does not.
+Dated docs under docs/ may still say "projector"; this file and the code do not.
 
 | old | new |
 |---|---|
@@ -35,11 +35,11 @@ Four declarations on the registry record, and nothing generic branches on an ope
 | `params` | what one entry can be RUN with (`params=` makes the registered object a factory) |
 | `requires` | the modules it needs — **listed either way, run refused BY NAME when missing** |
 
-**ONE table** (`_engine._OPERATORS`, 2026-08-05). `add_projector` and `add_region_operator` are two
+**ONE table** (`_engine._OPERATORS`, 2026-08-05). `add_operator` and `add_region_operator` are two
 registrars over one record, sharing one validator (`_engine._declare`); `add_region_operator`
 stamps `consumes=REGION_OP` (`{"fov"}`) and that declaration is what `stitch_plate` selects on,
 what `project_plate` refuses on, and what `_compose` refuses inside a chain. `runnable_operators()`
-is `sorted(_OPERATORS)` and is defined once; `available_projectors()` / `available_region_operators()`
+is `sorted(_OPERATORS)` and is defined once; `available_plane_operators()` / `available_region_operators()`
 are its two complementary filters; `is_region_operator(name)` is the ONE spelling of "which loop
 runs this", replacing `name in available_region_operators()` at ten call sites. Deleted with the
 second table: `_stitch._REGION_OPERATORS`, `_stitch._REGION_REQUIRES` (a sidecar of a sidecar),
@@ -48,7 +48,7 @@ bodies. The queries are named `operator_consumes` / `operator_produces` / `opera
 `operator_requires` / `bind_operator` — they answer for every entry, so they are no longer spelled
 `projector_*`.
 
-`requires=` (2026-08-05) is the same word on all three registrars — `add_projector`,
+`requires=` (2026-08-05) is the same word on all three registrars — `add_operator`,
 `add_region_operator`, `add_segmenter`. It closed a measured silent success: `decon`, `decon3d` and
 `flatfield` import packages absent from `[project.dependencies]`, raised ImportError one call deep,
 and `project_plate(on_error=...)` filed that as a per-well skip — a green run that wrote nothing.
@@ -86,8 +86,8 @@ A broken plugin aborts the import, NAMED; `SQUIDXPLORER_NO_PLUGINS=1` is the esc
 hardcoded built-in imports in `squidxplorer/__init__.py` stay — discovery is additive.
 
 **Composition** (2026-08-05): a chain is written wherever a name is —
-`projector="flatfield + decon + mip"`, accepted by `project_plate`, `write_plate`, `stitch_region`,
-the CLI's `--projector` and the `run_operator` command with no new argument on any of them. The
+`operator="flatfield + decon + mip"`, accepted by `run_plate`, `write_plate`, `stitch_region`,
+the CLI's `--operator` and the `run_operator` command with no new argument on any of them. The
 expression IS `RecipeChain.label()`, and `RecipeChain.parse()` is its inverse, so the words a
 console prints are the words that run. `squidxplorer/_compose.py` derives the composed operator's four
 declarations from its parts (`consumes` union, `produces` last, `params` namespaced
