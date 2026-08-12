@@ -58,11 +58,11 @@ class _RecordingReader:
     def metadata(self):
         return self._inner.metadata
 
-    def read(self, region, fov, channel, z, t=0):
+    def read(self, region, fov, channel, z_level, time_point=0):
         with self._lock:
             self.read_threads.append(threading.get_ident())
             self.reads += 1
-        return self._inner.read(region, fov, channel, z, t)
+        return self._inner.read(region, fov, channel, z_level, time_point)
 
     def __getattr__(self, name):
         return getattr(self._inner, name)
@@ -231,9 +231,9 @@ def test_a_ragged_z_is_cropped_to_the_common_shape_rather_than_losing_the_whole_
     ch = G.channel_field(meta["channels"][0], "name")
     real_read = reader.read
 
-    def ragged(region, fov, channel, z, t=0):
-        plane = real_read(region, fov, channel, z, t)
-        return plane[:3, :3] if int(z) == 1 else plane      # z=1 is one pixel short both ways
+    def ragged(region, fov, channel, z_level, time_point=0):
+        plane = real_read(region, fov, channel, z_level, time_point)
+        return plane[:3, :3] if int(z_level) == 1 else plane      # z=1 is one pixel short both ways
 
     monkeypatch.setattr(reader, "read", ragged)
     cell = G.fuse_gallery_cell(reader, meta, "B2", (0, 1), ch, projection="mip")
@@ -251,10 +251,10 @@ def test_one_unreadable_fov_leaves_a_counted_hole_in_its_own_place(squid_dataset
 
     real_read = reader.read
 
-    def flaky(region, fov, channel, z, t=0):
+    def flaky(region, fov, channel, z_level, time_point=0):
         if int(fov) == 1:
             raise OSError("simulated bad plane")
-        return real_read(region, fov, channel, z, t)
+        return real_read(region, fov, channel, z_level, time_point)
 
     monkeypatch.setattr(reader, "read", flaky)
     holed = G.fuse_gallery_cell(reader, meta, "B2", (0, 1), ch)
@@ -349,10 +349,10 @@ def test_a_cell_with_a_hole_in_it_is_not_cached(squid_dataset, monkeypatch):
     cache, token = plane_cache(), source_token(reader)
     real_read = inner.read
 
-    def flaky(region, fov, channel, z, t=0):
+    def flaky(region, fov, channel, z_level, time_point=0):
         if int(fov) == 1:
             raise OSError("simulated bad plane")
-        return real_read(region, fov, channel, z, t)
+        return real_read(region, fov, channel, z_level, time_point)
 
     monkeypatch.setattr(inner, "read", flaky)
     holed = G.fuse_gallery_cell(reader, meta, "B2", (0, 1), ch, cache=cache, token=token)
@@ -669,7 +669,7 @@ def test_more_than_one_timepoint_gets_a_control_and_changing_it_changes_the_pixe
 
         win._t.setValue(2)                        # -> restart() on the new timepoint
         _drain(qapp, win)
-        assert win._scope.t == 2
+        assert win._scope.time_point == 2
         later = {k: c.image for k, c in win._cells.items()}
         assert set(later) == set(first)
         assert any(not np.array_equal(later[k], first[k]) for k in first), (

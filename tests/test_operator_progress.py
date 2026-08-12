@@ -400,7 +400,7 @@ class _PrintingReader:
         self._path = str(path)               # the identity the plate cache's token asks for
         self.chatter = bool(chatter)
 
-    def read(self, region, fov, channel, z, t=0):
+    def read(self, region, fov, channel, z_level, time_point=0):
         import numpy as np
 
         if self.chatter:

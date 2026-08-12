@@ -2672,9 +2672,9 @@ def test_the_exported_timepoint_is_the_one_the_plate_is_showing(
     real = V._MinervaWorker
 
     class Spy(real):
-        def __init__(self, reader, selection, out_dir, z_operator, t=0, **kw):
-            seen.append(t)
-            super().__init__(reader, selection, out_dir, z_operator, t=t, **kw)
+        def __init__(self, reader, selection, out_dir, z_operator, time_point=0, **kw):
+            seen.append(time_point)
+            super().__init__(reader, selection, out_dir, z_operator, time_point=time_point, **kw)
 
     monkeypatch.setattr(V, "_MinervaWorker", Spy)
 
@@ -2886,7 +2886,7 @@ def test_retire_disconnects_every_declared_signal(qapp, squid_dataset, tmp_path)
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
-    worker = V._MinervaWorker(win._reader, [("B2", 0)], str(tmp_path), "mip", t=0, launch=False)
+    worker = V._MinervaWorker(win._reader, [("B2", 0)], str(tmp_path), "mip", time_point=0, launch=False)
 
     payload = {"progress": (1, 1), "exported": ([],), "launched": (False,), "failed": ("x",),
                "finished_ok": ()}
@@ -3727,8 +3727,8 @@ class _PyrReader:
         self.frame = frame
         self._path = path
 
-    def read(self, region, fov, channel, z, t=0):
-        return np.full(self.frame, z + 1, dtype=np.uint16)
+    def read(self, region, fov, channel, z_level, time_point=0):
+        return np.full(self.frame, z_level + 1, dtype=np.uint16)
 
 
 def _pyr_meta(nz=4, n=16, frame=(256, 256), px=1.0):
@@ -4625,7 +4625,7 @@ class _PerChannelReader:
     def __init__(self, path):
         self._path = str(path)
 
-    def read(self, region, fov, channel, z, t=0):
+    def read(self, region, fov, channel, z_level, time_point=0):
         return np.full(_DOWNSAMPLE_FRAME, (_DOWNSAMPLE_CHANNELS.index(str(channel)) + 1) * 1000,
                        dtype=np.uint16)
 

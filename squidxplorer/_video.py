@@ -137,8 +137,8 @@ def region_movie_frames(
     channels: "Optional[Sequence[str]]" = None,
     windows: "Optional[Sequence[Sequence[float]]]" = None,
     rgb_by_channel: "Optional[dict]" = None,
-    z: int = 0,
-    t: int = 0,
+    z_level: int = 0,
+    time_point: int = 0,
     max_px: int = MOVIE_MAX_PX,
     on_frame: "Optional[Callable[[int, int], None]]" = None,
     should_stop: "Optional[Callable[[], bool]]" = None,
@@ -157,9 +157,9 @@ def region_movie_frames(
 
     z_levels = list(meta.get("z_levels") or [0])
     if axis == "z":
-        indices = [(int(zl), int(t)) for zl in z_levels]
+        indices = [(int(zl), int(time_point)) for zl in z_levels]
     elif axis == "t":
-        z_use = z_levels[min(int(z), len(z_levels) - 1)]
+        z_use = z_levels[min(int(z_level), len(z_levels) - 1)]
         indices = [(int(z_use), int(ti)) for ti in range(axis_length(meta, "t"))]
     else:
         raise ValueError(f"axis must be 't' or 'z', not {axis!r}")
@@ -171,7 +171,7 @@ def region_movie_frames(
             return
         planes = []
         for ch in names:
-            fused = fuse_region_mosaic(reader, meta, region, ch, z=zi, t=ti, max_px=max_px)
+            fused = fuse_region_mosaic(reader, meta, region, ch, z_level=zi, time_point=ti, max_px=max_px)
             if fused is None:
                 # same "not derivable, do not guess" signal the mosaic path returns
                 raise ValueError(

@@ -251,14 +251,14 @@ class _MinervaWorker(QThread):
     failed = Signal(str)
     finished_ok = Signal()
 
-    def __init__(self, reader, selection, out_dir, z_operator: str, t: int = 0, launch: bool = True,
+    def __init__(self, reader, selection, out_dir, z_operator: str, time_point: int = 0, launch: bool = True,
                  luts=None):
         super().__init__()
         self._reader = reader
         self._selection = list(selection)
         self._out_dir = out_dir
         self._z_operator = z_operator
-        self._t = t
+        self._t = time_point
         self._launch = launch
         # snapshotted by the caller on the GUI thread; this thread must not touch napari layers
         self._luts = dict(luts) if luts else None
@@ -283,7 +283,7 @@ class _MinervaWorker(QThread):
                 pairs.extend(
                     _minerva.export_selection(
                         self._reader, [(region, f) for f in fovs], self._out_dir,
-                        t=self._t, z_operator=self._z_operator, luts=self._luts,
+                        time_point=self._t, z_operator=self._z_operator, luts=self._luts,
                     )
                 )
                 on_progress(i + 1, len(grouped))
@@ -349,13 +349,13 @@ class _MosaicWorker(QThread):
     problem = Signal(str)
     finished_count = Signal(int)
 
-    def __init__(self, reader, meta, region, channels, parent=None, t=0):
+    def __init__(self, reader, meta, region, channels, parent=None, time_point=0):
         super().__init__(parent)
         self._reader, self._meta = reader, meta
         self._region = region
         self._channels = list(channels)
         #: which timepoint this mosaic is of
-        self._t = int(t)
+        self._t = int(time_point)
         self._stop = threading.Event()
 
     def stop(self):
@@ -380,7 +380,7 @@ class _MosaicWorker(QThread):
                 # a lazy multiscale pyramid of (z, y, x) levels; only the visible (level, z)
                 # is ever materialised
                 res = fuse_region_pyramid(self._reader, self._meta, self._region, ch,
-                                          t=self._t)
+                                          time_point=self._t)
             except Exception as exc:                # noqa: BLE001 - reported, never swallowed
                 self.problem.emit(f"{self._region}/{ch}: {type(exc).__name__}: {exc}")
                 continue
@@ -589,7 +589,7 @@ class _VideoWorker(QThread):
     cancelled = Signal()
 
     def __init__(self, reader, meta, region, out_path, *, axis, fps,
-                 channels=None, windows=None, rgb_by_channel=None, z=0, t=0, parent=None):
+                 channels=None, windows=None, rgb_by_channel=None, z_level=0, time_point=0, parent=None):
         super().__init__(parent)
         self._reader, self._meta, self._region = reader, meta, region
         self._out_path = str(out_path)
@@ -597,7 +597,7 @@ class _VideoWorker(QThread):
         self._channels = list(channels) if channels is not None else None
         self._windows = list(windows) if windows else None
         self._rgb_by_channel = dict(rgb_by_channel or {})
-        self._z, self._t = int(z), int(t)
+        self._z, self._t = int(z_level), int(time_point)
         self._stop = threading.Event()
 
     def stop(self):
@@ -612,7 +612,7 @@ class _VideoWorker(QThread):
                 self._reader, self._meta, self._region, self._out_path,
                 axis=self._axis, fps=self._fps, channels=self._channels,
                 windows=self._windows, rgb_by_channel=self._rgb_by_channel,
-                z=self._z, t=self._t,
+                z_level=self._z, time_point=self._t,
                 on_frame=lambda d, total: self.progress.emit(int(d), int(total)),
                 should_stop=self._stop.is_set,
             )
@@ -689,7 +689,7 @@ class _PreviewWorker(QThread):
     failed = Signal(str)                         # a preview that could not finish names why
 
     def __init__(self, reader, meta, fov_index: dict, order: list, mosaic: bool = True,
-                 cache=_CACHE_AUTO, t: int = 0):
+                 cache=_CACHE_AUTO, time_point: int = 0):
         super().__init__()
         self._reader, self._meta = reader, meta
         self._fov_index, self._order = fov_index, order
@@ -697,7 +697,7 @@ class _PreviewWorker(QThread):
         self._dtype = np.dtype(meta["dtype"])
         self._mosaic = bool(mosaic)
         #: which timepoint this preview is of
-        self._t = max(0, int(t))
+        self._t = max(0, int(time_point))
         self._stop = threading.Event()
         # persisted plate cells; for_reader returns None (logging why) when caching is unavailable
         from squidxplorer._platecache import PlateCellCache
@@ -709,7 +709,7 @@ class _PreviewWorker(QThread):
         if (self._cache is not None
                 and getattr(self._cache, "time_point", self._t) != self._t):
             raise ValueError(
-                f"_PreviewWorker(t={self._t}) was handed a cache for timepoint "
+                f"_PreviewWorker(time_point={self._t}) was handed a cache for timepoint "
                 f"{self._cache.time_point}: its cells would be published under the wrong frame.")
         self._pending: dict = {}      # region -> the cell being accumulated for the cache
         self.cache_hits = 0           # regions served from the cache
@@ -816,7 +816,8 @@ class _PreviewWorker(QThread):
                     return None
                 h, w = (_CELL, _CELL) if box is None else (box[2], box[3])
                 fit = _fit_cell if box is None else (lambda a: _fit_box(a, h, w))
-                return region, box, [fit(self._reader.read(region, fov, ch, z_mid, t=self._t)
+                return region, box, [fit(self._reader.read(region, fov, ch, z_mid,
+                                                            time_point=self._t)
                                          .astype(np.float32)) for ch in self._channels]
 
             # ex.map submits every item before the first result; the poll in load cancels the work

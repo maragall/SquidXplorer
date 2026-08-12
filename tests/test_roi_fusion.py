@@ -16,15 +16,15 @@ from squidxplorer._napari3d import read_brick, roi_window_px
 
 
 class _FakeReader:
-    """The reader protocol's own signature: `read(region, fov, channel, z, t=0)`."""
+    """The reader protocol's own signature: `read(region, fov, channel, z_level, time_point=0)`."""
 
     def __init__(self):
         self.reads = []
 
-    def read(self, region, fov, channel, z, t=0):
-        self.reads.append((region, int(fov), channel, int(z), int(t)))
+    def read(self, region, fov, channel, z_level, time_point=0):
+        self.reads.append((region, int(fov), channel, int(z_level), int(time_point)))
         base = 10 if int(fov) == 0 else 20        # FOV0 -> 10+z, FOV1 -> 20+z, so the seam is visible
-        return np.full((4, 4), base + int(z), dtype=np.uint16)
+        return np.full((4, 4), base + int(z_level), dtype=np.uint16)
 
 
 def _meta(**over):

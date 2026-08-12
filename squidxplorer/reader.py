@@ -32,10 +32,10 @@ class SquidAcquisitionReader(Protocol):
     def metadata(self) -> dict:  # pragma: no cover - protocol declaration
         ...
 
-    def read(self, region, fov, channel, z, t=0):  # pragma: no cover - protocol declaration
+    def read(self, region, fov, channel, z_level, time_point=0):  # pragma: no cover - protocol declaration
         ...
 
-    def plane_ref(self, region, fov, channel, z, t=0) -> tuple:  # pragma: no cover - protocol
+    def plane_ref(self, region, fov, channel, z_level, time_point=0) -> tuple:  # pragma: no cover - protocol
         ...
 
 # region has no underscore; fov and z are ints; channel is the remainder (may contain _ and -).
@@ -576,38 +576,38 @@ class SquidReader:
         return self._meta
 
     # -- read -------------------------------------------------------------
-    def read(self, region, fov, channel, z, t=0):
+    def read(self, region, fov, channel, z_level, time_point=0):
         """Return one plane as a 2D array in its native dtype. Lazy: reads exactly one file."""
         index = self._build_index()
         time_folders = self._discover_time_folders()
-        key = (str(region), int(fov), int(z), str(channel))
+        key = (str(region), int(fov), int(z_level), str(channel))
         if key not in index:
             raise KeyError(
-                f"No such plane region={region!r} fov={fov} channel={channel!r} z={z}. "
+                f"No such plane region={region!r} fov={fov} channel={channel!r} z={z_level}. "
                 f"Known regions={sorted({k[0] for k in index})}, "
                 f"channels={sorted({k[3] for k in index})}."
             )
-        t = int(t)
-        if not 0 <= t < len(time_folders):
-            raise IndexError(f"t={t} out of range (n_t={len(time_folders)}).")
-        path = self._resolve_file(time_folders[t], key, index[key])
+        time_point = int(time_point)
+        if not 0 <= time_point < len(time_folders):
+            raise IndexError(f"t={time_point} out of range (n_t={len(time_folders)}).")
+        path = self._resolve_file(time_folders[time_point], key, index[key])
         return _validate_plane(tifffile.imread(path), path)
 
-    def plane_path(self, region, fov, channel, z, t=0) -> Path:
+    def plane_path(self, region, fov, channel, z_level, time_point=0) -> Path:
         """Path to one raw plane's TIFF on disk (no decode)."""
         index = self._build_index()
         time_folders = self._discover_time_folders()
-        key = (str(region), int(fov), int(z), str(channel))
+        key = (str(region), int(fov), int(z_level), str(channel))
         if key not in index:
-            raise KeyError(f"No such plane region={region!r} fov={fov} channel={channel!r} z={z}.")
-        t = int(t)
-        if not 0 <= t < len(time_folders):
-            raise IndexError(f"t={t} out of range (n_t={len(time_folders)}).")
-        return self._resolve_file(time_folders[t], key, index[key])
+            raise KeyError(f"No such plane region={region!r} fov={fov} channel={channel!r} z={z_level}.")
+        time_point = int(time_point)
+        if not 0 <= time_point < len(time_folders):
+            raise IndexError(f"t={time_point} out of range (n_t={len(time_folders)}).")
+        return self._resolve_file(time_folders[time_point], key, index[key])
 
-    def plane_ref(self, region, fov, channel, z, t=0) -> tuple:
+    def plane_ref(self, region, fov, channel, z_level, time_point=0) -> tuple:
         """(filepath, page_index) for one plane; individual TIFFs are one plane per file, so page 0."""
-        return str(self.plane_path(region, fov, channel, z, t)), 0
+        return str(self.plane_path(region, fov, channel, z_level, time_point)), 0
 
     # -- helpers ----------------------------------------------------------
     @staticmethod
@@ -689,11 +689,11 @@ class SquidMultiPageTiffReader:
         return self._time_folders_cache
 
 
-    def _index_for(self, t: int) -> dict:
+    def _index_for(self, time_point: int) -> dict:
         """``{(region, fov, z, channel): (path, page_index)}`` for one timepoint folder."""
-        if t in self._indexes:
-            return self._indexes[t]
-        folder = self._discover_time_folders()[t]
+        if time_point in self._indexes:
+            return self._indexes[time_point]
+        folder = self._discover_time_folders()[time_point]
         index: dict = {}
         stacks = [f for f in sorted(folder.iterdir())
                   if f.suffix.lower() in _TIFF_SUFFIXES and _STACK_STEM_RE.match(f.stem)]
@@ -714,14 +714,14 @@ class SquidMultiPageTiffReader:
                         "refusing rather than serving whichever happened to be indexed last."
                     )
                 index[key] = (f, page_index)
-                if t == 0:
+                if time_point == 0:
                     self._record_position(region, fov, payload)
         if not index:
             raise ValueError(
                 "No Squid MULTI_PAGE_TIFF stacks ({region}_{fov}_stack.tiff) found in "
                 f"{folder!s}"
             )
-        self._indexes[t] = index
+        self._indexes[time_point] = index
         return index
 
     def _record_position(self, region: str, fov: int, payload: dict) -> None:
@@ -794,33 +794,33 @@ class SquidMultiPageTiffReader:
         return _fov_positions_um_or_empty(self._path, fovs_per_region)
 
     # -- read --------------------------------------------------------------
-    def _locate(self, region, fov, channel, z, t) -> tuple:
+    def _locate(self, region, fov, channel, z_level, time_point) -> tuple:
         time_folders = self._discover_time_folders()
-        t = int(t)
-        if not 0 <= t < len(time_folders):
-            raise IndexError(f"t={t} out of range (n_t={len(time_folders)}).")
-        index = self._index_for(t)
-        key = (str(region), int(fov), int(z), str(channel))
+        time_point = int(time_point)
+        if not 0 <= time_point < len(time_folders):
+            raise IndexError(f"t={time_point} out of range (n_t={len(time_folders)}).")
+        index = self._index_for(time_point)
+        key = (str(region), int(fov), int(z_level), str(channel))
         if key not in index:
             raise KeyError(
-                f"No such plane region={region!r} fov={fov} channel={channel!r} z={z}. "
+                f"No such plane region={region!r} fov={fov} channel={channel!r} z={z_level}. "
                 f"Known regions={sorted({k[0] for k in index})}, "
                 f"channels={sorted({k[3] for k in index})}."
             )
         return index[key]
 
-    def read(self, region, fov, channel, z, t=0):
+    def read(self, region, fov, channel, z_level, time_point=0):
         """Return one plane as a 2D array in its native dtype (decodes exactly one IFD page)."""
-        path, page_index = self._locate(region, fov, channel, z, t)
+        path, page_index = self._locate(region, fov, channel, z_level, time_point)
         return self._handles.page(path, page_index)
 
-    def plane_path(self, region, fov, channel, z, t=0) -> Path:
+    def plane_path(self, region, fov, channel, z_level, time_point=0) -> Path:
         """The stack file holding this plane (the whole field's pages)."""
-        return self._locate(region, fov, channel, z, t)[0]
+        return self._locate(region, fov, channel, z_level, time_point)[0]
 
-    def plane_ref(self, region, fov, channel, z, t=0) -> tuple:
+    def plane_ref(self, region, fov, channel, z_level, time_point=0) -> tuple:
         """``(filepath, page_index)`` for one plane."""
-        path, page_index = self._locate(region, fov, channel, z, t)
+        path, page_index = self._locate(region, fov, channel, z_level, time_point)
         return str(path), page_index
 
 
@@ -905,11 +905,11 @@ class SquidOMEReader:
         })
         return self._meta
 
-    def _page_index(self, t: int, z: int, c: int) -> int:
+    def _page_index(self, time_point: int, z_level: int, c: int) -> int:
         """Flat IFD page index for (t, z, c), honouring the file's non-spatial axis order."""
         meta = self.metadata
         sizes = {"T": meta["n_t"], "Z": meta["n_z"], "C": len(meta["channels"])}
-        pos = {"T": t, "Z": z, "C": c}
+        pos = {"T": time_point, "Z": z_level, "C": c}
         order = self._axes or "TZC"
         return int(np.ravel_multi_index([pos[a] for a in order], [sizes[a] for a in order]))
 
@@ -917,18 +917,18 @@ class SquidOMEReader:
         names = [c["name"] for c in self.metadata["channels"]]
         return names.index(str(channel))
 
-    def read(self, region, fov, channel, z, t=0):
+    def read(self, region, fov, channel, z_level, time_point=0):
         """Return one plane as a 2D native-dtype array (reads exactly one IFD page)."""
         files = self._discover()
         key = (str(region), int(fov))
         if key not in files:
             raise KeyError(f"No such well/FOV region={region!r} fov={fov}. Known: {sorted(files)[:8]}")
-        p = self._page_index(int(t), int(z), self._channel_index(channel))
+        p = self._page_index(int(time_point), int(z_level), self._channel_index(channel))
         return self._handles.page(files[key], p)
 
-    def plane_ref(self, region, fov, channel, z, t=0) -> tuple:
+    def plane_ref(self, region, fov, channel, z_level, time_point=0) -> tuple:
         """(filepath, page_index) for one plane."""
-        p = self._page_index(int(t), int(z), self._channel_index(channel))
+        p = self._page_index(int(time_point), int(z_level), self._channel_index(channel))
         return str(self._discover()[(str(region), int(fov))]), p
 
 
@@ -1076,9 +1076,9 @@ class _Multiscale:
         """True for Squid's non-standard 6D ``acquisition.zarr`` — a leading ``fov`` axis."""
         return self.axis_names[:1] == ["fov"]
 
-    def index(self, shape, t: int, c: int, z: int, fov: int = 0) -> tuple:
+    def index(self, shape, time_point: int, c: int, z_level: int, fov: int = 0) -> tuple:
         """The tensorstore index tuple selecting the single ``(y, x)`` plane at (t, c, z[, fov])."""
-        picks = {"t": t, "c": c, "z": z, "fov": fov}
+        picks = {"t": time_point, "c": c, "z": z_level, "fov": fov}
         return tuple(
             slice(None) if n in ("y", "x") else picks.get(n, 0)
             for n in self.axis_names[: len(shape)]
@@ -1320,23 +1320,23 @@ class SquidZarrReader:
             raise KeyError(f"No such channel {channel!r}. Known channels={names}.")
         return names.index(str(channel))
 
-    def read(self, region, fov, channel, z, t=0):
+    def read(self, region, fov, channel, z_level, time_point=0):
         """Return one plane as a 2D array in its native dtype; only the covering chunks are read."""
         group = self._field(region, fov)
         meta = self.metadata
-        z, t = int(z), int(t)
-        if not 0 <= z < meta["n_z"]:
-            raise IndexError(f"z={z} out of range (n_z={meta['n_z']}).")
-        if not 0 <= t < meta["n_t"]:
-            raise IndexError(f"t={t} out of range (n_t={meta['n_t']}).")
+        z_level, time_point = int(z_level), int(time_point)
+        if not 0 <= z_level < meta["n_z"]:
+            raise IndexError(f"z={z_level} out of range (n_z={meta['n_z']}).")
+        if not 0 <= time_point < meta["n_t"]:
+            raise IndexError(f"t={time_point} out of range (n_t={meta['n_t']}).")
         arr = self._array(group)
         idx = self._multiscale(group).index(
-            arr.shape, t, self._channel_index(channel), z, fov=int(fov)
+            arr.shape, time_point, self._channel_index(channel), z_level, fov=int(fov)
         )
         plane = np.asarray(arr[idx].read().result())
         return _validate_plane(plane, self._multiscale(group).array_path)
 
-    def plane_ref(self, region, fov, channel, z, t=0) -> tuple:
+    def plane_ref(self, region, fov, channel, z_level, time_point=0) -> tuple:
         """``(path, 0)`` for one plane, where *path* is the field's NGFF image group."""
         self._channel_index(channel)            # validate like the TIFF readers do
         return str(self._field(region, fov)), 0

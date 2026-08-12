@@ -195,14 +195,14 @@ def write_story(story_path, ome_path, groups: list[dict], pixels_per_micron: flo
 
 
 def _provenance_text(image, z_operator: str, operator: str, *, region: str = "",
-                     t: Optional[int] = None, fovs: Optional[Sequence[int]] = None,
+                     time_point: Optional[int] = None, fovs: Optional[Sequence[int]] = None,
                      n_fovs: Optional[int] = None) -> str:
     """One line saying what produced these pixels, for the story's ``sample_info.text``."""
     parts = [f"squidxplorer {operator}/{z_operator}"]
     if region:
         parts.append(f"region {region}")
-    if t is not None:
-        parts.append(f"timepoint t={int(t)}")
+    if time_point is not None:
+        parts.append(f"timepoint t={int(time_point)}")
     if fovs is not None:
         got = len(list(fovs))
         parts.append(f"all {got} FOV(s)" if n_fovs in (None, got)
@@ -255,7 +255,7 @@ def export_selection(
     selection: Iterable[tuple[str, int]],
     out_dir=None,
     *,
-    t: int = 0,
+    time_point: int = 0,
     z_operator: str = "mip",
     operator: str = "stitch",
     on_progress=None,
@@ -284,8 +284,8 @@ def export_selection(
                 )
 
     n_t = int(meta.get("n_t", 1) or 1)
-    if not 0 <= t < n_t:
-        raise ValueError(f"t={t} is out of range: this acquisition has {n_t} timepoint(s)")
+    if not 0 <= time_point < n_t:
+        raise ValueError(f"t={time_point} is out of range: this acquisition has {n_t} timepoint(s)")
 
     channels = meta["channels"]
     names = _channel_names(channels)
@@ -304,10 +304,10 @@ def export_selection(
     )
     for region, _anchor_fov, image in stream:
         # Stream: fuse one region, write it, drop it.
-        img_cyx = np.asarray(image[t, :, 0])
+        img_cyx = np.asarray(image[time_point, :, 0])
         fovs = grouped[region]
         whole = len(fovs) == len(fovs_per_region.get(region, []))
-        stem = f"{stem_prefix}_{_safe(region)}_t{t}_{_safe(z_operator)}_{_safe(operator)}"
+        stem = f"{stem_prefix}_{_safe(region)}_t{time_point}_{_safe(z_operator)}_{_safe(operator)}"
         if not whole:      # a crop, not the region — say so in the filename, not just the story
             stem += f"_{len(fovs)}fov"
         label = region if whole else f"{region} ({len(fovs)} FOVs)"
@@ -318,7 +318,7 @@ def export_selection(
             auto_groups(img_cyx, names, colors, label=label, luts=luts),
             pixels_per_micron=ppm,
             provenance=_provenance_text(
-                image, z_operator, operator, region=region, t=t, fovs=fovs,
+                image, z_operator, operator, region=region, time_point=time_point, fovs=fovs,
                 n_fovs=len(fovs_per_region.get(region, []) or []) or None),
         )
         written[region] = (ome_path, story_path)

@@ -76,10 +76,10 @@ class _FakeReader:
         }
         self.reads = 0
 
-    def read(self, region, fov, channel, z=0, t=0):
+    def read(self, region, fov, channel, z_level=0, time_point=0):
         self.reads += 1
         y, x = self._true[fov]
-        if t != self._good_t:
+        if time_point != self._good_t:
             # Unregistrable by construction: white noise aliases under any sub-pixel shift.
             return np.random.default_rng(1000 + fov).integers(
                 0, 65535, size=(TILE, TILE), dtype=np.uint16)
@@ -554,7 +554,7 @@ def test_write_plate_refuses_operator_kwargs_an_operator_does_not_declare():
 class _SplitChannelReader(_FakeReader):
     """Channel 0 is registrable texture; channel 1 is flat and carries no alignment signal."""
 
-    def read(self, region, fov, channel, z=0, t=0):
+    def read(self, region, fov, channel, z_level=0, time_point=0):
         self.reads += 1
         if channel == CHANNELS[1]:
             return np.full((TILE, TILE), 1000, dtype=np.uint16)   # flat: unregistrable
@@ -983,11 +983,11 @@ class _ZStackReader(_FakeReader):
         self.metadata["z_levels"] = list(range(n_z))
         self._mid_z = n_z // 2
 
-    def read(self, region, fov, channel, z=0, t=0):
-        if z != self._mid_z:
+    def read(self, region, fov, channel, z_level=0, time_point=0):
+        if z_level != self._mid_z:
             self.reads += 1
             return np.full((TILE, TILE), self._FLOOR, dtype=np.uint16)
-        return super().read(region, fov, channel, z=z, t=t)
+        return super().read(region, fov, channel, z_level=z_level, time_point=time_point)
 
 
 def test_registration_solves_on_the_raw_middle_plane_not_the_projected_one(master):
@@ -1005,7 +1005,7 @@ def test_registration_solves_on_the_raw_middle_plane_not_the_projected_one(maste
     # or the assertion below is vacuous. This repo has already shipped a test that was dead its
     # whole life.
     mip = np.stack([
-        np.max(np.stack([reader.read("A1", f, CHANNELS[0], z=z) for z in range(3)]), axis=0)[None]
+        np.max(np.stack([reader.read("A1", f, CHANNELS[0], z_level=z) for z in range(3)]), axis=0)[None]
         for f in fovs
     ])
     mip_offsets = solve_offsets_px(mip, positions, (PIXEL_UM, PIXEL_UM), (TILE, TILE))
@@ -1273,7 +1273,8 @@ def test_the_flatfield_stage_says_what_it_is_doing_before_it_does_it(master, mon
     caplog.set_level(logging.INFO)
     from squidxplorer._stitch import estimate_region_flatfield
 
-    estimate_region_flatfield(_FakeReader(master), "A1", list(range(4)), channels=[0, 1], z=0)
+    estimate_region_flatfield(_FakeReader(master), "A1", list(range(4)), channels=[0, 1],
+                              z_level=0)
 
     assert len(log_at_entry) == 2, "the estimator should have run once per channel"
     said_first = log_at_entry[0]

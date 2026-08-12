@@ -218,7 +218,7 @@ class _PrintingReader:
     def __init__(self, path):
         self._path = str(path)
 
-    def read(self, region, fov, channel, z, t=0):
+    def read(self, region, fov, channel, z_level, time_point=0):
         import numpy as np
 
         print(f"Parallel registration: {region} fov {fov}")

@@ -31,7 +31,7 @@ class _Reader:
         self.fail = set(fail)
         self._path = f"/fake/acquisition/{next(_Reader._counter)}"
 
-    def read(self, region, fov, channel, z, t=0):
+    def read(self, region, fov, channel, z_level, time_point=0):
         if fov in self.fail:
             raise OSError("simulated unreadable FOV")
         return np.full(self.frame, self.values.get(fov, fov + 1), dtype=np.uint16)
@@ -207,9 +207,9 @@ class _CountingReader(_Reader):
         super().__init__(*a, **kw)
         self.reads = 0
 
-    def read(self, region, fov, channel, z, t=0):
+    def read(self, region, fov, channel, z_level, time_point=0):
         self.reads += 1
-        return np.full(self.frame, z + 1, dtype=np.uint16)
+        return np.full(self.frame, z_level + 1, dtype=np.uint16)
 
 
 def test_a_zstack_becomes_a_lazy_z_y_x_array():
@@ -278,9 +278,9 @@ class _StepReader(_Reader):
         super().__init__(*a, **kw)
         self.reads: list = []
 
-    def read(self, region, fov, channel, z, t=0):
-        self.reads.append((region, fov, channel, z, t))
-        return np.full(self.frame, z + 1, dtype=np.uint16)
+    def read(self, region, fov, channel, z_level, time_point=0):
+        self.reads.append((region, fov, channel, z_level, time_point))
+        return np.full(self.frame, z_level + 1, dtype=np.uint16)
 
 
 @pytest.fixture

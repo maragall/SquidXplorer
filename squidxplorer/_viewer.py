@@ -922,8 +922,8 @@ class PlateWindow(QMainWindow):
             return None
         sel = self.selected_region_fovs()
         if sel:
-            return _GalleryScope.from_region_fovs(self._meta, sel, t=self.time_point)
-        return _GalleryScope.whole(self._meta, t=self.time_point)
+            return _GalleryScope.from_region_fovs(self._meta, sel, time_point=self.time_point)
+        return _GalleryScope.whole(self._meta, time_point=self.time_point)
 
     def _open_gallery_view(self):
         """Tile the selected Regions side by side, one row each, one column per channel.
@@ -2184,7 +2184,7 @@ class PlateWindow(QMainWindow):
         return luts or None
 
     def run_minerva_export(self, out_dir=None, z_operator: str = "mip", launch: bool = True,
-                           on_exported=None, t=None, selection=None, luts=None):
+                           on_exported=None, time_point=None, selection=None, luts=None):
         """Export the user's selection for Minerva Author and (optionally) open it.
 
         Runs off the GUI thread: projecting a well is real I/O plus compute, and starting
@@ -2204,7 +2204,7 @@ class PlateWindow(QMainWindow):
         if self._reader is None or self._meta is None:
             self._readout.setText("open an acquisition first")
             return
-        t = self.time_point if t is None else int(t)
+        time_point = self.time_point if time_point is None else int(time_point)
         if self._minerva is not None and self._minerva.isRunning():
             self._readout.setText("already exporting — let the current export finish first")
             return
@@ -2227,9 +2227,9 @@ class PlateWindow(QMainWindow):
                 f"({', '.join(regions)}, {len(sel)} FOVs"
                 + (f", {len(cropped)} cropped" if cropped else "") + ")")
         n_t = self._meta.get("n_t", 1) or 1
-        t_note = f" (t={t} of {n_t})" if n_t > 1 else ""
+        t_note = f" (t={time_point} of {n_t})" if n_t > 1 else ""
         self._minerva = w = _MinervaWorker(
-            self._reader, sel, out_dir, z_operator, t=t, launch=launch, luts=luts)
+            self._reader, sel, out_dir, z_operator, time_point=time_point, launch=launch, luts=luts)
 
         def on_launched(ok):
             if ok:
@@ -3456,7 +3456,8 @@ class PlateWindow(QMainWindow):
         paths somebody remembered. The worker carries the same t into its cell cache, so a
         revisited timepoint is a cache HIT and not a re-read (`_platecache.PlateCellCache`).
         """
-        self._preview = _PreviewWorker(reader, meta, self._fov_index, order, t=self.time_point)
+        self._preview = _PreviewWorker(reader, meta, self._fov_index, order,
+                                       time_point=self.time_point)
         self._preview_order = list(order)
         self._preview.tileReady.connect(self._on_preview_tile)
         self._preview.streamEnded.connect(lambda: self._recomposite("raw"))

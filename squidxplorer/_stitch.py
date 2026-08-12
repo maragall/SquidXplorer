@@ -133,8 +133,8 @@ def estimate_region_flatfield(
     fovs: Sequence[int],
     *,
     channels: Optional[Sequence[int]] = None,
-    z: Optional[int] = None,
-    t: int = 0,
+    z_level: Optional[int] = None,
+    time_point: int = 0,
     use_darkfield: bool = False,
     max_tiles: int = _FF_MAX_TILES,
 ) -> dict:
@@ -145,8 +145,8 @@ def estimate_region_flatfield(
     all_channels = [c["name"] for c in meta["channels"]]
     if channels is None:
         channels = list(range(len(all_channels)))
-    if z is None:
-        z = int(meta["n_z"]) // 2
+    if z_level is None:
+        z_level = int(meta["n_z"]) // 2
 
     fovs = list(fovs)
     n = min(int(max_tiles), len(fovs))
@@ -155,13 +155,13 @@ def estimate_region_flatfield(
 
     _log.info("Flatfield: no profile in hand — estimating %d channel profile(s) from %d raw "
               "tile(s) of region %s at z=%d (tilefusion BaSiC). Stitching starts after this.",
-              len(channels), n, region, z)
+              len(channels), n, region, z_level)
     profiles = {}
     for i, c in enumerate(channels, 1):
         name = all_channels[c]
         _log.info("Flatfield: channel %d of %d (%s) — reading %d raw tile(s)…",
                   i, len(channels), name, n)
-        stack = np.stack([reader.read(region, f, name, z, t) for f in picked])
+        stack = np.stack([reader.read(region, f, name, z_level, time_point) for f in picked])
         t0 = time.perf_counter()
         profiles[name] = estimate_profile(stack, use_darkfield=use_darkfield)
         _log.info("Flatfield: channel %d of %d (%s) estimated in %.1f s.",
@@ -169,7 +169,7 @@ def estimate_region_flatfield(
         del stack
     _log.info(
         "Flatfield: estimated %d channel profile(s) from %d raw tile(s) of region %s at z=%d.",
-        len(profiles), n, region, z,
+        len(profiles), n, region, z_level,
     )
     return profiles
 
@@ -211,7 +211,7 @@ def _selected_profiles(names: Sequence[str]) -> Optional[dict]:
 
 
 def resolve_flatfield(reader, region: str, fovs: Sequence[int], *, channels=None,
-                      z: Optional[int] = None, t: int = 0, use_darkfield: bool = False) -> dict:
+                      z_level: Optional[int] = None, time_point: int = 0, use_darkfield: bool = False) -> dict:
     """Resolve one profile per channel: GUI selection > stored ``.npy`` > estimate-and-save."""
     from squidxplorer._flatfield import FlatfieldProfile
 
@@ -238,8 +238,8 @@ def resolve_flatfield(reader, region: str, fovs: Sequence[int], *, channels=None
                          path, exc)
 
     # Estimate ALL channels so the saved (C, Y, X) .npy is valid and reusable.
-    profiles = estimate_region_flatfield(reader, region, fovs, channels=None, z=z, t=t,
-                                         use_darkfield=use_darkfield)
+    profiles = estimate_region_flatfield(reader, region, fovs, channels=None, z_level=z_level,
+                                         time_point=time_point, use_darkfield=use_darkfield)
     if path is not None and len(profiles) == len(names):
         try:
             from tilefusion.flatfield import save_flatfield
@@ -265,10 +265,10 @@ class _FlatfieldReader:
     def __getattr__(self, name):
         return getattr(self._inner, name)
 
-    def read(self, region, fov, channel, z, t=0):
+    def read(self, region, fov, channel, z_level, time_point=0):
         from squidxplorer._flatfield import correct_flatfield
 
-        plane = self._inner.read(region, fov, channel, z, t)
+        plane = self._inner.read(region, fov, channel, z_level, time_point)
         profile = self._profiles.get(str(channel))
         return plane if profile is None else correct_flatfield(plane, profile)
 
@@ -525,7 +525,8 @@ def stitch_region(
             with timer.stage("flatfield"):
                 flatfield = resolve_flatfield(
                     reader, region, fovs, channels=sorted(set(channels) | {reg_c_global}),
-                    z=registration_z, t=registration_t, use_darkfield=use_darkfield,
+                    z_level=registration_z, time_point=registration_t,
+                    use_darkfield=use_darkfield,
                 )
         reader = _FlatfieldReader(reader, flatfield)
 
@@ -537,7 +538,7 @@ def stitch_region(
             for i, fov in enumerate(fovs):
                 reg_planes[i, 0] = reader.read(
                     region=region, fov=fov, channel=all_channels[reg_c_global],
-                    z=registration_z, t=registration_t,
+                    z_level=registration_z, time_point=registration_t,
                 )
 
     offsets = np.zeros((len(fovs), 2), dtype=np.float64)
@@ -641,7 +642,7 @@ def stitch_region(
             tiles = np.empty((len(fovs), n_t, len(channels), *tile_shape), dtype=dtype)
             for i, fov in enumerate(fovs):
                 tiles[i] = project_well(reader, region, fov, reduce=_op.fn,
-                                        consumes=_op.consumes, z=z_src)[:, channels, 0]
+                                        consumes=_op.consumes, z_level=z_src)[:, channels, 0]
 
         with timer.stage("fuse"):
             def read_tile(idx: int, z_level: int, time_idx: int, _tiles=tiles) -> np.ndarray:

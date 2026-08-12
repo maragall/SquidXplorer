@@ -100,7 +100,7 @@ class RegionResultAccumulator:
 
         class _PlaneReader:
             @staticmethod
-            def read(region, fov, channel, z=0, t=0):
+            def read(region, fov, channel, z_level=0, time_point=0):
                 stack = planes.get(int(fov))
                 return None if stack is None else stack[c_idx]
 

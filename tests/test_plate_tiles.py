@@ -25,8 +25,8 @@ class FakeReader:
         self.reads = []
         self.fail = set(fail)
 
-    def read(self, region, fov, channel, z, t=0):
-        self.reads.append((region, int(fov), str(channel), int(z), int(t)))
+    def read(self, region, fov, channel, z_level, time_point=0):
+        self.reads.append((region, int(fov), str(channel), int(z_level), int(time_point)))
         if (region, int(fov)) in self.fail:
             raise OSError("simulated unreadable field")
         return np.full(FRAME, int(fov) + 1, dtype=np.uint16)
@@ -58,7 +58,7 @@ def test_a_tile_over_one_fov_reads_that_fovs_pixels():
     meta = _meta()
     src, ladder = _src(meta)
     key = ("A1", 3)
-    desc = type("D", (), {"t": 0, "level": 0, "key": key, "channel": "488",
+    desc = type("D", (), {"time_point": 0, "level": 0, "key": key, "channel": "488",
                           "bbox_um": ladder.fov_bboxes[key]})()
     tile = src.read_tile(desc)
     assert tile.shape == (64, 64)
@@ -70,7 +70,7 @@ def test_world_with_no_fov_reads_as_zeros_not_an_error():
     meta = _meta()
     src, _ = _src(meta)
     far = (10_000.0, 10_000.0, 10_064.0, 10_064.0)
-    desc = type("D", (), {"t": 0, "level": 0, "key": ("A1", 0), "channel": "488", "bbox_um": far})()
+    desc = type("D", (), {"time_point": 0, "level": 0, "key": ("A1", 0), "channel": "488", "bbox_um": far})()
     tile = src.read_tile(desc)
     assert tile.shape == (64, 64)
     assert not tile.any()
@@ -81,7 +81,7 @@ def test_a_coarse_tile_composites_every_fov_it_covers():
     meta = _meta(n=2)
     src, ladder = _src(meta)
     whole = ladder.world_bbox_um
-    desc = type("D", (), {"t": 0, "level": len(ladder.geometry) - 1, "key": (0, 0),
+    desc = type("D", (), {"time_point": 0, "level": len(ladder.geometry) - 1, "key": (0, 0),
                           "channel": "488", "bbox_um": whole})()
     tile = src.read_tile(desc)
     assert set(np.unique(tile)) == {1, 2, 3, 4}, "all four FOVs must land, none overwrite another"
@@ -94,7 +94,7 @@ def test_a_coarse_tile_composites_every_fov_it_covers():
 def test_an_unreadable_field_is_a_hole_not_a_dead_viewport():
     meta = _meta(n=2)
     src, ladder = _src(meta, reader=FakeReader(fail={("A1", 0)}))
-    desc = type("D", (), {"t": 0, "level": len(ladder.geometry) - 1, "key": (0, 0),
+    desc = type("D", (), {"time_point": 0, "level": len(ladder.geometry) - 1, "key": (0, 0),
                           "channel": "488", "bbox_um": ladder.world_bbox_um})()
     tile = src.read_tile(desc)                       # must not raise
     assert set(np.unique(tile)) == {0, 2, 3, 4}, "the failed field is zeros; the rest still render"
@@ -105,7 +105,7 @@ def test_the_same_field_is_decoded_once_across_tiles():
     meta = _meta(n=2)
     reader = FakeReader()
     src, ladder = _src(meta, reader=reader)
-    desc = type("D", (), {"t": 0, "level": len(ladder.geometry) - 1, "key": (0, 0),
+    desc = type("D", (), {"time_point": 0, "level": len(ladder.geometry) - 1, "key": (0, 0),
                           "channel": "488", "bbox_um": ladder.world_bbox_um})()
     src.read_tile(desc)
     first = len(reader.reads)
@@ -119,10 +119,10 @@ def test_tiles_are_maximum_intensity_projections_by_default():
     meta = _meta()
     reader = FakeReader()
     src, ladder = _src(meta, reader=reader)
-    assert src.operator == "mip" and src.z is None
+    assert src.operator == "mip" and src.z_level is None
 
     key = ("A1", 0)
-    desc = type("D", (), {"t": 0, "level": 0, "key": key, "channel": "488",
+    desc = type("D", (), {"time_point": 0, "level": 0, "key": key, "channel": "488",
                           "bbox_um": ladder.fov_bboxes[key]})()
     src.read_tile(desc)
     zs_read = sorted(r[3] for r in reader.reads)
@@ -132,9 +132,9 @@ def test_tiles_are_maximum_intensity_projections_by_default():
 def test_an_explicit_z_reads_exactly_that_plane():
     meta = _meta()
     reader = FakeReader()
-    src, ladder = _src(meta, reader=reader, z=1)
+    src, ladder = _src(meta, reader=reader, z_level=1)
     key = ("A1", 0)
-    desc = type("D", (), {"t": 0, "level": 0, "key": key, "channel": "488",
+    desc = type("D", (), {"time_point": 0, "level": 0, "key": key, "channel": "488",
                           "bbox_um": ladder.fov_bboxes[key]})()
     src.read_tile(desc)
     assert [r[3] for r in reader.reads] == [1]

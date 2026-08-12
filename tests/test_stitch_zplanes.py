@@ -38,10 +38,10 @@ class _ZReader(_FakeReader):
         self.metadata["z_levels"] = list(range(n_z))
         self.read_z: list[int] = []
 
-    def read(self, region, fov, channel, z=0, t=0):
-        self.read_z.append(int(z))
-        base = super().read(region, fov, channel, 0, t).astype(np.int32)
-        return np.clip(base + int(z) * _PLANE_OFFSET, 0, 65535).astype(np.uint16)
+    def read(self, region, fov, channel, z_level=0, time_point=0):
+        self.read_z.append(int(z_level))
+        base = super().read(region, fov, channel, 0, time_point).astype(np.int32)
+        return np.clip(base + int(z_level) * _PLANE_OFFSET, 0, 65535).astype(np.uint16)
 
 
 @pytest.fixture(scope="module")
@@ -263,7 +263,7 @@ def test_project_well_z_selects_exactly_one_acquisition_plane(master):
     whole = project_well(reader, "A1", 0, reduce=plane_op(_passthrough), consumes=PLANE_OP)
     assert whole.shape[2] == N_Z
     for z in range(N_Z):
-        one = project_well(reader, "A1", 0, reduce=plane_op(_passthrough), consumes=PLANE_OP, z=z)
+        one = project_well(reader, "A1", 0, reduce=plane_op(_passthrough), consumes=PLANE_OP, z_level=z)
         assert one.shape[2] == 1
         assert np.array_equal(one[:, :, 0], whole[:, :, z]), (
             f"z={z} did not select acquisition plane {z}")
@@ -275,4 +275,4 @@ def test_project_well_refuses_a_single_plane_for_a_z_reducer(master):
 
     reader = _ZReader(master)
     with pytest.raises(ValueError, match="only meaningful for a plane-op"):
-        project_well(reader, "A1", 0, reduce=project, z=1)
+        project_well(reader, "A1", 0, reduce=project, z_level=1)

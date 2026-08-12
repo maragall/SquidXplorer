@@ -52,7 +52,7 @@ def _open(root):
 
 def _fov_desc(ladder, channel, t):
     key = next(iter(ladder.fov_bboxes))
-    return TileDescriptor(level=0, key=key, channel=channel, bbox_um=ladder.fov_bboxes[key], t=t)
+    return TileDescriptor(level=0, key=key, channel=channel, bbox_um=ladder.fov_bboxes[key], time_point=t)
 
 
 def _expected_mip(t, channel_index):
@@ -133,7 +133,7 @@ def test_the_composite_refuses_a_cell_cache_for_another_timepoint(multi_time_poi
             return {}
 
     with pytest.raises(ValueError, match="timepoint 1"):
-        CompositePlateSource(reader, meta, ladder, t=0, cache=_Cache())
+        CompositePlateSource(reader, meta, ladder, time_point=0, cache=_Cache())
 
 
 def test_in_ram_plate_rungs_refuse_a_tile_from_another_timepoint():
@@ -143,7 +143,7 @@ def test_in_ram_plate_rungs_refuse_a_tile_from_another_timepoint():
             "frame_shape": (64, 64), "pixel_size_um": 1.0,
             "fov_positions_um": {("A1", 0): (0.0, 0.0), ("A2", 0): (2000.0, 0.0)}}
     ladder = plate_ladder(meta)
-    pv = InMemoryMultiscale(ladder, channels=["c0"], dtype=np.uint16, budget_bytes=8 << 20, t=1)
+    pv = InMemoryMultiscale(ladder, channels=["c0"], dtype=np.uint16, budget_bytes=8 << 20, time_point=1)
     coarse = max(i for i in range(len(ladder.geometry)) if not ladder.is_fov_level(i))
     key = ladder.geometry.levels[coarse].keys[0]
     box = ladder.cell_bbox_um(coarse, key)
@@ -194,7 +194,7 @@ def test_every_tile_the_plate_view_enumerates_carries_its_timepoint(
     ov._cd = PO._CELL * 4                       # zoomed past the crossover: tiles engage
     ov.set_time_point(2)
 
-    stamped = {d.t for d, _ in ov._visible_fov_tiles()}
+    stamped = {d.time_point for d, _ in ov._visible_fov_tiles()}
     assert stamped == {2}, (
         f"the plate is showing timepoint 2 and enumerated tiles for timepoint(s) {stamped or 'none'}")
     ov.clear_tile_source()

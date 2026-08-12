@@ -23,15 +23,15 @@ _PIN_BUDGET_FRACTION = 0.5
 class TileDescriptor:
     """One cacheable tile: level, key, channel, world bbox, timepoint.
 
-    Frozen because it is the cache key. ``t`` has no default on purpose: the timepoint is
-    part of the identity a producer must state.
+    Frozen because it is the cache key. ``time_point`` has no default on purpose: the timepoint
+    is part of the identity a producer must state.
     """
 
     level: int
     key: Hashable
     channel: str
     bbox_um: tuple[float, float, float, float]
-    t: int
+    time_point: int
 
 
 class Level:
@@ -111,7 +111,7 @@ class TileSource(Protocol):
 
 
 def select_tiles(bbox_um: tuple[float, float, float, float], um_per_px: float, geometry: Geometry, *,
-                 channels: Sequence[str] = ("0",), t: int = 0, current_level: int | None = None,
+                 channels: Sequence[str] = ("0",), time_point: int = 0, current_level: int | None = None,
                  hysteresis: float = _DEFAULT_HYSTERESIS) -> list[TileDescriptor]:
     """The ideal tile set for a viewport: LOD pick, then frustum cull. Pure, stateless.
 
@@ -137,18 +137,18 @@ def select_tiles(bbox_um: tuple[float, float, float, float], um_per_px: float, g
         for i in idx:
             i = int(i)
             out.append(TileDescriptor(level_idx, level.keys[i], ch,
-                                      (b[i, 0], b[i, 1], b[i, 2], b[i, 3]), int(t)))
+                                      (b[i, 0], b[i, 1], b[i, 2], b[i, 3]), int(time_point)))
     return out
 
 
 def viewport(bbox_world: tuple[float, float, float, float], zoom: float, geometry: Geometry, *,
-             channels: Sequence[str] = ("0",), t: int = 0, current_level: int | None = None,
+             channels: Sequence[str] = ("0",), time_point: int = 0, current_level: int | None = None,
              hysteresis: float = _DEFAULT_HYSTERESIS) -> list[TileDescriptor]:
     """``select_tiles`` in the renderer's units: ``zoom`` is screen pixels per world unit."""
     z = float(zoom)
     if not np.isfinite(z) or z <= 0:
         raise ValueError(f"zoom must be finite and > 0, got {zoom!r}")
-    return select_tiles(bbox_world, 1.0 / z, geometry, channels=channels, t=t,
+    return select_tiles(bbox_world, 1.0 / z, geometry, channels=channels, time_point=time_point,
                         current_level=current_level, hysteresis=hysteresis)
 
 
@@ -259,7 +259,8 @@ class TileCache:
         """The finest cached tile of the same channel AND timepoint, coarser, whose bbox covers it."""
         best: TileDescriptor | None = None
         for other in self._cached:
-            if other.channel != desc.channel or other.t != desc.t or other.level <= desc.level:
+            if other.channel != desc.channel or other.time_point != desc.time_point \
+                    or other.level <= desc.level:
                 continue
             if not _contains(other.bbox_um, desc.bbox_um):
                 continue

@@ -154,7 +154,7 @@ def test_export_rejects_a_timepoint_out_of_range(squid_dataset, tmp_path):
     root, _ = squid_dataset
     out = tmp_path / "out"
     with pytest.raises(ValueError, match="out of range"):
-        export_selection(open_reader(root), [("B2", 0)], out, t=7)
+        export_selection(open_reader(root), [("B2", 0)], out, time_point=7)
     assert not out.exists() or not list(out.iterdir())
 
 
@@ -265,9 +265,9 @@ def test_export_reads_only_the_requested_timepoint(squid_dataset, tmp_path):
     seen_t = []
     real_read = type(reader).read
 
-    def spy(self, region, fov, channel, z, t=0):
-        seen_t.append(t)
-        return real_read(self, region, fov, channel, z, t)
+    def spy(self, region, fov, channel, z_level, time_point=0):
+        seen_t.append(time_point)
+        return real_read(self, region, fov, channel, z_level, time_point)
 
     type(reader).read = spy
     try:

@@ -65,18 +65,18 @@ class FakeReader:
             "dtype": self._dtype,
         }
 
-    def read(self, region, fov, channel, z, t=0):
+    def read(self, region, fov, channel, z_level, time_point=0):
         with self._lock:
             self.events.append("read")
             self.wells_started.add((region, fov))
             self.read_count += 1
         if self._fail_on is not None and (region, fov) == self._fail_on:
-            raise ValueError(f"synthetic read failure at region={region!r} fov={fov} z={z}")
+            raise ValueError(f"synthetic read failure at region={region!r} fov={fov} z={z_level}")
         if self._read_sleep:
             time.sleep(self._read_sleep)
         # Value grows with z so max-over-z is well-defined.
-        base = (hash((region, fov, channel, t)) % 100) * 10
-        return np.full(self._shape, base + int(z), dtype=self._dtype)
+        base = (hash((region, fov, channel, time_point)) % 100) * 10
+        return np.full(self._shape, base + int(z_level), dtype=self._dtype)
 
 
 @pytest.fixture(autouse=True)
