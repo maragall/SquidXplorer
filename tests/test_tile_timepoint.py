@@ -34,9 +34,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")  # headless Qt; must prece
 import numpy as np
 import pytest
 
-from squidmip._tiling import TileCache, TileDescriptor
-from squidmip._tilesource import CompositePlateSource, InMemoryMultiscale, ReaderTileSource, plate_ladder
-from squidmip.reader import open_reader
+from squidxplorer._tiling import TileCache, TileDescriptor
+from squidxplorer._tilesource import CompositePlateSource, InMemoryMultiscale, ReaderTileSource, plate_ladder
+from squidxplorer.reader import open_reader
 from tests.conftest import TIME_SERIES_CHANNELS, time_series_pixel_value
 
 N_T = 3
@@ -53,7 +53,7 @@ def qapp():
     from qtpy.QtWidgets import QApplication
 
     app = QApplication.instance() or QApplication([])
-    app.setProperty("_squidmip_test", True)
+    app.setProperty("_squidxplorer_test", True)
     return app
 
 
@@ -186,8 +186,8 @@ def test_the_plate_view_asks_for_the_timepoint_it_says_it_is_showing(
     ``set_time_point`` used to touch neither ``_tile_src`` nor ``_tile_cache``, so the plate said
     "timepoint 2" over frame 0's tiles.
     """
-    monkeypatch.setenv("SQUIDMIP_DEEP_ZOOM", "1")
-    from squidmip import _viewer as V
+    monkeypatch.setenv("SQUIDXPLORER_DEEP_ZOOM", "1")
+    from squidxplorer import _viewer as V
 
     root, _ = multi_time_point_dataset
     reader, meta, ladder = _open(root)
@@ -212,9 +212,9 @@ def test_the_plate_view_asks_for_the_timepoint_it_says_it_is_showing(
 def test_every_tile_the_plate_view_enumerates_carries_its_timepoint(
         qapp, monkeypatch, multi_time_point_dataset):
     """The producer's own descriptors, not a hand-built one: the stamp has to be in the widget."""
-    monkeypatch.setenv("SQUIDMIP_DEEP_ZOOM", "1")
-    from squidmip import _plate_overview as PO
-    from squidmip import _viewer as V
+    monkeypatch.setenv("SQUIDXPLORER_DEEP_ZOOM", "1")
+    from squidxplorer import _plate_overview as PO
+    from squidxplorer import _viewer as V
 
     root, _ = multi_time_point_dataset
     reader, meta, _ = _open(root)

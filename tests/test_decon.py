@@ -18,8 +18,8 @@ import json
 import numpy as np
 import pytest
 
-from squidmip import add_projector, available_projectors, project_well, operator_consumes
-from squidmip._decon import (
+from squidxplorer import add_projector, available_projectors, project_well, operator_consumes
+from squidxplorer._decon import (
     DEFAULT_ITERATIONS,
     DEFAULT_OPTICS,
     METHOD,
@@ -37,9 +37,9 @@ from squidmip._decon import (
     optics_override,
     set_optics,
 )
-from squidmip._engine import _resolve_operator
-from squidmip.projection import PLANE_OP, Z_REDUCER, bind_channel
-from squidmip.reader import open_reader
+from squidxplorer._engine import _resolve_operator
+from squidxplorer.projection import PLANE_OP, Z_REDUCER, bind_channel
+from squidxplorer.reader import open_reader
 
 scipy_ndimage = pytest.importorskip("scipy.ndimage")
 scipy_signal = pytest.importorskip("scipy.signal")
@@ -281,7 +281,7 @@ def test_the_engine_method_is_pinned_to_rl_because_petakit_defaults_to_a_broken_
 def test_an_all_zero_engine_result_raises_instead_of_writing_black_tiles():
     """The guard behind trap 1: a degenerate engine result must fail loud, not look like a
     successful deconvolution of a dark field."""
-    import squidmip._decon as decon_mod
+    import squidxplorer._decon as decon_mod
 
     class _Fake:
         @staticmethod
@@ -302,7 +302,7 @@ def test_a_missing_petakit_fails_loud_and_never_silently_falls_back():
     is missing, not handed a different algorithm's output."""
     import builtins
 
-    import squidmip._decon as decon_mod
+    import squidxplorer._decon as decon_mod
 
     real_import = builtins.__import__
 
@@ -404,15 +404,15 @@ def test_deconvolve_stack_rejects_a_2d_input():
 
 # --- the channel-label seam (IMA-252) ------------------------------------------------------
 
-def test_channel_labels_from_squidmips_own_reader_parse_into_a_wavelength():
-    """A caller holds the label squidmip's reader gave them. It has to work.
+def test_channel_labels_from_squidxplorers_own_reader_parse_into_a_wavelength():
+    """A caller holds the label squidxplorer's reader gave them. It has to work.
 
     Squid writes channels as ``Fluorescence_488_nm_Ex`` - UNDERSCORED - and that is what
     ``reader.metadata["channels"]`` reports, and on a multi-band cube it writes
     ``Fluorescence_638_nm_-_Penta``. The wavelength is now read by ``_channels.excitation_nm``,
     this package's own parse, so every spelling of one line must land on one emission.
     """
-    from squidmip._decon import emission_um_for
+    from squidxplorer._decon import emission_um_for
 
     wavelengths = {
         emission_um_for(name)
@@ -620,7 +620,7 @@ def test_the_psf_is_cached_by_its_optics_tuple_not_rebuilt_per_plane(tmp_path):
 
 def test_an_operator_that_declares_nothing_is_handed_through_unchanged():
     """``bind_channel`` is a declaration seam, not a wrapper: no ``for_channel``, no change."""
-    from squidmip.projection import project
+    from squidxplorer.projection import project
     assert bind_channel(project, "/some/acquisition", "Fluorescence_638_nm_Ex") is project
     # An explicit optics argument is an instruction, so it is never re-derived per channel.
     fixed = decon_op(FAST_OPTICS, iterations=1)

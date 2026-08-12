@@ -9,7 +9,7 @@ thrashes, is never unbounded, and a human can override it.
 
 from __future__ import annotations
 
-from squidmip._budget import (
+from squidxplorer._budget import (
     CEILING_BYTES,
     DEFAULT_FRACTION,
     ENV_VAR,
@@ -75,7 +75,7 @@ def test_it_sizes_off_AVAILABLE_not_total():
 
     assert "available" in inspect.signature(cache_budget).parameters
     # ...and the real reader asks for available, not total.
-    src = inspect.getsource(__import__("squidmip._budget", fromlist=["x"]).available_bytes)
+    src = inspect.getsource(__import__("squidxplorer._budget", fromlist=["x"]).available_bytes)
     assert ".available" in src and ".total" not in src
 
 

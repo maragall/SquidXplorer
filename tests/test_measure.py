@@ -12,7 +12,7 @@ import time
 
 import pytest
 
-from squidmip._measure import (
+from squidxplorer._measure import (
     FAILED,
     MetricsLog,
     OK,
@@ -74,7 +74,7 @@ def test_the_sampler_keeps_the_MAX_not_the_last_reading(monkeypatch):
     MUTATION: change ``if value > self.peak`` to always assign (report the last reading) and this
     goes red — 300 is kept, not the final 150.
     """
-    from squidmip import _measure as M
+    from squidxplorer import _measure as M
 
     seq = iter([100, 250, 300, 180, 150])   # RSS climbs to 300, then recedes
     monkeypatch.setattr(M, "rss_bytes", lambda: next(seq, 150))
@@ -122,7 +122,7 @@ def test_a_run_shorter_than_one_sample_interval_still_reports_a_peak(log):
 def test_the_measurement_survives_a_machine_that_will_not_report_memory(log, monkeypatch):
     """psutil absent or refused degrades to an honest None, never to a fabricated number and never
     to an exception in the caller's path."""
-    monkeypatch.setattr("squidmip._measure.rss_bytes", lambda: None)
+    monkeypatch.setattr("squidxplorer._measure.rss_bytes", lambda: None)
     with measure_run("mip", "1 region", metrics=log):
         pass
     m = log.last()
@@ -140,7 +140,7 @@ def test_the_sampler_thread_does_not_outlive_the_run(log):
             time.sleep(0.02)
     time.sleep(0.05)
     after = [t for t in threading.enumerate()
-             if t.name == "squidmip-rss" and t.name not in before]
+             if t.name == "squidxplorer-rss" and t.name not in before]
     assert not after, f"sampler threads survived their runs: {after}"
 
 

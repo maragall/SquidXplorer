@@ -55,15 +55,15 @@ if "PySide6" in sys.modules or "PySide2" in sys.modules:
 
 from qtpy.QtWidgets import QApplication
 
-from squidmip import _viewer as V
+from squidxplorer import _viewer as V
 
 
 @pytest.fixture(scope="module")
 def qapp():
-    # Held for the module, and the process's app is pinned by squidmip._viewer.qt_app() — see
+    # Held for the module, and the process's app is pinned by squidxplorer._viewer.qt_app() — see
     # tests/test_window_lifetime.py for why a fixture must not be the only owner.
     app = QApplication.instance() or QApplication([])
-    app.setProperty("_squidmip_test", True)
+    app.setProperty("_squidxplorer_test", True)
     return app
 
 
@@ -152,7 +152,7 @@ def _copy(luts: dict) -> None:
     2026-08-06 -- `on`, the channel's visibility, which travels WITH the look rather than as a
     separate gesture.
     """
-    from squidmip._region_viewer import _LUT_CLIPBOARD
+    from squidxplorer._region_viewer import _LUT_CLIPBOARD
     _LUT_CLIPBOARD.clear()
     _LUT_CLIPBOARD.update(luts)
 

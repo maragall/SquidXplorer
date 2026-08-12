@@ -28,7 +28,7 @@ import json
 
 import pytest
 
-from squidmip._measure import (
+from squidxplorer._measure import (
     FAILED,
     OK,
     STOPPED,
@@ -128,7 +128,7 @@ def test_first_paint_is_not_the_run_duration():
 def test_the_run_log_sits_under_the_user_cache_root(tmp_path, monkeypatch):
     """Never in the repo, never in the acquisition. `_platecache.cache_root` already owns that
     rule and its override, so this reuses it rather than deriving a second location."""
-    from squidmip import _platecache
+    from squidxplorer import _platecache
 
     monkeypatch.setenv(_platecache.ENV_DIR, str(tmp_path))
     assert run_log_path().parent == tmp_path

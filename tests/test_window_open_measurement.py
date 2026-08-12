@@ -39,7 +39,7 @@ import pytest  # noqa: E402
 
 # The ONE guard in this file, and it is an ENVIRONMENT gate rather than a skipped assertion, exactly
 # as every other GUI test module here does it: PyQt is an optional extra and
-# ``squidmip._region_viewer`` imports it at module scope, so without it there is nothing to test.
+# ``squidxplorer._region_viewer`` imports it at module scope, so without it there is nothing to test.
 pytest.importorskip("qtpy")
 if "PySide6" in sys.modules or "PySide2" in sys.modules:
     pytest.skip(
@@ -48,8 +48,8 @@ if "PySide6" in sys.modules or "PySide2" in sys.modules:
         allow_module_level=True,
     )
 
-from squidmip._measure import METRICS, OK, WINDOW_OPEN  # noqa: E402
-from squidmip._region_viewer import ViewerManager  # noqa: E402
+from squidxplorer._measure import METRICS, OK, WINDOW_OPEN  # noqa: E402
+from squidxplorer._region_viewer import ViewerManager  # noqa: E402
 
 from .conftest import REGIONS  # noqa: E402
 from .test_viewer import _drain_until, qapp  # noqa: E402,F401  (fixture)
@@ -72,7 +72,7 @@ def manager(qapp, napari_pane_stub, squid_dataset):
     Same shape as the fixture in tests/test_view_settings.py, and for the same reason: the windows
     it hands out set WA_DeleteOnClose, so the drain and the collect belong here, with the app alive.
     """
-    from squidmip import open_reader
+    from squidxplorer import open_reader
 
     root, _arrays = squid_dataset
     reader = open_reader(str(root))
@@ -127,7 +127,7 @@ def test_the_clock_covers_building_the_window_not_only_loading_it(qapp, manager,
     yet. ADR-0001 forbids the direct form of this assertion, and the order is what makes the number
     honest anyway.
     """
-    from squidmip import _measure
+    from squidxplorer import _measure
 
     panes_at_start = []
     real = _measure.WindowOpen

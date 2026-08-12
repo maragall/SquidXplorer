@@ -26,8 +26,8 @@ import tifffile
 pytest.importorskip("tilefusion", reason="tilefusion (maragall/stitcher) not installed: the minerva "
                                          "export path is UNTESTED here, not passing")
 
-from squidmip import _engine, _minerva
-from squidmip._minerva import (
+from squidxplorer import _engine, _minerva
+from squidxplorer._minerva import (
     auto_groups,
     default_out_dir,
     export_selection,
@@ -35,7 +35,7 @@ from squidmip._minerva import (
     write_ome_tiff,
     write_story,
 )
-from squidmip.reader import open_reader
+from squidxplorer.reader import open_reader
 from tests.conftest import CH_IN_YAML, CH_NOT_IN_YAML, NZ, _pixel_value
 from tests.writer_fixtures import WRITERS as _WRITERS
 
@@ -122,8 +122,8 @@ def test_export_goes_through_the_region_operator_seam(squid_dataset, tmp_path):
     """The fusion path is IMA-222's region-operator table, not a private stitcher and not
     ``project_plate`` (the z-reduction path, which cannot fuse FOVs at all). An operator
     registered at runtime must therefore be selectable with no edit to _minerva.py."""
-    import squidmip
-    from squidmip import _stitch
+    import squidxplorer
+    from squidxplorer import _stitch
 
     calls = []
 
@@ -133,7 +133,7 @@ def test_export_goes_through_the_region_operator_seam(squid_dataset, tmp_path):
 
     name = "minerva_test_op"
     _engine._OPERATORS.pop(name, None)
-    squidmip.add_region_operator(name, spy)
+    squidxplorer.add_region_operator(name, spy)
     try:
         pairs = export_selection(
             open_reader(squid_dataset[0]), [("B2", 0), ("B2", 1)], tmp_path,
@@ -204,7 +204,7 @@ def test_export_rejects_a_timepoint_out_of_range(squid_dataset, tmp_path):
 
 
 def test_group_selection_groups_by_region_in_first_seen_order():
-    from squidmip._minerva import group_selection
+    from squidxplorer._minerva import group_selection
     assert group_selection([("B3", 1), ("B2", 0), ("B3", 0), ("B3", 1)]) == {
         "B3": [1, 0], "B2": [0]}
 

@@ -27,7 +27,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")  # headless Qt; must prece
 
 import pytest  # noqa: E402
 
-from squidmip._run_scope import describe_view_target, distinct_view_regions  # noqa: E402
+from squidxplorer._run_scope import describe_view_target, distinct_view_regions  # noqa: E402
 
 
 class _View:
@@ -167,7 +167,7 @@ def test_the_roi_subset_is_printed_in_the_existing_extent_spelling():
     """An ROI child's subset is the box, and there is ONE spelling of a box in this codebase
     (``Extent.label()``). A second one is exactly the drift ``_address.py``'s naming law exists to
     stop, so the printer derives it rather than copying the format string."""
-    from squidmip._address import Extent
+    from squidxplorer._address import Extent
 
     bbox = (120.0, 340.0, 636.0, 856.0)
     block = describe_view_target([_View(5, "ROI · B6", ["B6"], roi_bbox=bbox)])
@@ -201,7 +201,7 @@ if "PySide6" in sys.modules or "PySide2" in sys.modules:
 
 from qtpy.QtWidgets import QComboBox, QPushButton  # noqa: E402
 
-from squidmip import _viewer as V  # noqa: E402
+from squidxplorer import _viewer as V  # noqa: E402
 
 from .test_viewer import qapp  # noqa: E402,F401  (fixtures)
 

@@ -12,8 +12,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from squidmip import _mosaic_source
-from squidmip._mosaic_source import (
+from squidxplorer import _mosaic_source
+from squidxplorer._mosaic_source import (
     fuse_region_mosaic,
     level_paths,
     mosaic_bbox_um,
@@ -246,7 +246,7 @@ class _CountingReader(_Reader):
 
 
 def test_a_zstack_becomes_a_lazy_z_y_x_array():
-    from squidmip._mosaic_source import fuse_region_stack
+    from squidxplorer._mosaic_source import fuse_region_stack
 
     meta = _meta({("A1", 0): (0.0, 0.0), ("A1", 1): (12.0, 0.0)}, [0, 1])
     meta["n_z"] = 5
@@ -260,7 +260,7 @@ def test_a_zstack_becomes_a_lazy_z_y_x_array():
 def test_only_the_requested_plane_is_ever_materialised():
     """The architecture taken from record-zstack-viewer: requests cost only what is visible.
     Eagerly fusing every z would turn a 10-plane 28-FOV region into ~10x the reads on open."""
-    from squidmip._mosaic_source import fuse_region_stack
+    from squidxplorer._mosaic_source import fuse_region_stack
 
     meta = _meta({("A1", 0): (0.0, 0.0), ("A1", 1): (12.0, 0.0)}, [0, 1])
     meta["n_z"] = 8
@@ -278,7 +278,7 @@ def test_only_the_requested_plane_is_ever_materialised():
 def test_a_single_plane_acquisition_gets_no_singleton_z_axis():
     """A one-position slider is clutter; record-zstack-viewer relies on the viewer hiding
     singleton sliders and napari does the same when the axis simply is not there."""
-    from squidmip._mosaic_source import fuse_region_stack
+    from squidxplorer._mosaic_source import fuse_region_stack
 
     meta = _meta({("A1", 0): (0.0, 0.0), ("A1", 1): (12.0, 0.0)}, [0, 1])
     meta["n_z"] = 1
@@ -289,7 +289,7 @@ def test_a_single_plane_acquisition_gets_no_singleton_z_axis():
 
 
 def test_an_oversized_plane_is_refused_loudly_rather_than_paging_the_machine():
-    from squidmip._mosaic_source import fuse_region_stack
+    from squidxplorer._mosaic_source import fuse_region_stack
 
     # A genuinely huge extent, with decimation effectively disabled.
     meta = _meta({("A1", 0): (0.0, 0.0), ("A1", 1): (40000.0, 0.0)}, [0, 1],
@@ -300,7 +300,7 @@ def test_an_oversized_plane_is_refused_loudly_rather_than_paging_the_machine():
 
 
 def test_a_stack_with_no_positions_is_still_not_derivable():
-    from squidmip._mosaic_source import fuse_region_stack
+    from squidxplorer._mosaic_source import fuse_region_stack
 
     meta = _meta({}, [0, 1])
     meta["n_z"] = 4
@@ -343,7 +343,7 @@ def _record_fuse_calls(monkeypatch):
     60 ms for a 956x799 level), because the coarsen path must allocate and paste the 54.9 MB
     level-0 plane first.
     """
-    from squidmip import _mosaic_source as ms
+    from squidxplorer import _mosaic_source as ms
 
     calls: list = []
     real = ms._fuse_levels
@@ -373,7 +373,7 @@ def _pyr_meta(nz=6, frame=(256, 256), px=1.0, n=16):
 def test_the_raw_preview_returns_a_pyramid_of_strictly_decreasing_levels():
     """napari's ``multiscale=True`` contract: a LIST, highest resolution first, each level
     strictly smaller than the one above it in both displayed axes."""
-    from squidmip._mosaic_source import fuse_region_pyramid
+    from squidxplorer._mosaic_source import fuse_region_pyramid
 
     meta = _pyr_meta()
     levels, step, nz = fuse_region_pyramid(_Reader(), meta, "A1", "488")
@@ -388,7 +388,7 @@ def test_the_raw_preview_returns_a_pyramid_of_strictly_decreasing_levels():
 def test_every_pyramid_level_keeps_the_z_axis_and_its_length():
     """A pyramid must not silently flatten z. Levels downsample y and x ONLY, so napari's
     z slider (and the dz_um scale commit 19cd491 established) survive the change."""
-    from squidmip._mosaic_source import fuse_region_pyramid
+    from squidxplorer._mosaic_source import fuse_region_pyramid
 
     meta = _pyr_meta(nz=6)
     levels, _step, nz = fuse_region_pyramid(_Reader(), meta, "A1", "488")
@@ -401,7 +401,7 @@ def test_every_pyramid_level_keeps_the_z_axis_and_its_length():
 def test_every_pyramid_level_is_lazy():
     """Level 0 of the real region is 54.9 MB and there are 10 z and 4 channels. If building the
     pyramid materialised anything, opening the region would cost 2.2 GB before the first paint."""
-    from squidmip._mosaic_source import fuse_region_pyramid
+    from squidxplorer._mosaic_source import fuse_region_pyramid
 
     reader = _StepReader()
     levels, _step, _nz = fuse_region_pyramid(reader, _pyr_meta(), "A1", "488")
@@ -414,7 +414,7 @@ def test_a_coarse_level_is_fused_directly_and_never_materialises_level_zero(_rec
     """THE performance property. Coarsening over the lazy level-0 graph would force the full
     54.9 MB plane to be pasted just to throw 63/64 of it away; fusing the level directly from
     the FOV tiles strides each frame on read instead. Measured 3.2x cheaper on the real set."""
-    from squidmip._mosaic_source import fuse_region_pyramid
+    from squidxplorer._mosaic_source import fuse_region_pyramid
 
     meta = _pyr_meta()
     levels, _step, _nz = fuse_region_pyramid(_Reader(), meta, "A1", "488")
@@ -443,7 +443,7 @@ def test_fusing_a_level_also_yields_the_coarser_levels_from_the_same_decode():
     The fix is to yield every coarser level from the decode already in hand: level 3..6 of one
     (z, channel) together are ~2 MB, so the thumbnail costs a stride, not a second read pass.
     """
-    from squidmip._mosaic_source import fuse_region_pyramid
+    from squidxplorer._mosaic_source import fuse_region_pyramid
 
     reader = _StepReader()
     levels, _step, _nz = fuse_region_pyramid(reader, _pyr_meta(), "A1", "488")
@@ -461,7 +461,7 @@ def test_fusing_a_level_also_yields_the_coarser_levels_from_the_same_decode():
 
 def test_a_level_finer_than_the_one_requested_is_never_produced(_record_fuse_calls):
     """Yielding the COARSER levels is free; yielding finer ones would defeat the whole point."""
-    from squidmip._mosaic_source import fuse_region_pyramid
+    from squidxplorer._mosaic_source import fuse_region_pyramid
 
     levels, _step, _nz = fuse_region_pyramid(_Reader(frame=(256, 256)), _pyr_meta(), "A1", "488")
     _record_fuse_calls.clear()
@@ -477,7 +477,7 @@ def test_a_region_whose_every_fov_is_unreadable_is_an_error_not_a_blank_mosaic()
     """A hole where one FOV failed is a visible hole. A mosaic where EVERY FOV failed is not a
     picture at all, and handing napari a black plane would report a read failure as empty tissue.
     Six confirmed silent failures in this project say this must be loud."""
-    from squidmip._mosaic_source import fuse_region_pyramid
+    from squidxplorer._mosaic_source import fuse_region_pyramid
 
     meta = _pyr_meta(n=4)
     reader = _Reader(frame=(256, 256), fail=range(4))
@@ -490,7 +490,7 @@ def test_a_region_whose_every_fov_is_unreadable_is_an_error_not_a_blank_mosaic()
 def test_revisiting_a_z_plane_does_not_re_fuse_it():
     """Julio steps z back and forth. Without a cache every step re-reads every FOV of every
     channel — measured at 428 ms per step on the real region."""
-    from squidmip._mosaic_source import fuse_region_pyramid
+    from squidxplorer._mosaic_source import fuse_region_pyramid
 
     reader = _StepReader()
     levels, _step, _nz = fuse_region_pyramid(reader, _pyr_meta(), "A1", "488")
@@ -509,7 +509,7 @@ def test_revisiting_a_z_plane_does_not_re_fuse_it():
 def test_the_cache_is_bounded_in_bytes_and_evicts_rather_than_growing():
     """An unbounded cache is a slow memory leak wearing a performance costume. The bound is
     explicit and reported, and the oldest entry goes when it is reached."""
-    from squidmip._mosaic_source import PYRAMID_CACHE_BYTES, fuse_region_pyramid
+    from squidxplorer._mosaic_source import PYRAMID_CACHE_BYTES, fuse_region_pyramid
 
     assert isinstance(PYRAMID_CACHE_BYTES, int) and PYRAMID_CACHE_BYTES > 0
 
@@ -531,7 +531,7 @@ def test_a_plane_larger_than_the_whole_cache_is_a_loud_error_not_a_silent_no_op(
     """The ported ndviewer_light cache logs at DEBUG and returns when an item exceeds the budget.
     That is log-and-continue: the cache silently does nothing and the only symptom is that
     everything is slow. This repo has six confirmed silent failures already; make it audible."""
-    from squidmip._mosaic_source import MemoryBoundedLRUCache
+    from squidxplorer._mosaic_source import MemoryBoundedLRUCache
 
     cache = MemoryBoundedLRUCache(1024)
     with pytest.raises(ValueError, match="larger than the whole"):
@@ -553,7 +553,7 @@ def test_the_plane_cache_serialises_concurrent_writers():
     """
     import threading
 
-    from squidmip._mosaic_source import MemoryBoundedLRUCache
+    from squidxplorer._mosaic_source import MemoryBoundedLRUCache
 
     cache = MemoryBoundedLRUCache(64 * 1024)
     assert isinstance(cache._lock, type(threading.Lock())), (
@@ -586,7 +586,7 @@ def test_the_plane_cache_serialises_concurrent_writers():
 def test_a_mosaic_too_small_to_shrink_gets_one_level_not_a_degenerate_pyramid():
     """The guard ``open_pyramid`` already applies: napari needs strictly decreasing levels, so a
     level that does not shrink is dropped rather than handed over as a duplicate."""
-    from squidmip._mosaic_source import fuse_region_pyramid
+    from squidxplorer._mosaic_source import fuse_region_pyramid
 
     meta = _meta({("A1", 0): (0.0, 0.0)}, [0], frame=(4, 6), px=2.0)
     meta["n_z"] = 3
@@ -599,7 +599,7 @@ def test_the_pyramid_levels_agree_with_the_full_resolution_picture():
     """A pyramid that renders a misregistered level looks fine in a shape assertion and wrong on
     screen. Each level must show the SAME picture, coarser — so a feature at a given fraction of
     the mosaic must land at that same fraction on every level."""
-    from squidmip._mosaic_source import fuse_region_pyramid
+    from squidxplorer._mosaic_source import fuse_region_pyramid
 
     # 16 FOVs left-to-right, each a distinct constant: the picture is a ramp along x.
     meta = _pyr_meta(nz=2)
@@ -620,7 +620,7 @@ def test_the_pyramid_levels_agree_with_the_full_resolution_picture():
 
 
 def test_a_pyramid_with_no_positions_is_not_derivable_and_says_so():
-    from squidmip._mosaic_source import fuse_region_pyramid
+    from squidxplorer._mosaic_source import fuse_region_pyramid
 
     meta = _meta({}, [0, 1])
     meta["n_z"] = 4
@@ -629,7 +629,7 @@ def test_a_pyramid_with_no_positions_is_not_derivable_and_says_so():
 
 def test_a_single_plane_acquisition_pyramid_has_no_singleton_z_axis():
     """Same rule as the flat stack: a one-position slider is clutter."""
-    from squidmip._mosaic_source import fuse_region_pyramid
+    from squidxplorer._mosaic_source import fuse_region_pyramid
 
     meta = _pyr_meta(nz=1)
     levels, _step, nz = fuse_region_pyramid(_Reader(), meta, "A1", "488")
@@ -642,7 +642,7 @@ def test_a_single_plane_acquisition_pyramid_has_no_singleton_z_axis():
 
 def test_an_oversized_level_zero_is_still_refused_loudly():
     """The plane budget guards the pyramid too — a pyramid is not a licence to skip it."""
-    from squidmip._mosaic_source import fuse_region_pyramid
+    from squidxplorer._mosaic_source import fuse_region_pyramid
 
     meta = _meta({("A1", 0): (0.0, 0.0), ("A1", 1): (40000.0, 0.0)}, [0, 1],
                  frame=(40000, 40000), px=1.0)
@@ -654,7 +654,7 @@ def test_an_oversized_level_zero_is_still_refused_loudly():
 def test_a_reader_that_cannot_identify_its_acquisition_is_refused():
     """The cache key must name the DATASET. A reader that cannot say which acquisition it reads
     would share a key with every other such reader."""
-    from squidmip._mosaic_source import _source_token
+    from squidxplorer._mosaic_source import _source_token
 
     with pytest.raises(ValueError, match="_path"):
         _source_token(object())
@@ -667,7 +667,7 @@ def test_the_cache_is_keyed_by_the_acquisition_not_by_the_reader_object():
     entry can outlive the reader that produced it, CPython recycles ids, so a later reader over a
     DIFFERENT dataset could collide with a stale key and be served another acquisition's pixels.
     """
-    from squidmip._mosaic_source import fuse_region_pyramid
+    from squidxplorer._mosaic_source import fuse_region_pyramid
 
     meta = _pyr_meta()
     first = _StepReader(frame=(256, 256))

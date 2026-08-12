@@ -21,8 +21,8 @@ if "PySide6" in sys.modules or "PySide2" in sys.modules:
         allow_module_level=True,
     )
 
-from squidmip import _napari_pane  # noqa: E402
-from squidmip._napari_pane import (  # noqa: E402
+from squidxplorer import _napari_pane  # noqa: E402
+from squidxplorer._napari_pane import (  # noqa: E402
     SETTLE_MS,
     MosaicPane,
     SettleCoalescer,
@@ -30,7 +30,7 @@ from squidmip._napari_pane import (  # noqa: E402
     make_pane,
     max_3d_texture_line,
 )
-from squidmip._napari_view import _DEFAULT_MAX_3D_TEXTURE  # noqa: E402
+from squidxplorer._napari_view import _DEFAULT_MAX_3D_TEXTURE  # noqa: E402
 
 
 class _Clock:
@@ -139,7 +139,7 @@ def test_the_interval_sits_under_the_perceptible_pause():
 
 
 def test_a_retired_flag_value_changes_nothing(monkeypatch):
-    """`SQUIDMIP_VIEWER=ndv` must take exactly the same path as no flag at all.
+    """`SQUIDXPLORER_VIEWER=ndv` must take exactly the same path as no flag at all.
 
     The failure this prevents is specific: someone's launcher still exports the old value, and a
     naive removal turns that into "no viewer at all, and no explanation". Asserting the two runs
@@ -150,9 +150,9 @@ def test_a_retired_flag_value_changes_nothing(monkeypatch):
     unsetting the guard inside an offscreen process kills the interpreter, taking pytest's
     summary with it. I did exactly that here on the first attempt and it aborted the run.
     """
-    monkeypatch.delenv("SQUIDMIP_VIEWER", raising=False)
+    monkeypatch.delenv("SQUIDXPLORER_VIEWER", raising=False)
     without = make_pane()[1:]
-    monkeypatch.setenv("SQUIDMIP_VIEWER", "ndv")
+    monkeypatch.setenv("SQUIDXPLORER_VIEWER", "ndv")
     with_flag = make_pane()[1:]
     assert with_flag == without, (
         f"a retired flag value took a different path: {with_flag} vs {without}"
@@ -161,7 +161,7 @@ def test_a_retired_flag_value_changes_nothing(monkeypatch):
 
 
 def test_napari_is_the_default(monkeypatch):
-    monkeypatch.delenv("SQUIDMIP_VIEWER", raising=False)
+    monkeypatch.delenv("SQUIDXPLORER_VIEWER", raising=False)
     widget, mode, msg = make_pane()
     # Whichever way it resolves, a non-napari result must carry a REASON — never a silent
     # downgrade. Six confirmed silent failures in this project say so.
@@ -189,7 +189,7 @@ def test_a_real_platform_is_allowed():
 
 def test_headless_says_there_is_no_viewer_rather_than_crashing(monkeypatch):
     """No GL means no mosaic, said in a sentence. The window still opens without one."""
-    monkeypatch.setenv("SQUIDMIP_VIEWER", "napari")
+    monkeypatch.setenv("SQUIDXPLORER_VIEWER", "napari")
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     widget, mode, msg = make_pane()
     assert (widget, mode) == (None, "unavailable")
@@ -198,12 +198,12 @@ def test_headless_says_there_is_no_viewer_rather_than_crashing(monkeypatch):
 
 def test_an_unknown_viewer_name_does_not_silently_disable_the_viewer(monkeypatch):
     """A typo must cost you nothing. It resolves to napari, exactly as an empty value does."""
-    monkeypatch.setenv("SQUIDMIP_VIEWER", "wat")
+    monkeypatch.setenv("SQUIDXPLORER_VIEWER", "wat")
     # `in ("napari", "unavailable")` accepted the very outcome the test name forbids, and those
     # two are the whole domain of `mode`. The claim is that a TYPO takes the SAME branch an unset
     # value takes -- so it is measured against that, not against a list of everything possible.
     _widget, mode, msg = make_pane()
-    monkeypatch.delenv("SQUIDMIP_VIEWER", raising=False)
+    monkeypatch.delenv("SQUIDXPLORER_VIEWER", raising=False)
     _dwidget, default_mode, default_msg = make_pane()
     assert mode == default_mode, (
         f"a typo resolved to {mode!r} where no value at all resolves to {default_mode!r}")

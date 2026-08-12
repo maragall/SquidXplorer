@@ -38,7 +38,7 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from squidmip._footprint import rss_mb
+from squidxplorer._footprint import rss_mb
 
 _MB = 1024 * 1024
 
@@ -160,7 +160,7 @@ def test_the_live_process_reports_a_nonzero_peak_here():
 def test_the_viewer_entry_point_still_returns_a_pair():
     """``_viewer._rss_mb`` is the name the footprint monitor calls; it delegates now, and the two
     call sites unpack a 2-tuple."""
-    from squidmip._viewer import _rss_mb
+    from squidxplorer._viewer import _rss_mb
 
     peak, cur = _rss_mb()
     assert peak > 0.0

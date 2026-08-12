@@ -28,7 +28,7 @@ corrections below OVERRIDE the corresponding statements later in this doc.
 - **tilefusion's `float32` cast is NOT lossy for us — my "destroys exact uint16" claim was wrong.**
   uint16 ⊂ float32 exactly (max 65535 < 2²⁴), and `_to_grayscale_2d` is a no-op for a 2D plane
   (`individual_tiffs.py:234`). So tilefusion's read is lossless for 2D grayscale — which is why
-  **your stitcher's MIP is fine using it.** SquidMIP reads raw only for **native dtype + half the
+  **your stitcher's MIP is fine using it.** SquidXplorer reads raw only for **native dtype + half the
   memory (2B vs 4B/px) + zero dependency**, not for correctness. The only genuinely lossy path is
   grayscale-averaging a real RGB plane, which we exclude anyway. (Fixes §3.2 #1 and Decision-Build.)
 - **`coordinates.csv` schema is version-dependent.** Current Squid writes
@@ -96,7 +96,7 @@ YAML** — use it. Match brightfield by wavelength/letter substring in the chann
 
 ## 1. Executive summary
 
-IMA-189 is the **keystone** of SquidMIP: a reader that ingests a Squid `individual_tiffs`
+IMA-189 is the **keystone** of SquidXplorer: a reader that ingests a Squid `individual_tiffs`
 acquisition directory, discovers everything from metadata + filenames (no manual per-file
 input), and yields exact pixel planes on demand.
 
@@ -111,7 +111,7 @@ decisions. The headline:
   cross-repo pinned git dependency. At IMA-184 the OME-zarr writer is **vendored (copied in),
   not imported** — tilefusion's package `__init__` is heavy, so even the output ticket lifts
   `create_zarr_store` / `write_ome` / `colors.py` rather than depending on the whole library.
-  **SquidMIP takes no cross-repo dependency at any slot.**
+  **SquidXplorer takes no cross-repo dependency at any slot.**
 
 - **Net effect: the plan got smaller and safer.** One repo, PyPI-only deps, no cross-repo pin
   dance, and a read path that is correct-by-construction (raw `tifffile.imread`,
@@ -132,7 +132,7 @@ From the spec:
 > do in a more high-throughput way that your software can recognize file names and data format
 > more easily. — Nick (Slack)
 
-The projection itself is trivial (`np.max` over z, identical to FIJI). What makes SquidMIP
+The projection itself is trivial (`np.max` over z, identical to FIJI). What makes SquidXplorer
 high-throughput is deleting the manual, format-blind workflow: parse the whole acquisition
 from its metadata so no file is opened by hand. The same parsed metadata drives batch
 projection **and** the plate-view navigation. **IMA-189 is that parser.** Projection (183/188),
@@ -210,21 +210,21 @@ Spec draft:           "depend on tilefusion" (Decision A), reader ~90% there, sc
       │
       ▼  Step 0 verification (read tilefusion source, dataset, packaging)
 Interim direction:    HYBRID — push the 2 gaps (uint16 read, YAML colors) INTO tilefusion,
-                      thin SquidMIP adapter, deliver via pinned git dependency
+                      thin SquidXplorer adapter, deliver via pinned git dependency
       │  (user confirmed: owns tilefusion, edit freely, git-dependency delivery)
       ▼  decision 4: adapter derives (region,fov,z,channel) from FILENAMES, not CSV
 Refinement:           "uint16 raw read" is just tifffile.imread — nothing non-trivial to push
                       upstream. Only the color parser was left as a tilefusion change.
       │
       ▼  OUTSIDE VOICE challenge: a ~30-line color reader doesn't justify a cross-repo dep;
-                      display color is a SquidMIP presentation concern, not stitcher's
+                      display color is a SquidXplorer presentation concern, not stitcher's
       ▼
-FINAL (locked):       STANDALONE ingest in SquidMIP. No tilefusion dep. tilefusion → IMA-184.
+FINAL (locked):       STANDALONE ingest in SquidXplorer. No tilefusion dep. tilefusion → IMA-184.
 ```
 
 **Superseded decisions** (recorded so a future session doesn't re-litigate):
 - "depend on tilefusion" (spec) → **superseded**: standalone.
-- "hybrid: gaps in tilefusion" → **superseded**: color parser lives in SquidMIP.
+- "hybrid: gaps in tilefusion" → **superseded**: color parser lives in SquidXplorer.
 - "git-dependency delivery" / "edit tilefusion freely" → **moot for 189**: no tilefusion change,
   no dep; both re-apply at IMA-184.
 
@@ -234,7 +234,7 @@ FINAL (locked):       STANDALONE ingest in SquidMIP. No tilefusion dep. tilefusi
 
 | # | Decision | Rationale | Your preference it serves |
 |---|----------|-----------|---------------------------|
-| **Build** | **Standalone SquidMIP package. No tilefusion dependency in 189.** tilefusion enters at IMA-184 (output). | The only reuse left was trivial; a cross-repo pin isn't justified for ingest. Removes cross-repo coupling from the keystone. | Right-sized diff; blast-radius/boring-by-default |
+| **Build** | **Standalone SquidXplorer package. No tilefusion dependency in 189.** tilefusion enters at IMA-184 (output). | The only reuse left was trivial; a cross-repo pin isn't justified for ingest. Removes cross-repo coupling from the keystone. | Right-sized diff; blast-radius/boring-by-default |
 | **1** | Channel identity: **filename form is canonical** (`Fluorescence_638_nm_-_Penta`) — the key `read()` takes. Metadata also carries `display_name` (human, from YAML) + `display_color` + `ex`. | AC3/AC4 fix the underscored form as the addressing key; one unambiguous key, no second lookup. | Explicit over clever |
 | **2** | YAML join is **strict, benign-absence degrades**: YAML present → every filename channel must have a YAML entry else **raise** naming the channel; YAML absent → names from filenames + `display_color=None`. | Colors must be read, not guessed (AC2). Silently painting a fluor channel the wrong color is a scientific error worse than stopping. Each mismatch shape has a defined outcome. | Handle more edge cases; explicit |
 | **3** | **Add minimal CI now** — GitHub Actions: clean-room `pip install .` + `pytest`. | Proves the build is reproducible off the dev's conda env (the exact ambient-import trap this repo is in). stitcher public → no dep auth needed. | Well-tested; own it in production |
@@ -254,7 +254,7 @@ review *missed*. It returned 13 findings. Disposition:
 | 1 | `read()` has no `t` arg but metadata reports `n_t` — API inconsistent | **→ Decision 6** (add `t=0`, keep `n_t`) |
 | 2 | "exact uint16" breaks on Squid RGB/brightfield planes (`(Y,X,3)`) | **→ Decision 5** (raise on non-2D; brightfield deferred) |
 | 3 | `load_channel_colors` normalization unspecified / collision risk | **Folded in:** pin `spaces→underscore` (dash preserved), add round-trip + collision test |
-| 4 | A ~30-line color reader doesn't justify a cross-repo pinned git dep; color is a presentation concern | **→ Build reversal** (standalone; color parser in SquidMIP) |
+| 4 | A ~30-line color reader doesn't justify a cross-repo pinned git dep; color is a presentation concern | **→ Build reversal** (standalone; color parser in SquidXplorer) |
 | 5 | Chicken-and-egg: can't pin `@commit` until tilefusion PR merges; local editable so only CI tests the pin | **Resolved by** build reversal (no dep, no pin) |
 | 6 | CI clean-room needs private-repo auth | **Dismissed** — verified stitcher is public |
 | 7 | `dz_um`/`n_z` two sources of truth, no reconciliation | **Folded in:** filenames = z-range ground truth; `dz_um` from params; warn if `Nz(params) ≠ max_z+1`; test |
@@ -333,7 +333,7 @@ YAML ──► [{name:'Fluorescence 638 nm - Penta', color:'#FF0000', ex:50.0}, 
 ### 7.4 Module layout
 
 ```
-squidmip/
+squidxplorer/
   __init__.py        # exports open_reader, SquidReader
   reader.py          # open_reader(), SquidReader (index build, metadata, read)
   _channels.py       # normalize(), load_channel_colors(), strict join
@@ -410,9 +410,9 @@ Greenfield — all ship WITH the code (100% of the 6 ACs + every branch above).
 | Task | P | Effort (human / CC) | Component | Files |
 |------|---|---------------------|-----------|-------|
 | T1 | P1 | 2h / 20min | packaging | `pyproject.toml` (numpy, tifffile, pandas, pyyaml; no tilefusion) |
-| T2 | P1 | 3h / 25min | channels | `squidmip/_channels.py`, `tests/test_channels.py` |
-| T3 | P1 | 3h / 30min | acquisition | `squidmip/_acquisition.py` (params + coords→positions) |
-| T4 | P1 | 1d / 40min | reader | `squidmip/reader.py`, `squidmip/__init__.py`, `tests/test_reader.py` |
+| T2 | P1 | 3h / 25min | channels | `squidxplorer/_channels.py`, `tests/test_channels.py` |
+| T3 | P1 | 3h / 30min | acquisition | `squidxplorer/_acquisition.py` (params + coords→positions) |
+| T4 | P1 | 1d / 40min | reader | `squidxplorer/reader.py`, `squidxplorer/__init__.py`, `tests/test_reader.py` |
 | T5 | P1 | 2h / 15min | ci | `.github/workflows/ci.yml` |
 | T6 | P2 | 1h / 10min | fixtures | `tests/fixtures/` (tiny real-shaped) |
 

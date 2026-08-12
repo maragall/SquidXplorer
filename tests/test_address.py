@@ -3,7 +3,7 @@
 WHAT WAS WRONG
 --------------
 The only identifier this application had was ``scope = row * 1_000_000 + col * 10_000 + roi``
-(:mod:`squidmip._plate`). Three defects, and they compound:
+(:mod:`squidxplorer._plate`). Three defects, and they compound:
 
 1. **It does three jobs.** It is the flat cache key, the logger's id for a thing, and the
    navigator's row. A data address and a view id are different questions and it answers both
@@ -16,7 +16,7 @@ The only identifier this application had was ``scope = row * 1_000_000 + col * 1
    Task 4 (every consumer reads ``t=0`` and presents it as the whole dataset) is not expressible
    in it, let alone fixable.
 
-And it breaks the naming law :mod:`squidmip._address` is written under: our ROI is a user-drawn
+And it breaks the naming law :mod:`squidxplorer._address` is written under: our ROI is a user-drawn
 box, a software concept, but the packed id puts it in the structural slot where Squid puts a FIELD
 OF VIEW, a physical one. Squid separately uses "ROI" for a manually drawn SCAN SHAPE, an
 acquisition INPUT. One word, two ontologies, pointing opposite ways.
@@ -41,8 +41,8 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from squidmip._address import Address, Extent
-from squidmip._logpane import (
+from squidxplorer._address import Address, Extent
+from squidxplorer._logpane import (
     ADDRESS_FIELD,
     LOG_DATEFORMAT,
     LOG_FORMAT,
@@ -120,7 +120,7 @@ def test_deleting_an_ROI_does_not_change_another_ROIs_key_but_the_packed_id_SHIF
     its logger id and its navigator row all move under whatever was pointing at them. Under an
     extent, nothing was ever numbered, so nothing moves.
     """
-    from squidmip._plate import roi_code
+    from squidxplorer._plate import roi_code
 
     keep = Extent("A1", bbox_um=(0.0, 0.0, 10.0, 10.0))
     before = keep.key()
@@ -262,7 +262,7 @@ def test_a_window_logs_its_address_without_the_window_having_to_remember_to(qtbo
     this fails if someone re-adds a bare ``log.info`` to a window."""
     import inspect
 
-    from squidmip import _region_viewer
+    from squidxplorer import _region_viewer
 
     src = inspect.getsource(_region_viewer.RegionViewer._say)
     assert "self.view_log()" in src, "a window's status line stopped carrying its address"

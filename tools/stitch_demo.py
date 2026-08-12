@@ -23,11 +23,11 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 # THIS checkout wins over an editable install pointing somewhere else — same bootstrap as
-# tools/acceptance.py, and the reason is not hypothetical: on the build machine `squidmip`
+# tools/acceptance.py, and the reason is not hypothetical: on the build machine `squidxplorer`
 # resolved to a different worktree entirely.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from squidmip import open_reader, stitch_region  # noqa: E402
+from squidxplorer import open_reader, stitch_region  # noqa: E402
 
 DATASET = (
     "/Users/julioamaragall/Downloads/"
@@ -75,10 +75,10 @@ def _window(a: np.ndarray, lo: float, hi: float) -> np.ndarray:
     return (np.clip(x, 0, 1) * 255).astype(np.uint8)
 
 
-# The seam metric moved to squidmip._benchmark at IMA-233 so the demo and the benchmark
+# The seam metric moved to squidxplorer._benchmark at IMA-233 so the demo and the benchmark
 # harness score seams with ONE implementation. Two copies would eventually disagree, and
 # then the demo's claim and the benchmark table's claim would be about different things.
-from squidmip._benchmark import overlap_ncc as _overlap_ncc  # noqa: E402
+from squidxplorer._benchmark import overlap_ncc as _overlap_ncc  # noqa: E402
 
 
 def main() -> int:
@@ -93,7 +93,7 @@ def main() -> int:
     fovs = [int(f) for f in args.fovs.split(",")]
 
     # Julio's own profiler (profiling/stages.py in the stitcher repo). Optional: the demo
-    # must still run for someone who only has squidmip.
+    # must still run for someone who only has squidxplorer.
     try:
         from profiling.stages import StageTimer
 
@@ -216,7 +216,7 @@ def main() -> int:
 
     # The seam, measured on the SOURCE FOVs rather than eyeballed on the render: how well the
     # two tiles agree in their overlap at the stage-reported offset vs the solved one.
-    from squidmip.projection import project
+    from squidxplorer.projection import project
 
     z_levels = meta["z_levels"]
     mip_i, mip_j = (

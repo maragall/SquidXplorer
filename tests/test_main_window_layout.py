@@ -31,7 +31,7 @@ import pytest
 
 from qtpy.QtWidgets import QApplication
 
-import squidmip._viewer as V
+import squidxplorer._viewer as V
 
 
 DESIGN = (596, 850)     # PlateWindow._DESIGN_W, _DESIGN_H — the shape the layout was drawn against
@@ -41,7 +41,7 @@ DESKTOP = (1280, 900)   # a second realistic shape: the plate's share must not f
 @pytest.fixture(scope="module")
 def qapp():
     app = QApplication.instance() or QApplication([])
-    app.setProperty("_squidmip_test", True)
+    app.setProperty("_squidxplorer_test", True)
     return app
 
 

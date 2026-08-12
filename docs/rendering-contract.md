@@ -6,7 +6,7 @@ handing napari data at the wrong abstraction. Read this before touching any rend
 
 ## The data structure: a lazy multiscale pyramid
 
-A fused region mosaic is NOT a single array. `squidmip._mosaic_source.fuse_region_pyramid` returns
+A fused region mosaic is NOT a single array. `squidxplorer._mosaic_source.fuse_region_pyramid` returns
 `(levels, step, nz)`:
 
 - `levels` is a list, **highest resolution first**, each entry a **lazy** (dask) array shaped

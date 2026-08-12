@@ -2,7 +2,7 @@
 
 Gap 1 of the three-viewers review (Hongquan, 2026-07-28), which is also the blocker
 ``NEXT_STEPS.md`` records against the deep-zoom work. At HEAD ``platformdirs`` appeared nowhere in
-``squidmip/`` and both plate producers re-derived every well on every open.
+``squidxplorer/`` and both plate producers re-derived every well on every open.
 
 These tests pin the five properties the design is made of, and they are deliberately separate
 because each one, missing, produces a different and quiet failure:
@@ -35,10 +35,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from squidmip import _platecache
-from squidmip._budget import cache_budget
-from squidmip._mosaic_source import MemoryBoundedLRUCache
-from squidmip._platecache import CellTile, PlateCellCache
+from squidxplorer import _platecache
+from squidxplorer._budget import cache_budget
+from squidxplorer._mosaic_source import MemoryBoundedLRUCache
+from squidxplorer._platecache import CellTile, PlateCellCache
 
 
 # --- helpers ---------------------------------------------------------------------------------
@@ -351,7 +351,7 @@ def test_the_default_root_is_the_platform_user_cache_dir(monkeypatch, tmp_path):
     monkeypatch.delenv(_platecache.ENV_DIR, raising=False)
     import platformdirs
 
-    assert str(_platecache.cache_root()) == platformdirs.user_cache_dir("squidmip", "cephla")
+    assert str(_platecache.cache_root()) == platformdirs.user_cache_dir("squidxplorer", "cephla")
 
 
 # --- the byte bound ------------------------------------------------------------------------------
@@ -363,7 +363,7 @@ def test_the_ram_tier_is_bounded_by_BYTES_from_the_measured_budget(tmp_path):
     192 MB. ``_budget`` argues a constant "encodes an assumption about a machine it has never
     seen", and ``_tsctx`` already refused the same literal.
     """
-    from squidmip import _budget
+    from squidxplorer import _budget
 
     assert isinstance(_platecache._CELLS, MemoryBoundedLRUCache)
     assert _platecache.cache_budget is cache_budget, "the cache stopped using the measured budget"
@@ -423,7 +423,7 @@ pytest.importorskip("qtpy")
 
 from qtpy.QtWidgets import QApplication            # noqa: E402
 
-import squidmip._viewer as V                        # noqa: E402
+import squidxplorer._viewer as V                        # noqa: E402
 
 FRAME = (8, 8)
 CHANNELS = ["c0", "c1"]
@@ -815,9 +815,9 @@ def test_the_plate_cell_follows_t_on_the_REAL_5D_acquisition(qapp, tmp_path):
     than in a call. Written by ``tools/make_5d_fixture.py``.
 
     The cache root is ``tmp_path``: a test must never write into the developer's real cache, and
-    ``_platecache`` has ``SQUIDMIP_CACHE_DIR`` for exactly this.
+    ``_platecache`` has ``SQUIDXPLORER_CACHE_DIR`` for exactly this.
     """
-    from squidmip.reader import open_reader
+    from squidxplorer.reader import open_reader
 
     reader = open_reader(FIXTURE_5D)
     meta = reader.metadata

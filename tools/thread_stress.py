@@ -37,7 +37,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-from squidmip.reader import open_reader
+from squidxplorer.reader import open_reader
 
 
 def _digest(arr) -> str:

@@ -16,9 +16,9 @@ Two mechanisms make that possible, and this file pins both.
    tests pin the refusal that replaces it, and pin that per-well fault isolation can no longer
    absorb it.
 
-2. ENTRY-POINT DISCOVERY (§4-§5). ``squidmip/__init__.py`` ends in a hardcoded side-effect import
+2. ENTRY-POINT DISCOVERY (§4-§5). ``squidxplorer/__init__.py`` ends in a hardcoded side-effect import
    list, and that list was the only thing that made a registration run — so an operator in a
-   package we do not ship appeared nowhere. The ``squidmip.operators`` entry-point group is the
+   package we do not ship appeared nowhere. The ``squidxplorer.operators`` entry-point group is the
    seam that fixes it, and it must fail LOUD and NAMED on a broken plugin, never skip it silently:
    a plugin that quietly does not load is indistinguishable from an operator nobody wrote, which
    is the same defect ``requires=`` exists to end, one layer up.
@@ -35,10 +35,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-import squidmip as s
-from squidmip._engine import MissingOperatorDependency, Operator
-from squidmip._plugins import GROUP, DISABLE_ENV, OperatorPluginError, load_operator_plugins
-from squidmip.projection import MissingDependency
+import squidxplorer as s
+from squidxplorer._engine import MissingOperatorDependency, Operator
+from squidxplorer._plugins import GROUP, DISABLE_ENV, OperatorPluginError, load_operator_plugins
+from squidxplorer.projection import MissingDependency
 
 _REPO = Path(__file__).resolve().parents[1]
 _TEMPLATE = _REPO / "templates" / "operator"
@@ -59,7 +59,7 @@ def _passthrough(planes):
 def test_operator_carries_requires_with_the_same_spelling_as_segmenter():
     """One word, three registries. A second spelling (``needs=``, ``deps=``) would make the
     template teach two contracts for one idea."""
-    from squidmip._spots import Segmenter
+    from squidxplorer._spots import Segmenter
 
     assert "requires" in Operator.__dataclass_fields__
     assert "requires" in Segmenter.__dataclass_fields__
@@ -72,8 +72,8 @@ def test_every_registrar_takes_requires_by_the_same_keyword():
     without it."""
     import inspect
 
-    from squidmip._spots import add_segmenter
-    from squidmip._stitch import add_region_operator
+    from squidxplorer._spots import add_segmenter
+    from squidxplorer._stitch import add_region_operator
 
     for fn in (s.add_projector, add_region_operator, add_segmenter):
         assert "requires" in inspect.signature(fn).parameters, fn.__name__
@@ -148,7 +148,7 @@ def test_the_refusal_is_a_missing_dependency_so_a_runner_can_tell_it_from_a_data
     """One base class across the three registries: ``projection.MissingDependency``. That is what
     lets ``project_plate`` say "environment fault, not a corrupt well" without importing each
     registry to name its own exception."""
-    from squidmip._spots import MissingSegmenterDependency
+    from squidxplorer._spots import MissingSegmenterDependency
 
     assert issubclass(MissingOperatorDependency, MissingDependency)
     assert issubclass(MissingSegmenterDependency, MissingDependency)
@@ -225,7 +225,7 @@ def test_a_genuine_per_well_data_fault_is_still_isolated(small_reader):
 def test_the_command_surface_refuses_with_its_own_code(small_acquisition, unavailable):
     """``unavailable_operator`` is a DISTINCT refusal code from ``unknown_operator``, because the
     caller's next move differs: pick another name, versus install a package."""
-    from squidmip._command import (UNAVAILABLE_OPERATOR, CommandBus, EngineExecutor,
+    from squidxplorer._command import (UNAVAILABLE_OPERATOR, CommandBus, EngineExecutor,
                                    OpenAcquisition, RunOperator)
 
     bus = CommandBus(EngineExecutor())
@@ -238,7 +238,7 @@ def test_the_command_surface_refuses_with_its_own_code(small_acquisition, unavai
 
 
 def test_list_operators_reports_availability_without_filtering_the_list(unavailable):
-    from squidmip._command import CommandBus, EngineExecutor, ListOperators
+    from squidxplorer._command import CommandBus, EngineExecutor, ListOperators
 
     result = CommandBus(EngineExecutor()).execute(ListOperators())
     rows = {row["name"]: row for row in result.data["operators"]}
@@ -345,8 +345,8 @@ def _with_entry_points(monkeypatch, entry_points):
 def test_the_group_name_is_the_documented_one():
     """The template's ``pyproject.toml`` writes this string. If it changes here and not there,
     every plugin ever published becomes invisible — so it is pinned in both places."""
-    assert GROUP == "squidmip.operators"
-    assert '[project.entry-points."squidmip.operators"]' in (_TEMPLATE / "pyproject.toml").read_text()
+    assert GROUP == "squidxplorer.operators"
+    assert '[project.entry-points."squidxplorer.operators"]' in (_TEMPLATE / "pyproject.toml").read_text()
 
 
 def test_a_plugin_registers_its_operator_into_the_same_table_as_the_built_ins(monkeypatch):
@@ -459,34 +459,34 @@ def test_discovery_is_additive_the_built_ins_do_not_go_through_it():
 
 def test_the_template_ships_every_file_a_contributor_needs():
     for relative in ("pyproject.toml", "README.md",
-                     "squidmip_operator_template/__init__.py",
-                     "squidmip_operator_template/_stdev.py",
+                     "squidxplorer_operator_template/__init__.py",
+                     "squidxplorer_operator_template/_stdev.py",
                      "tests/test_template_operator.py"):
         assert (_TEMPLATE / relative).exists(), f"templates/operator/{relative} is missing"
 
 
 def test_the_templates_operator_declares_all_four_things():
     """The template must demonstrate the WHOLE record, or it teaches half a contract."""
-    source = (_TEMPLATE / "squidmip_operator_template" / "__init__.py").read_text()
+    source = (_TEMPLATE / "squidxplorer_operator_template" / "__init__.py").read_text()
 
     for declaration in ("consumes=", "produces=", "params=", "requires="):
         assert declaration in source, f"the template's registration omits {declaration}"
 
 
-def test_the_template_does_not_import_squidmip_at_module_scope():
+def test_the_template_does_not_import_squidxplorer_at_module_scope():
     """The circular-import trap, pinned. SquidXplorer loads a plugin from INSIDE ``import
-    squidmip``, so a module-scope ``from squidmip import ...`` in the plugin is re-entrant and
+    squidxplorer``, so a module-scope ``from squidxplorer import ...`` in the plugin is re-entrant and
     fails with a partially-initialised module. The template imports inside ``register()`` and says
     why; this test stops that from being edited back."""
     import ast
 
-    tree = ast.parse((_TEMPLATE / "squidmip_operator_template" / "__init__.py").read_text())
+    tree = ast.parse((_TEMPLATE / "squidxplorer_operator_template" / "__init__.py").read_text())
     for node in tree.body:                    # module scope only, deliberately
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             name = getattr(node, "module", None) or node.names[0].name
-            assert not name.startswith("squidmip."), name
-            assert name != "squidmip", (
-                "the template imports squidmip at module scope; that is re-entrant and is the "
+            assert not name.startswith("squidxplorer."), name
+            assert name != "squidxplorer", (
+                "the template imports squidxplorer at module scope; that is re-entrant and is the "
                 "first mistake every plugin author makes")
 
 
@@ -505,7 +505,7 @@ def test_the_template_readme_states_the_contract_the_viewer_depends_on():
         "Param(name: str, default: Any",         # how a parameter is declared
         "requires=",                             # how a dependency is declared
         "unavailable_operator",                  # what happens when it is missing
-        "SQUIDMIP_NO_PLUGINS=1",                 # the escape hatch
+        "SQUIDXPLORER_NO_PLUGINS=1",                 # the escape hatch
     ):
         assert fact in readme, f"templates/operator/README.md does not state: {fact}"
 
@@ -513,11 +513,11 @@ def test_the_template_readme_states_the_contract_the_viewer_depends_on():
 def test_the_template_names_what_it_does_not_support():
     """The unsupported list is real and stays stated: a template that implies a feature exists sends
     a contributor to build against a hole. (Composition WAS on this list. It is now §2.6, because it
-    executes — see ``squidmip/_compose.py`` and ``tests/test_compose.py``.)
+    executes — see ``squidxplorer/_compose.py`` and ``tests/test_compose.py``.)
 
     A GUI PANEL FROM ``params`` WAS ALSO ON THIS LIST, and it was the weakest link in the whole
     contract: §2.4 told a contributor to declare parameters into a GUI that ignored them. It is
-    now built (``squidmip/_param_panel.py``), so what stays unsupported is the narrower and true
+    now built (``squidxplorer/_param_panel.py``), so what stays unsupported is the narrower and true
     thing — a panel with BEHAVIOUR of its own, which lives in SquidXplorer.
     """
     readme = (_TEMPLATE / "README.md").read_text()
@@ -535,7 +535,7 @@ def test_the_template_states_how_a_declared_param_becomes_a_widget():
     readme = (_TEMPLATE / "README.md").read_text()
 
     for fact in (
-        "squidmip/_param_panel.py",          # where the rule lives
+        "squidxplorer/_param_panel.py",          # where the rule lives
         "TYPE OF YOUR\nDEFAULT",             # what the widget is chosen from
         "a check box",                       # bool
         "an integer spin",                   # int
@@ -557,7 +557,7 @@ def test_the_template_states_how_a_contributed_operator_composes():
         "projector=\"flatfield + my_operator(smooth_sigma=2.0) + mip\"",   # the expression
         "plane-op → z-reducer",                                      # what composes
         "z-reducer → anything",                                      # what does not
-        "squidmip/_compose.py",                                           # where to read the rule
+        "squidxplorer/_compose.py",                                           # where to read the rule
     ):
         assert fact in readme, f"templates/operator/README.md does not state: {fact}"
 
@@ -568,16 +568,16 @@ def test_the_template_package_imports_and_registers_in_a_clean_interpreter():
     engine and describe a real operator."""
     script = (
         "import sys; sys.path.insert(0, %r); sys.path.insert(0, %r)\n"
-        "import squidmip, squidmip_operator_template as t\n"
+        "import squidxplorer, squidxplorer_operator_template as t\n"
         "t.register()\n"
-        "assert t.OPERATOR_NAME in squidmip.available_projectors()\n"
-        "assert squidmip.operator_consumes(t.OPERATOR_NAME) == frozenset({'z'})\n"
-        "assert squidmip.operator_produces(t.OPERATOR_NAME) == 'intensity'\n"
-        "assert squidmip.operator_requires(t.OPERATOR_NAME) == ('scipy',)\n"
-        "assert {p.name for p in squidmip.operator_params(t.OPERATOR_NAME)} == "
+        "assert t.OPERATOR_NAME in squidxplorer.available_projectors()\n"
+        "assert squidxplorer.operator_consumes(t.OPERATOR_NAME) == frozenset({'z'})\n"
+        "assert squidxplorer.operator_produces(t.OPERATOR_NAME) == 'intensity'\n"
+        "assert squidxplorer.operator_requires(t.OPERATOR_NAME) == ('scipy',)\n"
+        "assert {p.name for p in squidxplorer.operator_params(t.OPERATOR_NAME)} == "
         "{'smooth_sigma', 'ddof'}\n"
         "import numpy as np\n"
-        "out = squidmip.bind_operator(t.OPERATOR_NAME, {'smooth_sigma': 0.0})("
+        "out = squidxplorer.bind_operator(t.OPERATOR_NAME, {'smooth_sigma': 0.0})("
         "[np.full((4, 4), 10, np.uint16), np.full((4, 4), 20, np.uint16)])\n"
         "assert out.shape == (4, 4) and out.dtype == np.uint16 and out.max() == 5, out\n"
         "print('OK')\n"

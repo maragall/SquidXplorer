@@ -36,8 +36,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from squidmip import open_reader
-from squidmip._video import (
+from squidxplorer import open_reader
+from squidxplorer._video import (
     DEFAULT_FPS,
     MissingEncoder,
     axis_length,
@@ -298,10 +298,10 @@ def test_a_producer_that_raises_part_way_leaves_no_truncated_movie(tmp_path):
 
 def test_a_missing_encoder_refuses_by_name_and_writes_nothing(tmp_path, monkeypatch):
     """The refusal names what is missing. Never a silent success, never a partial file."""
-    import squidmip._video as V
+    import squidxplorer._video as V
 
     monkeypatch.setattr(V, "encoder_problem",
-                        lambda: "imageio-ffmpeg is not installed (test). Install squidmip[video].")
+                        lambda: "imageio-ffmpeg is not installed (test). Install squidxplorer[video].")
     out = tmp_path / "refused.mp4"
     with pytest.raises(MissingEncoder, match="imageio-ffmpeg is not installed"):
         V.write_mp4(_moving_frames(n=2), out, fps=DEFAULT_FPS)

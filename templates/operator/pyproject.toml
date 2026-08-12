@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 # Rename this. The distribution name is what a user types to `pip install` and `pip uninstall`
 # your operator, and it is what SquidXplorer names in an error message if your plugin fails to
 # load — so make it identify YOU, not this template.
-name = "squidmip-operator-template"
+name = "squidxplorer-operator-template"
 version = "0.1.0"
 description = "A worked example of a SquidXplorer operator, installable as a plugin"
 readme = "README.md"
@@ -14,7 +14,7 @@ requires-python = ">=3.10"
 license = { text = "BSD-3-Clause" }
 
 # Your operator's OWN dependencies. Declare here the packages your code imports, and declare the
-# same names in `requires=` on the registration (see squidmip_operator_template/_stdev.py).
+# same names in `requires=` on the registration (see squidxplorer_operator_template/_stdev.py).
 #
 # The two are not redundant and both are load-bearing:
 #   * this list is what pip INSTALLS, and it only helps someone installing your package fresh;
@@ -24,7 +24,7 @@ license = { text = "BSD-3-Clause" }
 # hypothetical: three of SquidXplorer's own operators shipped for months importing packages that
 # were not in its dependency list at all.
 #
-# squidmip itself is deliberately NOT listed. Your operator is loaded BY squidmip, in squidmip's
+# squidxplorer itself is deliberately NOT listed. Your operator is loaded BY squidxplorer, in squidxplorer's
 # environment; depending on it here would let pip install a second copy over the one running.
 dependencies = [
     "numpy>=1.24",
@@ -37,23 +37,23 @@ test = ["pytest>=7.0"]
 # ==============================================================================================
 # THE ONE LINE THAT MAKES THIS A SQUIDXPLORER OPERATOR.
 #
-# `squidmip.operators` is the entry-point group SquidXplorer scans on `import squidmip`. The KEY
+# `squidxplorer.operators` is the entry-point group SquidXplorer scans on `import squidxplorer`. The KEY
 # is a label for your plugin (it appears in error messages; it is not an operator name). The VALUE
 # is `module:callable` — the function SquidXplorer calls to let you register.
 #
 # After `pip install -e .` into the environment that runs SquidXplorer, your operator is in
-# `squidmip.available_projectors()`, the CLI's `--projector`, the viewer's operator list and the
+# `squidxplorer.available_projectors()`, the CLI's `--projector`, the viewer's operator list and the
 # `list_operators` command. No edit to SquidXplorer. No fork.
 #
 # A module path with no `:callable` also works (registration as an import side effect), but a
 # named function is better: it is importable and testable on its own, which is what
 # tests/test_template_operator.py does.
 # ==============================================================================================
-[project.entry-points."squidmip.operators"]
-squidmip-operator-template = "squidmip_operator_template:register"
+[project.entry-points."squidxplorer.operators"]
+squidxplorer-operator-template = "squidxplorer_operator_template:register"
 
 [tool.hatch.build.targets.wheel]
-packages = ["squidmip_operator_template"]
+packages = ["squidxplorer_operator_template"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

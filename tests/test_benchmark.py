@@ -13,7 +13,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from squidmip import _benchmark as bm
+from squidxplorer import _benchmark as bm
 
 
 # --- quality metrics -------------------------------------------------------------------
@@ -220,7 +220,7 @@ def test_write_csv_and_json_round_trip(tmp_path):
 
 
 def test_default_operators_are_all_real_registry_entries():
-    from squidmip import available_projectors, available_region_operators
+    from squidxplorer import available_projectors, available_region_operators
 
     known = set(available_projectors()) | set(available_region_operators())
     assert set(bm.DEFAULT_OPERATORS) <= known

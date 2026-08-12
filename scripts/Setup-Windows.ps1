@@ -11,7 +11,7 @@
 # stderr and that would otherwise abort the script. We check exit codes explicitly and Die on failure.
 $ErrorActionPreference = "Continue"
 $AppName = "MIP tool"
-$Module  = "squidmip._viewer"
+$Module  = "squidxplorer._viewer"
 $repo = Split-Path $PSScriptRoot -Parent
 
 function Die($msg) { Write-Host ""; Write-Host ("ERROR: " + $msg) -ForegroundColor Red; exit 1 }
@@ -37,7 +37,7 @@ $ver = (& $pyExe @pyArgs --version 2>&1 | Out-String).Trim()
 Write-Host ("Using " + $ver)
 
 # 2. Create the venv (once).
-$venv = Join-Path $env:LOCALAPPDATA "squidmip\venv"
+$venv = Join-Path $env:LOCALAPPDATA "squidxplorer\venv"
 $vpy  = Join-Path $venv "Scripts\python.exe"
 $vpyw = Join-Path $venv "Scripts\pythonw.exe"
 if (-not (Test-Path $vpy)) {

@@ -1,4 +1,4 @@
-"""3D volume rendering of a z-stack (IMA-255) — the SquidMIP half of the seam.
+"""3D volume rendering of a z-stack (IMA-255) — the SquidXplorer half of the seam.
 
 ndviewer_light owns the renderer; this repo owns exactly one thing: telling it the
 PHYSICAL voxel size when a raw z-stack is pushed. Without that the volume renders
@@ -32,7 +32,7 @@ if "PySide6" in sys.modules or "PySide2" in sys.modules:
         allow_module_level=True,
     )
 
-from squidmip import _viewer as V  # noqa: E402
+from squidxplorer import _viewer as V  # noqa: E402
 
 from .conftest import (  # noqa: E402
     _scene_stack,
@@ -129,7 +129,7 @@ class TestRawPushCarriesVoxelSize:
         MUTATION: pass `scale=(1.0, py, px)` (or omit it) -> aspect 1 -> red. Pass
         `meta["pixel_size_um"]` for y/x -> red on the layer's own scale.
         """
-        import squidmip._napari3d as napari3d
+        import squidxplorer._napari3d as napari3d
 
         root, _ = squid_dataset
         win = V.PlateWindow(None)
@@ -199,7 +199,7 @@ class TestRawPushCarriesVoxelSize:
         MUTATION: restore the isinstance branch in ``_render_roi_volume`` -> the pushed volume
         comes back at the smallest rung's shape -> red.
         """
-        import squidmip._napari3d as napari3d
+        import squidxplorer._napari3d as napari3d
 
         root, _ = squid_dataset
         win = V.PlateWindow(None)
@@ -244,7 +244,7 @@ class TestThe3DPopoutDoesNotPileUp:
     ):
         """MUTATION: assign self._native3d directly instead of going through
         _replace_native3d -> the first popout is never closed -> red."""
-        import squidmip._napari3d as napari3d
+        import squidxplorer._napari3d as napari3d
 
         class _FakeViewer:
             def __init__(self):
@@ -279,7 +279,7 @@ class TestThe3DPopoutDoesNotPileUp:
     ):
         """A stale window whose close() raises (already destroyed, no Qt window) must not be the
         reason the user cannot open the view they asked for."""
-        import squidmip._napari3d as napari3d
+        import squidxplorer._napari3d as napari3d
 
         class _StuckViewer:
             def close(self):
@@ -339,7 +339,7 @@ def mosaic():
     """
     from napari.components import ViewerModel
 
-    from squidmip._napari_view import MosaicLayers
+    from squidxplorer._napari_view import MosaicLayers
 
     return MosaicLayers(ViewerModel())
 
@@ -528,7 +528,7 @@ def test_a_volume_is_MANY_layers_under_ONE_identity(mosaic):
     Without this the whole file could pass against a one-brick volume and prove nothing about the
     case that actually broke.
     """
-    from squidmip._napari_view import MosaicKey, key_of
+    from squidxplorer._napari_view import MosaicKey, key_of
 
     build_volume_scene(mosaic, OP, CHANNELS, bricks=3)
 
@@ -549,7 +549,7 @@ def test_every_brick_declares_the_operator_whose_volume_it_is(op, mosaic):
     The operator is never compared by name anywhere: it is carried from
     `RegionViewer._volume_source`, which picks it off the registry declaration.
     """
-    from squidmip._napari_view import key_of
+    from squidxplorer._napari_view import key_of
 
     build_volume_scene(mosaic, op, ("c0", "c1"), bricks=3)
 
@@ -572,7 +572,7 @@ def test_the_bricks_claim_the_same_identity_a_2d_mosaic_layer_would():
     """
     from napari.components import ViewerModel
 
-    from squidmip._napari_view import MosaicKey, MosaicLayers, key_of
+    from squidxplorer._napari_view import MosaicKey, MosaicLayers, key_of
 
     flat = MosaicLayers(ViewerModel())
     build_flat_scene(flat, "decon", ("c0",))
@@ -648,7 +648,7 @@ def test_evicting_one_brick_leaves_the_identity_and_its_other_bricks_alone(mosai
 
 def _open_over_flat(mosaic, op="raw", channels=("c0",)):
     """A `BrickedVolume` opened over a scene that already holds flat mosaics of the same op."""
-    from squidmip._brick_view import BrickedVolume
+    from squidxplorer._brick_view import BrickedVolume
 
     build_flat_scene(mosaic, op, channels)
     vol = BrickedVolume(
@@ -666,7 +666,7 @@ def _open_over_flat(mosaic, op="raw", channels=("c0",)):
 
 def test_the_flat_mosaic_leaves_the_tree_while_3d_is_up(mosaic):
     """It must be FOREIGN, not merely hidden: a hidden layer still has a checkbox."""
-    from squidmip._napari_view import key_of
+    from squidxplorer._napari_view import key_of
 
     vol = _open_over_flat(mosaic, "raw", ("c0", "c1"))
     shown, already_hidden = mosaic.find("raw", "c0"), mosaic.find("raw", "c1")
@@ -680,7 +680,7 @@ def test_the_flat_mosaic_leaves_the_tree_while_3d_is_up(mosaic):
 
 
 def test_the_mosaic_gets_its_identity_and_visibility_BACK_on_close(mosaic):
-    from squidmip._napari_view import MosaicKey, key_of
+    from squidxplorer._napari_view import MosaicKey, key_of
 
     vol = _open_over_flat(mosaic, "decon", ("c1",))
     shown = mosaic.find("decon", "c1")
@@ -695,7 +695,7 @@ def test_the_mosaic_gets_its_identity_and_visibility_BACK_on_close(mosaic):
 def test_the_volume_is_the_only_thing_holding_that_key_while_3d_is_up(mosaic):
     """THE REPORTED BUG. If both hold it, one group checkbox lights the volume AND a flat coarser
     plane across it -- which is what 'overlays a downsampled copy over the full res version' is."""
-    from squidmip._napari_view import MosaicKey, key_of
+    from squidxplorer._napari_view import MosaicKey, key_of
 
     vol = _open_over_flat(mosaic, "raw", ("c0",))
     shown = mosaic.find("raw", "c0")

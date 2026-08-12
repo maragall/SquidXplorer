@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import pytest
 
-from squidmip._placement import (
+from squidxplorer._placement import (
     cell_boxes,
     fov_offsets_px,
     mosaic_extent_px,

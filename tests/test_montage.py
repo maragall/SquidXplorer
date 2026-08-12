@@ -14,11 +14,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from squidmip import build_montage
-from squidmip._montage import (
+from squidxplorer import build_montage
+from squidxplorer._montage import (
     _area_downsample, _channel_slug, _hex_to_rgb01, _window, _window_lut, composite,
 )
-from squidmip._output import write_from_stream
+from squidxplorer._output import write_from_stream
 
 # Two channels: red (638) and blue (405), so composite color is unambiguous per channel.
 CH = [
@@ -213,7 +213,7 @@ def test_composite_banding_does_not_change_a_single_pixel(monkeypatch):
     including at the band seams, which is where an off-by-one in the row split would show and
     where a visual check would never look.
     """
-    import squidmip._montage as M
+    import squidxplorer._montage as M
     rng = np.random.default_rng(99)
     store = rng.integers(0, 65535, size=(4, 101, 67)).astype(np.uint16)   # prime-ish, uneven split
     colors = np.stack([_hex_to_rgb01(c) for c in ("#FF0000", "#00FF00", "#0000FF", "#FFFFFF")])
@@ -229,7 +229,7 @@ def test_composite_banding_does_not_change_a_single_pixel(monkeypatch):
 def test_composite_banding_still_honours_the_channel_mask(monkeypatch):
     # A masked channel contributes nothing in EVERY band — a band that forgot the mask would
     # paint a stripe of an off channel back in.
-    import squidmip._montage as M
+    import squidxplorer._montage as M
     store = np.full((2, 80, 40), 40000, np.uint16)
     colors = np.stack([_hex_to_rgb01("#FF0000"), _hex_to_rgb01("#0000FF")])
     monkeypatch.setattr(M, "_COMPOSITE_MIN_PX_PER_BAND", 1)
@@ -247,7 +247,7 @@ def test_composite_of_an_empty_store_is_empty_not_a_crash():
 
 def test_window_lut_cache_is_bounded():
     """A continuous drag mints a new (lo, hi) every tick; an unbounded cache is a slow leak."""
-    import squidmip._montage as M
+    import squidxplorer._montage as M
     for i in range(M._LUT_CACHE_MAX * 3):
         _window_lut(np.dtype(np.uint16), float(i), float(i + 1000))
     assert len(M._LUT_CACHE) <= M._LUT_CACHE_MAX

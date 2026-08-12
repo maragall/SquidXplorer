@@ -12,7 +12,7 @@ not get a *card* in the viewer's operator panel; see §3.)
 templates/operator/
 ├── pyproject.toml                        the entry point that makes this a plugin
 ├── README.md                             this file: THE CONTRACT
-├── squidmip_operator_template/
+├── squidxplorer_operator_template/
 │   ├── __init__.py                       register(): the four declarations
 │   └── _stdev.py                         the algorithm
 └── tests/test_template_operator.py       the four groups of tests every operator needs
@@ -24,24 +24,24 @@ templates/operator/
 
 ```bash
 pip install -e templates/operator          # into the environment that runs SquidXplorer
-python -c "import squidmip; print(squidmip.available_projectors())"
+python -c "import squidxplorer; print(squidxplorer.available_projectors())"
 # ['bgsub', 'cellpose', 'decon', 'decon3d', 'flatfield', 'mip', 'reference', 'spot', 'stdev']
 #                                                                                    ^^^^^^^
 # it runs, headless, over a whole plate:
-squidmip /path/to/acquisition --projector stdev --output-folder /tmp/out
+squidxplorer /path/to/acquisition --projector stdev --output-folder /tmp/out
 
-pip uninstall squidmip-operator-template                        # and it leaves cleanly
+pip uninstall squidxplorer-operator-template                        # and it leaves cleanly
 ```
 
 Or from Python, which is what the template's own tests do:
 
 ```python
-import squidmip
-reader = squidmip.open_reader("/path/to/acquisition")
-for region, fov, image in squidmip.project_plate(reader, projector="stdev",
+import squidxplorer
+reader = squidxplorer.open_reader("/path/to/acquisition")
+for region, fov, image in squidxplorer.project_plate(reader, projector="stdev",
                                                  operator_kwargs={"smooth_sigma": 0.0}):
     ...                                    # (T, C, 1, Y, X), the acquisition's native dtype
-squidmip.write_plate(reader, "/tmp/out.hcs", projector="stdev")   # navigable OME-Zarr plate
+squidxplorer.write_plate(reader, "/tmp/out.hcs", projector="stdev")   # navigable OME-Zarr plate
 ```
 
 ---
@@ -78,14 +78,14 @@ registered operator's name without a written justification.
 For a plane-op, write a natural `plane -> plane` function and lift it:
 
 ```python
-from squidmip import plane_op, add_projector
+from squidxplorer import plane_op, add_projector
 add_projector("mything", plane_op(my_plane_function))     # consumes inferred = frozenset()
 ```
 
 **`consumes={"fov"}` is refused by `add_projector`.** An `add_projector` operator is
 `Iterable[plane] -> plane` and never sees a tile's stage geometry, so anything inter-FOV (stitching,
 fitting an illumination field across a well) cannot be expressed with that callable. Register it
-with `squidmip.add_region_operator` instead, whose entries take
+with `squidxplorer.add_region_operator` instead, whose entries take
 `(reader, region, fovs) -> (T, C, Nz, Y, X)`. It is the **same registry table** and the same four
 declarations — `add_region_operator` stamps `consumes={"fov"}` on the record, and `stitch_plate`
 finds your operator by reading it.
@@ -126,8 +126,8 @@ values.
 ```python
 add_projector("stdev", stdev_op, params=(Param("smooth_sigma", 1.0, "..."),))
 
-squidmip.bind_operator("stdev", {"smooth_sigma": 0.0})            # a different binding
-squidmip.project_plate(reader, projector="stdev",
+squidxplorer.bind_operator("stdev", {"smooth_sigma": 0.0})            # a different binding
+squidxplorer.project_plate(reader, projector="stdev",
                        operator_kwargs={"smooth_sigma": 0.0})      # a run at that binding
 ```
 
@@ -141,11 +141,11 @@ A `Param` has a name, a default and one line of prose. Deliberately **no type, n
 hint**: the moment it carries a widget hint it has become the GUI's schema and two places own the
 same fact.
 
-**How parameters reach the GUI.** `squidmip.operator_params("<name>")` is the public accessor,
+**How parameters reach the GUI.** `squidxplorer.operator_params("<name>")` is the public accessor,
 and `list_operators` reports every parameter with its default, so an agent or script driving the
 app can set them. The desktop GUI reads the same accessor: **your declared parameters become
 widgets, with no code in SquidXplorer that knows your operator's name.**
-`squidmip/_param_panel.py` builds the panel, and the widget is chosen from the TYPE OF YOUR
+`squidxplorer/_param_panel.py` builds the panel, and the widget is chosen from the TYPE OF YOUR
 DEFAULT — which is why `Param` needs no widget hint:
 
 | your default | the widget you get |
@@ -174,7 +174,7 @@ whole contract: this README told you to declare `params` into a GUI that ignored
 planes only, so a value bound at registration never learns which channel it is looking at. If your
 operator must be specialised per channel (a PSF at the right emission wavelength, say), stamp a
 `for_channel(acquisition_path, channel) -> operator` attribute on your callable; the engine calls
-it once per channel and runs what it returns. See `squidmip._decon.optics_for_channel`.
+it once per channel and runs what it returns. See `squidxplorer._decon.optics_for_channel`.
 
 ### 2.5 `requires` — how you declare dependencies, and what happens when they are missing
 
@@ -246,7 +246,7 @@ What your `consumes` buys you, and what it costs:
 | a z-SELECTING operator (`select_index`) inside a chain | **refused by name.** Its z is solved on raw planes outside the operator, so a chain around it would never touch the planes it picks |
 
 Refusals name both operators and say what to do instead; nothing is ever silently reordered. See
-`squidmip/_compose.py`.
+`squidxplorer/_compose.py`.
 
 ---
 
@@ -274,9 +274,9 @@ Stated so you do not build against something that is not there.
 
 | what you did | what happens |
 |---|---|
-| `from squidmip import ...` at **module scope** in your plugin | `OperatorPluginError: ... AttributeError: partially initialized module ... (most likely due to a circular import)`. SquidXplorer loads you from inside `import squidmip`, so importing it back at module scope is re-entrant. **Import squidmip inside `register()`** — the template does, with the reason written next to it. This is the first mistake everyone makes. |
-| Your operator's name is already taken | `add_projector` raises at import; `import squidmip` fails naming your plugin, its distribution, and the collision |
-| Your module raises on import | `OperatorPluginError` out of `import squidmip`, naming your plugin and the original error |
+| `from squidxplorer import ...` at **module scope** in your plugin | `OperatorPluginError: ... AttributeError: partially initialized module ... (most likely due to a circular import)`. SquidXplorer loads you from inside `import squidxplorer`, so importing it back at module scope is re-entrant. **Import squidxplorer inside `register()`** — the template does, with the reason written next to it. This is the first mistake everyone makes. |
+| Your operator's name is already taken | `add_projector` raises at import; `import squidxplorer` fails naming your plugin, its distribution, and the collision |
+| Your module raises on import | `OperatorPluginError` out of `import squidxplorer`, naming your plugin and the original error |
 | Your `register()` raises | same, with "raised while registering its operators" |
 | Your entry point points at nothing | same, at `ep.load()` |
 | A `requires=` module is missing | operator LISTED, run REFUSED by name — see §2.5 |
@@ -285,10 +285,10 @@ Stated so you do not build against something that is not there.
 | You declared a parameter twice | refused at registration — a duplicate makes `operator_kwargs` ambiguous |
 | Your factory returned something not callable | refused at registration, explaining that `params=` makes the registered object a factory |
 
-A broken plugin **stops `import squidmip`**. That is deliberate: the alternative is an application
+A broken plugin **stops `import squidxplorer`**. That is deliberate: the alternative is an application
 that silently does not have the operator you installed, which is the same defect `requires=` exists
 to end, one layer up. The escape hatch, for a user whose app will not start, is
-`SQUIDMIP_NO_PLUGINS=1`, and it is named in every one of those error messages.
+`SQUIDXPLORER_NO_PLUGINS=1`, and it is named in every one of those error messages.
 
 ---
 

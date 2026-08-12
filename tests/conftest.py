@@ -30,7 +30,7 @@ import tifffile
 #: while widgets, the shared QStyle and posted events still pointed at it, segfaulting the run and
 #: taking the summary line with it, so a run that crashed and a run that passed looked identical.
 #:
-#: ``squidmip._viewer.qt_app()`` fixes this for anything that builds a PlateWindow, but modules
+#: ``squidxplorer._viewer.qt_app()`` fixes this for anything that builds a PlateWindow, but modules
 #: like ``tests/test_layer_tree.py`` never build one, so nothing pinned the app for them: measured
 #: 2026-07-28, ``pytest tests/test_layer_tree.py`` returned 139 on 3 of 3 runs, and 0 on 3 of 3
 #: with a reference held. Holding it here covers every GUI module at once, which is the right
@@ -88,7 +88,7 @@ def pytest_sessionfinish(session, exitstatus):
 def pytest_configure(config):
     """Pin the QApplication before any test runs. No-op where PyQt5 is not installed.
 
-    Also redirects the plate cell cache (``squidmip._platecache``) into a temporary directory for
+    Also redirects the plate cell cache (``squidxplorer._platecache``) into a temporary directory for
     the whole session. Two reasons, and both are about the suite being honest rather than tidy:
     a test that opens a fixture acquisition would otherwise write real cells into the developer's
     ``user_cache_dir``, and a cell left there by one run would be read by the next, so a caching
@@ -125,10 +125,10 @@ def pytest_configure(config):
     import sys
     import tempfile
 
-    from squidmip import _platecache
+    from squidxplorer import _platecache
 
     if not os.environ.get(_platecache.ENV_DIR):
-        _CACHE_DIR = tempfile.mkdtemp(prefix="squidmip-test-cache-")
+        _CACHE_DIR = tempfile.mkdtemp(prefix="squidxplorer-test-cache-")
         os.environ[_platecache.ENV_DIR] = _CACHE_DIR
     # Do NOT force PyQt5 in. The GUI modules skip themselves when PySide is already loaded
     # (pytest-qt autoload pulls it in, and two Qt bindings in one process break GL rendering);
@@ -168,12 +168,12 @@ def _keep_test_windows_off_the_foreground() -> None:
         otherwise make the window key and pull focus.
 
     Best-effort by construction: every failure path leaves the old behaviour rather than breaking
-    a test run over a display nicety. Set ``SQUIDMIP_TEST_FOREGROUND=1`` to opt back into windows
+    a test run over a display nicety. Set ``SQUIDXPLORER_TEST_FOREGROUND=1`` to opt back into windows
     that take focus (useful when driving a test by hand and wanting it frontmost).
     """
     import sys
 
-    if sys.platform != "darwin" or os.environ.get("SQUIDMIP_TEST_FOREGROUND"):
+    if sys.platform != "darwin" or os.environ.get("SQUIDXPLORER_TEST_FOREGROUND"):
         return
 
     try:                                        # process-level: never become the active app
@@ -189,7 +189,7 @@ def _keep_test_windows_off_the_foreground() -> None:
         from qtpy.QtCore import Qt
         from qtpy.QtWidgets import QWidget
 
-        if getattr(QWidget, "_squidmip_no_activate", False):
+        if getattr(QWidget, "_squidxplorer_no_activate", False):
             return                              # already patched (pytest_configure ran twice)
         original_set_visible = QWidget.setVisible
 
@@ -202,7 +202,7 @@ def _keep_test_windows_off_the_foreground() -> None:
             return original_set_visible(self, visible)
 
         QWidget.setVisible = set_visible
-        QWidget._squidmip_no_activate = True
+        QWidget._squidxplorer_no_activate = True
     except Exception:
         pass
 
@@ -224,14 +224,14 @@ def _keep_test_windows_off_the_foreground() -> None:
 # TWO, not four: `add_projector` and `add_region_operator` both write `_engine._OPERATORS`, and the
 # `_stitch._REGION_OPERATORS` / `_stitch._REGION_REQUIRES` pair they used to write instead is gone.
 _REGISTRIES = (
-    ("squidmip._engine", "_OPERATORS"),
-    ("squidmip._spots", "_SEGMENTERS"),
+    ("squidxplorer._engine", "_OPERATORS"),
+    ("squidxplorer._spots", "_SEGMENTERS"),
 )
 
 
 @pytest.fixture(autouse=True)
 def _cold_plate_cell_cache(tmp_path, monkeypatch):
-    """Every test starts with a COLD plate cell cache (``squidmip._platecache``).
+    """Every test starts with a COLD plate cell cache (``squidxplorer._platecache``).
 
     Two failures this prevents, and the second is the one that bites. A test that opens a fixture
     acquisition would otherwise write real cells into the developer's ``user_cache_dir``; and,
@@ -244,7 +244,7 @@ def _cold_plate_cell_cache(tmp_path, monkeypatch):
     A test that wants a WARM cache builds one explicitly with ``root=``; that is what
     ``tests/test_platecache.py`` does, and it is the honest way to test persistence.
     """
-    from squidmip import _platecache
+    from squidxplorer import _platecache
 
     monkeypatch.setenv(_platecache.ENV_DIR, str(tmp_path / "plate-cells"))
     _platecache.clear_memory_tier()
@@ -254,7 +254,7 @@ def _cold_plate_cell_cache(tmp_path, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _cold_result_cache():
-    """Every test starts and ends with an EMPTY ``squidmip._recipe.RESULTS``.
+    """Every test starts and ends with an EMPTY ``squidxplorer._recipe.RESULTS``.
 
     ``RESULTS`` is process-wide by design -- that is what makes a result computed in one window
     available to a window opened later -- and its key is ``(region scope, acquisition, chain)``.
@@ -264,7 +264,7 @@ def _cold_result_cache():
     tmp_path fixture and two tests that happen to get the same tmp_path prefix are not worth
     reasoning about: the same argument as ``_cold_plate_cell_cache`` above, and the same fix.
     """
-    from squidmip import _recipe
+    from squidxplorer import _recipe
 
     _recipe.RESULTS.clear()
     yield
@@ -702,7 +702,7 @@ def sim_1536wp():
     return SIM_1536WP
 
 
-# --- the decentralized WINDOW (squidmip/_region_viewer.RegionViewer) under offscreen Qt ---------
+# --- the decentralized WINDOW (squidxplorer/_region_viewer.RegionViewer) under offscreen Qt ---------
 #
 # Since the decentralization (2026-07-23) the root PlateWindow has no central viewer: `_detail` is
 # permanently None and viewing happens in independent `RegionViewer` windows, each with its OWN
@@ -761,7 +761,7 @@ def _stub_pane_classes():
         if scale is not None or bbox is None:
             return scale, translate
         try:
-            from squidmip._napari_view import placement_for
+            from squidxplorer._napari_view import placement_for
 
             level0 = data[0] if isinstance(data, (list, tuple)) else data
             return placement_for(int(level0.ndim), bbox, level0.shape[-2:], kw.get("z_scale_um"))
@@ -842,8 +842,8 @@ def _stub_pane_classes():
         @staticmethod
         def _reduces_z(op):
             """The DECLARATION, exactly as `MosaicLayers._reduces_z` reads it — never the name."""
-            from squidmip._engine import Z_REDUCER, operator_consumes
-            from squidmip._operations import operator_name
+            from squidxplorer._engine import Z_REDUCER, operator_consumes
+            from squidxplorer._operations import operator_name
 
             try:
                 return operator_consumes(operator_name(str(op))) == Z_REDUCER
@@ -1020,7 +1020,7 @@ def napari_pane_stub(monkeypatch):
 
     Every window opened while this fixture is active gets its own recording pane, in open order.
     """
-    import squidmip._napari_pane as napari_pane
+    import squidxplorer._napari_pane as napari_pane
 
     stub_pane_cls = _stub_pane_classes()
     panes = []
@@ -1073,7 +1073,7 @@ def build_volume_scene(mosaic, op="raw", channels=("488", "561"), bricks=3):
     SEVERAL bricks by default. A rule that only holds for a one-brick volume is the bug wearing a
     disguise: one brick and one mosaic layer are the same shape, and the shape is the problem.
     """
-    from squidmip._brick_view import BrickedVolume
+    from squidxplorer._brick_view import BrickedVolume
 
     vol = BrickedVolume(
         mosaic, reader=None, meta={}, region="A1", window_px=(0, 8, 0, 8),

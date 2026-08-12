@@ -139,7 +139,7 @@
 ### CLI
 
 - Purpose: run the Iterator headless, high throughput.
-- Signature: squidmip(input_dir, operation, output_dir, options) drives Iterator(acquisition, operation) then WriteAcquisition.
+- Signature: squidxplorer(input_dir, operation, output_dir, options) drives Iterator(acquisition, operation) then WriteAcquisition.
 - Requirements:
   - pydantic-settings params (field docstrings become help). Validate up front (dir exists, known operator) before any disk write.
   - Resilient: skip a bad well and report the count.

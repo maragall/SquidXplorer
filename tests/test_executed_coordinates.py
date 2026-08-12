@@ -34,7 +34,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from squidmip.reader import COORDS_EXECUTED, COORDS_PLANNED, _coords_path, load_fov_positions_um
+from squidxplorer.reader import COORDS_EXECUTED, COORDS_PLANNED, _coords_path, load_fov_positions_um
 
 _PLANNED = "region,x (mm),y (mm),z (mm)\nA1,1.0,1.0,0.0\nA1,2.0,1.0,0.0\n"
 

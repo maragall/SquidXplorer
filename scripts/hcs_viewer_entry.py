@@ -1,7 +1,7 @@
 """PyInstaller entry point for the frozen HCS viewer.
 
-Normal launch is exactly ``squidmip._viewer.main`` — the frozen bundle and the
-``squidmip-view`` console script run the same code.
+Normal launch is exactly ``squidxplorer._viewer.main`` — the frozen bundle and the
+``squidxplorer-view`` console script run the same code.
 
 ``--selftest DATASET`` (IMA-232) is the headless proof that the *bundle* works, not just
 the source tree: it builds the real ``PlateWindow`` against a real acquisition folder
@@ -16,7 +16,7 @@ import sys
 
 if not getattr(sys, "frozen", False):
     # Running from a checkout: put THIS tree's repo root ahead of site-packages. An
-    # editable install elsewhere on the machine can point `squidmip` at a different
+    # editable install elsewhere on the machine can point `squidxplorer` at a different
     # checkout (it did — at a worktree with no _viewer.py), and running a script file
     # does not put the cwd on sys.path to save you. Frozen builds skip this: the bundle
     # carries its own copy and the repo root does not exist on the demoer's machine.
@@ -29,19 +29,19 @@ def _selftest(dataset: str) -> int:
     # windowed bundle would otherwise abort before reaching a single line of our code.
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-    # squidmip FIRST, then qtpy. That order is the whole point: importing the package is what
+    # squidxplorer FIRST, then qtpy. That order is the whole point: importing the package is what
     # pins QT_API, and qtpy resolves the binding at ITS import, so a `from qtpy... import` above
     # this line would settle on qtpy's own default (PyQt5) and the selftest would exercise a
     # different binding than the app ships. Naming PyQt5 here directly, as this did until
     # 2026-07-31, was the same bug with the answer hardcoded.
-    from squidmip._viewer import PlateWindow
+    from squidxplorer._viewer import PlateWindow
 
     from qtpy.QtWidgets import QApplication
 
     app = QApplication.instance() or QApplication([])
     # The viewer's own test escape hatch (_viewer.main checks it) — set on the app rather
     # than faked here, so the check exercises the shipped code path.
-    app.setProperty("_squidmip_test", True)
+    app.setProperty("_squidxplorer_test", True)
 
     win = PlateWindow(dataset)
     app.processEvents()
@@ -91,7 +91,7 @@ def _compute_check(win) -> dict:
     # ImportError on every run -- caught while flipping the Qt binding on 2026-07-31, unrelated to
     # it. It failed inside `_compute_check`'s own try/except, which reports rather than crashes,
     # so a frozen build reported "compute check failed" and exited 0 the whole time.
-    from squidmip import deconvolve_plane, project_well, subtract_background
+    from squidxplorer import deconvolve_plane, project_well, subtract_background
 
     out = {}
     try:
@@ -121,7 +121,7 @@ def main() -> int:
             return 2
         return _selftest(sys.argv[i + 1])
 
-    from squidmip._viewer import main as viewer_main
+    from squidxplorer._viewer import main as viewer_main
 
     viewer_main()
     return 0

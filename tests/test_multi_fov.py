@@ -14,9 +14,9 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from squidmip._output import write_from_stream
-from squidmip.projection import project_well, resolve_n_fovs, select_fovs
-from squidmip.reader import open_reader
+from squidxplorer._output import write_from_stream
+from squidxplorer.projection import project_well, resolve_n_fovs, select_fovs
+from squidxplorer.reader import open_reader
 
 
 def _meta(fovs_per_region):

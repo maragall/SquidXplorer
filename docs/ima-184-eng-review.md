@@ -1,10 +1,10 @@
 # IMA-184 — Engineering Review (longform)
 
-Slot 4 of the SquidMIP state machine (189 → 183(+187) → 188 → **184**). Output: a canonical
+Slot 4 of the SquidXplorer state machine (189 → 183(+187) → 188 → **184**). Output: a canonical
 multiscale OME-zarr HCS plate + an individual-TIFF export, written by streaming IMA-188's
 `project_plate`. Landed on `main` via `--no-ff` merge; cross commit green on both datasets.
 
-Public surface: `from squidmip import write_plate`.
+Public surface: `from squidxplorer import write_plate`.
 
 ## 1. Intent (asserted a-priori, before code)
 
@@ -20,7 +20,7 @@ Public surface: `from squidmip import write_plate`.
 - **Fail loud.** Refuse a non-`(T,C,1,Y,X)` frame, a channel-count mismatch, or a
   non-`<letters><digits>` region — a mislabelled field must never be written silently.
 
-## 2. Inherited seam (verified against merged `squidmip/`)
+## 2. Inherited seam (verified against merged `squidxplorer/`)
 
 - **Contract consumed:** `project_plate(reader, *, n_fovs=1, workers=None, projector="mip")
   -> Iterator[(region, fov, ndarray(T, C, 1, Y, X))]` (`_engine.py`), native dtype, TCZYX,
@@ -33,7 +33,7 @@ Public surface: `from squidmip import write_plate`.
 
 ## 3. Design decisions
 
-- **Vendor, don't import.** `squidmip/_zarr_store.py` vendors the ~40-line tensorstore
+- **Vendor, don't import.** `squidxplorer/_zarr_store.py` vendors the ~40-line tensorstore
   store-config (blosc-zstd zarr v3) + NGFF group JSON. Importing `tilefusion` would run its
   heavy `__init__` (numba / GPU / basicpy). `tensorstore` is the only new runtime dep.
 - **Layout = Squid canonical:** `plate.ome.zarr/{row}/{col}/{fov}/0`, arrays named `0`
@@ -50,7 +50,7 @@ Public surface: `from squidmip import write_plate`.
 ## 4. The contract IMA-185 consumes (finalized — stable)
 
 ```python
-from squidmip import write_plate
+from squidxplorer import write_plate
 manifest = write_plate(reader, out_dir, *, n_fovs=1, workers=None, projector="mip", tiff=True)
 #   out_dir/plate.ome.zarr/{row}/{col}/{fov}/0   — OME-NGFF v0.5 HCS plate (zarr v3, TCZYX)
 #   out_dir/tiff/{t}/{region}_{fov}_0_{channel}.tiff   — individual per-plane TIFFs
@@ -86,10 +86,10 @@ manifest = write_plate(reader, out_dir, *, n_fovs=1, workers=None, projector="mi
 
 ## 7. Verification figures (saved to `~/Downloads` — drag each PNG in to embed)
 
-- `squidmip_ima184_plate_colors.png` — OME-zarr plate, omero colors from the channel YAML.
-- `squidmip_ima184_roundtrip_identity.png` — project_well vs OME-zarr vs TIFF, `|diff| = 0`.
-- `squidmip_ima184_write_memory.png` — flat memory footprint vs "if materialized".
-- `squidmip_ima184_write_speed.png` — per-well write time, both datasets.
+- `squidxplorer_ima184_plate_colors.png` — OME-zarr plate, omero colors from the channel YAML.
+- `squidxplorer_ima184_roundtrip_identity.png` — project_well vs OME-zarr vs TIFF, `|diff| = 0`.
+- `squidxplorer_ima184_write_memory.png` — flat memory footprint vs "if materialized".
+- `squidxplorer_ima184_write_speed.png` — per-well write time, both datasets.
 
 ## 8. Block-by-block review feedback applied
 

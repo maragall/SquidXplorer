@@ -106,9 +106,9 @@ def measure(root: Path, fps_list, seconds: float, blocking: bool) -> int:
 
     app = QApplication.instance() or QApplication([])
 
-    from squidmip import open_reader
-    from squidmip._napari_pane import gl_available
-    from squidmip._region_viewer import RegionViewer, ViewerManager
+    from squidxplorer import open_reader
+    from squidxplorer._napari_pane import gl_available
+    from squidxplorer._region_viewer import RegionViewer, ViewerManager
 
     ok, why = gl_available()
     print(f"napari canvas: {'REAL (GL available)' if ok else f'NOT AVAILABLE — {why}'}")

@@ -11,7 +11,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from squidmip._spots import (
+from squidxplorer._spots import (
     DEFAULT_PARAMS,
     LAYER_KEY,
     SpotParams,
@@ -203,7 +203,7 @@ def test_a_non_positive_sigma_is_refused():
 
 def test_spot_detection_is_a_peer_of_mip_in_the_ENGINE_registry():
     """Not a special case: it is in the same table mip/bgsub/decon are in (IMA-210's seam)."""
-    from squidmip import available_projectors
+    from squidxplorer import available_projectors
 
     assert LAYER_KEY in available_projectors()
 
@@ -215,7 +215,7 @@ def test_it_declares_that_it_does_NOT_consume_z():
     CellProfiler both use. Declaring ``{"z"}`` here would silently throw away every plane but
     one's worth of cells.
     """
-    from squidmip import operator_consumes
+    from squidxplorer import operator_consumes
 
     assert operator_consumes(LAYER_KEY) == frozenset()
 
@@ -247,7 +247,7 @@ def test_more_nuclei_than_the_container_dtype_can_hold_fails_loud():
 
 
 def test_registering_it_twice_is_refused_so_a_reimport_cannot_clobber_the_table():
-    from squidmip import add_projector
+    from squidxplorer import add_projector
 
     with pytest.raises(ValueError, match="already defined"):
         add_projector(LAYER_KEY, spots_op())
@@ -280,7 +280,7 @@ def test_the_defaults_are_valid():
 
 
 def test_every_stage_announces_itself_so_the_indicator_has_something_to_say():
-    from squidmip._spots import STAGES
+    from squidxplorer._spots import STAGES
 
     seen = []
     detect_spots(_plane_with_disks(_FOUR), on_stage=lambda n, d, t: seen.append((n, d, t)))
@@ -292,7 +292,7 @@ def test_every_stage_announces_itself_so_the_indicator_has_something_to_say():
 
 def test_the_progress_total_is_derived_from_the_stage_list_not_hardcoded_twice():
     """Two representations of one number that can disagree is this codebase's defect shape."""
-    from squidmip._spots import STAGES
+    from squidxplorer._spots import STAGES
 
     totals = []
     detect_spots(_plane_with_disks(_FOUR), on_stage=lambda n, d, t: totals.append(t))
@@ -301,7 +301,7 @@ def test_the_progress_total_is_derived_from_the_stage_list_not_hardcoded_twice()
 
 def test_a_cancel_raises_instead_of_returning_a_half_finished_answer():
     """A partial segmentation that looks finished would report a WRONG count and look fine."""
-    from squidmip._spots import SpotDetectionCancelled
+    from squidxplorer._spots import SpotDetectionCancelled
 
     with pytest.raises(SpotDetectionCancelled):
         detect_spots(_plane_with_disks(_FOUR), should_stop=lambda: True)
@@ -309,7 +309,7 @@ def test_a_cancel_raises_instead_of_returning_a_half_finished_answer():
 
 def test_cancel_is_checked_at_every_stage_not_only_the_first():
     """Cancelling after the run has started must still take effect."""
-    from squidmip._spots import SpotDetectionCancelled
+    from squidxplorer._spots import SpotDetectionCancelled
 
     calls = {"n": 0}
 
@@ -339,7 +339,7 @@ def test_a_run_that_is_not_cancelled_is_unaffected_by_the_seam():
 def test_the_default_segmenter_is_registered_under_an_algorithm_neutral_operator_name():
     """The operator is called 'spot' — what it PRODUCES. 'otsu-watershed' is the algorithm, and
     it lives in a separate table so a sibling can replace it without renaming the operator."""
-    from squidmip._spots import DEFAULT_SEGMENTER, available_segmenters
+    from squidxplorer._spots import DEFAULT_SEGMENTER, available_segmenters
 
     assert LAYER_KEY == "spot"
     assert DEFAULT_SEGMENTER in available_segmenters()
@@ -349,7 +349,7 @@ def test_the_default_segmenter_is_registered_under_an_algorithm_neutral_operator
 def test_a_new_segmenter_is_one_call_and_the_operator_does_not_change():
     """This is the Cellpose drop-in, rehearsed with a stub: register a function that returns a
     LABEL IMAGE and everything downstream — count, centroids, layers, readout — already works."""
-    from squidmip._spots import add_segmenter, result_from_labels
+    from squidxplorer._spots import add_segmenter, result_from_labels
 
     def fake_cellpose(plane, params, *, on_stage=None, should_stop=None):
         labels = np.zeros(plane.shape, dtype=np.int32)
@@ -365,7 +365,7 @@ def test_a_new_segmenter_is_one_call_and_the_operator_does_not_change():
         assert res.centroids.shape == (2, 2)
         assert int(res.labels.max()) == 2
     finally:
-        from squidmip._spots import _SEGMENTERS
+        from squidxplorer._spots import _SEGMENTERS
 
         del _SEGMENTERS[name]
 
@@ -373,7 +373,7 @@ def test_a_new_segmenter_is_one_call_and_the_operator_does_not_change():
 def test_result_from_labels_gives_every_segmenter_the_same_counting_semantics():
     """Cellpose returns a label array with arbitrary, non-sequential ids. The shared helper is
     what stops two segmenters disagreeing about what 'how many' means."""
-    from squidmip._spots import result_from_labels
+    from squidxplorer._spots import result_from_labels
 
     labels = np.zeros((32, 32), dtype=np.int32)
     labels[2:6, 2:6] = 7                                       # gappy, non-sequential ids…
@@ -388,7 +388,7 @@ def test_result_from_labels_gives_every_segmenter_the_same_counting_semantics():
 def test_an_uninstalled_segmenter_is_a_NAMED_refusal_not_a_silent_absence():
     """A missing optional dep must not make the operator quietly vanish from the list — that is
     indistinguishable from nobody having written it."""
-    from squidmip._spots import (
+    from squidxplorer._spots import (
         MissingSegmenterDependency,
         _SEGMENTERS,
         add_segmenter,
@@ -417,7 +417,7 @@ def test_an_unknown_segmenter_names_the_ones_that_do_exist():
 
 
 def test_registering_a_segmenter_twice_is_refused():
-    from squidmip._spots import DEFAULT_SEGMENTER, add_segmenter, skimage_watershed
+    from squidxplorer._spots import DEFAULT_SEGMENTER, add_segmenter, skimage_watershed
 
     with pytest.raises(ValueError, match="already defined"):
         add_segmenter(DEFAULT_SEGMENTER, skimage_watershed)
@@ -427,7 +427,7 @@ def test_a_slow_segmenter_can_still_be_cancelled_and_report_progress():
     """Cellpose on a mosaic is seconds to minutes. The cancel/progress seam is the SEGMENTER's
     to honour, so it is part of the registered signature, not something the fast one gets away
     with ignoring."""
-    from squidmip._spots import SpotDetectionCancelled, _SEGMENTERS, add_segmenter
+    from squidxplorer._spots import SpotDetectionCancelled, _SEGMENTERS, add_segmenter
 
     def slow(plane, params, *, on_stage=None, should_stop=None):
         if on_stage is not None:
@@ -450,8 +450,8 @@ def test_a_slow_segmenter_can_still_be_cancelled_and_report_progress():
 
 def test_the_engine_operator_resolves_its_segmenter_lazily_not_at_import():
     """Registering a Cellpose operator must not import cellpose (or claim a GPU) at
-    ``import squidmip`` time. Building the op is free; only running it resolves."""
-    from squidmip._spots import MissingSegmenterDependency, _SEGMENTERS, add_segmenter
+    ``import squidxplorer`` time. Building the op is free; only running it resolves."""
+    from squidxplorer._spots import MissingSegmenterDependency, _SEGMENTERS, add_segmenter
 
     name = "lazy-stub"
     add_segmenter(name, lambda *a, **k: None, requires=("definitely_not_installed_xyz",))

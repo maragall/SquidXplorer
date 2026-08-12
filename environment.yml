@@ -1,9 +1,9 @@
 # One-command setup for the MIP tool (GUI + CLI).
 #   conda env create -f environment.yml
-#   conda activate squidmip
-# then run:  squidmip-view <acquisition>      (desktop app)
-#       or:  squidmip <acquisition> --tiff    (headless CLI)
-name: squidmip
+#   conda activate squidxplorer
+# then run:  squidxplorer-view <acquisition>      (desktop app)
+#       or:  squidxplorer <acquisition> --tiff    (headless CLI)
+name: squidxplorer
 channels:
   - conda-forge
 dependencies:
@@ -19,12 +19,12 @@ dependencies:
       - tensorstore
       - pydantic-settings
       # PyQt6 as of 2026-07-31, matching pyproject's [gui] extra and the QT_API pin in
-      # squidmip/__init__.py. A conda env that installs PyQt5 while the package pins pyqt6
+      # squidxplorer/__init__.py. A conda env that installs PyQt5 while the package pins pyqt6
       # produces the exact silent split this migration exists to end: the pin falls back, the
       # app runs Qt5, and nothing says so.
       - PyQt6
       # `".[gui]"`, not `"."`, as of 2026-08-05. This file's own header promises
-      # `squidmip-view <acquisition>` works after one command, and with a bare `"."` it did not:
+      # `squidxplorer-view <acquisition>` works after one command, and with a bare `"."` it did not:
       # `.` installs the headless CLI only, so `conda env create -f environment.yml` produced an
       # environment with NO NAPARI -- the exact "every view window says napari viewer
       # unavailable" failure that pyproject's [gui] comment documents as a FIXED bug. It was
@@ -33,4 +33,4 @@ dependencies:
       # PyQt6 above is now redundant (the [gui] extra pins it) and is kept deliberately: it
       # states the binding at the point a reader is choosing an environment, and a conda env that
       # resolves PyQt5 while the package pins pyqt6 is the silent split this migration ended.
-      - ".[gui]"     # squidmip + the desktop app (run `conda env create` from the repo root)
+      - ".[gui]"     # squidxplorer + the desktop app (run `conda env create` from the repo root)

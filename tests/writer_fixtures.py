@@ -1,6 +1,6 @@
 """IMA-254: one TINY synthetic acquisition per Squid output writer.
 
-THE POINT. Two of Squid's writers were unserved by ``squidmip.reader`` — one of them silently —
+THE POINT. Two of Squid's writers were unserved by ``squidxplorer.reader`` — one of them silently —
 and the reason was not that they are hard. It is that this repo only ever had two acquisitions to
 test against, and both of them came from the same writer. Coverage followed whatever happened to
 be in ``~/Downloads``. This module makes coverage follow the SPEC instead: every writer in

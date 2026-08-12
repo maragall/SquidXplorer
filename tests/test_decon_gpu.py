@@ -1,6 +1,6 @@
 """The GPU decon backend must be a BACKEND: same algorithm, same numbers, different device.
 
-The whole risk of ``squidmip/_decon_gpu.py`` is that it is a second transcription of
+The whole risk of ``squidxplorer/_decon_gpu.py`` is that it is a second transcription of
 ``petakit.engine._rl_core`` and could silently drift from it. So the load-bearing test here is
 not "the GPU path returns an array", it is "the GPU path returns petakit's array". Everything
 else in this file is about the DECISION (which device, and when not to), which must be
@@ -34,9 +34,9 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from squidmip import _decon_gpu
-from squidmip._decon import DEFAULT_OPTICS, METHOD, make_psf, make_psf_2d
-from squidmip.projection import cast_like
+from squidxplorer import _decon_gpu
+from squidxplorer._decon import DEFAULT_OPTICS, METHOD, make_psf, make_psf_2d
+from squidxplorer.projection import cast_like
 
 petakit = pytest.importorskip("petakit")
 
@@ -126,7 +126,7 @@ def test_the_uint16_planes_the_two_backends_write_agree_to_the_quantisation_step
 def test_deconvolve_plane_goes_through_the_device_and_still_matches_the_cpu_path(monkeypatch):
     """The seam, not just the kernel: ``_run``'s fork must not change ``deconvolve_plane``."""
     _device_or_skip()
-    from squidmip import _decon
+    from squidxplorer import _decon
 
     plane = _phantom((1, SIZE, SIZE), seed=7)[0].astype(np.uint16)
 
@@ -310,7 +310,7 @@ def test_end_to_end_at_the_real_camera_width_cpu_and_gpu_write_the_same_plane(mo
     backend comparison in this file.
     """
     _device_or_skip()
-    from squidmip import _decon
+    from squidxplorer import _decon
 
     plane = _rim_phantom((1, AWKWARD, AWKWARD), seed=13)[0].astype(np.uint16)
     monkeypatch.setenv(_decon_gpu.ENV_VAR, "cpu")
@@ -426,7 +426,7 @@ def test_opting_the_cpu_path_into_padding_keeps_the_extent_and_stays_below_shot_
 
     It does NOT meet the one-count bar the GPU path meets; see :data:`CPU_PAD_MAX_COUNTS`.
     """
-    from squidmip import _decon
+    from squidxplorer import _decon
 
     # 514 = 2 x 257, NOT 7-smooth, so the pad plan is non-trivial. 512 would be 2^9 and the
     # test would silently assert nothing.
@@ -450,7 +450,7 @@ def test_opting_the_cpu_path_into_padding_keeps_the_extent_and_stays_below_shot_
 
 
 def test_forcing_a_device_this_machine_does_not_have_falls_back_instead_of_raising(monkeypatch):
-    """``SQUIDMIP_DECON_DEVICE=mps`` on a CUDA box (or vice versa) must degrade, not explode
+    """``SQUIDXPLORER_DECON_DEVICE=mps`` on a CUDA box (or vice versa) must degrade, not explode
     from inside torch halfway through a plate run."""
     monkeypatch.setattr(_decon_gpu, "_torch_device", lambda: "cuda")
     monkeypatch.setenv(_decon_gpu.ENV_VAR, "mps")
@@ -467,7 +467,7 @@ def test_a_volume_too_large_for_a_tiler_less_backend_is_declined(monkeypatch):
     """petakit answers an oversized volume by tiling along z; this backend must answer by
     declining, never by allocating something that does not fit.
 
-    NEEDS TORCH, which is not a squidmip dependency -- the test below this one calls its absence
+    NEEDS TORCH, which is not a squidxplorer dependency -- the test below this one calls its absence
     "the normal case on a clean install". With no GPU device to size against, `describe` answers
     "CPU (no torch GPU device)" and never reaches the size reasoning asserted here, so on CI and in
     any clean venv this failure was about the environment and not about the backend. It was one of
@@ -481,7 +481,7 @@ def test_a_volume_too_large_for_a_tiler_less_backend_is_declined(monkeypatch):
 
 
 def test_selection_degrades_silently_when_torch_is_absent(monkeypatch):
-    """The normal case on a clean install: torch is not a squidmip dependency at all."""
+    """The normal case on a clean install: torch is not a squidxplorer dependency at all."""
     monkeypatch.setattr(_decon_gpu, "_torch_device", lambda: None)
     assert _decon_gpu.select_device((1, 256, 256)) is None
     assert "no torch GPU device" in _decon_gpu.describe((1, 256, 256))
@@ -489,7 +489,7 @@ def test_selection_degrades_silently_when_torch_is_absent(monkeypatch):
 
 def test_the_device_choice_is_logged_once_and_not_once_per_plane(caplog, monkeypatch):
     """A decon that silently declined the GPU must be visible in the log panel, not a mystery."""
-    from squidmip import _decon
+    from squidxplorer import _decon
 
     monkeypatch.setattr(_decon_gpu, "_LOG_ONCE", set())
     monkeypatch.setenv(_decon_gpu.ENV_VAR, "cpu")

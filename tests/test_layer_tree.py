@@ -44,7 +44,7 @@ def _run_qt(script_body: str, tmp_path, marker: str):
     # guarantees a segfault and a permanent skip. Let Qt pick the real platform.
     env.pop("QT_QPA_PLATFORM", None)
     # Pin the CHILD to the binding the PARENT is using. This used to hardcode "pyqt5" with the
-    # comment "squidmip imports PyQt5", which stopped being true on 2026-07-30 when every Qt import
+    # comment "squidxplorer imports PyQt5", which stopped being true on 2026-07-30 when every Qt import
     # moved to qtpy: the child would then run PyQt5 while a QT_API=pyqt6 parent ran PyQt6, which is
     # the one-binding rule broken across a process boundary and the reason PyQt5 kept appearing in
     # a Qt6 run's module list. What the original comment was RIGHT about is why the pin exists at
@@ -76,7 +76,7 @@ from qtpy.QtWidgets import QApplication, QVBoxLayout, QWidget
 app = QApplication.instance() or QApplication([])
 out = {}
 try:
-    from squidmip._napari_pane import MosaicPane
+    from squidxplorer._napari_pane import MosaicPane
 """
 
 _POSTAMBLE = r"""
@@ -184,7 +184,7 @@ def test_the_3d_button_is_naparis_own_and_is_kept_alive_but_hidden(tmp_path):
     # (docs/VERSIONS.md), so that assertion pinned a green test to a control the user does not
     # have, which is the same defect the tooltip itself was written to avoid. The escape hatch is
     # now the ROI crop, which is real, so that is what we pin.
-    from squidmip._napari_pane import NDISPLAY_TOOLTIP
+    from squidxplorer._napari_pane import NDISPLAY_TOOLTIP
 
     assert got["tooltip"] == NDISPLAY_TOOLTIP
     assert "ROI" in got["tooltip"], "the tooltip must name a real way to reach full resolution"
@@ -205,8 +205,8 @@ from qtpy.QtWidgets import QApplication                             # noqa: E402
 
 import numpy as np                                                   # noqa: E402
 
-from squidmip._napari_view import MosaicLayers                       # noqa: E402
-from squidmip._layer_tree import MosaicTree                          # noqa: E402
+from squidxplorer._napari_view import MosaicLayers                       # noqa: E402
+from squidxplorer._layer_tree import MosaicTree                          # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -527,7 +527,7 @@ def test_foreign_layers_never_appear_in_the_tree(tree, mosaic, qapp):
 
 def _brick(mosaic, op, channel, iy, ix):
     """One brick layer, stamped exactly as ``BrickedVolume._add_layer`` stamps it."""
-    from squidmip._napari_view import MosaicKey
+    from squidxplorer._napari_view import MosaicKey
 
     return mosaic.model.add_image(
         _img(iy * 3 + ix, (4, 8, 8)), name=f"{channel} B{iy},{ix}",
@@ -730,7 +730,7 @@ def test_the_tree_is_mounted_beside_naparis_own_controls(tmp_path):
 def test_the_rows_are_painted_by_naparis_own_delegate(qapp, mosaic):
     """Not "a delegate is set" -- napari's, by class. A fallback that silently kept Qt's default
     would leave the ugly rows on screen with every test still green."""
-    from squidmip import _layer_tree as LT
+    from squidxplorer import _layer_tree as LT
 
     tree = LT.MosaicTree(mosaic)
     delegate = tree.itemDelegate()
@@ -754,7 +754,7 @@ def test_the_eye_rules_reach_the_tree_and_not_only_naparis_own_list():
     Pure logic against a known sheet: the live theme is napari's to change, but the REWRITE is
     ours, and it is the part that regressed silently once already.
     """
-    from squidmip import _layer_tree as LT
+    from squidxplorer import _layer_tree as LT
 
     sheet = (
         'QListView { background: #000000; }\n'
@@ -781,7 +781,7 @@ def test_the_eye_rules_reach_the_tree_and_not_only_naparis_own_list():
 def test_the_model_serves_every_role_that_delegate_paints_from(qapp, mosaic):
     """The delegate is only as good as the roles behind it. Miss one and the row degrades
     silently: no thumbnail, or a folder icon on a channel, with nothing raised."""
-    from squidmip import _layer_tree as LT
+    from squidxplorer import _layer_tree as LT
 
     assert LT._NAPARI_ROLES, "napari's delegate roles did not resolve; rows cannot be painted"
     view = LT.MosaicTree(mosaic)        # held: the model is parented to it and dies with it
@@ -821,7 +821,7 @@ def test_the_rows_actually_PAINT_without_raising(qapp, mosaic):
 
     from qtpy.QtGui import QPixmap
 
-    from squidmip import _layer_tree as LT
+    from squidxplorer import _layer_tree as LT
 
     view = LT.MosaicTree(mosaic)
     view.resize(300, 400)
@@ -848,7 +848,7 @@ def test_the_rows_actually_PAINT_without_raising(qapp, mosaic):
 
 def test_selecting_a_channel_row_selects_that_layer_in_napari(qapp, mosaic):
     """MUTATION: drop the currentChanged connection and this goes red."""
-    from squidmip import _layer_tree as LT
+    from squidxplorer import _layer_tree as LT
 
     tree = LT.MosaicTree(mosaic)
     tree.setCurrentIndex(_ch_index_of(tree, "raw", "488"))
@@ -868,7 +868,7 @@ def test_selecting_a_processing_layer_selects_all_of_its_channels(qapp, mosaic):
     setter calls select_only(), which silently collapses a four-channel selection to one; that
     is what it did before this test existed.
     """
-    from squidmip import _layer_tree as LT
+    from squidxplorer import _layer_tree as LT
 
     tree = LT.MosaicTree(mosaic)
     tree.setCurrentIndex(_op_index_of(tree, "raw"))
@@ -887,7 +887,7 @@ def test_the_tree_lists_topmost_first_like_naparis_own_layer_list(qapp, mosaic):
 
     MUTATION: drop either `reversed(...)` in `refresh` and this goes red.
     """
-    from squidmip import _layer_tree as LT
+    from squidxplorer import _layer_tree as LT
 
     tree = LT.MosaicTree(mosaic)
     model = tree.model()
@@ -896,7 +896,7 @@ def test_the_tree_lists_topmost_first_like_naparis_own_layer_list(qapp, mosaic):
     # napari's own order, as its list widget shows it: last added first.
     napari_order = []
     for layer in reversed(list(mosaic.model.layers)):
-        op = layer.metadata["squidmip"]["op"]
+        op = layer.metadata["squidxplorer"]["op"]
         if op not in napari_order:
             napari_order.append(op)
     assert ours == napari_order, f"tree shows {ours}, napari shows {napari_order}"

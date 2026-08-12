@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from squidmip._plate import (
+from squidxplorer._plate import (
     CarrierArt,
     Plate,
     PlateBuildError,
@@ -35,7 +35,7 @@ from squidmip._plate import (
 )
 # Private on purpose: the pitch-matching tests below assert a PROPERTY of the candidate table
 # (no two candidates within the tolerance), which cannot be enumerated without the table itself.
-from squidmip._plate import _PITCH_TOL, _SLIDE_FORMATS, _WELLPLATE_FORMATS
+from squidxplorer._plate import _PITCH_TOL, _SLIDE_FORMATS, _WELLPLATE_FORMATS
 
 
 # --------------------------------------------------------------------------- helpers
@@ -544,7 +544,7 @@ _SYNTH = Path.home() / "Downloads" / "synthetic_2x2_wellplate"
 
 @pytest.mark.skipif(not _SYNTH.is_dir(), reason="synthetic_2x2_wellplate not present")
 def test_real_synthetic_dataset_resolves_to_96_not_the_declared_384():
-    from squidmip.reader import open_reader
+    from squidxplorer.reader import open_reader
 
     md = open_reader(_SYNTH).metadata
     assert md["wellplate_format"] == "384 well plate"        # what the yaml says
@@ -762,7 +762,7 @@ def test_real_tissue_regions_stacked_on_the_stage_are_drawn_as_an_even_row():
     plate draws from them: a stacked pair on the stage is still a one-row carrier on screen, because
     stacking them on screen too is what "looked like shite" and wasted the horizontal space.
     """
-    from squidmip.reader import open_reader
+    from squidxplorer.reader import open_reader
 
     md = open_reader(Path.home() / "Downloads" /
                      "test_10x_laser_af_z_stack_2025-10-28_13-40-43.939945 yy").metadata

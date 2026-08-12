@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 import qtpy
 
-from squidmip._napari_view import (
+from squidxplorer._napari_view import (
     META_KEY,
     MosaicKey,
     MosaicLayers,
@@ -43,14 +43,14 @@ def _img(seed=0, shape=(32, 32)):
 
 def test_napari_is_the_default_viewer_now_that_the_gate_passed():
     assert resolve_viewer({}) == "napari"
-    assert resolve_viewer({"SQUIDMIP_VIEWER": ""}) == "napari"
+    assert resolve_viewer({"SQUIDXPLORER_VIEWER": ""}) == "napari"
     assert napari_enabled({}) is True
 
 
 def test_a_retired_ndviewer_name_still_builds_napari_and_says_so(caplog):
     """The fallback is gone, so asking for it by name must announce the substitution.
 
-    This test asserted the opposite until 2026-07-30: that ``SQUIDMIP_VIEWER=ndv`` reached
+    This test asserted the opposite until 2026-07-30: that ``SQUIDXPLORER_VIEWER=ndv`` reached
     ndviewer_light, so "a bad napari path never leaves the window with no viewer". That stack was
     deleted, because napari won the written gate and because ndviewer_light imports PyQt5 at
     module scope and so cannot share a process with a Qt6 napari.
@@ -65,13 +65,13 @@ def test_a_retired_ndviewer_name_still_builds_napari_and_says_so(caplog):
     for spelling in ("ndv", "ndviewer", "ndviewer_light", "  NDV  "):
         with caplog.at_level(logging.WARNING):
             caplog.clear()
-            assert resolve_viewer({"SQUIDMIP_VIEWER": spelling}) == "napari", spelling
+            assert resolve_viewer({"SQUIDXPLORER_VIEWER": spelling}) == "napari", spelling
         assert "deleted" in caplog.text, f"{spelling!r} was retired in silence"
-    assert napari_enabled({"SQUIDMIP_VIEWER": "ndv"}) is True
+    assert napari_enabled({"SQUIDXPLORER_VIEWER": "ndv"}) is True
 
 
 def test_a_typo_does_not_silently_cost_you_the_viewer():
-    assert resolve_viewer({"SQUIDMIP_VIEWER": "napri"}) == "napari"
+    assert resolve_viewer({"SQUIDXPLORER_VIEWER": "napri"}) == "napari"
 
 
 def test_one_resolver_decides_so_the_pane_cannot_disagree_with_the_model():
@@ -79,7 +79,7 @@ def test_one_resolver_decides_so_the_pane_cannot_disagree_with_the_model():
     on screen. _napari_pane.make_pane asks resolve_viewer rather than parsing it again."""
     import inspect
 
-    from squidmip import _napari_pane
+    from squidxplorer import _napari_pane
 
     src = inspect.getsource(_napari_pane.make_pane)
     assert "resolve_viewer" in src, "make_pane does not ask the one resolver"
@@ -464,7 +464,7 @@ def test_the_contrast_seed_samples_the_plane_napari_shows(layers):
     the claim is about what napari does, so napari has to be the one asked. If a future napari
     centres differently, this fails instead of the cost quietly returning.
     """
-    from squidmip._contrast import opening_z
+    from squidxplorer._contrast import opening_z
 
     for nz in (10, 9, 2):
         mdl = MosaicLayers(type(layers._model)())
@@ -490,7 +490,7 @@ def test_adding_a_placed_mosaic_pulls_two_z_not_four(layers):
     own constructor, before the viewer's dims can be consulted. That one is NOT fixed and is not
     fixable from outside napari.
     """
-    from squidmip._contrast import opening_z
+    from squidxplorer._contrast import opening_z
 
     data, pulls = _pyramid(nz=10)
     layers.add_mosaic("raw", "488", data, multiscale=True,
@@ -625,7 +625,7 @@ import json, os, sys, traceback
 # display this runs for real; on a headless box it fails cleanly and the test skips with the
 # reason attached rather than pretending to have verified something.
 import numpy as np
-# PyQt5 explicitly, and QT_API pinned before any qtpy import. squidmip imports PyQt5 directly,
+# PyQt5 explicitly, and QT_API pinned before any qtpy import. squidxplorer imports PyQt5 directly,
 # while qtpy defaults to PySide6 here; loading both aborts the process with "Class QMacAutoRelease
 # PoolTracker is implemented in both ... QtCore" long before any assertion runs. Test the binding
 # production actually uses.
@@ -638,7 +638,7 @@ app = QApplication.instance() or QApplication([])
 # return value; it raised, printed no EMBED line, and the test SKIPPED -- so it read green for
 # its whole life while asserting nothing. A skip and a bug must not look the same.
 try:
-    from squidmip._napari_pane import MosaicPane
+    from squidxplorer._napari_pane import MosaicPane
 
     host = QWidget()
     lay = QHBoxLayout(host)
@@ -723,8 +723,8 @@ def test_the_canvas_stays_inside_the_embedded_napari_window(tmp_path):
     # a headless one it fails cleanly into the skip below with the reason attached.
     env.pop("QT_QPA_PLATFORM", None)
     # Pin the CHILD to the binding the PARENT is using. This hardcoded "pyqt5" with the comment
-    # "squidmip imports PyQt5", which stopped being true on 2026-07-31 when the package pinned
-    # PyQt6 (`squidmip/__init__.py`): the child then ran Qt5 while the parent ran Qt6, so this
+    # "squidxplorer imports PyQt5", which stopped being true on 2026-07-31 when the package pinned
+    # PyQt6 (`squidxplorer/__init__.py`): the child then ran Qt5 while the parent ran Qt6, so this
     # harness verified a binding the app no longer runs on. `tests/test_layer_tree.py` fixed the
     # identical line and this one was left behind -- two guards for one thing that disagreed.
     # What the original comment was right about is why the pin exists: unpinned, qtpy here
@@ -774,7 +774,7 @@ def test_channels_composite_additively_not_occluding_each_other():
 
     from napari.components import ViewerModel
 
-    from squidmip._napari_view import MosaicLayers
+    from squidxplorer._napari_view import MosaicLayers
 
     m = MosaicLayers(ViewerModel())
     for ch in ("Fluorescence_405_nm_Ex", "Fluorescence_638_nm_Ex"):
@@ -1127,7 +1127,7 @@ def test_enable_scale_bar_turns_it_on_in_micrometres():
     """
     from napari.components import ViewerModel
 
-    from squidmip._napari_view import enable_scale_bar
+    from squidxplorer._napari_view import enable_scale_bar
 
     v = ViewerModel()
     enable_scale_bar(v)
@@ -1385,7 +1385,7 @@ def _hue_layer(viewer_layers, cmap):
 ])
 def test_a_single_hue_colormap_reduces_to_exactly_its_hue(layers, name, expected):
     """napari's own black-to-hue maps are the ones this app and its users actually pick."""
-    from squidmip._napari_view import colormap_hue_rgb
+    from squidxplorer._napari_view import colormap_hue_rgb
     assert colormap_hue_rgb(_hue_layer(layers, name)) == expected
 
 
@@ -1394,7 +1394,7 @@ def test_the_colormap_this_app_builds_for_a_channel_reduces_to_its_palette_colou
     NOT reduce, the common case would silently fall back and the feature would do nothing."""
     from napari.utils import Colormap
 
-    from squidmip._napari_view import colormap_hue_rgb
+    from squidxplorer._napari_view import colormap_hue_rgb
 
     cmap = Colormap([[0.0, 0.0, 0.0, 1.0], [0x1F / 255, 1.0, 0.0, 1.0]], name="squid-488")
     assert colormap_hue_rgb(_hue_layer(layers, cmap)) == (0x1F, 255, 0)
@@ -1405,7 +1405,7 @@ def test_a_multi_stop_colormap_refuses_rather_than_approximating(layers, name):
     """THE case that must not be fudged. A perceptual map's last stop is the top of a ramp, not
     the map: viridis ends yellow and is mostly not yellow. Emitting that stop would put a colour
     into Minerva that is on no screen, so this returns None and the caller keeps what it had."""
-    from squidmip._napari_view import colormap_hue_rgb
+    from squidxplorer._napari_view import colormap_hue_rgb
     try:
         layer = _hue_layer(layers, name)
     except (KeyError, ValueError):
@@ -1418,14 +1418,14 @@ def test_a_colormap_ending_in_black_has_no_hue_to_name(layers):
     divide by zero and, unguarded, would call black a valid hue for anything."""
     from napari.utils import Colormap
 
-    from squidmip._napari_view import colormap_hue_rgb
+    from squidxplorer._napari_view import colormap_hue_rgb
 
     cmap = Colormap([[1.0, 1.0, 1.0, 1.0], [0.0, 0.0, 0.0, 1.0]], name="inverted")
     assert colormap_hue_rgb(_hue_layer(layers, cmap)) is None
 
 
 def test_a_layer_with_no_colormap_table_says_so_instead_of_guessing(layers):
-    from squidmip._napari_view import colormap_hue_rgb
+    from squidxplorer._napari_view import colormap_hue_rgb
     assert colormap_hue_rgb(object()) is None
 
 
@@ -1506,7 +1506,7 @@ def test_a_plane_op_result_KEEPS_the_z_axis(layers):
     it. The distinction is read off the operator's DECLARATION; ``tests/test_operator_declaration``
     fails the build on a comparison against an operator's name for exactly this reason.
     """
-    from squidmip import add_projector, available_projectors, plane_op
+    from squidxplorer import add_projector, available_projectors, plane_op
 
     if "zaxis_plane_op" not in available_projectors():
         add_projector("zaxis_plane_op", plane_op(lambda a: a))
@@ -1596,7 +1596,7 @@ def test_full_res_level_takes_level_zero_off_napari_s_own_container():
     """
     from napari.components import ViewerModel
 
-    from squidmip._napari_view import full_res_level, pyramid_levels
+    from squidxplorer._napari_view import full_res_level, pyramid_levels
 
     lv0 = np.arange(64 * 64, dtype=np.uint16).reshape(64, 64)
     data = ViewerModel().add_image([lv0, lv0[::2, ::2], lv0[::4, ::4]], multiscale=True).data
@@ -1610,7 +1610,7 @@ def test_full_res_level_takes_level_zero_off_napari_s_own_container():
 def test_a_plain_array_and_a_nested_list_are_not_pyramids():
     """The discriminator is the ELEMENT, not the container: ``[[1, 2], [3, 4]]`` encodes ONE array
     and must not be read as two levels."""
-    from squidmip._napari_view import full_res_level, pyramid_levels
+    from squidxplorer._napari_view import full_res_level, pyramid_levels
 
     arr = np.zeros((4, 4), np.uint16)
     assert pyramid_levels(arr) is None

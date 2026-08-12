@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from squidmip._region_nav import RegionCursor
+from squidxplorer._region_nav import RegionCursor
 
 
 # --------------------------------------------------------------------------------------
@@ -231,7 +231,7 @@ def make_slider():
     still running", which kills pytest before it can print why a test failed. The first run of
     this file exited 134 with no summary at all for exactly that reason.
     """
-    from squidmip._region_nav import RegionSlider
+    from squidxplorer._region_nav import RegionSlider
     made = []
 
     def _make():
@@ -247,7 +247,7 @@ def make_slider():
 def test_slider_bindings_are_verified_not_trusted():
     """napari moved its Qt access path twice between 0.5 and 0.8. A bound-but-absent symbol is
     how `_voxel_scale` ran every time and did nothing for its whole life."""
-    from squidmip._region_nav import REQUIRED_PLAYBACK_BINDINGS, NapariPlaybackError, verify_playback_bindings
+    from squidxplorer._region_nav import REQUIRED_PLAYBACK_BINDINGS, NapariPlaybackError, verify_playback_bindings
 
     verify_playback_bindings()                     # the real ones must be there
     assert REQUIRED_PLAYBACK_BINDINGS, "the binding list must not be empty"
@@ -263,7 +263,7 @@ def test_slider_bindings_are_verified_not_trusted():
 def test_slider_is_napari_s_own_dims_slider_with_a_play_button(qapp, make_slider):
     """We are not reinventing playback. The widget IS napari's QtDims over a napari Dims model,
     so the play button, the fps popup and the loop modes are napari's, not ours."""
-    from squidmip._region_nav import RegionSlider
+    from squidxplorer._region_nav import RegionSlider
     from napari._qt.widgets.qt_dims_slider import QtDimSliderWidget
 
     s = make_slider()

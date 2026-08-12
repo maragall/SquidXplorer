@@ -1,4 +1,4 @@
-"""Cross-slot integration tests — the "cross commit" surface for SquidMIP.
+"""Cross-slot integration tests — the "cross commit" surface for SquidXplorer.
 
 This is the SHARED integration file: each slot appends ONE section here as it lands, testing
 the real seam between it and the slots it depends on — no mocks, on real data. The file grows
@@ -34,8 +34,8 @@ import pytest
 import tensorstore as ts
 import tifffile
 
-from squidmip import build_montage, open_reader, project_plate, project_well, select_fovs, write_plate
-from squidmip._output import plate_metadata, split_well, write_from_stream
+from squidxplorer import build_montage, open_reader, project_plate, project_well, select_fovs, write_plate
+from squidxplorer._output import plate_metadata, split_well, write_from_stream
 from tests.test_performance import benchmark_single_well  # shared single-thread baseline harness
 
 
@@ -226,7 +226,7 @@ def test_ima188_sim1536_scaling_measured_no_regression(sim_1536wp, capsys):
     import threading
     from unittest import mock
 
-    from squidmip import _engine
+    from squidxplorer import _engine
 
     reader = open_reader(sim_1536wp)
     regions = reader.metadata["regions"]
@@ -526,7 +526,7 @@ def test_ima185_sim1536_montage_real_seam_subset(sim_1536wp, tmp_path):
 #
 # tests/test_operator_fidelity.py already asserts solve_offsets_px equals a hand-run tilefusion
 # pipeline -- but on a 2-FOV SYNTHETIC fixture, driving tilefusion's primitives directly. It
-# cannot see the defect that mattered, because that one was about WHICH IMAGE squidmip fed the
+# cannot see the defect that mattered, because that one was about WHICH IMAGE squidxplorer fed the
 # solver, and a fixture with a single z-plane has only one image to feed.
 #
 # So this runs the two tools end to end on a real z-stack: TileFusion.run()'s registration half
@@ -542,13 +542,13 @@ _STITCHER_PARITY_SET = Path(
 @pytest.mark.integration
 @pytest.mark.parametrize("region", ["manual0", "manual1"])
 def test_stitch_geometry_matches_maragall_stitcher_on_a_real_zstack(region):
-    """squidmip's solved offsets == TileFusion.run()'s, to the bit, on a real acquisition."""
+    """squidxplorer's solved offsets == TileFusion.run()'s, to the bit, on a real acquisition."""
     if not _STITCHER_PARITY_SET.is_dir():
         pytest.skip(f"parity acquisition not on this machine: {_STITCHER_PARITY_SET}")
     pytest.importorskip("tilefusion")
     from tilefusion.core import TileFusion
 
-    from squidmip import stitch_region
+    from squidxplorer import stitch_region
 
     # --- the reference: TileFusion.run()'s registration half, verbatim -----------------------
     tf = TileFusion(_STITCHER_PARITY_SET, output_path="/tmp/parity_never_written.ome.zarr",

@@ -3,7 +3,7 @@
 <!--
   Hardened Runtime entitlements for the notarised macOS build. See SIGNING.md.
 
-  THIS FILE IS UNUSED UNLESS $SQUIDMIP_CODESIGN_IDENTITY IS SET. With no identity the bundle is
+  THIS FILE IS UNUSED UNLESS $SQUIDXPLORER_CODESIGN_IDENTITY IS SET. With no identity the bundle is
   ad-hoc signed (which is what macOS already requires of any arm64 binary) and entitlements are
   meaningless, so scripts/hcs-viewer.spec passes entitlements_file=None in that case.
 

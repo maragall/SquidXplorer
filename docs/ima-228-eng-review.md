@@ -13,10 +13,10 @@ records what the review found, the decisions taken, and the implementation plan 
 
 | # | Decision | Why | Rejected |
 |---|---|---|---|
-| 1A | SquidMIP writes its own OME-TIFF via `tifffile`; **no `squid2minerva` dependency** | `tifffile` is already a hard dep (`pyproject.toml:15`); `_output._omero`/`_wavelength_nm` already produce correct channel colour + wavelength | Vendoring (drags the `display_color` bug from `TODOS.md:47`); SHA-pinned dep (drags a Flask stack + conflicting pins) |
+| 1A | SquidXplorer writes its own OME-TIFF via `tifffile`; **no `squid2minerva` dependency** | `tifffile` is already a hard dep (`pyproject.toml:15`); `_output._omero`/`_wavelength_nm` already produce correct channel colour + wavelength | Vendoring (drags the `display_color` bug from `TODOS.md:47`); SHA-pinned dep (drags a Flask stack + conflicting pins) |
 | 2A | Launch minerva-author **out-of-process**, then show the exact `.story.json` path | minerva-author has no deep-link; the handoff is manual by design (`convert.py:145`) | Patching minerva-author upstream (cross-repo, lost on re-clone); export-only (drops the stated P1) |
 | 3A | Export the **current well** now, behind a **list-shaped API** | No selection model exists; IMA-205/187 own that work and rewrite the same file | Blocking on IMA-205 (parks the independent 80%); building multi-select here (duplicates IMA-205's keystone) |
-| 4A | **One OME-TIFF + one story.json per FOV**, return the list of paths | Minerva Author ingests one 2D image at a time (`story.py:53`); SquidMIP has no stitcher (`docs/SCOPE.md:45`) | Mosaic (needs a stitcher, out of scope); single-FOV cap (contradicts 3A) |
+| 4A | **One OME-TIFF + one story.json per FOV**, return the list of paths | Minerva Author ingests one 2D image at a time (`story.py:53`); SquidXplorer has no stitcher (`docs/SCOPE.md:45`) | Mosaic (needs a stitcher, out of scope); single-FOV cap (contradicts 3A) |
 | 5A | Explicit `out_dir` argument, defaulting to `~/minerva_export/<acquisition>` | Matches `write_plate`'s existing `out_dir` convention (`_output.py:377-390`) | Temp dir (OS sweep breaks a live Minerva session); always-prompt (modal friction on a one-click button) |
 | 5A′ | **Corrected during implementation:** the default is the *home directory*, not beside the acquisition | `README.md` "Good to know" already promises "It never writes into your acquisition folder. Results go only where you point them." Defaulting into the acquisition would break a standing user-facing promise, and acquisition volumes are routinely read-only network shares — it would fail exactly where users least expect it | `<acquisition>/minerva_export` (as originally decided in 5A) |
 | 6A | Export runs on its own `QThread`, signals added to `_retire`'s tuple | `_retire` (`_viewer.py:1949`) disconnects a hardcoded signal-name list; a new worker not listed there leaks signals into a freshly-opened plate | Blocking the GUI thread |
@@ -33,7 +33,7 @@ defects that verify against the code. All are folded in above and below.
 | # | Correction | Verified at |
 |---|---|---|
 | OV1 | **Minerva ignores OME-TIFF channel colours.** Colour reaches Author *only* via story.json hex. Decision 1A's "correct colour" justification applies to the story groups, not the OME-XML. | `story.py:4-5` — "Minerva Author colors channels by index and ignores OME-TIFF channel colors" |
-| OV2 | **Pixel size is a hard ingest gate**, not a nice-to-have. Missing → opaque HTTP 500. SquidMIP's `pixel_size_um` is nullable and defended elsewhere with a silent `1.0` fallback, which here would put a *wrong physical scale* into Minerva. | `app.py:1855-1860` `api_error(500, "Image is missing OME-XML pixel size")`; `_acquisition.py:62`; `_output.py:173` |
+| OV2 | **Pixel size is a hard ingest gate**, not a nice-to-have. Missing → opaque HTTP 500. SquidXplorer's `pixel_size_um` is nullable and defended elsewhere with a silent `1.0` fallback, which here would put a *wrong physical scale* into Minerva. | `app.py:1855-1860` `api_error(500, "Image is missing OME-XML pixel size")`; `_acquisition.py:62`; `_output.py:173` |
 | OV3 | **Filename is a gate.** `check_ext` takes the last two extension components; anything not ending exactly `.ome.tif`/`.ome.tiff` sets `reader = None` and import dies as "Invalid tiff file". | `app.py:112`, `:333` |
 | OV4 | **Do not deviate to `imwrite(ome=True)`.** The proven writer is `imwrite(path, img, photometric="minisblack", metadata=meta)` with OME inferred from the extension. Minerva's `_get_ome_version` returns 5 when SubIFDs tag 330 is absent and re-opens with `is_ome=False` — a different axis path that flat output survives *by accident*. Deviating for no reason is unforced risk. | `export.py:26`; `app.py:343` |
 | OV5 | **Decision 1A removed the import, not the runtime dependency.** minerva-author has no venv of its own; `explorer/setup.py:50-57` installs its deps into `explorer/.venv`. T3 must locate `explorer/vendor/minerva-author/src/app.py` **and** `explorer/.venv/bin/python`. The plan no longer claims the launch stage is dependency-free. | `explorer/.venv/bin/python` and `vendor/minerva-author/src/app.py` both present; no `vendor/minerva-author/.venv` |
@@ -47,7 +47,7 @@ review was locked on 2026-07-21. Decision 3A stands.
 
 **Partially accepted — "just use `convert.py`".** The challenge that `convert.py` is already a
 strict superset is fair on one point: it offers `--mip`, `--z N`, and best-focus, while this plan's
-v1 silently hardcodes one projection. SquidMIP has a projector registry
+v1 silently hardcodes one projection. SquidXplorer has a projector registry
 (`available_projectors`, `_engine.py`), so exposing that choice is nearly free — folded into T4.
 The conclusion ("ship nothing here, shell out to `convert.py`") is rejected: it reintroduces the
 whole `explorer` checkout as a hard runtime dependency of the *export* path, which is exactly what
@@ -61,16 +61,16 @@ decision 1A ruled out. Under this plan `explorer` is optional and only the *laun
 `/Users/julioamaragall/CEPHLA/projects/explorer`; its `setup.py` is a venv bootstrapper that
 git-clones minerva-author into `vendor/`. Imports resolve only because `run.py:33` does
 `sys.path.insert(0, ROOT)`. `requirements.txt` hard-pins `tifffile==2025.5.10` and `zarr==2.18.7`,
-both of which fight SquidMIP's `tifffile>=2023.1.0` (`pyproject.toml:15`). There are no git tags,
+both of which fight SquidXplorer's `tifffile>=2023.1.0` (`pyproject.toml:15`). There are no git tags,
 and `__init__.py` says `0.1.0` while the README says v0.3 — it can only be pinned by SHA.
 `minerva.ensure_running()` (`minerva.py:33`) runs
 `subprocess.Popen([sys.executable, vendor/minerva-author/src/app.py])`, so importing it would
-require SquidMIP's own interpreter to carry `waitress`, `flask_cors`, `pydantic`,
+require SquidXplorer's own interpreter to carry `waitress`, `flask_cors`, `pydantic`,
 `xsdata==24.3.1`, `ome-types==0.6.3`, `scikit-image` and `openslide-bin`.
 
 The parts actually needed are ~60 lines of pure-array code: `export.write_ome` (`export.py:13`),
 `story.auto_groups` (`story.py:35`), `story.write_story_file` (`story.py:53`). `open_reader` is
-disk-only and useless here — SquidMIP already holds the pixels in memory.
+disk-only and useless here — SquidXplorer already holds the pixels in memory.
 
 **"launches minerva-author on it" — there is no deep link.** `ensure_running()` (`minerva.py:26`)
 takes no arguments. `open_author()` (`minerva.py:42`) returns the bare string
@@ -93,7 +93,7 @@ The app runs one FOV per well today (`n_fovs=1`, `_viewer.py:853`).
 ## Architecture
 
 ```
-                        SquidMIP process                    │  separate process
+                        SquidXplorer process                    │  separate process
                                                             │
   PlateOverview                                             │
   self._sel (red box)                                       │
@@ -119,7 +119,7 @@ The app runs one FOV per well today (`n_fovs=1`, `_viewer.py:853`).
                  │  per (region, fov) — streamed, never accumulated
                  ▼                                          │
   ┌──────────────────────────────────────────────────┐      │
-  │ squidmip/_minerva.py                             │      │
+  │ squidxplorer/_minerva.py                             │      │
   │                                                  │      │
   │  require pixel_size_um  ── missing → raise ──────┼──────┼──▶ export refused, loud
   │    (OV2: Minerva 500s without PhysicalSizeX)     │      │
@@ -189,7 +189,7 @@ shim.
 
 ```
 CODE PATHS                                              USER FLOWS
-[+] squidmip/_minerva.py                                [+] Export the current well
+[+] squidxplorer/_minerva.py                                [+] Export the current well
   ├── export_selection(reader, sel, out_dir)              ├── [GAP] Button → files on disk → path shown
   │   ├── [GAP] N=1 happy path (pixels byte-exact)        ├── [GAP] Export with no well selected
   │   ├── [GAP] N=3 → 3 file pairs, list order stable     └── [GAP] Second export overwrites cleanly
@@ -213,7 +213,7 @@ CODE PATHS                                              USER FLOWS
       ├── [GAP] liveness poll times out → False       [+] Error states
       └── [GAP] already running → reuses the server      ├── [GAP] read error mid-export → which FOV failed
                                                          └── [GAP] out_dir read-only → actionable message
-[+] squidmip/_viewer.py
+[+] squidxplorer/_viewer.py
   ├── _build_minerva_tab()
   │   ├── [GAP] renders with no acquisition loaded
   │   └── [GAP] out_dir picker updates state["dir"]
@@ -302,7 +302,7 @@ No database access, no N+1, no caching opportunity worth taking.
 | Stitching a selection into one mosaic | No stitcher exists; `docs/SCOPE.md:45` and `docs/DESIGN-STATUS.md:44` put it out of scope (decision 4A) |
 | Deep-linking minerva-author to a story | Requires patching a third-party app in `explorer/vendor/`; must be upstreamed first (decision 2B rejected) |
 | Packaging `squid2minerva` as a real library | Belongs to that repo's maintainer; `TODOS.md:46-52` already tracks its `display_color` bug |
-| Bundling or installing minerva-author | SquidMIP locates it, it does not own its install (decision 7A) |
+| Bundling or installing minerva-author | SquidXplorer locates it, it does not own its install (decision 7A) |
 | Parallel export via `project_plate` | Selection sizes are small today; revisit when IMA-187 makes them large |
 | Distribution/CI for a new artifact | None introduced — this adds a module to an existing package, no new binary or container |
 
@@ -312,40 +312,40 @@ No database access, no N+1, no caching opportunity worth taking.
 
 Synthesized from this review's findings. Each task derives from a specific finding above.
 
-- [ ] **T1a (P1, human: ~1h / CC: ~5min)** — `squidmip/projection.py` — add an optional `t` parameter to `project_well`
+- [ ] **T1a (P1, human: ~1h / CC: ~5min)** — `squidxplorer/projection.py` — add an optional `t` parameter to `project_well`
   - Surfaced by: Outside voice OV6 — `project_well` loops `for t in range(n_t)` (`projection.py:155`) and computes every timepoint, so exporting one means an n_t× wasted read plus silent loss of the rest
-  - Files: `squidmip/projection.py`, `tests/test_projection.py`
+  - Files: `squidxplorer/projection.py`, `tests/test_projection.py`
   - Detail: `project_well(reader, region, fov, reduce=project, t=None)`. `None` keeps today's all-timepoints behaviour so every existing caller is untouched; an int reads only that timepoint and returns `(1,C,1,Y,X)`.
   - Verify: `pytest tests/test_projection.py -k timepoint`
-- [ ] **T1 (P1, human: ~1 day / CC: ~30min)** — `squidmip/_minerva.py` — write the OME-TIFF + story.json writer
+- [ ] **T1 (P1, human: ~1 day / CC: ~30min)** — `squidxplorer/_minerva.py` — write the OME-TIFF + story.json writer
   - Surfaced by: Architecture issue 1 — `squid2minerva` is not an importable library (no `pyproject.toml`, `sys.path` hack at `run.py:33`, conflicting pins); corrected by OV1–OV4
-  - Files: `squidmip/_minerva.py` (new)
+  - Files: `squidxplorer/_minerva.py` (new)
   - Detail: `export_selection(reader, selection, out_dir=None, t=0, projector="mip") -> list[tuple[Path, Path]]`. Per FOV: `project_well(..., t=t)` → `image[0, :, 0]` → `(C,Y,X)`. Stream — never accumulate images.
     - **OV2:** refuse the whole export up front if `metadata["pixel_size_um"]` is falsy. Never inherit `_output.py:173`'s silent `1.0` fallback — that writes a wrong physical scale into Minerva rather than failing.
     - **OV3:** enforce that every output path ends `.ome.tiff`.
     - **OV4:** use the proven call shape `tifffile.imwrite(path, img, photometric="minisblack", metadata=meta)` with `axes="CYX"`, `PhysicalSizeX/Y` + `µm` units. Do **not** pass `ome=True`.
     - **OV1:** channel colour goes into the story groups as hex, converted from `metadata["channels"][i]["display_color"]`. OME-XML `Channel.Color` is optional garnish — Minerva ignores it.
   - Verify: `pytest tests/test_minerva.py -k export`
-- [ ] **T2 (P1, human: ~4h / CC: ~15min)** — `squidmip/_minerva.py` — `out_dir` policy
+- [ ] **T2 (P1, human: ~4h / CC: ~15min)** — `squidxplorer/_minerva.py` — `out_dir` policy
   - Surfaced by: Code Quality issue 5 — `squid2minerva` hardcodes `<repo>/output` (`convert.py:22,55`), which would write into a sibling checkout
-  - Files: `squidmip/_minerva.py`
+  - Files: `squidxplorer/_minerva.py`
   - Detail: explicit `out_dir` argument matching `write_plate`'s convention (`_output.py:377-390`); default `<acquisition>/minerva_export/`; `mkdir(parents=True, exist_ok=True)`; absolute paths in `story["in_file"]`.
   - Verify: `pytest tests/test_minerva.py -k out_dir`
-- [ ] **T3 (P1, human: ~1 day / CC: ~30min)** — `squidmip/_minerva.py` — best-effort launch shim
+- [ ] **T3 (P1, human: ~1 day / CC: ~30min)** — `squidxplorer/_minerva.py` — best-effort launch shim
   - Surfaced by: Architecture issue 2 — minerva-author has no deep-link and `ensure_running()` takes no dataset argument (`minerva.py:26`); scoped by OV5
-  - Files: `squidmip/_minerva.py`
-  - Detail: locate **both** `<explorer>/vendor/minerva-author/src/app.py` and `<explorer>/.venv/bin/python` from one env var (`SQUIDMIP_MINERVA_HOME`) — minerva-author has no venv of its own, its deps live in explorer's shared venv (`explorer/setup.py:50-57`). Start via `QProcess` following `_ProcTerminal` (`_viewer.py:307-357`), poll `http://localhost:2020/` for liveness, `webbrowser.open`. Return `False` on every failure — **never raise into the export path**.
+  - Files: `squidxplorer/_minerva.py`
+  - Detail: locate **both** `<explorer>/vendor/minerva-author/src/app.py` and `<explorer>/.venv/bin/python` from one env var (`SQUIDXPLORER_MINERVA_HOME`) — minerva-author has no venv of its own, its deps live in explorer's shared venv (`explorer/setup.py:50-57`). Start via `QProcess` following `_ProcTerminal` (`_viewer.py:307-357`), poll `http://localhost:2020/` for liveness, `webbrowser.open`. Return `False` on every failure — **never raise into the export path**.
   - Note: this is a real, undeclared runtime dependency for the *launch* stage only. The export stage stays dependency-free. Document it in the README rather than pretending it does not exist.
   - Verify: `pytest tests/test_minerva.py -k launch`
-- [ ] **T4 (P1, human: ~1 day / CC: ~30min)** — `squidmip/_viewer.py` — Minerva tab + worker
+- [ ] **T4 (P1, human: ~1 day / CC: ~30min)** — `squidxplorer/_viewer.py` — Minerva tab + worker
   - Surfaced by: Architecture issue 3 — export the current well behind a list-shaped API (decision 3A)
-  - Files: `squidmip/_viewer.py`
+  - Files: `squidxplorer/_viewer.py`
   - Detail: one `Operation("minerva", ...)` entry in `_OPERATIONS` (`:410`) for card + menu + tab; `_build_minerva_tab` using `_op_tab_shell` (`:1258`) and the `state={"dir":None}` closure (`:1279`); `_MinervaWorker(QThread)` following `_OperatorWorker` (`:773`); pass `[( _current_well, 0 )]` today so IMA-205 only widens the list.
-  - Also expose the **projector choice** (`available_projectors`, `_engine.py`) in the tab. Surfaced by the outside voice: `convert.py` offers `--mip` / `--z N` / best-focus, and v1 silently hardcoding one projection is a real capability regression against the tool this replaces. SquidMIP already has the registry, so this is a combo box.
+  - Also expose the **projector choice** (`available_projectors`, `_engine.py`) in the tab. Surfaced by the outside voice: `convert.py` offers `--mip` / `--z N` / best-focus, and v1 silently hardcoding one projection is a real capability regression against the tool this replaces. SquidXplorer already has the registry, so this is a combo box.
   - Verify: `pytest tests/test_viewer.py -k minerva`
-- [ ] **T5 (P2, human: ~1h / CC: ~10min)** — `squidmip/_viewer.py` — make `_retire` introspect signals instead of hardcoding names
+- [ ] **T5 (P2, human: ~1h / CC: ~10min)** — `squidxplorer/_viewer.py` — make `_retire` introspect signals instead of hardcoding names
   - Surfaced by: Test review regression rule, **rescoped by the outside voice** — three of the four new worker signals are already in the tuple at `:1949`, so the exposure was one missing name, not a critical regression. The real defect is the hardcoded list.
-  - Files: `squidmip/_viewer.py`, `tests/test_viewer.py`
+  - Files: `squidxplorer/_viewer.py`, `tests/test_viewer.py`
   - Detail: replace the literal tuple with introspection over the worker's `pyqtSignal` class attributes, which deletes this failure class for every future worker. Keep the existing `TypeError` guard. Add the concurrent-export guard mirroring `run_operator`'s `isRunning()` check (`:1741-1743`). Test: close the window mid-export, assert no signal fires afterward.
   - Verify: `pytest tests/test_viewer.py -k retire`
 - [ ] **T6 (P1, human: ~1 day / CC: ~30min)** — `tests/` — full coverage for all 31 paths
@@ -353,9 +353,9 @@ Synthesized from this review's findings. Each task derives from a specific findi
   - Files: `tests/test_minerva.py` (new), `tests/test_viewer.py`
   - Detail: use `squid_dataset` (`tests/conftest.py:79`) to assert exported pixels byte-for-byte against the fixture's deterministic planes; use `qapp`/`stub_detail`/`_drain_until` (`tests/test_viewer.py:66,73,79`) for the worker.
   - Verify: `pytest tests/ -q`
-- [ ] **T7 (P2, human: ~15min / CC: ~2min)** — `squidmip/_viewer.py` — fix the stale roadmap comment
+- [ ] **T7 (P2, human: ~15min / CC: ~2min)** — `squidxplorer/_viewer.py` — fix the stale roadmap comment
   - Surfaced by: Code Quality — the comment at `_viewer.py:417-421` describes disabled "hand-off to Minerva Author" roadmap cards that no longer exist, and `_TO_BE_ADDED` is empty; adding a real Minerva operation makes it doubly wrong
-  - Files: `squidmip/_viewer.py`
+  - Files: `squidxplorer/_viewer.py`
   - Detail: delete the two stale lines; keep the accurate description of `_TO_BE_ADDED`.
   - Verify: read it
 - [ ] **T8 (P2, human: ~30min / CC: ~5min)** — `.spec/`, `docs/` — correct the spec and oracle
@@ -366,7 +366,7 @@ Synthesized from this review's findings. Each task derives from a specific findi
 - [ ] **T9 (P2, human: ~30min / CC: ~5min)** — `README.md` — document the minerva-author runtime dependency
   - Surfaced by: Outside voice OV5 — the launch stage needs an `explorer` checkout with a populated `.venv`, which decision 1A's framing obscured
   - Files: `README.md`
-  - Detail: state that export works standalone, that launch requires `SQUIDMIP_MINERVA_HOME` pointing at an `explorer` checkout that has run its `setup.py`, and that the handoff is a manual "Select File" in Author.
+  - Detail: state that export works standalone, that launch requires `SQUIDXPLORER_MINERVA_HOME` pointing at an `explorer` checkout that has run its `setup.py`, and that the handoff is a manual "Select File" in Author.
   - Verify: read it
 - [ ] **T10 (P1, human: ~2h / CC: ~2h)** — manual — verify a real export actually ingests
   - Surfaced by: Outside voice OV1–OV4 — every ingest requirement here was found by reading minerva-author's source, and the gates (pixel size, filename, OME version fallback) are undocumented and unversioned (`--depth 1` clone of upstream `main`, no tag)
@@ -380,9 +380,9 @@ Synthesized from this review's findings. Each task derives from a specific findi
 
 | Step | Modules touched | Depends on |
 |---|---|---|
-| T1a | `squidmip/` (`projection.py`) | — |
-| T1, T2, T3 | `squidmip/` (new `_minerva.py`) | T1a (needs the `t` parameter) |
-| T4, T5, T7 | `squidmip/` (`_viewer.py`) | T1 (needs the export signature) |
+| T1a | `squidxplorer/` (`projection.py`) | — |
+| T1, T2, T3 | `squidxplorer/` (new `_minerva.py`) | T1a (needs the `t` parameter) |
+| T4, T5, T7 | `squidxplorer/` (`_viewer.py`) | T1 (needs the export signature) |
 | T6 | `tests/` | T1a–T5 |
 | T8, T9 | `.spec/`, `docs/`, `README.md` | — |
 | T10 | — (manual) | T1–T4 |

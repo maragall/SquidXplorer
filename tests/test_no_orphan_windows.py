@@ -75,7 +75,7 @@ if "PySide6" in sys.modules or "PySide2" in sys.modules:
 
 from qtpy.QtWidgets import QApplication  # noqa: E402
 
-from squidmip import _viewer as V  # noqa: E402
+from squidxplorer import _viewer as V  # noqa: E402
 
 from .conftest import shutdown_plate_window  # noqa: E402
 from .test_viewer import qapp  # noqa: E402,F401  (fixtures)
@@ -141,7 +141,7 @@ def test_a_published_qc_result_is_really_inside_the_window_and_really_visible(
     MUTATION: give `publish_qc_result` a bar that is not in the layout -> the ancestry assertion
     fails with the view's chain ending at a top level -> red.
     """
-    from squidmip._op_panels import DeconQCResultView
+    from squidxplorer._op_panels import DeconQCResultView
 
     root, _ = squid_dataset
     win = V.PlateWindow(None)
@@ -204,7 +204,7 @@ def test_the_focus_worker_itself_survives_because_the_windows_use_it(qapp,
     ``_viewer._FocusWorker`` by name, so removing it would break the control that REPLACED the
     orphan."""
     assert hasattr(V, "_FocusWorker")
-    from squidmip._region_viewer import RegionViewer
+    from squidxplorer._region_viewer import RegionViewer
 
     assert hasattr(RegionViewer, "_focus_reference_plane")
     assert hasattr(RegionViewer, "_on_reference_plane")

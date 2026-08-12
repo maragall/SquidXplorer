@@ -36,7 +36,7 @@ import sys
 from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 # Freeze THIS checkout, not whatever an editable install elsewhere on the machine points
-# `squidmip` at. On the build machine it pointed at a different worktree entirely, one
+# `squidxplorer` at. On the build machine it pointed at a different worktree entirely, one
 # with no _viewer.py — which would have frozen a bundle with no GUI in it.
 _REPO_ROOT = os.path.dirname(os.path.abspath(SPECPATH))  # noqa: F821
 if _REPO_ROOT not in sys.path:                            # noqa: F821
@@ -86,7 +86,7 @@ _BINARIES = []
 # interpreter would trade one runtime ImportError for another. This app is a plate viewer, not a
 # notebook, and nothing on the demo path opens a console.
 #
-# imageio / imageio_ffmpeg: the .mp4 export's encoder (squidmip/_video.py). imageio resolves
+# imageio / imageio_ffmpeg: the .mp4 export's encoder (squidxplorer/_video.py). imageio resolves
 # its FORMAT plug-ins by name at runtime, and imageio_ffmpeg ships an ffmpeg BINARY as package
 # data that no import can reveal -- so `collect_all` is what brings both, and it is the same
 # manifest-off-disk failure napari has above. Without it `_video.encoder_problem()` would
@@ -111,27 +111,27 @@ _DATAS += _d
 _BINARIES += _b
 _HIDDEN += _h
 
-# squidmip's own operator registries (_PROJECTORS / _REGION_OPERATORS) are populated by
+# squidxplorer's own operator registries (_PROJECTORS / _REGION_OPERATORS) are populated by
 # import side effect, so every module must be present even if nothing imports it by name.
-_HIDDEN += collect_submodules("squidmip")
+_HIDDEN += collect_submodules("squidxplorer")
 
 # Never imported by this app. Each arrives as a transitive dependency of scikit-image /
 # pandas / vispy, and together they were 190 MB of the first (517 MB) build — measured
 # per-directory with `du -sk` on the bundle, not estimated. The image I/O back ends are
-# the big ones: squidmip reads TIFF through tifffile and Zarr through tensorstore, so
+# the big ones: squidxplorer reads TIFF through tifffile and Zarr through tensorstore, so
 # skimage.io's imageio/OpenCV plug-ins are pure dead weight. scripts/build_app.py
 # --verify runs the real operators inside the bundle, so a wrong exclude here fails
 # loudly instead of shipping.
 _EXCLUDES = [
     "cv2",                 # 110 MB of OpenCV, pulled by skimage's optional io plug-in
     # `imageio` and `imageio_ffmpeg` USED TO BE HERE, on the grounds that only skimage.io wanted
-    # them. squidmip/_video.py wants them now, so they moved to the collect_all list above.
+    # them. squidxplorer/_video.py wants them now, so they moved to the collect_all list above.
     "mypy",                # a type checker, in a shipped GUI
     "lxml", "cryptography",
     # matplotlib is NOT unconditionally excluded any more (2026-08-05). The old note said "the app
-    # plots nothing", and that has stopped being true: squidmip/_decon_qc.py does
+    # plots nothing", and that has stopped being true: squidxplorer/_decon_qc.py does
     # `import matplotlib` / `matplotlib.use("Agg")` / `import matplotlib.pyplot` inside
-    # turbo_rgb() and write_montage(), and squidmip/_op_panels.py calls straight into them
+    # turbo_rgb() and write_montage(), and squidxplorer/_op_panels.py calls straight into them
     # (turbo_rgb, qc_composite, halo_verdict) to draw the decon QC panel.
     #
     # It is still excluded in the DEFAULT build, and the reason is reachability rather than taste:
@@ -149,10 +149,10 @@ _EXCLUDES = [
     "IPython", "jupyter_core", "notebook", "ipykernel", "ipywidgets",
     "pytest", "_pytest", "pytest_qt",
     "sphinx", "docutils",
-    "numba", "llvmlite",   # tilefusion pulls these; squidmip deliberately does not import tilefusion
+    "numba", "llvmlite",   # tilefusion pulls these; squidxplorer deliberately does not import tilefusion
     "torch", "tensorflow",
     # BINDING FLIPPED 2026-07-31. This list excluded PyQt6 and trimmed PyQt5's unused modules,
-    # which was correct while the app was Qt5 and is now exactly backwards: squidmip/__init__
+    # which was correct while the app was Qt5 and is now exactly backwards: squidxplorer/__init__
     # pins QT_API=pyqt6, so a bundle built from the old list ships the one binding the app
     # refuses to use and excludes the one it requires.
     #
@@ -212,19 +212,19 @@ exe = EXE(
     # What is new is that both are now OVERRIDABLE from the environment, so the owner signs by
     # exporting two variables and re-running the same build command, with no edit to this file:
     #
-    #   export SQUIDMIP_CODESIGN_IDENTITY="Developer ID Application: <Name> (TEAMID)"
+    #   export SQUIDXPLORER_CODESIGN_IDENTITY="Developer ID Application: <Name> (TEAMID)"
     #   python scripts/build_app.py --dataset /path/to/acquisition
     #
     # Unset (the default, and what CI does) reproduces today's behaviour exactly: ad-hoc, and
     # honest about it. NOTHING here disables or weakens a security control -- the fallback is the
     # same ad-hoc signature macOS already required, not an unsigned binary.
-    codesign_identity=os.environ.get("SQUIDMIP_CODESIGN_IDENTITY") or None,
+    codesign_identity=os.environ.get("SQUIDXPLORER_CODESIGN_IDENTITY") or None,
     # Only meaningful together with a real identity + --options runtime (Hardened Runtime), which
     # notarisation requires. scripts/entitlements.plist is the starting point; SIGNING.md explains
     # why it is a starting point and not a final answer.
-    entitlements_file=(os.environ.get("SQUIDMIP_ENTITLEMENTS")
+    entitlements_file=(os.environ.get("SQUIDXPLORER_ENTITLEMENTS")
                        or (os.path.join(SPECPATH, "entitlements.plist")  # noqa: F821
-                           if os.environ.get("SQUIDMIP_CODESIGN_IDENTITY") else None)),
+                           if os.environ.get("SQUIDXPLORER_CODESIGN_IDENTITY") else None)),
 )
 
 coll = COLLECT(
@@ -240,7 +240,7 @@ app = BUNDLE(
     coll,
     name="hcs-viewer.app",
     icon=None,
-    bundle_identifier="com.cephla.squidmip.hcsviewer",
+    bundle_identifier="com.cephla.squidxplorer.hcsviewer",
     info_plist={
         "CFBundleName": "MIP tool",
         "CFBundleDisplayName": "MIP tool",

@@ -56,7 +56,7 @@ import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 
 # The ONE guard in this file, and it is an ENVIRONMENT gate rather than a skipped assertion: PyQt5
-# is an optional extra (`.[gui]`), `squidmip._region_viewer` imports it at module scope, so without
+# is an optional extra (`.[gui]`), `squidxplorer._region_viewer` imports it at module scope, so without
 # it there is nothing here to test rather than something being waved past. Every GUI test file in
 # this suite gates the same way. Nothing below is conditional, marked, or xfailed.
 pytest.importorskip("qtpy")
@@ -67,7 +67,7 @@ if "PySide6" in sys.modules or "PySide2" in sys.modules:
         allow_module_level=True,
     )
 
-from squidmip._region_viewer import (  # noqa: E402
+from squidxplorer._region_viewer import (  # noqa: E402
     _GLOBAL,
     _INHERIT,
     _SETTING_BASELINE,
@@ -200,7 +200,7 @@ def manager(qapp, napari_pane_stub, squid_dataset):
     and the collect happen HERE, with the app alive, rather than letting a Qt wrapper whose C++ half
     is gone be collected in the middle of an unrelated later test.
     """
-    from squidmip import open_reader
+    from squidxplorer import open_reader
 
     root, _arrays = squid_dataset
     reader = open_reader(str(root))
@@ -514,7 +514,7 @@ def test_make_default_on_a_closed_window_refuses_rather_than_appearing_to_work(q
 
 def test_pasting_luts_marks_the_window_diverged(qapp, manager):
     """A paste IS the user changing contrast here, so the window has to admit it moved."""
-    from squidmip import _region_viewer as RV
+    from squidxplorer import _region_viewer as RV
 
     manager.defaults.set("luts", _LUT_A)
     one = manager.open([REGIONS[0]])
@@ -555,7 +555,7 @@ def test_copy_paste_luts_is_the_only_contrast_path_between_two_open_windows(qapp
     COLORMAP: ``link_layers`` is bound to ``("contrast_limits",)`` and ``match_contrast_to``
     writes contrast and nothing else.
     """
-    from squidmip import _region_viewer as RV
+    from squidxplorer import _region_viewer as RV
 
     RV._LUT_CLIPBOARD.clear()
     one = manager.open([REGIONS[0]])
@@ -652,7 +652,7 @@ def test_the_autofocus_default_is_actually_read_when_a_window_loads(qapp, manage
 
 
 # ---------------------------------------------------------------------------------------------
-# A SECOND WINDOW REUSES THE FIRST WINDOW'S OPERATOR RESULT (squidmip._recipe.RESULTS)
+# A SECOND WINDOW REUSES THE FIRST WINDOW'S OPERATOR RESULT (squidxplorer._recipe.RESULTS)
 #
 # `_deliver_to_views` already propagates a finished result to every window open AT THAT MOMENT.
 # A window opened afterwards got nothing: `RESULTS` -- the content-addressed store whose docstring
@@ -661,8 +661,8 @@ def test_the_autofocus_default_is_actually_read_when_a_window_loads(qapp, manage
 
 def _fake_result(region, channels):
     """A finished operator result, shaped like what `PlateWindow._as_result` builds."""
-    from squidmip._address import Extent
-    from squidmip._result import Result
+    from squidxplorer._address import Extent
+    from squidxplorer._result import Result
 
     planes = [np.full((16, 16), 700 + i, dtype=np.uint16) for i, _ in enumerate(channels)]
     return Result.of(Extent(region_id=region), planes, channels=tuple(channels),
@@ -678,7 +678,7 @@ def test_a_second_window_reuses_the_first_windows_result_without_recomputing(qap
     there is no re-fuse and no copy. Both windows are in one process over one reader
     (`DEFAULT_MAX_GUI=1` plus an flock refuses a second one), which is what makes that legal.
     """
-    from squidmip._recipe import acquisition_version, cache_operator_result
+    from squidxplorer._recipe import acquisition_version, cache_operator_result
 
     region = REGIONS[0]
     channels = [CH_IN_YAML, CH_NOT_IN_YAML]
@@ -711,7 +711,7 @@ def test_a_second_window_reuses_the_first_windows_result_without_recomputing(qap
 def test_a_window_opened_on_a_DIFFERENT_region_gains_nothing(qapp, manager):
     """The replay is scoped. A cached B2 result must not land in a window showing B3, where it
     would sit at B2's stage coordinates over B3's raw and read as something the operator did."""
-    from squidmip._recipe import acquisition_version, cache_operator_result
+    from squidxplorer._recipe import acquisition_version, cache_operator_result
 
     channels = [CH_IN_YAML, CH_NOT_IN_YAML]
     cache_operator_result("mip", _fake_result(REGIONS[0], channels),

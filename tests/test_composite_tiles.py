@@ -24,14 +24,14 @@ import time
 import numpy as np
 import pytest
 
-from squidmip._platecache import CellTile
-from squidmip._tilesource import (
+from squidxplorer._platecache import CellTile
+from squidxplorer._tilesource import (
     CompositePlateSource,
     ReaderTileSource,
     plate_ladder,
     region_bbox_um,
 )
-from squidmip._tiling import TileDescriptor
+from squidxplorer._tiling import TileDescriptor
 
 CH = "c0"
 FRAME = (64, 64)
@@ -218,7 +218,7 @@ def test_the_deep_zoom_source_is_the_composite_one():
     """The regression that matters: nobody may quietly put the bare ReaderTileSource back."""
     import inspect
 
-    from squidmip import _viewer
+    from squidxplorer import _viewer
 
     src = inspect.getsource(_viewer.PlateOverview.set_tile_source)
     assert "CompositePlateSource(" in src, "the plate view stopped using the composite source"

@@ -34,7 +34,7 @@ if "PySide6" in sys.modules or "PySide2" in sys.modules:
 
 from qtpy.QtWidgets import QApplication, QPushButton, QWidget  # noqa: E402
 
-from squidmip._region_viewer import ViewerManager  # noqa: E402
+from squidxplorer._region_viewer import ViewerManager  # noqa: E402
 
 from .conftest import REGIONS  # noqa: E402
 
@@ -42,7 +42,7 @@ from .conftest import REGIONS  # noqa: E402
 @pytest.fixture(scope="module")
 def qapp():
     app = QApplication.instance() or QApplication([])
-    app.setProperty("_squidmip_test", True)
+    app.setProperty("_squidxplorer_test", True)
     return app
 
 
@@ -138,7 +138,7 @@ def manager(qapp, napari_pane_stub, squid_dataset):
     Same shape as tests/test_view_settings.py's fixture: real registry, real RegionViewer, with
     only the GL pane stubbed. The parent is what ``raise_plate`` will go looking for.
     """
-    from squidmip import open_reader
+    from squidxplorer import open_reader
 
     root, _arrays = squid_dataset
     reader = open_reader(str(root))
@@ -321,7 +321,7 @@ def test_it_reads_the_operators_off_the_LAYERS_the_window_really_holds(qapp, man
     """
     import numpy as np
 
-    from squidmip._result import Extent, Result
+    from squidxplorer._result import Extent, Result
 
     win = manager.open([REGIONS[0]])
     plate = _wired(manager)

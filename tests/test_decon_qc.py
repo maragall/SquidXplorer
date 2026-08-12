@@ -19,7 +19,7 @@ import pytest
 # the GUI's deconvolution panel and tools/decon_qc.py call the same functions. These tests
 # were written against the script and are deliberately UNCHANGED apart from this import:
 # if the move altered any behaviour they go red.
-from squidmip import _decon_qc as decon_qc
+from squidxplorer import _decon_qc as decon_qc
 
 
 DXY, DZ = 0.752, 1.5

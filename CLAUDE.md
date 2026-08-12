@@ -63,16 +63,16 @@ from `Operator.bind` instead of a number the run drops.
 `tests/test_operator_declaration.py::test_every_parameter_a_segmentation_operator_DECLARES_changes_its_pixels`
 is the guard: a declared parameter that cannot change the label image fails the build.
 
-**Discovery**: `squidmip/_plugins.py` scans the `squidmip.operators` entry-point group on
-`import squidmip`, AFTER the built-ins. An operator in someone else's package needs no edit here.
-A broken plugin aborts the import, NAMED; `SQUIDMIP_NO_PLUGINS=1` is the escape hatch. The
-hardcoded built-in imports in `squidmip/__init__.py` stay — discovery is additive.
+**Discovery**: `squidxplorer/_plugins.py` scans the `squidxplorer.operators` entry-point group on
+`import squidxplorer`, AFTER the built-ins. An operator in someone else's package needs no edit here.
+A broken plugin aborts the import, NAMED; `SQUIDXPLORER_NO_PLUGINS=1` is the escape hatch. The
+hardcoded built-in imports in `squidxplorer/__init__.py` stay — discovery is additive.
 
 **Composition** (2026-08-05): a chain is written wherever a name is —
 `projector="flatfield + decon + mip"`, accepted by `project_plate`, `write_plate`, `stitch_region`,
 the CLI's `--projector` and the `run_operator` command with no new argument on any of them. The
 expression IS `RecipeChain.label()`, and `RecipeChain.parse()` is its inverse, so the words a
-console prints are the words that run. `squidmip/_compose.py` derives the composed operator's four
+console prints are the words that run. `squidxplorer/_compose.py` derives the composed operator's four
 declarations from its parts (`consumes` union, `produces` last, `params` namespaced
 `<step>.<param>`, `requires` union) and carries `corrects_illumination` / `for_channel` through.
 
@@ -82,7 +82,7 @@ step inside a chain** (`reference` — its z is solved on raw planes outside the
 **repeated step** (namespaced params would be ambiguous). A bare name still resolves to the exact
 registry object, so nothing existing routes through composition.
 
-**GUI panels ARE generated from `params`** (2026-08-05). `squidmip/_param_panel.py` builds one
+**GUI panels ARE generated from `params`** (2026-08-05). `squidxplorer/_param_panel.py` builds one
 widget per declared `Param`, choosing it from the TYPE OF THE DEFAULT — `bool` a check box, `int`
 a spin, `float` a decimal spin, `str` a text field, the `blurb` its tooltip. Any other type is
 **refused by name**; a guessed widget is how a value the user typed becomes a value the run did
@@ -145,7 +145,7 @@ the run, warns by name when it does not, and never broadcasts.
 `write_from_stream`'s manifest carries `complete` and `stopped` as **two facts** (2026-08-06).
 `complete` used to be `not stopped`, i.e. purely "nobody pressed cancel", so a well lost to
 `on_error` — an unreadable TIFF, a corrupt field, exactly what per-well fault isolation exists to
-survive — still deleted the `.squidmip-incomplete` marker. Measured on a copy of `sim_5d_2x2_t3`
+survive — still deleted the `.squidxplorer-incomplete` marker. Measured on a copy of `sim_5d_2x2_t3`
 with one well's TIFFs corrupted: `is_incomplete(store)` was **False with 4 of 16 fields missing**,
 while the well group went on advertising images that are not on disk. The CLI warned; the STORE,
 which is what `_check_output`, Odon's samplesheet walk and every external reader consult, did not.
@@ -157,7 +157,7 @@ Counts are named with their own unit for the same reason: `n_fields_written` ove
 printed **"16/4 wells written"** on a healthy plate and **"12/4"** on one that lost a quarter of
 itself, and `_command`'s cancel line printed "stopped after 12 of 4 target(s)".
 
-**ONE marker, and the openers read it** (2026-08-06). `.squidmip-incomplete`, written inside
+**ONE marker, and the openers read it** (2026-08-06). `.squidxplorer-incomplete`, written inside
 `plate.ome.zarr` by `write_from_stream` and by nothing else, is THE record that a store is not
 whole. `_output.incomplete_reason(dir)` is the one reader that turns it into a sentence (quoting
 the marker's own `fields` / `fields_written` / `stopped`, never re-deriving them) and takes either
@@ -276,7 +276,7 @@ with no checkbox, a coarse 2D mosaic drawable over it, a channel checkbox reachi
 second contrast model).
 
 **The fact is now declared in the shared model, not branched on in a caller**
-(`squidmip/_napari_view.py`):
+(`squidxplorer/_napari_view.py`):
 
 | | |
 |---|---|
@@ -377,7 +377,7 @@ a movie is a display artifact, and the fuser's own 8192 cap is a 200 MB RGB fram
 
 ## Recording is post-acquisition, and that is why it exists here
 
-`squidmip/_video.py` assembles an **already-acquired axis** into an .mp4 — T when `n_t > 1`, else
+`squidxplorer/_video.py` assembles an **already-acquired axis** into an .mp4 — T when `n_t > 1`, else
 Z. It is not camera capture, which belongs to Squid. That distinction is load-bearing: the module
 was deleted on 2026-07-31 (c25d84d, "users record at acquisition time, not here") and
 `scripts/smoke_import.py` recorded the removal as final; both statements are true of camera capture

@@ -1,6 +1,6 @@
 # scripts
 
-Utility scripts for the SquidMIP / SquidXplorer repo.
+Utility scripts for the SquidXplorer / SquidXplorer repo.
 
 ## Building the desktop app (macOS)
 

@@ -54,13 +54,13 @@ result you can reopen here, in napari, or in FIJI. Read only, it never changes y
 - Click "Open CLI" for a terminal inside the app, or use your own PowerShell.
 - Helpful commands:
   - MIP the whole plate and save FIJI TIFFs:
-    - `python -m squidmip "C:\path\to\acquisition" --tiff`
+    - `python -m squidxplorer "C:\path\to\acquisition" --tiff`
   - Try the first 8 wells first (quick):
-    - `python -m squidmip "C:\path\to\acquisition" --limit 8 --tiff`
+    - `python -m squidxplorer "C:\path\to\acquisition" --limit 8 --tiff`
   - Choose where to save:
-    - `python -m squidmip "C:\path\to\acquisition" --tiff --output-folder C:\Users\you\Downloads`
+    - `python -m squidxplorer "C:\path\to\acquisition" --tiff --output-folder C:\Users\you\Downloads`
   - See all options:
-    - `python -m squidmip --help`
+    - `python -m squidxplorer --help`
 
 ## Good to know
 

@@ -18,8 +18,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from squidmip_operator_template import OPERATOR_NAME, register
-from squidmip_operator_template._stdev import stdev_op
+from squidxplorer_operator_template import OPERATOR_NAME, register
+from squidxplorer_operator_template._stdev import stdev_op
 
 
 # ==============================================================================================
@@ -119,13 +119,13 @@ def test_the_registry_records_exactly_what_this_operator_declares():
     """Read back through SquidXplorer's public accessors, not through our own constants — this is
     the fact every generic surface (engine loop, napari layer type, GUI parameters, refusals) will
     act on."""
-    import squidmip
+    import squidxplorer
 
-    assert OPERATOR_NAME in squidmip.available_projectors()
-    assert squidmip.operator_consumes(OPERATOR_NAME) == frozenset({"z"})
-    assert squidmip.operator_produces(OPERATOR_NAME) == "intensity"
-    assert {p.name for p in squidmip.operator_params(OPERATOR_NAME)} == {"smooth_sigma", "ddof"}
-    assert squidmip.operator_requires(OPERATOR_NAME) == ("scipy",)
+    assert OPERATOR_NAME in squidxplorer.available_projectors()
+    assert squidxplorer.operator_consumes(OPERATOR_NAME) == frozenset({"z"})
+    assert squidxplorer.operator_produces(OPERATOR_NAME) == "intensity"
+    assert {p.name for p in squidxplorer.operator_params(OPERATOR_NAME)} == {"smooth_sigma", "ddof"}
+    assert squidxplorer.operator_requires(OPERATOR_NAME) == ("scipy",)
 
 
 def test_the_declared_consumes_is_what_the_code_actually_does():
@@ -140,14 +140,14 @@ def test_the_declared_consumes_is_what_the_code_actually_does():
 def test_operator_kwargs_reach_the_operator_through_the_registry():
     """The parameter seam end to end: a run naming a parameter gets a DIFFERENT binding, and one
     naming a parameter this operator does not declare is refused by name."""
-    import squidmip
+    import squidxplorer
 
-    bound = squidmip.bind_operator(OPERATOR_NAME, {"smooth_sigma": 0.0})
+    bound = squidxplorer.bind_operator(OPERATOR_NAME, {"smooth_sigma": 0.0})
     stack = [np.full((4, 4), 10, np.uint16), np.full((4, 4), 20, np.uint16)]
     assert bound(stack).max() == 5          # std of {10, 20} = 5
 
     with pytest.raises(ValueError, match="no parameter"):
-        squidmip.bind_operator(OPERATOR_NAME, {"sigma": 1.0})
+        squidxplorer.bind_operator(OPERATOR_NAME, {"sigma": 1.0})
 
 
 # ==============================================================================================
@@ -160,18 +160,18 @@ def test_the_entry_point_is_declared_and_resolves_to_register():
     built without the entry point."""
     from importlib.metadata import entry_points
 
-    eps = {ep.name: ep for ep in entry_points(group="squidmip.operators")}
-    assert "squidmip-operator-template" in eps, (
+    eps = {ep.name: ep for ep in entry_points(group="squidxplorer.operators")}
+    assert "squidxplorer-operator-template" in eps, (
         "this package's entry point is not installed — reinstall with `pip install -e .`")
-    assert eps["squidmip-operator-template"].load() is register
+    assert eps["squidxplorer-operator-template"].load() is register
 
 
-def test_importing_squidmip_registered_this_operator_with_no_edit_to_squidmip():
+def test_importing_squidxplorer_registered_this_operator_with_no_edit_to_squidxplorer():
     """THE POINT OF THE WHOLE TEMPLATE. Nothing in SquidXplorer mentions this package."""
-    import squidmip
-    from squidmip._operations import runnable_operators
+    import squidxplorer
+    from squidxplorer._operations import runnable_operators
 
-    assert OPERATOR_NAME in squidmip.available_projectors()
+    assert OPERATOR_NAME in squidxplorer.available_projectors()
     # `runnable_operators()` is what the GUI and the command surface gate a run on, and it is a
     # different list from `available_projectors()` (it adds the region operators). Being in
     # available_projectors and NOT in this one means installed-but-unreachable-from-the-app.

@@ -16,8 +16,8 @@ import importlib.util
 import numpy as np
 import pytest
 
-from squidmip import available_projectors, project_well, operator_consumes
-from squidmip._background import (
+from squidxplorer import available_projectors, project_well, operator_consumes
+from squidxplorer._background import (
     BackgroundParams,
     bgsub_op,
     clipped_fraction,
@@ -25,9 +25,9 @@ from squidmip._background import (
     restore,
     subtract_background,
 )
-from squidmip._layers import OperationStack
-from squidmip.projection import PLANE_OP
-from squidmip.reader import open_reader
+from squidxplorer._layers import OperationStack
+from squidxplorer.projection import PLANE_OP
+from squidxplorer.reader import open_reader
 
 pytest.importorskip("scipy.ndimage")
 

@@ -49,7 +49,7 @@ committed to, scheduled, or estimated.
   fallback for the renderer it could not share a process with. napari won a written gate
   (`docs/napari-gate.md`) and `docs/SCOPE.md` already argued this ("a half-alive second viewer
   stack. Delete, do not maintain"), so the second stack was carrying no load. Julio's call,
-  2026-07-30. `SQUIDMIP_VIEWER=ndv` now builds napari and says so in the log rather than
+  2026-07-30. `SQUIDXPLORER_VIEWER=ndv` now builds napari and says so in the log rather than
   silently handing you a viewer you did not ask for. Nothing to migrate, and the PyInstaller
   spec and `environment.yml` lose their `ndviewer_light` entries rather than gaining Qt6 ones.
   <sub>added 2026-07-27 · Spencer · closed 2026-07-30</sub>
@@ -187,7 +187,7 @@ committed to, scheduled, or estimated.
   while `_viewer._ComputedPlateWorker._read`, `_ZarrLoupeSource.coarse` and `_on_well` hardcode
   `[0, :, 0]`. So a multi-timepoint plate renders as its FIRST frame with no error anywhere, and
   no test catches it because every fixture in the suite is `Nt = 1`. Written up honestly in the
-  Time section of `docs/plate-contract.md`; `python -m squidmip.contract.validate` now warns when
+  Time section of `docs/plate-contract.md`; `python -m squidxplorer.contract.validate` now warns when
   a plate carries more than one timepoint, and `tests/test_plate_contract.py` pins the three
   hardcoded sites so the doc cannot rot. Julio: users WILL drop multi-timepoint datasets on this.
   <sub>added 2026-07-29 · Julio</sub>
@@ -212,7 +212,7 @@ committed to, scheduled, or estimated.
   `ReaderTileSource` gives raw acquisitions MIP tiles with no written plate; `_TileFetcher`
   decodes off the GUI thread newest-first; `paintEvent` overlays cached tiles on the montage and
   sharpens in place. Gestures were already right — `wheelEvent` has zoomed about the cursor
-  since IMA-221. `SQUIDMIP_DEEP_ZOOM=0` disables the whole overlay.
+  since IMA-221. `SQUIDXPLORER_DEEP_ZOOM=0` disables the whole overlay.
 
   *Known gaps to measure against the video:* tiles engage only above `cd > _CELL` (88 px/well),
   so everything below that zoom is still the flat 88 px montage — the video appears continuous

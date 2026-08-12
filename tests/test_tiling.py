@@ -12,7 +12,7 @@ import time
 import numpy as np
 import pytest
 
-from squidmip._tiling import (
+from squidxplorer._tiling import (
     Geometry,
     Level,
     TileCache,

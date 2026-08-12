@@ -35,23 +35,23 @@ import sys
 import time
 
 os.environ.pop("QT_QPA_PLATFORM", None)          # we need a real GL context
-os.environ.setdefault("SQUIDMIP_VIEWER", "napari")
+os.environ.setdefault("SQUIDXPLORER_VIEWER", "napari")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
 
-# `import squidmip` FIRST, THEN qtpy. `squidmip/__init__` pins QT_API=pyqt6 and the pin has to be
+# `import squidxplorer` FIRST, THEN qtpy. `squidxplorer/__init__` pins QT_API=pyqt6 and the pin has to be
 # set before qtpy resolves a binding. This said `from PyQt5.QtWidgets import QApplication` (and
-# imported it BEFORE squidmip) until 2026-08-06: the widgets under test were Qt6 while the
+# imported it BEFORE squidxplorer) until 2026-08-06: the widgets under test were Qt6 while the
 # application was Qt5, both frameworks loaded into one process, and the script aborted on
 # "QWidget: Must construct a QApplication before a QWidget". Same defect commit 6b51793 fixed in
 # tools/walkthrough.py; this file was not carried over. Dead since the Qt6 migration (10b8348,
 # f7f9b28, ce5605c).
-import squidmip  # noqa: F401
+import squidxplorer  # noqa: F401
 from qtpy.QtWidgets import QApplication
 
-from squidmip._viewer import PlateWindow
+from squidxplorer._viewer import PlateWindow
 
 if len(sys.argv) < 2:
     print("usage: python tools/verify_napari_mosaic.py <acquisition dir> [budget_s]")
@@ -161,7 +161,7 @@ out["frame_shape"] = list(frame)
 
 layers = []
 for ly in pane.mosaic.ours():
-    from squidmip._napari_view import key_of
+    from squidxplorer._napari_view import key_of
 
     k = key_of(ly)
     layers.append({

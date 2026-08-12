@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from squidmip._activity import ActivityLog
+from squidxplorer._activity import ActivityLog
 
 
 @pytest.fixture

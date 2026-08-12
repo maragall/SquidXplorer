@@ -131,7 +131,7 @@ whether WINDOWS survive a re-ingest is a different question against `ViewerManag
 - **Why:** IMA-189 `read()` deliberately **raises** on non-2D planes (decision 5). Without this note the raise reads like a bug.
 - **Pros:** Broadens input coverage to brightfield acquisitions.
 - **Cons:** Requires an RGB→2D policy the MIP tool may never need; better decided when brightfield is actually in scope.
-- **Context:** Linked to the `read()` non-2D assertion in `squidmip/reader.py`. tilefusion's `_to_grayscale_2d` is a reference implementation if reduction is chosen.
+- **Context:** Linked to the `read()` non-2D assertion in `squidxplorer/reader.py`. tilefusion's `_to_grayscale_2d` is a reference implementation if reduction is chosen.
 - **Depends on / blocked by:** IMA-189 reader.
 
 ## Multi-timepoint iteration / projection → low priority follow-up
@@ -230,8 +230,8 @@ whether WINDOWS survive a re-ingest is a different question against `ViewerManag
 - **What:** `squid2minerva/colors.py:load_yaml_colors` reads `channel["display_color"]`, but real `acquisition_channels.yaml` nests it under `channel.camera_settings.<cam>.display_color`. Its Minerva OME-TIFF exports only get right colors via the wavelength-fallback map — a custom yaml color is silently ignored.
 - **Why:** Confirmed against a real dataset yaml. It's correct-by-luck today because the fallback palette matches the standard 4 channels; any non-default color drops silently.
 - **Pros:** Fixes silently-wrong colors in a sibling tool's exports.
-- **Cons:** Different repo, different owner; not on any SquidMIP critical path.
-- **Context:** SquidMIP does **not** carry this bug — IMA-189's `squidmip/_channels.py` already resolves `display_color` correctly (top-level v1.0+ *and* nested `camera_settings`, mapped by name, raises on unresolved), and IMA-184 consumes `metadata.channels[].display_color` rather than re-parsing the yaml. This TODO is purely a flag for whoever owns `~/CEPHLA/projects/explorer/squid2minerva`.
+- **Cons:** Different repo, different owner; not on any SquidXplorer critical path.
+- **Context:** SquidXplorer does **not** carry this bug — IMA-189's `squidxplorer/_channels.py` already resolves `display_color` correctly (top-level v1.0+ *and* nested `camera_settings`, mapped by name, raises on unresolved), and IMA-184 consumes `metadata.channels[].display_color` rather than re-parsing the yaml. This TODO is purely a flag for whoever owns `~/CEPHLA/projects/explorer/squid2minerva`.
 - **Depends on / blocked by:** squid2minerva maintainer.
 - **Update (IMA-228 eng review, 2026-07-20):** this matters more than it looked. `squid2minerva/story.py`'s own docstring confirms Minerva Author ignores OME-TIFF channel colours and takes colour **only** from the `.story.json` groups — which are built from `colors.load_yaml_colors`. So this bug is the *entire* colour path for the salesperson tool's exports, not a secondary one. IMA-228 sidesteps it by feeding `metadata.channels[].display_color` straight into the story groups.
 
@@ -266,7 +266,7 @@ constraint is worth keeping for any NEW tab, and it is stated at `_open_op_tab` 
 - **Why:** IMA-209 made detach a property of the tab container (eng review D2); any tab bypassing the registry won't detach and won't be cleaned up by `_dispose_tab_widget`.
 - **Pros:** Zero extra work in 205 to get the Nick float behavior.
 - **Cons:** None — this is a one-line integration constraint.
-- **Context:** Registry + cleanup contract in `squidmip/_viewer.py` (`_op_tabs`/`_floating`/`_dispose_tab_widget`).
+- **Context:** Registry + cleanup contract in `squidxplorer/_viewer.py` (`_op_tabs`/`_floating`/`_dispose_tab_widget`).
 - **Depends on / blocked by:** IMA-205 design.
 ## Viewport tiling / LOD for deep zoom → region-window ticket
 - **What:** `viewport(bbox, zoom) -> tiles` with level-of-detail selection and frustum culling, so a single well can be zoomed into without fetching the whole mosaic.
@@ -296,11 +296,11 @@ constraint is worth keeping for any NEW tab, and it is stated at `_open_op_tab` 
 - **Why:** IMA-212's spec opened with "evaluate Odon as the web/remote renderer." Reading Odon v0.1.5's source killed that premise: it is a native Rust desktop GUI (`eframe::run_native` on every path except `--check`), with no HTTP server, no WASM build, and no headless render-to-file. Its only listening socket is a localhost MCP control bridge on `127.0.0.1:17870` that its own docs say must not be network-exposed. "Remote" in Odon means it *reads* remote zarr, not that it *serves* pixels. So the original question is still completely open, and IMA-212 must not be read as having answered it.
 - **Pros:** Unblocks anyone who needs to look at plate output without sitting at the instrument — the actual underlying need.
 - **Cons:** Genuinely larger than a bridge ticket: needs a hosting story, an access-control story, and a decision between serving pixels (render server) vs serving bytes (object store + a zarr-reading web viewer).
-- **Context:** SquidMIP's existing output is already a strong starting point — `plate.ome.zarr` is spec OME-NGFF v0.5, zarr v3, with a per-FOV pyramid, so a zarr-capable web viewer could read it over HTTP with no writer changes at all. The `_montage.py` hover viewer is a precedent for a static, server-free artifact. Worth scoping the "object store + web zarr viewer" option first, since it reuses everything already built.
+- **Context:** SquidXplorer's existing output is already a strong starting point — `plate.ome.zarr` is spec OME-NGFF v0.5, zarr v3, with a per-FOV pyramid, so a zarr-capable web viewer could read it over HTTP with no writer changes at all. The `_montage.py` hover viewer is a precedent for a static, server-free artifact. Worth scoping the "object store + web zarr viewer" option first, since it reuses everything already built.
 - **Depends on / blocked by:** nothing technically; needs a product call on who the remote viewer is and where the data lives.
 
 ## Non-integer inter-level pyramid scale ratios → possible IMA-184 follow-up
-- **What:** `_multiscales` (`squidmip/_output.py:165`) computes each level's scale as `p * (y0/y)`. Because `_downsample_yx` crops odd axes by one before halving, the ratio between levels is not exactly 2.0 — a 4167-px axis gives 2.0009…, not 2.
+- **What:** `_multiscales` (`squidxplorer/_output.py:165`) computes each level's scale as `p * (y0/y)`. Because `_downsample_yx` crops odd axes by one before halving, the ratio between levels is not exactly 2.0 — a 4167-px axis gives 2.0009…, not 2.
 - **Why:** The metadata is *self-consistent* (the scale honestly describes each level's real size), so this is not obviously a bug. But readers that use `scale` for level-of-detail placement can accumulate misalignment, which shows up as image drift while zooming rather than as an error. Nobody has looked for it, and a length-check on the scale array — which is what our conformance tests do — cannot catch it.
 - **Pros:** Rules out a class of subtle, silent geometric error in every downstream viewer.
 - **Cons:** May well be a non-issue; fixing it (padding instead of cropping odd axes) changes pixel content at coarse levels, which is a real behaviour change to a shipped writer.
@@ -308,7 +308,7 @@ constraint is worth keeping for any NEW tab, and it is stated at `_open_op_tab` 
 - **Depends on / blocked by:** IMA-212 Phase 0 observation.
 ## External stitchers as the ACCEPTANCE ORACLE (ASHLAR first) → IMA-211 (re-scoped to exactly this)
 - **What:** Run ASHLAR out-of-process on a dev box over 3-5 real wells and compare its per-tile
-  displacements against SquidMIP's own stitch output (IMA-222's operator). Require max disagreement ≤ 2 px. Optionally
+  displacements against SquidXplorer's own stitch output (IMA-222's operator). Require max disagreement ≤ 2 px. Optionally
   extend to BigStitcher/PetaKit5D later; ASHLAR alone carries most of the signal.
 - **Why:** IMA-211 asked to *prototype/evaluate* four stitchers. The review's first answer —
   "none is shippable inside our Windows app" — is true but answers a different question.
@@ -365,7 +365,7 @@ constraint is worth keeping for any NEW tab, and it is stated at `_open_op_tab` 
 - **Depends on / blocked by:** nothing — runs today.
 
 ## Parallel export for large Minerva selections → deferred until IMA-205/187
-- **What:** `squidmip/_minerva.py` exports FOVs in a plain sequential loop over `project_well`. When real multi-FOV selection lands, large selections should use `project_plate`'s existing worker pool.
+- **What:** `squidxplorer/_minerva.py` exports FOVs in a plain sequential loop over `project_well`. When real multi-FOV selection lands, large selections should use `project_plate`'s existing worker pool.
 - **Why:** `project_plate` (`_engine.py:131-139`) already parallelises and accepts `regions=`, so the machinery exists. A 50-FOV selection exported serially would be a visibly slow button.
 - **Pros:** Reuses a tested parallel path instead of hand-rolling threads; large selections stop being a wait.
 - **Cons:** `project_plate` picks FOVs through `select_fovs(metadata, n_fovs)`, which cannot express an arbitrary `(region, fov)` list — the semantics genuinely do not match a user selection today, so adopting it needs a new entry point, not a swap.

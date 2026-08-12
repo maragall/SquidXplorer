@@ -13,9 +13,9 @@ import pytest
 
 from qtpy.QtWidgets import QApplication
 
-import squidmip._viewer as V
-from squidmip import _run_scope
-from squidmip._command import (
+import squidxplorer._viewer as V
+from squidxplorer import _run_scope
+from squidxplorer._command import (
     BUSY,
     CommandBus,
     Describe,
@@ -33,7 +33,7 @@ from squidmip._command import (
 @pytest.fixture(scope="module")
 def qapp():
     app = QApplication.instance() or QApplication([])
-    app.setProperty("_squidmip_test", True)
+    app.setProperty("_squidxplorer_test", True)
     return app
 
 
@@ -66,7 +66,7 @@ def test_the_gui_surface_supports_the_run_and_control_commands(win):
 
 
 def test_list_operators_is_answered_identically_to_the_engine(win):
-    from squidmip._command import CommandBus as _Bus, EngineExecutor
+    from squidxplorer._command import CommandBus as _Bus, EngineExecutor
 
     gui = win.commands.execute(ListOperators()).data["names"]
     engine = _Bus(EngineExecutor()).execute(ListOperators()).data["names"]
@@ -136,7 +136,7 @@ def test_stop_with_nothing_running_is_a_named_refusal_not_a_noop(open_win):
 def test_a_running_operator_is_measured_and_lands_in_the_shared_metrics(open_win, qapp):
     """The GUI's run path writes the SAME METRICS log the CLI does — one measurement, one table,
     both surfaces. After a run completes, the comparison table has a 'mip' row."""
-    from squidmip._measure import METRICS
+    from squidxplorer._measure import METRICS
 
     before = len(METRICS)
     open_win.commands.execute(RunOperator(operator="mip", scope=_run_scope.SCOPE_PLATE, save=False))
@@ -254,8 +254,8 @@ def test_a_plate_run_opens_AND_closes_a_started_done_pair_in_the_console(open_wi
     deliberate and is Task 2's to close."""
     import logging
 
-    from squidmip._address import Extent
-    from squidmip._logpane import ADDRESS_FIELD, VIEW_FIELD
+    from squidxplorer._address import Extent
+    from squidxplorer._logpane import ADDRESS_FIELD, VIEW_FIELD
 
     regions = open_win.commands.execute(Describe()).data["regions"][:1]
     with caplog.at_level(logging.INFO):

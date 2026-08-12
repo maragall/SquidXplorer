@@ -40,7 +40,7 @@ if "PySide6" in sys.modules or "PySide2" in sys.modules:
 
 from qtpy.QtCore import QObject, Signal  # noqa: E402
 
-from squidmip import _viewer as V  # noqa: E402
+from squidxplorer import _viewer as V  # noqa: E402
 
 from .conftest import shutdown_plate_window  # noqa: E402
 from .test_viewer import qapp  # noqa: E402,F401  (fixtures)

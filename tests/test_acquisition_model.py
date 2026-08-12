@@ -21,7 +21,7 @@ import numpy as np
 import pytest
 from pydantic import ValidationError
 
-from squidmip._acquisition import Acquisition, Channel
+from squidxplorer._acquisition import Acquisition, Channel
 
 
 def _kw(**over):
@@ -188,7 +188,7 @@ def test_every_reader_returns_a_validated_acquisition(squid_dataset, multipage_d
     validated type — otherwise a consumer has to ask which reader it holds before it can trust
     what it was given, which is the situation the model exists to end.
     """
-    from squidmip.reader import open_reader
+    from squidxplorer.reader import open_reader
 
     for root, _ in (squid_dataset, multipage_dataset, ome_tiff_dataset, zarr_hcs_dataset):
         meta = open_reader(root).metadata
@@ -204,8 +204,8 @@ def test_the_reader_boundary_refuses_a_malformed_acquisition(squid_dataset, monk
     failure appeared wherever someone first allocated against it — a stack trace pointing at
     the victim rather than the cause.
     """
-    import squidmip.reader as reader_mod
-    from squidmip.reader import open_reader
+    import squidxplorer.reader as reader_mod
+    from squidxplorer.reader import open_reader
 
     real = reader_mod.load_acquisition_metadata
 

@@ -16,7 +16,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from squidmip._op_panels import (
+from squidxplorer._op_panels import (
     STITCH_DEFAULTS,
     stitch_refusal,
     stitch_operator_kwargs,
@@ -44,7 +44,7 @@ from squidmip._op_panels import (
 def test_defaults_reproduce_the_pipeline_exactly():
     """An untouched panel must launch byte-for-byte what stitch_region does unaided --
     otherwise the panel silently becomes a second set of defaults."""
-    from squidmip._stitch import _ABS_THRESH, _BLEND_PX, _REL_THRESH
+    from squidxplorer._stitch import _ABS_THRESH, _BLEND_PX, _REL_THRESH
 
     kw = stitch_operator_kwargs(**STITCH_DEFAULTS)
     assert kw["blend_px"] == _BLEND_PX
@@ -104,7 +104,7 @@ def test_the_kwargs_are_accepted_by_stitch_region_itself():
     only symptom is a status line that stops updating."""
     import inspect
 
-    from squidmip._stitch import stitch_region
+    from squidxplorer._stitch import stitch_region
 
     accepted = set(inspect.signature(stitch_region).parameters)
     for case in ({}, {"register": False}, {"channels": [0]}):
@@ -154,7 +154,7 @@ def test_an_unknown_projector_is_named_rather_than_crashing_the_panel():
 # ---------------------------------------------------------------------------------------
 
 def test_the_first_iteration_has_nothing_to_compare_against():
-    from squidmip._decon_qc import halo_verdict
+    from squidxplorer._decon_qc import halo_verdict
 
     kind, msg = halo_verdict([(2, 0.40)])
     assert kind == "first"
@@ -162,7 +162,7 @@ def test_the_first_iteration_has_nothing_to_compare_against():
 
 
 def test_a_falling_ratio_says_the_halo_is_still_tightening():
-    from squidmip._decon_qc import halo_verdict
+    from squidxplorer._decon_qc import halo_verdict
 
     kind, msg = halo_verdict([(2, 0.40), (3, 0.31)])
     assert kind == "improving"
@@ -172,7 +172,7 @@ def test_a_falling_ratio_says_the_halo_is_still_tightening():
 def test_a_rising_ratio_says_the_disc_is_growing_back():
     """The semi-convergence tell. This is the whole reason the loop is one iteration at a
     time, so it must be stated as 'stop / go back', not as a neutral number."""
-    from squidmip._decon_qc import halo_verdict
+    from squidxplorer._decon_qc import halo_verdict
 
     kind, msg = halo_verdict([(2, 0.31), (3, 0.44)])
     assert kind == "worse"
@@ -182,7 +182,7 @@ def test_a_rising_ratio_says_the_disc_is_growing_back():
 def test_the_verdict_uses_the_best_seen_not_merely_the_previous_one():
     """Falling, falling, rising, rising: the answer is still 'the best was k=3', not
     'k=4 was better than k=5'."""
-    from squidmip._decon_qc import halo_verdict
+    from squidxplorer._decon_qc import halo_verdict
 
     kind, msg = halo_verdict([(1, 0.9), (2, 0.5), (3, 0.3), (4, 0.4), (5, 0.6)])
     assert kind == "worse"
@@ -190,7 +190,7 @@ def test_the_verdict_uses_the_best_seen_not_merely_the_previous_one():
 
 
 def test_an_empty_history_is_refused_rather_than_returning_a_confident_nothing():
-    from squidmip._decon_qc import halo_verdict
+    from squidxplorer._decon_qc import halo_verdict
 
     with pytest.raises(ValueError):
         halo_verdict([])
@@ -213,7 +213,7 @@ if "PySide6" in sys.modules or "PySide2" in sys.modules:   # pragma: no cover
 from qtpy.QtCore import Qt  # noqa: E402
 from qtpy.QtWidgets import QApplication  # noqa: E402
 
-from squidmip._op_panels import DeconQCPanel, DeconQCResultView, StitcherPanel  # noqa: E402
+from squidxplorer._op_panels import DeconQCPanel, DeconQCResultView, StitcherPanel  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -252,7 +252,7 @@ class _Host:
 
 def test_the_stitcher_panel_builds_and_offers_the_ported_controls(qapp):
     p = StitcherPanel(_Host())
-    # The Settings group of maragall/stitcher, minus the parts squidmip pins (see the
+    # The Settings group of maragall/stitcher, minus the parts squidxplorer pins (see the
     # module docstring for what was deliberately not ported and why).
     assert p.register_cb is not None
     assert p.reg_channel_combo.count() == 2
@@ -342,7 +342,7 @@ def test_the_run_handler_itself_refuses_labels_not_just_the_disabled_button(qapp
 
 
 def test_the_decon_panel_starts_at_the_qc_start_iteration_count(qapp):
-    from squidmip._decon import QC_START_ITERATIONS
+    from squidxplorer._decon import QC_START_ITERATIONS
 
     p = DeconQCPanel(_Host())
     assert p.iter_spin.value() == QC_START_ITERATIONS
@@ -361,7 +361,7 @@ def test_the_decon_panel_shutdown_joins_a_running_worker(qapp):
     panel must expose exactly that name — stop() alone was never on the teardown path."""
     import threading
 
-    from squidmip._op_panels import _DeconQCWorker
+    from squidxplorer._op_panels import _DeconQCWorker
 
     assert hasattr(DeconQCPanel, "shutdown"), "the teardown path calls shutdown(), not stop()"
 
@@ -387,9 +387,9 @@ def test_the_decon_panel_shutdown_joins_a_running_worker(qapp):
 
 
 def test_the_result_view_renders_the_turbo_composite_at_the_composite_s_own_size(qapp):
-    """Pane 3 shows the picture squidmip._decon_qc produced -- it does not build one."""
+    """Pane 3 shows the picture squidxplorer._decon_qc produced -- it does not build one."""
     pytest.importorskip("matplotlib")
-    from squidmip._decon_qc import qc_composite
+    from squidxplorer._decon_qc import qc_composite
 
     volume = np.zeros((5, 40, 40), dtype=np.float32)
     volume[2, 20, 20] = 1000.0
@@ -421,7 +421,7 @@ def _click(qapp, view, row, col):
 
 def _qc_view(qapp, volume, centre, view_half=None):
     """A result view showing one iteration of *volume*, laid out and clickable."""
-    from squidmip._decon_qc import qc_composite
+    from squidxplorer._decon_qc import qc_composite
 
     view = DeconQCResultView("A1/0/c0")
     view.show_iteration(3, qc_composite(volume, centre, view_half=view_half), 0.31,
@@ -481,7 +481,7 @@ def test_a_view_shown_without_its_volume_is_simply_not_clickable(qapp):
     """The three-argument show_iteration still works and must not raise on a click: there is
     nothing to re-slice, so the picture just sits there."""
     pytest.importorskip("matplotlib")
-    from squidmip._decon_qc import qc_composite
+    from squidxplorer._decon_qc import qc_composite
 
     volume = np.zeros((5, 40, 40), dtype=np.float32)
     volume[2, 20, 20] = 1000.0
@@ -507,8 +507,8 @@ def test_the_worker_hands_the_volume_through_so_the_click_has_something_to_re_sl
     `frame.centre` / `frame.view_half` and passes them to the view.
     """
     pytest.importorskip("matplotlib")
-    from squidmip._decon_qc import qc_composite
-    from squidmip._op_panels import QCFrame
+    from squidxplorer._decon_qc import qc_composite
+    from squidxplorer._op_panels import QCFrame
 
     volume = np.zeros((5, 40, 40), dtype=np.float32)
     volume[2, 20, 20] = 1000.0
@@ -526,7 +526,7 @@ def test_the_worker_hands_the_volume_through_so_the_click_has_something_to_re_sl
 
 def test_the_result_view_keeps_every_iteration_so_they_can_be_compared(qapp):
     pytest.importorskip("matplotlib")
-    from squidmip._decon_qc import qc_composite
+    from squidxplorer._decon_qc import qc_composite
 
     volume = np.zeros((5, 20, 20), dtype=np.float32)
     volume[2, 10, 10] = 1000.0
@@ -546,7 +546,7 @@ def test_every_kwarg_the_panel_emits_is_a_real_stitch_region_parameter():
     worker thread, where the only symptom is a status line that stops updating."""
     import inspect
 
-    from squidmip._stitch import stitch_region
+    from squidxplorer._stitch import stitch_region
 
     kw = stitch_operator_kwargs(
         register=True, registration_channel=0, channels=None, blend_px=64,
@@ -591,7 +591,7 @@ def test_the_panel_offers_the_distortion_and_auto_blend_controls(qapp):
     # ON by default, changed deliberately on 2026-08-03 (Julio: "Correct lens distort should be
     # defaulted to on"). It used to assert the opposite. The port carried the standalone's
     # opt-in SPELLING across without its behaviour: maragall/stitcher's checkbox is dead, so the
-    # standalone corrects distortion on every run, and squidmip was the only one of the two that
+    # standalone corrects distortion on every run, and squidxplorer was the only one of the two that
     # did not unless asked.
     assert p.distortion_cb.isChecked()
 
@@ -639,8 +639,8 @@ def test_the_stitch_defaults_are_read_off_stitch_region_not_mirrored_by_hand():
     """
     from inspect import signature
 
-    from squidmip._op_panels import _stitch_default
-    from squidmip._stitch import stitch_region
+    from squidxplorer._op_panels import _stitch_default
+    from squidxplorer._stitch import stitch_region
 
     sig = signature(stitch_region).parameters
     assert STITCH_DEFAULTS["register"] == sig["register"].default
@@ -659,11 +659,11 @@ def test_the_stitch_defaults_are_read_off_stitch_region_not_mirrored_by_hand():
 # and the GUI was not one of them. `spot` and `cellpose` declare four parameters each and NOT ONE
 # was reachable from a panel -- so an operator declaring `params=(Param("sigma", 2.0),)` got zero
 # widgets and ran silently at its defaults, while `templates/operator/README.md` told contributors
-# to declare them. These tests are over `squidmip._param_panel`, whose policy half is Qt-free for
+# to declare them. These tests are over `squidxplorer._param_panel`, whose policy half is Qt-free for
 # the same reason the stitcher's is.
 
-from squidmip._engine import Param  # noqa: E402
-from squidmip._param_panel import (  # noqa: E402
+from squidxplorer._engine import Param  # noqa: E402
+from squidxplorer._param_panel import (  # noqa: E402
     WIDGET_KINDS,
     GenericOperatorPanel,
     group_params,
@@ -716,7 +716,7 @@ def test_a_chain_is_grouped_by_step_in_chain_order_not_refused():
     """Task 4: what does `operator_params()` return for a chain, and does the panel handle it?
     It returns the parts' params namespaced, and this is the handling: one group per step, in the
     order the expression is written."""
-    from squidmip._engine import operator_params
+    from squidxplorer._engine import operator_params
 
     params = operator_params("bgsub + spot")
     assert [p.name for p in params] == ["spot.sigma_px", "spot.min_area_px",
@@ -763,7 +763,7 @@ def test_a_key_that_is_not_an_operator_is_refused_by_name():
 def test_an_undrawable_parameter_refuses_the_whole_panel_naming_the_parameter():
     """A panel that silently omitted the one parameter it could not draw would run that parameter
     at its default while every other control implied the form was complete."""
-    from squidmip import add_projector
+    from squidxplorer import add_projector
 
     def _factory(**kwargs):
         def _op(planes):
@@ -776,7 +776,7 @@ def test_an_undrawable_parameter_refuses_the_whole_panel_naming_the_parameter():
         why = panel_refusal(name)
         assert why and "mask" in why and "NoneType" in why
     finally:
-        from squidmip._engine import _OPERATORS
+        from squidxplorer._engine import _OPERATORS
         _OPERATORS.pop(name, None)
 
 
@@ -784,7 +784,7 @@ def test_an_undrawable_parameter_refuses_the_whole_panel_naming_the_parameter():
 
 def test_the_panel_builds_one_widget_per_declared_parameter(qapp):
     """The defect itself, pinned: `spot` declares four parameters and had zero widgets."""
-    from squidmip._engine import operator_params
+    from squidxplorer._engine import operator_params
 
     p = GenericOperatorPanel(_Host(), "spot")
     assert sorted(p.widgets) == sorted(param.name for param in operator_params("spot"))
@@ -794,7 +794,7 @@ def test_the_panel_builds_one_widget_per_declared_parameter(qapp):
 def test_each_widget_starts_at_the_declared_default(qapp):
     """An untouched panel must launch what the operator ships with, or the panel has become a
     second set of defaults -- the same rule `STITCH_DEFAULTS` is held to."""
-    from squidmip._engine import operator_params
+    from squidxplorer._engine import operator_params
 
     p = GenericOperatorPanel(_Host(), "spot")
     declared = {param.name: param.default for param in operator_params("spot")}
@@ -803,7 +803,7 @@ def test_each_widget_starts_at_the_declared_default(qapp):
 
 def test_the_blurb_becomes_the_tooltip(qapp):
     """`Param.blurb` is documented as 'the one line a UI shows'. Until now no UI showed it."""
-    from squidmip._engine import operator_params
+    from squidxplorer._engine import operator_params
 
     blurbs = {param.name: param.blurb for param in operator_params("spot")}
     p = GenericOperatorPanel(_Host(), "spot")
@@ -845,7 +845,7 @@ def test_every_kwarg_the_panel_emits_is_a_parameter_the_operator_accepts(qapp):
     """The panel's output has to survive `Operator.bind`, which refuses an unknown name LOUD.
     A panel emitting a key the operator does not declare would raise inside a worker thread,
     where the only symptom is a status line that stops updating."""
-    from squidmip import bind_operator
+    from squidxplorer import bind_operator
 
     host = _Host()
     p = GenericOperatorPanel(host, "spot")
@@ -893,7 +893,7 @@ def test_a_chain_panel_shows_the_form_and_greys_the_run_with_a_reason(qapp):
 def test_a_chain_panel_keeps_the_namespaced_names_bind_expects(qapp):
     """`Operator.bind` validates against the namespaced tuple this panel was built from, so the
     values go back under exactly the names they arrived with."""
-    from squidmip import bind_operator
+    from squidxplorer import bind_operator
 
     p = GenericOperatorPanel(_Host(), "bgsub + spot")
     p.widgets["spot.min_area_px"].setValue(400)

@@ -32,11 +32,11 @@ An agent writing a plugin needs the host to answer four questions. We answer thr
 
 ### 1. "What is the data?" — ANSWERED
 
-`squidmip/reader.py` reads four Squid output layouts behind one interface (`open_reader(path)`):
+`squidxplorer/reader.py` reads four Squid output layouts behind one interface (`open_reader(path)`):
 individual TIFFs, multi-page TIFF stacks, OME-TIFF, and OME-NGFF Zarr (HCS, per-FOV, and 6D).
 An adapter never parses a directory layout. It asks for pixels.
 
-`squidmip/_acquisition.py` is a frozen pydantic `Acquisition` model, validated ONCE at the reader
+`squidxplorer/_acquisition.py` is a frozen pydantic `Acquisition` model, validated ONCE at the reader
 boundary, with `require_pixel_size_um()` / `require_dz_um()`. So an adapter does not guess whether
 `pixel_size_um` is present — it asks, and gets a named refusal if it is missing.
 
@@ -44,7 +44,7 @@ boundary, with `require_pixel_size_um()` / `require_dz_um()`. So an adapter does
 
 ### 2. "What shape must my function be?" — ANSWERED for two kinds
 
-`squidmip/_engine.py` types operators by the axis they CONSUME:
+`squidxplorer/_engine.py` types operators by the axis they CONSUME:
 
 ```
 consumes = frozenset({"z"})   z-reducer   stack -> plane    (T, C,  1, Y, X)    mip, reference
@@ -64,7 +64,7 @@ a silently absent menu entry.
 example package with `README.md` stating the contract precisely — what arrives, what to return for
 each `consumes` value, what `produces` means for rendering, how parameters are declared, how
 dependencies are declared and what happens when they are missing. `requires=` is on all three
-registrars with one spelling. And `squidmip/_plugins.py` scans the `squidmip.operators` entry-point
+registrars with one spelling. And `squidxplorer/_plugins.py` scans the `squidxplorer.operators` entry-point
 group, so **an operator in a repo we do not ship registers itself with no edit to SquidXplorer** —
 which is precisely the "turn a repo link into an operator" step this document is about. The agent's
 job shrinks to: write the adapter, declare four things, `pip install`.
@@ -80,12 +80,12 @@ tool whose output shape the host has no concept of.
 
 Gallery view USED to be listed here as a second symptom of the same gap. It is not one, and saying
 so was what kept it unbuilt: a gallery is a look, not an operator run, so it needs no result type at
-all. It shipped (2026-08-05, `squidmip/_gallery.py`) over the raw mosaic's own placement helpers
+all. It shipped (2026-08-05, `squidxplorer/_gallery.py`) over the raw mosaic's own placement helpers
 and the plate selection that already existed. Background subtraction is still the real instance.
 
 ### 3. "Did it work?" — PARTLY ANSWERED
 
-`squidmip/_oracle.py` is the model to copy. It grades a stitcher WITHOUT containing one: cut a
+`squidxplorer/_oracle.py` is the model to copy. It grades a stitcher WITHOUT containing one: cut a
 known image into tiles at known positions, hand them over, measure how far off they are put back.
 That is a machine-checkable acceptance criterion, which is what an agent needs to know it
 succeeded rather than merely to run without raising.
@@ -133,7 +133,7 @@ honest summary of what matters for the DESIGN, independent of which product is u
    available verdict, and that is how a scrambled mosaic passes.
 2. **Dependency hell.** Half these tools pin conflicting versions of torch/numpy. Mitigation:
    `requires=` plus lazy imports, and a named refusal. Never import a plugin's dependency at
-   `import squidmip`.
+   `import squidxplorer`.
 3. **The tool assumes a different data model** — single FOV, single channel, 8-bit, a specific
    axis order. Our unit is a REGION (a mosaic of FOVs), never a single field. The adapter's job is
    precisely this translation, and it is where an agent will most often get it wrong.

@@ -96,7 +96,7 @@ def _pixel_size_um(root: Path):
     The two metadata generations are NOT interchangeable and conflating them is a 20x error:
 
       acquisition.yaml       objective.pixel_size_um    ALREADY object-space and binning-aware
-                                                        (per squidmip/_acquisition.py:3-5)
+                                                        (per squidxplorer/_acquisition.py:3-5)
       acquisition params.json sensor_pixel_size_um      SENSOR pitch — must be divided by
                                                         objective.magnification
 

@@ -40,13 +40,13 @@ if "PySide6" in sys.modules or "PySide2" in sys.modules:
 from qtpy.QtCore import Qt  # noqa: E402
 from qtpy.QtWidgets import QApplication, QPushButton, QTreeWidgetItem  # noqa: E402
 
-from squidmip._region_viewer import OpenViewList, ViewerManager  # noqa: E402
+from squidxplorer._region_viewer import OpenViewList, ViewerManager  # noqa: E402
 
 
 @pytest.fixture(scope="module")
 def qapp():
     app = QApplication.instance() or QApplication([])
-    app.setProperty("_squidmip_test", True)
+    app.setProperty("_squidxplorer_test", True)
     return app
 
 

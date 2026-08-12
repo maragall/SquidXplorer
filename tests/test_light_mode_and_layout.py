@@ -42,16 +42,16 @@ if "PySide6" in sys.modules or "PySide2" in sys.modules:
 from qtpy.QtGui import QColor, QFont, QGuiApplication, QPalette  # noqa: E402
 from qtpy.QtWidgets import QApplication, QComboBox  # noqa: E402
 
-from squidmip import _plate_overview as PO  # noqa: E402
-from squidmip import _qtstyle, _slide_art  # noqa: E402
-from squidmip._fontscale import window_screen  # noqa: E402
-from squidmip._region_viewer import RegionViewer  # noqa: E402
+from squidxplorer import _plate_overview as PO  # noqa: E402
+from squidxplorer import _qtstyle, _slide_art  # noqa: E402
+from squidxplorer._fontscale import window_screen  # noqa: E402
+from squidxplorer._region_viewer import RegionViewer  # noqa: E402
 
 
 @pytest.fixture(scope="module")
 def qapp():
     app = QApplication.instance() or QApplication([])
-    app.setProperty("_squidmip_test", True)
+    app.setProperty("_squidxplorer_test", True)
     return app
 
 
@@ -201,8 +201,8 @@ def test_the_card_never_demands_its_unelided_width_from_the_layout(card):
 
 def test_the_cards_in_the_process_pane_all_elide(qapp, monkeypatch):
     """The wiring, not just the widget: every operator card in the main window is an eliding one."""
-    from squidmip._operations import _OPERATIONS
-    from squidmip._viewer import PlateWindow
+    from squidxplorer._operations import _OPERATIONS
+    from squidxplorer._viewer import PlateWindow
 
     win = PlateWindow(None)
     try:
@@ -263,7 +263,7 @@ def _qt_parse_failures(qapp, build, resizes=((1400, 900), (900, 700), (1600, 100
 
 
 def test_no_widget_in_the_plate_window_has_an_unparseable_stylesheet(qapp):
-    from squidmip._viewer import PlateWindow
+    from squidxplorer._viewer import PlateWindow
 
     failures = _qt_parse_failures(qapp, lambda: PlateWindow(None))
     assert failures == [], (
@@ -273,7 +273,7 @@ def test_no_widget_in_the_plate_window_has_an_unparseable_stylesheet(qapp):
 
 def test_the_log_panel_toggle_closes_its_qss_block_exactly_once(qapp):
     """The specific brace bug, named. ``}}`` in a NON-f-string half of a split literal."""
-    from squidmip._logpanel import LogPanel
+    from squidxplorer._logpanel import LogPanel
 
     panel = LogPanel()
     try:

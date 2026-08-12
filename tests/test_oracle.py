@@ -1,4 +1,4 @@
-"""Unit tests for IMA-211's stitch acceptance oracle (``squidmip/_oracle.py``).
+"""Unit tests for IMA-211's stitch acceptance oracle (``squidxplorer/_oracle.py``).
 
 The oracle grades a stitcher; these tests grade the oracle. The load-bearing property is
 **discrimination**: a metric that passes everything is worse than no metric, so every
@@ -22,7 +22,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from squidmip._oracle import (
+from squidxplorer._oracle import (
     coverage,
     cut_fixture,
     grade_positions,

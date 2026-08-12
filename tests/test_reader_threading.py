@@ -33,7 +33,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from squidmip import reader as R
+from squidxplorer import reader as R
 
 
 class _FakePage:

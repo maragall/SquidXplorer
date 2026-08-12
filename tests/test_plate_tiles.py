@@ -16,8 +16,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from squidmip._tiling import TileCache, select_tiles, viewport
-from squidmip._tilesource import ReaderTileSource, plate_ladder
+from squidxplorer._tiling import TileCache, select_tiles, viewport
+from squidxplorer._tilesource import ReaderTileSource, plate_ladder
 
 FRAME = (64, 64)
 PX_UM = 1.0
@@ -157,7 +157,7 @@ def test_a_projector_that_does_not_consume_z_is_refused():
     """This collapses a stack to one plane. A plane-op has no z to collapse, and running it per z
     and keeping the last would look plausible and be wrong."""
     meta = _meta()
-    from squidmip._engine import add_projector
+    from squidxplorer._engine import add_projector
 
     add_projector("_tiletest_planeop", lambda planes: next(iter(planes)), consumes=frozenset())
     with pytest.raises(ValueError, match="does not consume z"):

@@ -1,6 +1,6 @@
 """IMA-254: the reader covers EVERY Squid output writer, and never skips one in silence.
 
-Two defects, one root cause. ``squidmip.reader`` served three of Squid's six on-disk shapes; of the
+Two defects, one root cause. ``squidxplorer.reader`` served three of Squid's six on-disk shapes; of the
 three it did not serve, MULTI_PAGE_TIFF was the worst, because it was not refused — the discovery
 glob hit a bare ``continue`` on every single file and the acquisition came out EMPTY. An operator
 pointing the tool at a real multi-page run was told the folder had no images in it. The comment on
@@ -18,7 +18,7 @@ What is asserted, per writer:
 * ``metadata`` resolves regions, fovs_per_region, channels, n_z, n_t IDENTICALLY across all six
   (they encode the same acquisition, so any difference is a reader bug);
 * every plane's pixels are EXACT against a direct read of the bytes on disk, per writer, using
-  that format's own native library rather than another squidmip reader (an oracle that is the
+  that format's own native library rather than another squidxplorer reader (an oracle that is the
   thing under test proves nothing);
 * ``fov_positions_um`` is populated and in MICROMETRES wherever the writer records positions.
 
@@ -36,9 +36,9 @@ import numpy as np
 import pytest
 import tifffile
 
-import squidmip
-from squidmip import open_reader
-from squidmip.reader import _MM_TO_UM
+import squidxplorer
+from squidxplorer import open_reader
+from squidxplorer.reader import _MM_TO_UM
 from tests.conftest import CHANNELS, FOVS, NZ, REGIONS, _FOV_MM
 from tests import writer_fixtures
 from tests.writer_fixtures import WRITERS, expected_arrays, plane
@@ -237,7 +237,7 @@ def test_a_multipage_acquisition_is_never_reported_as_empty(tmp_path):
 
 def test_the_individual_tiff_reader_refuses_stacks_by_name_instead_of_skipping(tmp_path):
     """Forcing the WRONG reader onto multi-page output must raise and name both formats."""
-    from squidmip.reader import SquidReader
+    from squidxplorer.reader import SquidReader
 
     root = writer_fixtures.build_multi_page_tiff(tmp_path / "acq")
     with pytest.raises(ValueError) as exc:
@@ -294,7 +294,7 @@ def test_no_reader_silently_continues_past_a_known_squid_filename():
     ``continue`` is a fine statement. What is banned is skipping a file the project KNOWS how to
     name, without saying so.
     """
-    lines = Path(squidmip.reader.__file__).read_text().splitlines()
+    lines = Path(squidxplorer.reader.__file__).read_text().splitlines()
     offenders = find_silent_skips(lines)
     assert not offenders, (
         "reader.py skips files matching a known Squid naming pattern without raising:\n"
