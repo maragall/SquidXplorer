@@ -62,7 +62,7 @@ def load_objective_na(root) -> Optional[float]:
     return na if na > 0 else None
 
 
-class Channel(BaseModel):
+class DisplayChannel(BaseModel):
     """One channel of the acquisition, keyed on its canonical (filename) name."""
 
     model_config = ConfigDict(extra="forbid")
@@ -118,7 +118,7 @@ class Acquisition(BaseModel):
     fov_positions_um: dict[tuple[str, int], tuple[float, float]]
     """``{(region, fov): (x_um, y_um)}`` — stage MICROMETRES; ``{}`` when unusable."""
 
-    channels: list[Channel]
+    channels: list[DisplayChannel]
     """Acquisition channels, in C-axis order."""
 
     n_z: int = Field(ge=1)
@@ -245,5 +245,5 @@ class Acquisition(BaseModel):
 # work per access, ~18x slower than these lookups on the viewer's paint path.
 _ACQ_KEYS: tuple[str, ...] = tuple(Acquisition.model_fields)
 _ACQ_FIELDSET = frozenset(_ACQ_KEYS)
-_CHANNEL_KEYS: tuple[str, ...] = tuple(Channel.model_fields)
+_CHANNEL_KEYS: tuple[str, ...] = tuple(DisplayChannel.model_fields)
 _CHANNEL_FIELDSET = frozenset(_CHANNEL_KEYS)
