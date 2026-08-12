@@ -323,7 +323,7 @@ class RegionViewer(QMainWindow):
         self._op_address: Any = None
         self._result_region: Optional[str] = None
 
-        self._derived_name = title or self._region_label(self._regions)
+        self._derived_name = title or self._view_label(self._regions)
         if self._roi_bbox is not None:
             self._derived_name = f"ROI · {self._derived_name}"
         self._display_name = self._derived_name
@@ -360,7 +360,7 @@ class RegionViewer(QMainWindow):
         return int(w), int(h)
 
     @staticmethod
-    def _region_label(regions: "list[str]", limit: int = 3) -> str:
+    def _view_label(regions: "list[str]", limit: int = 3) -> str:
         if not regions:
             return "(empty)"
         if len(regions) <= limit:
@@ -886,7 +886,7 @@ class RegionViewer(QMainWindow):
             self._say("cancelling the movie export…")
             return
         if self._reader is None or self._meta is None:
-            self._say("open a region first, then export a movie.")
+            self._say("show a region in this view first, then export a movie.")
             return
         if not can_record(self._meta):
             self._say("this acquisition has a single timepoint and a single z plane, so there is "
@@ -915,7 +915,7 @@ class RegionViewer(QMainWindow):
         n = axis_length(self._meta, axis)
         w = _VideoWorker(self._reader, self._meta, region, path, axis=axis, fps=DEFAULT_FPS,
                          channels=channels, windows=windows, rgb_by_channel=rgb,
-                         z=self._z_slider_index(), t=self.time_point, parent=self)
+                         z_level=self._z_slider_index(), time_point=self.time_point, parent=self)
         w.progress.connect(lambda d, total: self._show_progress(
             int(100 * d / max(1, total)), f"movie: frame {d} of {total}"))
         w.done.connect(self._on_movie_done)
@@ -1016,7 +1016,7 @@ class RegionViewer(QMainWindow):
             self._run_operator(key, regions=regions, save=save, requester=self,
                                operator_kwargs=kwargs)
             mode = "saving" if save else "previewing"
-            self._echo(f"{mode} {self._op_combo.currentText()} on {self._region_label(regions)} "
+            self._echo(f"{mode} {self._op_combo.currentText()} on {self._view_label(regions)} "
                        f"[{self._render_mode.upper()}] · {self._params_summary(key)}.")
         except Exception as exc:                          # noqa: BLE001 - named to the window
             self._say(f"could not start {self._op_combo.currentText()}: {exc}")
@@ -1192,7 +1192,7 @@ class RegionViewer(QMainWindow):
         if layer is None:
             channel, layer = self._spot_source()
         if layer is None:
-            self._say("open a region first, then detect nuclei.")
+            self._say("show a region in this view first, then detect nuclei.")
             return
         try:
             from squidxplorer._viewer import _SpotWorker
@@ -1284,7 +1284,7 @@ class RegionViewer(QMainWindow):
         region = self._cursor.region if self._cursor is not None else (
             self._regions[0] if self._regions else None)
         if v is None or region is None or self._reader is None or self._meta is None:
-            self._say("open a region first, then focus the reference plane.")
+            self._say("show a region in this view first, then focus the reference plane.")
             return
         z_levels = list((self._meta.get("z_levels") or []))
         if len(z_levels) <= 1:
@@ -1751,7 +1751,7 @@ class RegionViewer(QMainWindow):
             pane.mosaic.remove_op(_RAW_OP)
         channels = [c["name"] for c in self._meta["channels"]]
         w = _MosaicWorker(self._reader, self._meta, region, channels, parent=self,
-                          t=self.time_point)
+                          time_point=self.time_point)
         w.ready.connect(lambda r, ch, levels, bbox, win:
                         self._on_plane(r, ch, levels, bbox, win, gen=gen))
         w.problem.connect(self._say)
@@ -2168,7 +2168,7 @@ class RegionViewer(QMainWindow):
             self._replace_native3d(lambda: open_native_3d_volume(
                 {n: np.asarray(v) for n, v in volumes.items()},
                 scale=(dz, py_um, px_um),
-                title=f"3D ROI — {self._region_label(self._regions)}",
+                title=f"3D ROI — {self._view_label(self._regions)}",
                 contrast_by_channel=contrast_by or None,
                 colormap_by_channel=colormap_by or None,
                 max_texture=max_tex,
@@ -2362,7 +2362,7 @@ class ViewerManager(QObject):
         regions = [str(r) for r in regions if r]
         if not regions:
             return None
-        base = RegionViewer._region_label(regions)
+        base = RegionViewer._view_label(regions)
         title = f"{base}  ◂ view {parent_id}" if parent_id is not None else base
         return self._spawn(regions, title=title, roi_bbox=roi_bbox, parent_id=parent_id, luts=luts)
 
@@ -2416,7 +2416,7 @@ class ViewerManager(QObject):
         n = len(regions)
         clock = _measure.WindowOpen(
             f"{'ROI in ' if roi_bbox is not None else ''}{n} region{'' if n == 1 else 's'}: "
-            f"{RegionViewer._region_label(regions)}",
+            f"{RegionViewer._view_label(regions)}",
             n_targets=n)
         baseline = self._baseline_for(parent_id)
         if luts is not None:
