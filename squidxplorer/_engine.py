@@ -33,7 +33,7 @@ from squidxplorer.projection import (
 if TYPE_CHECKING:  # avoid import cost / cycle at runtime
     from squidxplorer.reader import SquidReader
 
-Projector = Callable[[Iterable[np.ndarray]], np.ndarray]
+OperatorFn = Callable[[Iterable[np.ndarray]], np.ndarray]
 
 
 @dataclass(frozen=True)
@@ -53,11 +53,11 @@ class MissingOperatorDependency(MissingDependency):
 class Operator:
     """A registry entry: name, callable, and the four declarations the engine dispatches on."""
     name: str
-    fn: Projector
+    fn: OperatorFn
     consumes: frozenset[str]
     produces: str = INTENSITY
     params: tuple[Param, ...] = ()
-    factory: Optional[Callable[..., Projector]] = None
+    factory: Optional[Callable[..., OperatorFn]] = None
     #: Importable module names this operator needs, e.g. ``("petakit",)``.
     requires: tuple[str, ...] = ()
 
@@ -68,14 +68,14 @@ class Operator:
             return False, requirement_refusal("operator", self.name, missing)
         return True, ""
 
-    def bind(self, operator_kwargs: Optional[dict] = None) -> Projector:
+    def bind(self, operator_kwargs: Optional[dict] = None) -> OperatorFn:
         """The callable to run, with *operator_kwargs* applied; refuses unknown params by name."""
         ok, why = self.available()
         if not ok:
             raise MissingOperatorDependency(why)
         return self.with_params(operator_kwargs)
 
-    def with_params(self, operator_kwargs: Optional[dict] = None) -> Projector:
+    def with_params(self, operator_kwargs: Optional[dict] = None) -> OperatorFn:
         """The callable *operator_kwargs* names, without the availability check :meth:`bind` makes."""
         if not operator_kwargs:
             return self.fn
@@ -121,10 +121,10 @@ def _default_workers() -> int:
     return n or 1
 
 
-def add_projector(name: str, projector: Projector, *, consumes=None, produces=None,
-                  params: Sequence[Param] = (), requires=()) -> None:
-    """Add a named operator so it can be selected by name in :func:`project_plate`."""
-    _declare(name, projector, consumes=consumes, produces=produces, params=params,
+def add_operator(name: str, operator: OperatorFn, *, consumes=None, produces=None,
+                 params: Sequence[Param] = (), requires=()) -> None:
+    """Add a named operator so it can be selected by name in :func:`run_plate`."""
+    _declare(name, operator, consumes=consumes, produces=produces, params=params,
              requires=requires, region=False)
 
 
@@ -137,7 +137,7 @@ def add_region_operator(name: str, operator, *, produces=None, params: Sequence[
 
 def _declare(name: str, fn, *, consumes, produces, params, requires, region: bool) -> None:
     """Validate ONE operator and file it in :data:`_OPERATORS`. The only writer of that table."""
-    kind = "region operator" if region else "projector"
+    kind = "region operator" if region else "operator"
     if not name:
         raise ValueError(f"{kind} name must be a non-empty string")
     reserved = sorted(set(name) & set(CHAIN_CHARS))
@@ -167,7 +167,7 @@ def _declare(name: str, fn, *, consumes, produces, params, requires, region: boo
             f"{kind} {name!r} declares a parameter twice: {sorted(names)}; a duplicate makes "
             "operator_kwargs ambiguous")
 
-    factory: Optional[Callable[..., Projector]] = None
+    factory: Optional[Callable[..., OperatorFn]] = None
     if declared:
         factory = fn
         fn = factory(**{p.name: p.default for p in declared})
@@ -195,13 +195,13 @@ def runnable_operators() -> list[str]:
     return sorted(_OPERATORS)
 
 
-def available_projectors() -> list[str]:
-    """Registered operators with the ``Iterable[plane] -> plane`` shape — what ``project_plate`` runs."""
+def available_plane_operators() -> list[str]:
+    """Registered operators with the ``Iterable[plane] -> plane`` shape — what the per-FOV loop runs."""
     return sorted(n for n, op in _OPERATORS.items() if "fov" not in op.consumes)
 
 
 def is_region_operator(name) -> bool:
-    """Does *name* eat a whole well's FOVs — i.e. must it be run by ``stitch_plate``?"""
+    """Does *name* eat a whole well's FOVs — i.e. must it be run by the region loop?"""
     try:
         return "fov" in _resolve_operator(name).consumes
     except (KeyError, TypeError, ValueError):
@@ -209,7 +209,7 @@ def is_region_operator(name) -> bool:
 
 
 def available_region_operators() -> list[str]:
-    """Registered operators that eat a whole well's FOVs — what :func:`squidxplorer.stitch_plate` runs."""
+    """Registered operators that eat a whole well's FOVs — what the region loop runs."""
     return sorted(n for n, op in _OPERATORS.items() if "fov" in op.consumes)
 
 
@@ -242,7 +242,7 @@ def operator_params(name: str) -> tuple[Param, ...]:
     return _resolve_operator(name).params
 
 
-def bind_operator(name: str, operator_kwargs: Optional[dict] = None) -> Projector:
+def bind_operator(name: str, operator_kwargs: Optional[dict] = None) -> OperatorFn:
     """Resolve *name* and apply *operator_kwargs*, raising on an unknown name or parameter."""
     return _resolve_operator(name).bind(operator_kwargs)
 
@@ -254,11 +254,11 @@ def _resolve_operator(name) -> Operator:
     if isinstance(name, (list, tuple)):
         spelled = f" {CHAIN_SEPARATOR} ".join(str(part) for part in name)
         raise TypeError(
-            f"a projector is named by one string, got {type(name).__name__} {name!r}. A chain is "
-            f"written as a string too: projector={spelled!r}. See squidxplorer._compose.")
+            f"an operator is named by one string, got {type(name).__name__} {name!r}. A chain is "
+            f"written as a string too: operator={spelled!r}. See squidxplorer._compose.")
     if not isinstance(name, str):
         raise TypeError(
-            f"a projector is named by a string or a RecipeChain, got {type(name).__name__}: "
+            f"an operator is named by a string or a RecipeChain, got {type(name).__name__}: "
             f"{name!r}.")
     operator = _OPERATORS.get(name)
     if operator is not None:
@@ -267,18 +267,44 @@ def _resolve_operator(name) -> Operator:
         return compose_operator(name, _resolve_operator)
     raise KeyError(
         f"unknown operator {name!r}; available: {runnable_operators()}. "
-        "Add new modes with squidxplorer.add_projector(name, fn) — or "
+        "Add new modes with squidxplorer.add_operator(name, fn) — or "
         "squidxplorer.add_region_operator(name, fn) for one that fuses a whole well — or chain "
         "registered ones with '+' (e.g. 'flatfield+decon+mip')."
     )
 
 
-def project_plate(
+def run_plate(
+    reader: "SquidReader",
+    *,
+    operator: str = "mip",
+    regions=None,
+    n_fovs: Optional[int] = 1,
+    workers: int | None = None,
+    on_error=None,
+    operator_kwargs: Optional[dict] = None,
+) -> Iterator[tuple[str, int, np.ndarray]]:
+    """Run *operator* over every selected well, streaming ``(region, fov, image)`` results.
+
+    Dispatches off the operator's ``consumes``: ``{"fov"}`` runs the region loop (one fused
+    result per well, every FOV, one well in flight unless *workers* says otherwise), anything
+    else the per-FOV loop.
+    """
+    if is_region_operator(operator):
+        from squidxplorer._stitch import _stitch_plate
+
+        return _stitch_plate(reader, n_fovs=None, workers=1 if workers is None else workers,
+                             operator=operator, on_error=on_error, regions=regions,
+                             **(operator_kwargs or {}))
+    return _project_plate(reader, n_fovs=n_fovs, workers=workers, operator=operator,
+                          on_error=on_error, regions=regions, operator_kwargs=operator_kwargs)
+
+
+def _project_plate(
     reader: "SquidReader",
     *,
     n_fovs: Optional[int] = 1,
     workers: int | None = None,
-    projector: str = "mip",
+    operator: str = "mip",
     on_error=None,
     regions=None,
     operator_kwargs: Optional[dict] = None,
@@ -292,14 +318,14 @@ def project_plate(
         raise ValueError(f"workers must be >= 1, got {workers}")
     n_workers = workers if workers is not None else _default_workers()
 
-    op = _resolve_operator(projector)
+    op = _resolve_operator(operator)
     # A region operator is a whole-well callable; this loop hands out planes.
     if "fov" in op.consumes:
         raise ValueError(
-            f"{projector!r} consumes fov — it fuses a whole well's FOVs and takes "
-            "(reader, region, fovs), which is not what project_plate hands an operator. Run it "
-            f"with squidxplorer.stitch_plate(reader, operator={projector!r}).")
-    fn = bind_operator(projector, operator_kwargs)
+            f"{operator!r} consumes fov — it fuses a whole well's FOVs and takes "
+            "(reader, region, fovs), which is not what the per-FOV loop hands an operator. Run "
+            f"it with squidxplorer.run_plate(reader, operator={operator!r}).")
+    fn = bind_operator(operator, operator_kwargs)
 
     # Warm the reader's lazy state single-threaded before fan-out.
     meta = reader.metadata

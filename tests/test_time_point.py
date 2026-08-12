@@ -10,7 +10,7 @@ import pytest
 import tensorstore as ts
 
 from squidxplorer import open_reader
-from squidxplorer._engine import project_plate
+from squidxplorer._engine import run_plate
 from squidxplorer._output import parse_well_id, write_plate
 from squidxplorer.contract import field_path
 from tests.conftest import (
@@ -111,7 +111,7 @@ def test_every_timepoint_holds_its_own_pixels(multi_time_point_dataset):
 def test_the_engine_keeps_all_three_timepoints(multi_time_point_dataset):
     root, _ = multi_time_point_dataset
     reader = open_reader(root)
-    results = list(project_plate(reader, n_fovs=1, workers=1))
+    results = list(run_plate(reader, n_fovs=1, workers=1))
 
     assert len(results) == 1
     region, fov, image = results[0]

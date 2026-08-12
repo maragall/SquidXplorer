@@ -30,7 +30,7 @@ def test_a_per_fov_operator_counts_fovs_not_wells():
 
 
 def test_a_region_operator_counts_regions_because_that_is_its_unit():
-    """stitch_plate yields ONE fused mosaic per region, so a region is the honest unit there."""
+    """the region loop yields ONE fused mosaic per region, so a region is the honest unit there."""
     assert unit_plan(_META, ["B2", "B3"], region_op=True, n_fovs=None) == (2, REGION_UNIT)
 
 
@@ -188,7 +188,7 @@ def test_a_failed_run_closes_the_pair_so_the_bar_cannot_be_left_running(qapp, pl
 
     # the engine raising is the real shape of a failed run (`_run_body` catches it and emits `failed`)
     with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(squidxplorer, "project_plate", _boom)
+        mp.setattr(squidxplorer, "run_plate", _boom)
         r = _Requester()
         plate.run_operator("mip", regions=[REGIONS[0]], save=False, requester=r)
         assert _drain_until(qapp, lambda: bool(r.failed or r.done), timeout=60)

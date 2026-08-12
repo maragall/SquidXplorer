@@ -1326,10 +1326,10 @@ def test_a_plane_op_result_KEEPS_the_z_axis(layers):
     """A plane-op declares ``consumes=frozenset()`` — z survives at full depth — so its result
     says nothing about whether the pane should show a z axis. Read off the DECLARATION, never
     a name comparison."""
-    from squidxplorer import add_projector, available_projectors, plane_op
+    from squidxplorer import add_operator, available_plane_operators, plane_op
 
-    if "zaxis_plane_op" not in available_projectors():
-        add_projector("zaxis_plane_op", plane_op(lambda a: a))
+    if "zaxis_plane_op" not in available_plane_operators():
+        add_operator("zaxis_plane_op", plane_op(lambda a: a))
     layers.add_mosaic("raw", "405", _z_stack_pyramid(), multiscale=True,
                       bbox_um=_Z_BBOX, z_scale_um=2.0)
 

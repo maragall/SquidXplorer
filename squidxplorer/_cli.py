@@ -49,7 +49,7 @@ def _operator_catalogue() -> str:
     entries = []
     for name in runnable_operators():
         declared = ", ".join(f"{p.name}={p.default!r}" for p in operator_params(name))
-        # A region operator's remaining kwargs go straight to `stitch_plate`.
+        # A region operator's remaining kwargs go straight to `stitch_region`.
         if is_region_operator(name):
             declared = ", ".join(filter(None, (declared, "**stitcher kwargs")))
         entries.append(f"{name}({declared})")
@@ -74,7 +74,7 @@ class ProcessParameters(BaseModel, use_attribute_docstrings=True):
     input_folder: CliPositionalArg[str]
     """A Squid HCS acquisition folder on this machine (the latest Cephla acquisition format)."""
 
-    projector: str = Field(default="mip", description=(
+    operator: str = Field(default="mip", description=(
         "Operator to run over every well. A z-reduction ('mip' = maximum intensity projection), a "
         "plane operator, or a REGION operator ('stitch' fuses a well's FOVs into one mosaic). "
         "Anything the engine can run is accepted, including an operator installed from another "
@@ -137,11 +137,11 @@ class ProcessParameters(BaseModel, use_attribute_docstrings=True):
             raise ValueError(f"input_folder {v!r} is not an existing directory")
         return str(p.resolve())
 
-    @field_validator("projector")
+    @field_validator("operator")
     @classmethod
     def _known_operator(cls, v: str) -> str:
         # Validate up front, before write_plate has written an output skeleton. Against the
-        # runnable set (every entry of the one operator table), not projectors alone.
+        # runnable set (every entry of the one operator table), not plane operators alone.
         from squidxplorer import runnable_operators
 
         runnable = runnable_operators()
@@ -163,16 +163,16 @@ class ProcessParameters(BaseModel, use_attribute_docstrings=True):
     def _known_parameters(self):
         """Refuse a --param the chosen operator does not declare, before the reader is opened."""
         pairs = dict(_parse_param(p) for p in self.param)
-        declared = operator_defaults(self.projector)
+        declared = operator_defaults(self.operator)
         if declared:
             unknown = [k for k in pairs if k not in declared]
             if unknown:
                 raise ValueError(
-                    f"{self.projector!r} does not take {', '.join(unknown)}; it takes: "
+                    f"{self.operator!r} does not take {', '.join(unknown)}; it takes: "
                     f"{', '.join(declared) or 'no parameters'}")
-        elif pairs and self.projector not in _region_operator_names():
+        elif pairs and self.operator not in _region_operator_names():
             raise ValueError(
-                f"{self.projector!r} declares no parameters, so it cannot be given "
+                f"{self.operator!r} declares no parameters, so it cannot be given "
                 f"{', '.join(pairs)}")
         return self
 
@@ -291,22 +291,22 @@ def run(params: ProcessParameters, *, stop=None) -> dict:
     _check_output(out_dir, params.overwrite)
     regions = _resolve_regions(params, reader)
     n_targets = len(regions) if regions is not None else len(reader.metadata["regions"])
-    logger.info("running '%s' over %s -> %s", params.projector, name, out_dir)
+    logger.info("running '%s' over %s -> %s", params.operator, name, out_dir)
 
     # Drive the shared command surface; a refusal comes back as a value with a code.
     progress = _Progress(n_targets)
     bus = CommandBus(EngineExecutor(params.input_folder, reader=reader,
                                     on_well=progress, stop=stop))
     result = bus.execute(RunOperator(
-        operator=params.projector, regions=regions, save=True,
+        operator=params.operator, regions=regions, save=True,
         output_folder=str(out_parent), n_fovs=n_fovs, workers=params.workers, tiff=params.tiff,
         parameters=params.parameters(),
     ))
     if not result.ok:
         if result.refusal == CANCELLED:
-            logger.error("%s: %s", params.projector, result.message)
+            logger.error("%s: %s", params.operator, result.message)
             raise SystemExit(EXIT_INTERRUPTED)
-        raise SystemExit(f"{params.projector}: {result.message}")
+        raise SystemExit(f"{params.operator}: {result.message}")
     manifest = dict(result.data["manifest"])
     skipped = list(result.data.get("skipped") or [])
     outcome = str(result.data.get("outcome") or "ok")

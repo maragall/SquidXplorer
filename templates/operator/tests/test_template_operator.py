@@ -89,7 +89,7 @@ def test_ddof_larger_than_the_stack_is_refused_naming_both_numbers():
 def test_the_registry_records_exactly_what_this_operator_declares():
     import squidxplorer
 
-    assert OPERATOR_NAME in squidxplorer.available_projectors()
+    assert OPERATOR_NAME in squidxplorer.available_plane_operators()
     assert squidxplorer.operator_consumes(OPERATOR_NAME) == frozenset({"z"})
     assert squidxplorer.operator_produces(OPERATOR_NAME) == "intensity"
     assert {p.name for p in squidxplorer.operator_params(OPERATOR_NAME)} == {"smooth_sigma", "ddof"}
@@ -126,7 +126,7 @@ def test_importing_squidxplorer_registered_this_operator_with_no_edit_to_squidxp
     import squidxplorer
     from squidxplorer._operations import runnable_operators
 
-    assert OPERATOR_NAME in squidxplorer.available_projectors()
+    assert OPERATOR_NAME in squidxplorer.available_plane_operators()
     assert OPERATOR_NAME in runnable_operators()
 
 

@@ -13,7 +13,7 @@ from squidxplorer.projection import INTENSITY, bind_channel
 
 __all__ = ["CHAIN_CHARS", "compose_operator", "is_chain_expression"]
 
-#: The characters that make a ``projector=`` string an EXPRESSION rather than a table key.
+#: The characters that make an ``operator=`` string an EXPRESSION rather than a table key.
 #: A registered name may contain neither, so this test can never shadow a real entry.
 CHAIN_CHARS = "+()"
 
@@ -85,7 +85,7 @@ def _refuse_impossible(parts: Sequence[tuple], label: str) -> None:
                 f"cannot compose {label!r}: {recipe.name!r} consumes fov — it takes a whole well "
                 "(reader, region, fovs) and returns its fused mosaic, so there are no planes to "
                 "hand the other steps and no plane stream to join it to. Run it on its own with "
-                "stitch_plate, then run the chain over the result.")
+                "run_plate, then run the chain over the result.")
 
         if getattr(operator.fn, "select_index", None) is not None:
             raise ValueError(

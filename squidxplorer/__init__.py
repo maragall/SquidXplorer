@@ -12,9 +12,9 @@ from squidxplorer._engine import (
     MissingOperatorDependency,
     Operator,
     Param,
-    add_projector,
+    add_operator,
     add_region_operator,
-    available_projectors,
+    available_plane_operators,
     available_region_operators,
     bind_operator,
     is_region_operator,
@@ -23,7 +23,7 @@ from squidxplorer._engine import (
     operator_params,
     operator_produces,
     operator_requires,
-    project_plate,
+    run_plate,
     runnable_operators,
 )
 from squidxplorer._minerva import export_selection, launch_minerva
@@ -37,7 +37,6 @@ from squidxplorer._plugins import (
 )
 from squidxplorer._stitch import (
     solve_offsets_px,
-    stitch_plate,
     stitch_region,
 )
 from squidxplorer._tiling import Geometry, TileCache, TileDescriptor, select_tiles
@@ -98,9 +97,9 @@ __all__ = [
     "select_fovs",
     "project",
     "project_well",
-    "project_plate",
-    "add_projector",
-    "available_projectors",
+    "run_plate",
+    "add_operator",
+    "available_plane_operators",
     "operator_consumes",
     "Operator",
     "plane_op",
@@ -124,7 +123,6 @@ __all__ = [
     "build_montage",
     # region operators (inter-FOV)
     "stitch_region",
-    "stitch_plate",
     "solve_offsets_px",
     "add_region_operator",
     "available_region_operators",

@@ -161,7 +161,7 @@ class _OperatorWorker(QThread):
     def run(self):
         target = _run_scope.describe_run_target(self._regions, total=self._total) or self._operator
         # capture print() for the run's duration (tilefusion reports with bare print);
-        # scoped to the run, not this thread — stitch_plate prints from pool threads
+        # scoped to the run, not this thread — the region loop prints from pool threads
         with capture_stdout_to_log(), \
                 measure_run(self._operator, target, n_targets=self._total) as _run_metrics:
             _run_metrics.note(surface="gui", save=self._save)
@@ -186,12 +186,14 @@ class _OperatorWorker(QThread):
         # say 0 of N before any work, so the bar is determinate from its first frame
         self.runProgress.emit(self._progress.report())
         try:
-            projector = self._operator
+            operator = self._operator
+            # a region operator runs one well at a time: peak memory is workers x one fused mosaic
+            workers = 1 if self._region_op else _VIEWER_WORKERS
             if self._save:
                 from squidxplorer import write_plate  # persist + project in one bounded, streaming pass
 
-                write_plate(self._reader, self._out_dir, n_fovs=self._n_fovs, workers=_VIEWER_WORKERS,
-                            projector=projector, tiff=False, on_well=self._on_well,
+                write_plate(self._reader, self._out_dir, n_fovs=self._n_fovs, workers=workers,
+                            operator=operator, tiff=False, on_well=self._on_well,
                             stop=self._stop.is_set, on_error=self._on_error, regions=self._regions,
                             operator_kwargs=self._operator_kwargs or None)
                 if self._stop.is_set():
@@ -201,21 +203,13 @@ class _OperatorWorker(QThread):
                 self.writtenReady.emit(str(Path(self._out_dir) / "plate.ome.zarr"))
             else:
                 # PREVIEW: same math as the saved run, writes nothing to disk
-                if self._region_op:
-                    # workers=1: peak memory is workers x one fused mosaic
-                    from squidxplorer import stitch_plate
+                from squidxplorer import run_plate
 
-                    stream = stitch_plate(self._reader, workers=1, operator=projector,
-                                          n_fovs=None, on_error=self._on_error,
-                                          regions=self._regions, **self._operator_kwargs)
-                else:
-                    from squidxplorer import project_plate
-
-                    # operator_kwargs on the preview too: both branches must run the same arguments
-                    stream = project_plate(self._reader, workers=_VIEWER_WORKERS, projector=projector,
-                                           n_fovs=self._n_fovs, on_error=self._on_error,
-                                           regions=self._regions,
-                                           operator_kwargs=self._operator_kwargs or None)
+                # operator_kwargs on the preview too: both branches must run the same arguments
+                stream = run_plate(self._reader, operator=operator, workers=workers,
+                                   n_fovs=self._n_fovs, on_error=self._on_error,
+                                   regions=self._regions,
+                                   operator_kwargs=self._operator_kwargs or None)
                 try:
                     for region, fov, image in stream:
                         if self._stop.is_set():
@@ -257,13 +251,13 @@ class _MinervaWorker(QThread):
     failed = Signal(str)
     finished_ok = Signal()
 
-    def __init__(self, reader, selection, out_dir, projector: str, t: int = 0, launch: bool = True,
+    def __init__(self, reader, selection, out_dir, z_operator: str, t: int = 0, launch: bool = True,
                  luts=None):
         super().__init__()
         self._reader = reader
         self._selection = list(selection)
         self._out_dir = out_dir
-        self._projector = projector
+        self._z_operator = z_operator
         self._t = t
         self._launch = launch
         # snapshotted by the caller on the GUI thread; this thread must not touch napari layers
@@ -289,7 +283,7 @@ class _MinervaWorker(QThread):
                 pairs.extend(
                     _minerva.export_selection(
                         self._reader, [(region, f) for f in fovs], self._out_dir,
-                        t=self._t, projector=self._projector, luts=self._luts,
+                        t=self._t, z_operator=self._z_operator, luts=self._luts,
                     )
                 )
                 on_progress(i + 1, len(grouped))

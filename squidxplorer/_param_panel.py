@@ -188,7 +188,7 @@ class GenericOperatorPanel(_Panel):
             return None
         return (f"the parameters of '{self.key}' are shown above, but this window runs operators "
                 f"by registry key and '{self.key}' is not one — a chain expression is run from the "
-                f"CLI (--projector '{self.key}' --param …). Runnable here: "
+                f"CLI (--operator '{self.key}' --param …). Runnable here: "
                 f"{', '.join(runnable_operators())}.")
 
     # -- building ------------------------------------------------------------------------

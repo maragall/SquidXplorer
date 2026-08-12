@@ -37,30 +37,30 @@ def test_input_folder_validator_rejects_missing(tmp_path):
         ProcessParameters(input_folder=str(tmp_path / "nope"))
 
 
-def test_projector_validator_accepts_region_operators(squid_dataset):
-    # the CLI must not be narrower than the command layer: region operators are valid projectors too.
+def test_operator_validator_accepts_region_operators(squid_dataset):
+    # the CLI must not be narrower than the command layer: region operators are valid operators too.
     root, _ = squid_dataset
     for name in ("mip", "stitch", "coordinate"):
-        assert ProcessParameters(input_folder=str(root), projector=name).projector == name
+        assert ProcessParameters(input_folder=str(root), operator=name).operator == name
 
 
-def test_projector_validator_names_what_it_can_run(squid_dataset):
+def test_operator_validator_names_what_it_can_run(squid_dataset):
     root, _ = squid_dataset
     with pytest.raises(ValueError, match="unknown operator 'nope'"):
-        ProcessParameters(input_folder=str(root), projector="nope")
+        ProcessParameters(input_folder=str(root), operator="nope")
 
 
 def test_param_is_refused_against_the_operators_own_declaration(squid_dataset):
     root, _ = squid_dataset
     with pytest.raises(ValueError, match="does not take bogus"):
-        ProcessParameters(input_folder=str(root), projector="spot", param=["bogus=1"])
+        ProcessParameters(input_folder=str(root), operator="spot", param=["bogus=1"])
     with pytest.raises(ValueError, match="'mip' declares no parameters"):
-        ProcessParameters(input_folder=str(root), projector="mip", param=["min_area_px=80"])
+        ProcessParameters(input_folder=str(root), operator="mip", param=["min_area_px=80"])
 
 
 def test_param_values_are_python_literals(squid_dataset):
     root, _ = squid_dataset
-    p = ProcessParameters(input_folder=str(root), projector="spot",
+    p = ProcessParameters(input_folder=str(root), operator="spot",
                           param=["min_area_px=80", "split_touching=False", "sigma_px=1.5"])
     assert p.parameters() == {"min_area_px": 80, "split_touching": False, "sigma_px": 1.5}
 
@@ -173,9 +173,9 @@ def test_operator_parameters_reach_the_operator(squid_dataset, tmp_path):
 
     root, _ = squid_dataset
     loose = run(ProcessParameters(input_folder=str(root), output_folder=str(tmp_path / "loose"),
-                                  projector="spot", param=["min_area_px=1"]))
+                                  operator="spot", param=["min_area_px=1"]))
     strict = run(ProcessParameters(input_folder=str(root), output_folder=str(tmp_path / "strict"),
-                                   projector="spot", param=["min_area_px=100000"]))
+                                   operator="spot", param=["min_area_px=100000"]))
     n_loose = int(zarr.open_array(str(Path(loose["plate"]) / "B" / "2" / "0" / "0"))[:].max())
     n_strict = int(zarr.open_array(str(Path(strict["plate"]) / "B" / "2" / "0" / "0"))[:].max())
     assert n_strict == 0 < n_loose
@@ -266,7 +266,7 @@ def test_main_exits_nonzero_when_the_plate_is_partial(squid_dataset, tmp_path):
 
 def test_main_exits_two_on_a_bad_command_line(squid_dataset, tmp_path, capsys):
     root, _ = squid_dataset
-    assert main([str(root), "--projector", "nope"]) == EXIT_USAGE
+    assert main([str(root), "--operator", "nope"]) == EXIT_USAGE
     assert "unknown operator" in capsys.readouterr().err
     # USAGE must stay distinct from the data outcomes, or a script can't tell "typo" from "bad data".
     assert EXIT_USAGE not in (EXIT_OK, EXIT_NOTHING, EXIT_PARTIAL, EXIT_INTERRUPTED)

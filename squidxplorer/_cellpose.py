@@ -6,7 +6,7 @@ import logging
 
 import numpy as np
 
-from squidxplorer._engine import add_projector
+from squidxplorer._engine import add_operator
 from squidxplorer._spots import (
     SpotDetectionCancelled,
     SpotParams,
@@ -97,6 +97,6 @@ def register_operator() -> None:
 
     # Filtered from SPOT_PARAMS so each default and blurb stays defined once, in SpotParams.
     honoured = frozenset(segmenter_honours(SEGMENTER_NAME))
-    add_projector(OPERATOR_NAME, segmentation_operator(SEGMENTER_NAME),
+    add_operator(OPERATOR_NAME, segmentation_operator(SEGMENTER_NAME),
                   params=tuple(p for p in SPOT_PARAMS if p.name in honoured),
                   requires=("cellpose",))

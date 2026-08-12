@@ -280,7 +280,7 @@ def test_project_reference_picks_sharpest_plane():
     out = project_reference(iter([flat, dim, sharp]))
     assert np.array_equal(out, sharp)
     import squidxplorer
-    assert "reference" in squidxplorer.available_projectors()
+    assert "reference" in squidxplorer.available_plane_operators()
 
 
 CH_A = "Fluorescence_405_nm_-_Penta"

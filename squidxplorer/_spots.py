@@ -8,7 +8,7 @@ from typing import Callable, Iterable, Optional
 
 import numpy as np
 
-from squidxplorer._engine import Param, add_projector
+from squidxplorer._engine import Param, add_operator
 from squidxplorer.projection import (
     MissingDependency,
     labels_op,
@@ -297,7 +297,7 @@ def spots_op(params: Optional[SpotParams] = None, *,
 
 
 # Registrations. Two tables, two questions: add_segmenter -> which algorithm counts the nuclei;
-# add_projector -> which operator the engine and the UI offer.
+# add_operator -> which operator the engine and the UI offer.
 
 add_segmenter(
     DEFAULT_SEGMENTER, skimage_watershed,
@@ -336,7 +336,7 @@ SPOT_PARAMS: tuple[Param, ...] = tuple(
 
 
 def segmentation_operator(algorithm: str) -> Callable[..., Callable]:
-    """The FACTORY an ``add_projector`` entry registers for *algorithm*."""
+    """The FACTORY an ``add_operator`` entry registers for *algorithm*."""
     def _build(**kwargs) -> Callable:
         return spots_op(SpotParams(**kwargs), algorithm=algorithm)
 
@@ -344,6 +344,6 @@ def segmentation_operator(algorithm: str) -> Callable[..., Callable]:
     return _build
 
 
-add_projector(LAYER_KEY, segmentation_operator(DEFAULT_SEGMENTER), params=SPOT_PARAMS)
+add_operator(LAYER_KEY, segmentation_operator(DEFAULT_SEGMENTER), params=SPOT_PARAMS)
 
 _register_cellpose_operator()

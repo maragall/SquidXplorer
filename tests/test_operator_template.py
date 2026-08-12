@@ -46,25 +46,25 @@ def test_every_registrar_takes_requires_by_the_same_keyword():
     from squidxplorer._spots import add_segmenter
     from squidxplorer._stitch import add_region_operator
 
-    for fn in (s.add_projector, add_region_operator, add_segmenter):
+    for fn in (s.add_operator, add_region_operator, add_segmenter):
         assert "requires" in inspect.signature(fn).parameters, fn.__name__
 
 
 def test_a_bare_string_requires_is_read_as_one_module_not_eight_letters():
     """The tuple-comma trap. ``requires="cellpose"`` must mean one module."""
-    s.add_projector("tpl_bare_string", _passthrough, requires="cellpose")
+    s.add_operator("tpl_bare_string", _passthrough, requires="cellpose")
 
     assert s.operator_requires("tpl_bare_string") == ("cellpose",)
 
 
 def test_a_requirement_that_is_not_a_module_name_is_refused_at_registration():
     with pytest.raises(ValueError, match="MODULE names"):
-        s.add_projector("tpl_bad_requires", _passthrough, requires=(None,))
+        s.add_operator("tpl_bad_requires", _passthrough, requires=(None,))
 
 
 def test_declaring_nothing_keeps_the_pre_existing_contract_exactly():
     """Every registration written before this feature keeps its exact meaning."""
-    s.add_projector("tpl_no_requires", _passthrough)
+    s.add_operator("tpl_no_requires", _passthrough)
 
     assert s.operator_requires("tpl_no_requires") == ()
     assert s.operator_available("tpl_no_requires") == (True, "")
@@ -89,13 +89,13 @@ def small_reader(small_acquisition):
 @pytest.fixture
 def unavailable():
     """A registered operator whose declared package does not exist."""
-    s.add_projector("tpl_unavailable", _passthrough, requires=(ABSENT,))
+    s.add_operator("tpl_unavailable", _passthrough, requires=(ABSENT,))
     return "tpl_unavailable"
 
 
 def test_an_unavailable_operator_is_still_listed(unavailable):
     """Filtering it out would make "package missing" and "nobody wrote it" identical."""
-    assert unavailable in s.available_projectors()
+    assert unavailable in s.available_plane_operators()
 
 
 def test_availability_is_reported_with_a_reason_and_the_install_command(unavailable):
@@ -139,13 +139,13 @@ def test_an_unknown_name_and_an_unavailable_one_are_different_answers():
 # 3. THE SILENT SUCCESS THIS CLOSES
 # ==============================================================================================
 
-def test_project_plate_refuses_before_reading_a_well_and_on_error_cannot_swallow_it(
+def test_run_plate_refuses_before_reading_a_well_and_on_error_cannot_swallow_it(
         small_reader, unavailable):
     """The refusal happens at bind time, before the per-well loop exists."""
     skipped = []
 
     with pytest.raises(MissingOperatorDependency):
-        list(s.project_plate(small_reader, n_fovs=1, projector=unavailable,
+        list(s.run_plate(small_reader, n_fovs=1, operator=unavailable,
                              on_error=lambda region, fov, exc: skipped.append((region, fov))))
 
     assert skipped == [], "a missing package was filed as a per-well skip"
@@ -157,11 +157,11 @@ def test_an_undeclared_lazy_import_error_is_also_not_a_per_well_skip(small_reade
         __import__(ABSENT)
         return next(iter(planes))
 
-    s.add_projector("tpl_undeclared", _needs_the_absent)
+    s.add_operator("tpl_undeclared", _needs_the_absent)
     skipped = []
 
     with pytest.raises(ImportError):
-        list(s.project_plate(small_reader, n_fovs=1, projector="tpl_undeclared",
+        list(s.run_plate(small_reader, n_fovs=1, operator="tpl_undeclared",
                              on_error=lambda region, fov, exc: skipped.append((region, fov))))
 
     assert skipped == []
@@ -172,10 +172,10 @@ def test_a_genuine_per_well_data_fault_is_still_isolated(small_reader):
     def _explodes(planes):
         raise ValueError("this well's pixels are corrupt")
 
-    s.add_projector("tpl_data_fault", _explodes)
+    s.add_operator("tpl_data_fault", _explodes)
     skipped = []
 
-    produced = list(s.project_plate(small_reader, n_fovs=1, projector="tpl_data_fault",
+    produced = list(s.run_plate(small_reader, n_fovs=1, operator="tpl_data_fault",
                                     on_error=lambda region, fov, exc: skipped.append(region)))
 
     assert produced == []
@@ -238,7 +238,7 @@ def test_region_operators_declare_and_refuse_the_same_way(small_reader):
     ok, why = s.operator_available("tpl_region_unavailable")
     assert not ok and ABSENT in why
     with pytest.raises(MissingOperatorDependency, match=ABSENT):
-        list(s.stitch_plate(small_reader, operator="tpl_region_unavailable"))
+        list(s.run_plate(small_reader, operator="tpl_region_unavailable"))
 
 
 # ==============================================================================================
@@ -287,12 +287,12 @@ def test_the_group_name_is_the_documented_one():
 
 def test_a_plugin_registers_its_operator_into_the_same_table_as_the_built_ins(monkeypatch):
     def _register():
-        s.add_projector("tpl_from_a_plugin", _passthrough, produces="intensity")
+        s.add_operator("tpl_from_a_plugin", _passthrough, produces="intensity")
 
     _with_entry_points(monkeypatch, [_FakeEntryPoint("demo", "demo:register", lambda: _register)])
 
     assert load_operator_plugins() == ["demo"]
-    assert "tpl_from_a_plugin" in s.available_projectors()
+    assert "tpl_from_a_plugin" in s.available_plane_operators()
 
 
 def test_a_plugin_that_fails_to_import_aborts_by_name_never_silently(monkeypatch):
@@ -327,7 +327,7 @@ def test_a_plugin_whose_register_raises_aborts_by_name(monkeypatch):
 def test_a_plugin_that_collides_with_a_built_in_name_is_refused_not_allowed_to_clobber(monkeypatch):
     """A plugin that replaced ``mip`` would change what every existing recipe means."""
     def _register():
-        s.add_projector("mip", _passthrough)
+        s.add_operator("mip", _passthrough)
 
     _with_entry_points(monkeypatch,
                        [_FakeEntryPoint("collider", "collider:register", lambda: _register)])
@@ -344,14 +344,14 @@ def test_a_module_entry_point_registers_by_import_side_effect(monkeypatch):
     module = types.ModuleType("tpl_side_effect_module")
 
     def _load():
-        s.add_projector("tpl_side_effect", _passthrough)
+        s.add_operator("tpl_side_effect", _passthrough)
         return module
 
     _with_entry_points(monkeypatch, [_FakeEntryPoint("sideeffect", "mod", _load)])
 
     load_operator_plugins()
 
-    assert "tpl_side_effect" in s.available_projectors()
+    assert "tpl_side_effect" in s.available_plane_operators()
 
 
 def test_plugins_load_in_a_deterministic_order(monkeypatch):
@@ -380,7 +380,7 @@ def test_discovery_is_additive_the_built_ins_do_not_go_through_it():
     declared = {name for name, _target, _dist in s.declared_operator_plugins()}
 
     for built_in in ("mip", "reference", "decon", "bgsub", "flatfield", "spot", "cellpose"):
-        assert built_in in s.available_projectors()
+        assert built_in in s.available_plane_operators()
         assert built_in not in declared
 
 
@@ -468,7 +468,7 @@ def test_the_template_states_how_a_contributed_operator_composes():
     readme = (_TEMPLATE / "README.md").read_text()
 
     for fact in (
-        "projector=\"flatfield + my_operator(smooth_sigma=2.0) + mip\"",   # the expression
+        "operator=\"flatfield + my_operator(smooth_sigma=2.0) + mip\"",   # the expression
         "plane-op → z-reducer",                                      # what composes
         "z-reducer → anything",                                      # what does not
         "squidxplorer/_compose.py",                                           # where to read the rule
@@ -482,7 +482,7 @@ def test_the_template_package_imports_and_registers_in_a_clean_interpreter():
         "import sys; sys.path.insert(0, %r); sys.path.insert(0, %r)\n"
         "import squidxplorer, squidxplorer_operator_template as t\n"
         "t.register()\n"
-        "assert t.OPERATOR_NAME in squidxplorer.available_projectors()\n"
+        "assert t.OPERATOR_NAME in squidxplorer.available_plane_operators()\n"
         "assert squidxplorer.operator_consumes(t.OPERATOR_NAME) == frozenset({'z'})\n"
         "assert squidxplorer.operator_produces(t.OPERATOR_NAME) == 'intensity'\n"
         "assert squidxplorer.operator_requires(t.OPERATOR_NAME) == ('scipy',)\n"

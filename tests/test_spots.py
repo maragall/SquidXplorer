@@ -160,9 +160,9 @@ def test_a_non_positive_sigma_is_refused():
 
 def test_spot_detection_is_a_peer_of_mip_in_the_ENGINE_registry():
     """Not a special case: it is in the same table mip/bgsub/decon are in."""
-    from squidxplorer import available_projectors
+    from squidxplorer import available_plane_operators
 
-    assert LAYER_KEY in available_projectors()
+    assert LAYER_KEY in available_plane_operators()
 
 
 def test_it_declares_that_it_does_NOT_consume_z():
@@ -197,10 +197,10 @@ def test_more_nuclei_than_the_container_dtype_can_hold_fails_loud():
 
 
 def test_registering_it_twice_is_refused_so_a_reimport_cannot_clobber_the_table():
-    from squidxplorer import add_projector
+    from squidxplorer import add_operator
 
     with pytest.raises(ValueError, match="already defined"):
-        add_projector(LAYER_KEY, spots_op())
+        add_operator(LAYER_KEY, spots_op())
 
 
 def test_the_plane_op_contract_refuses_a_whole_z_stack():

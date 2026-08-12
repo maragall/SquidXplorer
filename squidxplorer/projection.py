@@ -96,11 +96,11 @@ def normalise_consumes(consumes) -> frozenset[str]:
     axes = frozenset(consumes)
     if "fov" in axes:
         raise ValueError(
-            "consumes={'fov'} is not supported by the projector table: a projector is "
+            "consumes={'fov'} is not supported by the operator table: an operator is "
             "Iterable[plane] -> plane and never sees a tile's x/y stage geometry, which any "
             "inter-FOV operation (stitching, illumination-field fitting across a well) requires. "
             "Register it with squidxplorer.add_region_operator(name, fn) instead: that stamps "
-            "consumes=REGION_OP on the SAME registry record, and stitch_plate reads it."
+            "consumes=REGION_OP on the SAME registry record, and the region loop reads it."
         )
     unknown = axes - CONSUMABLE_AXES
     if unknown:

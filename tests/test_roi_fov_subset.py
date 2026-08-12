@@ -96,8 +96,8 @@ def test_BOTH_engines_call_the_one_resolver():
 # ------------------------------------------------------------- link 3: the whole chain, measured
 
 
-def test_project_plate_really_runs_only_the_requested_fields(squid_dataset):
-    from squidxplorer import open_reader, project_plate
+def test_run_plate_really_runs_only_the_requested_fields(squid_dataset):
+    from squidxplorer import open_reader, run_plate
 
     root, _ = squid_dataset
     reader = open_reader(str(root))
@@ -107,7 +107,7 @@ def test_project_plate_really_runs_only_the_requested_fields(squid_dataset):
         pytest.skip("this fixture has one FOV per well; there is no subset to take")
 
     ran = [(r, f) for r, f, _ in
-           project_plate(reader, regions={region: [every[0]]}, n_fovs=None, projector="mip")]
+           run_plate(reader, regions={region: [every[0]]}, n_fovs=None, operator="mip")]
     assert ran == [(region, every[0])], (
         f"asked for one field, ran {len(ran)}: the FOV subset was dropped between the caller "
         f"and the engine")

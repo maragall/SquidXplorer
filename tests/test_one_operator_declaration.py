@@ -55,7 +55,7 @@ def _region_op_factory(*, fill: int = REGION_DEFAULT_FILL):
 
 @pytest.fixture
 def declared_operators():
-    s.add_projector(
+    s.add_operator(
         PLANE_OP_NAME, _plane_op_factory,
         params=(Param("offset", PLANE_DEFAULT_OFFSET, "counts added to every plane"),
                 Param("gain", 1.0, "multiplied in before the offset")),
@@ -77,8 +77,8 @@ def reader(squid_dataset):
 
 def test_it_runs_plate_scope_and_the_declared_default_is_in_the_pixels(declared_operators, reader):
     out = dict(((region, fov), image)
-               for region, fov, image in s.project_plate(reader, n_fovs=1,
-                                                         projector=PLANE_OP_NAME))
+               for region, fov, image in s.run_plate(reader, n_fovs=1,
+                                                     operator=PLANE_OP_NAME))
 
     assert {region for region, _fov in out} == set(reader.metadata["regions"])
     assert out, "the operator ran over no region at all"
@@ -90,7 +90,7 @@ def test_it_runs_plate_scope_and_the_declared_default_is_in_the_pixels(declared_
 def test_it_runs_region_scope_and_touches_only_that_region(declared_operators, reader):
     one = reader.metadata["regions"][0]
     seen = {region for region, _fov, _img in
-            s.project_plate(reader, n_fovs=1, projector=PLANE_OP_NAME, regions=[one])}
+            s.run_plate(reader, n_fovs=1, operator=PLANE_OP_NAME, regions=[one])}
 
     assert seen == {one}
 
@@ -100,23 +100,23 @@ def test_a_parameter_the_run_names_reaches_the_pixels(declared_operators, reader
     one = reader.metadata["regions"][0]
 
     def _run(**kwargs):
-        return next(iter(s.project_plate(reader, n_fovs=1, projector=PLANE_OP_NAME,
-                                         regions=[one], operator_kwargs=kwargs or None)))[2]
+        return next(iter(s.run_plate(reader, n_fovs=1, operator=PLANE_OP_NAME,
+                                     regions=[one], operator_kwargs=kwargs or None)))[2]
 
     assert int(_run(offset=200).min()) - int(_run().min()) == 200 - PLANE_DEFAULT_OFFSET
 
 
 def test_the_region_operator_runs_plate_scope_and_region_scope(declared_operators, reader):
-    """The whole-well loop, reached with no edit to `stitch_plate` and no second table."""
+    """The whole-well loop, reached with no edit to the region loop and no second table."""
     regions = list(reader.metadata["regions"])
     whole = [(region, image) for region, _fov, image in
-             s.stitch_plate(reader, operator=REGION_OP_NAME)]
+             s.run_plate(reader, operator=REGION_OP_NAME)]
 
     assert {region for region, _img in whole} == set(regions)
     assert all(int(image.min()) == REGION_DEFAULT_FILL for _r, image in whole)
 
     scoped = [region for region, _fov, _img in
-              s.stitch_plate(reader, operator=REGION_OP_NAME, regions=[regions[0]])]
+              s.run_plate(reader, operator=REGION_OP_NAME, regions=[regions[0]])]
     assert scoped == [regions[0]]
 
 
@@ -124,14 +124,15 @@ def test_the_region_operators_declared_parameter_is_applied(declared_operators, 
     """Same `params=` seam as any other operator; a region operator's kwargs used to be unchecked."""
     one = reader.metadata["regions"][0]
     _region, _fov, image = next(iter(
-        s.stitch_plate(reader, operator=REGION_OP_NAME, regions=[one], fill=42)))
+        s.run_plate(reader, operator=REGION_OP_NAME, regions=[one],
+                    operator_kwargs={"fill": 42})))
 
     assert int(image.min()) == int(image.max()) == 42
 
 
 def test_it_is_saved_to_a_plate_with_no_edit_to_the_writer(declared_operators, reader, tmp_path):
     """The SAVE path, not just preview: `write_plate` dispatches on the declaration."""
-    manifest = s.write_plate(reader, tmp_path / "out.hcs", projector=PLANE_OP_NAME, n_fovs=1,
+    manifest = s.write_plate(reader, tmp_path / "out.hcs", operator=PLANE_OP_NAME, n_fovs=1,
                              operator_kwargs={"offset": 3})
 
     assert int(manifest.get("n_fields_written") or 0) > 0
@@ -140,14 +141,14 @@ def test_it_is_saved_to_a_plate_with_no_edit_to_the_writer(declared_operators, r
 # CONSUMER 2: the CLI
 
 def test_the_cli_accepts_the_name_and_checks_the_declared_parameters(declared_operators):
-    """`--projector <name> --param <declared>=v` validates; an undeclared one is refused by name."""
+    """`--operator <name> --param <declared>=v` validates; an undeclared one is refused by name."""
     from squidxplorer._cli import ProcessParameters
 
-    params = ProcessParameters(input_folder=".", projector=PLANE_OP_NAME, param=["offset=5"])
-    assert params.projector == PLANE_OP_NAME
+    params = ProcessParameters(input_folder=".", operator=PLANE_OP_NAME, param=["offset=5"])
+    assert params.operator == PLANE_OP_NAME
 
     with pytest.raises(ValueError, match="offsett|declares"):
-        ProcessParameters(input_folder=".", projector=PLANE_OP_NAME, param=["offsett=5"])
+        ProcessParameters(input_folder=".", operator=PLANE_OP_NAME, param=["offsett=5"])
 
 
 def test_the_cli_help_lists_the_operator_with_its_declared_defaults(declared_operators):
@@ -162,7 +163,7 @@ def test_the_cli_names_a_region_operator_too(declared_operators):
     from squidxplorer._cli import ProcessParameters
 
     assert ProcessParameters(input_folder=".",
-                             projector=REGION_OP_NAME).projector == REGION_OP_NAME
+                             operator=REGION_OP_NAME).operator == REGION_OP_NAME
 
 
 # CONSUMER 3: the command surface (what an agent or script drives the app with)
@@ -229,7 +230,7 @@ def test_a_region_operator_that_declares_params_gets_a_panel_too(declared_operat
 
 
 def test_the_gui_run_path_dispatches_it_to_the_right_engine_loop(declared_operators, reader):
-    """`_OperatorWorker` picks `project_plate` or `stitch_plate` off `is_region_operator`."""
+    """`_OperatorWorker` hands `run_plate` the workers its `is_region_operator` verdict allows."""
     from squidxplorer._workers import _OperatorWorker
 
     meta = reader.metadata

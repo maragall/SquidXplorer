@@ -13,7 +13,7 @@ import pytest
 import tensorstore as ts
 import tifffile
 
-from squidxplorer import build_montage, open_reader, project_plate, project_well, select_fovs, write_plate
+from squidxplorer import build_montage, open_reader, project_well, run_plate, select_fovs, write_plate
 from squidxplorer._output import plate_metadata, split_well, write_from_stream
 from tests.test_performance import benchmark_single_well
 
@@ -119,8 +119,8 @@ _SUBSET = 24
 
 
 def _first_n_projected(reader, n, **kw):
-    """Drain the first *n* wells from project_plate into {(region, fov): image}."""
-    return {(r, f): img for r, f, img in islice(project_plate(reader, **kw), n)}
+    """Drain the first *n* wells from run_plate into {(region, fov): image}."""
+    return {(r, f): img for r, f, img in islice(run_plate(reader, **kw), n)}
 
 
 @pytest.mark.filterwarnings("ignore:Recorded Nz")
@@ -189,7 +189,7 @@ def test_ima188_sim1536_memory_bounded_by_workers_not_plate(sim_1536wp):
     workers = 4
 
     tracemalloc.start()
-    for _ in islice(project_plate(reader, workers=workers), 12):
+    for _ in islice(run_plate(reader, workers=workers), 12):
         pass
     peak = tracemalloc.get_traced_memory()[1]
     tracemalloc.stop()
@@ -207,9 +207,9 @@ def test_ima188_real_parallel_pixel_identical(real_dataset):
 
 
 @pytest.mark.integration
-def test_ima188_real_projector_registry_swap_end_to_end(real_dataset):
+def test_ima188_real_operator_registry_swap_end_to_end(real_dataset):
     reader = open_reader(real_dataset)
-    for region, fov, img in islice(project_plate(reader, workers=4, projector="mip"), 3):
+    for region, fov, img in islice(run_plate(reader, workers=4, operator="mip"), 3):
         np.testing.assert_array_equal(img, project_well(reader, region, fov))
 
 
@@ -297,7 +297,7 @@ def test_ima184_sim1536_streamed_subset(sim_1536wp, tmp_path):
     core = pytest.importorskip("ndviewer_light.core")
     reader = open_reader(sim_1536wp)
 
-    picked = list(islice(project_plate(reader, n_fovs=1, workers=4), 4))
+    picked = list(islice(run_plate(reader, n_fovs=1, workers=4), 4))
     assert len(picked) == 4
     submeta = {
         **reader.metadata,
@@ -356,7 +356,7 @@ def test_ima185_sim1536_montage_real_seam_subset(sim_1536wp, tmp_path):
     from PIL import Image
 
     reader = open_reader(sim_1536wp)
-    picked = list(islice(project_plate(reader, n_fovs=1, workers=4), 6))
+    picked = list(islice(run_plate(reader, n_fovs=1, workers=4), 6))
     submeta = {
         **reader.metadata,
         "regions": [r for r, _, _ in picked],

@@ -4,7 +4,7 @@
 
 This is a complete, installable example of a SquidXplorer *operator* living in its own package.
 After `pip install -e .` into the environment that runs SquidXplorer, the operator it declares
-appears in `available_projectors()`, in the CLI's `--projector`, in the viewer's runnable-operator
+appears in `available_plane_operators()`, in the CLI's `--operator`, in the viewer's runnable-operator
 list and in the `list_operators` command — with **no edit to SquidXplorer and no fork**. (It does
 not get a *card* in the viewer's operator panel; see §3.)
 
@@ -24,11 +24,11 @@ templates/operator/
 
 ```bash
 pip install -e templates/operator          # into the environment that runs SquidXplorer
-python -c "import squidxplorer; print(squidxplorer.available_projectors())"
+python -c "import squidxplorer; print(squidxplorer.available_plane_operators())"
 # ['bgsub', 'cellpose', 'decon', 'decon3d', 'flatfield', 'mip', 'reference', 'spot', 'stdev']
 #                                                                                    ^^^^^^^
 # it runs, headless, over a whole plate:
-squidxplorer /path/to/acquisition --projector stdev --output-folder /tmp/out
+squidxplorer /path/to/acquisition --operator stdev --output-folder /tmp/out
 
 pip uninstall squidxplorer-operator-template                        # and it leaves cleanly
 ```
@@ -38,10 +38,10 @@ Or from Python, which is what the template's own tests do:
 ```python
 import squidxplorer
 reader = squidxplorer.open_reader("/path/to/acquisition")
-for region, fov, image in squidxplorer.project_plate(reader, projector="stdev",
-                                                 operator_kwargs={"smooth_sigma": 0.0}):
+for region, fov, image in squidxplorer.run_plate(reader, operator="stdev",
+                                             operator_kwargs={"smooth_sigma": 0.0}):
     ...                                    # (T, C, 1, Y, X), the acquisition's native dtype
-squidxplorer.write_plate(reader, "/tmp/out.hcs", projector="stdev")   # navigable OME-Zarr plate
+squidxplorer.write_plate(reader, "/tmp/out.hcs", operator="stdev")   # navigable OME-Zarr plate
 ```
 
 ---
@@ -78,16 +78,16 @@ registered operator's name without a written justification.
 For a plane-op, write a natural `plane -> plane` function and lift it:
 
 ```python
-from squidxplorer import plane_op, add_projector
-add_projector("mything", plane_op(my_plane_function))     # consumes inferred = frozenset()
+from squidxplorer import plane_op, add_operator
+add_operator("mything", plane_op(my_plane_function))      # consumes inferred = frozenset()
 ```
 
-**`consumes={"fov"}` is refused by `add_projector`.** An `add_projector` operator is
+**`consumes={"fov"}` is refused by `add_operator`.** An `add_operator` operator is
 `Iterable[plane] -> plane` and never sees a tile's stage geometry, so anything inter-FOV (stitching,
 fitting an illumination field across a well) cannot be expressed with that callable. Register it
 with `squidxplorer.add_region_operator` instead, whose entries take
 `(reader, region, fovs) -> (T, C, Nz, Y, X)`. It is the **same registry table** and the same four
-declarations — `add_region_operator` stamps `consumes={"fov"}` on the record, and `stitch_plate`
+declarations — `add_region_operator` stamps `consumes={"fov"}` on the record, and `run_plate`
 finds your operator by reading it.
 
 **Stream. Do not call `list(planes)`.** The engine runs several wells concurrently and its peak
@@ -118,17 +118,17 @@ declare your way into.
 Param(name: str, default: Any, blurb: str = "")
 ```
 
-Declaring `params=` changes what `add_projector` does with your callable: **it is read as a
+Declaring `params=` changes what `add_operator` does with your callable: **it is read as a
 factory.** SquidXplorer calls it once with your declared defaults to build the entry's default
 binding, and calls it again with a caller's `operator_kwargs` for a run that names different
 values.
 
 ```python
-add_projector("stdev", stdev_op, params=(Param("smooth_sigma", 1.0, "..."),))
+add_operator("stdev", stdev_op, params=(Param("smooth_sigma", 1.0, "..."),))
 
 squidxplorer.bind_operator("stdev", {"smooth_sigma": 0.0})            # a different binding
-squidxplorer.project_plate(reader, projector="stdev",
-                       operator_kwargs={"smooth_sigma": 0.0})      # a run at that binding
+squidxplorer.run_plate(reader, operator="stdev",
+                   operator_kwargs={"smooth_sigma": 0.0})          # a run at that binding
 ```
 
 So ONE entry covers every setting. Do not register `stdev_tight` and `stdev_loose`.
@@ -179,7 +179,7 @@ it once per channel and runs what it returns. See `squidxplorer._decon.optics_fo
 ### 2.5 `requires` — how you declare dependencies, and what happens when they are missing
 
 ```python
-add_projector("stdev", stdev_op, params=(...), requires=("scipy",))
+add_operator("stdev", stdev_op, params=(...), requires=("scipy",))
 ```
 
 Importable **module** names — what you `import`, not what pip installs, when the two differ
@@ -189,7 +189,7 @@ What happens when one is missing:
 
 | | |
 |---|---|
-| **Listed?** | **Yes, always.** `available_projectors()` still contains your operator. Dropping it would make "scipy is not installed" and "nobody wrote this operator" look identical to the user. |
+| **Listed?** | **Yes, always.** `available_plane_operators()` still contains your operator. Dropping it would make "scipy is not installed" and "nobody wrote this operator" look identical to the user. |
 | **`operator_available("stdev")`** | `(False, "operator 'stdev' needs scipy, which is not installed (pip install scipy)")` |
 | **`list_operators`** | the row carries `"available": false` and `"unavailable_reason"`, and the summary line names every unavailable operator |
 | **A run** | **refused by name, before any well is read.** `bind_operator` raises `MissingOperatorDependency` with that sentence. The headless command surface returns the refusal code `unavailable_operator`; the GUI puts the sentence in the readout and never starts a worker. |
@@ -198,7 +198,7 @@ What happens when one is missing:
 bites, and it is measured rather than hypothetical: three of SquidXplorer's own operators (`decon`,
 `decon3d`, `flatfield`) imported packages that were not in its dependency list at all. On a stock
 install they were advertised, they raised `ImportError` one call deep, per-well fault isolation
-(`project_plate(on_error=...)`) recorded that as one skip per well — and a whole-plate run finished
+(`run_plate(on_error=...)`) recorded that as one skip per well — and a whole-plate run finished
 green having written nothing. `requires=` is what turns that into a refusal.
 
 Declare what the entry needs **at its declared defaults**. `stdev` declares `scipy` even though
@@ -212,7 +212,7 @@ dangerous direction; over-declaring only greys out a row.
 * It is delivered to napari by the same path, with the layer type your `produces` chose.
 * It appears in the CLI, the viewer, `list_operators` and the recipe/console line automatically.
 * It is validated by SquidXplorer's own test suite: `tests/test_operator_declaration.py` is
-  parametrised over `available_projectors()`, so tests written before your operator existed run
+  parametrised over `available_plane_operators()`, so tests written before your operator existed run
   against it the moment it is installed.
 * Its results are written by `write_plate` as a navigable OME-Zarr plate — z-reducers at `Nz=1`,
   plane-ops at the acquisition's full depth.
@@ -225,9 +225,9 @@ Your operator is composable the moment it is registered. A chain is written wher
 separated by `+`, with parameters in parentheses:
 
 ```python
-project_plate(reader, projector="flatfield + my_operator(smooth_sigma=2.0) + mip")
-write_plate(reader, out_dir, projector="my_operator+mip")
-stitch_region(reader, "B2", fovs, projector="my_operator+mip")
+run_plate(reader, operator="flatfield + my_operator(smooth_sigma=2.0) + mip")
+write_plate(reader, out_dir, operator="my_operator+mip")
+stitch_region(reader, "B2", fovs, z_operator="my_operator+mip")
 ```
 
 That string is exactly what `RecipeChain.label()` prints, so a console line or a pasted recipe
@@ -257,7 +257,7 @@ Stated so you do not build against something that is not there.
 * **A HAND-WRITTEN GUI panel.** You get the generic one built from your `params` (§2.4), which is
   a form. A panel with behaviour of its own — unit conversions, controls that grey each other out,
   an iterative QC loop that publishes a picture — lives in SquidXplorer and a plugin cannot add one.
-* **Inter-FOV work through `add_projector`.** See §2.2 — `add_region_operator` instead. It is the
+* **Inter-FOV work through `add_operator`.** See §2.2 — `add_region_operator` instead. It is the
   SAME record and the same four declarations as of 2026-08-05 (it used to be a second table with
   only `requires=`, and `produces` hardcoded to `"intensity"` by every reader of it). What still
   differs is the callable shape, and it is not what this template's example code is written
@@ -275,12 +275,12 @@ Stated so you do not build against something that is not there.
 | what you did | what happens |
 |---|---|
 | `from squidxplorer import ...` at **module scope** in your plugin | `OperatorPluginError: ... AttributeError: partially initialized module ... (most likely due to a circular import)`. SquidXplorer loads you from inside `import squidxplorer`, so importing it back at module scope is re-entrant. **Import squidxplorer inside `register()`** — the template does, with the reason written next to it. This is the first mistake everyone makes. |
-| Your operator's name is already taken | `add_projector` raises at import; `import squidxplorer` fails naming your plugin, its distribution, and the collision |
+| Your operator's name is already taken | `add_operator` raises at import; `import squidxplorer` fails naming your plugin, its distribution, and the collision |
 | Your module raises on import | `OperatorPluginError` out of `import squidxplorer`, naming your plugin and the original error |
 | Your `register()` raises | same, with "raised while registering its operators" |
 | Your entry point points at nothing | same, at `ep.load()` |
 | A `requires=` module is missing | operator LISTED, run REFUSED by name — see §2.5 |
-| You declared `consumes={"fov"}` on `add_projector` | refused at registration, pointing at `add_region_operator` |
+| You declared `consumes={"fov"}` on `add_operator` | refused at registration, pointing at `add_region_operator` |
 | You declared `produces="mesh"` | refused at registration, listing the kinds that exist |
 | You declared a parameter twice | refused at registration — a duplicate makes `operator_kwargs` ambiguous |
 | Your factory returned something not callable | refused at registration, explaining that `params=` makes the registered object a factory |

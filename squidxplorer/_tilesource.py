@@ -512,7 +512,7 @@ class ReaderTileSource:
     """
 
     def __init__(self, reader, metadata: Mapping, ladder: PlateLadder, *,
-                 projector: Optional[str] = "mip", z: Optional[int] = None,
+                 operator: Optional[str] = "mip", z: Optional[int] = None,
                  cache_bytes: Optional[int] = None) -> None:
         self.reader = reader
         self.meta = dict(metadata)
@@ -520,18 +520,18 @@ class ReaderTileSource:
         self.dtype = np.dtype(self.meta.get("dtype") or np.uint16)
         self.z_levels = list(self.meta.get("z_levels") or [0])
 
-        # Refuse a projector that does not consume z: it cannot reduce a stack to a tile.
-        self.projector = projector
+        # Refuse an operator that does not consume z: it cannot reduce a stack to a tile.
+        self.operator = operator
         self.z = None if z is None else int(z)
-        if projector is not None and self.z is None:
+        if operator is not None and self.z is None:
             from squidxplorer._engine import operator_consumes
 
-            if "z" not in operator_consumes(projector):
+            if "z" not in operator_consumes(operator):
                 raise ValueError(
-                    f"projector {projector!r} does not consume z, so it cannot reduce a stack to "
+                    f"operator {operator!r} does not consume z, so it cannot reduce a stack to "
                     "a tile. Pass a z-reducer (mip, reference) or an explicit z=.")
-        elif projector is None and self.z is None:
-            # Neither a projector nor a plane: fall back to the montage's mid-stack plane.
+        elif operator is None and self.z is None:
+            # Neither an operator nor a plane: fall back to the montage's mid-stack plane.
             self.z = int(self.z_levels[len(self.z_levels) // 2])
 
         self._planes = MemoryBoundedLRUCache(
@@ -557,7 +557,7 @@ class ReaderTileSource:
         """The FOV's image for one channel at one timepoint — projected over z, or one plane."""
         region, fov = key
         ck = (str(region), int(fov), str(channel),
-              "z%d" % self.z if self.z is not None else "p:%s" % self.projector, int(t))
+              "z%d" % self.z if self.z is not None else "op:%s" % self.operator, int(t))
         hit = self._planes.get(ck)
         if hit is not None:
             return hit
@@ -567,7 +567,7 @@ class ReaderTileSource:
             else:
                 from squidxplorer._engine import _resolve_operator
 
-                reduce = _resolve_operator(self.projector).fn
+                reduce = _resolve_operator(self.operator).fn
                 plane = np.asarray(reduce(
                     np.asarray(self._read(region, fov, channel, z, t)) for z in self.z_levels))
         except Exception:

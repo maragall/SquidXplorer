@@ -65,7 +65,7 @@ def _meta() -> dict:
 
 
 def _stitched_5d(h: int, w: int) -> np.ndarray:
-    """What ``stitch_plate`` yields for a plane-op: ``(T, C, Nz, Y, X)``, every plane fused."""
+    """What the region loop yields for a plane-op: ``(T, C, Nz, Y, X)``, every plane fused."""
     out = np.empty((1, N_C, N_Z, h, w), np.uint16)
     for c in range(N_C):
         for z in range(N_Z):

@@ -115,11 +115,11 @@ def test_the_same_field_is_decoded_once_across_tiles():
 
 def test_tiles_are_maximum_intensity_projections_by_default():
     """Default must project the stack through the registered operator, so `reference` and any
-    add_projector op work too."""
+    add_operator op work too."""
     meta = _meta()
     reader = FakeReader()
     src, ladder = _src(meta, reader=reader)
-    assert src.projector == "mip" and src.z is None
+    assert src.operator == "mip" and src.z is None
 
     key = ("A1", 0)
     desc = type("D", (), {"t": 0, "level": 0, "key": key, "channel": "488",
@@ -140,14 +140,14 @@ def test_an_explicit_z_reads_exactly_that_plane():
     assert [r[3] for r in reader.reads] == [1]
 
 
-def test_a_projector_that_does_not_consume_z_is_refused():
+def test_an_operator_that_does_not_consume_z_is_refused():
     """A plane-op has no z to collapse; running it per z and keeping the last would be wrong."""
     meta = _meta()
-    from squidxplorer._engine import add_projector
+    from squidxplorer._engine import add_operator
 
-    add_projector("_tiletest_planeop", lambda planes: next(iter(planes)), consumes=frozenset())
+    add_operator("_tiletest_planeop", lambda planes: next(iter(planes)), consumes=frozenset())
     with pytest.raises(ValueError, match="does not consume z"):
-        _src(meta, projector="_tiletest_planeop")
+        _src(meta, operator="_tiletest_planeop")
 
 
 def test_a_small_viewport_at_fine_zoom_does_not_fetch_the_plate():

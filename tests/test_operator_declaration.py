@@ -10,14 +10,14 @@ import pytest
 
 import squidxplorer
 from squidxplorer import (
-    available_projectors,
+    available_plane_operators,
     available_region_operators,
     project_well,
     operator_consumes,
     operator_params,
     operator_produces,
 )
-from squidxplorer._engine import Param, _resolve_operator, add_projector, bind_operator
+from squidxplorer._engine import Param, _resolve_operator, add_operator, bind_operator
 from squidxplorer._spots import LAYER_KEY as SPOT_KEY, available_segmenters, segmenter_available
 
 napari = pytest.importorskip("napari")
@@ -83,7 +83,7 @@ def _slow(name: str) -> bool:
 
 # 1. the conformance test — parametrized over the registry
 
-@pytest.mark.parametrize("name", available_projectors())
+@pytest.mark.parametrize("name", available_plane_operators())
 def test_every_operator_delivers_the_result_kind_it_declares(name, mosaic):
     if _slow(name) and not segmenter_available(name)[0]:
         pytest.skip(f"{name} needs an optional package that is not installed")
@@ -159,7 +159,7 @@ KNOWN_NAME_BRANCHES = {
 
 def _name_branches() -> list:
     """Every ``<something> == "<a registered operator>"`` comparison in the package, by AST."""
-    known = set(available_projectors()) | set(available_region_operators())
+    known = set(available_plane_operators()) | set(available_region_operators())
     found = []
     for path in sorted((_REPO / "squidxplorer").rglob("*.py")):
         tree = ast.parse(path.read_text(), str(path))
@@ -239,7 +239,7 @@ def test_a_registered_factory_is_called_at_its_declared_defaults():
         seen["scale"] = scale
         return lambda planes: next(iter(planes)) * scale
 
-    add_projector("_decl_test_scaled", _factory, params=(Param("scale", 3),),
+    add_operator("_decl_test_scaled", _factory, params=(Param("scale", 3),),
                   consumes=frozenset())
     assert seen["scale"] == 3, "the factory was not called with the declared default"
     plane = np.ones((4, 4), dtype=np.uint16)
@@ -249,13 +249,13 @@ def test_a_registered_factory_is_called_at_its_declared_defaults():
 
 def test_a_duplicate_declared_parameter_is_refused():
     with pytest.raises(ValueError, match="declares a parameter twice"):
-        add_projector("_decl_test_dup", lambda **kw: (lambda planes: next(iter(planes))),
+        add_operator("_decl_test_dup", lambda **kw: (lambda planes: next(iter(planes))),
                       params=(Param("a", 1), Param("a", 2)))
 
 
 def test_an_unknown_result_kind_is_refused_at_registration():
     with pytest.raises(ValueError, match="unknown result kind"):
-        add_projector("_decl_test_kind", lambda planes: next(iter(planes)), produces="lables")
+        add_operator("_decl_test_kind", lambda planes: next(iter(planes)), produces="lables")
 
 
 # 4. cellpose, as an operator
@@ -265,7 +265,7 @@ def test_cellpose_is_in_the_engine_registry_not_only_the_segmenter_table():
 
     from squidxplorer._operations import runnable_operators
 
-    assert OPERATOR_NAME in available_projectors()
+    assert OPERATOR_NAME in available_plane_operators()
     assert OPERATOR_NAME in available_segmenters(), "the two tables disagree about the spelling"
     # ...and therefore in every surface that reads the registry rather than a hardcoded list.
     assert OPERATOR_NAME in runnable_operators()
@@ -330,7 +330,7 @@ def test_registering_cellpose_does_not_import_torch():
     out = subprocess.run(
         [sys.executable, "-c",
          "import squidxplorer, sys; "
-         "assert 'cellpose' in squidxplorer.available_projectors(), 'not registered'; "
+         "assert 'cellpose' in squidxplorer.available_plane_operators(), 'not registered'; "
          "print('torch' in sys.modules, 'cellpose' in sys.modules)"],
         cwd=str(_REPO), capture_output=True, text=True, timeout=300)
     assert out.returncode == 0, out.stderr
@@ -352,7 +352,7 @@ def test_a_labels_operator_is_written_to_a_plate_as_a_real_z_stack(squid_dataset
         "this fixture has one z plane, so a plane-op's output would be Z==1 and this test could "
         "not tell a written stack from a written plane")
     out = root.parent / "labels_out"
-    manifest = write_plate(reader, str(out), projector=SPOT_KEY, n_fovs=1)
+    manifest = write_plate(reader, str(out), operator=SPOT_KEY, n_fovs=1)
     assert manifest["complete"] and manifest["n_fields_written"] >= 1
 
     region = reader.metadata["regions"][0]
@@ -373,7 +373,7 @@ def test_write_plate_refuses_kwargs_only_for_an_operator_that_declares_none(squi
     reader = open_reader(str(root))
     out = root.parent / "kwargs_out"
     with pytest.raises(ValueError, match="declares no parameters"):
-        write_plate(reader, str(out), projector="mip", operator_kwargs={"nope": 1})
+        write_plate(reader, str(out), operator="mip", operator_kwargs={"nope": 1})
     assert not out.exists(), "the run made its output tree before refusing"
 
 
@@ -497,12 +497,12 @@ def _halving_factory(*, divisor=1):
 
 
 def _register_halving(name: str) -> None:
-    add_projector(name, _halving_factory, params=(Param("divisor", 1),), consumes=frozenset({"z"}))
+    add_operator(name, _halving_factory, params=(Param("divisor", 1),), consumes=frozenset({"z"}))
 
 
-def test_a_parameterised_projector_reaches_the_pixels_through_project_plate(squid_dataset):
+def test_a_parameterised_operator_reaches_the_pixels_through_run_plate(squid_dataset):
     """End to end through the ENGINE: ``operator_kwargs`` has to survive the thread pool."""
-    from squidxplorer import open_reader, project_plate
+    from squidxplorer import open_reader, run_plate
 
     _register_halving("_decl_test_halve")
     root, _ = squid_dataset
@@ -510,8 +510,8 @@ def test_a_parameterised_projector_reaches_the_pixels_through_project_plate(squi
     region = reader.metadata["regions"][0]
 
     def _run_plate(**kw):
-        return {(r, f): np.asarray(img) for r, f, img in project_plate(
-            reader, n_fovs=1, workers=1, projector="_decl_test_halve", regions=[region], **kw)}
+        return {(r, f): np.asarray(img) for r, f, img in run_plate(
+            reader, n_fovs=1, workers=1, operator="_decl_test_halve", regions=[region], **kw)}
 
     plain = _run_plate()
     assert plain and max(int(v.max()) for v in plain.values()) > 1, (
@@ -520,10 +520,10 @@ def test_a_parameterised_projector_reaches_the_pixels_through_project_plate(squi
     assert set(plain) == set(halved)
     for key, img in halved.items():
         assert np.array_equal(img, plain[key] // 2), (
-            "the parameter did not reach project_well through project_plate")
+            "the parameter did not reach project_well through run_plate")
 
 
-def test_a_parameterised_projector_reaches_the_pixels_through_write_plate(squid_dataset, tmp_path):
+def test_a_parameterised_operator_reaches_the_pixels_through_write_plate(squid_dataset, tmp_path):
     """...and through the WRITER: reads the written OME-Zarr back rather than trusting the manifest."""
     import zarr
 
@@ -535,7 +535,7 @@ def test_a_parameterised_projector_reaches_the_pixels_through_write_plate(squid_
     reader = open_reader(str(root))
 
     def _write(out, **kw):
-        write_plate(reader, str(out), projector="_decl_test_halve_w", n_fovs=1,
+        write_plate(reader, str(out), operator="_decl_test_halve_w", n_fovs=1,
                     check_disk=False, **kw)
         store = out / "plate.ome.zarr"
         grp = zarr.open_group(str(store), mode="r")
@@ -548,4 +548,4 @@ def test_a_parameterised_projector_reaches_the_pixels_through_write_plate(squid_
     assert int(plain.max()) > 1, "the fixture is too dim for a division to show"
     halved = _write(tmp_path / "halved", operator_kwargs={"divisor": 2})
     assert np.array_equal(halved, plain // 2), (
-        "operator_kwargs did not reach the projector through write_plate")
+        "operator_kwargs did not reach the operator through write_plate")

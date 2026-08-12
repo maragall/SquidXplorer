@@ -1,4 +1,4 @@
-"""Parallel/streaming plate engine + projector table, over an in-memory fake reader."""
+"""Parallel/streaming plate engine + operator table, over an in-memory fake reader."""
 
 from __future__ import annotations
 
@@ -10,11 +10,11 @@ import pytest
 
 import squidxplorer._engine as engine
 from squidxplorer import (
-    add_projector,
-    available_projectors,
+    add_operator,
+    available_plane_operators,
     plane_op,
-    project_plate,
     project_well,
+    run_plate,
 )
 
 
@@ -80,8 +80,8 @@ class FakeReader:
 
 
 @pytest.fixture(autouse=True)
-def _restore_projector_table():
-    """Snapshot/restore the module-global projector table so tests that add don't leak."""
+def _restore_operator_table():
+    """Snapshot/restore the module-global operator table so tests that add don't leak."""
     saved = dict(engine._OPERATORS)
     try:
         yield
@@ -91,44 +91,44 @@ def _restore_projector_table():
 
 
 def _collect(reader, **kw) -> dict[tuple[str, int], np.ndarray]:
-    """Drain project_plate into a {(region, fov): image} dict (order-independent compare)."""
-    return {(r, f): img for r, f, img in project_plate(reader, **kw)}
+    """Drain run_plate into a {(region, fov): image} dict (order-independent compare)."""
+    return {(r, f): img for r, f, img in run_plate(reader, **kw)}
 
 
 def test_mip_is_available_by_default():
-    assert "mip" in available_projectors()
+    assert "mip" in available_plane_operators()
 
 
-def test_available_projectors_is_sorted_and_reflects_registration():
-    add_projector("zzz_custom", lambda planes: next(iter(planes)))
-    names = available_projectors()
+def test_available_plane_operators_is_sorted_and_reflects_registration():
+    add_operator("zzz_custom", lambda planes: next(iter(planes)))
+    names = available_plane_operators()
     assert names == sorted(names)
     assert "zzz_custom" in names
 
 
 def test_add_duplicate_name_raises():
     with pytest.raises(ValueError, match="already defined"):
-        add_projector("mip", lambda planes: next(iter(planes)))
+        add_operator("mip", lambda planes: next(iter(planes)))
 
 
 def test_add_rejects_empty_name_and_non_callable():
     with pytest.raises(ValueError, match="non-empty"):
-        add_projector("", lambda planes: next(iter(planes)))
+        add_operator("", lambda planes: next(iter(planes)))
     with pytest.raises(ValueError, match="not callable"):
-        add_projector("bad", object())  # type: ignore[arg-type]
+        add_operator("bad", object())  # type: ignore[arg-type]
 
 
-def test_project_plate_unknown_projector_raises_named():
+def test_run_plate_unknown_operator_raises_named():
     reader = FakeReader(n_wells=2)
     with pytest.raises(KeyError, match="unknown operator 'nope'"):
-        next(project_plate(reader, projector="nope"))
+        next(run_plate(reader, operator="nope"))
 
 
-def test_project_plate_refuses_a_region_operator_by_its_declaration():
+def test_the_per_fov_loop_refuses_a_region_operator_by_its_declaration():
     """`stitch` resolves here; `consumes` is what says it is the wrong loop."""
     reader = FakeReader(n_wells=2)
-    with pytest.raises(ValueError, match="consumes fov.*stitch_plate"):
-        next(project_plate(reader, projector="stitch"))
+    with pytest.raises(ValueError, match="consumes fov.*run_plate"):
+        next(engine._project_plate(reader, operator="stitch"))
 
 
 def test_yields_every_well_with_correct_shape_and_dtype():
@@ -164,11 +164,11 @@ def test_respects_n_fovs():
     assert {f for _, f in out} == {0, 1}
 
 
-def test_projector_swap_runs_through_the_same_engine():
-    # A non-MIP projector selected purely by name; the engine code is untouched.
-    add_projector("first_z", lambda planes: next(iter(planes)))
+def test_operator_swap_runs_through_the_same_engine():
+    # A non-MIP operator selected purely by name; the engine code is untouched.
+    add_operator("first_z", lambda planes: next(iter(planes)))
     reader = FakeReader(n_wells=3, z_levels=(0, 1, 2, 3))
-    out = _collect(reader, workers=2, projector="first_z")
+    out = _collect(reader, workers=2, operator="first_z")
     # Guard against an empty dict: a loop over nothing asserts nothing.
     assert set(out) == {(f"W{i:04d}", 0) for i in range(3)}, sorted(out)
     for (region, fov), img in out.items():
@@ -189,7 +189,7 @@ def test_bounded_window_does_not_prefetch_the_whole_plate():
     # Consuming one result must have started at most `workers + 1` wells, not all N.
     n_wells, workers = 40, 3
     reader = FakeReader(n_wells=n_wells, read_sleep=0.01)
-    gen = project_plate(reader, workers=workers)
+    gen = run_plate(reader, workers=workers)
     try:
         next(gen)  # consume exactly one well
         with reader._lock:
@@ -203,7 +203,7 @@ def test_bounded_window_does_not_prefetch_the_whole_plate():
 def test_metadata_is_warmed_before_any_read():
     # metadata must be touched single-threaded before reads fan out.
     reader = FakeReader(n_wells=4)
-    list(project_plate(reader, workers=2))
+    list(run_plate(reader, workers=2))
     assert reader.events, "engine never touched the reader"
     assert reader.events[0] == "meta"
     assert reader.events.index("meta") < reader.events.index("read")
@@ -212,7 +212,7 @@ def test_metadata_is_warmed_before_any_read():
 def test_invalid_workers_raises():
     reader = FakeReader(n_wells=2)
     with pytest.raises(ValueError, match="workers must be >= 1"):
-        next(project_plate(reader, workers=0))
+        next(run_plate(reader, workers=0))
 
 
 # The consumes-axis registry: consumes=frozenset() is a plane-op (z survives),
@@ -226,7 +226,7 @@ def _plus_one(plane):
     return plane + 1
 
 
-def test_shipped_projectors_declare_the_z_axis():
+def test_shipped_operators_declare_the_z_axis():
     # Both mip and reference consume z; z-selecting is a way of picking within z.
     assert engine.operator_consumes("mip") == frozenset({"z"})
     assert engine.operator_consumes("reference") == frozenset({"z"})
@@ -240,20 +240,20 @@ def test_consumes_is_orthogonal_to_select_index():
     assert engine.operator_consumes("mip") == engine.operator_consumes("reference")
 
 
-def test_add_projector_defaults_to_z_reducer():
-    add_projector("legacy_style", _first)                 # no consumes=
+def test_add_operator_defaults_to_z_reducer():
+    add_operator("legacy_style", _first)                 # no consumes=
     assert engine.operator_consumes("legacy_style") == frozenset({"z"})
 
 
-def test_add_projector_records_a_plane_op():
-    add_projector("planeop", plane_op(_plus_one), consumes=frozenset())
+def test_add_operator_records_a_plane_op():
+    add_operator("planeop", plane_op(_plus_one), consumes=frozenset())
     assert engine.operator_consumes("planeop") == frozenset()
 
 
 def test_consumes_accepts_any_iterable_of_axis_names():
-    add_projector("as_set", _first, consumes={"z"})
-    add_projector("as_str", _first, consumes="z")
-    add_projector("as_tuple", _first, consumes=())
+    add_operator("as_set", _first, consumes={"z"})
+    add_operator("as_str", _first, consumes="z")
+    add_operator("as_tuple", _first, consumes=())
     assert engine.operator_consumes("as_set") == frozenset({"z"})
     assert engine.operator_consumes("as_str") == frozenset({"z"})
     assert engine.operator_consumes("as_tuple") == frozenset()
@@ -265,21 +265,21 @@ def test_operator_consumes_unknown_name_is_loud():
 
 
 def test_fov_is_refused_by_name_and_points_at_the_region_seam():
-    # An add_projector callable never sees a tile's x/y stage geometry; {"fov"} is
+    # An add_operator callable never sees a tile's x/y stage geometry; {"fov"} is
     # add_region_operator's to stamp.
     with pytest.raises(ValueError, match="fov"):
-        add_projector("would_be_stitch", _first, consumes=frozenset({"fov"}))
+        add_operator("would_be_stitch", _first, consumes=frozenset({"fov"}))
 
 
 def test_unknown_axis_is_refused_named():
     with pytest.raises(ValueError, match="unsupported.*'t'|'t'.*unsupported"):
-        add_projector("timelapse", _first, consumes=frozenset({"t"}))
+        add_operator("timelapse", _first, consumes=frozenset({"t"}))
 
 
 def test_plane_op_preserves_z_and_maps_each_plane():
-    add_projector("plus_one", plane_op(_plus_one), consumes=frozenset())
+    add_operator("plus_one", plane_op(_plus_one), consumes=frozenset())
     reader = FakeReader(n_wells=2, z_levels=(0, 1, 3))
-    out = _collect(reader, workers=2, projector="plus_one")
+    out = _collect(reader, workers=2, operator="plus_one")
     assert set(out) == {(f"W{i:04d}", 0) for i in range(2)}, sorted(out)
     for (region, fov), img in out.items():
         # z survives a plane-op: one output plane per input plane, in z_levels order.
@@ -298,9 +298,9 @@ def test_plane_op_is_never_routed_through_the_z_reduction():
         seen.append(len(planes))
         return planes[0]
 
-    add_projector("spy", spy, consumes=frozenset())
+    add_operator("spy", spy, consumes=frozenset())
     reader = FakeReader(n_wells=1, z_levels=(0, 1, 2, 3))
-    _collect(reader, workers=1, projector="spy")
+    _collect(reader, workers=1, operator="spy")
     assert seen and set(seen) == {1}, f"plane-op was handed stacks of {sorted(set(seen))} planes"
 
 
@@ -312,17 +312,17 @@ def test_z_reducer_still_sees_the_whole_stack():
         seen.append(len(planes))
         return planes[0]
 
-    add_projector("spy_z", spy, consumes=frozenset({"z"}))
+    add_operator("spy_z", spy, consumes=frozenset({"z"}))
     reader = FakeReader(n_wells=1, z_levels=(0, 1, 2, 3))
-    _collect(reader, workers=1, projector="spy_z")
+    _collect(reader, workers=1, operator="spy_z")
     assert seen and set(seen) == {4}
 
 
 def test_adding_a_plane_op_needs_zero_engine_edits():
-    add_projector("bgsub_like", plane_op(lambda p: (p // 2)), consumes=frozenset())
-    assert "bgsub_like" in available_projectors()
+    add_operator("bgsub_like", plane_op(lambda p: (p // 2)), consumes=frozenset())
+    assert "bgsub_like" in available_plane_operators()
     reader = FakeReader(n_wells=1, z_levels=(0, 1))
-    ((_, img),) = list(_collect(reader, workers=1, projector="bgsub_like").items())
+    ((_, img),) = list(_collect(reader, workers=1, operator="bgsub_like").items())
     np.testing.assert_array_equal(img[0, 0, 0], reader.read("W0000", 0, "c0", 0) // 2)
 
 
@@ -356,5 +356,5 @@ def test_mip_pixels_unchanged_by_the_registry_rewrite():
 
 def test_plane_op_adapter_makes_the_declaration_inferable():
     # plane_op() stamps `consumes` on the callable, so the registration site need not repeat it.
-    add_projector("inferred", plane_op(_plus_one))
+    add_operator("inferred", plane_op(_plus_one))
     assert engine.operator_consumes("inferred") == frozenset()

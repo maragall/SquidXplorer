@@ -1,6 +1,6 @@
 """Stitch region operator: register a well's FOVs against each other and fuse them into
 one seamless mosaic. Wraps Julio's ``tilefusion`` pipeline on in-memory arrays;
-registration runs on the raw middle z-plane, never on the projector's output.
+registration runs on the raw middle z-plane, never on the z operator's output.
 """
 
 from __future__ import annotations
@@ -431,7 +431,7 @@ def stitch_region(
     region: str,
     fovs: Sequence[int],
     *,
-    projector: str = "mip",
+    z_operator: str = "mip",
     register: bool = True,
     registration_channel=None,
     channels: Optional[Sequence[int]] = None,
@@ -481,7 +481,7 @@ def stitch_region(
     # blend_px=None is maragall/stitcher's "Auto": measure the overlap instead of guessing.
     if blend_px is None:
         blend_px = auto_blend_px(positions, pixel_size, tile_shape)
-    _op = _resolve_operator(projector)
+    _op = _resolve_operator(z_operator)
 
     reg_c_global = _resolve_registration_channel(meta, registration_channel)
 
@@ -499,20 +499,20 @@ def stitch_region(
     # Fusion blends by weighted average, which is meaningless for integer object ids.
     if _op.produces == LABELS:
         raise ValueError(
-            f"operator {projector!r} produces label images (integer object ids), and fusion blends "
+            f"operator {z_operator!r} produces label images (integer object ids), and fusion blends "
             "overlapping tiles by a weighted average — the mean of two label ids is a third, "
             "nonexistent object, and per-FOV ids collide across every seam. Stitching labels needs "
             "id reconciliation across seams, which this operator does not do. Segment per FOV "
-            f"instead (write_plate(projector={projector!r})), or stitch an intensity operator."
+            f"instead (write_plate(operator={z_operator!r})), or stitch an intensity operator."
         )
 
     # Exactly one of the read path and the operator may flat-field per pass (not idempotent).
     if correct_illumination is not False and getattr(_op.fn, "corrects_illumination", False):
         raise ValueError(
-            f"projector {projector!r} flat-field corrects its input, and stitching's read path is "
+            f"z_operator {z_operator!r} flat-field corrects its input, and stitching's read path is "
             "ALSO correcting (correct_illumination is on by default). The correction is not "
             "idempotent — applying it twice changes ~89% of pixels by up to 23 counts, silently. "
-            "Pick ONE: correct_illumination=False to let the operator do it, or a projector that "
+            "Pick ONE: correct_illumination=False to let the operator do it, or a z operator that "
             "does not correct (e.g. 'mip') and let the read path do it, which is where TileFusion "
             "applies it and the only place registration can benefit from it."
         )
@@ -711,14 +711,14 @@ def _resolve_region_operator(name: str, operator_kwargs: Optional[dict] = None) 
     if "fov" not in operator.consumes:
         raise KeyError(
             f"{name!r} is a registered operator but not a REGION operator: it declares "
-            f"consumes={sorted(operator.consumes)} and takes planes, while stitch_plate hands its "
+            f"consumes={sorted(operator.consumes)} and takes planes, while the region loop hands its "
             f"operator (reader, region, fovs). Region operators: "
-            f"{available_region_operators()}; run {name!r} with squidxplorer.project_plate."
+            f"{available_region_operators()}; run {name!r} with squidxplorer.run_plate."
         )
     return operator.with_params(operator_kwargs)
 
 
-def stitch_plate(
+def _stitch_plate(
     reader: "SquidReader",
     *,
     n_fovs: Optional[int] = None,
@@ -834,7 +834,7 @@ def stitch_plate(
                     raise  # a missing package is not a corrupt well
                 except Exception as exc:
                     if on_error is None:
-                        raise  # default: fail-fast (project_plate's contract)
+                        raise  # default: fail-fast (the per-FOV loop's contract)
                     on_error(region, anchor_fov, exc)
                     continue
                 yield region, anchor_fov, image

@@ -761,18 +761,18 @@ class RegionViewer(QMainWindow):
                 return {}
         except Exception:                        # noqa: BLE001 - an unknown key: leave it alone
             return {}
-        chosen = str(current.get("projector") or "")
+        chosen = str(current.get("z_operator") or "")
         from squidxplorer._engine import Z_REDUCER, operator_consumes
 
         try:
             reduces = bool(operator_consumes(chosen) & Z_REDUCER) if chosen else True
-        except Exception:                        # noqa: BLE001 - an unknown projector: leave it
+        except Exception:                        # noqa: BLE001 - an unknown z operator: leave it
             return {}
         if not reduces:
             return {}
         self._say(f"3D: stitching all {int((self._meta or {}).get('n_z') or 1)} z-planes "
-                  f"(projector 'keepz') — one pose graph, every plane fused from it.")
-        return {"projector": "keepz"}
+                  f"(z operator 'keepz') — one pose graph, every plane fused from it.")
+        return {"z_operator": "keepz"}
 
     def set_render_mode(self, mode: str) -> None:
         """Record whether this window is a PLANE or a VOLUME, and repaint what says so."""

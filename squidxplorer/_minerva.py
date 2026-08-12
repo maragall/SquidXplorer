@@ -194,11 +194,11 @@ def write_story(story_path, ome_path, groups: list[dict], pixels_per_micron: flo
     return story_path
 
 
-def _provenance_text(image, projector: str, operator: str, *, region: str = "",
+def _provenance_text(image, z_operator: str, operator: str, *, region: str = "",
                      t: Optional[int] = None, fovs: Optional[Sequence[int]] = None,
                      n_fovs: Optional[int] = None) -> str:
     """One line saying what produced these pixels, for the story's ``sample_info.text``."""
-    parts = [f"squidxplorer {operator}/{projector}"]
+    parts = [f"squidxplorer {operator}/{z_operator}"]
     if region:
         parts.append(f"region {region}")
     if t is not None:
@@ -256,14 +256,14 @@ def export_selection(
     out_dir=None,
     *,
     t: int = 0,
-    projector: str = "mip",
+    z_operator: str = "mip",
     operator: str = "stitch",
     on_progress=None,
     luts: Optional[dict] = None,
     **operator_kwargs,
 ) -> list[tuple[Path, Path]]:
     """Export the selected region(s) to Minerva-ingestable file pairs — one pair per region."""
-    from squidxplorer._stitch import stitch_plate   # local: avoids an import cycle at module load
+    from squidxplorer._stitch import _stitch_plate   # local: avoids an import cycle at module load
 
     grouped = group_selection(selection)
     if not grouped:
@@ -271,7 +271,7 @@ def export_selection(
 
     meta = reader.metadata
     pixel_um = _require_pixel_size(meta)                  # refuse early — nothing written yet
-    _resolve_operator(projector)     # unknown projector: fail here, named, not mid-stitch
+    _resolve_operator(z_operator)    # unknown z operator: fail here, named, not mid-stitch
 
     fovs_per_region = meta.get("fovs_per_region", {})
     for region, fovs in grouped.items():
@@ -298,16 +298,16 @@ def export_selection(
 
     # workers=1: peak memory is workers x one fused mosaic, and fusion is internally parallel.
     written: dict[str, tuple[Path, Path]] = {}
-    stream = stitch_plate(
+    stream = _stitch_plate(
         reader, regions=grouped, workers=1, operator=operator,
-        projector=projector, **operator_kwargs,
+        z_operator=z_operator, **operator_kwargs,
     )
     for region, _anchor_fov, image in stream:
         # Stream: fuse one region, write it, drop it.
         img_cyx = np.asarray(image[t, :, 0])
         fovs = grouped[region]
         whole = len(fovs) == len(fovs_per_region.get(region, []))
-        stem = f"{stem_prefix}_{_safe(region)}_t{t}_{_safe(projector)}_{_safe(operator)}"
+        stem = f"{stem_prefix}_{_safe(region)}_t{t}_{_safe(z_operator)}_{_safe(operator)}"
         if not whole:      # a crop, not the region — say so in the filename, not just the story
             stem += f"_{len(fovs)}fov"
         label = region if whole else f"{region} ({len(fovs)} FOVs)"
@@ -318,14 +318,14 @@ def export_selection(
             auto_groups(img_cyx, names, colors, label=label, luts=luts),
             pixels_per_micron=ppm,
             provenance=_provenance_text(
-                image, projector, operator, region=region, t=t, fovs=fovs,
+                image, z_operator, operator, region=region, t=t, fovs=fovs,
                 n_fovs=len(fovs_per_region.get(region, []) or []) or None),
         )
         written[region] = (ome_path, story_path)
         del image, img_cyx
         if on_progress is not None:
             on_progress(len(written), len(grouped))
-    # stitch_plate yields in COMPLETION order; the caller asked in selection order.
+    # the region loop yields in COMPLETION order; the caller asked in selection order.
     return [written[r] for r in grouped if r in written]
 
 

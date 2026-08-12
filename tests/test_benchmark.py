@@ -198,9 +198,9 @@ def test_write_csv_and_json_round_trip(tmp_path):
 
 
 def test_default_operators_are_all_real_registry_entries():
-    from squidxplorer import available_projectors, available_region_operators
+    from squidxplorer import available_plane_operators, available_region_operators
 
-    known = set(available_projectors()) | set(available_region_operators())
+    known = set(available_plane_operators()) | set(available_region_operators())
     assert set(bm.DEFAULT_OPERATORS) <= known
 
 

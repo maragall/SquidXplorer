@@ -112,7 +112,7 @@ def test_the_whole_acquisition_is_a_scope_and_so_is_a_selection(squid_dataset):
 
 
 def test_a_stale_selection_drops_the_wells_that_are_gone_rather_than_refusing(squid_dataset):
-    """A selection outlives a re-ingest: ``stitch_plate`` drops an unknown region, so does this."""
+    """A selection outlives a re-ingest: ``run_plate`` drops an unknown region, so does this."""
     root, _arrays = squid_dataset
     _reader, meta = _meta(root)
     sel = G.GalleryScope.from_region_fovs(meta, [("B2", 0), ("Z99", 0), ("B3", 47)])
@@ -174,7 +174,7 @@ def test_an_unknown_projection_is_refused_at_construction():
 
 
 def test_a_fov_subset_fuses_a_smaller_cell_than_the_whole_region(squid_dataset):
-    """Same FOV mapping ``stitch_plate`` takes; the crop comes for free from
+    """Same FOV mapping ``run_plate`` takes; the crop comes for free from
     ``_placement.fov_offsets_px``, which normalises whatever FOV set it is handed."""
     root, _arrays = squid_dataset
     reader, meta = _meta(root)

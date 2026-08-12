@@ -16,7 +16,7 @@ import numpy as np
 from squidxplorer import _decon_gpu
 from squidxplorer._acquisition import load_acquisition_metadata, load_objective_na
 from squidxplorer._channels import excitation_nm
-from squidxplorer._engine import add_projector
+from squidxplorer._engine import add_operator
 from squidxplorer.projection import cast_like, plane_op
 
 # RL is semi-convergent; the working point on this instrument, not a textbook default.
@@ -225,7 +225,7 @@ def deconvolve_stack(
 
 
 # The override optics: an escape hatch checked first by optics_for_channel, empty by default.
-# Locked because project_plate runs the operator on a thread pool.
+# Locked because the per-FOV loop runs the operator on a thread pool.
 _lock = threading.Lock()
 _active: Optional[OpticsParams] = None
 
@@ -296,7 +296,7 @@ def decon_op(
     optics: Optional[OpticsParams] = None,
     iterations: int = DEFAULT_ITERATIONS,
 ) -> Callable[[Iterable[np.ndarray]], np.ndarray]:
-    """Build a parameterised deconvolution plane-op, ready for ``add_projector``.
+    """Build a parameterised deconvolution plane-op, ready for ``add_operator``.
 
     With ``optics=None`` the callable carries ``for_channel`` so optics are derived per channel.
     """
@@ -327,5 +327,5 @@ def decon3d_op(
     return _decon3d
 
 
-add_projector("decon", decon_op(), requires=("petakit",))
-add_projector("decon3d", decon3d_op(), consumes=frozenset({"z"}), requires=("petakit",))
+add_operator("decon", decon_op(), requires=("petakit",))
+add_operator("decon3d", decon3d_op(), consumes=frozenset({"z"}), requires=("petakit",))

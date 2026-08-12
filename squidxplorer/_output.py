@@ -11,7 +11,7 @@ from typing import Iterable, Iterator, Optional
 import numpy as np
 import tifffile
 
-from squidxplorer._engine import _default_workers, project_plate
+from squidxplorer._engine import _default_workers, run_plate
 from squidxplorer._volume import release as release_pages
 from squidxplorer._zarr_store import create_array, write_group
 from squidxplorer.contract import contract_stamp
@@ -768,7 +768,7 @@ def write_plate(
     *,
     n_fovs: Optional[int] = 1,
     workers: Optional[int] = None,
-    projector: str = "mip",
+    operator: str = "mip",
     tiff: bool = False,
     on_well=None,
     write_workers: int = _WRITE_WORKERS,
@@ -783,29 +783,23 @@ def write_plate(
 ) -> dict:
     """Project a plate and write the canonical OME-zarr + individual TIFFs; returns the manifest."""
     from squidxplorer._engine import is_region_operator
-    from squidxplorer._stitch import stitch_plate
 
     metadata = reader.metadata
-    region_operator = is_region_operator(projector)
+    region_operator = is_region_operator(operator)
     if not region_operator and operator_kwargs:
         from squidxplorer._engine import bind_operator
 
-        bind_operator(projector, operator_kwargs)   # refuse BEFORE any directory is made
+        bind_operator(operator, operator_kwargs)   # refuse BEFORE any directory is made
     # Result depth and pixel meaning come off the INNER operator's own declarations, so the disk
     # estimate and the pyramid reducer cannot disagree with what is then written.
     from squidxplorer._engine import operator_consumes, operator_produces
 
-    inner = (operator_kwargs or {}).get("projector", "mip") if region_operator else projector
+    inner = (operator_kwargs or {}).get("z_operator", "mip") if region_operator else operator
     n_z_out = 1 if "z" in operator_consumes(inner) else int(metadata.get("n_z", 1) or 1)
     produces_out = operator_produces(inner)
 
-    if region_operator:
-        stream = stitch_plate(reader, n_fovs=None, workers=1, operator=projector,
-                              on_error=on_error, regions=regions, **(operator_kwargs or {}))
-    else:
-        stream = project_plate(reader, n_fovs=n_fovs, workers=workers, projector=projector,
-                               on_error=on_error, regions=regions,
-                               operator_kwargs=operator_kwargs)
+    stream = run_plate(reader, operator=operator, n_fovs=n_fovs, workers=workers,
+                       on_error=on_error, regions=regions, operator_kwargs=operator_kwargs)
     return write_from_stream(metadata, stream, out_dir, n_fovs=n_fovs, tiff=tiff, on_well=on_well,
                              write_workers=write_workers, stop=stop, regions=regions,
                              check_disk=check_disk, disk_headroom=disk_headroom,

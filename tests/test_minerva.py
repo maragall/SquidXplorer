@@ -44,7 +44,7 @@ def test_export_writes_one_fused_mosaic_per_region_never_one_per_fov(squid_datas
         assert ome.name.endswith(".ome.tiff")
         assert story.name.endswith(".story.json")
         assert "fov" not in ome.name, "a per-FOV filename means the per-FOV model came back"
-    # order is the caller's region order, not stitch_plate's completion order
+    # order is the caller's region order, not the region loop's completion order
     assert "B2" in pairs[0][0].name and "B3" in pairs[1][0].name
 
 
@@ -164,10 +164,10 @@ def test_group_selection_groups_by_region_in_first_seen_order():
         "B3": [1, 0], "B2": [0]}
 
 
-def test_export_honours_the_projector_choice(squid_dataset, tmp_path):
+def test_export_honours_the_z_operator_choice(squid_dataset, tmp_path):
     """`reference` picks the sharpest plane rather than reducing — a different image.
 
-    Asserted on PIXELS, not on the filename: the name's projector token is interpolated from the
+    Asserted on PIXELS, not on the filename: the name's z-operator token is interpolated from the
     caller's string, so a build that ignored the choice and always MIP'd would still be named
     "reference". Both reductions are computed here from the fixture planes and the file must
     match ITS OWN one and differ from the other.
@@ -176,11 +176,11 @@ def test_export_honours_the_projector_choice(squid_dataset, tmp_path):
     # correct_illumination=False: the claim under test is that the PROJECTOR choice reaches the
     # pixels, and both expectations below are computed from the raw fixture planes. Leaving the
     # default flat-field on would divide both by a gain field estimated from 4 px tiles, which
-    # tests nothing about projector dispatch.
+    # tests nothing about z-operator dispatch.
     (mip, _), = export_selection(open_reader(root), [("B2", 0)], tmp_path / "a",
-                                 projector="mip", blend_px=0, correct_illumination=False)
+                                 z_operator="mip", blend_px=0, correct_illumination=False)
     (ref, _), = export_selection(
-        open_reader(root), [("B2", 0)], tmp_path / "b", projector="reference", blend_px=0,
+        open_reader(root), [("B2", 0)], tmp_path / "b", z_operator="reference", blend_px=0,
         correct_illumination=False,
     )
     assert "mip" in mip.name and "reference" in ref.name

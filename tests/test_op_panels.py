@@ -96,7 +96,7 @@ def test_the_kwargs_are_accepted_by_stitch_region_itself():
 # the stitch guard, surfaced BEFORE the run
 # ---------------------------------------------------------------------------------------
 
-def test_a_labels_projector_is_refused_with_a_sentence_naming_the_way_out():
+def test_a_labels_operator_is_refused_with_a_sentence_naming_the_way_out():
     """``stitch_region`` raises for a labels operator; the panel asks the same registry first
     rather than let the user discover it after a multi-minute run."""
     why = stitch_refusal("cellpose")
@@ -119,7 +119,7 @@ def test_a_z_reducer_is_not_refused():
     assert stitch_refusal("decon3d") is None
 
 
-def test_an_unknown_projector_is_named_rather_than_crashing_the_panel():
+def test_an_unknown_operator_is_named_rather_than_crashing_the_panel():
     why = stitch_refusal("does_not_exist")
     assert why is not None and "does_not_exist" in why
 
@@ -272,21 +272,21 @@ def test_turning_registration_off_disables_the_registration_only_controls(qapp):
     assert p.rel_spin.isEnabled()
 
 
-def test_a_labels_projector_disables_the_run_button_and_says_why(qapp):
+def test_a_labels_z_operator_disables_the_run_button_and_says_why(qapp):
     host = _Host()
     p = StitcherPanel(host)
-    p.projector_combo.setCurrentText("cellpose")
+    p.z_operator_combo.setCurrentText("cellpose")
     assert not p.run_btn.isEnabled()
     assert host.said and "label" in host.said[-1].lower()
-    p.projector_combo.setCurrentText("mip")
+    p.z_operator_combo.setCurrentText("mip")
     assert p.run_btn.isEnabled()
 
 
-def test_a_plane_op_projector_leaves_the_run_button_enabled(qapp):
+def test_a_plane_op_z_operator_leaves_the_run_button_enabled(qapp):
     """The button follows the ENGINE, not a guard the engine outgrew."""
     host = _Host()
     p = StitcherPanel(host)
-    p.projector_combo.setCurrentText("decon")
+    p.z_operator_combo.setCurrentText("decon")
     assert p.run_btn.isEnabled()
 
 
@@ -295,7 +295,7 @@ def test_the_run_handler_itself_refuses_labels_not_just_the_disabled_button(qapp
     the guard inside ``_run`` must refuse independently of the button's enabled state."""
     host = _Host()
     p = StitcherPanel(host)
-    p.projector_combo.setCurrentText("cellpose")
+    p.z_operator_combo.setCurrentText("cellpose")
     p.run_btn.setEnabled(True)                  # simulate reaching _run some other way
     p._run()
     assert host.calls == [], "the run must not start"
@@ -682,7 +682,7 @@ def test_a_key_that_is_not_an_operator_is_refused_by_name():
 def test_an_undrawable_parameter_refuses_the_whole_panel_naming_the_parameter():
     """A panel that silently omitted the one parameter it could not draw would run that
     parameter at its default while every other control implied the form was complete."""
-    from squidxplorer import add_projector
+    from squidxplorer import add_operator
 
     def _factory(**kwargs):
         def _op(planes):
@@ -690,7 +690,7 @@ def test_an_undrawable_parameter_refuses_the_whole_panel_naming_the_parameter():
         return _op
 
     name = "panel_test_undrawable"
-    add_projector(name, _factory, params=(Param("sigma_px", 2.0), Param("mask", None)))
+    add_operator(name, _factory, params=(Param("sigma_px", 2.0), Param("mask", None)))
     try:
         why = panel_refusal(name)
         assert why and "mask" in why and "NoneType" in why

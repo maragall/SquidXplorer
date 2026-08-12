@@ -1,7 +1,7 @@
 """Gallery View's PRODUCER: one region's mosaic per channel, at gallery resolution, off-thread.
 
 Qt-free on purpose; the Qt side (:mod:`squidxplorer._gallery_window`) holds nothing but layout.
-Cells fuse at PREVIEW placement (later FOV overwrites earlier), never through ``stitch_plate``.
+Cells fuse at PREVIEW placement (later FOV overwrites earlier), never through the stitcher.
 """
 
 from __future__ import annotations
@@ -56,7 +56,7 @@ PROJECTIONS = tuple(Z_SELECTORS)
 class GalleryScope:
     """WHICH pixels a gallery is over: regions, the FOVs of each, channels, timepoint, projection.
 
-    The FOV mapping is the same shape ``stitch_plate(regions=...)`` takes. Frozen (mapping stored
+    The FOV mapping is the same shape ``run_plate(regions=...)`` takes. Frozen (mapping stored
     as a tuple-of-tuples) because a scope is passed to a worker thread.
     """
 
@@ -92,7 +92,7 @@ class GalleryScope:
         """A plate selection — ``[(region, fov), ...]`` — as a scope, in plate order.
 
         Pairs naming a region or FOV the acquisition does not have are dropped, as
-        ``stitch_plate`` drops an unknown region.
+        ``run_plate`` drops an unknown region.
         """
         per = dict((meta.get("fovs_per_region") or {}))
         order = [str(r) for r in (meta.get("regions") or list(per))]

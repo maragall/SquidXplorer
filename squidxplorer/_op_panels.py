@@ -103,18 +103,18 @@ def stitch_operator_kwargs(*, register, registration_channel, channels, blend_px
     return kwargs
 
 
-def stitch_refusal(projector: str) -> Optional[str]:
-    """The refusal sentence for *projector*, mirroring stitch_region's own guard against fusing labels."""
+def stitch_refusal(name: str) -> Optional[str]:
+    """The refusal sentence for *name*, mirroring stitch_region's own guard against fusing labels."""
     from squidxplorer._stitch import LABELS, _resolve_operator
 
     try:
-        op = _resolve_operator(projector)
+        op = _resolve_operator(name)
     except Exception as exc:                       # unknown name -> name it, don't crash
-        return (f"{projector!r} is not a projector this build knows: {exc}")
+        return (f"{name!r} is not an operator this build knows: {exc}")
     if op.produces != LABELS:
         return None
     return (
-        f"{projector!r} produces label images (integer object ids), and fusion blends "
+        f"{name!r} produces label images (integer object ids), and fusion blends "
         f"overlapping tiles by a weighted average - the mean of two label ids is a third, "
         f"nonexistent object, and per-FOV ids collide across every seam. Segment per FOV "
         f"instead, or stitch an intensity operator such as mip or decon.")
@@ -222,26 +222,26 @@ class StitcherPanel(_Panel):
         # two things that can happen here, not the only one.
         self.v.addWidget(_head("Z HANDLING"))
         self._n_z = int(((getattr(host, "_meta", None) or {}).get("n_z")) or 1)
-        self.projector_combo = QComboBox()
-        from squidxplorer import available_projectors
+        self.z_operator_combo = QComboBox()
+        from squidxplorer import available_plane_operators
 
-        for name in sorted(available_projectors()):
-            self.projector_combo.addItem(name)
+        for name in sorted(available_plane_operators()):
+            self.z_operator_combo.addItem(name)
         # mip stays the default even on a z-stack: RegionViewer switches to keepz only when
         # the window is actually in 3D mode, so a 2D canvas never gets a volume it can't show.
-        self.projector_combo.setCurrentText("mip")
-        self.projector_combo.setToolTip(
+        self.z_operator_combo.setCurrentText("mip")
+        self.z_operator_combo.setToolTip(
             "What each FOV's z-stack becomes before registration.\n\n"
             "A z-REDUCER (mip, reference) collapses it to one plane, so the well fuses to one "
             "image. A PLANE-OP (keepz, bgsub, decon, flatfield) keeps every plane, and the well "
             "fuses to a volume: the pose graph is solved ONCE and every plane is fused from those "
             "same origins, so the planes cannot drift apart.\n\n"
             "keepz is the identity — every plane, no pixel changed.")
-        self.projector_combo.currentTextChanged.connect(self._check_projector)
-        self.v.addLayout(_row(QLabel("Z handling:"), self.projector_combo))
+        self.z_operator_combo.currentTextChanged.connect(self._check_z_operator)
+        self.v.addLayout(_row(QLabel("Z handling:"), self.z_operator_combo))
 
         # z-plane count comes from the chosen operator's `consumes` declaration crossed with
-        # n_z, not from anything visible on this panel; kept in sync by _check_projector.
+        # n_z, not from anything visible on this panel; kept in sync by _check_z_operator.
         self.z_note = QLabel("")
         self.z_note.setWordWrap(True)
         self.v.addWidget(self.z_note)
@@ -369,7 +369,7 @@ class StitcherPanel(_Panel):
 
         _apply_qss(self)
         self._on_register_toggled(self.register_cb.isChecked())
-        self._check_projector(self.projector_combo.currentText())
+        self._check_z_operator(self.z_operator_combo.currentText())
 
     def _on_register_toggled(self, on: bool) -> None:
         """Grey out the knobs that provably do nothing with registration off."""
@@ -377,7 +377,7 @@ class StitcherPanel(_Panel):
                   self.reg_t_spin, self.distortion_cb):
             w.setEnabled(bool(on))
 
-    def _check_projector(self, name: str) -> None:
+    def _check_z_operator(self, name: str) -> None:
         why = stitch_refusal(name)
         self.run_btn.setEnabled(why is None)
         self.say("" if why is None else why)
@@ -423,7 +423,7 @@ class StitcherPanel(_Panel):
         )
 
     def _run(self) -> None:
-        why = stitch_refusal(self.projector_combo.currentText())
+        why = stitch_refusal(self.z_operator_combo.currentText())
         if why is not None:
             self.say(why)
             return
@@ -432,7 +432,7 @@ class StitcherPanel(_Panel):
         except ValueError as exc:                 # a refused setting -> say it, run nothing
             self.say(str(exc))
             return
-        kwargs["projector"] = self.projector_combo.currentText()
+        kwargs["z_operator"] = self.z_operator_combo.currentText()
         self.say("")
         # regions=None means UNSCOPED, resolved against the run selector's live selection.
         self.host.run_operator("stitch", regions=None,

@@ -7,7 +7,7 @@ import pytest
 
 import squidxplorer
 from squidxplorer._compose import compose_operator
-from squidxplorer._engine import _OPERATORS, _resolve_operator, add_projector, bind_operator
+from squidxplorer._engine import _OPERATORS, _resolve_operator, add_operator, bind_operator
 from squidxplorer._recipe import Recipe, RecipeChain
 from squidxplorer.projection import PLANE_OP, Z_REDUCER, plane_op
 
@@ -36,10 +36,10 @@ _count.consumes = Z_REDUCER
 
 @pytest.fixture(autouse=True)
 def _register_test_operators():
-    """Registered per test: ``add_projector`` writes to a process-global table."""
-    add_projector(ADD, plane_op(_add10))
-    add_projector(DOUBLE, plane_op(_double))
-    add_projector(COUNT, _count)
+    """Registered per test: ``add_operator`` writes to a process-global table."""
+    add_operator(ADD, plane_op(_add10))
+    add_operator(DOUBLE, plane_op(_double))
+    add_operator(COUNT, _count)
     try:
         yield
     finally:
@@ -182,12 +182,12 @@ def test_a_list_of_names_is_refused_by_type_naming_the_chain_spelling():
     with pytest.raises(TypeError) as exc:
         _resolve_operator(["flatfield", "mip"])
 
-    assert "projector='flatfield + mip'" in str(exc.value)
+    assert "operator='flatfield + mip'" in str(exc.value)
 
 
 def test_a_registered_name_may_not_contain_chain_punctuation():
     with pytest.raises(ValueError, match="chain punctuation"):
-        add_projector("a+b", plane_op(_add10))
+        add_operator("a+b", plane_op(_add10))
 
 
 def test_an_empty_chain_names_no_operator():
@@ -221,7 +221,7 @@ def test_the_plane_ops_are_applied_lazily_as_the_reducer_pulls():
         events.append("op")
         return plane
 
-    add_projector("compose_traced", plane_op(_traced))
+    add_operator("compose_traced", plane_op(_traced))
     try:
         def _reading():
             for value in (1, 2, 3):
@@ -240,18 +240,18 @@ def test_a_plane_op_chain_handed_a_stack_refuses_rather_than_dropping_planes():
         _resolve_operator(f"{ADD}+{DOUBLE}").fn(_planes([1, 2]))
 
 
-def test_a_chain_runs_over_a_real_acquisition_through_project_plate(squid_dataset):
+def test_a_chain_runs_over_a_real_acquisition_through_run_plate(squid_dataset):
     root, _arrays = squid_dataset
     reader = squidxplorer.open_reader(root)
     n_z = len(reader.metadata["z_levels"])
     n_c = len(reader.metadata["channels"])
 
     planes = dict(((region, fov), image) for region, fov, image
-                  in squidxplorer.project_plate(reader, n_fovs=1, workers=1,
-                                            projector=f"{ADD}+{DOUBLE}"))
+                  in squidxplorer.run_plate(reader, n_fovs=1, workers=1,
+                                            operator=f"{ADD}+{DOUBLE}"))
     reduced = dict(((region, fov), image) for region, fov, image
-                   in squidxplorer.project_plate(reader, n_fovs=1, workers=1,
-                                             projector=f"{ADD}+{DOUBLE}+mip"))
+                   in squidxplorer.run_plate(reader, n_fovs=1, workers=1,
+                                             operator=f"{ADD}+{DOUBLE}+mip"))
 
     assert planes and set(planes) == set(reduced)
     for key, image in planes.items():
@@ -272,7 +272,7 @@ def test_a_composed_chain_reaches_write_plate_and_the_store_keeps_its_depth(squi
     n_z = len(reader.metadata["z_levels"])
 
     manifest = squidxplorer.write_plate(reader, tmp_path / "out", n_fovs=1, workers=1,
-                                    projector=f"{ADD}+{DOUBLE}", check_disk=False)
+                                    operator=f"{ADD}+{DOUBLE}", check_disk=False)
 
     written = squidxplorer.open_reader(manifest["plate"])
     assert len(written.metadata["z_levels"]) == n_z
@@ -297,9 +297,9 @@ def test_a_composed_plane_op_chain_stitches_every_z_plane():
     reader, fovs, n_z = _stitch_fixtures()
     from squidxplorer._stitch import stitch_region
 
-    out = np.asarray(stitch_region(reader, "A1", fovs, projector=f"{ADD}+{DOUBLE}",
+    out = np.asarray(stitch_region(reader, "A1", fovs, z_operator=f"{ADD}+{DOUBLE}",
                                    register=False, correct_illumination=False))
-    reduced = np.asarray(stitch_region(reader, "A1", fovs, projector=f"{ADD}+{DOUBLE}+mip",
+    reduced = np.asarray(stitch_region(reader, "A1", fovs, z_operator=f"{ADD}+{DOUBLE}+mip",
                                        register=False, correct_illumination=False))
 
     assert out.shape[2] == n_z, out.shape
@@ -315,7 +315,7 @@ def test_a_chain_containing_flatfield_does_not_defeat_the_double_apply_guard():
     for chain in ("flatfield+mip", f"{ADD}+flatfield", f"flatfield+{ADD}+mip"):
         assert getattr(_resolve_operator(chain).fn, "corrects_illumination", False), chain
         with pytest.raises(ValueError, match="flat-field corrects its input"):
-            stitch_region(reader, "A1", fovs, projector=chain, register=False)
+            stitch_region(reader, "A1", fovs, z_operator=chain, register=False)
 
     # ...and a chain of operators that do NOT correct is untouched by the guard.
     assert not getattr(_resolve_operator(f"{ADD}+mip").fn, "corrects_illumination", False)
@@ -326,7 +326,7 @@ def test_a_chain_ending_in_labels_is_refused_by_stitching_for_the_reason_labels_
     from squidxplorer._stitch import stitch_region
 
     with pytest.raises(ValueError, match="label images"):
-        stitch_region(reader, "A1", fovs, projector=f"{ADD}+spot", register=False,
+        stitch_region(reader, "A1", fovs, z_operator=f"{ADD}+spot", register=False,
                       correct_illumination=False)
 
 
@@ -361,17 +361,17 @@ def test_the_cli_validates_a_chain_before_it_writes_anything(tmp_path):
     (tmp_path / "acq").mkdir()
     common = dict(input_folder=str(tmp_path / "acq"), output_folder=str(tmp_path / "out"))
 
-    assert ProcessParameters(projector=f"{ADD}+mip", **common).projector == f"{ADD}+mip"
+    assert ProcessParameters(operator=f"{ADD}+mip", **common).operator == f"{ADD}+mip"
     with pytest.raises(pydantic.ValidationError, match="consumes z"):
-        ProcessParameters(projector=f"mip+{ADD}", **common)
+        ProcessParameters(operator=f"mip+{ADD}", **common)
     with pytest.raises(pydantic.ValidationError, match="unknown operator"):
-        ProcessParameters(projector="noplease", **common)
+        ProcessParameters(operator="noplease", **common)
 
     # ...and --param reaches ONE step of a chain, by the namespaced name the chain declares.
-    assert ProcessParameters(projector=f"{ADD}+spot", param=["spot.min_area_px=80"],
+    assert ProcessParameters(operator=f"{ADD}+spot", param=["spot.min_area_px=80"],
                              **common).parameters() == {"spot.min_area_px": 80}
     with pytest.raises(pydantic.ValidationError, match="does not take spot.nope"):
-        ProcessParameters(projector=f"{ADD}+spot", param=["spot.nope=1"], **common)
+        ProcessParameters(operator=f"{ADD}+spot", param=["spot.nope=1"], **common)
 
 
 def test_operator_available_answers_for_a_chain_rather_than_calling_it_unknown():

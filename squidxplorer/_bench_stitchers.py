@@ -129,7 +129,7 @@ def ashlar_region(
     region: str,
     fovs: Sequence[int],
     *,
-    projector: str = "mip",
+    z_operator: str = "mip",
     registration_channel=None,
     channels: Optional[Sequence[int]] = None,
     max_shift_um: float = 30.0,
@@ -161,7 +161,7 @@ def ashlar_region(
     tile_shape = tuple(int(v) for v in meta["frame_shape"])
     dtype = np.dtype(meta["dtype"])
     n_t = int(meta["n_t"])
-    _op = _resolve_operator(projector)
+    _op = _resolve_operator(z_operator)
 
     with timer.stage("project"):
         tiles = np.empty((len(fovs), n_t, len(channels), *tile_shape), dtype=dtype)
