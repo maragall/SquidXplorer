@@ -1,14 +1,4 @@
-"""IMA-188 unit tests — parallel/streaming plate engine + projector table.
-
-Clean-room (no ``integration`` mark, no data on disk): the reader is a controllable in-memory
-fake so we can exercise the engine's own logic — projector table, projector swap (AC4), completion
-streaming, bounded in-flight window, fail-loud propagation, and metadata warm-up ordering —
-without the real 1536wp fixture. The real seam (189 reader → 188 engine on real pixels) is
-proven separately by the 188↔183 cross commit in ``tests/test_integration.py``.
-
-The fake mirrors exactly the slice of the IMA-189 reader contract that ``project_well`` and
-``project_plate`` touch: a ``metadata`` dict and ``read(region, fov, channel, z, t)`` → 2D plane.
-"""
+"""Parallel/streaming plate engine + projector table, over an in-memory fake reader."""
 
 from __future__ import annotations
 
@@ -29,14 +19,7 @@ from squidxplorer import (
 
 
 class FakeReader:
-    """In-memory stand-in for an IMA-189 ``SquidReader`` — only what the engine consumes.
-
-    Instrumented for the engine tests: it records the order of ``metadata`` vs ``read`` access
-    (warm-up ordering), the set of wells that have begun reading (bounded-window / laziness),
-    and can be told to sleep per read (to keep wells in flight) or raise on a chosen well
-    (fail-loud). ``read`` returns a constant plane whose value grows with ``z`` so a max
-    projection has a known, non-degenerate answer.
-    """
+    """In-memory stand-in for a ``SquidReader``, instrumented for the engine tests."""
 
     def __init__(
         self,
@@ -91,7 +74,7 @@ class FakeReader:
             raise ValueError(f"synthetic read failure at region={region!r} fov={fov} z={z}")
         if self._read_sleep:
             time.sleep(self._read_sleep)
-        # value grows with z so max-over-z is well-defined and != any lower slice
+        # Value grows with z so max-over-z is well-defined.
         base = (hash((region, fov, channel, t)) % 100) * 10
         return np.full(self._shape, base + int(z), dtype=self._dtype)
 
@@ -111,8 +94,6 @@ def _collect(reader, **kw) -> dict[tuple[str, int], np.ndarray]:
     """Drain project_plate into a {(region, fov): image} dict (order-independent compare)."""
     return {(r, f): img for r, f, img in project_plate(reader, **kw)}
 
-
-# ── projector table ─────────────────────────────────────────────────────────────────────
 
 def test_mip_is_available_by_default():
     assert "mip" in available_projectors()
@@ -144,18 +125,11 @@ def test_project_plate_unknown_projector_raises_named():
 
 
 def test_project_plate_refuses_a_region_operator_by_its_declaration():
-    """One table means `stitch` RESOLVES here; `consumes` is what says it is the wrong loop.
-
-    A region operator takes (reader, region, fovs), so running it through project_plate would
-    call it with an iterable of planes as its `reader`. The refusal names the function that runs
-    it instead, rather than reporting the name as unknown, which is what a second table did.
-    """
+    """`stitch` resolves here; `consumes` is what says it is the wrong loop."""
     reader = FakeReader(n_wells=2)
     with pytest.raises(ValueError, match="consumes fov.*stitch_plate"):
         next(project_plate(reader, projector="stitch"))
 
-
-# ── correctness: concurrency changes no pixel ───────────────────────────────────────────
 
 def test_yields_every_well_with_correct_shape_and_dtype():
     reader = FakeReader(n_wells=7)
@@ -186,30 +160,24 @@ def test_result_is_deterministic_across_worker_counts():
 def test_respects_n_fovs():
     reader = FakeReader(n_wells=3, n_fovs=2)
     out = _collect(reader, workers=2, n_fovs=2)
-    assert len(out) == 6  # 3 wells × 2 fovs
+    assert len(out) == 6  # 3 wells x 2 fovs
     assert {f for _, f in out} == {0, 1}
 
 
-# ── AC4: pluggable projector swaps with zero engine edits ────────────────────────────────
-
 def test_projector_swap_runs_through_the_same_engine():
-    # A non-MIP projector (returns the FIRST z-plane) selected purely by name — the engine
-    # code is untouched. Proves project_plate(..., projector=<name>) is the pluggable seam.
+    # A non-MIP projector selected purely by name; the engine code is untouched.
     add_projector("first_z", lambda planes: next(iter(planes)))
     reader = FakeReader(n_wells=3, z_levels=(0, 1, 2, 3))
     out = _collect(reader, workers=2, projector="first_z")
-    # Per-well fault isolation can yield an EMPTY dict, and a loop over nothing asserts nothing.
-    # `test_yields_every_well_with_correct_shape_and_dtype` already guards this way; these did not.
+    # Guard against an empty dict: a loop over nothing asserts nothing.
     assert set(out) == {(f"W{i:04d}", 0) for i in range(3)}, sorted(out)
     for (region, fov), img in out.items():
         for c_i, ch in enumerate(reader._channels):
             first_plane = reader.read(region, fov, ch, reader._z_levels[0])
             np.testing.assert_array_equal(img[0, c_i, 0], first_plane)
-            # and it is genuinely NOT the MIP (which would pick the largest z)
+            # and it is genuinely NOT the MIP
             assert not np.array_equal(img[0, c_i, 0], project_well(reader, region, fov)[0, c_i, 0])
 
-
-# ── fail loud (per-well resilience is IMA-186's, not the engine's) ───────────────────────
 
 def test_failure_in_one_well_propagates_and_aborts_the_stream():
     reader = FakeReader(n_wells=6, fail_on=("W0003", 0))
@@ -217,12 +185,8 @@ def test_failure_in_one_well_propagates_and_aborts_the_stream():
         _collect(reader, workers=3)
 
 
-# ── bounded in-flight window / laziness (peak RSS flat vs plate size) ────────────────────
-
 def test_bounded_window_does_not_prefetch_the_whole_plate():
-    # With N wells >> workers, consuming ONE result must have started at most `workers + 1`
-    # wells (prime `workers`, one refill after the single completion) — NOT all N. This is the
-    # invariant that keeps ~139 MB per-well results from piling up → peak RSS flat in plate size.
+    # Consuming one result must have started at most `workers + 1` wells, not all N.
     n_wells, workers = 40, 3
     reader = FakeReader(n_wells=n_wells, read_sleep=0.01)
     gen = project_plate(reader, workers=workers)
@@ -233,12 +197,11 @@ def test_bounded_window_does_not_prefetch_the_whole_plate():
         assert started <= workers + 1, f"prefetched {started} wells with only {workers} workers"
         assert started < n_wells  # emphatically not the whole plate
     finally:
-        gen.close()  # GeneratorExit → ThreadPoolExecutor shuts down
+        gen.close()  # GeneratorExit -> ThreadPoolExecutor shuts down
 
 
 def test_metadata_is_warmed_before_any_read():
-    # The engine must touch reader.metadata (single-threaded) before fanning out reads, so the
-    # IMA-189 reader's lazy index/time-folders are populated before concurrent read() calls.
+    # metadata must be touched single-threaded before reads fan out.
     reader = FakeReader(n_wells=4)
     list(project_plate(reader, workers=2))
     assert reader.events, "engine never touched the reader"
@@ -246,38 +209,25 @@ def test_metadata_is_warmed_before_any_read():
     assert reader.events.index("meta") < reader.events.index("read")
 
 
-# ── argument validation ──────────────────────────────────────────────────────────────────
-
 def test_invalid_workers_raises():
     reader = FakeReader(n_wells=2)
     with pytest.raises(ValueError, match="workers must be >= 1"):
         next(project_plate(reader, workers=0))
 
 
-# ══════════════════════════════════════════════════════════════════════════════════════════
-# IMA-210 — the consumes-axis registry
-#
-# An operator declares WHICH AXIS it eats, and the engine derives the loop from that:
-#   consumes = frozenset()      plane-op   plane -> plane, z SURVIVES (decon/bgsub/flatfield)
-#   consumes = frozenset({"z"}) z-reducer  all z -> one plane, z collapses to 1 (mip/reference)
-# One group-by-then-reduce loop serves both. `consumes` is orthogonal to `select_index`
-# (which is HOW a z-reducer picks, not WHICH axis it eats) — both mip and reference are {"z"}.
-# ══════════════════════════════════════════════════════════════════════════════════════════
+# The consumes-axis registry: consumes=frozenset() is a plane-op (z survives),
+# consumes={"z"} is a z-reducer (z collapses to 1). One group-by-then-reduce loop serves both.
 
 def _first(planes):
     return next(iter(planes))
 
 
 def _plus_one(plane):
-    """A plane-op written the natural way: plane -> plane."""
     return plane + 1
 
 
-# ── the declaration ───────────────────────────────────────────────────────────────────────
-
 def test_shipped_projectors_declare_the_z_axis():
-    # BOTH mip and reference consume z. z-SELECTING (reference) is not a different axis: it is
-    # a different way of picking within z. Splitting them here is what broke channel alignment.
+    # Both mip and reference consume z; z-selecting is a way of picking within z.
     assert engine.operator_consumes("mip") == frozenset({"z"})
     assert engine.operator_consumes("reference") == frozenset({"z"})
 
@@ -286,12 +236,12 @@ def test_consumes_is_orthogonal_to_select_index():
     from squidxplorer.projection import project as mip, project_reference
     assert getattr(mip, "select_index", None) is None
     assert getattr(project_reference, "select_index", None) is not None
-    # ...yet they declare the SAME consumed axis.
+    # ...yet they declare the same consumed axis.
     assert engine.operator_consumes("mip") == engine.operator_consumes("reference")
 
 
 def test_add_projector_defaults_to_z_reducer():
-    add_projector("legacy_style", _first)                 # no consumes= → the old contract
+    add_projector("legacy_style", _first)                 # no consumes=
     assert engine.operator_consumes("legacy_style") == frozenset({"z"})
 
 
@@ -314,13 +264,9 @@ def test_operator_consumes_unknown_name_is_loud():
         engine.operator_consumes("nope")
 
 
-# ── the axes this seam refuses (IMA-222 owns inter-FOV) ───────────────────────────────────
-
 def test_fov_is_refused_by_name_and_points_at_the_region_seam():
-    # A stitcher consumes fov, but an `add_projector` callable is Iterable[plane] -> plane and
-    # never sees a tile's x/y stage geometry. Declaring {"fov"} through THIS registrar is still a
-    # promise we cannot keep: the RECORD can carry {"fov"} (that is what `add_region_operator`
-    # stamps), but only for a callable of the whole-well shape.
+    # An add_projector callable never sees a tile's x/y stage geometry; {"fov"} is
+    # add_region_operator's to stamp.
     with pytest.raises(ValueError, match="fov"):
         add_projector("would_be_stitch", _first, consumes=frozenset({"fov"}))
 
@@ -330,15 +276,13 @@ def test_unknown_axis_is_refused_named():
         add_projector("timelapse", _first, consumes=frozenset({"t"}))
 
 
-# ── the engine: one group-by-then-reduce loop, two shapes ─────────────────────────────────
-
 def test_plane_op_preserves_z_and_maps_each_plane():
     add_projector("plus_one", plane_op(_plus_one), consumes=frozenset())
     reader = FakeReader(n_wells=2, z_levels=(0, 1, 3))
     out = _collect(reader, workers=2, projector="plus_one")
     assert set(out) == {(f"W{i:04d}", 0) for i in range(2)}, sorted(out)
     for (region, fov), img in out.items():
-        # z SURVIVES a plane-op — one output plane per input plane, in z_levels order.
+        # z survives a plane-op: one output plane per input plane, in z_levels order.
         assert img.shape == (reader._n_t, len(reader._channels), 3, *reader._shape)
         for c_i, ch in enumerate(reader._channels):
             for k, z in enumerate(reader._z_levels):
@@ -346,7 +290,7 @@ def test_plane_op_preserves_z_and_maps_each_plane():
 
 
 def test_plane_op_is_never_routed_through_the_z_reduction():
-    # THE point of `consumes`: a plane-op must see exactly ONE plane per call, never the stack.
+    # A plane-op must see exactly one plane per call, never the stack.
     seen = []
 
     def spy(planes):
@@ -375,16 +319,12 @@ def test_z_reducer_still_sees_the_whole_stack():
 
 
 def test_adding_a_plane_op_needs_zero_engine_edits():
-    # The whole abstraction test: a new operator is ONE add_projector call + a name at the
-    # call site. If this ever needs an engine branch, the registry is the wrong shape.
     add_projector("bgsub_like", plane_op(lambda p: (p // 2)), consumes=frozenset())
     assert "bgsub_like" in available_projectors()
     reader = FakeReader(n_wells=1, z_levels=(0, 1))
     ((_, img),) = list(_collect(reader, workers=1, projector="bgsub_like").items())
     np.testing.assert_array_equal(img[0, 0, 0], reader.read("W0000", 0, "c0", 0) // 2)
 
-
-# ── regression guards: MIP behaviour is untouched ─────────────────────────────────────────
 
 def test_mip_shape_is_still_z_collapsed_to_one():
     reader = FakeReader(n_wells=3, z_levels=(0, 1, 2))
@@ -395,7 +335,7 @@ def test_mip_shape_is_still_z_collapsed_to_one():
 
 
 def test_n_equals_1_mip_is_byte_identical_to_the_single_plane():
-    # THE regression guard: with one z, a MIP must return that plane's bytes, unchanged.
+    # With one z, a MIP must return that plane's bytes, unchanged.
     reader = FakeReader(n_wells=2, z_levels=(7,))
     out = _collect(reader, workers=2)
     assert set(out) == {(f"W{i:04d}", 0) for i in range(2)}, sorted(out)
@@ -415,7 +355,6 @@ def test_mip_pixels_unchanged_by_the_registry_rewrite():
 
 
 def test_plane_op_adapter_makes_the_declaration_inferable():
-    # plane_op() stamps `consumes` on the callable, so the registration site does not have to
-    # repeat it — the same idiom project_reference already uses for `select_index`.
+    # plane_op() stamps `consumes` on the callable, so the registration site need not repeat it.
     add_projector("inferred", plane_op(_plus_one))
     assert engine.operator_consumes("inferred") == frozenset()

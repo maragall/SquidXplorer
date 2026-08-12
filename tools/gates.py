@@ -1,82 +1,12 @@
 #!/usr/bin/env python3
-"""Structural gates over the REAL widget tree of a shown window (IMA-268).
+"""Structural gates over the REAL widget tree of a shown window.
 
     QT_QPA_PLATFORM=offscreen PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python tools/gates.py
 
-GATE 2 — NO DUPLICATED CONTROLLERS
-==================================
-"Two representations of one truth, hand-synced" is this project's second-most-common defect shape.
-Four confirmed instances before this gate existed:
-
-  * millimetres stored under a key ending ``_um``;
-  * ``manual0`` and ``MANUAL0`` as two spellings of one channel state;
-  * a ``_push_index`` that disagreed with its producer and silently dropped pushes;
-  * two compositors with two percentile rules that had already drifted apart — one of them
-    clipping a blank channel to full white, so an empty channel read as signal.
-
-And a fifth, the one a human actually reported: the plate carried its own low/high contrast
-sliders and an "auto" button per channel, two hand-widths from the embedded array viewer's
-contrast slider over the same channel. The same channel was displayed at two different windows,
-side by side, on one screen.
-
-WHY THIS GATE IS EMPIRICAL AND NOT A GREP
------------------------------------------
-A grep for ``QSlider`` finds the sliders that exist today under the names they have today. It
-cannot answer the question that actually matters, which is not "how many sliders are there" but
-"how many WIDGETS CAN WRITE THIS ONE VALUE". So this gate does not read the source. It:
-
-  1. opens a real window on a real acquisition and SHOWS it (an unshown splitter reports every
-     child at its default size, so testing an unshown window measures the harness);
-  2. walks the real widget tree for every interactive control;
-  3. ACTUATES each one the way a user would — moves the slider, ticks the box, picks the combo
-     entry, clicks the button;
-  4. watches a set of PROBES that read the application's underlying state directly;
-  5. groups by probe. A probe that more than one widget can move is a duplicated controller.
-
-That is a definition of "duplicate" that does not care what the widget is called, which file it
-lives in, or which repo it came from — so a NEW duplicate is caught on the day it is added, which
-a hand-written "there must be no sliders in the channel bar" assertion never would be.
-
-MUTATION-CHECKED, four ways. `tools/gates.py --self-test` reintroduces a duplicate contrast
-slider on the plate, duplicates a control in an unrelated concern, and FREEZES A PROBE'S VALUE TO
-A CONSTANT, requiring the gate to fail on each — then removes them and requires it to pass. A gate
-that cannot fail is worth nothing: this project already shipped 832 passing tests over a model
-error, because every fixture had one FOV and one region.
-
-THE PROBES ARE CHECKED TOO, and that is the part that was missing. Every concern in ``EXPECTED``
-is 0 — the plate is meant to own none of them — so every GATE 2 line reads "at most 0 (expected at
-most 0) — PASS" and the whole gate rests on the probes being able to SEE a change. ``_snapshot``
-catches a probe that RAISES (``_probe_scope`` and ``_probe_fov`` both did, from July, and were
-swallowed). Nothing caught a probe that goes QUIET: ``_probe_fov``'s last weeks were spent reading
-``w._detail``, which was unconditionally None, so it returned the same constant forever and its
-concern passed over a value nothing read. :func:`dead_probes` now drives the model under every
-probe and requires the reading to move; the comment where that probe used to be states the lesson
-and there was no mechanism behind the sentence.
-
-GATE 3 — NO DEAD CONTROLS
-=========================
-GATE 2 asks "does more than one widget move this value". GATE 3 asks the complementary and, on the
-evidence, more expensive question: **does this widget move ANYTHING at all.** Every defect in the
-table below shipped past a green unit suite because every test called the handler instead of
-clicking the thing:
-
-  * ``_on_detect_nuclei`` — the "run Cellpose" handler's only entry point was a button on a pane
-    deleted in July, so it was never called at all;
-  * ``run_operator`` opened its preview tab into a pane kept hidden — the decon QC picture was
-    published to nobody for six weeks;
-  * the plate's timepoint bar called ``self._say``, which does not exist on ``PlateWindow``;
-  * this gate's own ``--self-test`` mutated a ``_ChannelBar`` the window had stopped constructing,
-    so it ran zero mutations and printed PASS.
-
-So: open a real plate AND a real region window, take the full inventory of the controls a user can
-actually reach, actuate each one, and require SOME observable outcome — a changed status line, a
-changed widget anywhere in the app, a tab, a window, a napari layer, a log record, a call into a
-neutralised entry point, or changed pixels. A control with none of those is reported by name.
-
-``--inventory`` prints the whole table with a verdict per control and is the deliverable a human
-reads; the gate is the same sweep with a pass/fail on the end. Mutation-checked the same way GATE
-2 is: ``--self-test`` bolts a button wired to nothing onto each window and requires the gate to
-name it.
+GATE 2 checks that no more than one widget can write any given piece of state (no duplicated
+controllers). GATE 3 checks that every reachable control produces an observable outcome when
+actuated (no dead controls). Both gates open a real, shown window and drive the real widget tree
+rather than reading source or calling handlers directly; both are mutation-checked via --self-test.
 """
 from __future__ import annotations
 
@@ -90,29 +20,17 @@ os.environ.setdefault("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-#: ``~/Downloads/synthetic_2x2_wellplate`` until 2026-08-06, when that folder no longer existed
-#: and ``main()`` answered "dataset absent, cannot run" with exit code 2. Rebuild the replacement:
-#:   python tools/make_5d_fixture.py ~/Downloads/sim_2x2_36fov_96wp --fovs 36 --nz 1 --nt 1 \
-#:       --well-pitch-mm 9.0 --declared-format "384 well plate"
-#: ``SQUIDXPLORER_FIXTURE_PLATE`` overrides it, which is how CI runs this gate (and its --self-test)
-#: for real rather than watching it skip: the fixture is generated, so a runner can make one.
+# SQUIDXPLORER_FIXTURE_PLATE overrides the default fixture path; regenerate it with
+# tools/make_5d_fixture.py if missing (see the SKIP message in main()).
 PLATE = os.environ.get("SQUIDXPLORER_FIXTURE_PLATE") or \
     "/Users/julioamaragall/Downloads/sim_2x2_36fov_96wp"
 
 _APP = None
-_MISSING = object()      # "this attribute was inherited, not the class's own" — see monkey()
+_MISSING = object()      # sentinel: attribute was inherited, not the class's own (see monkey())
 
 
 def _app():
-    """The QApplication, on THE BINDING THE APP SHIPS -- decided by importing `squidxplorer` first.
-
-    Nine import sites in this file said ``PyQt5`` until 2026-08-06, which is the same defect
-    commit 6b51793 fixed in ``tools/walkthrough.py`` and did not carry here. ``squidxplorer/__init__``
-    pins ``QT_API=pyqt6``, so this constructed a Qt5 application around Qt6 widgets, loaded both
-    frameworks into one process, and aborted on "QWidget: Must construct a QApplication before a
-    QWidget" before the gate looked at anything. Dead since the Qt6 migration (10b8348, f7f9b28,
-    ce5605c); nothing in CI ran it, so nothing said so.
-    """
+    """The QApplication, on the binding squidxplorer actually ships (import it first so QT_API is set)."""
     global _APP
     import squidxplorer  # noqa: F401  -- sets QT_API before qtpy resolves a binding
     from qtpy.QtWidgets import QApplication
@@ -120,17 +38,9 @@ def _app():
     return _APP
 
 
-# --- the probes: what "one truth" means, read straight off the model ---------------------------
-#
-# A probe returns a hashable snapshot of ONE piece of application state. It must read the model,
-# never a widget — a probe that read the widget back would be satisfied by two widgets that agree
-# at the instant of reading and drift a second later, which is the very defect being hunted.
-
-# A probe returns {slot key: value}. The KEY, not the concern, is the unit of duplication: four
-# per-channel visibility checkboxes are four controls over four DIFFERENT truths and are correct,
-# while two widgets that both move "visibility[2]" are the defect. Collapsing a per-channel
-# concern to one value would report the correct design as a duplicate and be switched off within
-# a week, which is how a gate dies.
+# A probe returns a hashable {slot key: value} snapshot of ONE piece of application state, read
+# from the model, never from a widget. The KEY, not the concern, is the unit of duplication: four
+# per-channel visibility checkboxes are four controls over four different truths.
 
 def _probe_contrast(w):
     ov = w._overview
@@ -151,15 +61,6 @@ def _probe_active_layer(w):
     return {"active layer": w._overview._active}
 
 
-    # `_probe_scope` was here. Contrast SCOPE (global vs per-region) was deleted from the product
-    # on 2026-07-22 (8b0cbfc): "the contrast should be only global, I don't understand why there's
-    # a per region contrast". `PlateOverview._scope` went with it, so this probe raised
-    # AttributeError on every snapshot -- and `_snapshot` swallowed it, so the concern simply never
-    # appeared and the table's "contrast scope: 1" reported PASS over a probe that had not run
-    # since July. That swallow is fixed below; the probe itself is deleted, because there is no
-    # scope to probe.
-
-
 def _probe_selection(w):
     return {"plate selection": (repr(w._overview._sel), tuple(w._selected_regions))}
 
@@ -171,14 +72,6 @@ def _probe_current_well(w):
 def _probe_zoom(w):
     ov = w._overview
     return {"zoom / viewport": (round(ov._cd, 4), round(ov._ox, 4), round(ov._oy, 4))}
-
-
-    # `_probe_fov` was here. It read `w._detail._fov_slider`, and `PlateWindow._detail` has been
-    # unconditionally None since 19cd491 (2026-07-22); the central array viewer was removed
-    # outright by 2b8fbc5 (2026-07-23, "Decentralize GUI"). The probe therefore returned the
-    # constant `(None, None)` on every snapshot -- it could not change, so no widget could ever be
-    # reported as moving it, and "fov / plane index: 1" was a PASS over a value nothing read.
-    # A probe that cannot vary is not a weak probe, it is a decoration.
 
 
 def _probe_colormap(w):
@@ -197,21 +90,12 @@ def _concern_of(key: str) -> str:
     return key.split("[", 1)[0].strip()
 
 
-#: Probes that raised while snapshotting, as ``{probe name: "TypeName: message"}``. Reported, not
-#: swallowed -- see :func:`_snapshot`.
+#: Probes that raised while snapshotting: {probe name: "TypeName: message"}.
 BROKEN_PROBES: dict[str, str] = {}
 
 
 def _snapshot(w):
-    """Every probe's reading, and a RECORD of any probe that could not take one.
-
-    This used to ``except Exception: continue``. That is the failure mode this whole gate exists
-    to prevent, turned on itself: two probes (``_probe_scope``, ``_probe_fov``) had been reading
-    attributes deleted in July, raised on every snapshot, and were dropped in silence -- so their
-    concerns never appeared in the results, ``by_concern.get(concern, {})`` returned ``{}``, and
-    the gate printed "at most 0 control surfaces (expected at most 1) -- PASS". A gate cannot
-    both skip a check and call it green.
-    """
+    """Every probe's reading, and a record of any probe that could not take one (never swallowed)."""
     out = {}
     for p in PROBES:
         try:
@@ -221,26 +105,19 @@ def _snapshot(w):
     return out
 
 
-#: Probes whose reading did not move when the MODEL underneath them was moved by hand, as
-#: ``{probe name: "what was driven"}``. See :func:`dead_probes`.
+#: Probes whose reading did not move when the model underneath them was moved by hand.
 FROZEN_PROBES: dict[str, str] = {}
 
-#: Controls whose ACTUATION raised during GATE 2's sweep, as ``{description: "TypeName: message"}``.
-#: Reported, not swallowed -- see :func:`find_duplicate_controls`.
+#: Controls whose actuation raised during GATE 2's sweep.
 RAISING_CONTROLS: dict[str, str] = {}
 
 
 def _drive_the_model(w):
-    """One model-level mutation per probe, as ``{probe name: (what, apply)}``.
+    """One model-level mutation per probe: {probe name: (what, apply)}.
 
-    Deliberately writes the MODEL, never a widget: this is not asking "can a user move it", which
-    is GATE 2's own question, but the prior one — "can this reading move at all".
-
-    Every driver RESTORES what it moved, and that is not tidiness. Measured while writing this:
-    bumping ``PlateOverview._cd`` off its fit baseline and leaving it there made the next repaint
-    snap it back, so the sweep afterwards reported "Select all" as a second controller of
-    ``zoom / viewport`` — a FAIL invented by the instrument. ``apply()`` returns an undo callable,
-    or ``None`` when the model has nothing here to move.
+    Writes the MODEL, never a widget — this asks "can this reading move at all", not "can a user
+    move it" (GATE 2's question). Every driver restores what it moved; ``apply()`` returns an undo
+    callable, or None when the model has nothing here to move.
     """
     ov = w._overview
 
@@ -285,8 +162,7 @@ def _drive_the_model(w):
         return undo
 
     def _move_current_well():
-        # `PlateWindow._current_well` is a PROPERTY over `self._cursor`, not an overview
-        # attribute: it has to be driven where it lives.
+        # `_current_well` is a property over `self._cursor`, not an overview attribute.
         regions = list(getattr(w, "_order", None) or (w._meta or {}).get("regions") or [])
         if not regions:
             return None
@@ -311,23 +187,10 @@ def _drive_the_model(w):
 
 
 def dead_probes(w):
-    """Every probe whose reading CANNOT MOVE, checked by moving the model underneath it.
+    """Every probe whose reading cannot move, checked by moving the model underneath it.
 
-    THE MISSING MECHANISM. ``_snapshot`` catches a probe that RAISES, and this file records two
-    that did (``_probe_scope``, ``_probe_fov``, both reading attributes deleted in July). It
-    catches nothing about a probe that returns a CONSTANT — and ``_probe_fov`` was exactly that
-    for the last part of its life: ``w._detail`` was unconditionally None, so it answered
-    ``(None, None)`` every time, no widget could ever be reported as moving it, and
-    "fov / plane index: 1" was a PASS over a value nothing read. The comment where that probe used
-    to be states the lesson — "a probe that cannot vary is not a weak probe, it is a decoration" —
-    and there was no mechanism behind the sentence, so the next one would go the same way.
-
-    Every concern in ``EXPECTED`` is currently 0, so EVERY GATE 2 line is "at most 0 (expected at
-    most 0) — PASS". That is a defensible specification (the plate is meant to own none of these)
-    but it means the whole gate rests on the probes being able to see a change at all. This is the
-    check that they can.
-
-    Returns ``{probe name: why it is dead}``.
+    ``_snapshot`` catches a probe that raises; this catches one that returns a constant instead
+    (silently unable to detect any duplicate, since nothing ever moves). Returns {probe name: why}.
     """
     app = _app()
     dead: dict[str, str] = {}
@@ -371,41 +234,22 @@ def dead_probes(w):
     return dead
 
 
-# --- the expected table: how many CONTROL SURFACES each concern is allowed ---------------------
-#
-# This is the whole specification, and it is deliberately a table rather than a pile of asserts:
-# adding a concern is one line, and the gate fails on a count that is too HIGH (a duplicate
-# appeared) as well as too LOW (the control was lost in a refactor). "1" is the normal answer.
-# "0" means the plate must not own this at all — contrast belongs to the array viewer.
-
+# How many control surfaces each concern is allowed to have. Fails on a count too HIGH (a
+# duplicate appeared) as well as too LOW (the control was lost). 0 means the plate must not own
+# this at all (napari owns it instead); every EXPECTED entry below is currently 0.
 EXPECTED = {
-    # Rewritten 2026-08-06 against the window as it stands. Every one of these was 1 and every one
-    # of them measured 0, because the controls the numbers described are in a napari RegionViewer
-    # window now (2b8fbc5, "Decentralize GUI") or are MOUSE GESTURES on the plate rather than
-    # widgets -- and this sweep only actuates widgets. Leaving them at 1 made nine PASS lines that
-    # could not fail, which is the same "832 green tests" shape the docstring above is about.
-    #
-    # 0 is not "unchecked": the gate fails the moment ANY widget starts moving one of these, which
-    # is exactly the event worth catching -- a control creeping back onto the root window beside
-    # the one that already owns the value elsewhere.
-    "contrast":              0,   # napari's LUT row owns it, in the region window (IMA-261)
-    "visibility":            0,   # napari's eye icon; the plate's checkboxes went in 8b0cbfc
-    "channel colour / LUT":  0,   # napari's colormap picker; the plate follows it
-    "active layer":          0,   # the Layers tree, which is a tree item and not a control widget
-    # click / marquee are gestures, not widgets. "Select all" IS a widget and DOES move this, and
-    # it is the one EXEMPT entry -- verified live 2026-08-06 by emptying EXEMPT, which turned this
-    # line red with "Select all [QPushButton in PlateWindow]". So the 0 here is a measurement, not
-    # an absence of measurement.
-    "plate selection":       0,
+    "contrast":              0,
+    "visibility":            0,
+    "channel colour / LUT":  0,
+    "active layer":          0,
+    "plate selection":       0,   # "Select all" is a widget and legitimately moves this; see EXEMPT
     "current well":          0,   # double-click: a gesture, no widget
     "zoom / viewport":       0,   # the wheel: a gesture, no widget
 }
 
-# Controls that legitimately move a probe as a SIDE EFFECT of doing something else, and are not a
-# second controller of it. Each entry needs a reason: an unexplained entry here is how a real
-# duplicate gets waved through, which is the failure mode this gate is guarding against.
+# Controls that legitimately move a probe as a side effect of something else, not a second owner
+# of it. Each entry needs a reason.
 EXEMPT = {
-    # (probe, widget label): why it is not a second owner
     ("plate selection", "select all"): "a bulk gesture over the one selection model, not a "
                                        "second representation of it",
 }
@@ -432,9 +276,8 @@ def _where(wdg) -> str:
         if p is None:
             break
         chain.append(type(p).__name__)
-    # `_ChannelBar` and `LightweightViewer` are gone (2026-07-22 and 2026-08-05). Kept in this
-    # list on purpose: it names what a control's ANCESTOR might be, and a stale name here costs
-    # nothing while a missing one makes a re-introduced widget report its owner as "?".
+    # `_ChannelBar` / `LightweightViewer` are gone but kept here: a stale name costs nothing, a
+    # missing one makes a re-introduced widget report its owner as "?".
     for interesting in ("_ChannelBar", "PlateOverview", "LightweightViewer", "PlateWindow"):
         if interesting in chain:
             return interesting
@@ -452,10 +295,8 @@ def interactive_widgets(root):
         for wdg in root.findChildren(k):
             if wdg not in out:
                 out.append(wdg)
-    # A composite control (superqt's QLabeledSlider, a spinbox's own up/down buttons) CONTAINS an
-    # interactive widget. Both would report moving the same value, and the gate would accuse a
-    # single control of duplicating itself. Only the outermost widget of a nest is a control
-    # surface — a user sees and drags one thing.
+    # A composite control (superqt's QLabeledSlider, a spinbox's own buttons) contains an
+    # interactive widget too; only the outermost of a nest is a control surface.
     outer = [w for w in out if not any(o is not w and o.isAncestorOf(w) for o in out)]
     return outer
 
@@ -505,9 +346,8 @@ def _actuate(wdg):
 def _recorder(called, detail=None):
     """``rec(name)`` -> a callable that records and returns *ret*, appending into *called*.
 
-    *detail*, when given, also receives ``(name, args, kwargs)`` — which is what lets GATE 3 ask
-    the question that matters for an input control: did the value the user typed ARRIVE at the
-    call. That is the shape of the ``operator_kwargs`` defect (57 labels vs 44).
+    *detail*, when given, also receives ``(name, args, kwargs)`` — lets a caller check that a
+    value a user set actually arrived at the call, not just that the widget changed.
     """
     def rec(name, ret=None):
         def f(*a, **k):
@@ -519,13 +359,9 @@ def _recorder(called, detail=None):
     return rec
 
 
-#: Entry points that must be stubbed BEFORE ``PlateWindow`` is constructed, not after it is shown.
-#: ``ViewerManager`` is built inside ``PlateWindow.__init__`` and captures ``win.run_operator`` as a
-#: BOUND METHOD, which every region window then holds as ``self._run_operator``. Patching the class
-#: afterwards leaves that bound method pointing at the real one — measured 2026-08-06: the region
-#: window's ``Run`` chip started a genuine operator run in the middle of the sweep, and its result
-#: landed while the NEXT control ("save") was being measured, so a checkbox was credited with
-#: adding a napari layer.
+#: Entry points that must be stubbed BEFORE ``PlateWindow`` is constructed: ``ViewerManager``
+#: captures ``win.run_operator`` as a bound method at construction, so patching the class
+#: afterwards leaves already-built region windows calling the real handler.
 _EARLY_STUBS = ("run_operator", "run_minerva_export")
 
 
@@ -542,10 +378,8 @@ def _neutralise_early(monkey, called, detail=None):
 def _neutralise(win, monkey, called=None):
     """Stop a click from doing something a gate has no business doing.
 
-    The gate clicks every button in the window, so anything that opens a modal dialog, launches a
-    multi-minute operator run, re-ingests, or closes the app has to be turned into a recorded
-    no-op first. This is a safety harness, NOT an exemption: the neutralised calls are still
-    observed, they simply do not run.
+    Anything that opens a modal dialog, launches a multi-minute operator run, re-ingests, or
+    closes the app is turned into a recorded no-op — observed, but not run.
     """
     from qtpy.QtWidgets import QFileDialog, QMessageBox
     import squidxplorer._viewer as V
@@ -575,11 +409,6 @@ def find_duplicate_controls(win, verbose=False):
         try:
             undo = _actuate(wdg)
         except Exception as exc:                       # noqa: BLE001 - recorded, then reported
-            # RECORDED, not swallowed. This was a bare `continue`: a control whose actuation
-            # raises simply vanished from GATE 2's evidence, so it could never be reported as a
-            # second owner of anything -- and the raise itself, which GATE 3 reports as its own
-            # verdict, was invisible here. Same defect the docstring of `_snapshot` describes,
-            # left standing one function away from the fix.
             RAISING_CONTROLS[f"{_label(wdg)} [{type(wdg).__name__} in {_where(wdg)}]"] = \
                 f"{type(exc).__name__}: {exc}"
             continue
@@ -611,21 +440,11 @@ def _is_button(wdg):
     return isinstance(wdg, QAbstractButton)
 
 
-# --- the contrast-specific structural assertion ------------------------------------------------
-
 def contrast_surfaces(win):
-    """Contrast controls on the PLATE side, which must be zero (IMA-261).
+    """Contrast controls on the PLATE side, which must be zero.
 
-    Kept alongside the empirical sweep rather than replaced by it, because "the plate has no
-    contrast slider" must hold even for a slider that is currently disabled or hidden — a
-    hide()-den control is a second owner waiting to be un-hidden, and the sweep only actuates what
-    a user could actuate today.
-
-    SCOPED TO THE PLATE WIDGET, not to ``win._channel_bar``, since 2026-08-06. That attribute has
-    not existed since 8b0cbfc (2026-07-22) deleted the plate's channel bar outright, so this
-    returned ``([], [])`` from the very first line and reported "PASS contrast: 0 sliders, 0 auto
-    buttons" without looking at a single widget. The claim was over-satisfied and the check was
-    dead, which look identical in the output and are not the same thing at all.
+    Kept alongside the empirical sweep because it must hold even for a slider that is currently
+    disabled or hidden, which the sweep would not actuate.
     """
     from qtpy.QtWidgets import QAbstractSlider, QPushButton
     plate = getattr(win, "_overview", None)
@@ -637,18 +456,12 @@ def contrast_surfaces(win):
     return sliders, autos
 
 
-# --- the gate ----------------------------------------------------------------------------------
-
 def _drain_preview(win, timeout_s=180):
     """Block until the plate's background preview stream has finished.
 
-    QUIESCENCE IS PART OF THE MEASUREMENT. The plate's contrast is a RUNNING percentile: every
-    tile the preview worker delivers moves ``channel_windows()``. Sweeping while that stream is
-    live means the before/after snapshots straddle an update nothing on screen caused, and the
-    widget that happened to be under the cursor at that moment is recorded as its owner. Measured
-    2026-08-06: the gate reported "contrast[0] <- QScrollBar [QScrollBar in PlateWindow]" -- the
-    LOG PANEL's scrollbar accused of owning channel 0's contrast window. A false duplicate is
-    worse than no gate, because it is the finding people learn to ignore.
+    Quiescence is part of the measurement: the plate's contrast is a running percentile, and
+    sweeping while it is still live attributes an unrelated update to whatever widget was under
+    the cursor at that moment.
     """
     import time
     app = _app()
@@ -667,8 +480,8 @@ def _drain_preview(win, timeout_s=180):
 def gate_no_duplicated_controllers(dataset=PLATE, verbose=False, mutate=None):
     """Returns (ok, list of human-readable findings).
 
-    *mutate*, when given, is called with the shown, ingested window before the sweep. It is how
-    ``--self-test`` mounts a duplicate control; see :func:`self_test`.
+    *mutate*, when given, is called with the shown, ingested window before the sweep — how
+    --self-test mounts a duplicate control.
     """
     import squidxplorer._viewer as V
     app = _app()
@@ -683,12 +496,12 @@ def gate_no_duplicated_controllers(dataset=PLATE, verbose=False, mutate=None):
     app.processEvents()
     if win._reader is None:
         return False, [f"FAIL  could not open {dataset}: {win._readout.text()!r}"]
-    _drain_preview(win)            # the plate must be STILL before anything is attributed to it
+    _drain_preview(win)
     if mutate is not None:
         mutate(win)
         app.processEvents()
 
-    # 1. the structural half: the plate must own no contrast control at all.
+    # 1. structural: the plate must own no contrast control at all.
     sliders, autos = contrast_surfaces(win)
     if sliders or autos:
         ok = False
@@ -697,9 +510,8 @@ def gate_no_duplicated_controllers(dataset=PLATE, verbose=False, mutate=None):
     else:
         findings.append("PASS  contrast: 0 sliders, 0 auto buttons in the plate view")
 
-    # 2. THE PROBES THEMSELVES, before anything is actuated. `_probe_selection` is the reason
-    #    this runs first: the sweep clicks "Select all", so a liveness driver running afterwards
-    #    would find the selection already full and report its own no-op as a frozen probe.
+    # 2. the probes themselves, before anything is actuated (run first because the sweep clicks
+    #    "Select all", which would make a later liveness check see a no-op).
     FROZEN_PROBES.clear()
     FROZEN_PROBES.update(dead_probes(win))
 
@@ -707,10 +519,8 @@ def gate_no_duplicated_controllers(dataset=PLATE, verbose=False, mutate=None):
     patches = []
 
     def monkey(obj, name, value):
-        # Record whether the attribute was the class's OWN or inherited. Re-setting an inherited
-        # C++ slot (QWidget.close) onto the subclass turns it into an unbound sip method that no
-        # longer binds to an instance — so an inherited attribute must be DELETED to restore it,
-        # never re-assigned.
+        # An inherited C++ slot (QWidget.close) re-set on the subclass becomes an unbound sip
+        # method, so restoring it must DELETE rather than re-assign; track own-vs-inherited here.
         patches.append((obj, name, obj.__dict__.get(name, _MISSING)))
         setattr(obj, name, value)
 
@@ -745,9 +555,7 @@ def gate_no_duplicated_controllers(dataset=PLATE, verbose=False, mutate=None):
             findings.append(f"PASS  {concern}: at most {worst} control surface(s) over any one "
                             f"value (expected at most {expected})")
 
-    # 4. anything the table has never heard of. A key that appears here is a NEW piece of state
-    #    that two or more widgets can move and nobody has decided who owns — which is exactly the
-    #    fifth instance of this defect arriving, so it fails rather than warns.
+    # 4. an undeclared concern: state two+ widgets can move that nobody has assigned an owner to.
     for concern, slots in sorted(by_concern.items()):
         if concern in EXPECTED:
             continue
@@ -757,27 +565,19 @@ def gate_no_duplicated_controllers(dataset=PLATE, verbose=False, mutate=None):
                 findings.append(f"FAIL  {key}: UNDECLARED concern with {len(got)} control "
                                 f"surfaces — add it to EXPECTED and pick an owner: {got}")
 
-    # 5. a probe that could not read is a CHECK THAT DID NOT RUN, and it fails rather than
-    #    disappearing. Two probes had been raising since July and were swallowed; their concerns
-    #    then reported "at most 0 control surfaces — PASS" while measuring nothing.
+    # 5. a probe that could not read is a check that did not run, and fails rather than vanishing.
     for name, why in sorted(BROKEN_PROBES.items()):
         ok = False
         findings.append(f"FAIL  {name}: the probe itself raised, so its concern was NOT "
                         f"checked — {why}")
 
-    # 6. a control whose ACTUATION raised never reached step 3 at all, so it could not be reported
-    #    as a second owner of anything. That is a check that did not run, on the same argument as
-    #    step 5, and it used to be a bare `continue`.
+    # 6. a control whose actuation raised never reached step 3, so was never checked as an owner.
     for desc, why in sorted(RAISING_CONTROLS.items()):
         ok = False
         findings.append(f"FAIL  {desc}: actuating it raised, so it was NOT measured against any "
                         f"concern — {why}")
 
-    # 7. A PROBE THAT CANNOT VARY IS A DECORATION. Every line in step 3 reads "at most 0 (expected
-    #    at most 0)", which is the right specification and is also the reason the whole gate rests
-    #    on the probes being able to see a change at all. Step 4 catches a probe that raises;
-    #    nothing caught `_probe_fov`, which for the last part of its life read an attribute that
-    #    was unconditionally None and answered the same constant forever.
+    # 7. a probe that cannot vary is a decoration: it would pass every concern by never measuring.
     for name, why in sorted(FROZEN_PROBES.items()):
         ok = False
         findings.append(f"FAIL  {name}: the probe cannot VARY, so its concern was NOT "
@@ -791,14 +591,10 @@ def gate_no_duplicated_controllers(dataset=PLATE, verbose=False, mutate=None):
     return ok, findings
 
 
-# ==================================================================================================
-# GATE 3 — NO DEAD CONTROLS.  Clicked, not called.
-# ==================================================================================================
+# --- GATE 3: no dead controls, clicked not called -----------------------------------------------
 
-#: Widget classes defined in these packages are somebody else's controls. napari's dims play
-#: buttons, superqt's labelled sliders and Qt's own scroll bars are all inside our windows and none
-#: of them is ours to declare alive or dead — a napari button that does nothing in an offscreen
-#: canvas is a napari fact, and reporting it here would bury the ones that are ours under noise.
+#: Widget classes defined in these packages are somebody else's controls, not ours to declare
+#: alive or dead.
 _THIRD_PARTY = ("napari", "superqt", "vispy", "qtpy", "PyQt", "PySide", "qtconsole")
 
 
@@ -810,8 +606,7 @@ def _third_party(wdg) -> bool:
             return False
         mod = type(node).__module__ or ""
         if mod.startswith(_THIRD_PARTY):
-            # A plain QPushButton is `PyQt6.QtWidgets`, and refusing those would empty the sweep.
-            # Only a SUBCLASS defined in a library, or a library CONTAINER, disqualifies.
+            # A plain QPushButton is `PyQt6.QtWidgets`; only a library SUBCLASS/CONTAINER disqualifies.
             if not mod.startswith(("PyQt", "PySide", "qtpy")):
                 return True
         node = node.parent()
@@ -819,27 +614,15 @@ def _third_party(wdg) -> bool:
 
 
 def our_controls(root):
-    """The inventory: every control in *root* that is OURS, with hidden/disabled ones kept.
-
-    Hidden and disabled are kept deliberately and reported as their own verdicts. "The control is
-    not on screen in this state" is an answer a human needs — it is how ``_on_detect_nuclei``'s
-    button vanished — and dropping those rows would turn an absence into a silence.
-    """
+    """Every control in *root* that is ours, with hidden/disabled ones kept (reported, not dropped)."""
     return [w for w in interactive_widgets(root) if not _third_party(w)]
 
 
 class _LogSpy:
     """Every log record OURS emitted while a control is being actuated.
 
-    A handler is not a probe of state, it is a probe of ACTIVITY — and half this app's controls
-    report by logging (``RegionViewer._say`` goes to the shared logger before it goes to the pane).
-
-    SCOPED TO ``squid.xplorer``, and that scope is the difference between evidence and noise.
-    Offscreen Qt routes its own platform warnings through logging ("This plugin does not support
-    raise()", "Cannot open file theme_dark:/…"), one or more per click, so an unscoped spy would
-    report EVERY control as having done something — including a chip wired to nothing, which is
-    the exact thing this gate exists to catch. Measured: ``▣ plate`` and ``⚙ controls`` both listed
-    a Qt warning as their only evidence before this was scoped.
+    Scoped to ``squid.xplorer`` — offscreen Qt logs its own platform warnings on every click, so
+    an unscoped spy would credit every control with "something happened" including a dead one.
     """
 
     def __init__(self) -> None:
@@ -860,8 +643,7 @@ class _LogSpy:
                     outer.records.append(record.msg if isinstance(record.msg, str) else "?")
 
         self._h = _H()
-        # OUR logger, not the stdlib root: the level check happens on the logger that EMITS, so
-        # lowering the root's level would not have let a single INFO from `squid.xplorer.*` through.
+        # The level check happens on the emitting logger, not the stdlib root.
         self._root = logging.getLogger(XPLORER_ROOT)
 
     def __enter__(self):
@@ -876,12 +658,8 @@ class _LogSpy:
 
 
 def _texts(root) -> dict:
-    """Every piece of text a user can read in *root*, keyed stably.
-
-    Keyed by (class, ordinal) rather than by object identity: a click that REPLACES a label still
-    has to be visible as a change, and identity keys would make the old and new label two
-    different, both-unchanged entries.
-    """
+    """Every piece of text a user can read in *root*, keyed by (class, ordinal) rather than
+    identity so a click that REPLACES a label still reads as a change."""
     from qtpy.QtWidgets import QLabel, QLineEdit, QPlainTextEdit, QTextEdit
 
     out, n = {}, {}
@@ -921,12 +699,7 @@ def _widget_states(root) -> dict:
 
 
 def _layer_state(root) -> dict:
-    """The napari model under a region window: what the pixels ARE.
-
-    This is the reading that makes the gate about PIXELS rather than about widgets. It goes
-    through ``MosaicLayers``, so a control that adds a layer group, hides one, moves a contrast
-    window or swaps a colormap is visible here whatever widget it used to do it.
-    """
+    """The napari model under a region window: what the pixels are, via MosaicLayers."""
     pane = getattr(root, "_pane", None)
     mosaic = getattr(pane, "mosaic", None) if pane is not None else None
     if mosaic is None:
@@ -974,16 +747,9 @@ def _tab_state(root) -> dict:
 
 
 def _pixels(root, blank=None):
-    """A hash of what the window draws, with the CONTROL ITSELF painted out.
-
-    *blank* is the widget being actuated. Its own rectangle is excluded, and that exclusion is
-    load-bearing rather than tidy: a button repaints itself when it is clicked (focus ring, hover,
-    the native style's pressed state), and that repaint is the ACTUATION, not an outcome. Measured
-    2026-08-06 — the gate's own mutation, a ``QPushButton`` connected to nothing, was reported as
-    "reaches: pixels" and the self-test failed to catch its own dead chip. Exactly the same rule
-    already applied to the control's own entry in :func:`_widget_states`, one level down.
-
-    A 4-pixel pad, because a focus ring is drawn outside the widget's geometry.
+    """A hash of what the window draws, with *blank* (the widget being actuated) painted out —
+    its own click repaint (focus ring, hover, pressed state) is the actuation, not an outcome.
+    4px pad because a focus ring is drawn outside the widget's own geometry.
     """
     import hashlib
 
@@ -1010,17 +776,9 @@ def _pixels(root, blank=None):
 
 
 def _quieten_timers(root):
-    """Stop every REPEATING QTimer under *root*, and say how many.
+    """Stop every repeating QTimer under *root* (memory poll, log panel), and say how many.
 
-    A window with a periodic repaint has no stable pixel state, and this app has two: the
-    navigator's memory poll (2 s) and the log panel's. Measured 2026-08-06: the gate's own
-    mutation — a chip wired to nothing — was credited with "reaches: pixels" INTERMITTENTLY,
-    because a memory bar happened to tick inside its ``processEvents``. The self-test passed on
-    one run and failed on the next over the same code, which is worse than a gate that never
-    works, because it teaches people to re-run it.
-
-    Stopped at the source rather than tolerated by a weaker probe: a periodic repaint is not
-    something any control does, so nothing under test is lost.
+    A periodic repaint would otherwise make the pixel hash flicker independent of any click.
     """
     from qtpy.QtCore import QTimer
 
@@ -1033,15 +791,9 @@ def _quieten_timers(root):
 
 
 def _pixel_noise(root, app, n=6, seconds=1.5) -> bool:
-    """Do IDLE grabs of *root* differ, ACROSS REAL TIME? If so, pixels are not evidence.
+    """Do idle grabs of *root* differ across real time? If so, pixels are not evidence.
 
-    A caret, a spinner or a queued repaint would make every control look alive, and a probe that
-    always fires turns a gate green over anything. Measuring the noise instead of assuming it is
-    absent is the difference between this and a decoration.
-
-    The sampling spans over a second on purpose. Six back-to-back grabs take about 40 ms and would
-    sit entirely inside the gap between two ticks of a 2 s timer, so the old version measured that
-    the window was quiet for one fortieth of the interval it had to be quiet over.
+    Sampled over a second rather than back-to-back, so a slow (e.g. 2s) timer tick isn't missed.
     """
     import time
 
@@ -1054,15 +806,10 @@ def _pixel_noise(root, app, n=6, seconds=1.5) -> bool:
 
 
 def wait_still(roots, app, tries=20, step=0.05) -> bool:
-    """Pump events until two consecutive grabs of every root agree. Returns whether they ever did.
+    """Pump events until two consecutive grabs of every root agree; returns whether they ever did.
 
-    THE BASELINE MUST BE A STILL FRAME. `_pixel_noise` proves the window has no PERIODIC repaint;
-    this is the other half, and it is the half that actually bit. The sweep clicks ~30 controls in
-    a row and several of them start something asynchronous (a preview stream, a tab build, a
-    focus worker). A repaint queued by control N lands inside control N+1's ``processEvents`` and
-    is attributed to it — measured 2026-08-06 on the gate's OWN mutation, a chip wired to nothing,
-    reported as "reaches: pixels" on one run and correctly as dead on the next. An intermittent
-    gate is worse than no gate: it teaches people to re-run it.
+    `_pixel_noise` proves no periodic repaint; this catches a repaint queued by the PREVIOUS
+    control landing inside the next one's measurement and being misattributed to it.
     """
     import time
 
@@ -1088,9 +835,8 @@ def _fingerprint(root, use_pixels: bool, blank=None) -> dict:
     return out
 
 
-#: Why each neutralised entry point is neutralised. Printed next to the control that reached it,
-#: because "the click reached its handler and the harness stopped it there" and "the click did
-#: what it promises" are DIFFERENT claims and this file must never print the second for the first.
+#: Why each neutralised entry point is neutralised — printed alongside the "reached but not run"
+#: verdict, so that claim is never confused with "did what it promises".
 NEUTRALISED_WHY = {
     "RegionViewer._open_3d": "vispy needs a live GL context; the volume path cannot be driven "
                              "offscreen (docs/rendering-contract.md)",
@@ -1105,11 +851,9 @@ NEUTRALISED_WHY = {
 }
 
 
-#: INPUT controls: their whole job is to hold a value another control reads, so moving one changes
-#: nothing on screen and the sweep would call them dead. They are not swept — they are PROVEN
-#: instead, by :func:`prove_inputs_reach_the_run`, which sets each one and then reads the arguments
-#: that arrived at the call. An entry here without a proof is how a real dead input gets waved
-#: through, so the proof emits their rows and the gate fails if it cannot.
+#: Input controls: moving one changes nothing on screen, so the sweep would call them dead.
+#: Excluded from the sweep and instead PROVEN by prove_inputs_reach_the_run, which checks the
+#: value actually arrives at the call.
 DEFERRED_INPUTS = {
     ("view", "QComboBox"): "the operator picker — read by 'Run'",
     ("view", "save"): "preview vs persist — read by 'Run'",
@@ -1117,17 +861,10 @@ DEFERRED_INPUTS = {
 
 
 def prove_inputs_reach_the_run(view, detail, app):
-    """Set the region window's operator picker and its ``save`` box, click **Run**, and read the
-    arguments that actually arrived at ``PlateWindow.run_operator``.
+    """Set the operator picker and ``save`` box, click Run, and read the arguments that actually
+    arrived at ``PlateWindow.run_operator`` — "the widget changed" is not proof the value did.
 
-    This is the one question worth asking about an input control, and it is the question this
-    project has already got wrong once with money on it: ``_workers._OperatorWorker``'s preview
-    branch called ``project_plate`` WITHOUT ``operator_kwargs`` while the save branch passed them,
-    so a value the user typed reached the console line and not the pixels — 57 labels against 44.
-    "The widget changed" would have been green for that. "The value arrived at the call" is not.
-
-    Returns rows for both controls; a run that never reaches the call gives them ``no outcome``,
-    which fails the gate exactly as a dead chip does.
+    Returns rows for both controls; a run that never reaches the call gives them "no outcome".
     """
     from qtpy.QtWidgets import QCheckBox, QComboBox, QPushButton
 
@@ -1138,8 +875,8 @@ def prove_inputs_reach_the_run(view, detail, app):
         return [("view", "Run inputs", "-", "no outcome",
                  "the operator picker, the save box or Run is missing from this window")]
 
-    # A DIFFERENT entry from the one it opens on, and `save` flipped, so a handler that ignores
-    # them and passes a default cannot accidentally agree with what was set.
+    # Set to a value different from the default, so a handler that ignores it and passes a
+    # default cannot accidentally agree with what was set.
     want_index = 1 if combo.count() > 1 else 0
     combo.setCurrentIndex(want_index)
     want_key = combo.currentData()
@@ -1156,9 +893,7 @@ def prove_inputs_reach_the_run(view, detail, app):
                 ("view", "save", "QCheckBox", "no outcome",
                  "clicking Run did not reach PlateWindow.run_operator at all")]
     _name, args, kwargs = calls[-1]
-    # The stub replaced an attribute on the CLASS, so it is called unbound: args[0] is the
-    # PlateWindow. Reading `args[0]` as the operator key reported "the run was asked for
-    # <PlateWindow object ...>" — a harness bug that reads exactly like a product one.
+    # The stub replaced a CLASS attribute, so it's called unbound: args[0] is the PlateWindow.
     pos = args[1:]
     got_key = kwargs.get("key", pos[0] if pos else None)
     got_save = kwargs.get("save")
@@ -1176,34 +911,21 @@ def prove_inputs_reach_the_run(view, detail, app):
 
 
 def _home_tab(win):
-    """Put the plate back on its Operators home tab between controls.
-
-    Not tidiness. The first card clicked opens its own tab and takes the focus with it, so the six
-    operator cards BEHIND it become ``isVisible() == False`` and the sweep would report them as
-    "hidden" — six controls silently unmeasured because of the order this file happened to walk
-    the tree in. A sweep that changes what it can still reach has to put the surface back.
-    """
+    """Put the plate back on its Operators home tab between controls — the first card clicked
+    opens its own tab, hiding the cards behind it, so the sweep must restore the surface."""
     tabs = getattr(win, "_left_tabs", None)
     if tabs is not None and tabs.count():
         tabs.setCurrentIndex(0)
 
 
 def sweep_controls(root, kind: str, app, watched=None, recorder=None, settle=None, observed=None):
-    """Actuate every control of *root* and return one row per control.
+    """Actuate every control of *root* and return one row per control: (label, class, verdict, evidence).
 
-    A row is ``(label, class, verdict, evidence)``. The verdicts:
+    Verdicts: ``reaches`` (something observable changed), ``raised`` (the click raised),
+    ``neutralised`` (reached a stubbed entry point; its outcome is not observed here),
+    ``no outcome`` (nothing changed/logged/called), ``hidden``/``disabled`` (not reachable now).
 
-    ``reaches``      something observable changed, and the evidence names WHAT;
-    ``raised``       the click raised — the loudest possible finding, and a failure;
-    ``neutralised``  the click reached an entry point this harness deliberately stubs. The handler
-                     was REACHED (which is the half that keeps dying); its outcome is NOT observed
-                     here and the row says which one and why;
-    ``no outcome``   nothing anywhere in the app changed, nothing was logged, nothing was called;
-    ``hidden`` / ``disabled``  the user cannot reach it in this state, reported not skipped.
-
-    *watched* is an extra list of roots to fingerprint besides *root* — a region window's chips
-    reach the PLATE, and a change there is the outcome, so the plate has to be watched too.
-    *recorder* is the list :func:`_neutralise` / :func:`_neutralise_view` append to.
+    *watched* is extra roots to fingerprint (a region window's chips can change the plate too).
     """
     recorder = [] if recorder is None else recorder
     observed = [] if observed is None else observed
@@ -1218,10 +940,8 @@ def sweep_controls(root, kind: str, app, watched=None, recorder=None, settle=Non
     rows = []
 
     def emit(row):
-        # STREAMED as it is produced, the same rule `tools/walkthrough.py::check` follows: this
-        # sweep clicks every button in a Qt app, and a click that hangs or aborts the process
-        # would otherwise take the whole table with it and name nothing. The last line printed IS
-        # the control that was in the chair.
+        # Streamed as produced: a click that hangs or crashes the process still leaves the last
+        # printed line naming the control that was in the chair.
         rows.append(row)
         print(f"...   {kind:5} {row[0][:40]:<40} {row[2]}", file=sys.__stdout__, flush=True)
 
@@ -1239,11 +959,8 @@ def sweep_controls(root, kind: str, app, watched=None, recorder=None, settle=Non
             tip = (wdg.toolTip() or "").strip().splitlines()
             emit((label, cls, "disabled", tip[0][:120] if tip else "no tooltip says why"))
             continue
-        # A STILL FRAME first, then the baseline. See `wait_still`: the previous control's queued
-        # repaint would otherwise land inside this one's measurement.
         still = wait_still(watched, app)
-        # `blank=wdg` only on the window the control lives in; on any OTHER watched window the
-        # control is not a descendant and nothing needs painting out.
+        # `blank=wdg` only on the window it lives in — other watched windows have nothing to paint out.
         before = [_fingerprint(r, p and still, wdg if i == 0 else None)
                   for i, (r, p) in enumerate(zip(watched, use_pixels))]
         n_calls, n_obs = len(recorder), len(observed)
@@ -1254,19 +971,14 @@ def sweep_controls(root, kind: str, app, watched=None, recorder=None, settle=Non
                 emit((label, cls, "raised", f"{type(exc).__name__}: {exc}"))
                 continue
             app.processEvents()
-            # ...and a still frame again before reading the outcome, so a control whose effect is
-            # a LATE repaint (a tab building, a worker's first tile) is credited with it here
-            # rather than blamed on whatever is clicked next. INSIDE the spy: a line logged while
-            # this settles is this control's line.
+            # A still frame again before reading the outcome, so a LATE repaint (tab building, a
+            # worker's first tile) is credited to this control rather than the next one.
             wait_still(watched, app, tries=10)
         after = [_fingerprint(r, p and still, wdg if i == 0 else None)
                  for i, (r, p) in enumerate(zip(watched, use_pixels))]
 
         reached = recorder[n_calls:]
         if reached:
-            # The handler WAS reached — the half that keeps dying in this codebase — and the
-            # harness stopped it there on purpose. Reported as its own verdict rather than folded
-            # into `reaches`, because what happens after the entry point is not measured here.
             name = reached[0]
             emit((label, cls, "neutralised",
                   f"reached {name} — not run here: {NEUTRALISED_WHY.get(name, 'see _neutralise')}"))
@@ -1283,8 +995,7 @@ def sweep_controls(root, kind: str, app, watched=None, recorder=None, settle=Non
             where = "" if i == 0 else f" (on the {['', 'plate'][min(i, 1)]})"
             for key in sorted(b):
                 if key in a and a[key] != b[key]:
-                    # The control's OWN state moving is the actuation, not an outcome. Excluding it
-                    # is what stops every checkbox in the app from reporting itself alive.
+                    # The control's own state moving is the actuation, not an outcome.
                     if i == 0 and key.startswith(f"control {cls}["):
                         continue
                     changed.append(f"{key}{where}")
@@ -1305,17 +1016,9 @@ def sweep_controls(root, kind: str, app, watched=None, recorder=None, settle=Non
 
 
 class _ModelPane:
-    """Built lazily: a region-window pane whose napari canvas is absent but whose MODEL is real.
-
-    ``napari.components.ViewerModel`` is Qt-free, so ``MosaicLayers`` — the class every operator
-    layer, every contrast write and every visibility toggle in a region window goes through — runs
-    headless in full. This is strictly more honest than the recording stub in ``tests/conftest.py``
-    (which has no ``ops()`` at all, so ``RegionViewer._window_operators()`` returned ``[]`` against
-    it and every ⚙ controls test had to replace the mosaic wholesale to see anything).
-
-    What is NOT covered, and is not claimed: the vispy canvas. Nothing here proves a layer was
-    PAINTED, only that it exists in the model with the scale, contrast and visibility it should.
-    """
+    """A region-window pane whose napari canvas is absent but whose model (ViewerModel, Qt-free)
+    is real, so MosaicLayers runs headless. Does not prove a layer was PAINTED, only that it
+    exists in the model with the right scale/contrast/visibility."""
 
 
 def _model_pane_class():
@@ -1344,17 +1047,11 @@ def _model_pane_class():
 
 
 def _watch_window_stacking(monkey, seen):
-    """WRAP (never stub) the window-stacking calls, so "bring the plate forward" is observable.
+    """Wrap (never stub) the window-stacking calls, so "bring the plate forward" is observable.
 
-    ``raise_()`` and ``activateWindow()`` are no-ops on the offscreen platform — Qt says so itself,
-    once per call: "This plugin does not support raise()". So ``▣ plate``, whose entire job is to
-    bring the plate forward and which says nothing when it succeeds, changed NOTHING this harness
-    could read and was reported as a dead control. It is not dead;
-    ``tests/test_raise_plate.py::test_clicking_it_raises_the_plate`` proves the wiring against a
-    counting fake.
-
-    Wrapping rather than neutralising is the point: the real call still runs, and the record is
-    evidence of the outcome rather than of the harness having intercepted it.
+    ``raise_()`` / ``activateWindow()`` are no-ops on the offscreen platform, so a click that
+    only re-stacks the window would otherwise read as dead; wrapping records the call while the
+    real (no-op) implementation still runs.
     """
     from qtpy.QtWidgets import QWidget
 
@@ -1375,9 +1072,8 @@ def _watch_window_stacking(monkey, seen):
 def _neutralise_view(monkey, called):
     """Stop a region window's chips from doing what this harness has no business doing.
 
-    Same rule as :func:`_neutralise`: the call is RECORDED and not run, so "the click reached the
-    handler" is still measured — it is the handler's blast radius that is contained. Appends into
-    the caller's *called* list so one recorder covers the plate's entry points and this window's.
+    Same rule as :func:`_neutralise`: the call is recorded and not run. Appends into the
+    caller's *called* list so one recorder covers both the plate's entry points and this window's.
     """
     from squidxplorer import _region_viewer as RV
 
@@ -1434,11 +1130,9 @@ def gate_no_dead_controls(dataset=PLATE, mutate_plate=None, mutate_view=None, ve
             mutate_plate(win)
             app.processEvents()
         _neutralise(win, monkey, recorded)
-        # BEFORE the window is opened, not after. `RegionViewer._chip` connects a BOUND METHOD
-        # captured at construction (``b.clicked.connect(lambda _=False: slot())``), so patching the
-        # class afterwards leaves every already-built chip calling the real handler. Measured: the
-        # sweep reported `2D` as "no outcome" (its neutralised stub never ran, so nothing was
-        # recorded) and then took the process down with SIGSEGV on `3D`, which reached vispy.
+        # BEFORE the window is opened: `RegionViewer._chip` connects a bound method captured at
+        # construction, so patching the class afterwards leaves already-built chips calling the
+        # real handler (measured: SIGSEGV in vispy when an unstubbed 3D chip was clicked).
         _neutralise_view(monkey, recorded)
         seen: list[str] = []
         _watch_window_stacking(monkey, seen)
@@ -1459,7 +1153,7 @@ def gate_no_dead_controls(dataset=PLATE, mutate_plate=None, mutate_view=None, ve
             # PlateWindow.run_operator) has to be seen as reaching a neutralised entry point too.
             rows += [("view", *r) for r in sweep_controls(view, "view", app, watched=[win],
                                                           recorder=recorded, observed=seen)]
-            # The INPUT controls the sweep skipped: proven by the arguments that arrive at the run.
+            # The input controls the sweep skipped: proven by the arguments that arrive at the run.
             rows += prove_inputs_reach_the_run(view, detail, app)
     finally:
         for obj, name, old in reversed(patches):
@@ -1508,24 +1202,16 @@ def print_inventory(rows) -> None:
         print(f"  {label:<{width}}  {cls:<16} {verdict:<13} {why}")
 
 
-# --- mutation check: prove the gate can fail ---------------------------------------------------
+# --- mutation check: prove the gate can fail -----------------------------------------------------
 
 def _mount_contrast_duplicate(win):
-    """Bolt a second, independently draggable owner of the contrast window onto the plate.
-
-    Exactly the control IMA-261 deleted, put back where a user would see it: on the root window,
-    beside the value's real owner. Mounted on the SHOWN, INGESTED window rather than by patching
-    ``_ChannelBar.__init__`` (which is what this did until 2026-08-06) -- the channel bar was
-    deleted in 8b0cbfc on 2026-07-22 and is never constructed, so that patch ran zero times and
-    the self-test reported "a duplicate contrast slider was added and the gate stayed GREEN"
-    about a duplicate that was never added. A mutation test that cannot mutate is worth less than
-    no mutation test, because it reads as evidence.
-    """
+    """Bolt a second, independently draggable owner of the contrast window onto the plate —
+    mounted on the shown, ingested window itself, so the mutation is guaranteed live."""
     from qtpy.QtCore import Qt
     from qtpy.QtWidgets import QSlider
     ov = win._overview
     for c_i in range(len(ov.channel_windows() or [])):
-        s = QSlider(Qt.Orientation.Horizontal, win)     # SCOPED: Qt.Horizontal is Qt5-only
+        s = QSlider(Qt.Orientation.Horizontal, win)
         s.setRange(0, 65535)
         s.setValue(30000)
         s.valueChanged.connect(lambda v, i=c_i: ov.set_channel_window(i, 0.0, float(v)))
@@ -1545,18 +1231,9 @@ def _mount_visibility_duplicate(win):
 
 
 def _freeze_a_probe(win):
-    """Make ONE probe's value a CONSTANT — the exact shape ``_probe_fov`` died in.
-
-    ``_probe_fov`` read ``w._detail._fov_slider``, and ``PlateWindow._detail`` had been
-    unconditionally None since 2026-07-22: it answered ``(None, None)`` on every snapshot, so no
-    widget could ever be reported as moving it, and "fov / plane index: 1" was a PASS over a value
-    nothing read. Nothing in this gate could tell that apart from "there really is one owner".
-    Steps 4 and 5 catch a probe that RAISES; this is the mutation for the one that goes quiet.
-
-    Patched on the CLASS, because ``_current_well`` is a property, and UNDONE by
-    :func:`_unfreeze_a_probe` — a self-test that leaves the product mutated proves nothing about
-    the recovery run that follows it.
-    """
+    """Make ONE probe's value a constant, so it cannot vary and no widget could ever be reported
+    as moving it. Patched on the class (``_current_well`` is a property); undone by
+    :func:`_unfreeze_a_probe`."""
     import squidxplorer._viewer as V
 
     _FROZEN_PROBE_ORIGINAL.append(V.PlateWindow._current_well)
@@ -1575,11 +1252,7 @@ def _unfreeze_a_probe():
 
 
 def _mount_dead_button(win):
-    """Bolt a chip that LOOKS alive and is wired to nothing onto the plate.
-
-    This is the shape of every defect in GATE 3's docstring: a button with a face, a tooltip and
-    a cursor, connected either to no slot at all or to a handler that returns at its first guard.
-    """
+    """Bolt a chip that looks alive and is wired to nothing onto the plate."""
     from qtpy.QtWidgets import QPushButton
     b = QPushButton("⚙ tune", win)
     b.setToolTip("Tune the operator on screen.")      # a promise; nothing keeps it
@@ -1588,12 +1261,8 @@ def _mount_dead_button(win):
 
 
 def _mount_dead_view_button(view):
-    """The same mutation on a REGION window, wired to a handler that returns at its first guard.
-
-    Deliberately not "connected to nothing": ``_on_detect_nuclei`` and the plate's timepoint bar
-    both HAD a handler, and it is the early return that made them dead. A gate that only catches
-    a missing connection would have caught neither.
-    """
+    """The same mutation on a region window, wired to a handler that returns at its first guard
+    rather than being connected to nothing — the shape GATE 3 actually has to catch."""
     from qtpy.QtWidgets import QPushButton
 
     def _guarded():
@@ -1683,9 +1352,8 @@ def self_test(dataset=PLATE):
         return 1
     print("\n    the gate bit, as it must.")
 
-    # A gate that only knows about contrast is a hard-coded assertion about the bug we happen to
-    # have just fixed. The point of IMA-268 is the NEXT duplicate, in a concern nobody is looking
-    # at — so duplicate a DIFFERENT control and require the same failure.
+    # A gate that only knows about contrast is a hard-coded assertion; duplicate a DIFFERENT
+    # control to prove it generalises instead.
     print("=" * 100)
     print("SELF-TEST 3/4: duplicating a control in a DIFFERENT concern (channel visibility) —")
     print("               the gate must generalise, not just know about contrast.")
@@ -1705,10 +1373,8 @@ def self_test(dataset=PLATE):
         return 1
     print("\n    the gate bit on a concern it was never specifically taught. It generalises.")
 
-    # A probe that cannot vary is invisible to everything above: its concern reports
-    # "at most 0 control surfaces (expected at most 0) -- PASS" while measuring nothing, which is
-    # how `_probe_fov` and `_probe_scope` survived from July. Mutation-check the mechanism that
-    # was added for it, or that mechanism goes the same way as the sentence it replaced.
+    # A probe that cannot vary is invisible to everything above (its concern reports "at most 0
+    # surfaces" while measuring nothing), so the mechanism that catches it is mutation-checked too.
     print("=" * 100)
     print("SELF-TEST 4/4: freezing a probe's value to a CONSTANT (the _probe_fov shape) —")
     print("               the gate must NAME the probe, not report its concern as clean.")
@@ -1755,9 +1421,6 @@ def main():
     args = ap.parse_args()
 
     if not os.path.isdir(args.dataset):
-        # SKIP, not a failure, and with the exact command that makes the fixture. This gate needs
-        # a real acquisition to have a real widget tree; on a machine (or a CI runner) without one
-        # there is nothing to be wrong about.
         print(f"SKIP  dataset absent on this machine, cannot run: {args.dataset}")
         if args.dataset == PLATE:
             print('      rebuild it with: python tools/make_5d_fixture.py '
@@ -1810,9 +1473,8 @@ def main():
 
 if __name__ == "__main__":
     rc = main()
-    # os._exit, NOT sys.exit. Measured 2026-08-06: the gate printed its full verdict and the
-    # process then died with SIGSEGV (139) unwinding Qt at interpreter shutdown. A gate whose exit
-    # code is decided by a teardown crash gates nothing.
+    # os._exit, not sys.exit: Qt can SIGSEGV unwinding at interpreter shutdown, which would
+    # otherwise decide the exit code instead of the gate's own verdict.
     sys.stdout.flush()
     sys.stderr.flush()
     os._exit(rc)

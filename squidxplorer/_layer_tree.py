@@ -1,68 +1,7 @@
-"""The grouped layer tree: PROCESSING LAYER -> CHANNELS, over napari's flat LayerList.
+"""The grouped layer tree: processing layer -> channels, over napari's flat LayerList.
 
-THE ARITHMETIC THAT FORCES THIS
--------------------------------
-We key one napari layer per (processing layer, channel). Five operators -- raw, stitched,
-deconvolved, background-subtracted, flatfield-corrected -- times four channels (405/488/561/638)
-is 24 rows in a single flat list. A scientist cannot work in that.
-
-Three facts bound the solution and are not up for re-litigation:
-
-* **napari 0.6.6 has no layer groups.** There is not one ``LayerGroup`` symbol in the package.
-  Upstream napari#2229 has been open since Feb 2021 and is still open; #5950 and #6345 sit
-  behind it. Plan as if groups never arrive.
-* **One layer per channel is idiomatic napari, not our mistake.** ``add_image(channel_axis=)``
-  provably SPLITS into N layers (``split_channels``, ``viewer_model.py:1162``).
-* **Nobody ships a layer cap.** A prior-art survey found no precedent for destroying layers on
-  switch or for an arbitrary ceiling, and an earlier proposal here to cap at 8 was contradicted
-  by that evidence. Not implemented, deliberately.
-
-So the fix is the one BOTH shipped precedents chose: replace the layer-list UI, not the layers.
-
-* brainglobe/**napari-experimental** builds its own grouped tree beside napari's list. Its own
-  ethos: "the main layer list should only be used to add/remove layers".
-* 4DNucleome/**PartSeg** is our exact architecture -- a host Qt app embedding napari -- and
-  rebuilds its control surface out of napari's own widget classes.
-
-WHAT IS PORTED, AND WHAT IS DELIBERATELY NOT
---------------------------------------------
-Ported from napari-experimental: a ``QTreeView`` over a real ``QAbstractItemModel`` (they use
-napari's ``QtNodeTreeView``/``QtNodeTreeModel``), ``CheckStateRole`` at both levels, a group
-toggle that cascades to every leaf and then emits ``dataChanged`` for each child so the child
-checkboxes repaint.
-
-NOT ported, on purpose:
-
-* **``GroupLayer._visible``.** They store the group's visibility as its own bool, and the
-  consequence is written into their own code: nothing syncs it upward, so a group checkbox
-  drifts out of step with the layers it claims to describe. This project's dominant defect
-  shape is exactly that -- two representations of one truth, hand-synced (4+ confirmed, most
-  recently the contrast sync silently killed by layer recreation). Here the group's check state
-  is DERIVED on every read: all visible -> Checked, none -> Unchecked, otherwise
-  PartiallyChecked. There is no group state, so there is nothing to drift.
-* **Drag-and-drop reordering and the LayerList order sync.** Their tree owns ordering, which is
-  most of the file (``flat_index_order``, ``_move_plan``, index reversal between tree and
-  LayerList). We are ADDING a tree next to napari's real controls, not replacing them, so
-  napari's own list keeps ordering and this stays a view. Less code that can disagree.
-* **Deleting napari's docks (PartSeg).** Not done. dc0f288 embeds the real napari window on
-  purpose, because hand-rebuilt controls were rejected as "not napari". Nothing here conflicts
-  with napari's own list -- both write ``layer.visible`` -- so there is no reason to remove it.
-
-IDENTITY IS (op, channel), NEVER A LAYER OBJECT AND NEVER A PARSED NAME
------------------------------------------------------------------------
-``RegionViewer._load_mosaic`` destroys and recreates every layer on each REGION change (it
-keeps them for a timepoint change; see ``_region_viewer.py``). A subscription bound to layer
-objects therefore dies silently on the next region -- that is precisely how the contrast sync was
-lost (``MosaicLayers.on_user_contrast``).
-Every row here resolves its layers through ``MosaicLayers.layers_for(op, channel)`` at read time, and
-identity comes from ``layer.metadata`` via ``key_of``. Names are labels; ian-stitcher's
-``extractWavelength(layer.name)`` and petakit's unparseable channel names are why.
-
-``layers_for`` and not ``find``, because a key is one-to-MANY and is meant to be: a 3-D volume is
-many brick layers sharing one ``(op, channel)`` so that a hundred textures collapse into one row
-(``_brick_view.BrickedVolume._op``). Resolving a channel row to the FIRST match made its checkbox
-drive one brick of a hundred -- Julio, 2026-08-06: "Turning off one layer doesn't turn the other
-like in the 2D view."
+Identity is (op, channel), resolved through ``MosaicLayers.layers_for`` at read time,
+never a layer object and never a parsed name. Check state is derived, never stored.
 """
 
 from __future__ import annotations
@@ -76,16 +15,12 @@ from qtpy.QtWidgets import QFrame, QTreeView
 
 from squidxplorer._napari_view import MosaicLayers, key_of
 
-#: internalId marking a top-level (processing-layer) row. Qt hands the id back on parent()
-#: lookups, so a child stores its OP ROW there and a top-level row stores this sentinel.
+#: internalId marking a top-level (processing-layer) row; a child stores its op row there.
 _TOP = 0xFFFFFFFF
 
 
-#: napari's own delegate roles, resolved ONCE and by name. They live in
-#: ``napari._qt.containers`` -- private, like ``QtLayerControlsContainer`` already is, and for the
-#: same reason: the alternative is reimplementing napari's layer row and reintroducing exactly the
-#: duplication this project keeps deleting. Resolved defensively so a napari upgrade that moves
-#: them costs the PRETTY rendering and not the pane.
+#: napari's own delegate roles, resolved once and defensively: a napari upgrade that moves
+#: them costs the pretty rendering and not the pane.
 def _resolve_napari_roles() -> dict:
     try:
         from napari._qt.containers._base_item_model import ItemRole
@@ -99,13 +34,7 @@ _NAPARI_ROLES: dict = _resolve_napari_roles()
 
 
 def _check_state(layers) -> Any:
-    """A row's check state DERIVED from the layers it stands for. Never stored.
-
-    One rule for both levels of the tree, because both are one-to-MANY: a processing-layer row
-    stands for its channels, and a channel row stands for every layer holding that ``(op, channel)``
-    -- one for a mosaic, one per brick for a 3-D volume. See the module docstring on
-    ``GroupLayer._visible`` for why this is derived rather than kept.
-    """
+    """A row's check state derived from the layers it stands for. Never stored."""
     visible = [bool(getattr(ly, "visible", False)) for ly in layers]
     if all(visible):
         return Qt.Checked
@@ -115,12 +44,7 @@ def _check_state(layers) -> Any:
 
 
 class _GroupItem:
-    """What a PROCESSING-LAYER row reports itself to be.
-
-    napari's delegate asks the item ``is_group()`` -- a branch it already carries for layer trees
-    -- and paints a folder (open when expanded) instead of an image icon. So a group row gets
-    napari's own folder treatment without us drawing anything.
-    """
+    """What a processing-layer row reports itself to be: napari's delegate paints a folder."""
 
     def is_group(self) -> bool:
         return True
@@ -140,24 +64,15 @@ _EMPTY_THUMBNAIL = _empty_thumbnail()
 
 
 def _thumbnail_image(layer) -> Optional[Any]:
-    """The layer's own thumbnail as a QImage, or None.
-
-    napari keeps ``layer.thumbnail`` as an RGBA array and repaints it as the data changes, so
-    this is the SAME picture napari's own layer list shows -- read, never generated here.
-    """
+    """The layer's own thumbnail as a QImage, or None."""
     if layer is None:
         return None
     thumb = getattr(layer, "thumbnail", None)
     if thumb is None:
         return None
     try:
-        # .copy() is LOAD-BEARING, not defensive. QImage does NOT copy a buffer it is handed: it
-        # wraps it and keeps a bare pointer, and PyQt does not keep the numpy array alive for us.
-        # napari repaints `layer.thumbnail` into a NEW array whenever the layer's data changes, so
-        # the array wrapped here is dropped and freed while Qt still paints through the pointer.
-        # Measured 2026-07-28: without the copy, `pytest tests/test_layer_tree.py` segfaulted 3 of
-        # 3 runs (rc 139); pinning every wrapped buffer alive made it 0 of 3, which is what
-        # identified this line. Pinned by tests/test_layer_tree_thumbnail.py.
+        # .copy() is load-bearing: QImage wraps the buffer without owning it, and napari
+        # replaces `layer.thumbnail` with a new array, freeing the one Qt still paints through.
         img = QImage(thumb, thumb.shape[1], thumb.shape[0], QImage.Format_RGBA8888)
         return img.copy()                   # deep copy: the returned QImage owns its own pixels
     except Exception:                       # noqa: BLE001 - an odd thumbnail shape is not fatal
@@ -165,15 +80,7 @@ def _thumbnail_image(layer) -> Optional[Any]:
 
 
 class MosaicTreeModel(QAbstractItemModel):
-    """Two-level model over ``MosaicLayers``. Owns structure, never owns visibility.
-
-    ``_rows`` caches only the SHAPE of the hierarchy -- ``[(op, [channel, ...]), ...]`` -- because
-    Qt requires ``rowCount``/``index`` to be stable between ``beginResetModel`` and
-    ``endResetModel``. It is rebuilt wholesale from ``MosaicLayers`` whenever the LayerList
-    changes; it is never edited in place, so it cannot drift into a second opinion about which
-    layers exist. Visibility is not cached at all: every ``CheckStateRole`` read goes to the
-    live layer.
-    """
+    """Two-level model over ``MosaicLayers``. Owns structure, never owns visibility."""
 
     def __init__(self, mosaic: MosaicLayers, parent=None) -> None:
         super().__init__(parent)
@@ -182,25 +89,16 @@ class MosaicTreeModel(QAbstractItemModel):
         self._watched: list[Any] = []
         self.refresh()
 
-        # Layers appear and disappear underneath us: _load_mosaic wipes and rebuilds them on
-        # every region change, and the user can delete one from napari's own list.
+        # Layers appear and disappear underneath us: _load_mosaic rebuilds them on region change.
         layers = mosaic.model.layers
         layers.events.inserted.connect(self._on_layers_changed)
         layers.events.removed.connect(self._on_layers_changed)
 
     # -- structure ----------------------------------------------------------------------
     def refresh(self) -> None:
-        """Rebuild the hierarchy from the layers that exist RIGHT NOW."""
+        """Rebuild the hierarchy from the layers that exist right now."""
         self.beginResetModel()
-        # TOPMOST FIRST, which is napari's own convention for a layer list: napari renders its
-        # LayerList reversed, so the last-added layer sits at the TOP of the widget. Ours listed
-        # the same list in insertion order, so the two panes showed one list under two different
-        # rules and disagreed about which channel was on top. Julio: "stack order is inverted ->
-        # that points to a bad data model on channels."
-        #
-        # He is right that it is a data-model problem, and the fix is the same rule as everywhere
-        # else here: there is ONE order, napari owns it, and we render the owner's order rather
-        # than a second one derived from when we happened to add things.
+        # Topmost first: napari renders its LayerList reversed, and there is ONE order — napari's.
         ops = list(reversed(self._mosaic.ops()))
         self._rows = [(op, list(reversed(self._mosaic.channels(op)))) for op in ops]
         self._rewatch()
@@ -210,14 +108,7 @@ class MosaicTreeModel(QAbstractItemModel):
         self.refresh()
 
     def _rewatch(self) -> None:
-        """Re-subscribe to ``layer.events.visible`` for the layers that exist now.
-
-        Reading the truth is not enough: without this the checkbox is correct only until
-        somebody toggles the layer from napari's own list, and then it is quietly stale. The
-        subscriptions are rebuilt from scratch on every refresh precisely BECAUSE the layer
-        objects are thrown away and remade -- binding once at construction is the mistake that
-        killed the contrast sync.
-        """
+        """Re-subscribe to ``layer.events.visible``; layer objects are thrown away and remade."""
         for layer in self._watched:
             try:
                 layer.events.visible.disconnect(self._on_layer_visible)
@@ -270,9 +161,7 @@ class MosaicTreeModel(QAbstractItemModel):
     def flags(self, index=QModelIndex()):
         if not index.isValid():
             return Qt.NoItemFlags
-        # ItemIsUserCheckable is load-bearing: a model that answers CheckStateRole without it
-        # renders a tree with no checkboxes -- readable, unclickable, and green under any test
-        # that only calls setData directly.
+        # ItemIsUserCheckable is load-bearing: without it the tree renders no checkboxes.
         return Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable
 
     def _key_at(self, index: QModelIndex) -> Optional[tuple[str, str]]:
@@ -304,44 +193,27 @@ class MosaicTreeModel(QAbstractItemModel):
                 if index.row() >= len(self._rows):
                     return None
                 return self._group_state(self._rows[index.row()][0])
-            # EVERY layer of the pair, by the same derived rule the group row uses. A channel is
-            # one layer for a mosaic and N bricks for a 3-D volume; reading only the first drew a
-            # cleared checkbox over a volume that was still lit.
+            # Every layer of the pair: a channel is one mosaic layer or N bricks of a volume.
             layers = self._mosaic.layers_for(*key)
             if not layers:
                 return None
             return _check_state(layers)
 
         # --- the roles napari's own LayerDelegate paints from -------------------------------
-        #
-        # Julio: "I still don't like these napari layer UX. The original napari layer widgets
-        # were way more beautiful." They were: napari does not draw a checkbox and a name, it
-        # draws an EYE, a type icon and the layer's THUMBNAIL, through `LayerDelegate`. Serving
-        # the delegate's roles here means we use napari's actual renderer instead of imitating
-        # it -- the same choice as embedding napari's window rather than rebuilding its controls.
         if role == _NAPARI_ROLES.get("item"):
-            # The delegate asks the item what it IS: a group gets a folder icon (it checks
-            # `is_group()`, which exists for exactly this case), a channel gets the image icon
-            # for its layer type.
             if key is None:
                 return _GROUP_ITEM
             return self._mosaic.find(*key)
 
         if role == _NAPARI_ROLES.get("thumbnail"):
-            # NEVER None. The delegate does QPixmap.fromImage(index.data(ThumbnailRole)) with no
-            # guard, so a missing thumbnail is a TypeError on every repaint. A group has no
-            # pixels of its own, so it gets a TRANSPARENT tile: nothing is drawn, and nothing is
-            # invented either (borrowing a channel's thumbnail would label the group with one
-            # arbitrary channel's picture).
+            # Never None: the delegate does QPixmap.fromImage on this with no guard.
             if key is None:
                 return _EMPTY_THUMBNAIL
             layer = self._mosaic.find(*key)
             return _thumbnail_image(layer) or _EMPTY_THUMBNAIL
 
         if role == _NAPARI_ROLES.get("loaded"):
-            # Always loaded. The alternative starts napari's loading GIF, which animates forever
-            # unless something later says otherwise -- a spinner that outlives its cause is the
-            # same lie as an indicator that cannot turn off.
+            # Always loaded; the alternative starts napari's loading GIF forever.
             return True
 
         if role == Qt.SizeHintRole:
@@ -350,25 +222,19 @@ class MosaicTreeModel(QAbstractItemModel):
         return None
 
     # -- the contract napari's LayerDelegate expects of the model behind a view ------------
-    #
-    # `_paint_thumbnail` calls `index.model().sourceModel().all_loaded()`, because in napari the
-    # view always sits behind a QSortFilterProxyModel. Ours does not, so painting raised
-    # AttributeError on EVERY repaint -- 54 tracebacks in one launch, while the headless tests
-    # stayed green because they read roles and never actually painted a row.
-    #
-    # Implementing the two methods is the smaller lie than inserting a proxy we do not otherwise
-    # need. They are here, next to the delegate roles they serve, and named as what they are.
+    # `_paint_thumbnail` calls `index.model().sourceModel().all_loaded()`; napari's view always
+    # sits behind a QSortFilterProxyModel, ours does not, so both methods answer directly.
 
     def sourceModel(self):
         """This model IS the source; there is no proxy in front of it."""
         return self
 
     def all_loaded(self) -> bool:
-        """Every row is loaded. See ``LoadedRole`` in ``data`` for why that is unconditional."""
+        """Every row is loaded."""
         return True
 
     def _group_state(self, op: str):
-        """DERIVED, never stored. See the module docstring on ``GroupLayer._visible``."""
+        """Derived, never stored."""
         group = self._mosaic.group(op)
         if not group:
             return Qt.Unchecked
@@ -381,9 +247,7 @@ class MosaicTreeModel(QAbstractItemModel):
         key = self._key_at(index)
 
         if key is not None:
-            # ALL of them, for the reason spelled out in `MosaicLayers.layers_for`: a channel row is
-            # one layer for a mosaic and every brick of a channel for a 3-D volume, and a checkbox
-            # that drives one of a hundred is a control that does not control.
+            # All of them: a checkbox that drives one brick of a hundred does not control.
             layers = self._mosaic.layers_for(*key)
             if not layers:
                 return False
@@ -403,7 +267,6 @@ class MosaicTreeModel(QAbstractItemModel):
             layer.visible = want
         self.dataChanged.emit(index, index, [role])
         # Toggling a group changes every child; emit for each so their checkboxes repaint.
-        # (Straight out of napari-experimental's QtGroupLayerModel.setData.)
         for child_row in range(self.rowCount(index)):
             child = self.index(child_row, 0, index)
             self.dataChanged.emit(child, child, [role])
@@ -411,21 +274,7 @@ class MosaicTreeModel(QAbstractItemModel):
 
 
 def _install_napari_delegate(view) -> bool:
-    """Paint the rows with napari's OWN ``LayerDelegate``, not with Qt's default.
-
-    Julio: "I still don't like these napari layer UX. The original napari layer widgets were way
-    more beautiful."
-
-    He is right, and the gap was never styling. A default Qt item view draws a native checkbox
-    and a string. napari draws an EYE (its stylesheet paints the check indicator as an eye icon),
-    a per-type icon, and the layer's live THUMBNAIL -- all in `LayerDelegate.paint`. Imitating
-    that would be a second renderer to keep in step with napari's, which is the duplication this
-    project keeps deleting; so the model serves the delegate's roles instead and napari paints.
-
-    Returns whether it took, so the caller/tests can tell "napari painted this" from "we fell
-    back". Failure is cosmetic and never fatal: an unstyled tree is ugly, an exception while
-    building pane 2 costs the viewer.
-    """
+    """Paint the rows with napari's own ``LayerDelegate``; failure is cosmetic, never fatal."""
     if not _NAPARI_ROLES:
         return False
     try:
@@ -437,49 +286,15 @@ def _install_napari_delegate(view) -> bool:
         return False
 
 
-#: The napari selectors whose rules must also reach a ``QTreeView``.
-#:
-#: ``QListView`` is napari's GENERIC list styling -- background, selection colour. ``QtLayerList``
-#: is its LAYER list specifically, and it is the one that carries the eye: ``::indicator`` sets
-#: ``image: url(theme_*:/visibility.svg)``, and ``::item`` sets ``margin: 2px 2px 2px 28px``, the
-#: 28 px gutter the indicator is absolutely positioned into (``left: -3px``).
-#:
-#: Copying only ``QListView`` -- which is what this did until 2026-07-30 -- is why the channel
-#: rows had no eye. It is worth being precise about the failure, because it did not look like a
-#: missing stylesheet rule: it looked like a missing WIDGET.
-#:
-#: Without the ``::item`` margin the item rect starts at x=0, so Qt draws the check indicator
-#: there. napari's ``LayerDelegate._paint_thumbnail`` then draws the thumbnail at
-#: ``option.rect.translated(-2, 2)`` -- the item rect's left edge -- because in napari's own list
-#: the 28 px margin has already moved that edge clear of the indicator. Here it had not, so every
-#: channel's thumbnail was painted directly OVER its own checkbox. The processing-layer rows kept
-#: a visible checkbox only because a group's thumbnail is ``_EMPTY_THUMBNAIL``, a fully
-#: transparent tile, and a checkbox under a transparent square still reads as a checkbox.
-#:
-#: So the symptom was "the eye icons are not drawing" and the cause was two rules that never
-#: arrived, one of which was not about the eye at all.
+#: The napari selectors whose rules must also reach a ``QTreeView``. ``QtLayerList`` carries
+#: the eye indicator and the 28 px item margin the thumbnail is painted clear of.
 _TREE_SOURCE_SELECTORS = ("QListView", "QtLayerList")
 
 
 def _napari_stylesheet(sheet: Optional[str] = None) -> str:
-    """napari's OWN stylesheet, with its list rules extended to cover a tree.
+    """napari's own stylesheet, with its list rules duplicated onto the QTreeView selector.
 
-    Julio: "I like the layer nesting, but the widgets look ugly, napari's original ones were way
-    nicer." They were, and the reason is that this tree had no stylesheet at all: it rendered in
-    the default Qt style inside a napari-themed dock, so it looked like a widget from another
-    application -- which it was.
-
-    The fix is NOT to hand-pick colours to match. That would be a second theme, drifting from
-    napari's the moment the user switches theme. `napari.qt.get_current_stylesheet` is public and
-    returns the real thing; the only gap is that napari styles ``QListView`` and ``QtLayerList``
-    and never ``QTreeView``, so every rule from both is DUPLICATED onto the tree selector. The
-    values stay napari's -- nothing here invents a colour, a margin or an icon.
-
-    *sheet* is injectable so the rewrite can be tested against a known stylesheet without a live
-    napari theme, which is the only part of this that can regress silently.
-
-    Falls back to an empty stylesheet if napari changes the API: an unstyled tree is ugly, a
-    crash on building the pane costs the whole viewer.
+    *sheet* is injectable for tests. Falls back to an empty stylesheet if napari changes the API.
     """
     if sheet is None:
         try:
@@ -498,10 +313,7 @@ def _napari_stylesheet(sheet: Optional[str] = None) -> str:
 class MosaicTree(QTreeView):
     """The grouped layer view: processing layers, each expanding into its channels.
 
-    Lives ALONGSIDE napari's own layer list rather than replacing it (that is the divergence
-    from napari-experimental's ethos, and it is deliberate -- dc0f288 embeds the real napari
-    window because hand-rebuilt controls were rejected as "not napari"). Both surfaces write the
-    same ``layer.visible``, so they cannot disagree: toggle one and the other repaints.
+    Lives alongside napari's own layer list; both write the same ``layer.visible``.
     """
 
     def __init__(self, mosaic: MosaicLayers, parent=None) -> None:
@@ -522,22 +334,7 @@ class MosaicTree(QTreeView):
         self.selectionModel().currentChanged.connect(self._select_in_napari)
 
     def _select_in_napari(self, current, _previous=None) -> None:
-        """Selecting a row here SELECTS THE LAYER in napari, so its controls follow.
-
-        Julio: "when I click on the mosaic layers I cannot adjust contrast, I would have to go
-        from the processing layers."
-
-        Exactly right, and it is the one-owner rule again read from the other side. napari's
-        contrast/gamma/colormap panel renders whatever is in ``viewer.layers.selection``; our
-        tree had its own Qt selection and never touched napari's, so clicking a channel here
-        highlighted a row and changed nothing the controls could see. The tree was a viewer of
-        layers that could not DRIVE them.
-
-        Selecting a PROCESSING LAYER selects all of its channels, which is what the group means
-        -- and napari's controls then show the shared properties for that set.
-
-        Nothing is stored: the selection lives in napari's LayerList, as it already did.
-        """
+        """Selecting a row here selects the layer(s) in napari, so its controls follow."""
         model = self.model()
         if model is None or not current.isValid():
             return
@@ -551,29 +348,17 @@ class MosaicTree(QTreeView):
         try:
             selection = model._mosaic.model.layers.selection
             if len(layers) == 1:
-                # `active` is the right seam for ONE layer: napari's setter does select_only()
-                # plus current, which is exactly "show this layer's controls".
+                # `active` is the right seam for ONE layer: select_only() plus current.
                 selection.active = layers[0]
             else:
-                # ...and exactly the WRONG one for a group: that same setter makes its argument
-                # the ONLY selected item, so setting it after a multi-select silently collapsed
-                # the group's four channels down to one (measured: selecting the raw group
-                # selected 638 alone). napari leaves `active` None for a multi-selection and
-                # shows the shared controls; do the same.
+                # ...and the wrong one for a group: that setter collapses a multi-select to one.
                 selection.clear()
                 selection.update(layers)
         except Exception:                      # noqa: BLE001 - selection is a convenience
             pass
 
     def changeEvent(self, e):
-        """Follow a napari THEME switch. The stylesheet is a snapshot of the theme at build time;
-        napari repaints its own widgets on a palette change and ours would otherwise stay the old
-        theme's colours, which is the "two answers to one question" shape again.
-
-        The reentrancy guard is load-bearing: ``setStyleSheet`` itself posts a StyleChange, so
-        restyling from inside changeEvent without it recurses until the process dies -- which it
-        did, immediately, the first time this was written.
-        """
+        """Follow a napari theme switch; the reentrancy guard stops setStyleSheet recursing."""
         super().changeEvent(e)
         if e.type() != QEvent.PaletteChange or self._restyling:
             return

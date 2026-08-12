@@ -1,30 +1,9 @@
-"""Three reported UI defects, and the assertions that keep them fixed.
+"""Three UI defects, pinned by the mechanism behind each rather than by a screenshot:
 
-Julio, on macOS in LIGHT mode:
-
-1. "When my computer is in light mode, in-window operator dropdown text goes black, which clobber
-   the contrast with background."
-2. "cross-monitor UI fixes: keep font/window sizing more consistent across laptop + external
-   monitor setups"
-3. "Remove or shorten operator descriptions in the main window because the labels are getting
-   clipped"
-
-WHAT IS ACTUALLY ASSERTABLE OFFSCREEN
--------------------------------------
-Whether it LOOKS right is a screenshot, not a unit test -- the same line `test_root_resize` draws.
-What IS assertable is the mechanism behind each report:
-
-1. Every colour rule states INK AND GROUND TOGETHER. The bug was never a wrong colour: the view
-   window's operator combo declared no ``color`` at all, so Qt took the foreground from the OS
-   palette (black in light mode) while the background came from the row's selector-less
-   ``background:#0b0e14``, which Qt applies to every descendant. One half from us, one half from
-   the platform. The regression test is that neither half is left unstated -- including the popup
-   ``QAbstractItemView``, which the ``QComboBox`` selector never reaches.
-2. Type is measured in PIXELS, never points. A point resolves against the paint device's
-   per-screen ``logicalDpiY``, so a pt-sized label is the one thing in this app that changes
-   apparent size when the window moves to another monitor.
-3. The card's description is ELIDED to the card's width and the full text is on the tooltip. Not
-   shortened at the registry: the blurbs are where the app says what an operator does.
+1. every colour rule must state ink and ground together (a bare `background:` with no `color:`
+   lets the OS palette supply black-on-dark text)
+2. all type is sized in pixels, never points, so it does not change size across screens
+3. operator card descriptions are elided to the card's width, with the full text on the tooltip
 """
 
 from __future__ import annotations
@@ -55,8 +34,6 @@ def qapp():
     return app
 
 
-# --- 1. light mode: no colour rule may state only half of a pair -------------------------------
-
 def _rules(qss: str) -> "dict[str, str]":
     """``{selector: declarations}`` for a flat (non-nested) Qt style sheet."""
     return {m.group(1).strip(): m.group(2) for m in re.finditer(r"([^{}]+)\{([^{}]*)\}", qss)}
@@ -67,11 +44,6 @@ def _rules(qss: str) -> "dict[str, str]":
     (_qtstyle.COMBO_QSS, "the shared combo chrome"),
 ])
 def test_a_combo_states_its_foreground_wherever_it_states_a_background(qss, who):
-    """The defect exactly: a background with no foreground, so the OS palette supplies the ink."""
-    # The guard used to be `"background" in decls and "background-color" not in decls`, i.e. the
-    # assertion only ran for the BARE `background:` shorthand. Every rule spelling
-    # `background-color:` -- the common form -- was skipped, so a stylesheet with no foreground
-    # anywhere was green. The claim is about ANY background property.
     checked = 0
     for selector, decls in _rules(qss).items():
         if "background" not in decls:
@@ -90,11 +62,8 @@ def test_the_popup_list_is_styled_and_not_just_the_closed_combo(qss):
 
 
 def test_the_operator_dropdown_ink_does_not_come_from_a_light_palette(qapp):
-    """Measured, not argued: resolve the combo's foreground under a BLACK-on-light palette.
-
-    Before the fix the sheet named no colour, so this returned the palette's #000000 over the
-    near-black background inherited from the row — Julio's report. After it, the sheet's own ink.
-    """
+    """Resolve the combo's foreground under a black-on-light palette: the sheet's own ink must
+    win, not the palette's."""
     light = QPalette()
     for role in (QPalette.WindowText, QPalette.Text, QPalette.ButtonText):
         light.setColor(role, QColor("#000000"))
@@ -113,16 +82,10 @@ def test_the_operator_dropdown_ink_does_not_come_from_a_light_palette(qapp):
     assert resolved.lightness() > 128, "the ink must be light against the combo's dark ground"
 
 
-# --- 2. cross-monitor: pixels, not points; this window's screen, not the primary one ------------
-
 @pytest.mark.parametrize("module", [PO, _slide_art])
 def test_no_painted_label_is_measured_in_points(module):
-    """``QFont(family, N)`` is a POINT size, resolved against the paint device's per-screen DPI.
-
-    Every other size in this GUI is a logical pixel, which ``enable_hidpi`` makes device
-    independent. A pt size is the one thing that changes apparent size between a laptop panel and
-    an external monitor. Comment lines are skipped: the note explaining this quotes the old call.
-    """
+    """A QFont point size resolves against the paint device's per-screen DPI, so it is the one
+    size that changes apparent size between a laptop panel and an external monitor."""
     code = "\n".join(ln for ln in inspect.getsource(module).splitlines()
                      if not ln.lstrip().startswith(("#", "#:")))
     assert not re.search(r"QFont\(\s*[\"'][^\"']+[\"']\s*,\s*\d", code), \
@@ -136,7 +99,6 @@ def test_the_plate_labels_carry_a_pixel_size(qapp):
 
 
 def test_window_screen_falls_back_to_the_primary_rather_than_none(qapp):
-    """The fallback is the OLD behaviour, so a widget with no window handle still gets an answer."""
     assert window_screen(None) is QGuiApplication.primaryScreen()
 
 
@@ -149,14 +111,12 @@ def test_window_screen_prefers_the_screen_the_widget_is_actually_on(qapp):
 
 
 def test_a_view_window_is_placed_relative_to_its_own_screen_not_the_desktop_origin():
-    """``move(120, 90)`` is a GLOBAL coordinate: it pins every view to whichever display owns
-    (0, 0). The offsets are unchanged; what changed is what they are measured from."""
+    """``move(120, 90)`` is a global coordinate that pins every view to whichever display owns
+    (0, 0); the offsets are unchanged, only what they are measured from."""
     src = inspect.getsource(RegionViewer.__init__)
     assert "availableGeometry().topLeft()" in src
     assert "self.move(120 + off, 90 + off)" not in src
 
-
-# --- 3. the operator cards: elided, with the full text on the tooltip ---------------------------
 
 _BLURB = ("Register every FOV of a well against its neighbours and fuse one seamless mosaic "
           "per well, instead of trusting the stage coordinates alone.")
@@ -182,7 +142,7 @@ def test_the_description_is_elided_to_the_card_and_fits_it(card):
 
 
 def test_eliding_never_loses_the_text_it_hides(card):
-    """Elide-with-a-tooltip rather than shorten-at-the-registry: nothing is deleted."""
+    """Elide with a tooltip rather than shorten at the registry: nothing is deleted."""
     assert card.toolTip() == f"{_LABEL}\n{_BLURB}"
 
 
@@ -200,16 +160,13 @@ def test_the_card_never_demands_its_unelided_width_from_the_layout(card):
 
 
 def test_the_cards_in_the_process_pane_all_elide(qapp, monkeypatch):
-    """The wiring, not just the widget: every operator card in the main window is an eliding one."""
     from squidxplorer._operations import _OPERATIONS
     from squidxplorer._viewer import PlateWindow
 
     win = PlateWindow(None)
     try:
         cards = win._op_cards
-        # The operator stack is the operator REGISTRY and nothing else. "galleryview" used to be
-        # here as a bare extra key; it arranges windows rather than pixels and is a View-menu
-        # action now, so a stray key in this dict is once again a real defect.
+        # "galleryview" is not an operator key; it's a View-menu action now.
         assert set(cards) == {op.key for op in _OPERATIONS}
         for key, c in cards.items():
             assert hasattr(c, "_retext"), f"the {key!r} card is a plain QPushButton again"
@@ -218,26 +175,9 @@ def test_the_cards_in_the_process_pane_all_elide(qapp, monkeypatch):
         win.close()
 
 
-# --- 4. every stylesheet in a built window must actually PARSE ----------------------------------
-#
-# Reported as "gallery view is giving us vispy problems", followed by hundreds of
-# `WARN vispy: Could not parse stylesheet of object QPushButton(0x600000d06060)` -- the same
-# pointer every time, so one widget re-warning rather than many widgets.
-#
-# It is not vispy and it is not the gallery view. vispy installs a PROCESS-WIDE Qt message handler
-# (``vispy/app/backends/_qt.py``: ``qInstallMessageHandler(message_handler)``), so every Qt warning
-# in this process comes out through vispy's logger. The warning itself is Qt's own CSS parser
-# giving up on one widget's stylesheet, after which that widget is left completely unstyled --
-# which is the part that matters and the part a log filter would hide.
-#
-# The offender was the log panel's collapse toggle: a two-part string whose first half is an
-# f-string (``{{`` -> ``{``) and whose second half is a plain literal, so its ``}}`` stayed two
-# braces and the sheet closed one brace too many. It repeated because ``rescale_fonts`` rewrites
-# every stylesheet carrying a ``font-size:`` on each resize, dropping Qt's per-object parse cache.
-#
-# Asserted over the WHOLE WINDOW rather than over that one string, because the failure is a class
-# (Python brace-escaping meeting Qt's grammar) and the only honest question is whether anything in
-# a built window fails to parse.
+# vispy installs a process-wide Qt message handler, so a stylesheet Qt's CSS parser rejects on
+# ANY widget surfaces as a vispy log warning. Checked over the whole window because the failure
+# is a class of bug (Python brace-escaping vs. Qt's grammar), not one string.
 
 def _qt_parse_failures(qapp, build, resizes=((1400, 900), (900, 700), (1600, 1000))):
     """Build a window, resize it, and collect Qt's "could not parse" complaints."""
@@ -272,7 +212,7 @@ def test_no_widget_in_the_plate_window_has_an_unparseable_stylesheet(qapp):
 
 
 def test_the_log_panel_toggle_closes_its_qss_block_exactly_once(qapp):
-    """The specific brace bug, named. ``}}`` in a NON-f-string half of a split literal."""
+    """The specific brace bug: ``}}`` in the non-f-string half of a split literal."""
     from squidxplorer._logpanel import LogPanel
 
     panel = LogPanel()

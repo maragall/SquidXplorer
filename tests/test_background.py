@@ -1,13 +1,5 @@
-"""IMA-224 background subtraction — numerical property tests + the LAYER contract.
-
-Julio's constraint, and the reason this file is longer than a "does it run" test: background
-subtraction is a **layer**, not a destructive edit. "Each transform is a layer, something like
-CellProfiler does this." So there are two families of test here:
-
-  1. it must actually REMOVE a known added background (the numerical property), and
-  2. the raw must remain RECOVERABLE — the source planes are never mutated, the background is
-     an addressable artefact of its own, and ``raw == corrected + background`` exactly.
-"""
+"""Background subtraction: the numerical property (it removes a known background) and the layer
+contract (raw stays recoverable, never mutated in place)."""
 
 from __future__ import annotations
 
@@ -31,24 +23,17 @@ from squidxplorer.reader import open_reader
 
 pytest.importorskip("scipy.ndimage")
 
-# Julio's bgsub (the 'sep' estimator, IMA-247) is an OPTIONAL package, not a dependency, so a clean
-# install has no `bgsub`. test_sep_method_is_julios_bgsub_implementation_not_a_reimplementation
-# already guards itself with importorskip("bgsub.core") -- and is the one sep test that did NOT
-# fail on CI. The sep PARAMETRISATIONS and the two dedicated sep tests below never got the same
-# guard, so on every runner they failed with ModuleNotFoundError instead of skipping. Same
-# reasoning as the tilefusion guard in tests/test_stitch.py.
-#
-# Stated plainly: THE SEP ESTIMATOR IS NOT COVERED IN CI. A skip is not a pass. rolling_ball and
-# gaussian, which are the default and the one that ships, keep running everywhere.
+# bgsub (the 'sep' estimator) is an optional package: skip sep tests when it's not installed
+# rather than failing with ModuleNotFoundError. The sep path is therefore not covered in CI;
+# rolling_ball and gaussian (the default and the one that ships) run everywhere.
 _NEEDS_BGSUB = pytest.mark.skipif(
     importlib.util.find_spec("bgsub") is None,
     reason="bgsub (Julio's sep estimator) not installed: the sep path is UNTESTED here, not passing")
-#: Use in place of the bare "sep" string so the parametrised cases skip rather than error.
 _SEP = pytest.param("sep", marks=_NEEDS_BGSUB)
 
 
 def _foreground(size: int = 128, seed: int = 1) -> np.ndarray:
-    """Sparse bright puncta on a true-zero background — so any nonzero floor in the corrected
+    """Sparse bright puncta on a true-zero background, so any nonzero floor in the corrected
     image is measurable leftover background, not sample."""
     rng = np.random.default_rng(seed)
     img = np.zeros((size, size), dtype=np.float32)
@@ -58,22 +43,16 @@ def _foreground(size: int = 128, seed: int = 1) -> np.ndarray:
 
 
 def _known_background(size: int = 128, amplitude: float = 600.0, pedestal: float = 200.0):
-    """A smooth corner-to-corner dome: the shape stray light and out-of-focus haze actually
-    make, and something a single scalar offset provably cannot remove."""
+    """A smooth corner-to-corner dome, the shape stray light and haze actually make — something
+    a single scalar offset provably cannot remove."""
     yy, xx = np.mgrid[0:size, 0:size] / (size - 1)
     return (pedestal + amplitude * np.exp(-((yy - 0.2) ** 2 + (xx - 0.8) ** 2) / 0.5)).astype(np.float32)
 
 
-# --- the core numerical property: a KNOWN added background must come off ------------------
-
 @pytest.mark.parametrize("method", ["rolling_ball", "gaussian", _SEP])
 def test_removes_the_structure_of_a_known_added_background(method):
-    """The estimate must reproduce the SHAPE of the planted dome, and subtracting it must
-    flatten the empty field.
-
-    Measured against shape, not against absolute level, because a constant offset in the
-    estimate is not an error here — see ``test_rolling_ball_bias_is_conservative``. What would
-    be an error is leaving the dome's *structure* behind, and that is what is asserted."""
+    """The estimate must reproduce the SHAPE of the planted dome; a constant offset is not an
+    error (see test_rolling_ball_bias_is_conservative), but leaving the structure behind is."""
     size = 128
     fg, bg = _foreground(size), _known_background(size)
     raw = (fg + bg).astype(np.uint16)
@@ -86,8 +65,7 @@ def test_removes_the_structure_of_a_known_added_background(method):
     shape_err = float(np.abs((estimated - estimated.mean()) - (bg - bg.mean())).mean()) / span
     assert shape_err < 0.15, f"{method}: estimate's SHAPE is off by {shape_err:.1%} of the span"
 
-    # and the corrected image must be flat where there is no sample: the dome's spread must be
-    # gone, not merely reduced.
+    # the corrected image must be flat where there is no sample, not merely improved.
     empty = fg == 0
     residual_spread = float(np.percentile(corrected[empty], 90) - np.percentile(corrected[empty], 10))
     assert residual_spread < span * 0.35, (
@@ -96,10 +74,8 @@ def test_removes_the_structure_of_a_known_added_background(method):
 
 
 def test_rolling_ball_bias_is_conservative_and_measured():
-    """Sternberg's ball rolls UNDER the surface, so its estimate is systematically LOW by
-    roughly the ball's sagitta — it never subtracts more signal than is there. That is a
-    property of the algorithm (ImageJ behaves the same way), not a bug, and it is pinned here
-    with a number so a future change that flips the sign cannot pass silently."""
+    """The rolling-ball estimate is systematically LOW (it rolls under the surface), never
+    subtracting more signal than is there; pinned with a number so a sign flip can't pass silently."""
     size = 128
     fg, bg = _foreground(size), _known_background(size)
     raw = (fg + bg).astype(np.uint16)
@@ -113,8 +89,8 @@ def test_rolling_ball_bias_is_conservative_and_measured():
 
 @pytest.mark.parametrize("method", ["rolling_ball", "gaussian", _SEP])
 def test_a_gradient_background_is_flattened_across_the_field(method):
-    """A single scalar offset cannot do this: with a corner-to-corner ramp, the bright corner
-    and the dark corner must end up at the SAME level after subtraction."""
+    """A single scalar offset cannot do this: bright corner and dark corner must end up at the
+    same level after subtraction."""
     size = 128
     yy, xx = np.mgrid[0:size, 0:size].astype(np.float32)
     ramp = 100.0 + 8.0 * (yy + xx)
@@ -133,8 +109,8 @@ def test_a_gradient_background_is_flattened_across_the_field(method):
 
 @pytest.mark.parametrize("method", ["rolling_ball", "gaussian", _SEP])
 def test_foreground_puncta_survive_subtraction(method):
-    """Removing the background must not eat the sample: a background estimator with too large
-    an effect would flatten the puncta too, which is the failure mode that matters clinically."""
+    """Removing the background must not eat the sample: too large an effect would flatten the
+    puncta too."""
     size = 128
     fg, bg = _foreground(size), _known_background(size)
     raw = (fg + bg).astype(np.uint16)
@@ -150,11 +126,9 @@ def test_a_flat_image_has_a_flat_background_and_subtracts_to_zero():
     assert subtract_background(flat, BackgroundParams(radius_px=15)).max() < 40
 
 
-# --- THE LAYER CONTRACT: the raw stays recoverable ----------------------------------------
-
 def test_the_input_plane_is_never_mutated():
-    """The most basic sense in which this is not a destructive edit: the caller's buffer — the
-    array the reader just handed us, backed by the raw TIFF — is untouched."""
+    """The caller's buffer, backed by the raw TIFF, must be untouched — this is not a
+    destructive edit."""
     raw = (_foreground(64) + _known_background(64)).astype(np.uint16)
     before = raw.copy()
     subtract_background(raw, BackgroundParams(radius_px=15))
@@ -165,13 +139,8 @@ def test_the_input_plane_is_never_mutated():
 @pytest.mark.parametrize("method", ["rolling_ball", "gaussian", _SEP])
 @pytest.mark.parametrize("dtype", [np.uint16, np.uint8])
 def test_raw_is_exactly_recoverable_wherever_the_result_did_not_clip_for_every_method(dtype, method):
-    """Property 3 of the layer contract, held for EVERY estimator including Julio's sep.
-
-    ``restore()`` must give the raw back exactly (``array_equal``, no tolerance) wherever the
-    subtraction did not clip. This is what keeps 'background subtraction is a layer' true no
-    matter which background was subtracted — the invertibility comes from the additive
-    composition and the rounding cast, not from the choice of estimator.
-    """
+    """restore() must give the raw back exactly wherever the subtraction did not clip, for every
+    estimator including sep."""
     scale = 255 / 4000 if dtype is np.uint8 else 1.0
     raw = ((_foreground(96) + _known_background(96)) * scale).astype(dtype)
     params = BackgroundParams(method=method, radius_px=20)
@@ -186,15 +155,8 @@ def test_raw_is_exactly_recoverable_wherever_the_result_did_not_clip_for_every_m
 
 @pytest.mark.parametrize("dtype", [np.uint16, np.uint8])
 def test_raw_is_exactly_recoverable_wherever_the_result_did_not_clip(dtype):
-    """The layer is ADDITIVE and its operand is addressable, so the composition is INVERTIBLE:
-    ``raw == corrected + background`` exactly — ``array_equal``, no tolerance — on the
-    acquisition dtypes (uint8/uint16). This is the mechanical form of "the raw is preserved".
-
-    It works because the integer cast ROUNDS: the residual of ``round(raw - bg)`` is under half
-    a count, so adding ``bg`` back and rounding lands on ``raw`` itself. Truncating instead
-    (plain ``astype``) would lose the raw by one count everywhere, which is precisely the kind
-    of quiet destructive edit this operator must not be.
-    """
+    """raw == corrected + background exactly, because the integer cast rounds rather than
+    truncates."""
     scale = 255 / 4000 if dtype is np.uint8 else 1.0
     raw = ((_foreground(96) + _known_background(96)) * scale).astype(dtype)
     params = BackgroundParams(radius_px=20)
@@ -207,9 +169,8 @@ def test_raw_is_exactly_recoverable_wherever_the_result_did_not_clip(dtype):
 
 
 def test_integer_clipping_is_reported_not_hidden():
-    """Clipping at the dtype floor is the ONE place this transform loses information — where
-    the background estimate exceeds the raw value. The operator must be able to say how much,
-    rather than presenting a lossy transform as a lossless one."""
+    """Clipping at the dtype floor is the one place this transform loses information; the
+    operator must be able to say how much, not present a lossy transform as a lossless one."""
     raw = (_foreground(96) + _known_background(96)).astype(np.uint16)
     params = BackgroundParams(radius_px=20)
     bg = estimate_background(raw, params)
@@ -218,26 +179,18 @@ def test_integer_clipping_is_reported_not_hidden():
     measured = float(np.mean(np.rint(raw.astype(np.float32) - bg) < 0))
     assert reported == pytest.approx(measured)
 
-    # rolling_ball rolls UNDER the surface, so its estimate never exceeds the raw and NOTHING
-    # clips: with the default method the layer is fully lossless, and it can say so.
+    # rolling_ball never exceeds the raw, so nothing clips.
     assert reported == 0.0
 
-    # the gaussian method has a positive bias (bright objects leak into their own background),
-    # so it DOES clip — and the operator reports a nonzero fraction rather than hiding it.
+    # gaussian has a positive bias, so it does clip.
     leaky = BackgroundParams(method="gaussian", radius_px=20)
     assert clipped_fraction(raw, leaky) > 0.0
     assert clipped_fraction(raw.astype(np.float32), leaky) == 0.0   # float has no floor to clip at
 
 
-# --- IMA-247: Julio's sep estimator is wired in, and is deliberately not the default --------
-
 def test_sep_method_is_julios_bgsub_implementation_not_a_reimplementation():
-    """The 'sep' method must be a call INTO bgsub.core, not a local copy of it.
-
-    Pinned by substitution: monkeypatch bgsub.core._run_sep and assert our estimate changes.
-    If this module ever grew its own box-estimator, this test would keep passing while the
-    reuse silently disappeared — so it also asserts the sentinel value flows through.
-    """
+    """The 'sep' method must call INTO bgsub.core, not reimplement it — pinned by monkeypatching
+    bgsub.core._run_sep and asserting the sentinel value flows through."""
     bgsub_core = pytest.importorskip("bgsub.core")
     raw = (_foreground(96) + _known_background(96)).astype(np.uint16)
     params = BackgroundParams(method="sep", radius_px=20)
@@ -250,7 +203,7 @@ def test_sep_method_is_julios_bgsub_implementation_not_a_reimplementation():
     finally:
         bgsub_core._run_sep = real
 
-    # and with his real implementation restored it produces a sane, plane-shaped estimate
+    # with the real implementation restored, the estimate is sane and plane-shaped.
     bg = estimate_background(raw, params)
     assert bg.shape == raw.shape and bg.dtype == np.float32
     assert 0 < float(bg.mean()) < float(raw.max())
@@ -258,13 +211,8 @@ def test_sep_method_is_julios_bgsub_implementation_not_a_reimplementation():
 
 @_NEEDS_BGSUB
 def test_sep_is_not_the_default_because_it_clips_far_more_of_the_frame():
-    """The measured reason sep stays opt-in.
-
-    sep is a CENTRAL background estimator (sigma-clipped box mean), so roughly half a plane
-    sits below its estimate and clips at zero on an unsigned dtype. rolling_ball is a lower
-    ENVELOPE and clips almost nothing. Clipping is the one place this layer destroys
-    information, so the default must be the estimator that destroys least.
-    """
+    """sep is a central estimator that clips roughly half the plane; rolling_ball is a lower
+    envelope that clips almost nothing, which is why it stays the default."""
     raw = (_foreground(96) + _known_background(96)).astype(np.uint16)
 
     assert BackgroundParams().method == "rolling_ball", "the default estimator changed"
@@ -282,13 +230,8 @@ def test_sep_is_not_the_default_because_it_clips_far_more_of_the_frame():
 
 @_NEEDS_BGSUB
 def test_sep_never_writes_to_disk_and_never_mutates_the_caller(tmp_path):
-    """Property 1 of the layer contract for the sep path specifically.
-
-    bgsub ships a BackgroundSubtractor that WRITES corrected TIFFs into an output directory.
-    That orchestrator is deliberately not used: only the pure array-level estimator is called.
-    Asserted by running the operator with the CWD inside an empty directory and checking that
-    nothing appeared, and that the input plane is byte-identical afterwards.
-    """
+    """bgsub's BackgroundSubtractor writes files to disk; only the pure array-level estimator is
+    used here, never that orchestrator."""
     import os
 
     raw = (_foreground(64) + _known_background(64)).astype(np.uint16)
@@ -309,8 +252,8 @@ def test_sep_never_writes_to_disk_and_never_mutates_the_caller(tmp_path):
 
 
 def test_a_missing_bgsub_fails_loud_and_never_silently_falls_back_to_rolling_ball():
-    """No silent substitution between estimators: they disagree by design (see the clipping
-    numbers above), so a missing dependency must be an error, not a different algorithm."""
+    """Estimators disagree by design, so a missing dependency must be an error, not a silent
+    substitution of a different algorithm."""
     import builtins
 
     real_import = builtins.__import__
@@ -330,8 +273,8 @@ def test_a_missing_bgsub_fails_loud_and_never_silently_falls_back_to_rolling_bal
 
 
 def test_a_bgsub_layer_can_be_toggled_off_to_return_to_raw():
-    """The OperationStack half of 'it's a layer': the plate falls back to the raw base the
-    moment the layer is disabled or removed — no re-read, no undo stack, no inverse transform."""
+    """The plate falls back to the raw base the moment the layer is disabled or removed — no
+    re-read, no undo stack, no inverse transform."""
     stack = OperationStack()
     stack.add("bgsub@tab1", "background subtraction")
     assert stack.top_enabled().key == "bgsub@tab1"
@@ -346,8 +289,8 @@ def test_a_bgsub_layer_can_be_toggled_off_to_return_to_raw():
 
 
 def test_the_reader_is_read_only_so_the_source_tiffs_survive_a_run(squid_dataset):
-    """End-to-end non-destructiveness: run the operator over a real acquisition and prove the
-    on-disk raw is byte-identical afterwards."""
+    """Run the operator over a real acquisition and prove the on-disk raw is byte-identical
+    afterwards."""
     root, arrays = squid_dataset
     reader = open_reader(root)
     tiffs = sorted((root / "0").glob("*.tiff"))
@@ -359,8 +302,6 @@ def test_the_reader_is_read_only_so_the_source_tiffs_survive_a_run(squid_dataset
     key = ("B2", 0, 0, reader.metadata["channels"][0]["name"])
     assert np.array_equal(reader.read("B2", 0, key[3], 0, 0), arrays[key])
 
-
-# --- registry / engine seam ---------------------------------------------------------------
 
 def test_bgsub_is_registered_as_a_plane_op():
     assert "bgsub" in available_projectors()

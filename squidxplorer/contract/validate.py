@@ -1,30 +1,9 @@
 """Check a plate against ``docs/plate-contract.md``, and say which half it broke.
 
-Gap 5 of the three-viewers review. The shape is record-zstack-viewer's, and the shape IS the
-point:
-
-    ERRORS   are violations of the STABLE section. The store is not the thing it claims to be, and
-             a reader that proceeds renders something plausible and wrong.
-    WARNINGS are absences in the OPTIONAL section. Every one of them has a named fallback that
-             already exists in code, so the store is READABLE and merely reads for less. A missing
-             ``translation`` is a warning; a missing level 0 is an error. Collapsing those two into
-             one severity is how a validator becomes noise that nobody runs.
-
-This module was ``tests/ngff_check.py``, which validated our own output against OME's official
-``ome-zarr-models`` pydantic schema and could therefore only ever be pointed at a plate we had
-just written. It is promoted out of ``tests/`` so that a USER can point it at a plate they were
-handed:
-
-    python -m squidxplorer.contract.validate /path/to/plate.ome.zarr
-
-``ome-zarr-models`` stays a ``[test]`` extra rather than becoming a runtime dependency. When it is
-absent the schema pass is skipped and the structural checks below still run, which is the whole
-reason they are written out longhand here instead of delegating: the structural half is the half
-that encodes OUR contract, and OME's schema does not know about it. The skip is reported as a
-warning rather than swallowed, because "validated" and "half-validated" must not look alike.
-
-Everything checked here is stated in ``docs/plate-contract.md``. If the two ever disagree, the
-document is the contract and this file is the bug.
+Errors are violations of the stable section (the store isn't what it claims to be); warnings
+are absences in the optional section, each with a named fallback already in code. Everything
+checked here is stated in ``docs/plate-contract.md``; if the two disagree, the doc is the
+contract and this file is the bug.
 """
 
 from __future__ import annotations
@@ -42,19 +21,14 @@ from squidxplorer.contract.version import (
     read_contract_version,
 )
 
-#: The stable axis order. Squid's canonical order and the one every array in this package is
-#: written and read in. A store that reorders these is not readable by this build at all.
+#: The stable TCZYX axis order; a store that reorders these is unreadable by this build.
 STABLE_AXES = ["t", "c", "z", "y", "x"]
 
-#: Written by ``_output`` from the first byte of a plate write to the last. Its presence means the
-#: run did not finish, so the store may be missing wells that the plate metadata promises. IMPORTED,
-#: never re-spelled: two copies of a filename are two different files the moment one is edited.
+#: Imported, not re-spelled, so the marker filename can't drift between copies.
 from squidxplorer._output import INCOMPLETE_MARKER as _INCOMPLETE_MARKER
 from squidxplorer._output import is_incomplete as _is_incomplete
 
-#: UDUNITS-2 length units the reader can convert to micrometres (``reader._UNIT_TO_UM``). A unit
-#: outside this set cannot be converted, so a physical value taken from the store would reach a
-#: ``_um`` key in the wrong unit, which is the 1000x class of bug.
+#: Units the reader can convert to micrometres; anything else risks a 1000x unit bug.
 _KNOWN_UNITS = {
     "angstrom", "nanometer", "micrometer", "micron", "millimeter", "centimeter", "meter",
 }
@@ -85,12 +59,8 @@ class ValidationReport:
 
 
 def _ome_attrs(group_dir: Path) -> dict:
-    """The OME payload of a group, via the reader's own normaliser. Imported late on purpose.
-
-    ``reader`` imports ``contract.version`` (it compares the stamp), so importing it at module
-    scope here would close a cycle. It is also the heavier module of the two, and the writer path
-    pulls ``contract`` on every plate write while never needing this function.
-    """
+    """The OME payload of a group, via the reader's own normaliser. Imported late to avoid a
+    cycle: ``reader`` imports ``contract.version``."""
     from squidxplorer.reader import _group_attrs
 
     return _group_attrs(group_dir)
@@ -154,10 +124,7 @@ def _check_field(base: Path, wellpath: str, fov: str, report: ValidationReport, 
 
     if shapes:
         (_, first) = shapes[0]
-        # The t axis. The format carries it and the writer writes every timepoint; most of the
-        # READ side collapses to t=0. Announcing that is the whole reason this is checked here:
-        # a multi-timepoint plate currently renders as its first frame with no error anywhere,
-        # and every fixture in the suite is Nt=1, so nothing else catches it.
+        # Multi-timepoint plates render as t=0 with no error elsewhere; flag it here.
         if len(first) == 5 and first[0] > 1:
             seen["n_t"] = max(seen["n_t"], int(first[0]))
         for i, shape in shapes[1:]:
@@ -189,12 +156,7 @@ def _check_field(base: Path, wellpath: str, fov: str, report: ValidationReport, 
 
 
 def _schema_errors(plate_dir: Path, plate: dict) -> Optional[list]:
-    """OME's own pydantic verdict, or ``None`` when ``ome-zarr-models`` is not installed.
-
-    This is the part that is worth borrowing spec code for: is our metadata JSON actually valid
-    against the published v0.5 schema? The writer stays our lean tensorstore code; the schema
-    stays OME's.
-    """
+    """OME's own pydantic verdict, or ``None`` when ``ome-zarr-models`` is not installed."""
     try:
         from ome_zarr_models.v05 import image as I
         from ome_zarr_models.v05 import plate as P
@@ -215,7 +177,7 @@ def _schema_errors(plate_dir: Path, plate: dict) -> Optional[list]:
         rel = str(well.get("path", "")).strip("/")
         well_dir = plate_dir / rel
         if not (well_dir / "zarr.json").exists():
-            continue                             # already reported as a structural error
+            continue  # already reported as a structural error
         try:
             well_ome = _ome(well_dir)
             W.WellMeta.model_validate(well_ome["well"])
@@ -248,8 +210,7 @@ def validate_plate(path) -> ValidationReport:
     try:
         verdict = compare_contract_version(declared)
     except PlateContractError as e:
-        # The validator REPORTS what the reader RAISES. Same policy, one place (version.py), two
-        # deliveries: a reader must stop, a validator must finish and list everything it found.
+        # The validator reports what a reader would raise, but keeps going.
         report.errors.append(str(e))
         verdict = "refused"
     if verdict == "absent":
@@ -344,11 +305,7 @@ def validate_plate(path) -> ValidationReport:
 
 def assert_valid_ngff_plate(plate_dir) -> None:
     """Raise unless *plate_dir* satisfies the stable contract and the OME v0.5 schema.
-
-    The assertion form ``tests/`` has always used. It is deliberately strict about ERRORS only:
-    a test plate legitimately has no coordinates.csv and legitimately writes single-level fields,
-    and a validator that failed on those would be a validator every test had to suppress.
-    """
+    Strict about errors only; warnings (e.g. no coordinates.csv) do not raise."""
     report = validate_plate(plate_dir)
     if not report.ok:
         raise AssertionError(report.summary())

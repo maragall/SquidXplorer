@@ -1,62 +1,19 @@
-"""Per-operator benchmark harness (IMA-233): speed, footprint, quality — on real data.
+"""Per-operator benchmark harness: speed, footprint, quality — on real data.
 
-This is an **adapter**, not a profiler
-=====================================
-Julio's profiling suite already exists, at ``profiling/`` in the stitcher repo, and it is
-the one that produced the numbers in ``_stitch.py``'s docstring (project 589.5 ms,
-register 105.6 ms, optimize 0.2 ms, fuse 878.4 ms). Rebuilding it here would produce a
-second, worse set of numbers — that mistake has already been made once on this ticket.
-So every measurement primitive below is IMPORTED:
+An **adapter**, not a profiler: every measurement primitive (StageTimer, RSSSampler,
+AllocationSampler, compute_ranking, the CSV writers) is imported from Julio's profiling
+suite (``profiling/`` in the stitcher repo) rather than reimplemented. What is new here is
+the per-operator driver over squidxplorer's registry, the quality metrics, and the storage
+guard.
 
-===============================================  ======================================
-from Julio's suite                               used here for
-===============================================  ======================================
-``profiling.stages.StageTimer.stage(name)``      the per-phase spans (``register``,
-                                                 ``fuse``, …) — the same object
-                                                 ``squidxplorer.stitch_region(timer=)``
-                                                 already accepts
-``profiling.stages.assign_stages(samples,        labelling every RSS sample with the
-spans)``                                         phase it fell inside → peak RSS *per
-                                                 stage*, not just per run
-``profiling.sampler.RSSSampler`` / ``Sample``    the resident-set time series
-``profiling.attribution.AllocationSampler``      tracemalloc snapshots attributed to the
-``profiling.attribution.AllocRecord``            enclosing Python function
-``profiling.ranking.compute_ranking``            per-function peak MB and integrated
-                                                 MB·seconds, ranked
-``profiling.harness._collect``                   run-under-both-samplers with guaranteed
-                                                 teardown; returns partial results even
-                                                 when the run raises
-``profiling.record.write_timeline_csv`` /        the CSV shapes, unchanged, so a
-``write_functions_csv``                          squidxplorer run and a tilefusion run plot
-                                                 with the same tooling
-===============================================  ======================================
+Storage/memory guards reuse ``squidxplorer._output.estimate_write_bytes`` /
+``check_disk_space``: a run reports what persisting its output would cost, and refuses to
+start if it does not fit with headroom.
 
-What is genuinely NEW here is the *subject*: ``profiling.harness.profile_dataset`` drives
-one ``TileFusion.run()`` — a file-to-file pipeline over a whole dataset. squidxplorer has a
-registry of **operators** (``mip``, ``bgsub``, ``decon``, ``flatfield``, ``reference``,
-and the region operators ``stitch`` / ``coordinate``), each of which needs the same three
-numbers measured the same way so they can be put in one table. That per-operator driver,
-the quality metrics, and the storage guard are this module.
-
-Storage guard
-=============
-A benchmark that fills the disk is exactly the failure this repo already has a guard for,
-so the guard is REUSED rather than re-invented: :func:`squidxplorer._output.estimate_write_bytes`
-(overlap-aware — ``region_operator=True`` sizes a fused mosaic from the real stage
-positions instead of counting whole frames) and :func:`squidxplorer._output.check_disk_space`.
-Every run reports what persisting its output *would* cost; ``--persist`` runs refuse to
-start unless it fits with headroom. Memory is guarded on the same principle: a fused 4 ch
-mosaic of a 27-FOV 10x well is ~0.9 GB, so the expected resident size is checked against
-free RAM before the run rather than discovered by the OOM killer.
-
-Reading the numbers
-===================
-``read_ms`` is measured by ACCUMULATION on ``reader.read``, not by a StageTimer span, and
-that is deliberate: ``project_well`` hands the reducer a *generator*, so the reads happen
-lazily **inside** the operator call. Spans would nest, and a nested span double-counts.
-The stage spans below are only ever taken where the phases are genuinely sequential —
-which is why the FOV operators report ``open``/``stream`` and only the region operators
-report the four-phase ``project``/``register``/``optimize``/``fuse`` breakdown.
+``read_ms`` is measured by accumulation on ``reader.read``, not a StageTimer span, because
+``project_well`` hands the reducer a generator: the reads happen lazily inside the operator
+call, and a span there would nest and double-count. Only region operators get the four-phase
+project/register/optimize/fuse breakdown; FOV operators report open/stream.
 """
 
 from __future__ import annotations
@@ -81,9 +38,7 @@ from squidxplorer._engine import available_region_operators, is_region_operator
 _MB = 1024.0 ** 2
 _GB = 1024.0 ** 3
 
-# Fraction of currently-free RAM a single benchmark run may be expected to occupy. Above
-# this the run is refused rather than started: the point of the harness is measurement,
-# and a swapping machine measures nothing except swap.
+# Fraction of free RAM a run may occupy before it is refused rather than started.
 _RAM_BUDGET = 0.5
 
 
@@ -91,17 +46,8 @@ class BenchmarkGuardError(RuntimeError):
     """A run was refused before it started because it would not fit in RAM or on disk."""
 
 
-# --------------------------------------------------------------------------------------
-# Julio's suite, imported. One import site, one actionable error.
-# --------------------------------------------------------------------------------------
-
 def _profiling():
-    """Import Julio's profiling package, or explain precisely what to do about it.
-
-    It is a developer tool in the stitcher repo, not a squidxplorer runtime dependency — this
-    module is the only thing in squidxplorer that needs it, and only when you actually run a
-    benchmark.
-    """
+    """Import Julio's profiling package (dev tool, not a squidxplorer runtime dependency)."""
     try:
         from profiling import attribution, harness, ranking, record, sampler, stages
     except ImportError as exc:  # pragma: no cover - environment-dependent
@@ -119,17 +65,9 @@ def _profiling():
 # --------------------------------------------------------------------------------------
 
 def relative_gradient_energy(plane: np.ndarray) -> float:
-    """Mean absolute gradient divided by mean intensity — "how much structure per photon".
-
-    Normalising by the mean is what makes the number comparable ACROSS operators: a
-    background subtraction lowers the mean, so raw gradient energy would rise for a reason
-    that has nothing to do with sharpness. Dimensionless; higher = crisper.
-
-    Not Tenengrad (squared Sobel): squaring is dominated by the few brightest edges, and
-    on fluorescence that means it tracks the hottest speck in the field rather than the
-    tissue. The absolute first difference is the robust choice and is what the seam
-    analysis in ``tools/stitch_demo.py`` already uses.
-    """
+    """Mean absolute gradient / mean intensity — "structure per photon", comparable across
+    operators whose mean shifts (e.g. bgsub). Absolute diff, not squared Sobel: squaring is
+    dominated by the brightest speck rather than tissue structure."""
     a = np.asarray(plane, dtype=np.float32)
     if a.size == 0:
         return float("nan")
@@ -142,8 +80,8 @@ def relative_gradient_energy(plane: np.ndarray) -> float:
 
 
 def _abs_gradient(plane: np.ndarray) -> float:
-    """Mean absolute gradient, NOT divided by the mean. The companion to
-    :func:`relative_gradient_energy` — see ``sharp_abs`` in :func:`_quality`."""
+    """Mean absolute gradient, NOT divided by the mean — companion to
+    :func:`relative_gradient_energy` (``sharp_abs`` in :func:`_quality`)."""
     a = np.asarray(plane, dtype=np.float32)
     if a.size == 0:
         return float("nan")
@@ -154,11 +92,7 @@ def _abs_gradient(plane: np.ndarray) -> float:
 
 def block_uniformity(plane: np.ndarray, blocks: int = 8) -> float:
     """Illumination flatness in [0, 1]: ``1 - std/mean`` of a ``blocks x blocks`` mean field.
-
-    Coarse block means deliberately look past sample structure at the *slowly varying*
-    component — which is what vignetting and uneven illumination are, and therefore what
-    the flat-field operator is supposed to remove. 1.0 = perfectly flat.
-    """
+    1.0 = perfectly flat."""
     a = np.asarray(plane, dtype=np.float32)
     if a.ndim != 2 or min(a.shape) < blocks:
         return float("nan")
@@ -173,17 +107,12 @@ def block_uniformity(plane: np.ndarray, blocks: int = 8) -> float:
 def overlap_ncc(tile_i: np.ndarray, tile_j: np.ndarray, dy: float, dx: float) -> float:
     """How well two FOVs agree in their overlap when placed *dy, dx* apart. NCC in [-1, 1].
 
-    THE seam metric, and the one number that means what it says. The obvious alternative,
-    gradient energy in the seam band, is misleading here: sub-pixel placement bilinearly
-    resamples the tiles, which smooths sensor noise and *lowers* gradient energy even as
-    the seam gets strictly better. Measured on the FOV 10|15 seam of the 10x tissue
-    acquisition: gradient energy FELL 137.3 -> 116.5 while the overlap NCC ROSE 0.666 ->
-    0.759. A metric that moves the wrong way on a correct result is not a metric.
+    THE seam metric: gradient energy in the seam band is misleading here because sub-pixel
+    placement bilinearly resamples the tiles, smoothing noise and lowering gradient energy
+    even as the seam gets better (measured: 137.3 -> 116.5 while NCC rose 0.666 -> 0.759).
 
-    Bounds come from ``tilefusion.registration.compute_pair_bounds``, so the compared
-    rectangle is identical to the one registration itself scored. Imported lazily:
-    ``tilefusion``'s package ``__init__`` is heavy (numba/GPU/basicpy) and squidxplorer's
-    reader path must never pay for it.
+    Bounds come from ``tilefusion.registration.compute_pair_bounds``, imported lazily since
+    ``tilefusion``'s package init is heavy and squidxplorer's reader path must not pay for it.
     """
     from tilefusion.registration import compute_pair_bounds
 
@@ -201,8 +130,7 @@ def overlap_ncc(tile_i: np.ndarray, tile_j: np.ndarray, dy: float, dx: float) ->
     return float(np.corrcoef(a[:n], b[:n])[0, 1])
 
 
-# What each operator's quality columns MEAN, and which direction is good. Printed with the
-# table: a number whose desired direction the reader has to guess is not a measurement.
+# What each operator's quality columns mean and which direction is good.
 QUALITY_NOTES = {
     "mip": "read sharp_abs vs the middle z-plane — and see the caveat: it is NOT "
            "expected to exceed 1 on a laser-AF stack",
@@ -219,20 +147,17 @@ QUALITY_NOTES = {
     "coordinate": "the unregistered control for 'stitch'; its seam_ncc is the baseline",
 }
 
-# Where a number does NOT mean what its name suggests. Printed under the table: an
-# unexplained counter-intuitive number gets explained away by whoever reads it next.
+# Where a number does not mean what its name suggests.
 QUALITY_CAVEATS = {
-    "mip": "sharp_abs < 1 is the EXPECTED result here, not a defect, and the first draft "
-           "of this note wrongly predicted > 1. The 10x acquisition is laser-autofocused, "
-           "so its middle z-plane is already the in-focus one; max-projection then adds "
-           "the out-of-focus planes' haze and gradient energy falls (measured 0.68). "
-           "MIP's value is COVERAGE — every in-focus feature, wherever in z it sits, in "
-           "one plane — and on an AF'd stack sharp_abs is the price of that, quantified.",
-    "bgsub": "flat_gain < 1 here is expected, not a regression. block_uniformity is "
-             "1 - std/mean of a coarse mean field; subtracting the background collapses "
-             "the mean, so the SAME residual variation is a larger fraction of it. The "
-             "operator's success shows up as the large sharp_gain (structure per photon) "
-             "and a small clipped fraction.",
+    "mip": "sharp_abs < 1 is EXPECTED here, not a defect. The 10x acquisition is "
+           "laser-autofocused, so its middle z-plane is already in focus; max-projection "
+           "then adds out-of-focus haze and gradient energy falls (measured 0.68). MIP's "
+           "value is coverage, and on an AF'd stack sharp_abs is the price of that.",
+    "bgsub": "flat_gain < 1 here is expected, not a regression: block_uniformity is "
+             "1 - std/mean of a coarse mean field, and subtracting the background "
+             "collapses the mean, making the same residual variation a larger fraction "
+             "of it. The operator's success shows up as sharp_gain and a small clipped "
+             "fraction.",
 }
 
 
@@ -251,21 +176,18 @@ class OperatorResult:
     n_fovs: Optional[int] = None
     channels: Optional[tuple] = None
 
-    # speed
     wall_ms: float = 0.0
     stage_ms: dict = field(default_factory=dict)
     read_ms: float = 0.0
     read_calls: int = 0
     read_mb: float = 0.0
 
-    # footprint
     baseline_rss_mb: float = 0.0
     peak_rss_mb: float = 0.0
     stage_peak_rss_mb: dict = field(default_factory=dict)
     integrated_mb_s: float = 0.0
     top_functions: tuple = ()
 
-    # output + cost
     wells: int = 0
     out_shape: tuple = ()
     out_megapixels: float = 0.0
@@ -281,7 +203,7 @@ class OperatorResult:
 
     @property
     def compute_ms(self) -> float:
-        """Wall time not spent inside ``reader.read``. Negative is impossible; clamped at 0."""
+        """Wall time not spent inside ``reader.read``; clamped at 0."""
         return max(0.0, self.wall_ms - self.read_ms)
 
     def as_row(self) -> dict:
@@ -314,12 +236,9 @@ def _fmt(v) -> str:
 # --------------------------------------------------------------------------------------
 
 class _ReadRecorder:
-    """Accumulate time and bytes spent inside ``reader.read``.
-
-    Accumulation, not StageTimer spans — see this module's docstring: the reads happen
-    lazily inside the reducer, so a span around them would nest inside the compute span
-    and double-count. Locked because ``project_plate`` fans out over a thread pool.
-    """
+    """Accumulate time and bytes spent inside ``reader.read`` (not a StageTimer span — the
+    reads happen lazily inside the reducer, see module docstring). Locked because
+    ``project_plate`` fans out over a thread pool."""
 
     def __init__(self) -> None:
         self.lock = threading.Lock()
@@ -362,10 +281,9 @@ def expected_output_bytes(meta: dict, *, kind: str, regions: Sequence[str],
                           channels: Optional[Sequence] = None) -> int:
     """Bytes the harness expects to hold RESIDENT for one run's outputs.
 
-    This is the RAM question, and it is not the same as the disk question: a plane-op
-    keeps z at full depth (``bgsub`` on Nz=10 is ten times a MIP), while the disk estimate
-    is written post-projection. Reusing ``estimate_write_bytes`` here would understate the
-    plane-op case by exactly Nz, which is the term whose omission fills things up.
+    This is the RAM question, distinct from the disk question: a plane-op keeps z at full
+    depth (bgsub on Nz=10 is ten times a MIP), while the disk estimate is written
+    post-projection.
     """
     frame = meta.get("frame_shape")
     if not frame:
@@ -380,8 +298,7 @@ def expected_output_bytes(meta: dict, *, kind: str, regions: Sequence[str],
     if kind == "region":
         from squidxplorer._output import _region_mosaic_pixels
         px = _region_mosaic_pixels(meta, list(regions), (ny, nx))
-        # A region run holds ONE well's mosaic at a time (workers=1 by contract), so the
-        # per-well average is the resident figure, not the sum over wells.
+        # A region run holds ONE well's mosaic at a time (workers=1 by contract).
         px = px // max(1, len(regions))
     else:
         n_fields = sum(min(int(n_fovs), len(fovs_per_region.get(r, ())))
@@ -409,14 +326,8 @@ def guard_memory(expected_bytes: int, *, what: str, budget: float = _RAM_BUDGET)
 
 def persist_estimate(meta: dict, *, kind: str, regions: Sequence[str],
                      n_fovs: Optional[int]) -> int:
-    """What writing this operator's output as an OME-Zarr plate would cost, in bytes.
-
-    Straight through to :func:`squidxplorer._output.estimate_write_bytes` — the SAME estimator
-    the writer itself gates on, including ``region_operator=True``, which sizes a fused
-    mosaic from the real stage positions (overlap-aware) instead of counting whole frames.
-    A second, benchmark-local estimator would eventually disagree with the writer's, and
-    the writer's is the one that decides whether a real run is allowed to start.
-    """
+    """What writing this operator's output as an OME-Zarr plate would cost, in bytes —
+    the same estimator the writer itself gates on."""
     return estimate_write_bytes(meta, n_fovs=n_fovs, regions=list(regions),
                                 region_operator=(kind == "region"))
 
@@ -445,13 +356,8 @@ def _fov_runner(reader, operator: str, regions, n_fovs, workers, timer):
 
 
 def _region_runner(reader, operator: str, regions, n_fovs, channels, timer):
-    """Build the callable for a REGION operator run.
-
-    ``stitch_region`` accepts Julio's ``StageTimer`` directly (``timer=``), which is why
-    this path gets a real four-phase breakdown — project / register / optimize / fuse —
-    while the FOV path gets only open/stream. The stages are the operator's own, not
-    something this harness imposes on it.
-    """
+    """Build the callable for a REGION operator run: ``stitch_region`` accepts Julio's
+    ``StageTimer`` directly, which is why this path gets a real four-phase breakdown."""
     from squidxplorer import stitch_plate
 
     sink: list = []
@@ -467,10 +373,8 @@ def _region_runner(reader, operator: str, regions, n_fovs, channels, timer):
             reader, operator=operator, n_fovs=n_fovs, regions=list(regions),
             workers=1, timer=timer, **kwargs,
         ):
-            # `geometry` is one dict reused across wells, so snapshot it at the yield —
-            # which, at workers=1, is the moment it describes THIS well. That snapshot is
-            # what makes the seam metric measure the placement the operator actually
-            # solved, rather than the stage coordinates it started from.
+            # `geometry` is reused across wells; snapshot it at the yield (workers=1, so
+            # that is the moment it describes THIS well).
             sink.append((region, fov, image, dict(geometry)))
 
     return run, sink
@@ -506,11 +410,8 @@ def benchmark_operator(
 ) -> OperatorResult:
     """Measure ONE operator on a real acquisition: speed, footprint, quality, disk cost.
 
-    Runs at ``workers=1`` by default. That is not timidity: the read/compute split and the
-    per-stage RSS peaks are only interpretable when one well is in flight, and a
-    thread-count sweep is a different experiment from an operator comparison. Peak RSS
-    scales with ``workers`` by construction (``project_plate``'s bounded window), so a
-    many-worker number belongs in its own row, not mixed into this table.
+    Runs at ``workers=1`` by default: peak RSS scales with workers by construction, so a
+    many-worker number belongs in its own row, not mixed into an operator comparison.
     """
     stages_mod, sampler_mod, attribution_mod, ranking_mod, harness_mod, _record = _profiling()
 
@@ -529,7 +430,7 @@ def benchmark_operator(
         channels=tuple(channels) if channels else None,
     )
 
-    # --- guards, BEFORE anything is allocated ------------------------------------------
+    # guards, before anything is allocated
     result.persist_bytes = persist_estimate(meta, kind=kind, regions=regions, n_fovs=n_fovs)
     result.persist_fits = result.persist_bytes < max(0, free_bytes(".")) * (1 - 0.10)
     guard_memory(
@@ -553,8 +454,7 @@ def benchmark_operator(
 
     wall0 = time.perf_counter()
     with recorder.wrap(reader):
-        # Julio's harness._collect: RSSSampler + AllocationSampler with guaranteed teardown,
-        # returning partial results even if the run raises. Not re-implemented.
+        # Julio's harness._collect: RSSSampler + AllocationSampler, guaranteed teardown.
         profile = harness_mod._collect(run, t0, timer, rss_interval, alloc_interval)
     result.wall_ms = (time.perf_counter() - wall0) * 1000.0
     result.error = profile.error
@@ -588,13 +488,10 @@ def benchmark_operator(
 
 
 def _prepare(operator: str, reader, meta: dict, regions, n_fovs) -> None:
-    """Anything an operator needs INSTALLED before it can run, done outside the timing.
+    """Anything an operator needs installed before it can run, outside the timed window.
 
-    Only ``flatfield`` has one: it is selected by name, so it cannot take a profile
-    argument, and it fails loud when none is installed (an identity field would silently
-    do nothing while the UI said "flat-field applied"). Estimating the profile is a
-    one-off setup cost, not part of the per-plane operator cost the table compares, so it
-    happens here rather than inside the measured window.
+    Only ``flatfield`` has one: it is selected by name, cannot take a profile argument, and
+    fails loud when none is installed.
     """
     if operator != "flatfield":
         return
@@ -607,21 +504,13 @@ def _prepare(operator: str, reader, meta: dict, regions, n_fovs) -> None:
     fovs = list((meta.get("fovs_per_region") or {}).get(region, ()))[: (n_fovs or 3) or 3]
     if not fovs:
         return
-    # ONE PROFILE PER CHANNEL (2026-08-06). The operator is now specialised per channel by
-    # ``project_well`` and REFUSES a channel it has no measured field for, so installing one
-    # estimate for every channel is no longer expressible — and it was never right: it corrected
-    # 488/561/638 with 405's gain field (see squidxplorer._flatfield's module docstring). This runs
-    # the shipped estimator, once per channel, still outside the timed window.
+    # One profile per channel: the operator refuses a channel it has no measured field for.
     set_profiles(estimate_region_flatfield(reader, region, fovs, max_tiles=len(fovs)))
 
 
 def _quality(operator: str, kind: str, reader, meta: dict, sink, channels) -> dict:
-    """Operator-appropriate quality numbers, measured against a REAL baseline.
-
-    The baseline for a FOV operator is the same FOV's middle z-plane, read raw. It is the
-    honest comparator: it is what you would have looked at if you had not run the operator
-    at all.
-    """
+    """Operator-appropriate quality numbers, measured against a REAL baseline: for a FOV
+    operator, the same FOV's middle z-plane, read raw."""
     region, fov, image, geometry = sink[0]
     out = {}
     try:
@@ -637,14 +526,9 @@ def _quality(operator: str, kind: str, reader, meta: dict, sink, channels) -> di
         s_out, s_raw = relative_gradient_energy(plane), relative_gradient_energy(raw)
         f_out, f_raw = block_uniformity(plane), block_uniformity(raw)
         out["sharp_gain"] = s_out / s_raw if s_raw else float("nan")
-        # ...and the UNNORMALISED ratio too, because the normalisation is not neutral for
-        # every operator. A MIP takes the maximum over z, which lifts the mean (noise floor
-        # included) more than it lifts the edges — so `sharp_gain` reads 0.65 on the 10x
-        # tissue even though the MIP is plainly the sharper image. Normalising is still
-        # right for bgsub/flatfield, which deliberately MOVE the mean and would otherwise
-        # score a gain for that alone. Both are printed; the notes say which one is the
-        # operative one per operator, because picking one silently would be picking the
-        # flattering one.
+        # Also the UNNORMALISED ratio: normalisation is not neutral for every operator (a
+        # MIP lifts the mean more than the edges, so sharp_gain alone reads 0.65 on a
+        # plainly sharper image). Both are printed; QUALITY_NOTES says which is operative.
         out["sharp_abs"] = _abs_gradient(plane) / (_abs_gradient(raw) or float("nan"))
         out["flat_gain"] = f_out / f_raw if f_raw else float("nan")
         if operator in ("bgsub", "decon"):
@@ -656,13 +540,11 @@ def _quality(operator: str, kind: str, reader, meta: dict, sink, channels) -> di
 
 def _seam_quality(reader, meta: dict, region: str, geometry: Optional[dict],
                   channels) -> dict:
-    """Overlap NCC on the strongest overlapping FOV pair, AT THE PLACEMENT THIS RUN SOLVED.
+    """Overlap NCC on the strongest overlapping FOV pair, at the placement this run solved.
 
-    The offsets come from the operator's own ``geometry`` dict (``origins_px``), not from
-    the stage coordinates — that is what makes ``stitch`` and ``coordinate`` comparable
-    rows whose *difference* is the registration's value rather than two readings of the
-    same number. The tiles compared are the source FOVs' MIPs, so the metric measures
-    placement and never the render.
+    Offsets come from the operator's own ``geometry["origins_px"]``, not the stage
+    coordinates — that is what makes ``stitch`` and ``coordinate`` rows comparable, their
+    difference being registration's value.
     """
     if not geometry or "origins_px" not in geometry:
         return {"seam_ncc": float("nan"), "note": "operator reported no geometry"}
@@ -672,11 +554,8 @@ def _seam_quality(reader, meta: dict, region: str, geometry: Optional[dict],
     if len(fovs) < 2:
         return {"seam_ncc": float("nan"), "note": "region has < 2 FOVs"}
 
-    # WHICH pair, chosen from the STAGE COORDINATES — the same input both operators start
-    # from — and never from the operator's own solved origins. Choosing per-operator was
-    # tried first and is a trap: `coordinate` picked pair 0|1 and `stitch` picked 1|2, so
-    # the two rows scored different seams and their difference measured nothing. The pair
-    # must be fixed before the operator gets a vote.
+    # WHICH pair is chosen from the stage coordinates (the shared input), never from either
+    # operator's own solved origins — else stitch and coordinate could score different seams.
     from squidxplorer._placement import fov_offsets_px
 
     stage = fov_offsets_px(meta["fov_positions_um"], region, fovs,
@@ -686,8 +565,7 @@ def _seam_quality(reader, meta: dict, region: str, geometry: Optional[dict],
         for j in range(i + 1, len(fovs)):
             sy = float(stage[fovs[j]][0] - stage[fovs[i]][0])
             sx = float(stage[fovs[j]][1] - stage[fovs[i]][1])
-            # A shared seam means the tiles overlap on BOTH axes. Diagonal neighbours touch
-            # at a corner only, so "the seam between them" is not a rectangle you can score.
+            # Diagonal neighbours touch at a corner only, not a scoreable rectangle.
             if abs(sy) >= ty or abs(sx) >= tx:
                 continue
             area = (ty - abs(sy)) * (tx - abs(sx))
@@ -696,7 +574,7 @@ def _seam_quality(reader, meta: dict, region: str, geometry: Optional[dict],
     if best is None:
         return {"seam_ncc": float("nan"), "note": "no overlapping FOV pair"}
     _area, i, j = best
-    # ...but the OFFSETS are the operator's own solved placement. That is the variable.
+    # ...but the OFFSETS are the operator's own solved placement.
     dy = float(origins[j][0] - origins[i][0])
     dx = float(origins[j][1] - origins[i][1])
 
@@ -733,14 +611,10 @@ def benchmark_dataset(
 ) -> list:
     """Run the suite over one acquisition and return one :class:`OperatorResult` each.
 
-    Region operators get ALL FOVs but a SINGLE channel by default. Both halves matter:
-    a 27-FOV 10x well fused at 4 channels is ~0.9 GB resident, which measures memory
-    rather than stitching — but truncating to the first few FOVs is worse, because
-    ``select_fovs`` takes them in index order and an arbitrary prefix of a serpentine
-    scan is not connected. Measured: at 4 FOVs the solve reported "2 disconnected tile
-    groups, placed by the affine fallback", i.e. it was benchmarking the fallback, not
-    registration. The parameters are carried on every result so the table says what it
-    measured.
+    Region operators get ALL FOVs but a SINGLE channel by default: fusing at 4 channels
+    would measure memory rather than stitching, and truncating to the first few FOVs is
+    worse — ``select_fovs`` takes an index-order prefix of a serpentine scan, which is not
+    a connected region (measured: disconnected tile groups, placed by the affine fallback).
     """
     from squidxplorer import open_reader
 
@@ -812,10 +686,8 @@ def format_stages(results: Sequence[OperatorResult]) -> str:
             peak = r.stage_peak_rss_mb.get(name)
             peak_s = f"{peak:8.1f} MB peak RSS" if peak else " " * 20
             lines.append(f"    {name:<12} {ms:9.1f} ms   {peak_s}")
-        # The stages NEVER sum to the wall clock, and hiding that would misattribute the
-        # difference to whichever stage the reader happens to trust. It is the work
-        # outside any span (setup, the sampler's own tracemalloc overhead, teardown), and
-        # `assign_stages` already has a name for it.
+        # Stages never sum to the wall clock: this is the work outside any span (setup,
+        # sampler overhead, teardown), which `assign_stages` calls "(other)".
         other = r.wall_ms - sum(r.stage_ms.values())
         peak = r.stage_peak_rss_mb.get("(other)")
         peak_s = f"{peak:8.1f} MB peak RSS" if peak else " " * 20
@@ -848,8 +720,7 @@ def write_csv(results: Sequence[OperatorResult], path) -> Path:
 
 
 def write_json(results: Sequence[OperatorResult], path, *, meta: Optional[dict] = None) -> Path:
-    """Everything, including the machine it was measured on. A benchmark without a machine
-    attached is not reproducible and not comparable to the next one."""
+    """Everything, including the machine it was measured on — for reproducibility."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {

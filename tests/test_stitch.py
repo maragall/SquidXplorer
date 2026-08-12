@@ -1,32 +1,12 @@
-"""IMA-222 stitch operator: registration recovers a KNOWN error, and the plate generator
-mirrors ``project_plate``'s contract.
-
-The fixture is a synthetic mosaic cut from one master image, so there is **ground truth**:
-the correct fused result is a crop of the master. That turns every claim into a number —
-"the solve recovered the 6 px I injected", "the stitched mosaic is closer to truth than the
-coordinate-placed one" — instead of "a picture appeared", which is what a shape-only test
-asserts and is exactly how a stitcher ships broken.
-
-Geometry mirrors the real 10x tissue acquisition in the one way that matters: tiles overlap
-by a real, registrable fraction (64 of 256 px here; ~208 of 2084 px there).
-"""
+"""Stitch operator tests: the synthetic mosaic is cut from one master image, so every
+claim is a number against ground truth."""
 
 from __future__ import annotations
 
 import numpy as np
 import pytest
 
-# tilefusion (maragall/stitcher) is the library this module ADAPTS, and it is deliberately not a
-# dependency: pyproject says so in as many words ("No tilefusion dependency ... importing
-# tilefusion runs its heavy __init__ (numba/GPU/basicpy)"), and only the ~40-line store-config
-# wrapper is vendored. `squidxplorer._stitch` therefore imports it lazily, so this file COLLECTS
-# without it and only fails mid-test with ModuleNotFoundError -- which is what it did on every CI
-# runner, as hard failures for a package CI was never asked to install.
-#
-# Skip rather than install it in CI: adding a git dependency to the build is exactly what was just
-# removed for ndviewer_light, and numba/basicpy would dominate the job. The cost is real and is
-# stated here rather than hidden: THE STITCH ADAPTER IS NOT COVERED IN CI, only on a machine that
-# has tilefusion. A skip is not a pass. To gate this seam, install tilefusion deliberately.
+# tilefusion is deliberately not a dependency; without it this seam is untested, not passing.
 pytest.importorskip("tilefusion", reason="tilefusion (maragall/stitcher) not installed: the stitch "
                                          "adapter is UNTESTED here, which is not the same as passing")
 
@@ -46,25 +26,12 @@ from squidxplorer._stitch import (
 TILE = 256
 STEP = 192            # -> 64 px overlap, ~25%
 GRID = 2              # 2x2 = 4 FOVs
-PIXEL_UM = 1.0        # 1 um/px keeps micrometres and pixels numerically identical, so a
-#                       sign/scale slip shows up as a wrong number rather than hiding in a
-#                       unit conversion.
+PIXEL_UM = 1.0        # 1 um/px keeps micrometres and pixels numerically identical
 CHANNELS = ["Fluorescence_405_nm_Ex", "Fluorescence_488_nm_Ex"]
 
 
 def _master(seed: int = 0) -> np.ndarray:
-    """A smooth, high-contrast random texture — registrable, unlike white noise or a ramp.
-
-    Phase correlation needs broadband structure that is *locally unique*. White noise
-    aliases under any sub-pixel shift; a gradient has no unique peak. A low-pass filtered
-    random field has both, which is why it is the standard synthetic registration fixture.
-
-    "Lightly" filtered is load-bearing, and was found by measurement rather than taste:
-    tilefusion correlates with ``normalization="phase"``, which whitens the spectrum, so an
-    over-smoothed field leaves only high-frequency noise to correlate on and the lock
-    collapses. Measured on this fixture: a 3x 7-px blur scores NCC 0.44 and recovers 1.3 px
-    of a known 6 px shift; a single 5-px blur scores 0.9999 and recovers it exactly.
-    """
+    """A lightly low-pass filtered random texture: registrable, unlike white noise or a ramp."""
     rng = np.random.default_rng(seed)
     n = (GRID - 1) * STEP + TILE
     field = rng.normal(size=(n, n))
@@ -77,20 +44,13 @@ def _master(seed: int = 0) -> np.ndarray:
 
 
 class _FakeReader:
-    """Minimal ``SquidReader`` duck-type: ``.metadata`` + ``.read``.
-
-    Deliberately not the real reader — this test is about the stitch math, and a synthetic
-    on-disk acquisition would only add TIFF I/O between the assertion and the thing asserted.
-    """
+    """Minimal ``SquidReader`` duck-type: ``.metadata`` + ``.read``."""
 
     def __init__(self, master: np.ndarray, error_px: dict[int, tuple[float, float]] | None = None,
                  regions=("A1",), step: int = STEP, n_t: int = 1, good_t: int = 0):
         self._master = master
         self._step = step
-        # Only ONE timepoint carries registrable structure; the others are noise. That makes
-        # "the solve actually read the timepoint it was told to" an assertion about NUMBERS
-        # rather than about provenance -- a mutation that hardcodes t=0 survives any test that
-        # only checks what the Placement claims.
+        # Only one timepoint carries registrable structure; the others are noise.
         self._good_t = good_t
         self._true = [
             ((i // GRID) * step, (i % GRID) * step) for i in range(GRID * GRID)
@@ -124,8 +84,7 @@ class _FakeReader:
             return np.random.default_rng(1000 + fov).integers(
                 0, 65535, size=(TILE, TILE), dtype=np.uint16)
         tile = self._master[y : y + TILE, x : x + TILE]
-        # Second channel is a scaled copy: distinct data, same geometry, so a channel mix-up
-        # in the fuse is visible while registration stays well-posed on channel 0.
+        # Second channel is a scaled copy: distinct data, same geometry.
         return tile if channel == CHANNELS[0] else (tile // 2 + 500).astype(np.uint16)
 
 
@@ -166,8 +125,7 @@ def test_mosaic_geometry_accounts_for_overlap(master):
 
 
 def test_mosaic_origins_stay_fractional():
-    """Sub-pixel origins must survive: truncating them re-introduces the misalignment the
-    registration just removed."""
+    """Truncating sub-pixel origins re-introduces the misalignment registration just removed."""
     (_h, _w), origins = _mosaic_geometry([(0.0, 0.0), (0.0, 10.4)], (1.0, 1.0), (8, 8))
     assert origins[1][1] == pytest.approx(10.4)
 
@@ -190,8 +148,7 @@ def test_solve_recovers_injected_stage_error(master):
     offsets = solve_offsets_px(tiles, positions, (1.0, 1.0), (TILE, TILE), max_workers=2)
 
     corrected = np.asarray(positions) + offsets
-    # The corrected layout must reproduce the TRUE grid up to a global translation (the solve
-    # is gauge-free: it anchors tile 0, so only relative geometry is meaningful).
+    # The solve is gauge-free (anchors tile 0), so compare relative geometry only.
     truth = np.array([[(i // GRID) * STEP, (i % GRID) * STEP] for i in range(4)], float)
     residual = (corrected - corrected[0]) - (truth - truth[0])
     assert np.abs(residual).max() < 0.5, f"residual {residual}"
@@ -214,16 +171,9 @@ def test_no_overlap_degrades_to_stage_positions(master):
 
 
 def _rmse_vs_truth(fused: np.ndarray, master: np.ndarray) -> float:
-    """RMSE of the fused channel-0 mosaic against the master crop it should reproduce.
-
-    Compared on the INTERIOR only: the mosaic border is a single-tile feather ramp whose
-    normalized weight is fine but whose edge pixels are dominated by one tile, so including
-    them measures the ramp rather than the seam.
-    """
+    """RMSE of the fused channel-0 mosaic against the master crop, on the interior only."""
     a = fused[0, 0, 0].astype(np.float64)
-    # Crop both to their common extent: an UNregistered mosaic is larger than the truth
-    # (the stage error inflates the bounding box), which is itself a symptom, not a reason
-    # to skip the comparison. Both share the top-left origin (tile 0 anchors there).
+    # Crop both to their common extent; both share the top-left origin (tile 0 anchors there).
     h, w = min(a.shape[0], master.shape[0]), min(a.shape[1], master.shape[1])
     a = a[:h, :w]
     b = master[:h, :w].astype(np.float64)
@@ -250,21 +200,7 @@ def test_stitch_region_shape_and_dtype(fused_pair, master):
 
 
 def test_the_fused_write_rounds_to_the_dtype_instead_of_truncating(master, monkeypatch):
-    """The blend accumulates in float32, ``out`` is the acquisition dtype (uint16 here).
-
-    A plain slice assignment truncates toward zero, which is a half-count systematic dimming of
-    every pixel of the mosaic. Every other operator in this codebase routes its write through
-    ``projection.cast_like`` for exactly that reason; stitch was the one that did not, and now
-    shares the same one function that ``_background``, ``_decon``, ``_flatfield``, ``_output``
-    and ``_tilesource`` do.
-
-    Pinned on NUMBERS, not on which function was called: the fuse kernel is replaced by one that
-    hands ``write_block`` a block of known fractional values, and the assertion is on what lands
-    in the returned array. 11.5 and 12.7 are the discriminating ones -- truncation gives 11 and
-    12, rounding gives 12 and 13. 10.5 -> 10 is asserted too, and is not a truncation: it is
-    ``np.rint``'s half-to-EVEN, which is what the shared helper does and therefore what stitch
-    must do as well.
-    """
+    """Truncation gives 11/12 for 11.5/12.7, rounding gives 12/13; 10.5 -> 10 is half-to-even."""
     import tilefusion.fusion as tf_fusion
 
     fractions = np.array([10.5, 11.5, 12.7, 13.2], dtype=np.float32)
@@ -285,7 +221,7 @@ def test_the_fused_write_rounds_to_the_dtype_instead_of_truncating(master, monke
 
 
 def test_stitching_beats_coordinate_placement(fused_pair, master):
-    """The load-bearing assertion: registration must measurably reduce error vs ground truth."""
+    """Registration must measurably reduce error vs ground truth."""
     stitched, placed = fused_pair
     e_stitched = _rmse_vs_truth(stitched, master)
     e_placed = _rmse_vs_truth(placed, master)
@@ -293,14 +229,12 @@ def test_stitching_beats_coordinate_placement(fused_pair, master):
 
 
 def test_all_channels_share_one_geometry(master):
-    """Channels must be placed by the SAME solve — independent per-channel geometry would
-    make the channels of one well stop overlaying."""
+    """Channels must be placed by the same solve or they stop overlaying."""
     reader = _FakeReader(master, error_px={3: (6.0, -4.0)})
     out = stitch_region(reader, "A1", list(range(4)), blend_px=24, block_px=512, max_workers=2)
     assert out.shape[1] == len(CHANNELS)
     c0, c1 = out[0, 0, 0].astype(np.float64), out[0, 1, 0].astype(np.float64)
-    # Channel 1 is channel 0 // 2 + 500 by construction, so if geometry matched, the two
-    # mosaics correlate near-perfectly. A per-channel geometry slip destroys that.
+    # Channel 1 is channel 0 // 2 + 500 by construction, so matched geometry correlates near 1.
     inner = (slice(40, -40), slice(40, -40))
     assert np.corrcoef(c0[inner].ravel(), c1[inner].ravel())[0, 1] > 0.99
 
@@ -368,11 +302,7 @@ def test_unknown_operator_names_the_alternatives(master):
 
 
 def test_a_plane_operator_handed_to_stitch_plate_is_refused_as_the_wrong_kind(master):
-    """`mip` is a real operator and not a region one; the sentence has to say which, not 'unknown'.
-
-    With two tables this read "unknown region operator 'mip'" — a claim that the operator did not
-    exist, about one that did. One table means the name resolves and the DECLARATION refuses.
-    """
+    """`mip` is a real operator and not a region one; the refusal has to say which, not 'unknown'."""
     with pytest.raises(KeyError, match="registered operator but not a REGION operator"):
         list(stitch_plate(_FakeReader(master), operator="mip"))
 
@@ -393,7 +323,7 @@ def _fast_plate(reader, **kw):
 
 
 def test_one_result_per_region_anchored_at_first_fov(master):
-    """A stitched well yields ONE array, not one per FOV — the contract difference, asserted."""
+    """A stitched well yields one array, not one per FOV."""
     reader = _FakeReader(master, regions=("A1", "A2"))
     out = list(_fast_plate(reader))
     assert sorted(r for r, _f, _i in out) == ["A1", "A2"]
@@ -433,8 +363,7 @@ def test_failure_is_loud_by_default(master):
 
 
 def test_on_error_skips_the_well_and_keeps_going(master):
-    """One corrupt well must not abort a plate when the caller opts in — project_plate's
-    IMA-186 contract, same keyword, same signature."""
+    """One corrupt well must not abort a plate when the caller opts in."""
     def flaky(reader, region, fovs, **kw):
         if region == "A1":
             raise RuntimeError("corrupt plane")
@@ -489,18 +418,7 @@ def test_window_is_bounded_by_workers(master):
 
 
 def test_stitching_a_plane_op_fuses_every_plane_instead_of_keeping_only_z0(master):
-    """A plane-op is STITCHED now, per z plane (IMA-277). It used to raise NotImplementedError.
-
-    This test is the inverse of the one it replaces. `stitch_region` used to fuse with z pinned
-    to 1 — `out` allocated with a z extent of 1, write_block writing [t, :, 0, ...], fuse_plane
-    called with z_level=0 — which is right for a z-reducer and silently kept ONE plane of a
-    plane-op's full-depth output. Rather than truncate, it refused; the refusal made five of the
-    eight registered operators unstitchable. The z loop is now outer and streaming, so the
-    refusal is gone and what is asserted here is that no plane went missing.
-
-    The deep behaviour (one solved geometry for every plane, the flat-field double-apply guard,
-    the memory bound) is in tests/test_stitch_zplanes.py.
-    """
+    """A plane-op is stitched per z plane; no plane may go missing."""
     from squidxplorer._stitch import _resolve_operator, stitch_region
 
     plane_ops = [n for n in ("bgsub", "decon", "flatfield")
@@ -519,20 +437,15 @@ def test_stitching_a_plane_op_fuses_every_plane_instead_of_keeping_only_z0(maste
 
 
 # ---------------------------------------------------------------------------------------
-# blunder rejection: the operator's two knobs (ported from maragall/stitcher's GUI)
+# blunder rejection: the two outlier knobs must actually reach the solver
 # ---------------------------------------------------------------------------------------
-#
-# maragall/stitcher exposes "Outlier rel: N%" and "abs: N px" as the two controls over
-# two_round_optimization's blunder rejection. They were module constants here, so the
-# stitcher panel had nothing to bind to. These tests pin that the values actually REACH
-# the solver -- a parameter that is accepted and then ignored is the exact defect shape
-# this repo has shipped before (a test that read green while the function it called had
-# grown a third return value).
 
 
 def _spy_two_round(monkeypatch):
-    """Record the args tilefusion's two_round_optimization is called with, and short-circuit
-    it. Patched on the tilefusion module because _solve imports it at CALL time."""
+    """Record the args two_round_optimization is called with, and short-circuit it.
+
+    Patched on the tilefusion module because _solve imports it at call time.
+    """
     import tilefusion.optimization as opt
 
     seen = {}
@@ -553,7 +466,7 @@ def _tiles_and_positions(master):
 
 
 def test_solve_defaults_are_tilefusion_run_s_own_thresholds(master, monkeypatch):
-    """Unset, the solve must behave EXACTLY as it did: TileFusion.run()'s 0.5 / 2.0."""
+    """Unset, the solve must use TileFusion.run()'s own 0.5 / 2.0."""
     from squidxplorer._stitch import _ABS_THRESH, _REL_THRESH
 
     seen = _spy_two_round(monkeypatch)
@@ -571,10 +484,7 @@ def test_solve_forwards_the_operator_s_thresholds(master, monkeypatch):
 
 
 def test_stitch_region_forwards_the_thresholds_all_the_way_down(master, monkeypatch):
-    """The one that matters for the panel: the kwargs a user sets in the LEFT pane travel
-    stitch_plate -> stitch_region -> solve_offsets_px -> two_round_optimization. Accepting
-    them at the top and dropping them one layer down would leave the controls inert while
-    looking like they worked."""
+    """Panel kwargs travel stitch_plate -> stitch_region -> solve_offsets_px -> two_round_optimization."""
     seen = _spy_two_round(monkeypatch)
     reader = _FakeReader(master, error_px={3: (6.0, -4.0)})
     stitch_region(reader, "A1", list(range(GRID * GRID)), channels=[0], blend_px=24,
@@ -583,8 +493,7 @@ def test_stitch_region_forwards_the_thresholds_all_the_way_down(master, monkeypa
 
 
 def test_thresholds_must_be_positive(master):
-    """A zero/negative threshold rejects every link or none; refuse by name rather than
-    silently solving on an empty edge set and returning zeros that look like 'no error'."""
+    """A zero/negative threshold rejects every link or none; refuse by name."""
     tiles, positions = _tiles_and_positions(master)
     with pytest.raises(ValueError, match="rel_thresh"):
         solve_offsets_px(tiles, positions, (1.0, 1.0), (TILE, TILE), rel_thresh=0.0)
@@ -593,13 +502,8 @@ def test_thresholds_must_be_positive(master):
 
 
 # ---------------------------------------------------------------------------------------
-# write_plate: the SAVE path has to carry the operator's settings too
+# write_plate: the save path has to carry the operator's settings too
 # ---------------------------------------------------------------------------------------
-#
-# The panel's controls reach the preview through stitch_plate(**operator_kwargs). Without
-# the same seam on write_plate, "Run on the whole plate" would quietly use the pipeline
-# defaults while the panel showed the user's settings -- a tuned registration thrown away
-# at exactly the moment it is written to disk, with nothing said.
 
 
 class _MetaOnlyReader:
@@ -619,11 +523,9 @@ def test_write_plate_forwards_operator_kwargs_to_stitch_plate(monkeypatch):
         return iter(())
 
     monkeypatch.setattr(st, "stitch_plate", _fake_stitch_plate)
-    # The real `write_from_stream` returns the manifest `write_plate` forwards verbatim and
-    # `_command` reads with `.get()`. `{"written": 0}` is a key that exists NOWHERE, so a
-    # real run through this stub would report "landed 0 of N" and nothing here would see it.
+
     def _fake_write_from_stream(meta, stream, out, **kw):
-        fields = sum(1 for _ in stream)          # DRAIN it: the real one consumes the stream
+        fields = sum(1 for _ in stream)          # drain it: the real one consumes the stream
         return {"plate": str(out), "tiff": None, "n_wells": 0, "n_fields": fields,
                 "n_fields_written": fields, "levels": 1, "complete": True, "stopped": False}
 
@@ -636,44 +538,21 @@ def test_write_plate_forwards_operator_kwargs_to_stitch_plate(monkeypatch):
 
 
 def test_write_plate_refuses_operator_kwargs_an_operator_does_not_declare():
-    """Accepting a parameter and dropping it is the silent failure this seam exists to avoid.
-
-    The REASON for the refusal moved on 2026-08-03 and the test says so. It used to be a rule
-    about WHICH TABLE the operator is in: "project_plate has no such seam -- a projector's
-    parameters are baked in at registration". A projector can now declare its own ``params``
-    (``Operator.bind``), so the refusal comes from ``mip``'s own entry, which declares none. That
-    is a strictly better answer to the same question: ``mip`` genuinely takes no ``blend_px``,
-    whereas the old message would have refused a parameter the operator really did have.
-    """
+    """Accepting a parameter and dropping it is the silent failure this seam exists to avoid."""
     import squidxplorer._output as out_mod
 
     with pytest.raises(ValueError, match="declares no parameters"):
         out_mod.write_plate(_MetaOnlyReader(), "/tmp/does-not-matter", projector="mip",
                             operator_kwargs={"blend_px": 64})
-# ═══════════════════════════════════════════════════════════════════════════════════════
-# Defect 2: registration must run on the registration channel, ALWAYS.
-#
-# `reg_c = channels.index(reg_c_global) if reg_c_global in channels else 0` silently
-# registered on whichever channel happened to be FIRST in the selected subset, while the
-# docstring promised "Registration always runs on registration_channel, whatever this
-# selects." The same region stitched with different channel selections therefore got
-# DIFFERENT SOLVED OFFSETS, with no warning — non-reproducible scientific output.
-#
-# The module's existing _FakeReader cannot catch this: its channel 1 is `tile // 2 + 500`,
-# i.e. the same geometry, so registering on either channel gives the same answer and any
-# comparison of offsets passes whether or not the bug is present. A test needs a channel
-# that registers to a DIFFERENT answer, which is what _SplitChannelReader provides.
-# ═══════════════════════════════════════════════════════════════════════════════════════
+
+
+# ---------------------------------------------------------------------------------------
+# registration must run on the registration channel, always
+# ---------------------------------------------------------------------------------------
 
 
 class _SplitChannelReader(_FakeReader):
-    """Channel 0 is registrable texture; channel 1 is FLAT and carries no alignment signal.
-
-    That asymmetry is the whole point. Registering on channel 0 recovers the injected stage
-    error; registering on channel 1 cannot recover anything and degrades to the stage
-    positions (all-zero offsets). So "which channel solved this" becomes a NUMBER, and the
-    silent substitution stops being invisible.
-    """
+    """Channel 0 is registrable texture; channel 1 is flat and carries no alignment signal."""
 
     def read(self, region, fov, channel, z=0, t=0):
         self.reads += 1
@@ -694,11 +573,7 @@ def _offsets(reader, **kw):
 
 
 def test_the_fixture_can_actually_tell_the_two_channels_apart(master):
-    """Guard the guard: if both channels solved the same, every test below would be vacuous.
-
-    This repo has already shipped a test that was dead its whole life. A fixture that cannot
-    distinguish the two outcomes is the same failure mode, so prove the distinction FIRST.
-    """
+    """Guard the guard: if both channels solved the same, every test below would be vacuous."""
     textured = _offsets(_SplitChannelReader(master, error_px=_ERR),
                         registration_channel=CHANNELS[0])
     flat = _offsets(_SplitChannelReader(master, error_px=_ERR),
@@ -708,12 +583,7 @@ def test_the_fixture_can_actually_tell_the_two_channels_apart(master):
 
 
 def test_registration_channel_outside_the_selection_still_drives_the_solve(master):
-    """THE BUG. Selecting only channel 1 must not move registration onto channel 1.
-
-    Before the fix `reg_c` fell back to 0 — index 0 OF THE SUBSET, i.e. global channel 1, the
-    flat one — so the solve silently returned zeros and the mosaic was placed on raw stage
-    coordinates while the caller believed it had registered on channel 0.
-    """
+    """Selecting only channel 1 must not move registration onto channel 1."""
     got = _offsets(_SplitChannelReader(master, error_px=_ERR),
                    registration_channel=CHANNELS[0], channels=[1])
     assert np.abs(got[3]).max() > 2.0, (
@@ -723,8 +593,7 @@ def test_registration_channel_outside_the_selection_still_drives_the_solve(maste
 
 
 def test_the_solved_geometry_does_not_depend_on_which_channels_were_selected(master):
-    """The reproducibility property, stated directly: same region + same registration channel
-    => same offsets, whatever subset is being fused. This is the promise at _stitch.py:332."""
+    """Same region + same registration channel => same offsets, whatever subset is fused."""
     kw = dict(registration_channel=CHANNELS[0])
     both = _offsets(_SplitChannelReader(master, error_px=_ERR), **kw)
     only_0 = _offsets(_SplitChannelReader(master, error_px=_ERR), channels=[0], **kw)
@@ -734,31 +603,19 @@ def test_the_solved_geometry_does_not_depend_on_which_channels_were_selected(mas
 
 
 def test_the_registration_only_channel_is_not_leaked_into_the_output(master):
-    """Reading the registration channel to solve on it must not add it to the fused result —
-    the caller asked for one channel and must get exactly one, in the order requested."""
+    """Reading the registration channel to solve on it must not add it to the fused result."""
     reader = _SplitChannelReader(master, error_px=_ERR)
     out = stitch_region(reader, "A1", list(range(4)), channels=[1], blend_px=24, block_px=512,
                         max_workers=2, registration_channel=CHANNELS[0])
     assert out.shape[1] == 1
-    # channel 1 is the FLAT one; if the textured registration channel leaked into the output
-    # this plane would have structure instead of being (feathered) constant.
+    # channel 1 is the flat one; a leak would give this plane structure.
     plane = out[0, 0, 0].astype(np.float64)
     interior = plane[60:-60, 60:-60]
     assert interior.std() < 1.0, f"output plane is not the flat channel (std={interior.std():.1f})"
 
 
 def test_registration_costs_exactly_one_extra_plane_read_per_fov(master):
-    """Registering on the RAW plane costs a read, and the price is pinned at ONE plane per FOV.
-
-    This replaces a test that asserted registration was free. It was free because registration
-    consumed the projector's output — which is precisely the defect: on a z-stack the pose graph
-    was then solved on a MIP, an image maragall/stitcher never registers, costing 2 of 43 pairs
-    and up to 6.62 px on the 10x tissue set. Reading the acquisition's own middle z-plane is what
-    buys back the agreement, so the honest thing to pin is the SIZE of that cost, not its absence.
-
-    One plane per FOV, one channel, one z. Not a second z-stack pass: if this ever regresses into
-    re-reading depth, a 27-FOV 10-deep well pays 10x for it on every stitch.
-    """
+    """Registering on the raw plane costs exactly one extra plane read per FOV."""
     def reads(**kw):
         r = _SplitChannelReader(master, error_px=_ERR)
         stitch_region(r, "A1", list(range(4)), blend_px=24, block_px=512, max_workers=2, **kw)
@@ -772,30 +629,24 @@ def test_registration_costs_exactly_one_extra_plane_read_per_fov(master):
         f"register=False {baseline}, register=True {registered}, FOVs {n_fovs}"
     )
 
-    # And the cost does not depend on the channel SELECTION — registration reads its own plane
-    # either way, which is why the solved geometry is selection-independent by construction.
+    # The cost does not depend on the channel selection.
     assert reads(registration_channel=CHANNELS[0]) - reads(
         register=False, registration_channel=CHANNELS[0]) == n_fovs
 
 
 def test_an_unknown_registration_channel_is_still_refused_by_name(master):
-    # Unchanged behaviour, pinned so the fix does not accidentally make this permissive.
     with pytest.raises(ValueError, match="not a channel of this acquisition"):
         stitch_region(_SplitChannelReader(master), "A1", [0, 1],
                       registration_channel="Fluorescence_638_nm_Ex")
 
 
-# ═══════════════════════════════════════════════════════════════════════════════════════
-# Defect 3: the placement travels WITH the array, unconditionally.
-# ═══════════════════════════════════════════════════════════════════════════════════════
+# ---------------------------------------------------------------------------------------
+# the placement travels with the array, unconditionally
+# ---------------------------------------------------------------------------------------
 
 
 def test_the_mosaic_carries_its_placement_without_being_asked(master):
-    """No `geometry=` out-dict passed. The geometry must exist anyway.
-
-    This is the defect in one line: the solved transform used to be computed at t=0 and then
-    discarded unless the caller opted in to receiving it.
-    """
+    """No `geometry=` out-dict passed; the geometry must exist anyway."""
     out = stitch_region(_SplitChannelReader(master, error_px=_ERR), "A1", list(range(4)),
                         blend_px=24, block_px=512, max_workers=2,
                         registration_channel=CHANNELS[0])

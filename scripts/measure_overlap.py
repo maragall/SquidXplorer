@@ -1,30 +1,11 @@
 #!/usr/bin/env python3
-"""Measure the real per-well FOV grid and tile overlap of Squid acquisitions (IMA-211 T2).
+"""Measure the real per-well FOV grid and tile overlap of Squid acquisitions.
 
-Why this exists: every stitching decision downstream depends on a number nobody had measured.
-If an acquisition runs 0% overlap, phase correlation has nothing to correlate on and **only
-nominal placement can work** — so this gates whether registration code is worth writing at
-all. It is cheap to run and it answers the question with data instead of assumption.
+Reads coordinates.csv (planned grid, row-order FOV) and original_coordinates/*.csv (actual
+stage positions, explicit fov/z_level), and reports per region the grid, step, and derived
+overlap, plus any disagreement between the two sources. Never writes anything.
 
-It also demonstrates the IMA-211 geometry correction in the most direct way available:
-it reads BOTH coordinate files and reports where they disagree.
-
-    coordinates.csv                                   region,x (mm),y (mm),z (mm)
-        the PLANNED grid. No `fov` column, so a FOV index can only be inferred from
-        row order — the "silent wrong tile" hazard docs/ima-189-eng-review.md refused.
-
-    original_coordinates/original_coordinates_{t}.csv region,fov,z_level,x (mm),y (mm),z (um),time
-        the ACTUAL stage positions, WITH an explicit `fov` key and an explicit `z_level`.
-        Cell assignment becomes arithmetic instead of inference.
-
-Usage::
-
-    python scripts/measure_overlap.py PATH [PATH ...]
-    python scripts/measure_overlap.py ~/Downloads/20x_scan_* --json
-
-Reports per acquisition: which coordinate files exist, the FOV grid per region, the step in
-mm, the frame size in px, the derived overlap fraction, and any disagreement between the two
-coordinate sources. Never writes anything.
+Usage: python scripts/measure_overlap.py PATH [PATH ...] [--json]
 """
 
 from __future__ import annotations
@@ -36,8 +17,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-# Imported lazily inside the frame-size probe so the script still reports geometry on a
-# machine without tifffile.
+# tifffile is imported lazily inside the frame-size probe so geometry still reports without it.
 
 
 def _read_csv(path: Path) -> list:
@@ -59,11 +39,7 @@ def _col(row: dict, *names):
 
 
 def _modal_step(values) -> float:
-    """Smallest consistent positive spacing among sorted unique coordinates.
-
-    The modal positive delta, not the mean: a partial or non-rectangular scan leaves gaps,
-    and a mean would silently blend a real step with a skipped one.
-    """
+    """Modal (not mean) positive spacing, so a partial scan doesn't blend a skipped step in."""
     uniq = sorted({round(float(v), 4) for v in values})
     deltas = [round(b - a, 4) for a, b in zip(uniq, uniq[1:]) if b - a > 1e-6]
     if not deltas:
@@ -91,19 +67,9 @@ def _frame_shape(root: Path):
 
 
 def _pixel_size_um(root: Path):
-    """Object-space pixel size in µm, and where it came from.
-
-    The two metadata generations are NOT interchangeable and conflating them is a 20x error:
-
-      acquisition.yaml       objective.pixel_size_um    ALREADY object-space and binning-aware
-                                                        (per squidxplorer/_acquisition.py:3-5)
-      acquisition params.json sensor_pixel_size_um      SENSOR pitch — must be divided by
-                                                        objective.magnification
-
-    Reading the JSON's sensor pitch as if it were object-space reports a ~95% overlap on a
-    scan that actually overlaps ~9%, which would make every downstream stitching decision
-    wrong in the same direction.
-    """
+    """Object-space pixel size in µm, and its source. acquisition.yaml's pixel_size_um is
+    already object-space; the json's sensor_pixel_size_um is sensor pitch and must be divided
+    by magnification — conflating the two is a ~10x overlap error."""
     y = root / "acquisition.yaml"
     if y.exists():
         try:
@@ -166,8 +132,7 @@ def survey(root: Path) -> dict:
     has_fov = "fov" in rows[0]
     out["has_explicit_fov_column"] = has_fov
 
-    # z_level is explicit in original_coordinates, so multi-z rows are FILTERED rather than
-    # guessed at — this is exactly the open worry IMA-187 recorded about row-count checks.
+    # z_level is explicit, so multi-z rows are filtered rather than guessed at.
     if "z_level" in rows[0]:
         z0 = {r["z_level"] for r in rows}
         if len(z0) > 1:

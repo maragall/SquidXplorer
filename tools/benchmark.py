@@ -1,19 +1,11 @@
-"""IMA-233 evidence: run the per-operator benchmark on a real acquisition, print the table.
+"""Run the per-operator benchmark on a real acquisition and print the table.
 
     python tools/benchmark.py --dataset "/path/to/acquisition"
     python tools/benchmark.py --dataset ... --operators mip,stitch --regions manual0
     python tools/benchmark.py --dataset ... --csv out.csv --json out.json
 
-Speed, footprint and quality for every operator in the registry, measured with Julio's
-own profiling suite (``profiling/`` in the stitcher repo — StageTimer, assign_stages,
-RSSSampler, AllocationSampler, compute_ranking, harness._collect). See
-``squidxplorer/_benchmark.py`` for exactly which functions are adapted and why.
-
-Nothing is written unless you ask for --csv/--json, and neither is large. The run itself
-is storage- and memory-guarded before it starts: see ``_benchmark.guard_memory`` and
-``_benchmark.persist_estimate``, which route through the writer's OWN
-``estimate_write_bytes`` / ``check_disk_space`` (overlap-aware for region operators)
-rather than a second opinion.
+Nothing is written unless you ask for --csv/--json. The run is storage- and memory-guarded
+before it starts (see squidxplorer/_benchmark.py: guard_memory, persist_estimate).
 """
 
 from __future__ import annotations
@@ -60,19 +52,13 @@ def main() -> int:
     ap.add_argument("--workers", type=int, default=1)
     ap.add_argument("--no-quality", action="store_true")
     ap.add_argument("--warmup", action="store_true",
-                    help="run the whole operator list once and DISCARD it, then measure. "
-                         "Needed for any comparison involving 'stitch'/'coordinate': "
-                         "tilefusion's fusion kernels are numba-JIT'd, so whichever of "
-                         "them runs first is charged ~7 s of compilation that belongs to "
-                         "neither stitcher. Measured on the 10x well: 'fuse' 8203 ms cold "
-                         "vs 974 ms warm, same operator, same data. ashlar shows no such "
-                         "effect (scipy FFT, no JIT), so without this the first row is "
-                         "penalised and the ranking is an artefact of ordering.")
+                    help="run the whole operator list once and discard it, then measure — "
+                         "needed for stitch/coordinate comparisons since tilefusion's fusion "
+                         "kernels are numba-JIT'd and whichever runs first pays ~7s compile time")
     ap.add_argument("--stitchers", action="store_true",
-                    help="head-to-head stitcher comparison (IMA-211): register every "
-                         "importable third-party stitcher as a region operator and run "
-                         "coordinate,stitch,<challengers>. Prints an availability report "
-                         "for the ones that could not run. Overrides --operators unless "
+                    help="head-to-head stitcher comparison: register every importable "
+                         "third-party stitcher as a region operator and run "
+                         "coordinate,stitch,<challengers>. Overrides --operators unless "
                          "--operators was given explicitly.")
     ap.add_argument("--csv", default=None)
     ap.add_argument("--json", default=None)
@@ -80,9 +66,6 @@ def main() -> int:
 
     operators = [o.strip() for o in args.operators.split(",") if o.strip()]
     if args.stitchers:
-        # Same harness, same seam, same fixtures — the challengers are just region
-        # operators. That is the point: a separate stitcher suite would measure a
-        # different thing and has already produced wrong numbers on this project once.
         from squidxplorer._bench_stitchers import availability_report, register_challengers
 
         added = register_challengers()

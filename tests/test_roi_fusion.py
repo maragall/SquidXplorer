@@ -1,14 +1,11 @@
-"""Native cross-FOV ROI fusion geometry (``roi_window_px`` + ``read_brick``).
+"""Native cross-FOV ROI fusion geometry (`roi_window_px` + `read_brick`).
 
 The 3D-of-an-ROI path fuses the FOVs the ROI overlaps at native resolution, all z, cropped to the
 box. Placement must match the 2D mosaic exactly (each FOV pasted at its stage-pixel offset), or the
 3D volume shows the wrong tissue. This pins that geometry with a synthetic two-FOV reader.
 
-THERE IS ONE CONVERSION AND ONE FUSER, and this file exists to keep it that way. Until 2026-08-06
-``_napari3d.native_roi_volume`` was a second copy of both -- and ``roi_window_px``'s own docstring
-already claimed to BE that copy "lifted out, so the bricked path and the single-volume path cannot
-drift apart". They had drifted, in three measurable ways, and the copy was the wrong one every
-time (see the three regression tests at the bottom). It had no caller outside this file.
+There is ONE conversion and ONE fuser here on purpose — a second copy (`_napari3d.native_roi_volume`,
+deleted 2026-08-06) drifted from this one in three measurable ways; see the regression tests below.
 """
 
 import numpy as np
@@ -19,13 +16,7 @@ from squidxplorer._napari3d import read_brick, roi_window_px
 
 
 class _FakeReader:
-    """The reader protocol's own signature: ``read(region, fov, channel, z, t=0)``.
-
-    It said ``read(self, region, fov, ch, z)`` -- the third parameter RENAMED and no ``t`` at all
-    -- so a keyword call would have raised and a timepoint could not be passed. Both real readers
-    spell it ``channel`` (`tests/test_reader_protocol.py` pins the four signatures), and the
-    3D path this file drives calls positionally, which is the only reason the rename never bit.
-    """
+    """The reader protocol's own signature: `read(region, fov, channel, z, t=0)`."""
 
     def __init__(self):
         self.reads = []
@@ -50,7 +41,7 @@ def _meta(**over):
 
 
 def _roi_volume(meta, roi_bbox_um, channels=("c0",)):
-    """THE path a drawn ROI's 3D takes: box -> window -> voxels. Both halves, no third spelling."""
+    """The path a drawn ROI's 3D takes: box -> window -> voxels."""
     window = roi_window_px(meta, "A1", roi_bbox_um)
     if window is None:
         return {}
@@ -83,9 +74,6 @@ def test_roi_fully_inside_one_fov():
 
 
 # --- the three ways the deleted second copy disagreed with this one -----------------------------
-#
-# Each of these passes on `roi_window_px` + `read_brick` and FAILED on `native_roi_volume`, whose
-# answer is quoted in the message. They are the reason the collapse is not merely tidier.
 
 def test_a_box_past_the_region_edge_is_clipped_to_the_pixels_that_exist():
     """The mosaic is 8 px wide. A box 40 um across must not become a 40 px volume of zeros."""
@@ -116,11 +104,6 @@ def test_an_acquisition_with_no_pixel_size_is_refused_not_guessed():
 
 
 def test_there_is_no_second_roi_fuser_on_the_module():
-    """A structural guard: adding the copy back would break this.
-
-    `roi_window_px` is the ONE box->window conversion and `read_brick` the ONE window->voxels
-    fuser. A sibling that does both again is what this file's header is about.
-    """
     assert not hasattr(_napari3d, "native_roi_volume"), (
         "native_roi_volume is back. It is roi_window_px + read_brick open-coded, and every time "
         "it existed it disagreed with them -- see the three tests above."
@@ -129,6 +112,5 @@ def test_there_is_no_second_roi_fuser_on_the_module():
 
 @pytest.mark.parametrize("box", [(2.0, 1.0, 6.0, 3.0), (0.0, 0.0, 4.0, 4.0), (0.0, 0.0, 3.0, 3.0)])
 def test_the_window_is_the_shape_of_the_volume(box):
-    """The two halves agree on size, which is the property a single copy cannot get wrong."""
     r0, r1, c0, c1 = roi_window_px(_meta(), "A1", box)
     assert _roi_volume(_meta(), box)["c0"].shape[1:] == (r1 - r0, c1 - c0)

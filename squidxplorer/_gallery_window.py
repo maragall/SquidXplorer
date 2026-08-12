@@ -1,51 +1,7 @@
 """Gallery View: the selected Regions tiled side by side, one row each, one column per channel.
 
-The Qt half of :mod:`squidxplorer._gallery` — layout and nothing else. Every pixel this window shows
-was fused, windowed and handed over by :class:`GalleryWorker` on its own thread; the only numpy
-this thread runs is :func:`squidxplorer._montage.composite` over an array that is ALREADY in RAM at
-cell resolution (~512 px), which is the same multiply-sum the plate overview does on every contrast
-tick. Nothing here decodes, and ``test_gallery.py`` pins that by failing if the window's thread
-ever calls ``reader.read``.
-
-WHY THAT RULE IS WRITTEN DOWN RATHER THAN ASSUMED
---------------------------------------------------
-Because the thing that breaks it does not look like a read. ``_contrast.sample_plane`` picks the
-COARSEST pyramid level, which is why it kept passing review — but every level of a raw-preview
-pyramid is fused from the FOV TIFFs at its own decimation, so materialising even the smallest rung
-decodes every FOV of the region. ``_MosaicWorker`` was fixed for exactly this (``_workers.py``,
-merged at 400c63f): **128 ms of frozen UI per region**, 493-604 ms on the machine it was reported
-from. A gallery is N regions, so the same mistake here is N freezes rather than one. The gallery
-therefore computes its contrast where it computes its pixels — in the worker, off one
-already-decimated array — and this thread receives ``(lo, hi)`` as data.
-
-THE LAYOUT IS gallery-view's, NOT A REFLOWING GRID
----------------------------------------------------
-hongquanli/gallery-view's gallery is a TABLE: one row per sample, one column per wavelength, in a
-``QScrollArea``, with a fixed-size ``QLabel`` per cell and a ghost cell where a sample lacks a
-channel so the columns stay aligned. That is ported, with Region for sample: a channel reads DOWN
-the page across regions, which is what makes two wells comparable. A reflowing "n columns from the
-window width" grid would put two regions' 488 nm cells in different columns at different window
-sizes, and comparison is the entire purpose of the view.
-
-Ported alongside it: the three fixed thumbnail presets (80 / 160 / 320), the numpy -> ``QImage``
--> scaled ``QPixmap`` path with its ``.copy()`` and its explicit stride, and rebuilding every cell
-from arrays already in RAM whenever a display setting changes (a size or contrast change re-renders,
-it never re-reads).
-
-SUBSET-NATIVE, AND IT DOES NOT OWN A SELECTION
------------------------------------------------
-The window is handed a :class:`squidxplorer._gallery.GalleryScope` and never asks the plate anything.
-The scope's FOV mapping is the same ``{region: [fov, ...]}`` shape ``stitch_plate(regions=...)``
-takes, so "run the gallery on the marquee" and "run the gallery on the whole acquisition" are one
-code path with two scopes. See ``PlateWindow._open_gallery_view``.
-
-NOT A VIEWER WINDOW, SO NO WINDOW ID
--------------------------------------
-CONTEXT.md reserves **Window id** for a viewer window in ``ViewerManager``'s registry — the integer
-the console prints in brackets, that contrast inheritance and the navigator rows key on. A gallery
-has no region cursor, no napari pane and no contrast to inherit; registering one would put a row in
-the navigator that none of those lookups can answer. It is owned by the root ``PlateWindow``
-instead, one at a time, and re-opening rescopes and raises the existing one.
+The Qt half of :mod:`squidxplorer._gallery` — layout only. All fusing and contrast happens in
+:class:`GalleryWorker` on its own thread; this thread never decodes.
 """
 
 from __future__ import annotations
@@ -87,42 +43,24 @@ from squidxplorer._montage import _hex_to_rgb01, composite
 
 log = get_logger("gallery")
 
-#: gallery-view's three presets, unchanged. Not a continuous slider: a cell is a fixed-size QLabel
-#: and the columns only stay aligned because every cell in a column is the same width.
+#: gallery-view's three fixed presets; cells are fixed-size QLabels so columns stay aligned.
 CELL_SIZE_PRESETS = (("Small", 80), ("Medium", 160), ("Large", 320))
 DEFAULT_CELL_PX = 160
 
-#: Contrast modes. "shared" is the default and the divergence from gallery-view; see
-#: :func:`squidxplorer._gallery.shared_windows` for why comparison needs it.
 CONTRAST_MODES = (("Shared per channel", "shared"), ("Per cell", "cell"))
 
-#: Human labels for `_gallery.Z_SELECTORS`' keys. Labels only — the KEYS and their ORDER come from
-#: `PROJECTIONS`, so this dict cannot become a second, disagreeing list of what a projection can be.
+#: Labels only — the keys and their order come from `PROJECTIONS`.
 PROJECTION_LABELS = {"mip": "MIP", "plane": "Single plane"}
 
-#: Width of the row-label column. Fixed, so the cells of every row start at the same x and a long
-#: region id cannot push one row's pictures out of line with the next's.
+#: Fixed row-label column width, so every row's cells start at the same x.
 _ROW_LABEL_PX = 96
 
-#: Cells redrawn per repaint tick. Chosen against the measurement in `_flush_repaints`: one cell is
-#: a measured 2.2 ms median (4.5 ms p95) of composite + QImage + scale, so 12 is ~26 ms of work per
-#: tick — under a frame at 30 Hz, and bounded by the BUDGET rather than by how many regions the user
-#: selected. That last clause is the property: 4 regions and 64 regions must feel the same.
+#: Cells redrawn per repaint tick; bounds the worst stall regardless of gallery size.
 REPAINT_BUDGET = 12
 
 
 class GalleryWorker(QThread):
-    """Fuses gallery cells off the Qt thread and emits them ONE AT A TIME, as they land.
-
-    One long-lived thread over a ``queue.Queue``, which is gallery-view's ``MipLoader`` shape
-    rather than a ``QThreadPool``: a pool would give up the cheap cooperative cancel (a flag the
-    loop checks between cells) and the ordering, and the ordering is the feature — cells are queued
-    region-major so a whole ROW completes early instead of every region's first channel.
-
-    Emits per cell rather than per gallery because the owner asked for exactly that: "populate each
-    channel as soon as it is ready". A gallery that waited for all of them would show nothing for
-    the length of the slowest region.
-    """
+    """Fuses gallery cells off the Qt thread and emits them one at a time, as they land."""
 
     cellReady = Signal(object)          # GalleryCell
     problem = Signal(str)               # one cell failed, by name; the gallery keeps going
@@ -137,19 +75,11 @@ class GalleryWorker(QThread):
         for job in scope.cells():
             self._queue.put(job)
         self._total = self._queue.qsize()
-        # The SHARED byte budget, not a new cache. `_budget.cache_budget()` already decided how
-        # much this machine can spend on preview pixels; a gallery-private cache would spend it
-        # twice and the two would evict against each other.
         self._cache, self._token = self._shared_cache(reader)
 
     @staticmethod
     def _shared_cache(reader):
-        """``(cache, token)`` into ``_mosaic_source``'s process-wide plane cache, or ``(None, None)``.
-
-        A reader with no stable identity (a test stub) cannot be given cache keys without risking
-        another acquisition's pixels, so it runs UNCACHED and says so once, rather than either
-        crashing the gallery or quietly keying on ``id()``.
-        """
+        """``(cache, token)`` into the process-wide plane cache, or ``(None, None)`` uncached."""
         from squidxplorer._mosaic_source import plane_cache, source_token
 
         try:
@@ -218,12 +148,7 @@ class GalleryWindow(QMainWindow):
 
     @staticmethod
     def _channel_colors(meta) -> dict:
-        """``{channel: (3,) float RGB}`` from the RESOLVED ``display_color``.
-
-        The acquisition's own colour, resolved by ``resolve_channels`` (YAML first, wavelength
-        fallback second) — the same source every other compositing site in this product tints
-        from, so a gallery cell and the plate cell of the same well are the same colour.
-        """
+        """``{channel: (3,) float RGB}`` from the resolved ``display_color``."""
         out = {}
         for ch in (meta.get("channels") or []):
             name = channel_field(ch, "name")
@@ -257,30 +182,20 @@ class GalleryWindow(QMainWindow):
         outer.addWidget(self._status)
         self.setCentralWidget(central)
 
-        # Repaints are COALESCED. A shared window widens as cells land, and each widening
-        # invalidates every other cell of that channel; repainting synchronously would make the
-        # last cell of a 96-region gallery pay for 96 repaints in one slot.
+        # Repaints are coalesced and drained a few per tick; see _flush_repaints.
         self._repaint_timer = QTimer(self)
         self._repaint_timer.setSingleShot(True)
         self._repaint_timer.setInterval(120)
         self._repaint_timer.timeout.connect(self._flush_repaints)
         self._dirty: set = set()
-        # NO `_lay_out_grid()` here. `__init__` calls `restart()` next and `restart` always lays
-        # the grid out, so building it here made every gallery construct one whole set of widgets
-        # and retire it unused a moment later — which is also what made the retire path's
-        # orphan bug (see `_lay_out_grid`) fire on the very first paint rather than only on a
-        # rescope. One owner of the grid's contents, and it is `restart`.
+        # No `_lay_out_grid()` here: `restart()`, called next by __init__, owns the grid's contents.
 
     def _controls(self) -> QHBoxLayout:
         row = QHBoxLayout()
         row.setSpacing(10)
 
         self._proj = QComboBox()
-        # Built FROM `_gallery.PROJECTIONS`, so a projection added to `Z_SELECTORS` appears here
-        # with no edit. `.get(key, key)` rather than a lookup that can KeyError: a new projection
-        # showing up under its raw key is a cosmetic problem, missing from the control is a
-        # capability that shipped and is unreachable — this repo has already lost `reference` that
-        # way for months.
+        # Built from `_gallery.PROJECTIONS`, so a new projection appears here with no edit.
         for key in PROJECTIONS:
             self._proj.addItem(PROJECTION_LABELS.get(key, key), key)
         self._select_projection(self._scope.projection)
@@ -303,8 +218,7 @@ class GalleryWindow(QMainWindow):
         row.addWidget(QLabel("Cell:"))
         row.addWidget(self._size)
 
-        # The timepoint control exists ONLY when there is more than one. A spin box pinned to 0..0
-        # is a control that implies an axis the acquisition does not have.
+        # The timepoint control is shown only when the acquisition has more than one.
         n_t = int((self._meta or {}).get("n_t", 1) or 1)
         self._t = QSpinBox()
         self._t.setRange(0, max(0, n_t - 1))
@@ -330,21 +244,9 @@ class GalleryWindow(QMainWindow):
     # -- the grid -------------------------------------------------------------------------------
 
     def _lay_out_grid(self) -> None:
-        """Build every row and column up front, empty. Cells are filled in as they arrive.
-
-        Up front, because the SHAPE of the gallery is known from the scope alone and a grid that
-        grew as cells landed would reflow under the user's cursor on every arrival.
-
-        ``setParent(None)`` BEFORE ``deleteLater()``, and that is not belt-and-braces. Taking a
-        widget out of a layout does NOT reparent it: it stays a child of ``_grid_host`` and keeps
-        painting at its last geometry, and ``deleteLater`` only schedules the destruction for
-        whenever the event loop next runs. Between those two facts, a rescope drew the OLD row
-        labels and the OLD dark cell backgrounds on top of the new ones — measured on the 10x
-        tissue set, where "manual0 / 28 FOV / manual1 / 28 FOV" appeared superimposed in one row
-        label and a leftover cell sat over the top-left corner. Unparenting removes it from the
-        display in the same statement that retires it. Same class of defect as
-        ``tests/test_no_orphan_windows.py``, one container down.
-        """
+        """Build every row and column up front, empty; cells are filled in as they arrive."""
+        # setParent(None) BEFORE deleteLater(): taking a widget out of a layout does not
+        # reparent it, so it keeps painting at its old geometry until unparented.
         while self._grid.count():
             item = self._grid.takeAt(0)
             w = item.widget()
@@ -358,10 +260,7 @@ class GalleryWindow(QMainWindow):
             head = QLabel(self._channel_header(channel))
             head.setAlignment(Qt.AlignCenter)
             head.setStyleSheet("font-weight:600;")
-            # FIXED to the cell width, or the header is as wide as its text and a real channel
-            # name ("Fluorescence_405_nm_Ex", 22 chars) overruns its column and paints over its
-            # neighbours' headers. Observed on the 10x tissue set at Medium: four headers ran
-            # together into one illegible line and a row label was overprinted.
+            # Fixed to the cell width, or a long channel name overruns its column.
             head.setFixedWidth(self._cell_px)
             head.setWordWrap(True)
             head.setToolTip(self._channel_label(channel))
@@ -386,24 +285,12 @@ class GalleryWindow(QMainWindow):
         self._grid.setColumnStretch(len(self._scope.channels) + 1, 1)
 
     def _select_projection(self, projection: str) -> None:
-        """Point the combo at *projection* BY DATA, not by index.
-
-        `findData` and not `setCurrentIndex(0 if projection == "mip" else 1)`: that comparison is
-        the operator-name branch `test_no_module_branches_on_an_operator_name` fails the build on,
-        and it also silently means "plane" for any third projection ever added. A key the combo
-        does not hold falls back to the first item rather than leaving the control on whatever it
-        happened to show, so the control and the scope cannot disagree.
-        """
+        """Point the combo at *projection* by data, never by index."""
         index = self._proj.findData(str(projection))
         self._proj.setCurrentIndex(index if index >= 0 else 0)
 
     def _region_label(self, region: str) -> str:
-        """The Region, and the FOV count IN SCOPE when that is fewer than the region has.
-
-        Naming the crop on the row is the only way a user can tell a marquee'd corner of a well
-        from the whole well: both render as a picture, and one of them is a smaller picture of the
-        same tissue.
-        """
+        """The Region, and the FOV count in scope when that is fewer than the region has."""
         in_scope = len(self._scope.fovs_of(region))
         whole = len((self._meta.get("fovs_per_region") or {}).get(region) or ())
         if whole and in_scope < whole:
@@ -422,15 +309,7 @@ class GalleryWindow(QMainWindow):
         return channel if rec is None else str(channel_field(rec, "display_name") or channel)
 
     def _channel_header(self, channel: str) -> str:
-        """The SHORT column heading: the excitation wavelength when the channel has one.
-
-        gallery-view's columns are wavelengths, and that is the right unit for a heading a user
-        scans down: "405 nm" is what distinguishes the columns, while "Fluorescence_" is what every
-        one of them has in common. The full name is one hover away (`setToolTip` above) and is in
-        every cell's caption, so nothing is lost — this is the label being narrower than the datum,
-        not the datum being thrown away. Falls back to the display name when there is no
-        wavelength (brightfield), which is exactly when the name IS the distinguishing part.
-        """
+        """The short column heading: the excitation wavelength when the channel has one."""
         rec = self._channel_record(channel)
         nm = None if rec is None else channel_field(rec, "excitation_nm")
         if nm:
@@ -476,8 +355,7 @@ class GalleryWindow(QMainWindow):
         if w is None:
             return
         w.stop()
-        # Bounded, and it does not block the close: a cell is one region's reads, and the worker
-        # checks the flag between FOVs.
+        # Bounded wait; the worker checks the stop flag between FOVs.
         if not w.wait(4000):
             log.warning("gallery worker did not stop within 4 s; leaving it to finish")
 
@@ -492,8 +370,7 @@ class GalleryWindow(QMainWindow):
             before = self._shared.get(cell.channel)
             self._shared = shared_windows(self._cells.values())
             if self._shared.get(cell.channel) != before:
-                # Every OTHER cell of this channel now reads differently. Queued, not painted:
-                # see _flush_repaints for why the queue is drained a few cells at a time.
+                # Every other cell of this channel now reads differently; queued, not painted.
                 self._queue_repaint(k for k in self._cells if k[1] == cell.channel)
         self._paint(cell)
 
@@ -520,13 +397,7 @@ class GalleryWindow(QMainWindow):
     # -- rendering (arrays already in RAM; nothing here reads) ----------------------------------
 
     def _window_for(self, cell: GalleryCell):
-        """The ``(lo, hi)`` this cell is drawn at, honouring the contrast mode.
-
-        Falls back to the dtype's FULL range when no window could be derived, which draws a blank
-        channel BLACK. A fabricated narrow window would draw its noise at full intensity, i.e. it
-        would read as signal — ``_contrast.auto_contrast`` returns None rather than guess for
-        exactly this reason and the gallery must not undo that.
-        """
+        """The ``(lo, hi)`` this cell is drawn at, honouring the contrast mode."""
         if self._contrast_mode == "shared":
             win = self._shared.get(cell.channel)
             if win is not None:
@@ -536,12 +407,7 @@ class GalleryWindow(QMainWindow):
         return dtype_range(cell.image.dtype)
 
     def _draw_stride(self, cell: GalleryCell) -> int:
-        """Integer decimation that still leaves >= 1 source pixel per displayed pixel.
-
-        Deliberately conservative — ``//`` rounds down, so the strided view is never SMALLER than
-        the label it is scaled into, and the visible result is identical to compositing the whole
-        plane. A stride of 1 (a cell already at or below the label size) costs nothing.
-        """
+        """Integer decimation that still leaves >= 1 source pixel per displayed pixel."""
         h, w = cell.shape
         return max(1, min(h // max(1, self._cell_px), w // max(1, self._cell_px)))
 
@@ -553,31 +419,15 @@ class GalleryWindow(QMainWindow):
         color = self._colors.get(cell.channel)
         if color is None:
             color = np.ones(3, dtype=np.float32)      # unresolved channel: grey, never invisible
-        # COMPOSITE AT DISPLAY RESOLUTION, not at fuse resolution. The cell is fused at ~512 px so
-        # that a Large preset and a caption have something to work with, but it is drawn into a
-        # 160 px label: windowing all 451x451 of it and then throwing 90% away cost a MEASURED
-        # 5.5 ms median / 46 ms worst per cell on the 1536-well plate, which is the whole of this
-        # thread's budget spent on pixels no one sees. Striding first is exact (no interpolation,
-        # no allocation of the full plane) and leaves at least one source pixel per displayed
-        # pixel, so `Qt.SmoothTransformation` below still has more than it needs.
-        #
-        # The WINDOW is unaffected: it was computed in the worker over the full covered data, and
-        # windowing is per-pixel, so a decimated view maps to exactly the same greys.
-        #
-        # gallery-view keeps the full-resolution array and re-scales on every render — its own
-        # notes flag that as the thing most likely to bite when the gallery gets big, and 256 cells
-        # is where it did.
+        # Composite at display resolution: stride first (exact — windowing is per-pixel),
+        # then window and scale.
         k = self._draw_stride(cell)
         view = cell.image[::k, ::k]
-        # THE single home of the window-multiply-sum (`_montage.composite`), over a one-channel
-        # store. Not a private ramp: what the gallery shows and what the montage exports have to
-        # be the same arithmetic or they will drift.
         rgb = composite(np.ascontiguousarray(view)[None, ...],
                         np.asarray(color, np.float32)[None, :], [(lo, hi)])
         h, w = rgb.shape[:2]
-        # `.copy()` is load-bearing (QImage does not own a buffer it is handed) and the explicit
-        # 3*w stride is too (a width that is not a multiple of 4 corrupts without it). Both are
-        # gallery-view's, and `_layer_tree.py` already states the same rule for the same reason.
+        # `.copy()` is load-bearing (QImage does not own a buffer it is handed) and so is the
+        # explicit 3*w stride (a width not a multiple of 4 corrupts without it).
         img = QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888).copy()
         label.setPixmap(QPixmap.fromImage(img).scaled(
             self._cell_px, self._cell_px, Qt.KeepAspectRatio, Qt.SmoothTransformation))
@@ -600,24 +450,7 @@ class GalleryWindow(QMainWindow):
             self._repaint_timer.start()
 
     def _flush_repaints(self) -> None:
-        """Redraw at most :data:`REPAINT_BUDGET` cells, then hand the event loop back.
-
-        MEASURED, and it is the reason this is not one loop over every dirty cell. On the
-        1536-well plate (256 cells, 4 channels) the shared window widens as cells land, and each
-        widening invalidates all 64 cells of that channel. Repainting them in one slot blocked the
-        Qt thread for **159-190 ms**, which a user feels as a stutter even though not one byte was
-        being decoded there — a `composite` + `QImage` + `scaled` per cell is only ~2-3 ms, and 64
-        of them is the whole problem. Budgeted, the worst stall over the same gallery is bounded by
-        the budget rather than by how many regions are in scope, which is the property that has to
-        hold: a gallery of 4 regions and a gallery of 64 must feel the same.
-
-        Re-arms while work remains, so this converges without ever owning the thread.
-
-        AFTER, on the same 256-cell gallery: worst stall 27 ms median (92 ms worst seen in any run,
-        on a cold cache under memory pressure), and this method's own worst tick 16.5 ms. Two fixes
-        got there — this budget, and compositing at display resolution in :meth:`_paint`, which is
-        what took a cell from 5.5 ms to 2.2 ms in the first place.
-        """
+        """Redraw at most :data:`REPAINT_BUDGET` cells, then hand the event loop back."""
         for _ in range(REPAINT_BUDGET):
             if not self._dirty:
                 break
@@ -628,13 +461,7 @@ class GalleryWindow(QMainWindow):
             self._repaint_timer.start()
 
     def _refresh_captions(self) -> None:
-        """Redraw everything, through the SAME budgeted queue a contrast widening uses.
-
-        Not a synchronous loop: a display change on a 256-cell gallery is the same 159-190 ms
-        stall measured above, just triggered by a combo box instead of by a cell landing. The
-        control that causes it is one the user is actively holding, which makes it worse, not
-        better.
-        """
+        """Redraw everything, through the same budgeted queue a contrast widening uses."""
         self._queue_repaint(self._cells.keys())
 
     def _on_contrast_mode(self, _index: int) -> None:
@@ -643,7 +470,7 @@ class GalleryWindow(QMainWindow):
         self._refresh_captions()
 
     def _on_cell_size(self, _index: int) -> None:
-        """A size change RE-RENDERS from the arrays in RAM. It never re-reads — gallery-view's rule."""
+        """A size change re-renders from the arrays in RAM; it never re-reads."""
         self._cell_px = int(self._size.currentData() or DEFAULT_CELL_PX)
         for label in self._labels.values():
             label.setFixedSize(self._cell_px, self._cell_px)

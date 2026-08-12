@@ -1,41 +1,6 @@
-"""SquidXplorer CLI (IMA-186) — run a post-processing operator over an HCS acquisition, headless.
+"""SquidXplorer CLI: run a post-processing operator over an HCS acquisition, headless.
 
-This is the same engine the GUI drives, exposed for high-throughput/batch use: point it at a Squid
-acquisition and it iterates the chosen operator over every well of the plate and writes a navigable
-multiscale OME-Zarr plate. No GUI, no FIJI.
-
-Structured after Cephla's stitcher CLI: a declarative pydantic ``ProcessParameters`` model (its
-field docstrings become ``--help`` text) + ``CliApp.run`` + a thin ``run()`` that opens the reader
-and drives the shared command layer. Keeping the "what to run" as data (parameters) and "how to
-run" as the shared engine means a new operator is a new ``--projector`` value, not new CLI plumbing.
-(The flag keeps its name for compatibility; it selects any OPERATOR, not only a z-reduction.)
-
-    squidxplorer <acquisition>                          # MIP every well -> <acquisition>.hcs/plate.ome.zarr
-    squidxplorer <acquisition> --projector stitch       # a REGION operator, same flag
-    squidxplorer <acquisition> --wells B2,B3            # named subset
-    squidxplorer <acquisition> --projector cellpose --param min_area_px=80
-    squidxplorer <acquisition> --tiff                   # also write the per-plane TIFF export
-
-THE OPERATOR SURFACE IS GENERATED, NOT LISTED
----------------------------------------------
-``--projector`` accepts anything ``list_operators`` reports — every projector AND every region
-operator — because that is the exact set ``EngineExecutor.do_run_operator`` accepts and
-``write_plate`` dispatches on. ``--param name=value`` is validated against the operator's own
-``params`` declaration, and ``--help`` prints that declaration. Neither is a hand-written table:
-an operator installed from another package through the ``squidxplorer.operators`` entry-point group
-appears in both with no edit to this file. (This docstring used to claim that and the code did
-not: the validator only knew ``available_projectors()``.)
-
-EXIT CODES — the whole point of a batch surface
------------------------------------------------
-``for d in */; do squidxplorer "$d" || echo "FAILED: $d"; done`` has to work, so "the run finished"
-and "the run produced a plate" are DIFFERENT exit codes:
-
-    0   every target was written
-    1   nothing was written: refused, failed, or every target was skipped
-    2   bad usage (argparse/pydantic rejected the command line)
-    3   PARTIAL — a plate exists, but at least one target was skipped
-    130 interrupted (Ctrl-C); whatever had landed is on disk and marked incomplete
+Exit codes: 0 every target written, 1 nothing written, 2 bad usage, 3 partial, 130 interrupted.
 """
 
 from __future__ import annotations
@@ -57,11 +22,7 @@ from squidxplorer._logpane import get_logger
 
 logger = get_logger()
 
-# --- exit codes ---------------------------------------------------------------------------------
-#
-# 2 is deliberately skipped for our own outcomes: argparse/pydantic already exit 2 on a bad command
-# line, and a batch script must be able to tell "you typed it wrong" from "the data was bad".
-
+# 2 is skipped for our own outcomes: argparse/pydantic already exit 2 on a bad command line.
 EXIT_OK = 0
 EXIT_NOTHING = 1
 EXIT_USAGE = 2
@@ -70,18 +31,11 @@ EXIT_INTERRUPTED = 130
 
 
 def operator_defaults(operator: str) -> dict:
-    """``{name: default}`` an operator declares it can be run with — ``{}`` when it declares none.
-
-    Read off the registry's ``params`` declaration (``squidxplorer._engine.Param``), which is the same
-    declaration ``Operator.bind`` applies and ``list_operators`` reports — for every operator,
-    region ones included, since they are entries in the same table. A region operator that declares
-    no params still passes its kwargs through to ``stitch_plate``, where an unknown one is refused.
-    """
+    """``{name: default}`` an operator declares it can be run with; ``{}`` when it declares none."""
     from squidxplorer import operator_params
 
-    # ASKED, not looked up: an operator CHAIN ('bgsub+spot') is not a table key, and it declares
-    # its parts' parameters namespaced `<step>.<param>` — so `--param spot.min_area_px=80` has to
-    # be checkable here or the chain would be runnable with parameters the CLI called unknown.
+    # Asked, not looked up: a chain ('bgsub+spot') is not a table key and declares
+    # namespaced params.
     try:
         return {p.name: p.default for p in operator_params(operator)}
     except (KeyError, TypeError, ValueError):
@@ -95,8 +49,7 @@ def _operator_catalogue() -> str:
     entries = []
     for name in runnable_operators():
         declared = ", ".join(f"{p.name}={p.default!r}" for p in operator_params(name))
-        # A region operator's remaining kwargs go straight to `stitch_plate`, which refuses an
-        # unknown one there; say so rather than imply the declared list is exhaustive.
+        # A region operator's remaining kwargs go straight to `stitch_plate`.
         if is_region_operator(name):
             declared = ", ".join(filter(None, (declared, "**stitcher kwargs")))
         entries.append(f"{name}({declared})")
@@ -127,9 +80,6 @@ class ProcessParameters(BaseModel, use_attribute_docstrings=True):
         "Anything the engine can run is accepted, including an operator installed from another "
         "package — see --param for the full table."))
 
-    # The table in this help text is BUILT from the registry at import time (after squidxplorer's
-    # built-ins and its entry-point plugins have registered), never written out here — so an
-    # operator from another package documents itself in `--help` on the day it is installed.
     param: list[str] = Field(default_factory=list, description=(
         "Operator parameter, name=value, repeatable: --param min_area_px=80 --param "
         "split_touching=False. Values are Python literals (numbers, True/False, quoted strings); a "
@@ -137,44 +87,29 @@ class ProcessParameters(BaseModel, use_attribute_docstrings=True):
         "is opened. Declared parameters per operator: " + _operator_catalogue()))
 
     output_folder: Optional[str] = None
-    """Directory to receive ``<acquisition-name>.hcs/`` (plate.ome.zarr). Defaults to a sibling of
-    the input acquisition. The output can be hundreds of GB on a large plate — aim it at a disk with
-    room."""
+    """Directory to receive ``<acquisition-name>.hcs/`` (plate.ome.zarr)."""
 
     workers: Optional[int] = None
-    """Projection worker threads. Default: all usable cores (the engine is memory-bandwidth-bound, so
-    more workers mainly helps on cold/network storage)."""
+    """Projection worker threads."""
 
     tiff: bool = False
-    """Also write the individual per-plane TIFF export (Squid filename convention). This is a SECOND,
-    uncompressed copy — roughly doubles on-disk size — so it's off by default."""
+    """Also write the individual per-plane TIFF export (Squid filename convention)."""
 
     n_fovs: Optional[int] = 1
-    """FOVs to project per well. 1 (default) keeps the historical one-FOV-per-well behaviour.
-    Pass 0 for EVERY FOV in every well (the multi-FOV mosaic, IMA-187) — note this multiplies
-    both compute and output size by the FOV count, so a 36-FOV plate is ~36x the work."""
+    """FOVs to project per well: 1 (default) for one per well, 0 for EVERY FOV."""
 
     wells: Optional[str] = None
-    """Run only these wells, comma-separated and in this order: --wells B2,B3. A name that is not
-    in the acquisition is refused BY NAME before any output directory is made. Combines with
-    --limit (the named list is truncated to the first N)."""
+    """Run only these wells, comma-separated and in this order: --wells B2,B3."""
 
     limit: Optional[int] = None
     """Process only the first N wells — a quick SLICE of the plate (subset preview) so you can test
-    the operator without committing the whole plate's compute + disk. Default: every well."""
+    the operator without committing the whole plate's compute + disk."""
 
     overwrite: bool = False
-    """Allow writing into an <acquisition>.hcs that already holds a plate. OFF by default: a re-run
-    republishes each field over the old one, so a second run with a narrower --wells/--limit leaves
-    a plate that DECLARES fewer wells than are on disk. Nothing here resumes an interrupted run —
-    it either refuses or overwrites."""
+    """Allow writing into an <acquisition>.hcs that already holds a plate."""
 
     odon: bool = False
-    """Also write an Odon samplesheet next to the plate and launch Odon on it (IMA-212).
-
-    Odon is a separately-installed GPL-3 desktop viewer — SquidXplorer never bundles it. Install it
-    from https://github.com/alexcoulton/odon/releases, or set $ODON_BIN. Note Odon has no
-    well-plate model, so it shows the fields as a flat mosaic, and it ignores our channel colors."""
+    """Also write an Odon samplesheet next to the plate and launch Odon on it."""
 
     verbose: bool = False
     """Show debug-level logging."""
@@ -182,8 +117,7 @@ class ProcessParameters(BaseModel, use_attribute_docstrings=True):
     @field_validator("n_fovs")
     @classmethod
     def _n_fovs(cls, v):
-        # 0 is the CLI spelling of "all". pydantic-settings maps flags to scalars, so a
-        # sentinel int is cleaner here than accepting the literal string "all" or None.
+        # 0 is the CLI spelling of "all".
         if v is not None and v < 0:
             raise ValueError(f"n_fovs must be >= 0 (0 = every FOV), got {v}")
         return v
@@ -206,26 +140,15 @@ class ProcessParameters(BaseModel, use_attribute_docstrings=True):
     @field_validator("projector")
     @classmethod
     def _known_operator(cls, v: str) -> str:
-        # Validate UP FRONT: otherwise the name is only resolved lazily inside project_plate, after
-        # write_plate has already written an empty plate skeleton to disk, then crashes with a raw
-        # traceback. A clean CLI error before any output is the safe behavior.
-        #
-        # Against the RUNNABLE set — every entry of the one operator table. Validating against
-        # `available_projectors()` alone made the CLI strictly narrower than the command layer it
-        # fronts: `--projector stitch` was refused as "unknown" by a CLI whose executor accepts it
-        # and whose write_plate dispatches on it.
+        # Validate up front, before write_plate has written an output skeleton. Against the
+        # runnable set (every entry of the one operator table), not projectors alone.
         from squidxplorer import runnable_operators
 
         runnable = runnable_operators()
         if v in runnable:
             return v
-        # Not a registered name, and it may still be an operator CHAIN ('bgsub+mip') — a legal
-        # projector everywhere the engine takes one. So the engine is asked to RESOLVE it, exactly
-        # as `EngineExecutor.do_run_operator` does, and for the same reason: a membership test
-        # against the table is not the whole answer, and deciding otherwise here would make
-        # the CLI narrower than the command layer it fronts a second time. The chain refusals
-        # (`_compose`: a z-reducer that is not last, a repeated step) arrive with their own
-        # sentence, which names the fix.
+        # Not a registered name; may still be an operator CHAIN ('bgsub+mip'), so let the
+        # engine resolve it exactly as `EngineExecutor.do_run_operator` does.
         from squidxplorer._engine import _resolve_operator
 
         try:
@@ -238,11 +161,7 @@ class ProcessParameters(BaseModel, use_attribute_docstrings=True):
 
     @model_validator(mode="after")
     def _known_parameters(self):
-        """Refuse a --param the chosen operator does not declare, before the reader is opened.
-
-        The engine refuses it too (``Operator.bind``), and later — after ``write_plate`` has made
-        the output tree. Same refusal, asked sooner, in the words of the flag the user typed.
-        """
+        """Refuse a --param the chosen operator does not declare, before the reader is opened."""
         pairs = dict(_parse_param(p) for p in self.param)
         declared = operator_defaults(self.projector)
         if declared:
@@ -280,10 +199,7 @@ def _region_operator_names() -> set:
 def _resolve_regions(params: ProcessParameters, reader) -> Optional[list[str]]:
     """The explicit ``regions`` list for the command, or None for the whole plate.
 
-    ``--wells`` then ``--limit``, both expressed through the command layer's ``regions`` field —
-    documented there as "the ONE way to express a subset". Unknown names are NOT filtered out here:
-    they go to the command layer, which refuses them by name (``unknown_region``), because silently
-    running 2 of the 3 wells somebody asked for is the wrong kind of helpful.
+    Unknown names are not filtered here; the command layer refuses them by name.
     """
     all_regions = list(reader.metadata["regions"])
     regions = params.named_wells()
@@ -299,13 +215,7 @@ def _resolve_regions(params: ProcessParameters, reader) -> Optional[list[str]]:
 
 
 def _check_output(out_dir: Path, overwrite: bool) -> None:
-    """Refuse to write into an <acquisition>.hcs that already holds a plate, unless asked.
-
-    A re-run does not merge: each field is republished over the old one and the plate group's well
-    list is rewritten from THIS run's target set, so re-running with a narrower --wells/--limit
-    leaves a store that declares fewer wells than are on disk. That used to happen silently and
-    exit 0. This is a GUARD, not a resume: --overwrite proceeds exactly as before.
-    """
+    """Refuse to write into an <acquisition>.hcs that already holds a plate, unless asked."""
     from squidxplorer._output import is_incomplete
 
     plate = out_dir / "plate.ome.zarr"
@@ -321,16 +231,7 @@ def _check_output(out_dir: Path, overwrite: bool) -> None:
 
 
 class _Progress:
-    """A thread-safe ``on_well`` that says a well landed. Runs on WRITER threads (several at once).
-
-    The reason this exists: ``write_plate`` has taken ``on_well`` since IMA-230 and the headless
-    surface passed None, so a multi-hour plate printed one line at the start and one at the end.
-
-    It also keeps ``wells`` — the set of regions that produced at least one field — because this
-    callback is the ONLY place the CLI can learn it. The manifest counts fields written
-    (``n_fields_written``) against wells targeted (``n_wells``), two different units, and printing
-    one over the other is how ``16/4 wells written`` reached the console.
-    """
+    """A thread-safe ``on_well`` progress callback; also collects which wells produced a field."""
 
     def __init__(self, n_targets: int) -> None:
         self.n_targets = int(n_targets)
@@ -342,8 +243,7 @@ class _Progress:
         with self._lock:
             n = next(self._counter)
             self.wells.add(str(region))
-        # n counts FIELDS, not wells (a multi-FOV run writes several per well), so the target is
-        # named as wells rather than pretending to be a percentage it cannot compute.
+        # n counts FIELDS, not wells, so the target is named as wells rather than a percentage.
         logger.info("  [%d] wrote %s fov %s%s", n, region, fov,
                     f" (target: {self.n_targets} well(s))" if self.n_targets else "")
 
@@ -351,28 +251,16 @@ class _Progress:
 def run(params: ProcessParameters, *, stop=None) -> dict:
     """Open the acquisition and write the operator's OME-Zarr plate; return write_plate's manifest.
 
-    The operator run itself goes through the SHARED command layer (``squidxplorer._command``) — the
-    exact surface the GUI drives — so "it works from the CLI" and "the button works" stop being
-    two separate questions. This function keeps only what is genuinely CLI-shaped around that one
-    command: the plate-format resolution, the multi-FOV warning, the ``--wells``/``--limit`` plate
-    slice (expressed as the command's explicit ``regions`` list), the overwrite guard, and the Odon
-    hand-off, which is a post-write launch of a separate program and not an operator at all.
-
-    The returned manifest carries ``outcome`` (``"ok"`` / ``"partial"`` / ``"stopped"``) — what
-    :func:`main` turns into the process exit code. ``run`` itself raises ``SystemExit`` only for a
-    refusal (nothing ran); a run that ran and skipped everything RETURNS, so a library caller still
-    gets the manifest and the skip list.
+    The run goes through the shared command layer (``squidxplorer._command``), the exact surface
+    the GUI drives. Raises ``SystemExit`` only for a refusal; a run that skipped everything
+    still returns the manifest.
     """
     from squidxplorer import open_reader
     from squidxplorer._command import CANCELLED, CommandBus, EngineExecutor, RunOperator
     from squidxplorer._output import incomplete_reason
     from squidxplorer._plate_shape import PlateShapeError, resolve_plate_format
 
-    # An OME-Zarr plate is a legal INPUT (`reader.SquidZarrReader`), so "process this folder" can
-    # be aimed at a store some earlier run left half-written. Refuse it here, in the same words the
-    # plate window uses, rather than project a subset of a plate and report it as the plate: every
-    # count downstream -- targets, wells written, the exit code -- would be honest about the run
-    # and wrong about the sample. Deleting the marker is the override, exactly as in the GUI.
+    # An OME-Zarr plate is a legal INPUT, so refuse a half-written store up front.
     why = incomplete_reason(params.input_folder)
     if why is not None:
         raise SystemExit(
@@ -381,18 +269,12 @@ def run(params: ProcessParameters, *, stop=None) -> dict:
             f"process what did land.")
 
     reader = open_reader(params.input_folder)
-    # What plate is this? Resolved by the module that OWNS the question: declared format ->
-    # SQUIDXPLORER_WELLPLATE_FORMAT (documented there as the headless/CLI override) -> inferred from
-    # the well ids. Every Squid format is supported, including a glass slide / freeform tissue
-    # acquisition, which reports "glass slide" and used to be refused as 'unknown'. The only
-    # refusal left is the one _plate_shape itself raises: ids that fit NO format at all.
     try:
         fmt = resolve_plate_format(reader.metadata)
     except PlateShapeError as exc:
         raise SystemExit(str(exc)) from exc
     logger.info("plate format: %s", fmt)
-    # Multi-FOV policy (IMA-187): n_fovs=0 on the CLI means "every FOV"; anything else is an
-    # explicit count. Only warn about discarding FOVs when we are actually discarding them.
+    # n_fovs=0 on the CLI means "every FOV"; only warn when FOVs are actually discarded.
     fpr = reader.metadata["fovs_per_region"]
     n_fovs = None if params.n_fovs == 0 else params.n_fovs
     multi = sum(1 for r in fpr if len(fpr[r]) > 1)
@@ -411,11 +293,7 @@ def run(params: ProcessParameters, *, stop=None) -> dict:
     n_targets = len(regions) if regions is not None else len(reader.metadata["regions"])
     logger.info("running '%s' over %s -> %s", params.projector, name, out_dir)
 
-    # Drive the SHARED command surface. The reader is already open, so hand it to the executor
-    # rather than making it re-open the folder. A refusal comes back as a value with a code — the
-    # CLI turns it into a clean SystemExit instead of a traceback, the same failure the GUI shows
-    # as a status-line sentence. `on_well`/`stop` are the surface's own, not command fields: a
-    # command is serialisable and a callback is not.
+    # Drive the shared command surface; a refusal comes back as a value with a code.
     progress = _Progress(n_targets)
     bus = CommandBus(EngineExecutor(params.input_folder, reader=reader,
                                     on_well=progress, stop=stop))
@@ -426,8 +304,6 @@ def run(params: ProcessParameters, *, stop=None) -> dict:
     ))
     if not result.ok:
         if result.refusal == CANCELLED:
-            # A second Ctrl-C, or an operator that raised KeyboardInterrupt: the bus turns it into
-            # a refusal (it is not a crash), and the exit code says INTERRUPTED, not FAILED.
             logger.error("%s: %s", params.projector, result.message)
             raise SystemExit(EXIT_INTERRUPTED)
         raise SystemExit(f"{params.projector}: {result.message}")
@@ -439,17 +315,10 @@ def run(params: ProcessParameters, *, stop=None) -> dict:
     manifest["outcome"] = outcome
     manifest["detail"] = detail
     manifest["n_targets"] = int(result.data.get("n_targets") or 0)
-    # Wells that produced at least one field, counted by the callback that saw each one land. The
-    # manifest cannot answer this: `n_wells` is how many wells the run TARGETED.
+    # Wells that produced at least one field; the manifest's n_wells is wells TARGETED.
     manifest["n_wells_written"] = len(progress.wells)
 
-    # SAY WHICH ONE IT WAS. "done:" over an empty plate is the line this whole exit-code change
-    # exists to stop printing, so the verdict picks the level and the word.
-    #
-    # EACH COUNT AGAINST ITS OWN TOTAL. This printed `n_fields_written`/`n_wells` — FIELDS over
-    # WELLS — labelled "wells written", so a healthy 4-well 4-FOV plate read "16/4 wells written"
-    # and a run that lost a quarter of the plate read "12/4", a numerator above its denominator.
-    # `_progress` carries the same warning ten lines up and this line did the pretending anyway.
+    # Each count against its own total: fields/fields and wells/wells, never mixed.
     line = ("%s (%d/%d fields written across %d/%d wells, %d pyramid level(s))%s" % (
         manifest["plate"], manifest["n_fields_written"], manifest["n_fields"],
         manifest["n_wells_written"], manifest["n_wells"], manifest["levels"],
@@ -459,17 +328,10 @@ def run(params: ProcessParameters, *, stop=None) -> dict:
     else:
         logger.error("%s — %s: %s", outcome.upper(), detail, line)
     if skipped:
-        # NOT "due to read errors": per-well fault isolation catches whatever the operator raised
-        # (a missing plane, a bad --param for a region operator, a numeric blow-up), and each one
-        # was already logged by name as a SKIP line. Naming a cause here that the summary does not
-        # know is how a wrong diagnosis gets read off the last line of a run.
         logger.warning("%d well(s) SKIPPED — see the SKIP line for each: %s",
                        len(skipped), ", ".join(skipped[:15]) + (" …" if len(skipped) > 15 else ""))
 
-    # IMA-212: hand the finished plate to Odon. Deliberately AFTER the plate is fully written
-    # and recorded in the manifest, so a missing binary costs the user nothing — the output is
-    # already on disk and complete. The samplesheet is derived by walking that output, not from
-    # `regions`/`n_fovs`, so it cannot disagree with what was actually written.
+    # Odon hand-off, deliberately AFTER the plate is fully written and recorded.
     if params.odon:
         from squidxplorer._odon import launch_odon, write_samplesheet
 
@@ -484,12 +346,7 @@ def run(params: ProcessParameters, *, stop=None) -> dict:
 
 
 def exit_code(manifest: dict) -> int:
-    """The process exit code for a finished run. The batch surface's whole contract.
-
-    ``ok`` -> 0. ``stopped`` -> 130 (Ctrl-C). Everything else is 1 when NOTHING landed and 3 when
-    a plate exists but is short of what was asked for, so ``squidxplorer d || echo FAILED`` catches
-    both and a script that wants to keep a partial plate can tell them apart.
-    """
+    """The process exit code for a finished run: 0 ok, 130 stopped, 1 nothing landed, 3 partial."""
     outcome = manifest.get("outcome", "ok")
     if outcome == "ok":
         return EXIT_OK
@@ -500,15 +357,7 @@ def exit_code(manifest: dict) -> int:
 
 @contextmanager
 def interrupt_stop():
-    """Yield a ``stop()`` predicate wired to SIGINT: the first Ctrl-C asks for a clean partial stop.
-
-    A second one is left to Python's default handler, so a wedged run is still killable. The engine
-    drains its in-flight writes and the store keeps its ``.squidxplorer-incomplete`` marker, which is
-    what makes an interrupted plate tellable from a finished one.
-
-    A context manager because ``main()`` is importable and tests call it: the previous handler is
-    always put back, so nothing this process does afterwards inherits our Ctrl-C.
-    """
+    """Yield a ``stop()`` predicate wired to SIGINT: first Ctrl-C stops cleanly, second aborts."""
     stopping = threading.Event()
 
     def handler(_signum, _frame):
@@ -531,20 +380,14 @@ def interrupt_stop():
 
 
 def main(args: Optional[list[str]] = None) -> int:
-    """Parse, run, and RETURN AN EXIT CODE. The console script does ``sys.exit(main())``.
-
-    Returning the code (rather than exiting 0 unconditionally, which is what this did) is the
-    whole fix for a batch loop: ``for d in */; do squidxplorer "$d" || note "$d"; done`` could not
-    detect a plate that wrote nothing, because every path here ended in an implicit None.
-    """
+    """Parse, run, and RETURN AN EXIT CODE. The console script does ``sys.exit(main())``."""
     from pydantic import ValidationError
 
     argv = list(sys.argv[1:] if args is None else args)
     try:
         params = CliApp.run(ProcessParameters, cli_args=argv)
     except ValidationError as exc:
-        # A clean sentence, not a pydantic traceback: an unknown --projector or a bad --param is a
-        # USAGE error and must read like one (and exit 2, like every other usage error).
+        # A clean sentence and exit 2, not a pydantic traceback.
         for err in exc.errors():
             where = ".".join(str(p) for p in err["loc"]) or "argument"
             print(f"squidxplorer: {where}: {err['msg']}", file=sys.stderr)

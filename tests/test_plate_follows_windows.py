@@ -1,44 +1,4 @@
-"""The plate has to follow the WINDOWS' napari, because there is no central napari left.
-
-Task 8.1, 2026-07-29. The requirement is Julio's, and it was quoted verbatim inside the method
-that could not run:
-
-    "there shouldn't be any controls for the plate view. It just reacts to toggles and contrast
-    adjustments in napari."
-
-WHAT WAS WRONG. ``PlateWindow._bind_napari_contrast`` bound the plate to ``self._mosaic_pane``,
-the ONE central napari pane. The decentralization deleted that pane and left
-``self._mosaic_pane = None`` unconditionally in ``__init__``, so the method's first guard was
-permanently true: it returned before subscribing to anything. Contrast drags, eye-icon toggles and
-colormap changes inside a window changed that window and NOTHING else, and no test named it,
-because every test that touched the method assigned a stub pane onto a bare ``__new__`` shell and
-so never met the guard the real window hits.
-
-The sentinel and every method that guarded on it were deleted on 2026-08-06, including
-``_bind_napari_contrast`` itself: once ``_on_mosaic_done`` went, its sweep over every open window
-had no caller left. The binding that has always done the work is
-``ViewerManager.windowOpened -> _bind_window_contrast``, connected in ``__init__``, and that is
-what this file drives.
-
-WHAT IS PINNED. The sources are now the per-region ``RegionViewer`` windows registered in
-``ViewerManager``, so:
-
-* a window is bound the moment the manager spawns it (``windowOpened``), with the real root
-  window and its real manager;
-* a contrast gesture in a window lands in the plate's FOLLOW path, and NOT in its manual latch.
-  That distinction is load-bearing: napari autoscales on its own at open, so recording an owner's
-  autoscale as a user gesture latched every channel MANUAL before anyone had touched anything and
-  killed the plate's running auto-contrast from the first frame;
-* channel VISIBILITY follows too (Julio asked for the toggles as well as the contrast), and so
-  does the colormap;
-* a second window is bound as well as the first, and a window bound twice does not stack a second
-  subscription.
-
-WHAT IS DELIBERATELY NOT HERE. Whether a napari event counts as a user gesture at all is
-``MosaicLayers``' decision (it filters our own writes, including the percentile window set at add
-time and link propagation) and is pinned in ``tests/test_napari_view.py``. This file starts one
-step later: given that the owner reported a gesture, where do the numbers land.
-"""
+"""The plate follows the per-region windows' napari; it owns no central pane of its own."""
 
 from __future__ import annotations
 
@@ -60,29 +20,20 @@ from squidxplorer import _viewer as V
 
 @pytest.fixture(scope="module")
 def qapp():
-    # Held for the module, and the process's app is pinned by squidxplorer._viewer.qt_app() — see
-    # tests/test_window_lifetime.py for why a fixture must not be the only owner.
     app = QApplication.instance() or QApplication([])
     app.setProperty("_squidxplorer_test", True)
     return app
 
 
 class _FakeMosaic:
-    """The SUBSCRIPTION surface of ``MosaicLayers``, and its gesture calls, and nothing else.
-
-    It records what the plate subscribed and can fire it, which is exactly what the real
-    ``MosaicLayers`` does once it has decided a napari event was a user gesture.
-    """
+    """The SUBSCRIPTION surface of ``MosaicLayers``, and its gesture calls, and nothing else."""
 
     def __init__(self, resolved=None) -> None:
         self.contrast_cbs: list = []
         self.visibility_cbs: list = []
         self.colormap_cbs: list = []
         self.op_cbs: list = []
-        # What napari has ALREADY resolved for each channel in this window -- its own autoscale at
-        # open. Deliberately NOT reachable through the gesture helpers below: an autoscale is not a
-        # gesture, the sinks filter it out, and it is therefore the one state that can only be
-        # READ. `_adopt_window_view` is the reader.
+        # napari's own autoscale at open: readable, never fired as a gesture.
         self.resolved: dict = dict(resolved or {})
 
     def contrast(self, channel: str):
@@ -100,7 +51,6 @@ class _FakeMosaic:
     def on_user_op(self, cb) -> None:
         self.op_cbs.append(cb)
 
-    # -- what napari reports when the user actually gestures in this window ------------------
     def user_drags_contrast(self, channel: str, lo: float, hi: float) -> None:
         for cb in list(self.contrast_cbs):
             cb(channel, lo, hi)
@@ -120,13 +70,7 @@ class _FakeMosaic:
 
 
 class _FakeWindow:
-    """A ``RegionViewer`` as the PLATE reads one: a window id and a napari pane.
-
-    A real ``RegionViewer`` builds a real napari canvas, and building one in a process that
-    already holds PyQt5 widgets loads a second Qt binding and aborts the interpreter rather than
-    failing a test (see the note at the top of ``tests/test_channel_bar.py``). The plate touches
-    exactly two attributes of a window, so those two are what this carries.
-    """
+    """A ``RegionViewer`` as the PLATE reads one: a window id and a napari pane."""
 
     def __init__(self, window_id: int = 1, resolved=None) -> None:
         self.window_id = int(window_id)
@@ -146,12 +90,7 @@ def _channels(win) -> list:
 
 
 def _copy(luts: dict) -> None:
-    """Put a window's LUT snapshot on the shared clipboard, as `Copy LUTs` does.
-
-    The dict shape is `RegionViewer._per_channel_luts`': `clim`, `cmap`, `rgb`, and -- since
-    2026-08-06 -- `on`, the channel's visibility, which travels WITH the look rather than as a
-    separate gesture.
-    """
+    """Put a window's LUT snapshot on the shared clipboard, as `Copy LUTs` does."""
     from squidxplorer._region_viewer import _LUT_CLIPBOARD
     _LUT_CLIPBOARD.clear()
     _LUT_CLIPBOARD.update(luts)
@@ -164,16 +103,8 @@ def _spawn(win, window_id: int = 1, resolved=None) -> _FakeWindow:
     return child
 
 
-# --------------------------------------------------------------- the premise of the whole bug
-
-
 def test_the_root_really_has_no_central_napari_pane_to_bind(qapp, squid_dataset):
-    """The plate must own no napari surface at all. If this fails, the pane is back and the
-    precedence between it and the windows has to be DECIDED rather than inherited.
-
-    Pinned as "the attribute does not exist" rather than "the attribute is None", because None was
-    the state that let twenty dead methods sit here for two weeks looking like a feature.
-    """
+    """Pinned as "the attribute does not exist", not "is None" — None hid twenty dead methods."""
     win = _open_plate(squid_dataset)
     try:
         assert not hasattr(win, "_mosaic_pane"), (
@@ -184,31 +115,8 @@ def test_the_root_really_has_no_central_napari_pane_to_bind(qapp, squid_dataset)
         win.close()
 
 
-# ------------------------------------------- the LOOK: copy/paste, never a live subscription
-#
-# Julio, 2026-08-06: *"we're shelving the interactive contrast synch. What we do is that whichever
-# lookup table we have for the window, we copy it and it reflects on the plate, with whichever
-# channels were turned on on the window. And the plate image shouldn't change unless we paste a
-# LUT."*
-#
-# This file used to assert the opposite -- eight tests that a drag, an eye icon or a colormap
-# change in ANY window landed on the plate immediately -- and each of them was an honest
-# description of what the code did. What none of them could express is the property that made it
-# unusable: the plate followed *whichever window the user last gestured in*, so with several
-# windows open its look was decided by a history with no surface anywhere. The tests passed
-# because each one had exactly one window.
-#
-# The tests below pin the replacement, and the first one is the whole of it: gestures in a window
-# now change NOTHING on the plate.
-
-
 def test_a_gesture_in_a_window_leaves_the_plate_alone(qapp, squid_dataset):
-    """The shelving, stated as a property. Contrast, eye icon and colormap all together, because
-    all three used to land and the requirement is about the plate's look as a whole.
-
-    MUTATION: restore any of the three subscriptions in ``_bind_window_contrast`` and this goes
-    red on that quantity.
-    """
+    """Live look-following is shelved: gestures in a window change nothing on the plate."""
     win = _open_plate(squid_dataset)
     try:
         child = _spawn(win)
@@ -230,8 +138,6 @@ def test_a_gesture_in_a_window_leaves_the_plate_alone(qapp, squid_dataset):
 
 
 def test_pasting_a_windows_luts_is_what_moves_the_plate(qapp, squid_dataset):
-    """...and the explicit gesture DOES land. Shelving the subscription without this would be
-    removing the feature rather than replacing it."""
     win = _open_plate(squid_dataset)
     try:
         child = _spawn(win)
@@ -248,9 +154,7 @@ def test_pasting_a_windows_luts_is_what_moves_the_plate(qapp, squid_dataset):
 
 
 def test_a_paste_carries_the_channels_the_window_had_lit(qapp, squid_dataset):
-    """*"with whichever channels were turned on on the window."* Visibility travels WITH the LUT:
-    a copied look with every channel's window and none of its on/off state is not the look that
-    was on screen."""
+    """Visibility travels WITH the LUT."""
     win = _open_plate(squid_dataset)
     try:
         child = _spawn(win)
@@ -267,9 +171,7 @@ def test_a_paste_carries_the_channels_the_window_had_lit(qapp, squid_dataset):
 
 
 def test_a_paste_can_never_black_the_plate_out(qapp, squid_dataset):
-    """The never-go-black floor still wins over a paste. A window with everything switched off is
-    a legitimate thing to have; emptying the NAVIGATOR from it is not, because the plate has no
-    controls of its own to fill it back in from."""
+    """The never-go-black floor still wins over a paste."""
     win = _open_plate(squid_dataset)
     try:
         child = _spawn(win)
@@ -284,9 +186,7 @@ def test_a_paste_can_never_black_the_plate_out(qapp, squid_dataset):
 
 
 def test_a_channel_the_plate_does_not_have_is_ignored_rather_than_raising(qapp, squid_dataset):
-    """A window can show a layer whose channel this plate has no column for (a re-ingest, an
-    operator's own output). It must be dropped quietly: an exception here is raised inside a Qt
-    slot, where it kills the gesture rather than reporting anything."""
+    """An unknown channel must be dropped quietly — an exception here dies inside a Qt slot."""
     win = _open_plate(squid_dataset)
     try:
         child = _spawn(win)
@@ -296,18 +196,8 @@ def test_a_channel_the_plate_does_not_have_is_ignored_rather_than_raising(qapp, 
     finally:
         win.close()
 
-# ------------------------------------------------------- the processing layer, Julio 2026-08-03
-
 
 def test_picking_an_operator_layer_in_a_window_moves_the_plate_onto_it(qapp, squid_dataset):
-    """Julio: "after I click an operator layer in our window, the thumbnails don't update."
-
-    The three sinks above are all per CHANNEL, and a window's layer tree picks a PROCESSING
-    LAYER. There was no sink for that at all, so the plate went on showing whatever layer the
-    last run left active however the user drove the window's tree.
-
-    MUTATION: drop the ``on_user_op`` binding and this goes red.
-    """
     win = _open_plate(squid_dataset)
     try:
         win._op_stack.add("mip", "Maximum Intensity Projection")   # as a run would
@@ -327,9 +217,6 @@ def test_picking_an_operator_layer_in_a_window_moves_the_plate_onto_it(qapp, squ
 
 
 def test_the_plate_layers_tab_agrees_with_what_the_window_asked_for(qapp, squid_dataset):
-    """The tab's checkboxes are a second surface over one stack. A window toggling a layer that
-    left the tab reading the old state would be the "view disagrees with its own controls" defect
-    ``OperationStack.toggle`` was written to end."""
     win = _open_plate(squid_dataset)
     try:
         win._op_stack.add("mip", "Maximum Intensity Projection")
@@ -342,8 +229,6 @@ def test_the_plate_layers_tab_agrees_with_what_the_window_asked_for(qapp, squid_
 
 
 def test_a_window_layer_the_plate_never_ran_is_ignored_rather_than_raising(qapp, squid_dataset):
-    """A window can carry operator groups this plate has no layer for. Ignoring it must not raise
-    out of a Qt slot (an unhandled exception in one aborts the process)."""
     win = _open_plate(squid_dataset)
     try:
         child = _spawn(win)
@@ -354,17 +239,7 @@ def test_a_window_layer_the_plate_never_ran_is_ignored_rather_than_raising(qapp,
         win.close()
 
 
-# ------------------------------------------------------------------- many windows, one plate
-
-
 def test_every_open_window_is_bound_not_only_the_first(qapp, squid_dataset):
-    """The old binding was a once-per-process latch over a single pane. Windows are plural, and a
-    second window whose gestures went nowhere would be the same defect one window later.
-
-    Asserted on the LAYER sink, which is the subscription that survived the 2026-08-06 shelving of
-    the live look-following. The property under test is about BINDING, not about contrast, so it
-    is unaffected by which quantities the plate still follows.
-    """
     win = _open_plate(squid_dataset)
     try:
         first, second = _spawn(win, 1), _spawn(win, 2)
@@ -377,9 +252,7 @@ def test_every_open_window_is_bound_not_only_the_first(qapp, squid_dataset):
 
 
 def test_the_last_gesture_wins_when_two_windows_touch_one_channel(qapp, squid_dataset):
-    """Deliberate, and stated so it is a decision rather than an accident: a window IS a view of a
-    subset of this plate, so the plate paints with whatever window the user last resolved. The
-    alternative — one privileged window — is the central pane the decentralization removed."""
+    """Deliberate: the plate paints with whatever window the user last resolved."""
     win = _open_plate(squid_dataset)
     try:
         win._op_stack.add("mip", "Maximum Intensity Projection")
@@ -395,15 +268,7 @@ def test_the_last_gesture_wins_when_two_windows_touch_one_channel(qapp, squid_da
 
 
 def test_binding_the_same_window_twice_does_not_stack_a_second_subscription(qapp, squid_dataset):
-    """``MosaicLayers`` keeps a LIST of callbacks and cannot unsubscribe, so a re-bind is
-    permanent: a window offered twice must not gain a second copy of the plate on its sink.
-
-    The second offer used to come from ``_bind_napari_contrast``, a sweep over every open window
-    called from the mosaic-done path; both went on 2026-08-06 with the dead pane. The requirement
-    did not go with them -- ``windowOpened`` is emitted per window and nothing stops a caller
-    offering the same window again -- so it is pinned directly on the method that carries the
-    ``_followed_windows`` guard.
-    """
+    """``MosaicLayers`` cannot unsubscribe, so a window offered twice must not gain a second copy."""
     win = _open_plate(squid_dataset)
     try:
         child = _spawn(win)
@@ -420,9 +285,7 @@ def test_binding_the_same_window_twice_does_not_stack_a_second_subscription(qapp
 
 
 def test_a_window_that_came_up_without_napari_is_skipped_quietly(qapp, squid_dataset):
-    """``RegionViewer`` shows a red "napari viewer unavailable" panel instead of a pane when napari
-    is missing, leaving ``_pane`` None. That window has nothing to follow, and the plate must not
-    fail to open the rest of them over it."""
+    """A window with no napari pane has nothing to follow and must not break the rest."""
     win = _open_plate(squid_dataset)
     try:
         blind = _FakeWindow(3)

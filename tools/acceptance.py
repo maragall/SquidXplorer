@@ -1,31 +1,9 @@
 #!/usr/bin/env python3
-"""Headless acceptance gate: drive the REAL widget on the REAL acquisitions.
-
-Why this exists. Every defect this project has shipped passed a green unit suite,
-because nothing drove the application. The backend was solid, the GUI wiring was
-dead, and the test doubles agreed with each other. Two examples, both real:
-
-  * ``minerva_selection()`` probed only ``PlateOverview`` while the selection it
-    wanted lived on ``PlateWindow``. It reached the right answer by accident
-    through a fallback, and every test passed.
-  * The viewer refused every glass-slide acquisition outright. The unit suite was
-    green the whole time, because a test asserted the refusal.
-
-So: run this after every land, on both real datasets, before believing anything.
+"""Headless acceptance gate: drive the real widget on the real acquisitions.
 
     QT_QPA_PLATFORM=offscreen PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python tools/acceptance.py
 
-Exit code is 0 only if every case passes. Both env vars are required: without
-PYTEST_DISABLE_PLUGIN_AUTOLOAD the Qt tests silently skip against a second binding.
-
-THE BINDING. Every Qt import here goes through ``qtpy`` AFTER ``import squidxplorer``, because
-``squidxplorer/__init__`` pins ``QT_API=pyqt6`` and that pin has to be set before qtpy resolves
-anything. This file said ``from PyQt5.QtWidgets import QApplication`` at three sites until
-2026-08-06 -- the same defect commit 6b51793 fixed in ``tools/walkthrough.py``, left behind here:
-the widgets under test were Qt6 while the application was Qt5, both frameworks loaded into one
-process, and every widget case aborted on "QWidget: Must construct a QApplication before a
-QWidget". Dead since the Qt6 migration (10b8348, f7f9b28, ce5605c) and nothing ran it, so nobody
-saw.
+Exit code is 0 only if every case passes. Both env vars are required.
 """
 from __future__ import annotations
 
@@ -36,35 +14,18 @@ import traceback
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
 
-# Run from anywhere: import the repo this file lives in, not whatever `squidxplorer`
-# happens to be installed. The mac filesystem is case-insensitive, so an invoker
-# sitting in .../CEPHLA/ instead of .../Cephla/ otherwise resolves a different tree.
+# Run from anywhere: import the repo this file lives in, not an installed squidxplorer.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# The two acquisitions the product is actually demoed on. READ ONLY - never copy
-# or convert them; copying the 18 GB set is how this machine hit 0 bytes free.
+# The two acquisitions the product is actually demoed on. READ ONLY - never copy or convert.
 TISSUE = ("/Users/julioamaragall/Downloads/"
           "test_10x_laser_af_z_stack_2025-10-28_13-40-43.939945 yy")
-# ``~/Downloads/synthetic_2x2_wellplate`` until 2026-08-06, when that folder no longer existed and
-# the case had been silently SKIPping ("dataset not present") for however long. Its replacement is
-# built by a script rather than found, so a machine without it can make it:
-#   python tools/make_5d_fixture.py ~/Downloads/sim_2x2_36fov_96wp --fovs 36 --nz 1 --nt 1 \
-#       --well-pitch-mm 9.0 --declared-format "384 well plate"
-# ``SQUIDXPLORER_FIXTURE_PLATE`` overrides it, which is how CI runs this case for real: the fixture is
-# generated, so a runner can make one and point here. TISSUE has no override — it is a real
-# acquisition nothing can synthesise, and it skips by name off this machine.
+# Built by tools/make_5d_fixture.py; SQUIDXPLORER_FIXTURE_PLATE overrides it for CI.
 PLATE = os.environ.get("SQUIDXPLORER_FIXTURE_PLATE") or \
     "/Users/julioamaragall/Downloads/sim_2x2_36fov_96wp"
 
 # (label, path, expected regions, expected fov_positions_um entries)
-#
-# ``None`` for the count means "one position per (region, fov) the acquisition declares, however
-# many that is". TISSUE is a fixed real acquisition and keeps its literal 55. The plate case had a
-# literal 144, which is a property of ONE fixture rather than of the product: point the case at a
-# smaller generated plate (which is exactly what SQUIDXPLORER_FIXTURE_PLATE is for) and a correct
-# reader reported "fov_positions_um has 36 entries, expected 144" -- a red gate over a fixture
-# swap. ``None`` compares the CSV parser's output against the filename scan's `fovs_per_region`,
-# which are two different producers, so it is a real cross-check and not a tautology.
+# None for the count means "one position per (region, fov) the acquisition declares".
 CASES = [
     ("tissue (glass slide, freeform regions)", TISSUE, ["manual0", "manual1"], 55),
     ("2x2 well plate", PLATE, ["A1", "A2", "B1", "B2"], None),
@@ -75,12 +36,11 @@ _APP = None
 
 
 def _app():
-    """The QApplication, on THE BINDING THE APP SHIPS. See the module docstring."""
+    """The QApplication, on the binding the app ships."""
     global _APP
     import squidxplorer  # noqa: F401  -- sets QT_API before qtpy resolves a binding
     from qtpy.QtWidgets import QApplication
-    # Keep a module-level reference: a QApplication with no Python owner is garbage
-    # collected, and the next QWidget aborts with 'Must construct a QApplication first'.
+    # Keep a module-level reference: a QApplication with no Python owner is garbage collected.
     _APP = QApplication.instance() or QApplication([])
     return _APP
 
@@ -117,8 +77,7 @@ def check(label, path, want_regions, want_positions):
     if n_pos != want_positions:
         fails.append(f"fov_positions_um has {n_pos} entries, expected {want_positions}{why}")
 
-    # The units contract: world space is micrometres and the key says so. A plate
-    # spans tens of thousands of um, never tens - that is the 1000x tell.
+    # Units contract: world space is micrometres. A plate spans tens of thousands of um.
     if n_pos:
         xs = [v[0] for v in meta["fov_positions_um"].values()]
         span = max(xs) - min(xs)
@@ -143,26 +102,8 @@ def check(label, path, want_regions, want_positions):
     return fails
 
 
-# --- IMA-254: every Squid WRITER, not just every dataset on this machine ----------------------
-#
-# The two cases above are real acquisitions, and they are why this gate exists. They are also why
-# IMA-254 happened: they come from two of Squid's six output writers, and coverage quietly became
-# "whatever is in ~/Downloads". Three writers were unserved, one of them SILENTLY (a multi-page
-# acquisition reported as empty).
-#
-# So the gate also drives the widget over a synthetic acquisition from EVERY writer in
-# control/core/job_processing.py, built in a temp dir, kilobytes each, deleted on the way out.
-# A writer added to Squid without a fixture here fails at this gate, on this machine, rather
-# than at a customer with an acquisition nobody here can open.
-
 def check_one_writer(label, root, reader_cls):
-    """Reader contract + widget ingest for one writer's synthetic acquisition.
-
-    Returns ``(fails, notes)``. ``check()`` above is not reused: its units heuristic ("a plate
-    spans tens of thousands of um") is calibrated for a 144-FOV real plate, and these fixtures are
-    deliberately 2x2. The units contract is checked here against the EXACT expected micrometre
-    values instead, which is the stronger assertion anyway.
-    """
+    """Reader contract + widget ingest for one writer's synthetic acquisition."""
     import numpy as np
 
     import squidxplorer
@@ -174,8 +115,7 @@ def check_one_writer(label, root, reader_cls):
     except Exception:
         return ["open_reader raised:\n" + traceback.format_exc()], notes
 
-    # "A reader opened it" is not the claim. "The RIGHT reader opened it" is: a fallback that
-    # happens to work is exactly how the original defect stayed hidden.
+    # The claim is "the RIGHT reader opened it", not "a reader opened it".
     got = type(reader).__name__
     if got != reader_cls:
         fails.append(f"dispatched to {got}, expected {reader_cls}")
@@ -191,8 +131,7 @@ def check_one_writer(label, root, reader_cls):
         if meta.get(key) != want:
             fails.append(f"metadata[{key!r}] = {meta.get(key)!r}, expected {want}")
 
-    # Exact pixels, every plane. An acquisition that "opens" but serves the wrong plane is the
-    # failure this gate exists to catch.
+    # Exact pixels, every plane.
     for (region, fov, z, channel), expected in expected_arrays().items():
         try:
             got_plane = reader.read(region, fov, channel, z)
@@ -203,7 +142,7 @@ def check_one_writer(label, root, reader_cls):
             fails.append(f"pixels differ at region={region} fov={fov} z={z} ch={channel}")
             break
 
-    # UNITS: micrometres, key says so, converted once at the producer.
+    # Units: micrometres, key says so, converted once at the producer.
     positions = meta.get("fov_positions_um") or {}
     if set(positions) != {(r, f) for r in REGIONS for f in FOVS}:
         fails.append(f"fov_positions_um has {len(positions)} entries, expected "
@@ -225,11 +164,8 @@ def check_one_writer(label, root, reader_cls):
         readout = (getattr(getattr(win, "_readout", None), "text", lambda: "")() or "")
         if win._reader is None:
             if "already a written plate" in readout:
-                # NAMED, not swallowed. _viewer.resolve_plate_root treats any folder containing
-                # plate.ome.zarr as "a plate SquidXplorer already wrote", but that is byte-for-byte
-                # the shape SaveZarrJob's HCS mode produces — so the viewer refuses raw Squid HCS
-                # acquisitions. The reader serves them correctly (asserted above); the widget
-                # gate does not, and _viewer.py is owned elsewhere while IMA-254 is in flight.
+                # Named, not swallowed: resolve_plate_root cannot tell a raw Squid HCS
+                # acquisition from a SquidXplorer-written plate.
                 notes.append("widget ingest refused: _viewer.resolve_plate_root cannot tell a "
                              "raw Squid HCS acquisition from a SquidXplorer-written plate "
                              "(_viewer.py:701). Reader contract verified; widget path is a "
@@ -253,12 +189,7 @@ def check_one_writer(label, root, reader_cls):
 
 
 def check_writers():
-    """Walk every Squid writer. Returns ``[(label, fails, notes)]``.
-
-    Fixtures are built under a TemporaryDirectory and removed when it closes: this machine has
-    run out of disk mid-edit before, and an acceptance gate that leaves gigabytes behind is a
-    gate that gets deleted rather than run.
-    """
+    """Walk every Squid writer over synthetic fixtures in a temp dir. Returns [(label, fails, notes)]."""
     import tempfile
 
     from tests.writer_fixtures import WRITERS
@@ -321,10 +252,8 @@ def main():
 
 if __name__ == "__main__":
     rc = main()
-    # os._exit, NOT sys.exit. Measured 2026-08-06: every case PASSed, "acceptance: PASS" printed,
-    # and the process still died with SIGSEGV (139) unwinding Qt at interpreter shutdown. A gate
-    # whose exit code is decided by a teardown crash gates nothing, so the verdict is committed
-    # here -- after the report, before the unwind.
+    # os._exit, not sys.exit: Qt can SIGSEGV unwinding at interpreter shutdown, and a gate
+    # whose exit code is decided by a teardown crash gates nothing.
     sys.stdout.flush()
     sys.stderr.flush()
     os._exit(rc)

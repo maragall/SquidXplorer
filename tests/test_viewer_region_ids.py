@@ -1,23 +1,5 @@
-"""Two bugs re-landed from the SUPERSEDED IMA-250 branch (c1c9063).
-
-IMA-250's premise - that the "FOV" control should enumerate the FOVs of one region - was
-reversed by the user: a region is the unit of navigation and a mosaic is always what loads
-(IMA-265). None of that enumeration work is re-landed here. But two genuine defects were
-found while writing it, and they are independent of the premise that was withdrawn:
-
-(a) ``activate_well`` rebuilt the id it navigates to as ``f"{row}{col}"`` from
-    ``parse_well_id(well_id)``. A region id is only sometimes a well id. On a slide carrier
-    it is freeform - "R2C3", "region_A", "tissue-1", "scan 3" - and ``parse_well_id`` raises
-    on those. The raise happened INSIDE a bare ``except Exception: pass``, so the double-click
-    did not navigate and did not say why: the plate moved its red box onto the region and the
-    detail viewer kept showing the previous one. "manual0" survived only by luck (it parses,
-    and reassembles to the same string). Passing the id verbatim is the fix - there was never
-    a reason to take the id apart, since it is only a label for the detail viewer.
-
-(b) ``_focus_reference_plane`` ranked ``fovs_per_region[well][0]`` - the region's FIRST FOV -
-    whatever FOV was actually on screen. It is a per-FOV autofocus, so focusing field 0 while
-    the viewer shows field 12 reports a sharpest plane for pixels the user is not looking at.
-"""
+"""Freeform region ids must navigate verbatim, and window autofocus must rank a
+representative FOV."""
 
 from __future__ import annotations
 
@@ -45,26 +27,8 @@ from squidxplorer import _viewer as V  # noqa: E402
 from .conftest import shutdown_plate_window  # noqa: E402
 from .test_viewer import qapp  # noqa: E402,F401  (fixtures)
 
-# WHERE THESE NOW POINT (decentralization, 2026-07-23).
-#
-# There is no central viewer any more, and its remains (`PlateWindow._detail`,
-# `_make_detail_viewer`, the `stub_detail` fixture) were deleted on 2026-08-05. Both defects below
-# outlived that change, they just moved:
-#
-#   (a) the region id is still passed through verbatim, now to `ViewerManager.open`, which spawns an
-#       independent window over exactly that id;
-#   (b) the autofocus is now `_region_viewer.RegionViewer._focus_reference_plane`, which picks the
-#       region's CENTRE FOV (`_napari3d._center_fov`) rather than `fovs_per_region[region][0]`, and
-#       moves THAT window's napari z slider.
-
-
 def _spy_focus_worker(monkeypatch, answer_z=1, note=""):
-    """Replace `_FocusWorker` with a recorder. Returns the list of ``(region, fov, channel)``.
-
-    Spying on the WORKER's arguments, not on reader.read, is deliberate: the plate's raw preview
-    does its own reads of FOV 0 from another thread, so a read-spy pins the scheduler rather than
-    the autofocus. Emitting `ready` from `start()` keeps the whole test on one thread.
-    """
+    """Replace `_FocusWorker` with a recorder; returns the list of ``(region, fov, channel)``."""
     calls = []
 
     class _SpyFocusWorker(QObject):
@@ -103,24 +67,12 @@ def _slide_acquisition(root, region: str):
     return root
 
 
-# "region_A" is deliberately NOT here. An underscore is Squid's own field separator in
-# "<region>_<fov>_<z>_<channel>.tiff", so a region id containing one is ambiguous to the READER
-# and never reaches the viewer at all (it ingests as zero regions). That is a real limitation,
-# but it is a filename-grammar defect a long way upstream of this one - not something
-# activate_well can fix, and not what this test is pinning.
+# "region_A" is excluded: an underscore is Squid's own filename field separator, so such
+# ids never reach the viewer at all.
 @pytest.mark.parametrize("region", ["R2C3", "tissue-1", "scan 3"])
 def test_activate_well_opens_a_window_on_a_freeform_region_id_verbatim(
         qapp, napari_pane_stub, tmp_path, region):
-    """(a) A region id that is not <letters><digits> must still open its view.
-
-    The id is passed through UNCHANGED. Rebuilding it from parse_well_id raised on every one
-    of these, and the raise was swallowed, so the double-click silently did nothing. The
-    destination moved from the central detail viewer to `ViewerManager.open`; the defect and its
-    mutation-check did not, so this is the same test aimed at where the id now goes.
-
-    MUTATION: rebuild the id as f"{row}{col}" via parse_well_id again -> a raise (swallowed) or a
-    mangled id on the window -> red.
-    """
+    """The id must pass through unchanged; rebuilding it via parse_well_id raises on these."""
     root = _slide_acquisition(tmp_path / "slide_acq", region)
     win = V.PlateWindow(None)
     win.ingest(str(root))
@@ -140,18 +92,6 @@ def test_activate_well_opens_a_window_on_a_freeform_region_id_verbatim(
 
 def test_window_autofocus_ranks_a_representative_fov_not_the_regions_first(
         qapp, napari_pane_stub, squid_dataset, monkeypatch):
-    """(b) Autofocus must rank a REPRESENTATIVE field, not `fovs_per_region[region][0]`.
-
-    It is a per-FOV autofocus, so ranking field 0 while the user is looking elsewhere reports the
-    sharpest plane of pixels they are not looking at. On the root plate "representative" meant the
-    FOV on screen (`_current_fov`); a window shows a whole fused region and has no FOV cursor, so it
-    means the field nearest the region's stage centroid (`_napari3d._center_fov`).
-
-    The positions are rigged so the centre field is 1 and the region's first is 0 -- without that,
-    "centre" and "first" are the same number on this fixture and nothing is being tested.
-
-    MUTATION: rank `fovs_per_region[region][0]` -> fov 0 -> red.
-    """
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
@@ -173,8 +113,6 @@ def test_window_autofocus_ranks_a_representative_fov_not_the_regions_first(
     assert (region, fov) == ("B3", 1), (
         f"autofocus ranked {region}:{fov}; it ranked the wrong FOV")
     assert channel == w._meta["channels"][0]["name"], "autofocus ranked the wrong channel"
-    # The answer must MOVE this window's z slider: a "focused" message over a slider that never
-    # moved is the silent failure the reference-plane button exists to avoid.
     assert w._napari_viewer().dims.current_step[0] == 1, "the window's z slider never moved"
     assert any("reference plane: z=1" in s for s in w._pane.said), w._pane.said
     shutdown_plate_window(qapp, win)
@@ -182,13 +120,7 @@ def test_window_autofocus_ranks_a_representative_fov_not_the_regions_first(
 
 def test_window_autofocus_works_without_a_double_click(
         qapp, napari_pane_stub, squid_dataset, monkeypatch):
-    """The button must act on the region the window is SHOWING.
-
-    It used to demand ``_current_well``, which is only set by a double-click, and under napari
-    ``_detail`` was None so the handler returned before doing anything at all, a visible button
-    with zero function, telling the user to double-click a well they had already opened. A window
-    takes its region from its own cursor, which is seeded on open, so it never needs one.
-    """
+    """The button acts on the region the window is showing, from its own cursor."""
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
@@ -209,21 +141,11 @@ def test_window_autofocus_works_without_a_double_click(
 
 def test_focus_reference_plane_on_a_single_plane_acquisition_says_so(
         qapp, napari_pane_stub, squid_dataset, monkeypatch):
-    """A refusal must be a sentence. Silently doing nothing is the failure being removed.
-
-    Re-pointed at the WINDOW (2026-07-29). This used to live on `PlateWindow`, reachable only
-    through a parentless button Qt showed as a stray top-level window; that whole chain is deleted
-    (tests/test_no_orphan_windows.py). `RegionViewer` had no such guard, so it started a worker to
-    rank a stack of one and then announced a "sharpest plane" for the only plane there is. The
-    refusal moved with the button rather than being dropped with the dead code.
-
-    MUTATION: remove the z_levels guard -> a worker is started -> `calls` is non-empty -> red.
-    """
+    """A refusal must be a sentence, not a worker ranking a stack of one."""
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
     w = win._viewer_manager.open(["B3"])
-    # _meta is a FROZEN Acquisition since the reader-boundary validation landed.
     w._meta = w._meta.model_copy(update={"z_levels": [w._meta["z_levels"][0]]})
     calls = _spy_focus_worker(monkeypatch, answer_z=0)
 

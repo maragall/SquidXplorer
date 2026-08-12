@@ -1,133 +1,7 @@
-"""The sample holder as ONE model: a grid of cells, each holding 0..N FOVs (IMA-214).
+"""The sample holder as one model: a grid of cells, each holding 0..N FOVs.
 
-A slide carrier IS a plate. Both are a rectangular grid of addressable cells at a fixed physical
-pitch; the only real difference is how a cell is NAMED ("B3" vs "manual0") and how many FOVs it
-holds. Modelling them as two unrelated things is exactly what would force the mosaic, selection
-and loupe code to fork -- so they do not fork here::
-
-    Plate (ABC)          grid + physical geometry + occupancy; everything downstream talks to this
-      +- WellPlate       cells named A1..H12, geometry from Squid's sample_formats.csv
-      +- SlideCarrier    cells named by the acquisition's own freeform region ids (manual0, ...)
-
-Why this module exists at all, concretely: the viewer refuses the real tissue dataset
-(``regions = ["manual0", "manual1"]``) because every layout path in it parses region ids as well
-ids. A glass slide has no well grid and no well ids, and pretending it is a degenerate 1x1
-wellplate would put both regions in the same cell. Here a freeform region is a first-class cell.
-
-UNITS
------
-Micrometres everywhere, every value ending ``_um``, per ``_placement.py``'s contract. Squid's
-``sample_formats.csv`` is MILLIMETRES; it is converted exactly once, in :func:`load_sample_formats`,
-at the producer -- the same discipline the reader applies to coordinates.csv. A bare mm value must
-never travel in a geometry attribute; that is the silent-1000x defect class.
-
-NAMED CELLS vs POSITIONED CELLS (IMA-253)
------------------------------------------
-A well id ENCODES ITS POSITION: "B3" *is* row 1, column 2, and no stage coordinate is needed to
-lay a well plate out. A freeform region id does not: ``manual0`` and ``manual1`` say nothing
-about where on the glass those tissues sat. Assigning them cells by ENUMERATION ORDER -- which is
-what a "1 x N carrier, left to right, in the order the acquisition reports them" rule does -- is
-therefore inventing a layout, and it is why the real 10x tissue acquisition rendered as two
-squares side by side when the two regions are in fact separated in Y and overlapping in X.
-
-So the choice of layout is driven by WHETHER THE IDS CARRY POSITION, never by the format string::
-
-    well_span(regions) is not None   ->  WellPlate: ids are the layout. Unchanged, forever.
-    well_span(regions) is None       ->  freeform: the layout comes from fov_positions_um.
-
-For the freeform case each region gets a cell that is ITS OWN MOSAIC'S BOUNDING BOX in stage
-micrometres (:func:`region_stage_boxes_um`), so regions of different size and geometry -- which is
-the normal case for tissue -- get different-sized cells instead of being stretched or cropped into
-a uniform grid. :func:`freeform_grid` then derives (row, col) by CLUSTERING those boxes rather
-than by enumerating names, and :func:`freeform_layout` emits the exact rectangles, normalised into
-the grid's own units, that the viewer draws. Shuffling the region names changes nothing.
-
-STAGE vs COMPACT PLACEMENT (Task 5, 2026-07-29)
------------------------------------------------
-``build_plate(..., placement="stage" | "compact")``. The words are defined once, in
-:mod:`squidxplorer._placement`, so the geometry and the label on screen cannot spell them differently.
-
-    stage    (DEFAULT) cells where the stage says. Byte-identical to what this module has always
-             built. A well id encodes its own position, so an unacquired well keeps its space and
-             the plate measures like the plate.
-    compact  the space BETWEEN regions is closed. A 3-well scan of a 384-well plate reads as three
-             large cells rather than three dots in a 16 x 24 field of nothing.
-
-Compact is :func:`even_carrier_layout`, which already did exactly this for tissue carriers,
-generalised to every format. It is a PROMOTION of a shipped layout, not a new one.
-:func:`freeform_grid` / :func:`freeform_layout` remain as the stage-proportional pair.
-
-**What compact never moves.** FOVs. Overlapping or adjacent FOVs carry the registration stitching
-solves against; sparse ones (Squid schema v2's ``grid_subset`` and ``random`` patterns) carry
-sampling geometry. Either way the space inside a region carries information, so only the space
-between regions is free. Within-region geometry lives in :mod:`squidxplorer._placement` and takes no
-mode argument at all, which is how that guarantee is enforced rather than merely intended.
-
-**Why the mode is reported, not remembered.** This codebase refuses to guess positions
-(``reader.py`` raises rather than placing FOVs "at positions that would look plausible but be
-wrong"). A compact view is a PRESENTATION, and a compact view mistaken for a stage view is a
-mis-measurement that ends up in a figure. So :attr:`Plate.placement_mode` is the mode the cells
-ACTUALLY have and is meant to be on screen at all times, while :attr:`Plate.placement_requested`
-is what the caller asked for. The two differ in exactly one case, and it is not hypothetical: a
-FREEFORM tissue carrier has no stage-proportional layout in the product, because Julio removed it
-on 2026-07-23 (it "stacked two tissues into a tall, tiny, uneven column"). Its cells are even in
-both modes, so it reports ``compact`` even when ``stage`` was asked for. Labelling that "stage"
-would be the lie this attribute exists to prevent.
-
-DECLARED vs MEASURED
---------------------
-``~/Downloads/synthetic_2x2_wellplate`` declares ``384 well plate`` in its yaml but its stage
-coordinates measure a 9.000 mm pitch on both axes, which is physically a 96-well plate. 96 and 384
-differ by EXACTLY 2x in pitch, so believing the declaration draws the carrier art at exactly half
-scale (the IMA-220 hazard). The precedence rule is therefore::
-
-    override  >  measured  >  declared  >  inferred-from-span
-
-with MEASURED beating DECLARED, loudly (a ``UserWarning`` naming both formats and the measured
-pitch). Rationale: the declaration is a string a human typed into a yaml; the pitch is physics
-recorded by the stage. The measurement only wins when it is unambiguous -- both axes agree on one
-standard pitch to within tolerance, AND the resulting grid is big enough to contain every observed
-well. Otherwise the declaration stands and the disagreement is still warned about, never swallowed.
-
-Prior art
----------
-* **OME-NGFF 0.4/0.5 plate spec** -- a plate is ``{rows: [{name}], columns: [{name}], wells:
-  [{path, rowIndex, columnIndex}]}``, and every row/column of the physical plate MUST be declared
-  even when unpopulated. It is a purely LOGICAL grid: no pitch, no well diameter, no A1 offset, no
-  units anywhere in the schema. Taken: 0-based rowIndex/columnIndex addressing, and the
-  full-grid-vs-present-wells distinction (:attr:`Plate.cell_ids` vs :attr:`Plate.occupied_cells`).
-  Not taken: the absence of geometry -- carrier art and stage placement need real micrometres.
-* **OME-XML 2016-06** (which NGFF dropped this from) -- ``Plate/@WellOriginX|Y`` + explicit
-  ``@WellOriginXUnit``, and ``RowNamingConvention``/``ColumnNamingConvention``. Taken: the idea
-  that the origin is a first-class plate attribute carrying its unit. Even OME-XML has no PITCH.
-* **ngio / Fractal** (``OmeZarrPlate`` -> ``OmeZarrWell`` -> ``OmeZarrContainer``) -- composition,
-  not inheritance, and physical coordinates pushed out into ROI tables (``x_micrometer``,
-  ``len_x_micrometer``). Taken: the ``_micrometer``-suffixed-everywhere discipline, which is our
-  ``_um`` rule. Not taken: the split, since our cells need geometry to draw a carrier.
-* **Opentrons labware schema v2** -- the only ecosystem that models holder geometry properly:
-  ``dimensions``, ``cornerOffsetFromSlot``, and per-well ``{x, y, depth, diameter}``. Taken
-  directly as the shape of :class:`PlateGeometry` (offset + pitch + cell size), which is what
-  OME lacks.
-* **CellProfiler / platetools** -- plates are metadata STRINGS (``Metadata_Plate``,
-  ``Metadata_Well``) or well-id<->(row, col) integer conversion over a size enum
-  (6/12/24/48/96/384/1536). No geometry. Confirms the well-id parsing here is conventional.
-* **Slide carriers** -- no public library has a first-class ``SlideCarrier`` type. Where carriers
-  exist (Opera Phenix 1- and 4-slide holders), the vendor pattern is to DECLARE THE CARRIER AS A
-  PLATE TYPE with N wells; slide carriers are even built to the ANSI/SLAS microplate footprint so
-  plate-shaped machinery holds them. That is independent confirmation of this ticket's design
-  insight, so :class:`SlideCarrier` subclasses :class:`Plate` rather than forking.
-* **Declared-vs-measured reconciliation** -- searched and found NO prior art. Micro-Manager's
-  ``SBSPlate`` takes the size as a user-picked enum and only calibrates the A1 offset for an
-  already-declared format; information flows declared -> predicted coordinates everywhere. The
-  inverse (measured coordinates validating the declaration) is unoccupied ground, so the rule
-  below is ours and is documented rather than borrowed.
-* **Squid upstream** (``control/_def.py:read_sample_formats_csv``, ``core.py:NavigationViewer``) --
-  the CSV schema, the ``"{n} well plate"`` key convention, the carrier-PNG filenames and the
-  per-sample ``mm_per_pixel`` / origin-pixel art scale. Taken wholesale so our art lines up with
-  Squid's; mirrored in :data:`_ART`, never invented.
-* **_plate_shape.py (IMA-219)** -- format normalisation and SPAN+SNAP inference. Reused, not
-  duplicated: this module calls ``normalize_plate_format`` / ``infer_plate_format`` and only adds
-  the geometry-measured tier that IMA-219's docstring flags as future work (its "D5").
+Plate (ABC) holds grid + geometry + occupancy; WellPlate names cells A1..H12, SlideCarrier
+names them by the acquisition's own freeform region ids. All geometry is micrometres.
 """
 
 from __future__ import annotations
@@ -182,13 +56,10 @@ __all__ = [
     "squid_images_dir",
 ]
 
-# Carrier formats that are a grid of SLIDES, not wells. "glass slide" is Squid's own name for the
-# single-slide holder; "4 slide carrier" is the 4-up carrier its GUI calls "4 glass slide".
+# Carrier formats that are a grid of slides, not wells.
 FOUR_SLIDE_CARRIER = "4 slide carrier"
 _SLIDE_FORMATS = (GLASS_SLIDE, FOUR_SLIDE_CARRIER)
 
-# Where Squid's checkout may live, for the CSV and the carrier PNGs. Env var first so a user with
-# an unusual layout is never stuck; every lookup DEGRADES to None/vendored rather than guessing.
 _SQUID_ENV = "SQUIDXPLORER_SQUID_SOFTWARE"
 _SQUID_GUESSES = (
     Path.home() / "Cephla" / "projects" / "Squid" / "software",
@@ -196,9 +67,7 @@ _SQUID_GUESSES = (
     Path.home() / "projects" / "Squid" / "software",
 )
 
-# Squid's sample_formats.csv, vendored verbatim (mm, as upstream writes it) so a machine with no
-# Squid checkout still lays plates out correctly. Values mirror
-# Squid/software/objective_and_sample_formats/sample_formats.csv.
+# Squid's sample_formats.csv, vendored verbatim (mm, as upstream writes it).
 #   name: (a1_x_mm, a1_y_mm, a1_x_px, a1_y_px, well_size_mm, well_spacing_mm, skip, rows, cols)
 _VENDORED_MM = {
     GLASS_SLIDE:        (0.0,   0.0,   0,   0,   0.0,   0.0,  0,  1,  1),
@@ -210,25 +79,15 @@ _VENDORED_MM = {
     "1536 well plate":  (11.01, 7.87,  130, 93,  1.53,  2.25, 0, 32, 48),
 }
 
-# The 4-up slide carrier is NOT in sample_formats.csv -- upstream hardcodes it in the GUI
-# ("4 glass slide" -> images/4 slide carrier_1509x1010.png, mm_per_pixel 0.084665, origin 50,0).
-# Slot pitch/size are derived from a standard 75 x 25 mm slide sitting in a 4-up carrier; they are
-# a LAYOUT approximation, not a measured calibration, and are only used to place cells on the art.
+# Not in sample_formats.csv; upstream hardcodes it in the GUI. Slot pitch/size are a layout
+# approximation for a standard 75 x 25 mm slide, only used to place cells on the art.
 _VENDORED_MM[FOUR_SLIDE_CARRIER] = (14.0, 20.0, 50, 0, 25.0, 27.0, 0, 1, 4)
 
-# The WELLPLATE formats: the vendored table minus the slide holders. :func:`format_from_pitch_um`
-# matches a measured stage pitch against THIS, never against the whole table, and the distinction
-# is load-bearing rather than tidy. The carrier's 27 000 um slot pitch is a mere 1.038x a 12-well
-# plate's 26 000 um, so with the carrier in the candidate set EVERY 12-well plate matched two
-# formats and was refused as ambiguous -- measured: ``format_from_pitch_um(26000.0, 26000.0)`` ->
-# None, and ``build_plate`` then kept a yaml that lied ("24 well plate") with no warning at all, at
-# 0.7423x the true scale. Derived from the table so a format added above joins it automatically.
+# Pitch matching candidates: wellplates only. The 4-up carrier's slot pitch is within tolerance
+# of a 12-well plate's, so including slide holders makes every 12wp match ambiguous.
 _WELLPLATE_FORMATS = tuple(n for n in _VENDORED_MM if n not in _SLIDE_FORMATS)
 
-# Squid NavigationViewer.update_display_properties: mm/px of each background PNG, and the PNG name.
-# Filenames are copied from upstream's image_paths dict -- NEVER constructed -- so a missing
-# checkout yields None instead of a plausible-but-wrong path.
-#   format -> (png filename, mm_per_pixel)
+# Carrier art: format -> (png filename, mm_per_pixel), copied from Squid's image_paths dict.
 _ART = {
     GLASS_SLIDE:       ("slide carrier_828x662.png",   0.1453),
     FOUR_SLIDE_CARRIER: ("4 slide carrier_1509x1010.png", 0.084665),
@@ -242,13 +101,7 @@ _ART = {
 # Upstream hardcodes the art origin for the two slide holders instead of deriving it from a1.
 _ART_ORIGIN_PX = {GLASS_SLIDE: (200.0, 120.0), FOUR_SLIDE_CARRIER: (50.0, 0.0)}
 
-# Fractional slack when matching a measured pitch to a standard one. Two formats become ambiguous
-# -- one pitch inside both windows -- once they are within (1 + t) / (1 - t) = 1.105x of each other.
-# The closest pair of WELLPLATE pitches is 12wp/24wp at 26 000 / 19 300 = 1.347x apart (96wp/384wp,
-# which this comment used to name, are 2.0x), so 5% is loose enough for stage noise and nowhere near
-# ambiguous. That holds over :data:`_WELLPLATE_FORMATS` and is enumerated in
-# ``test_no_two_wellplate_pitches_are_within_the_matching_tolerance``; it did NOT hold over the
-# whole vendored table, which is why the slide holders are not candidates.
+# Fractional slack when matching a measured pitch to a standard one.
 _PITCH_TOL = 0.05
 
 
@@ -260,12 +113,7 @@ class PlateBuildError(ValueError):
 
 @dataclass(frozen=True)
 class PlateGeometry:
-    """Physical layout of one sample format. MICROMETRES; ``_px`` values are art pixels.
-
-    ``pitch_*_um`` is centre-to-centre cell spacing, ``cell_size_um`` the well diameter / slide
-    width, ``a1_*_um`` the stage position of the top-left cell's centre. ``a1_*_px`` is where that
-    same point sits in the carrier PNG, which is what makes :class:`CarrierArt` able to convert.
-    """
+    """Physical layout of one sample format, in micrometres; ``_px`` values are art pixels."""
 
     name: str
     rows: int
@@ -307,13 +155,7 @@ class PlateGeometry:
 
 
 def _canonical_format(name) -> str:
-    """Canonical format name, extending ``normalize_plate_format`` with the slide CARRIERS.
-
-    IMA-219's normaliser collapses anything containing "slide" to ``"glass slide"`` -- correct for
-    its question ("is this a plate at all?"), wrong for ours, because a 4-up carrier is a real
-    4-cell grid. So the carrier is disambiguated here and everything else is delegated, never
-    reimplemented.
-    """
+    """Canonical format name, extending ``normalize_plate_format`` with the slide carriers."""
     s = str(name or "").strip().lower()
     if "slide" in s and ("4" in s or "four" in s):
         return FOUR_SLIDE_CARRIER
@@ -324,13 +166,7 @@ def _canonical_format(name) -> str:
 
 
 def load_sample_formats(csv_path=None) -> dict[str, PlateGeometry]:
-    """``{format name: PlateGeometry}`` from Squid's sample_formats.csv, in MICROMETRES.
-
-    *csv_path* defaults to the CSV inside a discovered Squid checkout. A missing or unreadable CSV
-    is NOT an error: the vendored table is returned instead, so SquidXplorer lays plates out correctly
-    on a machine that has no Squid source at all. The 4-up slide carrier is always merged in --
-    upstream keeps it out of the CSV and hardcodes it in the GUI.
-    """
+    """``{format name: PlateGeometry}`` from Squid's sample_formats.csv, falling back to the vendored table."""
     formats = {name: PlateGeometry.from_mm(name, row) for name, row in _VENDORED_MM.items()}
     path = Path(csv_path) if csv_path is not None else _default_formats_csv()
     if path is None or not Path(path).is_file():
@@ -380,12 +216,7 @@ def squid_images_dir() -> Optional[Path]:
 
 @dataclass(frozen=True)
 class CarrierArt:
-    """A carrier background PNG plus the transform that puts stage micrometres onto its pixels.
-
-    ``um_per_px`` and the origin are Squid's own (NavigationViewer), so an overlay drawn through
-    this lands where Squid's navigator would draw it. IMA-220 consumes this; getting the scale
-    from the WRONG plate format is what would render it at 2x.
-    """
+    """A carrier background PNG plus the transform that puts stage micrometres onto its pixels."""
 
     format_name: str
     path: Path
@@ -401,12 +232,7 @@ class CarrierArt:
 
 def carrier_art(format_name, images_dir=None, geometry: Optional[PlateGeometry] = None
                 ) -> Optional[CarrierArt]:
-    """The carrier PNG for *format_name*, or None when it is not on disk.
-
-    Degrades to None rather than inventing a filename: every name in :data:`_ART` is copied from
-    Squid's ``image_paths`` dict, and a name with no entry -- or an entry whose file is absent --
-    yields None so callers draw their own grid instead of failing to load a fabricated path.
-    """
+    """The carrier PNG for *format_name*, or None when it is not on disk."""
     try:
         name = _canonical_format(format_name)
     except PlateShapeError:
@@ -436,12 +262,7 @@ def carrier_art(format_name, images_dir=None, geometry: Optional[PlateGeometry] 
 # --------------------------------------------------------------------------- the Plate ABC
 
 class Plate(ABC):
-    """A grid of cells, each holding 0, 1 or many FOVs.
-
-    Subclasses supply only NAMING -- how a cell id maps to a (row, col) and back, and what the
-    axis labels are. Geometry, occupancy, extent and carrier art are shared, which is the whole
-    point: mosaic/selection/loupe code written against ``Plate`` serves wells and slides alike.
-    """
+    """A grid of cells, each holding 0, 1 or many FOVs. Subclasses supply only naming."""
 
     def __init__(
         self,
@@ -461,10 +282,9 @@ class Plate(ABC):
         #: how ``format_name`` was decided: "override" | "measured" | "declared" | "inferred".
         self.format_source = format_source
         self.measured_pitch_um = measured_pitch_um
-        #: the geometry the cells ACTUALLY have: "stage" | "compact". What the label must show.
+        #: the geometry the cells actually have: "stage" | "compact".
         self.placement_mode = normalize_placement_mode(placement_mode)
-        #: the mode the caller ASKED for. Differs from ``placement_mode`` only for a freeform
-        #: tissue carrier, whose cells are even in both modes (see the module docstring).
+        #: the mode the caller asked for; differs only for a freeform tissue carrier.
         self.placement_requested = normalize_placement_mode(
             placement_mode if placement_requested is None else placement_requested
         )
@@ -517,9 +337,7 @@ class Plate(ABC):
             return False
         return True
 
-    #: Prefix of the SYNTHETIC ids a subclass invents to keep its grid rectangular ("slot3",
-    #: "pad5"). Empty means every cell id is a real region. Shared so :meth:`_sole_cell` can tell
-    #: a real region from a filler without each subclass re-deciding.
+    #: Prefix of the synthetic ids a subclass invents to keep its grid rectangular.
     _FILLER_PREFIX = ""
 
     def _is_filler(self, cell_id: str) -> bool:
@@ -527,12 +345,7 @@ class Plate(ABC):
         return bool(self._FILLER_PREFIX) and str(cell_id).startswith(self._FILLER_PREFIX)
 
     def _sole_cell(self, axis: int, i: int) -> Optional[str]:
-        """The id of the ONLY real region on row (*axis* 0) or column (*axis* 1) *i*, else None.
-
-        The axis label of a holder whose cells are named rather than positioned: a row or column
-        holding exactly one region is unambiguously that region's, and one holding several is left
-        blank rather than labelled with a guess.
-        """
+        """The id of the only real region on row (*axis* 0) or column (*axis* 1) *i*, else None."""
         n = self.cols if axis == 0 else self.rows
         hits = [cid for cid in (self.cell_id(i, j) if axis == 0 else self.cell_id(j, i)
                                 for j in range(n)) if not self._is_filler(cid)]
@@ -549,11 +362,7 @@ class Plate(ABC):
 
     @property
     def placement_label(self) -> str:
-        """The persistent on-screen text for this plate's geometry: ``"stage"`` or ``"compact"``.
-
-        Always available, never empty, and read off the RESOLVED mode -- so a viewer that shows it
-        cannot show a word the cells do not deserve.
-        """
+        """The on-screen text for this plate's geometry: ``"stage"`` or ``"compact"``."""
         return placement_mode_label(self.placement_mode)
 
     def cell_center_um(self, cell_id: str) -> tuple[float, float]:
@@ -569,23 +378,11 @@ class Plate(ABC):
                 (self.rows - 1) * self.geometry.pitch_y_um + self.geometry.cell_size_um)
 
     def art(self, images_dir=None) -> Optional[CarrierArt]:
-        """This plate's carrier PNG, or None when the artwork is not available.
-
-        NOT part of the default render path any more (IMA-253): the viewer draws the holder from
-        :meth:`cell_layout` + :class:`PlateGeometry` instead, in the one coordinate system the
-        cells already live in, so it cannot mis-register. Kept because it is small, tested, and
-        the obvious implementation of an optional photographic "skin".
-        """
+        """This plate's carrier PNG, or None when the artwork is not available."""
         return carrier_art(self.format_name, images_dir=images_dir, geometry=self.geometry)
 
     def cell_layout(self) -> Optional[dict[str, tuple[float, float, float, float]]]:
-        """``{cell_id: (x, y, w, h)}`` in GRID UNITS (1.0 = one nominal cell), or None.
-
-        ``None`` means "uniform": cell (r, c) occupies exactly ``(c, r, 1, 1)`` -- the only thing a
-        well plate can mean, and the fast path the viewer keeps for it. A non-None layout is a
-        FREEFORM holder whose cells are sized and positioned by real geometry; see the module
-        docstring. Rectangles are guaranteed to lie inside ``(0, 0, cols, rows)``.
-        """
+        """``{cell_id: (x, y, w, h)}`` in grid units, or None for a uniform grid."""
         return None
 
     # -- occupancy ------------------------------------------------------------------------
@@ -610,13 +407,7 @@ class Plate(ABC):
         return list(self._occupancy.get(cell_id, ()))
 
     def viewer_grid(self) -> tuple[list[str], list[str], dict[tuple[int, int], str], list[str]]:
-        """``(row_labels, col_labels, {(r, c): cell_id}, occupied_cells)`` -- PlateOverview's args.
-
-        A single call so the viewer's ingest path is one block instead of four (format guard, well-id
-        parse, full-vs-present grid choice, row-major sort). It also means a slide carrier reaches
-        the SAME widget as a well plate: the overview only ever sees labels and a cell map, and has
-        no idea whether a cell is a well or a slide.
-        """
+        """``(row_labels, col_labels, {(r, c): cell_id}, occupied_cells)`` -- PlateOverview's args."""
         return self.row_labels, self.col_labels, self.occupied_map, self.occupied_cells
 
     def __repr__(self) -> str:
@@ -628,13 +419,7 @@ class Plate(ABC):
 # --------------------------------------------------------------------------- WellPlate
 
 def _row_letter(i: int) -> str:
-    """0->A, 25->Z, 26->AA. THE definition — `_plate_shape._row_index` is its inverse.
-
-    It was called a "local copy" of one in the viewer that lived "behind a PyQt5 import". That
-    other copy was byte-identical, had no caller but its own dead `_plate_grid`, and was deleted on
-    2026-08-06; `_viewer` now re-exports THIS one under the historical name. (The import was qtpy,
-    not PyQt5, and had not been the reason for a while.)
-    """
+    """0->A, 25->Z, 26->AA; `_plate_shape._row_index` is its inverse."""
     s, i = "", i + 1
     while i:
         i, r = divmod(i - 1, 26)
@@ -643,54 +428,27 @@ def _row_letter(i: int) -> str:
 
 
 def display_well_id(cell_id: str) -> str:
-    """Numeric well id from the alphabet-encoded well: ``<row letter's 1-based index><column>``.
-
-    ``A1 -> "11"`` (A is row 1, column 1), ``C18 -> "318"`` (C is row 3, column 18). This is a
-    DISPLAY-ONLY re-labelling that Julio asked for; it is deliberately NOT used as a data key. The
-    real ``cell_id`` (``"A1"``, ``"C18"``) stays the reader's region key on disk, because the
-    numeric form is lossy for >=10-column plates (``"318"`` could be row 3/col 18 or row 31/col 8),
-    so it must never be parsed back. A cell id that is not the letter+column form (a tissue
-    slide's freeform region like ``"manual0"``) is returned unchanged — there is no row letter to
-    encode, and inventing one would be the "plain up bs" this is meant to avoid.
-    """
+    """Display-only numeric well id (``A1 -> "11"``); never parsed back, freeform ids pass through."""
     s = str(cell_id)
     i = 0
     while i < len(s) and s[i].isalpha():
         i += 1
     letters, digits = s[:i], s[i:]
-    # A well row label is UPPERCASE and short (1 letter up to 26 rows, 2 up to 702 — a 1536wp is 32
-    # rows = "AF"). A freeform region like "manual0"/"slot3" is lowercase or long, and passes
-    # through untouched rather than being encoded into a meaningless number.
+    # A well row label is uppercase and short; freeform ids pass through untouched.
     if not letters or not digits.isdigit() or not letters.isupper() or len(letters) > 2:
         return s
     return f"{_row_index(letters) + 1}{digits}"
 
 
-# --- fixed-width integer id: the flat-cache scope + the logger's numeric id -------------------
-#
-# SUPERSEDED, and left in place deliberately: :mod:`squidxplorer._address` is the successor to
-# everything below. Read its docstring for the diagnosis; the short form is that this id does three
-# jobs at once (cache key, logger id, navigator row), that two of its three fields are real
-# acquisition coordinates while the third is the order somebody drew boxes, and that the ROI slot
-# sits exactly where Squid puts a FIELD OF VIEW. Draw the same box twice and identical work is
-# cached twice; delete ROI 2 and every later id shifts under whatever pointed at it.
-#
-# The logger no longer uses it (Task 1, 2026-07-29): a window logs an ``Address``/``Extent`` plus
-# its view id. The CACHE still does, and migrating that key is Task 2/3 work. Do not add callers.
-#
-# Julio + Spencer (2026-07-24): enumerate with INTEGERS, not strings (a consultant warned string
-# keys are silently slow, and a machine may transform them). Fixed-width slots -- Row Column ROI --
-# make the id UNAMBIGUOUS and DECODABLE, unlike display_well_id's concatenated "318". Layout:
-# ``row * 1_000_000 + col * 10_000 + roi`` with 0-based row/col and a 4-digit ROI slot. A 1536-well
-# plate is 32 rows x 48 cols, so 2 digits each is ample; up to 10_000 ROIs per well.
+# Fixed-width integer id (superseded by squidxplorer._address; the cache still uses it):
+# row * 1_000_000 + col * 10_000 + roi, 0-based row/col, 4-digit ROI slot.
 _ROW_MUL = 1_000_000
 _COL_MUL = 10_000
 _ROI_MAX = 10_000
 
 
 def well_code(cell_id: str) -> "Optional[int]":
-    """The fixed-width integer id for a WELL (ROI slot 0), or None for a freeform region (no row
-    letter, e.g. a tissue slide's ``manual0``). This is the flat cache SCOPE and the logger id."""
+    """The fixed-width integer id for a well (ROI slot 0), or None for a freeform region."""
     s = str(cell_id)
     i = 0
     while i < len(s) and s[i].isalpha():
@@ -698,8 +456,8 @@ def well_code(cell_id: str) -> "Optional[int]":
     letters, digits = s[:i], s[i:]
     if not letters or not digits.isdigit() or not letters.isupper() or len(letters) > 2:
         return None
-    row = _row_index(letters)                 # 0-based row from the letter(s)
-    col = int(digits) - 1                      # 0-based column
+    row = _row_index(letters)
+    col = int(digits) - 1
     if not (0 <= row <= 99 and 0 <= col <= 99):
         return None
     return row * _ROW_MUL + col * _COL_MUL
@@ -717,22 +475,19 @@ def roi_code(cell_id: str, roi_index: int) -> "Optional[int]":
 
 
 def decode_code(code: int) -> "tuple[int, int, int]":
-    """``code -> (row, col, roi)``, all 0-based. The inverse of :func:`well_code`/:func:`roi_code`,
-    which is the whole point of the fixed-width layout: no string round-trip, no ambiguity."""
+    """``code -> (row, col, roi)``, all 0-based; the inverse of :func:`well_code`/:func:`roi_code`."""
     code = int(code)
     return (code // _ROW_MUL, (code // _COL_MUL) % 100, code % _ROI_MAX)
 
 
 def format_code(code: int) -> str:
-    """Human form ``"RR CC OOOO"`` (Row Column ROI), e.g. ``"02 17 0003"`` -- the layout Julio drew."""
+    """Human form ``"RR CC OOOO"`` (Row Column ROI)."""
     row, col, roi = decode_code(code)
     return f"{row:02d} {col:02d} {roi:04d}"
 
 
 def cache_scope(cell_id: str, roi_index: "Optional[int]" = None) -> str:
-    """The flat-cache SCOPE string for a well or an ROI: the integer id when the region is a real
-    well, else the raw region key (freeform slides have no row/col to encode). ``str`` so it drops
-    straight into ``ResultCache`` keys."""
+    """The flat-cache scope string: the integer id for a real well, else the raw region key."""
     code = roi_code(cell_id, roi_index) if roi_index is not None else well_code(cell_id)
     return str(code) if code is not None else str(cell_id)
 
@@ -773,13 +528,7 @@ class WellPlate(Plate):
 # --------------------------------------------------------------------------- SlideCarrier
 
 class SlideCarrier(Plate):
-    """A slide holder: a 1 x N grid whose cells are named by the acquisition's own region ids.
-
-    This is the freeform / tissue case, and it is a first-class Plate rather than a 1x1 wellplate
-    hack: the real dataset has TWO regions (``manual0``, ``manual1``) on one holder, and collapsing
-    them into a single degenerate cell would stack both mosaics on top of each other. Slots with no
-    region keep a synthetic ``slot{n}`` id so the grid stays rectangular and drawable.
-    """
+    """A slide holder: a grid whose cells are named by the acquisition's own region ids."""
 
     _FILLER_PREFIX = "slot"
 
@@ -787,20 +536,7 @@ class SlideCarrier(Plate):
                  placement: Optional[Mapping[str, tuple]] = None,
                  layout: Optional[Mapping[str, tuple]] = None,
                  stage_boxes_um: Optional[Mapping[str, tuple]] = None, **kw):
-        """*placement* / *layout* carry the GEOMETRIC assignment (IMA-253).
-
-        ``placement`` is ``{region: (row, col)}`` derived from stage coordinates by
-        :func:`freeform_grid`; ``layout`` is the matching ``{region: (x, y, w, h)}`` in grid units
-        from :func:`freeform_layout`. Both absent is the legacy POSITIONAL carrier -- regions left
-        to right in report order -- which is still exactly right when the acquisition has no stage
-        coordinates at all, and is the only thing that can be done then.
-
-        ``stage_boxes_um`` is ``{region: (x, y, w, h)}`` in stage MICROMETRES -- the raw
-        measurement ``layout`` was normalised from. It is retained (not just its normalised form)
-        because the SLIDE renderer (:mod:`squidxplorer._slide_art`) needs the true micron scale to draw
-        a 25 x 75 mm slide at the right size relative to the tissue on it; the normalised ``layout``
-        has already divided that scale out.
-        """
+        """*placement*/*layout* carry the geometric assignment; both absent means positional order."""
         names = list(cell_ids) if cell_ids is not None else []
         n_slots = geometry.rows * geometry.cols
         if len(names) > n_slots:
@@ -832,17 +568,12 @@ class SlideCarrier(Plate):
 
     @property
     def row_labels(self) -> list[str]:
-        # A 1 x N carrier keeps its blank row label (the columns carry the ids, as they always
-        # have). A geometrically stacked carrier has one region PER ROW, so the row is where the
-        # name belongs -- and an ambiguous row is left blank rather than labelled with a guess.
         if self.rows == 1:
             return [""]
         return [self._sole_cell(0, r) or "" for r in range(self.rows)]
 
     @property
     def col_labels(self) -> list[str]:
-        # The region ids themselves ARE the useful column labels on a carrier -- when a column
-        # holds exactly one of them. Otherwise fall back to the slot number.
         return [self._sole_cell(1, c) or str(c + 1) for c in range(self.cols)]
 
     def cell_id(self, row: int, col: int) -> str:
@@ -860,27 +591,7 @@ class SlideCarrier(Plate):
 # --------------------------------------------------------------------------- CompactPlate
 
 class CompactPlate(Plate):
-    """The OCCUPIED regions of any format, packed into an even grid: ``placement="compact"``.
-
-    A browse layout, and it says so. The cells are the regions the acquisition actually visited,
-    at equal size, in the reading order the STAGE gives them; the information-free space between
-    them is gone. Three wells of a 384-well plate stop being three dots in a 16 x 24 field of
-    nothing.
-
-    Not a new algorithm: the packing is :func:`even_carrier_layout`, shipped on 2026-07-23 for
-    tissue carriers, applied to every format. Not a :class:`SlideCarrier` either, however similar
-    the mechanism, because a compacted well plate is not a slide holder and the naming law forbids
-    reusing a physical word for a software concept -- ``compact`` is ours, ``slide`` is Squid's.
-
-    What is LOST, deliberately and visibly: the row/column topology. A compact grid's rows and
-    columns are packing indices, not plate rows and columns, so A1 is not guaranteed above A2. The
-    real ``cell_id`` survives on every cell, :attr:`placement_mode` reads ``compact``, and
-    :meth:`cell_center_um` refuses rather than fabricating a stage position.
-
-    Cells past the last region keep a synthetic ``pad{n}`` id so the grid stays rectangular
-    ("pad" because Squid will never call anything that; ``slot`` is the carrier's word for a real
-    physical bay and must not be borrowed for a blank).
-    """
+    """The occupied regions of any format, packed into an even grid: ``placement="compact"``."""
 
     _FILLER_PREFIX = "pad"
 
@@ -904,8 +615,7 @@ class CompactPlate(Plate):
         self._pos = {cid: i for i, cid in enumerate(self._ids)}
         self._layout = {str(k): tuple(float(v) for v in val)
                         for k, val in (layout or {}).items()} or None
-        #: raw stage boxes of the regions, retained so a consumer that needs true micron scale can
-        #: still get it. The compact CELLS are not at these positions; that is the point of them.
+        #: raw stage boxes of the regions; the compact cells are not at these positions.
         self.stage_boxes_um = {str(k): tuple(float(v) for v in val)
                                for k, val in (stage_boxes_um or {}).items()}
         kw.setdefault("placement_mode", COMPACT)
@@ -936,13 +646,7 @@ class CompactPlate(Plate):
         return divmod(i, self.cols)
 
     def cell_center_um(self, cell_id: str) -> tuple[float, float]:
-        """Refused: a compact cell is not at a stage position.
-
-        The base implementation computes ``a1 + index * pitch``, which on this plate would be a
-        plausible-looking micrometre pair for a place the stage never was. Everything else in this
-        codebase raises rather than answer that question wrongly, so this does too, and names the
-        way out.
-        """
+        """Refused: a compact cell is not at a stage position."""
         raise PlateBuildError(
             f"{cell_id!r} is a cell of a COMPACT plate, whose cells are packed for browsing and "
             "are not at stage positions. There is no stage centre to return. Rebuild with "
@@ -954,23 +658,14 @@ class CompactPlate(Plate):
 
 def region_stage_boxes_um(metadata: Mapping, regions: Optional[Iterable[str]] = None
                           ) -> dict[str, tuple[float, float, float, float]]:
-    """``{region: (x_um, y_um, w_um, h_um)}`` -- each region's MOSAIC bounding box on the stage.
+    """``{region: (x_um, y_um, w_um, h_um)}`` -- each region's mosaic bounding box on the stage.
 
-    The box is the union of every FOV's footprint, so it is the region's real extent: FOV top-left
-    positions span ``max - min``, and one frame's width/height is added because a position marks a
-    corner, not a point. That makes it exactly ``_placement.mosaic_extent_px`` expressed in
-    micrometres instead of pixels -- the same geometry the mosaic itself is composited from, which
-    is what lets the viewer draw a region's cell and its FOVs in one coordinate system.
-
-    Regions with no recorded position are OMITTED rather than given a zero box; a caller that
-    cannot place every region must fall back to a positional layout instead of dropping one.
+    Regions with no recorded position are omitted rather than given a zero box.
     """
     positions = metadata.get("fov_positions_um") or {}
     fovs_per_region = metadata.get("fovs_per_region") or {}
     scoped = list(metadata.get("regions") or []) if regions is None else list(regions)
-    # A stage position marks the frame's corner, so the region spans one extra frame past the
-    # last one. No pixel size / frame shape -> add nothing: the RELATIVE placement is still right,
-    # only the pad is missing, and that beats refusing to lay the acquisition out at all.
+    # A stage position marks the frame's corner, so one extra frame is added past the last one.
     frame = metadata.get("frame_shape") or (0, 0)
     p = metadata.get("pixel_size_um") or 0.0
     fh_um, fw_um = float(frame[0]) * float(p), float(frame[1]) * float(p)
@@ -989,17 +684,7 @@ def region_stage_boxes_um(metadata: Mapping, regions: Optional[Iterable[str]] = 
 
 
 def freeform_grid(boxes_um: Mapping[str, tuple]) -> tuple[int, int, dict[str, tuple[int, int]]]:
-    """``(rows, cols, {region: (row, col)})`` clustered from stage boxes -- never from names.
-
-    Regions whose y-intervals overlap share a ROW; within a row they are ordered by x. That is the
-    minimum structure the grid-shaped parts of the viewer (labels, ``(row, col)`` keys, marquee)
-    still need, and it is derived entirely from geometry, so re-ordering or renaming the regions
-    produces the identical grid. Exact rectangles -- the part that actually matters visually --
-    come from :func:`freeform_layout`; this only decides which cell KEY each region gets.
-
-    Two regions overlap in y when their intervals share more than half of the shorter one, so a
-    sliver of overlap between two clearly-stacked tissues does not fuse them into one row.
-    """
+    """``(rows, cols, {region: (row, col)})`` clustered from stage boxes, never from names."""
     order = sorted(boxes_um, key=lambda r: (boxes_um[r][1], boxes_um[r][0], r))
     rows: list[list[str]] = []
     spans: list[tuple[float, float]] = []
@@ -1031,19 +716,7 @@ def even_carrier_layout(
     target_aspect: float = 2.4,
     gap: float = 0.14,
 ) -> tuple[int, int, dict[str, tuple[int, int]], dict[str, tuple[float, float, float, float]]]:
-    """A tissue carrier laid out EVENLY, not by raw stage geometry (Julio, 2026-07-23).
-
-    Returns ``(rows, cols, placement, layout)``. Regions are placed left-to-right, top-to-bottom in
-    a LANDSCAPE-biased grid (like the physical 4-slide carrier, which is a horizontal row of
-    slides), and every region gets an EQUAL cell with the same inset gap — so mosaics are evenly
-    spaced and never overlap even when their native geometries differ wildly. This deliberately
-    REPLACES ``freeform_grid``/``freeform_layout`` for the carrier: those preserve true relative
-    size and position, which stacked two tissues into a tall, tiny, uneven column and wasted the
-    viewer's horizontal space. Even, readable cells beat geometric fidelity for a browse view.
-
-    ``order_key`` (region -> a sortable tuple, e.g. its stage box) orders the cells so spatially
-    left tissue lands on the left; absent, region report order is used.
-    """
+    """``(rows, cols, placement, layout)``: regions packed into equal, landscape-biased cells."""
     import math
 
     regs = list(regions)
@@ -1064,14 +737,7 @@ def even_carrier_layout(
 
 def freeform_layout(boxes_um: Mapping[str, tuple], rows: int, cols: int
                     ) -> dict[str, tuple[float, float, float, float]]:
-    """Stage boxes -> ``{region: (x, y, w, h)}`` in GRID UNITS, aspect preserved and centred.
-
-    ONE similarity transform is applied to every box, so relative offset AND relative scale
-    survive: a region twice the size of its neighbour gets a cell twice the size, and two regions
-    5 mm apart stay 5 mm apart in proportion. Fitting the union into the ``cols x rows`` box the
-    grid already declares means the result drops straight into the viewer's existing
-    cell-units-times-zoom arithmetic, with no second coordinate system to keep in sync.
-    """
+    """Stage boxes -> ``{region: (x, y, w, h)}`` in grid units, aspect preserved and centred."""
     if not boxes_um:
         return {}
     x0 = min(b[0] for b in boxes_um.values())
@@ -1080,8 +746,7 @@ def freeform_layout(boxes_um: Mapping[str, tuple], rows: int, cols: int
     y1 = max(b[1] + b[3] for b in boxes_um.values())
     uw, uh = x1 - x0, y1 - y0
     if not (uw > 0 and uh > 0):
-        return {}          # degenerate (points, or a single axis): no scale to preserve, so the
-        #                    caller keeps the nominal grid rather than dividing by ~zero
+        return {}  # degenerate: no scale to preserve, caller keeps the nominal grid
     s = min(cols / uw, rows / uh)
     ox, oy = (cols - uw * s) / 2.0, (rows - uh * s) / 2.0
     return {r: (ox + (b[0] - x0) * s, oy + (b[1] - y0) * s, b[2] * s, b[3] * s)
@@ -1092,25 +757,7 @@ def freeform_layout(boxes_um: Mapping[str, tuple], rows: int, cols: int
 
 def measure_region_pitch_um(positions_um: Mapping[tuple, tuple], regions: Iterable[str]
                             ) -> tuple[Optional[float], Optional[float]]:
-    """Centre-to-centre well pitch (x_um, y_um) MEASURED from stage coordinates, or (None, None).
-
-    Each region's anchor is its top-left FOV, which is stable regardless of how many FOVs the well
-    holds (a centroid is not: it shifts when wells have different FOV counts). The pitch is the
-    median of ``|dx| / |dcol|`` over every pair sharing a row, and likewise for rows -- so a plate
-    scanned at A1 and A5 only still measures the true pitch instead of a 4x-too-large one.
-
-    Returns None per axis whenever that axis cannot be measured: fewer than two distinct
-    rows/columns, no coordinates at all, or region ids that are not well ids (a slide carrier).
-
-    GROUPED, NOT SCANNED, in both halves — the only cost in this module that grew quadratically
-    with plate size. Measured on a full 1536-well plate: 180 ms before, 9.6 ms after. Two loops
-    were doing it. The first re-scanned every stage position once per region (1536 x 1536); it now
-    buckets the positions by region in one pass. The second compared every well against every
-    other well and discarded the ~97% that did not share the axis's index; it now buckets the
-    wells by that index first, so only pairs that CAN contribute are formed. Neither changes what
-    is measured: the same set of pairs reaches ``deltas``, and the median of a multiset does not
-    depend on the order it was built in.
-    """
+    """Centre-to-centre well pitch (x_um, y_um) measured from stage coordinates, or (None, None)."""
     by_region: dict[str, list] = {}
     for key, value in positions_um.items():
         by_region.setdefault(key[0], []).append(value)
@@ -1122,7 +769,7 @@ def measure_region_pitch_um(positions_um: Mapping[tuple, tuple], regions: Iterab
         if not pts:
             continue
         span = well_span([region])
-        if span is None:                       # freeform id -> not a well grid, nothing to measure
+        if span is None:  # freeform id -> not a well grid, nothing to measure
             return None, None
         r, c = span[0] - 1, span[1] - 1
         anchors[region] = (min(p[0] for p in pts), min(p[1] for p in pts))
@@ -1147,26 +794,12 @@ def measure_region_pitch_um(positions_um: Mapping[tuple, tuple], regions: Iterab
         deltas.sort()
         return deltas[len(deltas) // 2]
 
-    return _axis(0, 1, 0), _axis(1, 0, 1)      # x: same row, varying column; y: same column
+    return _axis(0, 1, 0), _axis(1, 0, 1)  # x: same row, varying column; y: same column
 
 
 def format_from_pitch_um(pitch_x_um: Optional[float], pitch_y_um: Optional[float],
                          tolerance: float = _PITCH_TOL) -> Optional[str]:
-    """The standard wellplate format whose pitch matches, or None when the match is not unambiguous.
-
-    Both axes must land on the SAME format (a real plate is square-pitched), so a measurement where
-    x reads 96wp and y reads 384wp is refused rather than resolved by picking one -- that would be
-    inventing a plate. A single measurable axis is accepted, since a one-row scan still pins the
-    pitch and the wellplate pitches are distinct by more than the tolerance.
-
-    The candidates are :data:`_WELLPLATE_FORMATS`, NOT the whole vendored table: a slide holder is
-    not a wellplate, and the 4-up carrier's 27 000 um slot pitch sits 1.038x from a 12-well plate's
-    26 000 um -- inside any tolerance loose enough for stage noise. While it was a candidate every
-    12-well plate matched two formats, was refused as ambiguous, and ``build_plate`` fell through to
-    an unchallenged declaration (measured: a lying yaml laid a 12-well plate out at 0.7423x scale
-    with zero warnings). Only a wellplate can be measured here anyway: a carrier's regions are
-    freeform ids, and ``measure_region_pitch_um`` already returns ``(None, None)`` for those.
-    """
+    """The standard wellplate format whose pitch matches, or None when the match is not unambiguous."""
     def _match(p):
         if p is None or p <= 0:
             return None
@@ -1184,22 +817,9 @@ def format_from_pitch_um(pitch_x_um: Optional[float], pitch_y_um: Optional[float
 
 def build_plate(metadata: Mapping, override=None, images_dir=None,
                 placement: str = DEFAULT_PLACEMENT_MODE) -> Plate:
-    """Build the :class:`Plate` an acquisition describes. The one entry point callers need.
+    """Build the :class:`Plate` an acquisition describes.
 
-    Precedence (see the module docstring): ``override > measured > declared > inferred-from-span``.
-    A measured format that CONTRADICTS the declared one wins and warns loudly; it is ignored (with
-    a warning) when it cannot contain every observed well, because then the measurement, not the
-    declaration, is the thing that must be wrong.
-
-    Freeform region ids (``manual0``) produce a :class:`SlideCarrier`, never a degenerate
-    wellplate -- that is what lets a glass-slide/tissue acquisition open at all.
-
-    *placement* is ``"stage"`` (the default, and byte-identical to every plate this function has
-    ever built) or ``"compact"``, which closes the space between regions and returns a
-    :class:`CompactPlate`. Format resolution is entirely unaffected: the mode decides where cells
-    are DRAWN, never which holder the acquisition is on, so a compact plate still measures its
-    pitch and still warns about a mis-declared format. Anything other than those two strings
-    raises; see :func:`squidxplorer._placement.normalize_placement_mode` for why it must not default.
+    Format precedence: ``override > measured > declared > inferred-from-span``.
     """
     placement = normalize_placement_mode(placement)
     regions = list(metadata.get("regions") or [])
@@ -1207,11 +827,9 @@ def build_plate(metadata: Mapping, override=None, images_dir=None,
     positions_um = metadata.get("fov_positions_um") or {}
     declared_raw = metadata.get("wellplate_format")
 
-    # Stage boxes for the freeform path (IMA-253). Computed once, here, because it is the only
-    # place that still holds the metadata; every _make below is handed the same measurement.
     stage_boxes = region_stage_boxes_um(metadata, regions) if regions else {}
     if len(stage_boxes) != len(regions):
-        stage_boxes = {}                   # cannot place EVERY region -> place none by geometry
+        stage_boxes = {}  # cannot place every region -> place none by geometry
 
     forced = normalize_plate_format(
         override if override is not None else os.environ.get("SQUIDXPLORER_WELLPLATE_FORMAT"),
@@ -1276,74 +894,39 @@ def _safe_canonical(name) -> Optional[str]:
 
 
 def _compact_order_key(regions, stage_boxes) -> dict[str, tuple[float, float]]:
-    """``{region: (y, x)}`` -- the sort key that gives a compact grid its READING order.
-
-    ``(y, x)``, not ``(x, y)``: a compact plate is filled row-major, so the outer key has to be the
-    axis that chooses the row. That reproduces ``occupied_cells`` order (top-left first, then left
-    to right along a row), and inside a row lower stage x still renders left, which is the property
-    that makes a compact plate comparable with the stage one at a glance.
-
-    Stage boxes are the truth when they exist. When they do not -- a plate WE wrote carries no
-    coordinates.csv -- a well id encodes its own position, so ``(row, col)`` from the id IS stage
-    geometry rather than a fallback to enumeration order. A freeform region with neither is placed
-    at the origin, which is the only honest answer and leaves the id as the tie-break.
-    """
+    """``{region: (y, x)}`` -- the row-major sort key that gives a compact grid its reading order."""
     key: dict[str, tuple[float, float]] = {}
     for region in regions:
         box = (stage_boxes or {}).get(region)
         if box is not None:
-            key[region] = (float(box[1]), float(box[0]))       # (y_um, x_um)
+            key[region] = (float(box[1]), float(box[0]))  # (y_um, x_um)
             continue
-        span = well_span([region])                              # "B3" -> (2, 3), 1-based
+        span = well_span([region])  # "B3" -> (2, 3), 1-based
         key[region] = (float(span[0]), float(span[1])) if span else (0.0, 0.0)
     return key
 
 
 def _make(name, regions, fovs_per_region, stage_boxes=None,
           placement_mode=DEFAULT_PLACEMENT_MODE, **kw) -> Plate:
-    """Instantiate the right subclass for *name*, sizing a slide carrier to the regions present.
-
-    *placement_mode* is the REQUESTED mode. Which class results, and what mode that class ends up
-    reporting, is decided here and nowhere else:
-
-    ``compact`` on any well plate
-        a :class:`CompactPlate` of the occupied wells, packed by :func:`even_carrier_layout`.
-    ``stage`` on any well plate
-        the :class:`WellPlate` this function has always built, untouched.
-    either mode on a FREEFORM carrier
-        the same even :class:`SlideCarrier`, reporting ``compact``, because the stage-proportional
-        carrier layout was removed from the product on 2026-07-23 and no longer exists to return.
-        See the module docstring; this is the one place requested and resolved diverge.
-    """
+    """Instantiate the right subclass for *name*, sizing a slide carrier to the regions present."""
     occupancy = {r: list(fovs_per_region.get(r, ())) for r in regions}
     if name in _SLIDE_FORMATS or well_span(regions) is None:
-        # SPAN+SNAP for carriers, mirroring _plate_shape's rule for plates: pick the smallest
-        # standard holder with room for every region. A 2-region tissue slide is a 4-up carrier,
-        # because that is the holder it physically sat in; 1 region on a declared glass slide is
-        # the single-slide holder.
+        # Pick the smallest standard holder with room for every region.
         n = max(1, len(regions))
         if name not in _SLIDE_FORMATS:
-            name = GLASS_SLIDE                     # freeform ids under a plate format name
+            name = GLASS_SLIDE  # freeform ids under a plate format name
         if n > 1 and name == GLASS_SLIDE:
             name = FOUR_SLIDE_CARRIER
         geom = PlateGeometry.vendored(name)
-        # EVEN layout (2026-07-23): a tissue carrier is drawn as evenly-spaced, equal, landscape-
-        # biased cells — NOT by raw stage geometry. Julio: the stage-proportional freeform layout
-        # stacked two tissues into a tall, tiny, uneven column and wasted the viewer's horizontal
-        # space; even cells that never overlap read far better for browsing, whatever each mosaic's
-        # native geometry. Stage boxes, when present, only ORDER the cells left-to-right so spatial
-        # left tissue stays on the left. (freeform_grid/freeform_layout are kept for reference.)
+        # Even layout: stage boxes, when present, only order the cells left-to-right.
         placement = layout = None
         if n >= 1:
             rows, cols, placement, layout = even_carrier_layout(list(regions), order_key=stage_boxes)
             geom = PlateGeometry(**{**vars(geom), "rows": rows, "cols": cols})
         if placement is None and n > geom.rows * geom.cols:
-            # More slides than any standard carrier: widen rather than refuse. There is no art for
-            # this, and carrier_art() will correctly return None instead of a wrong-scale PNG.
+            # More slides than any standard carrier: widen rather than refuse.
             geom = PlateGeometry(**{**vars(geom), "cols": n})
-        # The carrier's cells are EVEN in both modes, so it reports the mode it actually has and
-        # remembers what was asked. A carrier labelled "stage" would be claiming a proportionality
-        # that 2b8fbc5 deliberately removed.
+        # The carrier's cells are even in both modes, so it reports the mode it actually has.
         carrier_mode = COMPACT if placement else placement_mode
         return SlideCarrier(geom, occupancy, cell_ids=list(regions), placement=placement,
                             layout=layout, stage_boxes_um=stage_boxes,
@@ -1351,9 +934,6 @@ def _make(name, regions, fovs_per_region, stage_boxes=None,
                             placement_requested=placement_mode, **kw)
 
     if placement_mode == COMPACT and regions:
-        # COMPACT well plate: only the wells that were VISITED, packed evenly, ordered by the
-        # stage. `even_carrier_layout` is the shipped tissue-carrier packing, unchanged and
-        # unconditioned on format -- promoting it is the whole of this mode.
         base = PlateGeometry.vendored(name)
         rows, cols, cells, layout = even_carrier_layout(
             list(regions), order_key=_compact_order_key(regions, stage_boxes))

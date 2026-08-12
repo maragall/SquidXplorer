@@ -1,13 +1,7 @@
-"""IMA-212 odon bridge tests — samplesheet, binary discovery, headless probe, launch.
+"""Odon bridge tests — samplesheet, binary discovery, headless probe, launch.
 
-The samplesheet is built by WALKING a written plate, so most tests drive the real
-``write_from_stream`` (tiny 8x8 frames) and then assert over its output — that way the
-NGFF conformance assertions cover the artifact Odon will actually open, not a fabricated
-one. Edge cases that a correct writer can't produce (a half-written field) are built by
-hand.
-
-No odon binary is required: discovery and launch are exercised with a fake executable and
-a monkeypatched Popen. The one test that runs the real binary is skipped when it is absent.
+No odon binary is required: discovery and launch use a fake executable and a
+monkeypatched Popen; the one test that runs the real binary skips when absent.
 """
 
 from __future__ import annotations
@@ -36,7 +30,7 @@ CH = [
     {"name": "Fluorescence_638_nm_-_Penta", "display_name": "638", "display_color": "#FF0000"},
     {"name": "Fluorescence_405_nm_-_Penta", "display_name": "405", "display_color": "#20ADF8"},
 ]
-# B10 present so natural column sort is exercised (2, 3, 10 — not 10, 2, 3).
+# B10 present so natural column sort is exercised (2, 3, 10 — not 10, 2, 3)
 REGIONS = ["B2", "B3", "B10"]
 
 
@@ -97,8 +91,7 @@ def test_samplesheet_paths_are_relative_and_resolve(hcs):
     """Odon resolves relative paths against the CSV's own directory."""
     csv_path = write_samplesheet(hcs)
     rows = _read_sheet(csv_path)
-    # `_read_sheet` is `list(csv.DictReader(...))`, so a header-only sheet iterates zero times and
-    # every claim below is vacuous. The fixture has one group per well.
+    # a header-only sheet iterates zero times, making the loop vacuous
     assert rows, "the samplesheet has no rows: nothing below this line was checked"
     for row in rows:
         assert not Path(row["path"]).is_absolute()
@@ -119,8 +112,7 @@ def test_samplesheet_survives_the_output_being_moved(hcs, tmp_path):
 
 
 def test_partial_write_is_excluded(hcs):
-    """_write_field writes arrays FIRST and the group LAST, so a killed run leaves a field
-    directory with no zarr.json. That is exactly Odon's hard error — it must not be listed."""
+    """A killed run leaves a field directory with no zarr.json; it must not be listed."""
     victim = hcs / "plate.ome.zarr" / "B" / "3" / "0"
     (victim / "zarr.json").unlink()
     assert victim.is_dir()                       # the directory still exists...
@@ -172,9 +164,7 @@ def test_works_on_a_prior_output_with_no_reader(hcs):
     assert len(rows) == 3
 
 
-# --- NGFF conformance, asserted over the SAMPLESHEET'S OWN ROWS -------------------------
-# Deliberately driven from the CSV, not from the plate at large: a test that walked the
-# plate directly would pass even with _odon.py absent, and so would prove nothing.
+# --- NGFF conformance, asserted over the samplesheet's own rows -------------------------
 
 def test_every_samplesheet_row_is_a_conformant_odon_group(hcs):
     csv_path = write_samplesheet(hcs)
@@ -183,7 +173,7 @@ def test_every_samplesheet_row_is_a_conformant_odon_group(hcs):
     for row in rows:
         group = csv_path.parent / row["path"]
         doc = json.loads((group / "zarr.json").read_text())
-        ome = doc["attributes"]["ome"]                 # Odon unwraps the 0.5 {"ome": ...}
+        ome = doc["attributes"]["ome"]
         multiscales = ome["multiscales"]
         assert multiscales, "Odon hard-errors on a group with no multiscales[0]"
         ms = multiscales[0]
@@ -198,8 +188,7 @@ def test_every_samplesheet_row_is_a_conformant_odon_group(hcs):
 
 
 def test_omero_color_is_still_written_correctly(hcs):
-    """REGRESSION GUARD. Odon ignores omero.color, but ndviewer_light depends on it —
-    the bridge must never tempt anyone into dropping or rewriting it."""
+    """Odon ignores omero.color, but other readers depend on it."""
     group = hcs / "plate.ome.zarr" / "B" / "2" / "0"
     omero = json.loads((group / "zarr.json").read_text())["attributes"]["ome"]["omero"]
     assert [c["color"] for c in omero["channels"]] == ["FF0000", "20ADF8"]
@@ -228,7 +217,7 @@ def test_falls_back_to_path(tmp_path, monkeypatch):
 
 
 def test_macos_app_bundle_fallback(tmp_path, monkeypatch):
-    """The .dmg installs an .app and does NOT put odon on PATH — this is the common case."""
+    """The .dmg installs an .app and does not put odon on PATH."""
     bundle = tmp_path / "Applications" / "odon.app" / "Contents" / "MacOS"
     bundle.mkdir(parents=True)
     binary = _fake_binary(bundle)
@@ -270,9 +259,7 @@ def test_check_odon_reports_failure(tmp_path, hcs):
 @pytest.mark.skipif(not (os.environ.get("ODON_BIN") or __import__("shutil").which("odon")),
                     reason="odon binary not installed (optional third-party GUI tool)")
 def test_real_odon_check_opens_a_written_field(hcs):
-    """The one automated test that exercises the REAL binary. `odon --check` is its only
-    headless path; it takes a single local dataset and cannot accept a samplesheet, which
-    is why the samplesheet half of the oracle stays manual."""
+    """The one automated test that exercises the real binary."""
     assert check_odon(hcs / "plate.ome.zarr" / "B" / "2" / "0") is True
 
 

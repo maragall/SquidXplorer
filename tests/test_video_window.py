@@ -1,19 +1,6 @@
 """The window half of the .mp4 export: the chip, what it hands the worker, and what lands on disk.
 
-``tests/test_video.py`` pins the recorder itself, Qt-free. This file pins the two things only the
-window can get wrong, and both of them have precedent in this repo:
-
-* **The click handler doing the work.** ``_FocusWorker``'s docstring records that the reference
-  plane scan "used to run inside the button's clicked slot, which froze the window solid for the
-  whole scan", and ``_MosaicWorker``'s records 128 ms of frozen UI for one contrast seed. A movie
-  is 4 s of reads and encoding on the real 10x region. So the handler's own wall clock is
-  ASSERTED here, with a real worker started, rather than left as an intention in a comment.
-* **Recording something other than what is on screen.** The window knows the region, the visible
-  channels, the timepoint and the z plane; the recorder knows none of them. A test that only
-  checked "a worker was started" would pass on a movie of region A1 taken while looking at B2.
-
-Both end in a decoded file: the last test runs the REAL worker to completion and reads the frames
-back out of the .mp4 it wrote.
+``tests/test_video.py`` pins the recorder itself, Qt-free.
 """
 
 from __future__ import annotations
@@ -44,10 +31,7 @@ from .test_viewer import _drain_until, qapp  # noqa: E402,F401  (fixtures)
 
 @pytest.fixture
 def five_d_root(tmp_path):
-    """A tiny 5-D acquisition on disk: 2 regions x 1 FOV x 2 z x 2 ch x 3 t, 64 px.
-
-    Two regions so "the region on screen" is a question with a wrong answer available.
-    """
+    """A tiny 5-D acquisition on disk: 2 regions x 1 FOV x 2 z x 2 ch x 3 t, 64 px."""
     root = tmp_path / "acq5d"
     _make_5d().build(root, ["A1", "A2"], n_fovs=1, nz=2, nt=3, size=64)
     return root
@@ -118,8 +102,6 @@ def save_dialog(monkeypatch, tmp_path):
     return chosen
 
 
-# --- the chip -------------------------------------------------------------------------------
-
 def test_the_record_chip_is_enabled_on_an_acquisition_with_an_axis_to_sweep(
         qapp, napari_pane_stub, five_d_root):
     win, w = _open_window(qapp, five_d_root)
@@ -130,7 +112,7 @@ def test_the_record_chip_is_enabled_on_an_acquisition_with_an_axis_to_sweep(
 
 def test_the_record_chip_says_why_when_there_is_nothing_to_sweep(
         qapp, napari_pane_stub, tmp_path):
-    """n_t = 1 and one z plane: no axis, and the tooltip names that rather than going quiet."""
+    """n_t = 1 and one z plane: no axis, and the tooltip names that."""
     root = tmp_path / "flat"
     _make_5d().build(root, ["A1"], n_fovs=1, nz=1, nt=1, size=64)
     win, w = _open_window(qapp, root)
@@ -138,8 +120,6 @@ def test_the_record_chip_says_why_when_there_is_nothing_to_sweep(
     assert "single timepoint and a single z plane" in w._btn_record.toolTip()
     shutdown_plate_window(qapp, win)
 
-
-# --- what the handler hands over --------------------------------------------------------------
 
 def test_the_worker_is_given_the_region_the_window_is_actually_showing(
         qapp, napari_pane_stub, five_d_root, spy_worker, save_dialog):
@@ -187,22 +167,10 @@ def test_a_second_click_cancels_instead_of_starting_a_second_export(
     shutdown_plate_window(qapp, win)
 
 
-# --- the UI thread --------------------------------------------------------------------------
-
 def test_the_click_handler_does_not_read_or_encode_on_the_ui_thread(
         qapp, napari_pane_stub, five_d_root, save_dialog, tmp_path):
-    """The handler's own wall clock, with the REAL worker started.
-
-    SELF-CALIBRATING, not a fixed millisecond budget. The same export is first run SYNCHRONOUSLY
-    to find out what this machine and this fixture actually cost, and the click is then required
-    to be a small fraction of that. A fixed budget would be either untrippable on a small fixture
-    (a 3-frame 64 px encode is ~60 ms, which fits under any threshold loose enough to be
-    non-flaky) or flaky on a slow one. The ratio says the thing that matters — the work is
-    somewhere else — at any fixture size and on any machine.
-
-    Measured on the real 10x acquisition (27 FOVs x 4 channels x 10 z), which is the size this
-    guard exists for: 0.91 ms in the handler against 4.20 s of export.
-    """
+    """Self-calibrating: the export is first run synchronously, and the click must be a
+    small fraction of that."""
     from squidxplorer._video import record_region
 
     win, w = _open_window(qapp, five_d_root)
@@ -228,15 +196,7 @@ def test_the_click_handler_does_not_read_or_encode_on_the_ui_thread(
 
 def test_the_export_never_reads_a_plane_on_the_qt_thread(
         qapp, napari_pane_stub, five_d_root, save_dialog):
-    """The rule CLAUDE.md now states, pinned the way the gallery pins it: by thread ident.
-
-    The timing test above measures the CLICK; this measures every read of the whole export, so a
-    later refactor that "just" fuses one frame inline to fix a repaint fails here rather than
-    becoming a freeze somebody reports. Same instrumented-wrapper shape as
-    ``test_gallery.py::test_the_gallery_never_reads_a_plane_on_the_qt_thread``, and a wrapper over
-    a REAL reader rather than a fake for the same reason: a fake would pass this suite while
-    failing on a real acquisition's geometry.
-    """
+    """Every read of the whole export, pinned by thread ident."""
     from .test_gallery import _RecordingReader
 
     win, w = _open_window(qapp, five_d_root)
@@ -257,8 +217,6 @@ def test_the_export_never_reads_a_plane_on_the_qt_thread(
         f"must decode only in _VideoWorker")
     shutdown_plate_window(qapp, win)
 
-
-# --- the file the window produced ---------------------------------------------------------------
 
 @pytest.mark.skipif(encoder_problem() is not None,
                     reason=f"no mp4 encoder: {encoder_problem()}")

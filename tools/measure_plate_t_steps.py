@@ -1,36 +1,7 @@
 #!/usr/bin/env python
-"""Step the PLATE's timepoint t=0 -> t=1 -> t=0 and report, per step, the time AND the pixels.
+"""Step the plate's timepoint t=0 -> t=1 -> t=0, reporting per-step time and cell signatures.
 
-WHY BOTH. Timing this alone is how the bug it was written for hid: before 2026-08-05 the second
-step was the FASTEST of the three, because ``_PreviewWorker``'s cell cache was keyed with no
-timepoint and answered t=1 with t=0's cells. A pure benchmark would have called that a win. So
-every step also reports a signature of the composited plate CELLS, and the last two lines are the
-correctness claims -- "t=0 and t=1 differ" and "the revisit matches the first visit" -- without
-which the milliseconds mean nothing.
-
-WHAT IT DRIVES. The real ``_PreviewWorker`` over a real acquisition, through the real default cell
-cache (``cache=_CACHE_AUTO``), with the RAM tier dropped between steps so each one is what a fresh
-window would see. It runs the worker in-thread, so the number is the PASS and not the scheduler.
-
-Works unmodified against a checkout that predates the fix: it detects whether ``_PreviewWorker``
-takes a ``t`` and reports which shape it measured, which is what makes a before/after honest.
-
-Usage::
-
-    SQUIDXPLORER_CACHE_DIR=/tmp/plate-t python tools/measure_plate_t_steps.py ~/Downloads/sim_5d_2x2_t3
-    REPEATS=9 SQUIDXPLORER_CACHE_DIR=/tmp/plate-t python tools/measure_plate_t_steps.py ACQ
-
-``SQUIDXPLORER_CACHE_DIR`` is REQUIRED and gets a fresh suffix per repetition: this drives the real
-cache path, and a measurement must not write into (or read from) the developer's own cells.
-
-MEASURED on ``sim_5d_2x2_t3`` (4 regions x 4 FOVs x 2 channels, 256 px), median of 9, both columns
-back to back on one machine with the OS page cache warm::
-
-    step               before                              after
-    t=0 first visit    13.9 ms, 4 wells read               13.6 ms, 4 wells read
-    t=1                 6.4 ms, 4 HITS -- frame 0's cells  13.9 ms, 4 wells read
-    t=0 again           5.3 ms, 4 hits                      7.0 ms, 4 hits
-    t=0 != t=1          FALSE                               True
+Usage: SQUIDXPLORER_CACHE_DIR=/tmp/plate-t python tools/measure_plate_t_steps.py <acquisition>
 """
 from __future__ import annotations
 
@@ -39,10 +10,7 @@ import os
 import sys
 import time
 
-# THE CHECKOUT THIS FILE IS IN, not whichever squidxplorer is installed. Every other tool in here does
-# the same line, and it is load-bearing for this one in particular: the editable install points at
-# the main worktree, so without it a measurement run from a branch worktree silently measures MAIN
-# -- which, for a script whose whole job is a before/after, would report the "before" twice.
+# Measure the checkout this file is in, not whichever squidxplorer is installed.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -54,7 +22,7 @@ import squidxplorer._viewer as V                                  # noqa: E402
 from squidxplorer import _platecache                              # noqa: E402
 from squidxplorer.reader import open_reader                       # noqa: E402
 
-CELL = 88                                                     # _workers._CELL
+CELL = 88   # _workers._CELL
 STEPS = (("t=0 (cold)", 0), ("t=1 (new)", 1), ("t=0 (revisit)", 0))
 
 
@@ -64,9 +32,7 @@ def one_pass(reader, meta, idx, order, t, takes_t):
     cells: dict = {}
 
     def on_tile(_ri, _ci, region, tile, box=None):
-        # Composited at its box, exactly as PlateOverview.add_tile does. A cold pass emits one
-        # tile per FOV and a cache replay emits one per REGION (that is the reopen win), so the
-        # raw emissions are not comparable between the two. The cell is.
+        # Composite at its box, as PlateOverview.add_tile does; cells are comparable, emissions not.
         arr = np.asarray(tile)
         canvas = cells.get(region)
         if canvas is None:
@@ -103,9 +69,9 @@ def main() -> int:
     counts: dict = {}
     sigs: dict = {}
     for r in range(repeats):
-        os.environ["SQUIDXPLORER_CACHE_DIR"] = f"{base}-{r}"      # a COLD cache per repetition
+        os.environ["SQUIDXPLORER_CACHE_DIR"] = f"{base}-{r}"      # a cold cache per repetition
         for label, t in STEPS:
-            _platecache.clear_memory_tier()   # every step is a fresh window's worth of RAM
+            _platecache.clear_memory_tier()   # every step sees a fresh window's RAM
             elapsed, hits, reads, sig = one_pass(reader, meta, idx, order, t, takes_t)
             runs[label].append(elapsed * 1000)
             counts[label], sigs[label] = (hits, reads), sig

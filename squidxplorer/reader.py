@@ -1,75 +1,8 @@
-"""SquidXplorer reader: format-aware ingest for EVERY Squid output writer.
+"""Format-aware readers for Squid acquisitions.
 
-``open_reader(path)`` dispatches on the on-disk format and returns a reader. All four readers sit
-behind ONE interface — ``metadata`` (identical key set, micrometres, ``_um``-suffixed) plus
-``read(region, fov, channel, z, t)`` returning a 2-D native-dtype plane:
-
-    individual TIFFs   :class:`SquidReader`      (IMA-189)   ``<acq>/{t}/{region}_{fov}_{z}_{ch}.tiff``
-    multi-page TIFF    :class:`SquidMultiPageTiffReader` (IMA-254) ``<acq>/{t}/{region}_{fov}_stack.tiff``
-    OME-TIFF           :class:`SquidOMEReader`               ``<acq>/ome_tiff/{region}_{fov}.ome.tiff``
-    OME-NGFF Zarr      :class:`SquidZarrReader`  (IMA-229)   ``<acq>/plate.ome.zarr/…`` or ``<acq>/zarr/…``
-
-The interface IS the seam: engine, CLI and viewer consume any of them with no ``isinstance``
-check and no parallel API. That interface now has a NAME -- :class:`SquidAcquisitionReader`, a
-``runtime_checkable`` Protocol -- because a seam Squid is expected to depend on cannot be four
-undeclared duck types. See its docstring for why a Protocol rather than a base class.
-
-COVERAGE FOLLOWS THE SPEC, NOT THE LOCAL DISK (IMA-254). The writer list above is read out of
-``control/core/job_processing.py`` (``SaveImageJob``, ``SaveOMETiffJob``, ``SaveZarrJob``) and
-``control/utils.py`` (the three zarr path builders), and every one of them has a synthetic
-fixture in ``tests/conftest.py`` sized in kilobytes. Before this, two writers were unserved
-because only two acquisitions had ever been tested against and both came from the same writer;
-one of the two — MULTI_PAGE_TIFF — was not refused but SILENTLY skipped file-by-file, so a full
-acquisition reported as empty. Every unsupported or malformed layout now fails loudly, naming
-the format it found and the formats it expected. ``tests/test_writer_coverage.py`` asserts there
-is no ``continue`` past a file matching a known Squid naming pattern.
-
-Individual-TIFFs layout (one channel per file), verified against real data::
-
-    <acq>/
-    ├── acquisition parameters.json
-    ├── acquisition_channels.yaml
-    ├── coordinates.csv
-    └── 0/                                    # timepoint folder (1/, 2/, … if Nt>1)
-        └── {region}_{fov}_{z}_{channel}.tiff
-
-Discovery flow::
-
-    open_reader ──► detect format ──► SquidReader
-                                          │
-        glob timepoint folders (0/,1/…) ──┤─► n_t
-        glob *.tiff in t0, parse stems ───┤─► regions, fovs_per_region, channels, z-levels
-        read ONE frame ──────────────────┤─► frame_shape, dtype   (NOT hardcoded)
-        coordinates.csv (dedup by x,y) ───┤─► fov_positions_um {(region,fov): (x_um, y_um)}
-        acquisition.yaml (or JSON) ───────┴─► dz_um, pixel_size_um, wellplate_format, Nz/Nt cross-check
-
-The (region, fov, z, channel) index is parsed from FILENAMES — the ground truth. Scalar
-metadata comes from acquisition.yaml (authoritative pixel size etc.), the flat JSON as a
-legacy fallback. read() constructs the path directly and returns exactly what tifffile
-decodes (native dtype), refusing non-2D planes and dtypes outside {uint8, uint16}.
-
-``coordinates.csv`` IS read (IMA-187), into ``metadata["fov_positions_um"]``, so multiple FOVs
-per region can be placed at their true stage offsets. TWO schemas ship in real Squid output and
-both parse (IMA-215), discriminated by the HEADER and never by row count::
-
-    (a) region,fov,z_level,x (mm),y (mm),z (um),time     # fov id STATED
-    (b) region,x (mm),y (mm),z (mm)                      # fov id is ROW ORDER
-
-In (a) the ``fov`` column is the row -> image mapping, so row order is irrelevant; repeats (one
-row per z-level) collapse, and a repeat that disagrees about x/y is a hard error.
-
-In (b) there is NO ``fov`` column — the only link from a row to an image is position within the
-region's rows, so the Nth row of a region maps to that region's Nth sorted FOV. Rows are
-de-duplicated on (region, x, y) FIRST, because a multi-z / multi-timepoint acquisition can
-repeat a stage position once per z-level; comparing raw row counts against FOV counts would
-then fail on every genuine z-stack. The de-duplicated count IS cross-checked and fails loud
-on a mismatch: a wrong mapping does not crash, it silently draws a scrambled mosaic. That
-failure is CONTAINED to the coordinate half of the metadata (``_fov_positions_um_or_empty``):
-a truncated CSV costs placement, not the whole acquisition.
-
-Units: coordinates.csv records MILLIMETRES, but this package's world space is MICROMETRES and
-every world-space key ends in ``_um`` (see ``squidxplorer/_tiling.py``). The conversion happens
-here, at the producer, and the metadata key is ``fov_positions_um``.
+``open_reader(path)`` dispatches on the on-disk format and returns one of four readers
+(individual TIFFs, multi-page TIFF, OME-TIFF, OME-NGFF Zarr) behind one interface:
+``metadata`` (micrometres, ``_um``-suffixed) plus ``read(region, fov, channel, z, t)``.
 """
 
 from __future__ import annotations
@@ -93,61 +26,7 @@ from squidxplorer.contract import check_plate_contract
 
 @runtime_checkable
 class SquidAcquisitionReader(Protocol):
-    """The NAME for what :func:`open_reader` returns: a reader over one Squid acquisition.
-
-    WHY THIS EXISTS. The four readers below already share one interface, and the module docstring
-    says so ("the interface IS the seam"). Inside this repo that is true and duck typing is
-    enough: four classes, one test suite, every consumer written against all four. Across a REPO
-    BOUNDARY it is not a contract. SquidXplorer is a child node of Squid software (v1 opens from
-    a button in Squid, v2 replaces its mosaic and multi-channel views), so Squid needs something
-    to depend on, and until now there was no name at all -- not a base class, not a Protocol, so
-    an annotation on Squid's side could only say ``SquidReader`` (one of the four, and the wrong
-    one for a Zarr acquisition) or nothing.
-
-    WHY A PROTOCOL AND NOT AN ABC. Two reasons, both about the merge being a no-op rather than a
-    translation layer:
-
-    1. **It describes the four without touching them.** An ABC would need either four ``class X(
-       SquidAcquisitionReader)`` edits (a new MRO and a new ``__init_subclass__`` surface on
-       classes whose behaviour must not change) or four ``register()`` calls, which buy no static
-       checking and no error at definition time. This Protocol is structural: it is satisfied by
-       what the classes already do, and adding it changed no reader's behaviour.
-    2. **Squid's own objects can satisfy it without inheriting from ours.** The seam Squid offers
-       is a live per-plane feed (``signal_zarr_frame_written(fov, time_point, z_index,
-       channel_name, region_idx)``) and an ``extra_job_classes`` hook, so the natural
-       Squid-side implementation is an in-process reader over the acquisition it is currently
-       writing, not a subclass of a folder-walking TIFF reader. Nominal typing would force a
-       dependency in the wrong direction.
-
-    WHAT IT PINS. Exactly what all four already implement, and nothing more:
-
-    ``metadata``    the acquisition's identity, one identical key set across the four (see
-                    :class:`squidxplorer._acquisition.Acquisition`), micrometres, ``_um``-suffixed.
-                    A property, computed lazily and cached on first access.
-    ``read``        one 2-D plane in the native dtype.
-    ``plane_ref``   ``(path, page_index)`` for one plane, so a viewer can register the bytes on
-                    disk without copying them.
-
-    ``plane_path`` is deliberately NOT here: only the two TIFF readers have one, because only a
-    TIFF plane is a file. A Protocol member that two of four implementations lack is a lie that
-    type-checks.
-
-    PARAMETER NAMES ARE TODAY'S, ON PURPOSE. ``read(region, fov, channel, z, t=0)`` uses ``z``
-    and ``t`` where the naming law wants Squid's ``z_level`` and ``time_point``. Renaming them
-    here would either be a lie about the four implementations or a keyword-argument break in
-    every consumer; the rename is its own item (it is on the RENAME list in the data-model
-    reference) and this Protocol is a description of what exists, not a wish. ``region`` likewise
-    stays ``region`` in the signature while every new key and doc says ``region_id``.
-
-    RUNTIME CHECKING, AND ITS ONE SHARP EDGE. ``runtime_checkable`` makes ``isinstance`` work,
-    which is what lets a test assert all four satisfy this. It checks for the ATTRIBUTES only,
-    never their signatures, so it is a smoke test and not the contract. And because ``metadata``
-    is a non-method member, ``issubclass`` is unavailable (``TypeError`` by design in ``typing``)
-    and, on Python < 3.12, ``isinstance`` reaches the attribute through ``hasattr``, which RUNS
-    the lazy ``metadata`` property: an ``isinstance`` check against an unreadable acquisition can
-    therefore answer False for a class that does implement this. Check instances you have already
-    opened, and never use ``isinstance`` in place of ``open_reader``'s own loud dispatch.
-    """
+    """Structural Protocol satisfied by every reader :func:`open_reader` can return."""
 
     @property
     def metadata(self) -> dict:  # pragma: no cover - protocol declaration
@@ -163,52 +42,19 @@ class SquidAcquisitionReader(Protocol):
 _STEM_RE = re.compile(r"^(?P<region>[^_]+)_(?P<fov>\d+)_(?P<z>\d+)_(?P<channel>.+)$")
 _TIFF_SUFFIXES = (".tiff", ".tif")
 
-# IMA-254. Squid's SaveImageJob has TWO on-disk shapes, selected by _def.FILE_SAVING_OPTION:
-#
-#   FileSavingOption.<default>         {region}_{fov}_{z}_{channel}.tiff    -> _STEM_RE
-#   FileSavingOption.MULTI_PAGE_TIFF   {region}_{fov:0{FILE_ID_PADDING}}_stack.tiff
-#
-# The fov field is ZERO-PADDED to control._def.FILE_ID_PADDING, which is a deployment setting
-# (0 on the reference config, but sites set it to 3, 4, ...). The width is therefore parsed, never
-# assumed: ``\d+`` then ``int()``. Writing the padding into the pattern would make this reader
-# silently blind on any rig configured differently — the exact class of failure IMA-254 is about.
+# MULTI_PAGE_TIFF stems; fov zero-padding is a deployment setting, so the width is parsed.
 _STACK_STEM_RE = re.compile(r"^(?P<region>[^_]+)_(?P<fov>\d+)_stack$")
 
-# TIFF tags Squid's multi-page writer populates per page (job_processing.SaveImageJob.save_image).
+# TIFF tags Squid's multi-page writer populates per page.
 _TAG_IMAGE_DESCRIPTION = 270
 _TAG_PAGE_NAME = 285
 
-# Squid grayscale planes are MONO8 (uint8) or MONO12/MONO16 (uint16); see
-# software/squid/camera/utils.py get_available_pixel_formats. It never writes uint32/float
-# grayscale (RGB formats are color -> ndim>2, rejected separately). We preserve the native
-# dtype but refuse anything outside this set so a non-raw stack can't be silently projected.
+# Squid grayscale planes are MONO8 (uint8) or MONO12/MONO16 (uint16).
 _SUPPORTED_DTYPES = (np.dtype("uint8"), np.dtype("uint16"))
 
 
 class _TiffHandles:
-    """Cached ``tifffile.TiffFile`` handles, and THE LOCK that makes reading one of them safe.
-
-    A ``TiffFile`` is a file OBJECT: ``pages[p].asarray()`` seeks and reads. Two threads decoding
-    two different pages of the SAME cached handle move one seek position under each other, so one
-    of them reads the middle of a strip as if it were an IFD header.
-
-    MEASURED, 2026-08-06, on the 10x acquisition (``manual0`` FOV 17, 4 channels x 1 z):
-
-        serial   (8 reads):  0 errors
-        threaded (24 reads): 11 errors — ``TiffFileError('suspicious number of tags 38866')``,
-                             ``ValueError('failed to read 8686112 bytes, got 0')``
-
-    Those exceptions surfaced as PER-FIELD SKIPS in the GUI's operator run: an intermittent
-    ``1 well(s) skipped`` whose accumulator then never completed, so the region's layer was never
-    drawn at all while both status lines reported success. `_engine`'s per-well fault isolation was
-    doing its job over a fault that should not exist.
-
-    ONE LOCK PER FILE, not one per reader: the parallelism that matters is across FOVs and each
-    FOV is its own file, so serialising within a file costs nothing measurable while making a
-    read of it atomic. ``read()`` is a context manager so the handle cannot be handed out
-    unguarded — the previous ``_tif(path)`` accessor returned the shared object and every caller
-    was then on its own.
-    """
+    """Cached ``tifffile.TiffFile`` handles with a per-file lock: decoding seeks, so it is not re-entrant."""
 
     def __init__(self) -> None:
         self._handles: dict = {}                # Path -> tifffile.TiffFile
@@ -231,7 +77,7 @@ class _TiffHandles:
             yield tif
 
     def page(self, path: Path, index: int):
-        """One decoded IFD page, validated. The whole of what every caller here wanted."""
+        """One decoded IFD page, validated."""
         with self.read(path) as tif:
             return _validate_plane(np.asarray(tif.pages[int(index)].asarray()), path)
 
@@ -253,66 +99,17 @@ def _validate_plane(arr, path: Path):
 
 
 _COORDS_NAME = "coordinates.csv"
-# Header tolerance: Squid writes "x (mm)"/"y (mm)", but whitespace and case drift across
-# generations. Match on the leading axis letter of a column that mentions mm.
+# Header spellings drift across Squid generations; match the axis letter of a column mentioning mm.
 _X_COL_RE = re.compile(r"^\s*x\b.*\(\s*mm\s*\)", re.I)
 _Y_COL_RE = re.compile(r"^\s*y\b.*\(\s*mm\s*\)", re.I)
 
-#: Which file a set of FOV positions came from. This is DATA, not just a log line: a caller drawing
-#: a mosaic, or a user comparing two acquisitions, has to be able to ask which source it got.
+#: Which coordinates.csv a set of FOV positions came from.
 COORDS_EXECUTED = "executed"
 COORDS_PLANNED = "planned"
 
 
 def _coords_path(root):
-    """The best available ``coordinates.csv`` and WHICH one it is, as ``(path, source)``.
-
-    Squid writes TWO different files under this one name, and until 2026-07-29 we read only the
-    weaker of them.
-
-    * ``{root}/coordinates.csv`` is ``region, x, y, z``, written BEFORE the run
-      (`multi_point_controller.py:735-744`). Where the software INTENDED to go.
-    * ``{root}/{time_point}/coordinates.csv`` is ``region, fov, z_level, x, y, z, time``, written by
-      the worker as it goes (`multi_point_worker.py:757`, columns at `:802-805`). Where the stage
-      ACTUALLY was when each frame was captured.
-
-    Autofocus nudges, backlash and a stage that stopped short all live in the difference. Placing
-    FOVs from the plan draws the mosaic where the run was supposed to happen, so every seam is off
-    by the correction the stage really applied, and nothing says so.
-
-    **Why this returns the source rather than silently choosing.** Julio, 2026-07-29: a fallback
-    that quietly swaps one accuracy for another is confusing behaviour, and it contradicts this
-    project's standing rule, no fallbacks, fail to the logger. So the choice is reported: the caller
-    warns, naming what is missing AND what it costs.
-
-    **Why a fallback exists at all**, measured rather than assumed: both real Squid acquisitions on
-    this workstation carry the executed file. The only thing that does not is `sim_1536wp`, a
-    hand-built symlink farm Squid never wrote. Refusing without the executed file would reject
-    synthetic fixtures and nothing real, so announcing is enough and refusing would cost coverage
-    for no gain.
-
-    Timepoint 0, not a merge across timepoints: per-timepoint drift is real and averaging it would
-    invent a position no frame was taken at. When ``t`` becomes navigable this takes the CURRENT one.
-
-    Direction of travel: Squid has APPROVED making the per-FOV OME ``translation`` authoritative and
-    demoting ``coordinates.csv`` to "a derived export for the stitcher". Our zarr path already
-    prefers ``translation``; this is the raw-TIFF path catching up one step.
-
-    **Do not "fix" this to match maragall/stitcher (measured 2026-08-05).** That standalone reads
-    the PLANNED file on its OME-TIFF path (``tilefusion/io/ome_tiff_tiles.py``, which tries
-    ``{root}/coordinates.csv`` FIRST and falls back to ``0/``) while its own individual-TIFF path
-    (``io/individual_tiffs.py``) tries ``{image_folder}/coordinates.csv`` first and so reads the
-    EXECUTED file. It disagrees with itself, not only with us. Measured on both real acquisitions,
-    planned minus executed: 10x z-stack max 0.393 um = 0.523 px, 20x scan max 0.298 um = 0.794 px.
-    Sub-micron and NOT a fixed offset (means +0.01..+0.07 um against spreads of 0.19..0.30), so no
-    constant can reconcile them. The 20x planned file is a PERFECT lattice -- step std exactly
-    0.000000 um, against 0.389 um in the executed file -- which is what a synthesised grid looks
-    like and what a real stage does not. Our positions equal the executed file to 0.00000000 um on
-    both datasets and both reader classes, so the parity gap closes by changing ome_tiff_tiles.py
-    to prefer ``0/``, matching its sibling. Adopting the planned file here would also cost us the
-    ``fov`` column that only the executed file has, forcing fov to be inferred from ROW ORDER --
-    which is exactly the fragile assumption that path already makes.
-    """
+    """The best available ``coordinates.csv`` as ``(path, source)``: executed (``0/``) preferred over planned."""
     root = Path(root)
     executed = root / "0" / _COORDS_NAME
     if executed.exists():
@@ -336,25 +133,14 @@ def _coord_columns(fieldnames) -> tuple[str, str]:
     return x, y
 
 
-# IMA-215: the second real on-disk schema carries an explicit ``fov`` column. Its presence in the
-# HEADER is the whole format signal — see _fov_column.
 _FOV_COL_RE = re.compile(r"^\s*fov\s*$", re.I)
 
 
 def _fov_column(fieldnames):
     """The explicit ``fov`` column if this coordinates.csv has one, else ``None``.
 
-    This single header lookup IS the format discriminator (IMA-215). Two schemas ship in real
-    Squid output:
-
-        (a) ``region,fov,z_level,x (mm),y (mm),z (um),time``   — the fov id is STATED
-        (b) ``region,x (mm),y (mm),z (mm)``                    — the fov id is row ORDER
-
-    Detection must be on the header and never on row counts. Row counts are data: a type-(a) file
-    can happen to have exactly one row per FOV (a single-z acquisition), and a type-(b) file can
-    happen to have a count that looks like a z-repeat pattern. Guessing from them would silently
-    swap the two mappings, and a swapped mapping does not crash — it draws every tile in the wrong
-    place. The header is the schema; the schema decides.
+    The header, never row counts, discriminates the two real schemas: with a ``fov``
+    column the id is stated; without one it is row order within the region.
     """
     return next((n for n in list(fieldnames or []) if n and _FOV_COL_RE.match(n)), None)
 
@@ -365,7 +151,7 @@ _MM_TO_UM = 1000.0
 def _parse_mm_pair(raw_x: str, raw_y: str, region: str, line_no: int):
     """``(x_mm, y_mm)`` floats, or ``None`` for a blank (position-less) row. Raises on garbage."""
     if not raw_x or not raw_y:
-        return None                     # a blank position row carries no placement info
+        return None
     try:
         return float(raw_x), float(raw_y)
     except ValueError:
@@ -376,29 +162,7 @@ def _parse_mm_pair(raw_x: str, raw_y: str, region: str, line_no: int):
 
 
 def _positions_from_fov_column(reader, fovs_per_region: dict, fov_col, x_col, y_col) -> dict:
-    """Parse the type-(a) ("monkey") schema, where each row STATES its FOV id (IMA-215).
-
-    ``region,fov,z_level,x (mm),y (mm),z (um),time``. This is the strictly better of the two
-    schemas: the row -> FOV mapping is declared, so row order is irrelevant and a shuffled or
-    interleaved file still places correctly. The positional fallback in
-    :func:`load_fov_positions_um` exists only because the type-(b) schema has nothing else to go on.
-
-    Three properties are enforced, all for the same reason the positional path enforces its count:
-    a wrong mapping renders a plausible-looking, wrong mosaic and nothing downstream can catch it.
-
-    1. **Repeats of the same FOV are collapsed, not counted.** A z-stack writes one row per
-       z-level per FOV (the real 10x dataset: 550 rows, 55 FOVs, Nz=10). The first row for a FOV
-       wins.
-    2. **A repeat that DISAGREES about x/y is a hard error**, not a silent first-wins. Two
-       different stage positions filed under one FOV id means the file is corrupt or was
-       concatenated from two runs; picking either one would be a guess.
-    3. **The FOV id set must match the filename-derived set exactly.** An id in the CSV with no
-       image (or an image with no row) leaves part of the plate unplaceable.
-
-    Units: x/y are millimetres here exactly as in the type-(b) schema, so the same single
-    ``_MM_TO_UM`` conversion applies. The ``z (um)`` column is ALREADY micrometres and is not
-    read at all — there is no third unit crossing this boundary and no second scale factor.
-    """
+    """Parse the schema whose rows state their FOV id; repeats collapse, conflicts and set mismatches raise."""
     by_region: dict[str, dict[int, tuple]] = {}
     for line_no, row in enumerate(reader, start=2):
         region = (row.get("region") or "").strip()
@@ -418,7 +182,7 @@ def _positions_from_fov_column(reader, fovs_per_region: dict, fov_col, x_col, y_
                 f"({raw_fov!r}); the fov column is the row -> image mapping and cannot be guessed."
             ) from None
         x, y = pair
-        key = (round(x, 6), round(y, 6))    # tolerate float-repr drift, as the positional path does
+        key = (round(x, 6), round(y, 6))    # tolerate float-repr drift
         seen = by_region.setdefault(region, {})
         if fov in seen:
             if seen[fov][0] != key:
@@ -450,41 +214,10 @@ def _positions_from_fov_column(reader, fovs_per_region: dict, fov_col, x_col, y_
 
 
 def _parse_fov_positions_um(root, fovs_per_region: dict) -> tuple:
-    """Parse ``coordinates.csv`` into ``({(region, fov): (x_um, y_um)}, mismatched)`` — MICROMETRES.
+    """Parse ``coordinates.csv`` into ``({(region, fov): (x_um, y_um)}, mismatched)``, in micrometres.
 
-    Returns BOTH halves of the cross-check: the positions of every region that passed, and
-    ``mismatched`` mapping ``region -> (n_positions, n_fovs)`` for every region that did not.
-    Splitting it this way is what lets one truncated well cost only its own mosaic:
-    :func:`load_fov_positions_um` raises if ``mismatched`` is non-empty (the strict contract),
-    while :func:`_fov_positions_um_or_empty` keeps the regions that passed and warns about the
-    rest. Neither can place a FOV at an unverified position, which is the invariant that matters.
-
-    The file records millimetres; world space in this package is micrometres (``_tiling.py``),
-    and the units invariant is that every world-space value is µm and every key carrying one
-    ends in ``_um``. The mm -> µm conversion therefore happens HERE, at the single producer,
-    rather than in each consumer — an unsuffixed mm value crossing into µm code is a silent
-    1000x error that draws a plausible picture.
-
-    Returns ``{}`` (present but empty — never a missing key) when the file is absent, so a
-    consumer can degrade to single-FOV rendering instead of hitting a KeyError.
-
-    The mapping is **row order within a region**: coordinates.csv carries no ``fov`` column, so
-    the Nth distinct position recorded for a region is that region's Nth sorted FOV. Two
-    safeguards keep that honest:
-
-    1. **De-duplicate on (region, x, y) before counting.** A multi-z or multi-timepoint
-       acquisition can write one row per z-level at the same stage position; raw row counts
-       would then be a multiple of the FOV count and every z-stack would fail the check below.
-       De-duplicating first makes the count mean "distinct stage positions", which is the thing
-       that should equal the FOV count. First occurrence wins, preserving file order.
-    2. **Cross-check the de-duplicated count against the filename-derived FOV count** and raise
-       on a mismatch. This is the load-bearing guard: an off-by-one or a truncated CSV produces
-       a mosaic that looks entirely reasonable while every tile sits in the wrong place, and
-       nothing downstream can detect it.
-
-    Rows whose region is not in *fovs_per_region* are ignored (a CSV may describe regions whose
-    images were never written); a region with images but no rows is simply absent from the
-    result, and placement for it raises later with a clear message.
+    Positions are de-duplicated per region, then cross-checked against the filename-derived
+    FOV count; regions that fail land in ``mismatched`` instead of the positions dict.
     """
     import csv
 
@@ -492,9 +225,6 @@ def _parse_fov_positions_um(root, fovs_per_region: dict) -> tuple:
     if path is None:
         return {}, {}
     if source == COORDS_PLANNED:
-        # warnings.warn, matching this module's idiom for a degraded-but-usable read. It names what
-        # this COSTS, not only what happened: a line reporting a degraded source without its
-        # consequence reads as noise and gets scrolled past.
         warnings.warn(
             f"{_COORDS_NAME}: using PLANNED positions. The per-timepoint EXECUTED file "
             f"(0/{_COORDS_NAME}) is absent, so FOVs are placed where the run intended to go, not "
@@ -508,8 +238,6 @@ def _parse_fov_positions_um(root, fovs_per_region: dict) -> tuple:
         x_col, y_col = _coord_columns(reader.fieldnames)
         fov_col = _fov_column(reader.fieldnames)
         if fov_col is not None:
-            # An explicit 'fov' column names each position outright, so there is no row-order
-            # inference to cross-check and no mismatch to report.
             return _positions_from_fov_column(reader, fovs_per_region, fov_col, x_col, y_col), {}
         ordered: dict[str, list] = {}
         seen: dict[str, set] = {}
@@ -527,7 +255,6 @@ def _parse_fov_positions_um(root, fovs_per_region: dict) -> tuple:
             if key in seen.setdefault(region, set()):
                 continue                    # same position repeated (one row per z / per t)
             seen[region].add(key)
-            # De-duplication compares the raw mm values; only the stored value is converted.
             ordered.setdefault(region, []).append((x * _MM_TO_UM, y * _MM_TO_UM))
 
     positions: dict = {}
@@ -535,9 +262,7 @@ def _parse_fov_positions_um(root, fovs_per_region: dict) -> tuple:
     for region, coords in ordered.items():
         fovs = list(fovs_per_region[region])
         if len(coords) != len(fovs):
-            # Record and skip rather than abort the loop. The cross-check is per region --
-            # one truncated well says nothing about the others -- and a caller that wants the
-            # strict all-or-nothing contract raises on this dict (see load_fov_positions_um).
+            # Per-region cross-check: record and continue, callers decide strictness.
             mismatched[region] = (len(coords), len(fovs))
             continue
         for fov, xy in zip(fovs, coords):
@@ -561,12 +286,7 @@ def _mismatch_message(mismatched: dict) -> str:
 
 
 def load_fov_positions_um(root, fovs_per_region: dict) -> dict:
-    """Strict parse: every region cross-checks, or nothing is returned.
-
-    Raises :class:`ValueError` naming every region whose de-duplicated position count
-    disagrees with its FOV count. See :func:`_parse_fov_positions_um` for the parsing rules
-    and :func:`_fov_positions_um_or_empty` for the degrading variant the viewer uses.
-    """
+    """Strict parse: raises ValueError naming every region that fails the cross-check."""
     positions, mismatched = _parse_fov_positions_um(root, fovs_per_region)
     if mismatched:
         raise ValueError(_mismatch_message(mismatched))
@@ -574,32 +294,7 @@ def load_fov_positions_um(root, fovs_per_region: dict) -> dict:
 
 
 def _fov_positions_um_or_empty(root, fovs_per_region: dict) -> dict:
-    """``load_fov_positions_um`` degraded PER REGION on an unusable coordinates.csv.
-
-    ``metadata`` is the acquisition's whole identity: regions, channels, dtype, frame shape.
-    Those come from the FILENAMES and one decoded frame and are readable whatever the CSV says.
-    Before this, a truncated or malformed coordinates.csv raised out of the middle of the
-    metadata dict literal, so every one of those fields became unreachable and the viewer
-    reported "not a readable Squid acquisition" for an acquisition it could render perfectly
-    well minus the multi-FOV mosaic (IMA-187).
-
-    Degrading is safe precisely because a region absent from the mapping already means "no
-    stage positions for that region" — consumers fall back to single-tile rendering, and
-    ``_placement.fov_offsets_px`` raises a KeyError naming the missing FOVs rather than
-    guessing. It does NOT weaken the cross-check: an ambiguous region still never produces a
-    scrambled mosaic, it produces no mosaic, loudly (``UserWarning``).
-
-    The degradation is per REGION, not per file. A plate where one well was cut short mid-run
-    (its CSV rows outnumber its written FOVs) used to cost every OTHER well its mosaic too,
-    because the first mismatch raised and the whole mapping collapsed to ``{}``. One truncated
-    well says nothing about the wells that cross-check perfectly, so only the well that failed
-    loses its positions now.
-
-    A malformed FILE — unparseable coordinates, no recognisable x/y columns, conflicting
-    duplicate rows — is still all-or-nothing: those :class:`ValueError`\\ s come from the parse
-    itself, before any region can be judged, and there is nothing partial to salvage. Anything
-    that is not a :class:`ValueError` still propagates.
-    """
+    """``load_fov_positions_um`` degraded per region: failed regions warn and lose placement only."""
     try:
         positions, mismatched = _parse_fov_positions_um(root, fovs_per_region)
     except ValueError as e:
@@ -612,8 +307,6 @@ def _fov_positions_um_or_empty(root, fovs_per_region: dict) -> dict:
 
     if mismatched:
         kept = sorted({region for region, _ in positions})
-        # Name both halves. The old message said only that something was unusable, which read
-        # as a whole-plate failure even when a single well was at fault.
         warnings.warn(
             f"{_COORDS_NAME} is unusable for {len(mismatched)} of "
             f"{len(mismatched) + len(kept)} region(s) ({_mismatch_message(mismatched)}) — "
@@ -624,15 +317,7 @@ def _fov_positions_um_or_empty(root, fovs_per_region: dict) -> dict:
 
 
 def _plate_key(region: str):
-    """Sort well ids in true plate ROW-MAJOR order: A,B,...,Z,AA,AB,... with the column by integer
-    (so B2 < B3 < B10, and B < AA — single-letter rows before double-letter, not lexicographic
-    where "AA" < "B"). Downstream consumers (projection engine, plate viewer) then process wells
-    top-to-bottom, left-to-right. Non-well-plate region names fall back after the plate wells.
-
-    Changed from a plain natural sort in IMA-189: the old key ordered "AA" before "B", so a 1536wp
-    plate processed row A, then the AA-AF rows, then B..Z — filling the plate view out of visual
-    order. Row-major here fixes fill/scrub order for every slot. (Owner: IMA-185; see eng review.)
-    """
+    """Sort key for true plate row-major order (A..Z before AA..; columns by integer)."""
     m = re.match(r"^([A-Za-z]+)(\d+)$", region)
     if not m:
         return (1, len(region), region, 0)          # non-plate ids: stable, after the wells
@@ -640,30 +325,17 @@ def _plate_key(region: str):
 
 
 def _time_folders(path: Path) -> list[Path]:
-    """Squid's timepoint folders (``0/``, ``1/``, …) under *path*, else *path* itself.
-
-    Shared by every TIFF-shaped reader: ``multi_point_worker`` writes to
-    ``{experiment_path}/{time_point:0{FILE_ID_PADDING}}``, so the folder NAME is a zero-padded
-    integer of unknown width and the sort must be numeric, not lexicographic.
-    """
+    """Squid's timepoint folders (``0/``, ``1/``, …) under *path*, else *path* itself; sorted numerically."""
     numeric = [d for d in path.iterdir() if d.is_dir() and d.name.isdigit()]
     return sorted(numeric, key=lambda d: int(d.name)) if numeric else [path]
 
 
-#: How many unrecognised filenames an error message may name. An error listing 20 000 filenames
-#: is not a message.
+#: How many unrecognised filenames an error message may name.
 _NAMES_IN_ERRORS = 8
 
 
 def _note_odd_name(names: list, name: str) -> None:
-    """Keep the ``_NAMES_IN_ERRORS`` lexicographically smallest *name*s seen, in order.
-
-    Both scan sites below used to iterate a SORTED directory listing and take the first eight
-    names they did not recognise, so their error messages were deterministic. The listings are no
-    longer sorted (see :func:`_classify_tiff_folder`), and "eight arbitrary filenames" is a
-    message that says something different every run and cannot be asserted on. This keeps the
-    exact same eight, at the cost of an insort into a list that is never longer than eight.
-    """
+    """Keep the ``_NAMES_IN_ERRORS`` lexicographically smallest *name*s seen, in order."""
     if len(names) >= _NAMES_IN_ERRORS:
         if name >= names[-1]:
             return
@@ -675,20 +347,8 @@ def _classify_tiff_folder(folder: Path, entries: "Optional[list]" = None
                           ) -> tuple[int, int, list, list]:
     """``(n_individual, n_stack, other_names, entries)`` for one timepoint folder.
 
-    The dispatch evidence, gathered ONCE so the error message can state what was actually on
-    disk — and the ``entries`` it gathered it from, handed back so the reader this dispatches to
-    does not scan the same directory a second time (see :meth:`SquidReader._build_index`).
-
-    UNSORTED, and the listing is materialised once. On the 1536-well plate (24 576 files in one
-    timepoint folder) ``sorted(folder.iterdir())`` measured 149 ms against ``list(folder.iterdir())``
-    at 30 ms, and this function ran once here and once again inside the reader: ``open_reader``
-    plus ``.metadata`` went 551 ms -> 210 ms (medians of 15, same process, back to back). Nothing
-    downstream of either scan depends on the order: this one counts, ``_build_index`` fills a dict,
-    and ``SquidReader.metadata`` re-sorts every axis it publishes (``sorted(fovs, key=_plate_key)``,
-    ``sorted(channels)``, ``sorted(z_levels)``) precisely because "filesystem iteration order is
-    not stable". The two places that DID read order — the capped filename lists in the error
-    messages, and the frame sampled for shape/dtype — are each made order-independent rather than
-    left to the filesystem.
+    The listing is unsorted and materialised once, then handed back so the chosen
+    reader does not scan the same directory again.
     """
     if entries is None:
         entries = list(folder.iterdir())
@@ -707,43 +367,14 @@ def _classify_tiff_folder(folder: Path, entries: "Optional[list]" = None
 
 
 def open_reader(path) -> SquidAcquisitionReader:
-    """Detect the acquisition format at *path* and return a reader.
-
-    The return annotation is the interface, not one implementation: this returns whichever of the
-    four readers matches the layout, and every one of them satisfies
-    :class:`SquidAcquisitionReader`. (It said ``-> "SquidReader"`` until the Protocol existed,
-    which was wrong for three of the four dispatch targets.)
-
-    Dispatch covers every writer in ``control/core/job_processing.py`` (IMA-254). The mapping,
-    verified against that module rather than against whichever acquisitions happen to be on a
-    given machine — the reason two writers went unserved is that only two acquisitions were ever
-    tested, and both came from the same writer:
-
-    ===========================================  =======================================  =========
-    Squid writer                                 on-disk shape                            reader
-    ===========================================  =======================================  =========
-    ``SaveImageJob`` (default)                   ``{t}/{region}_{fov}_{z}_{ch}.tiff``     SquidReader
-    ``SaveImageJob`` MULTI_PAGE_TIFF             ``{t}/{region}_{fov}_stack.tiff``        SquidMultiPageTiffReader
-    ``SaveOMETiffJob``                           ``ome_tiff/{region}_{fov}.ome.tiff``     SquidOMEReader
-    ``SaveZarrJob`` HCS                          ``plate.ome.zarr/{row}/{col}/{fov}/0``   SquidZarrReader
-    ``SaveZarrJob`` non-HCS per-FOV              ``zarr/{region}/fov_{n}.ome.zarr/0``     SquidZarrReader
-    ``SaveZarrJob`` non-HCS 6D (non-standard)    ``zarr/{region}/acquisition.zarr``       SquidZarrReader
-    ===========================================  =======================================  =========
-
-    Anything else raises, NAMING what was found and what was expected. There is no path on which
-    an unrecognised layout yields an empty-looking acquisition: a reader that reports "0 images"
-    for a directory full of images is worse than one that refuses, because the operator believes
-    it.
-    """
+    """Detect the acquisition format at *path* and return a reader; unrecognised layouts raise, naming both sides."""
     path = Path(path)
     if not path.is_dir():
         raise NotImplementedError(
             f"{path!s} is not a directory. Point open_reader at a Squid acquisition folder."
         )
     ome = path / "ome_tiff"
-    # OME-TIFF only if ome_tiff/ actually CONTAINS .ome.tiff files. Squid often leaves an EMPTY
-    # ome_tiff/ placeholder next to an individual-TIFF acquisition — that empty folder must NOT
-    # shadow the individual-TIFF reader.
+    # Squid often leaves an empty ome_tiff/ placeholder; it must not shadow the TIFF readers.
     if ome.is_dir() and any(ome.rglob("*.ome.tif*")):
         return SquidOMEReader(path)
     store = _find_zarr_store(path)
@@ -754,9 +385,6 @@ def open_reader(path) -> SquidAcquisitionReader:
     individual, stacks, other, entries = _classify_tiff_folder(folder)
     if individual:
         if stacks:
-            # Both writers' output in one folder. Serve the richer one, but say so: this is
-            # either a re-run over an existing folder or a config change mid-acquisition, and
-            # silently ignoring half the files is how IMA-254 happened in the first place.
             warnings.warn(
                 f"{folder!s} contains BOTH {individual} individual-TIFF plane(s) "
                 f"({{region}}_{{fov}}_{{z}}_{{channel}}.tiff) and {stacks} multi-page stack(s) "
@@ -764,9 +392,7 @@ def open_reader(path) -> SquidAcquisitionReader:
                 "this folder holds two runs. Reading the individual TIFFs and IGNORING the "
                 "stacks — split them into separate folders to read the stacks."
             )
-        # Hand the scan on. The dispatch above already listed this folder; without the seed
-        # ``_build_index`` lists it again, which on the 1536-well plate is a second 83 ms of
-        # ``iterdir`` plus a second 24 576 stat calls for nothing.
+        # Seed the reader with the listing already paid for above.
         return SquidReader(path, _scanned=(folder, entries))
     if stacks:
         return SquidMultiPageTiffReader(path)
@@ -780,15 +406,10 @@ def open_reader(path) -> SquidAcquisitionReader:
     )
 
 
-# IMA-254. Squid's non-HCS Zarr output nests one MORE level than IMA-229 assumed:
-# ``zarr/{region_id}/fov_{n}.ome.zarr`` (``control/utils.build_per_fov_zarr_path``), one NGFF image
-# group per FOV, with the array at ``…/fov_{n}.ome.zarr/0``. ``n`` is the raw FOV index, unpadded.
+# Squid non-HCS per-FOV layout: zarr/{region}/fov_{n}.ome.zarr.
 _PER_FOV_ZARR_RE = re.compile(r"^fov_(?P<fov>\d+)\.ome\.zarr$")
 
-# ``control/utils.build_6d_zarr_path``: the non-standard 6D layout, one (FOV, T, C, Z, Y, X) array
-# per region. Note this node is a zarr ARRAY, not a group — Squid's ZarrWriter writes the OME
-# metadata into the array's own ``zarr.json`` attributes with ``datasets[0].path == "."`` — so
-# ``_is_zarr_group`` is False for it and it must be recognised by NAME.
+# Non-standard 6D layout: a zarr ARRAY (not group), so it is recognised by name.
 _SIXD_ZARR_NAME = "acquisition.zarr"
 
 
@@ -807,21 +428,7 @@ def _nonhcs_region_children(region_dir: Path) -> tuple[list, Optional[Path]]:
 def _find_zarr_store(path: Path):
     """The Zarr root to read at/under *path*, or ``None`` if this is not a Zarr acquisition.
 
-    Recognised (IMA-229, extended in IMA-254), in priority order:
-
-    * *path* IS a zarr group — an ``…​.ome.zarr`` plate or image group handed in directly;
-    * ``<path>/plate.ome.zarr`` — Squid's (and SquidXplorer's own writer's) canonical HCS output;
-    * ``<path>/*.zarr`` — any other single ``.zarr`` sibling, e.g. a renamed plate;
-    * ``<path>/zarr/`` — the non-HCS layouts. THREE shapes live under here and all three are
-      served: a bare image group per region (``zarr/{region}/`` itself, what IMA-229 assumed and
-      what SquidXplorer's own round-trip writes), Squid's real per-FOV
-      ``zarr/{region}/fov_{n}.ome.zarr``, and the non-standard 6D
-      ``zarr/{region}/acquisition.zarr``.
-
-    A ``zarr/`` folder that holds region subdirectories but nothing recognisable RAISES rather
-    than returning ``None``. Returning ``None`` would fall through to the individual-TIFF reader,
-    whose complaint ("no {region}_{fov}_{z}_{channel}.tiff") names the wrong format entirely and
-    sends the reader hunting for missing TIFFs in a Zarr acquisition.
+    An unrecognisable ``zarr/`` folder raises rather than falling through to the TIFF readers.
     """
     if _is_zarr_group(path):
         return path
@@ -858,10 +465,7 @@ class SquidReader:
         self._time_folders: Optional[list[Path]] = None
         self._index: Optional[dict] = None
         self._meta: Optional[dict] = None
-        #: ``(folder, entries)`` from a directory listing the CALLER already paid for, or None.
-        #: ``open_reader`` scans the first timepoint folder to decide which reader to build, so
-        #: without this the index build below re-lists the same directory. Consumed once, then
-        #: dropped: anything that rebuilds the index after that wants what is on disk now.
+        #: ``(folder, entries)`` from a listing the caller already paid for; consumed once.
         self._scanned = _scanned
 
     # -- timepoints -------------------------------------------------------
@@ -883,8 +487,6 @@ class SquidReader:
             if scanned_folder == folder:
                 entries = scanned_entries
         if entries is None:
-            # UNSORTED. Nothing below or downstream reads the order — see _classify_tiff_folder,
-            # which states the whole argument and names the two places that used to.
             entries = folder.iterdir()
         index: dict = {}
         skipped: list = []
@@ -896,12 +498,7 @@ class SquidReader:
                 key = (m["region"], int(m["fov"]), int(m["z"]), m["channel"])
                 index[key] = f.suffix
                 continue
-            # IMA-254. This branch used to be a bare ``continue`` with a comment naming the very
-            # format it was discarding. On a MULTI_PAGE_TIFF acquisition EVERY file took it, the
-            # index came out empty, and the acquisition reported as unreadable-because-empty
-            # rather than as the wrong reader for a known Squid format. The code knew and said
-            # nothing. A stem that matches a known Squid pattern now raises here; anything else
-            # is remembered so the empty-index error can name it.
+            # A stem matching a known Squid pattern raises; anything else is remembered for the error.
             if _STACK_STEM_RE.match(f.stem):
                 raise ValueError(
                     f"{f.name} is Squid's MULTI_PAGE_TIFF layout "
@@ -937,7 +534,6 @@ class SquidReader:
             fovs.setdefault(region, set()).add(fov)
             channels.add(channel)
             z_levels.add(z)
-        # Deterministic, natural-sorted order (filesystem iteration order is not stable).
         regions = sorted(fovs, key=_plate_key)   # true plate row-major (A,B,...,Z,AA,...)
 
         z_sorted = sorted(z_levels)
@@ -957,11 +553,7 @@ class SquidReader:
                 "using the folder-derived value."
             )
 
-        # frame shape + dtype come from a real frame — they vary with binning / pixel format.
-        # ``min``, not ``next(iter(index))``: the index is filled in filesystem order now, so the
-        # first key is whatever the directory happened to hand back, and an acquisition would
-        # report its shape from a different plane on different machines. ``min`` over the 1536
-        # plate's 24 576 key tuples measured 0.40 ms, which is the price of a reproducible answer.
+        # Frame shape/dtype come from a real frame; ``min`` keeps the sampled plane reproducible.
         sample_key = min(index)
         sample_path = self._resolve_file(time_folders[0], sample_key, index[sample_key])
         sample = _validate_plane(tifffile.imread(sample_path), sample_path)
@@ -970,16 +562,12 @@ class SquidReader:
         self._meta = Acquisition(**{
             "regions": regions,
             "fovs_per_region": fovs_per_region,
-            # {(region, fov): (x_um, y_um)} — MICROMETRES, per the package units invariant.
-            # {} when coordinates.csv is absent OR unusable (never raises out of metadata).
-            # Present on BOTH reader classes so consumers never have to ask which reader they
-            # hold (IMA-187).
             "fov_positions_um": _fov_positions_um_or_empty(self._path, fovs_per_region),
             "channels": resolve_channels(sorted(channels), load_channel_yaml(self._path)),
             "n_z": n_z,
             "z_levels": z_sorted,
             "dz_um": acq["dz_um"],
-            "pixel_size_um": acq["pixel_size_um"],  # authoritative (acquisition.yaml), not recomputed
+            "pixel_size_um": acq["pixel_size_um"],
             "wellplate_format": acq["wellplate_format"],
             "frame_shape": tuple(sample.shape),
             "dtype": sample.dtype,
@@ -1006,9 +594,7 @@ class SquidReader:
         return _validate_plane(tifffile.imread(path), path)
 
     def plane_path(self, region, fov, channel, z, t=0) -> Path:
-        """Path to one raw plane's TIFF on disk (no decode). The HCS viewer points the embedded
-        ndviewer at these raw files directly (register_image), so the detail view is the true
-        z-stack with zero extra bytes copied — read-only, never written."""
+        """Path to one raw plane's TIFF on disk (no decode)."""
         index = self._build_index()
         time_folders = self._discover_time_folders()
         key = (str(region), int(fov), int(z), str(channel))
@@ -1020,8 +606,7 @@ class SquidReader:
         return self._resolve_file(time_folders[t], key, index[key])
 
     def plane_ref(self, region, fov, channel, z, t=0) -> tuple:
-        """(filepath, page_index) for one plane — the viewer registers this into ndviewer. Individual
-        TIFFs hold one plane per file, so the page index is always 0."""
+        """(filepath, page_index) for one plane; individual TIFFs are one plane per file, so page 0."""
         return str(self.plane_path(region, fov, channel, z, t)), 0
 
     # -- helpers ----------------------------------------------------------
@@ -1042,12 +627,7 @@ class SquidReader:
 def _page_json(page, path: Path, page_index: int) -> dict:
     """The per-page metadata dict Squid embeds in ImageDescription, or a loud failure.
 
-    ``SaveImageJob.save_image`` calls ``TiffWriter.write(metadata=..., description=json.dumps(...),
-    extratags=[(285, 's', 0, channel, False)])``. tifffile honours BOTH arguments, so each page
-    carries TWO ImageDescription (270) tags: Squid's own JSON first, then tifffile's "shaped" JSON
-    (the same keys plus ``shape``). Either answers the question, so every 270 tag is tried and the
-    first one that parses as an object carrying ``z_level`` wins — that tolerates a tifffile
-    version that emits only one of them, in either order.
+    A page can carry two 270 tags; the first that parses as JSON with ``z_level`` wins.
     """
     for tag in page.tags:
         if tag.code != _TAG_IMAGE_DESCRIPTION:
@@ -1068,14 +648,7 @@ def _page_json(page, path: Path, page_index: int) -> dict:
 
 
 def _page_channel(page, payload: dict, path: Path, page_index: int) -> str:
-    """The page's channel name: PageName (tag 285) first, the JSON ``channel`` key as fallback.
-
-    Tag 285 is the primary source because it is the one field a generic TIFF viewer also shows,
-    so it is what an operator sees; the JSON copy exists for readers that drop unknown tags. When
-    both are present and DISAGREE the file is refused rather than resolved by precedence — two
-    different channel names for one plane means the writer or a post-processing step is broken,
-    and picking either one mislabels pixels in a way nothing downstream can detect.
-    """
+    """The page's channel name: PageName (tag 285) first, the JSON ``channel`` key as fallback; disagreement raises."""
     tag = page.tags.get(_TAG_PAGE_NAME)
     from_tag = str(tag.value).strip() if tag is not None and tag.value else ""
     from_json = str(payload.get("channel") or "").strip()
@@ -1096,36 +669,9 @@ def _page_channel(page, payload: dict, path: Path, page_index: int) -> str:
 
 
 class SquidMultiPageTiffReader:
-    """Lazy reader over Squid's MULTI_PAGE_TIFF acquisitions (IMA-254).
+    """Lazy reader over Squid's MULTI_PAGE_TIFF acquisitions (one stack file per field).
 
-    Layout, from ``control/core/job_processing.py`` ``SaveImageJob.save_image`` on the
-    ``_def.FILE_SAVING_OPTION == FileSavingOption.MULTI_PAGE_TIFF`` branch::
-
-        <acq>/{t}/{region}_{fov:0{FILE_ID_PADDING}}_stack.tiff
-
-    ONE file per (timepoint, region, FOV), APPENDED to one page at a time — every (z, channel) of
-    that field is a separate IFD page in whatever order the acquisition happened to run. The file
-    carries no series axes (tifffile reports four independent ``YX`` series for four pages), so
-    page ORDER is not a usable index.
-
-    The index therefore comes from each page's own metadata, never from its position:
-
-    * ``PageName`` (tag 285) -> channel name;
-    * ``ImageDescription`` (tag 270) -> JSON with ``z_level``, ``channel``, ``channel_index``,
-      ``region_id``, ``fov``, ``x_mm``, ``y_mm``, ``z_mm``, ``time`` and, when the piezo is in
-      use, ``z_piezo (um)``.
-
-    That is also why an interrupted or re-ordered acquisition still reads correctly, and why a
-    page missing its metadata is refused instead of being slotted in by position.
-
-    Presents the SAME interface as :class:`SquidReader`, :class:`SquidOMEReader` and
-    :class:`SquidZarrReader` — the identical ``metadata`` key set (micrometres, ``_um``-suffixed)
-    plus ``read``/``plane_ref``. The interface is the seam; no consumer branches on reader type.
-
-    Positions: this writer records the stage position INLINE, per page, in MILLIMETRES
-    (``x_mm``/``y_mm``). The mm -> um conversion happens here, at the producer, into
-    ``fov_positions_um``, exactly as ``coordinates.csv`` is converted in
-    :func:`load_fov_positions_um`. There is no second scale factor anywhere downstream.
+    Page order is not a usable index; the (z, channel) grid is read from each page's own metadata.
     """
 
     def __init__(self, path) -> None:
@@ -1134,8 +680,6 @@ class SquidMultiPageTiffReader:
         self._indexes: dict[int, dict] = {}     # t -> {(region, fov, z, channel): (Path, page)}
         self._positions_mm: dict = {}           # {(region, fov): (x_mm, y_mm)} from t=0
         self._meta: Optional[dict] = None
-        #: Cached handles AND their per-file locks. `read()`/`page()` are the only accessors;
-        #: see `_TiffHandles` for the measured thread-safety fault that made it a class.
         self._handles = _TiffHandles()
 
     # -- discovery ---------------------------------------------------------
@@ -1155,7 +699,6 @@ class SquidMultiPageTiffReader:
                   if f.suffix.lower() in _TIFF_SUFFIXES and _STACK_STEM_RE.match(f.stem)]
         for f in stacks:
             m = _STACK_STEM_RE.match(f.stem)
-            # FILE_ID_PADDING is a deployment setting; int() reads whatever width was written.
             region, fov = m["region"], int(m["fov"])
             with self._handles.read(f) as tif:
                 pages = list(enumerate(tif.pages))
@@ -1182,21 +725,14 @@ class SquidMultiPageTiffReader:
         return index
 
     def _record_position(self, region: str, fov: int, payload: dict) -> None:
-        """First page wins for a field's stage position — deliberately, and without a cross-check.
-
-        ``multi_point_worker`` re-reads ``stage.get_pos()`` for EVERY capture, so the x/y recorded
-        on a field's z=1 page differs from its z=0 page by the stage's own repeatability. Treating
-        that jitter as a conflict (the way ``coordinates.csv`` treats two genuinely different
-        positions filed under one fov id) would refuse every real z-stack. The first page of a
-        field is the position at which that field was first imaged, which is the tile origin.
-        """
+        """First page wins for a field's stage position; per-z stage jitter is not a conflict."""
         key = (str(region), int(fov))
         if key in self._positions_mm:
             return
         try:
             x_mm, y_mm = float(payload["x_mm"]), float(payload["y_mm"])
         except (KeyError, TypeError, ValueError):
-            return          # a page without a position simply contributes none
+            return
         self._positions_mm[key] = (x_mm, y_mm)
 
     # -- metadata ----------------------------------------------------------
@@ -1231,7 +767,6 @@ class SquidMultiPageTiffReader:
                 "using the folder-derived value."
             )
 
-        # frame shape + dtype come from a real decoded page — they vary with binning / pixel format.
         s_region, s_fov, s_z, s_channel = next(iter(index))
         sample = self.read(s_region, s_fov, s_channel, s_z)
         self._meta = Acquisition(**{
@@ -1251,12 +786,7 @@ class SquidMultiPageTiffReader:
         return self._meta
 
     def _positions_um(self, fovs_per_region: dict) -> dict:
-        """``{(region, fov): (x_um, y_um)}`` — MICROMETRES, converted HERE at the single producer.
-
-        The pages' inline ``x_mm``/``y_mm`` are authoritative for this writer: they are the stage
-        position of the capture itself, not a plan of where it was supposed to go. A sibling
-        ``coordinates.csv`` is the fallback only when no page carried a position at all.
-        """
+        """``{(region, fov): (x_um, y_um)}``: per-page inline positions first, coordinates.csv as fallback."""
         self._index_for(0)                       # populates _positions_mm
         if self._positions_mm:
             return {k: (x * _MM_TO_UM, y * _MM_TO_UM)
@@ -1285,13 +815,11 @@ class SquidMultiPageTiffReader:
         return self._handles.page(path, page_index)
 
     def plane_path(self, region, fov, channel, z, t=0) -> Path:
-        """The stack file holding this plane. Unlike the individual-TIFF reader's one-file-per-
-        plane, this path holds the whole field — see :meth:`plane_ref` for the addressable form."""
+        """The stack file holding this plane (the whole field's pages)."""
         return self._locate(region, fov, channel, z, t)[0]
 
     def plane_ref(self, region, fov, channel, z, t=0) -> tuple:
-        """``(filepath, page_index)`` — the viewer registers this straight into ndviewer, so the
-        raw stack displays from the .tiff on disk with zero bytes copied."""
+        """``(filepath, page_index)`` for one plane."""
         path, page_index = self._locate(region, fov, channel, z, t)
         return str(path), page_index
 
@@ -1302,14 +830,7 @@ _OME_SUFFIXES = (".ome.tiff", ".ome.tif", ".OME.TIFF", ".OME.TIF")
 
 
 class SquidOMEReader:
-    """Lazy reader over a Squid OME-TIFF acquisition.
-
-    Layout (from Squid's utils_ome_tiff_writer): ``<acq>/ome_tiff/{region}_{fov}.ome.tiff`` — ONE
-    file per well-FOV, each a 5-D ``TZCYX`` stack (dimension order written as TZCYX). Presents the
-    SAME interface as :class:`SquidReader` (``metadata`` + ``read`` + ``plane_ref``), so the engine,
-    CLI and viewer consume it unchanged. Reads one plane at a time (``TiffFile.pages[p]``) so memory
-    stays bounded; the TiffFile handles are cached per file.
-    """
+    """Lazy reader over a Squid OME-TIFF acquisition: one 5-D TZCYX stack per well-FOV."""
 
     def __init__(self, path) -> None:
         self._path = Path(path)
@@ -1317,8 +838,6 @@ class SquidOMEReader:
         self._files: Optional[dict] = None      # {(region, fov): Path}
         self._meta: Optional[dict] = None
         self._axes: Optional[str] = None        # non-spatial axes order, e.g. "TZC"
-        #: Cached handles AND their per-file locks. `read()`/`page()` are the only accessors;
-        #: see `_TiffHandles` for the measured thread-safety fault that made it a class.
         self._handles = _TiffHandles()
 
     def _discover(self) -> dict:
@@ -1359,7 +878,7 @@ class SquidOMEReader:
         yaml_map = load_channel_yaml(self._path)
         names = list(yaml_map.keys())
         if len(names) != n_c:
-            # yaml disagrees with the file — fall back to the OME channel names, else generic labels.
+            # yaml disagrees with the file: fall back to OME channel names, else generic labels.
             with self._handles.read(next(iter(files.values()))) as _tif:
                 ome_names = _ome_channel_names(_tif)
             names = [_normalize_local(n) for n in ome_names] if len(ome_names) == n_c \
@@ -1373,11 +892,6 @@ class SquidOMEReader:
         self._meta = Acquisition(**{
             "regions": regions,
             "fovs_per_region": fovs_per_region,
-            # Same key, same meaning as SquidReader — the shared-interface promise in this
-            # class's docstring. An OME acquisition with a sibling coordinates.csv gets real
-            # placement; without one this is {} and the mosaic degrades to a single field.
-            # (Positions inside the OME-XML are not read: different parsing path, no dataset
-            # on hand to validate it against. See .spec NOT-in-scope.)
             "fov_positions_um": _fov_positions_um_or_empty(self._path, fovs_per_region),
             "channels": channels,
             "n_z": n_z,
@@ -1413,8 +927,7 @@ class SquidOMEReader:
         return self._handles.page(files[key], p)
 
     def plane_ref(self, region, fov, channel, z, t=0) -> tuple:
-        """(filepath, page_index) for one plane — the viewer registers this (with the page) into
-        ndviewer, so the raw z-stack displays straight from the .ome.tiff, zero bytes copied."""
+        """(filepath, page_index) for one plane."""
         p = self._page_index(int(t), int(z), self._channel_index(channel))
         return str(self._discover()[(str(region), int(fov))]), p
 
@@ -1433,76 +946,14 @@ def _ome_channel_names(tif) -> list:
         return []
 
 
-# ==================================================================================================
-# IMA-229: Zarr input (OME-NGFF)
-# ==================================================================================================
-#
-# THE CONTRACT NOW LIVES IN ``docs/plate-contract.md``, split into a STABLE half (depend on it; a
-# major version bump refuses to open) and an OPTIONAL half where every entry names its fallback.
-# The machine-checkable part is ``squidxplorer/contract/``: the stamped-and-compared
-# ``PLATE_CONTRACT_VERSION``, the single ``field_path`` seam, and a validator you can run on a
-# plate you were handed (``python -m squidxplorer.contract.validate <plate.ome.zarr>``). The block
-# below is kept because it cites the spec sources; the document is the contract.
-#
-# PRIOR ART, and what was adopted. The layout below is not invented; it is read straight from the
-# OME-NGFF specification sources (github.com/ome/ngff-spec, branches 0.4 and 0.5 — index.bs, the
-# JSON schemas and the published examples) and cross-checked against what SquidXplorer's OWN writer
-# (``squidxplorer/_output.py``, already validated against the official ``ome-zarr-models`` pydantic
-# schema in ``squidxplorer/contract/validate.py``) emits. Anything a real NGFF reader (ome-zarr-py,
-# ngio, napari) cannot open would be a bug here.
-#
-#   HCS plate      ``plate.ome.zarr/{row}/{col}/{fov}/{level}``
-#     plate group   ``plate`` -> ``rows``/``columns``/``wells``; each well entry has ``path``
-#                   ("A/1" — the row NAME then the column NAME, regex ^[A-Za-z0-9]+/[A-Za-z0-9]+$),
-#                   ``rowIndex``, ``columnIndex``. The region id is the concatenation ``row+col``
-#                   ("B" + "2" = "B2"), the exact inverse of ``_output.parse_well_id``.
-#     well group    ``well`` -> ``images``: a list of ``{"path": ...}``. The spec allows ANY
-#                   alphanumeric field path, so the listed paths are used verbatim rather than
-#                   assuming 0..n-1 — Squid writes the raw (possibly non-contiguous) FOV id there.
-#     image group   ``multiscales`` (+ optional ``omero``) — see below.
-#
-#   non-HCS        ``zarr/{region_id}/{level}`` — a bare image group per region, no plate node.
-#                  Each region gets the single FOV 0; there is no well/field level to read.
-#
-#   multiscales    ``axes`` (2-5 entries, ordered time, then channel, then space z,y,x) and
-#                  ``datasets`` (ordered highest -> lowest resolution; each has ``path`` and
-#                  ``coordinateTransformations`` = exactly one ``scale``, optionally followed by
-#                  one ``translation``). Level 0 (``datasets[0]``) is the full-resolution array and
-#                  is the only one this reader serves — a MIP must never be computed from a
-#                  downsampled level. Array SHAPES come from the arrays, never from a scale factor:
-#                  the writer's 2x2 block-mean crops odd axes, so level shapes are floor(prev/2).
-#
-#   VERSIONS       v0.4 is zarr v2 — group metadata is a ``.zattrs`` file with ``plate`` / ``well``
-#                  / ``multiscales`` at the TOP level. v0.5 is zarr v3 — a single ``zarr.json`` with
-#                  the same payload namespaced under ``attributes.ome``. Both are read; refusing
-#                  either would lock out half the real stores. ``_group_attrs`` is the one place
-#                  that difference lives.
-#
-#   POSITIONS      The dataset-level ``translation`` (applied AFTER ``scale``, so it is already in
-#                  physical units) is the ONLY position mechanism the spec defines — there is no
-#                  well-level or plate-level stage metadata in either version. SquidXplorer's writer
-#                  DOES emit it (``_output.field_origin_um`` -> ``_output._multiscales``, IMA-217),
-#                  so a round-tripped store places its own FOVs; a sibling ``coordinates.csv`` is
-#                  the documented fallback for a store that carries none, and either way the
-#                  result lands in ``fov_positions_um``. [From IMA-217 until 2026-07-29 this block
-#                  asserted the opposite, i.e. it called the LIVE primary placement mechanism dead
-#                  inside the reader's own contract prose. That is the defect that pulled the plate
-#                  contract into v1 scope; see docs/plate-contract.md.]
-#
-#   UNITS          ``axes[].unit`` is a UDUNITS-2 string and is only a SHOULD, so it can be absent.
-#                  Every physical value taken out of a store (pixel size, dz, translation) is
-#                  converted to MICROMETRES HERE, at this single producer, by the axis's own unit —
-#                  a store written in millimetres must not reach a ``_um`` key as millimetres. That
-#                  is the same failure that was fixed on main; there is exactly one conversion and
-#                  no consumer compensates for it.
+# OME-NGFF Zarr input. The layout contract lives in docs/plate-contract.md.
 
 _ZARR_V3_META = "zarr.json"
 _ZARR_V2_GROUP = ".zgroup"
 _ZARR_V2_ATTRS = ".zattrs"
 _ZARR_V2_ARRAY = ".zarray"
 
-# UDUNITS-2 length units -> micrometres. Absent/unknown units are treated as micrometres (the
-# de-facto microscopy default) rather than guessed at, and never silently rescaled.
+# UDUNITS-2 length units -> micrometres; absent/unknown units are treated as micrometres.
 _UNIT_TO_UM = {
     "angstrom": 1e-4, "nanometer": 1e-3, "micrometer": 1.0, "micron": 1.0,
     "millimeter": 1e3, "centimeter": 1e4, "meter": 1e6,
@@ -1526,13 +977,7 @@ def _is_zarr_group(path: Path) -> bool:
 
 
 def _group_attrs(path: Path) -> dict:
-    """The OME metadata payload of a zarr group, normalising the v0.4 / v0.5 difference.
-
-    v0.5 (zarr v3) nests it as ``zarr.json -> attributes -> ome``; v0.4 (zarr v2) puts the same
-    keys at the top level of ``.zattrs``. Callers then read ``plate`` / ``well`` / ``multiscales``
-    without caring which version wrote the store. A v3 group whose attributes carry no ``ome``
-    namespace (e.g. a bioformats2raw-style store) falls back to the raw attributes.
-    """
+    """The OME metadata payload of a zarr group, normalising the v0.4 / v0.5 difference."""
     path = Path(path)
     v2 = path / _ZARR_V2_ATTRS
     if v2.exists():
@@ -1546,12 +991,7 @@ def _group_attrs(path: Path) -> dict:
 
 
 def _open_zarr_array(path: Path):
-    """Open one zarr array (v2 or v3) as a lazy tensorstore handle: no data is read here.
-
-    Goes through the process-wide pool (``_tsctx``) rather than opening directly, so every reader
-    binds to ONE bounded ``cache_pool`` and the number of live handles is capped. This used to
-    fill ``SquidZarrReader._arrays``, an unbounded per-reader dict with no eviction.
-    """
+    """Open one zarr array (v2 or v3) as a lazy tensorstore handle via the process-wide pool."""
     from squidxplorer._tsctx import HANDLES
 
     path = Path(path)
@@ -1574,10 +1014,7 @@ def _unit_to_um(unit) -> float:
 
 
 class _Multiscale:
-    """The parsed ``multiscales[0]`` of one image group: axis order, level-0 path, scale, offset.
-
-    Everything physical it exposes is already in MICROMETRES (see the UNITS note above).
-    """
+    """The parsed ``multiscales[0]`` of one image group; everything physical is in micrometres."""
 
     def __init__(self, group: Path) -> None:
         attrs = _group_attrs(group)
@@ -1591,8 +1028,7 @@ class _Multiscale:
         self.group = group
         self.omero = attrs.get("omero") or {}
         axes = ms.get("axes") or []
-        # Axis NAMES are the dimension order; the spec fixes the ORDER (t, c, then z, y, x) but
-        # not which axes are present, so a 2-D or 4-D store is legal and must still map cleanly.
+        # The spec fixes axis order but not which axes are present; 2-D/4-D stores are legal.
         self.axis_names = [str(a.get("name", "")).lower() for a in axes]
         self.units = {n: a.get("unit") for n, a in zip(self.axis_names, axes)}
 
@@ -1641,13 +1077,7 @@ class _Multiscale:
         return self.axis_names[:1] == ["fov"]
 
     def index(self, shape, t: int, c: int, z: int, fov: int = 0) -> tuple:
-        """The tensorstore index tuple selecting the single ``(y, x)`` plane at (t, c, z[, fov]).
-
-        ``fov`` matters only for the 6D layout; a 5D store has no ``fov`` axis and the value is
-        simply never consulted. It is threaded through rather than defaulted inside because the
-        alternative — letting the unknown axis fall to ``picks.get(n, 0)`` — served FOV 0's pixels
-        for every FOV of the region, which is a silently wrong image, not an error.
-        """
+        """The tensorstore index tuple selecting the single ``(y, x)`` plane at (t, c, z[, fov])."""
         picks = {"t": t, "c": c, "z": z, "fov": fov}
         return tuple(
             slice(None) if n in ("y", "x") else picks.get(n, 0)
@@ -1662,29 +1092,15 @@ class _Multiscale:
 class SquidZarrReader:
     """Lazy reader over an OME-NGFF Zarr acquisition — HCS plate or bare per-region image groups.
 
-    Presents the SAME interface as :class:`SquidReader` and :class:`SquidOMEReader`: the identical
-    ``metadata`` key set with the identical meanings (micrometres, ``_um``-suffixed), and
-    ``read(region, fov, channel, z, t)`` returning one 2-D native-dtype plane. The reader interface
-    IS the seam — the engine, CLI and viewer take a Zarr acquisition with no change and no
-    ``isinstance`` check. See the module-level IMA-229 block for the layout and its spec citations.
-
-    Only resolution level 0 is served. The pyramid exists for navigation; a projection computed
-    from a downsampled level would be silently wrong, so the coarse levels are never read.
+    Only resolution level 0 is served; a projection from a downsampled level would be silently wrong.
     """
 
     def __init__(self, path, acquisition_root=None) -> None:
         self._path = Path(path)
-        # Sidecars (acquisition.yaml, coordinates.csv) live beside the store, not inside it:
-        # ``<acq>/plate.ome.zarr`` and ``<acq>/zarr/`` are both children of the acquisition folder.
+        # Sidecars (acquisition.yaml, coordinates.csv) live beside the store, not inside it.
         self._root = Path(acquisition_root) if acquisition_root is not None else self._path.parent
         self._fields: Optional[dict] = None      # {(region, fov): Path to the image group}
-        # image group Path -> _Multiscale. Pure parsed METADATA, no file handle, so unlike the
-        # ``_arrays`` dict that used to sit beside it this holds nothing that needs closing. It is
-        # written without a lock from several threads and that is safe by shape rather than by
-        # luck: `_Multiscale(group)` is built complete into a local and published with one atomic
-        # store, so a racing reader either sees the old absence or the finished object, never a
-        # half-built one. Two threads racing one group parse the same JSON twice; nothing else.
-        self._ms: dict = {}
+        self._ms: dict = {}                      # image group Path -> _Multiscale (parsed metadata only)
         self._meta: Optional[dict] = None
         self._contract_version = None            # set by _discover: what the store declares, or None
 
@@ -1692,12 +1108,7 @@ class SquidZarrReader:
     def _discover(self) -> dict:
         if self._fields is not None:
             return self._fields
-        # The plate contract stamp is COMPARED here, before a single path is reconstructed from
-        # it. A major mismatch raises: a store whose stable layout moved would still discover
-        # wells and still render, just at the wrong positions or the wrong resolution, which is
-        # this reader's stated worst outcome. An unstamped store proceeds -- every plate written
-        # before the stamp landed, and every third-party NGFF store, has none. Policy and its
-        # reasoning live in squidxplorer/contract/version.py; this is its one reader-side call site.
+        # Contract stamp is compared before any path is reconstructed from it; unstamped stores proceed.
         self._contract_version = check_plate_contract(self._path)
         attrs = _group_attrs(self._path)
         fields = (
@@ -1719,8 +1130,7 @@ class SquidZarrReader:
             rel = str(well.get("path", "")).strip("/")
             if not rel:
                 continue
-            # The region id is the row NAME + column NAME, the inverse of _output.parse_well_id
-            # (which writes B2 -> B/2, never B/02, so concatenation restores the true well id).
+            # Region id is row name + column name, the inverse of _output.parse_well_id.
             region = "".join(rel.split("/"))
             well_dir = self._path / rel
             images = (_group_attrs(well_dir).get("well") or {}).get("images") or []
@@ -1728,27 +1138,15 @@ class SquidZarrReader:
                 name = str(image.get("path", ""))
                 if not name:
                     continue
-                # Field paths are arbitrary alphanumerics per spec; Squid writes the raw FOV id.
-                # A non-numeric path still needs an int FOV for the shared interface, so it falls
-                # back to its position in the list.
+                # Non-numeric field paths fall back to their list position for the int FOV.
                 fields[(region, int(name) if name.isdigit() else i)] = well_dir / name
         return fields
 
     def _discover_flat(self) -> dict:
         """Non-HCS: map every region folder under ``zarr/`` to its field image group(s).
 
-        Three shapes, all real (IMA-254 — the first was the only one IMA-229 handled, and it is
-        the one Squid does NOT write; it exists because SquidXplorer's own round-trip produces it):
-
-        ``zarr/{region}/``                     the region folder IS the image group; one FOV, id 0.
-        ``zarr/{region}/fov_{n}.ome.zarr``     ``build_per_fov_zarr_path`` — 5D TCZYX per FOV.
-        ``zarr/{region}/acquisition.zarr``     ``build_6d_zarr_path`` — ONE 6D FTCZYX array whose
-                                               leading axis is the FOV. Every FOV of the region
-                                               maps to the same node; ``_Multiscale.index`` picks
-                                               the FOV out of the leading axis at read time.
-
-        A region folder that holds none of these RAISES rather than being skipped: a region that
-        vanishes from ``regions`` looks exactly like a region that was never acquired.
+        Serves all three real shapes: the region folder as image group, per-FOV
+        ``fov_{n}.ome.zarr``, and the 6D ``acquisition.zarr``; anything else raises.
         """
         fields: dict = {}
         for child in sorted(self._path.iterdir()):
@@ -1771,18 +1169,13 @@ class SquidZarrReader:
                     "fov_{n}.ome.zarr (non-HCS default) or acquisition.zarr (non-HCS 6D). "
                     f"Contents: {[c.name for c in sorted(child.iterdir())][:8]}."
                 )
-        # A store that IS a single image group (handed in directly) is that one region.
+        # A store that is a single image group (handed in directly) is that one region.
         if not fields and "multiscales" in _group_attrs(self._path):
             fields[(self._path.name.replace(".ome.zarr", "").replace(".zarr", ""), 0)] = self._path
         return fields
 
     def _sixd_fov_count(self, sixd: Path) -> int:
-        """How many FOVs the 6D array's leading axis holds.
-
-        Read from the ARRAY's shape, never from ``region_fov_counts`` or any sidecar: the shape is
-        what was actually allocated, and a count taken from elsewhere that disagreed would index
-        past the end (loud) or leave real FOVs unreachable (silent).
-        """
+        """How many FOVs the 6D array's leading axis holds, read from the array's own shape."""
         ms = self._multiscale(sixd)
         if ms.axis_names[:1] != ["fov"]:
             raise ValueError(
@@ -1800,18 +1193,7 @@ class SquidZarrReader:
         return ms
 
     def _array(self, group: Path):
-        """The open store for a group. NOT memoised here — ``_tsctx.HANDLES`` is the cache.
-
-        There was a second dict, ``self._arrays``, in front of this call. It looked like a cheap
-        memo and it was a cap defeat: ``HandleCache`` evicts by dropping its last reference
-        (TensorStore has no explicit close), so a per-reader dict holding a strong reference to
-        every handle for the reader's whole life means ``DEFAULT_MAX_OPEN = 32`` never closes
-        anything. On a plate-scale read the bound was decorative. ``_open_zarr_array``'s own
-        docstring already claimed this dict was gone; now it is.
-
-        Nothing is lost by removing it: ``HANDLES.get`` is an ``OrderedDict`` lookup under a lock,
-        and unlike the dict it replaces it is safe to call from the several threads that do.
-        """
+        """The open store for a group; not memoised here — ``_tsctx.HANDLES`` is the cache."""
         return _open_zarr_array(self._multiscale(group).array_path)
 
     # -- metadata ----------------------------------------------------------
@@ -1857,27 +1239,12 @@ class SquidZarrReader:
         return self._meta
 
     def _positions_um(self, fields: dict, fovs_per_region: dict) -> dict:
-        """Stage positions in MICROMETRES: dataset ``translation`` first, coordinates.csv second.
-
-        The NGFF spec defines no other position mechanism. SquidXplorer's own writer DOES emit a
-        translation (IMA-217), so a store round-tripped through this package normally places its
-        own FOVs from the store alone. Three cases legitimately carry none: an acquisition with no
-        stage positions to record, a store written before IMA-217, and the 6D layout below. For
-        those the sibling ``coordinates.csv`` (both schemas, IMA-215) is the documented fallback.
-        When neither exists the value is ``{}``: present but empty, exactly as on the TIFF readers,
-        so consumers degrade to single-tile rendering instead of hitting a KeyError.
-
-        [Until 2026-07-29 this docstring asserted the opposite, which had been wrong since
-        IMA-217. See docs/plate-contract.md.]
-        """
+        """Stage positions in micrometres: dataset ``translation`` first, coordinates.csv second."""
         from_store = {}
         for key, group in fields.items():
             ms = self._multiscale(group)
             if ms.is_6d_fov:
-                # One 6D array holds every FOV of a region behind ONE translation, so that
-                # translation cannot be a per-FOV stage position. Copying it onto each FOV would
-                # stack the whole region on one tile — a plausible-looking, wrong mosaic. Fall
-                # through to coordinates.csv, which does record per-FOV positions.
+                # One 6D array has one translation for all FOVs, so it cannot place them; use the CSV.
                 continue
             position = ms.position_um
             if position is not None:
@@ -1887,13 +1254,7 @@ class SquidZarrReader:
         return _fov_positions_um_or_empty(self._root, fovs_per_region)
 
     def _channels(self, ms: _Multiscale, n_c: int) -> list:
-        """Channel list from ``omero.channels`` (labels + colours), the NGFF rendering metadata.
-
-        Falls back to a sibling ``acquisition_channels.yaml``, then to generic ``C{i}`` labels with
-        the shared wavelength/brightfield colour resolution. A store with neither is still opened —
-        a legal NGFF image need not carry ``omero`` — but the colours are then a best effort, so the
-        loss is announced rather than passed off as acquisition truth.
-        """
+        """Channel list from ``omero.channels``, falling back to acquisition_channels.yaml, then generic labels."""
         yaml_map = load_channel_yaml(self._root)
         omero_channels = (ms.omero.get("channels") or [])[:n_c]
         if len(omero_channels) == n_c and n_c:
@@ -1928,7 +1289,7 @@ class SquidZarrReader:
                     for n in names]
 
     def _wellplate_format(self, regions: list):
-        """Declared (sibling acquisition.yaml) beats inferred — the IMA-219 D1 precedence."""
+        """Declared (sibling acquisition.yaml) beats inferred."""
         try:
             declared = load_acquisition_metadata(self._root)["wellplate_format"]
         except (FileNotFoundError, ValueError):
@@ -1960,11 +1321,7 @@ class SquidZarrReader:
         return names.index(str(channel))
 
     def read(self, region, fov, channel, z, t=0):
-        """Return one plane as a 2D array in its native dtype.
-
-        Lazy in the sense that matters for a plate-scale store: tensorstore reads only the chunks
-        covering this ``(t, c, z)`` plane, never the whole ``(T, C, Z, Y, X)`` field.
-        """
+        """Return one plane as a 2D array in its native dtype; only the covering chunks are read."""
         group = self._field(region, fov)
         meta = self.metadata
         z, t = int(z), int(t)
@@ -1980,13 +1337,6 @@ class SquidZarrReader:
         return _validate_plane(plane, self._multiscale(group).array_path)
 
     def plane_ref(self, region, fov, channel, z, t=0) -> tuple:
-        """``(path, 0)`` for one plane, where *path* is the field's NGFF **image group**.
-
-        The TIFF readers return a file plus an IFD page because a TIFF plane is addressable that
-        way. A Zarr plane is not a file — it is a slice spread over chunk files — so the honest
-        referent is the image group itself: a valid NGFF node that ndviewer and every ome-zarr
-        reader can open directly, with no bytes copied. The page index is 0 to keep the tuple
-        shape identical for callers.
-        """
+        """``(path, 0)`` for one plane, where *path* is the field's NGFF image group."""
         self._channel_index(channel)            # validate like the TIFF readers do
         return str(self._field(region, fov)), 0

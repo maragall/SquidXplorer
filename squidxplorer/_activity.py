@@ -1,27 +1,6 @@
-"""What the application is DOING right now, in one place.
+"""One registry of the application's in-flight work; widgets subscribe.
 
-Spencer Schwarz (CSO): "responsiveness is important. And an indicator when its working."
-
-The complaint this answers is not that work is slow -- fusing a 5731x4793 mosaic takes as long
-as it takes. It is that a busy application and a wedged application LOOK IDENTICAL. Julio, on
-the mosaic load: "When I click on a different mosaic, say for my image, it takes some time to
-load", and separately, on a GUI that had silently died: feedback was given on a window that was
-no longer running. A user cannot tell "working" from "broken" unless the app says so.
-
-WHY A REGISTRY AND NOT A FLAG ON THE WIDGET
--------------------------------------------
-This codebase's dominant defect shape is "two representations of one truth, hand-synced" -- 4+
-confirmed instances, including the contrast that stopped following after one region change and
-the two operator registries that drifted in production. A ``self._busy = True`` set at five call
-sites and cleared at four is that defect with a new name, and the missed path leaves a spinner
-running forever over an idle application, which is worse than no indicator at all: it teaches
-the user that the indicator lies.
-
-So there is ONE owner. Work announces itself by starting an activity and ending it; every widget
-that shows activity SUBSCRIBES. Nothing else stores whether the app is busy.
-
-Pure Python -- no Qt -- so the rules are testable without a window, and so a failure here cannot
-be swallowed by Qt's habit of eating exceptions raised inside a slot.
+Pure Python, no Qt, so the rules are testable without a window.
 """
 
 from __future__ import annotations
@@ -30,13 +9,7 @@ from typing import Callable, Iterator, Optional
 
 
 class Activity:
-    """One unit of work the user should be told about.
-
-    ``total is None`` means the size is UNKNOWN, which is the honest state for a mosaic fuse
-    (the work is one lazy graph, not N countable steps). An unknown total drives an
-    INDETERMINATE indicator rather than a fake percentage -- a progress bar that invents a
-    denominator is a lie that gets believed.
-    """
+    """One unit of work the user should be told about; ``total is None`` means indeterminate."""
 
     __slots__ = ("key", "label", "done", "total")
 
@@ -51,7 +24,7 @@ class Activity:
         return self.total is not None and self.total > 0
 
     def sentence(self) -> str:
-        """What to show a human. Never a bare number: the label says what is working."""
+        """What to show a human."""
         if self.determinate:
             return f"{self.label} · {self.done}/{self.total}"
         return f"{self.label} …"
@@ -61,13 +34,7 @@ class Activity:
 
 
 class ActivityLog:
-    """THE registry of in-flight work. One instance per window.
-
-    Re-entrant by KEY: starting a key that is already running REPLACES it rather than stacking,
-    because the callers are event handlers that can legitimately fire twice (a region change
-    while the previous fuse is still draining). Ending a key that is not running is a no-op, not
-    an error -- teardown paths call ``end`` defensively and must not raise on the way out.
-    """
+    """The registry of in-flight work, one per window; re-entrant by key, ``end`` is a no-op."""
 
     def __init__(self) -> None:
         self._items: dict[str, Activity] = {}
@@ -88,11 +55,7 @@ class ActivityLog:
         return self._items.get(key)
 
     def current(self) -> Optional[Activity]:
-        """The activity an indicator should show when it can only show one.
-
-        A DETERMINATE one wins: it can show real progress, and "3/28 wells" tells the user more
-        than a spinner. Otherwise the first one started.
-        """
+        """The activity an indicator should show when it can only show one; determinate wins."""
         items = list(self._items.values())
         if not items:
             return None
@@ -117,13 +80,7 @@ class ActivityLog:
         return a
 
     def advance(self, key: str, done: int, total: Optional[int] = None) -> None:
-        """Report progress. Silently ignored for a key that is not running.
-
-        Ignored rather than raising because progress signals arrive asynchronously and can
-        outlive their activity by one delivery -- a worker's last ``progress`` can be queued
-        behind its own ``finished``. Raising there would turn a benign race into a crash inside
-        a Qt slot.
-        """
+        """Report progress; silently ignored for a key that is not running."""
         a = self._items.get(key)
         if a is None:
             return
@@ -137,15 +94,14 @@ class ActivityLog:
             self._fire()
 
     def clear(self) -> None:
-        """Everything stopped -- used on teardown, and as the one recovery from a leaked key."""
+        """Everything stopped; used on teardown."""
         if self._items:
             self._items.clear()
             self._fire()
 
     # -- subscribing -------------------------------------------------------------------
     def subscribe(self, callback: Callable[["ActivityLog"], None]) -> None:
-        """Be told whenever the picture changes. Called immediately with the current state, so a
-        widget built while work is already running does not start out blank and wrong."""
+        """Be told whenever the picture changes; called immediately with the current state."""
         self._subs.append(callback)
         callback(self)
 

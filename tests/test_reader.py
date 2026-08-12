@@ -1,4 +1,4 @@
-"""Tests for open_reader + SquidReader (AC1, AC4, AC5, AC6 + edge cases + decisions 4/5/6)."""
+"""Tests for open_reader and SquidReader."""
 
 import numpy as np
 import pytest
@@ -8,7 +8,6 @@ from squidxplorer import open_reader
 from tests.conftest import CH_IN_YAML, CH_NOT_IN_YAML, _write_timepoint
 
 
-# --- AC1 / AC5: metadata discovery ------------------------------------------
 def test_metadata_discovery(squid_dataset):
     root, _ = squid_dataset
     meta = open_reader(root).metadata
@@ -20,20 +19,19 @@ def test_metadata_discovery(squid_dataset):
     assert meta["dtype"] == np.uint16
     assert meta["n_t"] == 1
     assert meta["dz_um"] == 1.5
-    # 0.325 is the stored acquisition.yaml value, NOT the recomputed 3.76/20=0.188 -> proves
-    # we read the authoritative pixel size rather than recomputing it.
+    # 0.325 is the stored acquisition.yaml value, not the recomputed 3.76/20=0.188 — proves we
+    # read the authoritative pixel size rather than recomputing it.
     assert meta["pixel_size_um"] == 0.325
     assert meta["wellplate_format"] == "1536 well plate"
 
 
 def test_metadata_no_dead_attributes(squid_dataset):
-    # every metadata key must be present AND functionally derived (no dead/None scalars)
     root, _ = squid_dataset
     meta = open_reader(root).metadata
     assert set(meta) == {
         "regions",
         "fovs_per_region",
-        "fov_positions_um",   # IMA-187: {(region, fov): (x_um, y_um)}; {} when no coordinates.csv
+        "fov_positions_um",   # {(region, fov): (x_um, y_um)}; {} when no coordinates.csv
         "channels",
         "n_z",
         "z_levels",
@@ -46,15 +44,13 @@ def test_metadata_no_dead_attributes(squid_dataset):
     }
     for key, value in meta.items():
         assert value is not None, f"metadata[{key!r}] is None — dead attribute"
-    # `all(...) or meta["n_z"] >= 1` was here. `n_z` is a plane count and is >= 1 for any
-    # dataset that opened, so the right operand was a constant True and the left half was
-    # never reached: a metadata dict full of empty containers passed.
+    # Guards against a past tautology (`... or n_z >= 1`, always true) letting empty containers pass.
     empty = [k for k, v in meta.items() if not v]
     assert not empty, f"empty metadata container(s) on a real dataset: {empty}"
 
 
 def test_channel_count_independent_of_nz(squid_dataset):
-    # AC5: 2 channels, NOT 2 * Nz(=2)
+    # 2 channels, not 2 * Nz(=2)
     root, _ = squid_dataset
     meta = open_reader(root).metadata
     assert len(meta["channels"]) == 2
@@ -63,15 +59,14 @@ def test_channel_count_independent_of_nz(squid_dataset):
 
 
 def test_channel_colors_yaml_and_fallback(squid_dataset):
-    # AC2: 638 from YAML nested camera_settings; 561 absent from YAML -> wavelength fallback
+    # 638 comes from YAML's nested camera_settings; 561 is absent from YAML -> wavelength fallback
     root, _ = squid_dataset
     by_name = {c["name"]: c for c in open_reader(root).metadata["channels"]}
     assert by_name[CH_IN_YAML]["display_color"] == "#FF0000"
     assert by_name[CH_IN_YAML]["display_name"] == "Fluorescence 638 nm - Penta"
-    assert by_name[CH_NOT_IN_YAML]["display_color"] == "#FFCF00"  # 561 from CHANNEL_COLORS_MAP
+    assert by_name[CH_NOT_IN_YAML]["display_color"] == "#FFCF00"  # from CHANNEL_COLORS_MAP
 
 
-# --- AC4: exact-pixel read ---------------------------------------------------
 def test_read_exact_pixels(squid_dataset):
     root, arrays = squid_dataset
     reader = open_reader(root)
@@ -90,7 +85,6 @@ def test_read_matches_tifffile_directly(squid_dataset):
     np.testing.assert_array_equal(got, direct)
 
 
-# --- AC6: laziness -----------------------------------------------------------
 def test_read_is_lazy_one_file(squid_dataset, monkeypatch):
     root, _ = squid_dataset
     reader = open_reader(root)
@@ -108,17 +102,15 @@ def test_read_is_lazy_one_file(squid_dataset, monkeypatch):
     assert calls["n"] == 1
 
 
-# --- decision 5: non-2D refusal ---------------------------------------------
 def test_read_rejects_non_2d(squid_dataset):
     root, _ = squid_dataset
     rgb = np.zeros((4, 4, 3), dtype=np.uint8)
-    tifffile.imwrite(root / "0" / f"B2_0_0_{CH_IN_YAML}.tiff", rgb)  # overwrite with RGB
+    tifffile.imwrite(root / "0" / f"B2_0_0_{CH_IN_YAML}.tiff", rgb)
     reader = open_reader(root)
     with pytest.raises(ValueError, match="not a 2D grayscale plane|not supported"):
         reader.read("B2", 0, CH_IN_YAML, 0)
 
 
-# --- dtype contract: uint8/uint16 only (Squid's real grayscale set) ----------
 def test_read_rejects_uint32(squid_dataset):
     root, _ = squid_dataset
     tifffile.imwrite(
@@ -138,7 +130,6 @@ def test_read_accepts_uint8_native(squid_dataset):
     np.testing.assert_array_equal(got, arr)
 
 
-# --- decision 6: time dimension ---------------------------------------------
 def test_multi_timepoint(squid_dataset):
     root, arrays = squid_dataset
     t1_arrays: dict = {}
@@ -161,7 +152,6 @@ def test_read_t_out_of_range(squid_dataset):
         open_reader(root).read("B2", 0, CH_IN_YAML, 0, t=5)
 
 
-# --- validation + edges ------------------------------------------------------
 @pytest.mark.parametrize(
     "args",
     [
@@ -178,7 +168,6 @@ def test_read_invalid_args_raise(squid_dataset, args):
 
 
 def test_tif_suffix_fallback(squid_dataset):
-    # a plane stored as .tif (not .tiff) is still discovered and read
     root, _ = squid_dataset
     arr = np.full((4, 4), 7, dtype=np.uint16)
     tifffile.imwrite(root / "0" / f"B2_0_5_{CH_IN_YAML}.tif", arr)
@@ -198,7 +187,6 @@ def test_nz_mismatch_warns(squid_dataset):
         open_reader(root).metadata
 
 
-# --- format dispatch ---------------------------------------------------------
 def test_open_reader_uses_ome_reader_when_ome_files_present(tmp_path):
     # ome_tiff/ that CONTAINS .ome.tiff files -> the OME-TIFF reader (5-D TZCYX per well-FOV).
     import numpy as np
@@ -227,12 +215,12 @@ def test_open_reader_uses_ome_reader_when_ome_files_present(tmp_path):
 
 
 def test_open_reader_ignores_empty_ome_tiff_placeholder(tmp_path):
-    # Squid leaves an EMPTY ome_tiff/ beside an individual-TIFF acquisition; it must NOT block the
-    # individual-TIFF reader. With individual TIFFs present, open_reader should succeed.
+    # Squid leaves an empty ome_tiff/ beside an individual-TIFF acquisition; it must not block
+    # the individual-TIFF reader.
     import numpy as np
     import tifffile
 
-    (tmp_path / "ome_tiff").mkdir()                        # empty placeholder
+    (tmp_path / "ome_tiff").mkdir()
     (tmp_path / "0").mkdir()
     tifffile.imwrite(tmp_path / "0" / "A1_0_0_Fluorescence_488_nm_-_Penta.tiff",
                      np.zeros((4, 4), np.uint16))
@@ -254,10 +242,8 @@ def test_open_reader_rejects_non_directory(tmp_path):
 
 
 def test_empty_dir_raises(tmp_path):
-    # IMA-254: the refusal now comes from open_reader's dispatch rather than from SquidReader's
-    # index build, and it names EVERY writer it looked for instead of only the individual-TIFF
-    # one. An operator whose acquisition is multi-page or Zarr previously got "no
-    # {region}_{fov}_{z}_{channel}.tiff" — true, and a dead end.
+    # The refusal comes from open_reader's dispatch and names every writer it looked for, not
+    # just the individual-TIFF one.
     (tmp_path / "0").mkdir()
     with pytest.raises(ValueError, match="not a readable Squid acquisition"):
         open_reader(tmp_path).metadata
@@ -265,15 +251,8 @@ def test_empty_dir_raises(tmp_path):
 
 def test_opening_an_acquisition_lists_the_timepoint_folder_exactly_once(squid_dataset,
                                                                        monkeypatch):
-    """``open_reader`` + ``metadata`` scans the first timepoint folder ONE time, unsorted.
-
-    It used to scan it twice and sort both times: once in ``_classify_tiff_folder`` to pick the
-    reader, once in ``SquidReader._build_index`` to map the planes. On the 1536-well plate (24 576
-    files in one folder) that measured 551 ms for the pair, of which the two sorts were ~230 ms and
-    the duplicate listing the rest; one unsorted scan, handed from the dispatch to the reader, is
-    210 ms. Counting the LISTINGS rather than timing them is what makes this a regression test
-    instead of a benchmark: a reintroduced second scan fails it on any machine.
-    """
+    """Counts directory listings rather than timing them, so a reintroduced second scan fails
+    this on any machine, unlike a timing-based benchmark."""
     from pathlib import Path
 
     root, _arrays = squid_dataset
@@ -293,13 +272,8 @@ def test_opening_an_acquisition_lists_the_timepoint_folder_exactly_once(squid_da
 
 
 def test_the_index_seed_is_used_once_and_a_later_rebuild_re_reads_disk(squid_dataset):
-    """A reader built with a seeded listing drops the seed after using it.
-
-    The seed is a directory listing the CALLER already paid for, so it is only true for as long as
-    nobody has written to the folder. Keeping it would mean a reader that re-indexed after an
-    acquisition appended a plane still served the old listing, which is a stale-cache bug wearing
-    a performance fix's clothes. One use, then gone.
-    """
+    """A reader built with a seeded listing drops the seed after one use — keeping it would
+    serve a stale listing after the folder changes underneath it."""
     root, _arrays = squid_dataset
     reader = open_reader(root)
     assert reader._scanned is not None, "open_reader should hand its listing to the reader"
@@ -314,9 +288,7 @@ def test_the_index_seed_is_used_once_and_a_later_rebuild_re_reads_disk(squid_dat
         "a rebuild after the seed was consumed must re-read the directory"
 
 
-# --- integration: the real 10x laser-AF tissue acquisition (AC1 + AC4 on real data) ---------
-# Repointed from the deleted hongquan z-stack. This is the harder and more representative case:
-# a GLASS SLIDE with freeform regions, which the viewer refused outright until IMA-214.
+# A glass slide with freeform regions — the harder, more representative case than a regular grid.
 @pytest.mark.integration
 def test_real_dataset(real_dataset):
     reader = open_reader(real_dataset)

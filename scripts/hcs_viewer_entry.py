@@ -1,13 +1,8 @@
 """PyInstaller entry point for the frozen HCS viewer.
 
-Normal launch is exactly ``squidxplorer._viewer.main`` — the frozen bundle and the
-``squidxplorer-view`` console script run the same code.
-
-``--selftest DATASET`` (IMA-232) is the headless proof that the *bundle* works, not just
-the source tree: it builds the real ``PlateWindow`` against a real acquisition folder
-offscreen, then prints what was actually ingested and exits. A .app that starts and then
-dies on the first dataset is worth less than no .app, and "a window appeared" is not
-evidence against that; the region/FOV/channel counts printed here are.
+Normal launch is exactly squidxplorer._viewer.main. --selftest DATASET builds the real
+PlateWindow against a real acquisition offscreen and prints what was actually ingested, so the
+frozen bundle (not just the source tree) is proven to work.
 """
 
 import json
@@ -15,32 +10,23 @@ import os
 import sys
 
 if not getattr(sys, "frozen", False):
-    # Running from a checkout: put THIS tree's repo root ahead of site-packages. An
-    # editable install elsewhere on the machine can point `squidxplorer` at a different
-    # checkout (it did — at a worktree with no _viewer.py), and running a script file
-    # does not put the cwd on sys.path to save you. Frozen builds skip this: the bundle
-    # carries its own copy and the repo root does not exist on the demoer's machine.
+    # Editable installs elsewhere can point `squidxplorer` at a different checkout, and running
+    # a script file does not add the cwd to sys.path.
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def _selftest(dataset: str) -> int:
     """Launch offscreen, ingest *dataset*, print a JSON summary. Exit 0 iff it ingested."""
-    # Must precede any QApplication: there is no display in CI or over ssh, and a frozen
-    # windowed bundle would otherwise abort before reaching a single line of our code.
+    # Must precede any QApplication: no display in CI or over ssh.
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-    # squidxplorer FIRST, then qtpy. That order is the whole point: importing the package is what
-    # pins QT_API, and qtpy resolves the binding at ITS import, so a `from qtpy... import` above
-    # this line would settle on qtpy's own default (PyQt5) and the selftest would exercise a
-    # different binding than the app ships. Naming PyQt5 here directly, as this did until
-    # 2026-07-31, was the same bug with the answer hardcoded.
+    # squidxplorer first, then qtpy: importing the package pins QT_API, and qtpy resolves the
+    # binding at its own import.
     from squidxplorer._viewer import PlateWindow
 
     from qtpy.QtWidgets import QApplication
 
     app = QApplication.instance() or QApplication([])
-    # The viewer's own test escape hatch (_viewer.main checks it) — set on the app rather
-    # than faked here, so the check exercises the shipped code path.
     app.setProperty("_squidxplorer_test", True)
 
     win = PlateWindow(dataset)
@@ -76,21 +62,12 @@ def _selftest(dataset: str) -> int:
 
 
 def _compute_check(win) -> dict:
-    """MIP one REAL FOV, then run each plane operator on a crop of it.
+    """MIP one real FOV, then run each plane operator on a crop of it.
 
-    Ingest alone would not catch a frozen bundle that ships a broken scipy/scikit-image:
-    the reader path touches neither. The bundle's ``excludes`` list is aggressive (it
-    drops ~150 MB of skimage's optional imageio/OpenCV back ends), so the operators that
-    depend on what is LEFT have to be executed, not assumed. A crop, not a whole frame,
-    because rolling-ball on 2084x2084 takes minutes and this is a smoke check.
+    A crop rather than a whole frame: rolling-ball on 2084x2084 takes minutes.
     """
     import numpy as np
 
-    # `deconvolve_plane`, not `richardson_lucy_gaussian`. That name has not existed in the public
-    # surface since decon moved onto petakit's vectorial PSF (IMA-247), so this selftest raised
-    # ImportError on every run -- caught while flipping the Qt binding on 2026-07-31, unrelated to
-    # it. It failed inside `_compute_check`'s own try/except, which reports rather than crashes,
-    # so a frozen build reported "compute check failed" and exited 0 the whole time.
     from squidxplorer import deconvolve_plane, project_well, subtract_background
 
     out = {}

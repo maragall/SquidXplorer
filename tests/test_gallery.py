@@ -1,25 +1,8 @@
-"""Gallery View, for real: the scope, the crop, the contrast, the thread, and the window.
+"""Gallery View: the scope, the crop, the contrast, the thread, and the window.
 
-Replaces the half of `test_viewer.py::test_gallery_view_is_a_view_menu_command_and_not_an_operator`
-that pinned the stub's "not implemented" status line. That test still owns "it is a View-menu
-command and not an operator"; everything about what it BUILDS is here.
-
-The four things worth pinning, and why each one is a test rather than a comment:
-
-1. **The subset is real.** `stitch_plate(regions={region: [fov, ...]})` was already verified to
-   crop; the gallery reuses the same mapping and the same `_placement` helpers, and
-   `test_a_fov_subset_fuses_a_smaller_cell_than_the_whole_region` measures that it comes out
-   smaller. A gallery that quietly fused the whole well would still look like a picture.
-2. **Nothing decodes on the Qt thread.** `_contrast.py:157` costs a measured 493 ms per region
-   when a caller materialises pixels on the UI thread to pick contrast limits, and a gallery is N
-   of those. `test_the_gallery_never_reads_a_plane_on_the_qt_thread` instruments the reader with
-   the thread ident of every `read` and fails on the main one, so the rule cannot be broken by a
-   later refactor that "just" fuses one cell inline.
-3. **Cells arrive one at a time.** The owner asked for exactly that ("populate each channel as soon
-   as it is ready"), so it is behaviour, not an implementation detail.
-4. **Contrast is over the covered pixels.** gallery-view's own lesson. A region with holes windows
-   differently from the same region with its holes counted as black, and the difference is the
-   whole cell washing out.
+Complements test_viewer.py's "not implemented" pin; this covers what Gallery View actually
+builds: real FOV subsetting, contrast over covered pixels only, incremental cell delivery,
+and that nothing decodes on the Qt thread.
 """
 from __future__ import annotations
 
@@ -50,14 +33,8 @@ from squidxplorer.reader import open_reader                                   # 
 
 @pytest.fixture(scope="module")
 def qapp():
-    """This module's QApplication, by the same convention every other GUI test module here uses.
-
-    NOT pytest-qt's fixture of the same name: `tools/run_suite_chunked.py` runs with
-    `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` (it has to, or the PyQt5 tests silently skip on a PySide
-    that napari dragged in), so pytest-qt is not loaded and its `qapp` does not exist. A test that
-    only ever ran under a bare `pytest` invocation passes locally and errors at SETUP in the
-    suite — which is exactly how this module first went red.
-    """
+    """This module's QApplication, not pytest-qt's — the chunked suite disables plugin
+    autoload, so pytest-qt's fixture of the same name does not exist there."""
     app = QApplication.instance() or QApplication([])
     app.setProperty("_squidxplorer_test", True)   # main() won't call exec_/exit under test
     return app
@@ -67,12 +44,8 @@ def qapp():
 
 
 class _RecordingReader:
-    """A reader that forwards to a real one and records WHICH THREAD each read happened on.
-
-    Deliberately a wrapper over the real reader rather than a fake: a fake would let the gallery
-    pass this suite while failing on a real acquisition's geometry, which is the failure shape
-    this repo keeps finding.
-    """
+    """Wraps a real reader and records which thread each read happened on (not a fake reader,
+    so this still exercises real acquisition geometry)."""
 
     def __init__(self, inner) -> None:
         self._inner = inner
@@ -101,7 +74,8 @@ def _meta(root):
 
 
 def _drain(qapp, win, timeout_s: float = 60.0):
-    """Spin the event loop until the gallery's worker is finished, then flush its repaints."""
+    """Spin the event loop until the gallery's worker finishes, then flush its budgeted
+    repaints until settled."""
     import time
 
     deadline = time.time() + timeout_s
@@ -109,8 +83,6 @@ def _drain(qapp, win, timeout_s: float = 60.0):
         qapp.processEvents()
     for _ in range(10):
         qapp.processEvents()
-    # Repaints are BUDGETED (see GalleryWindow._flush_repaints), so one flush is not the end of
-    # them. Drain to a settled gallery, which is the state the assertions are about.
     guard = 0
     while win._dirty and guard < 10_000:
         win._flush_repaints()
@@ -140,11 +112,7 @@ def test_the_whole_acquisition_is_a_scope_and_so_is_a_selection(squid_dataset):
 
 
 def test_a_stale_selection_drops_the_wells_that_are_gone_rather_than_refusing(squid_dataset):
-    """A selection outlives a re-ingest. ``stitch_plate`` drops an unknown region; so does this.
-
-    Refusing the whole gallery over one stale well would be worse than showing the wells that are
-    still there — and silently RENAMING it would be worse still, which is why the drop is total.
-    """
+    """A selection outlives a re-ingest: ``stitch_plate`` drops an unknown region, so does this."""
     root, _arrays = squid_dataset
     _reader, meta = _meta(root)
     sel = G.GalleryScope.from_region_fovs(meta, [("B2", 0), ("Z99", 0), ("B3", 47)])
@@ -153,7 +121,7 @@ def test_a_stale_selection_drops_the_wells_that_are_gone_rather_than_refusing(sq
 
 
 def test_the_scope_is_in_plate_order_whatever_order_the_selection_arrives_in(squid_dataset):
-    """Rows read down the plate. A marquee reports cells in drag order, which is not plate order."""
+    """Rows read down the plate; a marquee reports cells in drag order, not plate order."""
     root, _arrays = squid_dataset
     _reader, meta = _meta(root)
     sel = G.GalleryScope.from_region_fovs(meta, [("B3", 0), ("B2", 1), ("B3", 1), ("B2", 0)])
@@ -170,11 +138,7 @@ def test_cells_are_queued_region_major_so_a_whole_row_lands_first(squid_dataset)
 
 
 def test_the_cell_cap_truncates_whole_regions_and_never_half_a_row():
-    """Half a region's channels is a row with holes, and a hole reads as a failed read.
-
-    The cap is not gallery-view's — it has none — and it is here because this product opens
-    1536-well plates, where a whole-acquisition gallery is 6144 cells.
-    """
+    """Half a region's channels is a row with holes, and a hole reads as a failed read."""
     scope = G.GalleryScope(
         regions=tuple(f"A{i}" for i in range(10)),
         fovs=tuple((f"A{i}", (0,)) for i in range(10)),
@@ -191,7 +155,7 @@ def test_the_cell_cap_truncates_whole_regions_and_never_half_a_row():
 
 
 def test_a_scope_names_itself_including_the_crop(squid_dataset):
-    """The status line has to distinguish a marquee'd corner from the whole well: both are pictures."""
+    """The status line has to distinguish a marquee'd corner from the whole well."""
     root, _arrays = squid_dataset
     _reader, meta = _meta(root)
     line = G.GalleryScope.from_region_fovs(meta, [("B2", 0)]).describe(meta)
@@ -210,12 +174,8 @@ def test_an_unknown_projection_is_refused_at_construction():
 
 
 def test_a_fov_subset_fuses_a_smaller_cell_than_the_whole_region(squid_dataset):
-    """THE subset requirement, measured. The FOV mapping is the same one ``stitch_plate`` takes.
-
-    The two FOVs of the fixture sit side by side (+0.5 mm in x, same row), so one of them is half
-    the mosaic. The crop comes for free from ``_placement.fov_offsets_px``, which normalises the
-    top-left FOV of whatever set it is handed to (0, 0) — there is no cropping code to get wrong.
-    """
+    """Same FOV mapping ``stitch_plate`` takes; the crop comes for free from
+    ``_placement.fov_offsets_px``, which normalises whatever FOV set it is handed."""
     root, _arrays = squid_dataset
     reader, meta = _meta(root)
     channel = meta["channels"][0]
@@ -232,8 +192,8 @@ def test_a_fov_subset_fuses_a_smaller_cell_than_the_whole_region(squid_dataset):
 
 
 def test_a_cell_reports_the_decimation_it_was_fused_at(squid_dataset):
-    """``step`` is how the cell relates to the acquisition. Without it a cell is a picture of
-    unknown scale, and the caption cannot say "1/23 of 11462x9587"."""
+    """``step`` is how the cell relates to the acquisition, so the caption can say "1/23 of
+    11462x9587"."""
     root, _arrays = squid_dataset
     reader, meta = _meta(root)
     ch = G.channel_field(meta["channels"][0], "name")
@@ -254,8 +214,8 @@ def test_a_geometry_that_is_not_derivable_returns_none_rather_than_a_guess(squid
 
 
 def test_a_cell_whose_every_fov_is_unreadable_raises_instead_of_going_black(squid_dataset):
-    """A black cell would report a read failure as empty tissue — the silent failure this
-    codebase has six confirmed instances of. One bad FOV is a hole; all of them is not a picture."""
+    """A black cell would read a failure as empty tissue; one bad FOV is a hole, all of them
+    is not a picture."""
     root, _arrays = squid_dataset
     reader, meta = _meta(root)
     with pytest.raises(ValueError, match="not one of the"):
@@ -264,13 +224,8 @@ def test_a_cell_whose_every_fov_is_unreadable_raises_instead_of_going_black(squi
 
 def test_a_ragged_z_is_cropped_to_the_common_shape_rather_than_losing_the_whole_cell(
         squid_dataset, monkeypatch):
-    """A MIP collapses the z axis away, so there is nothing left to misregister.
-
-    ``fuse_region_pyramid`` RAISES on a ragged z, and is right to: a pyramid level whose z planes
-    disagree misaligns the stack napari puts a slider on. Here z is being reduced, so the honest
-    thing is the opposite — crop to the common shape and keep the FOVs that are fine, rather than
-    lose the cell to one bad plane. Both rules are stated where they apply.
-    """
+    """``fuse_region_pyramid`` raises on a ragged z, correctly. Here z is being reduced, so
+    crop to the common shape instead of losing the whole cell to one bad plane."""
     root, _arrays = squid_dataset
     reader, meta = _meta(root)
     ch = G.channel_field(meta["channels"][0], "name")
@@ -287,8 +242,8 @@ def test_a_ragged_z_is_cropped_to_the_common_shape_rather_than_losing_the_whole_
 
 
 def test_one_unreadable_fov_leaves_a_counted_hole_in_its_own_place(squid_dataset, monkeypatch):
-    """gallery-view builds the canvas from EVERY coordinate for exactly this reason: dropping the
-    FOV instead would shift its neighbours and the region would be misregistered, not incomplete."""
+    """Dropping the failed FOV instead would shift its neighbours and misregister the region,
+    not merely leave it incomplete."""
     root, _arrays = squid_dataset
     reader, meta = _meta(root)
     ch = G.channel_field(meta["channels"][0], "name")
@@ -313,8 +268,7 @@ def test_one_unreadable_fov_leaves_a_counted_hole_in_its_own_place(squid_dataset
 
 
 def test_the_window_is_taken_over_the_covered_pixels_only():
-    """gallery-view's lesson, kept: black gaps between FOVs otherwise drag the low end to zero
-    and the whole region washes out."""
+    """Black gaps between FOVs otherwise drag the low end to zero and the whole region washes out."""
     rng = np.random.default_rng(0)
     signal = (rng.normal(9000, 400, size=(200, 200))).astype(np.uint16)
     image = np.zeros((200, 400), dtype=np.uint16)
@@ -331,16 +285,16 @@ def test_the_window_is_taken_over_the_covered_pixels_only():
 
 
 def test_a_flat_channel_gets_no_window_at_all_rather_than_a_fabricated_one():
-    """``auto_contrast`` refuses for a blank channel because a narrow window renders its noise at
-    full intensity, i.e. it reads as SIGNAL. The gallery must carry the refusal, not undo it."""
+    """``auto_contrast`` refuses for a blank channel — a narrow window would render its noise
+    at full intensity, i.e. as signal — and the gallery must carry the refusal, not undo it."""
     flat = np.full((64, 64), 700, dtype=np.uint16)
     assert G.cell_window(flat, np.ones_like(flat, dtype=bool)) is None
     assert G.cell_window(np.zeros((0, 0), dtype=np.uint16)) is None
 
 
 def test_shared_windows_is_the_union_and_omits_channels_that_refused():
-    """The default, and the divergence from gallery-view: per-cell contrast makes a dim well and a
-    bright well look the same, which is the one question a gallery exists to answer."""
+    """The default, diverging from gallery-view: per-cell contrast would make a dim well and
+    a bright well look the same."""
     def cell(region, channel, window):
         return G.GalleryCell(region, channel, np.zeros((2, 2), np.uint16),
                              np.ones((2, 2), bool), window, 1.0, (2, 2), 1)
@@ -359,8 +313,7 @@ def test_shared_windows_is_the_union_and_omits_channels_that_refused():
 
 def test_a_gallery_cell_keys_into_the_shared_plane_cache_and_a_second_fuse_reads_nothing(
         squid_dataset):
-    """Reuse, not a new cache: ``_budget.cache_budget()`` already decided how much this machine
-    can spend on preview pixels, and a gallery-private cache would spend it twice."""
+    """Reuse the shared plane cache (``_budget.cache_budget()``) rather than a gallery-private one."""
     from squidxplorer._mosaic_source import plane_cache, source_token
 
     root, _arrays = squid_dataset
@@ -384,13 +337,8 @@ def test_a_gallery_cell_keys_into_the_shared_plane_cache_and_a_second_fuse_reads
 
 
 def test_a_cell_with_a_hole_in_it_is_not_cached(squid_dataset, monkeypatch):
-    """A degraded read is a read to RETRY, not a picture to keep.
-
-    Two failures avoided by one rule. The transient that caused the hole (a disk hiccup, a file
-    mid-write) would otherwise become this session's permanent picture of that region. And the
-    cache stores pixels only, so a hit would rebuild the cell with ``unreadable=()`` — the hole
-    still on screen, the caption no longer saying so, which is worse than the hole.
-    """
+    """A degraded read is a read to retry, not a picture to keep: caching it would also drop
+    the hole silently on a later hit, since the cache stores pixels only."""
     from squidxplorer._mosaic_source import plane_cache, source_token
 
     root, _arrays = squid_dataset
@@ -431,13 +379,8 @@ def test_a_reader_with_no_identity_runs_uncached_rather_than_risking_another_acq
 
 
 def test_the_gallery_never_reads_a_plane_on_the_qt_thread(qapp, squid_dataset):
-    """THE performance contract, and the reason it is a test.
-
-    ``_contrast.py``'s ``sample_plane`` costs a measured 493 ms per region when a caller
-    materialises pixels on the UI thread to pick contrast limits. A gallery of N regions would pay
-    that N times, as N freezes. Instrumenting the reader is the only way to keep that true through
-    a later refactor that "just" fuses one cell inline to fix a repaint.
-    """
+    """``sample_plane`` costs a measured ~493 ms per region on the UI thread; a gallery of N
+    regions would pay that N times, so the reader is instrumented rather than trusted by inspection."""
     from squidxplorer._gallery_window import GalleryWindow
 
     root, _arrays = squid_dataset
@@ -459,14 +402,8 @@ def test_the_gallery_never_reads_a_plane_on_the_qt_thread(qapp, squid_dataset):
 
 
 def test_cells_are_emitted_one_at_a_time_as_they_are_fused(qapp, squid_dataset):
-    """The owner's words: "populate each channel as soon as it is ready".
-
-    Driven against ``GalleryWorker`` DIRECTLY rather than by connecting to a window's worker after
-    the fact. That is not stylistic: ``GalleryWindow.__init__`` starts its worker, so a test that
-    connects afterwards races the first cell and fails intermittently — observed once here on a
-    fast fixture before this was restructured. A flaky test is worse than no test, so the subject
-    is the object whose contract this is, connected BEFORE ``start()``.
-    """
+    """Driven against ``GalleryWorker`` directly, connected before ``start()`` — connecting
+    after ``GalleryWindow.__init__`` starts it would race the first cell."""
     from squidxplorer._gallery_window import GalleryWorker
 
     root, _arrays = squid_dataset
@@ -520,8 +457,8 @@ def test_every_cell_of_the_scope_ends_up_painted(qapp, squid_dataset):
 
 
 def test_the_grid_is_regions_down_and_channels_across(qapp, squid_dataset):
-    """gallery-view's table, not a reflowing grid: a channel has to stay in ONE column across
-    regions or the two wells the user is comparing are not side by side."""
+    """A channel must stay in ONE column across regions, or the two wells being compared are
+    not side by side."""
     from squidxplorer._gallery_window import GalleryWindow
 
     root, _arrays = squid_dataset
@@ -547,14 +484,8 @@ def test_the_grid_is_regions_down_and_channels_across(qapp, squid_dataset):
 
 
 def test_a_rescope_leaves_no_orphan_widgets_painting_over_the_new_grid(qapp, squid_dataset):
-    """Taking a widget out of a QGridLayout does not reparent it, and `deleteLater` only SCHEDULES.
-
-    Between those two facts a rescoped gallery drew the previous layout on top of the new one:
-    observed on the 10x tissue set as "manual0 / 28 FOV / manual1 / 28 FOV" superimposed in one row
-    label, plus a leftover dark cell over the top-left corner. It looked like a paint bug and was
-    a lifetime bug. `tests/test_no_orphan_windows.py` is the same class one container up: a widget
-    that is no longer wanted must stop being a CHILD, not merely stop being in a layout.
-    """
+    """Removing a widget from a QGridLayout does not reparent it, and ``deleteLater`` only
+    SCHEDULES — so a rescoped gallery drew the previous layout on top of the new one."""
     from squidxplorer._gallery_window import GalleryWindow
 
     root, _arrays = squid_dataset
@@ -582,14 +513,8 @@ def test_a_rescope_leaves_no_orphan_widgets_painting_over_the_new_grid(qapp, squ
 
 
 def test_a_column_header_never_overruns_its_column(qapp, squid_dataset):
-    """Observed on the 10x tissue set: four "Fluorescence_405_nm_Ex"-length headers ran together
-    into one illegible line and overprinted a row label.
-
-    Two fixes, both pinned here. The header is FIXED to the cell width so it cannot overrun
-    whatever it is called, and it is labelled by excitation wavelength — which is what actually
-    distinguishes the columns, where "Fluorescence_" is what they all share. The full name stays
-    reachable as the tooltip, so this narrows the label and not the datum.
-    """
+    """The header is fixed to the cell width and labelled by excitation wavelength rather than
+    the full channel name, which used to run several headers together into one line."""
     from squidxplorer._gallery_window import GalleryWindow
 
     root, _arrays = squid_dataset
@@ -620,14 +545,9 @@ def test_a_column_header_never_overruns_its_column(qapp, squid_dataset):
 
 def test_a_repaint_is_budgeted_so_a_big_gallery_stutters_no_more_than_a_small_one(
         qapp, squid_dataset):
-    """MEASURED on the 1536-well plate before this was budgeted: 159-190 ms of frozen Qt thread.
-
-    Not a decode — the reads were all on the worker, exactly as intended. It was the REPAINT: the
-    shared window widens as cells land, each widening invalidates every cell of that channel, and
-    64 cells x ~2-3 ms of composite + QImage + scale in one slot is the stall. The property that
-    has to hold is that a gallery of 4 regions and a gallery of 64 feel the same, so the work per
-    tick is bounded by a budget rather than by how many regions are in scope.
-    """
+    """Measured 159-190 ms of frozen Qt thread on a 1536-well plate: not decoding (that's on
+    the worker) but repainting, since each widened shared window invalidates every cell of
+    that channel. Work per tick is now bounded by a budget, not by scope size."""
     from squidxplorer import _gallery_window as GW
 
     root, _arrays = squid_dataset
@@ -662,14 +582,8 @@ def test_a_repaint_is_budgeted_so_a_big_gallery_stutters_no_more_than_a_small_on
 
 
 def test_compositing_at_display_resolution_never_starves_the_label(qapp, squid_dataset):
-    """The invariant that makes the 2.5x paint speed-up safe: >= 1 source pixel per drawn pixel.
-
-    `_paint` strides the cell down before windowing it, because windowing all 451x451 of a cell and
-    then throwing 90% away scaling it into a 160 px label cost a measured 5.5 ms median / 46 ms
-    worst per cell. That is only sound while the strided view is still at least as large as the
-    label — `//` rounds down, so it is, and this says so rather than trusting the arithmetic. If
-    the stride ever exceeded that, cells would go visibly soft and no other test would notice.
-    """
+    """The invariant behind the 2.5x paint speed-up: the strided view must stay >= 1 source
+    pixel per drawn pixel, or cells go visibly soft with nothing else to notice."""
     from squidxplorer._gallery_window import GalleryWindow
 
     root, _arrays = squid_dataset
@@ -697,7 +611,7 @@ def test_compositing_at_display_resolution_never_starves_the_label(qapp, squid_d
 
 
 def test_a_size_change_re_renders_from_ram_and_reads_nothing(qapp, squid_dataset):
-    """gallery-view's rule: display settings re-render the arrays already in RAM, never re-read."""
+    """Display settings re-render the arrays already in RAM, never re-read."""
     from squidxplorer._gallery_window import GalleryWindow
 
     root, _arrays = squid_dataset
@@ -719,8 +633,8 @@ def test_a_size_change_re_renders_from_ram_and_reads_nothing(qapp, squid_dataset
 
 
 def test_a_subset_gallery_shows_the_crop_on_the_row_label(qapp, squid_dataset):
-    """Both a marquee'd corner and the whole well render as a picture. Only the label can tell
-    them apart, so the label carries the FOV count in scope against the region's own."""
+    """Only the label can tell a marquee'd corner apart from the whole well, so it carries the
+    FOV count in scope against the region's own."""
     from squidxplorer._gallery_window import GalleryWindow
 
     root, _arrays = squid_dataset
@@ -737,8 +651,8 @@ def test_a_subset_gallery_shows_the_crop_on_the_row_label(qapp, squid_dataset):
 
 def test_more_than_one_timepoint_gets_a_control_and_changing_it_changes_the_pixels(
         qapp, multi_time_point_dataset):
-    """The 5-D case. The bar is HIDDEN at n_t == 1 — a spin box pinned to 0..0 implies an axis the
-    acquisition does not have — and shown, with real range, when there is a t axis to move on."""
+    """The bar is hidden at n_t == 1 (a spin pinned to 0..0 implies an axis that doesn't exist)
+    and shown with real range otherwise."""
     from squidxplorer._gallery_window import GalleryWindow
 
     root, _planes = multi_time_point_dataset
@@ -779,8 +693,7 @@ def test_a_single_timepoint_acquisition_shows_no_timepoint_control(qapp, squid_d
 
 
 def test_the_gallery_reports_its_own_first_paint(qapp, squid_dataset):
-    """CONTEXT.md's **first paint**: asking for the window to its first cell on screen, taken where
-    the drawing happens. Distinct from the total, and the total is what the status line adds."""
+    """First paint (CONTEXT.md's term) is distinct from the total; the status line adds the total."""
     from squidxplorer._gallery_window import GalleryWindow
 
     root, _arrays = squid_dataset
@@ -802,8 +715,8 @@ def test_the_gallery_reports_its_own_first_paint(qapp, squid_dataset):
 
 def test_the_view_menu_opens_a_gallery_on_the_selection_and_rescopes_on_a_second_click(
         qapp, squid_dataset):
-    """The subset plumbing that already existed, used rather than duplicated: the scope comes from
-    ``selected_region_fovs()``, which is what the marquee and shift-click already feed."""
+    """Scope comes from ``selected_region_fovs()``, the same plumbing the marquee and
+    shift-click already feed."""
     import squidxplorer._viewer as V
     from tests.conftest import shutdown_plate_window
 
@@ -835,8 +748,7 @@ def test_the_view_menu_opens_a_gallery_on_the_selection_and_rescopes_on_a_second
 
 
 def test_closing_the_plate_closes_the_gallery_and_joins_its_thread(qapp, squid_dataset):
-    """A gallery left open would draw into a closed plate's reader, and its QThread would be alive
-    at teardown — which is the one thing ``PlateWindow.closeEvent`` exists to prevent."""
+    """A gallery left open would draw into a closed plate's reader with a QThread still alive."""
     import squidxplorer._viewer as V
     from tests.conftest import shutdown_plate_window
 

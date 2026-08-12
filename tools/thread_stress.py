@@ -1,29 +1,8 @@
 #!/usr/bin/env python
-"""Hammer one acquisition from N threads and count the reads that come back WRONG.
+"""Hammer one acquisition from N threads and count the reads that come back wrong.
 
-Why this exists
----------------
-A serial run proves nothing about this class of bug. ``reader._TiffHandles`` was fixed on
-2026-08-06 because a cached ``tifffile.TiffFile`` is a FILE OBJECT and ``pages[p].asarray()``
-seeks: two threads decoding two pages of one file move one seek position under each other. The
-measurement that found it was **0 errors in 8 serial reads, 10 of 40 threaded** — the serial number
-is the whole point, because it is the number a normal test suite produces.
-
-So this is the instrument, kept as a tool rather than a test on purpose: it needs a real
-multi-gigabyte acquisition, and its failure counts are inherently probabilistic (an unlocked read
-that happens to be scheduled serially returns correct pixels). A test that asserts "0 of 40" would
-pass on a broken build whenever the machine was idle. What IS pinned deterministically lives in
-``tests/test_reader_threading.py``; this tool is for the numbers you quote in a report.
-
-What it checks
---------------
-Correctness, not just absence of exceptions. Every plane is read once serially to build a
-per-plane checksum, then read again from ``--threads`` threads; a read is counted WRONG if it
-raises OR if its bytes differ from the serial answer. Silent corruption is the failure mode that
-matters: a torn read that happens to decode without raising is a plausible-looking image.
-
-    python tools/thread_stress.py ~/Downloads/<acquisition> --threads 40 --reads 400
-    python tools/thread_stress.py <acq> --serial      # the control number, always report both
+    python tools/thread_stress.py <acquisition> --threads 40 --reads 400
+    python tools/thread_stress.py <acquisition> --serial
 """
 
 from __future__ import annotations
@@ -47,8 +26,7 @@ def _digest(arr) -> str:
 def _planes(reader, meta, limit: int) -> list:
     """``[(region, fov, channel, z, t), ...]`` — a deterministic sample of real planes."""
     out = []
-    # ``meta["channels"]`` may be `Channel` models (unhashable pydantic) or plain strings; the key
-    # `read()` accepts is the canonical NAME either way, and a plane key has to be hashable here.
+    # meta["channels"] may be Channel models or strings; the canonical NAME is the hashable key.
     channels = [getattr(c, "name", c) for c in (meta.get("channels") or [])]
     n_z = int(meta.get("n_z") or 1)
     n_t = int(meta.get("n_t") or 1)
@@ -62,18 +40,18 @@ def _planes(reader, meta, limit: int) -> list:
 
 
 def _truth(reader, planes: list) -> dict:
-    """Serial pass: the answer every threaded read must reproduce. Also the control number."""
+    """Serial pass: the answer every threaded read must reproduce."""
     truth, failed = {}, []
     for key in planes:
         try:
             truth[key] = _digest(reader.read(*key))
-        except Exception as exc:                      # a genuinely unreadable plane, not a race
+        except Exception as exc:                      # genuinely unreadable, not a race
             failed.append((key, f"{type(exc).__name__}: {exc}"))
     return truth, failed
 
 
 def _run(reader, truth: dict, keys: list, threads: int, reads: int) -> tuple:
-    """Return ``(wrong, raised, corrupt, elapsed)``. *corrupt* is the frightening one."""
+    """Return ``(raised, corrupt, elapsed)``."""
     raised: list = []
     corrupt: list = []
     lock = threading.Lock()

@@ -1,11 +1,9 @@
-"""IMA-233: the benchmark harness itself, on synthetic arrays and a synthetic reader.
+"""The benchmark harness itself, on synthetic arrays and a synthetic reader.
 
-These tests never touch a real acquisition — they lock the harness's CONTRACTS (the
-quality metrics move in the documented direction, the guards refuse before allocating,
-the read accounting is restored, the table renders every operator) so that a change to
-the harness fails here rather than silently producing a plausible-looking wrong table.
-The actual numbers come from ``tools/benchmark.py`` on real data; a benchmark asserted
-against synthetic data would be measuring the fixture.
+These lock the harness's contracts (quality metrics move in the documented direction, guards
+refuse before allocating, read accounting is restored, the table renders every operator) so a
+change to the harness fails here rather than silently producing a plausible-looking wrong table.
+The actual numbers come from tools/benchmark.py on real data.
 """
 
 from __future__ import annotations
@@ -16,8 +14,6 @@ import pytest
 from squidxplorer import _benchmark as bm
 
 
-# --- quality metrics -------------------------------------------------------------------
-
 def test_relative_gradient_energy_rises_with_structure():
     flat = np.full((64, 64), 100.0, dtype=np.float32)
     noisy = flat.copy()
@@ -27,8 +23,7 @@ def test_relative_gradient_energy_rises_with_structure():
 
 
 def test_relative_gradient_energy_is_scale_invariant():
-    """Normalising by the mean is the whole point: doubling the exposure must not read as
-    a sharper image."""
+    """Normalising by the mean is the point: doubling exposure must not read as sharper."""
     rng = np.random.default_rng(0)
     a = rng.random((64, 64)).astype(np.float32) + 1.0
     assert bm.relative_gradient_energy(a * 2) == pytest.approx(
@@ -57,15 +52,11 @@ def test_overlap_ncc_is_one_at_the_true_offset():
     pytest.importorskip("tilefusion.registration")
     rng = np.random.default_rng(1)
     full = rng.random((256, 400)).astype(np.float32)
-    # Two tiles 256x256 sharing a 112 px strip: tile_j sits 144 px to the right of tile_i.
+    # two 256x256 tiles sharing a 112 px strip: tile_j sits 144 px right of tile_i
     tile_i, tile_j = full[:, :256], full[:, 144:400]
     assert bm.overlap_ncc(tile_i, tile_j, 0, 144) == pytest.approx(1.0, abs=1e-6)
-    # A wrong placement scores near zero on white noise. This is the property that makes
-    # the metric usable as a seam score at all.
     assert abs(bm.overlap_ncc(tile_i, tile_j, 0, 100)) < 0.3
 
-
-# --- guards ----------------------------------------------------------------------------
 
 _META = {
     "frame_shape": (2084, 2084),
@@ -79,8 +70,7 @@ _META = {
 
 
 def test_expected_output_bytes_counts_z_for_a_plane_op():
-    """A plane-op keeps z at full depth; a z-reducer collapses it. The Nz factor between
-    them is exactly the term whose omission fills memory."""
+    """A plane-op keeps z at full depth; a z-reducer collapses it."""
     reducer = bm.expected_output_bytes(_META, kind="fov", regions=["A1"], n_fovs=1,
                                        consumes_z=True)
     plane_op = bm.expected_output_bytes(_META, kind="fov", regions=["A1"], n_fovs=1,
@@ -101,8 +91,6 @@ def test_guard_memory_refuses_an_impossible_run():
 
 
 def test_guard_memory_allows_a_small_run():
-    """``in (True, False)`` was here, which is the whole domain of a bool: the assertion could
-    only fail on a raise, so a guard that stopped checking anything at all was green."""
     pytest.importorskip("psutil")            # without it `checked` is legitimately False
     got = bm.guard_memory(1024, what="a small run")
     assert got["checked"] is True, got
@@ -110,8 +98,7 @@ def test_guard_memory_allows_a_small_run():
 
 
 def test_persist_estimate_is_overlap_aware_for_region_operators():
-    """A 27-FOV well fused into one mosaic must cost less than 27 separate frames — that
-    is the whole reason ``estimate_write_bytes`` grew ``region_operator``."""
+    """A 27-FOV well fused into one mosaic must cost less than 27 separate frames."""
     per_fov = bm.persist_estimate(_META | {"fov_positions_um": _positions()},
                                   kind="fov", regions=["A1"], n_fovs=None)
     region = bm.persist_estimate(_META | {"fov_positions_um": _positions()},
@@ -124,8 +111,6 @@ def _positions():
     step = 1410.45
     return {("A1", i): ((i % 6) * step, (i // 6) * step) for i in range(27)}
 
-
-# --- read accounting -------------------------------------------------------------------
 
 class _FakeReader:
     def __init__(self):
@@ -145,13 +130,10 @@ def test_read_recorder_accumulates_and_restores():
         reader.read("A1", 0, "c0", 1, 0)
     assert rec.calls == 2
     assert rec.nbytes == 2 * 4 * 4 * 2
-    # `>= 0.0` is true of any accumulated perf_counter delta, including one that never
-    # accumulated: a recorder whose timing was removed reported 0.0 and passed.
     assert rec.ms > 0.0, "the recorder timed nothing"
     assert rec.ms < 5000.0, rec.ms
     assert reader.calls == 2
-    # The wrapper must come off: a reader left permanently instrumented would make every
-    # later measurement include this run's bookkeeping.
+    # the wrapper must come off, or a reused reader stays permanently instrumented
     assert reader.read == original or reader.read.__func__ is original.__func__
 
 
@@ -162,8 +144,6 @@ def test_read_recorder_restores_after_an_exception():
             raise ValueError("boom")
     assert "read" not in vars(reader)
 
-
-# --- reporting -------------------------------------------------------------------------
 
 def _result(op="mip", **kw):
     r = bm.OperatorResult(operator=op, kind=kw.pop("kind", "fov"), dataset="/tmp/ds")
@@ -180,8 +160,7 @@ def test_as_row_and_derived_rates():
 
 
 def test_compute_ms_never_goes_negative():
-    """Read time is accumulated across threads, so at workers > 1 it can exceed the wall
-    clock. A negative 'compute' column would be nonsense, not a measurement."""
+    """Read time accumulates across threads, so at workers > 1 it can exceed the wall clock."""
     assert _result(wall_ms=100.0, read_ms=400.0).compute_ms == 0.0
 
 
@@ -195,8 +174,7 @@ def test_format_table_lists_every_operator_including_failures():
 
 
 def test_format_stages_reports_the_unattributed_residual():
-    """Stages never sum to the wall clock; the harness must SAY so rather than let the
-    reader misattribute the gap."""
+    """Stages never sum to the wall clock; the harness must say so."""
     r = _result("stitch", kind="region", wall_ms=1000.0,
                 stage_ms={"project": 400.0, "fuse": 500.0})
     out = bm.format_stages([r])
@@ -227,6 +205,4 @@ def test_default_operators_are_all_real_registry_entries():
 
 
 def test_every_default_operator_documents_its_quality_direction():
-    """A quality number whose desired direction the reader has to guess is not a
-    measurement."""
     assert set(bm.DEFAULT_OPERATORS) <= set(bm.QUALITY_NOTES)

@@ -1,13 +1,4 @@
-"""IMA-183 performance baselines — single-thread MIP speed + memory footprint.
-
-These are the numbers IMA-188's parallel/streaming engine must BEAT. Marked ``integration``
-(need `sim_1536wp` on disk); deselected in clean-room CI.
-
-Run:  pytest tests/test_performance.py -m integration -s   (‑s to see the printed baseline)
-
-IMA-188 can import ``benchmark_single_well`` to measure its per-worker cost against this
-single-threaded baseline (same metric, apples-to-apples).
-"""
+"""Performance baselines: single-thread MIP speed + memory footprint (integration-marked)."""
 
 from __future__ import annotations
 
@@ -20,28 +11,9 @@ import pytest
 
 from squidxplorer import open_reader, project_well
 
-# The `sim_1536wp` fixture lives in tests/conftest.py and is auto-discovered. The local copy that
-# used to sit here checked only that the directory EXISTS, which is not the same as it being
-# readable: `sim_1536wp/0` is 6144 SYMLINKS into a `synthetic_2x2_wellplate` that no longer exists
-# on this machine, so every link dangles, `open_reader` correctly refuses, and this test FAILED
-# rather than skipping. The shared fixture follows the links and tells absent from hollow.
-
 
 def benchmark_single_well(reader, region, fov) -> dict:
-    """Measure one well's projection: speed (full / read / compute) and memory footprint.
-
-    Returns a dict of:
-      full_ms      - project_well wall time (read + MIP)
-      read_ms      - tifffile decode + I/O for all planes
-      compute_ms   - np.maximum reduction with all planes already in RAM
-      read_MB      - bytes read for the well
-      peak_bytes   - tracemalloc peak during project_well (numpy domain is tracked)
-      result_bytes - size of the (T,C,1,Y,X) output (legitimate, not overhead)
-      plane_bytes  - one Y*X plane
-      full_stack_bytes - what a naive np.stack of all planes would cost (the anti-pattern)
-
-    Reused by IMA-188 to compare its per-worker cost to the IMA-183 single-thread baseline.
-    """
+    """Measure one well's projection: speed (full / read / compute) and memory footprint."""
     m = reader.metadata
     chans = [c["name"] for c in m["channels"]]
     z_levels = m["z_levels"]
@@ -49,7 +21,6 @@ def benchmark_single_well(reader, region, fov) -> dict:
     itemsize = np.dtype(m["dtype"]).itemsize
     plane_bytes = y * x * itemsize
 
-    # full project_well + peak memory (streaming must stay far below a full stack)
     tracemalloc.start()
     t0 = time.perf_counter()
     out = project_well(reader, region, fov)
@@ -90,7 +61,7 @@ def benchmark_single_well(reader, region, fov) -> dict:
 def test_single_well_speed_baseline(sim_1536wp, capsys):
     reader = open_reader(sim_1536wp)
     regions = reader.metadata["regions"]
-    project_well(reader, regions[100], 0)              # warm page cache / steady state
+    project_well(reader, regions[100], 0)  # warm page cache
     b = benchmark_single_well(reader, regions[0], 0)
     n = len(regions)
     with capsys.disabled():
@@ -103,24 +74,16 @@ def test_single_well_speed_baseline(sim_1536wp, capsys):
             f"[IMA-183 baseline] {n} wells single-thread ~= {b['full_ms']*n/1000:.0f}s "
             f"({b['full_ms']*n/60000:.1f} min, cache-warm) -> IMA-188 parallelizes this"
         )
-    # Loose regression ceiling only (timing is machine/cache dependent; the value is the
-    # printed baseline, not a tight bound). Fails only on catastrophic slowdown.
+    # loose ceiling only; timing is machine/cache dependent
     assert b["full_ms"] < 30_000
-    # the algorithm is memory-bandwidth bound: compute must be a meaningful, non-zero share
     assert b["compute_ms"] > 0
 
 
 @pytest.mark.filterwarnings("ignore:Recorded Nz")
 @pytest.mark.integration
 def test_single_well_memory_footprint(real_dataset):
-    # streaming MIP must NOT materialise the whole z-stack: peak is about the (T,C,1,Y,X) result
-    # plus a couple of in-flight planes, far below stacking all Nz*C planes.
-    #
-    # Runs on the real 10x tissue acquisition (Nz=10, 4 channels) rather than sim_1536wp, which
-    # is a symlink fixture with Nz=1: with a single plane there is no stack to avoid
-    # materialising, so the assertion below would pass or fail for reasons unrelated to
-    # streaming. A memory-streaming claim needs real z depth to mean anything.
+    # streaming MIP must not materialise the whole z-stack
     reader = open_reader(real_dataset)
     b = benchmark_single_well(reader, reader.metadata["regions"][0], 0)
     assert b["peak_bytes"] < b["result_bytes"] + 6 * b["plane_bytes"]
-    assert b["peak_bytes"] < b["full_stack_bytes"]      # never the naive all-planes footprint
+    assert b["peak_bytes"] < b["full_stack_bytes"]

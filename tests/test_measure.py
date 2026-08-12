@@ -1,8 +1,6 @@
-"""Per-operator wall clock and peak RSS — the measurement three consumers read.
+"""Per-operator wall clock and peak RSS measurement tests.
 
-These are RULE tests: they check the things that make a measurement worth trusting (peak and not
-final, an exception is recorded AND re-raised, a failed run is not counted as a fast one) rather
-than asserting particular numbers, which would be a flake on a shared machine.
+Rule tests: they check what makes a measurement trustworthy, not particular numbers.
 """
 
 from __future__ import annotations
@@ -38,7 +36,7 @@ def log():
 def test_a_run_is_recorded_with_its_wall_clock(log):
     with measure_run("mip", "2 regions", n_targets=2, metrics=log) as run:
         time.sleep(0.02)
-        assert run.outcome is None            # not yet decided; the block owns that
+        assert run.outcome is None            # not yet decided
     m = log.last()
     assert m.operator == "mip" and m.n_targets == 2
     assert m.seconds >= 0.02, "the recorded duration must cover the work, not the setup"
@@ -54,8 +52,6 @@ def test_the_outcome_the_block_names_is_the_one_recorded(log):
 
 
 def test_an_exception_is_recorded_as_failed_AND_reraised(log):
-    """Instrumentation must never swallow a failure — silent partial failure is the defect shape
-    this codebase has paid for most."""
     with pytest.raises(ValueError, match="boom"):
         with measure_run("decon", "1 region", metrics=log):
             raise ValueError("boom")
@@ -65,21 +61,12 @@ def test_an_exception_is_recorded_as_failed_AND_reraised(log):
 
 
 def test_the_sampler_keeps_the_MAX_not_the_last_reading(monkeypatch):
-    """The high-water-mark property, tested DETERMINISTICALLY.
-
-    A real freed buffer does not lower RSS (Python's allocator keeps it), so allocating-then-
-    freeing cannot distinguish peak from final on this machine. Instead, feed the sampler a known
-    rising-then-FALLING sequence and assert it reports the crest, not the trough it ended on.
-
-    MUTATION: change ``if value > self.peak`` to always assign (report the last reading) and this
-    goes red — 300 is kept, not the final 150.
-    """
+    """Feed a rising-then-falling sequence; the sampler must report the crest, not the end."""
     from squidxplorer import _measure as M
 
-    seq = iter([100, 250, 300, 180, 150])   # RSS climbs to 300, then recedes
+    seq = iter([100, 250, 300, 180, 150])
     monkeypatch.setattr(M, "rss_bytes", lambda: next(seq, 150))
     sampler = M._Sampler(interval=0.001).start()
-    # drive several notes past the crest, then stop (which takes the final reading too)
     for _ in range(4):
         sampler._note(M.rss_bytes())
     peak = sampler.stop()
@@ -88,7 +75,7 @@ def test_the_sampler_keeps_the_MAX_not_the_last_reading(monkeypatch):
 
 
 def test_a_run_reports_a_peak_at_or_above_where_it_started(log):
-    """Weaker but real end-to-end: an actual run's peak is never below where it began."""
+    """An actual run's peak is never below where it began."""
     if rss_bytes() is None:
         pytest.skip("RSS is not measurable on this machine")
     import numpy as np
@@ -101,17 +88,13 @@ def test_a_run_reports_a_peak_at_or_above_where_it_started(log):
         del block
     m = log.last()
     assert m.peak_rss is not None and m.start_rss is not None
-    # `>= 0` restates `_measure.py`'s own `max(0, peak_rss - start_rss)`. The block above is
-    # 64 MiB, touched every page so it is really resident, so a sampler that sampled reports tens
-    # of megabytes and one that never sampled reports exactly 0 -- which used to pass.
     assert m.peak_over_start is not None
     assert m.peak_over_start > (16 << 20), (
         f"peak_over_start {m.peak_over_start} did not see a resident 64 MiB allocation")
 
 
 def test_a_run_shorter_than_one_sample_interval_still_reports_a_peak(log):
-    """Seeded at t=0 on purpose: without it every fast operator reported 'peak unknown', which is
-    exactly the class of run people compare most often."""
+    """Seeded at t=0, so a run shorter than the interval still has a reading."""
     if rss_bytes() is None:
         pytest.skip("RSS is not measurable on this machine")
     with measure_run("fast", "1 region", metrics=log, interval=30.0):
@@ -120,8 +103,7 @@ def test_a_run_shorter_than_one_sample_interval_still_reports_a_peak(log):
 
 
 def test_the_measurement_survives_a_machine_that_will_not_report_memory(log, monkeypatch):
-    """psutil absent or refused degrades to an honest None, never to a fabricated number and never
-    to an exception in the caller's path."""
+    """psutil absent degrades to an honest None, never a fabricated number."""
     monkeypatch.setattr("squidxplorer._measure.rss_bytes", lambda: None)
     with measure_run("mip", "1 region", metrics=log):
         pass
@@ -131,7 +113,7 @@ def test_the_measurement_survives_a_machine_that_will_not_report_memory(log, mon
 
 
 def test_the_sampler_thread_does_not_outlive_the_run(log):
-    """A poller per run that is never joined is a thread leak in a GUI that runs hundreds."""
+    """A never-joined poller per run is a thread leak."""
     import threading
 
     before = {t.name for t in threading.enumerate()}
@@ -145,13 +127,7 @@ def test_the_sampler_thread_does_not_outlive_the_run(log):
 
 
 def test_the_sampler_overhead_is_negligible(log):
-    """The reason this is safe to leave on always.
-
-    Compares a fixed amount of real work with and without the instrumentation. The bar is
-    deliberately loose (2x the work's own duration is still a catastrophic overhead we would want
-    to catch; anything near 1.0 is what we expect) because CI machines are noisy — this is a
-    regression guard against someone dropping the interval to microseconds, not a benchmark.
-    """
+    """Compares fixed work with and without instrumentation; deliberately loose bar."""
     import numpy as np
 
     def work():
@@ -160,7 +136,7 @@ def test_the_sampler_overhead_is_negligible(log):
             a = a * 1.000001
         return float(a[0])
 
-    work()                                              # warm numpy/import paths
+    work()  # warm numpy/import paths
     t0 = time.perf_counter()
     for _ in range(3):
         work()
@@ -176,7 +152,7 @@ def test_the_sampler_overhead_is_negligible(log):
         f"instrumented {measured:.3f}s vs bare {bare:.3f}s — the sampler is not negligible")
 
 
-# --- the log line, which is what the panel shows ------------------------------------------------
+# --- the log line ------------------------------------------------------------------------------
 
 def test_the_log_line_names_operator_target_clock_peak_and_outcome(log):
     m = RunMetrics(operator="mip", target="28 regions", n_targets=28, seconds=41.2,
@@ -187,8 +163,7 @@ def test_the_log_line_names_operator_target_clock_peak_and_outcome(log):
 
 
 def test_the_run_emits_exactly_one_line_to_the_root_logger(caplog):
-    """One line per run is the contract with the log panel — the panel listens to the ROOT logger,
-    so anything logged here appears there with no wiring."""
+    """One line per run is the contract with the log panel."""
     metrics = MetricsLog()
     with caplog.at_level(logging.INFO, logger="squid.xplorer.measure"):
         with measure_run("mip", "2 regions", metrics=metrics):
@@ -220,7 +195,7 @@ def test_human_bytes_never_prints_a_bare_number_for_unknown():
     assert human_bytes(2 << 30).endswith("GiB")
 
 
-# --- the comparison table: the n-algorithms question --------------------------------------------
+# --- the comparison table ------------------------------------------------------------------------
 
 def test_compare_ranks_operators_by_median_wall_clock(log):
     for s in (0.30, 0.10, 0.20):
@@ -234,7 +209,7 @@ def test_compare_ranks_operators_by_median_wall_clock(log):
 
 
 def test_compare_uses_the_median_so_one_cold_run_does_not_decide_the_ranking(log):
-    log.record(RunMetrics("a", "t", 1, 10.0, None, None, OK))   # cold cache
+    log.record(RunMetrics("a", "t", 1, 10.0, None, None, OK))  # cold cache
     log.record(RunMetrics("a", "t", 1, 1.0, None, None, OK))
     log.record(RunMetrics("a", "t", 1, 1.0, None, None, OK))
     log.record(RunMetrics("b", "t", 1, 2.0, None, None, OK))
@@ -243,7 +218,7 @@ def test_compare_uses_the_median_so_one_cold_run_does_not_decide_the_ranking(log
 
 
 def test_a_failed_run_is_counted_but_never_timed(log):
-    """An operator that is fast and breaks half the time must not out-rank a slow one that works."""
+    """A fast operator that breaks half the time must not out-rank a slow one that works."""
     log.record(RunMetrics("flaky", "t", 1, 0.01, None, None, FAILED, "ValueError"))
     log.record(RunMetrics("flaky", "t", 1, 5.0, None, None, OK))
     row = compare(log)[0]
@@ -252,14 +227,7 @@ def test_a_failed_run_is_counted_but_never_timed(log):
 
 
 def test_a_run_that_produced_nothing_is_counted_but_never_timed(log):
-    """A `partial` or `stopped` duration is not a speed: it is how far the run got before quitting.
-
-    Only FAILED was excluded, so the two outcomes that mean "it finished having skipped every
-    well" and "Ctrl-C" went straight into the timings. Measured on one real 4-well `mip` run
-    against a `mip` over a well whose TIFFs are unreadable: `ok` 0.2546 s beside `partial` 0.0015 s
-    ("produced nothing — all 1 target(s) skipped"), and the table ranked mip at `best 2 ms`,
-    `median 128 ms`, `fail 0` — the fastest row in the table wrote zero pixels.
-    """
+    """A `partial` or `stopped` duration is not a speed: it is how far the run got before quitting."""
     log.record(RunMetrics("mip", "t", 1, 0.2546, None, None, OK))
     log.record(RunMetrics("mip", "t", 1, 0.0015, None, None, PARTIAL,
                           "produced nothing — all 1 target(s) skipped"))
@@ -275,7 +243,6 @@ def test_a_run_that_produced_nothing_is_counted_but_never_timed(log):
 
 
 def test_the_table_says_how_many_runs_were_timed_not_only_how_many_ran(log):
-    """A median over 1 of 3 runs must not read like a median over 3."""
     log.record(RunMetrics("mip", "t", 1, 5.0, None, None, OK))
     log.record(RunMetrics("mip", "t", 1, 0.001, None, None, PARTIAL, "produced nothing"))
     log.record(RunMetrics("mip", "t", 1, 0.001, None, None, STOPPED, "stopped after 0 of 1"))
@@ -330,7 +297,6 @@ def test_a_subscriber_is_told_about_every_finished_run(log):
 
 
 def test_one_broken_subscriber_does_not_stop_the_others(log):
-    """The same rule LogBus follows: a sink's bug is not the measurement's problem."""
     seen = []
 
     def boom(_m):
@@ -350,4 +316,4 @@ def test_metrics_serialise_to_plain_data_for_the_csat_record(log):
     assert d["extra"] == {"dataset": "plate-A", "adapter_version": "v3"}
     import json
 
-    json.dumps(d)      # the CSAT loop stores this next to a survey response; it must serialise
+    json.dumps(d)      # must serialise

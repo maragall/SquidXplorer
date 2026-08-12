@@ -1,17 +1,4 @@
-"""IMA-217 OME-Zarr pyramid source — the ladder, the zarr tile source, the RAM preview.
-
-Test-first for the three claims the ticket is judged on:
-
-  UNITS      every world value is µm, taken from ``metadata["fov_positions_um"]``; the plate
-             the writer emits carries its own µm origin (NGFF ``translation``) so the source
-             never needs a second, possibly-mm, coordinate path.
-  O(VIEWPORT) tiles per view do not grow with FOV count — asserted on a fabricated 14,400-FOV
-             plate against the same 144-FOV plate shipped in the real dataset.
-  BOUNDED    the in-RAM multiscale refuses to exceed an explicit byte budget and its actual
-             allocation is measured, not asserted by hand-wave.
-
-Pure numpy except the two zarr round-trips, which write ~1 MB into tmp_path.
-"""
+"""OME-Zarr pyramid source: the ladder, the zarr tile source, the RAM preview."""
 
 from __future__ import annotations
 
@@ -31,8 +18,6 @@ from squidxplorer._tilesource import (
     fov_bboxes_um,
     plate_ladder,
 )
-
-# --- fabricated acquisition metadata ----------------------------------------------------
 
 CH = [
     {"name": "Fluorescence_405_nm_Ex", "display_name": "Fluorescence 405 nm Ex", "display_color": "#20ADF8"},
@@ -62,8 +47,6 @@ def _meta(n_side: int, *, frame: int = 2084, regions=("A1",)) -> dict:
     }
 
 
-# --- pyramid shapes (the _output extension) ---------------------------------------------
-
 def test_pyramid_shapes_matches_the_written_levels():
     # 2084 -> 1042 -> 521 -> (crop 520) 260 -> 130; stops at the 256 px floor.
     assert pyramid_shapes((2084, 2084)) == [(2084, 2084), (1042, 1042), (521, 521), (260, 260), (130, 130)]
@@ -78,12 +61,9 @@ def test_pyramid_shapes_agrees_with_the_actual_downsample():
     assert [lv.shape[-2:] for lv in _pyramid(img)] == [tuple(s) for s in pyramid_shapes((600, 401))]
 
 
-# --- world geometry: units ---------------------------------------------------------------
-
 def test_fov_bboxes_are_centred_micrometres():
     """Positions are stage µm FOV *centres*; a bbox is the frame extent around one."""
     boxes = fov_bboxes_um({("A1", 0): (1000.0, 2000.0)}, (100, 200), 0.5)
-    # 200 px * 0.5 µm = 100 µm wide, 100 px * 0.5 = 50 µm tall, centred on (1000, 2000)
     assert boxes[("A1", 0)] == pytest.approx((950.0, 1975.0, 1050.0, 2025.0))
 
 
@@ -104,15 +84,11 @@ def test_ladder_rejects_positions_that_look_like_millimetres():
         plate_ladder(meta)
 
 
-# --- the ladder shape --------------------------------------------------------------------
-
 def test_ladder_is_a_valid_geometry_with_plate_rungs_on_top():
     ladder = plate_ladder(_meta(6))
     g = ladder.geometry
     assert isinstance(g, Geometry)
-    # All 5 written pyramid levels are known; only those finer than the crossover
-    # (fov_extent_um 777 µm == tile_px 512 * scale -> 1.52 µm/px) become per-FOV RUNGS. The
-    # coarser two are still read — they are the pixels a plate tile is composited from.
+    # only levels finer than the crossover (777 µm FOV extent -> 1.52 µm/px) become per-FOV rungs
     assert ladder.fov_level_shapes == pyramid_shapes((2084, 2084))
     assert ladder.n_fov_levels == 3
     assert len(g) > ladder.n_fov_levels                       # coarse plate rungs were added
@@ -148,8 +124,6 @@ def test_ladder_scales_and_keys_round_trip_through_select_tiles():
     assert len(tiles) == 2                                      # one per channel
 
 
-# --- O(viewport): the non-negotiable ------------------------------------------------------
-
 def _fit_to_plate_tiles(ladder: PlateLadder, screen_px: int = 1400) -> int:
     x0, y0, x1, y1 = ladder.world_bbox_um
     um_per_px = max(x1 - x0, y1 - y0) / screen_px
@@ -180,8 +154,6 @@ def test_every_rung_is_smaller_than_the_one_below_on_a_huge_plate():
     assert counts == sorted(counts, reverse=True) or all(
         counts[i] >= counts[i + 1] for i in range(len(counts) - 1))
 
-
-# --- the in-RAM multiscale: explicit byte budget -------------------------------------------
 
 def test_in_ram_multiscale_capacity_is_declared_and_under_budget():
     ladder = plate_ladder(_meta(12))
@@ -274,8 +246,6 @@ def test_in_ram_multiscale_dirty_tiles_drive_tilecache_invalidate():
     assert desc not in cache
     assert pv.read_tile(desc).max() == 900           # the re-read now carries the field
 
-
-# --- the zarr source: round trip through a real written plate ------------------------------
 
 def _write_small_plate(tmp_path: Path, *, frame: int = 512, n_side: int = 3) -> tuple[Path, dict]:
     meta = _meta(n_side, frame=frame)

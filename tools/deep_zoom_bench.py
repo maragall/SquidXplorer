@@ -1,14 +1,9 @@
 """Measure the deep-zoom tile path, and render a before/after on real data.
 
-Doubles as an offline prototype of the plate overlay: assembling tiles into a screen rectangle
-here uses the same maths ``PlateOverview._paint_tiles`` uses (``_paste_field`` from each tile's
-world bbox into the viewport rect), so a placement bug shows up HERE, where it is cheap to see,
-instead of as a picture someone has to eyeball in the GUI.
-
-It exists because the numbers decided the design. A fit-to-plate tile overlaps every FOV on the
-plate and measured **25 s** to build on a 9-well, 10-deep acquisition -- which is why the overlay
-engages only above ``cd > _CELL`` and leaves coarse zoom to the montage. Re-run this before
-changing that rule.
+Uses the same placement maths as PlateOverview._paint_tiles, so a placement bug shows up here
+rather than as a picture someone has to eyeball in the GUI. A fit-to-plate tile overlapping
+every FOV measured 25s to build on a 9-well, 10-deep acquisition — re-run this before changing
+the zoom threshold that decides when the overlay engages.
 
     python tools/deep_zoom_bench.py "D:/path/to/acquisition" --out before_after.png
 """

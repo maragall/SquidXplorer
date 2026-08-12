@@ -1,19 +1,12 @@
 """The root window resizes, and the type comes with it.
 
-Spencer, on a 200%-scaled 4K workstation: "the draw size on the main window is too small ...
-make that draw such that I can resize it, and have the font resize?"
+Two independent causes: `setFixedSize(596, 850)` made the window unresizable, and Qt5 does not
+scale for high DPI unless asked, so a 200%-scaled display drew 596x850 PHYSICAL pixels while
+every other app on screen drew at 2x. Enabling the DPI attributes makes each stylesheet `px` a
+logical pixel, doubling the whole UI without editing the 79 call sites that set a font size inline.
 
-Two independent causes sat behind that one sentence:
-
-1. ``setFixedSize(596, 850)`` -- the window could not be resized at all.
-2. No high-DPI handling anywhere in the package. Qt5 does not scale unless asked, so on a
-   200% display the app was DPI-*aware* but not DPI-*scaling*: it drew 596x850 PHYSICAL
-   pixels while every other application on the screen drew at 2x. Enabling the attributes
-   makes each stylesheet ``px`` a logical pixel, which doubles the whole UI on that machine
-   without editing the 79 call sites that set a font size inline.
-
-These tests cover the parts that are honest to assert offscreen: the geometry contract and
-the stylesheet arithmetic. Whether it LOOKS right is a screenshot, not a unit test.
+These tests cover what is honest to assert offscreen: the geometry contract and the stylesheet
+arithmetic. Whether it LOOKS right is a screenshot, not a unit test.
 """
 
 from __future__ import annotations

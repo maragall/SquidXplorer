@@ -1,30 +1,4 @@
-"""The STANDARDISED OPERATOR TEMPLATE: the declared-dependency seam and the discovery seam.
-
-Julio's Friday deliverable, phase 3: *"Standardized operator layer: public template defining what
-the viewer expects before/after processing"*, so that new operators are cheap to add and
-*"community contributors can adapt their own repos to work with Squid Explorer without custom
-integration."*
-
-Two mechanisms make that possible, and this file pins both.
-
-1. ``requires=`` ON THE OPERATOR RECORD (§1-§3). ``_spots.Segmenter`` has declared its optional
-   packages since Cellpose landed; ``Operator`` did not. The consequence was measured on a stock
-   ``pip install .[gui]``: ``decon``, ``decon3d`` and ``flatfield`` import packages that are not in
-   this project's dependency list at all, so they were advertised by ``available_projectors()``,
-   raised ImportError from a lazy import one call deep, and ``project_plate(on_error=...)`` filed
-   that as a per-well skip — a whole-plate run that finished GREEN having written nothing. These
-   tests pin the refusal that replaces it, and pin that per-well fault isolation can no longer
-   absorb it.
-
-2. ENTRY-POINT DISCOVERY (§4-§5). ``squidxplorer/__init__.py`` ends in a hardcoded side-effect import
-   list, and that list was the only thing that made a registration run — so an operator in a
-   package we do not ship appeared nowhere. The ``squidxplorer.operators`` entry-point group is the
-   seam that fixes it, and it must fail LOUD and NAMED on a broken plugin, never skip it silently:
-   a plugin that quietly does not load is indistinguishable from an operator nobody wrote, which
-   is the same defect ``requires=`` exists to end, one layer up.
-
-§6 pins the template package itself, because a template that does not install is not a template.
-"""
+"""The standardised operator template: the declared-dependency seam and the discovery seam."""
 
 from __future__ import annotations
 
@@ -57,8 +31,7 @@ def _passthrough(planes):
 # ==============================================================================================
 
 def test_operator_carries_requires_with_the_same_spelling_as_segmenter():
-    """One word, three registries. A second spelling (``needs=``, ``deps=``) would make the
-    template teach two contracts for one idea."""
+    """One word, three registries."""
     from squidxplorer._spots import Segmenter
 
     assert "requires" in Operator.__dataclass_fields__
@@ -67,9 +40,7 @@ def test_operator_carries_requires_with_the_same_spelling_as_segmenter():
 
 
 def test_every_registrar_takes_requires_by_the_same_keyword():
-    """``add_projector``, ``add_region_operator`` and ``add_segmenter`` — the three seams a
-    contributor can plug into. Checked by signature so a fourth registrar cannot quietly ship
-    without it."""
+    """Checked by signature so a fourth registrar cannot quietly ship without it."""
     import inspect
 
     from squidxplorer._spots import add_segmenter
@@ -105,8 +76,7 @@ def test_declaring_nothing_keeps_the_pre_existing_contract_exactly():
 
 @pytest.fixture
 def small_acquisition(squid_dataset):
-    """The tiny synthetic acquisition, as a path. Two regions, so a "skipped every well" bug is
-    visible as an empty result rather than as one missing field."""
+    """The tiny synthetic acquisition, as a path."""
     root, _arrays = squid_dataset
     return root
 
@@ -124,9 +94,7 @@ def unavailable():
 
 
 def test_an_unavailable_operator_is_still_listed(unavailable):
-    """ABSENT IS NOT UNWRITTEN. Filtering it out of the list would make "the package is missing"
-    and "nobody wrote this operator" identical to every caller — the exact rule
-    ``available_segmenters`` has always applied, now applied to the operator table."""
+    """Filtering it out would make "package missing" and "nobody wrote it" identical."""
     assert unavailable in s.available_projectors()
 
 
@@ -145,9 +113,7 @@ def test_binding_refuses_by_name_before_any_work(unavailable):
 
 
 def test_the_refusal_is_a_missing_dependency_so_a_runner_can_tell_it_from_a_data_fault(unavailable):
-    """One base class across the three registries: ``projection.MissingDependency``. That is what
-    lets ``project_plate`` say "environment fault, not a corrupt well" without importing each
-    registry to name its own exception."""
+    """One base class across the three registries: ``projection.MissingDependency``."""
     from squidxplorer._spots import MissingSegmenterDependency
 
     assert issubclass(MissingOperatorDependency, MissingDependency)
@@ -162,8 +128,7 @@ def test_reading_an_unavailable_operators_declaration_still_works(unavailable):
 
 
 def test_an_unknown_name_and_an_unavailable_one_are_different_answers():
-    """An agent branches on these differently: one means "pick another name", the other means
-    "install the package". Collapsing them makes both un-actionable."""
+    """One means "pick another name", the other "install the package"."""
     ok_unknown, why_unknown = s.operator_available("no_such_operator_at_all")
 
     assert not ok_unknown
@@ -176,9 +141,7 @@ def test_an_unknown_name_and_an_unavailable_one_are_different_answers():
 
 def test_project_plate_refuses_before_reading_a_well_and_on_error_cannot_swallow_it(
         small_reader, unavailable):
-    """THE DEFECT, pinned. Previously: the operator raised ImportError for every well, ``on_error``
-    recorded each as a skip, the stream ended normally and the run reported success with nothing
-    produced. Now the refusal happens at bind time, which is BEFORE the per-well loop exists."""
+    """The refusal happens at bind time, before the per-well loop exists."""
     skipped = []
 
     with pytest.raises(MissingOperatorDependency):
@@ -189,9 +152,7 @@ def test_project_plate_refuses_before_reading_a_well_and_on_error_cannot_swallow
 
 
 def test_an_undeclared_lazy_import_error_is_also_not_a_per_well_skip(small_reader):
-    """The backstop for an operator whose author forgot to declare. An ImportError raised from
-    inside the operator will raise identically for EVERY well, so isolating it skips all of them
-    and the run finishes green — which is not fault isolation, it is a hidden total failure."""
+    """The backstop for an operator whose author forgot to declare."""
     def _needs_the_absent(planes):
         __import__(ABSENT)
         return next(iter(planes))
@@ -207,8 +168,7 @@ def test_an_undeclared_lazy_import_error_is_also_not_a_per_well_skip(small_reade
 
 
 def test_a_genuine_per_well_data_fault_is_still_isolated(small_reader):
-    """The contract ``on_error`` was built for is UNCHANGED. One corrupt well must not abort a
-    plate; this is the line between the two behaviours."""
+    """One corrupt well must not abort a plate; this is the line between the two behaviours."""
     def _explodes(planes):
         raise ValueError("this well's pixels are corrupt")
 
@@ -223,8 +183,7 @@ def test_a_genuine_per_well_data_fault_is_still_isolated(small_reader):
 
 
 def test_the_command_surface_refuses_with_its_own_code(small_acquisition, unavailable):
-    """``unavailable_operator`` is a DISTINCT refusal code from ``unknown_operator``, because the
-    caller's next move differs: pick another name, versus install a package."""
+    """``unavailable_operator`` is a distinct refusal code from ``unknown_operator``."""
     from squidxplorer._command import (UNAVAILABLE_OPERATOR, CommandBus, EngineExecutor,
                                    OpenAcquisition, RunOperator)
 
@@ -252,8 +211,7 @@ def test_list_operators_reports_availability_without_filtering_the_list(unavaila
 
 
 def test_the_built_in_operators_with_heavyweight_lazy_imports_declare_them():
-    """The three that were measured advertising themselves and producing nothing. Pinned by name
-    HERE, in a test, rather than left to be rediscovered on the next clean install."""
+    """Pinned by name so it is not rediscovered on the next clean install."""
     assert s.operator_requires("decon") == ("petakit",)
     assert s.operator_requires("decon3d") == ("petakit",)
     assert s.operator_requires("flatfield") == ("tilefusion",)
@@ -261,26 +219,17 @@ def test_the_built_in_operators_with_heavyweight_lazy_imports_declare_them():
 
 
 def test_every_region_operator_declares_its_requirements():
-    """``requires`` used to live in a SIDECAR dict (``_stitch._REGION_REQUIRES``) shadowing a
-    second table, and this test existed to pin that the two were written together. Both are gone:
-    a region operator is a record in the ONE table, so it carries its own ``requires`` and there is
-    nothing left to disagree with it. What is checked now is that the declaration is READABLE
-    through the same function every other operator's is."""
+    """The declaration is readable through the same function every other operator's is."""
     names = s.available_region_operators()
     assert names, "no region operator is registered at all"
     for name in names:
         assert isinstance(s.operator_requires(name), tuple)
-    # `isinstance(..., tuple)` alone is the declared return type of the function under test: it
-    # holds for `()` on every operator, so a registry that stopped carrying `requires` at all was
-    # green. `stitch` reaches tilefusion one call deep and must SAY so, by name.
+    # `stitch` reaches tilefusion one call deep and must say so, by name.
     assert "tilefusion" in s.operator_requires("stitch"), s.operator_requires("stitch")
 
 
 def test_region_operators_declare_and_refuse_the_same_way(small_reader):
-    """The same word, the same registrar family and the same behaviour, so a contributor learns
-    the contract once. ``operator_available`` is now literally the same function for both kinds —
-    it used to answer "unknown projector 'stitch'" about a shipped operator, which is why every
-    caller had to guard it with a membership test against the other table first."""
+    """The same word, the same registrar family and the same behaviour for region operators."""
     s.add_region_operator("tpl_region_unavailable", lambda reader, region, fovs, **kw: None,
                           requires=(ABSENT,))
 
@@ -297,13 +246,7 @@ def test_region_operators_declare_and_refuse_the_same_way(small_reader):
 # ==============================================================================================
 
 class _FakeEntryPoint:
-    """Enough of an ``importlib.metadata.EntryPoint`` for the loader. ``load()`` is the seam.
-
-    Carries a ``group``, because the real one does and the loader FILTERS on it. Without it the
-    stand-in below ignored ``group=`` entirely, so `_plugins.load_operator_plugins` could have
-    passed the wrong group string -- or dropped the argument -- and every one of these tests
-    stayed green while every published plugin became invisible in production.
-    """
+    """Enough of an ``importlib.metadata.EntryPoint`` for the loader; carries a ``group`` because the loader filters on it."""
 
     dist = None
 
@@ -317,8 +260,7 @@ class _FakeEntryPoint:
         return self._loader()
 
 
-#: An entry point in SOMEBODY ELSE'S group. Every `_with_entry_points` call plants one, so a
-#: loader that stopped filtering would load it and be caught by name.
+#: An entry point in somebody else's group; a loader that stopped filtering is caught by name.
 _OFF_GROUP = _FakeEntryPoint(
     "not_ours", "somebody_else:register",
     lambda: (_ for _ in ()).throw(AssertionError(
@@ -328,12 +270,7 @@ _OFF_GROUP = _FakeEntryPoint(
 
 
 def _with_entry_points(monkeypatch, entry_points):
-    """Patch the METADATA source, not our own helper — so the loader's sorting, its group filter
-    and its error handling are all still under test.
-
-    The lambda used to be ``lambda group=None: list(entry_points)``, i.e. it accepted the argument
-    and threw it away. It now FILTERS, which is what makes `group=` load-bearing under test.
-    """
+    """Patch the metadata source, not our own helper, and filter on group for real."""
     planted = list(entry_points) + [_OFF_GROUP]
 
     def _entry_points(group=None):
@@ -343,8 +280,7 @@ def _with_entry_points(monkeypatch, entry_points):
 
 
 def test_the_group_name_is_the_documented_one():
-    """The template's ``pyproject.toml`` writes this string. If it changes here and not there,
-    every plugin ever published becomes invisible — so it is pinned in both places."""
+    """Pinned in both places: the group string and the template's pyproject.toml."""
     assert GROUP == "squidxplorer.operators"
     assert '[project.entry-points."squidxplorer.operators"]' in (_TEMPLATE / "pyproject.toml").read_text()
 
@@ -360,8 +296,7 @@ def test_a_plugin_registers_its_operator_into_the_same_table_as_the_built_ins(mo
 
 
 def test_a_plugin_that_fails_to_import_aborts_by_name_never_silently(monkeypatch):
-    """LOUD AND NAMED. A skipped plugin is an application that silently does not have the operator
-    the user installed — the same defect as an operator that runs and produces nothing."""
+    """A silently skipped plugin is an app that quietly lacks the operator the user installed."""
     def _explode():
         raise ModuleNotFoundError("No module named 'torch'")
 
@@ -390,8 +325,7 @@ def test_a_plugin_whose_register_raises_aborts_by_name(monkeypatch):
 
 
 def test_a_plugin_that_collides_with_a_built_in_name_is_refused_not_allowed_to_clobber(monkeypatch):
-    """Discovery runs AFTER the built-ins precisely so this is the outcome. A plugin that replaced
-    ``mip`` would change what every existing recipe means."""
+    """A plugin that replaced ``mip`` would change what every existing recipe means."""
     def _register():
         s.add_projector("mip", _passthrough)
 
@@ -404,8 +338,7 @@ def test_a_plugin_that_collides_with_a_built_in_name_is_refused_not_allowed_to_c
 
 
 def test_a_module_entry_point_registers_by_import_side_effect(monkeypatch):
-    """``my_package`` (no ``:callable``) is supported too — it is how this package's own operator
-    modules register. Not callable, so nothing is called."""
+    """``my_package`` (no ``:callable``) is supported too; nothing is called."""
     import types
 
     module = types.ModuleType("tpl_side_effect_module")
@@ -422,8 +355,7 @@ def test_a_module_entry_point_registers_by_import_side_effect(monkeypatch):
 
 
 def test_plugins_load_in_a_deterministic_order(monkeypatch):
-    """Two plugins can collide on an operator name. A collision whose winner depends on filesystem
-    iteration order is reproducible on one machine and not another."""
+    """A collision whose winner depends on filesystem iteration order is not reproducible."""
     seen = []
     eps = [_FakeEntryPoint(n, f"{n}:register", lambda n=n: (lambda: seen.append(n)))
            for n in ("zulu", "alpha", "mike")]
@@ -444,8 +376,7 @@ def test_the_escape_hatch_skips_discovery_entirely(monkeypatch):
 
 
 def test_discovery_is_additive_the_built_ins_do_not_go_through_it():
-    """The hardcoded imports keep working. Routing ``mip`` through installed metadata would make
-    the shipped operators depend on that metadata being intact, for no benefit."""
+    """The hardcoded imports keep working; discovery is additive."""
     declared = {name for name, _target, _dist in s.declared_operator_plugins()}
 
     for built_in in ("mip", "reference", "decon", "bgsub", "flatfield", "spot", "cellpose"):
@@ -474,10 +405,7 @@ def test_the_templates_operator_declares_all_four_things():
 
 
 def test_the_template_does_not_import_squidxplorer_at_module_scope():
-    """The circular-import trap, pinned. SquidXplorer loads a plugin from INSIDE ``import
-    squidxplorer``, so a module-scope ``from squidxplorer import ...`` in the plugin is re-entrant and
-    fails with a partially-initialised module. The template imports inside ``register()`` and says
-    why; this test stops that from being edited back."""
+    """The circular-import trap: plugins load from inside ``import squidxplorer``."""
     import ast
 
     tree = ast.parse((_TEMPLATE / "squidxplorer_operator_template" / "__init__.py").read_text())
@@ -491,8 +419,7 @@ def test_the_template_does_not_import_squidxplorer_at_module_scope():
 
 
 def test_the_template_readme_states_the_contract_the_viewer_depends_on():
-    """The deliverable is *a public template defining what the viewer expects before/after
-    processing*. These are the facts a contributor cannot guess."""
+    """These are the facts a contributor cannot guess."""
     readme = (_TEMPLATE / "README.md").read_text()
 
     for fact in (
@@ -511,15 +438,7 @@ def test_the_template_readme_states_the_contract_the_viewer_depends_on():
 
 
 def test_the_template_names_what_it_does_not_support():
-    """The unsupported list is real and stays stated: a template that implies a feature exists sends
-    a contributor to build against a hole. (Composition WAS on this list. It is now §2.6, because it
-    executes — see ``squidxplorer/_compose.py`` and ``tests/test_compose.py``.)
-
-    A GUI PANEL FROM ``params`` WAS ALSO ON THIS LIST, and it was the weakest link in the whole
-    contract: §2.4 told a contributor to declare parameters into a GUI that ignored them. It is
-    now built (``squidxplorer/_param_panel.py``), so what stays unsupported is the narrower and true
-    thing — a panel with BEHAVIOUR of its own, which lives in SquidXplorer.
-    """
+    """A template that implies a feature exists sends a contributor to build against a hole."""
     readme = (_TEMPLATE / "README.md").read_text()
 
     assert "does NOT support" in readme
@@ -528,10 +447,7 @@ def test_the_template_names_what_it_does_not_support():
 
 
 def test_the_template_states_how_a_declared_param_becomes_a_widget():
-    """§2.4 is a public contract, so the mapping rule a contributor's default is read by has to be
-    IN it. Without the rule, "declare params" is advice with an invisible acceptance test: a
-    parameter defaulting to None looks identical in the README to one defaulting to 30, and only
-    one of them gets a widget."""
+    """The default-type-to-widget mapping rule has to be in the public contract."""
     readme = (_TEMPLATE / "README.md").read_text()
 
     for fact in (
@@ -548,9 +464,7 @@ def test_the_template_states_how_a_declared_param_becomes_a_widget():
 
 
 def test_the_template_states_how_a_contributed_operator_composes():
-    """A contributor's operator chains with the shipped ones the moment it is registered, and the
-    README has to say so with the rule that decides it — otherwise the first thing they learn is a
-    refusal. The rule is ``consumes``, which they already declared."""
+    """The README states how a contributed operator composes, with the rule that decides it."""
     readme = (_TEMPLATE / "README.md").read_text()
 
     for fact in (
@@ -563,9 +477,7 @@ def test_the_template_states_how_a_contributed_operator_composes():
 
 
 def test_the_template_package_imports_and_registers_in_a_clean_interpreter():
-    """The template's own ``register()`` runs, in a subprocess so this suite's registry is
-    untouched. Proves the file is not merely well-formed prose: the four declarations reach the
-    engine and describe a real operator."""
+    """The template's own ``register()`` runs, in a subprocess so this suite's registry is untouched."""
     script = (
         "import sys; sys.path.insert(0, %r); sys.path.insert(0, %r)\n"
         "import squidxplorer, squidxplorer_operator_template as t\n"

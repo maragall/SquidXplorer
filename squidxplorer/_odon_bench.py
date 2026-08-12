@@ -1,51 +1,4 @@
-"""Local vs http-served OME-Zarr, for Odon — IMA-234.
-
-The claim under test
-====================
-squidxplorer writes an OME-Zarr plate that a web viewer can read **in place** over plain
-HTTP, with no server-side application, no database and no per-user copy. The local ->
-remote delta IS the web-performance proof, so this module serves the written plate over
-``http.server`` and measures both sides.
-
-What actually ran, and what did not
-===================================
-Measured here, and reported by :func:`format_report` with that provenance:
-
-* **Transport.** The same real chunk files, read from the local filesystem and over HTTP,
-  sequentially and with a viewer-like parallel fan-out. This is the layer that genuinely
-  differs between "open the folder" and "open the URL", and it needs no GUI, so it always
-  runs.
-* **Odon first paint, LOCAL.** ``odon --check <field>`` is Odon's only headless path: it
-  loads one coarse tile, prints ``OK: loaded tile level N ...`` and returns before any
-  window exists. Timed end-to-end over repeated runs.
-
-NOT measured, and deliberately not estimated:
-
-* **Odon first paint, REMOTE.** Odon v0.1.5 cannot open an http-served OME-Zarr at all.
-  This is not "the binary is missing" — the binary runs fine locally. Its single-dataset
-  open path resolves the argument as a filesystem path in both modes:
-
-      $ odon --check "http://127.0.0.1:8899/plate.ome.zarr/A/1/0"
-      Error: failed to canonicalize dataset root: "http://127.0.0.1:8899/..."
-      Caused by: No such file or directory (os error 2)
-
-      $ odon "http://127.0.0.1:8899/plate.ome.zarr/A/1/0"      # GUI, --log-level debug
-      [main][Info] open_single: http://127.0.0.1:8899/plate.ome.zarr/A/1/0
-      [main][Warn] open_single: open_local failed: failed to canonicalize dataset root
-
-  ``--help`` says the same thing in advance: "``--check``  Run a small IO sanity check
-  (single-dataset local only)". :func:`odon_remote_probe` re-runs this on every invocation
-  and records the binary's verbatim output, so the finding is re-derived rather than
-  quoted from a comment that might have gone stale.
-* **Framerate.** Odon exposes no headless render loop, no frame counter and no timing on
-  stdout; there is no interface to read a framerate through. A number here would have to
-  be eyeballed off a screen recording or invented, and an invented benchmark is worse than
-  a missing one.
-
-Everything this module writes goes under a caller-supplied directory and is deleted by the
-CLI's ``--clean``. The plate it needs is written through ``squidxplorer.write_plate``, whose
-own ``check_disk_space`` gate is left ON.
-"""
+"""Benchmark local vs http-served OME-Zarr reads, plus Odon's headless first paint."""
 
 from __future__ import annotations
 
@@ -69,16 +22,14 @@ from typing import Optional, Sequence
 
 _MB = 1024.0 ** 2
 
-# Odon's headless probe prints this on success. Its presence, not just a zero exit code,
-# is what makes a run count: a binary that exits 0 having drawn nothing is not a paint.
+# Odon's headless probe prints this on success; a zero exit code alone is not enough.
 _OK_MARKER = "OK: loaded tile"
 
 _CHECK_TIMEOUT_S = 120.0
 
 
 class _QuietHandler(http.server.SimpleHTTPRequestHandler):
-    """A static file server that does not narrate. Logging every chunk request would both
-    flood the console and put a print() inside the thing being timed."""
+    """A static file server that does not log each request."""
 
     def log_message(self, *_args):  # noqa: D102
         pass
@@ -91,12 +42,7 @@ class _ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 @contextlib.contextmanager
 def serve_directory(root, host: str = "127.0.0.1", port: int = 0):
-    """Serve *root* over HTTP for the duration of the block; yield the base URL.
-
-    Threading, and with a real thread pool, because a single-threaded server would
-    serialise the parallel fan-out below and make "parallel HTTP" measure the server's
-    concurrency limit instead of the transport's.
-    """
+    """Serve *root* over HTTP for the duration of the block; yield the base URL."""
     handler = functools.partial(_QuietHandler, directory=str(Path(root).resolve()))
     server = _ThreadingHTTPServer((host, port), handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -114,11 +60,7 @@ def serve_directory(root, host: str = "127.0.0.1", port: int = 0):
 # --------------------------------------------------------------------------------------
 
 def chunk_files(field_dir, level: str = "0", limit: int = 64) -> list:
-    """Real chunk files of one pyramid level, in path order. Never ``zarr.json``.
-
-    Metadata is a handful of small JSON reads and would flatter HTTP by dominating the
-    sample with tiny responses; a viewer's steady-state cost is chunks.
-    """
+    """Real chunk files of one pyramid level, in path order. Never ``zarr.json``."""
     root = Path(field_dir) / level
     files = sorted(p for p in root.rglob("*") if p.is_file() and p.name != "zarr.json")
     return files[:limit]
@@ -184,13 +126,7 @@ def _timed(label: str, fetch, items, workers: int) -> TransportResult:
 
 def benchmark_transport(field_dir, base_url: str, plate_root, *, level: str = "0",
                         limit: int = 64, workers: int = 8) -> list:
-    """Read the SAME chunks locally and over HTTP, serial and parallel. Four rows.
-
-    Parallel matters more than serial: a tile viewer fetches a screenful of chunks at
-    once, so per-chunk latency is hidden by concurrency and the honest remote number is
-    the parallel one. Serial is reported anyway because it isolates round-trip latency,
-    which is the term that grows when the server stops being localhost.
-    """
+    """Read the SAME chunks locally and over HTTP, serial and parallel. Four rows."""
     files = chunk_files(field_dir, level=level, limit=limit)
     if not files:
         return []
@@ -237,11 +173,7 @@ class OdonResult:
 
 
 def _run_odon(binary: str, target: str) -> tuple:
-    """``odon --check TARGET`` in a scratch cwd; return (seconds, combined output, rc).
-
-    A scratch cwd because odon writes ``odon.log`` next to wherever it is started, and a
-    benchmark that litters the repo is a benchmark nobody runs twice.
-    """
+    """``odon --check TARGET`` in a scratch cwd; return (seconds, combined output, rc)."""
     with tempfile.TemporaryDirectory(prefix="odon-check-") as cwd:
         t0 = time.perf_counter()
         try:
@@ -255,12 +187,7 @@ def _run_odon(binary: str, target: str) -> tuple:
 
 def benchmark_odon(field_dir, remote_url: Optional[str] = None, *,
                    repeats: int = 5, odon_bin=None) -> OdonResult:
-    """Time Odon's headless first paint locally, and PROBE whether it can do it remotely.
-
-    Skips cleanly, with the discovery error as the stated reason, when no binary is
-    installed — ``squidxplorer._odon.find_odon`` already knows every place to look and already
-    explains what to install. Nothing is estimated in that case.
-    """
+    """Time Odon's headless first paint locally, and probe whether it can do it remotely."""
     from squidxplorer._odon import find_odon
 
     result = OdonResult()
@@ -290,11 +217,7 @@ def benchmark_odon(field_dir, remote_url: Optional[str] = None, *,
 
 
 def odon_remote_probe(remote_url: str, odon_bin=None) -> dict:
-    """Re-derive, live, whether this Odon build can open an http-served dataset.
-
-    Kept separate from the timing path so the finding is a fresh observation on every run
-    rather than a claim in a docstring that nobody re-checks.
-    """
+    """Re-derive, live, whether this Odon build can open an http-served dataset."""
     from squidxplorer._odon import find_odon
 
     try:
@@ -314,8 +237,7 @@ def odon_remote_probe(remote_url: str, odon_bin=None) -> dict:
 @dataclass
 class OdonBenchReport:
     plate: str = ""
-    # NOT named `field`: this is a dataclass, and an attribute called `field` shadows
-    # dataclasses.field for every declaration BELOW it in the class body.
+    # NOT named `field`: that would shadow dataclasses.field for declarations below it.
     field_dir: str = ""
     base_url: str = ""
     chunk_level: str = "0"
@@ -336,9 +258,7 @@ def run(hcs_dir, *, level: str = "0", limit: int = 64, workers: int = 8,
     _row, _col, _fov, field_dir = fields[min(field_index, len(fields) - 1)]
 
     report = OdonBenchReport(plate=str(plate), field_dir=str(field_dir), chunk_level=level)
-    # Serve the plate's PARENT so the URL path mirrors the on-disk layout exactly
-    # (…/plate.ome.zarr/A/1/0/…). A viewer's URLs are the store's own keys; rebasing them
-    # would measure a rewrite that no real deployment performs.
+    # Serve the plate's PARENT so URLs mirror the on-disk layout (…/plate.ome.zarr/A/1/0/…).
     with serve_directory(plate.parent) as base_url:
         report.base_url = base_url
         report.transport = benchmark_transport(field_dir, base_url, plate,
@@ -388,9 +308,6 @@ def format_report(report: OdonBenchReport) -> str:
         lp, hp = by.get("local_par"), by.get("http_par")
         if ls and hs and hs.mb_per_s:
             ratio = ls.mb_per_s / hs.mb_per_s
-            # Direction-aware wording. On localhost against a page-cached store the two
-            # are within noise of each other and HTTP sometimes wins; printing "0.9x
-            # slower" would be an unreadable way of saying "faster".
             verdict = (f"{ratio:.1f}x slower" if ratio >= 1.0
                        else f"{1 / ratio:.1f}x FASTER (i.e. within noise of local)")
             lines.append(f"\n  serial  : HTTP is {verdict} "
@@ -420,9 +337,7 @@ def format_report(report: OdonBenchReport) -> str:
     else:
         lines.append(f"  binary: {o.binary}")
         if o.local_ok:
-            # COLD and WARM, separately. The demoer's first paint is the cold one (the
-            # binary and the chunks are not in any cache yet); every later navigation is
-            # the warm one. A single median hides a 20x difference between them.
+            # Cold and warm reported separately; a single median hides the gap.
             lines.append(f"  local first paint (`odon --check`, {len(o.local_ms)} runs):")
             lines.append(f"    cold (run 1)     {o.local_ms[0]:8.1f} ms")
             if len(o.local_ms) > 1:

@@ -1,14 +1,13 @@
 """Low-level zarr v3 store + NGFF group primitives (vendored from tilefusion io/zarr.py).
 
-Vendored, NOT imported: importing ``tilefusion`` runs its heavy ``__init__`` (numba's
-threading-layer pin, GPU/``cupy`` probes, ``basicpy``), which would make SquidXplorer fail to
-install/run on a machine without those. ``create_array`` here is a thin tensorstore-config
-wrapper (the substantive reuse); the group writers are plain ``zarr.json`` JSON.
+Vendored, not imported: importing tilefusion runs its heavy __init__ (numba threading-layer
+pin, GPU/cupy probes, basicpy), which would make SquidXplorer fail to install/run on a machine
+without those.
 
 Two node kinds in an OME-NGFF v0.5 / zarr-v3 store:
-  * arrays  — created by ``create_array`` (tensorstore writes the array ``zarr.json`` + chunks)
-  * groups  — plain ``zarr.json`` with ``node_type: group`` + optional ``attributes.ome``,
-              written by ``write_group`` (plate / well / row / field-image groups).
+  * arrays — created by create_array (tensorstore writes the array zarr.json + chunks)
+  * groups — plain zarr.json with node_type: group + optional attributes.ome, written by
+             write_group (plate / well / row / field-image groups)
 """
 
 from __future__ import annotations
@@ -20,8 +19,8 @@ from typing import Any, Optional, Sequence
 import numpy as np
 import tensorstore as ts
 
-# Full-res arrays are chunked to this per-plane tile so a viewer reads a region without
-# pulling the whole (Y, X) plane; downsample levels are smaller so they clamp to their shape.
+# full-res arrays chunked to this per-plane tile so a viewer reads a region without pulling
+# the whole (Y, X) plane
 _CHUNK_YX = 1024
 
 
@@ -35,10 +34,8 @@ def create_array(
 ) -> ts.TensorStore:
     """Create a zarr v3 array at *path* (blosc-zstd) and return an open tensorstore handle.
 
-    Shape is 5-D ``(t, c, z, y, x)`` (Squid canonical order). ``chunk`` defaults to one
-    ``(1, 1, 1, <=1024, <=1024)`` tile; every chunk dim is clamped into ``[1, shape_i]`` so
-    tiny arrays (e.g. 4x4 test frames) and odd shapes are always valid. ``delete_existing``
-    makes a rewrite idempotent (a rerun overwrites cleanly).
+    Shape is 5-D (t, c, z, y, x). chunk defaults to one (1, 1, 1, <=1024, <=1024) tile, each
+    dim clamped into [1, shape_i] so tiny/odd shapes stay valid.
     """
     shape = tuple(int(s) for s in shape)
     if chunk is None:
@@ -69,8 +66,7 @@ def create_array(
             "dimension_names": ["t", "c", "z", "y", "x"],
         },
     }
-    # create (overwriting any prior store so a rerun is idempotent). delete_existing may not be
-    # combined with open=True, and create already returns an open, writable handle.
+    # overwrites any prior store so a rerun is idempotent
     return ts.open(config, create=True, delete_existing=True).result()
 
 
@@ -80,15 +76,11 @@ def write_array(store: ts.TensorStore, data: np.ndarray) -> None:
 
 
 def write_group(path, ome: Optional[dict] = None, *, attributes: Optional[dict] = None) -> None:
-    """Write a zarr v3 group ``zarr.json`` at *path*, with optional ``attributes.ome``.
+    """Write a zarr v3 group zarr.json at *path*, with optional attributes.ome.
 
-    A bare group (``ome=None``) is a structural node (plate row); an ``ome`` payload carries
-    the plate / well / multiscales+omero metadata that ndviewer and ome-zarr readers consume.
-
-    ``attributes`` is merged in BESIDE ``ome``, not inside it. The one caller is the plate
-    contract stamp (``squidxplorer.contract.contract_stamp``): ``attributes.ome`` is OME's namespace
-    and is what ``ome-zarr-models`` validates, so a private SquidXplorer key goes next to it rather
-    than in it. Zarr attributes are free-form, so a reader that does not know the key ignores it.
+    A bare group (ome=None) is a structural node; an ome payload carries the plate / well /
+    multiscales+omero metadata. attributes is merged in beside ome, not inside it, since
+    attributes.ome is OME's own namespace.
     """
     path = Path(path)
     path.mkdir(parents=True, exist_ok=True)

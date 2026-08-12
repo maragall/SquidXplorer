@@ -1,36 +1,5 @@
-"""ONE declaration, every consumer. The cost of adding an operator, pinned.
-
-The audit this file answers found that adding one operator touched six files across five
-registries that already disagreed, and that ``_engine.Operator`` — the record that IS the good
-abstraction — was read by almost nobody. Both halves are closed, and prose is not proof, so each
-test below registers an operator in exactly ONE call and then asks a DIFFERENT CONSUMER a question
-it can only answer if it read the declaration.
-
-The rule these tests enforce, stated once:
-
-    the ONLY edit is the ``add_projector`` / ``add_region_operator`` call.
-
-Nothing in ``squidxplorer`` is touched, no card is added, no allowlist, no dict. Every assertion below
-is an OBSERVABLE OUTCOME — a widget that exists, a run that yields pixels, a CLI parameter that
-validates, a menu item with a label — never "a dict has a key". A test that asserted membership
-would pass on the state this change was made to remove: there were two dicts, and a name in one of
-them was invisible to half the application.
-
-WHY A REGION OPERATOR IS HALF OF THIS FILE. It is the case that could not be done before. Region
-operators lived in ``_stitch._REGION_OPERATORS`` with a ``_REGION_REQUIRES`` sidecar and no
-``produces``, no ``params`` and no ``consumes`` column at all, so:
-
-  * ``squidxplorer.operator_available("stitch")`` answered ``(False, "unknown projector 'stitch'")``;
-  * a region operator's parameters were undeclared ``**kwargs`` that no UI could enumerate and the
-    CLI could not check;
-  * the generic panel refused every region operator by kind.
-
-They are entries in the one table now, declaring ``consumes={"fov"}``, so every test here runs
-against both kinds.
-
-The registry is restored after each test by the autouse ``_restore_operator_registries`` fixture in
-``conftest.py``, which is why nothing here has a teardown.
-"""
+"""ONE declaration, every consumer: each test registers an operator in exactly one call and then
+asks a different consumer a question it can only answer if it read the declaration."""
 
 from __future__ import annotations
 
@@ -55,21 +24,15 @@ def qapp():
     yield app
 
 
-# ==============================================================================================
-# THE ONE EDIT
-# ==============================================================================================
-
 PLANE_OP_NAME = "declared_plane_op"
 REGION_OP_NAME = "declared_region_op"
 
-#: What the plane operator adds to every plane, unless a run says otherwise. Chosen non-zero and
-#: non-default-looking so "the parameter reached the pixels" is decidable from the pixels.
+# Non-zero and non-default-looking so "the parameter reached the pixels" is decidable from them.
 PLANE_DEFAULT_OFFSET = 11
 REGION_DEFAULT_FILL = 7
 
 
 def _plane_op_factory(*, offset: int = PLANE_DEFAULT_OFFSET, gain: float = 1.0):
-    """The FACTORY ``params=`` makes of the registered object. Adds *offset* to every plane."""
     def _operator(planes):
         out = None
         for plane in planes:                      # streams; never materialises the stack
@@ -92,7 +55,6 @@ def _region_op_factory(*, fill: int = REGION_DEFAULT_FILL):
 
 @pytest.fixture
 def declared_operators():
-    """THE ONLY EDIT, both kinds. Two calls, in a test file, and nothing else anywhere."""
     s.add_projector(
         PLANE_OP_NAME, _plane_op_factory,
         params=(Param("offset", PLANE_DEFAULT_OFFSET, "counts added to every plane"),
@@ -111,12 +73,9 @@ def reader(squid_dataset):
     return s.open_reader(str(root))
 
 
-# ==============================================================================================
 # CONSUMER 1: the engine — it runs, plate-scope and region-scope, at declared parameters
-# ==============================================================================================
 
 def test_it_runs_plate_scope_and_the_declared_default_is_in_the_pixels(declared_operators, reader):
-    """Whole-dataset run: every region comes back, and the operator's own default reached the data."""
     out = dict(((region, fov), image)
                for region, fov, image in s.project_plate(reader, n_fovs=1,
                                                          projector=PLANE_OP_NAME))
@@ -129,7 +88,6 @@ def test_it_runs_plate_scope_and_the_declared_default_is_in_the_pixels(declared_
 
 
 def test_it_runs_region_scope_and_touches_only_that_region(declared_operators, reader):
-    """Region-scope run: `regions=[one]` is the scope every GUI run selector resolves to."""
     one = reader.metadata["regions"][0]
     seen = {region for region, _fov, _img in
             s.project_plate(reader, n_fovs=1, projector=PLANE_OP_NAME, regions=[one])}
@@ -138,9 +96,7 @@ def test_it_runs_region_scope_and_touches_only_that_region(declared_operators, r
 
 
 def test_a_parameter_the_run_names_reaches_the_pixels(declared_operators, reader):
-    """`params=` is not decoration: a value that only reaches the console line is the defect this
-    declaration was added to end (measured at 57 labels vs 44 when the preview branch dropped
-    `operator_kwargs`)."""
+    """A value must reach the pixels, not just the console line."""
     one = reader.metadata["regions"][0]
 
     def _run(**kwargs):
@@ -165,8 +121,7 @@ def test_the_region_operator_runs_plate_scope_and_region_scope(declared_operator
 
 
 def test_the_region_operators_declared_parameter_is_applied(declared_operators, reader):
-    """A region operator could not declare a parameter at all before; its kwargs were unchecked
-    `**kwargs`. It is the same `params=` seam as every other operator now."""
+    """Same `params=` seam as any other operator; a region operator's kwargs used to be unchecked."""
     one = reader.metadata["regions"][0]
     _region, _fov, image = next(iter(
         s.stitch_plate(reader, operator=REGION_OP_NAME, regions=[one], fill=42)))
@@ -175,19 +130,17 @@ def test_the_region_operators_declared_parameter_is_applied(declared_operators, 
 
 
 def test_it_is_saved_to_a_plate_with_no_edit_to_the_writer(declared_operators, reader, tmp_path):
-    """The SAVE path, not just preview. `write_plate` dispatches on the declaration."""
+    """The SAVE path, not just preview: `write_plate` dispatches on the declaration."""
     manifest = s.write_plate(reader, tmp_path / "out.hcs", projector=PLANE_OP_NAME, n_fovs=1,
                              operator_kwargs={"offset": 3})
 
     assert int(manifest.get("n_fields_written") or 0) > 0
 
 
-# ==============================================================================================
 # CONSUMER 2: the CLI
-# ==============================================================================================
 
 def test_the_cli_accepts_the_name_and_checks_the_declared_parameters(declared_operators):
-    """`--projector <name> --param <declared>=v` validates; an undeclared one is refused BY NAME."""
+    """`--projector <name> --param <declared>=v` validates; an undeclared one is refused by name."""
     from squidxplorer._cli import ProcessParameters
 
     params = ProcessParameters(input_folder=".", projector=PLANE_OP_NAME, param=["offset=5"])
@@ -198,7 +151,6 @@ def test_the_cli_accepts_the_name_and_checks_the_declared_parameters(declared_op
 
 
 def test_the_cli_help_lists_the_operator_with_its_declared_defaults(declared_operators):
-    """`--help` is a consumer too: an operator nobody can discover is not reachable."""
     from squidxplorer._cli import _operator_catalogue
 
     catalogue = _operator_catalogue()
@@ -213,13 +165,11 @@ def test_the_cli_names_a_region_operator_too(declared_operators):
                              projector=REGION_OP_NAME).projector == REGION_OP_NAME
 
 
-# ==============================================================================================
 # CONSUMER 3: the command surface (what an agent or script drives the app with)
-# ==============================================================================================
 
 def test_list_operators_describes_it_from_the_declaration(declared_operators):
-    """Every column of the row is a declaration read off the record, so a new operator arrives in
-    `ops list` fully described. The region operator used to get three of them hardcoded."""
+    """Every column of the row is read off the declaration, so a new operator arrives fully
+    described in `ops list`."""
     from squidxplorer._command import CommandBus, EngineExecutor, ListOperators
 
     bus = CommandBus(EngineExecutor())
@@ -233,13 +183,11 @@ def test_list_operators_describes_it_from_the_declaration(declared_operators):
     assert rows[REGION_OP_NAME]["consumes"] == ["fov"]
 
 
-# ==============================================================================================
 # CONSUMER 4: the desktop GUI — the list, and the widgets
-# ==============================================================================================
 
 def test_the_gui_offers_it_in_the_operator_menu_with_no_card(declared_operators, qapp):
-    """The window's 'From their declaration' submenu is built off the registry, so an operator
-    added anywhere — including in somebody else's installed package — appears in it."""
+    """The 'From their declaration' submenu is built off the registry, so an operator added
+    anywhere — including in an installed plugin package — appears in it."""
     import squidxplorer._viewer as V
 
     win = V.PlateWindow(None)
@@ -252,8 +200,7 @@ def test_the_gui_offers_it_in_the_operator_menu_with_no_card(declared_operators,
 
 
 def test_its_params_become_widgets_seeded_at_the_declared_defaults(declared_operators, qapp):
-    """One widget per declared `Param`, chosen from the type of its default, seeded at it. An
-    untouched panel must launch what the operator ships with, or it is a second set of defaults."""
+    """One widget per declared `Param`, chosen from the type of its default, seeded at it."""
     from squidxplorer._param_panel import GenericOperatorPanel, panel_refusal
     from tests.test_op_panels import _Host
 
@@ -266,9 +213,8 @@ def test_its_params_become_widgets_seeded_at_the_declared_defaults(declared_oper
 
 
 def test_a_region_operator_that_declares_params_gets_a_panel_too(declared_operators, qapp):
-    """The case that was refused by KIND until the tables were one. `stitch` still has no generic
-    panel — because it declares no params, which is a fact about `stitch` and not about region
-    operators."""
+    """`stitch` still has no generic panel because it declares no params — a fact about `stitch`,
+    not about region operators."""
     from squidxplorer._param_panel import GenericOperatorPanel, panel_refusal
     from tests.test_op_panels import _Host
 
@@ -283,8 +229,7 @@ def test_a_region_operator_that_declares_params_gets_a_panel_too(declared_operat
 
 
 def test_the_gui_run_path_dispatches_it_to_the_right_engine_loop(declared_operators, reader):
-    """`_OperatorWorker` picks `project_plate` or `stitch_plate` off `is_region_operator`, which is
-    the declaration. It used to be a membership test against the table that no longer exists."""
+    """`_OperatorWorker` picks `project_plate` or `stitch_plate` off `is_region_operator`."""
     from squidxplorer._workers import _OperatorWorker
 
     meta = reader.metadata

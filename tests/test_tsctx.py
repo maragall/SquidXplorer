@@ -1,21 +1,13 @@
 """The TensorStore reads share one bounded context and one bounded pool of handles.
 
-Gap 2 of the three-viewers review (Hongquan, 2026-07-28). Verified against HEAD and found worse
-than reported: the note counted three ``ts.open`` sites, there were seven, and ``ts.Context``,
-``cache_pool`` and ``total_bytes_limit`` appeared ZERO times in the repo.
+`_ComputedPlateWorker._read` used to open a brand new store per well per pyramid level, called
+twice per well, so a 1536-well plate did 3072 fresh opens, each allocating its own private cache.
+These tests pin the two properties that fix it, deliberately orthogonal: a byte cap with unbounded
+handles still exhausts descriptors on a scrub, and a handle cap with no byte cap still lets one
+big read blow the footprint.
 
-The measured cost was on the plate scrub. ``_ComputedPlateWorker._read`` opened a brand new store
-per well per pyramid level, called twice per well, so a 1536-well plate did 3072 fresh opens, each
-allocating its own private cache. These tests pin the two properties that fixes it, and they are
-deliberately orthogonal because neither alone is sufficient: a byte cap with unbounded handles
-still exhausts descriptors on a scrub, and a handle cap with no byte cap still lets one big read
-blow the footprint.
-
-The byte limit comes from ``_budget.cache_budget()``, NOT from record-zstack-viewer's hardcoded
-192 MB. That is the one deliberate divergence from the design being ported, and it is asserted
-below so nobody "simplifies" it back to a constant: ``_budget`` derives from AVAILABLE memory with
-a floor, a ceiling and an env override, and argues that a constant "encodes an assumption about a
-machine it has never seen".
+The byte limit comes from `_budget.cache_budget()`, not a hardcoded constant — asserted below so
+nobody "simplifies" it back to one.
 """
 from __future__ import annotations
 
@@ -51,14 +43,12 @@ def test_the_context_is_one_object_for_the_whole_process():
 
 
 def test_the_byte_limit_comes_from_the_measured_budget_not_a_constant():
-    """The one deliberate divergence from the ported design. Do not replace with a literal."""
     limit = cache_budget()
     assert limit > 0
     assert _tsctx.cache_budget is cache_budget, "the context stopped using the measured budget"
 
 
 def test_handles_are_reused_rather_than_reopened(tmp_path):
-    """The actual bug: the plate scrub reopened a store per well per level."""
     p = tmp_path / "a.zarr"
     _write_store(p)
     cache = _tsctx.HandleCache()
@@ -94,11 +84,7 @@ def test_the_pool_is_least_recently_used_not_arbitrary(tmp_path):
 
 
 def test_concurrent_first_opens_yield_one_handle(tmp_path):
-    """_ComputedPlateWorker, _LoupeWorker and the tile fetcher all read off the GUI thread.
-
-    The four handle dicts this replaces were plain dicts mutated from QThreads with no lock. The
-    open happens inside the lock so a race on a cold miss opens once, not once per thread.
-    """
+    """The open happens inside the lock so a race on a cold miss opens once, not once per thread."""
     p = tmp_path / "race.zarr"
     _write_store(p)
     cache = _tsctx.HandleCache()
@@ -126,5 +112,4 @@ def test_the_plate_scrub_goes_through_the_pool():
 
     src = inspect.getsource(_viewer._ComputedPlateWorker._read)
     assert "HANDLES.get" in src, "the plate scrub stopped using the shared pool"
-    # a CALL, not a mention: the method's comment names ts.open to explain what it replaced.
     assert "ts.open(" not in src, "the plate scrub opens stores directly again (3072 on a 1536wp)"

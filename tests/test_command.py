@@ -1,7 +1,6 @@
-"""The ONE command surface: named, declarative, serialisable, and never raising into a caller.
+"""The ONE command surface: named, declarative, serialisable, never raising into a caller.
 
-Headless — no Qt. The GUI's half of the same surface is tested in ``tests/test_gui_commands.py``,
-and the fact that both are driven by the SAME commands is the point of the layer.
+Headless, no Qt. The GUI's half of the same surface is tested in tests/test_gui_commands.py.
 """
 
 from __future__ import annotations
@@ -46,11 +45,7 @@ def open_bus(squid_dataset):
     return b
 
 
-# --- commands are DATA -------------------------------------------------------------------------
-
 def test_a_command_survives_a_round_trip_through_plain_data():
-    """The whole reason a command is a model and not a method call: something outside this process
-    — an agent, a stored workflow, a replay — must be able to say it."""
     cmd = RunOperator(operator="mip", regions=["B2", "B3"], save=False)
     payload = json.loads(json.dumps(cmd.model_dump()))
     again = parse_command(payload)
@@ -69,8 +64,7 @@ def test_an_unknown_command_is_refused_by_name_and_lists_what_exists(bus):
 
 
 def test_a_misspelled_field_is_refused_rather_than_silently_ignored(bus):
-    """``region`` (singular) is the plausible guess an agent makes. Ignoring it would run the
-    WHOLE PLATE instead of one well — hours of compute from a typo."""
+    # "region" (singular) is a plausible typo; ignoring it would run the WHOLE PLATE, not one well.
     r = bus.execute({"kind": "run_operator", "operator": "mip", "region": "B2"})
     assert r.status == "refused" and r.refusal == BAD_COMMAND
     assert "region" in r.message
@@ -95,15 +89,11 @@ def test_every_command_kind_is_registered_and_carries_its_discriminator():
     }
     for kind, model in COMMANDS.items():
         assert model.kind == kind
-        # every command round-trips through plain data — that is what "serialisable" means
         assert parse_command(samples[kind].model_dump()).kind == kind
 
 
-# --- every command returns a RESULT, and the bus never raises -----------------------------------
-
 def test_the_bus_never_raises_even_when_the_executor_does():
-    """The GUI calls this from a Qt slot, where a raised exception is SWALLOWED by Qt and the user
-    sees a button that did nothing."""
+    # a Qt slot swallows a raised exception; the user just sees a button that did nothing.
 
     class Exploding:
         surface = "exploding"
@@ -127,8 +117,6 @@ def test_an_executor_that_forgets_to_return_a_result_is_refused_not_believed():
 
 
 def test_a_command_this_surface_cannot_express_is_a_named_refusal(bus):
-    """The honest edge of the migration. The headless engine has no run to stop, and it says so
-    by name rather than pretending."""
     r = bus.execute(StopRun())
     assert r.status == "refused" and r.refusal == NOT_SUPPORTED_HERE
     assert "engine" in r.message
@@ -149,8 +137,6 @@ def test_raise_for_refusal_is_opt_in_for_scripts(bus):
     with pytest.raises(RuntimeError, match="no_acquisition"):
         bus.execute(Describe()).raise_for_refusal()
 
-
-# --- introspection: what an agent asks first ----------------------------------------------------
 
 def test_list_operators_answers_off_the_engine_registry_not_a_card_table(bus):
     r = bus.execute(ListOperators())
@@ -192,11 +178,8 @@ def test_describe_names_the_regions_channels_and_scopes_a_run_could_target(open_
     assert list(_run_scope.RUN_SCOPES) == d["scopes"]
 
 
-# --- the target, resolved by the ONE existing owner ----------------------------------------------
-
 def test_nothing_selected_means_everything_the_established_convention(open_bus, monkeypatch):
-    """``scope='selected wells'`` with nothing selected IS the whole dataset — byte-for-byte the
-    behaviour that existed before a selector existed."""
+    # scope='selected wells' with nothing selected IS the whole dataset.
     seen = {}
     import squidxplorer._command as mod
 
@@ -219,7 +202,7 @@ def test_an_explicit_region_list_wins_over_the_scope(open_bus, monkeypatch):
 
 
 def test_an_empty_region_list_is_refused_and_never_widened_to_everything(open_bus):
-    """Running 1536 wells because a caller sent ``[]`` is hours of compute nobody asked for."""
+    # running 1536 wells because a caller sent [] is hours of compute nobody asked for.
     r = open_bus.execute(RunOperator(operator="mip", regions=[]))
     assert r.refusal == EMPTY_SCOPE
 
@@ -237,8 +220,7 @@ def test_an_invented_scope_is_refused_and_lists_the_real_ones(open_bus):
 
 
 def test_the_selection_drives_the_selected_wells_scope(open_bus, monkeypatch):
-    """The headless surface resolves 'selected wells' through the SAME
-    ``_run_scope.resolve_run_scope`` the GUI does — there is not a second resolver."""
+    # headless resolves 'selected wells' through the same _run_scope.resolve_run_scope as the GUI.
     seen = {}
     monkeypatch.setattr("squidxplorer.project_plate",
                         lambda reader, **kw: (seen.update(kw), iter(()))[1])
@@ -263,8 +245,6 @@ def test_saving_headless_without_an_output_folder_is_refused_not_guessed(open_bu
     assert r.refusal == BAD_COMMAND and "output_folder" in r.message
 
 
-# --- the run actually runs, and is measured -----------------------------------------------------
-
 def test_a_preview_run_computes_every_well_and_writes_nothing(open_bus, tmp_path):
     before = set(p.name for p in tmp_path.iterdir())
     r = open_bus.execute(RunOperator(operator="mip", scope=_run_scope.SCOPE_PLATE))
@@ -282,14 +262,7 @@ def test_a_saved_run_returns_the_manifest(open_bus, tmp_path):
 
 
 def test_a_cancelled_run_counts_fields_against_fields_and_wells_against_wells(open_bus, tmp_path):
-    """"stopped after 12 of 4 target(s)" — a numerator above its denominator, on the run summary.
-
-    ``landed`` counts FIELDS and ``n_targets`` counts WELLS, and this line put one over the other.
-    It is the same fields-over-wells confusion ``_cli``'s completion line printed as
-    "16/4 wells written", in the sentence the GUI shows. The denominator here must be the fields
-    the run owed (which the save path knows, from the manifest) and the wells must be named as
-    wells.
-    """
+    # landed counts FIELDS and n_targets counts WELLS; the summary must not divide one by the other.
     bus = CommandBus(EngineExecutor(str(open_bus.executor._path), stop=lambda: True))
     r = bus.execute(RunOperator(operator="mip", scope=_run_scope.SCOPE_PLATE, save=True,
                                 output_folder=str(tmp_path), n_fovs=1))
@@ -307,19 +280,7 @@ def test_a_cancelled_run_counts_fields_against_fields_and_wells_against_wells(op
 
 
 def test_a_preview_runs_with_the_parameters_it_was_given_not_the_defaults(squid_dataset):
-    """The parameter must reach the PIXELS, not just the console line and the manifest.
-
-    ``do_run_operator``'s preview branch called ``project_plate`` without ``operator_kwargs``
-    while its save branch passed ``operator_kwargs=cmd.parameters or None`` — the same omission
-    ``_workers._OperatorWorker`` was measured with and fixed for. Measured on sim_5d_2x2_t3,
-    region A1, ``spot``: preview at defaults found {52, 55, 59, 60} objects per well and preview
-    at ``min_area_px=4000`` found the SAME {52, 55, 59, 60}, while the save of that same command
-    found {30, 39, 45, 47}. A preview whose answer cannot change with the parameter is not a
-    preview of anything.
-
-    Pinned here with an operator that paints its parameter into the plane, so the assertion reads
-    the value the run actually used rather than a count that could coincide.
-    """
+    # a preview must run with the given parameters, not the defaults: the pixels must differ.
     import numpy as np
 
     from squidxplorer import add_projector
@@ -356,12 +317,8 @@ def test_a_preview_runs_with_the_parameters_it_was_given_not_the_defaults(squid_
 def test_every_run_is_measured_and_the_result_carries_the_metrics(open_bus):
     r = open_bus.execute(RunOperator(operator="mip", scope=_run_scope.SCOPE_PLATE))
     m = r.data["metrics"]
-    # `>= 0` is guaranteed by `_measure.py`'s own `max(0.0, perf_counter() - t0)`, so it asserted
-    # the production floor back at itself. A run whose clock never started reports exactly 0.0.
     assert m["operator"] == "mip"
     assert m["seconds"] > 0, "the run was measured as taking no time at all"
-    # `in ("ok", "partial")` accepted "produced nothing" alongside success; only "failed" could
-    # fail it. A plate-wide mip over the fixture completes every well.
     assert m["outcome"] == "ok", m
     assert m["target"], "a duration with no target named is not comparable to anything"
 
@@ -372,8 +329,7 @@ def test_the_result_names_the_target_set_it_resolved(open_bus):
 
 
 def test_a_run_that_produced_nothing_is_partial_not_ok(open_bus, monkeypatch):
-    """A run where every well raised still returns politely — the per-well fault isolation is what
-    keeps one bad file from aborting a plate. It is not a success."""
+    # per-well fault isolation returns politely even when every well raised; that is not a success.
     monkeypatch.setattr("squidxplorer.project_plate", lambda reader, **kw: iter(()))
     r = open_bus.execute(RunOperator(operator="mip", scope=_run_scope.SCOPE_PLATE))
     assert r.data["metrics"]["outcome"] == "partial"

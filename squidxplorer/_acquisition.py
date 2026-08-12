@@ -1,18 +1,7 @@
 """Physical / scalar acquisition metadata from ``acquisition.yaml`` (the single format).
 
-``acquisition.yaml`` is Squid's authoritative metadata: the objective pixel size ALREADY
-computed for the objective + camera binning (so no fragile sensor/mag recompute), the
-wellplate format, and the z-stack / time-series parameters. It is **required**.
-
-The legacy flat ``acquisition parameters.json`` is intentionally NOT supported: every current
-Squid acquisition writes ``acquisition.yaml``, so a JSON fallback has no real input — it would
-be dead code carrying a permanent second-format test burden. One format, required, loud on
-absence. (If a genuinely pre-yaml dataset ever resurfaces, convert it to ``acquisition.yaml``
-up front rather than adding a second read path here.)
-
-``coordinates.csv`` is not read *here* — this module owns the scalar/physical metadata only.
-Per-FOV stage positions moved into ``reader.load_fov_positions`` (IMA-187), which needs the
-filename-derived FOV index to key rows against and so belongs beside the reader.
+The legacy flat ``acquisition parameters.json`` is not supported as a metadata source; per-FOV
+stage positions live in ``reader.load_fov_positions``.
 """
 
 from __future__ import annotations
@@ -27,21 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 
 def load_acquisition_metadata(root) -> dict:
-    """Return scalar acquisition metadata from ``acquisition.yaml``.
-
-    Keys (all from acquisition.yaml; the reader cross-checks n_z/n_t against the filenames /
-    timepoint folders and warns on disagreement):
-        pixel_size_um    - object-space pixel size (µm), binning-aware
-        n_z_declared     - Nz as recorded
-        dz_um            - z-step (µm)
-        n_t_declared     - Nt as recorded
-        wellplate_format - e.g. "24 well plate"
-
-    Raises
-    ------
-    FileNotFoundError
-        If ``acquisition.yaml`` is absent — it is the single supported metadata format.
-    """
+    """Return scalar acquisition metadata from ``acquisition.yaml``; raises when it is absent."""
     root = Path(root)
     path = root / "acquisition.yaml"
     if not path.exists():
@@ -72,22 +47,7 @@ def load_acquisition_metadata(root) -> dict:
 
 
 def load_objective_na(root) -> Optional[float]:
-    """Objective numerical aperture, from ``acquisition parameters.json``. ``None`` if unstated.
-
-    NOT the JSON fallback this module refuses above. That refusal is about a SECOND SOURCE for
-    fields ``acquisition.yaml`` already carries; the NA is not one of them. Squid's own writer
-    (``control/acquisition_yaml_loader.py``, and every yaml on this machine) puts
-    ``name / magnification / pixel_size_um / camera_binning`` in the ``objective:`` block and no
-    aperture at all, while ``acquisition parameters.json`` records
-    ``objective: {magnification, NA, tube_lens_f_mm, name}``. So this file is the ONLY place the
-    NA is written, and reading it here is what stops a caller from going to a whole second
-    acquisition parser to get one number.
-
-    Returns ``None`` — never a default — when the file is absent, unparseable, or states no NA.
-    An NA is the width of the PSF; guessing one would produce a confidently wrong deconvolution,
-    so the refusal belongs to the caller that knows what the number is for
-    (:func:`squidxplorer._decon.optics_for_channel`).
-    """
+    """Objective NA from ``acquisition parameters.json`` (the only place it is written), or None."""
     path = Path(root) / "acquisition parameters.json"
     try:
         params = json.loads(path.read_text())
@@ -102,42 +62,8 @@ def load_objective_na(root) -> Optional[float]:
     return na if na > 0 else None
 
 
-# ══════════════════════════════════════════════════════════════════════════════════════════
-# The typed acquisition model.
-#
-# Everything above this line answers "what does acquisition.yaml say". Everything below
-# answers "what IS this acquisition" — the whole of `reader.metadata`, validated ONCE at the
-# reader boundary instead of being trusted at ~96 separate call sites.
-#
-# Why this exists. `reader.metadata` was a raw dict. pydantic was already a dependency but
-# was used only on the COMMAND LINE (`_cli.ProcessParameters`), so we validated the thing a
-# human typed and not the thing a microscope wrote. A missing key did not raise; it surfaced
-# as a blank render or an opaque failure several layers away. `pixel_size_um` is the
-# documented case — `_placement._require_pixel_size` is a hand-written guard for exactly one
-# field, which is what a schema looks like before you write it down.
-#
-# Two deliberate design choices:
-#
-# * `Acquisition` is ALSO a Mapping. The dict is read in ~96 places; a flag-day rewrite of
-#   all of them could not be kept green commit-by-commit, and a big-bang migration of the
-#   thing every render depends on is exactly the change you cannot review. Subscript access
-#   stays, call sites move to attributes incrementally, and the validation benefit lands on
-#   commit one for every consumer at once.
-# * The optional fields stay Optional and get LOUD accessors. `pixel_size_um` is genuinely
-#   absent on some acquisitions, so modelling it required would refuse datasets that open
-#   fine today. Modelling it Optional and letting `None` flow is how the mosaic silently
-#   collapsed. `require_pixel_size_um()` is the third answer: honest about absence, fatal at
-#   the point of use, and it names the field and the file to fix.
-# ══════════════════════════════════════════════════════════════════════════════════════════
-
-
 class Channel(BaseModel):
-    """One channel of the acquisition, keyed on its canonical (filename) name.
-
-    Mirrors what ``_channels.resolve_channels`` produces. ``display_color`` is required, not
-    optional: ``resolve_channels`` already REFUSES a channel it cannot colour rather than
-    handing back a placeholder white, and this model must not quietly re-open that door.
-    """
+    """One channel of the acquisition, keyed on its canonical (filename) name."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -151,27 +77,12 @@ class Channel(BaseModel):
     """Hex colour, e.g. ``#1FFF00``. Never a placeholder — see :func:`resolve_channels`."""
 
     exposure_time_ms: Optional[float] = None
-    """Camera exposure (ms) when the channel YAML records one.
-
-    THIS FIELD WAS CALLED ``ex`` AND DOCUMENTED AS "excitation wavelength (nm)", while
-    ``_channels._extract_exposure`` filled it with ``exposure_time_ms``. Nothing outside the
-    tests read it, so the contradiction never showed up as a wrong picture — but it is exactly
-    the kind of double-booked name that :attr:`excitation_nm` below would have collided with.
-    Renamed to what it holds."""
+    """Camera exposure (ms) when the channel YAML records one."""
 
     excitation_nm: Optional[float] = None
-    """Excitation wavelength (nm), parsed from the channel name by ``_channels.excitation_nm``.
+    """Excitation wavelength (nm); ``None`` for a broadband channel, never a substitute."""
 
-    ``None`` for a broadband channel (``BF_LED_matrix_full``, ``DF_LED_matrix``), which is an
-    answer rather than a gap: a consumer that needs a wavelength must refuse, not substitute.
-    Deconvolution's PSF is derived from this (``_decon.OpticsParams.from_acquisition``); no
-    acquisition on this machine states an EMISSION wavelength anywhere, so the Stokes-shifted
-    emission stays an explicit estimate made in the optics layer and is not stored here as if
-    the instrument had reported it."""
-
-    # -- Mapping shim: `c["name"]` is written at many call sites; keep it working. -------
-    # Membership is tested against the module-level _CHANNEL_KEYS, never against
-    # `model_fields` — see the note above _ACQ_KEYS.
+    # Mapping shim: `c["name"]` is written at many call sites; keep it working.
     def __getitem__(self, key: str):
         if key not in _CHANNEL_FIELDSET:
             raise KeyError(key)
@@ -190,13 +101,12 @@ class Channel(BaseModel):
 class Acquisition(BaseModel):
     """The validated acquisition model — what ``reader.metadata`` returns.
 
-    Constructed once, at the reader boundary, from what the reader actually produces. Every
-    field below exists because a reader emits it; none were invented.
+    Also a Mapping, so the ~96 subscript call sites keep working while attribute access lands
+    incrementally; genuinely-optional fields have loud ``require_*`` accessors.
     """
 
-    # arbitrary_types_allowed: `dtype` is a real numpy dtype and must STAY one — consumers
-    # allocate against it. extra="forbid": a typo'd key (`pixel_size` for `pixel_size_um`)
-    # must be refused here, not stored and silently never read.
+    # arbitrary_types_allowed: `dtype` is a real numpy dtype and must stay one.
+    # extra="forbid": a typo'd key must be refused here, not stored and never read.
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True, frozen=True)
 
     regions: list[str]
@@ -206,9 +116,7 @@ class Acquisition(BaseModel):
     """``{region: [fov, ...]}``. Must cover every region — see the validator."""
 
     fov_positions_um: dict[tuple[str, int], tuple[float, float]]
-    """``{(region, fov): (x_um, y_um)}`` — stage MICROMETRES. ``{}`` when the acquisition
-    carries no usable positions, which degrades the mosaic to a single field (a documented
-    degradation, unlike a wrong-unit value: see ``_placement``'s silent-1000x note)."""
+    """``{(region, fov): (x_um, y_um)}`` — stage MICROMETRES; ``{}`` when unusable."""
 
     channels: list[Channel]
     """Acquisition channels, in C-axis order."""
@@ -220,15 +128,10 @@ class Acquisition(BaseModel):
     """The z level values themselves; ``len`` must equal *n_z*."""
 
     dz_um: Optional[float] = Field(default=None, ge=0)
-    """Z step in micrometres. Optional, and legitimately **0.0** on a single-plane acquisition
-    (``delta_z_mm: 0`` with ``nz: 1``), which is why the bound here is ``ge=0`` and not ``gt=0``
-    — an early draft used ``gt=0`` and correctly refused four of this repo's own fixtures.
-    A zero step is only meaningless once it is used as a z SCALE, so that is where it is
-    refused: :meth:`require_dz_um`."""
+    """Z step in micrometres; legitimately 0.0 on a single-plane acquisition (hence ge=0)."""
 
     pixel_size_um: Optional[float] = Field(default=None, gt=0)
-    """Object-space pixel size (µm), binning-aware, straight from ``acquisition.yaml``.
-    Optional; use :meth:`require_pixel_size_um` where it is load-bearing."""
+    """Object-space pixel size (µm), binning-aware; use :meth:`require_pixel_size_um` when load-bearing."""
 
     wellplate_format: Optional[str] = None
     """e.g. ``"24 well plate"``. Optional: an OME/NGFF store need not declare one."""
@@ -242,8 +145,6 @@ class Acquisition(BaseModel):
     n_t: int = Field(ge=1)
     """Timepoints. Folder/axis-derived, cross-checked against the declared Nt."""
 
-    # -- validators: refuse at the boundary what would otherwise mis-render far away -----
-
     @field_validator("dtype", mode="before")
     @classmethod
     def _as_dtype(cls, v):
@@ -253,8 +154,7 @@ class Acquisition(BaseModel):
     @field_validator("frame_shape", "z_levels", "regions", mode="before")
     @classmethod
     def _as_sequence(cls, v):
-        # `tuple(sample.shape)` arrives as a tuple of np.int64; pydantic coerces those fine,
-        # but a bare numpy array does not iterate into a tuple field, so normalise here.
+        # A bare numpy array does not iterate into a tuple field, so normalise here.
         return tuple(v) if isinstance(v, np.ndarray) else v
 
     @model_validator(mode="after")
@@ -273,15 +173,8 @@ class Acquisition(BaseModel):
             )
         return self
 
-    # -- loud accessors for the genuinely-optional fields --------------------------------
-
     def require_pixel_size_um(self) -> float:
-        """*pixel_size_um*, or raise naming the field and the file that supplies it.
-
-        Call this wherever a missing pixel size would produce a WRONG PICTURE rather than an
-        error: micrometre->pixel conversion, mosaic placement, physical scale on a layer.
-        Never substitute a default — a mosaic drawn at the wrong scale looks like data.
-        """
+        """*pixel_size_um*, or raise naming the field and the file that supplies it."""
         if self.pixel_size_um is None:
             raise ValueError(
                 "pixel_size_um is required here, but this acquisition has none. Without it "
@@ -292,11 +185,7 @@ class Acquisition(BaseModel):
         return float(self.pixel_size_um)
 
     def require_dz_um(self) -> float:
-        """*dz_um*, or raise naming the field.
-
-        A missing z step rendered as 1.0 makes an anisotropic stack look isotropic — on the
-        tissue set, dz 1.5µm against pixel 0.752µm, i.e. 2x squashed in z, with nothing said.
-        """
+        """*dz_um*, or raise naming the field."""
         if not self.dz_um:
             raise ValueError(
                 f"dz_um is required here, but this acquisition has dz_um={self.dz_um!r}. "
@@ -308,20 +197,13 @@ class Acquisition(BaseModel):
             )
         return float(self.dz_um)
 
-    # -- convenience that removes a repeated comprehension, not an abstraction -----------
-
     @property
     def channel_names(self) -> list[str]:
         """``[c.name for c in channels]`` — written out at a dozen call sites."""
         return [c.name for c in self.channels]
 
     def channel_index(self, name: str) -> int:
-        """Index of *name* in the acquisition's channel order, or raise naming it.
-
-        Deliberately has NO fallback. ``names.index(x) if x in names else 0`` is the exact
-        shape of the registration bug in ``_stitch``: it answers a question it could not
-        answer, with a value that is indistinguishable from a correct one.
-        """
+        """Index of *name* in the acquisition's channel order, or raise naming it (no fallback)."""
         names = self.channel_names
         if name not in names:
             raise KeyError(
@@ -329,10 +211,7 @@ class Acquisition(BaseModel):
             )
         return names.index(name)
 
-    # -- Mapping shim -------------------------------------------------------------------
-    # `reader.metadata["..."]` is written ~96 times. These keep every one of them working so
-    # the migration to attributes is incremental and each step stays green. Delete this
-    # block once the last subscript is gone.
+    # Mapping shim: keeps `reader.metadata["..."]` working; delete once the last subscript is gone.
 
     def __getitem__(self, key: str) -> Any:
         if key not in _ACQ_FIELDSET:
@@ -355,24 +234,15 @@ class Acquisition(BaseModel):
         return [(k, getattr(self, k)) for k in _ACQ_KEYS]
 
     def __iter__(self) -> Iterator[str]:      # type: ignore[override]
-        # Mapping iteration (so `dict(meta)` works). BaseModel.__iter__ yields (k, v) pairs;
-        # a dict built from THAT is right by accident and wrong for `for k in meta`.
+        # Mapping iteration (so `dict(meta)` works); BaseModel.__iter__ yields (k, v) pairs.
         return iter(_ACQ_KEYS)
 
     def __len__(self) -> int:
         return len(_ACQ_KEYS)
 
 
-# The field names, resolved ONCE at import.
-#
-# This is not a micro-optimisation, it is a bug fix. `model_fields` is a pydantic
-# CLASSPROPERTY that does real work on every access, so the first draft of the Mapping shim
-# above — which consulted it on every `meta["..."]` — was ~18x slower than the plain dict it
-# replaced (measured: 0.42us vs 0.023us per lookup). `reader.metadata` is read in the viewer's
-# paint and ingest paths, and that was enough to push Qt tests past their _drain_until
-# timeouts: test_viewer.py went from ~60s to ~110s and failed a DIFFERENT test on 2 of 3 runs,
-# which reads exactly like flakiness and was not. Membership is a frozenset, order comes from
-# the tuple, and neither touches pydantic at lookup time.
+# Field names resolved once at import: `model_fields` is a pydantic classproperty doing real
+# work per access, ~18x slower than these lookups on the viewer's paint path.
 _ACQ_KEYS: tuple[str, ...] = tuple(Acquisition.model_fields)
 _ACQ_FIELDSET = frozenset(_ACQ_KEYS)
 _CHANNEL_KEYS: tuple[str, ...] = tuple(Channel.model_fields)

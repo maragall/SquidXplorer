@@ -1,47 +1,4 @@
-"""Settings scope: which settings are global defaults, which are per-window, and who says so.
-
-WHAT WAS WRONG
---------------
-Every display setting was per-window by accident rather than by decision, and the one exception
-was hand-carried. ``RegionViewer`` took an ``initial_luts`` dict, and the ONLY caller that filled
-it was ``_open_roi_children``, which read the parent's layers itself and posted them down. Three
-consequences, and they compound:
-
-1. **The rule lived at the call sites.** Whether a new window inherited anything depended on which
-   line opened it. A second opening site (the plate's "Open view", a future gallery double-click, a
-   restored session) would have to remember to do the same read, and any that forgot produced a
-   window whose contrast disagreed with everything else for no stated reason.
-2. **There were no defaults at all.** Turning autofocus on, or hiding a channel, was a per-window
-   act repeated in every window forever. Julio's call, 2026-07-29: global default with a per-window
-   override, under the rule **settings that describe HOW you look are global defaults; settings
-   that describe WHAT you are looking at are per-window.**
-3. **A window could not say which state it was in.** With a default in the picture that is the
-   dangerous part: a global default that silently disagrees with what is on screen is worse than no
-   default at all. The same objection killed a silent fallback between coordinate sources and forced
-   the compact placement mode to label itself.
-
-WHAT IS PINNED HERE
--------------------
-* ``ViewDefaults`` is owned by ``ViewerManager``, not by a window: windows come and go, the registry
-  is what a default can outlive.
-* A new window reads the defaults ONCE, at construction. A later change to the default reaches the
-  NEXT window and never an already-open one -- asserted for a diverged window specifically, which
-  is the case where a retroactive write would destroy work the user did by hand.
-* **ONE contrast rule, not two.** The decision was written as two ("the global default for a window
-  opened from the plate, the parent's LUTs for an ROI child"); ``_SETTING_BASELINE["luts"] ==
-  "inherit"`` is both of them, because a plate-opened window's opener IS the default. Both halves
-  are asserted through the real ``ViewerManager`` path, including that an ROI child gets its
-  parent's contrast and NOT the global default when the two differ.
-* Divergence is EXPLICIT (the set of settings overridden in this window), not computed against
-  today's default. So changing a default cannot light a marker on a window nobody touched, and an
-  ROI child that inherited a diverged parent's contrast is not itself diverged.
-* Divergence is VISIBLE, in the window, with reset enabled only when there is something to reset.
-* One window's change never reaches another. "make default" is the only outward push, it is a
-  deliberate act, and it still leaves every open window alone.
-* The per-window settings (2D/3D, the region, z, time_point) have NO slot in the defaults object,
-  and asking for one is a ``KeyError`` that says why. A silence is easy to fill in by accident; a
-  raise is not.
-"""
+"""Settings scope: which settings are global defaults, which are per-window, and who owns each."""
 
 from __future__ import annotations
 
@@ -55,10 +12,8 @@ import sys  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 
-# The ONE guard in this file, and it is an ENVIRONMENT gate rather than a skipped assertion: PyQt5
-# is an optional extra (`.[gui]`), `squidxplorer._region_viewer` imports it at module scope, so without
-# it there is nothing here to test rather than something being waved past. Every GUI test file in
-# this suite gates the same way. Nothing below is conditional, marked, or xfailed.
+# Environment gate, not a skipped assertion: PyQt5 is an optional extra (`.[gui]`) imported at
+# module scope by `squidxplorer._region_viewer`.
 pytest.importorskip("qtpy")
 if "PySide6" in sys.modules or "PySide2" in sys.modules:
     pytest.skip(
@@ -79,13 +34,7 @@ from squidxplorer._region_viewer import (  # noqa: E402
 from .conftest import CH_IN_YAML, CH_NOT_IN_YAML, REGIONS  # noqa: E402
 from .test_viewer import _drain_until, qapp  # noqa: E402,F401  (fixture)
 
-# --------------------------------------------------------------------------------------
-# The rule itself, as data. No Qt: this half is a model and is tested as one.
-# --------------------------------------------------------------------------------------
-
-#: The settings Julio classified as PER-WINDOW. None of them may acquire a global default, because
-#: they describe WHAT you are looking at, and a default for that is a default for someone else's
-#: subject. Spelled in the codebase's own vocabulary (Squid's words for the physical dimensions).
+# Settings describing WHAT you're looking at; none may have a global default.
 PER_WINDOW = ("ndisplay", "region_id", "z_level", "time_point", "roi_bbox")
 
 
@@ -141,8 +90,7 @@ def test_a_windows_settings_are_a_private_copy_of_the_defaults():
 
 
 def test_setting_a_value_back_to_the_baseline_clears_the_override():
-    """The marker means "not what this window opened with", so it cannot survive the value going
-    back. A sticky marker is a lie in the same direction as no marker at all."""
+    """A sticky divergence marker after the value returns to baseline would be its own lie."""
     s = ViewSettings(ViewDefaults().snapshot())
     assert s.diverged == ()
     assert s.set("tenengrad_focus", True) is True
@@ -152,8 +100,7 @@ def test_setting_a_value_back_to_the_baseline_clears_the_override():
 
 
 def test_reset_goes_back_to_what_the_window_opened_with_not_to_a_later_default():
-    """An ROI child's baseline is its parent's contrast, which the global default never held. Reset
-    has to mean that baseline, or reset would silently retarget the child at the plate."""
+    """An ROI child's baseline is its parent's contrast, not the global default."""
     parent_luts = {CH_IN_YAML: {"clim": (7.0, 99.0), "cmap": "red"}}
     s = ViewSettings({"tenengrad_focus": False, "channel_visibility": {}, "luts": parent_luts})
 
@@ -166,8 +113,7 @@ def test_reset_goes_back_to_what_the_window_opened_with_not_to_a_later_default()
 
 
 def test_adopt_makes_the_current_values_the_new_baseline():
-    """After "make this the default" the window IS the default, so a marker still claiming
-    divergence would be the silent disagreement this affordance exists to stop."""
+    """After "make this the default" the window IS the default, so it must report no divergence."""
     s = ViewSettings(ViewDefaults().snapshot())
     s.set("tenengrad_focus", True)
     assert s.is_diverged()
@@ -177,14 +123,8 @@ def test_adopt_makes_the_current_values_the_new_baseline():
     assert s.baseline("tenengrad_focus") is True
 
 
-# --------------------------------------------------------------------------------------
-# The same rule through the REAL registry and REAL windows
-# --------------------------------------------------------------------------------------
-#
-# `napari_pane_stub` replaces the one seam that needs a GL context (`make_pane`, which is false
-# under QT_QPA_PLATFORM=offscreen and would send `_build` down its "napari unavailable" branch).
-# Everything below it is production code: the real ViewerManager, the real RegionViewer, the real
-# `_MosaicWorker`. napari's own rendering is not exercised here and never was under offscreen.
+# `napari_pane_stub` replaces only the one seam needing a GL context (`make_pane`); everything
+# below is otherwise production code against a real ViewerManager and RegionViewer.
 
 _LUT_A = {CH_IN_YAML: {"clim": (11.0, 111.0), "cmap": "red"},
           CH_NOT_IN_YAML: {"clim": (22.0, 222.0), "cmap": "green"}}
@@ -196,9 +136,8 @@ _LUT_B = {CH_IN_YAML: {"clim": (33.0, 333.0), "cmap": "red"},
 def manager(qapp, napari_pane_stub, squid_dataset):
     """A real ViewerManager over the real reader, with no PlateWindow in the way.
 
-    The windows this hands out set WA_DeleteOnClose, so close() only SCHEDULES deletion; the drain
-    and the collect happen HERE, with the app alive, rather than letting a Qt wrapper whose C++ half
-    is gone be collected in the middle of an unrelated later test.
+    Windows use WA_DeleteOnClose, so close() only schedules deletion; drain and collect happen
+    here, with the app alive, rather than in the middle of an unrelated later test.
     """
     from squidxplorer import open_reader
 
@@ -255,14 +194,13 @@ def test_a_new_window_inherits_the_current_defaults(qapp, manager):
 
 
 def test_an_roi_child_inherits_its_parents_contrast_not_the_global_default(qapp, manager):
-    """THE contrast rule. The default and the parent are deliberately different, so inheriting is
-    distinguishable from defaulting -- which is the whole assertion."""
+    """The default and the parent are deliberately different, so inheriting is distinguishable
+    from defaulting."""
     manager.defaults.set("luts", _LUT_A)
     parent = manager.open([REGIONS[0]])
     _loaded(qapp, parent)
 
-    # The user drags contrast in napari, which writes the LAYERS. That is why the parent is read
-    # live rather than out of its record: the layers are the only thing that knows the answer.
+    # Read live off the layers, not the record: napari writes contrast to the layer, not the record.
     for ch, lut in _LUT_B.items():
         parent._pane.mosaic.find("raw", ch).contrast_limits = lut["clim"]
 
@@ -270,11 +208,8 @@ def test_an_roi_child_inherits_its_parents_contrast_not_the_global_default(qapp,
                                parent_id=parent.window_id)
     assert child is not None
 
-    # Asserted field by field, not as one dict equality. What is inherited is CONTRAST and
-    # COLORMAP, and that is what this test is named for; a LUT record read off live layers also
-    # carries derived fields (``rgb``, the colormap reduced to one colour for the Minerva export)
-    # that say nothing about inheritance. Pinning the exact dict made every added field look like
-    # a contrast regression, which is a false alarm this test should not raise.
+    # Field by field, not by dict equality: a live LUT record also carries derived fields (e.g.
+    # `rgb`) unrelated to inheritance, so pinning the whole dict would false-alarm on those.
     inherited = child.settings.get("luts")
     assert set(inherited) == {CH_IN_YAML, CH_NOT_IN_YAML}
     for ch, expected in _LUT_B.items():
@@ -292,16 +227,16 @@ def test_an_roi_child_inherits_its_parents_contrast_not_the_global_default(qapp,
     assert _layer_clims(child) == {CH_IN_YAML: (33.0, 333.0), CH_NOT_IN_YAML: (44.0, 444.0)}, (
         "the inherited contrast never reached the child's layers")
 
-    # The OTHER half of the same rule: a window opened from the PLATE has no opener window, so the
-    # same "inherit" line hands it the global default. One rule, both origins.
+    # The other half of the same rule: a plate-opened window has no opener, so "inherit" hands it
+    # the global default.
     sibling = manager.open([REGIONS[1]])
     assert sibling.settings.get("luts") == _LUT_A, (
         "a plate-opened window inherited from somewhere; its opener is the default")
 
 
 def test_an_roi_child_takes_the_global_default_for_the_global_settings(qapp, manager):
-    """Only contrast inherits. Autofocus and channel visibility are global defaults for EVERY
-    window, ROI children included, which is what the classification says."""
+    """Only contrast inherits; autofocus and channel visibility are global defaults for every
+    window, ROI children included."""
     manager.defaults.set("tenengrad_focus", False)
     manager.defaults.set("channel_visibility", {CH_NOT_IN_YAML: True})
     parent = manager.open([REGIONS[0]])
@@ -324,7 +259,7 @@ def test_changing_a_setting_in_one_window_does_not_change_another(qapp, manager)
     _loaded(qapp, one)
     _loaded(qapp, two)
 
-    one._focus_default_chk.setChecked(True)              # the user ticks it in window one
+    one._focus_default_chk.setChecked(True)
     for ch, lut in _LUT_B.items():
         one._pane.mosaic.find("raw", ch).contrast_limits = lut["clim"]
     one.settings.set("luts", one._per_channel_luts())
@@ -367,14 +302,8 @@ def test_a_diverged_window_says_so_in_the_window_and_reset_clears_it(qapp, manag
 
 
 def test_every_control_in_the_defaults_box_reaches_the_shared_console(qapp, manager, caplog):
-    """A quiet control next to a loud one reads as a control that did nothing.
-
-    `auto focus` used to `_echo` (the in-window strip only) while `make default` and `reset`, in
-    the same box, `_say` (the strip AND the one global console). Julio clicked it four times: the
-    loud confirmation appeared in the console and the quiet one did not, so the tick looked
-    ignored. `_echo` is for events the console ALREADY has a structured line for; a settings
-    change has none, so all three of these speak.
-    """
+    """A quiet control next to a loud one reads as a control that did nothing, so all three of
+    the settings-box controls must speak in the console."""
     import logging
 
     one = manager.open([REGIONS[0]])
@@ -394,18 +323,13 @@ def test_every_control_in_the_defaults_box_reaches_the_shared_console(qapp, mana
     assert any("auto focus" in m for m in reset), (
         "reset stopped naming what it put back")
 
-    # and the neighbour it was compared against, so the three stay a set rather than drifting apart
     one._focus_default_chk.setChecked(True)
     made = _console_lines(one._make_default)
     assert made, "make default said nothing in the console"
 
 
 def test_the_auto_focus_tooltip_describes_the_once_per_window_behaviour(qapp, manager):
-    """`_apply_settings_once` returns early after the first mosaic, so the jump happens ONCE.
-
-    The tooltip promised it "whenever this window loads a region", i.e. a refocus on every region
-    change that the code does not do. A tooltip is the only documentation this control has.
-    """
+    """The tooltip used to promise a refocus on every region change, which the code does not do."""
     one = manager.open([REGIONS[0]])
     tip = one._focus_default_chk.toolTip()
 
@@ -413,7 +337,6 @@ def test_the_auto_focus_tooltip_describes_the_once_per_window_behaviour(qapp, ma
     assert "whenever this window loads a region" not in tip, (
         "the tooltip still promises a per-region refocus")
 
-    # the behaviour the tooltip now describes, unchanged: the guard is what makes it once
     _loaded(qapp, one)
     assert one._settings_applied is True
     called = []
@@ -466,7 +389,6 @@ def test_changing_the_default_does_not_retroactively_change_a_diverged_window(qa
     assert one.settings.baseline("luts") == _LUT_A, (
         "the baseline moved; reset would now go somewhere the window never was")
 
-    # The default is a fact about the NEXT window, and that half must still work.
     nxt = manager.open([REGIONS[1]])
     assert nxt.settings.get("luts") == later
     assert nxt.settings.get("tenengrad_focus") is True
@@ -492,12 +414,11 @@ def test_make_default_is_the_only_outward_push_and_leaves_open_windows_alone(qap
     assert one.settings.diverged == (), (
         "the window that IS the default still claims to diverge from it")
 
-    # Window two, already open, is untouched. That is the decentralization, not an oversight.
+    # Window two, already open, is deliberately untouched.
     assert two.settings.get("tenengrad_focus") is False
     assert two.settings.get("luts") == _LUT_A
     assert _layer_clims(two) == {CH_IN_YAML: (11.0, 111.0), CH_NOT_IN_YAML: (22.0, 222.0)}
 
-    # And it reaches the next window opened.
     three = manager.open([REGIONS[0]])
     assert three.settings.get("tenengrad_focus") is True
     assert three.settings.get("luts")[CH_IN_YAML]["clim"] == (33.0, 333.0)
@@ -535,26 +456,9 @@ def test_pasting_luts_marks_the_window_diverged(qapp, manager):
 
 
 def test_copy_paste_luts_is_the_only_contrast_path_between_two_open_windows(qapp, manager):
-    """The scope NOTHING else reaches, pinned so deleting the chips can never look free.
-
-    Julio, 2026-07-31: "if contrast are synched, the LUT copy paste should be removed. Prove me
-    wrong if not." What is synced automatically is exactly ONE scope: napari's ``link_layers``
-    holds the operator layers of ONE channel together INSIDE ONE window
-    (``MosaicLayers._register_channel``). It cannot cross windows -- every window builds its own
-    napari ``ViewerModel`` (``MosaicPane.__init__`` -> ``build_pane``) and napari cannot link
-    layers across viewers. The two other ways contrast travels are both shut here, deliberately:
-
-    * ``_baseline_for`` (the ``_INHERIT`` rule) hands a window its opener's contrast AT OPEN, and
-      only when an opener was named -- ``open_child``/ROI. Window two is ALREADY OPEN, and was
-      opened from the plate with no parent, so nothing reaches it that way.
-    * ``make_default`` is documented and tested as "windows opened FROM NOW ON"; it leaves every
-      open window exactly as it is.
-
-    So two wells side by side sit on two different stretches until somebody copies, which is the
-    routine comparison this app exists for. And the copy is also the ONLY carrier of the
-    COLORMAP: ``link_layers`` is bound to ``("contrast_limits",)`` and ``match_contrast_to``
-    writes contrast and nothing else.
-    """
+    """Pins that copy/paste is the only contrast path between two already-open windows: napari's
+    `link_layers` cannot cross windows, `_baseline_for` only fires at open, and `make_default`
+    only affects future windows. The copy is also the only carrier of the colormap."""
     from squidxplorer import _region_viewer as RV
 
     RV._LUT_CLIPBOARD.clear()
@@ -567,22 +471,18 @@ def test_copy_paste_luts_is_the_only_contrast_path_between_two_open_windows(qapp
     before_cmaps = {ch: two._pane.mosaic.find("raw", ch).colormap
                     for ch in (CH_IN_YAML, CH_NOT_IN_YAML)}
 
-    # Window one is re-tuned: a new stretch AND a new colour, both by hand, as the user does.
     for ch, lut in _LUT_B.items():
         layer = one._pane.mosaic.find("raw", ch)
         layer.contrast_limits = lut["clim"]
         layer.colormap = "magenta"
     assert before_cmaps[CH_IN_YAML] != "magenta", "the fixture already used the colour under test"
 
-    # Nothing crossed. Not the link, not the baseline...
     assert _layer_clims(two) == before_clims, (
         "window one's contrast reached an already-open window two on its own; if that is now real "
         "then this test, not the chips, is what is wrong")
-    # ...and not make_default either, which is the affordance that REPLACED propagation.
     assert manager.make_default(one.window_id) is True
     assert _layer_clims(two) == before_clims, "make_default reached back into an open window"
 
-    # The chips are the path. Both halves of a LUT travel: the stretch and the colour.
     one._copy_luts()
     two._paste_luts()
 
@@ -595,22 +495,12 @@ def test_copy_paste_luts_is_the_only_contrast_path_between_two_open_windows(qapp
 
 def test_match_raw_contrast_is_wired_to_this_window_s_mosaic_and_leaves_it_at_defaults(
         qapp, manager):
-    """The window-level half of "Match raw contrast": the chip's handler reaches THIS window's
-    layers, and the action does not pretend the window's settings changed.
-
-    Two claims, both of which a unit test on MosaicLayers cannot make:
-
-    * the handler is bound to the right pane (a typo'd attribute would find no mosaic and say
-      "no mosaic here" while looking like it worked);
-    * it does NOT mark the window diverged. It writes operator layers only, never raw, so the
-      window's recorded LUTs are byte-for-byte what they were -- unlike a paste, which moves raw
-      and IS recorded (see the paste test above).
-    """
+    """The chip's handler must reach this window's own layers, and writing operator layers only
+    (never raw) must not mark the window diverged."""
     one = manager.open([REGIONS[0]])
     _loaded(qapp, one)
     mosaic = one._pane.mosaic
 
-    # A fake operator result over the raw mosaic, on a deliberately DIFFERENT window from raw's.
     for ch in (CH_IN_YAML, CH_NOT_IN_YAML):
         raw = mosaic.find("raw", ch)
         if raw is None:
@@ -637,8 +527,7 @@ def test_match_raw_contrast_is_wired_to_this_window_s_mosaic_and_leaves_it_at_de
 
 
 def test_the_autofocus_default_is_actually_read_when_a_window_loads(qapp, manager):
-    """A setting nobody reads is dead wiring. Off by default, so this also pins that the stock
-    default leaves the old behaviour exactly as it was."""
+    """Off by default, so the stock default leaves the old behaviour exactly as it was."""
     off = manager.open([REGIONS[0]])
     _loaded(qapp, off)
     assert off._focus_worker is None, (
@@ -651,13 +540,7 @@ def test_the_autofocus_default_is_actually_read_when_a_window_loads(qapp, manage
         "the autofocus default was never read, so it is a dead setting")
 
 
-# ---------------------------------------------------------------------------------------------
-# A SECOND WINDOW REUSES THE FIRST WINDOW'S OPERATOR RESULT (squidxplorer._recipe.RESULTS)
-#
-# `_deliver_to_views` already propagates a finished result to every window open AT THAT MOMENT.
-# A window opened afterwards got nothing: `RESULTS` -- the content-addressed store whose docstring
-# promises "two windows over the same node running the same chain at the same version hit the SAME
-# entry" -- had no production writer and no production reader until 2026-08-05.
+# A second window reuses the first window's operator result via `squidxplorer._recipe.RESULTS`.
 
 def _fake_result(region, channels):
     """A finished operator result, shaped like what `PlateWindow._as_result` builds."""
@@ -670,14 +553,8 @@ def _fake_result(region, channels):
 
 
 def test_a_second_window_reuses_the_first_windows_result_without_recomputing(qapp, manager):
-    """Open A, compute once, open B on the same region: B gains the layers and reads NOTHING.
-
-    "Reuse" is measured, not asserted: the manager's reader is wrapped so every `read` is counted,
-    and the count across the second window's whole open must be zero attributable to the operator.
-    The identity check is stronger still -- B is handed the very `Result` object A produced, so
-    there is no re-fuse and no copy. Both windows are in one process over one reader
-    (`DEFAULT_MAX_GUI=1` plus an flock refuses a second one), which is what makes that legal.
-    """
+    """Open A, compute once, open B on the same region: B gains A's very `Result` object, with
+    no re-fuse and no copy."""
     from squidxplorer._recipe import acquisition_version, cache_operator_result
 
     region = REGIONS[0]
@@ -686,8 +563,6 @@ def test_a_second_window_reuses_the_first_windows_result_without_recomputing(qap
     first = manager.open([region])
     _loaded(qapp, first)
 
-    # The run happens once, in the first window, exactly as `_deliver_operator_result` does it:
-    # deliver to the windows open now, and file the result for the ones that are not.
     result = _fake_result(region, channels)
     assert first.deliver_result("mip", result, visible=True) == len(channels)
     cache_operator_result("mip", result, acquisition_version(manager._reader))
@@ -701,7 +576,7 @@ def test_a_second_window_reuses_the_first_windows_result_without_recomputing(qap
     for ch, ly in layers.items():
         assert ly.visible is False, (
             f"{ch}: this window did not ask for the run, so its layer must arrive dark")
-    # THE PROOF OF REUSE: the same object, not an equal one.
+    # Identity, not equality, is the proof of reuse.
     for i, ch in enumerate(channels):
         assert layers[ch].data is result.plane(ch), (
             f"{ch}: the second window was handed different pixels, so something recomputed")
@@ -709,8 +584,7 @@ def test_a_second_window_reuses_the_first_windows_result_without_recomputing(qap
 
 
 def test_a_window_opened_on_a_DIFFERENT_region_gains_nothing(qapp, manager):
-    """The replay is scoped. A cached B2 result must not land in a window showing B3, where it
-    would sit at B2's stage coordinates over B3's raw and read as something the operator did."""
+    """A cached region's result must not land in a window showing a different region."""
     from squidxplorer._recipe import acquisition_version, cache_operator_result
 
     channels = [CH_IN_YAML, CH_NOT_IN_YAML]

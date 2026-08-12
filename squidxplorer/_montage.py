@@ -1,42 +1,7 @@
-"""IMA-185 navigable output: a static whole-plate montage from the canonical OME-zarr.
+"""Static whole-plate thumbnail montage rendered from the canonical OME-zarr HCS plate.
 
-Consumes the OME-NGFF HCS plate that IMA-184's ``write_plate`` produced and renders one
-static, shareable **thumbnail mosaic** of the whole plate — the artifact ndviewer_light
-cannot give (it navigates wells one at a time via a slider). "Opens in ndviewer_light" is
-already satisfied by the IMA-184 plate; this is the *navigable overview* on top.
-
-Self-contained from the written plate (no reader, no raw acquisition): the plate is
-self-describing, so the montage renders exactly the canonical output a viewer would see.
-
-  plate.ome.zarr/                         zarr.json .ome.plate  -> rows / columns / wells (grid)
-    {row}/{col}/                          zarr.json .ome.well   -> images[].path (raw fov ids)
-      {fov}/                              zarr.json .ome.omero  -> per-channel label + hex color
-        0/                                array (T, C, 1, Y, X) -> the projected pixels
-
-Flow (single streaming pass — peak memory is the montage canvas + ONE well, never the plate)::
-
-    read plate metadata ─► grid = (sorted rows) x (sorted columns), each well at (rowIdx,colIdx)
-    per well (streamed):
-        read array 0 at t=0 ─► (C, Y, X)          # one well resident, ~one field in flight
-        area-downsample each channel ─► (C, cell, cell)
-        write tile into canvas[c, y0:y1, x0:x1]   # canvas is montage-sized (downsampled), bounded
-    after the pass:
-        per channel: lo/hi = percentiles over FILLED cells ─► GLOBAL-per-channel window
-                     (one window per channel across all wells, so wells stay comparable)
-        window each channel to [0,1], composite additively via display_color ─► RGB uint8
-        write plate_montage.png  +  plate_montage.json (region-jump: well id -> cell bbox)
-                                 +  plate_montage.html (zero-dep viewer: hover a cell -> well id,
-                                                        legend doubles as the channel toggle)
-        per_channel=True: also composite ONE channel at a time -> plate_montage_<channel>.png
-                          (IMA-206; same canvas, same global window, its own LUT color)
-
-Why global-per-channel contrast: a montage is for comparing wells at a glance; a per-well
-window would make a dim well and a bright well look identical. The montage downsamples
-``array 0`` (full-res) directly; the writer now also emits per-FOV pyramid levels, but the
-montage reads level 0 to stay independent of the pyramid's level choices.
-
-Fail loud: a path that is not an HCS plate, a well whose field array is missing, or a
-channel with no resolvable color is refused, never rendered as a silent blank/black.
+Single streaming pass (one well resident at a time), global-per-channel contrast so wells
+stay comparable, additive RGB composite, plus JSON sidecar and self-contained HTML viewer.
 """
 
 from __future__ import annotations
@@ -53,15 +18,11 @@ from typing import Optional
 import numpy as np
 import tensorstore as ts
 
-# Montage cell size (downsampled well thumbnail, px). 128 gives a legible 1536wp mosaic
-# (32x48 wells -> ~4096x6144) while the per-channel canvas stays a few hundred MB.
+# Montage cell size (downsampled well thumbnail, px).
 _DEFAULT_CELL_PX = 128
-# Contrast percentiles (per channel, across all wells): clip the darkest 1% and brightest
-# 0.2% so a few hot pixels don't crush the window. Comparable to ndv's auto-scale.
+# Per-channel contrast percentiles across all wells; clips hot pixels.
 _DEFAULT_PERCENTILES = (1.0, 99.8)
 
-
-# --- plate metadata (read the self-describing zarr groups) ----------------------------------
 
 def _read_group_ome(group_dir: Path) -> dict:
     """Return the ``attributes.ome`` dict of a zarr v3 group, or {} if absent."""
@@ -98,7 +59,7 @@ class _PlateLayout:
             raise ValueError(f"{plate_dir!s} has no OME plate metadata (attributes.ome.plate).")
         self.rows = [r["name"] for r in plate["rows"]]
         self.cols = [c["name"] for c in plate["columns"]]
-        # each well: (well_id, row_name, col_name, row_index, col_index, first_field_path)
+        # (well_id, row_name, col_name, row_index, col_index, first_field_path)
         self.wells: list[tuple] = []
         for w in plate["wells"]:
             row_name, col_name = w["path"].split("/")
@@ -118,36 +79,18 @@ class _PlateLayout:
             )
         if not self.wells:
             raise ValueError(f"{plate_dir!s} plate metadata lists no wells.")
-        # Channels (label + color) come from the first field's omero — identical across fields.
+        # Channels come from the first field's omero — identical across fields.
         omero = _read_group_ome(self.wells[0][5]).get("omero")
         if not omero or not omero.get("channels"):
             raise ValueError(f"field {self.wells[0][5]!s} has no omero channel metadata.")
         self.channels = omero["channels"]
 
 
-# --- pixel ops -------------------------------------------------------------------------------
-
 def _area_downsample(plane: np.ndarray, out_h: int, out_w: int) -> np.ndarray:
-    """Area-average *plane* (Y, X) down to (out_h, out_w) — anti-aliased, arbitrary sizes.
+    """Area-average *plane* (Y, X) down to at most (out_h, out_w).
 
-    Uses ``np.add.reduceat`` to sum contiguous row/column blocks (bin edges spread as evenly
-    as integer division allows), then divides by the per-bin element count. Averaging (not
-    striding) so a thumbnail reflects the whole cell, not one sampled pixel.
-
-    NEVER upsamples, and the target is clamped **per axis**: a request larger than the source on
-    ONE axis shrinks the other axis and leaves that one at its own length, so the returned shape
-    is ``(min(out_h, Y), min(out_w, X))`` and may be smaller than asked on either axis alone.
-    Callers that need an EXACT shape must guard before calling (``_plate_overview._fit_cell`` /
-    ``_fit_box`` and ``_tilesource._resample`` all do, and nearest-sample the grow direction
-    themselves); ``build_montage`` deliberately corner-places by the tile's ACTUAL shape.
-
-    The clamp is per axis because a single shared ``out_h >= y and out_w >= x`` identity guard was
-    a wrong picture, not a wrong shape. With a 512x64 field asked for 128x128, the column edges
-    ``(np.arange(128) * 64) // 128`` REPEAT, so ``reduceat`` returned a lone element where a block
-    sum was meant and the matching ``col_counts`` entry was 0: measured 8192 of 16384 entries
-    ``inf`` on a uniform 1000-count plane. Through ``build_montage`` that inf reached the global
-    percentile window as ``hi=nan``, ``_window``'s ``span <= 0`` branch zeroed every pixel, and the
-    montage's max pixel value was **0** — a whole plate rendered black with no error raised.
+    Never upsamples; the target is clamped per axis, so the returned shape is
+    ``(min(out_h, Y), min(out_w, X))`` and callers needing an exact shape must guard.
     """
     y, x = plane.shape
     out_h, out_w = min(int(out_h), y), min(int(out_w), x)   # per axis: no bin count can be 0
@@ -163,57 +106,22 @@ def _area_downsample(plane: np.ndarray, out_h: int, out_w: int) -> np.ndarray:
 
 
 def _window(channel_plane: np.ndarray, lo: float, hi: float) -> np.ndarray:
-    """Linear contrast window [lo, hi] -> [0, 1]; guards a degenerate (all-equal) channel.
-
-    float32 out, always — the degenerate branch has always said so, and a windowed plane is a
-    display quantity with 8 bits of destination, so float64 buys nothing and costs 2x the bytes
-    on every composite.
-    """
+    """Linear contrast window [lo, hi] -> [0, 1] as float32; guards a degenerate channel."""
     span = hi - lo
-    if span <= 0:  # empty / flat channel — nothing to stretch, avoid divide-by-zero
+    if span <= 0:  # empty / flat channel — avoid divide-by-zero
         return np.zeros_like(channel_plane, dtype=np.float32)
     out = (channel_plane.astype(np.float32, copy=False) - np.float32(lo)) / np.float32(span)
     return np.clip(out, 0.0, 1.0, out=out)
 
 
-# --- the contrast window as a LOOKUP TABLE (IMA-261) ------------------------------------------
-#
-# `_window` is a POINT transform: the output at a pixel depends on that pixel's value and nothing
-# else. Over an integer dtype its domain is FINITE — 256 values for uint8, 65536 for uint16 — so
-# evaluating it once per distinct value and indexing is not an approximation of `_window`, it IS
-# `_window`, memoised over its whole domain. `_window_lut(dt, lo, hi)[plane]` and
-# `_window(plane, lo, hi)` are equal elementwise BY CONSTRUCTION, because the table's entries are
-# literally that same call's results; tests/test_montage.py pins it exhaustively over all 65536.
-#
-# That is what makes a contrast drag cheap, and it is the same commuting argument this codebase
-# already used for flatfield-after-MIP (a monotone f commutes with max, so f after the projection
-# is bit-identical at 1/Nz the cost). Here: a point transform commutes with any SELECTION of
-# pixels, so it may be applied at the smallest correct point in the pipeline —
-#
-#     _window(store[:, ::s, ::s], lo, hi)  ==  _window(store, lo, hi)[:, ::s, ::s]     (exactly)
-#
-# — i.e. windowing the DISPLAY-SIZED thumbnail is bit-identical to windowing the whole plate and
-# then subsampling, at (1/s^2) the cost. On a 1536-well plate at a typical zoom that is s = 4,
-# so 47.6 M pixels of work becomes 3.0 M.
-#
-# Arithmetic for the table itself: 65536 entries built once per (dtype, lo, hi) and cached, then
-# reused for every pixel of every channel of every cell. A 1536-well plate's display buffer is
-# ~0.96 M px per channel, so the table costs 65536 / 960000 = 6.8% of one channel's pixels — and
-# in SCOPE_PER_REGION, where 1536 cells share the same latched window, it is built once for all
-# 1536 instead of once each.
-
-_LUT_MAX_ITEMSIZE = 2            # uint8 (256) and uint16 (65536); a 32-bit table is 4 G entries
+_LUT_MAX_ITEMSIZE = 2            # uint8 and uint16 only; a 32-bit table is 4 G entries
 _LUT_CACHE: "OrderedDict[tuple, np.ndarray]" = OrderedDict()
-_LUT_CACHE_MAX = 64              # a few channels x a few windows; the drag reuses one key per tick
+_LUT_CACHE_MAX = 64
 _LUT_LOCK = threading.Lock()
 
 
 def _window_lut(dtype: np.dtype, lo: float, hi: float) -> Optional[np.ndarray]:
-    """``_window`` evaluated over EVERY value *dtype* can hold, or None if that is not finite.
-
-    Returns None for float / signed / >16-bit stores, where the caller falls back to evaluating
-    ``_window`` per pixel. Both are the same function; only the evaluation order differs.
-    """
+    """``_window`` memoised over every value *dtype* can hold, or None if that is not finite."""
     dt = np.dtype(dtype)
     if dt.kind != "u" or dt.itemsize > _LUT_MAX_ITEMSIZE:
         return None
@@ -239,14 +147,8 @@ _COMPOSITE_POOL_LOCK = threading.Lock()
 def _composite_pool() -> "ThreadPoolExecutor":
     """A small, process-wide pool for banded compositing.
 
-    numpy releases the GIL for the take/gemm/clip this kernel is made of, so bands really do run
-    in parallel. Created lazily so importing squidxplorer costs no threads.
-
-    Lazily AND under a lock, because ``composite()`` is called from the Qt thread (the plate's
-    repaint, ``_plate_overview``) and from ``_VideoWorker`` (``_video.py`` -> ``composite``) — two
-    threads that can both find ``None``. The loser's pool is orphaned: never ``shutdown()``, never
-    reachable again, so up to 8 live worker threads leak per race. ``_LUT_LOCK`` forty lines above
-    already guards a far cheaper object; this is the same rule applied to the expensive one.
+    Created lazily under a lock: composite() is called from two threads and a racing
+    loser's pool would leak its workers.
     """
     global _COMPOSITE_POOL
     with _COMPOSITE_POOL_LOCK:
@@ -268,11 +170,8 @@ def _hex_to_rgb01(hex_color: str) -> np.ndarray:
 def composite(store: np.ndarray, colors: np.ndarray, windows, mask=None) -> np.ndarray:
     """Window each channel of a ``(C, H, W)`` stack and add it into one ``(H, W, 3)`` uint8 RGB.
 
-    The single home of the window-multiply-sum loop (IMA-206): the montage, the per-channel PNGs
-    and the plate overview's live recomposite all go through here, so what is on screen and what
-    is exported cannot drift apart. *windows* is one ``(lo, hi)`` per channel; *mask* is a
-    per-channel bool (None = every channel on) — a masked-off channel contributes nothing, so an
-    all-off mask is plain black, never a NaN or a divide-by-zero.
+    The single home of the window-multiply-sum loop. *windows* is one ``(lo, hi)`` per
+    channel; *mask* is a per-channel bool (None = every channel on).
     """
     n_ch, h, w = store.shape
     if h == 0 or w == 0:
@@ -287,23 +186,13 @@ def composite(store: np.ndarray, colors: np.ndarray, windows, mask=None) -> np.n
     if n_bands == 1:
         work(rows[0])
     else:
-        # Bands write DISJOINT row slices of `out`, so no lock is needed and no band can see
-        # another's partial result. list() so an exception in a band is raised here, not dropped.
+        # Bands write disjoint row slices; list() re-raises any band's exception here.
         list(_composite_pool().map(work, rows))
     return out
 
 
 def _composite_band(store, colors, windows, mask, out, rows: slice) -> None:
-    """Composite one horizontal band of rows into ``out[rows]``.
-
-    Per channel the windowed plane is produced by ``_window`` — as a table lookup when the store's
-    dtype has a finite domain, elementwise otherwise; the two are the same function (see
-    ``_window_lut``). The per-channel results are then reduced against the LUT colours with ONE
-    ``(N, C) @ (C, 3)`` matrix product instead of C broadcast multiply-accumulates over an
-    (h, w, 3) canvas. That is the same sum in the same order, but it hands the channel axis to
-    BLAS and touches the RGB canvas once rather than C times — measured ~3x on a 4-channel plate,
-    on top of the LUT's own ~2x.
-    """
+    """Composite one horizontal band of rows into ``out[rows]``."""
     n_ch = store.shape[0]
     sub = store[:, rows]
     bh, bw = sub.shape[1], sub.shape[2]
@@ -319,9 +208,7 @@ def _composite_band(store, colors, windows, mask, out, rows: slice) -> None:
         if table is None:
             gray[ch] = _window(plane, lo, hi).reshape(-1)
         else:
-            # `table[idx]`, NOT `np.take(table, idx, out=...)`: measured 1.38 ms vs 3.18 ms for
-            # 0.96 M uint16 here, even though take writes in place and this allocates. numpy's
-            # take carries a mode/bounds-check path that the plain gather does not.
+            # table[idx] beats np.take here: take carries a bounds-check path.
             gray[ch] = table[plane.reshape(-1)]
     rgb = gray.T @ colors                           # (n, 3) float32
     np.clip(rgb, 0.0, 1.0, out=rgb)
@@ -335,18 +222,7 @@ def _channel_slug(label, index: int) -> str:
     return slug or f"ch{index}"
 
 
-# --- hover viewer (self-contained HTML over the montage + region-jump sidecar) ----------------
-
-# The montage sits under a top bar; row (A..) + column (1..) labels frame it; black grid lines
-# (the background color) separate the wells into tiles. Hovering a well draws a thin RED box on
-# that cell and shows the region id in LARGE text in the bar ABOVE the montage (never over the
-# wells). A cursor is mapped to a well purely from the sidecar geometry, so it needs no server.
-# Full-res-on-click (detail) remains the Plate View navigator ticket.
-# The legend doubles as the CHANNEL TOGGLE (IMA-206) when per-channel PNGs were exported: the
-# composite PNG shows while every channel is on, and any subset stacks the per-channel PNGs with
-# mix-blend-mode:screen (the browser's additive composite). No contrast slider here on purpose —
-# a PNG is already-windowed 8-bit, so re-windowing it in the browser cannot recover what the
-# window crushed; the honest thing is to SHOW the window each channel was exported at instead.
+# Self-contained hover viewer: maps the cursor to a well from the sidecar geometry alone.
 _VIEWER_HTML = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
@@ -496,8 +372,6 @@ def _write_viewer_html(out_dir: Path, png_name: str, sidecar: dict, title: str) 
     return path
 
 
-# --- public entry ----------------------------------------------------------------------------
-
 def build_montage(
     plate_path,
     out_dir=None,
@@ -507,39 +381,8 @@ def build_montage(
     t: int = 0,
     per_channel: bool = False,
 ) -> dict:
-    """Render a static whole-plate montage (thumbnail mosaic) from an OME-zarr HCS plate.
-
-    Parameters
-    ----------
-    plate_path:
-        ``write_plate``'s output directory, or its ``plate.ome.zarr`` directly.
-    out_dir:
-        Where to write ``plate_montage.png`` + ``plate_montage.json`` (default: the directory
-        containing ``plate.ome.zarr``).
-    cell_px:
-        Downsampled thumbnail size per well (square). Bounds the montage resolution and thus
-        peak memory (the canvas is ``n_rows*cell_px x n_cols*cell_px``, not the full plate).
-    percentiles:
-        ``(low, high)`` percentile clip for the GLOBAL-per-channel contrast window.
-    t:
-        Timepoint to render (default 0). A montage is a single-timepoint overview.
-    per_channel:
-        Also write ``plate_montage_<channel>.png`` per channel (IMA-206) — same canvas, same
-        GLOBAL window, one channel at a time in its own LUT color — and turn the HTML viewer's
-        legend into channel toggles. Off by default: it costs one extra PNG encode per channel.
-
-    Returns
-    -------
-    dict
-        Manifest: ``{"montage", "per_channel", "sidecar", "viewer", "n_wells",
-        "grid": (n_rows, n_cols), "cell_px"}``.
-
-    Raises
-    ------
-    ValueError
-        Not an HCS plate, a well missing its field array, or an unresolvable channel color.
-    """
-    from PIL import Image  # tried-and-true PNG encoder; imported lazily so import squidxplorer stays light
+    """Render a static whole-plate montage from an OME-zarr HCS plate; returns a manifest dict."""
+    from PIL import Image  # lazy so import squidxplorer stays light
 
     if cell_px < 1:
         raise ValueError(f"cell_px must be >= 1, got {cell_px}")
@@ -550,30 +393,27 @@ def build_montage(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     n_rows, n_cols, n_ch = len(layout.rows), len(layout.cols), len(layout.channels)
-    colors = np.stack([_hex_to_rgb01(c["color"]) for c in layout.channels])  # (C, 3), fail-loud
+    colors = np.stack([_hex_to_rgb01(c["color"]) for c in layout.channels])  # (C, 3)
 
-    # Per-channel downsampled mosaic canvas + a filled-cell mask. Canvas is bounded by the
-    # montage resolution (n_rows*cell x n_cols*cell), NOT by the full-res plate.
     canvas = np.zeros((n_ch, n_rows * cell_px, n_cols * cell_px), dtype=np.float32)
     filled = np.zeros((n_rows * cell_px, n_cols * cell_px), dtype=bool)
     placements: list[dict] = []
 
-    # --- single streaming pass: one well resident at a time -------------------------------
+    # Single streaming pass: one well resident at a time.
     for well_id, row_name, col_name, r_i, c_i, field_dir in layout.wells:
         store = _read_open_store(field_dir / "0")
         shape = store.shape  # (T, C, 1, Y, X)
         ti = min(int(t), shape[0] - 1)
-        well = np.asarray(store[ti, :, 0].read().result())  # (C, Y, X) — this well only
+        well = np.asarray(store[ti, :, 0].read().result())  # (C, Y, X)
         if well.shape[0] != n_ch:
             raise ValueError(
                 f"well {well_id} field has C={well.shape[0]} but plate omero lists {n_ch} channels."
             )
         y0, x0 = r_i * cell_px, c_i * cell_px
         for ch in range(n_ch):
-            tile = _area_downsample(well[ch], cell_px, cell_px)   # never upsamples: a field smaller
-            th, tw = tile.shape                                   # than cell_px stays its own size
-            canvas[ch, y0 : y0 + th, x0 : x0 + tw] = tile         # corner-place by ACTUAL shape (no
-            #                                    broadcast crash / no divide-by-zero on small fields)
+            tile = _area_downsample(well[ch], cell_px, cell_px)
+            th, tw = tile.shape
+            canvas[ch, y0 : y0 + th, x0 : x0 + tw] = tile   # corner-place by actual shape
         filled[y0 : y0 + th, x0 : x0 + tw] = True
         placements.append(
             {
@@ -582,26 +422,23 @@ def build_montage(
                 "x0": int(x0), "y0": int(y0), "x1": int(x0 + cell_px), "y1": int(y0 + cell_px),
             }
         )
-        del well  # release the full-res well before the next read (bounded memory)
+        del well  # release the full-res well before the next read
 
-    # --- global per-channel contrast, then composite to RGB -------------------------------
+    # Global per-channel contrast, then composite to RGB.
     windows = []
     for ch in range(n_ch):
-        vals = canvas[ch][filled]  # only real well pixels drive the window (blanks would skew it)
+        vals = canvas[ch][filled]  # only real well pixels drive the window
         if vals.size:
             lo, hi = np.percentile(vals, percentiles)
         else:
             lo, hi = 0.0, 1.0
         windows.append((float(lo), float(hi)))
-    rgb = composite(canvas, colors, windows)   # additive composite, one global window per channel
-    # Blank (never-filled) cells stay pure black — a viewer reads them as "no well here".
+    rgb = composite(canvas, colors, windows)
 
     montage_path = out_dir / "plate_montage.png"
     Image.fromarray(rgb, mode="RGB").save(montage_path)
 
-    # P1: ONE PNG PER CHANNEL. Same retained canvas, same global windows, one channel unmasked at
-    # a time — so a 638 signal sitting under a bright 405 is inspectable on its own, in its own
-    # color, at exactly the window the composite used (recorded in the sidecar next to it).
+    # One PNG per channel: same canvas, same global windows, one channel unmasked at a time.
     ch_pngs: list[Optional[str]] = [None] * n_ch
     if per_channel:
         for ch in range(n_ch):
@@ -622,16 +459,15 @@ def build_montage(
              "window": {"low": windows[i][0], "high": windows[i][1]}, "png": ch_pngs[i]}
             for i, c in enumerate(layout.channels)
         ],
-        "wells": placements,  # region-jump: map a montage pixel/click back to a well id
+        "wells": placements,  # region-jump: map a montage pixel back to a well id
     }
     sidecar_path.write_text(json.dumps(sidecar, indent=2))
 
-    # self-contained hover-indicator viewer (uses the sidecar geometry; no server, no deps)
     viewer_path = _write_viewer_html(out_dir, montage_path.name, sidecar, title="SquidXplorer plate montage")
 
     return {
         "montage": str(montage_path),
-        "per_channel": [str(out_dir / n) for n in ch_pngs if n],   # [] unless per_channel=True
+        "per_channel": [str(out_dir / n) for n in ch_pngs if n],
         "sidecar": str(sidecar_path),
         "viewer": str(viewer_path),
         "n_wells": len(layout.wells),

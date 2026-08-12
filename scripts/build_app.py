@@ -1,22 +1,4 @@
-"""Build, VERIFY, measure and (optionally) clean up the macOS .app bundle — IMA-232.
-
-    python scripts/build_app.py --dataset "/path/to/an/acquisition" --clean
-
-Three things a bare ``pyinstaller`` call does not do, and all three are the ticket:
-
-1. **Verify.** It runs the frozen binary against a REAL acquisition folder
-   (``hcs_viewer_entry --selftest``) and fails the build if the app cannot ingest it and
-   run the operators. A .app that crashes on start is worth less than no .app, and only
-   executing the bundle can tell you which one you have. The first build here looked
-   perfect and died on ``ModuleNotFoundError: ml_dtypes`` the moment it was run.
-2. **Measure.** It prints the bundle size and the ten largest directories inside it, so
-   the number is reported rather than discovered by the person downloading it.
-3. **Clean.** ``--clean`` deletes the build AND dist trees after measuring. A PyInstaller
-   run of this dependency set costs ~660 MB of scratch; leaving it behind on a laptop
-   that is already tight on disk is how a machine reaches zero bytes.
-
-The build is deliberately NOT wired into pytest: it takes ~3 minutes and hundreds of MB.
-"""
+"""Build, verify, measure and (optionally) clean up the macOS .app bundle."""
 
 import argparse
 import json
@@ -34,7 +16,7 @@ APP_NAME = "hcs-viewer.app"
 
 
 def _du_bytes(path: Path) -> int:
-    """Apparent size on disk of a tree, in bytes (``du`` semantics, i.e. real blocks)."""
+    """Size on disk of a tree, in bytes (``du`` semantics)."""
     out = subprocess.run(["du", "-sk", str(path)], capture_output=True, text=True, check=True)
     return int(out.stdout.split()[0]) * 1024
 

@@ -1,10 +1,4 @@
-"""IMA-184 output writer — clean-room unit tests (no reader, no data on disk).
-
-Drives ``write_from_stream`` with a fabricated metadata dict + a hand-built
-``(region, fov, image)`` stream, then reads the written store back with tensorstore + json
-(the same v3 store ndviewer_light reads). The real-seam cross commit (``project_plate`` on
-``sim_1536wp`` + hongquan) lives in tests/test_integration.py.
-"""
+"""Output writer clean-room unit tests: a fabricated stream in, the written store read back."""
 
 from __future__ import annotations
 
@@ -66,12 +60,7 @@ def _read_array(path: Path) -> np.ndarray:
 # --- pure helpers ---------------------------------------------------------------------------
 
 def test_parse_well_id_preserves_case_and_roundtrips_exactly():
-    # Vendored Squid semantics EXCEPT the .upper(): multi-letter rows, no zero-padding, and the
-    # region id preserved verbatim. Squid upper-cases, but the id is reconstructed from the
-    # directory names by concatenation, so upper-casing is data loss rather than normalisation:
-    # a freeform region "manual0" round-tripped through MANUAL/0/ and came back "MANUAL0",
-    # silently renaming the acquisition's own regions. Caught by test_ima184_real_plate_roundtrip
-    # once it was pointed at the real glass-slide acquisition.
+    # Vendored Squid semantics except the .upper(): upper-casing silently renames freeform regions.
     assert parse_well_id("B2") == ("B", "2")
     assert parse_well_id("aa3") == ("aa", "3")      # case preserved, NOT upper-cased
     assert parse_well_id("manual0") == ("manual", "0")
@@ -135,9 +124,7 @@ def test_write_from_stream_layout_and_pixels(tmp_path):
 
 
 def test_large_field_writes_pyramid(tmp_path):
-    # A field larger than the pyramid floor (256 px) gets downsample LEVELS: 600 -> 300 -> 150.
-    # Level 0 stays full-res pixel-exact; coarser levels are half-size area-averages. Small fields
-    # (the other tests, 8x8) collapse to level 0 alone — canonical single-level output unchanged.
+    # A field larger than the pyramid floor (256 px) gets downsample levels: 600 -> 300 -> 150.
     big = {r: _image(i, y=600, x=600) for i, r in enumerate(REGIONS)}
     manifest = write_from_stream(_meta(), _stream(big), tmp_path, n_fovs=1, tiff=False)
     assert manifest["levels"] == 3
@@ -188,15 +175,7 @@ def test_uint8_dtype_preserved(tmp_path):
 
 
 def test_fails_loud_on_wrong_shape(tmp_path):
-    """A malformed shape is still refused — but Z>1 is NOT malformed any more (IMA-277).
-
-    This test used to assert the opposite: Z=3 raised "expected a projected (T, C, 1, Y, X)
-    array". That refusal was the single reason five of the eight registered operators (bgsub,
-    decon, flatfield, spot, cellpose — every plane-op) could not be written to disk at all, and
-    it was never protecting a real invariant: the store is 5-D with a real z axis, its
-    multiscales already scale that axis by dz_um. What it protected against is what it still
-    refuses below.
-    """
+    """A malformed shape is still refused, but Z>1 is not malformed."""
     import pytest
 
     for bad, why in [
@@ -210,12 +189,7 @@ def test_fails_loud_on_wrong_shape(tmp_path):
 
 
 def test_z_stack_round_trips_through_the_plate(tmp_path):
-    """A (T, C, Nz, Y, X) result is written as a real z-stack and reads back pixel-identical.
-
-    The writer's half of IMA-277. Every plane must land at its own z index — the failure this
-    replaces would have been "plane 0 written Nz times" or "only plane 0 written", both of which
-    a shape-only assertion passes.
-    """
+    """A (T, C, Nz, Y, X) result is written as a real z-stack and reads back pixel-identical."""
     import tifffile
 
     rng = np.random.default_rng(7)
@@ -248,11 +222,7 @@ def test_fails_loud_on_channel_count_mismatch(tmp_path):
 
 
 def test_writer_memory_is_bounded_in_well_count(tmp_path):
-    """The writer streams: peak RSS is flat in the number of wells (it never holds the plate).
-
-    Feeds a lazy generator of N wells and checks 4x the wells does NOT ~4x the peak — each
-    (region, fov, image) is written and released before the next is pulled.
-    """
+    """The writer streams: peak memory is flat in the number of wells."""
     import tracemalloc
 
     def stream(n):
@@ -276,7 +246,7 @@ def test_writer_memory_is_bounded_in_well_count(tmp_path):
     assert p16 < p4 * 2  # 4x wells, <2x peak -> bounded/streaming, not proportional to plate size
 
 
-# --- IMA-230: disk pre-flight guard + graceful failure ----------------------------------------
+# --- disk pre-flight guard + graceful failure --------------------------------------------------
 
 import pytest
 
@@ -335,7 +305,7 @@ def test_free_bytes_uses_nearest_existing_ancestor(tmp_path):
 
 
 def test_refuses_up_front_and_writes_nothing(tmp_path, monkeypatch):
-    """The whole point of IMA-230: die BEFORE the first byte, not 94% through."""
+    """Die before the first byte, not 94% through."""
     monkeypatch.setattr("squidxplorer._output.free_bytes", lambda p: 10 * 1024 ** 2)  # 10 MB free
     meta = _big_meta()
     out = tmp_path / "run"
@@ -387,10 +357,7 @@ def test_a_failed_field_publishes_nothing_and_marks_the_plate_incomplete(tmp_pat
 
     plate = out / "plate.ome.zarr"
     assert is_incomplete(plate)                       # the store announces it is not finished
-    # every field directory that DOES exist is a complete one (no half-written stragglers)
-    # -- and there IS one. Three `continue` filters deep, a plate with no field directories at all
-    # passed "every field that exists is complete" while proving nothing; `boom` fires on the
-    # second write, so exactly one field survives.
+    # `boom` fires on the second write, so exactly one complete field survives.
     fields = [f for f in plate.glob("*/*/*") if f.is_dir() and (f / "zarr.json").exists()]
     assert len(fields) == 1, [str(f) for f in fields]
     for row in plate.iterdir():
@@ -414,17 +381,7 @@ def test_successful_write_clears_the_incomplete_marker(tmp_path):
 
 
 def test_a_run_that_lost_a_well_does_not_declare_the_store_trustworthy(tmp_path):
-    """`complete` must be read off the RESULT, not off "nobody pressed stop".
-
-    It used to be `complete = not stopped`, so a well the engine skipped (an unreadable TIFF, a
-    corrupt field — `project_plate(on_error=...)` swallows those by design) never reached the
-    writer, `n_written` fell short, and the marker was DELETED anyway. The store then declared
-    itself finished while its well group still advertised images that are not on disk, and the
-    store's own self-report is what `_check_output`, ngio and every external reader consult.
-
-    The stream here yields two of the three wells the metadata declares, which is exactly the
-    shape of a run that lost one.
-    """
+    """`complete` must be read off the result, not off "nobody pressed stop"."""
     images = {r: _image(i) for i, r in enumerate(REGIONS)}
 
     def short_stream():
@@ -450,17 +407,7 @@ def test_a_run_that_lost_a_well_does_not_declare_the_store_trustworthy(tmp_path)
 
 
 def test_a_labels_result_is_coarsened_by_nearest_because_object_ids_are_not_numbers(tmp_path):
-    """A ``produces='labels'`` field must never be block-MEANED into its coarse levels.
-
-    The mean of two object ids is a third object's id. Measured on a real ``spot`` run over the
-    10x set (region manual0, fov 0, z 5): 1004 of 1 085 764 level-1 pixels carried an id present
-    in NONE of their four level-0 source pixels — 2x2 blocks holding only background and object 4
-    were written as object 2, a real object elsewhere in the field. Nothing looked corrupt, and
-    only level 0 was trustworthy.
-
-    The fixture below is the same arithmetic in miniature: a 4x4 field of background and object
-    4 only. Block-mean writes 1s and 2s (objects that are not there); nearest writes 0s and 4s.
-    """
+    """A ``produces='labels'`` field must never be block-meaned: the mean of two ids is a third object's id."""
     meta = dict(_meta(), frame_shape=(4, 4))
     field = np.zeros((1, 2, 1, 4, 4), np.uint16)
     field[:, :, :, 1, 1] = 4          # one corner of each 2x2 block carries object 4
@@ -497,14 +444,7 @@ def test_a_pyramid_refuses_a_result_kind_it_does_not_know_how_to_coarsen(tmp_pat
 
 
 def test_the_channel_wavelength_on_disk_is_labelled_excitation_because_that_is_what_it_is(tmp_path):
-    """``Fluorescence_638_nm_-_Penta`` states an EXCITATION line; 638 nm is not its emission.
-
-    The writer parsed the digits out of the channel name with a private regex and stamped them
-    into OME's ``emission_wavelength`` — a different physical quantity, off by the Stokes shift on
-    every fluorescence channel this instrument has (this package's own ``_decon.emission_um_for``
-    answers 405 -> 450, 488 -> 525, 561 -> 590, 638 -> 670, and ``tests/test_decon.py`` pins it).
-    Durable, on disk, and read by anything that opens the store.
-    """
+    """``Fluorescence_638_nm_-_Penta`` states an excitation line; 638 nm is not its emission."""
     images = {r: _image(i) for i, r in enumerate(REGIONS)}
     manifest = write_from_stream(_meta(), _stream(images), tmp_path, n_fovs=1)
     doc = json.loads((Path(manifest["plate"]) / "B" / "2" / "0" / "zarr.json").read_text())
@@ -536,17 +476,14 @@ def test_partial_tiffs_are_never_published(tmp_path, monkeypatch):
     out = tmp_path / "run"
     with pytest.raises(OSError):
         write_from_stream(_meta(), _stream(images), out, n_fovs=1, tiff=True, write_workers=1)
-    # Vacuous three ways over: `rglob` on a directory that was never created yields nothing, the
-    # `if` skips every non-file, and `not X or Y` is trivially true of anything that is not a
-    # .tiff. Publishing ZERO tiffs -- the opposite failure -- was green. One write succeeded
-    # before the second raised, so exactly one .tiff must survive.
+    # One write succeeded before the second raised, so exactly one .tiff must survive.
     published = sorted(p for p in (out / "tiff").rglob("*.tiff") if p.is_file())
     assert len(published) == 1, [str(p) for p in published]
     for tif in published:
         assert tif.stat().st_size > 100, (tif, tif.stat().st_size)
 
 
-# --- IMA-231: FOV_ROI_table (Fractal / ngio convention) ---------------------------------------
+# --- FOV_ROI_table (Fractal / ngio convention) --------------------------------------------------
 
 from squidxplorer._output import (
     _NGIO_COLUMN,
@@ -620,7 +557,7 @@ def test_records_use_the_field_origin_corner_not_the_centre():
 
 
 def test_roi_boxes_agree_with_tilesource_field_origin_exactly():
-    """IMA-217's tile source and IMA-231's ROI table must place a field at the SAME corner."""
+    """The tile source and the ROI table must place a field at the same corner."""
     from squidxplorer._tilesource import fov_bboxes_um
 
     boxes = fov_bboxes_um({("B2", f): p for f, p in ROI_POS.items()}, ROI_FRAME, ROI_PX)
@@ -690,7 +627,7 @@ def test_no_roi_table_without_stage_positions(tmp_path):
 
 
 def test_millimetres_in_a_um_key_are_refused(tmp_path):
-    """The 1000x defect fixed on main today must not be reintroducible through this door."""
+    """The 1000x mm-in-a-_um-key defect must not be reintroducible through this door."""
     mm_positions = {0: (1.0, 2.0), 1: (1.5, 2.0)}           # mm wearing a _um key
     recs = fov_roi_records_um([0, 1], mm_positions, ROI_FRAME, ROI_PX)
     with pytest.raises(ValueError, match="millimetres"):

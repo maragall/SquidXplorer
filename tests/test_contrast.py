@@ -1,13 +1,9 @@
 """The fluorescence contrast rule, ported from maragall/stitcher.
 
-Julio, looking at the live GUI with both panes finally agreeing: "the channels are not well
-contrast-adjusted (background looks colored)". They agreed on a window that was wrong in the same
-way in both places.
-
-The property under test is the one that matters on screen: **background renders BLACK**. A
-percentile low end lands inside the background distribution of a fluorescence plane, so the whole
-field lifts off black and four additive channels sum to white. These tests build a plane with a
-known background and a known signal, and check the window separates them.
+The property under test: **background renders BLACK**. A percentile low end lands inside the
+background distribution of a fluorescence plane, so the whole field lifts off black and four
+additive channels sum to white. These tests build a plane with a known background and a known
+signal, and check the window separates them.
 """
 
 from __future__ import annotations
@@ -19,11 +15,10 @@ from squidxplorer._contrast import auto_contrast, dtype_range, sample_plane
 
 
 def _fluorescence(bg=500.0, bg_noise=30.0, signal=8000.0, frac=0.02, shape=(256, 256), seed=0):
-    """A plane shaped like real fluorescence: a big noisy background pedestal, a sparse bright tail.
+    """A plane shaped like real fluorescence: a noisy background pedestal, a sparse bright tail.
 
-    The pedestal is the point. Real fluorescence background is NOT near zero -- camera offset plus
-    autofluorescence put it at some few hundred counts -- which is exactly why a 1st percentile
-    low end fails: the 1st percentile of this plane is still background.
+    The pedestal is the point: real fluorescence background sits at a few hundred counts, not
+    near zero, which is exactly why a 1st-percentile low end fails.
     """
     rng = np.random.default_rng(seed)
     a = rng.normal(bg, bg_noise, shape)
@@ -34,11 +29,6 @@ def _fluorescence(bg=500.0, bg_noise=30.0, signal=8000.0, frac=0.02, shape=(256,
 
 
 def test_the_low_end_lands_ABOVE_the_background_so_it_renders_black():
-    """THE defect, stated as a number.
-
-    A window whose low end sits inside the background maps background to visible grey. Here the
-    background is 500 +/- 30, so a correct low end is above ~500 and the tissue is what lifts.
-    """
     plane = _fluorescence(bg=500.0, bg_noise=30.0)
     lo, hi = auto_contrast(plane)
 
@@ -48,10 +38,6 @@ def test_the_low_end_lands_ABOVE_the_background_so_it_renders_black():
 
 
 def test_a_percentile_window_is_what_it_beats():
-    """Pins the comparison rather than asserting the port is better in prose.
-
-    The 1st percentile of a fluorescence plane is BACKGROUND, and that is the whole problem.
-    """
     plane = _fluorescence(bg=500.0, bg_noise=30.0)
     pct_lo = float(np.percentile(plane, 1.0))
     auto_lo, _ = auto_contrast(plane)
@@ -64,9 +50,6 @@ def test_a_percentile_window_is_what_it_beats():
 
 
 def test_the_fraction_of_pixels_left_visible_is_small():
-    """The end result, measured the way the eye sees it: on a plane that is 2% signal, only a
-    few percent of pixels should be above the low end. A washed-out window leaves most of the
-    field visible, which is precisely what 'background looks colored' means."""
     plane = _fluorescence(frac=0.02)
     lo, _hi = auto_contrast(plane)
     visible = float((plane > lo).mean())
@@ -74,28 +57,21 @@ def test_the_fraction_of_pixels_left_visible_is_small():
 
 
 def test_a_brighter_background_moves_the_window_with_it():
-    """It tracks the data, not a constant. Two planes differing only in pedestal must get
-    windows that differ by about that pedestal."""
     lo_dim, _ = auto_contrast(_fluorescence(bg=300.0))
     lo_bright, _ = auto_contrast(_fluorescence(bg=3000.0))
     assert lo_bright - lo_dim > 2000.0, "the window ignored a 2700-count shift in background"
 
 
 def test_a_blank_channel_gets_NO_window_rather_than_a_guess():
-    """The deliberate divergence from the stitcher, which returns lo..lo+100 here.
-
-    A blank channel handed a 100-wide window renders its own read noise at full intensity, i.e.
-    it reads as SIGNAL. Refusing lets napari autoscale and says nothing false. `_pct_window` in
-    `_viewer` makes the same call for the same reason.
-    """
+    """A blank channel handed a 100-wide window would render its own read noise as signal;
+    refusing lets napari autoscale instead."""
     assert auto_contrast(np.full((64, 64), 700, dtype=np.uint16)) is None
     assert auto_contrast(np.zeros((64, 64), dtype=np.uint16)) is None
     assert auto_contrast(np.zeros((0,), dtype=np.uint16)) is None
 
 
 def test_a_nan_does_not_poison_the_window():
-    """One NaN makes the histogram, the median and the percentile all NaN, and a (nan, nan)
-    window is accepted by napari and renders BLACK — a blank pane with no error."""
+    """A NaN makes the histogram/median/percentile all NaN, and (nan, nan) renders BLACK silently."""
     plane = _fluorescence().astype(np.float32)
     plane[0, 0] = np.nan
     win = auto_contrast(plane)
@@ -103,15 +79,7 @@ def test_a_nan_does_not_poison_the_window():
 
 
 def test_the_same_plane_always_gets_the_SAME_window():
-    """Sampling is seeded, so a window is reproducible.
-
-    Found by this test failing: with the stitcher's unseeded np.random.choice the low end moved
-    ~6% between calls on a 1M-pixel plane. Small enough to be invisible, big enough that the same
-    region could come up looking different on two loads with nothing to account for it, and that
-    a screenshot could not be reproduced.
-
-    MUTATION: take the seed out of default_rng() in _contrast and this goes red.
-    """
+    """Sampling is seeded. MUTATION: drop the seed from default_rng() in _contrast and this fails."""
     plane = _fluorescence(shape=(1024, 1024))          # ~1M px, so sampling really happens
     windows = [auto_contrast(plane) for _ in range(5)]
     assert len(set(windows)) == 1, f"the same plane produced different windows: {set(windows)}"
@@ -123,8 +91,6 @@ def test_dtype_range_spans_the_whole_type():
     assert dtype_range(np.float32) == (0.0, 1.0)
 
 
-# --- picking the plane to measure ---------------------------------------------------------
-
 def test_the_sample_is_the_COARSEST_level_of_a_pyramid():
     """Seeding must cost nothing: measure the small level, not the 5731x4793 one."""
     levels = [np.zeros((64, 64), np.uint16), np.ones((16, 16), np.uint16)]
@@ -133,8 +99,7 @@ def test_the_sample_is_the_COARSEST_level_of_a_pyramid():
 
 
 def test_the_sample_is_the_MIDDLE_z_not_the_first():
-    """The first plane of a z-stack is routinely out of focus, and a window derived from an
-    out-of-focus plane is derived from blur."""
+    """The first plane of a z-stack is routinely out of focus."""
     stack = np.stack([np.full((8, 8), i, np.uint16) for i in range(5)])
     assert sample_plane([stack])[0, 0] == 2          # middle of 5, not 0
 

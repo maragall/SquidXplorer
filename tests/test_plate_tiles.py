@@ -1,14 +1,8 @@
-"""``ReaderTileSource`` — deep zoom over a RAW acquisition, with no written plate.
+"""ReaderTileSource — deep zoom over a RAW acquisition, with no written plate.
 
-The plate overview smooth-scales one 88 px-per-well montage, so zooming in blurs instead of
-resolving. IMA-216 (``_tiling``) and IMA-217 (``_tilesource``) already built the whole LOD stack,
-but both existing sources need a plate that has been WRITTEN — which leaves the case the viewer is
-in most of the time, an acquisition folder opened for a look, with no tile source at all.
-
-These tests pin the source's contract. They use a fake reader rather than the ``squid_dataset``
-fixture: what is under test is the world-µm-to-tile-pixel mapping, and a synthetic frame whose
-value encodes its own identity makes a misplacement visible as a wrong NUMBER rather than as a
-picture someone has to eyeball.
+Uses a fake reader rather than the squid_dataset fixture: what is under test is the
+world-µm-to-tile-pixel mapping, and a synthetic frame whose value encodes its own identity makes
+a misplacement visible as a wrong number rather than a picture someone has to eyeball.
 """
 
 from __future__ import annotations
@@ -25,8 +19,7 @@ PITCH_UM = 64.0            # no overlap: each FOV owns a clean 64x64 µm square
 
 
 class FakeReader:
-    """Every FOV is a constant plane whose value IS its fov index + 1. Misplacement shows up as
-    the wrong integer, which a test can assert on; a gradient could not."""
+    """Every FOV is a constant plane whose value is its fov index + 1."""
 
     def __init__(self, fail: set = frozenset()):
         self.reads = []
@@ -61,8 +54,6 @@ def _src(meta, reader=None, **kw):
     return ReaderTileSource(reader or FakeReader(), meta, ladder, **kw), ladder
 
 
-# --- the world-to-pixel mapping ---------------------------------------------------------------
-
 def test_a_tile_over_one_fov_reads_that_fovs_pixels():
     meta = _meta()
     src, ladder = _src(meta)
@@ -75,8 +66,7 @@ def test_a_tile_over_one_fov_reads_that_fovs_pixels():
 
 
 def test_world_with_no_fov_reads_as_zeros_not_an_error():
-    """A viewport routinely covers stage area nothing was placed on. Black is the honest answer;
-    raising would throw once per empty tile per frame on a part-acquired plate."""
+    """A viewport routinely covers stage area nothing was placed on."""
     meta = _meta()
     src, _ = _src(meta)
     far = (10_000.0, 10_000.0, 10_064.0, 10_064.0)
@@ -110,8 +100,6 @@ def test_an_unreadable_field_is_a_hole_not_a_dead_viewport():
     assert set(np.unique(tile)) == {0, 2, 3, 4}, "the failed field is zeros; the rest still render"
 
 
-# --- the plane cache --------------------------------------------------------------------------
-
 def test_the_same_field_is_decoded_once_across_tiles():
     """Adjacent tiles touch the same FOVs; without the cache a pan re-decodes continuously."""
     meta = _meta(n=2)
@@ -126,8 +114,8 @@ def test_the_same_field_is_decoded_once_across_tiles():
 
 
 def test_tiles_are_maximum_intensity_projections_by_default():
-    """Spencer: "I do want an MIP for this application." The default must project the stack, and
-    it must go through the registered operator so `reference` and any add_projector op work too."""
+    """Default must project the stack through the registered operator, so `reference` and any
+    add_projector op work too."""
     meta = _meta()
     reader = FakeReader()
     src, ladder = _src(meta, reader=reader)
@@ -142,7 +130,6 @@ def test_tiles_are_maximum_intensity_projections_by_default():
 
 
 def test_an_explicit_z_reads_exactly_that_plane():
-    """The escape hatch: one plane, no projection, for a fast path or a single-z acquisition."""
     meta = _meta()
     reader = FakeReader()
     src, ladder = _src(meta, reader=reader, z=1)
@@ -154,8 +141,7 @@ def test_an_explicit_z_reads_exactly_that_plane():
 
 
 def test_a_projector_that_does_not_consume_z_is_refused():
-    """This collapses a stack to one plane. A plane-op has no z to collapse, and running it per z
-    and keeping the last would look plausible and be wrong."""
+    """A plane-op has no z to collapse; running it per z and keeping the last would be wrong."""
     meta = _meta()
     from squidxplorer._engine import add_projector
 
@@ -164,10 +150,8 @@ def test_a_projector_that_does_not_consume_z_is_refused():
         _src(meta, projector="_tiletest_planeop")
 
 
-# --- the O(viewport) promise ------------------------------------------------------------------
-
 def test_a_small_viewport_at_fine_zoom_does_not_fetch_the_plate():
-    """The whole point of the ladder. A zoomed-in view must cost its SCREEN, not the sample."""
+    """A zoomed-in view must cost its screen, not the sample."""
     meta = _meta(n=6)
     _, ladder = _src(meta)
     g = ladder.geometry
@@ -182,9 +166,8 @@ def test_a_small_viewport_at_fine_zoom_does_not_fetch_the_plate():
 
 
 def test_zooming_out_past_the_ladder_clamps_to_the_coarsest_rung():
-    """Fit-to-plate on a real plate is a coarse view; the pick must clamp rather than run off the
-    end of the ladder. Driven by um_per_px directly — this fixture's plate is only a few hundred
-    µm across, so "fit into a 512 px window" would be a zoom IN and would prove nothing."""
+    """Driven by um_per_px directly — this fixture's plate is only a few hundred µm across, so
+    "fit into a 512 px window" would be a zoom IN and would prove nothing."""
     meta = _meta(n=6)
     _, ladder = _src(meta)
     g = ladder.geometry
@@ -195,8 +178,6 @@ def test_zooming_out_past_the_ladder_clamps_to_the_coarsest_rung():
     assert descs[0].level == len(g) - 1
     assert len(descs) <= g.worst_case_tiles
 
-
-# --- integration with the cache the renderer will use -----------------------------------------
 
 def test_tiles_round_trip_through_the_cache_the_renderer_uses():
     meta = _meta(n=2)
@@ -216,12 +197,8 @@ def test_tiles_round_trip_through_the_cache_the_renderer_uses():
 
 @pytest.mark.parametrize("how", ["empty", "absent"])
 def test_no_stage_positions_refuses_to_build_a_ladder(how):
-    """A region dropped for an unusable coordinates.csv must not silently pile every FOV at one
-    spot — plate_ladder already refuses, and the viewer's montage fallback depends on that raise.
-
-    Both shapes matter: `_fov_positions_um_or_empty` returns {} for a malformed file, and a
-    metadata dict assembled elsewhere may omit the key entirely.
-    """
+    """Both shapes matter: `_fov_positions_um_or_empty` returns {} for a malformed file, and a
+    metadata dict assembled elsewhere may omit the key entirely."""
     meta = _meta()
     if how == "empty":
         meta["fov_positions_um"] = {}

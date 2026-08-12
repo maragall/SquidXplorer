@@ -1,11 +1,7 @@
-"""Tests for the Plate abstraction, the sample_formats builder and the carrier-art registry (IMA-214).
+"""Tests for the Plate abstraction, the sample_formats builder and the carrier-art registry.
 
-Non-Qt on purpose (same reasoning as tests/test_plate_shape.py): the plate model is the thing the
-mosaic/selection/loupe code will share, so its contract is pinned here where it always runs, not
-behind ``pytest.importorskip("qtpy")``.
-
-UNITS: everything micrometres, every key ends ``_um`` (see _placement.py). sample_formats.csv is
-millimetres and is converted exactly once, at the loader.
+Non-Qt on purpose. Units: everything micrometres; sample_formats.csv is millimetres and is
+converted exactly once, at the loader.
 """
 
 from __future__ import annotations
@@ -33,8 +29,7 @@ from squidxplorer._plate import (
     region_stage_boxes_um,
     squid_images_dir,
 )
-# Private on purpose: the pitch-matching tests below assert a PROPERTY of the candidate table
-# (no two candidates within the tolerance), which cannot be enumerated without the table itself.
+# Private on purpose: the pitch-matching tests assert a property of the candidate table itself.
 from squidxplorer._plate import _PITCH_TOL, _SLIDE_FORMATS, _WELLPLATE_FORMATS
 
 
@@ -215,18 +210,8 @@ def test_measure_region_pitch_um_is_none_without_coordinates():
 
 
 def test_measure_region_pitch_um_matches_the_all_pairs_reference_on_a_jittered_plate():
-    """The grouped implementation returns EXACTLY what the all-pairs one returned.
-
-    ``measure_region_pitch_um`` used to compare every well against every other well and throw the
-    ~97% that shared neither a row nor a column away; on 1536 wells that was 180 ms, the only cost
-    in this module that grew quadratically with plate size. It now buckets the wells by the shared
-    index first (9.6 ms, measured the same way).
-
-    The guard has to be an EQUIVALENCE, not a spot value: an optimisation that quietly drops a
-    pair, or forms one it should not, still measures a plausible pitch on a regular grid. So the
-    input is JITTERED per well — a regular plate would give the same answer under almost any bug —
-    and the expected value is computed here by the exact all-pairs rule the function used to run.
-    """
+    """The grouped implementation must return EXACTLY what the all-pairs rule returns,
+    on a jittered plate (a regular grid would pass under almost any bug)."""
     rows, cols, pitch = 8, 12, 4500.0
     regions, positions, index = [], {}, {}
     for r in range(rows):
@@ -277,14 +262,7 @@ def test_format_from_pitch_um_rejects_disagreeing_axes():
 
 
 def test_format_from_pitch_um_names_a_12_well_plate_the_slide_carrier_used_to_shadow():
-    """A 12-well plate could not be identified from its stage coordinates AT ALL.
-
-    ``format_from_pitch_um`` matched against the whole vendored table, which since the 4-up slide
-    carrier was merged into it also contains a 27 000 um SLOT pitch. A 12-well plate's 26 000 um is
-    only 1.038x from that -- well inside ``_PITCH_TOL`` (5%) -- so both matched, the function saw
-    ``len(hits) == 2`` and returned None. A slide holder is not a wellplate and was never a
-    candidate for this question; the candidate set is now ``_WELLPLATE_FORMATS``.
-    """
+    """The candidate set must be _WELLPLATE_FORMATS: the 4-up carrier's slot pitch shadowed 12wp."""
     got = format_from_pitch_um(26000.0, 26000.0)
     assert got == "12 well plate", (
         f"a 26 000 um pitch IS a 12 well plate; got {got!r} "
@@ -307,14 +285,7 @@ def test_format_from_pitch_um_identifies_every_wellplate_from_its_own_pitch():
 
 
 def test_no_two_wellplate_pitches_are_within_the_matching_tolerance():
-    """The property the tolerance comment CLAIMS, enumerated instead of asserted once.
-
-    Two formats are ambiguous -- one measured pitch inside both windows -- exactly when the larger
-    pitch is within ``(1 + t) / (1 - t)`` of the smaller. Over ``_WELLPLATE_FORMATS`` the closest
-    pair is 12wp/24wp at 1.347x, so nothing is ambiguous and a bare None from
-    ``format_from_pitch_um`` can only ever mean "no match", never "several". Over the whole
-    vendored table it was NOT true (12wp vs the 4-up carrier, 1.038x), which is the defect above.
-    """
+    """No two wellplate pitches may be mutually ambiguous under _PITCH_TOL."""
     limit = (1.0 + _PITCH_TOL) / (1.0 - _PITCH_TOL)
     pitches = {n: PlateGeometry.vendored(n).pitch_x_um for n in _WELLPLATE_FORMATS}
     pitches = {n: p for n, p in pitches.items() if p > 0}
@@ -354,10 +325,7 @@ def test_build_plate_uses_the_declared_format_when_geometry_agrees():
 
 
 def test_build_plate_measured_geometry_overrides_a_contradicting_declared_format():
-    """THE live bug: ~/Downloads/synthetic_2x2_wellplate declares 384 but measures 9.000 mm.
-
-    Trusting the declaration would draw carrier art at exactly 2x wrong scale (IMA-220).
-    """
+    """Trusting a lying declaration would draw carrier art at exactly 2x wrong scale."""
     meta = _meta(wellplate_format="384 well plate")     # positions are 9 mm = 96wp
     with pytest.warns(UserWarning, match="384 well plate"):
         p = build_plate(meta)
@@ -376,15 +344,7 @@ def test_build_plate_warning_names_both_formats_and_the_measured_pitch():
 
 
 def test_build_plate_contradicts_a_lying_yaml_on_a_12_well_plate_too():
-    """The measured tier was disabled for exactly one format, and silently.
-
-    ``build_plate`` only emits its contradiction warning INSIDE ``if measured and measured !=
-    declared``. With ``format_from_pitch_um`` refusing every 12-well pitch as ambiguous, ``measured``
-    was None, so a 12-well acquisition whose yaml said "24 well plate" fell through to the
-    declaration and was laid out at 19 300 / 26 000 = 0.7423x the true scale WITH NO WARNING -- the
-    IMA-220 half-scale hazard the measured tier exists to prevent. The 24-well control below took
-    the measured branch all along, which is what made the gap invisible.
-    """
+    """The measured tier used to be silently disabled for 12wp (its pitch matched nothing)."""
     meta = _meta(fov_positions_um=_positions_um(26000.0, 26000.0),
                  wellplate_format="24 well plate")
     with pytest.warns(UserWarning, match="contradicts the stage coordinates") as rec:
@@ -554,29 +514,11 @@ def test_real_synthetic_dataset_resolves_to_96_not_the_declared_384():
     assert p.pitch_x_um == pytest.approx(9000.0, abs=1.0)
 
 
-# ------------------------------------------------- freeform carrier layout (IMA-253, then 2b8fbc5)
+# ------------------------------------------------- freeform carrier layout
 #
-# TWO RULES HAVE LIVED HERE, and the second one is the product.
-#
-# IMA-253's rule was stage-proportional: `freeform_grid` + `freeform_layout` reproduced each
-# region's true relative size and position, because a freeform region id carries no position and
-# assigning cells "left to right, in the order the acquisition reports them" invents the layout.
-#
-# Commit 2b8fbc5 (Julio, 2026-07-23) replaced that ON THE `build_plate` PATH with
-# `even_carrier_layout`: a landscape-biased grid of EQUAL, inset cells. The stage-proportional rule
-# stacked the two tissues of the real 10x acquisition into a tall, tiny, uneven column and wasted
-# the viewer's horizontal space; for a BROWSE view, even readable cells beat geometric fidelity.
-# Stage boxes survive in the new rule as the ORDER key, so spatially-left tissue still lands left.
-#
-# So these no longer assert proportionality. What they still guard is everything that was never
-# about proportionality and is still true, and still worth a mutation-check:
-#
-#   * GEOMETRY orders the cells (the stage boxes decide who is first, not the report order);
-#   * cells NEVER OVERLAP, whatever the regions' native geometries;
-#   * the layout depends on neither the region NAME nor the enumeration order.
-#
-# `freeform_grid` itself is unchanged and still has its own direct unit tests further down; they
-# pass and are deliberately left alone.
+# `build_plate` lays freeform regions out with `even_carrier_layout`: a landscape-biased grid of
+# EQUAL, inset cells, ordered by the regions' stage boxes. These tests guard the order-by-geometry,
+# no-overlap and name/order-independence properties; `freeform_grid` keeps its own unit tests.
 
 def _freeform_meta(boxes, pixel_size_um=1.0, frame=(100, 100)):
     """An acquisition of freeform regions, each a grid of FOVs covering ``(x0, y0, w, h)`` um."""
@@ -602,8 +544,7 @@ def test_region_stage_boxes_um_is_the_mosaic_extent_not_the_first_fov():
 
 
 def _overlap(a, b) -> bool:
-    """Do two ``(x, y, w, h)`` cells share any area? Cells that do are cells drawn on top of
-    each other, which is the failure `even_carrier_layout` exists to make impossible."""
+    """Do two ``(x, y, w, h)`` cells share any area?"""
     ax, ay, aw, ah = a
     bx, by, bw, bh = b
     return (min(ax + aw, bx + bw) - max(ax, bx)) > 1e-9 and (
@@ -611,15 +552,6 @@ def _overlap(a, b) -> bool:
 
 
 def test_two_tissue_regions_get_an_even_landscape_row_not_a_tall_thin_column():
-    """The real 10x tissue shape: overlapping in x, cleanly separated in y.
-
-    Under IMA-253 this produced a 2x1 grid -- two tall, tiny cells stacked in one column, which is
-    the picture 2b8fbc5 was opened to remove. The carrier is LANDSCAPE-biased now (the physical
-    4-slide holder is a horizontal row of slides), so two regions are one row of two equal cells
-    however they sit on the stage.
-
-    MUTATION: put `freeform_grid`/`freeform_layout` back on the `build_plate` path -> (2, 1) -> red.
-    """
     meta = _freeform_meta({"manual0": (96814.0, 10185.0, 5642.0, 7052.0),
                            "manual1": (97937.0, 21113.0, 5642.0, 7052.0)})
     p = build_plate(meta)
@@ -633,12 +565,6 @@ def test_two_tissue_regions_get_an_even_landscape_row_not_a_tall_thin_column():
 
 
 def test_freeform_layout_does_not_depend_on_the_ORDER_OR_NAMES_of_the_regions():
-    """The mutation-check: placement must follow geometry, never enumeration.
-
-    Renaming the regions so that alphabetical order REVERSES the stage order, and reporting them
-    in the opposite order, must produce the identical picture. A layout driven by enumeration
-    fails both halves; one driven by ``fov_positions_um`` cannot notice either change.
-    """
     boxes = {"manual0": (96814.0, 10185.0, 5642.0, 7052.0),
              "manual1": (97937.0, 21113.0, 5642.0, 7052.0)}
     base = build_plate(_freeform_meta(boxes))
@@ -651,26 +577,14 @@ def test_freeform_layout_does_not_depend_on_the_ORDER_OR_NAMES_of_the_regions():
 
     renamed = {"zebra": boxes["manual0"], "alpha": boxes["manual1"]}   # alphabetical == reversed
     r = build_plate(_freeform_meta(renamed))
-    # The cells still follow the STAGE BOXES: zebra carries manual0's box, which is the leftmost,
-    # so zebra is cell 0 even though "alpha" sorts before it. (The indices moved from (0,0)/(1,0)
-    # to (0,0)/(0,1) with 2b8fbc5's landscape carrier; the property under test did not.)
+    # The cells still follow the STAGE BOXES: zebra carries manual0's box, the leftmost.
     assert r.cell_index("zebra") == (0, 0) and r.cell_index("alpha") == (0, 1)
     assert r.cell_layout()["zebra"] == pytest.approx(ref["manual0"])
     assert r.cell_layout()["alpha"] == pytest.approx(ref["manual1"])
 
 
 def test_regions_with_wildly_different_extents_still_get_EQUAL_cells():
-    """Julio: "regions have different sizes and different geometries when it comes to tissues".
-
-    IMA-253 answered that by making the cell the region's own mosaic box, so a 24x-larger region
-    got a 24x-larger cell -- and the small one became unreadable. 2b8fbc5 reversed it: every region
-    gets the SAME cell, so a browse view of a carrier is legible whatever each tissue's extent. The
-    native geometry is not lost, it is where it belongs, inside the region's own window.
-
-    The ORDER is still geometric: same x, so the upper region (smaller y) takes the first cell.
-
-    MUTATION: scale the cells by the stage box again -> unequal cells -> red.
-    """
+    """Every region gets the SAME cell; the order is still geometric."""
     meta = _freeform_meta({"small": (0.0, 0.0, 2000.0, 1000.0),
                            "big": (0.0, 20000.0, 8000.0, 6000.0)}, frame=(0, 0))
     p = build_plate(meta)
@@ -683,14 +597,7 @@ def test_regions_with_wildly_different_extents_still_get_EQUAL_cells():
 
 
 def test_cell_spacing_is_EVEN_and_does_not_follow_the_stage_separation():
-    """Two acquisitions whose regions sit 4 mm and 40 mm apart must draw IDENTICALLY.
-
-    This is the inverse of the retired `..._preserves_relative_offset_not_just_order`: proportional
-    spacing is exactly what put two tissues at opposite ends of a tall empty column. The gap between
-    neighbouring cells is now the fixed inset, twice `even_carrier_layout`'s `gap`.
-
-    MUTATION: make the layout a function of the stage boxes' spacing again -> the two differ -> red.
-    """
+    """Two acquisitions whose regions sit 4 mm and 40 mm apart must draw IDENTICALLY."""
     near = build_plate(_freeform_meta({"a": (0.0, 0.0, 1000.0, 1000.0),
                                        "b": (0.0, 4000.0, 1000.0, 1000.0)}, frame=(0, 0)))
     far = build_plate(_freeform_meta({"a": (0.0, 0.0, 1000.0, 1000.0),
@@ -706,7 +613,7 @@ def test_cell_spacing_is_EVEN_and_does_not_follow_the_stage_separation():
 
 
 def test_well_plates_keep_the_uniform_grid_and_have_no_layout():
-    """A well id DOES encode position, so nothing above may touch a plate. IMA-253's whole rule."""
+    """A well id DOES encode position, so nothing above may touch a plate."""
     p = build_plate(_meta(wellplate_format="96 well plate"))
     assert p.cell_layout() is None
     assert (p.rows, p.cols) == (8, 12)
@@ -714,12 +621,7 @@ def test_well_plates_keep_the_uniform_grid_and_have_no_layout():
 
 
 def test_freeform_without_stage_coordinates_falls_back_to_report_order():
-    """No coordinates -> nothing to ORDER by, so the report order is the honest answer.
-
-    The cells themselves are unaffected: `even_carrier_layout` does not need stage boxes to place
-    them, only to sort them, so an acquisition with no coordinates still gets the same even grid
-    rather than the `None` layout (and the uniform-grid fallback) it used to get.
-    """
+    """No coordinates -> nothing to ORDER by, so the report order is the honest answer."""
     regions = ["manual0", "manual1"]
     p = build_plate(_meta(regions=regions, fovs_per_region={r: [0] for r in regions},
                           fov_positions_um={}, wellplate_format=None))
@@ -756,12 +658,6 @@ def test_cell_layout_rectangles_stay_inside_the_grid():
                          "test_10x_laser_af_z_stack_2025-10-28_13-40-43.939945 yy").is_dir(),
                     reason="real tissue acquisition not present")
 def test_real_tissue_regions_stacked_on_the_stage_are_drawn_as_an_even_row():
-    """The acquisition this ticket was opened about, measured rather than eyeballed.
-
-    The stage facts are unchanged and still asserted. What changed with 2b8fbc5 is the PICTURE the
-    plate draws from them: a stacked pair on the stage is still a one-row carrier on screen, because
-    stacking them on screen too is what "looked like shite" and wasted the horizontal space.
-    """
     from squidxplorer.reader import open_reader
 
     md = open_reader(Path.home() / "Downloads" /

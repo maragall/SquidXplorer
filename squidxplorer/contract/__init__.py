@@ -1,17 +1,6 @@
-"""The plate contract: what is on disk, what is promised about it, and how to check.
+"""Machine-enforceable half of the plate contract (see ``docs/plate-contract.md``).
 
-Written form: ``docs/plate-contract.md``. That document is the contract; this package is the part
-of it a machine can enforce.
-
-    version.py   ``PLATE_CONTRACT_VERSION``, stamped by ``_output`` and COMPARED by ``reader``,
-                 plus the mismatch policy (refuse on a major, warn on a minor).
-    paths.py     ``field_path``, the one place that knows ``{row}/{col}/{fov}/{level}``.
-    validate.py  errors (stable violations) versus warnings (missing optional sidecars), runnable
-                 as ``python -m squidxplorer.contract.validate <plate.ome.zarr>``.
-
-Only ``version`` and ``paths`` are re-exported here, and both are import-cheap: ``_output`` pulls
-this package on every plate write, and ``validate`` reaches back into ``reader``. Import the
-validator explicitly (``from squidxplorer.contract.validate import validate_plate``).
+Only ``version`` and ``paths`` are re-exported; import the validator explicitly.
 """
 
 from squidxplorer.contract.paths import field_levels, field_path

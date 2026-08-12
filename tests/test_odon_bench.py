@@ -1,9 +1,4 @@
-"""IMA-234: the local-vs-http harness, with no Odon and no real acquisition needed.
-
-The point of these is the HONESTY contract, not the timings: when a thing cannot be
-measured on this machine, the harness must say so in the report and must not emit a
-number for it. That is easy to break silently, so it is asserted.
-"""
+"""The local-vs-http benchmark harness, with no Odon and no real acquisition needed."""
 
 from __future__ import annotations
 
@@ -44,8 +39,6 @@ def test_serve_directory_serves_and_then_stops(plate):
         with urllib.request.urlopen(url, timeout=10) as resp:
             assert resp.status == 200
             assert resp.read() == b"{}"
-    # The port must be released, not merely orphaned: a leaked server would silently
-    # serve stale bytes into the NEXT run's measurement.
     with pytest.raises(Exception):
         urllib.request.urlopen(url, timeout=2)
 
@@ -56,8 +49,6 @@ def test_benchmark_transport_reads_the_same_bytes_both_ways(plate):
         rows = ob.benchmark_transport(field, base_url, plate, level="0", limit=4, workers=2)
     assert [r.label.split()[0] for r in rows] == ["local", "local", "http", "http"]
     assert all(r.errors == 0 for r in rows)
-    # Same chunks, so the same byte count — otherwise the two columns are not comparable
-    # and the "delta" would be measuring a different payload.
     assert len({r.bytes for r in rows}) == 1
     assert all(r.n == 4 for r in rows)
 
@@ -73,7 +64,6 @@ def test_transport_result_rates_are_finite_and_empty_is_nan():
 
 
 def test_benchmark_odon_skips_cleanly_with_a_reason(plate, monkeypatch):
-    """No binary must produce a stated skip, never a fabricated timing."""
     def _missing():
         raise FileNotFoundError("odon not found. Looked at $ODON_BIN, PATH, ...")
 
@@ -113,8 +103,6 @@ def test_format_report_never_invents_an_odon_number(plate, monkeypatch):
 
 
 def test_run_reports_a_refusal_verbatim(plate, monkeypatch):
-    """When odon exists but refuses the URL, its own words go in the report — the finding
-    must be re-derived per run, not quoted from a comment."""
     monkeypatch.setattr(ob, "_run_odon", lambda binary, target: (
         (0.01, "OK: loaded tile level 4 path '4'", 0) if not str(target).startswith("http")
         else (0.01, 'Error: failed to canonicalize dataset root: "%s"' % target, 1)))

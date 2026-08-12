@@ -1,19 +1,7 @@
 #!/usr/bin/env python3
-"""Headless functional walkthrough: drive EVERY shipped feature before a human opens the GUI.
-
-`tools/acceptance.py` answers "does an acquisition open at all". This answers "does each
-feature actually do its job", on real data, without eyes. It exists because every defect this
-project shipped passed a green unit suite: the backend was solid, the GUI wiring was dead, and
-the test doubles agreed with each other. A Re-dock button was broken from the day it shipped and
-no test noticed, because every test called the handler directly instead of clicking.
-
-Each check reports PASS / FAIL / SKIP with the number it measured, so a human walking the GUI
-afterwards knows which sections are worth their attention and which are already proven.
+"""Headless functional walkthrough: drive every shipped feature before a human opens the GUI.
 
     QT_QPA_PLATFORM=offscreen PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python tools/walkthrough.py
-
-Disk: writes nothing except one small operator output under a temp dir it deletes. Refuses to
-start below MIN_FREE_GB, because this machine has already been taken to 0 bytes free once.
 """
 from __future__ import annotations
 
@@ -30,19 +18,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
 
-#: The acquisitions this walkthrough drives. Every one is a developer-machine path, and every
-#: check that wants one goes through :func:`need`, so a machine that lacks it SKIPS with the path
-#: printed instead of erroring out somewhere less obvious.
-#:
-#: ``PLATE`` was ``~/Downloads/synthetic_2x2_wellplate`` until 2026-08-06 and that folder no
-#: longer exists, so every plate check below was a FAIL for reasons that had nothing to do with
-#: the product. Its replacement is REPRODUCIBLE rather than found, which is the point: the command
-#: in ``PLATE_RECIPE`` rebuilds it byte-for-byte, and the SKIP message prints that command.
-#:
-#: ``SQUIDXPLORER_FIXTURE_PLATE`` points ``PLATE`` somewhere else. That is what lets CI run this file
-#: for real instead of watching it skip: the plate fixture is GENERATED (0.1 s, 2.5 MB at CI size),
-#: so a runner can make one and hand over the path. TISSUE and PLATE1536 have no override because
-#: they are real acquisitions nothing can synthesise -- they skip off this machine, by name.
+#: Developer-machine datasets; checks that want one go through :func:`need` and SKIP when
+#: absent. ``SQUIDXPLORER_FIXTURE_PLATE`` points ``PLATE`` at a generated fixture for CI.
 TISSUE = ("/Users/julioamaragall/Downloads/"
           "test_10x_laser_af_z_stack_2025-10-28_13-40-43.939945 yy")
 PLATE = os.environ.get("SQUIDXPLORER_FIXTURE_PLATE") or \
@@ -50,9 +27,7 @@ PLATE = os.environ.get("SQUIDXPLORER_FIXTURE_PLATE") or \
 PLATE1536 = "/Users/julioamaragall/Downloads/synthetic_1536_wellplate"
 MIN_FREE_GB = 4.0
 
-#: How to rebuild PLATE. 4 wells x 36 FOVs = 144 positions on a 9 mm (96-well) pitch under a
-#: "384 well plate" declaration, which is exactly the shape the deleted fixture had: enough FOVs
-#: per well for a mosaic, and a declaration the coordinates contradict.
+#: How to rebuild PLATE byte-for-byte; printed in the SKIP message.
 PLATE_RECIPE = ('python tools/make_5d_fixture.py "%s" --fovs 36 --nz 1 --nt 1 '
                 '--well-pitch-mm 9.0 --declared-format "384 well plate"' % PLATE)
 
@@ -61,18 +36,7 @@ _RESULTS: list[tuple[str, str, str, str]] = []      # (ticket, title, verdict, d
 
 
 def _app():
-    """The QApplication, on THE BINDING THE APP SHIPS -- which is decided by importing `squidxplorer`.
-
-    This said ``from PyQt5.QtWidgets import QApplication`` until 2026-08-05. After the Qt6
-    migration (10b8348, f7f9b28, ce5605c) it did not merely test the wrong thing, it could not run
-    at all: `squidxplorer/__init__` pins ``QT_API=pyqt6``, so the widgets under test are Qt6 while this
-    constructed a Qt5 application, both frameworks loaded into one process, and the harness aborted
-    on ``QWidget: Must construct a QApplication before a QWidget`` before the first check.
-
-    The one harness whose whole purpose is to catch GUI wiring that no unit test can see was itself
-    dead, silently, for five days. Importing `squidxplorer` FIRST is the point, not tidiness: the pin
-    lives in its ``__init__`` and has to be set before qtpy resolves a binding.
-    """
+    """The QApplication, on the binding the app ships: importing squidxplorer pins QT_API first."""
     global _APP
     import squidxplorer  # noqa: F401  -- sets QT_API before qtpy resolves a binding
     from qtpy.QtWidgets import QApplication
@@ -84,26 +48,12 @@ _ONLY = os.environ.get("WALKTHROUGH_ONLY", "")   # e.g. IMA-261 — for mutation
 
 
 def say(text=""):
-    """Print the harness's own report, PAST anything the product has done to ``sys.stdout``.
-
-    Measured 2026-08-06: ``_workers._PreviewWorker.run`` wraps its whole pass in
-    ``_logpane.capture_stdout_to_log()``, which is deliberately process-wide and not thread-scoped
-    (its own comment says so). So while a plate preview is streaming, EVERY print on the main
-    thread is swallowed into the GUI's log panel -- and a check whose window still had a preview
-    running simply had no row in the output, which reads as the check having vanished. A console
-    tool that drives this widget cannot report through ``sys.stdout``.
-    """
+    """Print past sys.stdout: the product's log capture is process-wide and swallows print()."""
     print(text, file=sys.__stdout__, flush=True)
 
 
 def check(ticket, title):
-    """Decorator: run a check, catch everything, record one row.
-
-    The row is PRINTED as it is produced as well as recorded. ``try/except`` cannot catch a Qt
-    abort or a vispy segfault, and this file drives a GUI toolkit: when one check took the process
-    down, the summary at the bottom never ran and the whole run reported nothing at all -- not even
-    which check was in the chair. Streaming makes the crash name itself.
-    """
+    """Decorator: run a check, catch everything, record one row (streamed, so a crash names itself)."""
     def wrap(fn):
         if _ONLY and _ONLY not in ticket:
             return fn
@@ -133,32 +83,22 @@ class SkipCheck(Exception):
 
 
 def need(path):
-    """*path*, or SKIP this check naming it. The ONE gate between a check and a dataset.
-
-    The datasets live on one workstation, so on every other machine most of this file cannot run.
-    "Cannot run here" and "ran and failed" are different answers and the summary distinguishes
-    them -- but only if the absence is stated rather than discovered as a FileNotFoundError three
-    frames deep, which is what a `python tools/walkthrough.py` on CI used to produce.
-    """
+    """*path*, or SKIP this check naming it. The one gate between a check and a dataset."""
     if os.path.isdir(path):
         return path
     hint = f"\n            rebuild it with: {PLATE_RECIPE}" if path == PLATE else ""
     raise SkipCheck(f"dataset absent on this machine: {path}{hint}")
 
 
-#: Every window :func:`open_window` built and nobody has closed yet. See :func:`close_windows`.
+#: Every window :func:`open_window` built and nobody has closed yet.
 _OPEN: list = []
 
 
 def close_windows():
-    """Close every window this run opened and has not closed. Called after EVERY check.
+    """Close every window this run opened. Called after EVERY check.
 
-    A check that raises before its own ``w.close()`` leaves a ``PlateWindow`` with a live
-    ``_LoupeWorker`` and ``_TileFetcher`` on it. Those are QThreads parented to the window, so when
-    the next check's ingest triggers a collection, Qt destroys a running QThread and the PROCESS
-    ABORTS -- measured: IMA-221 failed on a Qt6 TypeError, and the abort landed two checks later
-    on IMA-228, which is where anyone reading the output would have gone looking. One check's
-    failure must not be able to end the run, and must not be able to frame a different check.
+    A leaked window's QThreads abort the process when Qt destroys them mid-run, framing a
+    later check.
     """
     while _OPEN:
         win = _OPEN.pop()
@@ -175,9 +115,7 @@ def open_window(path, size=(1600, 900)):
     _app()
     win = V.PlateWindow(None)
     _OPEN.append(win)
-    # Size and show BEFORE ingest: pane 3 carries setMinimumWidth(300), and a splitter that was
-    # never laid out at a real size reports every child at its default. Testing layout on an
-    # unshown window measures the harness, not the product.
+    # Size and show BEFORE ingest: an unshown splitter reports default child sizes.
     win.resize(*size)
     win.show()
     _app().processEvents()
@@ -188,17 +126,7 @@ def open_window(path, size=(1600, 900)):
 
 
 def open_view(win, region):
-    """Open a REAL ``RegionViewer`` on *region*, through the window's own manager.
-
-    The napari canvas is the one seam that needs a GL context, so it is replaced by a pane whose
-    ``mosaic`` is a real :class:`squidxplorer._napari_view.MosaicLayers` over a real Qt-free
-    ``napari.components.ViewerModel``. Everything a window does to its layers — an operator result
-    landing, a contrast write, a visibility toggle, ``ops()`` — is therefore the production class.
-    What is NOT covered, and is not claimed: vispy actually painting them.
-
-    Same substitution ``tools/gates.py`` makes; it is spelled out in both places rather than
-    shared, because a harness that imports another harness fails in a way neither one reports.
-    """
+    """Open a real ``RegionViewer`` on *region*, with the GL canvas swapped for a ViewerModel pane."""
     from qtpy.QtWidgets import QWidget
 
     from napari.components import ViewerModel
@@ -242,11 +170,7 @@ def drain_operator(win, timeout_s=600):
 
 
 def settle(ms=4000):
-    """Let the async preview stream finish before grabbing pixels.
-
-    ingest() starts a background worker that pushes tiles as they decode, so two grabs taken
-    without settling compare different stream states, not different settings.
-    """
+    """Let the async preview stream finish before grabbing pixels."""
     from qtpy.QtCore import QEventLoop, QTimer
     loop = QEventLoop()
     QTimer.singleShot(ms, loop.quit)
@@ -254,12 +178,7 @@ def settle(ms=4000):
 
 
 def drain_preview(win, timeout_s=120):
-    """Block until the window's raw preview worker has finished streaming (or the timeout).
-
-    Deterministic where ``settle(ms)`` is calibrated: a check that grabs pixels before/after a
-    setting must not race the background fill, and the fill's duration depends on how many fields
-    the acquisition has.
-    """
+    """Block until the window's raw preview worker has finished streaming (or the timeout)."""
     import time
     t0 = time.time()
     while time.time() - t0 < timeout_s:
@@ -274,26 +193,14 @@ def drain_preview(win, timeout_s=120):
 
 
 def rendered(widget, w=900, h=700):
-    """Grab a widget as an RGB array - what a human would actually see.
-
-    Returns DEVICE pixels, which on a retina panel is 2x the ``(w, h)`` asked for. Callers here
-    only ever diff one grab against another, so that is fine -- but anything that wants to crop
-    this by a WIDGET rectangle must scale by ``devicePixelRatioF()`` first. See
-    ``tests/test_viewer.py::_cell_slices``, which is the one place in the repo that does it and
-    says what a mixed-up crop looks like (it reads a neighbouring well and compares it to the one
-    it meant).
-    """
+    """Grab a widget as an RGB array (device pixels: 2x on retina)."""
     from qtpy.QtGui import QImage
     widget.resize(w, h)
     _app().processEvents()
-    # ``convertToFormat(4)`` -- the raw int for Format_RGB32 -- was accepted by PyQt5 and is a
-    # TypeError under PyQt6, which took out every check in this file that looks at pixels. Naming
-    # the enum is also the only spelling that survives a Qt renumbering.
+    # Name the enum: the raw int for Format_RGB32 is a TypeError under PyQt6.
     img = widget.grab().toImage().convertToFormat(QImage.Format.Format_RGB32)
     ptr = img.bits(); ptr.setsize(img.sizeInBytes())   # byteCount() is Qt5-only
-    # bytesPerLine, not width*4: Qt pads scanlines to a 4-byte boundary, and a padded row read as
-    # width*4 shears the image by a pixel per row. Device pixel ratio too -- grab() renders at the
-    # screen's ratio, which is 2 on a retina panel and 1 offscreen.
+    # bytesPerLine, not width*4: Qt pads scanlines to a 4-byte boundary.
     row = np.frombuffer(ptr, np.uint8).reshape(img.height(), img.bytesPerLine() // 4, 4)
     return row[:, :img.width(), :3].astype(float)
 
@@ -304,11 +211,6 @@ def free_gb():
 
 # ======================================================================================
 def run_all():
-    # Both off the package, not off `_stitch`: the one-operator-registry change (2026-08-05)
-    # deleted `_stitch._REGION_OPERATORS` and moved `available_region_operators` onto `squidxplorer`
-    # as a filter over the single `_engine._OPERATORS` table. This module-level import still said
-    # `from squidxplorer._stitch import ...` after the merge and would have taken the whole file down
-    # with an ImportError before the first check.
     from squidxplorer import available_projectors, available_region_operators, open_reader
 
     def read(ds):
@@ -348,21 +250,12 @@ def run_all():
 
     @check("IMA-215", "coordinates.csv: both on-disk schemas parse")
     def _():
-        """The discriminator is the HEADER (reader.py ``_has_fov_column``), so this check has to
-        drive one dataset of each header, and say which is which.
-
-        It used to name PLATE "20x-style, row order = fov" and TISSUE "monkey-style, fov column",
-        which is both backwards and, since the fixtures moved, untrue: every acquisition it opened
-        carried a ``fov`` column, so the type-(b) parser was never entered at all. The 1536 plate
-        is the type-(b) one on this machine -- its root ``coordinates.csv`` is
-        ``region,x (mm),y (mm),z (mm)`` with no fov column and one row per FOV in image order.
-        """
+        """One dataset per header schema: the discriminator is the header, not the dataset."""
         with_fov = read(TISSUE).metadata["fov_positions_um"]        # type (a): explicit fov column
         row_order = read(PLATE1536).metadata["fov_positions_um"]    # type (b): row order IS the fov
         assert len(with_fov) == 55, len(with_fov)
         assert len(row_order) == 6144, len(row_order)
-        # Both parsers must land in MICROMETRES. A plate spans tens of thousands of um; the 1000x
-        # tell is a span that looks like a millimetre count.
+        # Both parsers must land in MICROMETRES; a mm-scale span is the 1000x tell.
         spans = {}
         for name, pos in (("type-a", with_fov), ("type-b", row_order)):
             xs = [v[0] for v in pos.values()]
@@ -380,10 +273,7 @@ def run_all():
         per_well: dict = {}
         for (region, _fov), _b in boxes.items():
             per_well[region] = per_well.get(region, 0) + 1
-        # Derived from the acquisition, not from the fixture that happened to be here in July:
-        # the claim is "one box per acquired FOV, and more than one per well", and hard-coding
-        # 144/36 turned a fixture swap into a product FAIL. `_mosaic_boxes` computes placement
-        # independently of the metadata dict, so comparing the two is not circular.
+        # Derived from the acquisition, not hard-coded: one box per acquired FOV.
         want = {r: len(f) for r, f in m["fovs_per_region"].items()}
         assert len(boxes) == len(m["fov_positions_um"]), (len(boxes), len(m["fov_positions_um"]))
         assert per_well == want, f"{per_well} != {want}"
@@ -425,13 +315,8 @@ def run_all():
     # ---------- selection -> windows -> tabs -----------------------------------------
     @check("IMA-221", "Shift-drag marquee selects the right (region, fov) pairs")
     def _():
-        # A real drag through the widget's own event handlers - not a direct call to the
-        # selection setter. The Re-dock button was dead for a day precisely because every
-        # test called the handler instead of clicking.
-        # Enums FULLY SCOPED (Qt.MouseButton.LeftButton, not Qt.LeftButton). Qt5 accepted the
-        # short spelling and Qt6 does not, so an unscoped enum here is an AttributeError at the
-        # moment the gesture fires -- which reads as "the marquee is broken" rather than "the
-        # harness is".
+        # A real drag through the widget's own event handlers, not a direct setter call.
+        # Enums fully scoped: Qt6 rejects the short Qt5 spellings.
         from qtpy.QtCore import QEvent, QPointF, Qt
         from qtpy.QtGui import QMouseEvent
 
@@ -454,14 +339,8 @@ def run_all():
             ov.mouseMoveEvent(ev("move", b, mods))
             ov.mouseReleaseEvent(ev("release", b, mods, buttons=_NONE))
 
-        # WHAT A PLAIN SHIFT-DRAG DOES CHANGED ON 2026-07-23 (2b8fbc5, "Decentralize GUI"): it
-        # emits `marqueeSelected` -- open an independent window over the box -- and deliberately
-        # leaves NO selection wash behind, because the boxed set is visible in the new window's
-        # region slider. This check asserted the old binding and so reported `[] != [...]`, which
-        # reads as "the marquee is broken" and is not: the gesture that still SELECTS is Shift+Alt.
-        # Both halves are driven here, because "it opened the right wells" and "it selected the
-        # right wells" are now two different gestures and a check on one says nothing about the
-        # other.
+        # A plain Shift-drag OPENS a window and leaves no selection; Shift+Alt SELECTS.
+        # Both halves are driven because they are two different gestures.
         opened = []
         ov.marqueeSelected.connect(lambda wells: opened.append(list(wells)))
         drag(_SHIFT)
@@ -511,8 +390,7 @@ def run_all():
         if not hasattr(w, "minerva_selection"):
             w.close(); raise SkipCheck("minerva_selection() not present")
         # Decoys on the display-only overview: minerva_selection must ignore them and read
-        # PlateWindow, the selection's real owner. The old implementation probed the overview
-        # and reached the right answer only through a fallback.
+        # PlateWindow, the selection's real owner.
         w._overview.selected_wells = lambda: ["B1"]
         w._overview.selected_region_fovs = lambda: {"B1": [0]}
         w._selected_regions = ["A1", "A2"]
@@ -525,14 +403,7 @@ def run_all():
 
     @check("IMA-228", "The Minerva export is ONE FUSED MOSAIC per region, and Minerva reads it")
     def _():
-        """The claim that matters, on a real acquisition.
-
-        Minerva Author lays out exactly one image per story -- ``"Layout": {"Grid": [["i0"]]}``
-        is hardcoded in its ``src/app.py``, and only ``series[0]`` is ever opened -- so a
-        multi-FOV selection MUST fuse to a single mosaic. N per-FOV files would render the
-        first and silently discard the rest. A FOV subset of a region is therefore a CROP of
-        that region, still one file.
-        """
+        """Minerva opens series[0] of one image per story, so a multi-FOV selection must fuse."""
         if free_gb() < MIN_FREE_GB + 1:
             raise SkipCheck(f"only {free_gb():.1f} GB free; refusing to write")
         import tifffile
@@ -582,10 +453,7 @@ def run_all():
     def _():
         w = open_window(PLATE)
         ov = w._overview
-        # The preview stream must FINISH, or the three grabs below diff stream states rather than
-        # channel settings. Wait on the worker itself instead of a fixed sleep: since IMA-253 the
-        # preview composites every FOV of a multi-FOV well (144 fields on this plate, not 4), so
-        # how long the stream takes is a property of the acquisition, not a constant to calibrate.
+        # The preview stream must FINISH, or the grabs diff stream states, not settings.
         drain_preview(w)
         base = rendered(ov)
         if not hasattr(ov, "set_channel_visible"):
@@ -602,10 +470,8 @@ def run_all():
         restored = np.array_equal(base, back)
         assert changed > 0, "toggling a channel changed nothing"
         drift = float(np.abs(base - back).max())
-        # Restore is not required to be byte-identical: re-enabling a channel re-runs the
-        # running-percentile contrast, so a small window drift is expected and benign. A LARGE
-        # drift would mean the channel did not really come back, so bound it rather than
-        # asserting equality and getting a false alarm (or, worse, papering over a real one).
+        # Restore is bounded, not byte-identical: re-enabling re-runs the running-percentile
+        # contrast, so a small window drift is expected and benign.
         assert drift < 40, f"channel did not restore: max px drift {drift}"
         return (f"{changed} px changed when ch0 off; byte-identical on restore={restored}, "
                 f"max drift on restore {drift:.0f}/255")
@@ -624,27 +490,9 @@ def run_all():
                        f"std={g.std():.1f}")
         return " | ".join(out)
 
-    # IMA-207 ("per-region contrast lifts a dim well that global crushes") WAS HERE AND IS GONE.
-    # Per-region contrast was DELETED on 2026-07-22 (8b0cbfc) on purpose, with the reason on the
-    # record: "It made a dim well readable beside a bright one, which is a presentation trick that
-    # costs the one thing a plate view is for - two wells that look identical could differ by
-    # orders of magnitude." `set_contrast_scope`, `SCOPE_PER_REGION` and `_cell_windows` all went
-    # with it, so the check could only ever SKIP again -- and a permanent skip in a list of skips
-    # is how a dead check hides.
-
     @check("IMA-261", "The plate view owns NO contrast control (the duplicate is GONE)")
     def _():
-        """Not hidden, not disabled - ABSENT, walked over the REAL widget tree of a shown window.
-
-        Rewritten 2026-08-06. It used to read ``w._channel_bar``, which raised AttributeError:
-        8b0cbfc (2026-07-22) deleted the plate's whole channel bar, not merely its sliders. So the
-        check FAILED on a change that had over-satisfied it -- the worst kind of stale check,
-        because a real regression and a tightened design produce the same red.
-
-        The claim is now the stronger one that commit actually made: no interactive control ANY-
-        WHERE under the plate, and no ``_ChannelBar`` instance in the tree. Walking the tree rather
-        than naming an attribute is the point: this keeps holding whatever the bar is next called.
-        """
+        """Walk the real widget tree: no interactive control anywhere under the plate."""
         from qtpy.QtWidgets import QAbstractButton, QAbstractSlider, QAbstractSpinBox, QComboBox
         import squidxplorer._viewer as V
         w = open_window(PLATE)
@@ -653,12 +501,8 @@ def run_all():
         for kind in (QAbstractSlider, QAbstractSpinBox, QComboBox, QAbstractButton):
             controls += [f"{type(c).__name__}({c.text() if hasattr(c, 'text') else ''})"
                          for c in ov.findChildren(kind)]
-        # The CLASS is gone as of 2026-08-05, not merely unmounted: it had not been constructed
-        # since 8b0cbfc (2026-07-22) and was deleted with the rest of the dead central-pane paths.
-        # So `V._ChannelBar` is now an AttributeError, and this check asserts the stronger fact --
-        # the type does not exist to be mounted. Written as a getattr rather than a bare access
-        # because the reason this line changed is exactly the reason it must not raise: a harness
-        # that dies on the change it is meant to VERIFY reports a red for a green event.
+        # getattr: the _ChannelBar class itself is deleted, and this check must not raise
+        # on the change it is meant to verify.
         bar_cls = getattr(V, "_ChannelBar", None)
         bars = w.findChildren(bar_cls) if bar_cls is not None else []
         attr = hasattr(w, "_channel_bar")
@@ -669,37 +513,9 @@ def run_all():
         return ("0 interactive controls under the plate, no _ChannelBar type at all, no "
                 "_channel_bar attribute - the plate reports contrast, it does not set it")
 
-    # THREE IMA-261 CHECKS WERE HERE AND ARE GONE, all of them drivers of an `ndv_clims_slider`
-    # helper (deleted with them):
-    # "DRAGGING the CENTRAL viewer's contrast slider repaints the PLATE", "Plate PIXELS are the
-    # array viewer's window, not merely its numbers", and "A contrast drag is under 16 ms/frame on
-    # all three datasets".
-    #
-    # There is no central viewer to drag. ``PlateWindow._detail`` has been unconditionally None
-    # since 19cd491 (2026-07-22) and the locked central pane was removed by 2b8fbc5 (2026-07-23,
-    # "Decentralize GUI"); contrast now belongs to napari in an INDEPENDENT RegionViewer window,
-    # reaching the plate through ``MosaicLayers.on_user_contrast`` -> ``_on_detail_contrast``.
-    # the helper returned None on every dataset, so the first two SKIPped and -- worse --
-    # the 16 ms budget PASSED while measuring nothing at all ("tissue: no slider/store | 2x2: no
-    # slider/store | 1536wp: no slider/store", a green row over zero measurements, which is the
-    # exact failure its own docstring was written to prevent).
-    #
-    # They are not rewritten HERE because they cannot be: napari needs a real GL context and this
-    # file runs under QT_QPA_PLATFORM=offscreen, where its canvas does not exist. The claim moved
-    # to ``tools/verify_napari_mosaic.py``, which is the harness that has a GL context.
-
     @check("IMA-242", "ONE contrast model: the loupe obeys the window the plate obeys")
     def _():
-        """The duplication this ticket collapsed: the loupe used to memoise its own window and its
-        own compositor, so a contrast change moved the plate and left the magnifier of that same
-        plate showing the pre-change contrast. Latch a channel and require both to report it.
-
-        The PER-REGION arm was dropped on 2026-08-06: ``PlateOverview._cell_windows`` went with
-        per-region contrast itself in 8b0cbfc (2026-07-22), so reaching for it raised
-        AttributeError and reported "the contrast model is broken" about a third renderer that no
-        longer exists. Two renderers is now the whole population, and the check says so rather
-        than quietly measuring fewer things than its title claims.
-        """
+        """Latch a channel and require both renderers to report the same window."""
         import squidxplorer._viewer as V
         w = open_window(PLATE)
         ov = w._overview
@@ -785,9 +601,8 @@ def run_all():
             box = boxes.get((region, f))
             if box is None:
                 continue
-            # x_original_um is the ABSOLUTE stage corner; x_um is region-relative (ngio's
-            # reset_origin convention). The tile ladder works in absolute stage um, so compare
-            # against the original.
+            # x_original_um is the ABSOLUTE stage corner; x_um is region-relative. The tile
+            # ladder works in absolute stage um, so compare against the original.
             x = float(r["x_original_um"])
             worst = max(worst, abs(x - box[0])); n += 1
         assert n, "no ROI/bbox pairs compared"
@@ -835,31 +650,9 @@ def run_all():
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
-    # IMA-255 ("A z-stack switches to 3D volume rendering with the right geometry") WAS HERE AND
-    # IS GONE. It drove `ndviewer_light`'s volume monkey-patch. That package was deleted from this
-    # product on 2026-07-30 (58d342d, "Delete the ndviewer_light fallback: one renderer, and a
-    # named failure") precisely BECAUSE it imports PyQt5 at module scope.
-    #
-    # The check anticipated the deletion and raised SkipCheck on ImportError -- but the package is
-    # still installed on this workstation as a sibling editable checkout, so the import SUCCEEDED,
-    # dragged Qt5 into a Qt6 process ("Class QT_ROOT_LEVEL_POOL... is implemented in both PyQt6 and
-    # PyQt5"), and killed the run with "QWidget: Must construct a QApplication before a QWidget".
-    # Measured 2026-08-06: every check after it never ran. A skip guarded by ImportError cannot
-    # protect against an import that works and is still wrong.
-    #
-    # Its own docstring already named the replacement, and that replacement exists:
-    # `tests/test_viewer_3d.py` asserts napari's voxel scale.
-
-    # ---------- the two features that landed on 2026-08-05 ----------------------------
-    #
-    # Added the same day they merged. This file's contract is "drive EVERY shipped feature", and a
-    # feature that ships without a check here is exactly how the 25 above came to exist.
-
     @check("IMA-ii.5", "Gallery View fuses one comparable cell per (region, channel)")
     def _():
-        """A gallery is a LOOK, not an operator run: one fused cell per region per channel, at a
-        common decimation, with contrast SHARED per channel so a dim well and a bright well do not
-        both come out looking mid-grey. Both halves are asserted -- the pixels and the sharing."""
+        """One fused cell per region per channel, common decimation, shared per-channel contrast."""
         from squidxplorer._gallery import _channel_names, fuse_gallery_cell, shared_windows
 
         r = read(PLATE)
@@ -885,9 +678,7 @@ def run_all():
 
     @check("IMA-video", "The mp4 recorder writes a movie whose frames actually DIFFER")
     def _():
-        """The defect this feature can have is a movie every frame of which is identical -- which
-        looks like a working feature until someone plays it. So the mp4 is DECODED BACK and the
-        frames compared, on the axis `default_axis` picks for this acquisition."""
+        """The mp4 is decoded back and consecutive frames compared on the chosen axis."""
         from squidxplorer import _video as V
 
         why = V.encoder_problem()
@@ -916,13 +707,8 @@ def run_all():
             assert len(back) == n, f"encoded {n} frames, decoded {len(back)}"
             diffs = [float(np.abs(back[i].astype(int) - back[i + 1].astype(int)).mean())
                      for i in range(len(back) - 1)]
-            # NOT `> 0`. Feeding the encoder the SAME frame ten times does not decode back to ten
-            # byte-identical frames -- H.264 leaves compression noise, measured at 0.0000007 to
-            # 0.0046 mean abs difference per pair, and only one pair of nine came back exactly 0.
-            # So `> 0` would have passed a completely static movie whenever the encoder happened
-            # not to produce an exact tie. The real signal is two orders of magnitude away: 1.61
-            # minimum on this z-stack, 13.93 on the 3-timepoint fixture. 0.1 sits 16x below the
-            # smallest real motion and 20x above the largest artifact.
+            # NOT `> 0`: H.264 compression noise makes identical inputs differ slightly, so
+            # the 0.1 floor sits between the largest artifact and the smallest real motion.
             assert diffs and min(diffs) > 0.1, (
                 f"consecutive frames are effectively IDENTICAL on the {axis} axis "
                 f"(min {min(diffs):.4f}, floor 0.1): {[round(d, 4) for d in diffs]}")
@@ -936,15 +722,7 @@ def run_all():
 
     @check("IMA-controls", "⚙ controls: run an operator, and the chip opens ITS tab on the plate")
     def _():
-        """Julio, 2026-08-06: "The controls now brings plate view, but doesn't open the operator
-        tab." The whole journey, clicked: open a region window, run an operator on it from the
-        plate, then press the chip and look at the plate's tab bar.
-
-        Every step of this was already covered by a unit test and the journey was still broken,
-        because the break was between the steps: the run reported success and delivered no layer,
-        so ``_window_operators()`` was honestly empty and the chip had nothing to open. That is
-        why this check asserts the LAYER and the TAB, not the click.
-        """
+        """The whole journey, clicked: this asserts the LAYER and the TAB, not the click."""
         from qtpy.QtWidgets import QPushButton
 
         w = open_window(need(TISSUE))
@@ -979,22 +757,13 @@ def run_all():
 
     @check("IMA-controls", "One reader, many threads: a plane read is not corrupted by a sibling")
     def _():
-        """The engine reads FOVs from a thread pool through ONE reader object, and the reader
-        cached one ``tifffile.TiffFile`` per file and handed it out unguarded. Two threads decoding
-        two pages of the same file moved one seek position under each other.
-
-        It surfaced as an intermittent per-field skip -- ``TiffFileError('suspicious number of
-        tags')`` -- which the engine's per-well fault isolation absorbed, so a run could quietly
-        lose fields and then fail to draw the region's layer at all.
-        """
+        """Concurrent decodes of one TiffFile must not move each other's seek position."""
         import concurrent.futures as cf
 
         r = read(need(TISSUE))
         m = r.metadata
         region = list(m["regions"])[0]
-        # SEVERAL FOVs and SEVERAL passes. The race is a seek moved between one thread's header
-        # read and its strip read, so it is a probability, not a certainty: the first FOV alone,
-        # read once per channel, came out clean against the unlocked reader. Mutation-checked at
+        # Several FOVs and several passes: the race is probabilistic. Mutation-checked at
         # this size — removing the lock in `_TiffHandles.read` turns this red.
         fovs = sorted(m["fovs_per_region"][region])[:3]
         channels = [c["name"] for c in m["channels"]]
@@ -1058,11 +827,8 @@ def main():
 
 if __name__ == "__main__":
     rc = main()
-    # os._exit, NOT sys.exit. Measured: with every check reported and the summary printed, this
-    # process still died with SIGSEGV (139) on the way out -- Qt/vispy teardown after a GUI run,
-    # and nothing to do with any check's verdict. A harness whose exit code is decided by a
-    # teardown crash cannot gate anything, so the verdict is committed here, after the report and
-    # before the interpreter tries to unwind a widget tree it no longer needs.
+    # os._exit, NOT sys.exit: Qt/vispy teardown can segfault on the way out, and a harness
+    # whose exit code is decided by a teardown crash cannot gate anything.
     sys.stdout.flush()
     sys.stderr.flush()
     os._exit(rc)

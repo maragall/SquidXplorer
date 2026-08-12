@@ -1,6 +1,6 @@
-"""Tests for wellplate-format inference from well ids (IMA-219).
+"""Tests for wellplate-format inference from well ids.
 
-Deliberately NON-Qt: tests/test_viewer.py is behind ``pytest.importorskip("qtpy")`` and would
+Deliberately non-Qt: tests/test_viewer.py is behind `pytest.importorskip("qtpy")` and would
 silently not run headless, so the inference contract is pinned here instead.
 """
 
@@ -18,10 +18,6 @@ from squidxplorer._plate_shape import (
     well_span,
 )
 
-# The row alphabet is IMPORTED, not restated. This file used to carry a third copy of it,
-# justified by "_viewer's is behind a PyQt5 import" — a claim about a function that no longer
-# exists, guarding a test whose whole subject is which row a letter names.
-
 
 def _full_plate(rows, cols):
     """Every well id of an r x c plate: A1..{row}{col}."""
@@ -29,8 +25,7 @@ def _full_plate(rows, cols):
 
 
 def test_2x2_snaps_to_smallest_containing_format():
-    # ~/Downloads/synthetic_2x2_wellplate: A1/A2/B1/B2. A literal 2x2 is not a Squid format, so
-    # the 2x2 box snaps UP to the smallest one that contains it (6wp = 2x3).
+    # A literal 2x2 is not a Squid format, so the box snaps UP to the smallest one containing it.
     assert infer_plate_format(["A1", "A2", "B1", "B2"]) == "6 well plate"
 
 
@@ -49,21 +44,17 @@ def test_span_is_measured_from_the_plate_origin():
 
 
 def test_one_well_is_a_glass_slide():
-    # The degenerate 1x1 sample — smallest containing format for a single A1.
     assert infer_plate_format(["A1"]) == GLASS_SLIDE
 
 
 def test_exceeding_every_format_raises():
-    # A row past AF (32) / a column past 48 fits nothing; refuse rather than draw a wrong plate.
     with pytest.raises(PlateShapeError, match="exceeds every Squid format"):
         infer_plate_format(["A1", "BZ99"])
 
 
 def test_freeform_regions_report_a_slide_not_a_crash():
-    # Tissue / manual acquisitions: not wells at all -> non-wellplate layout, never an exception.
     assert infer_plate_format(["manual0", "manual1", "manual2"]) == GLASS_SLIDE
     assert well_span(["manual0"]) is None
-    # A single freeform id mixed into real wells still means "not a well plate".
     assert infer_plate_format(["A1", "B2", "manual0"]) == GLASS_SLIDE
 
 
@@ -72,7 +63,6 @@ def test_manual_override_beats_inference():
     assert infer_plate_format(wells, override="96 well plate") == "96 well plate"
     assert infer_plate_format(wells, override=96) == "96 well plate"
     assert infer_plate_format(wells, override="1536wp") == "1536 well plate"
-    # The override also rescues a set that fits no format at all.
     assert infer_plate_format(["A1", "BZ99"], override="384") == "384 well plate"
 
 
@@ -97,20 +87,13 @@ def test_normalize_and_dims():
 
 def test_resolve_prefers_declared_then_infers():
     declared = {"wellplate_format": "1536 well plate", "regions": ["A1", "A2"]}
-    assert resolve_plate_format(declared) == "1536 well plate"      # D1: declared is authoritative
+    assert resolve_plate_format(declared) == "1536 well plate"      # declared is authoritative
     absent = {"wellplate_format": None, "regions": ["A1", "A2", "B1", "B2"]}
     assert resolve_plate_format(absent) == "6 well plate"           # fallback: inference
     assert resolve_plate_format(declared, override="96") == "96 well plate"   # override beats both
 
 
-
-
-# --- ONE row alphabet, wherever it lives ---------------------------------------------------------
-#
-# `_row_letter` was two byte-identical copies (`_plate`, `_plate_overview`) and `_row_index` was
-# two copies that were NOT identical: `_plate`'s refused a non-letter, `_plate_shape`'s did not,
-# and `ord(ch) - 64` is a number for every character. Both collapsed on 2026-08-06. These pin the
-# COUNT, not the module, so the two independent collapses of the same duplication agree.
+# `_row_letter` / `_row_index` used to each have two copies; these pin the count, not the module.
 
 def _defs(name: str) -> list:
     import pathlib
@@ -137,10 +120,7 @@ def test_row_letter_and_row_index_are_inverses_over_every_plate_row():
 
 @pytest.mark.parametrize("name", ["_row_letter", "_row_index"])
 def test_the_row_alphabet_is_defined_exactly_once(name):
-    """Structural: a second definition anywhere is the copy coming back.
-
-    Text-level on purpose -- the deleted `_row_letter`s were byte-identical bodies, so only a
-    grep would ever have caught a third being added, and nothing did for the second.
-    """
+    """Text-level on purpose: the deleted duplicates were byte-identical, so only a grep catches
+    a third being added."""
     found = _defs(name)
     assert len(found) == 1, f"{name} is defined in {found}; there must be exactly one"

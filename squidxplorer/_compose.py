@@ -1,91 +1,6 @@
-"""Operator COMPOSITION: a chain of registered operators, resolved into one registry-shaped operator.
-
-``squidxplorer._recipe.RecipeChain`` has documented ``mip + decon(sigma=2.0)`` and the rule that order
-matters since 2026-07-24, and until now **nothing executed it**. Every call shape people reached for
-was refused: ``projector=["flatfield", "mip"]`` raised ``TypeError: unhashable type: 'list'``,
-``"flatfield+mip"`` raised ``KeyError: unknown projector``, and ``bind_operator("mip", {"then":
-"decon"})`` raised ``ValueError: operator 'mip' declares no parameters``. The blocker was never a
-missing convenience API: ``_OPERATORS`` is ``dict[str, Operator]`` and ``project_well`` applies
-exactly ONE ``reduce`` per ``(t, c, z_group)``, so there was no seam a second operator could sit in.
-
-WHAT THIS MODULE DOES, AND WHAT IT DELIBERATELY DOES NOT
---------------------------------------------------------
-It adds no seam to the loop. It builds ONE :class:`squidxplorer._engine.Operator` out of several, whose
-four declarations are DERIVED from its parts, and hands that to the loop that already exists::
-
-    project_plate(reader, projector="flatfield + decon + mip")
-    stitch_region(reader, "B2", fovs, projector="bgsub+mip", correct_illumination=False)
-    write_plate(reader, out, projector="bgsub+mip")
-
-So a chain is accepted anywhere a name is, by every caller, with no edit to any of them: the engine,
-the writer, the stitcher, the CLI's ``--projector``, the ``run_operator`` command. That is the whole
-reason the expression is a STRING and not a new argument -- ``projector=`` is already threaded
-through six call paths, and a parallel ``projectors=`` list would have to be threaded through all
-six again and then reconciled with the one that was already there.
-
-The expression is exactly :meth:`squidxplorer._recipe.RecipeChain.label` -- the words the console and a
-legend already print for a chain -- and :meth:`~squidxplorer._recipe.RecipeChain.parse` is its inverse.
-One spelling for the label, the cache key, the paste script and the run.
-
-THE THREE COMBINATIONS THAT ARE REFUSED, AND WHY EACH IS REFUSED RATHER THAN REORDERED
---------------------------------------------------------------------------------------
-``consumes`` decides the engine's loop and the output shape, so it also decides what can follow
-what. This is arithmetic on the declarations, not a table of operator names (which
-``tests/test_operator_declaration.py`` fails the build over):
-
-* **plane-op -> plane-op** composes. Both keep ``Nz``, so the second maps over what the first
-  produced: ``flatfield + decon`` is ``(T, C, Nz, Y, X)``.
-* **plane-op -> z-reducer** composes. The reducer consumes the stack the plane-ops produced:
-  ``flatfield + decon + mip`` is ``(T, C, 1, Y, X)``, and the plane-ops are applied LAZILY as the
-  reducer pulls, so the whole stack is still never resident.
-* **z-reducer -> anything** is REFUSED. After a reducer there is one plane and no stack, so the
-  step after it is not "mapped over z" in any sense the declaration can express; ``mip + mip`` is
-  not a second projection and ``mip + decon`` is deconvolution of a projection, which is a
-  different scientific claim from the deconvolution the chain appears to promise. A z-reducer is
-  the LAST step or the only one.
-* **labels -> anything** is REFUSED. ``produces="labels"`` means the pixels are integer OBJECT IDS,
-  so a following operator would do arithmetic on names: the mean of label 12 and label 37 is label
-  24, an object that does not exist. Same argument ``_stitch`` already makes when it refuses to
-  feather labels. An operator that produces labels is the LAST step.
-* a **z-SELECTING** step (``select_index``: ``reference``) is REFUSED inside a chain. It is not a
-  shape problem: ``project_well`` solves the focus ONCE per ``(t, fov)`` on RAW planes and shares
-  that z across channels, outside the operator, so a chain around it would never touch the planes
-  it picks. Composing it would silently drop every other step.
-
-Refused BY NAME, with the reason and the fix in the message, and never silently reordered: a run
-that quietly ran ``decon + mip`` when the user typed ``mip + decon`` is a wrong result that looks
-right, which is the failure mode this whole registry is shaped to avoid.
-
-WHAT A COMPOSED OPERATOR DECLARES
----------------------------------
-============ =================================================================================
-declaration  derived as
-============ =================================================================================
-``consumes`` the UNION of the parts'. Because only the last step may consume z, that is ``{"z"}``
-             iff the last step is a z-reducer -- so the engine's loop and the output shape follow
-             from the chain with no special case.
-``produces`` the LAST step's. Nothing may follow a non-intensity step, so the intermediate ones
-             are all ``"intensity"`` by construction.
-``params``   every part's, NAMESPACED ``<step>.<param>`` (``spot.min_area_px``), defaulted to what
-             the expression already fixed. So ``operator_kwargs`` reaches one step of a chain
-             unambiguously, and ``list_operators``-shaped readers see a chain like any operator.
-``requires`` the union, in first-declared order. One refusal at bind time naming every missing
-             package, before a single well is read.
-============ =================================================================================
-
-Two ATTRIBUTES are carried too, both because a generic reader elsewhere depends on them:
-
-* ``corrects_illumination`` -- true if ANY part corrects. ``_stitch.stitch_region`` reads it off
-  the callable to refuse the flat-field double-apply (measured: correcting twice changes 88.6% of
-  pixels by up to 23 counts, silently). A chain CONTAINING ``flatfield`` must not defeat that
-  guard, so the composed callable declares what its parts declare.
-* ``for_channel`` -- present if ANY part is channel-specialisable. ``project_well`` calls it once
-  per channel; the composition rebuilds itself with each part specialised, so ``bgsub + decon``
-  still deconvolves 638 with the 638 PSF.
-
-A one-step chain with no parameters resolves to the registry entry ITSELF, the same object the
-table has always held. ``projector="mip"`` is therefore byte-identical to what it was, including
-``reference``'s ``select_index``: nothing routes through this module unless a chain was asked for.
+"""Operator composition: a chain expression ("flatfield + decon + mip") resolved into ONE
+registry-shaped Operator whose consumes/produces/params/requires are derived from its parts.
+Impossible combinations are refused by declaration, never reordered.
 """
 
 from __future__ import annotations
@@ -98,10 +13,8 @@ from squidxplorer.projection import INTENSITY, bind_channel
 
 __all__ = ["CHAIN_CHARS", "compose_operator", "is_chain_expression"]
 
-#: The characters that make a ``projector=`` string an EXPRESSION rather than a table key. A
-#: registered name may contain neither (``add_projector`` refuses one that does), so this test can
-#: never shadow a real entry, and an unknown plain name still gets the registry's own KeyError
-#: rather than a parser's.
+#: The characters that make a ``projector=`` string an EXPRESSION rather than a table key.
+#: A registered name may contain neither, so this test can never shadow a real entry.
 CHAIN_CHARS = "+()"
 
 
@@ -120,26 +33,7 @@ class _Step:
 
 
 def compose_operator(expression: Any, lookup: Callable[[str], Any]) -> Any:
-    """Resolve *expression* into ONE :class:`squidxplorer._engine.Operator`.
-
-    *expression* is a chain string (``"flatfield + decon + mip"``) or an already parsed
-    :class:`~squidxplorer._recipe.RecipeChain`.
-
-    *lookup* resolves one bare operator NAME to its registry record. Passed in rather than reached
-    for, so the resolution RULE ("a registered name wins, then a chain") lives in exactly one place
-    -- :func:`squidxplorer._engine._resolve_operator`, which is the door every ``projector=`` arrives
-    at. A second copy of that rule here is how the CLI and the engine would come to disagree about
-    what a string means.
-
-    Raises
-    ------
-    KeyError
-        From *lookup*, when a step names an operator that is not registered. Unchanged wording, so
-        a typo inside a chain reads exactly like a typo outside one.
-    ValueError
-        On an empty chain, a repeated step, or one of the combinations this module's docstring
-        refuses. Every message names the two operators involved and what to do instead.
-    """
+    """Resolve *expression* (a chain string or RecipeChain) into ONE Operator via *lookup*."""
     from squidxplorer._engine import Operator, Param
 
     chain = expression if isinstance(expression, RecipeChain) else RecipeChain.parse(str(expression))
@@ -151,9 +45,8 @@ def compose_operator(expression: Any, lookup: Callable[[str], Any]) -> Any:
 
     parts = [(recipe, lookup(recipe.name)) for recipe in recipes]
 
-    # A BARE NAME IS THE TABLE ENTRY, not a one-step composition of it. The identity matters: it is
-    # what keeps `projector="mip"` the exact object the registry has always held, `reference`'s
-    # `select_index` reachable, and this module out of every existing run's path.
+    # A bare name is the table entry ITSELF, not a one-step composition of it — nothing
+    # routes through this module unless a chain was asked for.
     if len(parts) == 1 and not recipes[0].params:
         return parts[0][1]
 
@@ -177,13 +70,7 @@ def compose_operator(expression: Any, lookup: Callable[[str], Any]) -> Any:
 
 
 def _refuse_impossible(parts: Sequence[tuple], label: str) -> None:
-    """Refuse the combinations the declarations say cannot mean anything. See the module docstring.
-
-    Every test here reads a DECLARATION (``consumes``, ``produces``, ``select_index``) and never an
-    operator's name, which is the property ``tests/test_operator_declaration.py`` asserts over the
-    package's AST. A chain of operators nobody here has heard of is refused on the same grounds as
-    a chain of the shipped ones.
-    """
+    """Refuse combinations the declarations say cannot mean anything — never by operator name."""
     seen: dict = {}
     for position, (recipe, operator) in enumerate(parts):
         if recipe.name in seen:
@@ -232,24 +119,14 @@ def _refuse_impossible(parts: Sequence[tuple], label: str) -> None:
 def _map_planes(fn: Callable, stream: Iterable) -> Iterable:
     """Apply a plane-op to every plane of *stream*, LAZILY.
 
-    A named function and not an inline generator expression, because an inline one would close over
-    the loop variable in :func:`_composed_callable` and, being lazy, would run EVERY step with
-    whichever callable the loop happened to finish on. Binding both arguments in this frame is what
-    makes the composition correct; laziness is what keeps it bounded, so the reducer at the end of
-    ``flatfield + decon + mip`` still folds one plane at a time and the stack is never resident.
+    A named function, not an inline genexpr: an inline one would close over the loop
+    variable in _composed_callable and run every step with the last callable.
     """
     return (fn((plane,)) for plane in stream)
 
 
 def _composed_callable(steps: Sequence[_Step], label: str, consumes: frozenset):
-    """Build the ``Iterable[plane] -> plane`` callable that runs *steps* in order.
-
-    ONE callable shape out, exactly as in: nothing downstream can tell a composition from a shipped
-    operator, which is what lets ``project_well``, ``write_plate`` and ``stitch_region`` take one
-    with no edit. A z-reducing step swallows the stream and yields one plane; a plane-op step is
-    mapped over it. Both cases end with exactly one plane, and anything else is refused loud rather
-    than silently indexed into.
-    """
+    """Build the ``Iterable[plane] -> plane`` callable that runs *steps* in order."""
     def _run(planes: Iterable) -> Any:
         stream: Iterable = iter(planes)
         for step in steps:
@@ -270,17 +147,12 @@ def _composed_callable(steps: Sequence[_Step], label: str, consumes: frozenset):
     _run.__name__ = label
     _run.consumes = consumes
 
-    # THE FLAT-FIELD DOUBLE-APPLY GUARD, carried through the composition. `_stitch.stitch_region`
-    # reads this attribute off the callable to refuse "the read path corrects AND the operator
-    # corrects" — measured at 88.6% of pixels changed by up to 23 counts, with nothing downstream
-    # able to tell. A chain containing `flatfield` corrects its input just as much as `flatfield`
-    # does, so it says so, and the guard holds without knowing that compositions exist.
+    # Carry the flat-field double-apply guard through: a chain containing `flatfield`
+    # corrects its input just as much as `flatfield` does.
     if any(getattr(step.fn, "corrects_illumination", False) for step in steps):
         _run.corrects_illumination = True
 
-    # THE CHANNEL SPECIALISATION, carried through the same way. `project_well` calls `for_channel`
-    # once per channel; a composition rebuilds itself with each part specialised, so `bgsub + decon`
-    # still gets the 638 PSF for 638 rather than one module-level default for all four.
+    # Carry channel specialisation through: rebuild with each part specialised per channel.
     if any(hasattr(step.fn, "for_channel") for step in steps):
         def _for_channel(path, channel):
             return _composed_callable(
@@ -292,14 +164,7 @@ def _composed_callable(steps: Sequence[_Step], label: str, consumes: frozenset):
 
 
 def _rebinder(chain: RecipeChain, lookup: Callable[[str], Any]):
-    """The composed entry's ``factory``: apply NAMESPACED ``operator_kwargs`` and rebuild the chain.
-
-    ``Operator.bind`` validates the names against the declared ``params`` first, so every key that
-    arrives here is ``<step>.<param>`` for a step of this chain. Rebuilding through
-    :func:`compose_operator` rather than patching the built callable means a parameterised run and
-    a run whose parameters were written into the expression are the SAME object — there is one way
-    a chain becomes a callable, so the two cannot drift.
-    """
+    """The composed entry's ``factory``: apply namespaced ``operator_kwargs`` and rebuild the chain."""
     def _rebuild(**operator_kwargs):
         merged = {recipe.name: dict(recipe.params) for recipe in chain.recipes}
         for key, value in operator_kwargs.items():

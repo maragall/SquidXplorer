@@ -1,12 +1,4 @@
-"""The busy indicator's rules, tested without a window.
-
-Spencer Schwarz: "responsiveness is important. And an indicator when its working."
-
-The property under test is not "a bar appears". It is that the indicator CANNOT LIE: it is on
-exactly while work is in flight, it never invents a percentage it does not have, and it cannot
-be left running by a path that forgot to clear a flag -- because there is no flag, there is one
-registry and every widget is a sink of it.
-"""
+"""ActivityLog: the busy indicator's rules, tested without a window."""
 
 from __future__ import annotations
 
@@ -34,12 +26,7 @@ def test_starting_work_makes_it_busy_and_ending_it_stops(log):
 
 
 def test_unknown_size_is_reported_as_unknown_not_as_zero_percent(log):
-    """A mosaic fuse is ONE lazy graph, not N countable steps.
-
-    A bar that shows 0/1 or 0% for it is inventing a denominator, and an invented denominator is
-    believed: the user reads a stuck bar as a hung app. Unknown must stay unknown so the
-    indicator can be indeterminate.
-    """
+    """Unknown must stay unknown so the indicator can be indeterminate."""
     a = log.start("fuse", "loading mosaic")
     assert a.total is None
     assert not a.determinate
@@ -53,7 +40,7 @@ def test_known_size_counts(log):
 
 
 def test_advance_can_revise_a_total_it_did_not_know_at_the_start(log):
-    """The well count is known by the worker, not by the click that started it."""
+    """The total is known by the worker, not by the click that started it."""
     log.start("run", "MIP")
     assert not log.current().determinate
     log.advance("run", 1, 28)
@@ -62,8 +49,7 @@ def test_advance_can_revise_a_total_it_did_not_know_at_the_start(log):
 
 
 def test_progress_for_work_that_already_ended_is_ignored_not_fatal(log):
-    """A worker's last `progress` can be delivered after its `finished`. Raising there would
-    turn a benign Qt delivery race into a crash inside a slot."""
+    """A worker's last `progress` can be delivered after its `finished`."""
     log.start("run", "MIP", total=4)
     log.end("run")
     log.advance("run", 4, 4)          # must not raise
@@ -71,7 +57,6 @@ def test_progress_for_work_that_already_ended_is_ignored_not_fatal(log):
 
 
 def test_ending_something_that_never_started_is_not_an_error(log):
-    """Teardown paths call end() defensively; they must not raise on the way out."""
     log.end("never-started")
     assert not log.busy
 
@@ -86,18 +71,13 @@ def test_two_activities_are_both_tracked_and_the_bar_says_how_many(log):
 
 def test_a_determinate_activity_is_preferred_for_display(log):
     """When only one line can be shown, show the one that can say something real."""
-    log.start("fuse", "loading mosaic")            # indeterminate, started first
+    log.start("fuse", "loading mosaic")
     log.start("run", "MIP", total=28)
     assert log.current().key == "run"
 
 
 def test_restarting_the_same_key_replaces_it_rather_than_stacking(log):
-    """A region change while the previous fuse is still draining fires start() twice.
-
-    Stacking would need two end()s to clear one visible activity, and the second would never
-    come -- the indicator would be stuck on over an idle app, which is the exact failure this
-    design exists to prevent.
-    """
+    """Stacking would need two end()s to clear one visible activity."""
     log.start("fuse", "loading A1")
     log.start("fuse", "loading A2")
     assert len(log) == 1
@@ -115,7 +95,6 @@ def test_subscribers_hear_every_change(log):
 
 
 def test_a_subscriber_added_late_is_told_the_current_state_immediately(log):
-    """A widget built while work is already running must not start out blank and wrong."""
     log.start("run", "MIP", total=9)
     log.advance("run", 4)
     seen = []

@@ -1,37 +1,9 @@
 #!/usr/bin/env python
-"""Write a synthetic 5-D Squid acquisition: regions x FOV x z x channel x TIMEPOINT.
+"""Write a synthetic 5-D Squid acquisition: regions x FOV x z x channel x timepoint.
 
-WHY THIS EXISTS. Every acquisition on this workstation is ``n_t = 1`` -- the 10x tissue set, the
-20x scan and the 1536 plate all have a single timepoint folder. So the T axis is exercised by
-nothing except ``tests/conftest.py``'s in-memory ``multi_time_point_dataset``, and the features
-that live on that axis cannot be driven by hand at all: the timepoint bar, playback, the ``.mp4``
-recorder's T path, and ``fuse_region_pyramid``'s ``t`` argument (which, measured, is never passed
--- the region mosaic renders t=0 whatever the slider says, and nothing on disk could reveal it).
+Content varies along every axis so a defect that collapses one is visible.
 
-A SCRIPT, not a hand-built folder. The 1536 symlink farm was rebuilt by hand and dangled twice,
-the second time at 24576 of 24576 links, because the thing that made it was never written down.
-This is written down.
-
-WHAT IT MAKES. Content varies along EVERY axis, so a defect that collapses one is visible rather
-than merely plausible:
-
-* **t** moves a bright blob across the frame, so a stuck t=0 shows a blob that never moves.
-* **z** sweeps focus (sharpest at the middle plane), so a stuck z shows no focal sweep and a MIP
-  is brighter than any single plane.
-* **channel** changes the structure itself, so a channel mix-up is not just a brightness change.
-* **fov** shifts the field by the stage step with real overlap, so stitching has something to
-  register -- the texture is a function of ABSOLUTE stage position, so neighbouring FOVs genuinely
-  share content in the seam rather than by coincidence.
-
-Usage::
-
-    python tools/make_5d_fixture.py ~/Downloads/sim_5d_2x2_t3
     python tools/make_5d_fixture.py OUT --regions A1,A2,B1,B2 --fovs 4 --nz 3 --nt 3 --size 256
-
-    # the plate `tools/walkthrough.py` drives: a 96-well pitch under a 384 declaration, so
-    # build_plate's measured-beats-declared precedence has something to be right about.
-    python tools/make_5d_fixture.py ~/Downloads/sim_2x2_36fov_96wp \\
-        --fovs 36 --nz 1 --nt 1 --well-pitch-mm 9.0 --declared-format "384 well plate"
 """
 
 from __future__ import annotations
@@ -44,14 +16,11 @@ from pathlib import Path
 import numpy as np
 import tifffile
 
-#: Squid's own naming. The region token may not contain "_": reader.py:160's _STEM_RE is
-#: ``^(?P<region>[^_]+)_(?P<fov>\d+)_(?P<z>\d+)_(?P<channel>.+)$``, so "A1" is legal and
-#: "well_A1" is not -- it would parse as region "well" and then fail on the fov field.
+#: Squid's own naming. The region token may not contain "_" (reader.py _STEM_RE).
 _CHANNELS = ["Fluorescence_405_nm_Ex", "Fluorescence_638_nm_Ex"]
 _PIXEL_UM = 0.752
 _DZ_UM = 1.5
-#: Stage step as a FRACTION of the frame, so adjacent FOVs overlap by the remainder. 0.75 leaves
-#: 25% overlap, comfortably above find_adjacent_pairs' 15 px floor at any frame size here.
+#: Stage step as a fraction of the frame; 0.75 leaves 25% overlap for registration.
 _STEP_FRAC = 0.75
 
 
@@ -60,11 +29,7 @@ def _frame(size: int, fov: int, per_side: int, z: int, nz: int, c: int, t: int,
     """One plane. Every axis changes it, each in a way a human can name on sight."""
     yy, xx = np.mgrid[0:size, 0:size].astype(np.float32)
 
-    # Texture keyed on ABSOLUTE stage position, so the overlap between neighbouring FOVs really
-    # is the same tissue -- which is what makes registration meaningful here. *per_side* is the
-    # SAME number build() lays the coordinates out with; it said a literal 2 until 2026-08-06,
-    # so at any --fovs other than 4 the texture and the stage coordinates disagreed and the
-    # "neighbours share content in the seam" promise above was simply untrue.
+    # Texture keyed on absolute stage position, so neighbouring FOVs share real seam content.
     ox = (fov % per_side) * size * _STEP_FRAC
     oy = (fov // per_side) * size * _STEP_FRAC
     gx, gy = xx + ox, yy + oy
@@ -73,12 +38,11 @@ def _frame(size: int, fov: int, per_side: int, z: int, nz: int, c: int, t: int,
         + 0.5 * np.sin((gx + gy) / 23.0)
     )
 
-    # Focus sweep: sharpest at the middle plane, so a MIP is brighter than any one plane and a
-    # reference-plane pick has a real answer instead of a tie.
+    # Focus sweep: sharpest at the middle plane.
     mid = (nz - 1) / 2.0
     sharp = 1.0 / (1.0 + 2.0 * abs(z - mid))
 
-    # A blob that MOVES with t. This is the tell for a stuck timepoint.
+    # A blob that moves with t.
     frac = t / max(nt - 1, 1)
     bx = size * (0.2 + 0.6 * frac)
     by = size * (0.5 + 0.25 * np.sin(2 * np.pi * frac))
@@ -102,8 +66,7 @@ def build(out: Path, regions, n_fovs: int, nz: int, nt: int, size: int,
         tdir.mkdir(exist_ok=True)
         rows = ["region,fov,z_level,x (mm),y (mm),z (um),time"]
         for r_i, region in enumerate(regions):
-            # Wells sit a real WELL PITCH apart, so they read as distinct regions and so
-            # `_plate.measure_region_pitch_um` has a physical number to recognise the carrier by.
+            # Wells sit a real well pitch apart, so they read as distinct regions.
             rx, ry = (r_i % 2) * well_pitch_mm, (r_i // 2) * well_pitch_mm
             for fov in range(n_fovs):
                 x_mm = rx + (fov % per_side) * step_mm
@@ -137,8 +100,7 @@ def build(out: Path, regions, n_fovs: int, nz: int, nt: int, size: int,
         "dx(mm)": step_mm, "Nx": per_side, "dy(mm)": step_mm, "Ny": per_side,
         "dz(um)": _DZ_UM, "Nz": nz, "dt(s)": 1800.0, "Nt": nt,
         "with AF": False, "with reflection AF": False, "with manual focus map": False,
-        # NA is the ONLY source of aperture for decon's per-channel optics -- acquisition.yaml
-        # carries none -- so a fixture without this cannot be deconvolved.
+        # NA is the only source of aperture for decon's per-channel optics.
         "objective": {"magnification": 20.0, "NA": 0.8, "tube_lens_f_mm": 180.0, "name": "20x"},
         "sensor_pixel_size_um": 15.04, "tube_lens_mm": 180,
     }, indent=1), encoding="utf-8")

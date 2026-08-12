@@ -1,42 +1,4 @@
-"""The plate contract is written down, stamped, compared, and reconstructed in one place.
-
-Gap 5 of the three-viewers review (Hongquan, 2026-07-28), pulled to full v1 scope by Julio on
-2026-07-28. Verified against HEAD before writing anything, and the measurements are the reason
-this file exists rather than a docstring:
-
-* ``_output._NGFF_VERSION`` was written at FOUR sites and read at ZERO. Version discrimination in
-  the reader was structural sniffing (``_group_attrs`` testing whether a ``.zattrs`` or a
-  ``zarr.json`` exists), which is correct today and becomes a silent misparse the first time the
-  layout moves, because nothing ever compared a declared version to a supported one.
-* The plate path was reconstructed by f-string at FOUR sites in ``_viewer.py``, three of which
-  handed the string straight to a store open and bypassed ``reader.py`` entirely. One of them
-  hand-parsed ``zarr.json -> attributes -> ome -> multiscales[0] -> datasets[*].path`` behind a
-  bare ``except Exception``, which is both a fifth copy of the layout and an unnamed fallback.
-* The reader's own contract prose stated the OPPOSITE of what the writer does about
-  ``translation``, in two places, from IMA-217 until 2026-07-29. That is the live defect an
-  unversioned prose contract produces, and it is why this was not deferred.
-
-WHAT WAS REJECTED, and why, so nobody re-proposes it:
-
-* **Stamping the version per well or per field.** Rejected: a store has ONE layout, and the exact
-  failure being fixed is a value written in many places and read in none. One stamp, on the plate
-  group, one comparison in ``reader._discover``.
-* **Putting the stamp inside ``attributes.ome``.** Rejected: that namespace is OME's and is what
-  ``ome-zarr-models`` validates. A private key goes beside it, not in it. ``test_the_stamp_does
-  _not_disturb_the_official_schema`` pins that.
-* **Refusing an UNSTAMPED store.** Rejected: every plate written before 2026-07-29 and every
-  third-party NGFF store carries no stamp, and this reader explicitly supports four zarr layouts
-  from two spec versions. Refusing them would reject the installed base to enforce a rule invented
-  after they were written. Absent means "no promise made", and the structural checks then earn it.
-* **Warning on a major mismatch instead of raising.** Rejected: a major bump means a stable
-  guarantee moved, so the store still opens, still finds its wells, and places them wrongly. That
-  is the outcome ``reader._parse_fov_positions_um`` already refuses when it will not "place FOVs at
-  positions that would look plausible but be wrong".
-* **Making ``ome-zarr-models`` a runtime dependency** so the validator is always complete.
-  Rejected: it is a ``[test]`` extra and the writer stays lean. The validator degrades to its
-  structural checks and REPORTS the skip, because "validated" and "half-validated" must not look
-  alike.
-"""
+"""The plate contract: stamped, compared, and reconstructed from one place."""
 
 from __future__ import annotations
 
@@ -61,15 +23,8 @@ from squidxplorer.contract.validate import validate_plate
 from squidxplorer.reader import SquidZarrReader
 
 
-# --- fixtures: the smallest real plate that satisfies the stable contract -----------------------
-
 def _write_plate(tmp_path, *, translation=True, omero=True, version=None, n_t=1) -> Path:
-    """A two-well, one-field plate written by the REAL writers, then optionally degraded.
-
-    Built through ``_output.plate_metadata`` / ``_multiscales`` / ``_zarr_store`` rather than by
-    hand: a fixture that spells the layout itself would pass while the writer drifted, which is
-    the failure mode this whole file is about.
-    """
+    """A two-well, one-field plate written by the real writers, then optionally degraded."""
     from squidxplorer._zarr_store import create_array, write_array, write_group
 
     plate_dir = tmp_path / "plate.ome.zarr"
@@ -100,16 +55,13 @@ def _write_plate(tmp_path, *, translation=True, omero=True, version=None, n_t=1)
     return plate_dir
 
 
-# --- the version: round trip, and the mismatch policy -------------------------------------------
-
 def test_a_written_plate_carries_the_contract_version(tmp_path):
-    """The whole point: stamped by the writer, readable by anyone. Written at 4, read at 0 was the bug."""
     plate_dir = _write_plate(tmp_path)
     assert read_contract_version(plate_dir) == PLATE_CONTRACT_VERSION
 
 
 def test_the_stamp_lives_outside_the_ome_namespace(tmp_path):
-    """attributes.ome belongs to OME. A private key goes beside it, or a schema we did not write fails."""
+    """attributes.ome belongs to OME; a private key goes beside it, not in it."""
     plate_dir = _write_plate(tmp_path)
     attrs = json.loads((plate_dir / "zarr.json").read_text())["attributes"]
     assert "squidxplorer" in attrs and "plate_contract_version" in attrs["squidxplorer"]
@@ -118,7 +70,7 @@ def test_the_stamp_lives_outside_the_ome_namespace(tmp_path):
 
 
 def test_the_real_writer_stamps_the_plate(tmp_path, monkeypatch):
-    """Not just the fixture: _output.write_plate itself must stamp, at its one plate-group write."""
+    """Not just the fixture: write_plate itself must stamp, at its one plate-group write."""
     import inspect
 
     src = inspect.getsource(_output)
@@ -127,7 +79,7 @@ def test_the_real_writer_stamps_the_plate(tmp_path, monkeypatch):
 
 
 def test_write_then_read_carries_the_version_end_to_end(tmp_path):
-    """The real writer, the real reader, no fixture in between. This is the round trip that counts."""
+    """The real writer, the real reader, no fixture in between."""
     from tests.test_output import REGIONS, _image, _meta, _stream
 
     from squidxplorer._output import write_from_stream
@@ -144,7 +96,6 @@ def test_write_then_read_carries_the_version_end_to_end(tmp_path):
 
 
 def test_a_reader_round_trip_carries_the_version(tmp_path):
-    """The reader compares the stamp on open and remembers what it saw."""
     plate_dir = _write_plate(tmp_path)
     reader = SquidZarrReader(plate_dir)
     reader.metadata                                    # forces _discover
@@ -152,7 +103,6 @@ def test_a_reader_round_trip_carries_the_version(tmp_path):
 
 
 def test_a_major_mismatch_is_refused_not_warned():
-    """A stable guarantee moved. The store would open, find its wells, and place them wrongly."""
     major = int(PLATE_CONTRACT_VERSION.split(".")[0])
     with pytest.raises(PlateContractError) as excinfo:
         compare_contract_version(f"{major + 1}.0")
@@ -162,7 +112,7 @@ def test_a_major_mismatch_is_refused_not_warned():
 
 
 def test_a_major_mismatch_stops_the_reader_opening_the_store(tmp_path):
-    """End to end: the policy is enforced at the reader seam, not only in a pure function."""
+    """Enforced at the reader seam, not only in the pure function."""
     major = int(PLATE_CONTRACT_VERSION.split(".")[0])
     plate_dir = _write_plate(tmp_path, version=f"{major + 1}.0")
     with pytest.raises(PlateContractError):
@@ -179,7 +129,7 @@ def test_a_newer_minor_warns_and_proceeds(tmp_path):
 
 
 def test_an_unstamped_store_is_read_without_complaint(tmp_path):
-    """Every plate written before this landed, and every third-party NGFF store, is unstamped."""
+    """Every third-party NGFF store, and every plate written before this landed, is unstamped."""
     plate_dir = _write_plate(tmp_path)
     doc = json.loads((plate_dir / "zarr.json").read_text())
     doc["attributes"].pop("squidxplorer")
@@ -192,19 +142,16 @@ def test_an_unstamped_store_is_read_without_complaint(tmp_path):
 
 
 def test_an_unparseable_stamp_is_refused():
-    """Something deliberately made a promise and we cannot tell which one. Worse than no stamp."""
+    """A promise was deliberately made and we cannot tell which one: worse than no stamp."""
     for bad in ("one.two", "1", "1.2.3", ""):
         with pytest.raises(PlateContractError):
             compare_contract_version(bad)
 
 
 def test_the_spec_version_and_the_contract_version_are_different_things():
-    """_NGFF_VERSION is OME's schema version. Conflating the two is how one stands in for the other."""
     assert _output._NGFF_VERSION == "0.5"
     assert PLATE_CONTRACT_VERSION != _output._NGFF_VERSION
 
-
-# --- validate: errors are stable violations, warnings are missing optional sidecars -------------
 
 def test_a_conforming_plate_validates_clean(tmp_path):
     report = validate_plate(_write_plate(tmp_path))
@@ -213,7 +160,7 @@ def test_a_conforming_plate_validates_clean(tmp_path):
 
 
 def test_a_broken_stable_guarantee_is_an_ERROR(tmp_path):
-    """Level 0 is declared and missing: the store is not the thing it says it is."""
+    """Level 0 declared and missing: the store is not the thing it says it is."""
     plate_dir = _write_plate(tmp_path)
     import shutil
 
@@ -224,7 +171,7 @@ def test_a_broken_stable_guarantee_is_an_ERROR(tmp_path):
 
 
 def test_a_broken_axis_order_is_an_ERROR(tmp_path):
-    """TCZYX is stable. A store that reorders it is not readable by this build at all."""
+    """TCZYX is stable; a store that reorders it is not readable by this build at all."""
     plate_dir = _write_plate(tmp_path)
     field = plate_dir / "A" / "1" / "0"
     doc = json.loads((field / "zarr.json").read_text())
@@ -241,7 +188,7 @@ def test_a_missing_optional_sidecar_is_a_WARNING_not_an_error(tmp_path):
     """translation and omero both have named fallbacks, so their absence narrows a read, not breaks it."""
     plate_dir = _write_plate(tmp_path, translation=False, omero=False)
     report = validate_plate(plate_dir)
-    assert report.ok, report.summary()                  # <- the assertion that matters
+    assert report.ok, report.summary()
     assert any("translation" in w for w in report.warnings), report.summary()
     assert any("omero" in w for w in report.warnings), report.summary()
     assert any("coordinates.csv" in w for w in report.warnings), \
@@ -249,14 +196,13 @@ def test_a_missing_optional_sidecar_is_a_WARNING_not_an_error(tmp_path):
 
 
 def test_a_single_level_field_is_a_WARNING_and_names_level_zero(tmp_path):
-    """Small fields are written single-level ON PURPOSE (_PYRAMID_MIN_YX). Legal, and lossy."""
+    """Small fields are written single-level on purpose (_PYRAMID_MIN_YX). Legal, and lossy."""
     report = validate_plate(_write_plate(tmp_path))
     assert report.ok
     assert any("level '0'" in w for w in report.warnings), report.summary()
 
 
 def test_an_incomplete_marker_is_a_WARNING(tmp_path):
-    """A store mid-write is readable; what it promises may simply not all be there yet."""
     plate_dir = _write_plate(tmp_path)
     (plate_dir / ".squidxplorer-incomplete").write_text("{}")
     report = validate_plate(plate_dir)
@@ -265,7 +211,7 @@ def test_an_incomplete_marker_is_a_WARNING(tmp_path):
 
 
 def test_a_major_mismatch_is_reported_by_validate_rather_than_raised(tmp_path):
-    """Same policy, two deliveries: a reader must stop, a validator must finish and list everything."""
+    """A reader must stop; a validator must finish and list everything."""
     major = int(PLATE_CONTRACT_VERSION.split(".")[0])
     report = validate_plate(_write_plate(tmp_path, version=f"{major + 1}.0"))
     assert not report.ok
@@ -273,7 +219,7 @@ def test_a_major_mismatch_is_reported_by_validate_rather_than_raised(tmp_path):
 
 
 def test_the_stamp_does_not_disturb_the_official_schema(tmp_path):
-    """OME's own pydantic models still pass. The stamp sits beside their namespace, not in it."""
+    """OME's own pydantic models still pass; the stamp sits beside their namespace, not in it."""
     pytest.importorskip("ome_zarr_models")
     from tests.ngff_check import assert_valid_ngff_plate
 
@@ -281,7 +227,7 @@ def test_the_stamp_does_not_disturb_the_official_schema(tmp_path):
 
 
 def test_the_validator_still_runs_without_ome_zarr_models(tmp_path, monkeypatch):
-    """Degrade to structural checks, and SAY SO. 'validated' and 'half-validated' must differ."""
+    """Degrades to structural checks, and reports the skip: 'validated' != 'half-validated'."""
     import builtins
 
     real_import = builtins.__import__
@@ -298,14 +244,11 @@ def test_the_validator_still_runs_without_ome_zarr_models(tmp_path, monkeypatch)
 
 
 def test_the_validator_is_runnable_by_a_user_on_a_plate_they_were_handed(tmp_path, capsys):
-    """It was promoted out of tests/ for exactly this. An entry point with no CLI is still test-only."""
     from squidxplorer.contract.validate import main
 
     assert main([str(_write_plate(tmp_path))]) == 0
     assert "OK" in capsys.readouterr().out
 
-
-# --- field_path: the one place that knows the layout --------------------------------------------
 
 def test_field_path_builds_the_documented_layout():
     assert field_path("/p/plate.ome.zarr", "B/2", 7, "1") == "/p/plate.ome.zarr/B/2/7/1"
@@ -319,12 +262,11 @@ def test_field_path_is_forward_slashed_and_tolerant_of_stray_separators():
 
 
 def test_field_path_does_not_re_derive_the_well_path():
-    """wellpath comes from plate.wells[].path verbatim. B2 is B/2, never B/02 (_output.parse_well_id)."""
+    """wellpath comes from plate.wells[].path verbatim: B2 is B/2, never B/02."""
     assert field_path("/p", "AA/12", 3, 0) == "/p/AA/12/3/0"
 
 
 def test_field_levels_falls_back_to_level_zero_by_NAME_not_by_accident(tmp_path):
-    """The fallback that used to be a bare `except Exception`. It is a documented guarantee now."""
     missing = tmp_path / "nothing-here"
     assert field_levels(missing) == ["0"]
     plate_dir = _write_plate(tmp_path)
@@ -332,16 +274,8 @@ def test_field_levels_falls_back_to_level_zero_by_NAME_not_by_accident(tmp_path)
 
 
 def test_field_path_is_the_only_place_that_knows_the_layout():
-    """Asserted by grepping the source, the way test_tsctx asserts nobody calls ts.open again.
-
-    The pattern is a base joined to three or more slash-separated placeholders in one f-string,
-    which is precisely the four reconstructions this seam replaced.
-
-    Scope, stated so the guarantee is not read as wider than it is: this bans INVENTING a path.
-    ``_montage`` and ``_tilesource`` reach a field by DESCENDING the plate metadata
-    (``wells[].path`` -> ``well.images[].path``), which reads every name instead of assuming it,
-    and docs/plate-contract.md names that as the other legitimate route.
-    """
+    """Greps for a base joined to 3+ slash-separated placeholders in one f-string; ``_montage``
+    and ``_tilesource`` are allowed the other legitimate route, descending wells[].path."""
     root = Path(__file__).resolve().parent.parent / "squidxplorer"
     joined = re.compile(r'f"\{[^"{}]+\}/\{[^"{}]+\}/\{[^"{}]+\}')
     offenders = []
@@ -372,14 +306,6 @@ def test_the_viewer_read_paths_go_through_the_seam():
         "the loupe hand-parses multiscales again (it was a bare `except Exception`)"
 
 
-# --- the t axis: what the format guarantees versus what this implementation reads ---------------
-#
-# Julio, 2026-07-29: users WILL drop multi-timepoint datasets on this tool. Today the store is
-# written correctly (project_well runs with t=None, so every timepoint is on disk) and the plate
-# overview and loupe read t=0 unconditionally, so such a plate renders as its first frame with no
-# error anywhere. Nothing catches it because EVERY fixture in this suite is Nt=1. These three
-# tests are the ones that would have.
-
 def test_a_multi_timepoint_plate_is_WARNED_about_not_silently_flattened(tmp_path):
     """The store is valid, so this is a warning. Silence is what makes it a trap."""
     report = validate_plate(_write_plate(tmp_path, n_t=4))
@@ -396,14 +322,7 @@ def test_a_single_timepoint_plate_says_nothing_about_time(tmp_path):
 
 
 def test_every_documented_read_site_takes_a_timepoint():
-    """The doc's table is a claim about the code. Pin it, or it rots the way the reader prose did.
-
-    This test used to assert the OPPOSITE: that those sites hardcoded `[0, :, 0]`, with a message
-    telling whoever fixed it to update the contract in the same commit. On 2026-07-29 that is
-    exactly what happened, so it now pins the guarantee instead of the gap. It is kept rather than
-    deleted because the doc's Time section still describes the old bug, and a table nobody checks
-    is how the reader's own prose came to claim the writer emitted no translation for months.
-    """
+    """The doc's table is a claim about the code; pin it, or it rots the way the reader prose did."""
     import inspect
 
     from squidxplorer._plate_overview import _ZarrLoupeSource
@@ -421,16 +340,11 @@ def test_every_documented_read_site_takes_a_timepoint():
 
     doc = (Path(__file__).resolve().parent.parent / "docs" / "plate-contract.md").read_text()
     assert "### Time: the format carries it" in doc
-    # The doc must keep explaining WHY the old bug was invisible, because the reason (every fixture
-    # was Nt = 1) is the part that generalises to the next axis nobody tests.
     assert "Nt = 1" in doc
 
 
 def test_the_timepoint_control_is_one_class_for_plate_and_windows():
-    """Two implementations would drift about which timepoint you are looking at.
-
-    That is worse than having no control: you would compare two frames and be told they were one.
-    """
+    """Two implementations would drift about which timepoint you are looking at."""
     from squidxplorer._region_viewer import RegionViewer
     from squidxplorer._time_point import TimePointBar
     from squidxplorer import _viewer
@@ -441,20 +355,17 @@ def test_the_timepoint_control_is_one_class_for_plate_and_windows():
             f"{mod.__name__} does not use the shared TimePointBar")
 
 
-# --- the document itself ------------------------------------------------------------------------
-
 def test_the_contract_is_written_down_and_split_in_two():
-    """A prose contract that drifts into a lie is the defect that pulled this into v1 scope."""
     doc = (Path(__file__).resolve().parent.parent / "docs" / "plate-contract.md").read_text()
     assert "## Stable" in doc and "## Optional, each with its fallback" in doc
     for fallback in ("coordinates.csv", "auto-contrast", 'level `"0"`'):
         assert fallback in doc, f"the optional section stopped naming the {fallback} fallback"
-    # Not ported, deliberately: those describe a LIVE producer and v1 is post-acquisition only.
+    # events.jsonl describes a live producer; v1 is post-acquisition only.
     assert "events.jsonl" in doc and "NOT in this contract" in doc
 
 
 def test_the_reader_no_longer_says_the_writer_emits_no_translation():
-    """The live defect. Two places said the opposite of what _output.py does, inside contract prose."""
+    """Two places said the opposite of what _output.py does, inside contract prose."""
     from squidxplorer import reader
 
     src = Path(reader.__file__).read_text()

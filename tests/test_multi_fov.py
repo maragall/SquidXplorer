@@ -1,12 +1,8 @@
-"""IMA-187: n_fovs=None ("all FOVs") through selection, engine and writer.
+"""n_fovs=None ("all FOVs") through selection, engine and writer.
 
-Two things are load-bearing here:
-
-1. ``n_fovs=None`` must survive the whole pipeline. OME-NGFF's ``field_count`` is a plate-level
-   scalar that gets ``int()``-ed, so an unresolved ``None`` raises TypeError deep inside the
-   writer — far from the caller that passed it.
-2. ``n_fovs=1`` must behave EXACTLY as before. The mosaic work is worthless if it perturbs the
-   single-FOV path every existing acquisition uses.
+Two things are load-bearing here: `n_fovs=None` must survive the whole pipeline (OME-NGFF's
+`field_count` is `int()`-ed, so an unresolved None raises deep inside the writer), and `n_fovs=1`
+must behave exactly as before.
 """
 
 from __future__ import annotations
@@ -44,7 +40,6 @@ def test_none_tolerates_ragged_wells():
 
 
 def test_explicit_count_still_raises_on_a_short_well():
-    """The explicit-count contract is unchanged: asking for more than a well has is bad input."""
     meta = _meta({"A1": [0, 1, 2, 3], "A2": [0, 1]})
     with pytest.raises(ValueError, match="only 2 FOV"):
         select_fovs(meta, n_fovs=4)

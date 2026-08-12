@@ -1,9 +1,5 @@
-"""IMA-216 viewport tiler — LOD pick, frustum cull, byte-budget LRU, parent pinning.
-
-Pure numpy: every geometry here is fabricated, so these tests need no dataset and no Qt.
-Wall-clock assertions live only under the ``integration`` marker (precedent:
-``test_performance.py``) — CI asserts correctness, never speed.
-"""
+"""Viewport tiler: LOD pick, frustum cull, byte-budget LRU, parent pinning. Pure numpy, no
+dataset or Qt; wall-clock assertions live only under the ``integration`` marker."""
 
 from __future__ import annotations
 
@@ -22,8 +18,7 @@ from squidxplorer._tiling import (
 )
 
 # ---------------------------------------------------------------------------------------
-# fabricated geometry: a 20x20 grid of 100 µm FOVs (2000 µm plate) with a coarse ladder
-# above it — level 0 = per-FOV, level 1 = 2x2 groups, level 2 = the whole plate as one tile.
+# fabricated geometry: a 20x20 FOV grid with a coarse ladder above it (per-FOV / 2x2 / plate)
 # ---------------------------------------------------------------------------------------
 
 def _grid(n: int, size: float, level_tag: str) -> tuple[np.ndarray, list[str]]:
@@ -35,8 +30,8 @@ def _grid(n: int, size: float, level_tag: str) -> tuple[np.ndarray, list[str]]:
 
 
 def _ladder() -> Geometry:
-    fine, fine_keys = _grid(20, 100.0, "L0")      # 400 FOVs @ 0.5 µm/px
-    mid, mid_keys = _grid(10, 200.0, "L1")        # 100 tiles  @ 2.0 µm/px
+    fine, fine_keys = _grid(20, 100.0, "L0")
+    mid, mid_keys = _grid(10, 200.0, "L1")
     plate = np.array([[0.0, 0.0, 2000.0, 2000.0]])
     return Geometry([
         Level(0.5, fine, fine_keys),
@@ -502,7 +497,7 @@ def test_tiling_select_is_fast_on_a_55k_box_geometry():
     assert per_call_ms < 10.0                                # generous: a regression canary, not a target
 
 
-# --- IMA-216 follow-up: make the fit-to-plate cost explicit and catch inverted ladders ---
+# --- make the fit-to-plate cost explicit and catch inverted ladders ---
 
 def test_geometry_rejects_a_coarser_level_holding_more_tiles():
     """Regridding cannot invent tiles; a coarser rung with more of them is a construction bug."""
@@ -520,7 +515,7 @@ def test_geometry_allows_equal_counts_for_a_per_fov_pyramid():
 
 
 def test_worst_case_tiles_is_the_fit_to_plate_cost():
-    """The coarsest rung's count bounds any single view -- the number IMA-217 must keep small."""
+    """The coarsest rung's count bounds any single view."""
     geo = _ladder()                      # 400 / 100 / 1
     assert geo.worst_case_tiles == 1
     fit = select_tiles((0.0, 0.0, 2000.0, 2000.0), 1e6, geo, channels=("c",))

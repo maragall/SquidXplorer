@@ -1,70 +1,7 @@
-"""A GUI panel built FROM an operator's ``params`` declaration. The fifth reader of the record.
+"""A GUI panel generated from an operator's ``params`` declaration.
 
-THE GAP THIS CLOSES, MEASURED
------------------------------
-``_engine.Operator`` has declared ``params=(Param(name, default, blurb), ...)`` since Cellpose was
-made a real operator, and four readers grew up around it: :meth:`Operator.bind` (applies them),
-:func:`squidxplorer._cli._parse_param` (``--param min_area_px=80``), :mod:`squidxplorer._recipe` (writes
-them into a chain expression) and :mod:`squidxplorer._compose` (namespaces them).
-
-**The GUI was not one of them.** ``squidxplorer/_op_panels.py`` hand-writes a panel CLASS per operator,
-so an operator that declared four parameters got ZERO widgets and ran silently at its defaults:
-``spot`` and ``cellpose`` declare ``sigma_px``, ``min_area_px``, ``min_distance_px`` and
-``split_touching`` between them and not one was reachable from any panel. That is not a cosmetic
-gap — ``templates/operator/README.md`` is a PUBLIC contract telling a contributor to declare
-``params``, and §2.4 of it had to document that the GUI ignores them.
-
-This module is the fifth reader, and it is generic: it asks the registry for an operator's
-``params`` and builds one widget per :class:`~squidxplorer._engine.Param`. Nothing here knows an
-operator's name (``tests/test_operator_declaration.py`` fails the build if anything does), so
-``spot``, ``cellpose`` and an operator in somebody else's package discovered through
-``squidxplorer._plugins`` all get the same real controls from the same code.
-
-THE MAPPING RULE, AND WHY IT IS THE DEFAULT'S TYPE
--------------------------------------------------
-:class:`Param` deliberately declares **no type, no range and no widget hint** — its own docstring
-says "the moment it grows a widget hint it has become the UI's schema and two places own the same
-fact". So the widget is chosen from the one thing the declaration does carry: the TYPE OF THE
-DEFAULT. One dict, :data:`WIDGET_KINDS`, is the whole rule::
-
-    bool   -> a check box            split_touching=True
-    int    -> an integer spin        min_area_px=30
-    float  -> a decimal spin         sigma_px=2.0
-    str    -> a text field           (nothing declares one today, see below)
-
-``bool`` is looked up by EXACT type rather than ``isinstance``, because ``bool`` is a subclass of
-``int`` in Python and ``isinstance(True, int)`` is ``True`` — an isinstance ladder in the wrong
-order silently renders every check box as a 0/1 spinner.
-
-A default whose type is not in that table (``None``, a tuple, a numpy array) is REFUSED BY NAME:
-the panel says which parameter and which type, and offers the operator at its defaults rather than
-inventing a widget. A guessed widget is how a value the user typed becomes a value the run did not
-receive, which is the exact failure this module exists to end.
-
-**Why ``str`` is a text field and not a combo.** A combo needs a set of legal values, and a
-``Param`` declares none — there is no ``choices=`` and, per the docstring quoted above, there
-deliberately will not be one. A combo built from a lone default would be a one-item combo, i.e. a
-control that cannot be changed. Free text is the honest widget for "a string, and the declaration
-does not say which". Nothing in this build declares a ``str`` parameter, so this branch ships
-untested against a real operator and is pinned by a synthetic one in the tests.
-
-CHAINS
-------
-``operator_params("bgsub + spot")`` returns the chain's parts' parameters NAMESPACED
-``<step>.<param>`` (``squidxplorer._compose``), so a chain arrives here as a flat tuple whose names
-carry the structure. :func:`group_params` splits on the first ``.`` and the panel draws one
-HEADED GROUP per step, in chain order. Nothing else changes: the values go back through
-``operator_kwargs`` under their namespaced names, which is exactly what
-:meth:`Operator.bind` -> ``_compose._rebinder`` expects. A chain is not a special case here
-because composition already made it not one.
-
-WHAT THIS PANEL IS NOT
-----------------------
-It is the FALLBACK, not a replacement for :class:`~squidxplorer._op_panels.StitcherPanel` or
-:class:`~squidxplorer._op_panels.DeconQCPanel`. Those two do things a parameter form cannot: the
-stitcher converts units, drops registration-only knobs when registration is off and refuses a
-labels operator with a sentence; the decon panel runs an iterative QC loop and publishes a
-picture into pane 3. Generating a form over them would delete real behaviour to gain uniformity.
+The widget is chosen from the TYPE of each Param's default; anything else is refused by
+name. The fallback panel — the hand-written panels in ``_op_panels`` stay.
 """
 
 from __future__ import annotations
@@ -84,9 +21,8 @@ from qtpy.QtWidgets import (
 
 from squidxplorer._op_panels import _SUB, _Panel, _apply_qss, _head, _row, _wrapped
 
-#: THE MAPPING RULE. The type of a ``Param``'s default -> the kind of widget that edits it.
-#: Looked up by EXACT type (``type(default)``), never by ``isinstance``: ``bool`` is a subclass of
-#: ``int``, so an isinstance ladder in the wrong order draws every check box as a 0/1 spinner.
+#: Widget kind by the EXACT type of a Param's default — never isinstance: bool is a
+#: subclass of int, so an isinstance ladder would draw every check box as a 0/1 spinner.
 WIDGET_KINDS = {
     bool: "check",
     int: "spin",
@@ -94,17 +30,12 @@ WIDGET_KINDS = {
     str: "text",
 }
 
-#: Spin ranges. A ``Param`` declares no range (by design — see the module docstring), so these are
-#: the panel's own, and they are deliberately wide: a range that clipped a legal value would be a
-#: silent edit of the number the user typed, which is the failure this module exists to end. The
-#: floor is negative because nothing forbids a negative parameter.
+# Deliberately wide spin ranges: a range that clipped a legal value would silently edit it.
 _INT_RANGE = (-1_000_000_000, 1_000_000_000)
 _FLOAT_RANGE = (-1.0e12, 1.0e12)
 _FLOAT_DECIMALS = 4
 
-#: How many wells a preview runs over unless the user moves the spinner. The same "first N wells"
-#: shape ``_viewer._build_plane_op_tab`` uses, and for the same reason: an operator's parameters are
-#: judged by eye on a few wells before a plate-wide run is worth its minutes.
+#: How many wells a preview runs over unless the user moves the spinner.
 DEFAULT_PREVIEW_WELLS = 4
 
 
@@ -113,32 +44,18 @@ DEFAULT_PREVIEW_WELLS = 4
 # ---------------------------------------------------------------------------------------
 
 def widget_kind(default: Any) -> Optional[str]:
-    """The widget kind for a default value, or ``None`` when nothing here can edit it.
-
-    ``None`` is not a shrug: every caller turns it into a NAMED refusal that says which parameter
-    and which type. See :func:`unsupported_params`.
-    """
+    """The widget kind for a default value, or ``None`` when nothing here can edit it."""
     return WIDGET_KINDS.get(type(default))
 
 
 def param_step(name: str) -> tuple[Optional[str], str]:
-    """Split a possibly namespaced parameter name: ``"spot.min_area_px"`` -> ``("spot", …)``.
-
-    The inverse of what :mod:`squidxplorer._compose` does when it derives a chain's ``params``. Split on
-    the FIRST ``.`` only, matching ``_compose._rebinder``'s ``partition(".")`` exactly — the two have
-    to agree or a value would be routed to a step that never asked for it.
-    """
+    """Split a possibly namespaced parameter name: ``"spot.min_area_px"`` -> ``("spot", …)``."""
     step, dot, parameter = str(name).partition(".")
     return (step, parameter) if dot else (None, str(name))
 
 
 def group_params(params: Sequence) -> list[tuple[Optional[str], list]]:
-    """``[(step_or_None, [Param, ...]), ...]`` — a chain's parameters grouped by their step.
-
-    In first-appearance order, which for a chain is CHAIN ORDER: ``_compose`` builds the namespaced
-    tuple by walking the parts in order, so the groups come out reading left to right the way the
-    expression is written. A bare operator's parameters are one group keyed ``None``.
-    """
+    """``[(step_or_None, [Param, ...]), ...]`` — a chain's parameters grouped by step, in chain order."""
     groups: dict[Optional[str], list] = {}
     for param in params:
         step, _ = param_step(param.name)
@@ -153,28 +70,7 @@ def unsupported_params(params: Sequence) -> list[tuple[str, str]]:
 
 
 def panel_refusal(key: str) -> Optional[str]:
-    """Why a generic panel cannot be built for *key*, or ``None`` when it can.
-
-    THE NAMED REFUSAL. ``_viewer._activate_operator`` used to be a silent no-op for any key its
-    card table did not know — the click landed, nothing opened, and nothing said why. Silence is
-    the bug; this is the sentence that replaces it.
-
-    Three refusals, and each one is read off a declaration rather than off the name:
-
-    * an operator that declares NO parameters at all AND has no hand-written panel — there is
-      nothing for a form to show. ``stitch`` and ``coordinate`` are today's cases and they have
-      ``StitcherPanel``; a region operator that DOES declare ``params`` is drawn like any other,
-      which it could not be while region operators lived in a table with no ``params`` column;
-    * the key does not resolve to an operator, or this machine cannot run it because a declared
-      ``requires=`` package is missing — both in the registry's own words, via
-      :func:`squidxplorer.operator_available`, which resolves a bare NAME and a CHAIN alike;
-    * it declares a parameter whose default has a type nothing here can edit.
-
-    A CHAIN (``"bgsub + spot"``) is NOT refused: ``_compose`` derives its ``params`` from its
-    parts, namespaced, and :func:`group_params` draws one group per step. Whether the HOST can
-    launch that chain is a separate question the panel asks separately — see
-    :meth:`GenericOperatorPanel._launch_refusal`.
-    """
+    """Why a generic panel cannot be built for *key*, or ``None`` when it can."""
     from squidxplorer import is_region_operator, operator_available
     from squidxplorer._engine import operator_params
 
@@ -204,13 +100,7 @@ def panel_refusal(key: str) -> Optional[str]:
 # ---------------------------------------------------------------------------------------
 
 class GenericOperatorPanel(_Panel):
-    """One operator's declared parameters, as widgets, plus the run that carries them.
-
-    Built from :func:`squidxplorer._engine.operator_params` and nothing else. The values leave through
-    ``host.run_operator(key, ..., operator_kwargs=...)`` — the SAME argument
-    :class:`~squidxplorer._op_panels.StitcherPanel` uses, which is what makes the value's journey to the
-    pixels one already-tested path rather than a second one.
-    """
+    """One operator's declared parameters, as widgets, plus the run that carries them."""
 
     def __init__(self, host, key: str):
         from squidxplorer._engine import operator_consumes, operator_params
@@ -218,10 +108,7 @@ class GenericOperatorPanel(_Panel):
 
         self.key = str(key)
         params = operator_params(self.key)
-        # CAN THIS BE WRITTEN AS A PLATE? Off `consumes`, never off the name: a z-reducer
-        # collapses z to 1 and a region operator fuses a well, and both have a per-field
-        # result the OME-Zarr writer accepts. A plane-op keeps z at full depth, which is why
-        # `_build_plane_op_tab` offers no save either.
+        # Saveable is read off `consumes`, never off the name: a plane-op keeps z at full depth.
         self._can_save = bool(operator_consumes(self.key))
         super().__init__(
             host, operator_label(self.key),
@@ -238,8 +125,6 @@ class GenericOperatorPanel(_Panel):
                 _SUB))
         for step, group in group_params(params):
             if step is not None:
-                # A CHAIN. `_compose` namespaces a chain's parameters `<step>.<param>`, so the
-                # groups below read left to right in the order the expression is written.
                 self.v.addWidget(_head(step.upper()))
             for param in group:
                 self._add_param(param, step)
@@ -263,9 +148,7 @@ class GenericOperatorPanel(_Panel):
         self.run_btn.clicked.connect(self._preview)
         self.v.addWidget(self.run_btn)
 
-        # NOT BUILT AT ALL when it does not apply, rather than built and left out of the layout:
-        # `_viewer._raw_btn` is the precedent -- an orphan QPushButton nobody parented POPPED UP AS
-        # A FLOATING WINDOW ("a 'return to raw view' window pops up. That I don't get.").
+        # Not built at all when it does not apply — an unparented button pops up as a floating window.
         self.save_btn = None
         if self._can_save:
             self.save_btn = QPushButton("Run on the whole plate and save…")
@@ -289,11 +172,7 @@ class GenericOperatorPanel(_Panel):
         self.v.addStretch(1)
         _apply_qss(self)
 
-        # BUILDABLE AND LAUNCHABLE ARE TWO QUESTIONS. A chain's parameters are perfectly readable
-        # (that is the whole of `group_params`), while `run_operator` gates on
-        # `runnable_operators()`, which lists TABLE KEYS and has never contained an expression. So
-        # the form is shown and the buttons are greyed with the reason, rather than offering a
-        # click that would be refused in a status line somewhere else.
+        # Buildable and launchable are two questions: show the form, grey the buttons with the reason.
         why = self._launch_refusal()
         if why:
             self.run_btn.setEnabled(False)
@@ -318,8 +197,8 @@ class GenericOperatorPanel(_Panel):
         kind = widget_kind(param.default)
         _step, leaf = param_step(param.name)
         widget = _build_widget(kind, param.default)
-        if widget is None:                 # unreachable through _activate_operator (panel_refusal
-            return                         # catches it first), and silent here would be the bug
+        if widget is None:                 # unreachable: panel_refusal catches it first
+            return
         tip = param.blurb or f"{param.name}, declared by {self.key!r}. Default: {param.default!r}."
         widget.setToolTip(tip)
         self.widgets[param.name] = widget
@@ -337,12 +216,8 @@ class GenericOperatorPanel(_Panel):
     def kwargs(self) -> dict:
         """The panel's widget values as ``operator_kwargs``, keyed by the DECLARED name.
 
-        Every declared parameter is sent, including the untouched ones. Sending only the changed
-        ones would be smaller and would mean the same thing today, but it would make the console
-        line (``_action_label``) and the recipe describe a DIFFERENT set of numbers from the run,
-        and "the log says what ran" is the property this project spends most of its comments on.
-        A namespaced name is passed through as declared — ``Operator.bind`` validates it against
-        the same tuple this panel was built from.
+        Every declared parameter is sent, untouched ones included, so the console line and
+        the recipe describe the same numbers as the run.
         """
         return {name: _read_widget(widget) for name, widget in self.widgets.items()}
 
@@ -366,8 +241,7 @@ class GenericOperatorPanel(_Panel):
         self._launch(regions=order[:self.wells_spin.value()], save=False)
 
     def _save(self) -> None:
-        # regions=None is UNSCOPED, not "the whole plate": run_operator resolves it against the run
-        # selector. Same spelling StitcherPanel uses, for the same reason.
+        # regions=None is UNSCOPED: run_operator resolves it against the run selector.
         self._launch(regions=None, save=True)
 
 
@@ -397,12 +271,7 @@ def _build_widget(kind: Optional[str], default: Any):
 
 
 def _read_widget(widget) -> Any:
-    """A widget's value, in the TYPE the declaration's default had.
-
-    The type matters as much as the number: ``spots_op`` builds a ``SpotParams`` dataclass out of
-    these, and a ``min_area_px`` arriving as ``30.0`` where ``30`` was declared is the kind of
-    thing that survives all the way to a comparison against an integer pixel count.
-    """
+    """A widget's value, in the TYPE the declaration's default had."""
     if isinstance(widget, QCheckBox):
         return bool(widget.isChecked())
     if isinstance(widget, QSpinBox):

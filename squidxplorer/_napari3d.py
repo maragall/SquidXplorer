@@ -1,19 +1,5 @@
-"""Native-resolution napari 3D, adopting hongquanli/gallery-view's recipe (not reinventing it).
-
-WHY THIS EXISTS. napari renders 3D from ONE GL texture and refuses any axis over
-GL_MAX_3D_TEXTURE_SIZE (~2048 on Apple GPUs), so handing it a fused REGION mosaic (5731 px) forces
-napari's own crude downsample and the volume looks blocky. gallery-view sidesteps this the only way
-that works: it feeds napari a SINGLE NATIVE ZYX STACK (one FOV / acquisition, ~2084 px) that fits
-the texture, single-scale, with a micrometre voxel scale and the LUT carried over. That is native
-resolution because the volume never exceeds the texture. We cannot import gallery-view (it pins
-napari <0.6, we run 0.6.6), so this replicates its recipe: the exact add_image call, the
-(dz, px, px) scale, additive blending, carried-over contrast, and a micrometre scale bar.
-
-A single FOV, not the whole region, is deliberate: the region is a mosaic and cannot fit one
-texture at native resolution. With AGAVE cancelled (docs/VERSIONS.md) this is not a preview tier
-below a better renderer: it IS the full-resolution answer, and the crop is the mechanism
-for a path-traced, whole-region volume.
-"""
+"""Native-resolution napari 3D: single-FOV z-stacks and bricked ROI volumes that stay under
+the GL 3D texture limit, following gallery-view's recipe."""
 
 from __future__ import annotations
 
@@ -29,8 +15,7 @@ log = get_logger("napari3d")
 
 
 def _center_fov(meta: dict, region: str) -> Optional[int]:
-    """The FOV nearest the region's stage centroid, so the 3D preview lands on representative
-    tissue rather than a corner. Falls back to the first FOV when positions are unavailable."""
+    """The FOV nearest the region's stage centroid; the first FOV when positions are unavailable."""
     fovs = list((meta.get("fovs_per_region") or {}).get(region) or [])
     if not fovs:
         return None
@@ -45,18 +30,7 @@ def _center_fov(meta: dict, region: str) -> Optional[int]:
 
 
 def z_step_um(meta: dict, px: float, where: str = "3D") -> float:
-    """The acquisition's z step in micrometres, or the xy pixel size with a LOUD warning.
-
-    ``scale=(dz, px, px)`` is the only thing that makes a z-stack render at its true proportions,
-    so a wrong ``dz`` does not fail: it silently draws the volume at the wrong aspect. When
-    ``dz_um`` is missing or zero the fallback is the xy pixel size, which on a typical 10x
-    acquisition (dz 1.5 um, px 0.752 um) renders the stack HALF as tall as it really is, and the
-    report that comes back is "the 3D view is flattening my data".
-
-    So the fallback stays -- refusing to open a volume over a missing metadata field is worse --
-    but it is named in the log every time it is taken, with the number it substituted. Julio,
-    2026-07-31: a renderer that guesses must say so.
-    """
+    """The acquisition's z step in micrometres, or the xy pixel size with a LOUD warning."""
     dz = meta.get("dz_um")
     if dz:
         return float(dz)
@@ -81,13 +55,7 @@ def _native_stack(reader: Any, meta: dict, region: str, fov: int, channel: str) 
 
 
 def _auto_clim(stack: np.ndarray) -> Optional[tuple]:
-    """Contrast for a channel whose on-screen LUT was NOT carried in.
-
-    Without this, napari autoscales an un-supplied channel to its full data range and a
-    fluorescence volume renders as washed-out noise -- Julio's "contrast messes up". We use the
-    app's own fluorescence rule (mode + 2 sigma to black, 99.9th pct on top) so the 3D view matches
-    what 2D shows, and fall back to gallery-view's plain (1, 99.9) percentile pair only if that
-    helper is somehow unavailable. Never returns a raw full-range window."""
+    """Contrast for a channel whose on-screen LUT was NOT carried in; never a raw full-range window."""
     try:
         from squidxplorer._contrast import auto_contrast
 
@@ -132,11 +100,9 @@ def _add_bounding_box(viewer: Any, scale: tuple, shape_zyx: tuple) -> None:
 def _wire_close_to_release_memory(viewer: Any) -> None:
     """Drop the multi-GB stacks when the 3D popout is closed (gallery-view's memory patch).
 
-    napari keeps every Viewer in a global set and vispy holds a C-level ref to each layer's array
-    via the volume it uploaded to the GPU, so X-ing the window does NOT free the stacks -- they
-    linger in RSS for the life of the app, which fights the memory bar Spencer asked for. Swapping
-    each layer's data for a 1x1x1 stub forces vispy to release the buffer, then clear + gc reclaims
-    it."""
+    vispy holds a C-level ref to each layer's array, so closing alone does not free them;
+    swapping each layer's data for a 1x1x1 stub forces the release.
+    """
     import gc
 
     try:
@@ -163,30 +129,10 @@ def _wire_close_to_release_memory(viewer: Any) -> None:
 def pin_max_compositing(viewer: Any, layer: Any) -> bool:
     """Composite this layer into the canvas with the GL **max** equation, and KEEP it there.
 
-    THIS IS THE SEAM FIX, and it is the one thing that makes bricking exact rather than merely
-    possible. napari composites layers in screen space after each has rendered independently, so
-    with ``additive`` a camera ray that crosses a brick join passes through TWO bricks and their
-    MIPs are SUMMED where the true answer is their maximum. Measured on a 1024^2 volume split 2x2
-    and rotated to (45, 60): additive differs from the same voxels in one layer by up to 127/255
-    over ~31k pixels -- a bright cross sitting exactly on the joins. It is not subtle.
-
-    MIP is a maximum, and a maximum is order-independent and associative, so compositing bricks
-    with ``glBlendEquation(GL_MAX)`` reproduces the single-texture answer EXACTLY: the same
-    measurement gives max|diff| = 1/255 with ZERO pixels differing by more than 2. Bricked and
-    unbricked are the same picture.
-
-    napari's ``Blending`` enum has no ``max`` (it has ``minimum``, whose implementation --
-    ``blend_equation: 'min'`` and no ``blend_func`` -- is the proof this shape works), and the enum
-    cannot be extended at runtime. So the equation is set on the vispy node directly. That is one
-    GL state call on a node napari already built; it is not a second renderer.
-
-    THE PIN IS THE HARD PART. ``VispyCanvas._reorder_layers_in_the_same_view`` calls
-    ``_on_blending_change()`` on EVERY layer whenever the layer list is inserted into, reordered,
-    or has a visibility change (napari 0.6.6 ``_vispy/canvas.py:824``), and that call overwrites
-    ``set_gl_state`` wholesale. Adding the second brick would therefore silently un-fix the first.
-    Connecting to the same events would race napari's own handler; wrapping the method the canvas
-    actually calls does not, because it re-applies at exactly the moment napari clobbers it.
-    Verified to survive insert, visibility toggle and reorder.
+    MIP is a maximum, so GL max compositing makes bricked and unbricked the same picture, where
+    additive sums brick MIPs at the joins. napari's canvas re-applies blending on every layer
+    insert/reorder/visibility change, so the equation is re-pinned by wrapping the exact method
+    napari calls.
     """
     try:
         visual = viewer.window._qt_viewer.canvas.layer_to_visual[layer]
@@ -214,10 +160,7 @@ def pin_max_compositing(viewer: Any, layer: Any) -> bool:
 
 
 def region_origin_um(meta: dict, region: str) -> Optional[tuple]:
-    """The region mosaic's top-left in stage micrometres -- ``(min x, min y)`` of its FOV positions.
-
-    The SAME origin ``mosaic_bbox_um`` uses, which is what makes a brick's world translate land on
-    the pixels 2D shows. Returns None rather than a guess when the acquisition has no positions."""
+    """The region mosaic's top-left in stage micrometres — the same origin ``mosaic_bbox_um`` uses."""
     positions = meta.get("fov_positions_um") or {}
     fovs = list((meta.get("fovs_per_region") or {}).get(region) or [])
     if not fovs or not positions:
@@ -231,19 +174,7 @@ def region_origin_um(meta: dict, region: str) -> Optional[tuple]:
 
 
 def roi_window_px(meta: dict, region: str, roi_bbox_um: Sequence[float]) -> Optional[tuple]:
-    """An ROI box in stage um -> ``(r0, r1, c0, c1)`` LEVEL-0 mosaic pixels, clipped to the region.
-
-    Mosaic pixel space is the one ``_placement.fov_offsets_px`` speaks: row/col from the region's
-    top-left origin. THE box -> window conversion; :func:`read_brick` is the matching window ->
-    voxels half, and together they are the whole of what a drawn ROI's 3D takes.
-
-    This docstring used to say the conversion had been "lifted out of ``native_roi_volume`` so the
-    bricked path and the single-volume path cannot drift apart" — while ``native_roi_volume`` went
-    on carrying its own copy, with no caller. They had drifted three ways, and the copy was wrong
-    every time: a box past the region edge came back 40 px wide over an 8 px mosaic (32 columns of
-    zeros presented as data), a bottom-right-to-top-left drag came back empty, and a missing
-    ``pixel_size_um`` was fabricated as 1.0 rather than refused. It is deleted;
-    ``tests/test_roi_fusion.py`` pins all three and fails if it returns."""
+    """An ROI box in stage um -> ``(r0, r1, c0, c1)`` LEVEL-0 mosaic pixels, clipped to the region."""
     from squidxplorer._placement import fov_offsets_px, mosaic_extent_px
 
     origin = region_origin_um(meta, region)
@@ -277,28 +208,8 @@ def roi_window_px(meta: dict, region: str, roi_bbox_um: Sequence[float]) -> Opti
 def _plane_cache():
     """The bounded LRU that stops adjacent bricks re-decoding the same FOV plane.
 
-    MEASURED, on the 10x set, whole region, 1 channel, 120 bricks: without this the bricked open
-    peaked at 2820 MB RSS against a 537 MB texture budget and took 142 s to resolve. The texture
-    budget was never the problem -- the DECODE was. A brick is 1024 px and a field is 2084 px, so
-    every field is straddled by four to nine bricks and each of them decoded all ten of its z
-    planes again: ~1280 plane decodes for a region that holds 270 distinct planes.
-
-    So the fix is a cache, not a smaller budget. This reuses ``MemoryBoundedLRUCache`` and
-    ``cache_budget`` rather than inventing a fourth memory mechanism: bounded by BYTES, evicting
-    LRU, and measured off FREE memory so a 16 GB laptop and a 64 GB workstation each get a share
-    they can afford. Half the budget, because the brick textures are the other consumer here.
-
-    Bounding by NOT DECODING TWICE is deliberately preferred over bounding by releasing pages
-    afterwards: ``_volume.release`` is a no-op on Windows (``madvise(MADV_DONTNEED)`` is POSIX), so
-    a design that leaned on it would hold more resident there than here. A cache hit is a cache hit
-    on every platform.
-
-    Built under a lock, because every caller is a ``_BrickLoader`` QThread and a 3D window per
-    region means several of them. Two loaders that both see ``None`` build two caches, so the
-    byte bound this function exists to enforce is silently DOUBLED, and every ``put`` from the
-    losing thread lands in an object nothing will ever read again — a cache with a 0% hit rate,
-    paid for in full. The cache object itself is already internally locked; this guards only the
-    check-then-act that publishes it.
+    Built under a lock: every caller is a ``_BrickLoader`` QThread, and two racing builders
+    would silently double the byte bound.
     """
     global _PLANES
     with _PLANES_LOCK:
@@ -310,7 +221,7 @@ def _plane_cache():
         return _PLANES
 
 
-#: Built on first use so importing this module costs no memory measurement. See ``_plane_cache``.
+#: Built on first use so importing this module costs no memory measurement.
 _PLANES: Any = None
 _PLANES_LOCK = threading.Lock()
 
@@ -343,18 +254,8 @@ def read_brick(reader: Any, meta: dict, region: str, window: Sequence[int], chan
                step: int = 1, should_stop: Optional[Any] = None) -> Optional[np.ndarray]:
     """ONE brick's ``(z, y, x)`` voxels, fused across the FOVs it overlaps, strided by *step*.
 
-    THE window -> voxels fuser, and the scoping to one brick is the whole memory argument: the
-    caller never holds the ROI, only the bricks the camera is looking at. *window* is
-    ``(r0, r1, c0, c1)`` in level-0 mosaic pixels, which is what :func:`roi_window_px` returns.
-
-    The brick is pasted at NATIVE size and strided at the end rather than sampled sparsely, because
-    the reader hands back whole decoded FOV planes either way -- striding earlier would save nothing
-    on the read and would put an alignment bug where an off-by-one cannot be seen. The transient is
-    one brick (21 MB at the 1024 edge, 10 z, uint16), which is bounded and freed on return.
-
-    ``should_stop`` is polled per FOV and per z so a superseded load dies inside a read instead of
-    finishing work nobody is waiting for. Returns None when it was stopped, so the caller can tell
-    "cancelled" from "empty" -- a cancelled brick must not be cached as if it were the answer.
+    *window* is ``(r0, r1, c0, c1)`` in level-0 mosaic pixels (what :func:`roi_window_px` returns).
+    Returns None when stopped, so a cancelled brick cannot be cached as the answer.
     """
     from squidxplorer._placement import fov_offsets_px
 
@@ -404,13 +305,8 @@ def open_native_3d(
 ) -> Any:
     """Open a fresh napari 3D viewer on ONE FOV's native z-stack (gallery-view's recipe).
 
-    ``roi_bbox_um`` (x0, y0, x1, y1 stage micrometres) crops each channel's native z-stack to the
-    ROI's window WITHIN the FOV, so the volume is the exact ROI subarray at native resolution and
-    full z depth -- not the whole FOV, and not the single-z 2D preview. The FOV's micrometre origin
-    is its stage position (``fov_positions_um``), matching ``mosaic_bbox_um``'s placement.
-
-    Returns the napari ``Viewer`` (a popout window). Raises with a named reason if the stack cannot
-    be built, so the caller can route it to the log rather than a silent no-op.
+    ``roi_bbox_um`` crops each channel's stack to the ROI's window within the FOV. Raises with a
+    named reason if the stack cannot be built.
     """
     import napari  # lazy: heavy import, and a machine without napari still runs the 2D app
 
@@ -467,8 +363,7 @@ def open_native_3d(
         cmap = colormap_by_channel.get(ch)
         if cmap is not None:
             kwargs["colormap"] = cmap
-        # Carry the on-screen LUT; if this channel had none, derive one (never raw full-range,
-        # which is how a fluorescence volume "messes up" -- washed out. See _auto_clim.)
+        # Carry the on-screen LUT; if this channel had none, derive one (never raw full-range).
         clim = contrast_by_channel.get(ch)
         if clim is None:
             clim = _auto_clim(stack)
@@ -482,7 +377,6 @@ def open_native_3d(
         viewer.close()
         raise ValueError(f"{region}/fov {fov}: no channel could be read, so there is no 3D volume.")
 
-    # Micrometre scale bar + a 100 um-tick bounding box + a title overlay, exactly like gallery-view.
     if first_shape is not None:
         try:
             _add_bounding_box(viewer, (dz, px, px), first_shape)
@@ -498,8 +392,7 @@ def open_native_3d(
         viewer.text_overlay.position = "top_center"
     except Exception:                                   # noqa: BLE001 - cosmetic
         pass
-    # Free the native stacks the instant the popout is closed, so it does not hold RSS for the app's
-    # life (Spencer's memory brief). gallery-view's own patch.
+    # Free the native stacks the instant the popout is closed.
     _wire_close_to_release_memory(viewer)
     log.info("3D native: opened %s / fov %s, %d channel(s), %d z at native %.3f um/px, dz %.2f um",
              region, fov, len(viewer.layers), n_z, px, dz)
@@ -517,23 +410,10 @@ def open_native_3d_volume(
 ) -> Any:
     """Render READY per-channel ``(z, y, x)`` volumes in a napari 3D popout at NATIVE resolution.
 
-    This is the ORGANOID / ROI path (the contract, see ``docs/rendering-contract.md``): the caller
-    hands the ROI's native LEVEL-0 crop taken from the 2D pyramid — already fused across the FOVs the
-    ROI spans — and we render it with gallery-view's recipe (additive, (dz, py, px) scale, carried
-    LUT). Unlike ``open_native_3d`` this is not limited to a single FOV; it is limited by the GPU.
-
-    THE TEXTURE LIMIT IS NOW BRICKED, NOT REFUSED. napari renders 3D from ONE GL texture, so a
-    volume whose Y or X exceeds ``GL_MAX_3D_TEXTURE_SIZE`` used to be turned away here — which is
-    how the user ended up able to draw an ROI that could not be seen. A volume over the limit is now
-    TILED into blocks that each fit, one ``add_image`` per block placed with ``translate``, composed
-    with the GL max equation so the joins are invisible (see ``pin_max_compositing``). Nothing is
-    downsampled and nothing is refused. Z is never the limiter (napari sliders z); only Y/X hit the
-    texture, so the tiling is 2-D.
-
-    This entry point takes volumes ALREADY IN MEMORY, so it is the right call only when the caller
-    could afford to materialise them. The in-window path (``_brick_view.BrickedVolume``) reads brick
-    by brick and is what a whole region must use; this one keeps working for callers that hand over
-    a ready crop."""
+    A volume over the GL texture limit is tiled into bricks composed with GL max, never
+    downsampled and never refused. Takes volumes already in memory; the in-window path
+    (``_brick_view.BrickedVolume``) is what a whole region must use.
+    """
     import napari
 
     from squidxplorer import _bricks

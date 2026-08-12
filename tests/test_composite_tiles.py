@@ -1,22 +1,4 @@
-"""The coarse rung is a lookup, not a 25 second full-plate decode.
-
-``NEXT_STEPS.md``, Spencer, 2026-07-28:
-
-    Coarse rungs cannot be served by ``ReaderTileSource`` as it stands: a fit-to-plate tile
-    overlaps all 72 FOVs and measured **25 s** to build. The fix that was scoped but not built is
-    a composite source, ``InMemoryMultiscale`` fed from the existing ``_PreviewWorker`` pass for
-    plate rungs, ``ReaderTileSource`` for FOV rungs.
-
-The 25 s is arithmetic, not a slow loop: a fit-to-plate tile covers the whole sample, so every
-FOV overlaps it, and a raw acquisition has no written pyramid to read a coarse version from -- so
-each of those FOVs decodes a full frame to contribute a handful of pixels. On this repo's
-1536-well fixture the same tile touches 1536 fields, not 72.
-
-These tests pin what closes it: the plate rungs come from the cells the preview pass already
-composited (and ``_platecache`` now keeps across restarts), the FOV rungs still come from the
-reader byte for byte, a cell that is NOT cached goes to the reader rather than being drawn black,
-and the two pictures agree about where the sample is.
-"""
+"""The coarse rung is a lookup, not a 25 second full-plate decode."""
 from __future__ import annotations
 
 import time
@@ -36,10 +18,8 @@ from squidxplorer._tiling import TileDescriptor
 CH = "c0"
 FRAME = (64, 64)
 PIXEL_UM = 1.0
-#: Two wells 2 mm apart: far enough that a plate rung exists above the crossover, close enough
-#: that one coarse tile covers both. That is the tile Spencer measured.
 POSITIONS = {("A1", 0): (0.0, 0.0), ("A2", 0): (2000.0, 0.0)}
-VALUES = {"A1": 4000, "A2": 0}          # only A1 is bright: both sources must put it in one place
+VALUES = {"A1": 4000, "A2": 0}
 
 
 def _meta() -> dict:
@@ -70,7 +50,7 @@ def _plate_rung(ladder) -> int:
     plate = [i for i in range(len(ladder.geometry)) if not ladder.is_fov_level(i)]
     if not plate:
         pytest.skip("this ladder has no plate rung to test")
-    return plate[-1]                     # the coarsest: the fit-to-plate view
+    return plate[-1]
 
 
 def _desc(ladder, level, key, t=0) -> TileDescriptor:
@@ -85,10 +65,7 @@ def _cells(value_per_region=None) -> dict:
             for r, v in vals.items()}
 
 
-# --- the gap, closed --------------------------------------------------------------------------
-
 def test_a_coarse_tile_costs_no_frame_decodes_at_all():
-    """The whole point. Every FOV overlaps a fit-to-plate tile; none of them may be read."""
     ladder = _ladder()
     reader = _CountingReader()
     src = CompositePlateSource(reader, _meta(), ladder, cells=_cells())
@@ -102,7 +79,6 @@ def test_a_coarse_tile_costs_no_frame_decodes_at_all():
 
 
 def test_the_same_coarse_tile_off_the_reader_does_decode_every_overlapping_field():
-    """The before, so the after is a comparison and not an assertion of faith."""
     ladder = _ladder()
     reader = _CountingReader()
     src = ReaderTileSource(reader, _meta(), ladder)
@@ -113,7 +89,6 @@ def test_the_same_coarse_tile_off_the_reader_does_decode_every_overlapping_field
 
 
 def test_the_composite_and_the_reader_agree_about_where_the_sample_is():
-    """Cheap is worthless if it is cheap and wrong. The bright well must land in one place."""
     ladder = _ladder()
     lvl = _plate_rung(ladder)
     key = ladder.geometry.levels[lvl].keys[0]
@@ -135,10 +110,7 @@ def _centroid(a: np.ndarray) -> tuple:
     return (float((ys * w).sum() / total), float((xs * w).sum() / total))
 
 
-# --- the FOV rungs are untouched -----------------------------------------------------------------
-
 def test_fov_rungs_are_the_reader_byte_for_byte():
-    """Delegation, not a second implementation. Real resolution still comes from the frames."""
     ladder = _ladder()
     desc = TileDescriptor(level=0, key=("A1", 0), channel=CH,
                           bbox_um=ladder.fov_bboxes[("A1", 0)], t=0)
@@ -148,10 +120,7 @@ def test_fov_rungs_are_the_reader_byte_for_byte():
     assert composite.coarse_from_cells == 0 and composite.coarse_from_reader == 0
 
 
-# --- what happens when the cache cannot answer ---------------------------------------------------
-
 def test_an_uncached_well_goes_to_the_reader_and_SAYS_so():
-    """Not black, and not silent. Zeros would be a picture that looks acquired and is not."""
     ladder = _ladder()
     reader = _CountingReader()
     src = CompositePlateSource(reader, _meta(), ladder, cells={"A1": _cells()["A1"]})
@@ -164,7 +133,6 @@ def test_an_uncached_well_goes_to_the_reader_and_SAYS_so():
 
 
 def test_a_ladder_with_no_plate_rung_degrades_to_exactly_the_reader():
-    """A single-FOV acquisition has nothing to compose. It must not become a special case."""
     meta = _meta()
     meta["regions"] = ["A1"]
     meta["fovs_per_region"] = {"A1": [0]}
@@ -176,15 +144,7 @@ def test_a_ladder_with_no_plate_rung_degrades_to_exactly_the_reader():
     assert src.read_tile(desc).any()
 
 
-# --- geometry -------------------------------------------------------------------------------------
-
 def test_a_region_bbox_is_the_union_of_its_frames():
-    """The rectangle a cached cell covers, and the one ``cell_boxes`` scaled into the cell.
-
-    Both are the bounding box of the region's placed frames -- one in micrometres, one in pixels.
-    That equality is what lets a cell be pasted back into world space with no second geometry to
-    keep in step.
-    """
     ladder = _ladder()
     box = region_bbox_um(ladder, "A1")
     assert box == ladder.fov_bboxes[("A1", 0)]
@@ -192,7 +152,6 @@ def test_a_region_bbox_is_the_union_of_its_frames():
 
 
 def test_the_composite_is_lazy_and_reads_the_cache_only_when_a_coarse_tile_is_asked_for():
-    """A session that never zooms out past the crossover must not pay for a rung it never sees."""
     class _Cache:
         def __init__(self):
             self.loads = 0
@@ -215,7 +174,6 @@ def test_the_composite_is_lazy_and_reads_the_cache_only_when_a_coarse_tile_is_as
 
 
 def test_the_deep_zoom_source_is_the_composite_one():
-    """The regression that matters: nobody may quietly put the bare ReaderTileSource back."""
     import inspect
 
     from squidxplorer import _viewer

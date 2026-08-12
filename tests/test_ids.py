@@ -1,8 +1,4 @@
-"""Fixed-width integer ids: the flat-cache scope and the logger's numeric id (squidxplorer._plate).
-
-Julio + Spencer chose INTEGERS over strings (string enumeration is silently slow) with fixed-width
-Row/Column/ROI slots so the id is unambiguous and DECODABLE, unlike the lossy display string.
-"""
+"""Fixed-width integer ids: the flat-cache scope and the logger's numeric id."""
 
 from squidxplorer._plate import (
     cache_scope, decode_code, format_code, roi_code, well_code,

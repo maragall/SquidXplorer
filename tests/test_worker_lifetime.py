@@ -1,26 +1,5 @@
-"""A running ``QThread`` must never be destroyable. The ownership rule, pinned.
-
-The failure this prevents
-------------------------
-Qt's ``~QThread`` calls ``qFatal`` when ``isRunning()``: the process aborts with no Python
-traceback, no pytest summary, and no chance to report anything. Measured on 2026-08-06 with a
-20-line script (a ``QThread`` parented to a ``QWidget``, started, the parent dropped,
-``gc.collect()``): ``QThread: Destroyed while thread is still running``, exit code 134.
-
-It was reachable in this app because ``PlateOverview`` owns two worker threads whose only stop was
-somebody ELSE's ``closeEvent``. Reproduced end to end: ``pytest tests/test_integration.py
-tests/test_nav_wiring.py`` in one process aborted the interpreter — the first nav test failed
-before its ``shutdown_plate_window``, leaving a live ``_TileFetcher`` and ``_LoupeWorker``, and
-the next test's ``gc.collect()`` reaped them. **69 of the 100 tests in Linux CI's chunk 24 never
-ran** for the same species of reason. After the fix the same command runs all 30 tests and REPORTS
-the one real failure instead of taking the process down with it.
-
-So these do not test "does close() work". They test the two structural facts that make the abort
-impossible even when nobody closes anything:
-
-1. no worker QThread is a Qt CHILD of the widget (a child is deleted by Qt, running or not);
-2. a worker that will not stop in time is DETACHED and kept referenced, never dropped.
-"""
+"""A running QThread must never be destroyable: workers have no Qt parent, and a
+worker that will not stop in time is detached and kept referenced, never dropped."""
 
 from __future__ import annotations
 
@@ -56,17 +35,7 @@ class _NeverStops(PO.QThread):
 
 
 def test_the_overview_builds_its_workers_with_no_qt_parent(qapp):
-    """A parented QThread is deleted by Qt when the parent goes, running or not.
-
-    ``_TileFetcher`` used to be built as ``_TileFetcher(self._tile_src, self)``. Three call sites
-    destroy a ``PlateOverview`` and only one of them stopped the thread first, so the other two
-    handed a live thread to ``deleteLater()``.
-
-    This reads the CONSTRUCTION SITE, not a hand-built instance: the defect was an argument at one
-    call site, and a test that constructs its own object cannot see that argument. The scenario
-    test — destroy the widget and observe — cannot be written at all, because the observation is
-    ``SIGABRT`` and nothing survives to report it.
-    """
+    """Reads the construction sites: a parented QThread is deleted by Qt with the parent."""
     import inspect
 
     for owner, method in ((PO.PlateOverview, "set_tile_source"),

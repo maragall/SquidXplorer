@@ -1,48 +1,7 @@
-"""HCS viewer — a post-acquisition, well-plate viewer for Squid acquisitions (IMA-185).
+"""HCS viewer — a post-acquisition, well-plate viewer for Squid acquisitions.
 
-A single professional Qt window, isolated from the Squid acquisition software. This tool runs on
-acquisitions that are ALREADY on disk (post-acquisition), so there is no live-follow machinery — it
-opens a completed scan and lets you navigate it and apply post-processing operators to it.
-
-    drop a Squid acquisition folder
-      -> TOP-LEFT: the PROCESS console — a Cellpose-style stack of operators to run on the plate
-               (MIP, Record z-stack; more land here as cards) plus a "to be added" roadmap and an
-               "Open CLI" button (a standalone stub window; the visible seam to IMA-186's headless
-               CLI). Operators gather any parameters through dialogs — MIP prompts for a destination,
-               Record prompts for scope + folder — so the pane is self-contained, no tabs.
-      -> BOTTOM-LEFT (<= half the display): a low-resolution PLATE OVERVIEW — one cell per well, laid
-               out in true plate row-major (A,B,...,Z,AA,...). Each well is HUE-CODED by its PROCESSING
-               status (Hongquan Li's record-zstack-viewer palette): grey = not processed, amber =
-               processing, blue = done, red-x = failed. The CURRENT well in view is a red box; the
-               cursor's well (as you move around) is a red dot. Wheel-zoom + drag-pan; double-click
-               opens a well; PRESS-AND-HOLD raises a loupe (IMA-208) that overlays the well's real
-               pixels — read from the acquisition's TIFFs, or from the written pyramid once an
-               operator has persisted one — magnified relative to the current plate zoom and capped
-               at native resolution, with a µm scale bar when the pixel size is known.
-      -> RIGHT (>= half): ndviewer_light EMBEDDED (dark-themed) — the per-FOV 4D detail, full height.
-               DOUBLE-CLICK a well and its RAW z-stack (all z, all channels) opens here by pointing
-               ndviewer at the acquisition's existing TIFFs (register_image with the raw paths) — zero
-               bytes copied, nothing written to disk. The z / t sliders are the real acquisition axes.
-
-The plate is the spatial navigator; ndviewer handles the per-FOV z-stack. "Processing" here means
-post-processing: MIP is operator #1, and more operators stack behind the same menu (the moment a
-second operator lands this is a general HCS viewer, not just a MIP tool).
-
-Design notes:
-- ndviewer_light is the embedded detail viewer (its LightweightViewer QWidget + push API); PyQt5 to
-  match its stack. PyQt5 is imported here, never in squidxplorer/__init__, so the pipeline stays Qt-free.
-- Nothing is written to the user's disk: the detail view reads the acquisition's own read-only
-  TIFFs. Memory is NOT one-well-at-a-time on the plate side: PlateOverview retains the whole plate
-  with its CHANNEL AXIS intact — one (C, nr*88, nc*88) NATIVE-DTYPE store per displayed layer — so
-  a channel toggle or a contrast drag recomposites from pixels already in RAM instead of re-reading
-  or re-projecting anything. That is ~95 MB for a 1536wp at C=4 uint16 (native dtype, so half what
-  float32 would cost), and it MULTIPLIES per layer: raw + one operator layer is ~190 MB. Allocated
-  lazily, only for a layer that actually receives tiles. On top sits a grid-sized RGB canvas (~36 MB)
-  per layer and one transient float32 buffer during a full-resolution recomposite. Bounded by the
-  plate format (<=1536 wells), not by z/frame size. What IS one-well-at-a-time is project_plate's
-  producer (workers x one ~139 MB well) and the detail viewer's LRU-bounded decoded planes.
-- Hit-testing / cell fitting are pure functions (unit-testable); widgets run headless under
-  QT_QPA_PLATFORM=offscreen.
+One Qt main window: the plate overview on top, operator console and log below.
+Viewing happens in independent RegionViewer windows spawned from the plate.
 """
 
 from __future__ import annotations
@@ -67,49 +26,18 @@ from qtpy.QtWidgets import (
     QSplitter, QStyleFactory, QTabBar, QVBoxLayout, QWidget,
 )
 
-#: The one Fusion QStyle for this process, created on first use. It must NOT be per-window.
-#:
-#: ``QWidget.setStyle()`` does not take ownership: the widget keeps a bare pointer and Qt never
-#: tells it when the style dies. Holding the only reference on the window meant the style was
-#: freed with the window's ``__dict__``, before ``~QWidget`` ran -- and every widget destructor
-#: calls ``style()->unpolish(this)``. Building and dropping windows therefore corrupted the heap
-#: and segfaulted the process, which is what killed whole pytest runs (macOS SIGSEGV here, Windows
-#: 0xC0000005) and took the summary line with them. Measured 2026-07-28: the interpreter died on
-#: the 6th window; with the style kept alive, 40 survived. Pinned by tests/test_window_lifetime.py.
-#:
-#: A style is stateless chrome and Qt shares one app-wide by default, so one per process is also
-#: simply the right object count. ``None`` if this Qt build has no Fusion, which callers guard for.
+#: The one Fusion QStyle for this process. setStyle() does not take ownership, so a
+#: per-window style is freed before ~QWidget runs and corrupts the heap.
 _FUSION_STYLE = None
 _FUSION_STYLE_MADE = False
 
-#: The one QApplication for this process, PINNED here for the life of the process.
-#:
-#: Same class of bug as the style above, one level up. A QApplication is a process singleton that
-#: every widget, every QStyle and every posted event points back at, and PyQt gives its ownership
-#: to PYTHON: the last Python reference dying deletes it, whatever is still standing. Callers keep
-#: that reference in a place with a much shorter life than the process. ``main()`` held it in a
-#: local and then handed the WINDOW back to its caller, and every test module holds it in a
-#: module-scoped pytest fixture, whose cache pytest clears at the last test's teardown -- which is
-#: exactly where whole suites died, after the last test passed and before the summary printed.
-#: ``tests/test_channel_bar.py`` had already hit this and pinned its own copy in a global.
-#:
-#: Measured 2026-07-28 on a parametrised window fixture, 60 build/destroy cycles per run, 12 runs
-#: per configuration: unpinned, the summary line printed 0 times out of 12; with the QApplication
-#: pinned and NOTHING else changed, 12 out of 12. Pinned by tests/test_window_lifetime.py.
-#:
-#: One per process is also simply the right object count: ``QApplication.instance()`` is Qt saying
-#: so. Nothing here creates a second one.
+#: The one QApplication, pinned for the life of the process: PyQt deletes it when the
+#: last Python reference dies, whatever widgets are still standing.
 _APP = None
 
 
 def qt_app(argv=None):
-    """The process's QApplication, created if needed, and held so Python cannot free it early.
-
-    Every entry point should go through this instead of ``QApplication.instance() or
-    QApplication([])``, which binds the app to whatever local or fixture cache happens to be at
-    hand. Returns the existing instance untouched when Qt already has one, so a host application
-    that made its own is adopted rather than duplicated.
-    """
+    """The process's QApplication, created if needed, and held so Python cannot free it early."""
     global _APP
     if _APP is None:
         _APP = QApplication.instance() or QApplication(list(argv) if argv is not None else [])
@@ -125,11 +53,7 @@ def _fusion_style():
     return _FUSION_STYLE
 
 
-#: The main window's logger. The log panel taps the stdlib ROOT logger, so anything logged here
-#: appears in the bottom-right panel for free — the reason a failure the user triggers (a spot
-#: detection that raised, a region that would not fuse) MUST go through this and not only into an
-#: in-widget banner: a banner the user has already clicked past leaves no trace, and "the logger
-#: didn't show it" is the exact gap this closes.
+# The log panel taps the stdlib root logger, so anything logged here appears in it.
 from squidxplorer._fontscale import rescale_fonts, scale_qss_fonts, window_screen
 from squidxplorer._logpane import get_logger
 
@@ -140,10 +64,6 @@ from squidxplorer.contract import field_path
 from squidxplorer._engine import available_projectors
 from squidxplorer._layers import OperationStack
 from squidxplorer._minerva import MINERVA_HOME_ENV as _MINERVA_HOME_ENV
-# Shown in the Minerva tab, not only in a docstring: both Minerva front ends fetch their
-# JavaScript from jsdelivr, so a user without internet meets a blank page rather than an error.
-# The fact is owned by _minerva (which cites the two source lines it was read from) and imported
-# here so the GUI cannot drift from it.
 from squidxplorer._minerva import NEEDS_INTERNET_NOTE as _MINERVA_INTERNET_NOTE
 from squidxplorer._minerva import MINERVA_URL as _MINERVA_URL
 from squidxplorer._gallery import GalleryScope as _GalleryScope
@@ -161,14 +81,10 @@ from squidxplorer._qtstyle import hline as _hline
 from squidxplorer._qtstyle import operator_card as _operator_card
 from squidxplorer._time_point import TimePointBar
 from squidxplorer._terminal import _CmdEdit, _ProcTerminal, _Terminal  # noqa: F401 (re-export)
-from squidxplorer._region_nav import RegionCursor   # RegionSlider went with `_make_region_slider`
+from squidxplorer._region_nav import RegionCursor
 
-# The PLATE OVERVIEW and the plate geometry under it moved to `squidxplorer._plate_overview` (gap 6,
-# 2026-07-29): 2,459 lines, cut along the seam this file already had a comment for. Re-exported
-# here under their historical names so every caller, and the ~40 tests that reach in through
-# `from squidxplorer import _viewer as V`, are unchanged. The arrows run one way only: that module
-# imports nothing from this one. (The `_qtstyle` colour aliases are NOT re-exported: both modules
-# alias the same single definition in `squidxplorer._qtstyle`, which is where they belong.)
+# Plate overview and geometry live in `_plate_overview`; re-exported under their
+# historical names so callers and tests reaching through `_viewer` are unchanged.
 from squidxplorer._plate_overview import (  # noqa: F401 (re-exports)
     _CELL, _CLICK_SLOP, _COLH, _HDR, _LOUPE_CACHE, _LOUPE_HOLD_MS, _LOUPE_MAG, _LOUPE_MAX_CROP,
     _LOUPE_PX, _LOUPE_SLOP, _LOUPE_WIN_LOCK, _PAD, _PCT, _PUSH_PX, _TILE_CACHE_BYTES,
@@ -180,18 +96,9 @@ from squidxplorer._plate_overview import (  # noqa: F401 (re-exports)
     loupe_level, loupe_scale, loupe_um_per_screen_px,
     resolve_plate_root, selection_frame_pen_px, well_at,
 )
-# Row letters: ONE definition, `_plate._row_letter`, which is what `WellPlate.row_labels` and
-# `cell_id` use. `_plate_overview` carried a byte-identical second copy (plus a `_PLATE_DIMS` /
-# `_plate_grid` pair, both unreachable and one of them disagreeing with the live format table);
-# they were deleted on 2026-08-06 and this alias keeps `V._row_letter` pointing at the survivor.
 from squidxplorer._plate import _row_letter  # noqa: F401 (re-export)
 
-# The eight QThread workers moved to `squidxplorer._workers` (gap 6, 2026-07-29): 949 lines whose only
-# common property is the Qt threading rule, that a background thread may not touch a widget, which
-# is why none of them needed the window. Re-exported here under their historical names: several
-# tests swap one out with `monkeypatch.setattr(V, "_OperatorWorker", ...)` and `PlateWindow`
-# resolves the name in THIS module's namespace, so the spies keep working. `_region_viewer` also
-# imports three of them from here inside function bodies.
+# QThread workers live in `_workers`; re-exported so monkeypatched spies keep working.
 from squidxplorer._workers import (  # noqa: F401 (re-exports)
     _CACHE_AUTO, _MIN_PREVIEW_BOX_PX, _VIEWER_WORKERS,
     _ComputedPlateWorker, _FlatfieldWorker, _FocusWorker, _MinervaRenderWorker, _MinervaWorker,
@@ -199,34 +106,21 @@ from squidxplorer._workers import (  # noqa: F401 (re-exports)
     _full_res_plane, _spot_stages,
 )
 
-# (`_SUPPORTED_PLATES` and `resolve_plate_format` used to live here. `build_plate` (IMA-214) is now
-#  the single format-resolution path — override > measured > declared > inferred — so both were dead
-#  leftovers that could only ever disagree with it. Deleted rather than left as a second opinion.)
-
-# The operator REGISTRY moved to `squidxplorer._operations` (gap 6, 2026-07-29): 117 lines with no Qt in
-# them, which is why they could be lifted whole. Re-exported here under their historical names for
-# THIS module's own call sites only. `_gui_commands` used to reach back through here inside a
-# function body for `operator_label` / `runnable_operators`, which imported PyQt5, napari and a
-# QMainWindow to answer "what is this operator called"; it points at `_operations` directly as of
-# 2026-08-06. Nothing outside `_viewer` should import an operator name from `_viewer` again.
+# The operator registry lives in `_operations`; re-exported for this module's call sites.
 from squidxplorer._operations import (  # noqa: F401 (re-exports)
     _OPERATIONS, _OPERATIONS_BY_KEY, _SAVE_OPERATOR, _TO_BE_ADDED, Operation, _action_label,
     operator_label, operator_layer_key, operator_name, result_kind, runnable_operators,
 )
 
-# Chrome (colours, stylesheets, palette) is defined ONCE in `squidxplorer._qtstyle` and aliased here
-# so existing call sites keep their short private names. These are NOT second definitions: change
-# a colour in _qtstyle and every widget in the window moves with it.
+# Chrome (colours, stylesheets, palette) is defined once in `_qtstyle` and aliased here.
 _BG = _qtstyle.BG
 _GRID, _RED, _MUTED, _ACCENT = _qtstyle.GRID, _qtstyle.RED, _qtstyle.MUTED, _qtstyle.ACCENT
 _SEL_FILL = _qtstyle.SEL_FILL
 
 
 def _view_hue(view_id: int, *, focused: bool = False) -> QColor:
-    """A STABLE, distinct hue per open view/thread, so the plate colour-codes which wells belong to
-    which window (Julio: "colour hueing the different view threads"). The golden-ratio hue step keeps
-    successive views far apart on the wheel; the focused view is more opaque so it reads as active."""
-    h = (0.13 + 0.61803398875 * int(view_id)) % 1.0     # golden-ratio walk => maximally spread hues
+    """A stable, distinct hue per open view, so the plate colour-codes wells per window."""
+    h = (0.13 + 0.61803398875 * int(view_id)) % 1.0     # golden-ratio walk spreads hues
     c = QColor.fromHsvF(h, 0.62, 1.0, 0.34 if focused else 0.20)
     return c
 
@@ -234,7 +128,7 @@ def _view_hue(view_id: int, *, focused: bool = False) -> QColor:
 _CONTROL_BLUE = _qtstyle.CONTROL_BLUE
 
 
-_STATUS = _qtstyle.STATUS   # processing-status hue coding; see squidxplorer/_qtstyle.py
+_STATUS = _qtstyle.STATUS   # processing-status hue coding
 _TABS_DARK = _qtstyle.TABS_DARK
 _CARD_QSS = _qtstyle.CARD_QSS
 _BTN_QSS = _qtstyle.BTN_QSS
@@ -244,28 +138,19 @@ _TERM_QSS = _qtstyle.TERM_QSS
 _MENU_QSS = _qtstyle.MENU_QSS
 _ANSI_RE = _qtstyle.ANSI_RE
 
-#: ``font-size: 12px`` in a stylesheet, with the number as group 1. Only ``px`` — a ``pt`` size
-#: is already device-independent and must NOT be scaled a second time.
+#: ``font-size: 12px`` in a stylesheet; only ``px`` — ``pt`` must not be scaled twice.
 _QSS_FONT_PX_RE = re.compile(r"(?<=font-size:)\s*(\d+(?:\.\d+)?)\s*px", re.IGNORECASE)
 
 
 def _scale_qss_fonts(qss: str, scale: float) -> str:
-    """Alias. The implementation moved to `_fontscale` so CHILD windows can use it too.
-
-    Kept as a name here because the root window and its tests have always called it this.
-    """
+    """Alias for `_fontscale.scale_qss_fonts`, kept under this module's historical name."""
     return scale_qss_fonts(qss, scale)
 
     return _QSS_FONT_PX_RE.sub(_sub, qss)
 
 
 def _signal_names(cls) -> tuple:
-    """Every Signal declared on *cls* or its bases, by attribute name.
-
-    ``Signal`` is a class attribute until Qt binds it per-instance, so the class object is
-    where the declarations are discoverable. Excludes ``finished``/``started`` — QThread's own,
-    which the retire path connects deliberately and must not tear down.
-    """
+    """Every Signal declared on *cls* or its bases, excluding QThread's own finished/started."""
     from qtpy.QtCore import Signal as _sig
     seen, out = set(), []
     for klass in cls.__mro__:
@@ -278,50 +163,16 @@ def _signal_names(cls) -> tuple:
     return tuple(out)
 
 
-#: The BAND under the plate: Window Navigator on the left, Operator over Log on the right.
-#:
-#: IT WAS A TOP STRIP UNTIL 2026-08-03 (`_TOP_ROW_COMPACT_PX`, latterly 520 px). Spencer, on the v2
-#: drawing: the plate view should take roughly HALF the window's real estate, and it was at the
-#: bottom losing prominence to text-heavy panels. So the plate goes on top, full width, and the
-#: panels go below it. The names moved with the thing: there is no top row any more, and a constant
-#: called `_TOP_ROW_*` describing the bottom of the window is a comment that lies.
-#:
-#: TWO NUMBERS, BECAUSE THEY ANSWER TWO QUESTIONS, and the previous restack's "one height" rule was
-#: about something else (it deleted a SECOND CAP that a tab selection swapped in and out, inferring
-#: intent from a click). These are a default size and a hard ceiling:
-#:
-#: * `_BAND_DEFAULT_PX` is what the band gets at the design size. It is DERIVED, not chosen: at
-#:   596x850 the menu bar and the status bar take 25 px each and the splitter handle 6, leaving 794
-#:   for plate + band. 365 here puts the plate at 429 px, which is 50.5% of the window: the
-#:   "about half the real estate" Spencer asked for, measured offscreen rather than estimated.
-#: * `_BAND_MAX_PX` is the ceiling the operator cards' size hint cannot argue with. Unconstrained,
-#:   the band renders ~520 px (measured), which is where the old 32.8% plate came from.
-#:
-#: The band's stretch factor is 0 and the plate's is 1, so a taller window gives the extra height to
-#: the PLATE and its share only goes up (50.6% at 1280x900). The boundary is a splitter handle
-#: either way: these are the starting positions, not a constraint on the user.
-#:
-#: WHAT IT COSTS, STATED: the log opens at ~152 px in the band's right column against 199 px in the
-#: old top strip. That is the trade Spencer's "the plate should take roughly 50%" is, it is this one
-#: literal, and the handle above the band is how a user reading the console takes it back.
+#: Band under the plate: default height at the design size, and the hard ceiling the
+#: operator cards' size hint cannot argue with. The plate keeps stretch factor 1.
 _BAND_DEFAULT_PX = 365
 _BAND_MAX_PX = 520
 
-#: Operator-over-Log split inside the band's right column, in pixels, as a starting position.
-#: Measured offscreen at 596x850 it lands as Operator 203 px / Log 156 px, which is ~4 operator
-#: cards and ~11 console lines. ONE literal because two call sites need it (`__init__` and
-#: `_redock_log`): a re-dock that resized the console differently from how it opened would be a
-#: small lie about where it went.
+#: Operator-over-Log split inside the band's right column (starting position).
 _RIGHT_COL_SIZES = [215, 165]
 
 
 # --- the main window: the plate on top, the Open View list and the console below --------------
-#
-# There is no central viewer here and no factory for one. `_ChannelBar` (a per-channel contrast
-# READOUT under the plate) and `_make_mosaic_pane` (a napari pane for the root window) were both
-# deleted on 2026-08-06: the bar has not been constructed since 8b0cbfc (2026-07-22) and the
-# factory has had no call site since 2b8fbc5 (2026-07-23), when viewing moved out to independent
-# `RegionViewer` windows. Each window builds its own pane through `_napari_pane.make_pane`.
 
 
 class PlateWindow(QMainWindow):

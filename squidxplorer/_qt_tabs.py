@@ -1,15 +1,13 @@
-"""Detachable tabs and the float-out window (IMA-209/IMA-237) — the pane-shell machinery.
+"""Detachable tabs and the float-out window — the pane-shell machinery.
 
 Three widgets, no product knowledge between them:
 
-    _DetachTabBar   the GESTURE: a drag that leaves the bar means "float this tab out"
-    _DetachTabs     a QTabWidget wearing that bar, telling the handler WHICH widget fired
+    _DetachTabBar   the gesture: a drag that leaves the bar means "float this tab out"
+    _DetachTabs     a QTabWidget wearing that bar, telling the handler which widget fired
     _FloatWindow    the free-floating top-level window a detached tab lives in
 
-All the detach POLICY (what may float, how it is disposed, how it re-docks) stays in
-``PlateWindow._detach_tab`` — the seam the offscreen tests drive directly. These classes only
-notice the gesture and carry the widget; they were never viewer logic and are lifted out of
-``_viewer.py`` unchanged.
+All detach POLICY (what may float, how it is disposed, how it re-docks) stays in
+PlateWindow._detach_tab. These classes only notice the gesture and carry the widget.
 """
 
 from __future__ import annotations
@@ -23,14 +21,11 @@ from squidxplorer._qtstyle import BG, BTN_QSS, dark_palette
 
 
 class _DetachTabBar(QTabBar):
-    """Tab bar that detaches a tab when it's dragged OUT of the bar (ImageJ-style float-out,
-    IMA-209). Gesture only — all detach logic lives in PlateWindow._detach_tab (the seam the
-    offscreen tests drive directly). A drag that stays inside the bar keeps Qt's normal tab
-    behavior.
+    """Detaches a tab when dragged out of the bar (ImageJ-style float-out).
 
-    ``first_detachable`` is where the detachable range starts: 1 in the process console, whose
-    index 0 is the permanent 'Process wells' home tab, but 0 in IMA-237's exploration pane, where
-    every tab is a user-opened subset and the first one is no more special than the fifth."""
+    ``first_detachable`` is where the detachable range starts: 1 when index 0 is a permanent
+    home tab, 0 when every tab is equally a user-opened subset.
+    """
 
     def __init__(self, on_detach, parent=None, first_detachable: int = 1):
         super().__init__(parent)
@@ -51,8 +46,7 @@ class _DetachTabBar(QTabBar):
                 and not self.rect().contains(e.pos())):
             idx = self._press_index
             self._press_pos, self._press_index = None, -1      # fire once per press
-            # Defer: _detach_tab calls removeTab, and mutating the bar from inside its own
-            # mouseMoveEvent (mid-drag, pressed-index state live) is re-entrant — crash bait.
+            # deferred: mutating the bar inside its own mouseMoveEvent is re-entrant
             QTimer.singleShot(0, lambda: self._on_detach(idx))
             return
         super().mouseMoveEvent(e)
@@ -63,13 +57,11 @@ class _DetachTabBar(QTabBar):
 
 
 class _DetachTabs(QTabWidget):
-    """QTabWidget with a detachable tab bar. Qt requires setTabBar BEFORE any tab is added,
-    so the custom bar is installed here in __init__ rather than at the call site.
+    """QTabWidget with a detachable tab bar.
 
-    IMA-237 put a SECOND bar in the window (the exploration pane). Rather than fork a copy of
-    IMA-209's detach machinery — this codebase already paid for that once, with three parallel
-    _plate.py files — the bar tells the handler WHICH tab widget fired, so one _detach_tab serves
-    both. ``on_detach(index, tabs)``."""
+    A window can hold more than one of these; the bar tells the handler which tab widget
+    fired so one on_detach(index, tabs) serves all of them.
+    """
 
     def __init__(self, on_detach, first_detachable: int = 1):
         super().__init__()
@@ -78,12 +70,12 @@ class _DetachTabs(QTabWidget):
 
 
 class _FloatWindow(QWidget):
-    """A detached operator tab as a free-floating top-level window (IMA-209).
+    """A detached operator tab as a free-floating top-level window.
 
-    Owns no logic: PlateWindow hands it the live tab widget and two callbacks. 'Re-dock'
-    returns the widget to the tab bar (the SAME object — a live CLI keeps its shell and
-    history); closing the window disposes the widget through the same cleanup path as
-    closing its tab (PlateWindow._dispose_tab_widget)."""
+    Owns no logic: PlateWindow hands it the live tab widget and two callbacks. Re-dock returns
+    the same widget object to the tab bar; closing disposes it through the same cleanup path as
+    closing its tab.
+    """
 
     def __init__(self, title, content, on_close, on_redock):
         super().__init__()
@@ -91,10 +83,8 @@ class _FloatWindow(QWidget):
         self.setWindowTitle(f"{title} — SquidXplorer")
         self._content = content
         self._on_close = on_close
-        # Scoped dark chrome — palette + stylesheet only, never app-wide (see dark_palette).
-        # NO per-widget Fusion style here: _left_tabs needs it for its TAB STRIP rendering, but a
-        # float has no strip, and a Python-owned QStyle on a deleteLater'd widget can be GC'd
-        # first — ~QWidget then unpolishes a dangling style (segfault, found by the test suite).
+        # scoped dark chrome only, never app-wide: no per-widget Fusion style here, since a
+        # Python-owned QStyle on a deleteLater'd widget can be GC'd first (segfault)
         self.setPalette(dark_palette())
         self.setAutoFillBackground(True)
         self.setStyleSheet(f"background:{BG};color:#e6edf3;")
@@ -115,13 +105,11 @@ class _FloatWindow(QWidget):
         self.resize(560, 480)
 
     def content(self):
-        """The widget this window is holding (None once taken) — lets the window ask WHAT floated
-        without reaching into a private attribute."""
+        """The widget this window is holding (None once taken)."""
         return self._content
 
     def take_content(self):
-        """Detach and return the live widget (re-dock / app-exit); the window becomes an empty
-        shell whose close is then a plain close (see closeEvent's guard)."""
+        """Detach and return the live widget; the window becomes an empty shell."""
         w, self._content = self._content, None
         if w is not None:
             w.setParent(None)

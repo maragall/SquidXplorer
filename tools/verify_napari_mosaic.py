@@ -1,30 +1,9 @@
-"""Open a real acquisition, open a REGION WINDOW on it, and prove napari painted a real mosaic.
+"""Open a real acquisition, open a region window on it, and verify napari painted a real mosaic.
 
-Deliberately NOT offscreen: the offscreen Qt plugin has no OpenGL, so napari's canvas cannot
-exist there at all (it segfaults rather than raising). This is the step the headless gates
-structurally cannot cover, so it is run by hand against the real datasets.
+Deliberately not offscreen: the offscreen Qt plugin has no OpenGL, so napari's canvas cannot
+exist there (it segfaults rather than raising).
 
     python tools/verify_napari_mosaic.py ~/Downloads/sim_2x2_36fov_96wp
-
-RETARGETED 2026-08-06, from ``PlateWindow._mosaic_pane`` to a ``RegionViewer``. There is no pane 2
-any more: 2b8fbc5 (2026-07-23, "Decentralize GUI") removed the locked central napari pane, and
-``PlateWindow._mosaic_pane`` has been unconditionally None ever since. This script read it on its
-third line, found None, printed ``{"pane_is_napari": false, "failure": "no mosaic pane"}`` and
-exited 0 -- a script whose entire body was unreachable, reporting success. Viewing now happens in
-independent windows spawned through ``ViewerManager``, so that is what is driven here.
-
-Checks, in order of how much they would embarrass us if skipped:
-  1. the region window's pane is the napari canvas, not a fallback
-  2. a mosaic layer exists per channel, carrying our metadata identity
-  3. the layer is a MOSAIC, not one FOV - its extent exceeds the frame shape
-  4. the canvas actually PAINTED pixels: screenshot is not blank, not uniform
-  5. the layer is placed in stage micrometres
-  6. changing napari's contrast in that window REPAINTS THE PLATE (IMA-261)
-
-Check 6 is here and not in ``tools/walkthrough.py`` because it cannot be anywhere else: the
-control is napari's LUT row, and napari needs the GL context this file is the only harness to
-have. The walkthrough used to drive ndv's slider for it; ndv is gone, and three checks there were
-SKIPping or -- worse -- passing while measuring nothing.
 """
 
 from __future__ import annotations
@@ -34,20 +13,15 @@ import os
 import sys
 import time
 
-os.environ.pop("QT_QPA_PLATFORM", None)          # we need a real GL context
+os.environ.pop("QT_QPA_PLATFORM", None)          # need a real GL context
 os.environ.setdefault("SQUIDXPLORER_VIEWER", "napari")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
 
-# `import squidxplorer` FIRST, THEN qtpy. `squidxplorer/__init__` pins QT_API=pyqt6 and the pin has to be
-# set before qtpy resolves a binding. This said `from PyQt5.QtWidgets import QApplication` (and
-# imported it BEFORE squidxplorer) until 2026-08-06: the widgets under test were Qt6 while the
-# application was Qt5, both frameworks loaded into one process, and the script aborted on
-# "QWidget: Must construct a QApplication before a QWidget". Same defect commit 6b51793 fixed in
-# tools/walkthrough.py; this file was not carried over. Dead since the Qt6 migration (10b8348,
-# f7f9b28, ce5605c).
+# import squidxplorer before qtpy: it pins QT_API=pyqt6, which must happen before qtpy resolves
+# a binding.
 import squidxplorer  # noqa: F401
 from qtpy.QtWidgets import QApplication
 
@@ -58,7 +32,6 @@ if len(sys.argv) < 2:
     raise SystemExit(2)
 path = sys.argv[1]
 if not os.path.isdir(path):
-    # Named, never a traceback: this is a developer-machine script over developer-machine data.
     print("VERIFY " + json.dumps({"skipped": f"dataset absent on this machine: {path}"}))
     raise SystemExit(0)
 budget = float(sys.argv[2]) if len(sys.argv) > 2 else 240.0
@@ -72,19 +45,8 @@ app.processEvents()
 out: dict = {"dataset": os.path.basename(path.rstrip("/"))}
 
 
-#: The six checks in the docstring, as ``{key in `out`: what a False means}``. THE VERDICT.
-#:
-#: Until 2026-08-06 this file computed every one of them, printed them in a JSON blob, and called
-#: ``report(0)`` at the end regardless: only the three EARLY refusals (ingest failed,
-#: `ViewerManager.open` returned None, the pane is not napari) could produce a non-zero exit. So a
-#: run that painted NO PIXELS, or one where napari's contrast no longer repainted the plate,
-#: exited 0 with the failure sitting in a field of the report. A human reading the whole blob might
-#: notice; nothing else could -- and this is a harness whose entire reason for existing is that
-#: nobody notices.
-#:
-#: A key that is absent, or None, is UNMEASURED and does not fail the run: ``layers`` may
-#: legitimately be empty on a dataset with no mosaic, and check 6 says so in words rather than
-#: with a False.
+# The checks this script runs, keyed as they appear in `out`; a key absent or None is unmeasured
+# rather than failed (e.g. `layers` may legitimately be empty on a dataset with no mosaic).
 VERDICT = {
     "pane_is_napari": "the region window fell back: napari did not build a canvas",
     "canvas_painted_pixels": "the canvas framebuffer is blank or uniform: no pixels were painted",
@@ -97,10 +59,10 @@ VERDICT = {
 
 
 def _verdict():
-    """``(exit code, [failure sentences])`` read off *out*, never off the intent."""
+    """(exit code, [failure sentences]) read off *out*, never off the intent."""
     checks = dict(VERDICT)
     if int(out.get("n_z_in_meta") or 1) <= 1:
-        checks.pop("z_slider_present", None)     # a single-plane acquisition owes no slider
+        checks.pop("z_slider_present", None)     # single-plane acquisition owes no slider
     bad = [why for key, why in checks.items() if out.get(key) is False]
     return (1 if bad else 0), bad
 
@@ -114,8 +76,7 @@ def report(code=None):
     for why in out.get("failed_checks") or []:
         print("VERIFY FAIL: " + why)
     sys.stdout.flush()
-    # os._exit: unwinding napari + Qt at interpreter shutdown segfaults on this machine, and a
-    # verdict decided by a teardown crash is not a verdict.
+    # os._exit: unwinding napari + Qt at interpreter shutdown segfaults on this machine
     os._exit(code)
 
 
@@ -127,8 +88,7 @@ if win._reader is None:
     report(1)
 out["regions"] = list((win._meta or {}).get("regions", []))
 
-# THE WINDOW UNDER TEST. `ViewerManager.open` is the same call the plate's own double-click makes,
-# so this drives the product's entry point rather than constructing a RegionViewer by hand.
+# ViewerManager.open is the same call the plate's double-click makes.
 region = out["regions"][0]
 rv = win._viewer_manager.open([region])
 if rv is None:
@@ -174,7 +134,6 @@ for ly in pane.mosaic.ours():
     })
 out["layers"] = layers
 
-# Report 2/3 evidence: z navigable, and all channels composited rather than occluded.
 out["dims_ndim"] = int(pane.mosaic.model.dims.ndim)
 out["dims_not_displayed"] = [int(a) for a in pane.mosaic.model.dims.not_displayed]
 out["z_slider_present"] = out["dims_ndim"] > 2
@@ -182,34 +141,23 @@ out["n_z_in_meta"] = int((win._meta or {}).get("n_z") or 1)
 out["blending"] = sorted({str(l.blending) for l in pane.mosaic.ours()})
 out["colormaps"] = [str(l.colormap.name) for l in pane.mosaic.ours()]
 out["all_channels_visible"] = all(l.visible for l in pane.mosaic.ours())
-# Count REAL widgets, not row-tuple slots: the row's second element is now the read-only
-# window readout, so a truthiness check on it reports a control that no longer exists.
+# Count real widgets, not row-tuple slots: the row's second element is now the read-only
+# window readout.
 from qtpy.QtWidgets import QPushButton, QSlider, QWidget
-# Scoped to the PLATE WIDGET, not to `win._channel_bar`: that attribute has not existed since
-# 8b0cbfc (2026-07-22) deleted the plate's channel bar outright, so this reported 0/0 without
-# looking at anything. Same stale read as tools/gates.py's contrast_surfaces.
 _plate = win._overview
 out["plate_contrast_sliders"] = len(_plate.findChildren(QSlider)) if _plate is not None else 0
 out["plate_auto_buttons"] = len(
     [b for b in _plate.findChildren(QPushButton) if b.text() == "auto"]) \
     if _plate is not None else 0
-# Look for the real widgets in the tree rather than a pane attribute, so this keeps
-# reporting the truth regardless of how the control column is stored.
 _names = {type(c).__name__ for c in pane.findChildren(QWidget)}
 out["napari_layer_controls_mounted"] = "QtLayerControlsContainer" in _names
 out["napari_dims_slider_mounted"] = any("QtDim" in n for n in _names)
-# 3D is reachable via napari's OWN ndisplay button now that the real Window is embedded.
 out["napari_viewer_buttons_present"] = any(
     "ViewerButtons" in type(c).__name__ for c in pane.findChildren(QWidget))
 
 if layers:
-    # IN MICROMETRES, not pixels. The mosaic is a DECIMATED multiscale pyramid -- `_mosaic_source`
-    # produces preview placement, not native resolution -- so its level-0 array is routinely
-    # SMALLER in pixels than one native FOV while covering far more stage. Comparing pixel counts
-    # therefore reported `is_a_mosaic_not_one_fov: false` on a genuine 27-FOV mosaic: measured
-    # 2026-08-06 on the 10x tissue set, layer array (10, 128, 107) against a (2084, 2084) frame,
-    # while `extent.world` said 8618 x 7208 um against one FOV's 1567 um. The pixel comparison was
-    # answering a question about resolution; the claim is about EXTENT.
+    # In micrometres, not pixels: the mosaic is a decimated multiscale pyramid, so its level-0
+    # array can be smaller in pixels than one native FOV while covering far more stage.
     ext = np.asarray(pane.mosaic.ours()[0].extent.world, dtype=float)
     span_um = (ext[1] - ext[0])[-2:]
     fov_um = [f * float((win._meta or {}).get("pixel_size_um") or 0.0) for f in frame]
@@ -219,7 +167,6 @@ if layers:
         all(fov_um) and (span_um[0] > fov_um[0] or span_um[1] > fov_um[1]))
     out["placed_in_stage_um"] = bool(any(s != 1.0 for s in layers[0]["scale_um_per_px"]))
 
-# Did it actually paint? A layer list proves the model; only the framebuffer proves pixels.
 try:
     img = pane.canvas.screenshot()
     arr = np.asarray(img)[..., :3]
@@ -230,14 +177,8 @@ except Exception as exc:
     out["screenshot_error"] = f"{type(exc).__name__}: {exc}"
     out["canvas_painted_pixels"] = False        # unmeasurable is not the same as fine
 
-# ---- 6. IMA-261: napari's contrast in THIS window repaints the PLATE ------------------------
-#
-# The claim the walkthrough can no longer make. `PlateWindow._follow_window_contrast` subscribes
-# to `MosaicLayers.on_user_contrast` off `ViewerManager.windowOpened`; the sink resolves the
-# channel index and calls `PlateOverview.set_channel_window`. Driving `layer.contrast_limits` is
-# driving napari's own public event -- the same one the LUT row emits when a user drags it --
-# rather than calling our sink directly, which is the distinction this whole family of harnesses
-# exists to keep.
+# IMA-261: napari's contrast in this window should repaint the plate. Drive
+# `layer.contrast_limits` (napari's own public event) rather than calling our sink directly.
 ours = pane.mosaic.ours()
 if not ours:
     out["plate_follows_napari_contrast"] = None

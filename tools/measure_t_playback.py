@@ -1,29 +1,7 @@
 #!/usr/bin/env python
-"""Measure TIMEPOINT PLAYBACK in a real window: achieved rate, dropped frames, UI stalls, memory.
+"""Measure timepoint playback in a real window: achieved rate, dropped frames, UI stalls, memory.
 
-WHY A SCRIPT. "Playback is smooth" is an adjective. The questions this feature has to answer are
-numbers — what interval was actually achieved against the one that was requested, whether the
-frames that could not be drawn were DROPPED or QUEUED, how long the GUI thread was blocked while
-it happened, and whether a full loop leaks — and a number that cannot be reproduced is worth about
-as much as the adjective. So the instrument is written down, exactly as `make_5d_fixture.py` is.
-
-WHAT IT DRIVES. The real `RegionViewer` on a real acquisition, with a real napari pane when the
-machine has GL (it says which it used). The playback is napari's own `AnimationThread`; the loading
-is the real `_MosaicWorker`; the gate is the real one. Nothing here is a simulation of the app.
-
-WHAT IT MEASURES
-
-    requested fps      what napari's animation thread was asked for
-    steps              timepoint changes that actually reached the loader
-    dropped            frames the gate refused because the previous one was still loading.
-                       A DROP IS THE CORRECT BEHAVIOUR: it is the difference between playback
-                       that self-limits and playback that builds a backlog. `queued` is the
-                       number that must stay 0 -- loads started while another was in flight.
-    achieved interval  wall time between consecutive frames landing on screen
-    UI stall           the worst gap seen by a 5 ms timer ON THE GUI THREAD during playback.
-                       This is the responsiveness number: it is how long the window could not
-                       have answered a mouse event.
-    RSS               before / after a full loop of the series
+Drives the real RegionViewer / napari AnimationThread / _MosaicWorker on a real acquisition.
 
 Usage::
 
@@ -53,12 +31,7 @@ def _rss_mb() -> float:
 
 
 class _UiWatch:
-    """The worst blockage of the GUI thread, measured by something living on it.
-
-    A 5 ms timer that cannot run for 400 ms is a window that cannot repaint or answer a click for
-    400 ms. That is the only definition of "responsive" that means anything to the user, and it is
-    why this is measured rather than asserted.
-    """
+    """Worst blockage of the GUI thread, measured by a timer living on it."""
 
     def __init__(self, parent) -> None:
         from qtpy.QtCore import QTimer
@@ -125,9 +98,8 @@ def measure(root: Path, fps_list, seconds: float, blocking: bool) -> int:
         return 2
 
     if blocking:
-        # Reproduce the PRE-CANCELLATION behaviour: block the GUI thread until the superseded
-        # read gives up. Kept as a flag rather than deleted so the improvement is measurable and
-        # not merely asserted.
+        # reproduce the pre-cancellation behaviour: block the GUI thread until the superseded
+        # read gives up, kept as a flag so the improvement stays measurable
         RegionViewer._retire_worker = lambda self, worker: worker.wait(2000)   # type: ignore
         print("MODE: blocking supersede (the OLD behaviour), for comparison")
 
@@ -139,9 +111,8 @@ def measure(root: Path, fps_list, seconds: float, blocking: bool) -> int:
         print("REFUSING: this window's timepoint bar has no playback.")
         return 2
 
-    # Instrument: when a frame was REQUESTED by napari, when a step reached the loader, when the
-    # picture landed. `queued` counts a load started while another was still in flight, which is
-    # the failure the gate exists to prevent and must stay 0.
+    # `queued` counts a load started while another was still in flight, the failure the gate
+    # exists to prevent; it must stay 0.
     requested: list[float] = []
     stepped: list[tuple[float, int]] = []
     landed: list[float] = []
@@ -179,11 +150,8 @@ def measure(root: Path, fps_list, seconds: float, blocking: bool) -> int:
           f"{'achieved fps':>13} {'UI p95/worst ms':>17}  note")
     rss0 = _rss_mb()
     for fps in fps_list:
-        # THE WINDOW MUST BE ACTIVE OR IT STOPS ITSELF. `RegionViewer.set_active(False)` halts
-        # playback when the window is not the one the user is touching (Spencer's memory brief),
-        # so a measurement run that quietly lost focus reads as "playback degraded" when it is
-        # the halt working exactly as designed. Take focus back, and say so in the row when it
-        # was lost anyway.
+        # a window that is not active halts its own playback (RegionViewer.set_active), so
+        # reclaim focus before timing and flag it in the row if it was lost anyway
         win.raise_()
         win.activateWindow()
         app.processEvents()
@@ -208,8 +176,6 @@ def measure(root: Path, fps_list, seconds: float, blocking: bool) -> int:
         print(f"{fps:>8} {n_step:>6} {max(0, n_req - n_step):>5} {inflight['queued']:>7} "
               f"{interval:>22} {achieved} {watch.p95_ms:>8.0f} /{watch.worst_ms:>7.0f}{note}")
 
-    # MEMORY OVER A FULL LOOP, SAMPLED. A single before/after pair cannot tell a cache filling to
-    # its bound from a leak; a trace can, because a bounded cache PLATEAUS and a leak does not.
     print()
     print("memory over continuous playback (RSS MB / frames landed):")
     landed.clear()
@@ -218,9 +184,8 @@ def measure(root: Path, fps_list, seconds: float, blocking: bool) -> int:
     trace = []
     for _ in range(8):
         _pump(app, 5.0)
-        # `is_playing` is recorded because a window that LOSES FOCUS stops its own playback on
-        # purpose (`RegionViewer.set_active`), and a trace that did not say so would read as a
-        # stall. A flat frame count next to "playing no" is the halt working, not a hang.
+        # a window that loses focus stops its own playback on purpose; a flat frame count next
+        # to "playing no" is the halt working, not a hang
         trace.append((_rss_mb(), len(landed), bar.is_playing))
     bar.stop()
     _pump(app, 0.5)

@@ -1,29 +1,15 @@
-"""IMA-252: the semi-convergence QC tool's measurement, not its plumbing.
-
-The tool's job is to be BELIEVABLE about a turning point, so the tests are about the two
-ways it could lie: reporting a minimum that is really just the end of the sweep, and
-reporting a halo that is not the halo. Both are checked against constructed volumes where
-the right answer is known by construction, so a test can fail for a reason.
-
-No petakit and no real acquisition here - deconvolution itself is tested in
-``test_decon.py``. These tests exercise the QC layer over synthetic volumes, which is why
-they run in milliseconds.
-"""
+"""The semi-convergence QC tool's measurement, over synthetic volumes with known answers."""
 
 from __future__ import annotations
 
 import numpy as np
 import pytest
 
-# The QC measurement and the turbo rendering live in the PACKAGE now, not in the script, so
-# the GUI's deconvolution panel and tools/decon_qc.py call the same functions. These tests
-# were written against the script and are deliberately UNCHANGED apart from this import:
-# if the move altered any behaviour they go red.
 from squidxplorer import _decon_qc as decon_qc
 
 
 DXY, DZ = 0.752, 1.5
-CORE_UM = 0.61 * 0.525 / 0.3          # the NA-0.3 Airy radius, 1.0675 um
+CORE_UM = 0.61 * 0.525 / 0.3   # the NA-0.3 Airy radius, 1.0675 um
 WINDOW_UM = 6.0
 
 
@@ -38,16 +24,13 @@ def _volume(halo_level, shape=(11, 64, 64), core_level=1000.0):
     return volume, (zc, yc, xc)
 
 
-# --- the metric ------------------------------------------------------------------------
 def test_ratio_is_halo_brightness_over_core_brightness():
-    """The number is a plain brightness ratio, so it can be checked by construction."""
     volume, centre = _volume(halo_level=200.0, core_level=1000.0)
     got = decon_qc.halo_core_ratio(volume, centre, DXY, DZ, CORE_UM, WINDOW_UM)
     assert got == pytest.approx(0.2, abs=1e-6)
 
 
 def test_a_brighter_halo_scores_higher():
-    """'The disc is growing again' has to move the number UP, or the curve means nothing."""
     dim, centre = _volume(halo_level=100.0)
     bright, _ = _volume(halo_level=400.0)
     assert (decon_qc.halo_core_ratio(bright, centre, DXY, DZ, CORE_UM, WINDOW_UM)
@@ -55,11 +38,7 @@ def test_a_brighter_halo_scores_higher():
 
 
 def test_a_constant_camera_offset_does_not_change_the_answer():
-    """The floor subtraction has to actually neutralise the sensor's offset.
-
-    Without it the same optics would score differently on the same sample simply because
-    the camera pedestal changed, and iteration counts would not compare across channels.
-    """
+    """The floor subtraction has to actually neutralise the sensor's offset."""
     volume, centre = _volume(halo_level=200.0)
     plain = decon_qc.halo_core_ratio(volume, centre, DXY, DZ, CORE_UM, WINDOW_UM)
     offset = decon_qc.halo_core_ratio(volume + 500.0, centre, DXY, DZ, CORE_UM, WINDOW_UM)
@@ -72,20 +51,14 @@ def test_a_dark_core_is_refused_rather_than_divided_by():
         decon_qc.halo_core_ratio(volume, centre, DXY, DZ, CORE_UM, WINDOW_UM)
 
 
-# --- the window has to fit -------------------------------------------------------------
 def test_window_never_exceeds_what_the_stack_can_hold_axially():
-    """A 10-plane stack at 1.5 um cannot hold the preferred 8-Airy-radius sphere.
-
-    If it were used anyway the metric would silently measure a truncated cap whose shape
-    depends on where in the stack the structure happened to sit.
-    """
+    """A 10-plane stack at 1.5 um cannot hold the preferred 8-Airy-radius sphere."""
     assert decon_qc.qc_window_um(CORE_UM, nz=10, dz_um=1.5) == pytest.approx(6.0)
-    # Deep enough, and the preferred size is used unchanged.
+    # deep enough: the preferred size is used unchanged
     assert decon_qc.qc_window_um(CORE_UM, nz=40, dz_um=1.5) == pytest.approx(8 * CORE_UM)
 
 
 def test_the_structure_is_picked_away_from_the_edges():
-    """On the real first FOV the raw argmax lands on z=0; the window would be cut in half."""
     stack = np.zeros((10, 64, 64), dtype=np.uint16)
     stack[0, 32, 32] = 60000          # brightest overall, but unusable: top plane
     stack[5, 30, 30] = 30000          # dimmer, but a window fits around it
@@ -94,7 +67,6 @@ def test_the_structure_is_picked_away_from_the_edges():
     assert (int(y), int(x)) == (30, 30)
 
 
-# --- the recommendation ----------------------------------------------------------------
 def test_an_interior_minimum_is_reported_as_a_real_turn():
     best, kind, message = decon_qc.recommend([1, 2, 3, 4, 5], [0.9, 0.7, 0.5, 0.6, 0.8])
     assert (best, kind) == (3, "turn")
@@ -102,11 +74,7 @@ def test_an_interior_minimum_is_reported_as_a_real_turn():
 
 
 def test_a_still_falling_curve_is_not_dressed_up_as_a_turning_point():
-    """The failure this guards: argmin of a monotone curve is just where the sweep ended.
-
-    This is the case the real tissue data actually produces at 1..8, so the tool must say
-    'no turn' rather than confidently recommending 8.
-    """
+    """Argmin of a monotone curve is just where the sweep ended."""
     best, kind, message = decon_qc.recommend([1, 2, 3, 4], [0.9, 0.8, 0.7, 0.6])
     assert (best, kind) == (4, "still-falling")
     assert "NO TURN" in message and "RECOMMENDATION" not in message
@@ -118,7 +86,6 @@ def test_a_curve_that_only_rises_says_so():
     assert "NO TURN" in message
 
 
-# --- the picture -----------------------------------------------------------------------
 def test_orthogonal_slices_are_xz_and_yz_through_the_structure():
     volume = np.zeros((5, 20, 30), dtype=np.float32)
     volume[2, 7, 11] = 1.0
@@ -135,7 +102,6 @@ def test_the_montage_view_is_cropped_around_the_structure():
 
 
 def test_display_puts_background_at_the_bottom_of_the_colormap():
-    """Turbo's low end has to land on the background, or the halo is lost in green."""
     panel = np.full((10, 40), 500.0)
     panel[5, 20] = 5000.0
     shown = decon_qc._display(panel)
@@ -144,7 +110,6 @@ def test_display_puts_background_at_the_bottom_of_the_colormap():
 
 
 def test_the_montage_has_one_row_per_iteration_and_two_columns(tmp_path):
-    """End to end on the rendering path: rows = iterations, columns = [xz, yz]."""
     matplotlib = pytest.importorskip("matplotlib")
     volume, centre = _volume(halo_level=200.0)
     rows = [("raw", volume), ("1", volume), ("2", volume)]
@@ -153,19 +118,8 @@ def test_the_montage_has_one_row_per_iteration_and_two_columns(tmp_path):
     assert out.exists() and out.stat().st_size > 0
 
 
-# --- the ORTHOGONAL COMPOSITE (the GUI panel's picture) ---------------------------------
-#
-# Julio asked for "the deconvolved 2-D image rendered in turbo, with the x-z and y-z
-# orthogonal strips CONCATENATED to it". That is one array, not three pictures, so it is
-# built and tested here rather than assembled by the Qt panel -- a panel that pasted three
-# pixmaps together would be a second renderer to keep in step with write_montage.
-
 def test_the_composite_is_the_xy_plane_with_the_two_strips_attached():
-    """Shape, exactly: x-y (Y,X) with y-z (Y,Z) to its RIGHT and x-z (Z,X) BELOW it.
-
-    Getting this wrong is not a cosmetic bug: a transposed y-z strip shows the halo along
-    the wrong axis, and the whole point of the panel is judging that halo.
-    """
+    """x-y (Y,X) with y-z (Y,Z) to its right and x-z (Z,X) below it."""
     volume = np.zeros((5, 40, 60), dtype=np.float32)
     volume[2, 20, 30] = 1.0
     m = decon_qc.qc_composite(volume, (2, 20, 30), gap=2)
@@ -181,30 +135,15 @@ def test_the_composite_is_cropped_around_the_structure_like_the_montage():
 
 
 def test_the_three_views_share_ONE_intensity_scale():
-    """Per-panel normalisation would be a LIE here.
-
-    write_montage normalises each panel to its own peak on purpose -- it compares one
-    iteration against another. The composite compares three sections of the SAME volume at
-    the SAME iteration, so a dim x-z strip must LOOK dim. Normalising it to its own maximum
-    would paint an out-of-focus section as bright as the in-focus one and hide exactly the
-    axial halo the panel exists to show.
-    """
+    """A dim strip must look dim; per-panel normalisation would hide the axial halo."""
     volume = np.zeros((5, 40, 40), dtype=np.float32)
     volume[2, 20, 20] = 1000.0        # the structure the composite is centred on
-    # A 5x BRIGHTER structure elsewhere in the same plane. It is deliberately off row y=20
-    # and off column x=20, so it lands in the x-y panel but in NEITHER strip: the volume's
-    # peak (5000) and each strip's own peak (1000) are therefore different numbers, which is
-    # the only way this test can tell a shared scale from a per-panel one. (An earlier
-    # version of this test put the peak inside the strips, where both policies give the same
-    # answer -- it passed against per-panel normalisation and proved nothing.)
+    # a 5x brighter structure in the x-y panel but in neither strip
     volume[2, 10, 10] = 5000.0
-    # ...and the volume's true peak on a DIFFERENT z, so it is in no panel at all. Without
-    # this the x-y panel's own peak equals the volume's and per-panel normalisation of that
-    # panel is indistinguishable from a shared scale.
+    # the volume's true peak on a different z, so it is in no panel at all
     volume[0, 30, 30] = 8000.0
     m = decon_qc.qc_composite(volume, (2, 20, 20), gap=2, gamma=1.0)
-    # One scale, set by the volume's 8000 peak. Per-panel normalisation would put a 1.0
-    # somewhere in each of the three panels instead.
+    # one scale, set by the volume's 8000 peak
     assert m[40 + 2 + 2, 20] == pytest.approx(0.125, abs=1e-6)  # x-z strip, z=2, at x=20
     assert m[20, 40 + 2 + 2] == pytest.approx(0.125, abs=1e-6)  # y-z strip, z=2, at y=20
     assert m[10, 10] == pytest.approx(0.625, abs=1e-6)          # x-y panel, its own peak
@@ -212,8 +151,7 @@ def test_the_three_views_share_ONE_intensity_scale():
 
 
 def test_the_gaps_are_nan_so_a_separator_is_never_mistaken_for_signal():
-    """A gap filled with 0.0 renders as turbo's dark blue -- indistinguishable from
-    background, which is precisely the intensity range the halo lives in."""
+    """A gap filled with 0.0 would render as turbo's dark blue, indistinguishable from background."""
     volume = np.zeros((5, 40, 40), dtype=np.float32)
     volume[2, 20, 20] = 1.0
     m = decon_qc.qc_composite(volume, (2, 20, 20), gap=2)
@@ -223,21 +161,12 @@ def test_the_gaps_are_nan_so_a_separator_is_never_mistaken_for_signal():
 
 
 def test_the_corner_that_no_section_covers_is_blank():
-    """Bottom-right is (z vs z): there is no such section, so it must not show pixels."""
+    """Bottom-right is (z vs z): no such section exists."""
     volume = np.zeros((5, 40, 40), dtype=np.float32)
     volume[2, 20, 20] = 1.0
     m = decon_qc.qc_composite(volume, (2, 20, 20), gap=2)
     assert np.isnan(m[42:, 42:]).all()
 
-
-# --- clicking the composite: which voxel did the user point at? -------------------------
-#
-# Julio: "we should be able to toggle the turbo colormap mini-gui where we click on there
-# image and it moves teh crosshairs to display XZ and YZ bands." The crosshair move is a
-# RE-SLICE of the same volume (qc_composite already takes `centre`), so the only new thing
-# to get right is the pixel -> voxel map, and it is tested here rather than in the Qt
-# widget: it is arithmetic over the composite's own layout, and it has to stay the exact
-# inverse of the function two screens up in the same module.
 
 def test_a_click_in_the_xy_panel_picks_y_and_x_and_keeps_z():
     got = decon_qc.composite_centre_at((5, 40, 60), (2, 20, 30), row=7, col=11, gap=2)
@@ -259,8 +188,7 @@ def test_a_click_in_the_yz_strip_picks_z_and_y_and_keeps_x():
 
 
 def test_a_click_on_a_separator_or_the_dead_corner_moves_nothing():
-    """None, not a nearby guess: a crosshair that jumps to a voxel the user did not point
-    at is worse than one that does not move, because it looks like it worked."""
+    """None, not a nearby guess."""
     shape, centre = (5, 40, 60), (2, 20, 30)
     assert decon_qc.composite_centre_at(shape, centre, row=41, col=11) is None   # row gap
     assert decon_qc.composite_centre_at(shape, centre, row=7, col=61) is None    # col gap
@@ -270,33 +198,26 @@ def test_a_click_on_a_separator_or_the_dead_corner_moves_nothing():
 
 
 def test_the_click_map_is_the_composite_s_own_inverse_when_the_view_is_cropped():
-    """The CROP is where this goes wrong. With view_half the x-y panel starts at
-    (yc - half, xc - half), so a click at panel pixel (0, 0) is that corner voxel and NOT
-    (0, 0) of the volume. Both the composite and this map read the crop window from one
-    function so they cannot disagree; this drives it end to end.
-    """
+    """With view_half a click at panel pixel (0, 0) is the crop's corner voxel, not (0, 0)."""
     volume = np.zeros((5, 80, 80), dtype=np.float32)
     volume[2, 40, 40] = 1000.0
     centre, half = (2, 40, 40), 8
     m = decon_qc.qc_composite(volume, centre, view_half=half, gap=2)
     assert m.shape == (16 + 2 + 5, 16 + 2 + 5)
 
-    # The structure sits at the MIDDLE of the cropped x-y panel; clicking it must return the
-    # centre unchanged, which is the round trip.
+    # clicking the middle of the cropped panel round-trips to the centre
     assert decon_qc.composite_centre_at(volume.shape, centre, row=8, col=8,
                                         view_half=half, gap=2) == centre
-    # ...and the panel's top-left pixel is the crop's corner, not the volume's.
+    # the panel's top-left pixel is the crop's corner, not the volume's
     assert decon_qc.composite_centre_at(volume.shape, centre, row=0, col=0,
                                         view_half=half, gap=2) == (2, 32, 32)
-    # A click one pixel past the cropped panel is the separator, not the strip.
+    # one pixel past the cropped panel is the separator, not the strip
     assert decon_qc.composite_centre_at(volume.shape, centre, row=0, col=16,
                                         view_half=half, gap=2) is None
 
 
 def test_the_click_map_uses_the_cropped_width_so_the_strips_are_where_they_are_drawn():
-    """Regression shape, stated: if this map used the FULL width instead of the cropped one
-    it would still return sane-looking voxels for x-y clicks and put every strip click in
-    the wrong place. The y-z strip starts at column w_xy + gap of the CROPPED panel."""
+    """The y-z strip starts at column w_xy + gap of the CROPPED panel, not the full width."""
     volume = np.zeros((5, 80, 80), dtype=np.float32)
     centre, half = (2, 40, 40), 8
     m = decon_qc.qc_composite(volume, centre, view_half=half, gap=2)
@@ -307,8 +228,7 @@ def test_the_click_map_uses_the_cropped_width_so_the_strips_are_where_they_are_d
 
 
 def test_turbo_rgb_is_turbo_and_paints_the_gaps_neutral():
-    """The colormap is matplotlib's turbo, not a hand-rolled ramp, and NaN is NOT mapped
-    into the ramp -- otherwise the separator reads as a real intensity."""
+    """matplotlib's turbo, with NaN kept out of the ramp."""
     pytest.importorskip("matplotlib")
     panel = np.array([[0.0, 1.0], [np.nan, 0.5]], dtype=np.float64)
     rgb = decon_qc.turbo_rgb(panel)

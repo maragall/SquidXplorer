@@ -28,7 +28,6 @@ def test_reads_acquisition_yaml(tmp_path):
 
 
 def test_missing_yaml_raises(tmp_path):
-    # single format, loud on absence: no silent JSON recompute, no None-degradation.
     with pytest.raises(FileNotFoundError, match="acquisition.yaml"):
         load_acquisition_metadata(tmp_path)
 
@@ -41,10 +40,7 @@ def test_legacy_json_is_ignored(tmp_path):
 
 
 def test_metadata_keys_exact_no_dead_attributes(tmp_path):
-    # Guard against dead / leftover keys after edits (e.g. the removed 'source' key): the dict
-    # must be EXACTLY the fields the reader consumes — surfaced in reader.metadata
-    # (pixel_size_um, dz_um, wellplate_format) or used for its Nz/Nt cross-check
-    # (n_z_declared, n_t_declared). Nothing else, so no attribute goes stale/unused.
+    # the dict must be EXACTLY the fields the reader consumes; a leftover key would go stale.
     (tmp_path / "acquisition.yaml").write_text(_ACQ_YAML)
     m = load_acquisition_metadata(tmp_path)
     assert set(m) == {

@@ -1,14 +1,9 @@
 """The two operator panels in PANE 1: their POLICY, separately from their pixels.
 
-Julio: "Right now I'm blocked in testing the post-processing because Stitcher doesn't have
-that maragall/Stitcher interface embedded in our top-left subpane."
-
-So this covers the decisions those panels make -- which kwargs a registration/fusion run is
-launched with, what the scope selector offers, and when an operator must REFUSE with a
-sentence instead of running. All of it is pure functions over plain data, deliberately: a
-control surface whose only test is "the widget constructed" is the kind of test this repo
-has shipped dead before. The Qt half (that the widgets build and that the buttons are wired
-to these functions) is at the bottom and runs offscreen.
+Covers the decisions those panels make — which kwargs a registration/fusion run is launched
+with, what the scope selector offers, and when an operator must refuse with a sentence
+instead of running. Pure functions over plain data throughout; the Qt half (that the widgets
+build and are wired to these functions) is at the bottom and runs offscreen.
 """
 
 from __future__ import annotations
@@ -24,26 +19,18 @@ from squidxplorer._op_panels import (
 
 
 # ---------------------------------------------------------------------------------------
-# scope: ONE control surface, and it is NOT on the operator panel (Defect 2)
+# scope: ONE control surface, and it is NOT on the operator panel
 # ---------------------------------------------------------------------------------------
-#
-# This block used to test `scope_options`, a per-panel scope combo. It is deleted, and so is
-# the function. Scope belongs to the RUN, not to the operator: `_run_scope.resolve_run_scope`
-# is the single owner and pane 1's "run on" selector is its control. The panel combo was
-# wrong in both of its states -- always stale (built once, from an empty selection) and, in
-# its only reachable state, mislabeled (it said "Whole dataset" while sending regions=None,
-# which run_operator hands to the run selector anyway).
-#
-# What replaces the coverage: tests/test_run_scope.py's resolve_run_scope and
-# describe_run_target tests, plus test_the_panel_does_not_carry_its_own_scope below.
+# Scope belongs to the RUN, not the operator: `_run_scope.resolve_run_scope` is the single
+# owner and pane 1's "run on" selector is its control (see tests/test_run_scope.py and
+# test_the_panel_does_not_carry_its_own_scope below).
 
 # ---------------------------------------------------------------------------------------
 # the stitcher's control surface -> stitch_region's kwargs
 # ---------------------------------------------------------------------------------------
 
 def test_defaults_reproduce_the_pipeline_exactly():
-    """An untouched panel must launch byte-for-byte what stitch_region does unaided --
-    otherwise the panel silently becomes a second set of defaults."""
+    """An untouched panel must launch byte-for-byte what stitch_region does unaided."""
     from squidxplorer._stitch import _ABS_THRESH, _BLEND_PX, _REL_THRESH
 
     kw = stitch_operator_kwargs(**STITCH_DEFAULTS)
@@ -56,16 +43,13 @@ def test_defaults_reproduce_the_pipeline_exactly():
 
 
 def test_the_outlier_percentage_becomes_a_fraction():
-    """maragall/stitcher shows 'Outlier rel: 50%'; two_round_optimization wants 0.5. The
-    conversion happens ONCE, here -- a panel that handed 50 straight through would reject
-    nothing and the control would look like it worked."""
+    """The UI shows a percentage; ``two_round_optimization`` wants a fraction, converted here once."""
     kw = stitch_operator_kwargs(**{**STITCH_DEFAULTS, "outlier_rel_pct": 25})
     assert kw["rel_thresh"] == pytest.approx(0.25)
 
 
 def test_registration_off_drops_the_registration_only_knobs():
-    """With register=False there is no pose graph, so a blunder threshold is meaningless.
-    Passing one anyway would let the panel show a knob that provably does nothing."""
+    """With register=False there is no pose graph, so a blunder threshold is meaningless."""
     kw = stitch_operator_kwargs(**{**STITCH_DEFAULTS, "register": False})
     assert kw["register"] is False
     assert "rel_thresh" not in kw and "abs_thresh" not in kw
@@ -79,9 +63,8 @@ def test_a_channel_subset_is_passed_through_as_indices():
 
 
 def test_selecting_every_channel_is_spelled_None_not_a_full_list():
-    """stitch_region documents None as 'all'. An explicit full list is equivalent today but
-    it is a second spelling of the same intent, and the memory note in that docstring is
-    written against None."""
+    """``stitch_region`` documents None as "all"; an explicit full list would be a second
+    spelling of the same intent."""
     kw = stitch_operator_kwargs(**{**STITCH_DEFAULTS, "channels": [0, 1, 2]}, n_channels=3)
     assert kw["channels"] is None
 
@@ -92,16 +75,13 @@ def test_an_empty_channel_selection_is_refused_rather_than_fusing_nothing():
 
 
 def test_a_blend_wider_than_the_tile_is_refused():
-    """A feather ramp wider than the overlap never reaches full weight and DIMS the seam --
-    a subtly wrong mosaic, which is worse than a refusal."""
+    """A feather ramp wider than the overlap never reaches full weight and dims the seam."""
     with pytest.raises(ValueError, match="blend"):
         stitch_operator_kwargs(**{**STITCH_DEFAULTS, "blend_px": 4096}, tile_px=2084)
 
 
 def test_the_kwargs_are_accepted_by_stitch_region_itself():
-    """The load-bearing one: every key this panel emits must be a real parameter of
-    stitch_region. A typo'd key would raise TypeError deep inside a worker thread, where the
-    only symptom is a status line that stops updating."""
+    """Every key the panel emits must be a real parameter of ``stitch_region``."""
     import inspect
 
     from squidxplorer._stitch import stitch_region
@@ -117,10 +97,8 @@ def test_the_kwargs_are_accepted_by_stitch_region_itself():
 # ---------------------------------------------------------------------------------------
 
 def test_a_labels_projector_is_refused_with_a_sentence_naming_the_way_out():
-    """stitch_region raises ValueError for a labels operator: feathering blends overlapping
-    tiles by a weighted average, and the mean of two object ids is a third object that does
-    not exist. Discovering that at the end of a multi-minute run is a bad way to learn it,
-    so the panel asks the same registry first."""
+    """``stitch_region`` raises for a labels operator; the panel asks the same registry first
+    rather than let the user discover it after a multi-minute run."""
     why = stitch_refusal("cellpose")
     assert why is not None
     assert "cellpose" in why
@@ -129,11 +107,8 @@ def test_a_labels_projector_is_refused_with_a_sentence_naming_the_way_out():
 
 
 def test_a_plane_op_is_no_longer_refused():
-    """THE REGRESSION THIS GUARD ONCE WAS. Refusing a plane-op was right while the pipeline
-    fused with z pinned to 1; IMA-277's per-plane fusion removed that refusal from
-    stitch_region, and this pre-check went on blocking it in the GUI alone. A pre-check that
-    outlives the guard it mirrors is worse than no pre-check: it is the engine's answer,
-    wrong, delivered with authority."""
+    """Per-plane fusion made a plane-op stitchable; a pre-check outliving that change would be
+    the engine's answer, wrong, delivered with authority."""
     assert stitch_refusal("decon") is None
     assert stitch_refusal("bgsub") is None
     assert stitch_refusal("flatfield") is None
@@ -170,8 +145,7 @@ def test_a_falling_ratio_says_the_halo_is_still_tightening():
 
 
 def test_a_rising_ratio_says_the_disc_is_growing_back():
-    """The semi-convergence tell. This is the whole reason the loop is one iteration at a
-    time, so it must be stated as 'stop / go back', not as a neutral number."""
+    """The semi-convergence tell must be stated as "stop / go back", not a neutral number."""
     from squidxplorer._decon_qc import halo_verdict
 
     kind, msg = halo_verdict([(2, 0.31), (3, 0.44)])
@@ -180,8 +154,7 @@ def test_a_rising_ratio_says_the_disc_is_growing_back():
 
 
 def test_the_verdict_uses_the_best_seen_not_merely_the_previous_one():
-    """Falling, falling, rising, rising: the answer is still 'the best was k=3', not
-    'k=4 was better than k=5'."""
+    """Falling, falling, rising, rising: the answer is still "the best was k=3"."""
     from squidxplorer._decon_qc import halo_verdict
 
     kind, msg = halo_verdict([(1, 0.9), (2, 0.5), (3, 0.3), (4, 0.4), (5, 0.6)])
@@ -223,8 +196,7 @@ def qapp():
 
 
 class _Host:
-    """The slice of PlateWindow the panels actually use. Small on purpose: if a panel needs
-    more than this, that is a coupling worth seeing in the diff."""
+    """The slice of PlateWindow the panels actually use, kept small on purpose."""
 
     def __init__(self, channels=("c0", "c1"), order=("A1", "A2")):
         self.calls = []
@@ -252,8 +224,6 @@ class _Host:
 
 def test_the_stitcher_panel_builds_and_offers_the_ported_controls(qapp):
     p = StitcherPanel(_Host())
-    # The Settings group of maragall/stitcher, minus the parts squidxplorer pins (see the
-    # module docstring for what was deliberately not ported and why).
     assert p.register_cb is not None
     assert p.reg_channel_combo.count() == 2
     assert p.blend_spin.value() == STITCH_DEFAULTS["blend_px"]
@@ -262,15 +232,14 @@ def test_the_stitcher_panel_builds_and_offers_the_ported_controls(qapp):
 
 
 def test_the_panel_does_not_carry_its_own_scope(qapp):
-    """Defect 2: scope belongs to the RUN. One representation, owned by pane 1's selector."""
+    """Scope belongs to the RUN; one representation, owned by pane 1's selector."""
     p = StitcherPanel(_Host())
     assert not hasattr(p, "scope_combo")
 
 
 def test_the_run_leaves_scope_unresolved_so_the_run_selector_owns_it(qapp):
-    """regions=None is UNSCOPED, not 'the whole plate'. run_operator resolves it against the
-    LIVE selection -- which is the whole point: the panel is built once and cached, so any
-    region list it captured would be stale by the time the user pressed Run."""
+    """regions=None is UNSCOPED, not "the whole plate": run_operator resolves it against the
+    LIVE selection, since a panel built once and cached would otherwise capture a stale one."""
     host = _Host()
     p = StitcherPanel(host)
     p.run_btn.click()
@@ -314,9 +283,7 @@ def test_a_labels_projector_disables_the_run_button_and_says_why(qapp):
 
 
 def test_a_plane_op_projector_leaves_the_run_button_enabled(qapp):
-    """The button must follow the ENGINE, not a guard the engine outgrew. Per-plane fusion
-    (IMA-277) made a plane-op stitchable; a disabled button would be the GUI refusing on its
-    own authority something stitch_region performs."""
+    """The button follows the ENGINE, not a guard the engine outgrew."""
     host = _Host()
     p = StitcherPanel(host)
     p.projector_combo.setCurrentText("decon")
@@ -324,14 +291,8 @@ def test_a_plane_op_projector_leaves_the_run_button_enabled(qapp):
 
 
 def test_the_run_handler_itself_refuses_labels_not_just_the_disabled_button(qapp):
-    """Two defences, and this test must exercise the SECOND one.
-
-    An earlier version clicked the button and passed because the button was disabled --
-    it never entered the handler at all, so deleting the guard inside `_run` left it green.
-    The guard matters independently: the button's enabled state is driven by a combo signal,
-    and anything that invokes the run without going through that signal (a shortcut, a
-    programmatic call, a future 'run all operators' path) must still be refused.
-    """
+    """Exercises the SECOND defence: clicking a disabled button never enters the handler, so
+    the guard inside ``_run`` must refuse independently of the button's enabled state."""
     host = _Host()
     p = StitcherPanel(host)
     p.projector_combo.setCurrentText("cellpose")
@@ -356,9 +317,8 @@ def test_the_decon_panel_add_one_button_advances_by_exactly_one(qapp):
 
 
 def test_the_decon_panel_shutdown_joins_a_running_worker(qapp):
-    """Closing the Decon QC tab mid-run must JOIN the RL thread, not drop the last reference to a
-    running QThread (which aborts the interpreter). _dispose_tab_widget calls shutdown(), so the
-    panel must expose exactly that name — stop() alone was never on the teardown path."""
+    """Closing the tab mid-run must JOIN the RL thread rather than drop the last reference to
+    a running QThread (which aborts the interpreter); the teardown path calls ``shutdown()``."""
     import threading
 
     from squidxplorer._op_panels import _DeconQCWorker
@@ -387,7 +347,7 @@ def test_the_decon_panel_shutdown_joins_a_running_worker(qapp):
 
 
 def test_the_result_view_renders_the_turbo_composite_at_the_composite_s_own_size(qapp):
-    """Pane 3 shows the picture squidxplorer._decon_qc produced -- it does not build one."""
+    """Pane 3 renders the picture ``squidxplorer._decon_qc`` produced; it builds none of its own."""
     pytest.importorskip("matplotlib")
     from squidxplorer._decon_qc import qc_composite
 
@@ -402,12 +362,8 @@ def test_the_result_view_renders_the_turbo_composite_at_the_composite_s_own_size
 
 
 def _click(qapp, view, row, col):
-    """A REAL mouse press on the picture at composite pixel (row, col).
-
-    Goes through `_ClickableImage.mousePressEvent`, so the centring offset of a pixmap inside a
-    wider label is exercised rather than assumed: emitting `clicked` directly would test the
-    mapping and skip the half of this that has actually been wrong in Qt code before.
-    """
+    """A real mouse press at composite pixel (row, col), through ``mousePressEvent`` so the
+    pixmap's centring offset inside the label is exercised, not assumed."""
     from qtpy.QtCore import QPoint
     from qtpy.QtTest import QTest
 
@@ -434,13 +390,8 @@ def _qc_view(qapp, volume, centre, view_half=None):
 
 
 def test_clicking_the_picture_moves_the_crosshairs_and_re_cuts_the_strips(qapp):
-    """Julio: "we should be able to ... click on there image and it moves teh crosshairs to
-    display XZ and YZ bands."
-
-    The x-z and y-z strips are sections through ONE point, and the point the run picked is the
-    brightest structure it found, not necessarily the one worth judging. A click re-sections the
-    SAME volume: qc_composite already takes `centre`, so no RL run happens here.
-    """
+    """A click re-sections the SAME volume through the clicked point; ``qc_composite`` already
+    takes ``centre``, so no RL run happens here."""
     pytest.importorskip("matplotlib")
     volume = np.zeros((5, 40, 40), dtype=np.float32)
     volume[2, 20, 20] = 1000.0            # what the run centred on
@@ -462,8 +413,8 @@ def test_clicking_the_picture_moves_the_crosshairs_and_re_cuts_the_strips(qapp):
 
 
 def test_clicking_a_separator_band_moves_nothing(qapp):
-    """A gap pixel points at no section. Snapping to the nearest one would move the crosshairs
-    somewhere the user did not click, which reads as the feature working."""
+    """A gap pixel points at no section; snapping to the nearest one would move the crosshairs
+    somewhere the user did not click."""
     pytest.importorskip("matplotlib")
     volume = np.zeros((5, 40, 40), dtype=np.float32)
     volume[2, 20, 20] = 1000.0
@@ -478,8 +429,7 @@ def test_clicking_a_separator_band_moves_nothing(qapp):
 
 
 def test_a_view_shown_without_its_volume_is_simply_not_clickable(qapp):
-    """The three-argument show_iteration still works and must not raise on a click: there is
-    nothing to re-slice, so the picture just sits there."""
+    """The three-argument show_iteration must not raise on a click: there is nothing to re-slice."""
     pytest.importorskip("matplotlib")
     from squidxplorer._decon_qc import qc_composite
 
@@ -500,12 +450,8 @@ def test_a_view_shown_without_its_volume_is_simply_not_clickable(qapp):
 
 
 def test_the_worker_hands_the_volume_through_so_the_click_has_something_to_re_slice(qapp):
-    """The seam that makes the click possible at all: the RL volume has to survive the worker.
-
-    It used to emit the composite alone, which is a picture — you cannot cut a different
-    section out of a picture. Pinned as a shape, not a run: `_on_done` reads `frame.volume` /
-    `frame.centre` / `frame.view_half` and passes them to the view.
-    """
+    """The RL volume must survive the worker — emitting the composite alone would leave nothing
+    to cut a different section out of. Pinned via ``frame.volume``/``centre``/``view_half``."""
     pytest.importorskip("matplotlib")
     from squidxplorer._decon_qc import qc_composite
     from squidxplorer._op_panels import QCFrame
@@ -538,12 +484,10 @@ def test_the_result_view_keeps_every_iteration_so_they_can_be_compared(qapp):
 
 
 # ---------------------------------------------------------------------------------------
-# Defect 1: the controls ported from maragall/stitcher, and their kwargs
+# the controls ported from maragall/stitcher, and their kwargs
 # ---------------------------------------------------------------------------------------
 
 def test_every_kwarg_the_panel_emits_is_a_real_stitch_region_parameter():
-    """The existing guard, re-run over the NEW keys. A typo'd key raises TypeError inside a
-    worker thread, where the only symptom is a status line that stops updating."""
     import inspect
 
     from squidxplorer._stitch import stitch_region
@@ -556,8 +500,8 @@ def test_every_kwarg_the_panel_emits_is_a_real_stitch_region_parameter():
 
 
 def test_auto_blend_is_spelled_None_all_the_way_down():
-    """stitch_region measures the overlap when blend_px is None. Sending the spin's stale
-    number instead would look identical in the UI and silently ignore the checkbox."""
+    """``stitch_region`` measures the overlap when blend_px is None; sending the spin's stale
+    number instead would silently ignore the checkbox."""
     kw = stitch_operator_kwargs(
         register=True, registration_channel=0, channels=None, blend_px=999,
         outlier_rel_pct=50, outlier_abs_px=2, auto_blend=True)
@@ -565,9 +509,8 @@ def test_auto_blend_is_spelled_None_all_the_way_down():
 
 
 def test_auto_blend_skips_the_ramp_vs_tile_refusal():
-    """The 'ramp must fit inside the tile' check is about a number the USER typed. With Auto
-    on there is no such number yet -- refusing here would block the control that exists to
-    compute a safe one."""
+    """The "ramp must fit inside the tile" check is about a number the user typed; with Auto
+    on there is no such number yet."""
     kw = stitch_operator_kwargs(
         register=True, registration_channel=0, channels=None, blend_px=5000,
         outlier_rel_pct=50, outlier_abs_px=2, auto_blend=True, tile_px=2084)
@@ -575,8 +518,8 @@ def test_auto_blend_skips_the_ramp_vs_tile_refusal():
 
 
 def test_distortion_and_timepoint_are_dropped_when_registration_is_off():
-    """Both are registration-only. Forwarding correct_distortion=True with register=False
-    would make stitch_region refuse a run the user could not see they had configured."""
+    """Both are registration-only; forwarding them with register=False would make
+    stitch_region refuse a run the user could not see they had configured."""
     kw = stitch_operator_kwargs(
         register=False, registration_channel=None, channels=None, blend_px=64,
         outlier_rel_pct=50, outlier_abs_px=2, correct_distortion=True, registration_t=2)
@@ -588,12 +531,7 @@ def test_the_panel_offers_the_distortion_and_auto_blend_controls(qapp):
     p = StitcherPanel(_Host())
     assert p.distortion_cb is not None
     assert p.blend_auto_cb is not None
-    # ON by default, changed deliberately on 2026-08-03 (Julio: "Correct lens distort should be
-    # defaulted to on"). It used to assert the opposite. The port carried the standalone's
-    # opt-in SPELLING across without its behaviour: maragall/stitcher's checkbox is dead, so the
-    # standalone corrects distortion on every run, and squidxplorer was the only one of the two that
-    # did not unless asked.
-    assert p.distortion_cb.isChecked()
+    assert p.distortion_cb.isChecked()          # ON by default (Julio, 2026-08-03)
 
 
 def test_auto_blend_disables_the_manual_width_so_no_dead_number_is_shown(qapp):
@@ -605,8 +543,8 @@ def test_auto_blend_disables_the_manual_width_so_no_dead_number_is_shown(qapp):
 
 
 def test_the_distortion_checkbox_is_greyed_out_with_registration_off(qapp):
-    """maragall/stitcher's own version of this checkbox is never read at all (app.py:1472).
-    Ours must at least not look adjustable when it provably does nothing."""
+    """maragall/stitcher's own version of this checkbox is never read at all; ours must at
+    least not look adjustable when it provably does nothing."""
     p = StitcherPanel(_Host())
     p.register_cb.setChecked(False)
     assert not p.distortion_cb.isEnabled()
@@ -627,16 +565,8 @@ def test_the_timepoint_spin_is_hidden_on_a_single_timepoint_acquisition(qapp):
 
 
 def test_the_stitch_defaults_are_read_off_stitch_region_not_mirrored_by_hand():
-    """The dict used to import three PRIVATE constants out of `_stitch` (`_ABS_THRESH`,
-    `_BLEND_PX`, `_REL_THRESH`) and re-state their values here, which is a hand-kept second copy
-    of the pipeline's numbers: rename one and the panel silently launches a different run from
-    the one it claims to reproduce. They come off `stitch_region`'s own signature now.
-
-    NOT off a declaration, and the reason is worth pinning: `stitch` is a REGION operator, and
-    `add_region_operator` carries no `params=` at all -- so unlike a projector there is no `Param`
-    record to read. If the region table ever grows one, `_stitch_default` is the single place that
-    changes.
-    """
+    """Read off ``stitch_region``'s own signature, not a declaration: ``stitch`` is a region
+    operator and ``add_region_operator`` carries no ``params=`` for this dict to read instead."""
     from inspect import signature
 
     from squidxplorer._op_panels import _stitch_default
@@ -651,16 +581,11 @@ def test_the_stitch_defaults_are_read_off_stitch_region_not_mirrored_by_hand():
 
 
 # =======================================================================================
-# 3. THE GENERIC PANEL: a declared Param becomes a widget
+# THE GENERIC PANEL: a declared Param becomes a widget
 # =======================================================================================
-#
-# The gap this closes, stated once: `_engine.Operator` has declared `params` since Cellpose became
-# a real operator, four things read that declaration (bind, the CLI's --param, _recipe, _compose)
-# and the GUI was not one of them. `spot` and `cellpose` declare four parameters each and NOT ONE
-# was reachable from a panel -- so an operator declaring `params=(Param("sigma", 2.0),)` got zero
-# widgets and ran silently at its defaults, while `templates/operator/README.md` told contributors
-# to declare them. These tests are over `squidxplorer._param_panel`, whose policy half is Qt-free for
-# the same reason the stitcher's is.
+# `_engine.Operator.params` is read by bind/CLI/_recipe/_compose but was not read by the GUI,
+# so `spot`/`cellpose` declared four parameters each and none were reachable from a panel.
+# These tests are over `squidxplorer._param_panel`, whose policy half is Qt-free.
 
 from squidxplorer._engine import Param  # noqa: E402
 from squidxplorer._param_panel import (  # noqa: E402
@@ -677,8 +602,8 @@ from squidxplorer._param_panel import (  # noqa: E402
 # -- the mapping rule -------------------------------------------------------------------
 
 def test_the_widget_is_chosen_from_the_type_of_the_default():
-    """THE mapping rule. `Param` declares no type, no range and no widget hint (its docstring
-    forbids one), so the default's type is the only thing there is to dispatch on."""
+    """``Param`` declares no type/range/widget hint, so the default's type is the only
+    dispatch key there is."""
     assert widget_kind(2.0) == "decimal"
     assert widget_kind(30) == "spin"
     assert widget_kind(True) == "check"
@@ -686,17 +611,16 @@ def test_the_widget_is_chosen_from_the_type_of_the_default():
 
 
 def test_a_bool_is_a_check_box_and_not_a_zero_one_spinner():
-    """`bool` is a subclass of `int`, so `isinstance(True, int)` is True. An isinstance ladder in
-    the wrong order renders every check box as a 0/1 spin -- which is why the table is looked up
-    by EXACT type. This is the test that would catch the ladder being written."""
+    """``bool`` is a subclass of ``int``, so an isinstance ladder in the wrong order would
+    render every check box as a 0/1 spin — hence the exact-type lookup table."""
     assert widget_kind(True) == "check"
     assert widget_kind(False) == "check"
     assert WIDGET_KINDS[bool] != WIDGET_KINDS[int]
 
 
 def test_a_default_this_panel_cannot_draw_is_named_rather_than_guessed():
-    """No silent fallback to a text box. A guessed widget is how a value the user typed becomes a
-    value the run did not receive, which is the whole defect this module exists to end."""
+    """No silent fallback to a text box: a guessed widget is how a typed value becomes a
+    value the run never receives."""
     assert widget_kind(None) is None
     assert widget_kind((1, 2)) is None
     bad = unsupported_params((Param("sigma", 2.0), Param("mask", None)))
@@ -706,16 +630,15 @@ def test_a_default_this_panel_cannot_draw_is_named_rather_than_guessed():
 # -- chains -----------------------------------------------------------------------------
 
 def test_a_chain_s_namespaced_parameters_are_split_the_way_compose_joins_them():
-    """`_compose` namespaces `<step>.<param>` and `_rebinder` splits on `partition(".")`. Splitting
-    differently here would route a value to a step that never asked for it."""
+    """``_compose`` namespaces ``<step>.<param>``; splitting differently here would route a
+    value to a step that never asked for it."""
     assert param_step("spot.min_area_px") == ("spot", "min_area_px")
     assert param_step("min_area_px") == (None, "min_area_px")
 
 
 def test_a_chain_is_grouped_by_step_in_chain_order_not_refused():
-    """Task 4: what does `operator_params()` return for a chain, and does the panel handle it?
-    It returns the parts' params namespaced, and this is the handling: one group per step, in the
-    order the expression is written."""
+    """``operator_params()`` returns the parts' params namespaced; the panel groups them one
+    group per step, in the order the expression is written."""
     from squidxplorer._engine import operator_params
 
     params = operator_params("bgsub + spot")
@@ -735,34 +658,30 @@ def test_a_bare_operator_s_parameters_are_one_unnamed_group():
 
 def test_a_parameterised_operator_is_not_refused():
     assert panel_refusal("spot") is None
-    # cellpose is the [segment] extra, which `.[gui,test]` does NOT install -- so on CI, and in any
-    # clean venv, `panel_refusal("cellpose")` correctly answers "needs cellpose, which is not
-    # installed (pip install cellpose)". That is the PRODUCT being right; asserting None
-    # unconditionally was the TEST being wrong, and it was one of exactly two failures in the first
-    # clean-venv run of this suite (2026-08-05, napari 0.8.0 / numpy 2.4.6). Guarded rather than
-    # deleted: when the extra is installed, "an operator whose requires= is satisfied still gets a
-    # panel" is worth pinning, and `spot` alone does not reach the requires= branch at all.
+    # cellpose is the [segment] extra, not installed by `.[gui,test]`; on a clean venv it
+    # correctly refuses "needs cellpose, which is not installed". Guarded rather than
+    # deleted, because when the extra IS installed this pins that requires= being satisfied
+    # still yields a panel.
     pytest.importorskip("cellpose")
     assert panel_refusal("cellpose") is None
 
 
 def test_a_region_operator_that_declares_no_params_is_refused_for_that_reason():
-    """`stitch` declares no `params=`, so there is nothing for a form to show and StitcherPanel is
-    where its controls live. The refusal used to be by KIND -- every region operator, because that
-    table had no `params` column at all. It is one table now, so the refusal is about `stitch`."""
+    """``stitch`` declares no ``params=``, so there is nothing for a form to show; its
+    controls live in StitcherPanel."""
     why = panel_refusal("stitch")
     assert why and "declares no params" in why and "StitcherPanel" in why
 
 
 def test_a_key_that_is_not_an_operator_is_refused_by_name():
-    """`minerva` is a card, not an operator. Refused with the registry's own sentence."""
+    """``minerva`` is a card, not an operator; refused with the registry's own sentence."""
     why = panel_refusal("minerva")
     assert why and "minerva" in why
 
 
 def test_an_undrawable_parameter_refuses_the_whole_panel_naming_the_parameter():
-    """A panel that silently omitted the one parameter it could not draw would run that parameter
-    at its default while every other control implied the form was complete."""
+    """A panel that silently omitted the one parameter it could not draw would run that
+    parameter at its default while every other control implied the form was complete."""
     from squidxplorer import add_projector
 
     def _factory(**kwargs):
@@ -783,7 +702,6 @@ def test_an_undrawable_parameter_refuses_the_whole_panel_naming_the_parameter():
 # -- the Qt half ------------------------------------------------------------------------
 
 def test_the_panel_builds_one_widget_per_declared_parameter(qapp):
-    """The defect itself, pinned: `spot` declares four parameters and had zero widgets."""
     from squidxplorer._engine import operator_params
 
     p = GenericOperatorPanel(_Host(), "spot")
@@ -792,8 +710,8 @@ def test_the_panel_builds_one_widget_per_declared_parameter(qapp):
 
 
 def test_each_widget_starts_at_the_declared_default(qapp):
-    """An untouched panel must launch what the operator ships with, or the panel has become a
-    second set of defaults -- the same rule `STITCH_DEFAULTS` is held to."""
+    """An untouched panel must launch what the operator ships with — same rule
+    ``STITCH_DEFAULTS`` is held to."""
     from squidxplorer._engine import operator_params
 
     p = GenericOperatorPanel(_Host(), "spot")
@@ -802,13 +720,10 @@ def test_each_widget_starts_at_the_declared_default(qapp):
 
 
 def test_the_blurb_becomes_the_tooltip(qapp):
-    """`Param.blurb` is documented as 'the one line a UI shows'. Until now no UI showed it."""
     from squidxplorer._engine import operator_params
 
     blurbs = {param.name: param.blurb for param in operator_params("spot")}
     p = GenericOperatorPanel(_Host(), "spot")
-    # `if blurbs[name]:` meant an operator that LOST its blurb skipped the assertion instead of
-    # failing it. All four `spot` params carry one, so require that first and then compare.
     assert p.widgets, "the panel drew no widgets"
     for name, widget in p.widgets.items():
         assert blurbs[name], f"{name} declares no blurb, so the tooltip claim is untested"
@@ -816,8 +731,8 @@ def test_the_blurb_becomes_the_tooltip(qapp):
 
 
 def test_a_value_read_back_keeps_the_declared_type(qapp):
-    """`spots_op` builds a `SpotParams` dataclass out of these. A `min_area_px` arriving as 30.0
-    where 30 was declared survives all the way to a comparison against an integer pixel count."""
+    """A ``min_area_px`` arriving as 30.0 where 30 was declared would survive all the way to
+    a comparison against an integer pixel count."""
     p = GenericOperatorPanel(_Host(), "spot")
     p.widgets["min_area_px"].setValue(400)
     kwargs = p.kwargs()
@@ -827,8 +742,7 @@ def test_a_value_read_back_keeps_the_declared_type(qapp):
 
 
 def test_the_widget_s_value_travels_to_run_operator_through_operator_kwargs(qapp):
-    """The SAME argument StitcherPanel uses, so the value's journey to the pixels is a path that
-    was already tested rather than a second one."""
+    """The SAME argument StitcherPanel uses, so this is an already-tested path."""
     host = _Host()
     p = GenericOperatorPanel(host, "spot")
     p.widgets["min_area_px"].setValue(400)
@@ -842,9 +756,7 @@ def test_the_widget_s_value_travels_to_run_operator_through_operator_kwargs(qapp
 
 
 def test_every_kwarg_the_panel_emits_is_a_parameter_the_operator_accepts(qapp):
-    """The panel's output has to survive `Operator.bind`, which refuses an unknown name LOUD.
-    A panel emitting a key the operator does not declare would raise inside a worker thread,
-    where the only symptom is a status line that stops updating."""
+    """The panel's output must survive ``Operator.bind``, which refuses an unknown name loud."""
     from squidxplorer import bind_operator
 
     host = _Host()
@@ -855,13 +767,11 @@ def test_every_kwarg_the_panel_emits_is_a_parameter_the_operator_accepts(qapp):
 
 
 def test_a_plane_op_is_offered_preview_only_and_the_choice_comes_off_consumes(qapp):
-    """`spot` keeps z at full depth, so there is no plate to save. Read off `consumes`, never off
-    the name -- test_operator_declaration fails the build on a name comparison."""
+    """``spot`` keeps z at full depth, so there is no plate to save. Read off ``consumes``,
+    never the name."""
     p = GenericOperatorPanel(_Host(), "spot")
     assert p._can_save is False
-    # Not built at all rather than built and left out of the layout: `_viewer._raw_btn` is the
-    # precedent for an orphan QPushButton popping up as its own floating window.
-    assert p.save_btn is None
+    assert p.save_btn is None                # not built at all, not built-and-hidden
 
 
 def test_a_z_reducer_is_offered_the_save_run(qapp):
@@ -871,17 +781,16 @@ def test_a_z_reducer_is_offered_the_save_run(qapp):
 
 
 def test_an_operator_with_no_parameters_still_builds_and_says_so(qapp):
-    """`mip` declares nothing. A panel that refused would make 'no parameters' and 'unknown
-    operator' look identical, which is the rule `available_projectors` is written to."""
+    """``mip`` declares nothing; a panel that refused would make "no parameters" and "unknown
+    operator" look identical."""
     p = GenericOperatorPanel(_Host(), "mip")
     assert p.widgets == {}
     assert p.kwargs() == {}
 
 
 def test_a_chain_panel_shows_the_form_and_greys_the_run_with_a_reason(qapp):
-    """Buildable and launchable are two questions. A chain's params are readable; `run_operator`
-    gates on `runnable_operators()`, which lists table keys and has never held an expression. So
-    the form is shown and the buttons say why they are off -- not a click that dies elsewhere."""
+    """A chain's params are readable, but ``run_operator`` gates on ``runnable_operators()``,
+    which has never held an expression — so the form is shown and the button says why it is off."""
     host = _Host()
     p = GenericOperatorPanel(host, "bgsub + spot")
     assert sorted(p.widgets) == ["spot.min_area_px", "spot.min_distance_px",
@@ -891,8 +800,6 @@ def test_a_chain_panel_shows_the_form_and_greys_the_run_with_a_reason(qapp):
 
 
 def test_a_chain_panel_keeps_the_namespaced_names_bind_expects(qapp):
-    """`Operator.bind` validates against the namespaced tuple this panel was built from, so the
-    values go back under exactly the names they arrived with."""
     from squidxplorer import bind_operator
 
     p = GenericOperatorPanel(_Host(), "bgsub + spot")

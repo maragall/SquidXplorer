@@ -1,47 +1,7 @@
-"""The log panel WIDGET — the thing the user watches at the bottom of the window.
-
-The rules of what a log line is, how it is coloured, and that it is bounded live in
-:mod:`squidxplorer._logpane` (no Qt, unit-tested). This module is only the Qt surface that shows
-them, plus the two live readouts Squid's own status bar shows continuously — memory and the
-current activity — because "the GUI is actually doing something rather than staying idle" is the
-whole reason the panel exists.
-
-WHERE IT SITS, AND WHY THERE
-----------------------------
-Julio: "the logger... on the bottom right of the GUI, below the exploration pane" and "look how
-squid software positions it." Squid's ``gui_hcs.py`` puts three widgets in a persistent bottom
-status bar: ``ramMonitorWidget``, ``backpressureMonitorWidget``, ``warningErrorWidget``
-("Auto-hides when no messages pending"). So the shape is: RAM shown ALWAYS, activity shown
-ALWAYS, and the log body available but not allowed to dominate. This panel is that shape — a
-one-line header that is always visible (RAM + activity + a level tally), and a collapsible body
-that holds the actual lines.
-
-2026-08-03 (v2 layout) finished the copy: the memory BAR and the run-progress bar moved in here
-from under the Window Navigator, where they were a separate status block the new drawing deletes.
-See ``adopt_status_row`` — they are adopted, not rebuilt, so there is still one of each in the
-process and the poller that drives them never learned they moved.
-
-BOUNDED FOR FREE
-----------------
-``QPlainTextEdit.setMaximumBlockCount(MAX_LINES)`` makes Qt drop the oldest block when the cap is
-reached — the bounded-memory requirement met by the widget itself, not by our bookkeeping. A plate
-run emits tens of thousands of lines; without this the panel is a slow leak with a nice UI.
-
-THREADS — WHY THE BRIDGE IS A QObject
--------------------------------------
-Operators log from QThreads. ``LogBus`` is pure Python: it calls subscribers SYNCHRONOUSLY, on
-whatever thread emitted the record. Touching a QWidget from a worker thread is undefined behaviour
-and crashes at random — the exact class of bug this codebase has paid for at QThread teardown. So
-the subscriber this panel registers does nothing but emit a Qt signal, and the signal is delivered
-QUEUED into the GUI event loop, where the append actually happens. The pure bus stays testable
-without Qt; the widget owns the thread hop.
-
-COLLAPSED MEANS COLLAPSED
--------------------------
-Requirement: "it must not steal space from the panes when collapsed." Collapsing hides the body
-and drops this widget's vertical size hint to the header's height, so the splitter gives the
-reclaimed space back to the panes above rather than leaving a grey gap. The header stays, because
-a status bar that vanishes cannot tell you the app is busy — which is the one thing it is for.
+"""The log panel widget shown at the bottom of the window: a header (RAM, activity, level tally)
+that is always visible, and a collapsible body holding the log lines. The rules of what a log line
+is, its colour, and that it is bounded live in :mod:`squidxplorer._logpane` (no Qt, unit-tested);
+this module is only the Qt surface.
 """
 
 from __future__ import annotations
@@ -57,11 +17,8 @@ from qtpy.QtWidgets import (
 
 
 def _shrinkable(label: QLabel) -> QLabel:
-    """Let a header label shrink below its text width instead of forcing the panel — and the whole
-    pane-3 column — wider. A status readout must never widen the pane it lives under (the
-    exploration pane already sets that column's minimum); at the pane's natural width the text
-    shows in full, and only a hand-dragged-narrower pane clips it. Ignored horizontal policy makes
-    the label report a minimum width of 0."""
+    """Let a header label shrink below its text width instead of widening the pane it lives
+    under. Ignored horizontal policy makes it report a minimum width of 0."""
     sp = label.sizePolicy()
     sp.setHorizontalPolicy(QSizePolicy.Ignored)
     label.setSizePolicy(sp)
@@ -72,9 +29,7 @@ from squidxplorer._activity import ActivityLog
 from squidxplorer._logpane import MAX_LINES, DEFAULT_LEVEL, LogBus, color_for
 from squidxplorer._measure import human_bytes
 
-#: How often the memory readout refreshes. 1 s: fast enough that "busy" looks live, slow enough
-#: that the poll itself is invisible. It is one psutil call, on the GUI thread, never in a run's
-#: hot path.
+#: 1 s: fast enough that "busy" looks live, slow enough the poll itself is invisible.
 MEMORY_POLL_MS = 1000
 
 _MONO = "Menlo, Consolas, 'DejaVu Sans Mono', monospace"
@@ -84,13 +39,7 @@ _MUTED = "#8b949e"
 
 
 def memory_line() -> str:
-    """One line describing this process's footprint against the machine — the RAM readout.
-
-    Squid shows RAM continuously so the user can see a run consuming the machine before it swaps.
-    This shows the same: what THIS process holds, and how much of the machine is still free. Both
-    numbers, because "2.1 GiB" alone is alarming on a laptop and nothing on a workstation — the
-    free number is what makes it readable.
-    """
+    """This process's RSS against the machine's free/total memory."""
     try:
         import psutil
 
@@ -103,27 +52,18 @@ def memory_line() -> str:
 
 
 class _LogBridge(QObject):
-    """The thread hop. A worker logs, the bus calls us on the worker thread, we emit a signal that
-    Qt delivers QUEUED onto the GUI thread. Nothing else touches the widget from off-thread."""
+    """Thread hop: a worker logs, the bus calls us on the worker thread, we emit a signal Qt
+    delivers queued onto the GUI thread. Nothing else touches the widget off-thread."""
 
     line = Signal(str, str)             # (level_name, formatted_line)
 
 
 class LogPanel(QWidget):
-    """The bottom-right log panel: a header that is always visible and a collapsible body.
+    """The bottom-right log panel. Safe to construct and render headless. Owns nothing global; pass
+    it a :class:`~squidxplorer._logpane.LogBus` and :class:`~squidxplorer._activity.ActivityLog` and
+    it becomes a sink of both, or stays an inert valid widget with neither."""
 
-    Built to be safe to construct and render headless (offscreen) — the paint test renders it into
-    a QPixmap, which is what caught two bugs role-level tests could not see. It owns nothing global:
-    pass it the process's :class:`~squidxplorer._logpane.LogBus` and :class:`~squidxplorer._activity.ActivityLog`
-    and it becomes a sink of both. With neither, it is an inert but valid widget (used by the layout
-    before the window has wired the buses).
-    """
-
-    #: "Log (option to open in a new window)" (Julio, 2026-08-03). The panel only NOTICES the
-    #: gesture; who owns the window and how it comes back is PlateWindow's policy (`_float_log` /
-    #: `_redock_log`), exactly as `_DetachTabBar` notices a drag and `_detach_tab` decides what it
-    #: means. Unconnected, the button is inert rather than broken — the panel is constructed bare in
-    #: tests and in the layout before the window has wired anything.
+    #: The panel only notices the "open in new window" gesture; PlateWindow owns the window.
     float_requested = Signal()
 
     def __init__(self, bus: Optional[LogBus] = None, activity: Optional[ActivityLog] = None,
@@ -140,7 +80,6 @@ class LogPanel(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        # -- header: always visible (RAM, activity, level tally, collapse toggle) --------
         header = QWidget()
         header.setStyleSheet(f"background:{_HEADER_BG};")
         hl = QHBoxLayout(header)
@@ -150,16 +89,10 @@ class LogPanel(QWidget):
         self._toggle = QPushButton()
         self._toggle.setFlat(True)
         self._toggle.setCursor(Qt.PointingHandCursor)
-        # ONE closing brace. The first line is an f-string, so its `{{` collapses to `{`; the
-        # second line is a PLAIN literal, so a `}}` there stays two braces and the sheet ends
-        # `font-size:11px;}}`. Qt's CSS parser then fails BOTH of its attempts (the sheet as
-        # written, and the sheet wrapped in `* { ... }`), leaves this button entirely unstyled,
-        # and emits "Could not parse stylesheet of object QPushButton(0x...)" on every repolish.
-        # The warning arrives labelled `WARN vispy:` because vispy installs a process-wide Qt
-        # message handler (vispy/app/backends/_qt.py:250), which is why it read as a vispy
-        # problem; vispy has nothing to do with it. It repeats in bursts because `rescale_fonts`
-        # rewrites every stylesheet carrying a `font-size:` on each window resize, which drops
-        # Qt's per-object parse cache and makes it try, and fail, again.
+        # ONE closing brace: the f-string's `{{` collapses to `{`, but the second line is a plain
+        # literal so its `}}` stays two braces and the sheet ends `font-size:11px;}}` — Qt then
+        # fails to parse the whole sheet and warns "Could not parse stylesheet" on every repolish
+        # (labelled `WARN vispy:` only because vispy installs the process-wide Qt message handler).
         self._toggle.setStyleSheet(
             f"QPushButton{{color:#c3ccd9;border:none;background:transparent;font-family:{_MONO};"
             "font-size:11px;}")
@@ -181,10 +114,6 @@ class LogPanel(QWidget):
             f"color:{_MUTED};font-family:{_MONO};font-size:11px;background:transparent;")
         hl.addWidget(_shrinkable(self._mem_lbl))
 
-        # "Log (option to open in a new window)". BOTH lines are f-strings, so each `}}` collapses
-        # to one `}` — see the long note on `self._toggle` above for what a stray second brace
-        # costs (Qt fails to parse the WHOLE sheet, leaves the button unstyled, and warns on every
-        # repolish under a label that blames vispy).
         self._float_btn = QPushButton("⧉")
         self._float_btn.setFlat(True)
         self._float_btn.setCursor(Qt.PointingHandCursor)
@@ -195,40 +124,21 @@ class LogPanel(QWidget):
         self._float_btn.clicked.connect(lambda *_: self.float_requested.emit())
         hl.addWidget(self._float_btn)
 
-        # The panel itself must not impose a width on the pane-3 column — the exploration pane above
-        # it owns that column's minimum. Its OWN body (the log view) can shrink too.
         self.setMinimumWidth(0)
         header.setMinimumWidth(0)
         outer.addWidget(header)
 
-        # -- status strip: the window's memory and run-progress bars, adopted from elsewhere -----
-        #
-        # Julio, 2026-08-03: "the status bar and memory bar should be moved to inside the logger so
-        # that we save space." They were stacked under the Window Navigator, four widgets deep, in a
-        # block the v2 drawing deletes outright. They belong here for the reason the module
-        # docstring already gives: Squid's persistent bottom bar is RAM + backpressure + warnings
-        # together, and this panel is that bar. Two status blocks in one window is the same
-        # two-representations-of-one-truth shape this file's neighbours carry scars from.
-        #
-        # ADOPTED, NOT REBUILT. The widgets keep their existing wiring to ViewerManager's
-        # ``memoryChanged`` / ``runProgressChanged`` signals — those land on ``OpenViewList``'s
-        # handlers, which write into these very objects. Reparenting moves the pixels and touches
-        # none of the plumbing, so there is exactly one memory bar in the process and it is still
-        # driven by the one poller. Building a second one here would have been a second truth.
-        #
-        # BETWEEN the header and the body, so it survives ``set_collapsed``: collapsing hides only
-        # ``_view``. A status readout that vanishes when you fold the log away cannot tell you the
-        # app is busy, which is the one thing it is for.
+        # Memory + run-progress bars adopted from OpenViewList (not rebuilt): they keep their
+        # existing signal wiring, so reparenting them here moves pixels, not plumbing.
         self._status = QWidget()
         self._status.setStyleSheet(f"background:{_HEADER_BG};")
         self._status_l = QVBoxLayout(self._status)
         self._status_l.setContentsMargins(8, 2, 8, 3)
         self._status_l.setSpacing(2)
         self._status.setMinimumWidth(0)
-        self._status.setVisible(False)      # nothing adopted: it costs no pixels at all
+        self._status.setVisible(False)      # nothing adopted yet: costs no pixels
         outer.addWidget(self._status)
 
-        # -- body: the bounded log view --------------------------------------------------
         self._view = QPlainTextEdit()
         self._view.setReadOnly(True)
         self._view.setMaximumBlockCount(int(max_lines))   # Qt drops the oldest block: bounded, free
@@ -257,19 +167,10 @@ class LogPanel(QWidget):
         else:
             self._sync_toggle_text()
 
-    # -- the adopted status bars --------------------------------------------------------
     def adopt_status_row(self, memory_caption: QWidget, memory_bar: QWidget,
                          work_caption: QWidget, work_bar: QWidget) -> None:
-        """Show the window's memory and run-progress indicators inside this panel.
-
-        Caller hands over widgets it already owns and already drives (see
-        ``OpenViewList.take_status_row``); this only re-homes them. Idempotent enough to be safe on
-        a re-dock: adding a widget to a layout it is already in is a no-op move, not a duplicate.
-
-        The memory caption and its bar share ONE row — stacked, they cost two lines to say one
-        thing, and saving lines is the whole point of the move. The work caption keeps its own row
-        because it carries a sentence ("decon · 12 of 27 FOVs · ~4 min left") that wraps.
-        """
+        """Re-home the window's memory/run-progress widgets into this panel. Idempotent: adding a
+        widget to a layout it's already in is a no-op move, not a duplicate."""
         row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(8)
@@ -280,37 +181,30 @@ class LogPanel(QWidget):
         self._status_l.addWidget(work_bar)
         self._status.setVisible(True)
 
-    # -- wiring -------------------------------------------------------------------------
     def attach_bus(self, bus: LogBus, *, level: int = DEFAULT_LEVEL) -> None:
-        """Become a sink of *bus*. Subscribing (not owning the handler) is deliberate: many
-        widgets can watch one bus, and the bus is what installs on the root logger once."""
         self._bus = bus
         bus.subscribe(self._on_record)      # called on the LOGGING thread — hop via the bridge
 
     def attach_activity(self, activity: ActivityLog) -> None:
-        """Become a sink of the activity registry — the current-work line in the header."""
         self._activity = activity
         activity.subscribe(self._on_activity)   # fires immediately with current state
 
     def start(self) -> None:
         """Begin the memory poll. Separate from construction so a headless test can build the
-        widget without a running timer it then has to chase down."""
+        widget without a running timer to chase down."""
         self._refresh_memory()
         self._mem_timer.start()
 
     def stop(self) -> None:
         self._mem_timer.stop()
 
-    # -- log sink -----------------------------------------------------------------------
     def _on_record(self, level_name: str, line: str) -> None:
-        # Runs on whatever thread logged. Do NOTHING but emit — the append happens on the GUI
-        # thread via the queued signal. This is the whole reason the bridge exists.
+        # Runs on whatever thread logged; do nothing but emit — the append happens on the GUI
+        # thread via the queued signal.
         self._bridge.line.emit(level_name, line)
 
     def _append(self, level_name: str, line: str) -> None:
         colour = color_for(level_name)
-        # appendHtml adds one block; setMaximumBlockCount then evicts the oldest if over cap.
-        # Escape the payload so a log line containing "<" is not eaten as markup.
         safe = (line.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
         self._view.appendHtml(f'<span style="color:{colour};white-space:pre;">{safe}</span>')
         up = str(level_name).upper()
@@ -324,8 +218,6 @@ class LogPanel(QWidget):
         if not warn and not err:
             self._tally_lbl.setText("")
             return
-        # Auto-hides when there is nothing pending — Squid's warningErrorWidget behaviour. The
-        # colour is the loudest present, muted otherwise, so a clean run's header stays calm.
         parts = []
         if err:
             parts.append(f'<span style="color:{color_for("ERROR")};">{err} error'
@@ -335,16 +227,10 @@ class LogPanel(QWidget):
                          f'{"s" if warn != 1 else ""}</span>')
         self._tally_lbl.setText("  ·  ".join(parts))
 
-    # -- activity sink ------------------------------------------------------------------
     def _on_activity(self, log: ActivityLog) -> None:
-        # ActivityLog fires on whatever thread advanced it; label writes should be on the GUI
-        # thread. In practice the GUI advances it, but route through the bridge's thread affinity
-        # by using a plain setText which Qt tolerates for a QLabel text set — kept simple, and the
-        # heavy cross-thread traffic (log lines) already goes through the queued signal.
         sentence = log.sentence()
         self._activity_lbl.setText(sentence or "idle")
 
-    # -- collapse -----------------------------------------------------------------------
     @property
     def collapsed(self) -> bool:
         return self._collapsed
@@ -353,12 +239,11 @@ class LogPanel(QWidget):
         self.set_collapsed(not self._collapsed)
 
     def set_collapsed(self, collapsed: bool) -> None:
-        """Hide/show the body. Collapsed drops the vertical size hint to the header so the splitter
-        hands the space back to the panes — it must not leave a grey gap where the body was."""
+        """Collapsing drops the vertical size hint to the header's height so the splitter hands the
+        space back to the panes, instead of leaving a grey gap."""
         self._collapsed = bool(collapsed)
         self._view.setVisible(not self._collapsed)
         if self._collapsed:
-            # Fix height to the header so the widget cannot claim body space it is not showing.
             self.setMaximumHeight(self.sizeHint().height())
             self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         else:
@@ -369,13 +254,10 @@ class LogPanel(QWidget):
     def _sync_toggle_text(self) -> None:
         self._toggle.setText("▸ Log" if self._collapsed else "▾ Log")
 
-    # -- memory -------------------------------------------------------------------------
     def _refresh_memory(self) -> None:
         self._mem_lbl.setText(memory_line())
 
-    # -- testing seam -------------------------------------------------------------------
     def text(self) -> str:
-        """The visible log body as plain text. For tests and for a copy action."""
         return self._view.toPlainText()
 
     def line_count(self) -> int:

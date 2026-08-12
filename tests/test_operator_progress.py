@@ -1,36 +1,11 @@
-"""How far an operator run has got, said on screen instead of in the log.
-
-Julio, 2026-08-03, on a decon over ONE region that took 433 seconds::
-
-    "using decon as an example, I choose to run decon, and I know it's running because of the
-     orange dot ... But there's nothing on the child window that tells me how much is left what's
-     the progress, or that it is working. It only tells me that it worked after layers populated,
-     but how long is that?"
-
-WHAT IS ACTUALLY UNDER TEST
----------------------------
-Two halves, tested at two different heights, and neither at the height of a screenshot.
-
-* The arithmetic (:mod:`squidxplorer._progress`) is pure Python and is tested as such: which unit a
-  run counts, whether the total is knowable, and when a time-remaining estimate is honest enough
-  to show. This is the half that can be silently WRONG, so it is the half with the small tests.
-
-* The wiring is tested at the HIGHEST seam that exists: a real ``PlateWindow`` running a real
-  operator over a real acquisition, with a real ``RegionViewer`` as the ``requester``. That is the
-  whole reported path — a window asks for a run and is told what is happening — and it is the path
-  that had NO test at all, which is why ``requester=`` had been an accepted-and-dropped argument
-  since 2026-07-29 without anything noticing.
-
-NOTHING HERE WAS VERIFIED ON SCREEN. These assert the bar's RANGE, VALUE, FORMAT and VISIBILITY,
-which is what the widget is asked for; they do not assert that a human can see it.
-"""
+"""How far an operator run has got, said on screen instead of in the log."""
 
 from __future__ import annotations
 
 import os
 import sys
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")   # headless Qt; must precede any Qt import
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")   # must precede any Qt import
 
 import pytest
 
@@ -43,21 +18,13 @@ from squidxplorer._progress import (
     unit_plan,
 )
 
-# --------------------------------------------------------------------------------------
-# The arithmetic. No Qt, no window, no event loop.
-# --------------------------------------------------------------------------------------
-
-#: A two-region acquisition whose wells hold different FOV counts, so a per-region total and a
-#: per-FOV total cannot accidentally agree.
+# A two-region acquisition whose wells hold different FOV counts, so a per-region total and a
+# per-FOV total cannot accidentally agree.
 _META = {"regions": ["B2", "B3"], "fovs_per_region": {"B2": [0, 1, 2], "B3": [0, 1]}}
 
 
 def test_a_per_fov_operator_counts_fovs_not_wells():
-    """THE BUG, as a unit. A decon over one region is 3 units of work, not 1.
-
-    The well counter says 0 of 1 for the whole run and then 1 of 1, which is what left 433
-    seconds with nothing on screen.
-    """
+    """A decon over one region is 3 units of work, not 1, not a well count."""
     assert unit_plan(_META, ["B2"], region_op=False, n_fovs=None) == (3, FOV_UNIT)
     assert unit_plan(_META, None, region_op=False, n_fovs=None) == (5, FOV_UNIT)
 
@@ -84,8 +51,7 @@ def test_no_fov_table_means_no_total_rather_than_a_guess():
 
 
 def test_an_unknown_total_never_produces_a_percentage():
-    """squidxplorer._activity's rule, enforced on the report the widget actually reads: a progress bar
-    that invents a denominator is a lie that gets believed."""
+    """A progress bar that invents a denominator is a lie that gets believed."""
     r = ProgressReport("decon", done=7, total=None, unit=FOV_UNIT)
     assert r.percent is None and r.determinate is False
     assert "7 FOVs so far" in r.sentence()
@@ -93,8 +59,7 @@ def test_an_unknown_total_never_produces_a_percentage():
 
 
 def test_the_first_unit_is_never_extrapolated():
-    """The interval from the click to the first arrival pays metadata warm-up, pool priming and a
-    cache-cold read. A run whose ETA came from it would announce a number it cannot meet."""
+    """The first arrival pays warm-up cost; an ETA from it would announce a number it can't meet."""
     p = RunProgress("decon", total=10)
     p.tick(100.0)
     assert p.eta() is None, "one completion is not a rate"
@@ -103,7 +68,7 @@ def test_the_first_unit_is_never_extrapolated():
 def test_time_remaining_is_a_rate_over_completions_after_the_first():
     """Two units 2 s apart, 8 left -> 16 s. The 100 s the FIRST unit took does not appear."""
     p = RunProgress("decon", total=10)
-    p.tick(100.0)                     # 100 s after the click; warm-up, deliberately not measured
+    p.tick(100.0)                     # warm-up, deliberately not measured
     p.tick(102.0)
     assert p.eta() == pytest.approx(16.0)
     p.tick(104.0)
@@ -126,8 +91,7 @@ def test_an_unknown_total_offers_no_time_remaining():
 
 
 def test_the_estimate_is_stated_coarsely_because_the_sample_is_small():
-    """Rounded UP, in buckets. '247 s left' claims a precision a handful of arrivals cannot give,
-    and rounding up means a run tends to beat its promise rather than miss it."""
+    """Rounded UP, in buckets, so a run tends to beat its promise rather than miss it."""
     assert format_eta(None) == "" and format_eta(-1) == ""
     assert format_eta(3) == "a few seconds left"
     assert format_eta(41) == "~50 s left"
@@ -141,10 +105,6 @@ def test_the_sentence_names_the_operator_the_count_and_the_wait():
     assert r.sentence() == "decon · 12 of 27 FOVs · ~4 min left"
     assert ProgressReport("stitch", 0, 1, REGION_UNIT).sentence() == "stitch · 0 of 1 region"
 
-
-# --------------------------------------------------------------------------------------
-# The wiring, through the real windows.
-# --------------------------------------------------------------------------------------
 
 pytest.importorskip("qtpy")
 if "PySide6" in sys.modules or "PySide2" in sys.modules:      # pragma: no cover - env gate
@@ -161,12 +121,7 @@ from .test_viewer import _drain_until, qapp  # noqa: E402,F401  (fixture)
 
 
 class _Requester:
-    """A window standing in for a ``RegionViewer``, recording exactly what it was told.
-
-    Deliberately duck-typed on the four ``operator_*`` names rather than subclassing: those four
-    names ARE the contract between the plate and any window that asks it for a run, and a test that
-    inherited the real class would pass even if the contract were renamed on both sides at once.
-    """
+    """Duck-typed on the four ``operator_*`` names, which ARE the contract with the plate."""
 
     window_id = "test"
 
@@ -204,19 +159,13 @@ def _run_to_completion(qapp, win, requester, **kw):
 
 
 def test_the_window_that_asked_is_told_the_run_started(qapp, plate):
-    """``requester=`` was accepted and dropped: nothing assigned ``_run_requester``, so the four
-    callbacks the docstring promises were never called and the region window sat silent."""
     r = _Requester()
     _run_to_completion(qapp, plate, r)
     assert r.started, "the requester was never told the run began"
 
 
 def test_progress_climbs_monotonically_to_every_unit_of_the_run(qapp, plate):
-    """The whole point: N units in, N of N out, and never a step backwards on the way.
-
-    The fixture's region holds 2 FOVs, so a per-FOV operator over it is 2 units — a count the
-    WELL counter (1) cannot express at all.
-    """
+    """N units in, N of N out, never a step backwards; the fixture's region holds 2 FOVs."""
     r = _Requester()
     _run_to_completion(qapp, plate, r)
 
@@ -231,16 +180,13 @@ def test_progress_climbs_monotonically_to_every_unit_of_the_run(qapp, plate):
 
 
 def test_a_failed_run_closes_the_pair_so_the_bar_cannot_be_left_running(qapp, plate):
-    """The safety property. A bar taken down only on success is a bar left sweeping over a dead
-    run, which teaches the user the indicator lies."""
+    """A bar taken down only on success is left sweeping over a dead run."""
     import squidxplorer
 
     def _boom(*_a, **_kw):
         raise RuntimeError("no such plane")
 
-    # The ENGINE raises, which is the real shape of a failed run: `_run_body` catches it, records
-    # the outcome and emits `failed`. Breaking the worker's own run loop instead would test an
-    # unhandled QThread exception, which is not a case this path claims to survive.
+    # the engine raising is the real shape of a failed run (`_run_body` catches it and emits `failed`)
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(squidxplorer, "project_plate", _boom)
         r = _Requester()
@@ -251,14 +197,8 @@ def test_a_failed_run_closes_the_pair_so_the_bar_cannot_be_left_running(qapp, pl
 
 
 def test_the_asking_window_is_left_knowing_the_run_reached_its_total(qapp, plate):
-    """The last unit's report and ``QThread.finished`` are two signals racing out of one thread,
-    and the window was being torn out of the run by whichever won: on a fast run the bar's last
-    frame was "1 of 2" and the final unit's report was dropped. Observed, not theorised.
-
-    So the drain path reads the worker's own tally instead of waiting for the signal. This pins
-    that with the signal path REMOVED, which is the only way to assert it without a race: no
-    report can reach the requester here except the one the drain sends.
-    """
+    """The last report and ``QThread.finished`` race; the drain reads the worker's own tally
+    instead of the signal, pinned here with the signal path removed."""
     r = _Requester()
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(V.PlateWindow, "_on_unit_progress", lambda self, report: None)
@@ -270,8 +210,7 @@ def test_the_asking_window_is_left_knowing_the_run_reached_its_total(qapp, plate
 
 
 def test_the_plate_stops_talking_to_a_requester_once_its_run_has_drained(qapp, plate):
-    """One run, one pair. A stale requester would take the NEXT run's progress into a window that
-    did not ask for it — the same 'a result you did not ask for' rule ``deliver_result`` follows."""
+    """One run, one pair; a stale requester would leak the NEXT run's progress into it."""
     first = _Requester()
     _run_to_completion(qapp, plate, first)
     assert plate._run_requester is None
@@ -284,16 +223,8 @@ def test_the_plate_stops_talking_to_a_requester_once_its_run_has_drained(qapp, p
 
 
 def test_only_the_window_that_ASKED_gets_the_result_visible(qapp, plate):
-    """``_deliver_to_views`` passes ``visible=(win is requester)``, and nothing pinned WHICH window
-    that is.
-
-    `_Requester` above is never in ``mgr.windows`` -- it is handed to `run_operator` and the
-    delivery loop walks the manager -- so the condition was False for every window in this suite
-    and inverting it broke nothing. Julio's rule is the whole point of the flag: "a result reaching
-    a window that did NOT ask for it arrives dark; the window that ASKED gets it visible, because
-    asking is the consent." Two windows, one of them the requester, asserted on the flag each was
-    handed.
-    """
+    """``_deliver_to_views`` passes ``visible=(win is requester)``; a result the window did not
+    ask for arrives dark, and the one that asked gets it visible."""
     seen = {}
 
     class _Win:
@@ -321,10 +252,6 @@ def test_only_the_window_that_ASKED_gets_the_result_visible(qapp, plate):
     assert seen == {"asked": True, "other": False}, seen
 
 
-# --------------------------------------------------------------------------------------
-# The bar itself, on a real RegionViewer.
-# --------------------------------------------------------------------------------------
-
 @pytest.fixture
 def region_window(qapp, napari_pane_stub, squid_dataset):
     from squidxplorer import open_reader
@@ -351,8 +278,6 @@ def test_the_bar_is_absent_until_a_run_starts(region_window):
 
 
 def test_the_bar_comes_up_indeterminate_before_the_first_report(region_window):
-    """There is a real gap between the click and the first unit (metadata warm, pool priming), and
-    a window that shows nothing across it is the state being complained about."""
     region_window.operator_started("decon")
     bar = region_window._op_progress
     assert not bar.isHidden()
@@ -370,8 +295,7 @@ def test_the_bar_goes_determinate_and_says_the_count_and_the_wait(region_window)
 
 
 def test_a_report_with_no_total_keeps_the_bar_indeterminate(region_window):
-    """The fallback, on the window rather than in the arithmetic: an operator that cannot know its
-    total gets a sweep, not a fabricated percentage."""
+    """An operator that cannot know its total gets a sweep, not a fabricated percentage."""
     region_window.operator_started("decon")
     region_window.operator_progress(ProgressReport("decon", done=3, total=None, unit=FOV_UNIT))
     bar = region_window._op_progress
@@ -384,8 +308,7 @@ def test_a_report_with_no_total_keeps_the_bar_indeterminate(region_window):
     lambda w: w.operator_failed("decon", "no such plane"),
 ])
 def test_every_outcome_takes_the_bar_down(region_window, close):
-    """Done and failed alike. The plate calls exactly one of these on success, failure and a
-    STOPPED run, so there is no outcome that leaves the bar running."""
+    """Done and failed alike; no outcome leaves the bar running."""
     region_window.operator_started("decon")
     region_window.operator_progress(ProgressReport("decon", 1, 27, FOV_UNIT))
     close(region_window)
@@ -394,24 +317,9 @@ def test_every_outcome_takes_the_bar_down(region_window, close):
     assert (bar.minimum(), bar.maximum()) == (0, 100), "an indeterminate sweep was left behind"
 
 
-# --------------------------------------------------------------------------------------
-# ...and the SAME report next to the memory bar, for work started ANYWHERE.
-#
-# Julio, 2026-08-03: "Where the memory bar is, there should also be a loading bar for whichever
-# operator we're applying in bulk or in a specific window, even if it's preview."
-#
-# The region window's bar above answers only for a run that window ASKED for. A plate-wide run and
-# the raw preview have no requester at all, so they had nowhere to report. These pin the second
-# consumer: one bar, on the manager's channel, fed by every producer.
-# --------------------------------------------------------------------------------------
-
 @pytest.fixture
 def navigator(qapp):
-    """A real ``OpenViewList`` on a real ``ViewerManager``, with no dataset and no windows.
-
-    Deliberately dataset-free: the bar is a pure function of the report it is handed, and giving it
-    an acquisition would only add a way for the test to fail for an unrelated reason.
-    """
+    """Deliberately dataset-free: the bar is a pure function of the report it is handed."""
     from squidxplorer._region_viewer import OpenViewList, ViewerManager
 
     mgr = ViewerManager()
@@ -425,15 +333,13 @@ def navigator(qapp):
 
 
 def test_the_work_bar_is_ABSENT_while_nothing_is_running(navigator):
-    """Absent, not parked at 0 %. A bar sitting empty is indistinguishable from a run that has
-    started and produced nothing, which is the confusion it exists to end."""
+    """Absent, not parked at 0%, which would look like a run that started and produced nothing."""
     _mgr, panel = navigator
     assert panel._work_bar.isHidden()
     assert panel._work_label.isHidden()
 
 
 def test_a_report_from_ANY_producer_raises_the_bar_beside_the_memory_bar(navigator):
-    """The whole ask, in one assertion: something is running, and the navigator says so."""
     mgr, panel = navigator
     mgr.set_run_progress(
         ProgressReport("decon", done=12, total=27, unit=FOV_UNIT, eta_seconds=200))
@@ -444,8 +350,7 @@ def test_a_report_from_ANY_producer_raises_the_bar_beside_the_memory_bar(navigat
 
 
 def test_the_work_bar_stays_INDETERMINATE_when_the_total_is_not_known(navigator):
-    """The same rule the region window's bar follows, and for the same reason: a progress bar that
-    invents a denominator is a lie that gets believed."""
+    """Same rule as the region window's bar: an invented denominator is a lie that gets believed."""
     mgr, panel = navigator
     mgr.set_run_progress(ProgressReport("preview", done=3, total=None, unit=FOV_UNIT))
     assert (panel._work_bar.minimum(), panel._work_bar.maximum()) == (0, 0)
@@ -461,8 +366,7 @@ def test_clearing_the_channel_takes_the_work_bar_down(navigator):
 
 
 def test_a_navigator_built_MID_RUN_shows_the_bar_without_waiting_for_the_next_unit(qapp):
-    """On decon one unit is minutes, so "wait for the next report" is most of the run. The manager
-    holds the last report precisely so a late subscriber does not have to."""
+    """The manager holds the last report so a late subscriber does not wait for the next unit."""
     from squidxplorer._region_viewer import OpenViewList, ViewerManager
 
     mgr = ViewerManager()
@@ -478,12 +382,7 @@ def test_a_navigator_built_MID_RUN_shows_the_bar_without_waiting_for_the_next_un
 
 
 def test_a_plate_wide_run_reaches_the_navigator_and_is_taken_down_when_it_drains(qapp, plate):
-    """END TO END, at the highest seam there is: a real run on a real PlateWindow, with NO
-    requester window at all — the bulk case, which had no progress affordance anywhere.
-
-    Both halves matter. A bar that never comes up is the reported gap; a bar never taken down is
-    the failure mode ``_activity``'s docstring names, where the indicator teaches the user it lies.
-    """
+    """A real run on a real PlateWindow with NO requester window — the bulk case."""
     seen = []
     plate._viewer_manager.runProgressChanged.connect(seen.append)
     plate.run_operator("mip", regions=[REGIONS[0]], save=False)
@@ -494,25 +393,8 @@ def test_a_plate_wide_run_reaches_the_navigator_and_is_taken_down_when_it_drains
     assert reports[-1].done == reports[-1].total == len(FOVS)
 
 
-# --------------------------------------------------------------------------------------
-# ...INCLUDING THE PREVIEW ("even if it's preview").
-#
-# ``_PreviewWorker`` is a different worker from ``_OperatorWorker`` and had no progress channel at
-# all, so the plate's first fill — the longest single wait on opening a big acquisition — reported
-# nothing. It CAN share the channel, and now does: the same immutable ProgressReport.
-#
-# What it does NOT share is ``unit_plan``, and that is the one honest difference. ``unit_plan``
-# computes the ENGINE's denominator; ``_plan`` is not the engine's iteration (it collapses a region
-# to one read whenever a mosaic is not derivable), so the total comes from the plan itself.
-# --------------------------------------------------------------------------------------
-
 class _PrintingReader:
-    """A reader that PRINTS while it reads, standing in for the libraries this app orchestrates.
-
-    tilefusion says what it is DOING with bare ``print`` rather than through its loggers
-    (registration.py:274, optimization.py:254, distortion.py:245), so a stub that prints is the
-    honest shape of the thing ``capture_stdout_to_log`` exists for.
-    """
+    """Stands in for libraries (e.g. tilefusion) that report progress via bare ``print``."""
 
     def __init__(self, path, chatter: bool = False):
         self._path = str(path)               # the identity the plate cache's token asks for
@@ -540,9 +422,7 @@ def _preview_worker(tmp_path, cache=None, **kw):
 
 
 def test_the_PREVIEW_reports_on_the_same_channel_an_operator_run_does(qapp, tmp_path):
-    """The share, asserted as a share: the preview emits ``ProgressReport``, the one type the
-    navigator's bar already knows how to draw. A second progress type would be a second thing for
-    one bar to reconcile."""
+    """The preview emits the same ``ProgressReport`` type the navigator's bar already draws."""
     worker = _preview_worker(tmp_path)
     got = []
     worker.runProgress.connect(got.append)
@@ -554,8 +434,7 @@ def test_the_PREVIEW_reports_on_the_same_channel_an_operator_run_does(qapp, tmp_
 
 
 def test_the_previews_bar_is_DETERMINATE_from_its_first_frame(qapp, tmp_path):
-    """The total is known before the first read (``len(plan)``), so the bar never grows a
-    denominator as it goes — the same property the operator run's bar has."""
+    """The total is known before the first read (``len(plan)``), so it never grows mid-pass."""
     worker = _preview_worker(tmp_path)
     got = []
     worker.runProgress.connect(got.append)
@@ -570,8 +449,7 @@ def test_the_previews_bar_is_DETERMINATE_from_its_first_frame(qapp, tmp_path):
 
 
 def test_the_preview_names_itself_so_the_one_bar_says_WHICH_work_is_running(qapp, tmp_path):
-    """One bar, two kinds of work. CONTEXT.md's word for the raw fill is "preview", and the label
-    is the only field that distinguishes it from an operator run on the wire."""
+    """The label is the only field distinguishing a preview from an operator run on the wire."""
     from squidxplorer._progress import PREVIEW_LABEL
 
     worker = _preview_worker(tmp_path)
@@ -583,12 +461,7 @@ def test_the_preview_names_itself_so_the_one_bar_says_WHICH_work_is_running(qapp
 
 
 def test_a_CACHED_well_is_not_counted_as_work_the_preview_still_has_to_do(qapp, tmp_path):
-    """The denominator is the plan that SURVIVED the cache.
-
-    Counting replayed wells would draw a bar that starts near full and then crawls, and feeding
-    those instant completions to ``RunProgress`` would poison the rate too: N arrivals in one
-    instant makes the ETA for whatever is left wildly optimistic.
-    """
+    """The denominator is the plan that SURVIVED the cache, not the replayed wells."""
     import numpy as np
 
     from squidxplorer._platecache import PlateCellCache

@@ -1,10 +1,4 @@
-"""IMA-228 — Minerva export: OME-TIFF + .story.json, and the best-effort launch.
-
-Every requirement asserted here was read out of minerva-author's own ``src/app.py``; none of
-it is documented upstream, and the checkout is an untagged ``--depth 1`` clone. These tests
-pin OUR side of that contract. They cannot prove Minerva still honours it — that is what the
-manual check in ``docs/ima-228-eng-review.md`` (T10) is for.
-"""
+"""Minerva export: OME-TIFF + .story.json, and the best-effort launch."""
 
 from __future__ import annotations
 
@@ -16,13 +10,7 @@ import numpy as np
 import pytest
 import tifffile
 
-# Minerva export fuses each region through the SAME region-operator seam the stitcher uses, so it
-# reaches tilefusion at run time even though nothing here imports it directly. tilefusion is
-# deliberately not a dependency (pyproject: "No tilefusion dependency ... importing tilefusion runs
-# its heavy __init__"), so on a clean install every export test failed with ModuleNotFoundError
-# instead of skipping. See tests/test_stitch.py for the same guard and the same reasoning.
-#
-# Stated plainly: THE MINERVA EXPORT PATH IS NOT COVERED IN CI. A skip is not a pass.
+# The export reaches tilefusion at run time through the region-operator seam; not a dependency.
 pytest.importorskip("tilefusion", reason="tilefusion (maragall/stitcher) not installed: the minerva "
                                          "export path is UNTESTED here, not passing")
 
@@ -43,11 +31,7 @@ from tests.writer_fixtures import WRITERS as _WRITERS
 # --- export_selection ------------------------------------------------------------------------
 
 def test_export_writes_one_fused_mosaic_per_region_never_one_per_fov(squid_dataset, tmp_path):
-    """THE contract. Minerva Author lays out exactly one image — ``"Layout": {"Grid": [["i0"]]}``
-    is hardcoded in its ``src/app.py`` and only ``series[0]`` is ever opened — so a selection of
-    4 FOVs across 2 regions must become 2 fused mosaics, not 4 files. N files would silently
-    render the first and discard the rest.
-    """
+    """Minerva Author lays out exactly one image, so a region is a mosaic, not a FOV."""
     root, _ = squid_dataset
     out = tmp_path / "out"
     sel = [("B2", 0), ("B2", 1), ("B3", 0), ("B3", 1)]      # 4 FOVs, 2 regions
@@ -65,8 +49,7 @@ def test_export_writes_one_fused_mosaic_per_region_never_one_per_fov(squid_datas
 
 
 def test_each_exported_file_holds_exactly_one_series(squid_dataset, tmp_path):
-    """Minerva reads ``self.io.series[0]`` and nothing else. A file with a second series would
-    have its remainder silently dropped, so the writer must never produce one."""
+    """Minerva reads ``series[0]`` and nothing else."""
     root, _ = squid_dataset
     (ome, _), = export_selection(open_reader(root), [("B2", 0), ("B2", 1)], tmp_path)
     with tifffile.TiffFile(str(ome)) as tf:
@@ -74,10 +57,7 @@ def test_each_exported_file_holds_exactly_one_series(squid_dataset, tmp_path):
 
 
 def test_a_fov_subset_is_one_cropped_mosaic_not_n_files(squid_dataset, tmp_path):
-    """Selecting some of a region's FOVs fuses only those — and still emits ONE mosaic, the crop
-    of the region they span. The fixture's two FOVs sit 0.5 mm apart, so the whole region is far
-    wider than either FOV: the crop must be strictly narrower than the full mosaic.
-    """
+    """Selecting some of a region's FOVs still emits one mosaic, cropped to those FOVs."""
     root, _ = squid_dataset
     (whole, _), = export_selection(open_reader(root), [("B2", 0), ("B2", 1)], tmp_path / "whole")
     (crop, _), = export_selection(open_reader(root), [("B2", 1)], tmp_path / "crop")
@@ -89,22 +69,10 @@ def test_a_fov_subset_is_one_cropped_mosaic_not_n_files(squid_dataset, tmp_path)
 
 
 def test_exported_pixels_are_the_fused_mosaic_byte_for_byte(squid_dataset, tmp_path):
-    """The OME-TIFF must carry the real fused pixels in native uint16 — no rescale, no cast.
-
-    Checked on a single-FOV region selection, where the fused mosaic is exactly that FOV's
-    projection, so the expected pixels can be computed from the fixture planes with no
-    assumption about how fusion blends overlaps.
-    """
+    """The OME-TIFF must carry the real fused pixels in native uint16 — no rescale, no cast."""
     root, arrays = squid_dataset
-    # blend_px=0: the fixture's tiles are 4 px wide and the default 128 px feather would
-    # taper every one of them to zero at the edge. Turning the feather off is what makes a
-    # byte-for-byte comparison meaningful at this size; it is a fixture concession, not a
-    # claim that fusion normally copies pixels through untouched.
-    # correct_illumination=False for the same reason as blend_px=0 above: flat-fielding is ON by
-    # default and divides by an estimated gain field, so the pixels would no longer equal a plain
-    # MIP of the fixture planes. Both are fixture concessions that isolate the thing under test
-    # (do the fused pixels reach the file in native dtype, unrescaled) from a correction that is
-    # orthogonal to it -- and on 4 px tiles an estimated illumination profile is noise anyway.
+    # blend_px=0 and correct_illumination=False: fixture concessions on 4 px tiles, so the
+    # fused pixels equal a plain MIP of the fixture planes.
     (ome, _), = export_selection(open_reader(root), [("B3", 1)], tmp_path, blend_px=0,
                                  correct_illumination=False)
 
@@ -119,9 +87,7 @@ def test_exported_pixels_are_the_fused_mosaic_byte_for_byte(squid_dataset, tmp_p
 
 
 def test_export_goes_through_the_region_operator_seam(squid_dataset, tmp_path):
-    """The fusion path is IMA-222's region-operator table, not a private stitcher and not
-    ``project_plate`` (the z-reduction path, which cannot fuse FOVs at all). An operator
-    registered at runtime must therefore be selectable with no edit to _minerva.py."""
+    """An operator registered at runtime is selectable with no edit to _minerva.py."""
     import squidxplorer
     from squidxplorer import _stitch
 
@@ -144,9 +110,6 @@ def test_export_goes_through_the_region_operator_seam(squid_dataset, tmp_path):
 
     assert calls == [("B2", (0, 1))], "the whole region reached the operator in one call"
     assert len(pairs) == 1 and name in pairs[0][0].name
-    # `assert root` was here: a non-empty Path is always truthy, so it pinned nothing. The claim
-    # worth pinning is that the export LANDED -- the operator seam produced a file on disk under
-    # the directory it was given, not merely a pair in a list.
     written, out = pairs[0][0], Path(tmp_path)
     assert written.is_file(), f"{written} was reported but not written"
     assert out in written.parents, f"{written} escaped {out}"
@@ -155,13 +118,7 @@ def test_export_goes_through_the_region_operator_seam(squid_dataset, tmp_path):
 
 @pytest.mark.parametrize("label, build", [(w[0], w[1]) for w in _WRITERS])
 def test_export_is_one_mosaic_per_region_from_every_squid_writer(label, build, tmp_path):
-    """IMA-254 made the reader cover every Squid writer; the Minerva export rides that seam.
-
-    The export must not care which writer produced the acquisition — it goes through
-    ``open_reader`` and ``stitch_plate`` like everything else. One mosaic per region from
-    individual TIFF, multi-page TIFF, OME-TIFF and all three zarr layouts, or the export has
-    grown a format assumption it has no business having.
-    """
+    """The export must not care which Squid writer produced the acquisition."""
     root = build(tmp_path / "acq")
     reader = open_reader(root)
     region = list(reader.metadata["fovs_per_region"])[0]
@@ -182,9 +139,7 @@ def test_export_rejects_an_unknown_region_operator(squid_dataset, tmp_path):
 
 
 def test_export_refuses_a_channel_with_no_name(squid_dataset, tmp_path, monkeypatch):
-    """Minerva builds its label list as ``[c.name for c in channels if c.name]`` — an unnamed
-    channel is DROPPED from the labels but not from the pixels, so every later channel gets its
-    predecessor's name. A silent mislabel is worse than a refused export."""
+    """An unnamed channel would mislabel every later one; refusal beats a silent mislabel."""
     root, _ = squid_dataset
     reader = open_reader(root)
     meta = dict(reader.metadata)

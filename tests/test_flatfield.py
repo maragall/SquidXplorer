@@ -1,16 +1,4 @@
-"""IMA-225 flat-field correction — numerical property tests + the MIP-commutation shortcut.
-
-Two things are proven here on data rather than asserted in a comment:
-
-1. **It flattens a known vignette.** A synthetic dome is applied to a flat field and the
-   correction must bring the corner-to-centre ratio back to ~1.
-2. **Flat-field commutes with the MIP.** Correction is applied per pixel by a MONOTONE
-   non-decreasing map f, and ``max(f(a), f(b)) == f(max(a, b))`` for monotone f. So
-   flat-fielding AFTER a MIP is bit-identical to flat-fielding every plane before it, at
-   1/Nz the cost. Integer rounding and clipping do NOT break this (both are themselves
-   monotone), and that is exactly what these tests check — on real 10x data, not just
-   synthetic — because "assume it holds" is how a rounding bug ships.
-"""
+"""Flat-field correction: numerical property tests + the MIP-commutation shortcut."""
 
 from __future__ import annotations
 
@@ -49,21 +37,18 @@ def laser_af_dataset():
 
 @pytest.fixture(autouse=True)
 def _no_leaked_active_profile():
-    """The registered ``flatfield`` operator reads module-level state; make sure no test leaks
-    a profile into another one."""
+    """The registered operator reads module-level state; don't leak a profile across tests."""
     clear_profile()
     yield
     clear_profile()
 
 
 def _vignette(size: int = 128, depth: float = 0.55) -> np.ndarray:
-    """A radial dome normalised to mean 1 — bright centre, dim corners, like a real objective."""
+    """A radial dome normalised to mean 1."""
     yy, xx = np.mgrid[0:size, 0:size].astype(np.float32) / (size - 1) - 0.5
     field = 1.0 - depth * (yy ** 2 + xx ** 2) / 0.5
     return (field / field.mean()).astype(np.float32)
 
-
-# --- the core numerical property: a KNOWN vignette must be flattened ----------------------
 
 def test_flattens_a_known_vignette():
     size = 128
@@ -85,8 +70,7 @@ def test_flattens_a_known_vignette():
 
 
 def test_darkfield_pedestal_is_removed_before_the_gain_divide():
-    """Order matters: (raw - dark) / gain, not raw / gain - dark. Applying them in the wrong
-    order leaves a residual gradient proportional to the pedestal."""
+    """Order matters: (raw - dark) / gain, not raw / gain - dark."""
     size, pedestal = 96, 400.0
     ff = _vignette(size)
     raw = (np.float32(2000.0) * ff + pedestal).astype(np.uint16)
@@ -97,8 +81,7 @@ def test_darkfield_pedestal_is_removed_before_the_gain_divide():
 
 
 def test_estimate_profile_recovers_a_vignette_from_tiles():
-    """The estimator is the stitcher's BaSiC (reused, not reimplemented); this pins that the
-    reuse is wired up correctly by recovering a field we planted."""
+    """Pins that the reused BaSiC estimator is wired up correctly."""
     pytest.importorskip("tilefusion.flatfield")
     size, n = 64, 24
     rng = np.random.default_rng(3)
@@ -115,34 +98,23 @@ def test_estimate_profile_recovers_a_vignette_from_tiles():
 
 
 def test_estimate_profile_normalises_a_field_the_constructor_would_have_refused():
-    """FEW TILES: BaSiC's gain is only fixed up to a scale, and with one or two tiles it lands
-    outside ``FlatfieldProfile``'s 1e-3 tolerance — so the constructor raised and the whole run
-    died telling the caller to "divide by its mean first", from inside ``resolve_flatfield``
-    where no caller can reach. Flat-field is ON by default, so that broke every stitch and every
-    Minerva export of a one- or two-FOV selection. Measured on ``sim_5d_2x2_t3``: 1.0053 at one
-    tile, 1.0030 at two, 1.000000 at three and four.
-
-    Pinned through the SEAM rather than the estimator, because the claim is about what
-    ``estimate_profile`` guarantees its caller, not about what BaSiC happens to return today.
-    """
+    """With few tiles BaSiC's gain can land outside FlatfieldProfile's 1e-3 mean tolerance;
+    estimate_profile must renormalise it rather than let the constructor raise."""
     import squidxplorer._flatfield as F
 
     off_by = np.full((8, 8), 1.0, dtype=np.float32)
-    off_by[0, 0] = 1.32                    # mean 1.005 — the failing magnitude, deterministic
+    off_by[0, 0] = 1.32
     assert abs(float(off_by.mean()) - 1.0) > 1e-3
     with pytest.raises(ValueError, match="normalised to mean 1.0"):
-        FlatfieldProfile(off_by)           # the raw estimate, straight in: still refused
+        FlatfieldProfile(off_by)
 
     def stub(stack, use_darkfield=False):
         return off_by.copy(), None
 
-    # The `try` used to span `F.estimate_profile` as well as the import, so an ImportError raised
-    # one call deep INSIDE production -- exactly what `_engine._NOT_A_WELL_FAULT` exists to refuse
-    # to absorb -- reported as "tilefusion not installed" and the seam went untested while green.
-    # Only the import may skip.
+    # Only the import may skip; an ImportError inside estimate_profile itself must not be absorbed.
     try:
         import tilefusion.flatfield as tff
-    except ImportError:                    # no tilefusion: the seam is what is under test
+    except ImportError:
         pytest.skip("tilefusion not installed")
     real, tff.estimate_flatfield_channel = tff.estimate_flatfield_channel, stub
     try:
@@ -151,7 +123,6 @@ def test_estimate_profile_normalises_a_field_the_constructor_would_have_refused(
         tff.estimate_flatfield_channel = real
 
     assert abs(float(est.flatfield.mean()) - 1.0) < 1e-6
-    # The SHAPE of the correction is what a gain field is; only its scale moved.
     assert np.corrcoef(est.flatfield.ravel(), off_by.ravel())[0, 1] > 0.999
 
 
@@ -163,7 +134,7 @@ def test_dtype_preserved_input_not_mutated_and_no_integer_wrap():
     assert out.dtype == np.uint16
     assert np.array_equal(raw, before)
     assert out.max() <= 65535 and out.min() >= 0
-    # the dim corners get divided UP past the ceiling -> must clip, never wrap to black
+    # dim corners divide UP past the ceiling: must clip, never wrap to black
     assert out[:4, :4].mean() > raw[:4, :4].mean()
 
 
@@ -173,13 +144,10 @@ def test_shape_mismatch_fails_loud():
 
 
 def test_a_profile_that_is_not_mean_one_is_refused():
-    """A profile whose mean is not 1 silently rescales the whole image — a brightness change
-    masquerading as a correction. Refuse it by name."""
+    """A mean != 1 profile would silently rescale brightness rather than correct it."""
     with pytest.raises(ValueError, match="mean"):
         FlatfieldProfile(np.full((16, 16), 2.0, np.float32))
 
-
-# --- THE ALGEBRAIC SHORTCUT: flat-field commutes with the MIP ------------------------------
 
 def _monotone_map_is_exact(ff, planes):
     per_plane = project([correct_flatfield(p, FlatfieldProfile(ff)) for p in planes])
@@ -199,8 +167,7 @@ def test_flatfield_commutes_with_the_mip_exactly_on_synthetic_uint16():
 
 
 def test_commutation_survives_clipping_at_the_uint16_ceiling():
-    """Clipping is monotone too, so saturating the result must not break it. This is the case
-    a careless float-then-cast implementation gets wrong."""
+    """Clipping is monotone too, so saturating the result must not break commutation."""
     size = 64
     ff = _vignette(size, depth=0.9)
     rng = np.random.default_rng(11)
@@ -225,8 +192,7 @@ def test_commutation_survives_a_darkfield_pedestal_and_clipping_at_zero():
 
 @pytest.mark.integration
 def test_flatfield_commutes_with_the_mip_on_real_10x_data(laser_af_dataset, capsys):
-    """The measurement the ticket asks for: bit-exactness AND the measured speedup on real
-    2000px, Nz=10 planes — not a synthetic proxy."""
+    """Bit-exactness and speedup on real data, not a synthetic proxy."""
     reader = open_reader(laser_af_dataset)
     meta = reader.metadata
     region = meta["regions"][0]
@@ -237,7 +203,7 @@ def test_flatfield_commutes_with_the_mip_on_real_10x_data(laser_af_dataset, caps
     assert len(planes) > 1
 
     ff = _vignette(planes[0].shape[0]) if planes[0].shape[0] == planes[0].shape[1] else None
-    if ff is None:  # non-square frame: build the dome at the real aspect
+    if ff is None:
         yy, xx = (np.mgrid[0:planes[0].shape[0], 0:planes[0].shape[1]].astype(np.float32)
                   / np.array(planes[0].shape, np.float32)[:, None, None] - 0.5)
         f = 1.0 - 0.55 * (yy ** 2 + xx ** 2) / 0.5
@@ -260,16 +226,13 @@ def test_flatfield_commutes_with_the_mip_on_real_10x_data(laser_af_dataset, caps
     assert t_per_plane > t_after_mip
 
 
-# --- registry / engine seam ----------------------------------------------------------------
-
 def test_flatfield_is_registered_as_a_plane_op():
     assert "flatfield" in available_projectors()
     assert operator_consumes("flatfield") == PLANE_OP
 
 
 def test_the_registered_operator_fails_loud_and_actionable_with_no_profile_set():
-    """A flat-field with no profile has no sane default — an identity field would silently do
-    nothing while the UI said 'flat-field applied'."""
+    """No sane default: an identity field would silently do nothing while the UI said 'applied'."""
     from squidxplorer._engine import _resolve_operator
     op = _resolve_operator("flatfield").fn
     with pytest.raises(ValueError, match="no flat-field profile"):
@@ -287,9 +250,7 @@ def test_set_profile_activates_the_registered_operator():
 
 
 def test_a_profile_cannot_be_installed_without_saying_which_channel_measured_it():
-    """The defect, made unsayable. ``set_profile(profile)`` used to install ONE gain field that
-    every channel was then corrected by — 99.8% of pixels wrong by up to 1799 counts on the 10x
-    set. The channel is keyword-only and required, so that call no longer type-checks at all."""
+    """channel is keyword-only and required, so a call with no channel no longer type-checks."""
     with pytest.raises(TypeError):
         set_profile(FlatfieldProfile(_vignette(8)))          # type: ignore[call-arg]
     with pytest.raises(ValueError, match="CHANNEL NAME"):
@@ -311,16 +272,6 @@ def test_project_well_with_flatfield_keeps_z_at_full_depth(squid_dataset):
     assert out.dtype == reader.metadata["dtype"]
 
 
-# ==============================================================================================
-# PER CHANNEL — the declaration seam, and the defect whose absence from this file let it live
-# ==============================================================================================
-#
-# Every test above this line uses ONE channel, which is exactly why the registered operator could
-# correct all four of a real acquisition with channel 0's gain field for a day with the suite
-# green. The file on disk is (C, Y, X) and its fields are genuinely different (0.645–1.102 for
-# 488 against 0.974–1.020 for 405 on the 10x set), so "one profile" is not a simplification of
-# the truth, it is a different measurement.
-
 def _sloped(shape, slope: float) -> np.ndarray:
     """A gain field with a known, per-channel-distinguishable tilt, normalised to mean 1."""
     ny, nx = shape
@@ -337,13 +288,8 @@ def _fields_per_channel(reader) -> dict:
 
 
 def test_every_channel_is_corrected_by_its_own_gain_field(squid_dataset):
-    """THE CENTREPIECE. Run the registered operator the way the engine runs it — through
-    ``project_well``, which specialises it per channel via ``for_channel`` — and check every
-    (channel, z) plane against THAT CHANNEL's field.
-
-    The second assertion is what makes the first one worth its green: another channel's field
-    must give a different answer on this fixture, so a broadcast cannot pass by coincidence.
-    """
+    """Runs the operator through project_well and checks every (channel, z) plane against
+    that channel's own field; also checks another channel's field gives a different answer."""
     from squidxplorer._engine import _resolve_operator
 
     root, _ = squid_dataset
@@ -375,10 +321,7 @@ def test_every_channel_is_corrected_by_its_own_gain_field(squid_dataset):
 
 
 def test_a_channel_with_no_installed_profile_is_refused_by_name(squid_dataset):
-    """Install ONE channel's field — what the GUI's auto-estimate does, because the worker reads
-    one channel's tiles — and the OTHER channel must stop the run, named, listing what is
-    installed. Correcting it with the field beside it is not a degraded answer, it is a different
-    measurement, and it is the one that shipped."""
+    """Only one channel's field installed: the other channel must stop the run, named."""
     from squidxplorer._engine import _resolve_operator
 
     root, _ = squid_dataset
@@ -395,8 +338,7 @@ def test_a_channel_with_no_installed_profile_is_refused_by_name(squid_dataset):
     assert names[0] in message, (
         f"the refusal does not say which channel(s) DO have one: {message!r}")
 
-    # ...and the channel that HAS one still binds and corrects, so this is a refusal aimed at one
-    # channel, not a dead operator.
+    # the channel that HAS a profile still binds and corrects
     from squidxplorer.projection import bind_channel
 
     raw = reader.read("B2", 0, names[0], reader.metadata["z_levels"][0], 0)
@@ -406,8 +348,6 @@ def test_a_channel_with_no_installed_profile_is_refused_by_name(squid_dataset):
 
 
 def test_nothing_installed_still_refuses_loud_and_actionable():
-    """Unchanged claim, kept: an identity field would silently do nothing while the UI said
-    'flat-field applied'."""
     from squidxplorer._engine import _resolve_operator
 
     op = _resolve_operator("flatfield")
@@ -418,11 +358,7 @@ def test_nothing_installed_still_refuses_loud_and_actionable():
 
 
 def test_the_unbound_operator_refuses_to_choose_between_several_channels():
-    """Called with no channel bound and four fields installed, the operator must not pick one.
-
-    ``project_well`` always binds, so this is the direct-``fn`` path the registry conformance
-    suite uses. With exactly one profile installed there is no choice to make and it applies it;
-    with several, choosing is the defect."""
+    """With no channel bound and several profiles installed, the operator must not pick one."""
     from squidxplorer._engine import _resolve_operator
 
     op = _resolve_operator("flatfield").fn
@@ -433,12 +369,8 @@ def test_the_unbound_operator_refuses_to_choose_between_several_channels():
 
 @pytest.mark.integration
 def test_per_channel_correction_on_the_real_stored_profile(laser_af_dataset, capsys):
-    """The measurement itself, on the acquisition's OWN ``(4, 2084, 2084)`` profile.
-
-    Prints the WRONG(one profile) vs RIGHT(per channel) table the fix was built against. 405 is
-    channel 0 of that file, so the channel anyone looks at first was bit-identical either way —
-    which is why nobody saw it.
-    """
+    """On the acquisition's own (4, 2084, 2084) profile; channel 0 (405) is bit-identical
+    either way, which is why a broadcast bug there went unnoticed."""
     from squidxplorer._engine import _resolve_operator
     from squidxplorer.projection import bind_channel
 

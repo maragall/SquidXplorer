@@ -1,15 +1,4 @@
-"""The GUI refuses to open a second window while one is already open (cross-process).
-
-Julio: "there's a bunch of windows open ... you open another instance of the GUI without
-closing previous". Every agent proof run left its window on his screen, and nothing in the
-app stopped the next one. A launcher-script fix is not a cap: the cap has to live in the
-GUI, so it holds no matter who starts the process.
-
-The primitive is ``flock`` on a slot file, NOT a pidfile. A pidfile has to be cleaned up,
-and a killed or crashed GUI never cleans up -- which is exactly the state these runs end
-in, so a pidfile would have wedged the app shut. An flock is released by the kernel when
-the process dies, however it dies, so the cap is self-healing.
-"""
+"""The GUI refuses a second window while one is open, via flock on a slot file."""
 
 from __future__ import annotations
 
@@ -26,11 +15,7 @@ from squidxplorer._viewer import (
     release_gui_slot,
 )
 
-#: The cap IS flock. Where flock does not exist (Windows) there is no cross-process cap to test,
-#: so the tests below that assert a refusal have nothing to assert -- they are not "broken on
-#: Windows", they are inapplicable. What Windows must still guarantee is that the app opens at
-#: all, and ``test_a_platform_without_flock_still_opens_the_gui`` pins that on EVERY platform,
-#: unskipped. Keep it that way: skipping the launch test is what would reopen the crash.
+# Where flock does not exist (Windows) the cross-process cap does not apply.
 requires_flock = pytest.mark.skipif(
     importlib.util.find_spec("fcntl") is None,
     reason="no fcntl on this platform: the flock-based cap does not apply (the launch path is "
@@ -101,8 +86,7 @@ def test_the_refusal_names_the_limit_and_how_to_override(slots):
 
 @requires_flock
 def test_a_window_built_directly_still_takes_a_slot(slots, monkeypatch):
-    """main() is not the only door. Proof scripts and debug launchers construct a PlateWindow
-    themselves, which is exactly how the screen filled up, so the slot is taken on show()."""
+    """main() is not the only door: the slot is taken on show()."""
     pytest.importorskip("qtpy")
     from qtpy.QtWidgets import QApplication
 
@@ -126,27 +110,14 @@ def test_a_window_built_directly_still_takes_a_slot(slots, monkeypatch):
 
 
 def test_a_platform_without_flock_still_opens_the_gui(slots, monkeypatch):
-    """Windows has no ``fcntl``, and the cap must never be the thing that stops the app booting.
-
-    Both doors into ``acquire_gui_slot`` -- ``main()`` and ``PlateWindow.showEvent`` -- catch
-    only :class:`GuiAlreadyOpen`, so an ImportError out of here killed the process before any
-    window appeared. ``scripts/Setup-Windows.ps1`` installs a Desktop shortcut pointing straight
-    down that path, so on Windows the shipped launcher was the crash.
-
-    Simulated rather than skipped-on-win32 on purpose. Skipping would make the guard unprovable
-    on the Linux and macOS runs, and the obvious way to quiet a red Windows job -- marking this
-    file skipif(win32) -- would then reopen the hole with no red test anywhere.
-    """
-    # setitem, not a bare assignment: it restores the real module on Unix and removes the key
-    # again on Windows, where there was none to begin with.
+    """The cap must never be the thing that stops the app booting where fcntl is absent."""
     monkeypatch.setitem(sys.modules, "fcntl", None)   # `import fcntl` -> ModuleNotFoundError
 
     handle = acquire_gui_slot()
     assert handle is not None, "the GUI must still open where flock does not exist"
     assert handle.fd == -1, "no lock was taken, and the handle has to say so"
 
-    # The documented trade-off: no flock means no cross-process cap. Losing the cap is a
-    # nicety; losing the app is not. Pinned so the degradation stays deliberate.
+    # No flock means no cross-process cap, deliberately.
     second = acquire_gui_slot()
     release_gui_slot(second)
 
@@ -155,12 +126,7 @@ def test_a_platform_without_flock_still_opens_the_gui(slots, monkeypatch):
 
 @requires_flock
 def test_a_crashed_gui_does_not_wedge_the_app_shut(slots):
-    """The self-healing property. A slot whose holder died is reusable with no cleanup.
-
-    Simulated by closing the fd without the tidy release path -- which is what the kernel
-    does for a killed process. A pidfile design fails this test, and that failure mode
-    (app permanently refusing to start after a crash) is worse than the bug being fixed.
-    """
+    """A slot whose holder died is reusable with no cleanup."""
     handle = acquire_gui_slot()
     os.close(handle.fd)                  # the holder dies; no release_gui_slot()
 

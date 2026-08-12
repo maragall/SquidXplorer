@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
-"""IMA-252 command line: run the RL semi-convergence sweep and write the QC outputs.
+"""Run the RL semi-convergence sweep on a real acquisition and write the QC outputs.
 
-This file is now ONLY the command line. The measurement (:func:`halo_core_ratio`,
-:func:`recommend`), the structure picking and the turbo rendering live in
-``squidxplorer._decon_qc``, because the GUI's deconvolution panel needs exactly the same
-functions and a package cannot import a script directory. One implementation, two front
-ends - see that module's docstring.
+The measurement (halo_core_ratio, recommend) and rendering live in squidxplorer._decon_qc so the
+GUI's deconvolution panel can reuse the same functions; this file is only the command line.
 
 Usage
 -----
@@ -13,8 +10,8 @@ Usage
     python tools/decon_qc.py --iterations 12 --out /tmp/qc
     python tools/decon_qc.py --region manual1 --fov 3 --channel Fluorescence_405_nm_Ex
 
-Outputs (into --out): ``decon_qc_montage.png``, ``decon_qc_curve.png``, ``decon_qc.csv``.
-The datasets are opened READ ONLY and nothing is ever written back next to them.
+Outputs (into --out): decon_qc_montage.png, decon_qc_curve.png, decon_qc.csv. Datasets are
+opened read-only.
 """
 from __future__ import annotations
 
@@ -26,9 +23,8 @@ from pathlib import Path
 
 import numpy as np
 
-# Run from anywhere: import the repo this file lives in, not whatever `squidxplorer` happens
-# to be installed. The mac filesystem is case-insensitive, so an invoker sitting in
-# .../CEPHLA/ instead of .../Cephla/ otherwise resolves a different tree.
+# Import the repo this file lives in, not whatever `squidxplorer` happens to be installed —
+# the mac filesystem is case-insensitive and can otherwise resolve a different checkout.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from squidxplorer._decon_qc import (            # noqa: E402  (path pin must come first)
@@ -81,9 +77,7 @@ def main(argv=None) -> int:
                           int(stack.shape[0]), optics.ni)
     dxy_um, dz_um = optics.dxy_um, optics.dz_um
 
-    # The Airy radius of THIS instrument: the smallest core the optics could form. It is
-    # what separates "core" from "halo" below, and it comes from NA and wavelength, not
-    # from a tuning constant.
+    # Airy radius of this instrument, from NA and wavelength: separates "core" from "halo".
     core_um = 0.61 * optics.wavelength_um / optics.na
     window_um = qc_window_um(core_um, stack.shape[0], dz_um)
 
@@ -148,11 +142,7 @@ def main(argv=None) -> int:
 
 
 def _lateral_sigma_px(psf):
-    """Second-moment-equivalent lateral sigma of the in-focus PSF plane, in pixels.
-
-    Printed on every run so "the PSF really is the NA-0.3 one" is a measurement in the
-    log rather than a claim in a docstring.
-    """
+    """Second-moment-equivalent lateral sigma of the in-focus PSF plane, in pixels."""
     plane = np.asarray(psf[psf.shape[0] // 2], dtype=np.float64)
     total = plane.sum()
     if total <= 0:

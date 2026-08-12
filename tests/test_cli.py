@@ -1,13 +1,8 @@
-"""CLI (IMA-186) tests: the declarative params model + the run() that drives the command layer.
+"""CLI tests: the declarative params model + the run() that drives the command layer.
 
-Headless, no Qt. Uses the shared tiny `squid_dataset` fixture (a real 2-well acquisition on disk).
-
-The thing most of these tests are actually about is the EXIT CODE. A batch surface whose failure
-mode is `exit 0` is not a batch surface: `for d in */; do squidxplorer "$d"; done` cannot tell a
-finished plate from one where every well was skipped, and that is exactly what this CLI did — the
-`partial` verdict was computed in the command layer and then discarded by an unconditional
-`_done(...)`. So `main()` is tested through its RETURN VALUE (the console script does
-`sys.exit(main())`), not just `run()`.
+Headless, no Qt. Most of these tests are about the EXIT CODE, since a batch surface whose failure
+mode is `exit 0` cannot tell a finished plate from one where every well was skipped. `main()` is
+tested through its return value, not just `run()`.
 """
 
 from __future__ import annotations
@@ -30,18 +25,12 @@ def _break_well(root, region: str) -> None:
 
 
 def _break_every_fov(root, region: str) -> None:
-    """Delete one plane of EVERY fov of *region*, so the whole well produces nothing.
-
-    `_break_well` breaks the first plane it finds, which is ONE fov — under `--n-fovs 0` the
-    well's remaining FOVs still read, so the well is not actually lost.
-    """
+    """Delete one plane of every FOV of *region*, so the whole well produces nothing."""
     planes = sorted((Path(root) / "0").glob(f"{region}_*"))
     assert planes, f"no planes to break for {region}"
     for fov in sorted({p.name.split("_")[1] for p in planes}):
         next(iter(sorted((Path(root) / "0").glob(f"{region}_{fov}_*")))).unlink()
 
-
-# --- the model ----------------------------------------------------------------------------------
 
 def test_input_folder_validator_rejects_missing(tmp_path):
     with pytest.raises(ValueError):
@@ -49,9 +38,7 @@ def test_input_folder_validator_rejects_missing(tmp_path):
 
 
 def test_projector_validator_accepts_region_operators(squid_dataset):
-    # The CLI must not be NARROWER than the command layer it fronts: do_run_operator accepts
-    # `projectors | region_operators` and write_plate dispatches on it, so `--projector stitch`
-    # was a CLI-only refusal of a run the engine can do.
+    # the CLI must not be narrower than the command layer: region operators are valid projectors too.
     root, _ = squid_dataset
     for name in ("mip", "stitch", "coordinate"):
         assert ProcessParameters(input_folder=str(root), projector=name).projector == name
@@ -85,17 +72,8 @@ def test_wells_parses_to_the_commands_regions_list(squid_dataset):
 
 
 def test_help_lists_every_operators_declared_parameters():
-    """Generated from the registry, not hand-written per operator: a plugin operator installed
-    from another package is documented here with no edit to _cli.py.
-
-    Checked AGAINST THE REGISTRY rather than against a copy of today's declarations. This test
-    used to spell out ``cellpose(sigma_px=2.0`` and ``min_area_px=30``, which made it a second
-    place that recorded what cellpose takes — and when the real declaration turned out to be
-    wrong (three of those four parameters never reached a pixel), this assertion was one of the
-    things holding it in place. A test that restates a declaration cannot notice the declaration
-    is wrong; one that compares the help against the declaration still catches the help drifting,
-    which is all it was ever for.
-    """
+    """Generated from the registry, and checked against the registry itself, not a hand-copied
+    list of today's declarations — a copy can't notice the declaration it copied is wrong."""
     from squidxplorer._engine import operator_params
     from squidxplorer._operations import runnable_operators
 
@@ -112,8 +90,6 @@ def test_help_lists_every_operators_declared_parameters():
     assert "mip()" in described                    # ...and an operator with no parameters says so
 
 
-# --- the run ------------------------------------------------------------------------------------
-
 def test_run_writes_navigable_plate(squid_dataset, tmp_path):
     root, _ = squid_dataset                       # tiny real acquisition (B2, B3)
     params = ProcessParameters(input_folder=str(root), output_folder=str(tmp_path), tiff=False)
@@ -125,25 +101,23 @@ def test_run_writes_navigable_plate(squid_dataset, tmp_path):
     assert manifest["n_wells"] == 2
     assert manifest["tiff"] is None                # CLI default: no uncompressed TIFF duplicate
     assert manifest["outcome"] == "ok"
-    # the plate group + both wells' fields are on disk (level 0 present)
     assert (plate / "zarr.json").exists()
     for row, col in (("B", "2"), ("B", "3")):
         assert (plate / row / col / "0" / "zarr.json").exists()
 
 
 def test_run_skips_unreadable_well_instead_of_aborting(squid_dataset, tmp_path):
-    # Resilience (IMA-186): one corrupt/missing plane must NOT abort a whole-plate run — the bad
-    # well is SKIPPED (logged + reported), the good wells still write.
+    # one corrupt/missing plane must not abort a whole-plate run; the bad well is skipped, not fatal.
     root, _ = squid_dataset                       # B2, B3
     _break_well(root, "B3")
     params = ProcessParameters(input_folder=str(root), output_folder=str(tmp_path))
     manifest = run(params)
-    assert manifest["skipped"] == ["B3"]          # bad well skipped, not fatal
+    assert manifest["skipped"] == ["B3"]
     assert manifest["n_fields_written"] == 1      # B2 still written
-    assert manifest["outcome"] == "partial"       # ...and it SAYS so
+    assert manifest["outcome"] == "partial"
     plate = Path(manifest["plate"])
     assert (plate / "B" / "2" / "0" / "zarr.json").exists()
-    assert not (plate / "B" / "3" / "0" / "0").exists()   # B3 field never written
+    assert not (plate / "B" / "3" / "0" / "0").exists()
 
 
 def test_run_defaults_output_next_to_acquisition(squid_dataset):
@@ -194,8 +168,7 @@ def test_unknown_well_is_refused_by_name_before_anything_is_written(squid_datase
 
 
 def test_operator_parameters_reach_the_operator(squid_dataset, tmp_path):
-    # Not "the flag was accepted" — the PIXELS have to differ. `spot` labels objects, so an
-    # absurd min_area_px must erase them. Accept-and-drop would give two identical stores.
+    # the PIXELS have to differ, not just "the flag was accepted".
     import zarr
 
     root, _ = squid_dataset
@@ -208,13 +181,8 @@ def test_operator_parameters_reach_the_operator(squid_dataset, tmp_path):
     assert n_strict == 0 < n_loose
 
 
-# --- the plate-format scope (IMA-219's shared helper, not a hand-rolled substring test) ----------
-
 def test_a_96_well_plate_is_not_refused(squid_dataset, tmp_path):
-    # The old guard was `any(s in fmt for s in ("384", "1536"))` — a comment that said 1536-only,
-    # code that said 384-or-1536 and a message that said both. 96wp is a Squid format
-    # (_plate_shape._STANDARD_FORMATS) and nothing about this pipeline cares how many wells the
-    # plate has, so it was blocked for no reason.
+    # 96-well is a valid Squid format; nothing about this pipeline cares how many wells a plate has.
     root, _ = squid_dataset
     acq = Path(root) / "acquisition.yaml"
     acq.write_text(acq.read_text().replace("1536 well plate", "96 well plate"))
@@ -223,8 +191,7 @@ def test_a_96_well_plate_is_not_refused(squid_dataset, tmp_path):
 
 
 def test_a_freeform_slide_acquisition_is_not_refused(real_dataset, tmp_path):
-    # ...and the same guard refused a glass-slide / freeform acquisition (regions like "manual0",
-    # format "glass slide") as 'unknown', which blocked the very datasets the stitch tests use.
+    # a glass-slide / freeform acquisition ("manual0", format "glass slide") must not be refused.
     manifest = run(ProcessParameters(input_folder=str(real_dataset),
                                      output_folder=str(tmp_path), limit=1))
     assert manifest["n_fields_written"] == 1
@@ -232,14 +199,11 @@ def test_a_freeform_slide_acquisition_is_not_refused(real_dataset, tmp_path):
 
 
 def test_wellplate_format_override_is_honoured(squid_dataset, tmp_path, monkeypatch):
-    # _plate_shape documents SQUIDXPLORER_WELLPLATE_FORMAT as the override "for headless / CLI runs".
-    # The CLI ignored it entirely; now it resolves through the same helper, so it applies.
+    # SQUIDXPLORER_WELLPLATE_FORMAT must apply to CLI runs too, resolved through the same helper.
     root, _ = squid_dataset
     monkeypatch.setenv("SQUIDXPLORER_WELLPLATE_FORMAT", "96")
     assert run(ProcessParameters(input_folder=str(root), output_folder=str(tmp_path)))["n_wells"] == 2
 
-
-# --- the overwrite guard ------------------------------------------------------------------------
 
 def test_rerun_refuses_to_write_over_a_finished_plate(squid_dataset, tmp_path):
     root, _ = squid_dataset
@@ -247,7 +211,7 @@ def test_rerun_refuses_to_write_over_a_finished_plate(squid_dataset, tmp_path):
     assert first["n_wells"] == 2
     with pytest.raises(SystemExit, match="--overwrite"):
         run(ProcessParameters(input_folder=str(root), output_folder=str(tmp_path), limit=1))
-    # ...and the good plate is untouched: it still DECLARES both wells.
+    # the good plate is untouched: it still declares both wells.
     plate = Path(first["plate"])
     declared = json.loads((plate / "zarr.json").read_text())
     wells = [w["path"] for w in declared["attributes"]["ome"]["plate"]["wells"]]
@@ -255,13 +219,8 @@ def test_rerun_refuses_to_write_over_a_finished_plate(squid_dataset, tmp_path):
 
 
 def test_an_incomplete_plate_is_refused_as_INPUT(squid_dataset, tmp_path):
-    """A written plate is a legal input, so "process this folder" can be aimed at a half-written one.
-
-    The CLI took it and reported honestly about the RUN while being wrong about the SAMPLE: it
-    would project whatever wells happened to land and exit 0. The store says it is unfinished; the
-    opener has to read that. (The GUI's `Open a computed .hcs plate` had the same hole and looked
-    for a marker no writer produces.)
-    """
+    """A written plate is a legal input; the opener must refuse one the store itself marks
+    incomplete, rather than silently projecting whatever wells happened to land."""
     from squidxplorer._output import _mark_incomplete
 
     root, _ = squid_dataset
@@ -284,16 +243,13 @@ def test_overwrite_proceeds(squid_dataset, tmp_path):
     assert manifest["n_wells"] == 1
 
 
-# --- exit codes: the headline -------------------------------------------------------------------
-
 def test_main_exits_zero_on_a_complete_run(squid_dataset, tmp_path):
     root, _ = squid_dataset
     assert main([str(root), "--output-folder", str(tmp_path)]) == EXIT_OK
 
 
 def test_main_exits_nonzero_when_the_plate_is_empty(squid_dataset, tmp_path):
-    # THE defect: every target skipped, "0/2 wells written", and the process exited 0, so no
-    # batch loop could detect it.
+    # every target skipped must not exit 0, or a batch loop can't detect it.
     root, _ = squid_dataset
     for region in ("B2", "B3"):
         _break_well(root, region)
@@ -312,8 +268,7 @@ def test_main_exits_two_on_a_bad_command_line(squid_dataset, tmp_path, capsys):
     root, _ = squid_dataset
     assert main([str(root), "--projector", "nope"]) == EXIT_USAGE
     assert "unknown operator" in capsys.readouterr().err
-    # 2 is USAGE and must stay distinct from the data outcomes, or a script cannot tell "you
-    # typed it wrong" from "the acquisition was bad".
+    # USAGE must stay distinct from the data outcomes, or a script can't tell "typo" from "bad data".
     assert EXIT_USAGE not in (EXIT_OK, EXIT_NOTHING, EXIT_PARTIAL, EXIT_INTERRUPTED)
 
 
@@ -323,8 +278,6 @@ def test_exit_code_maps_every_outcome():
     assert exit_code({"outcome": "partial", "n_fields_written": 1}) == EXIT_PARTIAL
     assert exit_code({"outcome": "stopped", "n_fields_written": 1}) == EXIT_INTERRUPTED
 
-
-# --- progress + cancel --------------------------------------------------------------------------
 
 def test_run_reports_every_well_as_it_lands(squid_dataset, tmp_path, caplog):
     import logging
@@ -346,14 +299,8 @@ def _summary_line(caplog) -> str:
 
 def test_the_summary_line_counts_fields_and_wells_each_against_its_own_total(squid_dataset,
                                                                             tmp_path, caplog):
-    """FIELDS over WELLS, labelled "wells written", is not a fraction — it is two units.
-
-    The fixture is 2 wells x 2 FOVs, so a whole-plate `--n-fovs 0` run writes 4 fields into 2
-    wells. `n_fields_written` (4) over `n_wells` (2) printed "4/2 wells written"; on the real
-    ~/Downloads/sim_5d_2x2_t3 (4 wells x 4 FOVs) the same line read "16/4 wells written".
-    `_Progress` already carries the warning in a comment — "n counts FIELDS, not wells" — and the
-    summary forty lines below did the pretending anyway.
-    """
+    """fields and wells are two different units; the summary must report each against its own
+    total rather than dividing one by the other."""
     import logging
 
     root, _ = squid_dataset
@@ -370,12 +317,7 @@ def test_the_summary_line_counts_fields_and_wells_each_against_its_own_total(squ
 
 def test_the_summary_line_counts_only_the_wells_that_actually_landed(squid_dataset, tmp_path,
                                                                      caplog):
-    """A run that lost a well must not report a numerator larger than its denominator.
-
-    With B3 unreadable, 2 of 4 fields land, in 1 of 2 wells. The old line divided fields by wells
-    and printed "2/2 wells written" — a plate missing half its fields described as whole; on the
-    real 4-well set it printed "12/4 wells written" on a run that had just lost a quarter of it.
-    """
+    """A run that lost a well must not report a numerator larger than its denominator."""
     import logging
 
     root, _ = squid_dataset

@@ -1,68 +1,4 @@
-"""IMA-184 output: canonical multiscale OME-zarr HCS plate + individual-TIFF export.
-
-Consumes IMA-188's ``project_plate`` stream (single-thread — the engine parallelises the
-projection internally and hands results back one at a time, so the writer needs no locking)
-and writes each well as it arrives. Two outputs from one pass:
-
-  1. ``<out>/plate.ome.zarr``  — OME-NGFF v0.5 HCS *plate* (zarr v3), Squid's canonical
-     ``control/core/zarr_writer.py`` layout EXTENDED with a per-FOV pyramid (levels 0..L, each a 2x
-     block-mean of the previous) so a pyramid-aware reader / plate navigator can show a field without
-     pulling full-res. Level 0 stays full-res and pixel-exact, so canonical single-level consumers are
-     unchanged; fields <= 256 px keep just level 0:
-        plate.ome.zarr/                     zarr.json  = plate group (rows/columns/wells)
-          {row}/                            zarr.json  = row group (bare)
-            {col}/                          zarr.json  = well group (images -> raw fov ids)
-              {fov}/                        zarr.json  = image group (multiscales + omero)
-                0/                          array: full-res (T, C, Nz, Y, X), native dtype
-                                            (Nz>1 for a plane-op result -- IMA-277)
-                1/ 2/ ...                   array: 2x-downsampled pyramid levels (native dtype)
-     Opens in ndviewer_light (directory-walk -> array ``0`` + ``omero`` colors; it reads only level 0)
-     AND validates as a spec plate (plate/well group metadata) under an independent reader (zarr-python).
-
-  2. ``<out>/tiff/{t}/{region}_{fov}_{z}_{channel}.tiff`` — individual per-plane TIFFs in Squid's
-     filename convention, native dtype. ``{z}`` is the plane index: ``0`` for a z-reduced result
-     (the projection), and one file per plane for a plane-op's full-depth result. You Yan's
-     "individual tiff output": channel identity lives in the filename, no OME-XML, so it drops
-     straight into Nick's existing Squid-reading workflow.
-
-Flow::
-
-    reader.metadata ─► select_fovs ─► plate/row/well GROUP metadata written UP FRONT
-                                       (full layout known from metadata, so the stream's
-                                        completion-order arrival needs no ordering logic)
-    project_plate(reader, ...) ─► (region, fov, (T,C,Nz,Y,X))
-                                       │  per well, as it arrives:
-                                       ├─► field group: array 0 (full-res) + multiscales + omero
-                                       └─► individual TIFFs (one per channel, per timepoint)
-
-IMA-217 adds ONE thing to the metadata: each dataset also carries an NGFF ``translation``
-transform — the field's top-left corner in stage MICROMETRES, derived from
-``metadata["fov_positions_um"]`` (which records FOV *centres*, so half a frame is subtracted;
-see :func:`field_origin_um`). Per the NGFF v0.4/v0.5 spec a dataset MUST have exactly one
-``scale`` and MAY have one ``translation`` listed *after* it, each with one entry per axis —
-which is exactly what is written, so stock readers (ome-zarr-py, napari-ome-zarr) are unaffected
-while the plate becomes self-describing in world space. ``squidxplorer._tilesource`` rebuilds the
-whole plate layout from it without ever re-reading coordinates.csv. Acquisitions with no stage
-positions get no translation and are byte-identical to the pre-IMA-217 output.
-
-IMA-230 puts a DISK PRE-FLIGHT in front of the whole thing: the write is estimated from the real
-numbers (fields x n_t x channels x frame bytes x the exact pyramid factor) and refused up front,
-naming the estimate and the free space, instead of dying most of the way through and leaving a
-half-written store. While it runs, the store carries a ``.squidxplorer-incomplete`` marker, every
-field is published by atomic rename (so a field is never half-visible) and each region's
-intermediates are swept as it finishes. See :func:`estimate_write_bytes` / :func:`check_disk_space`.
-
-IMA-231 adds, per WELL and only on this persist path (the live viewer already has
-coordinates.csv), a Fractal/ngio ``tables/FOV_ROI_table``: an AnnData-encoded ROI table giving
-every FOV's box in µm, so an external tool can recover FOV boundaries after the region is fused.
-Its corners are :func:`field_origin_um` — the same top-left corner as the NGFF ``translation`` and
-as ``_tilesource.fov_bboxes_um``. See :func:`fov_roi_records_um`.
-
-Colors come from ``metadata.channels[].display_color`` (IMA-189 already resolves them, mapped
-by name, raising on an unrecognised channel) — the writer never re-parses the acquisition YAML.
-Channel order in ``omero`` and in the TIFF filenames follows ``metadata.channels`` order, which
-is exactly the array's C-axis order (IMA-183 builds the C axis from that list).
-"""
+"""Canonical multiscale OME-Zarr HCS plate output + individual-TIFF export."""
 
 from __future__ import annotations
 
@@ -88,69 +24,22 @@ from squidxplorer.projection import (
     select_fovs,
 )
 
-# The OME-NGFF SPEC version of the metadata payload. It says which published schema the
-# ``attributes.ome`` blocks conform to, and it belongs to OME. It is NOT a statement about
-# SquidXplorer's own layout promises (the hierarchy, TCZYX, what level 0 means, micrometre units) --
-# that is ``contract.PLATE_CONTRACT_VERSION``, stamped once on the plate group below and compared
-# by ``reader``. Two stores can be valid NGFF 0.5 and disagree on everything this package assumes.
 _NGFF_VERSION = "0.5"
 
-# Pyramid: halve (Y, X) per level until the coarsest level fits in a screen-sized tile, capped at a
-# few levels. A per-FOV pyramid IS worthwhile at HCS scale (4168x4168 fields): the coarse levels let
-# a plate navigator / pyramid-aware reader (napari, a future LOD viewer) show a well without pulling
-# the full-res plane. Small fields (<= _PYRAMID_MIN_YX, e.g. test frames) collapse to level 0 alone,
-# so the canonical single-level output is unchanged for them.
 _PYRAMID_MIN_YX = 256
 _PYRAMID_MAX_LEVELS = 6
-_WRITE_WORKERS = min(4, _default_workers())   # bounded writer pool overlapping pyramid-build + zstd
-#                            (~75% of end-to-end wall time when serial) with projection. Adapt to the
-#                            machine like the engine (never more writer threads than usable cores);
-#                            4 is plenty — the write stage is I/O + compress bound, not CPU-scaling.
+_WRITE_WORKERS = min(4, _default_workers())
 
 
-# --- IMA-230: disk pre-flight guard ----------------------------------------------------------
-#
-# Squid already stops an acquisition BEFORE it overflows the disk, in
-# ``control/widgets.py::check_space_available_with_error_dialog`` +
-# ``control/core/multi_point_controller.py::get_estimated_acquisition_disk_storage``. Four things
-# are reused here, deliberately, rather than a new policy being invented:
-#   1. count the units of work first (Squid: Nt x NZ x FOVs x configs = images), multiply by a
-#      per-unit byte cost;
-#   2. a FACTOR OF SAFETY on the estimate before the comparison (Squid: 1.03) — an over-estimate
-#      only ever asks for a roomier disk, which is the safe way to be wrong;
-#   3. a small fixed allowance for the non-image files (Squid: 100 kB of metadata/JSON);
-#   4. ``shutil.disk_usage(dir).free`` on the SAVE DIRECTORY (Squid's ``utils.get_available_disk_space``)
-#      and refuse up front with a message naming BOTH numbers.
-# SquidXplorer adds what Squid cannot know: the pyramid tail (:func:`plate_pyramid_factor`, the exact
-# level-shape sum this module writes, not a 4/3 approximation) and the optional second TIFF copy.
-#
-# This is the SAME policy the plate viewer's pre-flight check applies (``_viewer._check_disk``,
-# which refused a ~6 GB write during IMA-206): field count x n_t x channels x frame bytes x
-# pyramid, refused when it would eat past the headroom. That check is the GUI's early warning —
-# it can only warn a user before a run starts. This one is the ENFORCEMENT point on the write
-# path itself, so the CLI, the tests and any programmatic caller get the same refusal; it uses
-# the exact pyramid factor where the viewer uses the 1.34 closed form, so it is never the looser
-# of the two. ``_viewer._check_disk`` should be reduced to a call to
-# :func:`estimate_write_bytes` / :func:`check_disk_space` (that file is owned elsewhere today).
-
-_DISK_SAFETY_FACTOR = 1.03          # Squid's `factor_of_safecty`
-_DISK_NON_IMAGE_BYTES = 100 * 1024  # Squid's `non_image_file_size`: zarr.json/omero/attrs allowance
-_DISK_HEADROOM = 0.10               # keep this FRACTION of free space free (viewer: est > free*0.9)
-_DISK_MIN_FREE_BYTES = 256 * 1024 ** 2   # ...and never less than this, however small the disk is.
-#                                          A percentage alone lets an almost-full disk approve a
-#                                          write that lands it at a few MB free, where everything
-#                                          else on the machine then fails. Both are overridable.
-#: The ONE name for "this store did not finish writing", and the ONE place the question is
-#: answered (:func:`is_incomplete`). Public because three surfaces ask it -- the CLI's ``--check``,
-#: :mod:`squidxplorer.contract.validate`, and the GUI's "Open a computed .hcs plate" -- and a second
-#: marker file in a second directory is how the third of them came to open a plate with a third of
-#: its fields missing while the other two refused it.
+_DISK_SAFETY_FACTOR = 1.03
+_DISK_NON_IMAGE_BYTES = 100 * 1024
+_DISK_HEADROOM = 0.10               # keep this FRACTION of free space free
+_DISK_MIN_FREE_BYTES = 256 * 1024 ** 2   # ...and never less than this absolute floor
+#: Marker for "this store did not finish writing"; :func:`is_incomplete` is the one reader.
 INCOMPLETE_MARKER = ".squidxplorer-incomplete"
-#: The pre-rename spelling (this package was ``squidmip`` until 2026-08-12). Read and cleared,
-#: never written: a store an old build marked incomplete must not read as whole under this one.
+# The pre-rename spelling (package was ``squidmip``): read and cleared, never written.
 _MARKER_NAMES = (INCOMPLETE_MARKER, ".squidmip-incomplete")
-_PARTIAL_PREFIX = "."               # in-progress field dirs are ".{fov}.partial" — a leading dot
-#                                     keeps them out of ndviewer's digit-named field discovery.
+_PARTIAL_PREFIX = "."               # dot prefix keeps partials out of digit-named field discovery
 _PARTIAL_SUFFIX = ".partial"
 _GB = 1024 ** 3
 
@@ -170,12 +59,7 @@ def _env_float(name: str, default: float) -> float:
 
 
 def plate_pyramid_factor(frame_shape, **kw) -> float:
-    """Total written pixels per level-0 pixel, i.e. the exact pyramid overhead of one field.
-
-    ``1 + 1/4 + 1/16 + ...`` truncated at the real level ladder :func:`pyramid_shapes` produces
-    (and, for odd axes, at the real cropped shapes) — not the 4/3 infinite-sum approximation. A
-    field too small to pyramid returns exactly 1.0.
-    """
+    """Total written pixels per level-0 pixel, i.e. the exact pyramid overhead of one field."""
     shapes = pyramid_shapes(frame_shape, **kw)
     y0, x0 = shapes[0]
     return float(sum(y * x for y, x in shapes) / (y0 * x0))
@@ -184,24 +68,7 @@ def plate_pyramid_factor(frame_shape, **kw) -> float:
 def estimate_write_bytes(metadata: dict, *, n_fovs: Optional[int] = 1, regions=None,
                          tiff: bool = False, n_z: int = 1,
                          region_operator: bool = False) -> int:
-    """Bytes :func:`write_from_stream` will need for this acquisition, from the real numbers.
-
-    ``n_regions x n_fovs x n_channels x n_z x frame_bytes``, times the pyramid factor, times the
-    safety factor, plus the fixed non-image allowance — and times ``n_t``, which is the term whose
-    omission let a time-lapse fill the disk mid-write.
-
-    ``n_z`` is the number of Z planes *written per field*. It is 1 for a z-REDUCER (mip,
-    reference, decon3d collapse z) and the acquisition's ``n_z`` for a PLANE-OP (bgsub, decon,
-    flatfield, spot, cellpose keep every plane — IMA-277), which is a 10x difference on the 10x
-    tissue set. :func:`write_plate` derives it from the operator's own ``consumes`` declaration
-    and passes it here, so the guard sizes the write that is actually about to happen; it defaults
-    to 1 because a 10x over-estimate refuses runs that would have fit and is no kinder than an
-    under-estimate.
-
-    UNCOMPRESSED throughout: real fluorescence zstds unpredictably (often < 1.2x), so discounting
-    for compression would under-estimate. Returns 0 when the metadata cannot support an estimate
-    (no ``frame_shape``); the caller then skips the check rather than blocking on a guess.
-    """
+    """Bytes :func:`write_from_stream` will need for this acquisition (uncompressed estimate)."""
     frame_shape = metadata.get("frame_shape")
     channels = metadata.get("channels") or []
     if not frame_shape or not channels:
@@ -212,10 +79,7 @@ def estimate_write_bytes(metadata: dict, *, n_fovs: Optional[int] = 1, regions=N
 
     scoped = list(fovs_per_region) if regions is None else [r for r in regions if r in fovs_per_region]
     if region_operator:
-        # A REGION operator (stitch) emits ONE fused mosaic per region, sized to the bounding box
-        # of that region's placed FOVs -- not one frame per FOV. Counting frames here would
-        # under-estimate by roughly the overlap factor and let a stitched plate overrun the disk,
-        # which is the exact failure this guard exists to prevent.
+        # A region operator emits one fused mosaic per region, not one frame per FOV.
         px_per_field = _region_mosaic_pixels(metadata, scoped, (ny, nx))
     else:
         if n_fovs is None:
@@ -232,13 +96,7 @@ def estimate_write_bytes(metadata: dict, *, n_fovs: Optional[int] = 1, regions=N
 
 
 def _region_mosaic_pixels(metadata: dict, scoped, frame_shape) -> int:
-    """Total pixels a region operator writes: the summed area of each region's fused mosaic.
-
-    Uses the real stage positions, so overlap is accounted for -- a 27-FOV well at ~10% overlap
-    is meaningfully smaller than 27 whole frames, and meaningfully larger than one. Falls back to
-    frames-as-a-dense-grid when positions are missing, because over-estimating a disk requirement
-    is safe and under-estimating is what fills the disk.
-    """
+    """Total pixels a region operator writes: the summed area of each region's fused mosaic."""
     ny, nx = int(frame_shape[0]), int(frame_shape[1])
     positions_um = metadata.get("fov_positions_um") or {}
     px_um = metadata.get("pixel_size_um")
@@ -263,12 +121,7 @@ def _region_mosaic_pixels(metadata: dict, scoped, frame_shape) -> int:
 
 
 def free_bytes(path) -> int:
-    """Free bytes on the filesystem that will hold *path* — Squid's ``get_available_disk_space``.
-
-    Squid requires the directory to exist; a write destination legitimately does not yet, so the
-    nearest EXISTING ancestor is stat-ed instead (same filesystem, same answer). Returns -1 when
-    the filesystem cannot be stat-ed at all, which the caller reads as "don't block".
-    """
+    """Free bytes on the filesystem that will hold *path*, or -1 when it cannot be stat-ed."""
     p = Path(path).absolute()
     for candidate in (p, *p.parents):
         if candidate.is_dir():
@@ -281,12 +134,7 @@ def free_bytes(path) -> int:
 
 def check_disk_space(out_dir, required_bytes: int, *, headroom: Optional[float] = None,
                      min_free_bytes: Optional[int] = None, what: str = "this write") -> None:
-    """Raise :class:`InsufficientDiskSpaceError` unless *required_bytes* fits with headroom.
-
-    Headroom defaults to :data:`_DISK_HEADROOM` of the free space but never less than
-    :data:`_DISK_MIN_FREE_BYTES`, so an estimate can never consume the last of the disk; both are
-    overridable per call and via ``SQUIDXPLORER_DISK_HEADROOM`` / ``SQUIDXPLORER_MIN_FREE_BYTES``.
-    """
+    """Raise :class:`InsufficientDiskSpaceError` unless *required_bytes* fits with headroom."""
     if required_bytes <= 0:
         return
     frac = _env_float("SQUIDXPLORER_DISK_HEADROOM", _DISK_HEADROOM) if headroom is None else float(headroom)
@@ -307,31 +155,13 @@ def check_disk_space(out_dir, required_bytes: int, *, headroom: Optional[float] 
         )
 
 
-# --- IMA-230: partial-write hygiene ----------------------------------------------------------
-
 def is_incomplete(plate_dir) -> bool:
     """True while a plate store is mid-write, or if the write that made it never finished."""
     return any((Path(plate_dir) / name).exists() for name in _MARKER_NAMES)
 
 
 def incomplete_reason(plate_dir) -> Optional[str]:
-    """One sentence naming this store's shortfall, or ``None`` when it is whole.
-
-    THE marker is :data:`INCOMPLETE_MARKER`, written by :func:`write_from_stream` and by nothing
-    else, and this is how a READER turns it into words. It exists because every opener was
-    otherwise free to invent its own name for the same fact: the plate window checked a file
-    called ``INCOMPLETE`` that no writer has ever produced (its only writer,
-    ``_viewer._note_partial_output``, had zero callers), so a stopped save opened as a finished
-    acquisition — 3 of 8 fields on disk, the marker present, and the guard reading a different
-    path. Two names for one fact is the same defect as no name at all.
-
-    The marker's own recorded numbers are quoted rather than re-derived: it knows how many fields
-    the run owed and how many landed, and whether a human stopped it.
-
-    Accepts the STORE (``…/plate.ome.zarr``) or the ``.hcs`` folder holding it, because callers
-    legitimately hold either and making each one resolve that itself is how the second name got
-    invented in the first place.
-    """
+    """One sentence naming this store's shortfall, or ``None`` when it is whole."""
     root = Path(plate_dir)
     marker = next((p for d in (root, root / "plate.ome.zarr")
                    for name in _MARKER_NAMES
@@ -347,8 +177,7 @@ def incomplete_reason(plate_dir) -> Optional[str]:
     if isinstance(owed, int) and isinstance(wrote, int):
         return (f"the write that produced this plate {how}: {wrote} of {owed} field(s) landed, "
                 f"so wells its own metadata promises are not on disk")
-    # No counts: the marker was written at the START of the run and never replaced, i.e. the
-    # process died. That is MORE incomplete than a stop, not less, so it must never read as milder.
+    # No counts means the marker was never replaced, i.e. the process died mid-run.
     return (f"the write that produced this plate {how} — it was still running when it ended, so "
             f"an unknown number of the wells its metadata promises are not on disk")
 
@@ -370,24 +199,14 @@ def _partial_dir(well_dir: Path, fov) -> Path:
 
 
 def _publish(tmp: Path, final: Path) -> None:
-    """Atomically make *tmp* visible as *final* — a field appears whole or not at all.
-
-    ``os.replace`` on a directory needs the target absent (or an empty dir), so a rerun's old
-    field is removed first; the window between the two is the only moment a reader could see the
-    field missing, and a missing field is honest where a half-written one is not.
-    """
+    """Atomically make *tmp* visible as *final* — a field appears whole or not at all."""
     if final.exists():
         shutil.rmtree(final)
     os.replace(tmp, final)
 
 
 def _cleanup_partials(directory: Path) -> int:
-    """Remove any leftover ``.{fov}.partial`` intermediates under *directory*. Returns the count.
-
-    Called per REGION as its last field lands (and once at the end), so a long multi-region run
-    never accumulates every region's intermediates at once — a crashed field's temp directory is
-    reclaimed while the next region is still being projected, not hours later.
-    """
+    """Remove any leftover ``.{fov}.partial`` intermediates under *directory*. Returns the count."""
     n = 0
     if not directory.is_dir():
         return 0
@@ -398,30 +217,8 @@ def _cleanup_partials(directory: Path) -> int:
     return n
 
 
-# --- well id <-> row/col --------------------------------------------------------------------
-
 def parse_well_id(region: str) -> tuple[str, str]:
-    """Split a well id into (row_letters, col_digits) — vendored from Squid ``utils.parse_well_id``.
-
-    Squid's canonical parser upper-cases then partitions alphabetic vs numeric characters
-    (``"aa3" -> ("AA", "3")``); the HCS layout is ``plate.ome.zarr/{row}/{col}/{fov}/0`` and
-    ndviewer_light rebuilds ``well_id = row_dir + col_dir`` by concatenation. So the column is
-    NOT zero-padded — ``B2 -> B/2`` (``B/02`` would still be discovered, ``"02".isdigit()`` is
-    True, but report the well as ``B02`` != the real id ``B2``, breaking well-id fidelity).
-
-    We match Squid's accepted inputs exactly (multi-letter rows, no padding) but,
-    for a scientific tool, additionally ASSERT the canonical ``<letters><digits>`` shape and
-    fail loud: a manual/no-plate region (Squid would silently accumulate stray chars into the
-    column) must not be written to a mislabelled directory.
-
-    CASE IS PRESERVED, deliberately diverging from Squid's ``.upper()``. The region id is
-    reconstructed from the directory names by concatenation, so upper-casing here is not a
-    normalisation, it is data loss: a freeform region ``manual0`` round-tripped through
-    ``MANUAL/0/`` and came back as ``MANUAL0``, silently renaming the acquisition's own regions.
-    The shape assertion below already guarantees ``letters + digits == region``, so preserving
-    case keeps the round trip exact for every input it accepts. Squid writes uppercase well ids,
-    so real well-plate acquisitions are unaffected.
-    """
+    """Split a well id into (row_letters, col_digits); case preserved, canonical shape enforced."""
     s = str(region)
     letters = "".join(c for c in s if c.isalpha())
     digits = "".join(c for c in s if not c.isalpha())
@@ -434,7 +231,6 @@ def parse_well_id(region: str) -> tuple[str, str]:
     return letters, digits
 
 
-# Back-compat alias for the earlier name used in this module's history.
 split_well = parse_well_id
 
 
@@ -442,8 +238,6 @@ def _row_sort_key(row: str):
     # Plate row order: A..Z then AA..AF (shorter labels first, then lexicographic).
     return (len(row), row)
 
-
-# --- NGFF metadata builders -----------------------------------------------------------------
 
 def plate_metadata(regions: Iterable[str], field_count: int, name: str = "plate") -> dict:
     """OME-NGFF v0.5 ``plate`` group metadata from the well ids (rows/columns/wells)."""
@@ -467,45 +261,18 @@ def plate_metadata(regions: Iterable[str], field_count: int, name: str = "plate"
 
 
 def _downsample_yx(image: np.ndarray) -> np.ndarray:
-    """Halve a ``(T, C, Z, Y, X)`` field in Y and X by 2x2 block-mean, native dtype kept.
-
-    Each spatial axis is halved only when it has >= 2 px — a size-1 axis is left intact, so a narrow
-    strip never collapses to a zero-width level (which would divide-by-zero in ``_multiscales``). Odd
-    axes are cropped by one before halving. Vectorised reshape+mean over the whole 5-D field is ~3x
-    faster than looping ``_area_downsample`` per plane (measured 250ms vs 670ms for a 4168x4168x4ch
-    field), which matters because every written well pays this per level. Rounded back to the source
-    dtype (clamped for integers). mean in float32 (not float64) halves the transient and is exact for
-    a 2x2 mean of uint16 (max sum 4*65535 is within float32's integer range).
-    """
+    """Halve a ``(T, C, Z, Y, X)`` field in Y and X by 2x2 block-mean, native dtype kept."""
     fy = 2 if image.shape[-2] >= 2 else 1
     fx = 2 if image.shape[-1] >= 2 else 1
     y = (image.shape[-2] // fy) * fy                       # crop to a multiple of the axis factor
     x = (image.shape[-1] // fx) * fx
     cropped = image[..., :y, :x]
     ds = cropped.reshape(*cropped.shape[:-2], y // fy, fy, x // fx, fx).mean(axis=(-3, -1), dtype=np.float32)
-    return cast_like(ds, image.dtype, copy=False)   # in place: `ds` is ours, and this is per level
+    return cast_like(ds, image.dtype, copy=False)
 
 
 def _subsample_yx(image: np.ndarray) -> np.ndarray:
-    """Halve a ``(T, C, Z, Y, X)`` field in Y and X by taking one pixel per 2x2 block.
-
-    The LABELS counterpart of :func:`_downsample_yx`, and the reason it exists is arithmetic:
-    a label image's pixels are OBJECT IDS, and the mean of two ids is a third id belonging to a
-    third object. Measured on a real ``spot`` run over the 10x set (region ``manual0``, fov 0,
-    z 5): of 1 085 764 level-1 pixels, **1004 carried an id present in none of their four level-0
-    source pixels** — 2x2 blocks holding only background and object 4 were written as object 2,
-    which is a real object elsewhere in the field, so nothing about the result looks corrupt.
-
-    This is the same arithmetic :mod:`squidxplorer._compose` already refuses ("a ``produces='labels'``
-    step that is not last — arithmetic on object ids"); the writer was performing it after the
-    engine had refused it.
-
-    Crops exactly as :func:`_downsample_yx` does (an odd axis loses its last row/column, a size-1
-    axis is left intact) so both reducers walk the ladder :func:`pyramid_shapes` predicts. Every
-    id written to a coarse level is therefore an id that is really there. Objects narrower than
-    ``2**level`` px still fall out of a coarse level — that is true of any label pyramid, and it
-    is why level 0 is the one that is pixel-exact.
-    """
+    """Halve a ``(T, C, Z, Y, X)`` field in Y and X by taking one pixel per 2x2 block (labels)."""
     fy = 2 if image.shape[-2] >= 2 else 1
     fx = 2 if image.shape[-1] >= 2 else 1
     y = (image.shape[-2] // fy) * fy                       # crop to a multiple of the axis factor
@@ -513,12 +280,7 @@ def _subsample_yx(image: np.ndarray) -> np.ndarray:
     return np.ascontiguousarray(image[..., :y:fy, :x:fx])
 
 
-#: How a pyramid level is derived from the one below it, per ``produces`` declaration. TOTAL over
-#: :data:`~squidxplorer.projection.RESULT_KINDS` — a kind missing from this table is refused by name in
-#: :func:`_reducer_for`, because "what do the pixels mean" is the question that decides whether
-#: averaging them is arithmetic or nonsense, and guessing it is how the labels defect happened.
-#: The value is ``(reducer, NGFF "type", NGFF method description)``; the last two are what the store
-#: says about itself, so a reader never has to reverse-engineer the pixels.
+#: How a pyramid level is derived from the one below it, per ``produces`` declaration.
 _REDUCERS = {
     INTENSITY: (_downsample_yx, "mean", "2x2 block mean"),
     LABELS: (_subsample_yx, "nearest", "2x2 nearest (object ids are never averaged)"),
@@ -526,12 +288,7 @@ _REDUCERS = {
 
 
 def _reducer_for(produces: str):
-    """``(reducer, ngff_type, description)`` for a result kind, or raise naming the kind.
-
-    Refuses rather than defaulting to the mean. An unknown kind defaulting to ``INTENSITY`` is
-    exactly how a label image came to be block-averaged: the writer never asked what its pixels
-    meant, so it applied the only reduction it had.
-    """
+    """``(reducer, ngff_type, description)`` for a result kind, or raise naming the kind."""
     try:
         return _REDUCERS[str(produces)]
     except KeyError:
@@ -546,20 +303,7 @@ def _reducer_for(produces: str):
 def _pyramid(image: np.ndarray, *, min_yx: int = _PYRAMID_MIN_YX,
              max_levels: int = _PYRAMID_MAX_LEVELS,
              produces: str = INTENSITY) -> list[np.ndarray]:
-    """Level list ``[full-res, /2, /4, ...]`` — halving until the coarsest fits *min_yx*
-    (or *max_levels*). A field already <= the floor yields just ``[image]`` (level 0).
-
-    *produces* is the operator's own declaration and it picks the REDUCER (:data:`_REDUCERS`),
-    never the operator's name. It joins the other generic readers of that declaration — the napari
-    layer type, ``_compose``'s "a labels step must be last", and ``_stitch``'s refusal to FEATHER a
-    labels mosaic, which is the same argument about the same pixels one module over: a weighted
-    blend of two object ids is a third object's id, and so is their mean.
-
-    The stopping rule is duplicated, shape-only, in :func:`pyramid_shapes`; the two are pinned
-    together by a test, because IMA-217 needs the level ladder BEFORE any pixels exist (it builds
-    the viewer's :class:`~squidxplorer._tiling.Geometry` from metadata alone). Both reducers crop
-    identically, so the ladder is the same whichever one is chosen.
-    """
+    """Level list ``[full-res, /2, /4, ...]``, halving until the coarsest fits *min_yx*."""
     reduce_yx, _type, _desc = _reducer_for(produces)
     levels = [image]
     while (max(levels[-1].shape[-2:]) > int(min_yx) and len(levels) < int(max_levels)):
@@ -569,12 +313,7 @@ def _pyramid(image: np.ndarray, *, min_yx: int = _PYRAMID_MIN_YX,
 
 def pyramid_shapes(frame_shape, *, min_yx: int = _PYRAMID_MIN_YX,
                    max_levels: int = _PYRAMID_MAX_LEVELS) -> list[tuple[int, int]]:
-    """The ``(Y, X)`` of every pyramid level :func:`_pyramid` would write, from the shape alone.
-
-    Pure arithmetic — no array, no I/O — so a viewer can build its level ladder from acquisition
-    metadata before a single field has been projected. Mirrors ``_downsample_yx``: an axis with
-    < 2 px is left intact, an odd axis is cropped by one before halving (so 521 -> 260, not 261).
-    """
+    """The ``(Y, X)`` of every pyramid level :func:`_pyramid` would write, from the shape alone."""
     y, x = int(frame_shape[0]), int(frame_shape[1])
     if y < 1 or x < 1:
         raise ValueError(f"frame_shape must be positive, got {frame_shape!r}")
@@ -588,25 +327,7 @@ def pyramid_shapes(frame_shape, *, min_yx: int = _PYRAMID_MIN_YX,
 
 def _multiscales(level_shapes: list[tuple], pixel_size_um: Optional[float], dz_um: Optional[float] = None,
                  position_um: Optional[tuple] = None, produces: str = INTENSITY) -> dict:
-    """multiscales metadata for a per-FOV pyramid: one ``datasets`` entry per level, its scale the
-    real downsample factor (level 0's Y,X over this level's Y,X) so physical coordinates stay true.
-
-    ``level_shapes`` is the (Y, X) of each written level, level 0 first. A single-element list gives
-    the canonical single-dataset ``0`` output (unchanged for small fields). Axes mirror Squid's
-    zarr_writer.
-
-    ``position_um`` is the field's TOP-LEFT corner in stage MICROMETRES — the world coordinate of
-    pixel (0, 0). Given it, each dataset also carries an NGFF ``translation`` transform (after the
-    scale, as the spec requires: scale then translation, one entry per axis), which is what makes
-    the plate self-describing in world space: a pyramid-aware reader (IMA-217's tile source, napari,
-    ome-zarr-py) can place every field on the plate WITHOUT re-reading coordinates.csv. Omitted when
-    the acquisition has no stage positions, keeping the canonical output byte-identical for those.
-
-    Corner convention: every level's translation is the same corner. Area-averaged downsampling
-    nudges the sample *centre* by half a coarse pixel; carrying that half-pixel here would make the
-    levels of one field disagree with each other by less than one coarse pixel while breaking the
-    "levels share an origin" assumption every mosaic compositor makes. Corner it is, documented.
-    """
+    """multiscales metadata for a per-FOV pyramid: one ``datasets`` entry per level."""
     _reduce, ngff_type, ngff_desc = _reducer_for(produces)
     p = float(pixel_size_um) if pixel_size_um else 1.0
     dz = float(dz_um) if dz_um else 1.0
@@ -622,12 +343,6 @@ def _multiscales(level_shapes: list[tuple], pixel_size_um: Optional[float], dz_u
     doc = {
         "version": _NGFF_VERSION,
         "name": "0",
-        # NGFF SHOULDs: name the downscaling method and record its provenance, so a consumer knows
-        # how the coarse levels were made without reverse-engineering the pixels. Read off the
-        # SAME table `_pyramid` reduces with (`_REDUCERS`), so the store cannot claim one method
-        # and carry another -- it used to say "2x2 block mean" unconditionally, which was a true
-        # statement about the code and a false one about a labels field, whose ids must not be
-        # averaged.
         "type": ngff_type,
         "metadata": {"method": f"squidxplorer._output.{_reduce.__name__}", "description": ngff_desc},
         "axes": [
@@ -643,28 +358,7 @@ def _multiscales(level_shapes: list[tuple], pixel_size_um: Optional[float], dz_u
 
 
 def _excitation_nm(channel: dict) -> Optional[float]:
-    """The channel's EXCITATION wavelength in nm, or None when its name states none.
-
-    EXCITATION, and the key it is written under says so. This used to be ``_wavelength_nm`` and
-    its one number was stamped into OME's ``emission_wavelength`` -- which is a different physical
-    quantity, off by the Stokes shift, on every fluorescence channel this instrument has:
-
-        Fluorescence_405_nm_Ex  ->  written 405 nm, emission is ~450 nm
-        Fluorescence_488_nm_Ex  ->  written 488 nm, emission is ~525 nm
-        Fluorescence_561_nm_Ex  ->  written 561 nm, emission is ~590 nm
-        Fluorescence_638_nm_Ex  ->  written 638 nm, emission is ~670 nm
-
-    (The right-hand column is this package's own answer, ``_decon.emission_um_for``, which exists
-    because a PSF is formed by the light that REACHES the sensor -- ``tests/test_decon.py`` pins
-    488 -> 0.525.) The channel names literally end in ``_Ex``. Nothing here invents an emission:
-    deriving one needs petakit's Stokes table, which is a decon dependency and not one the writer
-    is going to acquire, and a guessed emission on disk is worse than an honest excitation.
-
-    Delegates to :func:`squidxplorer._channels.excitation_nm` -- squidxplorer's OWN channel parse, the same
-    one that resolves the display colour and that ``_decon`` builds its PSF from. The private
-    regex this used to keep was a second parser of one fact, and it did not cope with the file
-    forms that one does (``Fluorescence_638_nm_-_Penta``).
-    """
+    """The channel's EXCITATION wavelength in nm, or None when its name states none."""
     from squidxplorer._channels import excitation_nm
 
     return excitation_nm(channel.get("name", ""))
@@ -688,25 +382,8 @@ def _omero(channels: list[dict], dtype) -> dict:
     return {"channels": out}
 
 
-# --- field + tiff writers --------------------------------------------------------------------
-
 def _validate_image(image: np.ndarray, channels: list[dict]) -> None:
-    """Fail loud on anything that isn't a ``(T, C, Nz, Y, X)`` operator result for these channels.
-
-    ``Nz > 1`` IS ACCEPTED (IMA-277). It used to be refused outright — "expected a projected
-    (T, C, 1, Y, X) array" — which was true of the only producer that existed when this was
-    written (a z-reducing projection) and false of five of the eight operators that exist now:
-    ``bgsub``, ``decon``, ``flatfield``, ``spot`` and ``cellpose`` are PLANE-OPS, so
-    ``project_well`` hands back the acquisition's full depth and this guard was the reason none
-    of them could be written to disk at all. The store has been 5-D with a real ``z`` axis since
-    the first version (see :func:`_multiscales`, which already scales it by ``dz_um``); nothing
-    but this check stood in the way.
-
-    What it still refuses is what it was actually protecting against: a non-5-D array, an EMPTY
-    axis (which would create a zero-sized zarr array and divide by zero building the pyramid),
-    and a channel count that disagrees with the metadata (which would mislabel ``omero``). A
-    genuinely malformed shape is still a seam bug and still fails here.
-    """
+    """Fail loud on anything that isn't a ``(T, C, Nz, Y, X)`` operator result for these channels."""
     if image.ndim != 5:
         raise ValueError(
             f"expected a 5-D (T, C, Z, Y, X) operator result, got shape {image.shape} "
@@ -726,13 +403,7 @@ def _validate_image(image: np.ndarray, channels: list[dict]) -> None:
 
 
 def field_origin_um(centre_um, frame_shape, pixel_size_um) -> Optional[tuple[float, float]]:
-    """Stage-µm ``(x, y)`` of a field's TOP-LEFT pixel, from its recorded CENTRE position.
-
-    ``metadata["fov_positions_um"]`` records where the stage was, i.e. the middle of the frame;
-    NGFF ``translation`` places pixel (0, 0). Half a frame apart — 388 µm on a 2084 px 20x field,
-    which is half an FOV of mosaic shear if it is skipped. Returns None when the position or the
-    pixel size is unknown, so the writer simply omits the translation instead of guessing an origin.
-    """
+    """Stage-µm ``(x, y)`` of a field's TOP-LEFT pixel, from its recorded CENTRE position."""
     if centre_um is None or not pixel_size_um or frame_shape is None:
         return None
     p = float(pixel_size_um)
@@ -744,28 +415,9 @@ def field_origin_um(centre_um, frame_shape, pixel_size_um) -> Optional[tuple[flo
 
 def _write_field(field_dir: Path, image: np.ndarray, channels: list[dict], pixel_size_um, dz_um=None,
                  position_um: Optional[tuple] = None, produces: str = INTENSITY) -> int:
-    """Write one field: pyramid levels ``0..L`` (0 = full-res, pixel-exact) + multiscales + omero.
+    """Write one field: pyramid levels ``0..L`` + multiscales + omero; returns the level count.
 
-    ``position_um`` is the field's top-left corner in stage µm (see :func:`field_origin_um`); it
-    becomes the NGFF ``translation`` on every dataset, so the plate carries its own world layout.
-
-    ``produces`` is the operator's own declaration, and it decides how the COARSE levels are
-    derived (:func:`_pyramid`) and what the store says it did (:func:`_multiscales`). It is passed
-    rather than sniffed: an integer array is an integer array whether its values are photon counts
-    or object ids, and only the declaration knows which. Defaulting it here would put the guess
-    back where it was.
-
-    Returns the number of levels written (1 for a small field with no pyramid).
-
-    Z IS WRITTEN ONE PLANE AT A TIME (IMA-277). The pyramid only ever halves Y and X — see
-    :func:`_downsample_yx`, which leaves every other axis alone — so plane ``k`` of level ``L`` is
-    a function of plane ``k`` of level 0 and of nothing else. Building the whole volume's pyramid
-    at once is therefore not required, and on a real per-plane fused mosaic it is not possible:
-    a 10-plane 4-channel mosaic of a 27-FOV 10x well is 8.79 GB and its pyramid another 2.9 GB, on
-    a 16 GB machine. Writing plane by plane keeps the writer's transient at ONE plane plus its
-    pyramid (~1.2 GB there), flat in stack depth, and the pixels are identical either way — the
-    zarr chunking is ``(1, 1, 1, <=1024, <=1024)``, so a z plane is a whole number of chunks and
-    no chunk is ever partially written.
+    Z is written one plane at a time to keep the writer's transient at one plane's pyramid.
     """
     _validate_image(image, channels)
     level_shapes = pyramid_shapes(image.shape[-2:])
@@ -774,9 +426,7 @@ def _write_field(field_dir: Path, image: np.ndarray, channels: list[dict], pixel
     for z in range(image.shape[2]):
         plane = np.asarray(image[:, :, z:z + 1])   # asarray: a spilled mosaic is read back here
         levels = _pyramid(plane, produces=produces)
-        # zip() would SILENTLY truncate if the two ladders ever disagreed, and _pyramid's stopping
-        # rule living in two places (here and pyramid_shapes) is exactly the kind of duplication
-        # that drifts. They are pinned by a test; this is the same pin, on real data.
+        # zip() would silently truncate if the two ladders ever disagreed.
         if len(levels) != len(stores):
             raise AssertionError(
                 f"pyramid ladder disagrees with pyramid_shapes: {len(levels)} levels built for "
@@ -798,20 +448,7 @@ def _write_field(field_dir: Path, image: np.ndarray, channels: list[dict], pixel
 
 
 def _write_tiffs(tiff_root: Path, region: str, fov: int, image: np.ndarray, channel_names: list[str]) -> None:
-    """Individual per-plane TIFFs: tiff/{t}/{region}_{fov}_{z}_{channel}.tiff, native dtype.
-
-    THE ``{z}`` FIELD IS THE Z INDEX, and always was — that is Squid's own filename convention,
-    which this export copies so the files drop into Nick's Squid-reading workflow. It was hardcoded
-    to ``0`` because the only producer collapsed z, and the loop read ``image[t, c, 0]``. A plane-op
-    result (IMA-277) has real depth, so the loop now walks it and the field carries the plane index
-    it always named. A z-reduced result is one plane at ``z=0``, i.e. byte-identical filenames and
-    contents to before.
-
-    Each plane is written to a ``.partial`` sibling and atomically renamed into place (IMA-230):
-    a run killed by a full disk used to leave an 8-byte ``.tiff`` that every downstream tool
-    happily opened as a real file. A rename either happens or does not, so a published TIFF is
-    always a complete one; the temp file is removed on the way out of a failure.
-    """
+    """Individual per-plane TIFFs: tiff/{t}/{region}_{fov}_{z}_{channel}.tiff, native dtype."""
     n_t, _, n_z = image.shape[:3]
     for t in range(n_t):
         tdir = tiff_root / str(t)
@@ -828,40 +465,6 @@ def _write_tiffs(tiff_root: Path, region: str, fov: int, image: np.ndarray, chan
                     tmp.unlink(missing_ok=True)
                     raise
 
-
-# --- IMA-231: FOV_ROI_table (Fractal / ngio ROI-table convention) -----------------------------
-#
-# WHAT THE SPEC ACTUALLY SAYS (read from ngio's source — the fractal-tasks-core "Table
-# specifications" page 404s now, table I/O moved to ngio, which fractal-tasks-core 2.x depends on):
-#
-#   * location   — ``<image group>/tables/<table_name>``; the ``tables`` group's attrs list the
-#                  table names: ``{"tables": ["FOV_ROI_table"]}``.
-#   * name       — ``FOV_ROI_table`` (``fractal_tasks_core.roi.v1.prepare_FOV_ROI_table``).
-#   * payload    — an AnnData object; the six REQUIRED columns are, exactly
-#                  (``ngio/tables/v1/_roi_table.py::REQUIRED_COLUMNS``):
-#                     x_micrometer, y_micrometer, z_micrometer,
-#                     len_x_micrometer, len_y_micrometer, len_z_micrometer
-#                  optional ones used here: x_micrometer_original / y_micrometer_original /
-#                  z_micrometer_original (ORIGIN_COLUMNS) and path_in_well (PLATE_COLUMNS).
-#   * index      — ``FieldIndex``, string, values ``FOV_1``, ``FOV_2``, ... (ngio
-#                  ``RoiTableV1Meta.index_key`` default; fractal's prepare_FOV_ROI_table does
-#                  ``adata.obs_names = "FOV_" + adata.obs.index``).
-#   * attrs      — ngio writes ``{"type": "roi_table", "table_version": "1",
-#                  "backend": "anndata_v1", "index_key": "FieldIndex", "index_type": "str"}``;
-#                  fractal-tasks-core <= 1.6 requires ``fractal_table_version: "1"`` instead.
-#                  Both are written — ngio's model is ``extra="allow"``, so old and new readers work.
-#   * origin     — "the axes origin for the ROI positions corresponds to the top-left corner of the
-#                  image (for the YX axes) and to the lowest Z plane", i.e. the LOWER BOUND of the
-#                  interval, a CORNER, never a centre; and ``prepare_FOV_ROI_table`` calls
-#                  ``reset_origin()``, so x/y_micrometer are relative to the image (here: the well)
-#                  while the absolute stage coordinate is kept in x/y_micrometer_original.
-#
-# UNITS. SquidXplorer's contract is micrometres with a ``_um`` suffix on every key; ngio's contract is
-# micrometres with a ``_micrometer`` suffix. Same unit, different spelling — so the two vocabularies
-# are joined by ONE explicit table (:data:`_NGIO_COLUMN`) and nothing is renamed by coincidence.
-# There is no scale factor in that map, and there must never be one: a millimetre anywhere here is
-# a bug (positions arrive from ``metadata["fov_positions_um"]``, which the reader already converted
-# from coordinates.csv's mm).
 
 _ROI_TABLE_NAME = "FOV_ROI_table"
 _ROI_INDEX_KEY = "FieldIndex"
@@ -884,28 +487,13 @@ _ROI_OBS_COLUMNS = ("path_in_well",)          # string columns -> AnnData obs (n
 
 def fov_roi_records_um(fovs, positions_um, frame_shape, pixel_size_um, *,
                        dz_um: Optional[float] = None, n_z: int = 1) -> list[dict]:
-    """One ROI record per FOV of one region — all lengths and positions in MICROMETRES (``_um``).
-
-    ``x_um``/``y_um`` are the TOP-LEFT CORNER, derived by :func:`field_origin_um` from the recorded
-    FOV **centre** — the same function that produces the NGFF ``translation`` this writer stamps on
-    every dataset, and the same corner ``squidxplorer._tilesource.fov_bboxes_um`` computes. One
-    definition, so a fused region's ROI boxes cannot drift half an FOV from the pixels.
-
-    ``*_original_um`` is that corner in ABSOLUTE stage µm; ``x_um``/``y_um`` are relative to the
-    region's own top-left corner (min over its FOVs), which is fractal's ``reset_origin`` — after a
-    region is fused, pixel (0, 0) of the fused image is exactly that minimum, so a consumer can use
-    the ROI boxes as pixel offsets without knowing where the stage was.
-
-    FOVs with no recorded position are skipped; an empty list means "no table" (the acquisition had
-    no coordinates.csv), never a table full of zeros.
-    """
+    """One ROI record per FOV of one region — all lengths and positions in MICROMETRES (``_um``)."""
     p = float(pixel_size_um or 0.0)
     if not p > 0:
         return []
     h, w = int(frame_shape[0]), int(frame_shape[1])
     len_x_um, len_y_um = w * p, h * p
-    # A projected field is one plane, but the ROI describes the physical volume it came from:
-    # z-spacing x n planes (the ngio spec's own rule for a 2D table). Unknown spacing -> one plane.
+    # The ROI describes the physical volume the plane came from: z-spacing x n planes.
     len_z_um = float(dz_um) * max(1, int(n_z)) if dz_um else 1.0
 
     raw = []
@@ -931,12 +519,7 @@ def fov_roi_records_um(fovs, positions_um, frame_shape, pixel_size_um, *,
 
 
 def _check_roi_micrometres(records: list[dict], frame_extent_um: float) -> None:
-    """Fail loud if the FOV pitch says the positions were millimetres wearing a ``_um`` key.
-
-    Same invariant (and the same 1000x defect) as ``_tilesource._check_micrometres``, applied at
-    the other end of the pipe: a table is a durable artifact an external tool will trust, so it
-    must not be the place a unit bug becomes permanent.
-    """
+    """Fail loud if the FOV pitch says the positions were millimetres wearing a ``_um`` key."""
     xs = sorted({round(r["x_um"], 6) for r in records})
     ys = sorted({round(r["y_um"], 6) for r in records})
     gaps = [b - a for v in (xs, ys) for a, b in zip(v, v[1:]) if b > a]
@@ -949,14 +532,7 @@ def _check_roi_micrometres(records: list[dict], frame_extent_um: float) -> None:
 
 
 def _zarr_write_anndata_roi_table(table_dir: Path, records: list[dict]) -> None:
-    """Write *records* as an AnnData-encoded zarr v3 group at *table_dir* (no anndata dependency).
-
-    The AnnData zarr encoding is a documented on-disk contract (``encoding-type`` /
-    ``encoding-version`` attrs), so it is written directly with zarr-python rather than taking a
-    dependency on anndata + h5py for nine columns. Numeric ``_micrometer`` columns go in ``X``
-    (``var`` names them, which is where ngio and fractal look for them); the string columns go in
-    ``obs``, whose ``_index`` is the ``FieldIndex``.
-    """
+    """Write *records* as an AnnData-encoded zarr v3 group at *table_dir* (no anndata dependency)."""
     import zarr
 
     root = zarr.open_group(str(table_dir), mode="w", zarr_format=3)
@@ -997,11 +573,7 @@ def _zarr_write_anndata_roi_table(table_dir: Path, records: list[dict]) -> None:
 
 
 def write_fov_roi_table(image_dir, records: list[dict], *, table_name: str = _ROI_TABLE_NAME) -> Optional[Path]:
-    """Write ``<image_dir>/tables/<table_name>`` from :func:`fov_roi_records_um` records.
-
-    Returns the table path, or None when there is nothing to write. The ``tables`` group's attrs
-    accumulate the table names (``{"tables": [...]}``), which is how ngio discovers them.
-    """
+    """Write ``<image_dir>/tables/<table_name>`` from :func:`fov_roi_records_um` records."""
     if not records:
         return None
     _check_roi_micrometres(records, float(records[0]["len_x_um"]))
@@ -1030,8 +602,6 @@ def write_fov_roi_table(image_dir, records: list[dict], *, table_name: str = _RO
     return table_dir
 
 
-# --- orchestration ---------------------------------------------------------------------------
-
 def write_from_stream(
     metadata: dict,
     stream: Iterator[tuple[str, int, np.ndarray]],
@@ -1053,35 +623,8 @@ def write_from_stream(
 ) -> dict:
     """Write the plate + (optionally) TIFFs from a ``(region, fov, image)`` stream and *metadata*.
 
-    The core of :func:`write_plate`, split out so it can be driven clean-room in tests with a
-    fabricated metadata dict + a hand-built stream (no reader, no data on disk).
-
-    Each projected well is handed to a bounded writer POOL (``write_workers`` threads) so the disk
-    write — pyramid build + zstd compress, ~75% of end-to-end wall time when serial — overlaps the
-    projection engine instead of starving it. Wells write to disjoint directories, so parallel
-    writes never contend; at most ~``write_workers`` wells are in flight, so peak memory stays
-    O(engine workers + write_workers), never the whole plate.
-
-    ``produces`` is the running operator's own ``produces`` declaration, and it is what the coarse
-    pyramid levels are derived by (:func:`_pyramid`). It has to travel: this writer receives an
-    array and a metadata dict, neither of which says whether the integers in it are photon counts
-    or OBJECT IDS, and 2x2-block-averaging the second kind invents ids. :func:`write_plate` reads
-    it off the registry with :func:`squidxplorer.operator_produces`; a caller driving this function
-    directly with intensity pixels can leave it alone.
-
-    ``on_well(region, fov, image)`` is an optional callback invoked after each well is written.
-    NOTE: it runs on a WRITER THREAD and several may overlap — it MUST be thread-safe (the plate
-    viewer guards its shared contrast/tiles with a lock). ``stop()`` is an optional predicate polled
-    before each submit; when it returns True the stream is abandoned and in-flight writes are drained
-    — a clean partial-plate stop for a cancelled GUI run.
-
-    IMA-230: before anything is created, the write is estimated (:func:`estimate_write_bytes`) and
-    refused with :class:`InsufficientDiskSpaceError` if it would not fit with headroom — nothing
-    is written at all, rather than dying 94% of the way through. ``check_disk=False`` opts out;
-    ``disk_headroom`` / ``min_free_bytes`` tune the reserve. While the store is being written it
-    carries a ``.squidxplorer-incomplete`` marker (:func:`is_incomplete`), each field is published by
-    atomic rename so a half-written one is never visible, and each region's intermediates are
-    swept as its last field lands.
+    ``on_well`` runs on a writer thread and must be thread-safe; ``stop()`` is polled before each
+    submit and drains in-flight writes when it returns True.
     """
     from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
     from threading import Lock
@@ -1097,39 +640,29 @@ def write_from_stream(
         check_disk_space(out_dir, need, headroom=disk_headroom, min_free_bytes=min_free_bytes,
                          what=scope)
 
-    # ONE fused region at a time when the result has real depth (IMA-277). The writer pool exists
-    # to overlap pyramid+zstd with the projection, and at 4 threads it holds up to 4 results at
-    # once -- fine at ~139 MB per projected FOV, fatal at 8.79 GB per 10-plane fused mosaic (4 of
-    # those is 35 GB). A region operator already streams one region at a time; this stops the
-    # WRITER from re-widening the window behind it. The per-FOV path is untouched.
+    # One fused region at a time when the result has real depth: a deep fused mosaic is GBs,
+    # so the writer pool must not re-widen the memory window behind the region stream.
     if region_operator and int(n_z) > 1:
         write_workers = 1
 
     wells = select_fovs(metadata, n_fovs=n_fovs)  # {region: [fov, ...]}, deterministic
-    # NGFF field_count is a single plate-level scalar and is int()-ed below, so n_fovs=None
-    # (= all FOVs) MUST be resolved to a concrete number here or the write raises TypeError
-    # deep in plate_metadata. A ragged plate reports the max, the only value that does not
-    # under-describe some well.
+    # field_count is a single plate-level scalar; n_fovs=None must resolve to a concrete number.
     field_count = resolve_n_fovs(metadata, n_fovs)
-    if regions is not None:   # subset: write only these wells (keep the requested order), for previews
+    if regions is not None:   # subset: write only these wells (keep the requested order)
         keep = list(dict.fromkeys(regions))
         wells = {r: wells[r] for r in keep if r in wells}
 
-    # Full plate/row/well group metadata written UP FRONT (layout is fully known from metadata).
-    # The plate contract stamp rides along, ONCE, on the plate group: it describes the whole store,
-    # and ``_NGFF_VERSION``'s history (written at four sites, read at zero) is the argument against
-    # scattering a version. ``reader`` compares it on open; see squidxplorer/contract/version.py.
+    # Full plate/row/well group metadata is written up front; the contract stamp rides on the
+    # plate group once.
     write_group(plate_dir, plate_metadata(wells.keys(), field_count=field_count),
                 attributes=contract_stamp())
-    # ...and the store declares itself unfinished from its first byte until its last (IMA-230), so
-    # a run killed mid-write leaves something a reader can TELL is incomplete.
+    # The store declares itself unfinished from its first byte until its last.
     fields_owed = sum(len(f) for f in wells.values())
     _mark_incomplete(plate_dir, {"wells": list(wells), "fields": fields_owed})
     for region, fovs in wells.items():
         row, col = parse_well_id(region)
         write_group(plate_dir / row)  # bare row group
-        # well.images paths are the RAW fov ids (Squid uses {fov} as the field dir + image path),
-        # not a re-indexed 0-based field index — so a non-contiguous fov set stays faithful.
+        # well.images paths are the RAW fov ids, so a non-contiguous fov set stays faithful.
         write_group(
             plate_dir / row / col,
             {"version": _NGFF_VERSION, "well": {"images": [{"path": str(f)} for f in fovs]}},
@@ -1147,12 +680,10 @@ def write_from_stream(
     def _write_one(region, fov, image):
         row, col = parse_well_id(region)
         well_dir = plate_dir / row / col
-        # Stage µm of the field's top-left pixel -> the NGFF translation. Frame shape comes from the
-        # IMAGE, not the metadata, so a cropped/binned field is placed at its true extent.
+        # Frame shape comes from the IMAGE, so a cropped/binned field is placed at its true extent.
         origin_um = field_origin_um(positions_um.get((region, fov)), image.shape[-2:], pixel_size_um)
-        # Build the field in a ".{fov}.partial" directory and RENAME it into place: the field
-        # directory is the RAW fov id (Squid convention, digit-named for ndviewer), and it only
-        # ever appears complete. A crash leaves a dot-named temp, which no reader walks.
+        # Build in a ".{fov}.partial" directory and rename into place, so the field only ever
+        # appears complete.
         tmp = _partial_dir(well_dir, fov)
         shutil.rmtree(tmp, ignore_errors=True)
         try:
@@ -1164,15 +695,13 @@ def write_from_stream(
         except BaseException:
             shutil.rmtree(tmp, ignore_errors=True)     # never leave this field's intermediate behind
             raise
-        with remaining_lock:                            # per-REGION cleanup as the region finishes,
-            remaining[region] -= 1                      # so a long run doesn't hoard every region's
-            done_region = remaining[region] <= 0        # intermediates until the very end
+        with remaining_lock:                            # per-REGION cleanup as the region finishes
+            remaining[region] -= 1
+            done_region = remaining[region] <= 0
         if done_region:
             _cleanup_partials(well_dir)
             if roi_table:
-                # IMA-231: the region is complete, so its FOV boundaries can be published for
-                # whoever fuses it later (Fractal). Persist path ONLY — the live viewer has
-                # coordinates.csv already. Frame shape comes from the IMAGE, like the translation.
+                # Persist path only — the live viewer has coordinates.csv already.
                 fov_pos = {f: positions_um[(region, f)] for f in wells[region]
                            if (region, f) in positions_um}
                 write_fov_roi_table(well_dir, fov_roi_records_um(
@@ -1203,29 +732,16 @@ def write_from_stream(
                 n_levels = f.result()
                 n_written += 1
     finally:
-        # Close the producer promptly on a stop/exception (don't wait for GC) so project_plate's
-        # own thread pool shuts down now. Guarded: a plain iterator (used in tests) has no close().
+        # Close the producer promptly on a stop/exception; a plain iterator has no close().
         close = getattr(stream, "close", None)
         if callable(close):
             close()
-        # Sweep every well's leftovers, however this run ended (a failure that skipped the
-        # per-region sweep, or a stop that abandoned regions mid-flight).
+        # Sweep every well's leftovers, however this run ended.
         for region in wells:
             row, col = parse_well_id(region)
             _cleanup_partials(plate_dir / row / col)
 
-    # COMPLETE MEANS EVERY FIELD THIS RUN OWED IS ON DISK, not merely "nobody pressed stop".
-    # `complete = not stopped` was the whole test, and it read the INTENT rather than the RESULT:
-    # a well lost to `on_error` (an unreadable TIFF, a corrupt field) never reaches `_write_one`,
-    # so `n_written` falls short, `stopped` stays False, the marker is deleted and the store
-    # declares itself trustworthy while its well group still advertises four images that are not
-    # there. Measured on a copy of sim_5d_2x2_t3 with one well's TIFFs corrupted:
-    # `is_incomplete(store)` was False with 4 of 16 fields missing. The CLI did warn — but the
-    # STORE's own self-report is what `_check_output`, Odon's samplesheet walk, ngio and every
-    # external reader consult, and it is the one that said the plate was whole.
-    #
-    # A short run therefore KEEPS the marker, and the marker now records the shortfall, so the
-    # gap is a number on disk rather than a line in a console that has since scrolled away.
+    # Complete means every field this run owed is on disk, not merely "nobody pressed stop".
     complete = (not stopped) and n_written >= fields_owed
     if complete:
         _clear_incomplete(plate_dir)   # last act of a finished write: the store is now trustworthy
@@ -1241,12 +757,6 @@ def write_from_stream(
         "n_fields": fields_owed,          # what this run OWED, beside what it wrote
         "n_fields_written": n_written,
         "levels": n_levels,
-        # TWO FACTS, TWO KEYS. `complete` is "every field this run owed is on disk"; `stopped` is
-        # "the caller's stop() cut the stream". They were one flag while `complete` meant only
-        # `not stopped`, and `_command.EngineExecutor` reads it to decide whether to say STOPPED
-        # or PARTIAL -- so widening `complete` to catch a lost well would have relabelled every
-        # skipped-well run as a cancelled one. A wrong diagnosis on the last line of a run is the
-        # same class of defect as a wrong number.
         "complete": complete,
         "stopped": bool(stopped),
     }
@@ -1271,71 +781,22 @@ def write_plate(
     roi_table: bool = True,
     operator_kwargs: Optional[dict] = None,
 ) -> dict:
-    """Project a plate (IMA-188) and write the canonical OME-zarr + individual TIFFs.
-
-    Consumes :func:`squidxplorer.project_plate` lazily — each projected well is written as it
-    arrives, so peak memory stays at the engine's bounded window, never the whole plate.
-
-    Parameters
-    ----------
-    reader:
-        An IMA-189 ``SquidReader`` (from ``open_reader``).
-    out_dir:
-        Destination directory; receives ``plate.ome.zarr/`` and (if *tiff*) ``tiff/``.
-    n_fovs, workers, projector:
-        Passed straight to :func:`squidxplorer.project_plate`.
-    tiff:
-        Also write the individual per-plane TIFF export (default False — opt in). This is a SECOND,
-        UNCOMPRESSED copy of the output in Squid's ``{region}_{fov}_0_{channel}.tiff`` filename
-        convention (You Yan's "individual tiff output"), for tools that read Squid TIFFs directly and
-        can't open OME-Zarr. It roughly DOUBLES on-disk size, so it's off unless a caller asks for it.
-
-    Returns
-    -------
-    dict
-        Manifest: output paths, well/field counts, pyramid level count.
-    """
+    """Project a plate and write the canonical OME-zarr + individual TIFFs; returns the manifest."""
     from squidxplorer._engine import is_region_operator
     from squidxplorer._stitch import stitch_plate
 
     metadata = reader.metadata
-    # The operator decides the stream, and both twins yield the SAME (region, fov, (T,C,1,Y,X))
-    # contract, so the writer below is identical for either. A region operator's unit of work is
-    # the WELL, so n_fovs does not apply to it and workers stays at 1: peak memory is one fused
-    # mosaic (~0.9 GB on a 27-FOV 10x well) rather than one projected FOV (~139 MB).
     region_operator = is_region_operator(projector)
-    # A REGION operator is parameterised at CALL time (registration on/off, registration
-    # channel, feather width, blunder thresholds, channel subset), and the stitcher panel in
-    # pane 1 is where a user sets those. They have to survive the save path too: without this
-    # seam "Run on the whole plate" would quietly fuse with the pipeline defaults while the
-    # panel still showed the settings that were tuned on the preview, and nothing would say so.
-    #
-    # A PROJECTOR now has the same seam. It used to have none -- its parameters were baked in when
-    # it was registered (`add_projector("decon_sharp", decon_op(iterations=25))`), so this function
-    # refused `operator_kwargs` for a projector BY NAME rather than accept-and-drop. That refusal
-    # was correct for what the table could then express and is gone because the table changed: an
-    # `Operator` declares its own `params` and `Operator.bind` applies them, so project_plate has
-    # somewhere to put them. An operator that declares NONE still refuses, but now the refusal
-    # comes from that operator's own declaration instead of from a rule about which table it is in.
     if not region_operator and operator_kwargs:
         from squidxplorer._engine import bind_operator
 
         bind_operator(projector, operator_kwargs)   # refuse BEFORE any directory is made
-    # HOW DEEP THE RESULT WILL BE, from the operator's own `consumes` declaration — the same table
-    # project_well and stitch_region dispatch on, so the disk estimate cannot disagree with what is
-    # then written. A z-reducer collapses z (n_z=1, what this module wrote for its whole history);
-    # a plane-op keeps every plane, which is 10x the bytes on the 10x tissue set and used to be
-    # unwritable at all. The region operator's `projector=` kwarg is what decides it for a stitch;
-    # absent one, stitch_region's own default is "mip", a z-reducer.
+    # Result depth and pixel meaning come off the INNER operator's own declarations, so the disk
+    # estimate and the pyramid reducer cannot disagree with what is then written.
     from squidxplorer._engine import operator_consumes, operator_produces
 
     inner = (operator_kwargs or {}).get("projector", "mip") if region_operator else projector
     n_z_out = 1 if "z" in operator_consumes(inner) else int(metadata.get("n_z", 1) or 1)
-    # ...and WHAT THE RESULT PIXELS MEAN, off the same operator's `produces`, for the same reason:
-    # the writer coarsens every level above 0 and the only correct way to coarsen depends on this.
-    # `inner` is the operator whose pixels actually come out in both branches, which is why the
-    # depth above reads it too -- a stitch fusing `spot` planes would be a labels mosaic, and
-    # asking `stitch` would answer for the fuser rather than for the pixels.
     produces_out = operator_produces(inner)
 
     if region_operator:

@@ -1,20 +1,7 @@
-"""The embedded shell — IMA-186's ``squidxplorer`` CLI, live inside the Process pane.
+"""The embedded shell inside the Process pane.
 
-Two implementations of one widget contract, because the platform decides which is possible:
-
-    _Terminal        pty.fork() + QSocketNotifier   a REAL interactive terminal (Unix)
-    _ProcTerminal    QProcess                        works everywhere, including Windows
-
-They share a base (:class:`_ShellPane`) that owns everything neither of them should have an
-opinion about: the read-only scrollback with its capped block count, the ``$`` prompt row, the
-command line, and the history recall. Before the split existed, the two classes carried a
-verbatim copy each of the layout, the stylesheet string, the ``_append`` cursor dance and the
-``_send`` history bookkeeping — four facts with two owners apiece, which is the defect shape this
-project is named after. The subclasses now hold only what genuinely differs: how bytes get out
-(``_write``), how they come back, and how the child dies (``shutdown``).
-
-Lifted out of ``_viewer.py`` unchanged in behaviour. Nothing here knows about the plate, the
-reader, or napari — it is a shell in a box, and it was never part of the viewer's job.
+_Terminal (pty.fork + QSocketNotifier, Unix) and _ProcTerminal (QProcess, everywhere)
+share the _ShellPane base: scrollback, prompt row, command line, history.
 """
 
 from __future__ import annotations
@@ -30,12 +17,12 @@ from qtpy.QtWidgets import (
 
 from squidxplorer._qtstyle import ANSI_RE, TERM_INPUT_QSS, TERM_QSS
 
-#: Scrollback cap, in blocks. Output can never grow unbounded.
+#: Scrollback cap, in blocks.
 _MAX_BLOCKS = 4000
 
 
 class _CmdEdit(QLineEdit):
-    """A command input with up/down history recall (so re-running a `squidxplorer …` line is one key)."""
+    """A command input with up/down history recall."""
 
     def __init__(self, terminal):
         super().__init__()
@@ -54,14 +41,9 @@ class _CmdEdit(QLineEdit):
 
 
 class _ShellPane(QWidget):
-    """The parts of an embedded shell that do not depend on HOW the shell is spawned.
+    """The parts of an embedded shell that do not depend on how the shell is spawned."""
 
-    Owns: the scrollback view, the input row, the command history, and the append/send rules.
-    Subclasses implement :meth:`_write` (send a line to the child) and :meth:`shutdown`.
-    """
-
-    #: Subclasses set this to False when the transport echoes typed input back on its own (a PTY
-    #: does; a pipe does not). It decides whether ``_send`` prints the command itself.
+    #: False when the transport does not echo typed input (a PTY does; a pipe does not).
     _transport_echoes = True
 
     def __init__(self, parent=None):
@@ -91,7 +73,6 @@ class _ShellPane(QWidget):
         rl.addWidget(self._in, 1)
         v.addWidget(row)
 
-    # -- output ------------------------------------------------------------------------
     def _append(self, text: str):
         """Append to the output pane (ANSI escapes + carriage returns stripped), scrolled to end."""
         text = ANSI_RE.sub("", text).replace("\r", "")
@@ -101,7 +82,6 @@ class _ShellPane(QWidget):
         self._out.setTextCursor(cur)
         self._out.ensureCursorVisible()
 
-    # -- input -------------------------------------------------------------------------
     def _write(self, s: str):   # pragma: no cover - abstract
         raise NotImplementedError
 
@@ -115,7 +95,6 @@ class _ShellPane(QWidget):
             self._append("> " + cmd + "\n")   # pipes don't echo input, so show it ourselves
         self._write((cmd + "\n") if self._transport_echoes else cmd)
 
-    # -- teardown ----------------------------------------------------------------------
     def shutdown(self):   # pragma: no cover - abstract
         raise NotImplementedError
 
@@ -125,16 +104,7 @@ class _ShellPane(QWidget):
 
 
 class _Terminal(_ShellPane):
-    """A real, interactive shell embedded in the Process-wells pane — IMA-186's `squidxplorer` CLI, live.
-
-    A login shell on a pseudo-terminal (so it echoes input and behaves like a real terminal): type a
-    command, press Enter, see its output. `squidxplorer` is aliased to THIS app's interpreter, so the batch
-    MIP command runs here even though the console script isn't pip-installed. Pre-seeded with a how-to
-    banner (MIP every well; `--tiff` writes FIJI-openable TIFFs). Scrollback is capped (bounded RAM),
-    and the shell is killed when the tab or the window closes (no orphan process).
-
-    PTY-backed, so it needs a Unix-y OS; ``build`` falls back to a static command preview elsewhere.
-    """
+    """A real interactive shell on a pseudo-terminal (Unix only)."""
 
     _transport_echoes = True
 
@@ -150,38 +120,35 @@ class _Terminal(_ShellPane):
         import pty
         shell = os.environ.get("SHELL", "/bin/zsh")
         env = dict(os.environ)
-        env["TERM"] = "dumb"        # minimise escape sequences; still a real interactive shell
+        env["TERM"] = "dumb"        # minimise escape sequences
         env["PS1"] = "$ "
-        # put the venv's Scripts/bin on PATH so the `squidxplorer` console script resolves directly.
+        # venv's Scripts/bin on PATH so the `squidxplorer` console script resolves directly
         env["PATH"] = os.path.dirname(sys.executable) + os.pathsep + env.get("PATH", "")
         try:
             self._pid, self._fd = pty.fork()
-        except Exception as e:      # no PTY (e.g. Windows) — degrade to a disabled, informative pane
+        except Exception as e:      # no PTY (e.g. Windows) — degrade to a disabled pane
             self._out.setPlainText(f"(embedded terminal unavailable on this platform: {e})")
             self._in.setEnabled(False)
             return
-        if self._pid == 0:          # CHILD → becomes the shell (only chdir/exec between fork and exec)
+        if self._pid == 0:          # child becomes the shell
             try:
                 if cwd and os.path.isdir(cwd):
                     os.chdir(cwd)
                 os.execvpe(shell, [shell, "-i"], env)
             except Exception:
                 os._exit(127)
-        import fcntl                # PARENT: read the master fd non-blocking, driven by Qt's event loop
+        import fcntl                # parent: read the master fd non-blocking via Qt's event loop
         import struct
         import termios
-        try:                        # a wide PTY so long commands don't wrap into garbled cursor escapes
+        try:                        # a wide PTY so long commands don't wrap
             fcntl.ioctl(self._fd, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 400, 0, 0))
         except OSError:
-            # A PTY that will not take a window size still works; it just wraps at 80 columns.
-            # Narrow to OSError so a genuine bug (bad struct, wrong fd type) is not swallowed.
             self._append("(could not widen the terminal — long lines will wrap)\n")
         fl = fcntl.fcntl(self._fd, fcntl.F_GETFL)
         fcntl.fcntl(self._fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
         self._notifier = QSocketNotifier(self._fd, QSocketNotifier.Read, self)
         self._notifier.activated.connect(self._read)
-        # Banner is DISPLAY text — print it straight into the pane (NOT echo'd through the shell, which
-        # duplicates + line-wraps it). setup_cmds (e.g. the squidxplorer alias) run silently in the shell.
+        # banner is display text, printed straight into the pane; setup_cmds run silently
         self._append("\n".join(banner) + "\n")
         for cmd in setup_cmds:
             self._write(cmd + "\n")
@@ -190,7 +157,7 @@ class _Terminal(_ShellPane):
         try:
             data = os.read(self._fd, 8192)
         except BlockingIOError:
-            return                       # notifier fired but no data ready yet — keep listening
+            return                       # no data ready yet — keep listening
         except (OSError, TypeError):
             data = b""                   # EIO / fd closed -> the child shell is gone
         if not data:
@@ -204,12 +171,10 @@ class _Terminal(_ShellPane):
             try:
                 os.write(self._fd, s.encode())
             except OSError as exc:
-                # The child is gone. Say so once, in the pane the user is looking at, instead of
-                # letting Enter do nothing forever.
                 self._append(f"\n[the shell is not accepting input: {exc}]\n")
 
     def shutdown(self):
-        """Kill the shell (and its group) and release the fd. Idempotent; safe on tab/window close."""
+        """Kill the shell (and its group) and release the fd. Idempotent."""
         if self._notifier is not None:
             self._notifier.setEnabled(False)
             self._notifier = None
@@ -225,21 +190,18 @@ class _Terminal(_ShellPane):
             try:
                 os.waitpid(self._pid, os.WNOHANG)
             except OSError:
-                pass                     # already reaped, or never ours — nothing left to do
+                pass                     # already reaped
             self._pid = None
         if self._fd is not None:
             try:
                 os.close(self._fd)
             except OSError:
-                pass                     # already closed — the point was to release it
+                pass                     # already closed
             self._fd = None
 
 
 class _ProcTerminal(_ShellPane):
-    """An interactive shell in the pane via QProcess — works on Windows (cmd.exe) AND Unix ($SHELL),
-    no PTY needed. Type a command, it runs, output streams back. Not a full VT100 (pipes don't echo,
-    so we echo the typed line ourselves), but `squidxplorer …` and any command work. `squidxplorer` is aliased
-    to this app's interpreter. Used where a PTY is unavailable (i.e. on Windows)."""
+    """An interactive shell via QProcess — works on Windows (cmd.exe) and Unix ($SHELL), no PTY."""
 
     _transport_echoes = False
 
@@ -251,7 +213,7 @@ class _ProcTerminal(_ShellPane):
         self._proc.setProcessChannelMode(QProcess.MergedChannels)
         self._proc.readyRead.connect(self._read)
         self._proc.finished.connect(lambda *a: self._append("\n[shell exited]\n"))
-        # put the venv's Scripts/bin on PATH so the `squidxplorer` console script resolves directly.
+        # venv's Scripts/bin on PATH so the `squidxplorer` console script resolves directly
         env = QProcessEnvironment.systemEnvironment()
         env.insert("PATH", os.path.dirname(sys.executable) + os.pathsep + env.value("PATH"))
         self._proc.setProcessEnvironment(env)
@@ -261,7 +223,7 @@ class _ProcTerminal(_ShellPane):
         self._proc.start(shell, [])
         self._proc.waitForStarted(3000)
         self._append("\n".join(banner) + "\n")
-        for c in setup_cmds:            # e.g. the squidxplorer alias/doskey — run silently
+        for c in setup_cmds:            # run silently
             self._write(c)
 
     def running(self) -> bool:

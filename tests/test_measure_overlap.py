@@ -1,19 +1,4 @@
-"""Unit tests for scripts/measure_overlap.py (IMA-211 T2).
-
-The script answers a question that gates real design decisions — is there enough tile overlap
-for phase correlation to work at all — so its arithmetic needs to be right. Two pieces carry
-the risk:
-
-  * ``_pixel_size_um`` — the two Squid metadata generations store DIFFERENT quantities under
-    similar names. acquisition.yaml's ``objective.pixel_size_um`` is already object-space;
-    ``acquisition parameters.json`` stores the raw SENSOR pitch and must be divided by the
-    magnification. Conflating them is a 20x error that reported 95% overlap on a scan that
-    actually overlaps 9%. That regression is pinned here.
-  * ``_modal_step`` — must pick the real grid pitch out of coordinates that include gaps from
-    partial or non-rectangular scans (both present in real data).
-
-Loaded by path because ``scripts/`` is not a package.
-"""
+"""Unit tests for scripts/measure_overlap.py, loaded by path because scripts/ is not a package."""
 
 from __future__ import annotations
 
@@ -30,16 +15,13 @@ mo = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(mo)
 
 
-# --------------------------------------------------------------------------------------
 # _modal_step
-# --------------------------------------------------------------------------------------
 def test_modal_step_finds_the_pitch_of_a_regular_grid():
     xs = [0.0, 0.7056, 1.4112, 2.1168]
     assert mo._modal_step(xs) == pytest.approx(0.7056, abs=1e-4)
 
 
 def test_modal_step_survives_a_gap_from_a_partial_scan():
-    """Real data has non-rectangular scans; a mean would blend the pitch with the skip."""
     xs = [0.0, 0.7056, 1.4112, 2.8224]  # one position skipped -> a 1.4112 delta
     assert mo._modal_step(xs) == pytest.approx(0.7056, abs=1e-4)
 
@@ -54,11 +36,8 @@ def test_modal_step_single_position_is_zero_not_a_crash():
     assert mo._modal_step([]) == 0.0
 
 
-# --------------------------------------------------------------------------------------
-# _pixel_size_um — the 20x regression
-# --------------------------------------------------------------------------------------
+# _pixel_size_um
 def test_json_sensor_pitch_is_divided_by_magnification(tmp_path):
-    """The bug that reported 95% overlap on a 9% scan. Never again."""
     (tmp_path / "acquisition parameters.json").write_text(
         json.dumps({"sensor_pixel_size_um": 7.4571427, "objective": {"magnification": 20.0}})
     )
@@ -99,9 +78,7 @@ def test_missing_metadata_reports_not_found(tmp_path):
     assert px is None and src == "not found"
 
 
-# --------------------------------------------------------------------------------------
 # survey — end to end on a synthetic acquisition
-# --------------------------------------------------------------------------------------
 def _write_acq(root: Path, *, with_original: bool, n=3, step=0.7056, region="C5", z_levels=1):
     root.mkdir(parents=True, exist_ok=True)
     (root / "acquisition.yaml").write_text("objective:\n  pixel_size_um: 0.3728571\n")
@@ -136,7 +113,6 @@ def test_survey_reports_grid_and_overlap(tmp_path, monkeypatch):
 
 
 def test_survey_flags_missing_original_coordinates(tmp_path, monkeypatch):
-    """3 of 5 real acquisitions lack the folder — the fallback is mandatory, not optional."""
     root = tmp_path / "acq"
     _write_acq(root, with_original=False)
     monkeypatch.setattr(mo, "_frame_shape", lambda _r: (2084, 2084))
@@ -147,7 +123,6 @@ def test_survey_flags_missing_original_coordinates(tmp_path, monkeypatch):
 
 
 def test_survey_filters_multi_z_instead_of_miscounting(tmp_path, monkeypatch):
-    """A multi-z coordinate file must not inflate the FOV count — IMA-187's open worry."""
     root = tmp_path / "acq"
     _write_acq(root, with_original=True, n=3, z_levels=10)
     monkeypatch.setattr(mo, "_frame_shape", lambda _r: (2084, 2084))
@@ -158,7 +133,6 @@ def test_survey_filters_multi_z_instead_of_miscounting(tmp_path, monkeypatch):
 
 
 def test_survey_flags_declared_grid_disagreement(tmp_path, monkeypatch):
-    """acquisition parameters.json claiming Nx=1,Ny=1 over a real 3x3 must be called out."""
     root = tmp_path / "acq"
     _write_acq(root, with_original=True, n=3)
     (root / "acquisition parameters.json").write_text(json.dumps({"Nx": 1, "Ny": 1}))

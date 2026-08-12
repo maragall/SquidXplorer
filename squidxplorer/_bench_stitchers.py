@@ -1,33 +1,9 @@
-"""Third-party stitchers, wrapped as SquidXplorer **region operators** so they land in the
-existing operator benchmark (``tools/benchmark.py`` / :mod:`squidxplorer._benchmark`) rather
-than in a second, worse harness.
+"""Third-party stitchers, wrapped as SquidXplorer region operators so they land in the
+existing operator benchmark rather than a second harness.
 
-Why this shape. The benchmark already measures a region operator's speed (Julio's
-``StageTimer``), footprint (``RSSSampler``), allocation attribution (``AllocationSampler``)
-and seam quality (``overlap_ncc`` on a pair chosen from the STAGE COORDINATES before any
-operator runs). An external stitcher that satisfies the region-operator contract —
-``operator(reader, region, fovs, **kwargs) -> (T, C, 1, Y, X)`` plus a filled ``geometry``
-dict — is therefore measured by exactly the same code, on exactly the same seam, as
-``stitch`` and ``coordinate``. Nothing in the comparison is bespoke to the challenger.
-
-The one thing that must match for the comparison to mean anything is the INPUT. Each
-challenger receives the same per-FOV z-projection (``project_well``, ``mip``) of the same
-single channel at the same stage positions that :func:`squidxplorer._stitch.stitch_region`
-receives. What differs is only the registration solve and the fusion — which is the whole
-question.
-
-Registered here:
-
-``ashlar``
-    labsyspharm/ashlar (Muhlich et al., *Bioinformatics* 2022,
-    https://doi.org/10.1093/bioinformatics/btac544; code
-    https://github.com/labsyspharm/ashlar). Its own ``EdgeAligner`` (phase-correlation on
-    neighbour pairs, permutation-derived error threshold, maximum spanning tree, then a
-    linear model for the tiles it could not register) and its own ``Mosaic`` fusion
-    (``utils.pastefunc_blend``). We supply only an in-memory ``Reader``/``Metadata`` pair so
-    it never touches BioFormats or the disk.
-
-Deliberately NOT registered, with the reason on record: see :data:`UNAVAILABLE`.
+Registered here: ``ashlar`` (labsyspharm/ashlar), via an in-memory ``Reader``/``Metadata``
+pair so it never touches BioFormats or the disk. Deliberately not registered, with the
+reason on record: see :data:`UNAVAILABLE`.
 """
 
 from __future__ import annotations
@@ -37,10 +13,6 @@ from typing import Optional, Sequence
 
 import numpy as np
 
-
-# --------------------------------------------------------------------------------------
-# What we could not run, and what it would take. No estimated numbers appear anywhere.
-# --------------------------------------------------------------------------------------
 
 UNAVAILABLE = {
     "mcmicro": {
@@ -87,18 +59,9 @@ UNAVAILABLE = {
 }
 
 
-# --------------------------------------------------------------------------------------
-# ashlar
-# --------------------------------------------------------------------------------------
-
 class _ArrayMetadata:
-    """ashlar ``Metadata`` over tiles we already hold in RAM.
-
-    Positions are in PIXELS and zero-based, which is what ashlar's own
-    ``BioformatsMetadata.tile_position`` returns (it divides microns by ``pixel_size``
-    before handing them over), so ashlar's ``EdgeAligner`` sees exactly the units it
-    expects.
-    """
+    """ashlar ``Metadata`` over tiles already held in RAM. Positions are in pixels,
+    zero-based, matching what ashlar's own ``BioformatsMetadata.tile_position`` returns."""
 
     def __init__(self, tiles: np.ndarray, positions_px: np.ndarray, pixel_size_um: float):
         # tiles: (n_tiles, n_channels, Y, X)
@@ -175,34 +138,10 @@ def ashlar_region(
     timer=None,
     **_ignored,
 ) -> np.ndarray:
-    """Stitch one well with **ashlar's** aligner and ashlar's fusion.
-
-    Stage names are deliberately the same three that :func:`squidxplorer._stitch.stitch_region`
-    reports — ``project`` / ``register`` / ``fuse`` — so the per-stage table compares like
-    with like:
-
-    ``project``
-        identical code to ``stitch``: ``project_well`` per FOV. Shared, not re-implemented,
-        so the comparison isolates the stitcher rather than the reader.
-    ``register``
-        ``ashlar.reg.EdgeAligner.run()`` — ashlar's whole solve (thresholding, pairwise
-        phase correlation, spanning tree, linear model). ashlar has no separate optimise
-        step, so ``stitch``'s ``register`` + ``optimize`` are the comparable pair.
-    ``fuse``
-        ``ashlar.reg.Mosaic.assemble_channel`` per channel per timepoint, ashlar's own
-        alpha-blended paste.
-
-    Deviations from a stock ``ashlar`` command line, all of which are recorded because a
-    silently retuned competitor is not a competitor:
-
-    * ``do_make_thumbnail=False`` — the thumbnail exists for cross-CYCLE ``LayerAligner``
-      registration, which a single-cycle mosaic never uses. Leaving it on would charge
-      ashlar for work its result does not depend on.
-    * ``max_shift_um=30`` rather than ashlar's default 15. The measured stage step on this
-      acquisition is 1.4104 mm against a 1.567 mm tile, so a real correction can be tens
-      of microns; 15 um would reject good matches and make ashlar look worse than it is
-      for a reason that is ours, not ashlar's. Raise/lower via the operator kwarg.
-    """
+    """Stitch one well with ashlar's aligner and ashlar's fusion. Stage names match
+    ``squidxplorer._stitch.stitch_region``'s (``project`` / ``register`` / ``fuse``) so the
+    per-stage table compares like with like. ``max_shift_um`` defaults to 30, not ashlar's
+    15, because the measured stage step here exceeds 15 um and would reject good matches."""
     from squidxplorer._placement import fov_offsets_px
     from squidxplorer._stitch import _NullTimer, _pixel_size, _resolve_operator, _positions_yx_um
     from squidxplorer.projection import project_well
@@ -241,8 +180,7 @@ def ashlar_region(
 
     with timer.stage("register"):
         with warnings.catch_warnings():
-            # ashlar warns loudly per rejected pair; the count is reported via
-            # `geometry["ashlar_discarded"]` instead of 400 lines of stderr.
+            # ashlar warns loudly per rejected pair; silence it rather than bury the log.
             warnings.simplefilter("ignore")
             aligner = areg.EdgeAligner(
                 ash_reader, channel=0, max_shift=max_shift_um,
@@ -270,19 +208,15 @@ def ashlar_region(
         )
 
     with timer.stage("fuse"), warnings.catch_warnings():
-        # ashlar 1.20 calls scikit-image APIs deprecated in 0.26 (remove_small_holes'
-        # area_threshold, binary_dilation); one FutureWarning per pasted tile buries the
-        # table. The calls still work — this silences the noise, not an error.
+        # ashlar 1.20 hits scikit-image deprecation warnings per pasted tile; noise, not an error.
         warnings.simplefilter("ignore", FutureWarning)
         out = np.zeros((n_t, len(channels), 1, h, w), dtype=dtype)
         for t in range(n_t):
-            # ashlar's Mosaic reads through aligner.reader, so point that reader's tile
-            # store at this timepoint's planes before assembling it.
+            # ashlar's Mosaic reads tiles through aligner.reader; point it at this timepoint.
             md._tiles = tiles[:, t]
             mosaic = areg.Mosaic(aligner, (h, w), channels=range(len(channels)),
                                  verbose=False)
-            # Mosaic pastes at aligner.positions; use the zero-based copy so nothing
-            # falls outside the canvas we allocated.
+            # Mosaic pastes at aligner.positions; swap in the zero-based copy for the canvas.
             saved, aligner.positions = aligner.positions, solved
             try:
                 for ci in range(len(channels)):
@@ -302,30 +236,9 @@ def _ashlar_version() -> Optional[str]:
         return None
 
 
-# --------------------------------------------------------------------------------------
-# Registration into the operator table
-# --------------------------------------------------------------------------------------
-
 def ashlar_filtered_region(reader, region, fovs, **kwargs):
-    """ashlar with ``--filter-sigma 1``, its documented knob for noisy/low-contrast tiles.
-
-    Registered as a SECOND row rather than folded into the ``ashlar`` default, because
-    which one is "ashlar's number" is a real question and hiding either answer would be
-    picking the flattering one. Measured on manual0's 0|1 seam, registration only:
-
-    ===================  =======  =========  ========
-    setting              dy px    dx px      seam NCC
-    ===================  =======  =========  ========
-    stage coordinates      0.00   1875.60      0.9430
-    filter_sigma = 0       -2.11   1885.73      0.9560
-    filter_sigma = 1       -6.30   1881.60      0.9716
-    tilefusion (stitch)    -6.40   1882.05      0.9720
-    ===================  =======  =========  ========
-
-    ``max_shift`` is NOT the limiting knob: 15 / 30 / 100 um give bit-identical offsets at
-    either sigma, so the 0.956 result is a whitening/contrast effect, not a clamp. With
-    the filter on, ashlar lands within half a pixel of tilefusion on both axes.
-    """
+    """ashlar with ``--filter-sigma 1``, registered as a second row rather than folded into
+    the default, since which one is "ashlar's number" is a real question."""
     kwargs.setdefault("filter_sigma", 1.0)
     return ashlar_region(reader, region, fovs, **kwargs)
 
@@ -334,12 +247,8 @@ CHALLENGERS = {"ashlar": ashlar_region, "ashlar-filtered": ashlar_filtered_regio
 
 
 def register_challengers() -> list[str]:
-    """Add every importable third-party stitcher to the region-operator table.
-
-    Idempotent, and silent about the ones that are not installed: a stitcher that cannot
-    be imported must show up as a MISSING ROW in the report, never as a fabricated one.
-    Returns the names that were made available.
-    """
+    """Add every importable third-party stitcher to the region-operator table. Idempotent;
+    silent about ones that fail to import. Returns the names that were made available."""
     from squidxplorer._engine import add_region_operator, available_region_operators
 
     added = []

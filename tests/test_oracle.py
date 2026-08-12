@@ -1,21 +1,4 @@
-"""Unit tests for IMA-211's stitch acceptance oracle (``squidxplorer/_oracle.py``).
-
-The oracle grades a stitcher; these tests grade the oracle. The load-bearing property is
-**discrimination**: a metric that passes everything is worse than no metric, so every
-positive assertion here has a matching negative one proving the gate actually fails when it
-should.
-
-Covered:
-  * cut_fixture — geometry, dtype preservation, ground truth, loud refusals.
-  * paste — bit-exact reconstruction at truth; dtype preserved; loud refusals.
-  * seam_ratio — near 1 when aligned, high when misplaced (the discrimination proof).
-  * overlap_texture — flags a blank overlap strip (oracle #5 precondition).
-  * grade_positions — passes a perfect stitcher, fails a lazy one that trusts nominal,
-    and names every reason.
-
-Fixtures are synthetic but shaped like the real thing: uint16, and the default overlap is
-0.09, the fraction measured on ~/Downloads/20x_scan_2025-09-05_17-57-50.
-"""
+"""Unit tests for the stitch acceptance oracle (``squidxplorer/_oracle.py``)."""
 
 from __future__ import annotations
 
@@ -32,9 +15,6 @@ from squidxplorer._oracle import (
 )
 
 
-# --------------------------------------------------------------------------------------
-# helpers
-# --------------------------------------------------------------------------------------
 def _textured(h=400, w=400, dtype=np.uint16, seed=7):
     """An image with structure at every scale — what registration needs to exist."""
     rng = np.random.default_rng(seed)
@@ -48,9 +28,6 @@ def _textured(h=400, w=400, dtype=np.uint16, seed=7):
     return np.clip(smooth + grain, 0, 65535).astype(dtype)
 
 
-# --------------------------------------------------------------------------------------
-# cut_fixture
-# --------------------------------------------------------------------------------------
 def test_cut_fixture_shape_dtype_and_truth():
     src = _textured()
     fx = cut_fixture(src, grid=(2, 2), overlap_frac=0.20, max_offset_px=20, seed=1)
@@ -60,7 +37,6 @@ def test_cut_fixture_shape_dtype_and_truth():
     assert all(t.dtype == np.uint16 for t in fx.tiles), "dtype must never be upcast"
     assert all(t.shape == fx.tiles[0].shape for t in fx.tiles)
     assert fx.nominal.shape == (4, 2) and fx.truth.shape == (4, 2)
-    # The injected error is exactly truth - nominal, and it is non-trivial.
     assert np.array_equal(fx.offsets, fx.truth - fx.nominal)
     assert np.abs(fx.offsets).max() > 0, "a fixture with no error tests nothing"
     assert np.abs(fx.offsets).max() <= 20
@@ -72,7 +48,6 @@ def test_cut_fixture_overlap_is_nonzero_and_matches_request():
     th, tw = fx.tiles[0].shape
     oy, ox = fx.overlap_px
     assert oy > 0 and ox > 0
-    # overlap_px should be ~25% of the tile, within rounding of one pixel.
     assert abs(ox - round(tw * 0.25)) <= 1
     assert abs(oy - round(th * 0.25)) <= 1
 
@@ -85,8 +60,6 @@ def test_cut_fixture_explicit_zero_offsets_is_perfectly_aligned():
 
 
 def test_cut_fixture_six_by_six_matches_real_acquisition_shape():
-    # The 20x scan is 36 FOV/well in a 6x6 grid — the real case, not the 2x2 the first
-    # review pass assumed. The oracle must handle it.
     src = _textured(h=900, w=900)
     fx = cut_fixture(src, grid=(6, 6), overlap_frac=0.25, max_offset_px=8, seed=3)
     assert len(fx.tiles) == 36
@@ -123,15 +96,7 @@ def test_cut_fixture_refuses_wrong_offsets_shape():
         cut_fixture(src, grid=(2, 2), offsets=np.zeros((3, 2), dtype=int))
 
 
-# --------------------------------------------------------------------------------------
-# paste — oracle #1's bit-exactness
-# --------------------------------------------------------------------------------------
 def test_paste_at_truth_is_bit_exact_to_source():
-    """Oracle #1: recover the true positions and the source comes back exactly.
-
-    Judged over the covered region — offsetting tiles leaves the canvas corners as padding,
-    which is not a reconstruction failure.
-    """
     src = _textured()
     fx = cut_fixture(src, grid=(2, 2), overlap_frac=0.20, max_offset_px=15, seed=5)
     out = paste(fx.tiles, fx.truth)
@@ -142,7 +107,6 @@ def test_paste_at_truth_is_bit_exact_to_source():
 
 
 def test_paste_at_nominal_is_not_bit_exact_when_offsets_injected():
-    """The negative half: trusting the nominal grid must NOT reproduce the source."""
     src = _textured()
     fx = cut_fixture(src, grid=(2, 2), overlap_frac=0.20, max_offset_px=15, seed=5)
     out = paste(fx.tiles, fx.nominal)
@@ -169,9 +133,6 @@ def test_paste_refuses_empty_negative_and_non_2d():
         paste([np.ones((2, 2, 2), dtype=np.uint16)], [[0, 0]])
 
 
-# --------------------------------------------------------------------------------------
-# seam_ratio — oracle #2, and the proof it discriminates
-# --------------------------------------------------------------------------------------
 def test_seam_ratio_near_one_when_aligned():
     src = _textured()
     fx = cut_fixture(src, grid=(2, 2), overlap_frac=0.20, max_offset_px=15, seed=9)
@@ -183,7 +144,6 @@ def test_seam_ratio_near_one_when_aligned():
 
 
 def test_seam_ratio_spikes_when_misplaced():
-    """If this ever stops failing, the gate is worthless — that is the point of the test."""
     src = _textured()
     fx = cut_fixture(src, grid=(2, 2), overlap_frac=0.20, max_offset_px=15, seed=9)
     th, tw = fx.tiles[0].shape
@@ -208,9 +168,6 @@ def test_seam_ratio_single_tile_has_no_seams():
     assert seam_ratio(src, np.array([[0, 0]]), (100, 100)) == 1.0
 
 
-# --------------------------------------------------------------------------------------
-# overlap_texture — oracle #5's precondition
-# --------------------------------------------------------------------------------------
 def test_overlap_texture_positive_on_textured_data():
     src = _textured()
     fx = cut_fixture(src, grid=(2, 2), overlap_frac=0.20, max_offset_px=10, seed=11)
@@ -218,16 +175,12 @@ def test_overlap_texture_positive_on_textured_data():
 
 
 def test_overlap_texture_zero_on_blank_overlap():
-    """A blank seam carries no registration signal — the oracle must say so, loudly."""
     flat = np.full((400, 400), 500, dtype=np.uint16)
     fx = cut_fixture(flat, grid=(2, 2), overlap_frac=0.20, max_offset_px=10, seed=12)
     tex = overlap_texture(fx)
     assert (tex == 0).all(), "blank overlap must report zero texture, not a small number"
 
 
-# --------------------------------------------------------------------------------------
-# grade_positions — the gate itself
-# --------------------------------------------------------------------------------------
 def test_grade_passes_a_perfect_stitcher():
     src = _textured()
     fx = cut_fixture(src, grid=(2, 2), overlap_frac=0.20, max_offset_px=15, seed=13)
@@ -238,7 +191,6 @@ def test_grade_passes_a_perfect_stitcher():
 
 
 def test_grade_fails_a_stitcher_that_just_trusts_nominal():
-    """The lazy implementation — ignore the pixels, return the grid — must not pass."""
     src = _textured()
     fx = cut_fixture(src, grid=(2, 2), overlap_frac=0.20, max_offset_px=15, seed=13)
     g = grade_positions(fx.nominal, fx)
@@ -252,7 +204,7 @@ def test_grade_tolerates_sub_pixel_error_within_threshold():
     src = _textured()
     fx = cut_fixture(src, grid=(2, 2), overlap_frac=0.20, max_offset_px=15, seed=14)
     nudged = fx.truth.copy()
-    nudged[1, 1] += 1  # 1 px out — exactly at the documented tolerance
+    nudged[1, 1] += 1
     g = grade_positions(nudged, fx)
     assert g.max_error_px == 1.0
     assert not any("placement error" in r for r in g.reasons)
@@ -281,12 +233,6 @@ def test_grade_str_is_readable():
 
 
 def test_seam_ratio_does_not_discriminate_on_pure_noise():
-    """Documents the metric's known limit, so nobody trusts it where it cannot work.
-
-    Uncorrelated noise has no spatial structure, so a misplaced tile looks statistically
-    like a correct one and the seam gate passes regardless. That is why grade_positions
-    also checks placement, and why overlap_texture exists.
-    """
     rng = np.random.default_rng(0)
     noise = (rng.random((400, 400)) * 60000).astype(np.uint16)
     fx = cut_fixture(noise, grid=(2, 2), overlap_frac=0.20, max_offset_px=10, seed=1)
@@ -295,5 +241,4 @@ def test_seam_ratio_does_not_discriminate_on_pure_noise():
         paste(fx.tiles, fx.nominal), fx.nominal, (th, tw), mask=coverage(fx.tiles, fx.nominal)
     )
     assert misplaced <= 1.5, "on noise the seam gate cannot discriminate — documented limit"
-    # ...but the placement gate still catches it, which is the point.
     assert not grade_positions(fx.nominal, fx).passed

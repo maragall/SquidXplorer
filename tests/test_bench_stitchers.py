@@ -1,17 +1,4 @@
-"""IMA-211: the third-party-stitcher wrappers, on synthetic arrays only.
-
-Same rule as ``test_benchmark.py``: these lock CONTRACTS, never numbers. The numbers come
-from ``tools/benchmark.py --stitchers`` on the real acquisition; asserting a seam NCC
-against a synthetic fixture would be measuring the fixture.
-
-What must not silently break:
-
-* the ashlar adapters hand ashlar the units it expects (zero-based PIXEL positions),
-  because a micron/pixel mix-up produces a plausible mosaic that is simply wrong;
-* registering the challengers is idempotent and never clobbers ``stitch``;
-* every unavailable stitcher carries the four fields the report prints, so a missing tool
-  can never degrade into a missing row.
-"""
+"""Contract tests for the third-party-stitcher wrappers, on synthetic arrays only."""
 
 from __future__ import annotations
 
@@ -24,13 +11,7 @@ from squidxplorer import _engine, _stitch
 
 @pytest.fixture(autouse=True)
 def _restore_region_operators():
-    """``add_region_operator`` mutates a module-level table for the life of the process.
-
-    That is correct at runtime — ``tools/benchmark.py --stitchers`` wants the challengers
-    to stay registered — but a test that leaks them makes
-    ``test_stitch.py::test_default_operators_present`` fail depending on collection order.
-    Snapshot and restore, so these tests are order-independent.
-    """
+    """Snapshot and restore ``_engine._OPERATORS`` so these tests are order-independent."""
     saved = dict(_engine._OPERATORS)
     try:
         yield
@@ -40,8 +21,7 @@ def _restore_region_operators():
 
 
 def test_array_metadata_is_zero_based_in_pixels():
-    """ashlar's own BioformatsMetadata.tile_position divides microns by pixel_size before
-    returning, so the adapter must too — or EdgeAligner searches the wrong neighbourhood."""
+    """ashlar expects zero-based pixel positions, so the adapter must convert microns."""
     tiles = np.zeros((3, 2, 16, 24), dtype=np.uint16)
     md = bs._ArrayMetadata(tiles, [[100.0, 50.0], [100.0, 70.0], [120.0, 50.0]], 0.75)
     assert md.num_images == 3
@@ -75,11 +55,7 @@ def test_register_challengers_is_idempotent_and_keeps_stitch():
 
 
 def test_challengers_are_only_registered_when_importable():
-    """A stitcher that is not installed must be absent, never a stub that would produce a
-    fabricated row."""
-    # The only assertion used to live inside the `except`, so on a machine where every adapter
-    # imports cleanly ZERO assertions ran. Both directions are asserted now, and the count says
-    # the loop was not empty.
+    """A stitcher that is not installed must be absent, never a stub."""
     registered = bs.register_challengers()
     checked = 0
     for name in bs.CHALLENGERS:
@@ -106,9 +82,7 @@ def test_availability_report_mentions_every_unavailable_stitcher():
 
 
 def test_petakit_python_package_is_not_petakit5d():
-    """The importable ``petakit`` is Julio's deconvolution repo, not the Betzig-lab MATLAB
-    toolkit, and it has no stitching entry point. If that ever changes this test should
-    fail LOUD rather than let the report keep asserting it."""
+    """The importable ``petakit`` is a deconvolution repo with no stitching entry point."""
     petakit = pytest.importorskip("petakit")
     exported = set(getattr(petakit, "__all__", ())) | set(dir(petakit))
     assert not [n for n in exported if "stitch" in n.lower() or "mosaic" in n.lower()]

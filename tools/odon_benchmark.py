@@ -1,16 +1,11 @@
-"""IMA-234 evidence: local vs http-served OME-Zarr, for Odon.
+"""Measure local vs http-served OME-Zarr, for Odon.
 
     python tools/odon_benchmark.py --dataset "/path/to/acquisition" --clean
     python tools/odon_benchmark.py --hcs-dir /path/to/existing/output    # reuse a plate
 
-Writes a SMALL plate (one well, one FOV by default), serves it over ``http.server``,
-and measures both sides of the local/remote seam. ``--clean`` deletes the plate again;
-without a plate already on disk there is nothing to serve, so this is the one thing here
-that costs bytes, and ``write_plate``'s own ``check_disk_space`` gate stays on.
-
-The honest part is in the output, not this docstring: whatever cannot actually be
-executed on this machine is printed under "NOT MEASURED" with the reason, and no number
-is produced for it. See ``squidxplorer/_odon_bench.py``.
+Writes a small plate (one well, one FOV by default), serves it over http.server, and measures
+both sides of the local/remote seam. --clean deletes the plate again. Whatever cannot actually
+be measured on this machine is printed under "NOT MEASURED" with the reason.
 """
 
 from __future__ import annotations
@@ -68,9 +63,8 @@ def main() -> int:
         print(format_report(report))
         if args.json:
             print(f"\nwrote {write_json(report, args.json)}")
-        # Exit 0 even when odon could not be measured: "the measurement did not run, and
-        # here is why" is a successful outcome for this harness. A non-zero code would say
-        # the harness failed, which is a different and untrue statement.
+        # 0 even when odon could not be measured: "did not run, and here is why" is success
+        # for this harness.
         return 0
     finally:
         if args.clean and written:

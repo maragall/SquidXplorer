@@ -1,10 +1,4 @@
-"""IMA-185 montage — clean-room unit tests (no reader, no acquisition on disk).
-
-Fabricates a tiny real ``plate.ome.zarr`` with IMA-184's ``write_from_stream`` (a hand-built
-metadata dict + stream), then drives ``build_montage`` over it and inspects the PNG + sidecar.
-The real-seam cross commit (``write_plate`` on ``sim_1536wp`` + hongquan -> montage) lives in
-tests/test_integration.py.
-"""
+"""Montage unit tests: a tiny fabricated plate.ome.zarr driven through build_montage."""
 
 from __future__ import annotations
 
@@ -20,7 +14,7 @@ from squidxplorer._montage import (
 )
 from squidxplorer._output import write_from_stream
 
-# Two channels: red (638) and blue (405), so composite color is unambiguous per channel.
+# Two channels, red (638) and blue (405), so composite color is unambiguous per channel.
 CH = [
     {"name": "Fluorescence_638_nm_-_Penta", "display_name": "638", "display_color": "#FF0000"},
     {"name": "Fluorescence_405_nm_-_Penta", "display_name": "405", "display_color": "#20ADF8"},
@@ -62,8 +56,6 @@ def _make_plate(tmp_path: Path, images: dict) -> Path:
     return tmp_path
 
 
-# --- pure helpers ---------------------------------------------------------------------------
-
 def test_area_downsample_is_block_mean():
     # a 4x4 of four 2x2 quadrants (10, 20, 30, 40) -> 2x2 == the quadrant means
     plane = np.block([
@@ -75,23 +67,13 @@ def test_area_downsample_is_block_mean():
 
 
 def test_area_downsample_no_upsample():
-    # asking for a larger output than the source returns the source (float), never invents pixels
     plane = np.arange(16, dtype=np.uint16).reshape(4, 4)
     out = _area_downsample(plane, 8, 8)
     assert out.shape == (4, 4)
 
 
 def test_area_downsample_with_only_ONE_axis_shrinking_is_finite_and_still_a_block_mean():
-    """The mixed case — taller than the target, ALREADY narrower than it.
-
-    The identity guard used to be ``out_h >= y and out_w >= x``: BOTH axes at-or-above target.
-    But the ``reduceat`` path below it only works when BOTH axes shrink. Asking a 512x64 field
-    for 128x128 made the column edges ``(np.arange(128) * 64) // 128`` REPEAT, so ``reduceat``
-    returned a lone element where a block sum was meant, the matching ``col_counts`` entry was 0,
-    and 8192 of 16384 entries came back ``inf`` (first row ``[inf 1000. inf 1000. ...]`` on a
-    uniform 1000-count plane). Each axis is clamped to its own length now: the rows area-average
-    in 4-row blocks, the columns are left alone, and the shape is (128, 64).
-    """
+    """The mixed case: taller than the target, already narrower than it, clamped per axis."""
     plane = np.arange(512 * 64, dtype=np.float32).reshape(512, 64)
     out = _area_downsample(plane, 128, 128)
     n_bad = int((~np.isfinite(out)).sum())
@@ -99,11 +81,11 @@ def test_area_downsample_with_only_ONE_axis_shrinking_is_finite_and_still_a_bloc
     assert out.shape == (128, 64), f"clamped per axis -> (128, 64), got {out.shape}"
     np.testing.assert_allclose(out, plane.reshape(128, 4, 64).mean(axis=1))
 
-    # the reported repro verbatim: a uniform field can only average to its own constant
+    # a uniform field can only average to its own constant
     flat = _area_downsample(np.full((512, 64), 1000.0, np.float32), 128, 128)
     assert np.all(flat == 1000.0), f"uniform 1000-count field came back {np.unique(flat)[:4]}"
 
-    # and the other orientation — wide and short, so it is the ROW edges that would repeat
+    # the other orientation — wide and short, so it is the ROW edges that would repeat
     wide = np.arange(64 * 512, dtype=np.float32).reshape(64, 512)
     out_w = _area_downsample(wide, 128, 128)
     assert np.isfinite(out_w).all() and out_w.shape == (64, 128)
@@ -118,15 +100,14 @@ def test_hex_to_rgb01_parses_and_fails_loud():
 
 
 def test_composite_masks_out_a_channel():
-    # IMA-206: masking a channel off removes exactly that channel's contribution — nothing else
-    # moves. Red channel 0, blue-ish channel 1; a mask of [True, False] must leave pure red.
+    # masking a channel off removes exactly that channel's contribution
     store = np.stack([np.full((4, 4), 100.0), np.full((4, 4), 100.0)])
     colors = np.stack([_hex_to_rgb01("#FF0000"), _hex_to_rgb01("#0000FF")])
     windows = [(0.0, 100.0), (0.0, 100.0)]
     both = composite(store, colors, windows)
     only_red = composite(store, colors, windows, mask=np.array([True, False]))
-    assert (both[:, :, 2] > 0).all() and (only_red[:, :, 2] == 0).all()   # blue gone
-    np.testing.assert_array_equal(both[:, :, 0], only_red[:, :, 0])       # red untouched
+    assert (both[:, :, 2] > 0).all() and (only_red[:, :, 2] == 0).all()
+    np.testing.assert_array_equal(both[:, :, 0], only_red[:, :, 0])
 
 
 def test_composite_empty_mask_is_black_not_nan():
@@ -146,16 +127,8 @@ def test_composite_applies_a_distinct_window_per_channel():
     assert 0 < out[0, 0, 2] < 255              # channel 1 sits low in its much wider window
 
 
-# --- IMA-261: the fast contrast path must be the SAME function, not merely a close one --------
-#
-# Making a contrast drag interactive rested on three equalities. Each one is an opportunity to
-# ship a subtly different picture at 100 fps, so each is pinned here rather than argued in a
-# docstring. The project has already shipped two compositors whose percentile rules had drifted
-# apart, one of them clipping a blank channel to full white so it read as signal — "it looks the
-# same" is exactly the evidence that failed then.
-
 def test_window_lut_is_the_window_function_over_the_ENTIRE_uint16_alphabet():
-    """Not a sample of values: all 65536. The table IS `_window` memoised, or it is a bug."""
+    """All 65536 values: the table IS `_window` memoised, or it is a bug."""
     alphabet = np.arange(1 << 16, dtype=np.uint16)
     for lo, hi in [(0.0, 65535.0), (321.0, 8765.0), (1000.0, 1001.0), (60000.0, 65535.0)]:
         table = _window_lut(np.dtype(np.uint16), lo, hi)
@@ -164,16 +137,14 @@ def test_window_lut_is_the_window_function_over_the_ENTIRE_uint16_alphabet():
 
 
 def test_window_lut_covers_uint8_and_declines_the_dtypes_it_cannot_tabulate():
-    # uint8's domain is finite too. float/int32 are not (or are 4 G entries) — None means
-    # "fall back to elementwise", which is the same function evaluated a different way.
+    # None means "fall back to elementwise" — the same function evaluated a different way
     assert _window_lut(np.dtype(np.uint8), 0.0, 255.0).shape == (256,)
     for dt in (np.float32, np.float64, np.int16, np.uint32, np.int32):
         assert _window_lut(np.dtype(dt), 0.0, 100.0) is None
 
 
 def test_window_lut_handles_the_degenerate_window_like_window_does():
-    # lo == hi is the blank-channel case that has bitten this codebase before: it must go to
-    # zero (black), never to a divide-by-zero or a saturated white.
+    # lo == hi (a blank channel) must go to black, never divide-by-zero or saturated white
     table = _window_lut(np.dtype(np.uint16), 500.0, 500.0)
     assert table is not None and np.all(table == 0.0)
 
@@ -190,12 +161,7 @@ def test_composite_lut_path_is_byte_identical_to_the_elementwise_path():
 
 
 def test_composite_commutes_with_subsampling():
-    """The claim that lets a drag composite a thumbnail instead of the whole plate.
-
-    A contrast window is a POINT transform, so windowing the subsampled store must be bit-identical
-    to windowing the whole store and subsampling afterwards. If this ever stops holding, the plate
-    shows one picture while it is being dragged and a different one when it settles.
-    """
+    """A contrast window is a point transform, so it commutes with subsampling."""
     rng = np.random.default_rng(7)
     store = rng.integers(0, 65535, size=(2, 64, 96)).astype(np.uint16)
     colors = np.stack([_hex_to_rgb01("#FF0000"), _hex_to_rgb01("#0000FF")])
@@ -207,12 +173,7 @@ def test_composite_commutes_with_subsampling():
 
 
 def test_composite_banding_does_not_change_a_single_pixel(monkeypatch):
-    """Banded (threaded) compositing must be a pure optimisation.
-
-    Bands write disjoint row slices, so the result must equal the single-band result exactly —
-    including at the band seams, which is where an off-by-one in the row split would show and
-    where a visual check would never look.
-    """
+    """Banded (threaded) compositing must be a pure optimisation, seams included."""
     import squidxplorer._montage as M
     rng = np.random.default_rng(99)
     store = rng.integers(0, 65535, size=(4, 101, 67)).astype(np.uint16)   # prime-ish, uneven split
@@ -227,8 +188,6 @@ def test_composite_banding_does_not_change_a_single_pixel(monkeypatch):
 
 
 def test_composite_banding_still_honours_the_channel_mask(monkeypatch):
-    # A masked channel contributes nothing in EVERY band — a band that forgot the mask would
-    # paint a stripe of an off channel back in.
     import squidxplorer._montage as M
     store = np.full((2, 80, 40), 40000, np.uint16)
     colors = np.stack([_hex_to_rgb01("#FF0000"), _hex_to_rgb01("#0000FF")])
@@ -238,15 +197,14 @@ def test_composite_banding_still_honours_the_channel_mask(monkeypatch):
 
 
 def test_composite_of_an_empty_store_is_empty_not_a_crash():
-    # A layer allocated before any tile has landed has a zero dimension; banding divides by the
-    # row count, so this is the shape that would raise rather than render.
+    # a layer allocated before any tile lands has a zero dimension
     colors = np.stack([_hex_to_rgb01("#FF0000")])
     out = composite(np.zeros((1, 0, 5), np.uint16), colors, [(0.0, 1.0)])
     assert out.shape == (0, 5, 3) and out.dtype == np.uint8
 
 
 def test_window_lut_cache_is_bounded():
-    """A continuous drag mints a new (lo, hi) every tick; an unbounded cache is a slow leak."""
+    """A drag mints a new (lo, hi) every tick; an unbounded cache is a slow leak."""
     import squidxplorer._montage as M
     for i in range(M._LUT_CACHE_MAX * 3):
         _window_lut(np.dtype(np.uint16), float(i), float(i + 1000))
@@ -255,7 +213,7 @@ def test_window_lut_cache_is_bounded():
 
 def test_channel_slug_is_filename_safe():
     assert _channel_slug("Fluorescence 638 nm - Penta", 0) == "Fluorescence_638_nm_Penta"
-    assert _channel_slug(None, 3) == "ch3"     # blank label falls back to the index
+    assert _channel_slug(None, 3) == "ch3"
 
 
 def test_window_guards_flat_channel():

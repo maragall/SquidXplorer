@@ -1,13 +1,6 @@
-"""IMA-187: coordinates.csv -> metadata["fov_positions_um"], on both reader classes.
+"""coordinates.csv -> metadata["fov_positions_um"], on both reader classes.
 
-Units: the CSV records millimetres, the metadata key is micrometres — the conversion is the
-producer's job and the ``_um`` suffix is the contract (see ``test_units_invariant`` below).
-
-The load-bearing property is the row-order mapping and its cross-check. coordinates.csv has no
-``fov`` column, so the Nth distinct position of a region IS that region's Nth sorted FOV. If
-that mapping is wrong nothing crashes — the mosaic just draws every tile in the wrong place.
-So the count check has to be exact, and it has to survive multi-z acquisitions that repeat a
-stage position once per z-level.
+The CSV records millimetres, the metadata key is micrometres; the conversion is the producer's job.
 """
 
 from __future__ import annotations
@@ -184,12 +177,7 @@ def test_ome_reader_reads_a_sibling_coordinates_csv(tmp_path):
 # --- units invariant (world space is MICROMETRES, every key ends in _um) ---------------------
 
 def test_metadata_key_is_um_suffixed_and_no_mm_key_survives(squid_dataset):
-    """The contract ``_tiling.py`` declares: world space is µm and the key says so.
-
-    The un-suffixed ``fov_positions`` key carried MILLIMETRES into code documented in µm. A
-    lingering alias would let a consumer keep reading mm and re-introduce the 1000x error, so
-    assert the old key is gone rather than merely that the new one exists.
-    """
+    """World space is µm and the key says so; the old un-suffixed mm key must be gone."""
     root, _ = squid_dataset
     meta = open_reader(root).metadata
     assert "fov_positions_um" in meta
@@ -209,11 +197,7 @@ def test_positions_are_micrometres_not_millimetres(squid_dataset):
 
 
 def test_placement_consumes_um_without_rescaling(squid_dataset):
-    """End-to-end: reader µm -> _placement px, with no second mm->µm multiply anywhere.
-
-    0.5 mm = 500 µm at 0.5 µm/px is exactly 1000 px. If either side still converted, this
-    would be 1 px or 1_000_000 px — both of which render as a plausible picture.
-    """
+    """End-to-end: reader µm -> _placement px, with no second mm->µm multiply anywhere."""
     from squidxplorer._placement import fov_offsets_px
 
     root, _ = squid_dataset
@@ -225,11 +209,7 @@ def test_placement_consumes_um_without_rescaling(squid_dataset):
 # --- graceful degradation: a truncated CSV must not sink the whole acquisition ---------------
 
 def test_truncated_coordinates_csv_still_yields_channels_and_dtype(squid_dataset):
-    """The bug: the cross-check raised out of the middle of the ``metadata`` dict literal, so
-    regions/channels/dtype — all derived from FILENAMES and one decoded frame, none of which
-    the CSV can invalidate — became unreachable and the viewer declared the acquisition
-    unreadable. Placement may degrade; identity may not.
-    """
+    """Placement may degrade; identity (regions/channels/dtype) may not."""
     root, _ = squid_dataset
     lines = (root / "coordinates.csv").read_text().splitlines()
     (root / "coordinates.csv").write_text("\n".join(lines[:2]) + "\n")   # header + ONE row
@@ -256,10 +236,6 @@ def test_malformed_coordinates_csv_header_still_yields_metadata(squid_dataset):
 
 
 # --- one truncated well must not cost the whole plate its mosaic ----------------------------
-#
-# Shape taken from a real 9-well acquisition (WELLPLATE 2026-07-23): A1..C2 each wrote 9 FOVs
-# and list 9 positions; C3 was cut short at 4 FOVs while its 9 planned rows stayed in the CSV.
-# Every well lost its mosaic, because the first mismatch raised and collapsed the whole mapping.
 
 def _plate_csv(good_regions, short_region=None, planned=3, written=1):
     """A CSV where every *good_regions* entry cross-checks and *short_region* is truncated."""
@@ -327,12 +303,7 @@ def test_a_malformed_file_is_still_all_or_nothing(tmp_path):
 
 
 def test_degradation_does_not_swallow_unexpected_errors(squid_dataset, monkeypatch):
-    """Only the deliberate ValueErrors degrade; a genuine bug must still surface.
-
-    Patches ``_parse_fov_positions_um`` because that is the seam the degrading wrapper now
-    calls: the per-region cross-check moved into it so one truncated well stops costing the
-    whole plate its mosaic. The property under test is unchanged.
-    """
+    """Only the deliberate ValueErrors degrade; a genuine bug must still surface."""
     import squidxplorer.reader as reader_mod
 
     def boom(*_a, **_k):
@@ -345,23 +316,10 @@ def test_degradation_does_not_swallow_unexpected_errors(squid_dataset, monkeypat
 
 
 # ============================================================================================
-# IMA-215: the SECOND on-disk coordinates.csv format ("monkey style"), detected BY HEADER
-# ============================================================================================
-#
-# Two schemas ship in real Squid output and both must parse:
-#
+# The second on-disk coordinates.csv format ("monkey style"), detected by header:
 #   (a) monkey-style   region,fov,z_level,x (mm),y (mm),z (um),time
 #   (b) 20x-style      region,x (mm),y (mm),z (mm)
-#
-# (a) carries an explicit ``fov`` column, so the row->FOV mapping is STATED rather than inferred
-# from row order — strictly better, and it must be used when present. Detection is on the HEADER
-# (does a ``fov`` column exist?), never on row counts: a monkey CSV whose row count happens to
-# equal the FOV count is still a monkey CSV, and a 20x CSV whose row count happens to match a
-# z-repeat pattern is still positional. Row counts are data; the header is the schema.
-#
-# Units do NOT change between the formats: x/y are millimetres in BOTH, and the mm -> µm
-# conversion stays at this single producer. (a)'s ``z (um)`` column is already µm — it is not
-# read at all, so it cannot smuggle a unit mismatch in.
+# ============================================================================================
 
 _MONKEY_HEADER = "region,fov,z_level,x (mm),y (mm),z (um),time"
 
@@ -405,11 +363,7 @@ def test_monkey_z_levels_are_deduplicated_per_fov(tmp_path):
 
 
 def test_monkey_format_detected_by_header_not_row_count(tmp_path):
-    """Row count == FOV count, yet the fov column still decides the mapping (rows are shuffled).
-
-    If detection ever regressed to a row-count heuristic this file would parse positionally and
-    silently assign FOV 0 the position of FOV 1 — a scrambled mosaic that looks fine.
-    """
+    """Row count == FOV count, yet the fov column still decides the mapping (rows are shuffled)."""
     (tmp_path / "coordinates.csv").write_text(_monkey_csv([
         "A1,1,0,9.0,9.0,0,t",
         "A1,0,0,1.0,1.0,0,t",
@@ -467,7 +421,7 @@ def test_monkey_conflicting_positions_for_one_fov_raises(tmp_path):
 
 
 def test_monkey_malformed_csv_still_yields_metadata(squid_dataset):
-    """The IMA-187 containment must hold for the new format too: identity survives, placement degrades."""
+    """The containment holds for the new format too: identity survives, placement degrades."""
     root, _ = squid_dataset
     (root / "coordinates.csv").write_text(_monkey_csv(["B2,0,0,1.0,2.0,0,t"]))   # too few
     with pytest.warns(UserWarning, match="unusable"):
@@ -503,12 +457,7 @@ def test_real_20x_format_plate_span():
 
 @pytest.mark.integration
 def test_real_monkey_format_parses_with_fov_column(tmp_path):
-    """original_coordinates_0.csv from the 10x z-stack: the monkey header, on real data.
-
-    Read-only: the real file is copied nowhere; it is read straight from Downloads and only its
-    parsed result is asserted. The reader is pointed at the acquisition root, whose FOV ids come
-    from the filenames, so this exercises the real cross-check too.
-    """
+    """The monkey header on real data, read straight from Downloads (read-only)."""
     if not _REAL_MONKEY.is_dir():
         pytest.skip("10x laser-af z-stack dataset not present")
     src = _REAL_MONKEY / "original_coordinates" / "original_coordinates_0.csv"

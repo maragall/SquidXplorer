@@ -1,11 +1,4 @@
-"""The log panel WIDGET — mounted bottom-right, under the operator tabs.
-
-The seam's rules (bounded, colour, third-party appears) are tested in ``test_logpane.py`` without
-Qt. These tests are about the WIDGET: that it is bounded in practice, colours by level, shows the
-RAM and activity readouts Squid shows continuously, collapses without stealing pane space, and —
-the one role-level tests miss — actually PAINTS without raising (the technique that caught two
-bugs in the layer tree).
-"""
+"""The log panel widget: bounded, coloured, live readouts, collapse, and real painting."""
 
 from __future__ import annotations
 
@@ -49,8 +42,7 @@ def test_a_logged_line_reaches_the_panel(panel, bus):
 
 
 def test_a_third_party_library_appears_in_the_panel_without_being_wired(panel, bus):
-    """The design property, end to end: a library that never heard of us logs, and the user sees
-    it — because the bus attaches to the ROOT logger and the panel is a sink of the bus."""
+    """The bus attaches to the root logger and the panel is a sink of the bus."""
     bus.install()
     logging.getLogger("tilefusion.optimization").warning("fusing region manual0")
     assert "tilefusion" in panel.text()
@@ -60,7 +52,6 @@ def test_a_third_party_library_appears_in_the_panel_without_being_wired(panel, b
 def test_a_line_is_coloured_by_its_level(panel, bus):
     bus.install()
     logging.getLogger("x").error("it broke")
-    # the QPlainTextEdit holds HTML with the level colour; read it back from the document
     html = panel._view.document().toHtml()
     assert color_for("ERROR").lstrip("#").lower() in html.lower()
 
@@ -81,7 +72,6 @@ def test_the_view_is_bounded_no_matter_how_many_lines(qapp, bus):
         for i in range(200):
             logging.getLogger("run").info("well %d projected", i)
         assert panel.line_count() <= 20, "an unbounded log body is a leak with a nice UI"
-        # the newest line survived; the oldest was evicted
         assert "well 199" in panel.text()
         assert "well 0 " not in panel.text()
     finally:
@@ -94,7 +84,6 @@ def test_the_view_is_bounded_no_matter_how_many_lines(qapp, bus):
 def test_the_memory_readout_is_a_real_sentence():
     line = memory_line()
     assert line.startswith("mem")
-    # either a measured footprint or the honest dash, never a crash
     assert "GiB" in line or "MiB" in line or line == "mem —"
 
 
@@ -113,8 +102,7 @@ def test_the_activity_line_follows_the_activity_registry(qapp, bus):
 
 
 def test_warnings_and_errors_are_tallied_in_the_header(panel, bus):
-    """Squid's warningErrorWidget auto-hides when nothing is pending; the tally starts empty and
-    only fills when there is something to say."""
+    """The tally starts empty and only fills when there is something to say."""
     bus.install()
     assert panel._tally_lbl.text() == ""
     logging.getLogger("x").warning("heads up")
@@ -137,7 +125,6 @@ def test_collapsing_hides_the_body_and_caps_the_height(panel):
     panel.set_collapsed(True)
     assert panel.collapsed
     assert not panel._view.isVisibleTo(panel), "the body is still showing when collapsed"
-    # the widget must not claim body-sized space it is not drawing
     assert panel.maximumHeight() <= panel.sizeHint().height() + 1
     panel.set_collapsed(False)
     assert panel._view.isVisibleTo(panel)
@@ -145,8 +132,7 @@ def test_collapsing_hides_the_body_and_caps_the_height(panel):
 
 
 def test_the_header_survives_collapse_so_the_status_is_never_hidden(panel):
-    """A status bar that vanishes cannot tell you the app is busy — which is the one thing it is
-    for. The RAM and activity labels stay visible when the body is gone."""
+    """The RAM and activity labels stay visible when the body is gone."""
     panel.set_collapsed(True)
     assert panel._mem_lbl.isVisibleTo(panel)
     assert panel._activity_lbl.isVisibleTo(panel)
@@ -162,9 +148,7 @@ def test_the_toggle_text_reflects_the_state(panel):
 # --- it actually PAINTS -------------------------------------------------------------------------
 
 def test_the_panel_actually_PAINTS_without_raising(qapp, bus):
-    """Render into a pixmap for real. Serving a widget's roles is not the same as surviving its
-    paint — the layer tree shipped 54 tracebacks a launch that role-level tests never saw, because
-    Qt swallows exceptions raised inside paint()."""
+    """Render into a pixmap for real: Qt swallows exceptions raised inside paint()."""
     import sys
 
     from qtpy.QtGui import QPixmap
@@ -191,8 +175,7 @@ def test_the_panel_actually_PAINTS_without_raising(qapp, bus):
 
 
 def test_a_measured_run_line_flows_through_the_panel(panel, bus):
-    """The measurement's one-line-per-run reaches the panel with no extra wiring, because
-    ``measure_run`` logs at INFO to the root logger and the panel is a sink of the root logger."""
+    """``measure_run`` logs at INFO to the root logger, so its line reaches the panel unwired."""
     from squidxplorer._measure import MetricsLog, measure_run
 
     bus.install()

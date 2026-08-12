@@ -1,28 +1,5 @@
-"""Stitching, then 3D in-window: the four things Julio reported driving the real build 2026-08-06.
-
-Verbatim: *"When I stitch in 3d, in window, the contrast changes. Turning off one layer doesn't
-turn the other like in the 2D view. The stitched view is not exactly the same as that of raw
-(detected 2 FOVs instead of 4). It is not stitching the z-levels in the 3d view separately."*
-
-Sentence 2 is the layer tree's and lives in ``tests/test_layer_tree.py`` beside the rest of the
-tree. The other three are here, and two of them share ONE root cause:
-
-* **the z-levels** -- ``_workers._OperatorWorker._on_well`` emitted ``image[0, :, 0]`` for every
-  operator, so nine of a ten-plane stitched mosaic died on one unnamed index and the layer
-  declared ``z_depth 1``. Measured on the real 10x set (manual0, ``projector="bgsub"``):
-  ``stitch_plate`` yielded ``(1, 1, 10, 2084, 7711)`` and the display was handed
-  ``(1, 2084, 7711)``.
-* **the extent and the contrast** -- ``BrickedVolume.open()`` moves the ``(op, channel)`` identity
-  off the pane's 2-D mosaic layers and onto its bricks (2026-08-05, and correct: it is what puts
-  the volume in the tree). ``_open_3d`` then read the scene BEFORE closing the old volume, so
-  ``MosaicLayers`` answered about the BRICKS: ``find`` returned one 512-px texture, the new
-  volume's source was that texture, and its contrast was that texture's. Measured at the seam,
-  second 3D click over a bgsub layer: **1 of 9 bricks** of the box yielded voxels, and the
-  harvested window came back ``(0.0, 1.0)`` against the ``(120, 900)`` on screen.
-
-The Qt pane and the GL canvas are the only things stood in for. ``_OperatorWorker._on_well``,
-``RegionResultAccumulator``, ``MosaicLayers``, ``RegionViewer._open_3d`` / ``_open_roi_3d`` /
-``_volume_source`` and ``BrickedVolume.open`` all run for real.
+"""Stitching, then 3D in-window: z-depth delivery, second-open coverage, contrast harvest,
+and the hidden-layer reslice crash. Only the Qt pane and the GL canvas are stood in for.
 """
 
 from __future__ import annotations
@@ -54,7 +31,7 @@ from squidxplorer._op_result import RegionResultAccumulator  # noqa: E402
 from squidxplorer._region_viewer import _RAW_OP, RegionViewer  # noqa: E402
 from squidxplorer._workers import _OperatorWorker            # noqa: E402
 
-# -- a two-FOV region, small enough to hold in a test and shaped like the real one --------------
+# a two-FOV region, small enough to hold in a test and shaped like the real one
 N_Z, N_C = 4, 2
 FRAME = 64                     # px per FOV, square
 OVERLAP = 8                    # px
@@ -62,15 +39,10 @@ PX_UM, DZ_UM = 1.0, 2.5
 CHANNELS = ["c0", "c1"]
 REGION = "manual0"
 
-#: The raw PREVIEW's decimation. `_mosaic_source.fuse_region_pyramid` caps level 0 to
-#: `_MAX_FUSED_PX` and records the truth in the layer's own `scale`, so a window showing raw is
-#: showing coarser pixels than the acquisition's. A stitched mosaic is not: it is the fused result
-#: at full resolution. Both pitches therefore exist in one scene, which is what makes an assertion
-#: about which one 3D reads mean anything.
+#: The raw PREVIEW's decimation, so two pitches exist in one scene.
 _PREVIEW_STEP = 2
 
-#: plane k is filled with this, so a dropped, duplicated or reordered plane is a NUMBER that is
-#: wrong rather than a shape that happens to match.
+# plane k carries its own number, so a dropped/duplicated/reordered plane is a wrong VALUE
 def _plane_value(z: int, c: int) -> int:
     return 1000 + 100 * int(z) + int(c)
 
@@ -118,11 +90,7 @@ def _worker(meta: dict, operator: str) -> _OperatorWorker:
 
 
 def _deliver(worker, meta, image):
-    """One region's run, from the engine's 5-D yield to the ``OperatorResult`` the display gets.
-
-    ``_on_well`` is the real slot (it runs on write_plate's writer threads in production); the
-    accumulator and the ``z_depth`` rule below are ``_viewer._on_result`` / ``_as_result``.
-    """
+    """One region's run, from the engine's 5-D yield to the ``OperatorResult`` the display gets."""
     got: list = []
     worker.resultReady.connect(lambda region, fov, planes: got.append((region, fov, planes)))
     worker._on_well(REGION, 0, image)
@@ -135,8 +103,7 @@ def _deliver(worker, meta, image):
 
 
 def _z_depth(result) -> int:
-    """``_viewer._as_result``'s rule, verbatim: the channel axis is already off, so a 3-D plane's
-    leading axis can only be z."""
+    """``_viewer._as_result``'s rule, verbatim."""
     first = result.planes[0]
     return int(first.shape[0]) if int(getattr(first, "ndim", 2)) >= 3 else 1
 
@@ -146,14 +113,7 @@ def _z_depth(result) -> int:
 # =============================================================================================
 
 def test_a_stitched_region_reaches_the_layer_with_EVERY_acquired_plane():
-    """The observable is the DEPTH the layer declares, and the VALUES in it.
-
-    A shape check alone passes a stack that is plane 0 broadcast over z, which is why each plane
-    carries its own number here.
-
-    MUTATION: return ``well`` unconditionally from ``_OperatorWorker._result_pixels`` (i.e. put
-    ``image[0, :, 0]`` back) -> z_depth 1 -> red.
-    """
+    """Each plane carries its own number, so a broadcast of plane 0 cannot pass."""
     meta = _meta()
     h, w = _mosaic_hw(meta)
     result = _deliver(_worker(meta, "stitch"), meta, _stitched_5d(h, w))
@@ -169,23 +129,7 @@ def test_a_stitched_region_reaches_the_layer_with_EVERY_acquired_plane():
 
 
 def test_the_layer_z_depth_drives_3D_and_a_brick_comes_back_with_every_plane():
-    """End of the chain: the depth has to survive into what ``_volume_source`` hands the loader.
-
-    ``_volume_source`` refuses a layer with no z ("carries no z depth here"), which is what a
-    stitched layer used to be. This asserts the voxels, not the refusal message.
-
-    THE PITCH IS PART OF THE ANSWER, not something to discard. ``_volume_source`` returns the
-    ``(y, x)`` um/px of the LAYER it reads, because a displayed layer is not always at the
-    acquisition's pitch -- ``fuse_region_pyramid`` decimates a raw PREVIEW (measured: step 2, so
-    1.504 against 0.752 on the 10x set), and a volume drawn as if those were native voxels is a
-    physically wrong picture. A stitched region operator's layer is the opposite case and that is
-    the point of stitching for 3D: it is the fused mosaic at full resolution, placed by its own
-    canvas, so 3D of it is at the acquisition's own pitch and nothing is silently coarser.
-    ``tests/test_roi_pitch.py`` owns the decimated side of that contract; this owns the claim that
-    a STITCH is not decimated.
-
-    MUTATION: as above -> `_volume_source` returns (None, None, None) and this fails on `source`.
-    """
+    """The depth must survive into ``_volume_source``, at the acquisition's own pitch."""
     meta = _meta()
     h, w = _mosaic_hw(meta)
     result = _deliver(_worker(meta, "stitch"), meta, _stitched_5d(h, w))
@@ -194,8 +138,7 @@ def test_the_layer_z_depth_drives_3D_and_a_brick_comes_back_with_every_plane():
     win = _Window(meta, mos)
     read, source, pitch = RegionViewer._volume_source(win, (0, h, 0, w))
     assert source == "stitch" and read is not None, f"3D refused the stitched layer: {win.said}"
-    # The raw preview in this same scene is at `_PREVIEW_STEP * PX_UM`, so this is a statement
-    # about WHICH layer was read as much as about the pitch.
+    # the raw preview in this same scene is at _PREVIEW_STEP * PX_UM, so this also says WHICH layer
     assert pitch is not None and tuple(round(float(v), 6) for v in pitch) == (PX_UM, PX_UM), (
         f"3D reads the stitched layer at {pitch} um/px, not the acquisition's {PX_UM}: a stitched "
         f"mosaic is native, and a volume of it must not be at the preview's "
@@ -210,15 +153,7 @@ def test_the_layer_z_depth_drives_3D_and_a_brick_comes_back_with_every_plane():
 
 
 def test_a_per_FOV_operator_still_delivers_one_plane_AND_SAYS_SO(caplog):
-    """What is deliberately NOT fixed, pinned so it cannot pass for a result.
-
-    A per-FOV operator's mosaic is re-fused for display from tiles the accumulator holds until the
-    region is whole, so keeping its depth means ``Nz`` fusions over ~9.4 GB of tiles on one real
-    27-FOV well. That path still delivers plane 0 — and now says which plane, and of how many,
-    instead of letting a ten-plane operator look like a one-plane one.
-
-    MUTATION: delete the `_z_dropped_note` call in `_result_pixels` -> no line -> red.
-    """
+    """The per-FOV path still delivers plane 0, and names which plane of how many."""
     import logging
 
     meta = _meta()
@@ -235,24 +170,12 @@ def test_a_per_FOV_operator_still_delivers_one_plane_AND_SAYS_SO(caplog):
 
 
 # =============================================================================================
-# The seam: a pane's MosaicLayers over a bare ViewerModel, and a window that borrows the real
-# methods. Everything Qt (the widget, the canvas, the loader thread) is what is stood in for.
+# The seam: a pane's MosaicLayers over a bare ViewerModel, and a window borrowing real methods.
 # =============================================================================================
 
 def _pane_with(meta: dict, *, op: str, result=None, raw_clim=(5.0, 9.0),
                op_clim=(120.0, 900.0), raw_channels=CHANNELS):
-    """A pane holding a RAW mosaic and, optionally, one operator layer -- as a window builds them.
-
-    Raw is added first and the operator second, so ``_darken_other_ops`` puts raw out exactly as it
-    does in the app: at most one operator per channel is lit.
-
-    *raw_channels* is which channels raw exists for. It defaults to all of them, and a test that
-    narrows it is not being contrived: contrast is LINKED per channel across processing layers
-    (``_register_channel``), so where raw and the operator both exist they share one window by
-    construction and it does not matter which is read. Where raw does NOT exist for a channel the
-    operator produced, reading raw yields nothing at all and the brick derives its own with
-    ``_auto_clim`` -- which is the contrast changing under the user.
-    """
+    """A pane holding a RAW mosaic and, optionally, one operator layer — as a window builds them."""
     from squidxplorer._mosaic_source import mosaic_bbox_um
 
     model = ViewerModel()
@@ -260,11 +183,7 @@ def _pane_with(meta: dict, *, op: str, result=None, raw_clim=(5.0, 9.0),
     h, w = _mosaic_hw(meta)
     bbox = mosaic_bbox_um(meta, REGION)
     for channel in raw_channels:
-        # RAW IS DECIMATED, as `fuse_region_pyramid` really builds it: level 0 is capped to
-        # `_MAX_FUSED_PX`, so the preview covers the same micrometres in half the pixels (measured
-        # on the 10x set: step 2, 1.504 um/px against an acquisition 0.752). Building it at native
-        # size here would make the two pitches in this scene identical and every assertion about
-        # WHICH layer 3D read at WHAT pitch vacuous.
+        # raw is DECIMATED, as fuse_region_pyramid really builds it, so the scene holds two pitches
         mos.add_mosaic(_RAW_OP, channel, np.zeros((N_Z, h // _PREVIEW_STEP, w // _PREVIEW_STEP),
                                                   np.uint16),
                        contrast_limits=raw_clim, bbox_um=bbox, z_scale_um=DZ_UM)
@@ -285,8 +204,7 @@ class _Pane:
         self.settled = []
 
     def _live_max_3d_texture(self):
-        # Deliberately small, so the ROI is BRICKED rather than taking the single-texture path:
-        # the defect being pinned is one brick standing in for the whole box.
+        # small on purpose, so the ROI is BRICKED rather than taking the single-texture path
         return 32
 
     def on_camera_settled(self, cb):
@@ -298,16 +216,9 @@ class _Cursor:
 
 
 class _Window(QObject):
-    """A RegionViewer's 3D entry points, over a real pane model. No QWidget, no GL canvas.
-
-    A ``QObject`` because ``_open_roi_3d`` parents the brick loader (a ``QThread``) to the window,
-    which is the join that stops "QThread: Destroyed while thread is still running".
-    """
+    """A RegionViewer's 3D entry points, over a real pane model. No QWidget, no GL canvas."""
 
     _open_3d = RegionViewer._open_3d
-    # Opening 3D RECORDS the window's render mode (2026-08-06), which is what lets an operator run
-    # from this window know to iterate every z-plane rather than the shown one. Borrowed like every
-    # other method here so the real one is exercised, not stubbed past.
     set_render_mode = RegionViewer.set_render_mode
     _refresh_controls_note = RegionViewer._refresh_controls_note
     _open_roi_3d = RegionViewer._open_roi_3d
@@ -343,12 +254,7 @@ class _Window(QObject):
 
 @pytest.fixture
 def stub_bricked(monkeypatch):
-    """``BrickedVolume`` with the three things that need a live Qt event loop stubbed out.
-
-    Starting a real QThread with no QApplication aborts the interpreter, and the camera cannot be
-    framed without a canvas. ``open()``'s own layer bookkeeping — which is the subject — runs for
-    real, and so does ``_add_layer``.
-    """
+    """``BrickedVolume`` with only the pieces that need a live Qt event loop stubbed out."""
     import squidxplorer._brick_view as BV
 
     class _Stubbed(BV.BrickedVolume):
@@ -365,23 +271,11 @@ def stub_bricked(monkeypatch):
 
 
 #: A window a user drags to while the VOLUME is what they are looking at.
-#:
-#: This constant used to stand for "a window a brick carries that the 2-D layer does not", and that
-#: state no longer exists: since `fix/one-layer-model` a brick is a real model layer, so a write on
-#: one mirrors across its identity and propagates through `_link_set` to the channel's flat
-#: mosaics. Measured on the real 10x set: writing `(11, 22)` on a brick leaves the hidden
-#: `raw · 405` layer holding `(11, 22)`. One value per channel, everywhere, which is the stronger
-#: guarantee -- so what is worth pinning is that the value SURVIVES the flip, not that two of them
-#: can disagree.
 _DRAGGED_CLIM = (7.0, 8.0)
 
 
 def _volume_up(win, roi, stub_bricked, op, drag_to=None):
-    """Open a first 3D volume and let some of its bricks land, as a live view has them.
-
-    *drag_to* is a contrast the user moves to while the volume is up, written on a brick because
-    that is the layer napari's slider is addressing in 3D.
-    """
+    """Open a first 3D volume and let some of its bricks land, as a live view has them."""
     win._roi_bbox = roi
     win._open_3d()
     vol = win._native3d
@@ -393,12 +287,7 @@ def _volume_up(win, roi, stub_bricked, op, drag_to=None):
     assert [key_of(ly) for ly in win._napari_viewer().layers].count(
         MosaicKey(op, CHANNELS[0])) >= 3, "the bricks did not take the identity"
     if drag_to is not None:
-        # THE CRASH THIS ALSO PINS. Until `MosaicLayers._reslice_hidden_layers`, this write raised
-        # `RuntimeError: sequence argument must have length equal to input rank` from
-        # `scipy.ndimage.zoom` -- the flat mosaics are hidden across the 2D->3D flip, napari left
-        # their 2-D slice under a 3-D slice input, and the link carried the write straight into
-        # `Image._update_thumbnail`. Reproduced on the real 10x acquisition through
-        # `MosaicLayers.set_contrast` and through a bare layer write alike.
+        # a contrast drag in 3D addresses a brick; the write must not raise across the flip
         mos = win._pane.mosaic
         mos.find(op, CHANNELS[0]).contrast_limits = drag_to
     return vol
@@ -409,15 +298,7 @@ def _volume_up(win, roi, stub_bricked, op, drag_to=None):
 # =============================================================================================
 
 def test_a_SECOND_3d_open_reads_the_whole_ROI_and_not_one_brick_of_the_last_one(stub_bricked):
-    """THE REPORTED BUG, as coverage of the box rather than as a call order.
-
-    Every brick of the ROI must yield voxels. With the old ordering the source was one 16-px brick
-    of the volume still on screen, so exactly one brick of the box could be read and the rest of
-    the volume was empty -- fewer fields than 2D shows, with nothing said.
-
-    MUTATION: move `self._close_native3d()` in `_open_3d` to after `_open_roi_3d` returns (or
-    delete it, leaving the close inside `_replace_native3d`) -> 1 of 9 bricks -> red.
-    """
+    """Every brick of the ROI must yield voxels, not just the one brick of the previous view."""
     from squidxplorer._mosaic_source import mosaic_bbox_um
 
     meta = _meta()
@@ -443,10 +324,7 @@ def test_a_SECOND_3d_open_reads_the_whole_ROI_and_not_one_brick_of_the_last_one(
 
 
 def test_the_second_volumes_voxels_are_the_STITCHED_ones_at_full_extent(stub_bricked):
-    """Coverage is not enough: the bricks must carry the operator's pixels, at their own places.
-
-    MUTATION: as above -> the far bricks read None and the plane values never appear -> red.
-    """
+    """Coverage is not enough: the bricks must carry the operator's pixels, at their own places."""
     from squidxplorer._mosaic_source import mosaic_bbox_um
 
     meta = _meta()
@@ -470,17 +348,7 @@ def test_the_second_volumes_voxels_are_the_STITCHED_ones_at_full_extent(stub_bri
 # =============================================================================================
 
 def test_the_volume_opens_on_the_window_the_RENDERED_layer_is_showing(stub_bricked):
-    """The volume adopts the contrast of the layer it RENDERS, for every channel that layer has.
-
-    The harvest read ``find(_RAW_OP, ...)`` whatever was about to be rendered. Where raw and the
-    operator both exist that is harmless -- contrast is linked per channel, so they hold one value
-    -- and where raw does NOT exist for a channel the operator produced, it yields nothing at all
-    and ``_brick_view._add_layer`` derives one with ``_auto_clim``. So the channel that raw has is
-    the control, and the channel it does not is the measurement.
-
-    MUTATION: pass `_RAW_OP` to `_on_screen_luts` in `_open_roi_3d` -> c1 has no entry -> KeyError
-    -> red.
-    """
+    """The volume adopts the contrast of the layer it renders, for every channel that layer has."""
     from squidxplorer._mosaic_source import mosaic_bbox_um
 
     meta = _meta()
@@ -503,24 +371,7 @@ def test_the_volume_opens_on_the_window_the_RENDERED_layer_is_showing(stub_brick
 
 
 def test_a_contrast_set_IN_3D_survives_the_flip_and_the_next_volume_opens_on_it(stub_bricked):
-    """A window the user moved to while the VOLUME was up is the window the next one opens on.
-
-    Two things have to hold at once for this, and neither is free:
-
-    * the drag must not RAISE. It did, on real data, until
-      ``MosaicLayers._reslice_hidden_layers``: the flat mosaics are hidden across the 2D->3D flip
-      and napari left their 2-D slice under a 3-D slice input, so the linked write blew up in
-      ``Image._update_thumbnail``. ``_volume_up(drag_to=...)`` is that gesture.
-    * the second open must harvest the LIVE model. It reads the value the drag left behind, not
-      the one the layer was seeded with.
-
-    What this deliberately does NOT assert any more is that a brick can hold a window the flat
-    mosaic does not -- see ``_DRAGGED_CLIM``. Since `fix/one-layer-model` that state cannot exist,
-    and writing a test that manufactures it would be pinning a bug as a feature.
-
-    MUTATION: pass `contrast_by=None` in `_open_roi_3d`'s `BrickedVolume(...)` call -> the volume
-    derives its own with `_auto_clim` instead of adopting the screen's -> red.
-    """
+    """The window the user dragged to while the volume was up is what the next volume opens on."""
     from squidxplorer._mosaic_source import mosaic_bbox_um
 
     meta = _meta()
@@ -529,19 +380,17 @@ def test_a_contrast_set_IN_3D_survives_the_flip_and_the_next_volume_opens_on_it(
     mos, _model = _pane_with(meta, op="stitch", result=result)
     roi = mosaic_bbox_um(meta, REGION)
     win = _Window(meta, mos)
-    # Held by OBJECT: while a volume is up this layer has surrendered its identity, so `find` does
-    # not name it -- which is the whole reason `_open_3d` closes the volume before reading.
+    # held by OBJECT: while a volume is up this layer has surrendered its identity to the bricks
     flat = mos.find("stitch", CHANNELS[0])
 
     first = _volume_up(win, roi, stub_bricked, "stitch", drag_to=_DRAGGED_CLIM)
-    # The drag reached the flat mosaic under the volume: ONE value per channel, everywhere.
+    # the drag reached the flat mosaic under the volume: ONE value per channel, everywhere
     assert tuple(flat.contrast_limits) == _DRAGGED_CLIM
 
     win._open_3d()
 
     vol = win._native3d
-    # ...and it IS the second view. Reading the first one's window back would pass this for the
-    # wrong reason on a click that silently rendered nothing.
+    # ...and it IS the second view, not the first one's window read back
     assert vol is not None and vol is not first, f"the second 3D view never opened: {win.said}"
     assert tuple(vol._contrast_by[CHANNELS[0]]) == _DRAGGED_CLIM, (
         f"the second 3D view opened at {vol._contrast_by.get(CHANNELS[0])}, not the "
@@ -551,20 +400,6 @@ def test_a_contrast_set_IN_3D_survives_the_flip_and_the_next_volume_opens_on_it(
 # =============================================================================================
 # The crash under all of it: a HIDDEN layer's slice contradicts its own slice input across a flip
 # =============================================================================================
-#
-# Found while merging this branch with `fix/one-layer-model`, and it is a real product crash on a
-# real gesture, not a test artifact. Reproduced on the real 10x acquisition against a MULTISCALE
-# raw pyramid `(10, 5731, 4794)`, through `MosaicLayers.set_contrast` and through a bare layer
-# write alike: open a 3-D volume and drag the contrast ->
-# `RuntimeError: sequence argument must have length equal to input rank` out of `scipy.ndimage`.
-#
-# `Layer._slice_dims` assigns `_slice_input` unconditionally and then calls `_refresh_sync`, which
-# returns at its first line for an invisible layer. `BrickedVolume.open()` hides the pane's mosaics
-# and flips to `ndisplay=3`, so they end the flip claiming 3-D while holding a 2-D thumbnail; every
-# `contrast_limits` write calls `_update_thumbnail`, which then does `np.max(2-D, axis=0)`.
-#
-# Only reachable since bricks became real model layers: `adopt` registers them, so `_link_set`
-# links a brick to the hidden flat mosaics of its channel.
 
 
 def _flip_and_write(mos, ndisplay, layer, value):
@@ -574,15 +409,7 @@ def _flip_and_write(mos, ndisplay, layer, value):
 
 
 def test_a_contrast_write_survives_a_2D_3D_flip_that_left_a_layer_HIDDEN():
-    """Both directions, because both were measured to raise.
-
-    The observable is that the write lands, and the mechanism is that the hidden layer's slice
-    agrees with its own slice input -- asserted, so a `try/except` around the write could not make
-    this pass.
-
-    MUTATION: make `MosaicLayers._reslice_hidden_layers` a no-op -> RuntimeError from
-    `scipy.ndimage.zoom` in both halves -> red.
-    """
+    """Both directions, because both were measured to raise."""
     meta = _meta()
     mos, model = _pane_with(meta, op="raw")
     hidden = mos.find(_RAW_OP, CHANNELS[1])
@@ -598,15 +425,12 @@ def test_a_contrast_write_survives_a_2D_3D_flip_that_left_a_layer_HIDDEN():
     _flip_and_write(mos, 2, shown, (33.0, 44.0))
     assert np.ndim(hidden._slice.thumbnail.view) == 2, (
         "the hidden layer kept a 3-D thumbnail under a 2-D slice input")
-    # ...and the value really arrived, on the hidden layer too: contrast is one value per channel.
+    # ...and the value really arrived: contrast is one value per channel
     assert tuple(shown.contrast_limits) == (33.0, 44.0)
 
 
 def test_a_contrast_drag_ON_THE_VOLUME_does_not_raise(stub_bricked):
-    """The same defect as the GESTURE that hits it: the volume is up, the user drags contrast.
-
-    MUTATION: make `_reslice_hidden_layers` a no-op -> RuntimeError -> red.
-    """
+    """The same defect as the gesture that hits it: the volume is up, the user drags contrast."""
     from squidxplorer._mosaic_source import mosaic_bbox_um
 
     meta = _meta()
@@ -623,16 +447,7 @@ def test_a_contrast_drag_ON_THE_VOLUME_does_not_raise(stub_bricked):
 
 
 def test_taking_the_volume_down_puts_the_MOSAIC_back_in_charge_of_the_key(stub_bricked):
-    """The mechanism under both defects above, stated as the property it rests on.
-
-    ``BrickedVolume.open()`` takes ``(op, channel)`` off the 2-D layers on purpose -- it is what
-    stops the tree laying a flat, coarser mosaic across the volume. The consequence is that while a
-    volume is up, ``MosaicLayers`` is not describing the mosaic, so nothing may ask it what is on
-    screen until the volume is DOWN. ``_close_native3d`` is that seam, and this is what it has to
-    restore for the two tests above to mean anything.
-
-    MUTATION: make `_close_native3d` a no-op -> `find` still answers with a brick -> red.
-    """
+    """``_close_native3d`` must hand the ``(op, channel)`` identity back to the 2D layers."""
     from squidxplorer._mosaic_source import mosaic_bbox_um
 
     meta = _meta()

@@ -1,14 +1,6 @@
-"""IMA-277 per-plane 3-D fusion: every z plane fused, with ONE solved geometry.
+"""Per-plane 3-D fusion: every z plane fused, with ONE solved geometry.
 
-What this file is for, stated as the failures it would catch:
-
-  * "only plane 0 came out"          — the old behaviour, which was refused rather than shipped;
-  * "plane 0 was broadcast over z"   — a shape-only assertion passes this;
-  * "each plane solved its own registration" — the stack shears with depth and nothing says so;
-  * "the flat-field got applied twice" — 88.6% of pixels wrong, silently (measured);
-  * "the z loop held every plane's tiles" — 9.4 GB on the real set, i.e. it does not run.
-
-The fixture is tests/test_stitch.py's synthetic mosaic with a Z AXIS bolted on: each z plane is
+The fixture is tests/test_stitch.py's synthetic mosaic with a Z axis bolted on: each z plane is
 the master texture plus a per-plane constant, so a plane is identifiable by its pixel values
 alone and a swapped/duplicated/missing plane is a numeric failure, not a shape one.
 """
@@ -57,10 +49,6 @@ def master():
     return _master()
 
 
-# A do-nothing plane-op. Two jobs: it exercises the per-plane path while PRESERVING the pixels
-# (bgsub, the obvious real plane-op, subtracts this fixture's texture away to zeros, and a test
-# comparing all-zero planes proves nothing), and it lets a stitch run with the read-path
-# correction as the only correction.
 def _passthrough(p):
     return p
 
@@ -70,10 +58,8 @@ _PASSTHROUGH = "zplanes_passthrough"
 
 @pytest.fixture(autouse=True, scope="module")
 def _register_passthrough():
-    """Registered for this module only. `add_projector` writes to a PROCESS-GLOBAL table, and
-    tests/test_operator_integration.py asserts that table's exact contents — a module-import-time
-    registration here silently fails that test from another file, which is the kind of coupling
-    a fixture with a teardown exists to prevent."""
+    """Registered for this module only: `add_projector` writes to a process-global table that
+    tests/test_operator_integration.py asserts the exact contents of."""
     add_projector(_PASSTHROUGH, plane_op(_passthrough))
     try:
         yield
@@ -86,7 +72,7 @@ def _identity_profile(shape=(TILE, TILE)) -> FlatfieldProfile:
 
 
 def _vignette_profile(shape=(TILE, TILE)) -> FlatfieldProfile:
-    """A real-ish ~10%-deep radial vignette. Deep enough that a double-apply is visible."""
+    """A real-ish ~10%-deep radial vignette, deep enough that a double-apply is visible."""
     yy, xx = np.mgrid[0:shape[0], 0:shape[1]].astype(np.float32)
     cy, cx = (shape[0] - 1) / 2.0, (shape[1] - 1) / 2.0
     r2 = ((yy - cy) / cy) ** 2 + ((xx - cx) / cx) ** 2
@@ -95,30 +81,22 @@ def _vignette_profile(shape=(TILE, TILE)) -> FlatfieldProfile:
     return FlatfieldProfile(field.astype(np.float32), None)
 
 
-# ---------------------------------------------------------------------------------------
-# 1. every plane lands, and each is its own plane
-# ---------------------------------------------------------------------------------------
-
-
 def test_a_plane_op_fuses_every_z_plane(master):
-    """The headline. A plane-op used to raise NotImplementedError here."""
     reader = _ZReader(master)
     out = stitch_region(reader, "A1", list(range(GRID * GRID)), projector=_PASSTHROUGH,
                         register=False, correct_illumination=False)
 
     assert out.ndim == 5
     assert out.shape[2] == N_Z, f"expected {N_Z} fused z planes, got {out.shape[2]}"
-    # Every plane DISTINCT: rules out "plane 0 written N_Z times".
+    # every plane distinct: rules out "plane 0 written N_Z times"
     signatures = {out[0, 0, z].tobytes() for z in range(N_Z)}
     assert len(signatures) == N_Z, "fused planes are not distinct — z was broadcast, not fused"
-    # ...and in the right ORDER: the fixture lifts each plane by a known constant, so the plane
-    # means must be monotonically increasing. A shuffled z axis passes the distinctness check.
+    # and in the right order: a shuffled z axis passes the distinctness check but not this
     means = [float(out[0, 0, z].mean()) for z in range(N_Z)]
     assert means == sorted(means), f"z planes came out in the wrong order: {means}"
 
 
 def test_a_z_reducer_is_unchanged_and_still_collapses_z(master):
-    """mip must be byte-for-byte what it was: one plane out, whatever the stack depth."""
     reader = _ZReader(master)
     out = stitch_region(reader, "A1", list(range(GRID * GRID)), projector="mip",
                         register=False, correct_illumination=False)
@@ -127,17 +105,12 @@ def test_a_z_reducer_is_unchanged_and_still_collapses_z(master):
 
 
 def test_the_z_loop_reads_one_plane_at_a_time(master):
-    """Streaming, not stacking. The reason this was never done is memory (~9.4 GB on the real set).
-
-    Asserted on the READ ORDER rather than on RSS, because RSS is noisy and the property that
-    actually bounds memory is structural: all of plane k's reads happen before any of plane k+1's.
-    A z-INNER loop (project the whole stack per FOV, then fuse) interleaves them and fails this.
-    """
+    """Streaming, not stacking (~9.4 GB on the real set otherwise). Asserted on read ORDER, not
+    RSS: all of plane k's reads must happen before any of plane k+1's."""
     reader = _ZReader(master)
     stitch_region(reader, "A1", list(range(GRID * GRID)), projector="bgsub",
                   register=False, correct_illumination=False)
 
-    # Drop to the sequence of DISTINCT z values in read order: a z-outer loop visits each z once.
     runs = [z for i, z in enumerate(reader.read_z) if i == 0 or z != reader.read_z[i - 1]]
     assert runs == list(range(N_Z)), (
         f"z was not read outermost — read-order z runs were {runs}, expected one contiguous run "
@@ -145,21 +118,10 @@ def test_the_z_loop_reads_one_plane_at_a_time(master):
     )
 
 
-# ---------------------------------------------------------------------------------------
-# 2. ONE geometry for every plane — "pixel identical in all planes"
-# ---------------------------------------------------------------------------------------
-
-
 def test_every_plane_is_fused_with_the_same_solved_offsets(master):
-    """The correctness requirement, not an optimisation.
-
-    Registration is geometry: it is solved once, on one raw plane at one timepoint. If each z
-    re-solved, the planes would disagree by their residuals and the stack would shear with depth.
-
-    Proven two ways, because either alone is weak: (a) the solve runs ONCE (spy on the solver),
-    and (b) each fused plane equals — to the pixel — a single-plane fuse of the same data, which
-    is what "pixel identical in all planes" cashes out to.
-    """
+    """Registration is solved once, on one raw plane; a per-plane re-solve would shear the stack
+    with depth. Proven two ways: the solver is called once, and each fused plane equals a
+    single-plane fuse of the same data to within 1 count (float32 blend, uint16 round-trip)."""
     error = {1: (0.0, 5.0), 2: (4.0, 0.0)}      # a real, registrable stage error to solve away
     reader = _ZReader(_master(), error_px=error)
 
@@ -182,16 +144,6 @@ def test_every_plane_is_fused_with_the_same_solved_offsets(master):
         f"registration ran {len(calls)} times for {N_Z} z planes; it must run ONCE — a per-plane "
         "solve makes the planes disagree by their residuals and the stack shears with depth")
 
-    # (b) The fixture's planes differ ONLY by the constant _PLANE_OFFSET. Fuse them with one
-    # geometry and the fused planes must differ only by that same constant, everywhere — including
-    # across the seams, where the feather weights are what a re-solve would move. A per-plane solve
-    # shifts the tiles relative to each other, so the difference stops being constant exactly at
-    # the seams, which is where a stack shears.
-    #
-    # Tolerance is 1 count and it is arithmetic, not slack: fuse_plane blends in float32 and
-    # cast_like rounds back to uint16, so a value landing on .5 can round either way. A moved seam
-    # is worth hundreds of counts on this texture (its dynamic range is ~40000), so 1 does not hide
-    # one.
     p0 = out[0, 0, 0].astype(np.int32)
     for z in range(1, N_Z):
         delta = out[0, 0, z].astype(np.int32) - p0
@@ -204,7 +156,6 @@ def test_every_plane_is_fused_with_the_same_solved_offsets(master):
 
 
 def test_the_placement_reports_one_solve_for_the_whole_stack(master):
-    """The provenance attached to the pixels describes ONE solve, not N_Z of them."""
     reader = _ZReader(master)
     out = stitch_region(reader, "A1", list(range(GRID * GRID)), projector=_PASSTHROUGH,
                         correct_illumination=False, correct_distortion=False)
@@ -216,22 +167,14 @@ def test_the_placement_reports_one_solve_for_the_whole_stack(master):
     assert out.shape[-2:] == placement.shape
 
 
-# ---------------------------------------------------------------------------------------
-# 3. THE FLAT-FIELD DOUBLE-APPLY GUARD
-# ---------------------------------------------------------------------------------------
-#
-# This is the one that had to be built in the same change as the refusal it unblocks. Before
-# IMA-277, `stitch` wrapped the reader in `_FlatfieldReader` (correction ON by default) and the
-# ONLY thing stopping the `flatfield` projector from correcting the same pixels a second time was
-# the plane-op refusal. Lifting that refusal makes the combination reachable.
+# Before z-plane fusion, `stitch` wrapped the reader in `_FlatfieldReader` (correction ON by
+# default) and only the plane-op refusal stopped the `flatfield` projector correcting twice.
+# Lifting that refusal makes the combination reachable, hence this guard.
 
 
 def test_the_flatfield_correction_is_not_idempotent(master):
-    """The premise of the guard, measured rather than assumed.
-
-    If correcting twice were a no-op, no guard would be needed. It is not: dividing by the gain
-    field twice divides the dim corners by its square.
-    """
+    """The premise of the guard, measured rather than assumed: correcting twice divides the dim
+    corners by the gain field's square, it is not a no-op."""
     profile = _vignette_profile()
     plane = master[:TILE, :TILE]
     once = correct_flatfield(plane, profile)
@@ -245,10 +188,8 @@ def test_the_flatfield_correction_is_not_idempotent(master):
 
 
 def test_stitching_the_flatfield_operator_with_read_path_correction_refuses(master):
-    """The guard. Both corrections on = refuse, by name of both escapes."""
     reader = _ZReader(master)
-    # ONE PER CHANNEL: project_well specialises the operator per channel (for_channel), so a run
-    # over this acquisition needs every channel's field installed.
+    # one profile per channel: project_well specialises the operator per channel (for_channel)
     set_profiles({c: _vignette_profile() for c in CHANNELS})
     try:
         with pytest.raises(ValueError, match="not idempotent"):
@@ -262,12 +203,8 @@ def test_stitching_the_flatfield_operator_with_read_path_correction_refuses(mast
 
 
 def test_the_guard_catches_an_operator_registered_under_another_name(master):
-    """Keyed on the DECLARATION, not on the string "flatfield".
-
-    `flatfield_op(profile)` hands out correcting operators under any name the caller picks. A
-    `== "flatfield"` guard — which this package does have, in two other places — would miss every
-    one of them, and the double-apply would be back with no test failing.
-    """
+    """Keyed on the declaration, not the string "flatfield": `flatfield_op(profile)` can be
+    registered under any name, and a `== "flatfield"` guard would miss it."""
     from squidxplorer._flatfield import flatfield_op
 
     name = "flatfield_under_another_name"
@@ -281,22 +218,16 @@ def test_the_guard_catches_an_operator_registered_under_another_name(master):
 
 
 def test_each_single_correction_path_stays_available_and_corrects_exactly_once(master):
-    """The guard must refuse the DOUBLE, never the single. Both spellings, checked on pixels.
-
-    Reference: fuse the raw data with no correction anywhere, and separately correct the fused
-    result is NOT the same thing (correction is per-tile, before the blend) — so the assertion is
-    the one that matters operationally: the two single-correction spellings agree with each other,
-    and both differ from the uncorrected fuse.
-    """
+    """The guard must refuse the double, never the single. Fusing raw data then correcting the
+    result is NOT equivalent to correcting per-tile before the blend, so what's asserted is that
+    the two single-correction spellings agree with each other and both differ from uncorrected."""
     profile = _vignette_profile()
     fovs = list(range(GRID * GRID))
 
     set_profiles({c: profile for c in CHANNELS})
     try:
-        # (a) correction in the OPERATOR, read path off.
         by_operator = np.asarray(stitch_region(_ZReader(master), "A1", fovs, projector="flatfield",
                                                register=False, correct_illumination=False))
-        # (b) correction in the READ PATH, operator is a passthrough plane-op.
         by_read_path = np.asarray(stitch_region(
             _ZReader(master), "A1", fovs, projector=_PASSTHROUGH, register=False,
             correct_illumination=True, flatfield={c: profile for c in CHANNELS}))
@@ -314,11 +245,6 @@ def test_each_single_correction_path_stays_available_and_corrects_exactly_once(m
         "correction had no effect at all; the test proves nothing about double-applying")
 
 
-# ---------------------------------------------------------------------------------------
-# 4. what still cannot be stitched, and says so
-# ---------------------------------------------------------------------------------------
-
-
 def test_stitching_a_label_operator_refuses_rather_than_averaging_object_ids(master):
     """Feathered blending of integer object ids produces objects that do not exist."""
     labels = [n for n, op in _OPERATORS.items() if op.produces == "labels"]
@@ -328,11 +254,6 @@ def test_stitching_a_label_operator_refuses_rather_than_averaging_object_ids(mas
         with pytest.raises(ValueError, match="label"):
             stitch_region(reader, "A1", list(range(GRID * GRID)), projector=name,
                           register=False, correct_illumination=False)
-
-
-# ---------------------------------------------------------------------------------------
-# 5. project_well's single-plane selector, the primitive the z loop is built on
-# ---------------------------------------------------------------------------------------
 
 
 def test_project_well_z_selects_exactly_one_acquisition_plane(master):

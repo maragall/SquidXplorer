@@ -1,10 +1,4 @@
-"""Bricking geometry and policy (squidxplorer._bricks) + the per-brick read (squidxplorer._napari3d).
-
-These are the decisions that cannot be checked by looking at the screen: whether the tiles COVER
-the volume exactly, whether a brick lands on the world micrometre it claims, and whether the stride
-policy ever silently coarsens something the display could have resolved. The GL limit itself cannot
-be probed headless (no GL context), which is precisely why the policy is a pure function here.
-"""
+"""Bricking geometry and policy (squidxplorer._bricks) + the per-brick read (squidxplorer._napari3d)."""
 
 from __future__ import annotations
 
@@ -15,7 +9,6 @@ from squidxplorer import _bricks
 from squidxplorer._napari3d import read_brick, region_origin_um, roi_window_px
 
 
-# -- plan: the tiles must COVER, and never overlap --------------------------------------
 @pytest.mark.parametrize("h,w,limit,edge", [
     (2084, 2084, 2048, 1024),
     (11538, 9645, 2048, 1024),      # a whole stitched region on the 10x set
@@ -31,14 +24,13 @@ def test_plan_tiles_cover_exactly(h, w, limit, edge):
         assert b.height <= limit and b.width <= limit, "a brick must fit ONE GL texture"
         covered[b.r0:b.r1, b.c0:b.c1] += 1
     assert covered.min() >= 1, "every voxel must be covered by some brick — no gaps"
-    # The only overlap allowed is the deliberate halo, and only where two bricks meet: a voxel is
-    # shared by at most 2 bricks per axis, so at most 4 in a corner.
+    # only overlap allowed is the 1-voxel halo where two bricks meet: at most 4 in a corner
     assert covered.max() <= 4, "bricks must not overlap beyond the 1-voxel halo"
 
 
 def test_halo_makes_neighbours_share_exactly_one_voxel():
-    """The halo must be an OVERLAP of one, not a gap and not a shift: brick N+1 starts one voxel
-    before brick N ends, so each has the other's edge texel to interpolate against."""
+    """Brick N+1 starts one voxel before brick N ends, so each has the other's edge texel
+    to interpolate against — not a gap, not a shift."""
     bricks = _bricks.plan(4096, 4096, limit=2048, edge=1024, halo=1)
     by_pos = {(b.iy, b.ix): b for b in bricks}
     a, b = by_pos[(0, 0)], by_pos[(0, 1)]
@@ -73,7 +65,6 @@ def test_a_volume_that_fits_one_texture_is_not_bricked():
     assert not _bricks.fits_single_texture(2049, 1500, 10, 2048)
 
 
-# -- placement: a brick must land on the micrometre it claims ----------------------------
 def test_translate_is_the_bricks_own_world_corner():
     b = _bricks.Brick(iy=1, ix=2, r0=1024, r1=2048, c0=2048, c1=3072)
     z, y, x = b.translate_um((0.0, 100.0, 50.0), 0.752, 0.752)
@@ -87,11 +78,8 @@ def test_translate_does_not_move_with_the_stride():
     stride rides on `scale`, never on `translate`."""
     b = _bricks.Brick(iy=0, ix=1, r0=0, r1=1024, c0=1024, c1=2048)
     py = px = 0.752
-    # `f(a) == f(a)` was here, which is true of any function at all. `translate_um` takes NO
-    # stride argument, so the claim can only be pinned where the stride actually enters -- the
-    # production call site (`_brick_view._add_layer`) puts it on `scale`, not on `translate`.
-    # This walks the strides the caller uses and requires the NEAR corner to be identical while
-    # the FAR corner stays inside one strided sample of the level-0 extent.
+    # translate_um takes no stride argument; this walks the strides the caller actually uses
+    # (production puts stride on `scale`) and requires the near corner never to move.
     at_1 = b.translate_um((0, 0, 0), py, px)
     assert at_1 == (0.0, 0.0, 1024 * px)
     for step in (1, 2, 4, 8):
@@ -113,9 +101,8 @@ def test_sampled_shape_matches_numpy_striding_exactly():
         assert b.sampled_shape(3, step) == arr[:, ::step, ::step].shape
 
 
-# -- stride policy: never coarser than the screen, always a power of two ------------------
 def test_stride_is_native_at_or_past_one_to_one():
-    """The whole "full render" claim: if one screen pixel covers one voxel or less, stride is 1."""
+    """If one screen pixel covers one voxel or less, stride is 1."""
     assert _bricks.uniform_step(0.752, 0.752) == 1
     assert _bricks.uniform_step(0.1, 0.752) == 1        # zoomed in past native
     assert _bricks.uniform_step(1.4, 0.752) == 1        # 1.86 voxels/px still rounds DOWN to 1
@@ -138,17 +125,14 @@ def test_stride_survives_a_degenerate_camera():
 
 
 def test_power_of_two_stride_keeps_every_brick_on_one_global_lattice():
-    """The alignment property the power-of-two rule exists for: with edge % step == 0 the samples
-    of brick N continue the samples of brick N-1 without a jump."""
+    """With edge % step == 0, the samples of brick N continue the samples of brick N-1 without a jump."""
     edge = 1024
     for step in (1, 2, 4, 8, 16, 32, 64):
         assert edge % step == 0
-        # brick k starts at k*edge; its first sample must sit on the global k*edge lattice point
         for k in range(4):
             assert (k * edge) % step == 0
 
 
-# -- cull: only what the camera sees, centre first ---------------------------------------
 def test_cull_keeps_only_intersecting_bricks_centre_first():
     bricks = _bricks.plan(4096, 4096, limit=2048, edge=1024)      # 4x4 grid
     origin, py = (0.0, 0.0), 1.0
@@ -172,10 +156,9 @@ def test_margin_keeps_a_brick_just_outside_the_view():
     assert len(tight) == 1 and len(padded) == 2
 
 
-# -- budget: coarsen, do not punch holes -------------------------------------------------
 def test_budget_coarsens_the_stride_rather_than_dropping_bricks():
-    """A dropped brick is a black hole the user cannot distinguish from empty tissue; a coarser
-    stride is uniform and visible. The budget must reach for the second one."""
+    """A dropped brick is a black hole indistinguishable from empty tissue; the budget must
+    reach for a coarser (uniform, visible) stride before it drops anything."""
     bricks = _bricks.plan(8192, 8192, limit=2048, edge=1024)      # 64 bricks
     b = _bricks.plan_budget(bricks, nz=10, itemsize=2, step=1,
                             bytes_limit=64 << 20, n_channels=1)
@@ -209,20 +192,10 @@ def test_budget_finally_drops_only_when_the_stride_is_exhausted():
     assert b.dropped > 0 and b.bytes_resident <= b.bytes_limit
 
 
-# -- the read: a brick's voxels are the mosaic's voxels -----------------------------------
 class _Reader:
     """Each FOV is filled with a value derived from its own index, so a mis-paste is visible.
-
-    ``t`` is in the signature because the READER PROTOCOL has it (`reader.read(region, fov,
-    channel, z, t=0)`, pinned across all four real readers by `tests/test_reader_protocol.py`).
-    It was absent here, so this double could not be handed a timepoint at all -- and the whole
-    3D/brick path in `squidxplorer/_napari3d.py` calls `reader.read(region, fov, channel, z)` with no
-    ``t``, i.e. it is HARDCODED TO TIMEPOINT 0 while the same window passes `t=self.time_point`
-    to its mosaic worker and its video worker. That is a live defect (see the note in the report
-    for this change); the point here is that the double no longer LOCKS IT IN: threading ``t``
-    through production would have raised a TypeError against this fake and read as the test
-    catching a regression, when it is the reverse. The value is recorded so a test can assert it.
-    """
+    ``t`` is in the signature to match the real reader protocol (default 0) even though nothing
+    here varies it yet."""
 
     def __init__(self):
         self.reads = []
@@ -282,9 +255,8 @@ def test_a_cancelled_read_returns_none_rather_than_a_partial_brick():
                       should_stop=lambda: True) is None
 
 
-# -- the sanctioned cap: anything drawable must be renderable ----------------------------
 def test_clamp_holds_a_box_to_one_texture_and_keeps_its_anchor():
-    """The guarantee behind option (b): a drawn ROI can never exceed what one texture renders."""
+    """A drawn ROI can never exceed what one texture renders."""
     px, limit = 0.752, 2048
     span = limit * px                                  # 1540 um on this GPU
     box, clamped = _bricks.clamp_bbox_um((100.0, 200.0, 100.0 + 5000.0, 200.0 + 9000.0), px, limit)
@@ -308,13 +280,8 @@ def test_clamp_respects_a_drag_in_the_negative_direction():
 
 
 def test_a_clamped_box_always_fits_one_texture():
-    """The property that makes the cap a guarantee rather than a heuristic.
-
-    ``h, w`` are recovered at the SAME pitch the box was clamped with, so this is a statement about
-    ``clamp_bbox_um`` alone: whatever unit you give it, the box it returns is at most *limit* of
-    them. Whether that unit is the right one for the renderer is a different question and the test
-    below is the one that asks it.
-    """
+    """Whatever unit clamp_bbox_um is given, the box it returns is at most *limit* of them —
+    a statement about the function alone, not about whether that unit is the right one."""
     px = 0.752
     for limit in (512, 2048, 16384):
         (x0, y0, x1, y1), _ = _bricks.clamp_bbox_um((0.0, 0.0, 1e6, 1e6), px, limit)
@@ -324,25 +291,10 @@ def test_a_clamped_box_always_fits_one_texture():
 
 
 def test_a_clamped_box_fits_one_texture_of_the_VOXELS_THE_READER_HANDS_BACK():
-    """The same guarantee, asked of the render path instead of re-derived from the box.
-
-    ``clamp_bbox_um`` is fed ``meta["pixel_size_um"]`` by ``RegionViewer._clamp_last_roi``, and the
-    test above cannot tell whether that is the right unit, because it divides by the same number it
-    multiplied by. This one never divides: it hands the clamped box to ``roi_window_px`` and the
-    window to ``read_brick`` -- the two functions a drawn ROI's 3D actually goes through -- and
-    counts the voxels that come back.
-
-    That is the honest form of the question, because the mosaic the box is drawn ON is a different
-    thing from the voxels 3D reads: ``fuse_region_pyramid`` decimates the display (step 2 on the
-    10x set, 1.504 um/px), while ``read_brick`` reads whole FOV planes off the reader at 0.752.
-    Measured on ``test_10x_laser_af_z_stack_2025-10-28`` / manual0: a 1540 um clamped box is a
-    2048 x 2048 level-0 window, one texture, and a 256 px slice of it comes back as 256 voxels
-    across 192.5 um. At the display's pitch the same rule would pass a 3080 um box: 4095 x 4095
-    level-0 px, ``fits_single_texture`` False, 16 bricks.
-
-    MUTATION: clamp with ``px / 2`` (the decimated mosaic's pitch) -> the window doubles and
-    ``fits_single_texture`` goes False -> red.
-    """
+    """The same guarantee asked of the render path rather than re-derived from the box: clamps
+    at the acquisition pitch, then walks roi_window_px -> read_brick (what a drawn ROI's 3D
+    actually goes through) and counts the voxels that come back, since the mosaic the box is
+    drawn on is decimated while read_brick reads whole FOV planes at full pitch."""
     meta = _meta()                                       # 4 x 8 mosaic, 1.0 um/px, 2 z, 2 FOVs
     px, nz = meta["pixel_size_um"], len(meta["z_levels"])
     x0, y0 = region_origin_um(meta, "A1")
@@ -369,15 +321,9 @@ def test_the_ceiling_scales_with_the_gpu_and_says_where_it_came_from():
     assert "ASSUMED" in _bricks.ceiling_line(2048, 0.752, measured=False)
 
 
-# -- the perceptual contract: what "cannot look downsampled" means numerically -------------
 def test_the_stride_never_lets_the_picture_go_below_one_voxel_per_screen_pixel():
-    """Julio: "it can't look pixelated or downsampled or flattened to the user's eye".
-
-    "Pixelated" has a number: fewer than one voxel behind each screen pixel. ``uniform_step``
-    rounds the ratio DOWN, so the ratio AFTER striding is always >= 1 -- there is always at least
-    as much data as the display can show. This is the property that makes screen-matched sampling
-    perceptually identical to native rather than a compromise.
-    """
+    """"Pixelated" has a number: fewer than one voxel behind each screen pixel. uniform_step
+    rounds the ratio down, so the ratio after striding is always >= 1."""
     px = 0.752
     for ratio in [1.0, 1.5, 2.0, 3.7, 4.0, 8.9, 16.0, 33.0, 64.0, 300.0]:
         step = _bricks.uniform_step(ratio * px, px)
@@ -386,8 +332,8 @@ def test_the_stride_never_lets_the_picture_go_below_one_voxel_per_screen_pixel()
 
 
 def test_zooming_in_monotonically_refines_and_reaches_native():
-    """"Coarse and stays coarse" is the failure. Each zoom step must not get coarser, and at 1:1
-    the stride must be exactly 1."""
+    """"Coarse and stays coarse" is the failure: each zoom step must not get coarser, and at
+    1:1 the stride must be exactly 1."""
     px = 0.752
     steps = [_bricks.uniform_step(r * px, px) for r in (64, 32, 16, 8, 4, 2, 1, 0.5)]
     assert steps == sorted(steps, reverse=True), f"stride must never coarsen while zooming in: {steps}"
@@ -395,9 +341,7 @@ def test_zooming_in_monotonically_refines_and_reaches_native():
 
 
 def test_the_stride_never_touches_z():
-    """"Flattened" is the third failure and the one people forget. Bricks tile Y and X only, and
-    the stride is applied to Y and X only, so a volume keeps every z plane it was acquired with
-    however far out the camera is."""
+    """Bricks tile Y and X only, so a volume keeps every z plane however far out the camera is."""
     b = _bricks.Brick(iy=0, ix=0, r0=0, r1=1024, c0=0, c1=1024)
     for step in (1, 2, 4, 8, 16, 32, 64):
         nz, h, w = b.sampled_shape(10, step)

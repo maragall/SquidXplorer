@@ -1,65 +1,9 @@
-"""Building the root window must not put a window on the user's desktop that nobody asked for.
-
-2026-07-29, Task 9. Julio: a stray untitled window, about 129x59, floating with no home, on both
-launches of a session. This is it, and the mechanism is a one-liner with a big consequence.
-
-    self._focus_btn = QPushButton("Focus reference plane")     # no parent
-    self._focus_btn.hide()
-
-In Qt, a widget constructed with NO PARENT and never added to a layout is a TOP-LEVEL WINDOW. The
-``hide()`` on the next line is why this was thought to be harmless. It is not, because
-``_sync_focus_button`` then ran on every ingest and did::
-
-    btn.setVisible(len((self._meta or {}).get("z_levels", [])) > 1)
-
-So the button un-hid itself, as a bare 178x30 frameless window with no title, for any acquisition
-with more than one z level -- which is most of them. Measured here before the fix, on the standard
-z-stack fixture: ``QPushButton "Focus reference plane", top level, visible True, 178x30``. Nothing
-else in the process was visible, because a headless test never calls ``show()``.
-
-The backlog entry guessed at this and the plan recorded ``_update_focus_button`` as having "zero
-call sites". Both were half right. The button really was an orphan and the reference-plane control
-really did move onto each window's own z-slider in ``d07db43``; but the sync method was NOT
-uncalled, and it is precisely what made the orphan visible. A hidden orphan is untidy. An orphan
-that un-hides itself is a bug report.
-
-WHAT IS PINNED HERE
-
-1. Constructing and ingesting into a root window makes NOTHING visible. This is the general rule
-   rather than the specific button, and it is exactly as strong as it should be: the caller owns
-   ``show()``. Any future widget built without a parent and then made visible fails this, which is
-   the whole class of defect rather than the one instance of it.
-2. The dead reference-plane chain on ``PlateWindow`` is gone, and stays gone. The button, the sync
-   method, the handler and the z-slider helper it fed all had exactly one entry point between them
-   and it was the orphan's ``clicked``.
-3. A widget handed to ``publish_qc_result`` ends up INSIDE the shown window and VISIBLE, not
-   merely inside a tab bar. The old test for that seam asserted ``_explore_tabs.indexOf(view)
-   >= 0`` and stayed green for six weeks while the pane holding those tabs was in no layout at
-   all. Membership of a container is not reachability; ancestry up to the window, plus
-   ``isVisible()`` on a really-shown window, is.
-
-NOT pinned, deliberately: the several other parentless widgets ``PlateWindow`` keeps as hidden
-orphans so that old call sites still resolve (a ``QComboBox``, the "3D native" and "Return to raw
-view" buttons). They are documented as such in the source, they are never made visible, and rule 1
-above is what holds them to that.
-
-THE OTHER HALF OF THE SAME COIN (2026-08-03)
-
-An orphan that never shows is not automatically harmless, and the exploration pane — a
-``QStackedWidget`` this docstring once listed as a benign hidden orphan — is the proof.
-``publish_qc_result`` posted the deconvolution QC result into its tab bar, so for six weeks that
-result was built, tabbed and shown to nobody: invisible instead of floating, which is why it never
-tripped rule 1 and why nobody filed it as a stray window. Rule 3 below is the mirror of rule 1: a
-widget the code hands to the USER must be REACHABLE, not merely constructed. Both failures are the
-same missing question — is this thing parented into the window? — asked from opposite ends. The
-pane was removed on 2026-08-05 and the QC result now opens in ``_left_tabs``; rule 3 is what says
-so about wherever it goes next.
-"""
+"""Building the root window must not put a window on the user's desktop that nobody asked for."""
 from __future__ import annotations
 
 import os
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")  # headless Qt; must precede PyQt import
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import sys  # noqa: E402
 
@@ -88,7 +32,7 @@ def _visible_top_levels():
         try:
             if not w.isVisible():
                 continue
-        except RuntimeError:                      # a wrapper whose C++ half is already gone
+        except RuntimeError:
             continue
         label = getattr(w, "text", None)
         out.append(f"{type(w).__name__}(title={w.windowTitle()!r}, "
@@ -99,11 +43,6 @@ def _visible_top_levels():
 
 def test_building_and_ingesting_shows_no_window_the_caller_did_not_open(
         qapp, squid_dataset):
-    """A headless test never calls show(), so anything visible here showed ITSELF.
-
-    MUTATION: put back ``self._focus_btn = QPushButton(...)`` with no parent plus a
-    ``setVisible(True)`` on a z-stack -> the button appears in this list -> red.
-    """
     root, _ = squid_dataset
     before = set(_visible_top_levels())
 
@@ -129,24 +68,12 @@ def _ancestry(widget):
 
 def test_a_published_qc_result_is_really_inside_the_window_and_really_visible(
         qapp, squid_dataset):
-    """Rule 3. The decon QC view is the picture the whole iterate-and-look loop exists for.
-
-    Between 2b8fbc5 (which took the exploration pane out of the layout) and 2026-08-05,
-    `publish_qc_result` put it in that pane's tab bar and the pane had no parent and was never
-    shown — so the tab existed and the picture did not reach a screen. Julio asked for the
-    feature he had already paid for: "we should be able to toggle the turbo colormap mini-gui
-    where we click on there image". It goes to `_left_tabs` now, beside the controls that ask
-    for it.
-
-    MUTATION: give `publish_qc_result` a bar that is not in the layout -> the ancestry assertion
-    fails with the view's chain ending at a top level -> red.
-    """
     from squidxplorer._op_panels import DeconQCResultView
 
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.resize(900, 900)
-    win.show()                       # the caller opens the window; nothing else may open itself
+    win.show()
     win.ingest(str(root))
     qapp.processEvents()
 
@@ -154,7 +81,6 @@ def test_a_published_qc_result_is_really_inside_the_window_and_really_visible(
     win.publish_qc_result(view, "Decon QC · B2/0/c0")
     qapp.processEvents()
 
-    # 1. ANCESTRY: the view is a descendant of the window, not of a stray top level.
     ancestors = []
     w = view
     while w is not None:
@@ -166,14 +92,10 @@ def test_a_published_qc_result_is_really_inside_the_window_and_really_visible(
     assert win.centralWidget() in ancestors, (
         f"the QC result hangs off the window but outside its central widget: {_ancestry(view)}")
 
-    # 2. VISIBILITY: on a shown window, every link in that chain is shown too. `isVisible()` is
-    #    False for a widget inside a hidden pane, which is exactly the state this bug was in.
     assert view.isVisible(), (
         "the QC result is parented but not on screen — it is in a bar nothing shows")
     assert view.width() > 0 and view.height() > 0, "the QC result has no geometry"
 
-    # 3. ...and it is the bar the OPERATOR CONTROLS are in, which is the whole of the rehoming:
-    #    the picture opens where the user already is when they press Run.
     assert win._left_tabs.indexOf(view) >= 0, (
         "the QC result did not land in the operator tab bar")
 
@@ -182,10 +104,6 @@ def test_a_published_qc_result_is_really_inside_the_window_and_really_visible(
 
 def test_the_dead_reference_plane_chain_is_not_on_the_plate_window(qapp,
                                                                   squid_dataset):
-    """Focus is per-window now (each window's own z-slider, ``d07db43``). The plate's copy was
-    reachable only through the orphan button, so every link in it was dead code with a live
-    ``setEnabled`` habit. Named one by one so a re-introduction is a failing test, not a review
-    comment."""
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
@@ -200,9 +118,6 @@ def test_the_dead_reference_plane_chain_is_not_on_the_plate_window(qapp,
 
 def test_the_focus_worker_itself_survives_because_the_windows_use_it(qapp,
                                                                     squid_dataset):
-    """Deleting the chain must not take the Tenengrad worker with it: ``RegionViewer`` imports
-    ``_viewer._FocusWorker`` by name, so removing it would break the control that REPLACED the
-    orphan."""
     assert hasattr(V, "_FocusWorker")
     from squidxplorer._region_viewer import RegionViewer
 

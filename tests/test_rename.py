@@ -1,34 +1,12 @@
 """Renaming a window moves the LABEL and moves nothing else.
 
-Julio, 2026-08-03: "We should be able to rename our windows, since they might contain a bunch of
-sub windows (carefully w/ the design as this might break our logging and data model)."
+A window's identity is RegionViewer.window_id, a per-process monotonic int. The title is a
+rendering of that identity plus a mutable label, and nothing anywhere parses it. Rename safety
+is asserted at the three places a rename could plausibly break something: logging, the data
+model (ViewerManager._windows keyed by the int), and the navigator (rows carry the int under
+Qt.UserRole).
 
-He flagged the danger himself, so this file is the answer to the danger rather than a test of the
-feature. The claim under test is the identity model:
-
-    A window's identity is ``RegionViewer.window_id``, a per-process monotonic ``int``. The title
-    is a RENDERING of that identity plus a mutable label, and nothing anywhere parses it.
-
-Which is why a rename is safe, and why "safe" has to be asserted at the three places a rename could
-plausibly break something rather than at the setter:
-
-* **Logging.** ``ViewLog(log, self.window_id)`` is built from the int at construction. A line reads
-  ``[3] A1 fov 2  decon  started``, and the bracket is the ONLY visible join between that line and
-  a window on the desktop. If a rename could move the bracket, correlating a log line with a window
-  would silently stop working -- and it would stop working for the user who renamed the most.
-* **The data model.** ``ViewerManager._windows`` is keyed by the int, and ``views()`` /
-  ``view_for()`` are what an operator targets. A rename must leave the same window reachable, with
-  the same regions, by the same id.
-* **The navigator.** Rows carry the int under ``Qt.UserRole`` and the label as text. A rename must
-  repaint the text and leave the role alone.
-
-So: rename, then re-ask each of those three questions and require the same answer.
-
-WHAT IS NOT PINNED, AND IS A REAL LIMITATION: a rename does not survive a restart. Nothing about a
-window is persisted -- there is no ``QSettings``, no ``saveState``, no session file, and
-``_next_id`` starts at 1 every launch -- so a user who names three windows and relaunches loses all
-three. That is a gap this feature makes visible, not one it introduces, and it is an open decision
-in ``AI-docs/SquidXplorer/to-do/2026-08-03-window-model-and-operator-tuning-design.md``.
+Not pinned, and a real limitation: a rename does not survive a restart.
 """
 
 from __future__ import annotations
@@ -64,12 +42,7 @@ def qapp():
 
 @pytest.fixture
 def manager(qapp, napari_pane_stub, squid_dataset):
-    """A real ``ViewerManager`` over the real reader, with no PlateWindow in the way.
-
-    Copied in shape from ``test_view_settings.manager``, including the teardown drain: the windows
-    it hands out set ``WA_DeleteOnClose``, so ``close()`` only SCHEDULES deletion and the collect
-    has to happen here, with the app alive.
-    """
+    """A real ViewerManager over the real reader, with no PlateWindow in the way."""
     from squidxplorer import open_reader
 
     root, _arrays = squid_dataset
@@ -87,7 +60,7 @@ def manager(qapp, napari_pane_stub, squid_dataset):
 
 
 def _rows(nav) -> "dict[int, object]":
-    """Every navigator row, nested ones included, keyed by the window id under ``Qt.UserRole``."""
+    """Every navigator row, nested ones included, keyed by the window id under Qt.UserRole."""
     out: dict = {}
 
     def walk(item):
@@ -102,17 +75,9 @@ def _rows(nav) -> "dict[int, object]":
     return out
 
 
-# ------------------------------------------------------- the three "does this break it" questions
-
-
 def test_rename_does_not_move_the_log_id(qapp, manager, caplog):
-    """THE question Julio asked. The bracket in a log line is the window id, and it is built from
-    ``window_id`` at construction, so a rename cannot reach it.
-
-    MUTATION that turns this red: route the rename through ``ViewLog`` -- e.g. rebuild
-    ``self.log = ViewLog(log, self._display_name)`` in ``set_display_name`` instead of leaving
-    ``ViewLog(log, self.window_id)`` alone. Every other test in this file stays green.
-    """
+    """The bracket in a log line is built from window_id at construction, so a rename cannot
+    reach it."""
     win = manager.open([REGIONS[0]])
     assert win is not None
     wid = win.window_id
@@ -131,15 +96,7 @@ def test_rename_does_not_move_the_log_id(qapp, manager, caplog):
 
 
 def test_rename_does_not_move_the_target(qapp, manager):
-    """The data model half. An operator targets a ``View``, the registry is keyed by the int, and
-    both must answer identically after a rename -- same window, same regions, same id.
-
-    ``make_default`` is asserted too because it is the other id-keyed manager call, and it returns
-    False for an unknown id, so it can tell "still reachable" from "quietly lost".
-
-    MUTATION that turns this red: key ``_windows`` or ``view_for`` on anything derived from the
-    title or the label.
-    """
+    """Same window, same regions, same id after a rename."""
     win = manager.open([REGIONS[0], REGIONS[1]])
     wid = win.window_id
     before = manager.view_for(wid)
@@ -156,13 +113,6 @@ def test_rename_does_not_move_the_target(qapp, manager):
 
 
 def test_rename_reaches_the_navigator_and_keeps_the_bracket(qapp, manager):
-    """The visible half, and the bracket's job. The row text has to change (or the rename is
-    invisible) and the row's ``Qt.UserRole`` must not (or selecting the row raises the wrong
-    window, or nothing).
-
-    MUTATION that turns this red: drop the ``windowsChanged.emit()`` from ``ViewerManager.rename``
-    -- the row keeps the old text while the title bar shows the new one.
-    """
     win = manager.open([REGIONS[0]])
     wid = win.window_id
     nav = OpenViewList(manager)
@@ -178,12 +128,7 @@ def test_rename_reaches_the_navigator_and_keeps_the_bracket(qapp, manager):
     assert win.windowTitle() == f"[{wid}] Deconvolution trial"
 
 
-# ------------------------------------------------------------------------ the setter's own edges
-
-
 def test_the_bracket_is_not_editable(qapp, manager):
-    """A user typing a bracket gets a label containing a bracket, not a new id. The rendered id is
-    always ``window_id`` because ``_refresh_title`` is the one place the two are joined."""
     win = manager.open([REGIONS[0]])
     wid = win.window_id
 
@@ -195,8 +140,7 @@ def test_the_bracket_is_not_editable(qapp, manager):
 
 
 def test_a_blank_name_is_a_refusal_not_a_reset(qapp, manager):
-    """An empty box means "I changed my mind". Wiping the region-derived name instead would leave a
-    user unable to tell two windows apart, which is the thing the name is FOR."""
+    """An empty box means "I changed my mind", not "wipe the region-derived name"."""
     win = manager.open([REGIONS[0]])
     wid = win.window_id
     before = win.display_name
@@ -212,16 +156,11 @@ def test_a_blank_name_is_a_refusal_not_a_reset(qapp, manager):
 
 
 def test_renaming_an_unknown_id_refuses_rather_than_appearing_to_work(qapp, manager):
-    """Same contract as ``make_default``: False when the id is not in the registry, so a caller can
-    say so instead of silently doing nothing."""
     win = manager.open([REGIONS[0]])
     assert manager.rename(win.window_id + 999, "ghost") is False
 
 
 def test_two_windows_may_share_a_name_because_the_bracket_disambiguates(qapp, manager):
-    """Uniqueness is deliberately NOT enforced. Julio's own log already shows ``[0] manual1`` and
-    ``[1] manual1``: two windows, one region name, told apart by the bracket. A rename does not get
-    to be stricter than the thing it replaces."""
     a, b = manager.open([REGIONS[0]]), manager.open([REGIONS[1]])
     manager.rename(a.window_id, "same")
     manager.rename(b.window_id, "same")
@@ -232,9 +171,7 @@ def test_two_windows_may_share_a_name_because_the_bracket_disambiguates(qapp, ma
 
 
 def test_an_roi_childs_parent_reference_keeps_pointing_at_the_id(qapp, manager):
-    """The ``◂ view N`` suffix references the stable id, not the mutable label, so renaming the
-    parent correctly leaves it alone. That is an argument FOR the design, not a defect: a suffix
-    that chased the label would be a second, staler copy of the parent's name."""
+    """The "◂ view N" suffix references the stable id, not the mutable label."""
     parent = manager.open([REGIONS[0]])
     child = manager.open_child([REGIONS[0]], roi_bbox=(0.0, 0.0, 10.0, 10.0),
                                parent_id=parent.window_id)
@@ -245,14 +182,8 @@ def test_an_roi_childs_parent_reference_keeps_pointing_at_the_id(qapp, manager):
     assert child.parent_id == parent.window_id
 
 
-# ------------------------------------------------------------- View.name is the label, not the id
-
-
 def test_the_view_name_is_the_label_without_the_bracket(qapp, manager):
-    """``View.name`` used to carry ``windowTitle()``, bracket included, and that was safe only while
-    nothing read it. ``_run_scope.describe_view_target`` now does, so the id lives in ``window_id``
-    and the printer composes the two -- an id inside a string field is an id that can drift from
-    the one beside it."""
+    """View.name is the label alone; _run_scope.describe_view_target composes id + name."""
     win = manager.open([REGIONS[0]])
     wid = win.window_id
     manager.rename(wid, "Deconvolution trial")

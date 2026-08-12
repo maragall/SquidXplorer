@@ -1,69 +1,7 @@
-"""ONE named command surface, shared by the GUI, the CLI and a script. No Qt.
+"""One named command surface, shared by the GUI, the CLI and scripts. No Qt.
 
-Julio: "make sure that our GUI has an amazing API so that AI can interact with it... The logger
-and the API and the CLI are amazing to design really well and deeply so that the agent can program
-our tool cosmically." And: "do all the logger, cli, api infrastructure that forces us to think of
-scalable representations for how this code communicates with itself."
-
-THE PROBLEM THIS SOLVES
------------------------
-There were TWO surfaces. The GUI called methods on a 7,000-line ``PlateWindow``; the CLI called
-the engine directly. Both reached the same operators, by different routes, with different scope
-rules and different failure behaviour — a GUI refusal was a sentence in a status label, a CLI
-refusal was a traceback. The consequences are the ones ``docs/NAUTILUS.md`` records under
-"How do I drive the app? — NOT ANSWERED":
-
-* An agent (or a test, or a script) can drive ONE of them, and whichever it drives is not the one
-  the user uses. "It works from the CLI" has never been evidence that the button works.
-* Every new operator had to be wired twice, and the two wirings drifted. This codebase has already
-  shipped that exact defect at a smaller scale — two operator registries, different labels,
-  different ``save`` defaults, drifted in production (see ``_run_scope.RUN_SCOPES``).
-
-So there is one layer. The GUI is a CALLER of it and so is the CLI.
-
-WHAT A COMMAND IS
------------------
-A command is **named, declarative and serialisable**: a pydantic model with a ``kind``
-discriminator, not a method call and certainly not a Qt signal. That is what makes it usable by
-something that is not in this process — an agent, a saved workflow, a test fixture, a replay of
-what the user did. ``RunOperator(operator="mip", scope="selected wells", save=False)`` is a value
-you can print, diff, store next to a CSAT response, and hand back to the app to run again.
-
-pydantic and not a plain dict for the reason ``_acquisition.Acquisition`` is pydantic: the thing
-crossing the boundary is validated ONCE, at the boundary, so a typo is a named refusal at the
-door rather than an ``AttributeError`` eight frames deep inside a QThread.
-
-EVERY COMMAND NAMES ITS TARGET
-------------------------------
-Acquisition, regions, operator, parameters — explicitly, on the command. The established
-convention "nothing selected = everything" is preserved exactly, and it is preserved by CALLING
-:func:`squidxplorer._run_scope.resolve_run_scope`, which is the existing owner of scope resolution.
-There is no second resolver in this module. A command carries either an explicit ``regions`` list
-or a ``scope`` NAME, and the executor hands the live state (selection, current region, parked
-subset) to the one resolver that already knows the rules.
-
-EVERY COMMAND RETURNS A RESULT, AND A FAILURE IS A NAMED REFUSAL
-----------------------------------------------------------------
-:class:`CommandResult` always comes back. A refusal carries a CODE from :data:`REFUSALS` plus a
-sentence for a human, and it is a returned value — never an exception escaping into a Qt slot,
-where Qt's habit of swallowing exceptions turns "the run refused itself" into "the button did
-nothing". Codes and not just sentences because an agent has to BRANCH on the reason: retrying an
-``empty_scope`` is pointless and retrying a ``busy`` is exactly right.
-
-HOW THE TWO CALLERS STAY ONE SURFACE
-------------------------------------
-The bus dispatches ``kind`` to ``executor.do_<kind>``. An executor that does not implement a
-command refuses it BY NAME (:data:`NOT_SUPPORTED_HERE`) naming itself, so the edges of the
-migration are visible in the result rather than hidden in a fork. That is the deliberate design:
-a half-migrated surface that says which half it is beats a complete one that is a facade.
-
-    EngineExecutor   headless, synchronous. The CLI and any script. Returns ``completed``.
-    WindowExecutor   the GUI (``squidxplorer._gui_commands``). Starts a QThread; returns ``started``.
-
-``started`` vs ``completed`` is a REAL difference and it is in the result rather than papered
-over: a GUI run must not block the event loop, so the honest thing a command can say is that the
-run began. A caller that needs the end of it watches the metrics/activity log, which is the same
-record either way.
+Commands are serialisable pydantic models dispatched by :class:`CommandBus` to an executor's
+``do_<kind>``; every command returns a :class:`CommandResult`, and a failure is a named refusal.
 """
 
 from __future__ import annotations
@@ -110,19 +48,10 @@ __all__ = [
 ]
 
 # --- refusal codes -----------------------------------------------------------------------------
-#
-# A refusal names ITSELF. The sentence is for the user; the code is for the caller, which has to
-# decide whether to retry, ask the user something, or stop. Getting this wrong is how an agentic
-# loop becomes a random walk: "it didn't work" is not a branch.
 
 NO_ACQUISITION = "no_acquisition"        # nothing is open; open one first
 UNKNOWN_OPERATOR = "unknown_operator"    # not in the engine registry (the answer lists what is)
-# REGISTERED, spelled right, and this machine cannot run it: a `requires=` package is missing.
-# A DISTINCT code from UNKNOWN_OPERATOR because the caller's next move is different -- an agent
-# that gets `unknown_operator` should pick another name, and one that gets this should install
-# the package the sentence names (or tell a human to). Collapsing the two would make "you typo'd"
-# and "your environment is incomplete" the same branch.
-UNAVAILABLE_OPERATOR = "unavailable_operator"
+UNAVAILABLE_OPERATOR = "unavailable_operator"   # registered, but a `requires=` package is missing
 UNKNOWN_REGION = "unknown_region"        # a named region is not in this acquisition
 EMPTY_SCOPE = "empty_scope"              # the scope resolved to nothing — never widen it silently
 BAD_SCOPE = "bad_scope"                  # not one of _run_scope.RUN_SCOPES
@@ -133,10 +62,7 @@ UNKNOWN_COMMAND = "unknown_command"      # no such kind
 BAD_COMMAND = "bad_command"              # the kind exists; the payload does not validate
 NO_DISK_SPACE = "no_disk_space"          # the estimated write does not fit
 FAILED = "failed"                        # the work ran and raised — the detail carries the name
-# The OPERATOR asked to stop, or a human did (Ctrl-C on the headless surface). A distinct code
-# from FAILED because nothing is wrong: a caller that retries a `failed` is right and one that
-# retries a `cancelled` is arguing with the person who pressed the key.
-CANCELLED = "cancelled"
+CANCELLED = "cancelled"                  # stopped by the operator or the user; distinct from FAILED
 
 REFUSALS = (NO_ACQUISITION, UNKNOWN_OPERATOR, UNAVAILABLE_OPERATOR, UNKNOWN_REGION,
             EMPTY_SCOPE, BAD_SCOPE, BUSY, NO_RUN, NOT_SUPPORTED_HERE, UNKNOWN_COMMAND,
@@ -146,11 +72,7 @@ REFUSALS = (NO_ACQUISITION, UNKNOWN_OPERATOR, UNAVAILABLE_OPERATOR, UNKNOWN_REGI
 # --- the result --------------------------------------------------------------------------------
 
 class CommandResult(BaseModel):
-    """What EVERY command returns. Frozen and serialisable, like the command.
-
-    ``ok`` and ``status`` are not redundant: a run that STARTED is ok and is not finished, and a
-    caller that treats "started" as "the pixels are on disk" is the bug this distinction prevents.
-    """
+    """What every command returns. Frozen and serialisable, like the command."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -168,8 +90,7 @@ class CommandResult(BaseModel):
         return bool(self.ok)
 
     def raise_for_refusal(self) -> "CommandResult":
-        """For a script that WANTS an exception. The GUI never calls this — a refusal must reach a
-        Qt slot as a value. Offered here so a CLI/notebook caller does not invent its own check."""
+        """Raise on a refusal, for a script that wants an exception."""
         if self.status == "refused":
             raise RuntimeError(f"{self.command} refused ({self.refusal}): {self.message}")
         return self
@@ -192,14 +113,7 @@ def _started(command: str, message: str, **data) -> CommandResult:
 # --- the commands ------------------------------------------------------------------------------
 
 class Command(BaseModel):
-    """Base for every command. Frozen, and ``extra="forbid"``.
-
-    Forbidding extras is the point of having a schema at all: an agent that writes
-    ``{"kind": "run_operator", "operator": "mip", "region": "B2"}`` (singular, a plausible guess)
-    must be TOLD, not silently run over the whole plate because the misspelled key was ignored.
-    Silently ignoring an unknown field is how a scope mistake costs somebody an afternoon of
-    compute.
-    """
+    """Base for every command. Frozen, and ``extra="forbid"``."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -224,93 +138,51 @@ class OpenAcquisition(Command):
 
 
 class ListOperators(Command):
-    """What can this application run? The question an agent asks first, and the one that makes a
-    new operator discoverable without anybody updating a document.
-
-    Answered off the ENGINE registries (``available_projectors`` /
-    ``available_region_operators``), never off the GUI's card table — a card is presentation, an
-    engine entry is capability, and confusing the two already shipped a button that did nothing.
-
-    Every row carries the operator's whole declaration: ``consumes``, ``produces``, ``params``,
-    ``requires``, and ``available`` + ``unavailable_reason``. The list is NEVER filtered by
-    availability — an operator whose package is missing is still listed, with the reason, because
-    dropping it makes "the package is missing" and "nobody wrote this operator" the same answer.
-    ``data["unavailable"]`` is the subset an agent should not attempt without installing something
-    first; attempting one anyway is refused with :data:`UNAVAILABLE_OPERATOR`.
-
-    Includes operators installed from OTHER packages via the ``squidxplorer.operators`` entry-point
-    group, which is what makes this the discovery answer as well as the capability answer.
-    """
+    """List every runnable operator with its full declaration, availability included."""
 
     kind: ClassVar[str] = "list_operators"
     type: Literal["list_operators"] = "list_operators"
 
 
 class Describe(Command):
-    """What is open, and what could a run be aimed at? The state an agent needs to build a target.
-
-    Deliberately a COMMAND rather than an attribute on some object: it must be answerable
-    identically from the GUI and headless, and a caller that reaches into ``window._meta`` is
-    back to two surfaces.
-    """
+    """What is open, and what could a run be aimed at?"""
 
     kind: ClassVar[str] = "describe"
     type: Literal["describe"] = "describe"
 
 
 class RunOperator(Command):
-    """Run one registered operator over a named target set. THE command.
-
-    Target, explicitly, in the established order of precedence:
-
-    * ``regions`` — an explicit list wins over everything. This is the ONE way to express a
-      subset, and it is what a reproducible/agent-issued command should carry.
-    * ``scope`` — otherwise a scope NAME from :data:`squidxplorer._run_scope.RUN_SCOPES`, resolved
-      against the caller's live state by ``_run_scope.resolve_run_scope``. The default
-      ``"selected wells"`` keeps the established convention exactly: nothing selected = everything.
-    """
+    """Run one registered operator over a named target set."""
 
     kind: ClassVar[str] = "run_operator"
     type: Literal["run_operator"] = "run_operator"
 
     operator: str
-    """A name from ``list_operators`` — a projector ("mip", "bgsub") or a region operator
-    ("stitch"). Refused BY NAME against the engine registry if it is not one."""
+    """A name from ``list_operators``; refused by name if it is not registered."""
 
     scope: str = _run_scope.SCOPE_SELECTION
     """How to resolve the target when ``regions`` is not given. One of ``_run_scope.RUN_SCOPES``."""
 
     regions: Optional[list[str]] = None
-    """Explicit wells, in this order. ``None`` defers to ``scope``. An empty LIST is not the same
-    as ``None`` and is refused as an empty scope — running the whole plate because a caller sent
-    ``[]`` is hours of compute nobody asked for."""
+    """Explicit wells, in this order. ``None`` defers to ``scope``; an empty list is refused."""
 
     save: bool = False
-    """Persist a navigable OME-Zarr plate. ``False`` (the default) is PREVIEW: compute and show,
-    write nothing. The default is the one that cannot fill a disk."""
+    """Persist a navigable OME-Zarr plate. ``False`` (the default) is preview: write nothing."""
 
     output_folder: Optional[str] = None
-    """Where the ``<acquisition>.hcs`` goes when ``save``. Required headless — a headless run has
-    no dialog to ask, and guessing a hundreds-of-GB destination is not ours to do."""
+    """Where the ``<acquisition>.hcs`` goes when ``save``. Required headless."""
 
     n_fovs: Optional[int] = None
-    """FOVs per well. ``None`` = every FOV (the mosaic path, and what the GUI runs). ``1`` is the
-    historical one-FOV-per-well."""
+    """FOVs per well. ``None`` = every FOV (the mosaic path)."""
 
     workers: Optional[int] = None
-    """Worker threads. ``None`` = the engine's own default (CPUs usable by this process). Only the
-    headless surface honours this; the GUI pins its own worker count for responsiveness."""
+    """Worker threads. ``None`` = the engine's default. Only the headless surface honours this."""
 
     tiff: bool = False
-    """When ``save``, also write the uncompressed per-plane TIFF export (Squid filename
-    convention). A SECOND copy — roughly doubles on-disk size — so off by default. Ignored on a
-    preview (there is nothing on disk to duplicate)."""
+    """When ``save``, also write the per-plane TIFF export (a second copy, so off by default)."""
 
     parameters: dict = Field(default_factory=dict)
-    """Operator keyword arguments, passed through unchanged (e.g. the stitcher's ``register`` /
-    ``blend_px``). A dict and not a typed model per operator on purpose: the registry scales to n
-    algorithms, and a schema here would have to be edited for every one of them — which is the
-    engine edit ``add_projector`` exists to avoid."""
+    """Operator keyword arguments, passed through unchanged."""
 
     @field_validator("operator")
     @classmethod
@@ -327,19 +199,14 @@ class RunOperator(Command):
 
 
 class StopRun(Command):
-    """Stop the run in flight. A no-op is a NAMED refusal (``no_run``), not a silent success —
-    "stop" that returns ok over nothing teaches a caller that stopping worked."""
+    """Stop the run in flight. A no-op is a named refusal (``no_run``)."""
 
     kind: ClassVar[str] = "stop_run"
     type: Literal["stop_run"] = "stop_run"
 
 
 class Metrics(Command):
-    """The wall-clock / peak-RSS record: the n-algorithms comparison table (:mod:`squidxplorer._measure`).
-
-    The third consumer of the one measurement, and the one that answers "which of these two
-    implementations of the same operator should we keep".
-    """
+    """The wall-clock / peak-RSS record: the n-algorithms comparison table (:mod:`squidxplorer._measure`)."""
 
     kind: ClassVar[str] = "metrics"
     type: Literal["metrics"] = "metrics"
@@ -348,8 +215,7 @@ class Metrics(Command):
     """Restrict to one operator's runs. ``None`` = the whole table."""
 
 
-#: kind -> model. The registry a serialised command is parsed against, and the answer to "what can
-#: I say to this application" — which is a question an agent has to be able to ask.
+#: kind -> model. The registry a serialised command is parsed against.
 COMMANDS: dict = {c.kind: c for c in (OpenAcquisition, ListOperators, Describe, RunOperator,
                                       StopRun, Metrics)}
 
@@ -357,13 +223,7 @@ AnyCommand = Union[OpenAcquisition, ListOperators, Describe, RunOperator, StopRu
 
 
 def parse_command(payload) -> Command:
-    """Build a command from a dict (or pass one straight through). Raises ``KeyError``/``ValueError``.
-
-    The entry point for anything outside this process: JSON on a socket, a stored workflow step, an
-    agent's tool call. ``kind`` and ``type`` are both accepted as the discriminator — ``kind`` is
-    what a human writes and ``type`` is the field pydantic serialises — so a round-trip through
-    ``model_dump()`` and back is lossless.
-    """
+    """Build a command from a dict (or pass one straight through). Raises ``KeyError``/``ValueError``."""
     if isinstance(payload, Command):
         return payload
     if not isinstance(payload, dict):
@@ -383,13 +243,7 @@ def parse_command(payload) -> Command:
 # --- the bus -----------------------------------------------------------------------------------
 
 class CommandBus:
-    """Dispatches a command to an executor's ``do_<kind>`` and guarantees a :class:`CommandResult`.
-
-    The guarantee is the load-bearing part. ``execute`` NEVER raises: a bad payload, an unknown
-    kind, an executor that does not implement the command, and an executor method that itself
-    blows up all come back as refusals with a code. The GUI calls this from a Qt slot, where a
-    raised exception is swallowed by Qt and the user sees a button that did nothing.
-    """
+    """Dispatches a command to an executor's ``do_<kind>``; ``execute`` never raises."""
 
     def __init__(self, executor) -> None:
         self.executor = executor
@@ -423,11 +277,7 @@ class CommandBus:
         try:
             result = handler(command)
         except KeyboardInterrupt:
-            # Ctrl-C is the headless surface's stop button, and it arrives as a BaseException that
-            # `except Exception` does not see -- so the guarantee above ("execute NEVER raises")
-            # had a hole exactly where a user is most likely to be watching: a multi-hour run
-            # answered a keystroke with a raw traceback out of a worker thread. It is a REFUSAL
-            # with a code, like every other way a run can not-finish.
+            # Ctrl-C is a BaseException, so the `except Exception` below never sees it.
             logger.warning("%s interrupted by the user", command.kind)
             return _refuse(command.kind, CANCELLED, "interrupted (Ctrl-C) — nothing more was run")
         except Exception as exc:            # noqa: BLE001 - an executor bug is a refusal, not a crash
@@ -446,14 +296,7 @@ def resolve_target(command: "RunOperator", *, selection=None, current_region=Non
                    known_regions=None, total: Optional[int] = None):
     """Turn a :class:`RunOperator`'s target declaration into ``(regions, refusal_or_None)``.
 
-    The ONLY place a command's target is worked out, and it does not re-implement any of it:
-    ``_run_scope.resolve_run_scope`` owns the scope rules and ``_run_scope.describe_run_target`` owns
-    the sentence. This function adds exactly two things the resolver does not do — an explicit
-    ``regions`` list wins, and a named region that is not in the acquisition is refused by name
-    rather than becoming a bare ``KeyError`` several frames later.
-
-    ``regions is None`` in the result means THE WHOLE DATASET, which is the historical plate-wide
-    path and is preserved unchanged.
+    ``regions is None`` in the result means the whole dataset.
     """
     kind = command.kind
     if command.regions is not None:
@@ -481,12 +324,7 @@ def resolve_target(command: "RunOperator", *, selection=None, current_region=Non
 # --- the headless executor: the CLI and any script ----------------------------------------------
 
 class EngineExecutor:
-    """Runs commands against the ENGINE, synchronously, with no Qt and no window.
-
-    This is what the CLI drives and what a script or a test drives. It is deliberately the same
-    command vocabulary the GUI answers, so "does the button work" and "does the CLI work" stop
-    being two questions.
-    """
+    """Runs commands against the engine, synchronously, with no Qt and no window."""
 
     surface = "engine"
 
@@ -494,16 +332,10 @@ class EngineExecutor:
                  on_well=None, stop=None) -> None:
         self._path = str(path) if path else None
         self._reader = reader
-        #: The headless stand-in for the plate selection. ``resolve_run_scope`` reads it exactly
-        #: as it reads the GUI's, so "selected wells" means the same thing on both surfaces.
+        #: The headless stand-in for the plate selection.
         self.selection: list = list(selection or [])
-        #: ``on_well(region, fov, image)`` after each well lands, and ``stop() -> bool`` polled
-        #: before each one. NOT command fields: a command is serialisable and a callback is not,
-        #: so they belong to the SURFACE that is driving, exactly as the GUI's executor owns its
-        #: thread. Without them a headless run said nothing between "starting" and "done" and
-        #: could not be stopped at all -- ``write_plate`` has taken both since IMA-230 and this
-        #: executor was the only caller passing neither. ``on_well`` runs on a WRITER THREAD and
-        #: several may overlap: it must be thread-safe.
+        #: ``on_well(region, fov, image)`` after each well lands; ``stop() -> bool`` polled before
+        #: each one. ``on_well`` runs on a writer thread and must be thread-safe.
         self.on_well = on_well
         self.stop = stop
         self.last_metrics = None
@@ -542,25 +374,12 @@ class EngineExecutor:
         names = runnable_operators()
 
         def _row(name, kind, consumes, produces, params, requires, available):
-            # `available` and `requires` are the fourth declaration (2026-08-05). The list is NOT
-            # filtered by it -- an operator whose package is missing is still listed, because
-            # dropping it would make "petakit is not installed" and "nobody wrote a deconvolution
-            # operator" identical to the agent asking this question, which is the same rule
-            # `available_segmenters` has always applied. What changes is that the answer now says
-            # which is which, and why, in the operator's own words.
             ok, why = available
             return {"name": name, "kind": kind, "consumes": consumes, "produces": produces,
                     "params": params, "requires": list(requires),
                     "available": ok, "unavailable_reason": why}
 
-        # Every column here is a DECLARATION read off the registry, never a fact this method
-        # knows about any particular operator -- which is why a new operator appears in `ops list`
-        # fully described with no edit to this file. That now includes an operator installed from
-        # ANOTHER package through the `squidxplorer.operators` entry-point group.
         def _kind(name):
-            # The declaration, in three words. Region operators used to be a SECOND loop over a
-            # second table with three of these columns hardcoded ("intensity", {}, ["fov"]); they
-            # are rows like any other now, so every column is read and none is assumed.
             if is_region_operator(name):
                 return "region-operator"
             return "z-reducer" if operator_consumes(name) else "plane-op"
@@ -600,15 +419,9 @@ class EngineExecutor:
         return _done(cmd.kind, compare_table(METRICS), table=rows, runs=runs)
 
     def do_run_operator(self, cmd: RunOperator) -> CommandResult:
-        """Run the operator to COMPLETION and return the manifest (or the streamed count).
+        """Run the operator to completion and return the manifest (or the streamed count).
 
-        Synchronous on purpose: this surface has no event loop to keep responsive, and a caller
-        that gets ``completed`` back knows the pixels exist. The GUI's executor returns
-        ``started`` instead, and the difference is in the result rather than hidden.
-
-        ``completed`` is not ``succeeded``. ``data["outcome"]`` is the verdict — ``"ok"``,
-        ``"partial"`` (something was skipped, possibly everything) or ``"stopped"`` (``stop()``
-        cut it) — and a caller that turns this into an exit code must read THAT, not ``ok``.
+        ``data["outcome"]`` carries the verdict: ``"ok"``, ``"partial"`` or ``"stopped"``.
         """
         from squidxplorer import (is_region_operator, project_plate, runnable_operators,
                               stitch_plate, write_plate)
@@ -620,12 +433,7 @@ class EngineExecutor:
                            "nothing is open — run open_acquisition first")
         runnable = runnable_operators()
         if cmd.operator not in runnable:
-            # Not a registered name. It may still be an operator CHAIN ('bgsub+mip'), which is a
-            # legal projector everywhere the engine takes one, so ask the engine to resolve it
-            # rather than deciding here that the table is the whole answer. The two refusals stay
-            # distinct: a name nobody registered is UNKNOWN_OPERATOR and lists what exists; a chain
-            # of real operators that cannot mean anything (a z-reducer that is not last, a repeated
-            # step) is a BAD_COMMAND carrying `_compose`'s own reason, which names the fix.
+            # Not a registered name, but it may still be an operator chain ('bgsub+mip').
             from squidxplorer._engine import _resolve_operator
 
             try:
@@ -636,12 +444,7 @@ class EngineExecutor:
                                f"run: {', '.join(runnable)}", available=runnable)
             except ValueError as exc:
                 return _refuse(cmd.kind, BAD_COMMAND, str(exc), operator=cmd.operator)
-        # REGISTERED but not INSTALLABLE. A separate question with a separate answer: the operator
-        # exists and is spelled correctly, and the machine cannot run it. Asked here, before the
-        # target is resolved and before an output directory is named, so the refusal is the whole
-        # outcome rather than something discovered mid-run. Without it, `decon` on a machine
-        # without petakit raised the same ImportError for every well, `on_error` recorded each as
-        # a skip, and the command returned `completed` with an empty manifest.
+        # Registered but not runnable on this machine: refuse before resolving the target.
         from squidxplorer import operator_available
 
         ok, why = operator_available(cmd.operator)
@@ -682,16 +485,7 @@ class EngineExecutor:
                                        operator_kwargs=cmd.parameters or None,
                                        on_well=self.on_well, stop=self.stop)
                 landed = int(manifest.get("n_fields_written") or 0)
-                # write_from_stream has always ANSWERED this and this executor has always dropped
-                # it on the floor -- so a cancelled run and a finished one were the same
-                # `completed` result.
-                #
-                # Read off `stopped`, NOT off `complete`. `complete` used to mean exactly "stop()
-                # was not pressed", so the two were interchangeable; it now means "every field
-                # this run owed is on disk", which is also False when a well was lost to
-                # `on_error`. Keyed on `complete` this line would have called every skipped-well
-                # run a CANCELLED one -- the right verdict for it is PARTIAL, and the branch a few
-                # lines down already computes that from `skipped`.
+                # Read off `stopped`, not `complete`: a skipped-well run is PARTIAL, not CANCELLED.
                 stopped = bool(manifest.get("stopped"))
                 data = {"manifest": {k: (str(v) if hasattr(v, "__fspath__") else v)
                                      for k, v in manifest.items()}}
@@ -701,16 +495,7 @@ class EngineExecutor:
                                           n_fovs=None, on_error=on_error, regions=regions,
                                           **(cmd.parameters or {}))
                 else:
-                    # `operator_kwargs` ON THE PREVIEW TOO, spelled exactly as the save branch
-                    # above spells it. This is the SAME omission `_workers._OperatorWorker` was
-                    # measured with and fixed for (see the comment there): the save path passed
-                    # the parameters, the preview path did not, and the console line, the recipe
-                    # label and the manifest all reported the parameters the user asked for while
-                    # the pixels were the operator's DEFAULTS. Measured here on sim_5d_2x2_t3,
-                    # region A1, `spot`, counting objects per well: preview at defaults found
-                    # {52, 55, 59, 60} and preview at min_area_px=4000 found the SAME
-                    # {52, 55, 59, 60}, while the save of that command found {30, 39, 45, 47}.
-                    # A preview whose answer cannot change with the parameter is not a preview.
+                    # `operator_kwargs` on the preview too, exactly as the save branch passes them.
                     stream = project_plate(self.reader, projector=cmd.operator, workers=cmd.workers,
                                            n_fovs=cmd.n_fovs, on_error=on_error, regions=regions,
                                            operator_kwargs=cmd.parameters or None)
@@ -726,19 +511,7 @@ class EngineExecutor:
                     if self.on_well is not None:
                         self.on_well(_region, _fov, _image)
                 data = {"n_fields": landed}
-            # "It returned" is not "it worked". A run where every well raised (flat-field with no
-            # profile is the routine case) still reaches here, because per-well fault isolation is
-            # what keeps one bad file from aborting a plate — and the GUI already shipped a "✓"
-            # over an empty plate once. Landed == 0 is a partial result however politely we got here.
-            # EACH COUNT WITH ITS OWN UNIT. `landed` counts FIELDS; `n_targets` counts WELLS. This
-            # line put one over the other and printed "stopped after 12 of 4 target(s)" — a
-            # numerator above its denominator, on the run summary a user reads to find out what
-            # they got. It is the same fields-over-wells confusion `_cli`'s completion line was
-            # printing ("16/4 wells written"), in the sentence the GUI shows.
-            #
-            # The SAVE path knows how many fields were owed and says so; the preview path does not
-            # compute a fields total, so it names the wells it was aimed at rather than inventing
-            # one. A denominator that is not the numerator's own total is worse than no denominator.
+            # `landed` counts FIELDS; `n_targets` counts WELLS -- never put one over the other.
             owed = int((data.get("manifest") or {}).get("n_fields") or 0)
             if stopped:
                 got = f"{landed} of {owed} field(s)" if owed else f"{landed} field(s)"
@@ -757,11 +530,7 @@ class EngineExecutor:
         data["metrics"] = metrics.metrics.as_dict() if metrics.metrics else None
         data["regions"] = regions
         data["target"] = target
-        # THE VERDICT, at the top level of the result, spelled with `_measure`'s own words
-        # (`ok` / `partial` / `stopped`). It was computed here and then thrown away: `_done`
-        # makes every one of them `ok=True`, so a caller reading `result.ok` could not tell a
-        # finished plate from an empty one, and the CLI exited 0 over "produced nothing". A
-        # caller now branches on this; `ok` keeps its old meaning ("the command ran").
+        # The verdict, in `_measure`'s words; `ok` only means "the command ran".
         data["outcome"] = outcome
         data["detail"] = detail
         data["n_targets"] = n_targets
