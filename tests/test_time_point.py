@@ -100,7 +100,7 @@ def test_every_timepoint_holds_its_own_pixels(multi_time_point_dataset):
         for z_level in range(TIME_SERIES_NZ):
             for channel_index, channel in enumerate(channel_names):
                 got = reader.read(TIME_SERIES_REGION, TIME_SERIES_FOV, channel, z_level,
-                                  t=time_point)
+                                  time_point=time_point)
                 want = time_series_pixel_value(time_point, z_level, channel_index)
                 assert got.min() == got.max() == want
                 np.testing.assert_array_equal(got, planes[(time_point, z_level, channel)])
@@ -135,7 +135,7 @@ def test_the_region_mosaic_fuses_the_timepoint_it_is_asked_for(multi_time_point_
 
     def fused(time_point):
         got = {}
-        w = _MosaicWorker(reader, meta, TIME_SERIES_REGION, channels, t=time_point)
+        w = _MosaicWorker(reader, meta, TIME_SERIES_REGION, channels, time_point=time_point)
         w.ready.connect(lambda r, ch, levels, bbox, win: got.__setitem__(ch, levels))
         problems = []
         w.problem.connect(problems.append)
@@ -175,7 +175,7 @@ def test_a_region_window_fuses_the_timepoint_its_own_bar_shows(
 
         class _Recording(real_worker):
             def __init__(self, *a, **kw):
-                seen.append(int(kw.get("t", 0)))
+                seen.append(int(kw.get("time_point", 0)))
                 super().__init__(*a, **kw)
 
             def start(self):

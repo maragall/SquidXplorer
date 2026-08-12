@@ -271,7 +271,7 @@ def test_export_reads_only_the_requested_timepoint(squid_dataset, tmp_path):
 
     type(reader).read = spy
     try:
-        export_selection(reader, [("B2", 0)], tmp_path, t=0)
+        export_selection(reader, [("B2", 0)], tmp_path, time_point=0)
     finally:
         type(reader).read = real_read
     assert set(seen_t) == {0}
@@ -299,9 +299,9 @@ def test_two_timepoints_export_to_two_files_with_different_pixels(multi_time_poi
 
     root, _planes = multi_time_point_dataset
     sel = [(TIME_SERIES_REGION, TIME_SERIES_FOV)]
-    (ome1, _), = export_selection(open_reader(root), sel, tmp_path / "t1", t=1,
+    (ome1, _), = export_selection(open_reader(root), sel, tmp_path / "t1", time_point=1,
                                   blend_px=0, correct_illumination=False)
-    (ome2, _), = export_selection(open_reader(root), sel, tmp_path / "t2", t=2,
+    (ome2, _), = export_selection(open_reader(root), sel, tmp_path / "t2", time_point=2,
                                   blend_px=0, correct_illumination=False)
 
     assert "_t1_" in ome1.name and "_t2_" in ome2.name, "the filename does not name the timepoint"
