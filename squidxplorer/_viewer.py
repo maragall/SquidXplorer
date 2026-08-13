@@ -4179,8 +4179,10 @@ class PlateWindow(QMainWindow):
                 return
         super().showEvent(e)
 
-    #: The preference behind the close-all confirmation. True (the default) = ask.
-    WARN_CLOSE_ALL = "warn_close_all"
+    #: Session flag behind the close-all confirmation. True (the default) = ask. Class-level on
+    #: purpose: "don't show me this again" is about the application, not one window. It does not
+    #: reach disk (_prefs went with the 2026-08-13 kill list), so the dialog returns next launch.
+    _warn_close_all = True
 
     def _open_view_count(self) -> int:
         """How many region windows are open right now. 0 when there is no manager."""
@@ -4203,23 +4205,17 @@ class PlateWindow(QMainWindow):
         then refused by a process with no plate to find. But closing several windows is not
         undoable either, and a window may be mid-run.
 
-        The checkbox is honoured only when it actually PERSISTS (`_prefs.set` returns whether it
-        landed). A "don't show me this again" that silently fails to save is worse than none: the
-        user stops expecting the dialog and it comes back next session.
-
         Never shown when there is nothing to confirm (no open views) or under the test harness,
         where a modal dialog would hang the suite with no one to dismiss it.
         """
         from qtpy.QtWidgets import QApplication, QCheckBox, QMessageBox
-
-        from squidxplorer import _prefs
 
         if n <= 0:
             return True
         app = QApplication.instance()
         if app is not None and app.property("_squidxplorer_test"):
             return True
-        if not bool(_prefs.get(self.WARN_CLOSE_ALL, True)):
+        if not PlateWindow._warn_close_all:
             return True
 
         box = QMessageBox(self)
@@ -4235,10 +4231,8 @@ class PlateWindow(QMainWindow):
         box.setCheckBox(never)
         if box.exec() != QMessageBox.Close:
             return False
-        if never.isChecked() and not _prefs.set(self.WARN_CLOSE_ALL, False):
-            self._readout.setText(
-                "could not save 'don't show me this again' — see the log; it applies to this "
-                "session only.")
+        if never.isChecked():
+            PlateWindow._warn_close_all = False
         return True
 
     def closeEvent(self, e):
