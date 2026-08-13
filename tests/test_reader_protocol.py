@@ -149,3 +149,18 @@ def test_the_name_is_exported_from_the_package_root():
     """`from squidxplorer import SquidAcquisitionReader` is the deliverable."""
     assert squidxplorer.SquidAcquisitionReader is SquidAcquisitionReader
     assert "SquidAcquisitionReader" in squidxplorer.__all__
+
+
+def test_the_contract_module_is_the_definition_and_stays_import_light():
+    """Squid imports squidxplorer.contract.reader across the repo boundary; the module must
+    define the one Protocol object and pull in nothing beyond typing (+ numpy at most)."""
+    import ast
+
+    from squidxplorer.contract import reader as contract
+
+    assert contract.SquidAcquisitionReader is SquidAcquisitionReader
+    tree = ast.parse(inspect.getsource(contract))
+    mods = {alias.name for node in ast.walk(tree)
+            if isinstance(node, ast.Import) for alias in node.names}
+    mods |= {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
+    assert mods <= {"__future__", "typing", "numpy"}, mods
