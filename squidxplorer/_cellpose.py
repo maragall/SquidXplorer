@@ -1,4 +1,5 @@
-"""Cellpose as a SquidHCS segmenter: a thin zero-shot adapter over the pretrained model."""
+"""Cellpose nuclei segmentation as its own operator: a thin zero-shot adapter over the
+pretrained model."""
 
 from __future__ import annotations
 
@@ -6,12 +7,10 @@ import logging
 
 import numpy as np
 
-from squidxplorer._engine import add_operator
 from squidxplorer._spots import (
     SpotDetectionCancelled,
     SpotParams,
     SpotResult,
-    add_segmenter,
     result_from_labels,
 )
 
@@ -19,10 +18,10 @@ from squidxplorer._logpane import get_logger
 
 log = get_logger("cellpose")
 
-SEGMENTER_NAME = "cellpose"
+OPERATOR_NAME = "cellpose"
 
 #: The ``SpotParams`` fields :func:`cellpose_nuclei` actually reads.
-HONOURED_PARAMS: tuple[str, ...] = ("min_distance_px",)
+READS: tuple[str, ...] = ("min_distance_px",)
 
 _STAGE = "running cellpose"
 
@@ -79,24 +78,11 @@ def cellpose_nuclei(plane: np.ndarray, params: SpotParams, *,
     return result
 
 
-def register() -> None:
-    """Add Cellpose to the segmenter table."""
-    add_segmenter(
-        SEGMENTER_NAME, cellpose_nuclei, requires=("cellpose",), honours=HONOURED_PARAMS,
-        blurb="Cellpose — pretrained generalist, zero-shot (slow on CPU; wants a GPU)",
-    )
-
-
-#: Same string as :data:`SEGMENTER_NAME`: one algorithm, two tables.
-OPERATOR_NAME = SEGMENTER_NAME
-
-
 def register_operator() -> None:
     """Add Cellpose to the engine's operator table; cellpose itself imports lazily."""
-    from squidxplorer._spots import SPOT_PARAMS, segmentation_operator, segmenter_honours
+    from squidxplorer._spots import SPOT_PARAMS, add_segmentation_operator
 
     # Filtered from SPOT_PARAMS so each default and blurb stays defined once, in SpotParams.
-    honoured = frozenset(segmenter_honours(SEGMENTER_NAME))
-    add_operator(OPERATOR_NAME, segmentation_operator(SEGMENTER_NAME),
-                  params=tuple(p for p in SPOT_PARAMS if p.name in honoured),
-                  requires=("cellpose",))
+    add_segmentation_operator(OPERATOR_NAME, cellpose_nuclei,
+                              params=tuple(p for p in SPOT_PARAMS if p.name in READS),
+                              requires=("cellpose",))

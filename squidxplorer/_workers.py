@@ -463,10 +463,10 @@ class _SpotWorker(QThread):
         self._stop.set()
 
     def run(self):
-        from squidxplorer._spots import SpotDetectionCancelled, detect_spots, preferred_segmenter
+        from squidxplorer._spots import SpotDetectionCancelled, detect_spots
 
         where = f"{self._region}/{self._channel}"
-        algorithm = preferred_segmenter()
+        algorithm, segment = _nuclei_algorithm()
         # the progress denominator is whatever the running algorithm reports
         reported_total = [0]
 
@@ -480,7 +480,7 @@ class _SpotWorker(QThread):
             log.info("%s: detecting nuclei with %s on a %s MIP", where, algorithm, plane.shape)
 
             res = detect_spots(
-                plane, self._params, algorithm=algorithm,
+                plane, self._params, segment=segment,
                 on_stage=_stage,
                 should_stop=self._stop.is_set,
             )
@@ -501,6 +501,20 @@ class _SpotWorker(QThread):
         self.ready.emit(self._region, self._channel, res.labels, res.centroids,
                         self._bbox_um, res.count)
         self.finished_count.emit(self._region, self._channel, res.count)
+
+
+def _nuclei_algorithm():
+    """``(name, segment)`` the detect-nuclei button runs: Cellpose when installed, else the
+    Otsu-watershed."""
+    from squidxplorer.projection import missing_requirements
+
+    if not missing_requirements(("cellpose",)):
+        from squidxplorer._cellpose import OPERATOR_NAME, cellpose_nuclei
+
+        return OPERATOR_NAME, cellpose_nuclei
+    from squidxplorer._spots import LAYER_KEY, skimage_watershed
+
+    return LAYER_KEY, skimage_watershed
 
 
 def _spot_stages():

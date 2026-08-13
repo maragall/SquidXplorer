@@ -13,12 +13,14 @@ from squidxplorer import (
     available_plane_operators,
     available_region_operators,
     project_well,
+    operator_available,
     operator_consumes,
     operator_params,
     operator_produces,
+    operator_requires,
 )
 from squidxplorer._engine import Param, _resolve_operator, add_operator, bind_operator
-from squidxplorer._spots import LAYER_KEY as SPOT_KEY, available_segmenters, segmenter_available
+from squidxplorer._spots import LAYER_KEY as SPOT_KEY
 
 napari = pytest.importorskip("napari")
 
@@ -76,17 +78,19 @@ def _is_a_label_image(arr: np.ndarray) -> bool:
     return bool(np.array_equal(non_zero, np.arange(1, len(non_zero) + 1)))
 
 
-def _slow(name: str) -> bool:
-    """Is this operator a model that has to be downloaded and run on a GPU-less test box?"""
-    return name in available_segmenters() and name != "otsu-watershed"
+def _skip_unless_available(name: str) -> None:
+    """Skip when *name*'s declared ``requires`` are not importable in this environment."""
+    if operator_requires(name):
+        ok, why = operator_available(name)
+        if not ok:
+            pytest.skip(why)
 
 
 # 1. the conformance test — parametrized over the registry
 
 @pytest.mark.parametrize("name", available_plane_operators())
 def test_every_operator_delivers_the_result_kind_it_declares(name, mosaic):
-    if _slow(name) and not segmenter_available(name)[0]:
-        pytest.skip(f"{name} needs an optional package that is not installed")
+    _skip_unless_available(name)
 
     kind = operator_produces(name)
     assert kind in mosaic._RESULT_ADDERS, (
@@ -260,13 +264,12 @@ def test_an_unknown_result_kind_is_refused_at_registration():
 
 # 4. cellpose, as an operator
 
-def test_cellpose_is_in_the_engine_registry_not_only_the_segmenter_table():
+def test_cellpose_is_a_peer_operator_in_the_one_registry():
     from squidxplorer._cellpose import OPERATOR_NAME
 
     from squidxplorer._operations import runnable_operators
 
     assert OPERATOR_NAME in available_plane_operators()
-    assert OPERATOR_NAME in available_segmenters(), "the two tables disagree about the spelling"
     # ...and therefore in every surface that reads the registry rather than a hardcoded list.
     assert OPERATOR_NAME in runnable_operators()
 
@@ -280,7 +283,7 @@ def test_cellpose_declares_the_same_three_things_the_generic_path_reads():
     assert [p.name for p in operator_params(OPERATOR_NAME)] == ["min_distance_px"]
 
 
-def test_cellpose_refuses_the_parameters_it_cannot_honour_instead_of_ignoring_them():
+def test_cellpose_refuses_the_parameters_it_does_not_declare_instead_of_ignoring_them():
     from squidxplorer._cellpose import OPERATOR_NAME
     from squidxplorer._engine import bind_operator
 
@@ -291,14 +294,28 @@ def test_cellpose_refuses_the_parameters_it_cannot_honour_instead_of_ignoring_th
             f"{dead!r} must be refused by name, and the refusal must say what CAN be set; "
             f"got {excinfo.value}"
         )
-    bind_operator(OPERATOR_NAME, {"min_distance_px": 20})       # the honoured one still binds
+    bind_operator(OPERATOR_NAME, {"min_distance_px": 20})       # the declared one still binds
 
 
-def test_every_parameter_a_segmentation_operator_DECLARES_changes_its_pixels():
-    """A declared parameter that cannot change the label image is a control that does nothing."""
+#: A probe value per declared parameter name — different from the default, chosen so the blob
+#: fixture below must answer differently. A parameter with no probe here fails the build: an
+#: untestable declaration is a control nobody can vouch for.
+PARAMETER_PROBES = {
+    "sigma_px": 9.0,
+    "min_area_px": 400,
+    "min_distance_px": 40,
+    "split_touching": False,
+}
+
+
+@pytest.mark.parametrize("name", [n for n in available_plane_operators() if operator_params(n)])
+def test_every_parameter_an_operator_DECLARES_changes_its_pixels(name):
+    """A declared parameter that cannot change the output is a control that does nothing."""
     import numpy as np
 
     from squidxplorer._engine import bind_operator
+
+    _skip_unless_available(name)
 
     rng = np.random.default_rng(0)
     plane = np.zeros((256, 256), np.uint16)
@@ -306,19 +323,22 @@ def test_every_parameter_a_segmentation_operator_DECLARES_changes_its_pixels():
     for cy, cx in ((60, 60), (66, 70), (170, 60), (60, 175), (180, 180), (186, 190)):
         plane[(yy - cy) ** 2 + (xx - cx) ** 2 <= 64] = 4000        # touching and isolated blobs
     plane = np.clip(plane + rng.integers(0, 200, plane.shape), 0, 65535).astype(np.uint16)
+    group = [plane, plane] if "z" in operator_consumes(name) else [plane]
 
-    base = np.asarray(bind_operator("spot", {})(plane[None, ...]))
-    probes = {"sigma_px": 9.0, "min_area_px": 400, "min_distance_px": 40, "split_touching": False}
-    declared = [p.name for p in operator_params("spot")]
-    assert sorted(probes) == sorted(declared), (
-        f"this test must probe every declared parameter; spot declares {declared}"
-    )
-    for name, value in probes.items():
-        got = np.asarray(bind_operator("spot", {name: value})(plane[None, ...]))
+    base = np.asarray(bind_operator(name, {})(group))
+    for param in operator_params(name):
+        assert param.name in PARAMETER_PROBES, (
+            f"{name!r} declares {param.name!r}, which PARAMETER_PROBES has no probe value for; "
+            f"add one so the declaration stays testable")
+        probe = PARAMETER_PROBES[param.name]
+        assert probe != param.default, (
+            f"the probe for {param.name!r} equals its default {param.default!r}, so it cannot "
+            f"show the parameter reaching the pixels")
+        got = np.asarray(bind_operator(name, {param.name: probe})(group))
         assert not np.array_equal(got, base), (
-            f"'spot' declares {name!r}, so a run at {name}={value!r} must not return the label "
-            f"image the defaults return — it returned a byte-identical one, which is a control "
-            f"the panel offers and the pixels never see"
+            f"{name!r} declares {param.name!r}, so a run at {param.name}={probe!r} must not "
+            f"return the output the defaults return — it returned a byte-identical one, which "
+            f"is a control the panel offers and the pixels never see"
         )
 
 

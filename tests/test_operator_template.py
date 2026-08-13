@@ -30,23 +30,19 @@ def _passthrough(planes):
 # 1. THE DECLARATION
 # ==============================================================================================
 
-def test_operator_carries_requires_with_the_same_spelling_as_segmenter():
-    """One word, three registries."""
-    from squidxplorer._spots import Segmenter
-
+def test_operator_carries_requires_with_an_empty_default():
     assert "requires" in Operator.__dataclass_fields__
-    assert "requires" in Segmenter.__dataclass_fields__
     assert Operator.__dataclass_fields__["requires"].default == ()
 
 
 def test_every_registrar_takes_requires_by_the_same_keyword():
-    """Checked by signature so a fourth registrar cannot quietly ship without it."""
+    """Checked by signature so a new registrar cannot quietly ship without it."""
     import inspect
 
-    from squidxplorer._spots import add_segmenter
+    from squidxplorer._spots import add_segmentation_operator
     from squidxplorer._stitch import add_region_operator
 
-    for fn in (s.add_operator, add_region_operator, add_segmenter):
+    for fn in (s.add_operator, add_region_operator, add_segmentation_operator):
         assert "requires" in inspect.signature(fn).parameters, fn.__name__
 
 
@@ -113,11 +109,7 @@ def test_binding_refuses_by_name_before_any_work(unavailable):
 
 
 def test_the_refusal_is_a_missing_dependency_so_a_runner_can_tell_it_from_a_data_fault(unavailable):
-    """One base class across the three registries: ``projection.MissingDependency``."""
-    from squidxplorer._spots import MissingSegmenterDependency
-
     assert issubclass(MissingOperatorDependency, MissingDependency)
-    assert issubclass(MissingSegmenterDependency, MissingDependency)
 
 
 def test_reading_an_unavailable_operators_declaration_still_works(unavailable):
