@@ -336,10 +336,10 @@ def test_build_plate_measured_geometry_overrides_a_contradicting_declared_format
 
 
 def test_build_plate_warning_names_both_formats_and_the_measured_pitch():
-    with pytest.warns(UserWarning) as rec:
+    with pytest.warns(UserWarning, match="384 well plate") as rec:
         build_plate(_meta(wellplate_format="384 well plate"))
-    msg = str(rec[0].message)
-    assert "384 well plate" in msg and "96 well plate" in msg
+    msg = next(str(w.message) for w in rec if "384 well plate" in str(w.message))
+    assert "96 well plate" in msg
     assert "9000" in msg or "9.0" in msg
 
 
