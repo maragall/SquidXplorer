@@ -22,7 +22,7 @@ from qtpy.QtCore import (  # QThread/Signal: kept for tests that build a stub wo
 from qtpy.QtGui import QColor, QPalette
 from qtpy.QtWidgets import (
     QAction, QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel,
-    QMainWindow, QPlainTextEdit, QPushButton, QScrollArea, QSpinBox,
+    QMainWindow, QPushButton, QScrollArea, QSpinBox,
     QSplitter, QStyleFactory, QTabBar, QVBoxLayout, QWidget,
 )
 
@@ -80,7 +80,6 @@ from squidxplorer._qtstyle import dark_palette as _dark_palette
 from squidxplorer._qtstyle import hline as _hline
 from squidxplorer._qtstyle import operator_card as _operator_card
 from squidxplorer._time_point import TimePointBar
-from squidxplorer._terminal import _CmdEdit, _ProcTerminal, _Terminal  # noqa: F401 (re-export)
 from squidxplorer._region_nav import RegionCursor
 
 # Plate overview and geometry live in `_plate_overview`; re-exported under their
@@ -134,7 +133,6 @@ _CARD_QSS = _qtstyle.CARD_QSS
 _BTN_QSS = _qtstyle.BTN_QSS
 _COMBO_QSS = _qtstyle.COMBO_QSS
 _CHECK_QSS = _qtstyle.CHECK_QSS
-_TERM_QSS = _qtstyle.TERM_QSS
 _MENU_QSS = _qtstyle.MENU_QSS
 _ANSI_RE = _qtstyle.ANSI_RE
 
@@ -1000,7 +998,7 @@ class PlateWindow(QMainWindow):
         """Open (or focus) a UI as a tab. Built lazily, once. *tabs* is the bar it belongs in;
         there is one bar (the band's right column) and it is the default.
         If the UI is currently detached (see _detach_tab), focus its floating window instead —
-        never rebuild: for the CLI that would mean a second live shell."""
+        never rebuild, so a widget's live state survives."""
         tabs = self._left_tabs if tabs is None else tabs
         win = self._floating.get(key)
         if win is not None:
@@ -1178,8 +1176,8 @@ class PlateWindow(QMainWindow):
             self._dispose_tab_widget(w)
 
     def _redock(self, key: str):
-        """Re-dock button: return the floated widget to the tab bar — the SAME object, so a live
-        CLI keeps its shell and history (close-and-reopen would kill both)."""
+        """Re-dock button: return the floated widget to the tab bar — the SAME object, so its
+        live state survives (close-and-reopen would kill it)."""
         win = self._floating.pop(key, None)
         if win is None:
             return
@@ -2432,64 +2430,6 @@ class PlateWindow(QMainWindow):
         if self._meta and self._meta.get("channels"):
             colors = np.stack([_hex_to_rgb01(c["display_color"]) for c in self._meta["channels"]])
         self._overview.set_loupe_source(source, colors)
-
-    def _build_cli_tab(self) -> QWidget:
-        """A LIVE, interactive shell in the pane: run the `squidxplorer` batch CLI (IMA-186) right here.
-        Pre-seeded with the how-to (MIP every well; `--tiff` -> FIJI-openable TIFFs). `squidxplorer` is
-        aliased to this app's interpreter so it runs regardless of PATH/conda. Falls back to a static
-        command preview where a PTY isn't available (e.g. Windows)."""
-        # Input must be a RAW acquisition folder; if the current path is a computed .hcs plate (or
-        # none), show a placeholder rather than a wrong path.
-        p = str(self._acq_path) if self._acq_path else ""
-        acq = p if (p and ".hcs" not in p and not p.endswith(".ome.zarr")) else "<your acquisition folder>"
-        py = sys.executable
-        win = sys.platform == "win32"
-        banner = [
-            "==========================================================",
-            "  Process a whole plate from the command line",
-            "==========================================================",
-            "",
-            "  Same MIP as the buttons, on every well. Copy a line and press Enter.",
-            "",
-            "  - Flatten every well + save FIJI-openable TIFFs:",
-            f'      python -m squidxplorer "{acq}" --tiff',
-            "",
-            "  - Try just the first 8 wells first (quick, little disk):",
-            f'      python -m squidxplorer "{acq}" --limit 8 --tiff',
-            "",
-            "  - Choose where to save:",
-            f'      python -m squidxplorer "{acq}" --limit 8 --tiff --output-folder ~/Downloads',
-            "",
-            "  - All options:   python -m squidxplorer --help",
-            "",
-        ]
-        # The terminals put the venv's Scripts/bin on PATH, so the `squidxplorer` console script resolves
-        # directly — no alias needed (doskey is unreliable in a piped cmd.exe anyway).
-        setup: list = []
-        cwd = str(self._acq_path.parent) if self._acq_path else str(Path.home())
-        if not win:                              # Unix: a real PTY terminal
-            try:
-                t = _Terminal(cwd, banner, setup_cmds=setup)
-                if t._fd is not None:
-                    return t
-            except Exception:
-                pass
-        try:                                     # Windows (+ Unix fallback): a QProcess shell
-            t = _ProcTerminal(cwd, banner, setup)
-            if t.running():
-                return t
-        except Exception:
-            pass
-        term = QPlainTextEdit(); term.setReadOnly(True)   # last resort: static, copy-paste preview
-        term.setStyleSheet(_TERM_QSS)
-        term.setPlainText(
-            "Process a whole plate from the command line\n"
-            "──────────────────────────────\n"
-            "Open a terminal, then paste (no conda needed — this is the app's own Python):\n\n"
-            f'    "{py}" -m squidxplorer "{acq}" --limit 8 --tiff --output-folder ~/Downloads\n\n'
-            "This flattens the first 8 wells (MIP) and saves TIFFs you can open in FIJI.\n"
-            "Drop --limit 8 to do the whole plate. Add --help to see all options.\n")
-        return term
 
     def _enable_operators(self, flag: bool):
         for a in self._op_actions.values():

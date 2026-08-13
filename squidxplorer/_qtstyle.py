@@ -70,12 +70,6 @@ CHECK_QSS = (
     "QCheckBox::indicator{width:14px;height:14px;border:1px solid #c9d1d9;border-radius:3px;background:#0d1420;}"
     "QCheckBox::indicator:checked{background:#58a6ff;border:1px solid #c9d1d9;}"
 )
-TERM_QSS = ("QPlainTextEdit{background:#05070b;color:#8bffd0;border:none;"
-            "font-family:'SF Mono','Menlo',monospace;font-size:12px;padding:10px;}")
-#: The command line inside an embedded terminal.
-TERM_INPUT_QSS = (
-    "QLineEdit{background:#05070b;color:#e6edf3;border:1px solid #232b3a;border-radius:6px;"
-    "padding:6px 8px;font-family:'SF Mono','Menlo',monospace;font-size:12px;}")
 #: The plate's right-click dropdown.
 MENU_QSS = ("QMenu{background:#0d1420;color:#e6edf3;border:1px solid #232b3a;font-size:16px;}"
             "QMenu::item{padding:7px 18px;}"

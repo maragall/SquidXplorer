@@ -37,7 +37,6 @@ GUI_MODULES = frozenset({
     "_region_nav",
     "_region_viewer",
     "_slide_art",
-    "_terminal",
     "_time_point",       # the timepoint bar, shared by the plate and every window
     "_viewer",
     "_workers",          # the plate window's background threads
@@ -58,7 +57,7 @@ NAPARI_EXCEPTIONS = frozenset({"_layer_tree", "_region_nav"})
 #: The modules lifted out of ``_viewer.py``, and what each may lift out of the others. `_viewer` is
 #: absent from every value on purpose: that absence is the property under test.
 CUT_OUT_OF_VIEWER = frozenset({
-    "_operations", "_plate_overview", "_qt_tabs", "_qtstyle", "_terminal", "_workers",
+    "_operations", "_plate_overview", "_qt_tabs", "_qtstyle", "_workers",
 })
 
 
