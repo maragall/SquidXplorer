@@ -62,7 +62,7 @@ On-disk / Acquisition contract keys are untouched: `n_t`, `n_z`, `z_levels`, `dz
 `templates/operator/README.md` is the contract, and it is the public one: a complete, installable
 example package a contributor copies. Read it before adding an operator anywhere.
 
-Four declarations on the registry record, and nothing generic branches on an operator's NAME
+Five declarations on the registry record, and nothing generic branches on an operator's NAME
 (`tests/test_operator_declaration.py` fails the build if anything does):
 
 | declaration | decides |
@@ -71,6 +71,20 @@ Four declarations on the registry record, and nothing generic branches on an ope
 | `produces` | what the pixels MEAN — the napari layer type, **and how the OME-Zarr writer coarsens a pyramid level** |
 | `params` | what one entry can be RUN with (`params=` makes the registered object a factory) |
 | `requires` | the modules it needs — **listed either way, run refused BY NAME when missing** |
+| `extra` | the install payload — the `[project.optional-dependencies]` group that makes it runnable; `None` means core |
+
+**`extra=` and the installer** (2026-08-13). `operator_extra(name)` sits beside the other
+queries, `do_list_operators` rows carry it, and the declaration test enforces both directions: an
+operator requiring a non-core package must declare an extra, and a declared extra must name a
+real group (so `flatfield`, which requires tilefusion, is `extra="stitch"` like
+`stitch`/`coordinate`; `decon`/`decon3d` are `"decon"`, `cellpose` is `"segment"`).
+`scripts/installer/` (stdlib, Qt-free, tests in `tests/test_installer_menu.py`) is built on it:
+`menu.py` generates the install checkbox menu FROM the registry — defaults core/stitch/decon
+checked, segment unchecked, and a failed `cuda12_available()` probe shades decon with the probe's
+own reason (today: every Mac) — and `bootstrap.py` drives uv into the private env (`--dry-run`
+prints the exact commands; a missing uv is a refusal carrying the install hint). tilefusion and
+petakit are pinned to commit SHAs in pyproject so two installs resolve the same bits; the Windows
+exe is built elsewhere (`scripts/installer/README.md`).
 
 **ONE table** (`_engine._OPERATORS`, 2026-08-05). `add_operator` and `add_region_operator` are two
 registrars over one record, sharing one validator (`_engine._declare`); `add_region_operator`

@@ -62,6 +62,8 @@ class Operator:
     factory: Optional[Callable[..., OperatorFn]] = None
     #: Importable module names this operator needs, e.g. ``("petakit",)``.
     requires: tuple[str, ...] = ()
+    #: The pyproject optional-dependency group that installs those modules; ``None`` means core.
+    extra: Optional[str] = None
 
     def available(self) -> tuple[bool, str]:
         """``(ok, reason_if_not)`` — are this operator's declared packages importable right now?"""
@@ -124,20 +126,22 @@ def _default_workers() -> int:
 
 
 def add_operator(name: str, operator: OperatorFn, *, consumes=None, produces=None,
-                 params: Sequence[Param] = (), requires=()) -> None:
+                 params: Sequence[Param] = (), requires=(),
+                 extra: Optional[str] = None) -> None:
     """Add a named operator so it can be selected by name in :func:`run_plate`."""
     _declare(name, operator, consumes=consumes, produces=produces, params=params,
-             requires=requires, region=False)
+             requires=requires, extra=extra, region=False)
 
 
 def add_region_operator(name: str, operator, *, produces=None, params: Sequence[Param] = (),
-                        requires=()) -> None:
+                        requires=(), extra: Optional[str] = None) -> None:
     """Add a named REGION operator — one that eats a whole well's FOVs — to the same table."""
     _declare(name, operator, consumes=REGION_OP, produces=produces, params=params,
-             requires=requires, region=True)
+             requires=requires, extra=extra, region=True)
 
 
-def _declare(name: str, fn, *, consumes, produces, params, requires, region: bool) -> None:
+def _declare(name: str, fn, *, consumes, produces, params, requires, extra,
+             region: bool) -> None:
     """Validate ONE operator and file it in :data:`_OPERATORS`. The only writer of that table."""
     kind = "region operator" if region else "operator"
     if not name:
@@ -167,6 +171,10 @@ def _declare(name: str, fn, *, consumes, produces, params, requires, region: boo
         raise ValueError(
             f"{kind} {name!r} declares a parameter twice: {sorted(names)}; a duplicate makes "
             "operator_kwargs ambiguous")
+    if extra is not None and (not isinstance(extra, str) or not extra):
+        raise ValueError(
+            f"{kind} {name!r}: extra must be None (core) or the non-empty name of a "
+            f"[project.optional-dependencies] group; got {extra!r}")
 
     factory: Optional[Callable[..., OperatorFn]] = None
     if declared:
@@ -187,7 +195,7 @@ def _declare(name: str, fn, *, consumes, produces, params, requires, region: boo
         produces = getattr(fn, "produces", INTENSITY)
     _OPERATORS[name] = Operator(
         name, fn, axes, normalise_produces(produces),
-        declared, factory, normalise_requires(requires),
+        declared, factory, normalise_requires(requires), extra,
     )
 
 
@@ -226,6 +234,11 @@ def operator_available(name: str) -> tuple[bool, str]:
 def operator_requires(name: str) -> tuple[str, ...]:
     """The modules a registered operator declares it needs — ``()`` when it needs nothing extra."""
     return _resolve_operator(name).requires
+
+
+def operator_extra(name: str) -> Optional[str]:
+    """The optional-dependency group that makes this operator runnable — ``None`` means core."""
+    return _resolve_operator(name).extra
 
 
 def operator_consumes(name: str) -> frozenset[str]:

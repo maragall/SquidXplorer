@@ -231,7 +231,7 @@ SPOT_PARAMS: tuple[Param, ...] = tuple(
 
 
 def add_segmentation_operator(name: str, segment: Callable[..., SpotResult], *,
-                              params: Sequence[Param], requires=()) -> None:
+                              params: Sequence[Param], requires=(), extra=None) -> None:
     """One algorithm, one operator: register *segment* under *name*, declaring exactly the
     :class:`SpotParams` fields it reads (*params*, filtered from :data:`SPOT_PARAMS`)."""
     declared = tuple(params)
@@ -250,7 +250,7 @@ def add_segmentation_operator(name: str, segment: Callable[..., SpotResult], *,
         return spots_op(SpotParams(**kwargs), segment=segment, label=name, reads=reads)
 
     _factory.__name__ = f"spots_op[{name}]"
-    add_operator(name, _factory, params=declared, requires=requires)
+    add_operator(name, _factory, params=declared, requires=requires, extra=extra)
 
 
 add_segmentation_operator(LAYER_KEY, skimage_watershed, params=SPOT_PARAMS)

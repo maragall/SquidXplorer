@@ -720,8 +720,9 @@ def _stitch_factory(**params):
     return stitch
 
 
-add_region_operator("stitch", _stitch_factory, params=_STITCH_PARAMS, requires=("tilefusion",))
-add_region_operator("coordinate", _coordinate_region, requires=("tilefusion",))
+add_region_operator("stitch", _stitch_factory, params=_STITCH_PARAMS, requires=("tilefusion",),
+                    extra="stitch")
+add_region_operator("coordinate", _coordinate_region, requires=("tilefusion",), extra="stitch")
 
 
 def _accepts_kwarg(fn, name: str) -> bool:

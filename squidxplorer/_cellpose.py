@@ -85,4 +85,4 @@ def register_operator() -> None:
     # Filtered from SPOT_PARAMS so each default and blurb stays defined once, in SpotParams.
     add_segmentation_operator(OPERATOR_NAME, cellpose_nuclei,
                               params=tuple(p for p in SPOT_PARAMS if p.name in READS),
-                              requires=("cellpose",))
+                              requires=("cellpose",), extra="segment")
