@@ -317,7 +317,7 @@ def test_read_out_of_range_z_and_t_raise_indexerror(tmp_path):
     with pytest.raises(IndexError):
         reader.read("B2", 0, ch, 9)
     with pytest.raises(IndexError):
-        reader.read("B2", 0, ch, 0, t=5)
+        reader.read("B2", 0, ch, 0, time_point=5)
 
 
 def test_plane_ref_points_at_an_openable_ngff_image_group(tmp_path):

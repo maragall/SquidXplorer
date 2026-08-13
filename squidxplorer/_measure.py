@@ -14,6 +14,7 @@ __all__ = [
     "MetricsLog",
     "METRICS",
     "measure_run",
+    "verdict",
     "rss_bytes",
     "human_bytes",
     "human_seconds",
@@ -41,6 +42,24 @@ PARTIAL = "partial"
 FAILED = "failed"
 STOPPED = "stopped"
 OUTCOMES = (OK, PARTIAL, FAILED, STOPPED)
+
+
+def verdict(landed: int, owed: int, skipped: int, stopped: bool) -> "tuple[str, str]":
+    """``(outcome, detail)`` for a finished run — THE one computation, for every surface.
+
+    ``stopped`` wins and comes with an empty detail, because how a run was stopped (a manifest's
+    own flag, a window's stop event) is the caller's sentence to write. A run that landed nothing
+    while owing targets is PARTIAL, as is any skip. ``landed`` is in the caller's own unit
+    (fields or wells) — only zero is read here — while ``owed`` and ``skipped`` count target
+    wells. FAILED never comes from counts; it is the exception path's word.
+    """
+    if stopped:
+        return STOPPED, ""
+    if landed == 0 and owed:
+        return PARTIAL, f"produced nothing — all {owed} target(s) skipped"
+    if skipped:
+        return PARTIAL, f"{skipped} well(s) skipped"
+    return OK, ""
 
 
 def rss_bytes() -> Optional[int]:

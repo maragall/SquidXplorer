@@ -96,11 +96,11 @@ def normalise_consumes(consumes) -> frozenset[str]:
     axes = frozenset(consumes)
     if "fov" in axes:
         raise ValueError(
-            "consumes={'fov'} is not supported by the projector table: a projector is "
+            "consumes={'fov'} is not supported by the operator table: an operator is "
             "Iterable[plane] -> plane and never sees a tile's x/y stage geometry, which any "
             "inter-FOV operation (stitching, illumination-field fitting across a well) requires. "
             "Register it with squidxplorer.add_region_operator(name, fn) instead: that stamps "
-            "consumes=REGION_OP on the SAME registry record, and stitch_plate reads it."
+            "consumes=REGION_OP on the SAME registry record, and the region loop reads it."
         )
     unknown = axes - CONSUMABLE_AXES
     if unknown:
@@ -268,15 +268,15 @@ def project_well(
     reference_channel: Optional[str] = None,
     picked_z: Optional[dict] = None,
     consumes=None,
-    t: Optional[int] = None,
-    z: Optional[int] = None,
+    time_point: Optional[int] = None,
+    z_level: Optional[int] = None,
 ) -> np.ndarray:
     """Apply one operator to a FOV's planes for every channel and timepoint.
 
     The grouping comes from the operator's ``consumes`` declaration: a z-reducer collapses z
-    to 1, a plane-op keeps z at full depth. ``t``/``z`` restrict the run to one timepoint /
-    one acquisition plane (``z=`` is plane-ops only). ``picked_z`` receives ``{(t, channel): z}``
-    provenance for z-selecting reductions.
+    to 1, a plane-op keeps z at full depth. ``time_point``/``z_level`` restrict the run to one
+    timepoint / one acquisition plane (``z_level=`` is plane-ops only). ``picked_z`` receives
+    ``{(t, channel): z}`` provenance for z-selecting reductions.
     """
     meta = reader.metadata
     channels = [c["name"] for c in meta["channels"]]
@@ -291,26 +291,26 @@ def project_well(
         consumes = getattr(reduce, "consumes", Z_REDUCER)
     consumes = normalise_consumes(consumes)
 
-    if t is None:
+    if time_point is None:
         timepoints = tuple(range(n_t))
     else:
-        if not 0 <= t < n_t:
-            raise ValueError(f"timepoint {t} out of range for an acquisition with n_t={n_t}")
-        timepoints = (t,)
+        if not 0 <= time_point < n_t:
+            raise ValueError(f"timepoint {time_point} out of range for an acquisition with n_t={n_t}")
+        timepoints = (time_point,)
 
     # One acquisition plane; refused for a z-consumer ("the MIP of one plane" is a different result).
-    if z is not None:
+    if z_level is not None:
         if "z" in consumes:
             raise ValueError(
-                f"z={z} selects ONE acquisition plane, which is only meaningful for a plane-op. "
-                f"{getattr(reduce, '__name__', reduce)!r} declares consumes={sorted(consumes)} — it "
-                "REDUCES over z, so restricting it to one plane would silently change what it "
-                "computes. Drop z=, or use a plane-op."
+                f"z_level={z_level} selects ONE acquisition plane, which is only meaningful for a "
+                f"plane-op. {getattr(reduce, '__name__', reduce)!r} declares "
+                f"consumes={sorted(consumes)} — it REDUCES over z, so restricting it to one plane "
+                "would silently change what it computes. Drop z_level=, or use a plane-op."
             )
-        if z not in z_levels:
+        if z_level not in z_levels:
             raise ValueError(
-                f"z={z} is not one of this acquisition's z levels {list(z_levels)}")
-        z_levels = [z]
+                f"z_level={z_level} is not one of this acquisition's z levels {list(z_levels)}")
+        z_levels = [z_level]
 
     select_index = getattr(reduce, "select_index", None)
 
@@ -322,7 +322,7 @@ def project_well(
 
     if select_index is None:
         # z consumed -> one group per (t, c); z not consumed -> one group per (t, c, z).
-        z_groups = [tuple(z_levels)] if "z" in consumes else [(z,) for z in z_levels]
+        z_groups = [tuple(z_levels)] if "z" in consumes else [(z_level,) for z_level in z_levels]
         out = np.empty((len(timepoints), len(channels), len(z_groups), y, x), dtype=meta["dtype"])
         # One specialisation per channel for operators declaring `for_channel`.
         path = acquisition_path(reader) if hasattr(reduce, "for_channel") else None
@@ -331,7 +331,7 @@ def project_well(
             for c_i, channel in enumerate(channels):
                 op = per_channel[channel]
                 for k, group in enumerate(z_groups):
-                    planes = (reader.read(region, fov, channel, z, t_src) for z in group)
+                    planes = (reader.read(region, fov, channel, z_level, t_src) for z_level in group)
                     out[t_i, c_i, k] = op(planes)  # streamed z; bounded memory
         return out
 
@@ -344,7 +344,7 @@ def project_well(
 
     out = np.empty((len(timepoints), len(channels), 1, y, x), dtype=meta["dtype"])
     for t_i, t_src in enumerate(timepoints):
-        planes = (reader.read(region, fov, ref, z, t_src) for z in z_levels)
+        planes = (reader.read(region, fov, ref, z_level, t_src) for z_level in z_levels)
         z_star = z_levels[select_index(planes)]   # position -> real z label
         for c_i, channel in enumerate(channels):
             out[t_i, c_i, 0] = reader.read(region, fov, channel, z_star, t_src)

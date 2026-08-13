@@ -423,9 +423,8 @@ class EngineExecutor:
 
         ``data["outcome"]`` carries the verdict: ``"ok"``, ``"partial"`` or ``"stopped"``.
         """
-        from squidxplorer import (is_region_operator, project_plate, runnable_operators,
-                              stitch_plate, write_plate)
-        from squidxplorer._measure import OK, PARTIAL, STOPPED, measure_run
+        from squidxplorer import run_plate, runnable_operators, write_plate
+        from squidxplorer._measure import measure_run, verdict
 
         meta = self._meta()
         if meta is None:
@@ -433,7 +432,7 @@ class EngineExecutor:
                            "nothing is open — run open_acquisition first")
         runnable = runnable_operators()
         if cmd.operator not in runnable:
-            # Not a registered name, but it may still be an operator chain ('bgsub+mip').
+            # Resolve for the refusal: a chain expression gets the engine's own explanation.
             from squidxplorer._engine import _resolve_operator
 
             try:
@@ -474,12 +473,11 @@ class EngineExecutor:
             skipped.append(str(region))
             logger.warning("SKIP well %s (fov %s): %s: %s", region, fov, type(exc).__name__, exc)
 
-        region_op = is_region_operator(cmd.operator)
         stopped = False
         with measure_run(cmd.operator, target or "no target", n_targets=n_targets) as run:
             run.note(surface=self.surface, save=cmd.save, acquisition=self._path)
             if cmd.save:
-                manifest = write_plate(self.reader, out_dir, projector=cmd.operator,
+                manifest = write_plate(self.reader, out_dir, operator=cmd.operator,
                                        n_fovs=cmd.n_fovs, workers=cmd.workers, tiff=cmd.tiff,
                                        on_error=on_error, regions=regions,
                                        operator_kwargs=cmd.parameters or None,
@@ -490,15 +488,10 @@ class EngineExecutor:
                 data = {"manifest": {k: (str(v) if hasattr(v, "__fspath__") else v)
                                      for k, v in manifest.items()}}
             else:
-                if region_op:
-                    stream = stitch_plate(self.reader, workers=1, operator=cmd.operator,
-                                          n_fovs=None, on_error=on_error, regions=regions,
-                                          **(cmd.parameters or {}))
-                else:
-                    # `operator_kwargs` on the preview too, exactly as the save branch passes them.
-                    stream = project_plate(self.reader, projector=cmd.operator, workers=cmd.workers,
-                                           n_fovs=cmd.n_fovs, on_error=on_error, regions=regions,
-                                           operator_kwargs=cmd.parameters or None)
+                # `operator_kwargs` on the preview too, exactly as the save branch passes them.
+                stream = run_plate(self.reader, operator=cmd.operator, workers=cmd.workers,
+                                   n_fovs=cmd.n_fovs, on_error=on_error, regions=regions,
+                                   operator_kwargs=cmd.parameters or None)
                 landed = 0
                 for _region, _fov, _image in stream:
                     if self.stop is not None and self.stop():
@@ -512,16 +505,11 @@ class EngineExecutor:
                         self.on_well(_region, _fov, _image)
                 data = {"n_fields": landed}
             # `landed` counts FIELDS; `n_targets` counts WELLS -- never put one over the other.
-            owed = int((data.get("manifest") or {}).get("n_fields") or 0)
+            outcome, detail = verdict(landed, n_targets, len(set(skipped)), stopped)
             if stopped:
+                owed = int((data.get("manifest") or {}).get("n_fields") or 0)
                 got = f"{landed} of {owed} field(s)" if owed else f"{landed} field(s)"
-                outcome, detail = STOPPED, f"stopped after {got} across {n_targets} target well(s)"
-            elif landed == 0 and n_targets:
-                outcome, detail = PARTIAL, f"produced nothing — all {n_targets} target(s) skipped"
-            elif skipped:
-                outcome, detail = PARTIAL, f"{len(set(skipped))} well(s) skipped"
-            else:
-                outcome, detail = OK, ""
+                detail = f"stopped after {got} across {n_targets} target well(s)"
             run.finish(outcome, detail)
             metrics = run
         data["n_landed"] = landed

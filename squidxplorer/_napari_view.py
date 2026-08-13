@@ -502,7 +502,7 @@ class MosaicLayers:
         except Exception as exc:                 # noqa: BLE001 - a presentation nicety, never fatal
             log.warning("z axis restore failed on %s: %s", getattr(ly, "name", "layer"), exc)
 
-    def _collapse_layer_z(self, ly: Any, z: int) -> None:
+    def _collapse_layer_z(self, ly: Any, z_level: int) -> None:
         """Present a ``(z, y, x)`` layer as the single plane *z*, so it stops carrying a z axis."""
         meta = dict(getattr(ly, "metadata", None) or {})
         if _Z_STASH in meta:
@@ -520,7 +520,7 @@ class MosaicLayers:
                               "multiscale": multiscale,
                               "scale": scale, "translate": translate}
             coarsest = levels[-1]
-            plane = coarsest[max(0, min(int(z), int(coarsest.shape[0]) - 1))]
+            plane = coarsest[max(0, min(int(z_level), int(coarsest.shape[0]) - 1))]
             ly.metadata = meta
             ly.multiscale = False
             ly.data = plane

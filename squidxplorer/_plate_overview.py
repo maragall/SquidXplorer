@@ -787,7 +787,7 @@ class PlateOverview(QWidget):
             # cells (cheap), FOV rungs from the reader. time_point must match on both sides or
             # CompositePlateSource refuses the pair.
             self._tile_src = CompositePlateSource(
-                reader, meta, self._ladder, t=self._time_point,
+                reader, meta, self._ladder, time_point=self._time_point,
                 cache=PlateCellCache.for_reader(reader, meta, cell_px=_CELL,
                                                 time_point=self._time_point))
         except Exception:
@@ -872,7 +872,7 @@ class PlateOverview(QWidget):
                 self._tile_level = lvl
                 out.append((TileDescriptor(level=lvl, key=key, channel=self._tile_channel(),
                                            bbox_um=self._ladder.fov_bboxes[key],
-                                           t=self._time_point), rect))
+                                           time_point=self._time_point), rect))
         return out
 
     def _tile_channel(self) -> str:

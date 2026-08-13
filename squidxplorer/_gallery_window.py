@@ -101,7 +101,7 @@ class GalleryWorker(QThread):
             try:
                 cell = fuse_gallery_cell(
                     self._reader, self._meta, region, self._scope.fovs_of(region), channel,
-                    t=self._scope.t, projection=self._scope.projection,
+                    time_point=self._scope.time_point, projection=self._scope.projection,
                     cache=self._cache, token=self._token,
                     should_stop=self._stop.is_set,
                 )
@@ -222,7 +222,7 @@ class GalleryWindow(QMainWindow):
         n_t = int((self._meta or {}).get("n_t", 1) or 1)
         self._t = QSpinBox()
         self._t.setRange(0, max(0, n_t - 1))
-        self._t.setValue(min(self._scope.t, n_t - 1))
+        self._t.setValue(min(self._scope.time_point, n_t - 1))
         self._t.valueChanged.connect(lambda _v: self.restart())
         self._t_label = QLabel("Timepoint:")
         row.addWidget(self._t_label)
@@ -324,7 +324,7 @@ class GalleryWindow(QMainWindow):
             regions=self._scope.regions,
             fovs=self._scope.fovs,
             channels=self._scope.channels,
-            t=int(self._t.value()),
+            time_point=int(self._t.value()),
             projection=str(self._proj.currentData()),
             from_selection=self._scope.from_selection,
         )
@@ -495,7 +495,7 @@ class GalleryWindow(QMainWindow):
             self.setWindowTitle(f"{title} — Gallery View")
         n_t = int((self._meta or {}).get("n_t", 1) or 1)
         self._t.setRange(0, max(0, n_t - 1))
-        self._t.setValue(min(scope.t, n_t - 1))
+        self._t.setValue(min(scope.time_point, n_t - 1))
         self._t_label.setVisible(n_t > 1)
         self._t.setVisible(n_t > 1)
         self._select_projection(scope.projection)

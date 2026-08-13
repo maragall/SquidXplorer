@@ -291,8 +291,8 @@ class ZarrPyramidSource:
         """One tile as a 2-D native-dtype array; the timepoint comes off the descriptor."""
         c = self._channel_index(desc.channel)
         if self.ladder.is_fov_level(desc.level):
-            return self._read_fov_plane(desc.key, desc.level, c, int(desc.t))
-        return self._composite_cell(desc.level, desc.key, c, int(desc.t))
+            return self._read_fov_plane(desc.key, desc.level, c, int(desc.time_point))
+        return self._composite_cell(desc.level, desc.key, c, int(desc.time_point))
 
     def _channel_index(self, channel: str) -> int:
         s = str(channel)
@@ -307,18 +307,18 @@ class ZarrPyramidSource:
         from squidxplorer._tsctx import HANDLES
         return HANDLES.get(self._field_dirs[fov_key] / str(level))
 
-    def _read_fov_plane(self, fov_key, level: int, c: int, t: int) -> np.ndarray:
+    def _read_fov_plane(self, fov_key, level: int, c: int, time_point: int) -> np.ndarray:
         store = self._store(fov_key, level)
-        t = min(max(0, int(t)), store.shape[0] - 1)     # clamped to what this store actually holds
-        return np.asarray(store[t, c, 0].read().result())
+        time_point = min(max(0, int(time_point)), store.shape[0] - 1)     # clamped to what this store actually holds
+        return np.asarray(store[time_point, c, 0].read().result())
 
-    def _composite_cell(self, level: int, key, c: int, t: int) -> np.ndarray:
+    def _composite_cell(self, level: int, key, c: int, time_point: int) -> np.ndarray:
         bbox = self.ladder.cell_bbox_um(level, key)
         scale = self.ladder.geometry.levels[level].scale_um_per_px
         src_level = self.ladder.fov_source_level(scale)
         tile = np.zeros((self.ladder.tile_px, self.ladder.tile_px), dtype=self._dtype())
         for fov_key in self.ladder.fovs_overlapping(bbox):
-            plane = self._read_fov_plane(fov_key, src_level, c, t)
+            plane = self._read_fov_plane(fov_key, src_level, c, time_point)
             _paste_field(tile, bbox, scale, plane, self.ladder.fov_bboxes[fov_key])
         return tile
 
@@ -388,14 +388,14 @@ class InMemoryMultiscale:
     """
 
     def __init__(self, ladder: PlateLadder, channels: Sequence[str], dtype=np.uint16, *,
-                 budget_bytes: int = DEFAULT_PREVIEW_BUDGET_BYTES, t: int = 0) -> None:
+                 budget_bytes: int = DEFAULT_PREVIEW_BUDGET_BYTES, time_point: int = 0) -> None:
         import threading
 
         self.ladder = ladder
         self.channels = [str(c) for c in channels]
         self.dtype = np.dtype(dtype)
         self.budget_bytes = int(budget_bytes)
-        self.t = int(t)
+        self.time_point = int(time_point)
         if self.budget_bytes < 0:
             raise ValueError(f"budget_bytes must be >= 0, got {budget_bytes}")
         if not self.channels:
@@ -437,10 +437,10 @@ class InMemoryMultiscale:
 
     def read_tile(self, desc: TileDescriptor) -> np.ndarray:
         """One channel of one resident tile; untouched tiles read as zeros, another timepoint raises."""
-        if int(desc.t) != self.t:
+        if int(desc.time_point) != self.time_point:
             raise KeyError(
-                f"this preview holds timepoint {self.t}; tile {desc.key!r} was asked for at "
-                f"timepoint {desc.t}. Its pixels are not that frame's.")
+                f"this preview holds timepoint {self.time_point}; tile {desc.key!r} was asked "
+                f"for at timepoint {desc.time_point}. Its pixels are not that frame's.")
         if desc.level not in self.levels:
             raise KeyError(
                 f"level {desc.level} is not resident in this preview (resident: {self.levels}); "
@@ -473,14 +473,14 @@ class InMemoryMultiscale:
                 for c in range(len(self.channels)):
                     touched |= _paste_field(tile[c], cell_bbox, scale, planes[c], bbox_um)
                 if touched:
-                    dirty.extend(TileDescriptor(lvl, cell, ch, cell_bbox, self.t)
+                    dirty.extend(TileDescriptor(lvl, cell, ch, cell_bbox, self.time_point)
                                  for ch in self.channels)
         return dirty
 
     def _planes(self, image: np.ndarray) -> np.ndarray:
         arr = np.asarray(image)
         if arr.ndim == 5:
-            t = min(self.t, arr.shape[0] - 1)
+            t = min(self.time_point, arr.shape[0] - 1)
             arr = arr[t, :, 0]
         if arr.ndim != 3 or arr.shape[0] != len(self.channels):
             raise ValueError(
@@ -512,7 +512,7 @@ class ReaderTileSource:
     """
 
     def __init__(self, reader, metadata: Mapping, ladder: PlateLadder, *,
-                 projector: Optional[str] = "mip", z: Optional[int] = None,
+                 operator: Optional[str] = "mip", z_level: Optional[int] = None,
                  cache_bytes: Optional[int] = None) -> None:
         self.reader = reader
         self.meta = dict(metadata)
@@ -520,19 +520,19 @@ class ReaderTileSource:
         self.dtype = np.dtype(self.meta.get("dtype") or np.uint16)
         self.z_levels = list(self.meta.get("z_levels") or [0])
 
-        # Refuse a projector that does not consume z: it cannot reduce a stack to a tile.
-        self.projector = projector
-        self.z = None if z is None else int(z)
-        if projector is not None and self.z is None:
+        # Refuse an operator that does not consume z: it cannot reduce a stack to a tile.
+        self.operator = operator
+        self.z_level = None if z_level is None else int(z_level)
+        if operator is not None and self.z_level is None:
             from squidxplorer._engine import operator_consumes
 
-            if "z" not in operator_consumes(projector):
+            if "z" not in operator_consumes(operator):
                 raise ValueError(
-                    f"projector {projector!r} does not consume z, so it cannot reduce a stack to "
-                    "a tile. Pass a z-reducer (mip, reference) or an explicit z=.")
-        elif projector is None and self.z is None:
-            # Neither a projector nor a plane: fall back to the montage's mid-stack plane.
-            self.z = int(self.z_levels[len(self.z_levels) // 2])
+                    f"operator {operator!r} does not consume z, so it cannot reduce a stack to "
+                    "a tile. Pass a z-reducer (mip, reference) or an explicit z_level=.")
+        elif operator is None and self.z_level is None:
+            # Neither an operator nor a plane: fall back to the montage's mid-stack plane.
+            self.z_level = int(self.z_levels[len(self.z_levels) // 2])
 
         self._planes = MemoryBoundedLRUCache(
             DEFAULT_PREVIEW_BUDGET_BYTES if cache_bytes is None else int(cache_bytes))
@@ -547,40 +547,41 @@ class ReaderTileSource:
         out = np.zeros((tile_px, tile_px), dtype=self.dtype)
 
         for key in self.ladder.fovs_overlapping(bbox):
-            plane = self._plane(key, desc.channel, int(desc.t))
+            plane = self._plane(key, desc.channel, int(desc.time_point))
             if plane is None:
                 continue            # an unreadable field is a hole, not a dead viewport
             _paste_field(out, bbox, scale, plane, self.ladder.fov_bboxes[key])
         return out
 
-    def _plane(self, key, channel: str, t: int):
+    def _plane(self, key, channel: str, time_point: int):
         """The FOV's image for one channel at one timepoint — projected over z, or one plane."""
         region, fov = key
         ck = (str(region), int(fov), str(channel),
-              "z%d" % self.z if self.z is not None else "p:%s" % self.projector, int(t))
+              "z%d" % self.z_level if self.z_level is not None else "op:%s" % self.operator,
+              int(time_point))
         hit = self._planes.get(ck)
         if hit is not None:
             return hit
         try:
-            if self.z is not None:
-                plane = np.asarray(self._read(region, fov, channel, self.z, t))
+            if self.z_level is not None:
+                plane = np.asarray(self._read(region, fov, channel, self.z_level, time_point))
             else:
                 from squidxplorer._engine import _resolve_operator
 
-                reduce = _resolve_operator(self.projector).fn
+                reduce = _resolve_operator(self.operator).fn
                 plane = np.asarray(reduce(
-                    np.asarray(self._read(region, fov, channel, z, t)) for z in self.z_levels))
+                    np.asarray(self._read(region, fov, channel, z, time_point)) for z in self.z_levels))
         except Exception:
             return None             # decode failure: leave the hole, keep the viewport alive
         self._planes.put(ck, plane)
         return plane
 
-    def _read(self, region, fov, channel: str, z: int, t: int):
+    def _read(self, region, fov, channel: str, z_level: int, time_point: int):
         """One plane from the reader, tolerating readers whose ``read`` has no ``t``."""
         try:
-            return self.reader.read(region, int(fov), str(channel), int(z), t=int(t))
+            return self.reader.read(region, int(fov), str(channel), int(z_level), time_point=int(time_point))
         except TypeError:
-            return self.reader.read(region, int(fov), str(channel), int(z))
+            return self.reader.read(region, int(fov), str(channel), int(z_level))
 
 
 def region_bbox_um(ladder: PlateLadder, region: str) -> Optional[tuple]:
@@ -600,20 +601,21 @@ class CompositePlateSource:
     """
 
     def __init__(self, reader, metadata: Mapping, ladder: PlateLadder, *,
-                 cache=None, cells: Optional[Mapping] = None, t: int = 0,
+                 cache=None, cells: Optional[Mapping] = None, time_point: int = 0,
                  budget_bytes: Optional[int] = None, **fov_kwargs) -> None:
         self.reader = reader
         self.meta = dict(metadata)
         self.ladder = ladder
         self.cache = cache
-        # `t` is which frame the plate rungs are; a cache for a different frame is refused, not
-        # reconciled.
-        self.t = max(0, int(t))
-        cache_t = getattr(cache, "time_point", self.t) if cache is not None else self.t
-        if int(cache_t) != self.t:
+        # `time_point` is which frame the plate rungs are; a cache for a different frame is
+        # refused, not reconciled.
+        self.time_point = max(0, int(time_point))
+        cache_t = getattr(cache, "time_point", self.time_point) if cache is not None else self.time_point
+        if int(cache_t) != self.time_point:
             raise ValueError(
-                f"CompositePlateSource(t={self.t}) was handed a plate cell cache for timepoint "
-                f"{cache_t}: its cells would be pasted into the world under the wrong frame.")
+                f"CompositePlateSource(time_point={self.time_point}) was handed a plate cell cache "
+                f"for timepoint {cache_t}: its cells would be pasted into the world under the wrong "
+                "frame.")
         self.fov_source = ReaderTileSource(reader, metadata, ladder, **fov_kwargs)
         self.channels = [str(c["name"]) for c in (self.meta.get("channels") or [])] or ["0"]
         self.dtype = np.dtype(self.meta.get("dtype") or np.uint16)
@@ -625,7 +627,7 @@ class CompositePlateSource:
                 ladder, self.channels, self.dtype,
                 budget_bytes=(DEFAULT_PREVIEW_BUDGET_BYTES if budget_bytes is None
                               else int(budget_bytes)),
-                t=self.t)
+                time_point=self.time_point)
         except ValueError:
             # No plate rungs on this ladder: degrade to exactly ReaderTileSource.
             self.plate_source = None
@@ -673,7 +675,7 @@ class CompositePlateSource:
         """One channel of one tile; a coarse tile at another timepoint goes to the reader."""
         if self.ladder.is_fov_level(desc.level) or self.plate_source is None:
             return self.fov_source.read_tile(desc)
-        if int(desc.t) != self.t:
+        if int(desc.time_point) != self.time_point:
             self.coarse_from_reader += 1
             return self.fov_source.read_tile(desc)
         self._ensure_seeded()

@@ -1,4 +1,4 @@
-"""Operator + projector integration tests over the public ``squidxplorer`` surface.
+"""Operator integration tests over the public ``squidxplorer`` surface.
 
 All pixels are synthetic in-memory numpy; no dataset on disk is touched.
 """
@@ -29,8 +29,8 @@ def _stack(z=5, shape=(64, 64), seed=0):
     return [rng.rand(*shape).astype(np.float32) for _ in range(z)]
 
 
-def test_available_projectors_exact_list():
-    assert s.available_projectors() == [
+def test_available_plane_operators_exact_list():
+    assert s.available_plane_operators() == [
         "bgsub",
         "cellpose",
         "decon",
@@ -47,8 +47,8 @@ def test_available_region_operators_exact_list():
     assert s.available_region_operators() == ["coordinate", "stitch"]
 
 
-def test_every_projector_resolves():
-    for name in s.available_projectors():
+def test_every_operator_resolves():
+    for name in s.available_plane_operators():
         op = _resolve_operator(name)
         assert op.name == name
         assert callable(op.fn)
@@ -127,7 +127,7 @@ def test_flatfield_op_end_to_end_preserves_shape():
     assert out.shape == plane.shape
 
 
-def test_mip_projector_collapses_z_and_equals_max():
+def test_mip_collapses_z_and_equals_max():
     stack = _stack(z=5)
     expected = np.max(np.stack(stack), axis=0)
     out = _resolve_operator("mip").fn(list(stack))
@@ -141,7 +141,7 @@ def test_project_primitive_equals_max_over_z():
     assert np.array_equal(s.project(iter(stack)), expected)
 
 
-def test_reference_projector_collapses_z():
+def test_reference_collapses_z():
     stack = _stack(z=5, seed=2)
     out = _resolve_operator("reference").fn(list(stack))
     assert out.shape == (64, 64)
@@ -171,7 +171,7 @@ def test_plane_op_preserves_z_but_reducer_collapses():
 
 
 def test_decon_registered_and_petakit_present():
-    assert "decon" in s.available_projectors()
+    assert "decon" in s.available_plane_operators()
     import petakit  # noqa: F401
 
 

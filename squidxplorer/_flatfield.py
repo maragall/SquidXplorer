@@ -13,7 +13,7 @@ from typing import Callable, Iterable, Optional
 
 import numpy as np
 
-from squidxplorer._engine import add_projector
+from squidxplorer._engine import add_operator
 from squidxplorer.projection import cast_like, plane_op
 
 # A gain below this is treated as 1.0 rather than dividing a dead pixel to the dtype ceiling.
@@ -123,7 +123,7 @@ def correct_flatfield(plane: np.ndarray, profile: FlatfieldProfile) -> np.ndarra
 
 
 def flatfield_op(profile: FlatfieldProfile) -> Callable[[Iterable[np.ndarray]], np.ndarray]:
-    """Build a plane-op bound to *profile*, ready for ``add_projector``."""
+    """Build a plane-op bound to *profile*, ready for ``add_operator``."""
     if not isinstance(profile, FlatfieldProfile):
         raise ValueError(f"flatfield_op needs a FlatfieldProfile, got {type(profile).__name__}")
 
@@ -144,7 +144,7 @@ CORRECTS_ILLUMINATION = "corrects_illumination"
 
 # The active profiles, one per channel. ``_stitch._selected_profiles`` reads this too; the
 # per-call ``stitch_region(flatfield=...)`` argument still outranks it. Locked because
-# ``project_plate`` runs the operator on a thread pool.
+# The per-FOV loop runs the operator on a thread pool.
 _lock = threading.Lock()
 _active: dict[str, FlatfieldProfile] = {}
 
@@ -231,7 +231,7 @@ def _correct_with_active(plane: np.ndarray) -> np.ndarray:
         f"'flatfield' was handed a plane without being told which channel it is, and profiles "
         f"for {sorted(profiles)} are installed. Refusing to pick one of them: correcting a "
         "channel with another channel's gain field is a different measurement, not a degraded "
-        "one. Run it through project_well/project_plate (which specialises the operator per "
+        "one. Run it through project_well/run_plate (which specialises the operator per "
         "channel via for_channel), or call flatfield_op(profile) with the profile you mean."
     )
 
@@ -243,4 +243,4 @@ _ACTIVE_OP = plane_op(_correct_with_active)
 _ACTIVE_OP.corrects_illumination = True
 # The acquisition path is unused: a gain field is measured, never derived from metadata.
 _ACTIVE_OP.for_channel = lambda path, channel: flatfield_op(_profile_for(str(channel)))
-add_projector(LAYER_KEY, _ACTIVE_OP, requires=("tilefusion",))
+add_operator(LAYER_KEY, _ACTIVE_OP, requires=("tilefusion",))

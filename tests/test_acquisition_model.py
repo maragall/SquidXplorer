@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 from pydantic import ValidationError
 
-from squidxplorer._acquisition import Acquisition, Channel
+from squidxplorer._acquisition import Acquisition, DisplayChannel
 
 
 def _kw(**over):
@@ -41,7 +41,7 @@ def test_builds_from_the_reader_dict():
     assert a.frame_shape == (2084, 3000)
     assert a.dtype == np.dtype("uint16")
     assert a.channels[0].name == "Fluorescence_488_nm_Ex"
-    assert isinstance(a.channels[0], Channel)
+    assert isinstance(a.channels[0], DisplayChannel)
 
 
 def test_channel_names_are_a_convenience_not_a_reimplementation():

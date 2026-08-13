@@ -8,7 +8,7 @@ import importlib.util
 import numpy as np
 import pytest
 
-from squidxplorer import available_projectors, project_well, operator_consumes
+from squidxplorer import available_plane_operators, project_well, operator_consumes
 from squidxplorer._background import (
     BackgroundParams,
     bgsub_op,
@@ -304,7 +304,7 @@ def test_the_reader_is_read_only_so_the_source_tiffs_survive_a_run(squid_dataset
 
 
 def test_bgsub_is_registered_as_a_plane_op():
-    assert "bgsub" in available_projectors()
+    assert "bgsub" in available_plane_operators()
     assert operator_consumes("bgsub") == PLANE_OP
 
 

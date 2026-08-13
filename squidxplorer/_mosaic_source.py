@@ -36,7 +36,7 @@ def level_paths(group: Path) -> list[Path]:
     return [group / str(d["path"]) for d in datasets]
 
 
-def open_pyramid(group, *, t: int = 0, c: int = 0, z: int = 0) -> list:
+def open_pyramid(group, *, time_point: int = 0, c: int = 0, z_level: int = 0) -> list:
     """Lazy 2-D dask pyramid for one (t, c, z) of a written field/mosaic group."""
     import dask.array as da
     import zarr
@@ -47,11 +47,11 @@ def open_pyramid(group, *, t: int = 0, c: int = 0, z: int = 0) -> list:
         d = da.from_array(arr, chunks=arr.chunks)
         # Squid canonical order is (t, c, z, y, x); 2-D/3-D stores are legal NGFF too.
         if d.ndim == 5:
-            d = d[t, c, z]
+            d = d[time_point, c, z_level]
         elif d.ndim == 4:
-            d = d[t, c]
+            d = d[time_point, c]
         elif d.ndim == 3:
-            d = d[z]
+            d = d[z_level]
         elif d.ndim != 2:
             raise ValueError(f"{path}: unsupported rank {d.ndim} for a mosaic plane.")
         out.append(d)
@@ -80,8 +80,8 @@ def fuse_region_mosaic(
     region: str,
     channel: str,
     *,
-    z: int = 0,
-    t: int = 0,
+    z_level: int = 0,
+    time_point: int = 0,
     max_px: int = _MAX_FUSED_PX,
 ) -> Optional[tuple[np.ndarray, float]]:
     """Paste a region's FOVs into ONE plane, placed by stage position.
@@ -118,7 +118,7 @@ def fuse_region_mosaic(
     for fov in fovs:
         row, col = offsets[fov]
         try:
-            frame = reader.read(region, fov, channel, z, t)
+            frame = reader.read(region, fov, channel, z_level, time_point)
         except Exception as exc:                 # noqa: BLE001 - one bad FOV must not lose a well
             _log.warning("mosaic %s/%s: FOV %s could not be read (%s: %s) — it is a BLACK HOLE in "
                          "this mosaic, not an empty field.", region, channel, fov,
@@ -173,7 +173,7 @@ def fuse_region_stack(
     region: str,
     channel: str,
     *,
-    t: int = 0,
+    time_point: int = 0,
     max_px: int = _MAX_FUSED_PX,
 ):
     """A LAZY ``(z, y, x)`` mosaic stack — one fused plane materialised per visible z."""
@@ -198,7 +198,8 @@ def fuse_region_stack(
 
     if nz <= 1:
         # No singleton z axis: return the plane so napari draws no one-position slider.
-        probe = fuse_region_mosaic(reader, meta, region, channel, z=0, t=t, max_px=max_px)
+        probe = fuse_region_mosaic(reader, meta, region, channel, z_level=0, time_point=time_point,
+                                   max_px=max_px)
         if probe is None:
             return None
         return probe[0], probe[1], 1
@@ -207,12 +208,12 @@ def fuse_region_stack(
     _cache: dict = {"z": None, "plane": None}
     _cache_lock = __import__("threading").Lock()
 
-    def _plane(z: int):
-        z = int(z)
+    def _plane(z_level: int):
+        z_level = int(z_level)
         with _cache_lock:
-            if _cache["z"] == z and _cache["plane"] is not None:
+            if _cache["z"] == z_level and _cache["plane"] is not None:
                 return _cache["plane"]
-        got = fuse_region_mosaic(reader, meta, region, channel, z=int(z), t=t, max_px=max_px)
+        got = fuse_region_mosaic(reader, meta, region, channel, z_level=int(z_level), time_point=time_point, max_px=max_px)
         if got is None:
             out = np.zeros((h, w), dtype=dtype)
         else:
@@ -224,7 +225,7 @@ def fuse_region_stack(
             else:
                 out = arr
         with _cache_lock:
-            _cache["z"], _cache["plane"] = z, out
+            _cache["z"], _cache["plane"] = z_level, out
         return out
 
     from dask import delayed
@@ -344,7 +345,7 @@ def _level_max_px(max_px: int, k: int) -> int:
     return max(_MIN_LEVEL_PX, int(max_px) >> k)
 
 
-def _fuse_levels(reader: Any, meta: dict, region: str, channel: str, z: int, t: int, plans: list):
+def _fuse_levels(reader: Any, meta: dict, region: str, channel: str, z_level: int, time_point: int, plans: list):
     """Fuse ONE z into SEVERAL pyramid levels in a single pass over the FOV frames.
 
     TIFF decode is whole-frame, so every level coarser than the one asked for is pasted from
@@ -361,7 +362,7 @@ def _fuse_levels(reader: Any, meta: dict, region: str, channel: str, z: int, t: 
     unreadable = []
     for fov in fovs:
         try:
-            frame = reader.read(region, fov, channel, int(z), int(t))
+            frame = reader.read(region, fov, channel, int(z_level), int(time_point))
         except Exception as exc:                 # noqa: BLE001 - collected, then reported
             unreadable.append((fov, f"{type(exc).__name__}: {exc}"))
             continue
@@ -384,14 +385,14 @@ def _fuse_levels(reader: Any, meta: dict, region: str, channel: str, z: int, t: 
     if unreadable and len(unreadable) < len(fovs):
         _log.warning("mosaic %s/%s z=%s: %d of %d FOV(s) could not be read — they are BLACK HOLES "
                      "in this mosaic, not empty fields. First: fov %s: %s",
-                     region, channel, z, len(unreadable), len(fovs),
+                     region, channel, z_level, len(unreadable), len(fovs),
                      unreadable[0][0], unreadable[0][1])
     if unreadable and len(unreadable) == len(fovs):
         # Every FOV bad is not a picture at all; a black plane would report a read failure as
         # empty tissue.
         why = "; ".join(f"fov {f}: {m}" for f, m in unreadable[:3])
         raise ValueError(
-            f"{region}/{channel} z={z}: no FOV in the region could be read "
+            f"{region}/{channel} z={z_level}: no FOV in the region could be read "
             f"({len(unreadable)} of {len(fovs)} failed) — {why}"
         )
     return outs
@@ -403,7 +404,7 @@ def fuse_region_pyramid(
     region: str,
     channel: str,
     *,
-    t: int = 0,
+    time_point: int = 0,
     max_px: int = _MAX_FUSED_PX,
     cache_bytes: Optional[int] = None,
 ):
@@ -450,25 +451,25 @@ def fuse_region_pyramid(
         if level_px <= _MIN_LEVEL_PX:
             break
 
-    def _plane(i: int, z: int):
+    def _plane(i: int, z_level: int):
         """Level ``i`` at ``z``, from the cache or one decode pass that also fills coarser levels."""
         level_px, h, w, step, dt = plans[i]
-        key = (token, region, channel, int(t), float(step), int(z))
+        key = (token, region, channel, int(time_point), float(step), int(z_level))
         hit = cache.get(key)
         if hit is not None:
             return hit
 
         # This level and every coarser one; nothing finer is built.
         wanted = plans[i:]
-        outs = _fuse_levels(reader, meta, region, channel, int(z), int(t), wanted)
+        outs = _fuse_levels(reader, meta, region, channel, int(z_level), int(time_point), wanted)
         for px, ph, pw, pstep, _pdt in wanted:
             arr = outs[px]
             if arr.shape != (ph, pw):
                 raise ValueError(
-                    f"{region}/{channel}: z={z} fused to {arr.shape}, but this pyramid level is "
+                    f"{region}/{channel}: z={z_level} fused to {arr.shape}, but this pyramid level is "
                     f"{(ph, pw)}. A ragged z would misalign the stack and misregister the level."
                 )
-            cache.put((token, region, channel, int(t), float(pstep), int(z)), arr)
+            cache.put((token, region, channel, int(time_point), float(pstep), int(z_level)), arr)
         return outs[level_px]
 
     levels = []

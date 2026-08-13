@@ -378,7 +378,7 @@ def build_montage(
     *,
     cell_px: int = _DEFAULT_CELL_PX,
     percentiles: tuple[float, float] = _DEFAULT_PERCENTILES,
-    t: int = 0,
+    time_point: int = 0,
     per_channel: bool = False,
 ) -> dict:
     """Render a static whole-plate montage from an OME-zarr HCS plate; returns a manifest dict."""
@@ -403,7 +403,7 @@ def build_montage(
     for well_id, row_name, col_name, r_i, c_i, field_dir in layout.wells:
         store = _read_open_store(field_dir / "0")
         shape = store.shape  # (T, C, 1, Y, X)
-        ti = min(int(t), shape[0] - 1)
+        ti = min(int(time_point), shape[0] - 1)
         well = np.asarray(store[ti, :, 0].read().result())  # (C, Y, X)
         if well.shape[0] != n_ch:
             raise ValueError(
@@ -452,7 +452,7 @@ def build_montage(
     sidecar = {
         "montage": montage_path.name,
         "cell_px": int(cell_px),
-        "timepoint": int(t),
+        "timepoint": int(time_point),
         "grid": {"n_rows": n_rows, "n_cols": n_cols, "rows": layout.rows, "columns": layout.cols},
         "channels": [
             {"label": c.get("label"), "color": str(c["color"]).lstrip("#"),

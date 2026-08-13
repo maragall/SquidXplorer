@@ -135,7 +135,7 @@ def test_window_autofocus_works_without_a_double_click(
     assert calls, "the button did nothing without a prior double-click"
     assert calls[-1][0] == regions[0], "it focused a region the window is not showing"
     assert not any("double-click" in s for s in w._pane.said), w._pane.said
-    assert not any("open a region first" in s for s in w._pane.said), w._pane.said
+    assert not any("show a region in this view first" in s for s in w._pane.said), w._pane.said
     shutdown_plate_window(qapp, win)
 
 

@@ -10,15 +10,19 @@ import pytest
 
 import squidxplorer
 from squidxplorer import (
-    available_projectors,
+    available_plane_operators,
     available_region_operators,
+    is_region_operator,
     project_well,
+    operator_available,
     operator_consumes,
     operator_params,
     operator_produces,
+    operator_requires,
+    runnable_operators,
 )
-from squidxplorer._engine import Param, _resolve_operator, add_projector, bind_operator
-from squidxplorer._spots import LAYER_KEY as SPOT_KEY, available_segmenters, segmenter_available
+from squidxplorer._engine import Param, _resolve_operator, add_operator, bind_operator
+from squidxplorer._spots import LAYER_KEY as SPOT_KEY
 
 napari = pytest.importorskip("napari")
 
@@ -76,17 +80,19 @@ def _is_a_label_image(arr: np.ndarray) -> bool:
     return bool(np.array_equal(non_zero, np.arange(1, len(non_zero) + 1)))
 
 
-def _slow(name: str) -> bool:
-    """Is this operator a model that has to be downloaded and run on a GPU-less test box?"""
-    return name in available_segmenters() and name != "otsu-watershed"
+def _skip_unless_available(name: str) -> None:
+    """Skip when *name*'s declared ``requires`` are not importable in this environment."""
+    if operator_requires(name):
+        ok, why = operator_available(name)
+        if not ok:
+            pytest.skip(why)
 
 
 # 1. the conformance test — parametrized over the registry
 
-@pytest.mark.parametrize("name", available_projectors())
+@pytest.mark.parametrize("name", available_plane_operators())
 def test_every_operator_delivers_the_result_kind_it_declares(name, mosaic):
-    if _slow(name) and not segmenter_available(name)[0]:
-        pytest.skip(f"{name} needs an optional package that is not installed")
+    _skip_unless_available(name)
 
     kind = operator_produces(name)
     assert kind in mosaic._RESULT_ADDERS, (
@@ -159,7 +165,7 @@ KNOWN_NAME_BRANCHES = {
 
 def _name_branches() -> list:
     """Every ``<something> == "<a registered operator>"`` comparison in the package, by AST."""
-    known = set(available_projectors()) | set(available_region_operators())
+    known = set(available_plane_operators()) | set(available_region_operators())
     found = []
     for path in sorted((_REPO / "squidxplorer").rglob("*.py")):
         tree = ast.parse(path.read_text(), str(path))
@@ -239,7 +245,7 @@ def test_a_registered_factory_is_called_at_its_declared_defaults():
         seen["scale"] = scale
         return lambda planes: next(iter(planes)) * scale
 
-    add_projector("_decl_test_scaled", _factory, params=(Param("scale", 3),),
+    add_operator("_decl_test_scaled", _factory, params=(Param("scale", 3),),
                   consumes=frozenset())
     assert seen["scale"] == 3, "the factory was not called with the declared default"
     plane = np.ones((4, 4), dtype=np.uint16)
@@ -249,24 +255,23 @@ def test_a_registered_factory_is_called_at_its_declared_defaults():
 
 def test_a_duplicate_declared_parameter_is_refused():
     with pytest.raises(ValueError, match="declares a parameter twice"):
-        add_projector("_decl_test_dup", lambda **kw: (lambda planes: next(iter(planes))),
+        add_operator("_decl_test_dup", lambda **kw: (lambda planes: next(iter(planes))),
                       params=(Param("a", 1), Param("a", 2)))
 
 
 def test_an_unknown_result_kind_is_refused_at_registration():
     with pytest.raises(ValueError, match="unknown result kind"):
-        add_projector("_decl_test_kind", lambda planes: next(iter(planes)), produces="lables")
+        add_operator("_decl_test_kind", lambda planes: next(iter(planes)), produces="lables")
 
 
 # 4. cellpose, as an operator
 
-def test_cellpose_is_in_the_engine_registry_not_only_the_segmenter_table():
+def test_cellpose_is_a_peer_operator_in_the_one_registry():
     from squidxplorer._cellpose import OPERATOR_NAME
 
     from squidxplorer._operations import runnable_operators
 
-    assert OPERATOR_NAME in available_projectors()
-    assert OPERATOR_NAME in available_segmenters(), "the two tables disagree about the spelling"
+    assert OPERATOR_NAME in available_plane_operators()
     # ...and therefore in every surface that reads the registry rather than a hardcoded list.
     assert OPERATOR_NAME in runnable_operators()
 
@@ -280,7 +285,7 @@ def test_cellpose_declares_the_same_three_things_the_generic_path_reads():
     assert [p.name for p in operator_params(OPERATOR_NAME)] == ["min_distance_px"]
 
 
-def test_cellpose_refuses_the_parameters_it_cannot_honour_instead_of_ignoring_them():
+def test_cellpose_refuses_the_parameters_it_does_not_declare_instead_of_ignoring_them():
     from squidxplorer._cellpose import OPERATOR_NAME
     from squidxplorer._engine import bind_operator
 
@@ -291,34 +296,131 @@ def test_cellpose_refuses_the_parameters_it_cannot_honour_instead_of_ignoring_th
             f"{dead!r} must be refused by name, and the refusal must say what CAN be set; "
             f"got {excinfo.value}"
         )
-    bind_operator(OPERATOR_NAME, {"min_distance_px": 20})       # the honoured one still binds
+    bind_operator(OPERATOR_NAME, {"min_distance_px": 20})       # the declared one still binds
 
 
-def test_every_parameter_a_segmentation_operator_DECLARES_changes_its_pixels():
-    """A declared parameter that cannot change the label image is a control that does nothing."""
+#: A probe value per declared parameter name — different from the default, chosen so the blob
+#: fixture below (or the synthetic stitchable region, for a region operator) must answer
+#: differently. A parameter with no probe here fails the build: an untestable declaration is a
+#: control nobody can vouch for.
+PARAMETER_PROBES = {
+    "sigma_px": 9.0,
+    "min_area_px": 400,
+    "min_distance_px": 40,
+    "split_touching": False,
+    "z_operator": "keepz",
+    "register": False,
+    "registration_channel": 1,
+    "registration_t": 1,
+    "correct_illumination": False,
+}
+
+
+# -- a synthetic acquisition a REGION operator can register and fuse ----------------------
+
+_STITCH_CHANNELS = ("405", "488")
+_STITCH_FRAME = 64
+_STITCH_STEP = 40                                 # px between FOVs -> 24 px overlap
+
+
+def _stitch_content_error(c: int, t: int, fov: int) -> tuple:
+    """The offset between where the stage SAYS a tile is and where its content is — the thing
+    registration exists to solve. Distinct per channel and per timepoint, so registering on the
+    other channel or the other frame solves a different placement."""
+    if fov == 0:
+        return (0, 0)
+    mag = (3 + 2 * t) * (1 if c == 0 else -1)
+    return (mag if fov in (2, 3) else 0, mag if fov in (1, 3) else 0)
+
+
+class _StitchProbeReader:
+    """A 2x2 grid of overlapping FOVs, each cropped from one textured scene per
+    (channel, timepoint), so neighbouring tiles agree in their overlap up to the content
+    error above. z plane 1 is plane 0 halved, keeping texture at the registration z."""
+
+    def __init__(self):
+        f, s = _STITCH_FRAME, _STITCH_STEP
+        self.metadata = {
+            "regions": ["A1"],
+            "channels": [{"name": c} for c in _STITCH_CHANNELS],
+            "n_z": 2, "z_levels": [0, 1], "n_t": 2, "dz_um": 1.0,
+            "dtype": "uint16", "frame_shape": (f, f), "pixel_size_um": 1.0,
+            "fovs_per_region": {"A1": [0, 1, 2, 3]},
+            "fov_positions_um": {("A1", i): (float(s * (i % 2)), float(s * (i // 2)))
+                                 for i in range(4)},
+        }
+        self._scenes: dict = {}
+
+    def _scene(self, c: int, t: int) -> np.ndarray:
+        key = (c, t)
+        if key not in self._scenes:
+            rng = np.random.default_rng(100 * c + t)
+            self._scenes[key] = rng.integers(100, 4000, (128, 128)).astype(np.uint16)
+        return self._scenes[key]
+
+    def read(self, region, fov, channel, z_level, time_point=0):
+        c = _STITCH_CHANNELS.index(str(channel))
+        sy = _STITCH_STEP * (int(fov) // 2)
+        sx = _STITCH_STEP * (int(fov) % 2)
+        ey, ex = _stitch_content_error(c, int(time_point), int(fov))
+        y0, x0 = 10 + sy + ey, 10 + sx + ex
+        tile = self._scene(c, int(time_point))[y0:y0 + _STITCH_FRAME, x0:x0 + _STITCH_FRAME]
+        return tile if int(z_level) == 0 else (tile // 2).astype(np.uint16)
+
+
+@pytest.mark.parametrize("name", [n for n in runnable_operators() if operator_params(n)])
+def test_every_parameter_an_operator_DECLARES_changes_its_pixels(name):
+    """A declared parameter that cannot change the output is a control that does nothing."""
     import numpy as np
 
     from squidxplorer._engine import bind_operator
 
-    rng = np.random.default_rng(0)
-    plane = np.zeros((256, 256), np.uint16)
-    yy, xx = np.mgrid[0:256, 0:256]
-    for cy, cx in ((60, 60), (66, 70), (170, 60), (60, 175), (180, 180), (186, 190)):
-        plane[(yy - cy) ** 2 + (xx - cx) ** 2 <= 64] = 4000        # touching and isolated blobs
-    plane = np.clip(plane + rng.integers(0, 200, plane.shape), 0, 65535).astype(np.uint16)
+    _skip_unless_available(name)
 
-    base = np.asarray(bind_operator("spot", {})(plane[None, ...]))
-    probes = {"sigma_px": 9.0, "min_area_px": 400, "min_distance_px": 40, "split_touching": False}
-    declared = [p.name for p in operator_params("spot")]
-    assert sorted(probes) == sorted(declared), (
-        f"this test must probe every declared parameter; spot declares {declared}"
-    )
-    for name, value in probes.items():
-        got = np.asarray(bind_operator("spot", {name: value})(plane[None, ...]))
+    if is_region_operator(name):
+        from squidxplorer import _flatfield
+
+        # A non-flat, mean-1 gain field, so correct_illumination=False shows; it is uniform
+        # per column, so registration still solves the same content errors under it.
+        gain = np.ones((_STITCH_FRAME, _STITCH_FRAME), np.float32)
+        gain[:, : _STITCH_FRAME // 2] = 0.8
+        gain[:, _STITCH_FRAME // 2:] = 1.2
+        _flatfield.set_profiles({
+            "405": _flatfield.FlatfieldProfile(gain),
+            "488": _flatfield.FlatfieldProfile(np.ones((_STITCH_FRAME,) * 2, np.float32)),
+        })
+        reader = _StitchProbeReader()
+
+        def run(kwargs):
+            # correct_distortion is a call-site kwarg, off so the probe stays deterministic
+            return np.asarray(bind_operator(name, kwargs)(
+                reader, "A1", [0, 1, 2, 3], correct_distortion=False))
+    else:
+        rng = np.random.default_rng(0)
+        plane = np.zeros((256, 256), np.uint16)
+        yy, xx = np.mgrid[0:256, 0:256]
+        for cy, cx in ((60, 60), (66, 70), (170, 60), (60, 175), (180, 180), (186, 190)):
+            plane[(yy - cy) ** 2 + (xx - cx) ** 2 <= 64] = 4000    # touching and isolated blobs
+        plane = np.clip(plane + rng.integers(0, 200, plane.shape), 0, 65535).astype(np.uint16)
+        group = [plane, plane] if "z" in operator_consumes(name) else [plane]
+
+        def run(kwargs):
+            return np.asarray(bind_operator(name, kwargs)(group))
+
+    base = run({})
+    for param in operator_params(name):
+        assert param.name in PARAMETER_PROBES, (
+            f"{name!r} declares {param.name!r}, which PARAMETER_PROBES has no probe value for; "
+            f"add one so the declaration stays testable")
+        probe = PARAMETER_PROBES[param.name]
+        assert probe != param.default, (
+            f"the probe for {param.name!r} equals its default {param.default!r}, so it cannot "
+            f"show the parameter reaching the pixels")
+        got = run({param.name: probe})
         assert not np.array_equal(got, base), (
-            f"'spot' declares {name!r}, so a run at {name}={value!r} must not return the label "
-            f"image the defaults return — it returned a byte-identical one, which is a control "
-            f"the panel offers and the pixels never see"
+            f"{name!r} declares {param.name!r}, so a run at {param.name}={probe!r} must not "
+            f"return the output the defaults return — it returned a byte-identical one, which "
+            f"is a control the panel offers and the pixels never see"
         )
 
 
@@ -330,7 +432,7 @@ def test_registering_cellpose_does_not_import_torch():
     out = subprocess.run(
         [sys.executable, "-c",
          "import squidxplorer, sys; "
-         "assert 'cellpose' in squidxplorer.available_projectors(), 'not registered'; "
+         "assert 'cellpose' in squidxplorer.available_plane_operators(), 'not registered'; "
          "print('torch' in sys.modules, 'cellpose' in sys.modules)"],
         cwd=str(_REPO), capture_output=True, text=True, timeout=300)
     assert out.returncode == 0, out.stderr
@@ -352,7 +454,7 @@ def test_a_labels_operator_is_written_to_a_plate_as_a_real_z_stack(squid_dataset
         "this fixture has one z plane, so a plane-op's output would be Z==1 and this test could "
         "not tell a written stack from a written plane")
     out = root.parent / "labels_out"
-    manifest = write_plate(reader, str(out), projector=SPOT_KEY, n_fovs=1)
+    manifest = write_plate(reader, str(out), operator=SPOT_KEY, n_fovs=1)
     assert manifest["complete"] and manifest["n_fields_written"] >= 1
 
     region = reader.metadata["regions"][0]
@@ -373,7 +475,7 @@ def test_write_plate_refuses_kwargs_only_for_an_operator_that_declares_none(squi
     reader = open_reader(str(root))
     out = root.parent / "kwargs_out"
     with pytest.raises(ValueError, match="declares no parameters"):
-        write_plate(reader, str(out), projector="mip", operator_kwargs={"nope": 1})
+        write_plate(reader, str(out), operator="mip", operator_kwargs={"nope": 1})
     assert not out.exists(), "the run made its output tree before refusing"
 
 
@@ -497,12 +599,12 @@ def _halving_factory(*, divisor=1):
 
 
 def _register_halving(name: str) -> None:
-    add_projector(name, _halving_factory, params=(Param("divisor", 1),), consumes=frozenset({"z"}))
+    add_operator(name, _halving_factory, params=(Param("divisor", 1),), consumes=frozenset({"z"}))
 
 
-def test_a_parameterised_projector_reaches_the_pixels_through_project_plate(squid_dataset):
+def test_a_parameterised_operator_reaches_the_pixels_through_run_plate(squid_dataset):
     """End to end through the ENGINE: ``operator_kwargs`` has to survive the thread pool."""
-    from squidxplorer import open_reader, project_plate
+    from squidxplorer import open_reader, run_plate
 
     _register_halving("_decl_test_halve")
     root, _ = squid_dataset
@@ -510,8 +612,8 @@ def test_a_parameterised_projector_reaches_the_pixels_through_project_plate(squi
     region = reader.metadata["regions"][0]
 
     def _run_plate(**kw):
-        return {(r, f): np.asarray(img) for r, f, img in project_plate(
-            reader, n_fovs=1, workers=1, projector="_decl_test_halve", regions=[region], **kw)}
+        return {(r, f): np.asarray(img) for r, f, img in run_plate(
+            reader, n_fovs=1, workers=1, operator="_decl_test_halve", regions=[region], **kw)}
 
     plain = _run_plate()
     assert plain and max(int(v.max()) for v in plain.values()) > 1, (
@@ -520,10 +622,10 @@ def test_a_parameterised_projector_reaches_the_pixels_through_project_plate(squi
     assert set(plain) == set(halved)
     for key, img in halved.items():
         assert np.array_equal(img, plain[key] // 2), (
-            "the parameter did not reach project_well through project_plate")
+            "the parameter did not reach project_well through run_plate")
 
 
-def test_a_parameterised_projector_reaches_the_pixels_through_write_plate(squid_dataset, tmp_path):
+def test_a_parameterised_operator_reaches_the_pixels_through_write_plate(squid_dataset, tmp_path):
     """...and through the WRITER: reads the written OME-Zarr back rather than trusting the manifest."""
     import zarr
 
@@ -535,7 +637,7 @@ def test_a_parameterised_projector_reaches_the_pixels_through_write_plate(squid_
     reader = open_reader(str(root))
 
     def _write(out, **kw):
-        write_plate(reader, str(out), projector="_decl_test_halve_w", n_fovs=1,
+        write_plate(reader, str(out), operator="_decl_test_halve_w", n_fovs=1,
                     check_disk=False, **kw)
         store = out / "plate.ome.zarr"
         grp = zarr.open_group(str(store), mode="r")
@@ -548,4 +650,4 @@ def test_a_parameterised_projector_reaches_the_pixels_through_write_plate(squid_
     assert int(plain.max()) > 1, "the fixture is too dim for a division to show"
     halved = _write(tmp_path / "halved", operator_kwargs={"divisor": 2})
     assert np.array_equal(halved, plain // 2), (
-        "operator_kwargs did not reach the projector through write_plate")
+        "operator_kwargs did not reach the operator through write_plate")

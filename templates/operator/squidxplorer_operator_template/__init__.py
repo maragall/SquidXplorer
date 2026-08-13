@@ -22,7 +22,7 @@ from squidxplorer_operator_template._stdev import (
 __all__ = ["OPERATOR_NAME", "register", "stdev_op"]
 
 #: The name this operator holds in every registry-driven surface. Pick it for the ALGORITHM, not
-#: the package, and keep it unique — `add_projector` refuses a name that is already taken.
+#: the package, and keep it unique — `add_operator` refuses a name that is already taken.
 OPERATOR_NAME: str = "stdev"
 
 
@@ -35,9 +35,9 @@ def register() -> None:
     factory), and ``requires`` (the importable module names you need, so a missing dependency
     refuses by name instead of failing per-well deep inside the run).
     """
-    from squidxplorer import Param, add_projector      # INSIDE the function — see the note above
+    from squidxplorer import Param, add_operator       # INSIDE the function — see the note above
 
-    add_projector(
+    add_operator(
         OPERATOR_NAME,
         stdev_op,                                  # a FACTORY, because params= is non-empty
         consumes=frozenset({"z"}),                 # z-reducer: (T, C, Nz, Y, X) -> (T, C, 1, Y, X)

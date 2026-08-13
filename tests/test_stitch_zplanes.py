@@ -13,7 +13,7 @@ import pytest
 pytest.importorskip("tilefusion", reason="tilefusion (maragall/stitcher) not installed: the stitch "
                                          "adapter is UNTESTED here, which is not the same as passing")
 
-from squidxplorer._engine import _OPERATORS, add_projector
+from squidxplorer._engine import _OPERATORS, add_operator
 from squidxplorer._flatfield import (
     FlatfieldProfile,
     clear_profile,
@@ -38,10 +38,10 @@ class _ZReader(_FakeReader):
         self.metadata["z_levels"] = list(range(n_z))
         self.read_z: list[int] = []
 
-    def read(self, region, fov, channel, z=0, t=0):
-        self.read_z.append(int(z))
-        base = super().read(region, fov, channel, 0, t).astype(np.int32)
-        return np.clip(base + int(z) * _PLANE_OFFSET, 0, 65535).astype(np.uint16)
+    def read(self, region, fov, channel, z_level=0, time_point=0):
+        self.read_z.append(int(z_level))
+        base = super().read(region, fov, channel, 0, time_point).astype(np.int32)
+        return np.clip(base + int(z_level) * _PLANE_OFFSET, 0, 65535).astype(np.uint16)
 
 
 @pytest.fixture(scope="module")
@@ -58,9 +58,9 @@ _PASSTHROUGH = "zplanes_passthrough"
 
 @pytest.fixture(autouse=True, scope="module")
 def _register_passthrough():
-    """Registered for this module only: `add_projector` writes to a process-global table that
+    """Registered for this module only: `add_operator` writes to a process-global table that
     tests/test_operator_integration.py asserts the exact contents of."""
-    add_projector(_PASSTHROUGH, plane_op(_passthrough))
+    add_operator(_PASSTHROUGH, plane_op(_passthrough))
     try:
         yield
     finally:
@@ -83,7 +83,7 @@ def _vignette_profile(shape=(TILE, TILE)) -> FlatfieldProfile:
 
 def test_a_plane_op_fuses_every_z_plane(master):
     reader = _ZReader(master)
-    out = stitch_region(reader, "A1", list(range(GRID * GRID)), projector=_PASSTHROUGH,
+    out = stitch_region(reader, "A1", list(range(GRID * GRID)), z_operator=_PASSTHROUGH,
                         register=False, correct_illumination=False)
 
     assert out.ndim == 5
@@ -98,7 +98,7 @@ def test_a_plane_op_fuses_every_z_plane(master):
 
 def test_a_z_reducer_is_unchanged_and_still_collapses_z(master):
     reader = _ZReader(master)
-    out = stitch_region(reader, "A1", list(range(GRID * GRID)), projector="mip",
+    out = stitch_region(reader, "A1", list(range(GRID * GRID)), z_operator="mip",
                         register=False, correct_illumination=False)
     assert out.shape[2] == 1
     assert not isinstance(out.base, np.memmap), "a single fused plane must not spill to disk"
@@ -108,7 +108,7 @@ def test_the_z_loop_reads_one_plane_at_a_time(master):
     """Streaming, not stacking (~9.4 GB on the real set otherwise). Asserted on read ORDER, not
     RSS: all of plane k's reads must happen before any of plane k+1's."""
     reader = _ZReader(master)
-    stitch_region(reader, "A1", list(range(GRID * GRID)), projector="bgsub",
+    stitch_region(reader, "A1", list(range(GRID * GRID)), z_operator="bgsub",
                   register=False, correct_illumination=False)
 
     runs = [z for i, z in enumerate(reader.read_z) if i == 0 or z != reader.read_z[i - 1]]
@@ -135,7 +135,7 @@ def test_every_plane_is_fused_with_the_same_solved_offsets(master):
 
     stitch_mod.solve_offsets_px = _spy
     try:
-        out = stitch_region(reader, "A1", list(range(GRID * GRID)), projector=_PASSTHROUGH,
+        out = stitch_region(reader, "A1", list(range(GRID * GRID)), z_operator=_PASSTHROUGH,
                             correct_illumination=False, correct_distortion=False)
     finally:
         stitch_mod.solve_offsets_px = real_solve
@@ -157,7 +157,7 @@ def test_every_plane_is_fused_with_the_same_solved_offsets(master):
 
 def test_the_placement_reports_one_solve_for_the_whole_stack(master):
     reader = _ZReader(master)
-    out = stitch_region(reader, "A1", list(range(GRID * GRID)), projector=_PASSTHROUGH,
+    out = stitch_region(reader, "A1", list(range(GRID * GRID)), z_operator=_PASSTHROUGH,
                         correct_illumination=False, correct_distortion=False)
     placement = out.placement
     assert placement.reg_z == N_Z // 2, "geometry must be solved on the acquisition's middle plane"
@@ -168,7 +168,7 @@ def test_the_placement_reports_one_solve_for_the_whole_stack(master):
 
 
 # Before z-plane fusion, `stitch` wrapped the reader in `_FlatfieldReader` (correction ON by
-# default) and only the plane-op refusal stopped the `flatfield` projector correcting twice.
+# default) and only the plane-op refusal stopped the `flatfield` operator correcting twice.
 # Lifting that refusal makes the combination reachable, hence this guard.
 
 
@@ -193,10 +193,10 @@ def test_stitching_the_flatfield_operator_with_read_path_correction_refuses(mast
     set_profiles({c: _vignette_profile() for c in CHANNELS})
     try:
         with pytest.raises(ValueError, match="not idempotent"):
-            stitch_region(reader, "A1", list(range(GRID * GRID)), projector="flatfield",
+            stitch_region(reader, "A1", list(range(GRID * GRID)), z_operator="flatfield",
                           register=False)           # correct_illumination defaults to ON
         with pytest.raises(ValueError, match="not idempotent"):
-            stitch_region(reader, "A1", list(range(GRID * GRID)), projector="flatfield",
+            stitch_region(reader, "A1", list(range(GRID * GRID)), z_operator="flatfield",
                           register=False, correct_illumination=True)
     finally:
         clear_profile()
@@ -208,11 +208,11 @@ def test_the_guard_catches_an_operator_registered_under_another_name(master):
     from squidxplorer._flatfield import flatfield_op
 
     name = "flatfield_under_another_name"
-    add_projector(name, flatfield_op(_vignette_profile()))
+    add_operator(name, flatfield_op(_vignette_profile()))
     try:
         reader = _ZReader(master)
         with pytest.raises(ValueError, match="not idempotent"):
-            stitch_region(reader, "A1", list(range(GRID * GRID)), projector=name, register=False)
+            stitch_region(reader, "A1", list(range(GRID * GRID)), z_operator=name, register=False)
     finally:
         _OPERATORS.pop(name, None)
 
@@ -226,15 +226,15 @@ def test_each_single_correction_path_stays_available_and_corrects_exactly_once(m
 
     set_profiles({c: profile for c in CHANNELS})
     try:
-        by_operator = np.asarray(stitch_region(_ZReader(master), "A1", fovs, projector="flatfield",
+        by_operator = np.asarray(stitch_region(_ZReader(master), "A1", fovs, z_operator="flatfield",
                                                register=False, correct_illumination=False))
         by_read_path = np.asarray(stitch_region(
-            _ZReader(master), "A1", fovs, projector=_PASSTHROUGH, register=False,
+            _ZReader(master), "A1", fovs, z_operator=_PASSTHROUGH, register=False,
             correct_illumination=True, flatfield={c: profile for c in CHANNELS}))
     finally:
         clear_profile()
 
-    uncorrected = np.asarray(stitch_region(_ZReader(master), "A1", fovs, projector=_PASSTHROUGH,
+    uncorrected = np.asarray(stitch_region(_ZReader(master), "A1", fovs, z_operator=_PASSTHROUGH,
                                            register=False, correct_illumination=False))
 
     assert by_operator.shape == by_read_path.shape == uncorrected.shape
@@ -252,7 +252,7 @@ def test_stitching_a_label_operator_refuses_rather_than_averaging_object_ids(mas
     reader = _ZReader(master)
     for name in labels:
         with pytest.raises(ValueError, match="label"):
-            stitch_region(reader, "A1", list(range(GRID * GRID)), projector=name,
+            stitch_region(reader, "A1", list(range(GRID * GRID)), z_operator=name,
                           register=False, correct_illumination=False)
 
 
@@ -263,7 +263,7 @@ def test_project_well_z_selects_exactly_one_acquisition_plane(master):
     whole = project_well(reader, "A1", 0, reduce=plane_op(_passthrough), consumes=PLANE_OP)
     assert whole.shape[2] == N_Z
     for z in range(N_Z):
-        one = project_well(reader, "A1", 0, reduce=plane_op(_passthrough), consumes=PLANE_OP, z=z)
+        one = project_well(reader, "A1", 0, reduce=plane_op(_passthrough), consumes=PLANE_OP, z_level=z)
         assert one.shape[2] == 1
         assert np.array_equal(one[:, :, 0], whole[:, :, z]), (
             f"z={z} did not select acquisition plane {z}")
@@ -275,4 +275,4 @@ def test_project_well_refuses_a_single_plane_for_a_z_reducer(master):
 
     reader = _ZReader(master)
     with pytest.raises(ValueError, match="only meaningful for a plane-op"):
-        project_well(reader, "A1", 0, reduce=project, z=1)
+        project_well(reader, "A1", 0, reduce=project, z_level=1)

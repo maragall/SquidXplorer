@@ -12,7 +12,7 @@ from typing import Callable, Iterable, Optional
 
 import numpy as np
 
-from squidxplorer._engine import add_projector
+from squidxplorer._engine import add_operator
 from squidxplorer.projection import cast_like, plane_op
 
 # The methods this operator knows, in one greppable place (the error message quotes it).
@@ -143,7 +143,7 @@ def clipped_fraction(plane: np.ndarray, params: Optional[BackgroundParams] = Non
 def bgsub_op(
     params: Optional[BackgroundParams] = None,
 ) -> Callable[[Iterable[np.ndarray]], np.ndarray]:
-    """Build a parameterised background-subtraction plane-op, ready for ``add_projector``."""
+    """Build a parameterised background-subtraction plane-op, ready for ``add_operator``."""
     params = params or DEFAULT_PARAMS
 
     def _bgsub(p: np.ndarray) -> np.ndarray:
@@ -157,4 +157,4 @@ def bgsub_op(
 LAYER_KEY: str = "bgsub"
 LAYER_LABEL: str = "background subtraction"
 
-add_projector(LAYER_KEY, bgsub_op())
+add_operator(LAYER_KEY, bgsub_op())

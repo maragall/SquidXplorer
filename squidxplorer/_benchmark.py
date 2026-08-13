@@ -31,7 +31,7 @@ from typing import Callable, Iterable, Optional, Sequence
 
 import numpy as np
 
-from squidxplorer._engine import available_projectors, operator_consumes
+from squidxplorer._engine import available_plane_operators, operator_consumes
 from squidxplorer._output import check_disk_space, estimate_write_bytes, free_bytes
 from squidxplorer._engine import available_region_operators, is_region_operator
 
@@ -238,7 +238,7 @@ def _fmt(v) -> str:
 class _ReadRecorder:
     """Accumulate time and bytes spent inside ``reader.read`` (not a StageTimer span — the
     reads happen lazily inside the reducer, see module docstring). Locked because
-    ``project_plate`` fans out over a thread pool."""
+    the per-FOV loop fans out over a thread pool."""
 
     def __init__(self) -> None:
         self.lock = threading.Lock()
@@ -338,7 +338,7 @@ def persist_estimate(meta: dict, *, kind: str, regions: Sequence[str],
 
 def _fov_runner(reader, operator: str, regions, n_fovs, workers, timer):
     """Build the callable that streams one FOV-operator run, and its result sink."""
-    from squidxplorer import project_plate
+    from squidxplorer._engine import _project_plate
 
     sink: list = []
 
@@ -346,8 +346,8 @@ def _fov_runner(reader, operator: str, regions, n_fovs, workers, timer):
         with timer.stage("open"):
             _ = reader.metadata          # warm the lazy index single-threaded
         with timer.stage("stream"):
-            for region, fov, image in project_plate(
-                reader, projector=operator, n_fovs=n_fovs, regions=list(regions),
+            for region, fov, image in _project_plate(
+                reader, operator=operator, n_fovs=n_fovs, regions=list(regions),
                 workers=workers,
             ):
                 sink.append((region, fov, image, None))
@@ -358,7 +358,7 @@ def _fov_runner(reader, operator: str, regions, n_fovs, workers, timer):
 def _region_runner(reader, operator: str, regions, n_fovs, channels, timer):
     """Build the callable for a REGION operator run: ``stitch_region`` accepts Julio's
     ``StageTimer`` directly, which is why this path gets a real four-phase breakdown."""
-    from squidxplorer import stitch_plate
+    from squidxplorer._stitch import _stitch_plate
 
     sink: list = []
     geometry: dict = {}
@@ -369,7 +369,7 @@ def _region_runner(reader, operator: str, regions, n_fovs, channels, timer):
 
     def run() -> None:
         _ = reader.metadata
-        for region, fov, image in stitch_plate(
+        for region, fov, image in _stitch_plate(
             reader, operator=operator, n_fovs=n_fovs, regions=list(regions),
             workers=1, timer=timer, **kwargs,
         ):
@@ -419,9 +419,9 @@ def benchmark_operator(
     all_regions = list(meta.get("fovs_per_region") or {})
     regions = list(regions) if regions else all_regions
     kind = "region" if is_region_operator(operator) else "fov"
-    if kind == "fov" and operator not in available_projectors():
+    if kind == "fov" and operator not in available_plane_operators():
         raise KeyError(f"unknown operator {operator!r}; known: "
-                       f"{available_projectors() + available_region_operators()}")
+                       f"{available_plane_operators() + available_region_operators()}")
     consumes_z = (kind == "region") or ("z" in operator_consumes(operator))
 
     result = OperatorResult(

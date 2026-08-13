@@ -77,7 +77,7 @@ def test_a_nonpositive_pixel_size_is_refused():
 # --- travelling WITH the array ----------------------------------------------------------
 
 def test_a_placed_array_is_still_an_ndarray_for_every_existing_consumer():
-    """stitch_plate yields these straight into the viewer's worker and the OME-Zarr writer;
+    """the region loop yields these straight into the viewer's worker and the OME-Zarr writer;
     if a PlacedArray were not substitutable for an ndarray, both would need changes."""
     arr = PlacedArray(np.zeros((1, 2, 1, 8, 8), dtype=np.uint16), _p())
     assert isinstance(arr, np.ndarray)

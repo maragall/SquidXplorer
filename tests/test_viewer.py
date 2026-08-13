@@ -488,15 +488,15 @@ def test_ingest_non_wellplate_region_opens_as_a_slide_carrier(qapp, tmp_path):
 
 
 def test_run_operator_persists_via_write_plate(qapp, squid_dataset, monkeypatch, tmp_path):
-    # run_operator's SAVE path drives write_plate with the selected projector and must not also write the uncompressed per-TIFF copy (tiff=False) — that would double disk use.
+    # run_operator's SAVE path drives write_plate with the selected operator and must not also write the uncompressed per-TIFF copy (tiff=False) — that would double disk use.
     import squidxplorer
     captured = {}
 
-    def fake_write_plate(reader, out_dir, *, n_fovs=1, workers=None, projector="mip",
+    def fake_write_plate(reader, out_dir, *, n_fovs=1, workers=None, operator="mip",
                          tiff=True, on_well=None, write_workers=4, stop=None, on_error=None,
                          regions=None, operator_kwargs=None):
         # operator_kwargs must reach the SAVE path too, not just preview; a stub whose signature drifts from the real function raises TypeError here rather than passing by luck.
-        captured.update(projector=projector, tiff=tiff, out_dir=str(out_dir), regions=regions,
+        captured.update(operator=operator, tiff=tiff, out_dir=str(out_dir), regions=regions,
                         operator_kwargs=operator_kwargs)
         return {"plate": str(out_dir), "levels": 1}      # no wells — we only assert the dispatch
     monkeypatch.setattr(squidxplorer, "write_plate", fake_write_plate)
@@ -505,9 +505,9 @@ def test_run_operator_persists_via_write_plate(qapp, squid_dataset, monkeypatch,
     win = V.PlateWindow(None)
     win.ingest(str(root))
     win.run_operator("mip", out_parent=str(tmp_path))
-    _drain_until(qapp, lambda: "projector" in captured)
-    assert captured["projector"] == "mip"
-    assert captured["operator_kwargs"] is None      # a projector takes no per-run parameters
+    _drain_until(qapp, lambda: "operator" in captured)
+    assert captured["operator"] == "mip"
+    assert captured["operator_kwargs"] is None      # a bare z-reducer takes no per-run parameters
     assert captured["tiff"] is False                     # never the uncompressed TIFF duplicate
     assert captured["out_dir"].endswith(".hcs")          # persisted next to the acquisition
     win._stop_worker(); win.close()
@@ -2480,10 +2480,10 @@ def test_minerva_is_a_registered_operation():
     assert hasattr(V.PlateWindow, op.build_tab)
 
 
-def test_minerva_tab_builds_and_lists_projectors(qapp, squid_dataset):
-    """The projector choice must be real — squid2minerva's convert.py offers --mip/--z, so hardcoding here would be a capability regression."""
+def test_minerva_tab_builds_and_lists_z_operators(qapp, squid_dataset):
+    """The z-operator choice must be real — squid2minerva's convert.py offers --mip/--z, so hardcoding here would be a capability regression."""
     from qtpy.QtWidgets import QComboBox
-    from squidxplorer import available_projectors
+    from squidxplorer import available_plane_operators
 
     root, _ = squid_dataset
     win = V.PlateWindow(None)
@@ -2492,9 +2492,9 @@ def test_minerva_tab_builds_and_lists_projectors(qapp, squid_dataset):
     tab = win._op_tabs["minerva"]
 
     combos = tab.findChildren(QComboBox)
-    assert combos, "no projector selector in the Minerva tab"
+    assert combos, "no z-operator selector in the Minerva tab"
     listed = [combos[0].itemText(i) for i in range(combos[0].count())]
-    assert listed == available_projectors()
+    assert listed == available_plane_operators()
     assert combos[0].currentText() == "mip"
     win.close()
 
@@ -2548,7 +2548,7 @@ def _drag_px(qapp, ov, x0, y0, x1, y1, mods):
 
 def test_a_shift_alt_box_inside_a_mosaic_selects_fovs_not_the_whole_well(
         qapp, squid_dataset):
-    """stitch_plate has always supported a FOV subset via regions=, but no gesture could express which fields — every GUI caller expanded a well to all its FOVs first."""
+    """The region loop has always supported a FOV subset via regions=, but no gesture could express which fields — every GUI caller expanded a well to all its FOVs first."""
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
@@ -2672,9 +2672,9 @@ def test_the_exported_timepoint_is_the_one_the_plate_is_showing(
     real = V._MinervaWorker
 
     class Spy(real):
-        def __init__(self, reader, selection, out_dir, projector, t=0, **kw):
-            seen.append(t)
-            super().__init__(reader, selection, out_dir, projector, t=t, **kw)
+        def __init__(self, reader, selection, out_dir, z_operator, time_point=0, **kw):
+            seen.append(time_point)
+            super().__init__(reader, selection, out_dir, z_operator, time_point=time_point, **kw)
 
     monkeypatch.setattr(V, "_MinervaWorker", Spy)
 
@@ -2886,7 +2886,7 @@ def test_retire_disconnects_every_declared_signal(qapp, squid_dataset, tmp_path)
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
-    worker = V._MinervaWorker(win._reader, [("B2", 0)], str(tmp_path), "mip", t=0, launch=False)
+    worker = V._MinervaWorker(win._reader, [("B2", 0)], str(tmp_path), "mip", time_point=0, launch=False)
 
     payload = {"progress": (1, 1), "exported": ([],), "launched": (False,), "failed": ("x",),
                "finished_ok": ()}
@@ -2956,12 +2956,12 @@ def test_the_redock_BUTTON_works_not_just_the_method(qapp):
 
 def test_the_plane_op_cards_build_and_are_preview_only(qapp, squid_dataset):
     """The generic card offers Preview only, no Save; decon is the exception — its card is the RL semi-convergence QC panel, not this generic one."""
-    from squidxplorer import available_projectors
+    from squidxplorer import available_plane_operators
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
     for key in ("bgsub", "flatfield"):
-        assert key in available_projectors(), f"{key} is not registered in the engine"
+        assert key in available_plane_operators(), f"{key} is not registered in the engine"
         op = V._OPERATIONS_BY_KEY[key]
         win._open_op_tab(op.key, op.label, getattr(win, op.build_tab))
         qapp.processEvents()
@@ -3111,17 +3111,17 @@ def test_an_impossible_feather_is_refused_in_the_readout_not_at_the_end_of_a_fus
     win.close()
 
 
-def test_panel_kwargs_reach_stitch_plate_on_the_PREVIEW_path(qapp, squid_dataset,
+def test_panel_kwargs_reach_the_region_loop_on_the_PREVIEW_path(qapp, squid_dataset,
                                                              monkeypatch):
     """Spies on the engine call rather than the worker, since storing-but-not-forwarding kwargs is invisible to a worker-only assertion."""
     import squidxplorer
     seen = {}
 
-    def fake_stitch_plate(reader, **kw):
+    def fake_region_loop(reader, **kw):
         seen.update(kw)
         return iter(())
 
-    monkeypatch.setattr(squidxplorer, "stitch_plate", fake_stitch_plate)
+    monkeypatch.setattr(squidxplorer._stitch, "_stitch_plate", fake_region_loop)
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
@@ -3529,7 +3529,7 @@ def test_a_stitched_cell_lands_exactly_where_the_raw_cell_does(
         assert w.mosaic_boxes == {}, "a region operator has no per-FOV sub-boxes; that is the trap"
         got: list = []
         w.tileReady.connect(lambda *a: got.append(a))
-        # One fused mosaic per region, the shape `stitch_plate` yields: (T, C, 1, Y, X).
+        # One fused mosaic per region, the shape the region loop yields: (T, C, 1, Y, X).
         fused = np.zeros((1, len(win._meta["channels"]), 1, mh, mw), win._meta["dtype"])
         w._on_well(region, 0, fused)
         _ri, _ci, _wid, tile, box = got[0]
@@ -3727,8 +3727,8 @@ class _PyrReader:
         self.frame = frame
         self._path = path
 
-    def read(self, region, fov, channel, z, t=0):
-        return np.full(self.frame, z + 1, dtype=np.uint16)
+    def read(self, region, fov, channel, z_level, time_point=0):
+        return np.full(self.frame, z_level + 1, dtype=np.uint16)
 
 
 def _pyr_meta(nz=4, n=16, frame=(256, 256), px=1.0):
@@ -3897,14 +3897,14 @@ def test_on_plane_without_a_window_still_lets_add_mosaic_derive_one(qapp):
 
 def test_a_cards_runnability_is_the_engines_answer_and_cannot_go_stale():
     """Operation.runnable is now a property over runnable_operators(), not a hand-written bool that could drift."""
-    from squidxplorer import add_projector, plane_op
+    from squidxplorer import add_operator, plane_op
 
     assert V._OPERATIONS_BY_KEY["minerva"].runnable is False   # nobody registered it
     assert V._OPERATIONS_BY_KEY["mip"].runnable is True
 
     card = V.Operation("card_only_key", "Card only", "no engine entry", "_build_mip_tab")
     assert card.runnable is False
-    add_projector("card_only_key", plane_op(lambda p: p))
+    add_operator("card_only_key", plane_op(lambda p: p))
     assert card.runnable is True, "runnable is stale; it must be read, not stored"
 
 
@@ -3944,7 +3944,7 @@ CLI_ONLY_OPERATORS = {
                 "Same reason it has no card. (It is NOT because the result cannot be written -- "
                 "that was true while _validate_image accepted Z == 1 only, and IMA-277 lifted "
                 "it.) It is "
-                "reachable from the CLI (--projector cellpose), the operator dropdown and the "
+                "reachable from the CLI (--operator cellpose), the operator dropdown and the "
                 "Detect-nuclei button, all of which read the registry.",
     "decon3d": "the volume-then-project variant of `decon`; the decon card's own panel is where "
                "an iteration count gets chosen, and a second card for the same operator with a "
@@ -3954,9 +3954,9 @@ CLI_ONLY_OPERATORS = {
                   "not to be offered as a thing to run.",
     "keepz": "the IDENTITY plane-op: every z plane, no pixel changed. There is nothing to run it "
              "FOR on its own -- projecting an acquisition to itself writes a copy of the input. "
-             "It exists so that `stitch_region(projector=\'keepz\')` can fuse a VOLUME instead "
+             "It exists so that `stitch_region(z_operator=\'keepz\')` can fuse a VOLUME instead "
              "of one collapsed plane, and it is offered exactly there: the stitcher panel's "
-             "Z-handling combo, which is built from `available_projectors()`.",
+             "Z-handling combo, which is built from `available_plane_operators()`.",
 }
 
 
@@ -4001,7 +4001,7 @@ def test_the_save_button_names_its_operator_instead_of_taking_the_first_card():
 
 def test_a_cardless_operator_opens_a_panel_built_from_its_declaration(qapp,
                                                                      squid_dataset):
-    """spot is a registered projector with no card; _activate_operator used to silently do nothing for it."""
+    """spot is a registered operator with no card; _activate_operator used to silently do nothing for it."""
     from squidxplorer._engine import operator_params
     from squidxplorer._param_panel import GenericOperatorPanel
 
@@ -4030,7 +4030,7 @@ def test_a_key_that_has_no_panel_at_all_is_refused_by_name_never_silently(qapp,
 
 
 def test_the_preview_path_carries_operator_kwargs_to_the_engine(qapp, squid_dataset, monkeypatch):
-    """The PREVIEW branch called project_plate without operator_kwargs while the save branch passed them, so a panel's parameter value reached the console line but not the pixels."""
+    """The PREVIEW branch called the engine without operator_kwargs while the save branch passed them, so a panel's parameter value reached the console line but not the pixels."""
     import squidxplorer
     from squidxplorer.reader import open_reader
 
@@ -4039,11 +4039,11 @@ def test_the_preview_path_carries_operator_kwargs_to_the_engine(qapp, squid_data
     meta = reader.metadata
     seen = {}
 
-    def fake_project_plate(_reader, **kw):
+    def fake_run_plate(_reader, **kw):
         seen.update(kw)
         return iter(())
 
-    monkeypatch.setattr(squidxplorer, "project_plate", fake_project_plate)
+    monkeypatch.setattr(squidxplorer, "run_plate", fake_run_plate)
     fov_index = {r: {"rc": (0, i), "idx": i, "well_id": r}
                  for i, r in enumerate(meta["regions"])}
     worker = V._OperatorWorker("spot", reader, meta, fov_index, "", regions=meta["regions"][:1],
@@ -4052,7 +4052,7 @@ def test_the_preview_path_carries_operator_kwargs_to_the_engine(qapp, squid_data
     worker.run()
     assert seen.get("operator_kwargs") == {"min_area_px": 400}, (
         "the preview branch dropped the panel's parameters on the floor: "
-        f"project_plate was called with {sorted(seen)}")
+        f"run_plate was called with {sorted(seen)}")
 
 
 def test_every_uncarded_runnable_operator_is_offered_in_the_declaration_submenu(qapp):
@@ -4067,7 +4067,7 @@ def test_every_uncarded_runnable_operator_is_offered_in_the_declaration_submenu(
 
 
 def test_operator_label_falls_back_to_the_key_for_a_cardless_operator():
-    # spot is a registered projector with no card; it must still name itself rather than raising a bare KeyError out of the event loop.
+    # spot is a registered operator with no card; it must still name itself rather than raising a bare KeyError out of the event loop.
     assert V.operator_label("spot") == "spot"
     assert V.operator_label("mip") == V._OPERATIONS_BY_KEY["mip"].label
     # and the newly carded one now answers with its card
@@ -4625,7 +4625,7 @@ class _PerChannelReader:
     def __init__(self, path):
         self._path = str(path)
 
-    def read(self, region, fov, channel, z, t=0):
+    def read(self, region, fov, channel, z_level, time_point=0):
         return np.full(_DOWNSAMPLE_FRAME, (_DOWNSAMPLE_CHANNELS.index(str(channel)) + 1) * 1000,
                        dtype=np.uint16)
 

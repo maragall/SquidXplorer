@@ -144,9 +144,9 @@ def test_contrast_is_latched_so_a_brightening_sequence_stays_brightening(five_d)
 
         metadata = meta
 
-        def read(self, region_, fov, channel, z, t=0):
-            plane = reader.read(region_, fov, channel, z, 0).astype(np.float32)
-            return np.clip(plane * (1.0 + 0.6 * t), 0, 65535).astype(np.uint16)
+        def read(self, region_, fov, channel, z_level, time_point=0):
+            plane = reader.read(region_, fov, channel, z_level, 0).astype(np.float32)
+            return np.clip(plane * (1.0 + 0.6 * time_point), 0, 65535).astype(np.uint16)
 
     frames = list(region_movie_frames(_Brightening(), meta, region, axis="t"))
     means = [float(f.mean()) for f in frames]

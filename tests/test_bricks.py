@@ -200,9 +200,9 @@ class _Reader:
     def __init__(self):
         self.reads = []
 
-    def read(self, region, fov, channel, z, t=0):
-        self.reads.append((region, int(fov), channel, int(z), int(t)))
-        return np.full((4, 4), fov * 10 + z, dtype=np.uint16)
+    def read(self, region, fov, channel, z_level, time_point=0):
+        self.reads.append((region, int(fov), channel, int(z_level), int(time_point)))
+        return np.full((4, 4), fov * 10 + z_level, dtype=np.uint16)
 
 
 def _meta():

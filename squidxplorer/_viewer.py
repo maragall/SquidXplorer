@@ -61,7 +61,7 @@ log = get_logger("viewer")
 
 from squidxplorer import _measure, _qtstyle, _run_scope
 from squidxplorer.contract import field_path
-from squidxplorer._engine import available_projectors
+from squidxplorer._engine import available_plane_operators
 from squidxplorer._layers import OperationStack
 from squidxplorer._minerva import MINERVA_HOME_ENV as _MINERVA_HOME_ENV
 from squidxplorer._minerva import NEEDS_INTERNET_NOTE as _MINERVA_INTERNET_NOTE
@@ -914,7 +914,7 @@ class PlateWindow(QMainWindow):
         shift-drag marquee. A gallery therefore inherits the marquee, Cmd/Ctrl-A, and shift-click
         refinement for free, and there is no second selection mechanism to keep in step. The pairs
         it returns are ``(region, fov)``, which is exactly the ``{region: [fov, ...]}`` mapping
-        ``stitch_plate(regions=...)`` takes — so a cropped well stays cropped all the way through.
+        ``run_plate(regions=...)`` takes — so a cropped well stays cropped all the way through.
 
         Returns ``None`` (never an empty gallery) when no acquisition is open.
         """
@@ -922,8 +922,8 @@ class PlateWindow(QMainWindow):
             return None
         sel = self.selected_region_fovs()
         if sel:
-            return _GalleryScope.from_region_fovs(self._meta, sel, t=self.time_point)
-        return _GalleryScope.whole(self._meta, t=self.time_point)
+            return _GalleryScope.from_region_fovs(self._meta, sel, time_point=self.time_point)
+        return _GalleryScope.whole(self._meta, time_point=self.time_point)
 
     def _open_gallery_view(self):
         """Tile the selected Regions side by side, one row each, one column per channel.
@@ -1563,9 +1563,9 @@ class PlateWindow(QMainWindow):
         # `stitch_region`'s keyword set), and `StitcherPanel._run` adds it on the way out. It is a
         # PARAMETER of the run either way, so it is added here too -- otherwise the window's Run
         # silently reverted the one control this round of feedback was about.
-        combo = getattr(panel, "projector_combo", None)
-        if combo is not None and "projector" not in kwargs:
-            kwargs["projector"] = combo.currentText()
+        combo = getattr(panel, "z_operator_combo", None)
+        if combo is not None and "z_operator" not in kwargs:
+            kwargs["z_operator"] = combo.currentText()
         return kwargs
 
     def operator_params_text(self, key: str) -> str:
@@ -1723,7 +1723,7 @@ class PlateWindow(QMainWindow):
         CLOSE, not a contract. Do not cite Z == 1 to justify it.
 
         The preview path itself is unchanged and needs no worker edit: _OperatorWorker's save=False
-        branch streams project_plate, and _on_well already indexes image[0, :, 0] -- for a plane-op
+        branch streams the per-FOV loop, and _on_well already indexes image[0, :, 0] -- for a plane-op
         that is the FIRST z-plane, corrected, which is exactly what a preview should show.
         """
         w, v = self._op_tab_shell(op.label, op.blurb)
@@ -1859,7 +1859,7 @@ class PlateWindow(QMainWindow):
         return w
 
     def _build_run_tab(self, op) -> QWidget:
-        """Generic projector-operator tab (MIP, …): pick a destination, run over the whole plate → a
+        """Generic plane-operator tab (MIP, …): pick a destination, run over the whole plate → a
         navigable OME-Zarr plate. ONE builder for every z-reduction operator — a new one needs no new
         tab code. Per-tab state lives in a closure (no per-operator instance attrs)."""
         w, v = self._op_tab_shell(op.label, op.blurb + " Pick a destination with room — output can be large.")
@@ -1992,11 +1992,11 @@ class PlateWindow(QMainWindow):
         dir_lbl.setStyleSheet("color:#8b98ad;font-size:12px;")
 
         # Projection mode — the salesperson tool (squid2minerva convert.py) offers --mip/--z, so
-        # hardcoding one here would be a capability regression. Driven by the projector registry.
+        # hardcoding one here would be a capability regression. Driven by the operator registry.
         row = QHBoxLayout(); row.setSpacing(6)
         row.addWidget(QLabel("Projection"))
         proj = QComboBox(); proj.setStyleSheet(_COMBO_QSS)
-        proj.addItems(available_projectors())
+        proj.addItems(available_plane_operators())
         proj.setCurrentText("mip")
         row.addWidget(proj); row.addStretch(1)
 
@@ -2082,7 +2082,7 @@ class PlateWindow(QMainWindow):
         run = QPushButton("Export the selection (one mosaic per region)")
         run.setStyleSheet(_BTN_QSS)
         run.clicked.connect(lambda: self.run_minerva_export(
-            out_dir=state["dir"], projector=proj.currentText(),
+            out_dir=state["dir"], z_operator=proj.currentText(),
             launch=launch_cb.isChecked(), on_exported=on_exported,
             luts=self.on_screen_luts() if luts_cb.isChecked() else None,
         ))
@@ -2183,8 +2183,8 @@ class PlateWindow(QMainWindow):
             return None
         return luts or None
 
-    def run_minerva_export(self, out_dir=None, projector: str = "mip", launch: bool = True,
-                           on_exported=None, t=None, selection=None, luts=None):
+    def run_minerva_export(self, out_dir=None, z_operator: str = "mip", launch: bool = True,
+                           on_exported=None, time_point=None, selection=None, luts=None):
         """Export the user's selection for Minerva Author and (optionally) open it.
 
         Runs off the GUI thread: projecting a well is real I/O plus compute, and starting
@@ -2204,7 +2204,7 @@ class PlateWindow(QMainWindow):
         if self._reader is None or self._meta is None:
             self._readout.setText("open an acquisition first")
             return
-        t = self.time_point if t is None else int(t)
+        time_point = self.time_point if time_point is None else int(time_point)
         if self._minerva is not None and self._minerva.isRunning():
             self._readout.setText("already exporting — let the current export finish first")
             return
@@ -2227,9 +2227,9 @@ class PlateWindow(QMainWindow):
                 f"({', '.join(regions)}, {len(sel)} FOVs"
                 + (f", {len(cropped)} cropped" if cropped else "") + ")")
         n_t = self._meta.get("n_t", 1) or 1
-        t_note = f" (t={t} of {n_t})" if n_t > 1 else ""
+        t_note = f" (t={time_point} of {n_t})" if n_t > 1 else ""
         self._minerva = w = _MinervaWorker(
-            self._reader, sel, out_dir, projector, t=t, launch=launch, luts=luts)
+            self._reader, sel, out_dir, z_operator, time_point=time_point, launch=launch, luts=luts)
 
         def on_launched(ok):
             if ok:
@@ -2847,7 +2847,7 @@ class PlateWindow(QMainWindow):
         # windows showing tissue, yet my plate view shows black."*
         #
         # THE DECLARATION, not `has_pixels`. "No pixels yet" and "no pixels ever" are different
-        # answers and only the second is a reason to refuse: a projector's tiles stream in over
+        # answers and only the second is a reason to refuse: an operator's tiles stream in over
         # the course of a run, so a has-them-right-now test would refuse the plate its own layer
         # for as long as the first well took, and then leave it refused if the user toggled during
         # that window. `is_region_operator` asks the registry the question that is actually being
@@ -3080,7 +3080,7 @@ class PlateWindow(QMainWindow):
                      regions: Optional[list] = None, save: bool = True,
                      operator_kwargs: Optional[dict] = None,
                      requester: Optional[Any] = None):
-        """Run a projector operator (MIP / reference) over the plate, or over a subset of it.
+        """Run a plane operator (MIP / reference) over the plate, or over a subset of it.
 
         ``requester`` IS THE COMPLETION CALLBACK, and its absence was the root fault Julio
         reported on 2026-07-29. This method starts a QThread and returns; a ``RegionViewer``
@@ -3114,7 +3114,7 @@ class PlateWindow(QMainWindow):
             self._readout.setText("already processing — let the current run finish first")
             return
         # IMA-226: gate on the ENGINE registry, not on the card table. `_OPERATIONS_BY_KEY[key]`
-        # raised a bare KeyError for a registered projector with no card (`reference` then, `spot`
+        # raised a bare KeyError for a registered operator with no card (`reference` then, `spot`
         # and `decon3d` now) and let `minerva` (a card that is not an operator) through to die
         # inside the engine instead.
         # Refuse BY NAME here, in the readout, the same way an unknown region is refused below.
@@ -3192,7 +3192,7 @@ class PlateWindow(QMainWindow):
             # asks for -- is the one that carries the field lists. `list(regions)` over a dict
             # yields its KEYS, so this line silently widened every ROI run back to whole wells,
             # one call before the worker. It is the same defect `scope_wells` was extracted to fix
-            # in `project_plate`, surviving one level up: the checks below want NAMES, and taking
+            # in the per-FOV loop, surviving one level up: the checks below want NAMES, and taking
             # the names by flattening threw away the rest of the request.
             names = list(regions)                 # keys for a mapping, items for a sequence
             if not isinstance(regions, dict):
@@ -3456,7 +3456,8 @@ class PlateWindow(QMainWindow):
         paths somebody remembered. The worker carries the same t into its cell cache, so a
         revisited timepoint is a cache HIT and not a re-read (`_platecache.PlateCellCache`).
         """
-        self._preview = _PreviewWorker(reader, meta, self._fov_index, order, t=self.time_point)
+        self._preview = _PreviewWorker(reader, meta, self._fov_index, order,
+                                       time_point=self.time_point)
         self._preview_order = list(order)
         self._preview.tileReady.connect(self._on_preview_tile)
         self._preview.streamEnded.connect(lambda: self._recomposite("raw"))
@@ -3648,66 +3649,7 @@ class PlateWindow(QMainWindow):
                 regions.add(str(here))
         return regions
 
-    def _as_result(self, op_result):
-        """An ``OperatorResult`` as a SELF-DESCRIBING :class:`squidxplorer._result.Result`.
-
-        This is that type's first consumer that RENDERS one, and it is what lets a window draw
-        what the result declares -- its channels, its z depth -- instead of re-deriving both from
-        the acquisition metadata and hoping the two agree.
-
-        The pixels travel as the per-channel tuple the accumulator already fused, NOT restacked
-        into one array: ``Result.plane`` looks a channel up by NAME and then indexes axis 0, and a
-        sequence of per-channel planes is channel-major on axis 0 exactly as an array would be.
-        Restacking would copy a whole region mosaic to say something the tuple already says.
-
-        The extent is ``Extent(region_id=...)``: "all of it" on every other dimension, which is
-        what a whole-region operator run covers. The mosaic's own stage footprint is deliberately
-        NOT put in ``Extent.bbox_um`` -- that field means "the ROI a request was narrowed to", and
-        a second meaning for it is how the address model starts to drift. Placement is derived by
-        each surface from ``mosaic_bbox_um``, the one placement rule that placed raw.
-
-        THE RESULT KIND IS READ HERE, ONCE. ``produces`` is the operator's own declaration
-        (``add_projector(..., produces="labels")``), and this is the single place it is looked up
-        on the display side; from here it rides on the ``Result`` to every sink, so no sink has to
-        take a possibly-scoped layer key apart to ask the registry, and no sink can disagree with
-        another about what an operator's pixels mean. An operator the engine does not know (there
-        is one: the pseudo-key ``"computed"``, set by the reopened-plate path) falls back to
-        intensity, which is what those pixels are.
-
-        Returns None, having said why in the readout, when the acquisition cannot declare a pixel
-        size: a result that cannot say its own scale is not self-describing, and inventing one is
-        exactly the plausible-and-wrong guess this codebase refuses.
-        """
-        from squidxplorer._result import Result
-
-        planes = list(op_result.planes)
-        if not planes:
-            self._readout.setText(f"{op_result.op}: the result carries no planes to show")
-            return None
-        pixel_size_um = (self._meta or {}).get("pixel_size_um")
-        if not pixel_size_um:
-            self._readout.setText(
-                f"{op_result.op}: this acquisition declares no pixel size, so the result cannot "
-                f"declare its scale and will not be drawn as a layer")
-            return None
-        first = planes[0]
-        # z_depth from the pixels, which is unambiguous HERE and only here: OperatorResult has
-        # already split the channel axis off, so a 3-D plane's leading axis can only be z. The
-        # general (C, Z, Y, X) / (C, Y, X) ambiguity _result.Result.of refuses to guess at does
-        # not arise once the channel axis is gone.
-        z_depth = int(first.shape[0]) if int(getattr(first, "ndim", 2)) >= 3 else 1
-        try:
-            return Result.of(
-                Extent(region_id=op_result.region), planes,
-                channels=op_result.channels, z_depth=z_depth,
-                pixel_size_um=float(pixel_size_um), dtype=first.dtype,
-                kind=result_kind(op_result.op),
-            )
-        except ValueError as exc:
-            self._readout.setText(f"result not shown as a layer: {exc}")
-            return None
-
-    def _deliver_operator_result(self, op: str, op_result) -> None:
+    def _deliver_operator_result(self, op: str, result) -> None:
         """THE COMPLETION PATH: one region's finished result, to the surfaces that asked for it.
 
         Julio, 2026-07-29: "the layers such as 'raw', 'flatfield', 'stitched', in the window that I
@@ -3717,14 +3659,12 @@ class PlateWindow(QMainWindow):
         ``None`` since the decentralization. So the run happened, the pixels were written, and the
         window that asked for them gained nothing.
 
-        One declaration, several sinks. The ``Result`` is built once and handed to every open
-        window, so no sink re-derives what the result is. ``_add_result_layers`` -- the branch that
-        painted the plate's own pane -- was deleted on 2026-08-06 along with the pane it needed;
-        the windows are the sinks, and they always were.
+        One declaration, several sinks. The ``Result`` is built once -- by the accumulator, which
+        is the only place that knows what it fused -- and handed to every open window, so no sink
+        re-derives what the result is. ``_add_result_layers`` -- the branch that painted the
+        plate's own pane -- was deleted on 2026-08-06 along with the pane it needed; the windows
+        are the sinks, and they always were.
         """
-        result = self._as_result(op_result)
-        if result is None:
-            return                              # _as_result has already said why
         # FILE IT IN THE CROSS-WINDOW RESULT CACHE, whose docstring has promised exactly this
         # since it was written and which had no production call site at all: "two windows over the
         # same node running the same chain at the same version hit the SAME entry: results
@@ -4108,7 +4048,7 @@ class PlateWindow(QMainWindow):
 
         A region the user boxed only PART of contributes only those fields. That is the whole of
         "run on a subset of the acquisition": the engine has always cropped to the FOVs it is
-        handed (``stitch_plate(regions={region: [fov, ...]})`` derives the mosaic canvas from
+        handed (``run_plate(regions={region: [fov, ...]})`` derives the mosaic canvas from
         those positions alone), and this method was the place that threw the finer answer away by
         expanding every selected well to all of its fields before anyone downstream could see it.
 

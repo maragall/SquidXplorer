@@ -226,20 +226,20 @@ _PLANES: Any = None
 _PLANES_LOCK = threading.Lock()
 
 
-def _read_plane(reader: Any, region: str, fov: int, channel: str, z: int) -> np.ndarray:
+def _read_plane(reader: Any, region: str, fov: int, channel: str, z_level: int) -> np.ndarray:
     """One decoded FOV plane, from the shared bounded cache when it is already there."""
     cache = _plane_cache()
     try:
         from squidxplorer._mosaic_source import _source_token
 
-        key = (_source_token(reader), region, int(fov), channel, int(z))
+        key = (_source_token(reader), region, int(fov), channel, int(z_level))
     except Exception:                                   # noqa: BLE001 - uncacheable reader: read it
         key = None
     if key is not None:
         hit = cache.get(key)
         if hit is not None:
             return hit
-    frame = np.asarray(reader.read(region, int(fov), channel, int(z)))
+    frame = np.asarray(reader.read(region, int(fov), channel, int(z_level)))
     if frame.ndim != 2:
         frame = frame.reshape(frame.shape[-2:])
     if key is not None:

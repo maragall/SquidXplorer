@@ -7,7 +7,7 @@ import json
 import numpy as np
 import pytest
 
-from squidxplorer import add_projector, available_projectors, project_well, operator_consumes
+from squidxplorer import add_operator, available_plane_operators, project_well, operator_consumes
 from squidxplorer._decon import (
     DEFAULT_ITERATIONS,
     DEFAULT_OPTICS,
@@ -249,7 +249,7 @@ def test_a_missing_petakit_fails_loud_and_never_silently_falls_back():
 
 
 def test_decon_is_registered_as_a_plane_op():
-    assert "decon" in available_projectors()
+    assert "decon" in available_plane_operators()
     assert operator_consumes("decon") == PLANE_OP
 
 
@@ -257,8 +257,8 @@ def test_decon_op_factory_produces_a_plane_op_and_is_registrable():
     op = decon_op(FAST_OPTICS, iterations=3)
     assert op.consumes == PLANE_OP
     name = "decon_test_factory"
-    if name not in available_projectors():
-        add_projector(name, op)
+    if name not in available_plane_operators():
+        add_operator(name, op)
     assert operator_consumes(name) == PLANE_OP
     plane = _blur_with_real_psf(_ground_truth(32)).astype(np.uint16)
     assert op([plane]).shape == plane.shape
@@ -290,7 +290,7 @@ def test_project_well_with_decon_keeps_z_at_full_depth(squid_dataset):
 
 
 def test_decon3d_is_registered_as_a_z_reducer_with_zero_engine_edits():
-    assert "decon3d" in available_projectors()
+    assert "decon3d" in available_plane_operators()
     assert operator_consumes("decon3d") == Z_REDUCER
 
 

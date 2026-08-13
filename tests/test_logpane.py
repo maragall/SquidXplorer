@@ -145,7 +145,7 @@ def test_a_LIBRARYS_PRINT_reaches_the_panel(bus):
 
 
 def test_capture_survives_the_THREAD_POOL_the_work_actually_runs_on(bus):
-    """Run-scoped, not thread-local: stitch_plate's prints happen on pool threads, not the
+    """Run-scoped, not thread-local: the region loop's prints happen on pool threads, not the
     thread that opened the capture."""
     from concurrent.futures import ThreadPoolExecutor
 
@@ -218,7 +218,7 @@ class _PrintingReader:
     def __init__(self, path):
         self._path = str(path)
 
-    def read(self, region, fov, channel, z, t=0):
+    def read(self, region, fov, channel, z_level, time_point=0):
         import numpy as np
 
         print(f"Parallel registration: {region} fov {fov}")

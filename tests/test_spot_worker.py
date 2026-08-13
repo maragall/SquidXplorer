@@ -215,10 +215,9 @@ def _pyramid_layer(levels):
 
 
 def _stand_in_segmenter(monkeypatch, boxes=((2, 22), (60, 80))):
-    """Replace the preferred segmenter with one that stamps known object ids."""
-    import dataclasses
-
+    """Replace the worker's algorithm choice with one that stamps known object ids."""
     from squidxplorer import _spots as SP
+    from squidxplorer import _workers as W
 
     def _fn(plane, params, *, on_stage=None, should_stop=None):
         if on_stage is not None:
@@ -228,9 +227,8 @@ def _stand_in_segmenter(monkeypatch, boxes=((2, 22), (60, 80))):
             lab[a:b, a:b] = i
         return SP.result_from_labels(lab)
 
-    name = SP.preferred_segmenter()
-    monkeypatch.setitem(SP._SEGMENTERS, name,
-                        dataclasses.replace(SP._SEGMENTERS[name], fn=_fn))
+    name = "stand-in"
+    monkeypatch.setattr(W, "_nuclei_algorithm", lambda: (name, _fn))
     return name
 
 

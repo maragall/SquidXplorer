@@ -140,7 +140,7 @@ def test_multi_timepoint(squid_dataset):
     )
     reader = open_reader(root)
     assert reader.metadata["n_t"] == 2
-    got = reader.read("B2", 0, CH_IN_YAML, 0, t=1)
+    got = reader.read("B2", 0, CH_IN_YAML, 0, time_point=1)
     np.testing.assert_array_equal(got, t1_arrays[("B2", 0, 0, CH_IN_YAML)])
     # t=0 and t=1 differ (tag offset), proving t routes to the right folder
     assert not np.array_equal(got, arrays[("B2", 0, 0, CH_IN_YAML)])
@@ -149,7 +149,7 @@ def test_multi_timepoint(squid_dataset):
 def test_read_t_out_of_range(squid_dataset):
     root, _ = squid_dataset
     with pytest.raises(IndexError, match="out of range"):
-        open_reader(root).read("B2", 0, CH_IN_YAML, 0, t=5)
+        open_reader(root).read("B2", 0, CH_IN_YAML, 0, time_point=5)
 
 
 @pytest.mark.parametrize(

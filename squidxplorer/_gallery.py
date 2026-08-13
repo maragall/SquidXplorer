@@ -1,7 +1,7 @@
 """Gallery View's PRODUCER: one region's mosaic per channel, at gallery resolution, off-thread.
 
 Qt-free on purpose; the Qt side (:mod:`squidxplorer._gallery_window`) holds nothing but layout.
-Cells fuse at PREVIEW placement (later FOV overwrites earlier), never through ``stitch_plate``.
+Cells fuse at PREVIEW placement (later FOV overwrites earlier), never through the stitcher.
 """
 
 from __future__ import annotations
@@ -56,14 +56,14 @@ PROJECTIONS = tuple(Z_SELECTORS)
 class GalleryScope:
     """WHICH pixels a gallery is over: regions, the FOVs of each, channels, timepoint, projection.
 
-    The FOV mapping is the same shape ``stitch_plate(regions=...)`` takes. Frozen (mapping stored
+    The FOV mapping is the same shape ``run_plate(regions=...)`` takes. Frozen (mapping stored
     as a tuple-of-tuples) because a scope is passed to a worker thread.
     """
 
     regions: tuple[str, ...]
     fovs: tuple[tuple[str, tuple[int, ...]], ...]
     channels: tuple[str, ...]
-    t: int = 0
+    time_point: int = 0
     projection: str = "mip"
     #: True when the scope came from a plate SELECTION rather than the whole acquisition.
     from_selection: bool = False
@@ -78,21 +78,21 @@ class GalleryScope:
 
     @classmethod
     def whole(cls, meta: Mapping, *, channels: Optional[Sequence[str]] = None,
-              t: int = 0, projection: str = "mip") -> "GalleryScope":
+              time_point: int = 0, projection: str = "mip") -> "GalleryScope":
         """Every region of the acquisition, every FOV of each — the no-selection case."""
         per = dict((meta.get("fovs_per_region") or {}))
         regions = [str(r) for r in (meta.get("regions") or list(per)) if str(r) in per]
         return cls._build(regions, {r: per[r] for r in regions},
-                          _channel_names(meta, channels), t, projection, from_selection=False)
+                          _channel_names(meta, channels), time_point, projection, from_selection=False)
 
     @classmethod
     def from_region_fovs(cls, meta: Mapping, pairs: Iterable[tuple],
                          *, channels: Optional[Sequence[str]] = None,
-                         t: int = 0, projection: str = "mip") -> "GalleryScope":
+                         time_point: int = 0, projection: str = "mip") -> "GalleryScope":
         """A plate selection — ``[(region, fov), ...]`` — as a scope, in plate order.
 
         Pairs naming a region or FOV the acquisition does not have are dropped, as
-        ``stitch_plate`` drops an unknown region.
+        ``run_plate`` drops an unknown region.
         """
         per = dict((meta.get("fovs_per_region") or {}))
         order = [str(r) for r in (meta.get("regions") or list(per))]
@@ -107,17 +107,17 @@ class GalleryScope:
             if int(fov) not in picked[region]:
                 picked[region].append(int(fov))
         regions = sorted(picked, key=lambda r: (rank.get(r, len(rank)), r))
-        return cls._build(regions, picked, _channel_names(meta, channels), t, projection,
+        return cls._build(regions, picked, _channel_names(meta, channels), time_point, projection,
                           from_selection=True)
 
     @classmethod
-    def _build(cls, regions, picked, channels, t, projection, *, from_selection):
+    def _build(cls, regions, picked, channels, time_point, projection, *, from_selection):
         regions = tuple(str(r) for r in regions if picked.get(str(r)))
         return cls(
             regions=regions,
             fovs=tuple((r, tuple(int(f) for f in picked[r])) for r in regions),
             channels=tuple(str(c) for c in channels),
-            t=int(t),
+            time_point=int(time_point),
             projection=str(projection),
             from_selection=bool(from_selection),
         )
@@ -156,7 +156,7 @@ class GalleryScope:
                 regions=kept,
                 fovs=tuple((r, f) for r, f in self.fovs if r in set(kept)),
                 channels=self.channels,
-                t=self.t,
+                time_point=self.time_point,
                 projection=self.projection,
                 from_selection=self.from_selection,
             ),
@@ -172,7 +172,7 @@ class GalleryScope:
         what = "selection" if self.from_selection else "whole acquisition"
         n_fov = sum(len(f) for _r, f in self.fovs)
         line = (f"{len(self.regions)} region(s), {n_fov} FOV(s), {len(self.channels)} channel(s), "
-                f"t={self.t}, {self.projection} — {what}")
+                f"t={self.time_point}, {self.projection} — {what}")
         if meta is not None:
             cropped = self.crops(meta)
             if cropped:
@@ -225,10 +225,10 @@ def _channel_names(meta: Mapping, channels: Optional[Sequence[str]]) -> list[str
 
 
 def cell_cache_key(token: str, region: str, fovs: Sequence[int], channel: str,
-                   t: int, projection: str, step: float, what: str) -> tuple:
+                   time_point: int, projection: str, step: float, what: str) -> tuple:
     """The key a gallery cell occupies in ``_mosaic_source.plane_cache()``; the FOV tuple is IN it."""
     return ("gallery", what, str(token), str(region), tuple(int(f) for f in fovs),
-            str(channel), int(t), str(projection), float(step))
+            str(channel), int(time_point), str(projection), float(step))
 
 
 def plan_cell(meta: Mapping, region: str, fovs: Sequence[int],
@@ -274,7 +274,7 @@ def fuse_gallery_cell(
     fovs: Sequence[int],
     channel: str,
     *,
-    t: int = 0,
+    time_point: int = 0,
     projection: str = "mip",
     target_px: int = TARGET_CELL_PX,
     cache: Any = None,
@@ -293,7 +293,7 @@ def fuse_gallery_cell(
     fovs = [int(f) for f in fovs]
     istep = int(step)
 
-    hit = _cached_cell(cache, token, region, fovs, channel, t, projection, step,
+    hit = _cached_cell(cache, token, region, fovs, channel, time_point, projection, step,
                        (out_h, out_w))
     if hit is not None:
         image, covered = hit
@@ -308,7 +308,7 @@ def fuse_gallery_cell(
     for fov in fovs:
         if should_stop is not None and should_stop():
             return None
-        tile = _fov_tile(reader, region, fov, channel, zs, t, istep)
+        tile = _fov_tile(reader, region, fov, channel, zs, time_point, istep)
         if tile is None:
             # A hole, in the right place, counted: dropping the FOV would shift its neighbours.
             unreadable.append(int(fov))
@@ -326,20 +326,20 @@ def fuse_gallery_cell(
         # Every FOV bad is not a picture at all; a black cell would report a read failure
         # as empty tissue.
         raise ValueError(
-            f"{region}/{channel} t={t}: not one of the {len(fovs)} FOV(s) in scope could be read, "
+            f"{region}/{channel} t={time_point}: not one of the {len(fovs)} FOV(s) in scope could be read, "
             f"so there is no mosaic. First failures: {unreadable[:3]}"
         )
 
     if not unreadable:
         # A degraded cell is not cached: it would outlive the transient, and a hit reconstructs
         # with unreadable=() so the hole would stop being reported.
-        _cache_cell(cache, token, region, fovs, channel, t, projection, step, image, covered)
+        _cache_cell(cache, token, region, fovs, channel, time_point, projection, step, image, covered)
     return GalleryCell(str(region), str(channel), image, covered,
                        cell_window(image, covered), step, full_shape, len(fovs),
                        tuple(unreadable))
 
 
-def _fov_tile(reader, region, fov, channel, zs: Sequence[int], t: int, istep: int):
+def _fov_tile(reader, region, fov, channel, zs: Sequence[int], time_point: int, istep: int):
     """One FOV's contribution, decimated on read. ``None`` when nothing of it could be read.
 
     Maxes into an already-strided accumulator, so peak memory per FOV is one decimated plane.
@@ -348,7 +348,7 @@ def _fov_tile(reader, region, fov, channel, zs: Sequence[int], t: int, istep: in
     acc = None
     for z in zs:
         try:
-            frame = reader.read(region, int(fov), channel, int(z), int(t))
+            frame = reader.read(region, int(fov), channel, int(z), int(time_point))
         except Exception:                       # noqa: BLE001 - counted by the caller, never hidden
             continue
         if frame is None:
@@ -367,11 +367,11 @@ def _fov_tile(reader, region, fov, channel, zs: Sequence[int], t: int, istep: in
     return acc
 
 
-def _cached_cell(cache, token, region, fovs, channel, t, projection, step, shape):
+def _cached_cell(cache, token, region, fovs, channel, time_point, projection, step, shape):
     if cache is None or token is None:
         return None
-    img = cache.get(cell_cache_key(token, region, fovs, channel, t, projection, step, "img"))
-    cov = cache.get(cell_cache_key(token, region, fovs, channel, t, projection, step, "cov"))
+    img = cache.get(cell_cache_key(token, region, fovs, channel, time_point, projection, step, "img"))
+    cov = cache.get(cell_cache_key(token, region, fovs, channel, time_point, projection, step, "cov"))
     if img is None or cov is None:
         return None
     if img.shape != tuple(shape) or cov.shape != tuple(shape):
@@ -379,12 +379,12 @@ def _cached_cell(cache, token, region, fovs, channel, t, projection, step, shape
     return img, cov
 
 
-def _cache_cell(cache, token, region, fovs, channel, t, projection, step, image, covered):
+def _cache_cell(cache, token, region, fovs, channel, time_point, projection, step, image, covered):
     if cache is None or token is None:
         return
     try:
-        cache.put(cell_cache_key(token, region, fovs, channel, t, projection, step, "img"), image)
-        cache.put(cell_cache_key(token, region, fovs, channel, t, projection, step, "cov"), covered)
+        cache.put(cell_cache_key(token, region, fovs, channel, time_point, projection, step, "img"), image)
+        cache.put(cell_cache_key(token, region, fovs, channel, time_point, projection, step, "cov"), covered)
     except ValueError as exc:                # a cell over the whole budget: say so, keep drawing
         log.warning("gallery cell %s/%s not cached: %s", region, channel, exc)
 

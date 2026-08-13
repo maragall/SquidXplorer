@@ -3,6 +3,23 @@
 Post-acquisition HCS plate viewer. Reads finished Squid well-plate data (T, C, Z, FOV already on
 disk); no live capture, no stage motion.
 
+## Domain-model v2 renames (2026-08-12)
+
+"Projector" was fossil naming for the engine loop, and the axis words now use Squid's spelling.
+Dated docs under docs/ may still say "projector"; this file and the code do not.
+
+| old | new |
+|---|---|
+| `project_plate` / `stitch_plate` | `run_plate` (one entry, dispatching off `consumes`; the loops are private) |
+| `add_projector` | `add_operator` (`add_region_operator` stays) |
+| `available_projectors()` | `available_plane_operators()` |
+| `projector=` / `--projector` | `operator=` / `--operator` |
+| stitch's inner z-handling `projector=` | `z_operator=` (it rides in `operator_kwargs`, so `operator=` would collide) |
+| reader `read(..., z, t=0)` | `read(..., z_level, time_point=0)` (`plane_ref` likewise; `project_well`, `TileDescriptor`, tile sources, caches, workers follow) |
+| `_acquisition.Channel` | `DisplayChannel` |
+
+On-disk / Acquisition contract keys are untouched: `n_t`, `n_z`, `z_levels`, `dz_um`.
+
 ## The operator contract
 
 `templates/operator/README.md` is the contract, and it is the public one: a complete, installable
@@ -18,11 +35,11 @@ Four declarations on the registry record, and nothing generic branches on an ope
 | `params` | what one entry can be RUN with (`params=` makes the registered object a factory) |
 | `requires` | the modules it needs — **listed either way, run refused BY NAME when missing** |
 
-**ONE table** (`_engine._OPERATORS`, 2026-08-05). `add_projector` and `add_region_operator` are two
+**ONE table** (`_engine._OPERATORS`, 2026-08-05). `add_operator` and `add_region_operator` are two
 registrars over one record, sharing one validator (`_engine._declare`); `add_region_operator`
-stamps `consumes=REGION_OP` (`{"fov"}`) and that declaration is what `stitch_plate` selects on,
-what `project_plate` refuses on, and what `_compose` refuses inside a chain. `runnable_operators()`
-is `sorted(_OPERATORS)` and is defined once; `available_projectors()` / `available_region_operators()`
+stamps `consumes=REGION_OP` (`{"fov"}`) and that declaration is what the region loop selects on
+and the per-FOV loop refuses on. `runnable_operators()`
+is `sorted(_OPERATORS)` and is defined once; `available_plane_operators()` / `available_region_operators()`
 are its two complementary filters; `is_region_operator(name)` is the ONE spelling of "which loop
 runs this", replacing `name in available_region_operators()` at ten call sites. Deleted with the
 second table: `_stitch._REGION_OPERATORS`, `_stitch._REGION_REQUIRES` (a sidecar of a sidecar),
@@ -31,8 +48,8 @@ bodies. The queries are named `operator_consumes` / `operator_produces` / `opera
 `operator_requires` / `bind_operator` — they answer for every entry, so they are no longer spelled
 `projector_*`.
 
-`requires=` (2026-08-05) is the same word on all three registrars — `add_projector`,
-`add_region_operator`, `add_segmenter`. It closed a measured silent success: `decon`, `decon3d` and
+`requires=` (2026-08-05) is the same word on every registrar — `add_operator`,
+`add_region_operator`, `_spots.add_segmentation_operator`. It closed a measured silent success: `decon`, `decon3d` and
 `flatfield` import packages absent from `[project.dependencies]`, raised ImportError one call deep,
 and `project_plate(on_error=...)` filed that as a per-well skip — a green run that wrote nothing.
 Per-well fault isolation now refuses to absorb `ImportError` / `MissingDependency`
@@ -48,39 +65,46 @@ source pixels** — blocks holding only background and object 4 were written as 
 object elsewhere in the field, and the store still declared `"type": "mean"`. Level 0 was the only
 trustworthy rung and nothing said so. `_reducer_for` **refuses an unknown kind by name** rather
 than defaulting to the mean; that default is exactly how this happened. It is the same argument
-`_compose` already made ("a `produces="labels"` step must be last") and `_stitch` already made
-(labels are never feathered) — the writer was doing the arithmetic both of them refuse.
+`_stitch` already made (labels are never feathered) — the writer was doing arithmetic on object
+ids, which nothing that knows what labels mean will do.
 
-**A segmenter declares which knobs it READS: `honours`** (2026-08-06). `add_segmenter(honours=…)`
-names the `SpotParams` fields the algorithm actually uses; `_spots.segmenter_honours` is the ONE
-reader, and both the operator's `params=` and the operator callable's own `__name__` derive from
-it. `cellpose` was registered with the whole of `SPOT_PARAMS`, so `_param_panel` drew four spin
-boxes and the console line and recipe named four numbers — while `cellpose_nuclei` reads
-`min_distance_px` and nothing else. Measured on `synthetic_1536_wellplate` A1 / 405 nm, 1024 px:
-`min_area_px` 30 and 4000 returned the **same 42 masks, byte for byte**, where that parameter's
-own meaning leaves 2. Declaring the honest subset makes `--param min_area_px=80` a **named refusal**
-from `Operator.bind` instead of a number the run drops.
-`tests/test_operator_declaration.py::test_every_parameter_a_segmentation_operator_DECLARES_changes_its_pixels`
-is the guard: a declared parameter that cannot change the label image fails the build.
+**The segmenter registry is folded into the operator table** (2026-08-13). One operator per
+algorithm — `spot` IS the Otsu-watershed, `cellpose` declares `min_distance_px` and nothing
+else — registered through `_spots.add_segmentation_operator`, which filters `SPOT_PARAMS` so
+`SpotParams` stays the one place the knobs and defaults are written. Deleted with the second
+registry: `add_segmenter`, `resolve_segmenter`, `preferred_segmenter`, `segmenter_honours`,
+`available_segmenters`, `segmenter_available`, `Segmenter`, `MissingSegmenterDependency`, and
+`honours` as a concept — the entry's own `params=` is the honest subset now, so an undeclared
+`--param` is a named refusal from `Operator.bind`.
+`tests/test_operator_declaration.py::test_every_parameter_an_operator_DECLARES_changes_its_pixels`
+is the guard, parametrized over EVERY registered operator with `params` (skipping by `requires`
+when a dependency is absent): a declared parameter that cannot change the output fails the build.
 
 **Discovery**: `squidxplorer/_plugins.py` scans the `squidxplorer.operators` entry-point group on
 `import squidxplorer`, AFTER the built-ins. An operator in someone else's package needs no edit here.
 A broken plugin aborts the import, NAMED; `SQUIDXPLORER_NO_PLUGINS=1` is the escape hatch. The
 hardcoded built-in imports in `squidxplorer/__init__.py` stay — discovery is additive.
 
-**Composition** (2026-08-05): a chain is written wherever a name is —
-`projector="flatfield + decon + mip"`, accepted by `project_plate`, `write_plate`, `stitch_region`,
-the CLI's `--projector` and the `run_operator` command with no new argument on any of them. The
-expression IS `RecipeChain.label()`, and `RecipeChain.parse()` is its inverse, so the words a
-console prints are the words that run. `squidxplorer/_compose.py` derives the composed operator's four
-declarations from its parts (`consumes` union, `produces` last, `params` namespaced
-`<step>.<param>`, `requires` union) and carries `corrects_illumination` / `for_channel` through.
+**Composition was cut** (2026-08-13, added 2026-08-05). An `operator=` string is ONE registered
+name: a chain expression (`"flatfield + decon + mip"`) is a named refusal from
+`_engine._resolve_operator` explaining that chaining was removed and that composing happens in
+Python (`plane_op` around the steps + `add_operator`, a few lines). `_declare` still refuses
+`+()` in a registered name — `RecipeChain.parse` must round-trip a recipe label — and
+`_recipe.py` is untouched: the result cache and LUT clipboard ride on `RecipeChain`.
 
-Refused by declaration, never by name, never reordered: a **z-reducer that is not last** (no stack
-left), a **`produces="labels"` step that is not last** (arithmetic on object ids), a **z-SELECTING
-step inside a chain** (`reference` — its z is solved on raw planes outside the operator), and a
-**repeated step** (namespaced params would be ambiguous). A bare name still resolves to the exact
-registry object, so nothing existing routes through composition.
+**One result type** (2026-08-13). `OperatorResult` is deleted:
+`_op_result.RegionResultAccumulator.result()` builds the self-describing `_result.Result` itself —
+`Extent` carries region + bbox_um, `Substance` carries channels/z_depth/dtype/pixel_size_um/kind
+(`result_kind` is read there, once), `data` is the per-channel plane list — and `op` travels as a
+parameter of the delivery calls, where it already was. `_viewer._as_result` went with it; the
+accumulator's refusals (channel mismatch, unknown FOV, incomplete region, and now the missing
+pixel size) are unchanged in meaning.
+
+**One verdict** (2026-08-13). `_measure.verdict(landed, owed, skipped, stopped)` is the single
+OK/PARTIAL/STOPPED computation, called by `_command.do_run_operator` and
+`_workers._OperatorWorker`. `landed`'s unit stays the caller's (fields there, wells here) and only
+zero is read; `owed`/`skipped` count target wells; `stopped` comes from the manifest or the stop
+event, never from `complete`; a stopped run's detail stays the caller's own sentence.
 
 **GUI panels ARE generated from `params`** (2026-08-05). `squidxplorer/_param_panel.py` builds one
 widget per declared `Param`, choosing it from the TYPE OF THE DEFAULT — `bool` a check box, `int`
@@ -88,15 +112,24 @@ a spin, `float` a decimal spin, `str` a text field, the `blurb` its tooltip. Any
 **refused by name**; a guessed widget is how a value the user typed becomes a value the run did
 not receive. It is the FALLBACK for an operator with no hand-written panel, reached from
 **Process well-plates -> From their declaration** (built off `runnable_operators()`, so a plugin
-appears with no edit here). A chain's params arrive namespaced (`spot.min_area_px`) and are drawn
-as one group per step. `_viewer._activate_operator` opens that panel or states a refusal; it used
-to be a silent no-op for any key the card table did not know.
+appears with no edit here). `_viewer._activate_operator` opens that panel or states a refusal; it
+used to be a silent no-op for any key the card table did not know.
 
 The bespoke panels stay: `StitcherPanel` and `DeconQCPanel` do things a parameter form cannot.
-`STITCH_DEFAULTS` is still read off `stitch_region`'s own signature (`_op_panels._stitch_default`)
-rather than off a declaration. `add_region_operator` now ACCEPTS `params=` — it is the same record
-as every other operator — and `stitch` declares none, because its ~10 knobs reach `stitch_region`
-as `**kwargs` and moving them to `Param` records is a separate change with its own evidence.
+
+**Stitch joined the declaration system** (2026-08-13). The registration is a factory declaring
+`z_operator`, `register`, `registration_channel`, `registration_t` and `correct_illumination` as
+`Param` records, so `--param`, recipes and the probe test describe stitch like every other
+operator; `STITCH_DEFAULTS` and the `StitcherPanel` read the declaration, not
+`inspect.signature`, and None-defaulted signature knobs state their fixed meaning concretely
+(`registration_channel` None = index 0, `correct_illumination` None = on). Still kwargs, each for
+a reason: `blend_px` / `registration_z` / `correct_distortion` (their None is measured from the
+data), `block_px` / `max_workers` (cannot change the pixels), and `rel_thresh` / `abs_thresh` —
+tilefusion clamps `rel_thresh <= 1.0` to its own factor 3.0 and floors the rejection cutoff at
+150 px (`_BLUNDER_FLOOR_PX`), so neither knob can change a solve short of a >150 px blunder, and
+the probe test below could never vouch for declaring them. The probe covers stitch through a
+synthetic 2x2 region (`tests/test_operator_declaration.py::_StitchProbeReader`) whose content
+errors registration measurably solves, skipping by `requires` where tilefusion is absent.
 
 Measured while building it: `_workers._OperatorWorker`'s PREVIEW branch called `project_plate`
 without `operator_kwargs` while the save branch passed them, so a panel value reached the console
@@ -227,8 +260,8 @@ declaring `consumes={"fov"}`, and `RegionResultAccumulator.add` accepts it. The 
 `image[0, :, 0]` for everything: on the real 10x set `stitch_plate` yielded `(1, 1, 10, 2084, 7711)`
 and the display got `(1, 2084, 7711)`, so a stitched mosaic declared `z_depth 1` and 3D correctly
 refused a volume that no longer existed. The whole display side was already written for depth
-(`_as_result`'s `z_depth`, `deliver_result`'s `z_scale_um`, `_volume_source`'s `ndim >= 3`); one
-index contradicted all three. The per-FOV path still delivers ONE plane — keeping its depth means
+(the accumulated `Result`'s `z_depth`, `deliver_result`'s `z_scale_um`, `_volume_source`'s
+`ndim >= 3`); one index contradicted all three. The per-FOV path still delivers ONE plane — keeping its depth means
 `Nz` re-fusions over ~9.4 GB of accumulated tiles for one 27-FOV well — and `_z_dropped_note` says
 which plane of how many rather than letting a limitation read as a result.
 

@@ -385,7 +385,7 @@ def _shape_worker_class(shapes):
         finished_count = Signal(int)
         finished = Signal()
 
-        def __init__(self, reader, meta, region, channels, parent=None, t=0):
+        def __init__(self, reader, meta, region, channels, parent=None, time_point=0):
             super().__init__(parent)
             self._region = str(region)
             self._channels = list(channels)

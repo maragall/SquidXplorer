@@ -1,6 +1,6 @@
 """Stitch region operator: register a well's FOVs against each other and fuse them into
 one seamless mosaic. Wraps Julio's ``tilefusion`` pipeline on in-memory arrays;
-registration runs on the raw middle z-plane, never on the projector's output.
+registration runs on the raw middle z-plane, never on the z operator's output.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ from squidxplorer.projection import cast_like
 from squidxplorer._engine import (
     _NOT_A_WELL_FAULT,
     MissingOperatorDependency,
+    Param,
     _default_workers,
     _resolve_operator,
     add_region_operator,
@@ -133,8 +134,8 @@ def estimate_region_flatfield(
     fovs: Sequence[int],
     *,
     channels: Optional[Sequence[int]] = None,
-    z: Optional[int] = None,
-    t: int = 0,
+    z_level: Optional[int] = None,
+    time_point: int = 0,
     use_darkfield: bool = False,
     max_tiles: int = _FF_MAX_TILES,
 ) -> dict:
@@ -145,8 +146,8 @@ def estimate_region_flatfield(
     all_channels = [c["name"] for c in meta["channels"]]
     if channels is None:
         channels = list(range(len(all_channels)))
-    if z is None:
-        z = int(meta["n_z"]) // 2
+    if z_level is None:
+        z_level = int(meta["n_z"]) // 2
 
     fovs = list(fovs)
     n = min(int(max_tiles), len(fovs))
@@ -155,13 +156,13 @@ def estimate_region_flatfield(
 
     _log.info("Flatfield: no profile in hand — estimating %d channel profile(s) from %d raw "
               "tile(s) of region %s at z=%d (tilefusion BaSiC). Stitching starts after this.",
-              len(channels), n, region, z)
+              len(channels), n, region, z_level)
     profiles = {}
     for i, c in enumerate(channels, 1):
         name = all_channels[c]
         _log.info("Flatfield: channel %d of %d (%s) — reading %d raw tile(s)…",
                   i, len(channels), name, n)
-        stack = np.stack([reader.read(region, f, name, z, t) for f in picked])
+        stack = np.stack([reader.read(region, f, name, z_level, time_point) for f in picked])
         t0 = time.perf_counter()
         profiles[name] = estimate_profile(stack, use_darkfield=use_darkfield)
         _log.info("Flatfield: channel %d of %d (%s) estimated in %.1f s.",
@@ -169,7 +170,7 @@ def estimate_region_flatfield(
         del stack
     _log.info(
         "Flatfield: estimated %d channel profile(s) from %d raw tile(s) of region %s at z=%d.",
-        len(profiles), n, region, z,
+        len(profiles), n, region, z_level,
     )
     return profiles
 
@@ -211,7 +212,7 @@ def _selected_profiles(names: Sequence[str]) -> Optional[dict]:
 
 
 def resolve_flatfield(reader, region: str, fovs: Sequence[int], *, channels=None,
-                      z: Optional[int] = None, t: int = 0, use_darkfield: bool = False) -> dict:
+                      z_level: Optional[int] = None, time_point: int = 0, use_darkfield: bool = False) -> dict:
     """Resolve one profile per channel: GUI selection > stored ``.npy`` > estimate-and-save."""
     from squidxplorer._flatfield import FlatfieldProfile
 
@@ -238,8 +239,8 @@ def resolve_flatfield(reader, region: str, fovs: Sequence[int], *, channels=None
                          path, exc)
 
     # Estimate ALL channels so the saved (C, Y, X) .npy is valid and reusable.
-    profiles = estimate_region_flatfield(reader, region, fovs, channels=None, z=z, t=t,
-                                         use_darkfield=use_darkfield)
+    profiles = estimate_region_flatfield(reader, region, fovs, channels=None, z_level=z_level,
+                                         time_point=time_point, use_darkfield=use_darkfield)
     if path is not None and len(profiles) == len(names):
         try:
             from tilefusion.flatfield import save_flatfield
@@ -265,10 +266,10 @@ class _FlatfieldReader:
     def __getattr__(self, name):
         return getattr(self._inner, name)
 
-    def read(self, region, fov, channel, z, t=0):
+    def read(self, region, fov, channel, z_level, time_point=0):
         from squidxplorer._flatfield import correct_flatfield
 
-        plane = self._inner.read(region, fov, channel, z, t)
+        plane = self._inner.read(region, fov, channel, z_level, time_point)
         profile = self._profiles.get(str(channel))
         return plane if profile is None else correct_flatfield(plane, profile)
 
@@ -431,7 +432,7 @@ def stitch_region(
     region: str,
     fovs: Sequence[int],
     *,
-    projector: str = "mip",
+    z_operator: str = "mip",
     register: bool = True,
     registration_channel=None,
     channels: Optional[Sequence[int]] = None,
@@ -481,7 +482,7 @@ def stitch_region(
     # blend_px=None is maragall/stitcher's "Auto": measure the overlap instead of guessing.
     if blend_px is None:
         blend_px = auto_blend_px(positions, pixel_size, tile_shape)
-    _op = _resolve_operator(projector)
+    _op = _resolve_operator(z_operator)
 
     reg_c_global = _resolve_registration_channel(meta, registration_channel)
 
@@ -499,20 +500,20 @@ def stitch_region(
     # Fusion blends by weighted average, which is meaningless for integer object ids.
     if _op.produces == LABELS:
         raise ValueError(
-            f"operator {projector!r} produces label images (integer object ids), and fusion blends "
+            f"operator {z_operator!r} produces label images (integer object ids), and fusion blends "
             "overlapping tiles by a weighted average — the mean of two label ids is a third, "
             "nonexistent object, and per-FOV ids collide across every seam. Stitching labels needs "
             "id reconciliation across seams, which this operator does not do. Segment per FOV "
-            f"instead (write_plate(projector={projector!r})), or stitch an intensity operator."
+            f"instead (write_plate(operator={z_operator!r})), or stitch an intensity operator."
         )
 
     # Exactly one of the read path and the operator may flat-field per pass (not idempotent).
     if correct_illumination is not False and getattr(_op.fn, "corrects_illumination", False):
         raise ValueError(
-            f"projector {projector!r} flat-field corrects its input, and stitching's read path is "
+            f"z_operator {z_operator!r} flat-field corrects its input, and stitching's read path is "
             "ALSO correcting (correct_illumination is on by default). The correction is not "
             "idempotent — applying it twice changes ~89% of pixels by up to 23 counts, silently. "
-            "Pick ONE: correct_illumination=False to let the operator do it, or a projector that "
+            "Pick ONE: correct_illumination=False to let the operator do it, or a z operator that "
             "does not correct (e.g. 'mip') and let the read path do it, which is where TileFusion "
             "applies it and the only place registration can benefit from it."
         )
@@ -525,7 +526,8 @@ def stitch_region(
             with timer.stage("flatfield"):
                 flatfield = resolve_flatfield(
                     reader, region, fovs, channels=sorted(set(channels) | {reg_c_global}),
-                    z=registration_z, t=registration_t, use_darkfield=use_darkfield,
+                    z_level=registration_z, time_point=registration_t,
+                    use_darkfield=use_darkfield,
                 )
         reader = _FlatfieldReader(reader, flatfield)
 
@@ -537,7 +539,7 @@ def stitch_region(
             for i, fov in enumerate(fovs):
                 reg_planes[i, 0] = reader.read(
                     region=region, fov=fov, channel=all_channels[reg_c_global],
-                    z=registration_z, t=registration_t,
+                    z_level=registration_z, time_point=registration_t,
                 )
 
     offsets = np.zeros((len(fovs), 2), dtype=np.float64)
@@ -641,7 +643,7 @@ def stitch_region(
             tiles = np.empty((len(fovs), n_t, len(channels), *tile_shape), dtype=dtype)
             for i, fov in enumerate(fovs):
                 tiles[i] = project_well(reader, region, fov, reduce=_op.fn,
-                                        consumes=_op.consumes, z=z_src)[:, channels, 0]
+                                        consumes=_op.consumes, z_level=z_src)[:, channels, 0]
 
         with timer.stage("fuse"):
             def read_tile(idx: int, z_level: int, time_idx: int, _tiles=tiles) -> np.ndarray:
@@ -686,7 +688,39 @@ def _coordinate_region(reader, region, fovs, **kwargs):
 
 RegionOperator = Callable[..., np.ndarray]
 
-add_region_operator("stitch", stitch_region, requires=("tilefusion",))
+#: The scalar knobs `stitch` DECLARES, so `--param`, recipes and generated panels describe it
+#: like every other operator. Defaults restate `stitch_region`'s own, with None spelled
+#: concretely where None means a fixed value (registration_channel None = index 0,
+#: correct_illumination None = on). Knobs whose None default is measured from the data
+#: (blend_px, registration_z, correct_distortion) or that cannot change the pixels (block_px,
+#: max_workers) stay keyword arguments. rel_thresh/abs_thresh stay kwargs too, undeclared for
+#: a measured reason: tilefusion's two_round_optimization clamps rel_thresh <= 1.0 to its own
+#: factor 3.0 and floors the cutoff at _BLUNDER_FLOOR_PX (150 px), so neither knob can change
+#: the solve until a link is >150 px wrong — a declaration the build-failing probe test
+#: (a declared parameter must be able to change the pixels) could never vouch for.
+_STITCH_PARAMS = (
+    Param("z_operator", "mip",
+          "what each FOV's z-stack becomes before fusion; a z-reducer collapses it to one "
+          "plane, a plane-op keeps every plane"),
+    Param("register", True,
+          "solve per-tile offsets from the overlaps; off = stage-coordinate placement"),
+    Param("registration_channel", 0,
+          "the channel the pose graph is solved on, by index or name; every channel is then "
+          "fused with that one solution"),
+    Param("registration_t", _REG_T, "the timepoint the pose graph is solved on"),
+    Param("correct_illumination", True,
+          "flat-field the tiles on the read path, before registration and fusion"),
+)
+
+
+def _stitch_factory(**params):
+    """The registered object: called with the declared parameters, returns the region operator."""
+    def stitch(reader, region, fovs, **kwargs):
+        return stitch_region(reader, region, fovs, **{**params, **kwargs})
+    return stitch
+
+
+add_region_operator("stitch", _stitch_factory, params=_STITCH_PARAMS, requires=("tilefusion",))
 add_region_operator("coordinate", _coordinate_region, requires=("tilefusion",))
 
 
@@ -711,14 +745,14 @@ def _resolve_region_operator(name: str, operator_kwargs: Optional[dict] = None) 
     if "fov" not in operator.consumes:
         raise KeyError(
             f"{name!r} is a registered operator but not a REGION operator: it declares "
-            f"consumes={sorted(operator.consumes)} and takes planes, while stitch_plate hands its "
+            f"consumes={sorted(operator.consumes)} and takes planes, while the region loop hands its "
             f"operator (reader, region, fovs). Region operators: "
-            f"{available_region_operators()}; run {name!r} with squidxplorer.project_plate."
+            f"{available_region_operators()}; run {name!r} with squidxplorer.run_plate."
         )
     return operator.with_params(operator_kwargs)
 
 
-def stitch_plate(
+def _stitch_plate(
     reader: "SquidReader",
     *,
     n_fovs: Optional[int] = None,
@@ -750,8 +784,11 @@ def stitch_plate(
 
     # ONE illumination profile for the whole plate, resolved before any well starts, so
     # every well is corrected by the same gain field.
-    if _accepts_kwarg(op, "flatfield") \
-            and operator_kwargs.get("correct_illumination", True) is not False \
+    # correct_illumination is DECLARED, so it may sit in `bound` rather than the loose kwargs;
+    # either spelling of "off" must skip the plate-wide estimate.
+    wants_illumination = ({**bound, **operator_kwargs}.get("correct_illumination", True)
+                          is not False)
+    if _accepts_kwarg(op, "flatfield") and wants_illumination \
             and operator_kwargs.get("flatfield") is None and wells:
         spread = [(r, f) for r, fs in wells.items() for f in fs]
         rng = np.random.default_rng(_FF_SEED)
@@ -834,7 +871,7 @@ def stitch_plate(
                     raise  # a missing package is not a corrupt well
                 except Exception as exc:
                     if on_error is None:
-                        raise  # default: fail-fast (project_plate's contract)
+                        raise  # default: fail-fast (the per-FOV loop's contract)
                     on_error(region, anchor_fov, exc)
                     continue
                 yield region, anchor_fov, image

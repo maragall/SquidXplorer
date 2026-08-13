@@ -47,7 +47,7 @@ def load_operator_plugins(group: str = GROUP) -> list[str]:
     """Import and run every declared operator plugin. Returns the entry-point names loaded.
 
     Each entry point is loaded and, if the result is callable, called with no arguments:
-    my_package:register is a function that makes the add_projector calls; a bare module name
+    my_package:register is a function that makes the add_operator calls; a bare module name
     registers as an import side effect instead, like this package's own built-ins.
     """
     if os.environ.get(DISABLE_ENV):

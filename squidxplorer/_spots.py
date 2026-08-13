@@ -1,22 +1,15 @@
-"""Spot detection — a simple nuclei counter, registered as a plane-op, plus the
-segmenter registry that Cellpose and friends plug into."""
+"""Spot detection — nuclei counting. One operator per algorithm: the Otsu-watershed default
+lives here, and siblings like Cellpose register through :func:`add_segmentation_operator`."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, fields
-from typing import Callable, Iterable, Optional
+from typing import Callable, Iterable, Optional, Sequence
 
 import numpy as np
 
-from squidxplorer._engine import Param, add_projector
-from squidxplorer.projection import (
-    MissingDependency,
-    labels_op,
-    missing_requirements,
-    normalise_requires,
-    plane_op,
-    requirement_refusal,
-)
+from squidxplorer._engine import Param, add_operator
+from squidxplorer.projection import labels_op, plane_op
 
 # The layer key the UI files this operator's results under; the registry and the UI share it.
 LAYER_KEY: str = "spot"
@@ -88,94 +81,8 @@ STAGES: tuple[str, ...] = (
 )
 
 
-class MissingSegmenterDependency(MissingDependency):
-    """A registered segmenter's optional package is not importable. NAMED, never silent."""
-
-
-@dataclass(frozen=True)
-class Segmenter:
-    """One registered segmentation algorithm: ``fn(plane, params, *, on_stage, should_stop) -> SpotResult``."""
-
-    name: str
-    fn: Callable[..., "SpotResult"]
-    #: Importable module names this segmenter needs, e.g. ``("cellpose",)``.
-    requires: tuple[str, ...] = ()
-    #: One line for the UI.
-    blurb: str = ""
-    #: The :class:`SpotParams` field names this algorithm ACTUALLY READS; ``None`` means all.
-    honours: Optional[tuple[str, ...]] = None
-
-
-_SEGMENTERS: dict[str, Segmenter] = {}
-
-#: The segmenter used when the caller does not name one.
-DEFAULT_SEGMENTER: str = "otsu-watershed"
-
-
-def add_segmenter(name: str, fn, *, requires=(), blurb: str = "", honours=None) -> None:
-    """Register a segmentation algorithm under *name*."""
-    if not name:
-        raise ValueError("segmenter name must be a non-empty string")
-    if not callable(fn):
-        raise ValueError(f"segmenter for {name!r} is not callable: {fn!r}")
-    if name in _SEGMENTERS:
-        raise ValueError(
-            f"segmenter {name!r} is already defined; pick a distinct name "
-            f"(defined: {available_segmenters()})."
-        )
-    if honours is not None:
-        honours = tuple(str(n) for n in honours)
-        known = {f.name for f in fields(SpotParams)}
-        unknown = [n for n in honours if n not in known]
-        if unknown:
-            raise ValueError(
-                f"segmenter {name!r} declares it honours {unknown}, which SpotParams does not "
-                f"have (it has {sorted(known)}). A declared parameter that no field backs is a "
-                f"control that cannot reach the pixels, which is the failure this declaration "
-                f"exists to prevent."
-            )
-    _SEGMENTERS[name] = Segmenter(name, fn, normalise_requires(requires), blurb, honours)
-
-
-def segmenter_honours(algorithm: str) -> tuple[str, ...]:
-    """The :class:`SpotParams` field names *algorithm* reads. Every field, unless it says less."""
-    seg = _SEGMENTERS.get(str(algorithm))
-    declared = None if seg is None else seg.honours
-    return tuple(f.name for f in fields(SpotParams)) if declared is None else declared
-
-
-def available_segmenters() -> list[str]:
-    """Every registered segmenter, INCLUDING ones whose dependency is not installed."""
-    return sorted(_SEGMENTERS)
-
-
-def segmenter_available(name: str) -> tuple[bool, str]:
-    """``(ok, reason_if_not)`` — is this segmenter's dependency importable right now?"""
-    seg = _SEGMENTERS.get(name)
-    if seg is None:
-        return False, f"unknown segmenter {name!r}; available: {available_segmenters()}"
-    missing = missing_requirements(seg.requires)
-    if missing:
-        return False, requirement_refusal("segmenter", name, missing)
-    return True, ""
-
-
-def resolve_segmenter(name: str) -> Segmenter:
-    """Look up a segmenter, failing LOUD and by name on an unknown key or a missing package."""
-    seg = _SEGMENTERS.get(name)
-    if seg is None:
-        raise KeyError(
-            f"unknown segmenter {name!r}; available: {available_segmenters()}. "
-            "Add new ones with squidxplorer._spots.add_segmenter(name, fn)."
-        )
-    ok, why = segmenter_available(name)
-    if not ok:
-        raise MissingSegmenterDependency(why)
-    return seg
-
-
 def result_from_labels(labels: np.ndarray) -> SpotResult:
-    """Build the :class:`SpotResult` contract from any segmenter's LABEL IMAGE."""
+    """Build the :class:`SpotResult` contract from any algorithm's LABEL IMAGE."""
     from skimage import measure, segmentation
 
     labels = np.ascontiguousarray(labels, dtype=np.int32)
@@ -189,9 +96,13 @@ def result_from_labels(labels: np.ndarray) -> SpotResult:
 
 
 def detect_spots(plane: np.ndarray, params: Optional[SpotParams] = None, *,
-                 algorithm: str = DEFAULT_SEGMENTER,
+                 segment: Optional[Callable[..., SpotResult]] = None,
                  on_stage=None, should_stop=None) -> SpotResult:
-    """Count and outline the nuclei in one 2-D plane, with the named *algorithm*."""
+    """Count and outline the nuclei in one 2-D plane.
+
+    *segment* is the algorithm — ``fn(plane, params, *, on_stage, should_stop) -> SpotResult``
+    — defaulting to :func:`skimage_watershed`.
+    """
     params = (params or DEFAULT_PARAMS).validate()
 
     plane = np.asarray(plane)
@@ -202,13 +113,12 @@ def detect_spots(plane: np.ndarray, params: Optional[SpotParams] = None, *,
             "is why this operator declares consumes=frozenset()."
         )
 
-    seg = resolve_segmenter(algorithm)
-    return seg.fn(plane, params, on_stage=on_stage, should_stop=should_stop)
+    return (segment or skimage_watershed)(plane, params, on_stage=on_stage, should_stop=should_stop)
 
 
 def skimage_watershed(plane: np.ndarray, params: SpotParams, *,
                       on_stage=None, should_stop=None) -> SpotResult:
-    """The default segmenter: scikit-image's published Otsu + distance-watershed nuclei recipe."""
+    """The default algorithm: scikit-image's published Otsu + distance-watershed nuclei recipe."""
     import scipy.ndimage as ndi
     from skimage import feature, filters, measure, morphology, segmentation
 
@@ -264,18 +174,27 @@ def skimage_watershed(plane: np.ndarray, params: SpotParams, *,
             markers = measure.label(marker_mask)
             labels = segmentation.watershed(-distance, markers, mask=mask)
 
-    # 5. count and centroids, derived from `labels` by the shared helper every segmenter uses.
+    # 5. count and centroids, derived from `labels` by the shared helper every algorithm uses.
     _stage("measuring")
     return result_from_labels(labels)
 
 
 def spots_op(params: Optional[SpotParams] = None, *,
-             algorithm: str = DEFAULT_SEGMENTER) -> Callable[[Iterable[np.ndarray]], np.ndarray]:
-    """Build the engine-facing plane-op: plane -> label image, in the input's dtype."""
+             segment: Optional[Callable[..., SpotResult]] = None,
+             label: str = LAYER_KEY,
+             reads: Optional[tuple[str, ...]] = None,
+             ) -> Callable[[Iterable[np.ndarray]], np.ndarray]:
+    """Build the engine-facing plane-op: plane -> label image, in the input's dtype.
+
+    *reads* names the :class:`SpotParams` fields *segment* actually uses; every field, unless
+    it says less.
+    """
     params = (params or DEFAULT_PARAMS).validate()
+    if reads is None:
+        reads = tuple(f.name for f in fields(SpotParams))
 
     def _spots(p: np.ndarray) -> np.ndarray:
-        res = detect_spots(p, params, algorithm=algorithm)
+        res = detect_spots(p, params, segment=segment)
         dtype = np.asarray(p).dtype
         if np.issubdtype(dtype, np.integer):
             ceiling = int(np.iinfo(dtype).max)
@@ -290,35 +209,11 @@ def spots_op(params: Optional[SpotParams] = None, *,
 
     # The callable's name reaches the layer key, the console line and the recipe, so it names
     # only the parameters this algorithm actually reads.
-    shown = ",".join(f"{n}={getattr(params, n)}" for n in segmenter_honours(algorithm))
-    _spots.__name__ = f"spot({algorithm}{',' + shown if shown else ''})"
+    shown = ",".join(f"{n}={getattr(params, n)}" for n in reads)
+    _spots.__name__ = f"{label}({shown})" if shown else label
     # plane_op stamps consumes=frozenset() (z survives); labels_op stamps produces="labels".
     return labels_op(plane_op(_spots))
 
-
-# Registrations. Two tables, two questions: add_segmenter -> which algorithm counts the nuclei;
-# add_projector -> which operator the engine and the UI offer.
-
-add_segmenter(
-    DEFAULT_SEGMENTER, skimage_watershed,
-    blurb="scikit-image Otsu + distance-transform watershed. Fast, no model, no GPU.",
-)
-
-# Cellpose is registered unconditionally so it is always listed; it becomes the default only
-# when importable (see ``preferred_segmenter``). The adapter lives in _cellpose.py.
-from squidxplorer._cellpose import (
-    SEGMENTER_NAME as _CELLPOSE,
-    register as _register_cellpose,
-    register_operator as _register_cellpose_operator,
-)
-
-_register_cellpose()
-
-
-def preferred_segmenter() -> str:
-    """The segmenter to use when the caller does not name one: Cellpose when installed."""
-    ok, _why = segmenter_available(_CELLPOSE)
-    return _CELLPOSE if ok else DEFAULT_SEGMENTER
 
 #: The engine parameters a segmentation operator declares, derived from :class:`SpotParams` so
 #: the dataclass stays the one place the knobs and their defaults are written down.
@@ -335,15 +230,33 @@ SPOT_PARAMS: tuple[Param, ...] = tuple(
 )
 
 
-def segmentation_operator(algorithm: str) -> Callable[..., Callable]:
-    """The FACTORY an ``add_projector`` entry registers for *algorithm*."""
-    def _build(**kwargs) -> Callable:
-        return spots_op(SpotParams(**kwargs), algorithm=algorithm)
+def add_segmentation_operator(name: str, segment: Callable[..., SpotResult], *,
+                              params: Sequence[Param], requires=()) -> None:
+    """One algorithm, one operator: register *segment* under *name*, declaring exactly the
+    :class:`SpotParams` fields it reads (*params*, filtered from :data:`SPOT_PARAMS`)."""
+    declared = tuple(params)
+    reads = tuple(p.name for p in declared)
+    known = {f.name for f in fields(SpotParams)}
+    unknown = [n for n in reads if n not in known]
+    if unknown:
+        raise ValueError(
+            f"segmentation operator {name!r} declares {unknown}, which SpotParams does not "
+            f"have (it has {sorted(known)}). A declared parameter that no field backs is a "
+            f"control that cannot reach the pixels, which is the failure this declaration "
+            f"exists to prevent."
+        )
 
-    _build.__name__ = f"spots_op[{algorithm}]"
-    return _build
+    def _factory(**kwargs) -> Callable:
+        return spots_op(SpotParams(**kwargs), segment=segment, label=name, reads=reads)
+
+    _factory.__name__ = f"spots_op[{name}]"
+    add_operator(name, _factory, params=declared, requires=requires)
 
 
-add_projector(LAYER_KEY, segmentation_operator(DEFAULT_SEGMENTER), params=SPOT_PARAMS)
+add_segmentation_operator(LAYER_KEY, skimage_watershed, params=SPOT_PARAMS)
+
+# Registered unconditionally so it is always listed; requires=("cellpose",) makes a missing
+# package a named refusal at run time. The adapter lives in _cellpose.py.
+from squidxplorer._cellpose import register_operator as _register_cellpose_operator
 
 _register_cellpose_operator()

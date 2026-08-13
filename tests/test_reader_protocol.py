@@ -121,10 +121,10 @@ def test_a_foreign_class_satisfies_it_without_inheriting_anything():
         def metadata(self) -> dict:
             return {"regions": ["A1"], "fovs_per_region": {"A1": [0]}}
 
-        def read(self, region, fov, channel, z, t=0):
+        def read(self, region, fov, channel, z_level, time_point=0):
             return np.zeros((2, 2), dtype=np.uint16)
 
-        def plane_ref(self, region, fov, channel, z, t=0) -> tuple:
+        def plane_ref(self, region, fov, channel, z_level, time_point=0) -> tuple:
             return ("A1_0_0_ch.tiff", 0)
 
     assert isinstance(LiveAcquisitionReader(), SquidAcquisitionReader)
@@ -138,7 +138,7 @@ def test_a_class_missing_a_member_does_not_satisfy_it():
         def metadata(self) -> dict:
             return {}
 
-        def read(self, region, fov, channel, z, t=0):
+        def read(self, region, fov, channel, z_level, time_point=0):
             return np.zeros((2, 2), dtype=np.uint16)
         # no plane_ref: a viewer could not register a plane out of this
 

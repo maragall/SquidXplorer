@@ -39,7 +39,7 @@ def test_defaults_reproduce_the_pipeline_exactly():
     assert kw["abs_thresh"] == pytest.approx(_ABS_THRESH)
     assert kw["register"] is True
     assert kw["channels"] is None                 # all channels
-    assert kw["registration_channel"] is None     # = the first, stitch_region's own rule
+    assert kw["registration_channel"] == 0        # the first — None spelled concretely
 
 
 def test_the_outlier_percentage_becomes_a_fraction():
@@ -96,7 +96,7 @@ def test_the_kwargs_are_accepted_by_stitch_region_itself():
 # the stitch guard, surfaced BEFORE the run
 # ---------------------------------------------------------------------------------------
 
-def test_a_labels_projector_is_refused_with_a_sentence_naming_the_way_out():
+def test_a_labels_operator_is_refused_with_a_sentence_naming_the_way_out():
     """``stitch_region`` raises for a labels operator; the panel asks the same registry first
     rather than let the user discover it after a multi-minute run."""
     why = stitch_refusal("cellpose")
@@ -119,7 +119,7 @@ def test_a_z_reducer_is_not_refused():
     assert stitch_refusal("decon3d") is None
 
 
-def test_an_unknown_projector_is_named_rather_than_crashing_the_panel():
+def test_an_unknown_operator_is_named_rather_than_crashing_the_panel():
     why = stitch_refusal("does_not_exist")
     assert why is not None and "does_not_exist" in why
 
@@ -272,21 +272,21 @@ def test_turning_registration_off_disables_the_registration_only_controls(qapp):
     assert p.rel_spin.isEnabled()
 
 
-def test_a_labels_projector_disables_the_run_button_and_says_why(qapp):
+def test_a_labels_z_operator_disables_the_run_button_and_says_why(qapp):
     host = _Host()
     p = StitcherPanel(host)
-    p.projector_combo.setCurrentText("cellpose")
+    p.z_operator_combo.setCurrentText("cellpose")
     assert not p.run_btn.isEnabled()
     assert host.said and "label" in host.said[-1].lower()
-    p.projector_combo.setCurrentText("mip")
+    p.z_operator_combo.setCurrentText("mip")
     assert p.run_btn.isEnabled()
 
 
-def test_a_plane_op_projector_leaves_the_run_button_enabled(qapp):
+def test_a_plane_op_z_operator_leaves_the_run_button_enabled(qapp):
     """The button follows the ENGINE, not a guard the engine outgrew."""
     host = _Host()
     p = StitcherPanel(host)
-    p.projector_combo.setCurrentText("decon")
+    p.z_operator_combo.setCurrentText("decon")
     assert p.run_btn.isEnabled()
 
 
@@ -295,7 +295,7 @@ def test_the_run_handler_itself_refuses_labels_not_just_the_disabled_button(qapp
     the guard inside ``_run`` must refuse independently of the button's enabled state."""
     host = _Host()
     p = StitcherPanel(host)
-    p.projector_combo.setCurrentText("cellpose")
+    p.z_operator_combo.setCurrentText("cellpose")
     p.run_btn.setEnabled(True)                  # simulate reaching _run some other way
     p._run()
     assert host.calls == [], "the run must not start"
@@ -564,26 +564,42 @@ def test_the_timepoint_spin_is_hidden_on_a_single_timepoint_acquisition(qapp):
     assert p.reg_t_spin.maximum() == 0
 
 
-def test_the_stitch_defaults_are_read_off_stitch_region_not_mirrored_by_hand():
-    """Read off ``stitch_region``'s own signature, not a declaration: ``stitch`` is a region
-    operator and ``add_region_operator`` carries no ``params=`` for this dict to read instead."""
+def test_the_stitch_defaults_are_read_off_the_declaration_not_mirrored_by_hand():
+    """The panel's starting position IS the ``stitch`` registration's ``params=``; the two
+    outlier thresholds are undeclared (see ``_stitch._STITCH_PARAMS``) and come from
+    ``_stitch``'s own constants."""
+    from squidxplorer._engine import operator_params
+    from squidxplorer._stitch import _ABS_THRESH, _REL_THRESH
+
+    declared = {p.name: p.default for p in operator_params("stitch")}
+    assert STITCH_DEFAULTS["register"] == declared["register"]
+    assert STITCH_DEFAULTS["registration_channel"] == declared["registration_channel"]
+    assert STITCH_DEFAULTS["registration_t"] == declared["registration_t"]
+    assert STITCH_DEFAULTS["outlier_rel_pct"] == int(round(_REL_THRESH * 100))
+    assert STITCH_DEFAULTS["outlier_abs_px"] == int(round(_ABS_THRESH))
+
+
+def test_the_declaration_states_stitch_region_s_own_defaults():
+    """A declared default drifting from the signature would make the registered run and a
+    direct ``stitch_region`` call two different pipelines. A None signature default states its
+    fixed meaning concretely instead (registration_channel None = index 0,
+    correct_illumination None = on) and is exempt here."""
     from inspect import signature
 
-    from squidxplorer._op_panels import _stitch_default
+    from squidxplorer._engine import operator_params
     from squidxplorer._stitch import stitch_region
 
     sig = signature(stitch_region).parameters
-    assert STITCH_DEFAULTS["register"] == sig["register"].default
-    assert STITCH_DEFAULTS["outlier_rel_pct"] == int(round(sig["rel_thresh"].default * 100))
-    assert STITCH_DEFAULTS["outlier_abs_px"] == int(round(sig["abs_thresh"].default))
-    assert STITCH_DEFAULTS["registration_t"] == sig["registration_t"].default
-    assert _stitch_default("register") is sig["register"].default
+    for p in operator_params("stitch"):
+        want = sig[p.name].default
+        if want is not None:
+            assert p.default == want, f"{p.name}: declared {p.default!r}, signature {want!r}"
 
 
 # =======================================================================================
 # THE GENERIC PANEL: a declared Param becomes a widget
 # =======================================================================================
-# `_engine.Operator.params` is read by bind/CLI/_recipe/_compose but was not read by the GUI,
+# `_engine.Operator.params` is read by bind/CLI/_recipe but was not read by the GUI,
 # so `spot`/`cellpose` declared four parameters each and none were reachable from a panel.
 # These tests are over `squidxplorer._param_panel`, whose policy half is Qt-free.
 
@@ -591,9 +607,7 @@ from squidxplorer._engine import Param  # noqa: E402
 from squidxplorer._param_panel import (  # noqa: E402
     WIDGET_KINDS,
     GenericOperatorPanel,
-    group_params,
     panel_refusal,
-    param_step,
     unsupported_params,
     widget_kind,
 )
@@ -627,34 +641,11 @@ def test_a_default_this_panel_cannot_draw_is_named_rather_than_guessed():
     assert bad == [("mask", "NoneType")]
 
 
-# -- chains -----------------------------------------------------------------------------
-
-def test_a_chain_s_namespaced_parameters_are_split_the_way_compose_joins_them():
-    """``_compose`` namespaces ``<step>.<param>``; splitting differently here would route a
-    value to a step that never asked for it."""
-    assert param_step("spot.min_area_px") == ("spot", "min_area_px")
-    assert param_step("min_area_px") == (None, "min_area_px")
-
-
-def test_a_chain_is_grouped_by_step_in_chain_order_not_refused():
-    """``operator_params()`` returns the parts' params namespaced; the panel groups them one
-    group per step, in the order the expression is written."""
-    from squidxplorer._engine import operator_params
-
-    params = operator_params("bgsub + spot")
-    assert [p.name for p in params] == ["spot.sigma_px", "spot.min_area_px",
-                                        "spot.min_distance_px", "spot.split_touching"]
-    groups = group_params(params)
-    assert [step for step, _ in groups] == ["spot"]
-    assert [p.name for p in groups[0][1]] == [p.name for p in params]
-
-
-def test_a_bare_operator_s_parameters_are_one_unnamed_group():
-    groups = group_params((Param("sigma_px", 2.0), Param("min_area_px", 30)))
-    assert [step for step, _ in groups] == [None]
-
-
 # -- the refusal ------------------------------------------------------------------------
+
+def test_a_chain_expression_key_is_refused_naming_the_removal():
+    why = panel_refusal("bgsub + spot")
+    assert why is not None and "chaining was removed" in why
 
 def test_a_parameterised_operator_is_not_refused():
     assert panel_refusal("spot") is None
@@ -667,9 +658,8 @@ def test_a_parameterised_operator_is_not_refused():
 
 
 def test_a_region_operator_that_declares_no_params_is_refused_for_that_reason():
-    """``stitch`` declares no ``params=``, so there is nothing for a form to show; its
-    controls live in StitcherPanel."""
-    why = panel_refusal("stitch")
+    """``coordinate`` declares no ``params=``, so there is nothing for a form to show."""
+    why = panel_refusal("coordinate")
     assert why and "declares no params" in why and "StitcherPanel" in why
 
 
@@ -682,7 +672,7 @@ def test_a_key_that_is_not_an_operator_is_refused_by_name():
 def test_an_undrawable_parameter_refuses_the_whole_panel_naming_the_parameter():
     """A panel that silently omitted the one parameter it could not draw would run that
     parameter at its default while every other control implied the form was complete."""
-    from squidxplorer import add_projector
+    from squidxplorer import add_operator
 
     def _factory(**kwargs):
         def _op(planes):
@@ -690,7 +680,7 @@ def test_an_undrawable_parameter_refuses_the_whole_panel_naming_the_parameter():
         return _op
 
     name = "panel_test_undrawable"
-    add_projector(name, _factory, params=(Param("sigma_px", 2.0), Param("mask", None)))
+    add_operator(name, _factory, params=(Param("sigma_px", 2.0), Param("mask", None)))
     try:
         why = panel_refusal(name)
         assert why and "mask" in why and "NoneType" in why
@@ -788,22 +778,3 @@ def test_an_operator_with_no_parameters_still_builds_and_says_so(qapp):
     assert p.kwargs() == {}
 
 
-def test_a_chain_panel_shows_the_form_and_greys_the_run_with_a_reason(qapp):
-    """A chain's params are readable, but ``run_operator`` gates on ``runnable_operators()``,
-    which has never held an expression — so the form is shown and the button says why it is off."""
-    host = _Host()
-    p = GenericOperatorPanel(host, "bgsub + spot")
-    assert sorted(p.widgets) == ["spot.min_area_px", "spot.min_distance_px",
-                                 "spot.sigma_px", "spot.split_touching"]
-    assert not p.run_btn.isEnabled()
-    assert host.said and "chain" in host.said[-1]
-
-
-def test_a_chain_panel_keeps_the_namespaced_names_bind_expects(qapp):
-    from squidxplorer import bind_operator
-
-    p = GenericOperatorPanel(_Host(), "bgsub + spot")
-    p.widgets["spot.min_area_px"].setValue(400)
-    kwargs = p.kwargs()
-    assert kwargs["spot.min_area_px"] == 400
-    bind_operator("bgsub + spot", kwargs)        # raises if a namespaced name is wrong

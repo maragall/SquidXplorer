@@ -34,31 +34,34 @@ from qtpy.QtWidgets import (
 )
 
 from squidxplorer import _qtstyle
-from squidxplorer._stitch import _BLEND_PX
+from squidxplorer._stitch import _ABS_THRESH, _BLEND_PX, _REL_THRESH
 
 
-def _stitch_default(name: str):
-    """One default, read off ``stitch_region``'s own signature rather than mirrored here."""
-    from inspect import signature
+def _stitch_declared() -> dict:
+    """The ``stitch`` registration's own declared defaults — never mirrored here."""
+    from squidxplorer._engine import operator_params
 
-    from squidxplorer._stitch import stitch_region
-
-    return signature(stitch_region).parameters[name].default
+    return {p.name: p.default for p in operator_params("stitch")}
 
 
-# The panel's starting position mirrors stitch_region's own defaults. blend_px is the one
-# deliberate divergence: stitch_region's default is None ("measure the real overlap"), and
-# the panel starts at the fixed fallback with an "Auto" box beside it.
+_DECLARED = _stitch_declared()
+
+# The panel's starting position mirrors the stitch declaration. The divergences are the knobs
+# the declaration deliberately does not carry (see _stitch._STITCH_PARAMS): blend_px
+# (stitch_region's default is None, "measure the real overlap", and the panel starts at the
+# fixed fallback with an "Auto" box beside it), channels (None = all of them; a subset is
+# panel state), correct_distortion (None = on wherever registration ran) and the two outlier
+# thresholds, stated by _stitch's own constants.
 STITCH_DEFAULTS = {
-    "register": _stitch_default("register"),
-    "registration_channel": _stitch_default("registration_channel"),
-    "channels": _stitch_default("channels"),
+    "register": _DECLARED["register"],
+    "registration_channel": _DECLARED["registration_channel"],
+    "channels": None,
     "blend_px": _BLEND_PX,
-    "outlier_rel_pct": int(round(_stitch_default("rel_thresh") * 100)),
-    "outlier_abs_px": int(round(_stitch_default("abs_thresh"))),
+    "outlier_rel_pct": int(round(_REL_THRESH * 100)),
+    "outlier_abs_px": int(round(_ABS_THRESH)),
     "auto_blend": False,
     "correct_distortion": True,  # ON by default (Julio, 2026-08-03)
-    "registration_t": _stitch_default("registration_t"),
+    "registration_t": _DECLARED["registration_t"],
 }
 
 
@@ -103,18 +106,18 @@ def stitch_operator_kwargs(*, register, registration_channel, channels, blend_px
     return kwargs
 
 
-def stitch_refusal(projector: str) -> Optional[str]:
-    """The refusal sentence for *projector*, mirroring stitch_region's own guard against fusing labels."""
+def stitch_refusal(name: str) -> Optional[str]:
+    """The refusal sentence for *name*, mirroring stitch_region's own guard against fusing labels."""
     from squidxplorer._stitch import LABELS, _resolve_operator
 
     try:
-        op = _resolve_operator(projector)
+        op = _resolve_operator(name)
     except Exception as exc:                       # unknown name -> name it, don't crash
-        return (f"{projector!r} is not a projector this build knows: {exc}")
+        return (f"{name!r} is not an operator this build knows: {exc}")
     if op.produces != LABELS:
         return None
     return (
-        f"{projector!r} produces label images (integer object ids), and fusion blends "
+        f"{name!r} produces label images (integer object ids), and fusion blends "
         f"overlapping tiles by a weighted average - the mean of two label ids is a third, "
         f"nonexistent object, and per-FOV ids collide across every seam. Segment per FOV "
         f"instead, or stitch an intensity operator such as mip or decon.")
@@ -222,26 +225,26 @@ class StitcherPanel(_Panel):
         # two things that can happen here, not the only one.
         self.v.addWidget(_head("Z HANDLING"))
         self._n_z = int(((getattr(host, "_meta", None) or {}).get("n_z")) or 1)
-        self.projector_combo = QComboBox()
-        from squidxplorer import available_projectors
+        self.z_operator_combo = QComboBox()
+        from squidxplorer import available_plane_operators
 
-        for name in sorted(available_projectors()):
-            self.projector_combo.addItem(name)
-        # mip stays the default even on a z-stack: RegionViewer switches to keepz only when
+        for name in sorted(available_plane_operators()):
+            self.z_operator_combo.addItem(name)
+        # The declared default even on a z-stack: RegionViewer switches to keepz only when
         # the window is actually in 3D mode, so a 2D canvas never gets a volume it can't show.
-        self.projector_combo.setCurrentText("mip")
-        self.projector_combo.setToolTip(
+        self.z_operator_combo.setCurrentText(_DECLARED["z_operator"])
+        self.z_operator_combo.setToolTip(
             "What each FOV's z-stack becomes before registration.\n\n"
             "A z-REDUCER (mip, reference) collapses it to one plane, so the well fuses to one "
             "image. A PLANE-OP (keepz, bgsub, decon, flatfield) keeps every plane, and the well "
             "fuses to a volume: the pose graph is solved ONCE and every plane is fused from those "
             "same origins, so the planes cannot drift apart.\n\n"
             "keepz is the identity — every plane, no pixel changed.")
-        self.projector_combo.currentTextChanged.connect(self._check_projector)
-        self.v.addLayout(_row(QLabel("Z handling:"), self.projector_combo))
+        self.z_operator_combo.currentTextChanged.connect(self._check_z_operator)
+        self.v.addLayout(_row(QLabel("Z handling:"), self.z_operator_combo))
 
         # z-plane count comes from the chosen operator's `consumes` declaration crossed with
-        # n_z, not from anything visible on this panel; kept in sync by _check_projector.
+        # n_z, not from anything visible on this panel; kept in sync by _check_z_operator.
         self.z_note = QLabel("")
         self.z_note.setWordWrap(True)
         self.v.addWidget(self.z_note)
@@ -369,7 +372,7 @@ class StitcherPanel(_Panel):
 
         _apply_qss(self)
         self._on_register_toggled(self.register_cb.isChecked())
-        self._check_projector(self.projector_combo.currentText())
+        self._check_z_operator(self.z_operator_combo.currentText())
 
     def _on_register_toggled(self, on: bool) -> None:
         """Grey out the knobs that provably do nothing with registration off."""
@@ -377,7 +380,7 @@ class StitcherPanel(_Panel):
                   self.reg_t_spin, self.distortion_cb):
             w.setEnabled(bool(on))
 
-    def _check_projector(self, name: str) -> None:
+    def _check_z_operator(self, name: str) -> None:
         why = stitch_refusal(name)
         self.run_btn.setEnabled(why is None)
         self.say("" if why is None else why)
@@ -423,7 +426,7 @@ class StitcherPanel(_Panel):
         )
 
     def _run(self) -> None:
-        why = stitch_refusal(self.projector_combo.currentText())
+        why = stitch_refusal(self.z_operator_combo.currentText())
         if why is not None:
             self.say(why)
             return
@@ -432,7 +435,7 @@ class StitcherPanel(_Panel):
         except ValueError as exc:                 # a refused setting -> say it, run nothing
             self.say(str(exc))
             return
-        kwargs["projector"] = self.projector_combo.currentText()
+        kwargs["z_operator"] = self.z_operator_combo.currentText()
         self.say("")
         # regions=None means UNSCOPED, resolved against the run selector's live selection.
         self.host.run_operator("stitch", regions=None,

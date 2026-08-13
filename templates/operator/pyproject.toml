@@ -42,7 +42,7 @@ test = ["pytest>=7.0"]
 # is `module:callable` — the function SquidXplorer calls to let you register.
 #
 # After `pip install -e .` into the environment that runs SquidXplorer, your operator is in
-# `squidxplorer.available_projectors()`, the CLI's `--projector`, the viewer's operator list and the
+# `squidxplorer.available_plane_operators()`, the CLI's `--operator`, the viewer's operator list and the
 # `list_operators` command. No edit to SquidXplorer. No fork.
 #
 # A module path with no `:callable` also works (registration as an import side effect), but a

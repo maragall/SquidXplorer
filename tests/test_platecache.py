@@ -328,7 +328,7 @@ class _CountingReader:
         self.reads = 0
         self._boom_after = int(boom_after)
 
-    def read(self, region, fov, channel, z, t=0):
+    def read(self, region, fov, channel, z_level, time_point=0):
         self.reads += 1
         if self._boom_after and self.reads > self._boom_after:
             raise OSError("disk gone")
@@ -427,10 +427,10 @@ class _TimeReader:
         self.reads = 0
         self.reads_at: dict = {}
 
-    def read(self, region, fov, channel, z, t=0):
+    def read(self, region, fov, channel, z_level, time_point=0):
         self.reads += 1
-        self.reads_at[int(t)] = self.reads_at.get(int(t), 0) + 1
-        return np.full(FRAME, 1000 * (int(t) + 1) + CHANNELS.index(str(channel)), dtype=np.uint16)
+        self.reads_at[int(time_point)] = self.reads_at.get(int(time_point), 0) + 1
+        return np.full(FRAME, 1000 * (int(time_point) + 1) + CHANNELS.index(str(channel)), dtype=np.uint16)
 
 
 def _preview_cells(worker, cell_px: int = 88) -> dict:
@@ -531,9 +531,9 @@ def test_the_plate_CELL_at_t1_differs_from_the_cell_at_t0(qapp, tmp_path):
     reader = _TimeReader(exp)
 
     at0 = _preview_cells(V._PreviewWorker(reader, meta, idx, ["A1", "A2"],
-                                          cache=_cache(tmp_path, exp), t=0))
+                                          cache=_cache(tmp_path, exp), time_point=0))
     at1 = _preview_cells(V._PreviewWorker(reader, meta, idx, ["A1", "A2"],
-                                          cache=_cache(tmp_path, exp, time_point=1), t=1))
+                                          cache=_cache(tmp_path, exp, time_point=1), time_point=1))
 
     assert set(at0) == set(at1) == {"A1", "A2"}
     for region in ("A1", "A2"):
@@ -546,7 +546,7 @@ def test_the_plate_CELL_at_t1_differs_from_the_cell_at_t0(qapp, tmp_path):
     cold = _TimeReader(exp)
     for t, expected in ((1, at1), (0, at0)):
         replayed = _preview_cells(V._PreviewWorker(cold, meta, idx, ["A1", "A2"],
-                                                   cache=_cache(tmp_path, exp, time_point=t), t=t))
+                                                   cache=_cache(tmp_path, exp, time_point=t), time_point=t))
         assert cold.reads == 0, "the replay re-read the acquisition"
         for region in ("A1", "A2"):
             assert np.array_equal(replayed[region], expected[region]), \
@@ -557,7 +557,7 @@ def test_the_preview_READS_the_timepoint_it_was_asked_for(qapp, tmp_path):
     exp = _acquisition(tmp_path)
     reader = _TimeReader(exp)
     _run(V._PreviewWorker(reader, _meta(), {"A1": {"rc": (0, 0)}, "A2": {"rc": (0, 1)}},
-                          ["A1", "A2"], cache=None, t=2))
+                          ["A1", "A2"], cache=None, time_point=2))
     assert set(reader.reads_at) == {2}, f"the preview read timepoints {sorted(reader.reads_at)}"
 
 
@@ -567,13 +567,13 @@ def test_stepping_BACK_to_a_visited_timepoint_reads_NOTHING(qapp, tmp_path):
     reader = _TimeReader(exp)
     per_pass = len(CHANNELS) * len(meta["regions"])
 
-    _run(V._PreviewWorker(reader, meta, idx, ["A1", "A2"], cache=_cache(tmp_path, exp), t=0))
+    _run(V._PreviewWorker(reader, meta, idx, ["A1", "A2"], cache=_cache(tmp_path, exp), time_point=0))
     assert reader.reads == per_pass, "the first visit must read the plate"
     _run(V._PreviewWorker(reader, meta, idx, ["A1", "A2"],
-                          cache=_cache(tmp_path, exp, time_point=1), t=1))
+                          cache=_cache(tmp_path, exp, time_point=1), time_point=1))
     assert reader.reads == 2 * per_pass, "a NEW timepoint must read the plate"
 
-    back = V._PreviewWorker(reader, meta, idx, ["A1", "A2"], cache=_cache(tmp_path, exp), t=0)
+    back = V._PreviewWorker(reader, meta, idx, ["A1", "A2"], cache=_cache(tmp_path, exp), time_point=0)
     _run(back)
     assert reader.reads == 2 * per_pass, "stepping back to t=0 re-read the acquisition"
     assert back.cache_hits == 2 and back.cache_reads == 0
@@ -583,7 +583,7 @@ def test_a_preview_handed_a_cache_for_ANOTHER_timepoint_refuses_to_start(qapp, t
     exp = _acquisition(tmp_path)
     with pytest.raises(ValueError, match="wrong frame"):
         V._PreviewWorker(_TimeReader(exp), _meta(), {"A1": {"rc": (0, 0)}}, ["A1"],
-                         cache=_cache(tmp_path, exp), t=1)
+                         cache=_cache(tmp_path, exp), time_point=1)
 
 
 def test_the_plate_previews_the_timepoint_the_BAR_says():
@@ -618,7 +618,7 @@ def test_the_plate_cell_follows_t_on_the_REAL_5D_acquisition(qapp, tmp_path):
     cells = {}
     for t in range(3):
         cells[t] = _preview_cells(
-            V._PreviewWorker(reader, meta, idx, order, cache=_cache_at(t), t=t))
+            V._PreviewWorker(reader, meta, idx, order, cache=_cache_at(t), time_point=t))
         assert set(cells[t]) == set(order)
 
     for region in order:
@@ -628,7 +628,7 @@ def test_the_plate_cell_follows_t_on_the_REAL_5D_acquisition(qapp, tmp_path):
 
     _platecache.clear_memory_tier()
     for t in range(3):
-        worker = V._PreviewWorker(reader, meta, idx, order, cache=_cache_at(t), t=t)
+        worker = V._PreviewWorker(reader, meta, idx, order, cache=_cache_at(t), time_point=t)
         replayed = _preview_cells(worker)
         assert worker.cache_hits == len(order) and worker.cache_reads == 0
         for region in order:

@@ -211,7 +211,7 @@ def free_gb():
 
 # ======================================================================================
 def run_all():
-    from squidxplorer import available_projectors, available_region_operators, open_reader
+    from squidxplorer import available_plane_operators, available_region_operators, open_reader
 
     def read(ds):
         """``open_reader``, but an absent dataset SKIPs the check instead of raising."""
@@ -538,11 +538,11 @@ def run_all():
     # ---------- operators ------------------------------------------------------------
     @check("IMA-210", "Operator registry exposes every shipped operator")
     def _():
-        proj, region = available_projectors(), available_region_operators()
+        proj, region = available_plane_operators(), available_region_operators()
         for want in ("mip", "reference", "decon", "bgsub", "flatfield"):
             assert want in proj, f"{want} missing from {proj}"
         assert "stitch" in region, region
-        return f"projectors={proj} region_ops={region}"
+        return f"plane_ops={proj} region_ops={region}"
 
     @check("IMA-225", "Flatfield commutes with MIP (monotone f: max(f(a),f(b))==f(max(a,b)))")
     def _():
@@ -633,7 +633,7 @@ def run_all():
         tmp = tempfile.mkdtemp(prefix="walkthrough_zarr_")
         try:
             # One well, one FOV: enough to prove the round trip, kilobytes on disk.
-            write_plate(read(PLATE), tmp, regions=["A1"], n_fovs=1, projector="mip")
+            write_plate(read(PLATE), tmp, regions=["A1"], n_fovs=1, operator="mip")
             back = _open(os.path.join(tmp, "plate.ome.zarr"))
             m = back.metadata
             regions = list(m["regions"])
@@ -796,7 +796,7 @@ def run_all():
         est = estimate_write_bytes(m, n_fovs=None, regions=["A1"], region_operator=True)
         tmp = tempfile.mkdtemp(prefix="walkthrough_stitch_")
         try:
-            write_plate(read(PLATE), tmp, projector="stitch", regions=["A1"], n_fovs=None)
+            write_plate(read(PLATE), tmp, operator="stitch", regions=["A1"], n_fovs=None)
             size = sum(os.path.getsize(os.path.join(d, f))
                        for d, _, fs in os.walk(tmp) for f in fs)
             return (f"wrote {size/1e9:.3f} GB (estimate {est/1e9:.3f} GB, "

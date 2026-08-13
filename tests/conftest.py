@@ -106,11 +106,10 @@ def _keep_test_windows_off_the_foreground() -> None:
         pass
 
 
-# Process-global operator registries: snapshot + restore around every test, so a leaked
+# The process-global operator registry: snapshot + restore around every test, so a leaked
 # registration cannot fail an unrelated test file.
 _REGISTRIES = (
     ("squidxplorer._engine", "_OPERATORS"),
-    ("squidxplorer._spots", "_SEGMENTERS"),
 )
 
 

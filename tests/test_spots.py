@@ -160,9 +160,9 @@ def test_a_non_positive_sigma_is_refused():
 
 def test_spot_detection_is_a_peer_of_mip_in_the_ENGINE_registry():
     """Not a special case: it is in the same table mip/bgsub/decon are in."""
-    from squidxplorer import available_projectors
+    from squidxplorer import available_plane_operators
 
-    assert LAYER_KEY in available_projectors()
+    assert LAYER_KEY in available_plane_operators()
 
 
 def test_it_declares_that_it_does_NOT_consume_z():
@@ -197,10 +197,10 @@ def test_more_nuclei_than_the_container_dtype_can_hold_fails_loud():
 
 
 def test_registering_it_twice_is_refused_so_a_reimport_cannot_clobber_the_table():
-    from squidxplorer import add_projector
+    from squidxplorer import add_operator
 
     with pytest.raises(ValueError, match="already defined"):
-        add_projector(LAYER_KEY, spots_op())
+        add_operator(LAYER_KEY, spots_op())
 
 
 def test_the_plane_op_contract_refuses_a_whole_z_stack():
@@ -267,20 +267,17 @@ def test_a_run_that_is_not_cancelled_is_unaffected_by_the_seam():
     assert np.array_equal(watched.labels, plain.labels)
 
 
-def test_the_default_segmenter_is_registered_under_an_algorithm_neutral_operator_name():
-    """The operator is named 'spot' (what it produces); 'otsu-watershed' is the algorithm,
-    in a separate table so a sibling can replace it without renaming the operator."""
-    from squidxplorer._spots import DEFAULT_SEGMENTER, available_segmenters
-
+def test_the_operator_is_named_for_what_it_produces_not_the_algorithm():
+    """The operator is named 'spot' (what it produces), so a sibling algorithm registers
+    beside it under its own name without renaming this one."""
     assert LAYER_KEY == "spot"
-    assert DEFAULT_SEGMENTER in available_segmenters()
     assert "skimage" not in LAYER_KEY and "otsu" not in LAYER_KEY
 
 
-def test_a_new_segmenter_is_one_call_and_the_operator_does_not_change():
-    """The Cellpose drop-in, rehearsed with a stub: register a function that returns a label
-    image and everything downstream — count, centroids, layers, readout — already works."""
-    from squidxplorer._spots import add_segmenter, result_from_labels
+def test_a_new_algorithm_is_one_function_and_the_plumbing_does_not_change():
+    """The Cellpose drop-in, rehearsed with a stub: a function that returns a label image gets
+    everything downstream — count, centroids, layers, readout — for free."""
+    from squidxplorer._spots import result_from_labels
 
     def fake_cellpose(plane, params, *, on_stage=None, should_stop=None):
         labels = np.zeros(plane.shape, dtype=np.int32)
@@ -288,22 +285,15 @@ def test_a_new_segmenter_is_one_call_and_the_operator_does_not_change():
         labels[10:14, 10:14] = 2
         return result_from_labels(labels)
 
-    name = "fake-cellpose-for-this-test"
-    add_segmenter(name, fake_cellpose, blurb="stub")
-    try:
-        res = detect_spots(_blank(), algorithm=name)
-        assert res.count == 2
-        assert res.centroids.shape == (2, 2)
-        assert int(res.labels.max()) == 2
-    finally:
-        from squidxplorer._spots import _SEGMENTERS
-
-        del _SEGMENTERS[name]
+    res = detect_spots(_blank(), segment=fake_cellpose)
+    assert res.count == 2
+    assert res.centroids.shape == (2, 2)
+    assert int(res.labels.max()) == 2
 
 
-def test_result_from_labels_gives_every_segmenter_the_same_counting_semantics():
+def test_result_from_labels_gives_every_algorithm_the_same_counting_semantics():
     """Cellpose returns a label array with arbitrary, non-sequential ids; the shared helper is
-    what stops two segmenters disagreeing about what 'how many' means."""
+    what stops two algorithms disagreeing about what 'how many' means."""
     from squidxplorer._spots import result_from_labels
 
     labels = np.zeros((32, 32), dtype=np.int32)
@@ -316,47 +306,10 @@ def test_result_from_labels_gives_every_segmenter_the_same_counting_semantics():
     assert len(res.centroids) == 2
 
 
-def test_an_uninstalled_segmenter_is_a_NAMED_refusal_not_a_silent_absence():
-    """A missing optional dep must not make the operator quietly vanish from the list."""
-    from squidxplorer._spots import (
-        MissingSegmenterDependency,
-        _SEGMENTERS,
-        add_segmenter,
-        available_segmenters,
-        segmenter_available,
-    )
-
-    name = "needs-a-package-that-is-not-here"
-    add_segmenter(name, lambda *a, **k: None, requires=("definitely_not_installed_xyz",))
-    try:
-        assert name in available_segmenters(), "it vanished from the list instead of refusing"
-
-        ok, why = segmenter_available(name)
-        assert ok is False
-        assert "definitely_not_installed_xyz" in why
-
-        with pytest.raises(MissingSegmenterDependency, match="definitely_not_installed_xyz"):
-            detect_spots(_blank(), algorithm=name)
-    finally:
-        del _SEGMENTERS[name]
-
-
-def test_an_unknown_segmenter_names_the_ones_that_do_exist():
-    with pytest.raises(KeyError, match="otsu-watershed"):
-        detect_spots(_blank(), algorithm="no-such-algorithm")
-
-
-def test_registering_a_segmenter_twice_is_refused():
-    from squidxplorer._spots import DEFAULT_SEGMENTER, add_segmenter, skimage_watershed
-
-    with pytest.raises(ValueError, match="already defined"):
-        add_segmenter(DEFAULT_SEGMENTER, skimage_watershed)
-
-
-def test_a_slow_segmenter_can_still_be_cancelled_and_report_progress():
-    """The cancel/progress seam is the segmenter's to honour, part of the registered signature,
+def test_a_slow_algorithm_can_still_be_cancelled_and_report_progress():
+    """The cancel/progress seam is the algorithm's to honour, part of the callable's signature,
     not something the fast one gets away with ignoring."""
-    from squidxplorer._spots import SpotDetectionCancelled, _SEGMENTERS, add_segmenter
+    from squidxplorer._spots import SpotDetectionCancelled
 
     def slow(plane, params, *, on_stage=None, should_stop=None):
         if on_stage is not None:
@@ -365,28 +318,17 @@ def test_a_slow_segmenter_can_still_be_cancelled_and_report_progress():
             raise SpotDetectionCancelled("cancelled during the model")
         raise AssertionError("should have been cancelled")
 
-    name = "slow-stub"
-    add_segmenter(name, slow)
-    try:
-        seen = []
-        with pytest.raises(SpotDetectionCancelled):
-            detect_spots(_blank(), algorithm=name,
-                         on_stage=lambda *a: seen.append(a), should_stop=lambda: True)
-        assert seen == [("running the model", 0, 1)]
-    finally:
-        del _SEGMENTERS[name]
+    seen = []
+    with pytest.raises(SpotDetectionCancelled):
+        detect_spots(_blank(), segment=slow,
+                     on_stage=lambda *a: seen.append(a), should_stop=lambda: True)
+    assert seen == [("running the model", 0, 1)]
 
 
-def test_the_engine_operator_resolves_its_segmenter_lazily_not_at_import():
-    """Registering a Cellpose operator must not import cellpose (or claim a GPU) at
-    import time; building the op is free, only running it resolves."""
-    from squidxplorer._spots import MissingSegmenterDependency, _SEGMENTERS, add_segmenter
+def test_a_declared_parameter_no_SpotParams_field_backs_is_refused_at_registration():
+    from squidxplorer._engine import Param
+    from squidxplorer._spots import add_segmentation_operator
 
-    name = "lazy-stub"
-    add_segmenter(name, lambda *a, **k: None, requires=("definitely_not_installed_xyz",))
-    try:
-        op = spots_op(algorithm=name)                # must NOT raise
-        with pytest.raises(MissingSegmenterDependency):
-            op([_blank()])                           # …only running it does
-    finally:
-        del _SEGMENTERS[name]
+    with pytest.raises(ValueError, match="diameter"):
+        add_segmentation_operator("bad-seg", lambda *a, **k: None,
+                                  params=(Param("diameter", 30),))

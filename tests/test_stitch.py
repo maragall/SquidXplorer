@@ -19,7 +19,7 @@ from squidxplorer._stitch import (
     _mosaic_geometry,
     _positions_yx_um,
     solve_offsets_px,
-    stitch_plate,
+    _stitch_plate,
     stitch_region,
 )
 
@@ -76,10 +76,10 @@ class _FakeReader:
         }
         self.reads = 0
 
-    def read(self, region, fov, channel, z=0, t=0):
+    def read(self, region, fov, channel, z_level=0, time_point=0):
         self.reads += 1
         y, x = self._true[fov]
-        if t != self._good_t:
+        if time_point != self._good_t:
             # Unregistrable by construction: white noise aliases under any sub-pixel shift.
             return np.random.default_rng(1000 + fov).integers(
                 0, 65535, size=(TILE, TILE), dtype=np.uint16)
@@ -279,7 +279,7 @@ def test_add_and_resolve_region_operator(master):
     try:
         add_region_operator(name, lambda r, reg, fovs, **kw: np.zeros((1, 1, 1, 2, 2), np.uint16))
         assert name in available_region_operators()
-        out = list(stitch_plate(_FakeReader(master), operator=name))
+        out = list(_stitch_plate(_FakeReader(master), operator=name))
         assert [r for r, _f, _i in out] == ["A1"]
     finally:
         _OPERATORS.pop(name, None)
@@ -298,28 +298,28 @@ def test_invalid_operator_registration(bad):
 
 def test_unknown_operator_names_the_alternatives(master):
     with pytest.raises(KeyError, match="unknown operator 'nope'"):
-        list(stitch_plate(_FakeReader(master), operator="nope"))
+        list(_stitch_plate(_FakeReader(master), operator="nope"))
 
 
-def test_a_plane_operator_handed_to_stitch_plate_is_refused_as_the_wrong_kind(master):
+def test_a_plane_operator_handed_to_the_region_loop_is_refused_as_the_wrong_kind(master):
     """`mip` is a real operator and not a region one; the refusal has to say which, not 'unknown'."""
     with pytest.raises(KeyError, match="registered operator but not a REGION operator"):
-        list(stitch_plate(_FakeReader(master), operator="mip"))
+        list(_stitch_plate(_FakeReader(master), operator="mip"))
 
 
 # ---------------------------------------------------------------------------------------
-# stitch_plate: the project_plate contract, mirrored
+# _stitch_plate: the per-FOV loop contract, mirrored
 # ---------------------------------------------------------------------------------------
 
 
 def _fast_plate(reader, **kw):
-    """stitch_plate with the cheap operator settings the contract tests need."""
+    """_stitch_plate with the cheap operator settings the contract tests need."""
     kw.setdefault("channels", [0])
     kw.setdefault("blend_px", 24)
     kw.setdefault("block_px", 512)
     kw.setdefault("max_workers", 2)
     kw.setdefault("register", False)
-    return stitch_plate(reader, **kw)
+    return _stitch_plate(reader, **kw)
 
 
 def test_one_result_per_region_anchored_at_first_fov(master):
@@ -357,7 +357,7 @@ def test_failure_is_loud_by_default(master):
     add_region_operator(name, boom)
     try:
         with pytest.raises(RuntimeError, match="corrupt plane"):
-            list(stitch_plate(_FakeReader(master, regions=("A1", "A2")), operator=name))
+            list(_stitch_plate(_FakeReader(master, regions=("A1", "A2")), operator=name))
     finally:
         _OPERATORS.pop(name, None)
 
@@ -375,7 +375,7 @@ def test_on_error_skips_the_well_and_keeps_going(master):
     seen = []
     try:
         out = list(
-            stitch_plate(
+            _stitch_plate(
                 _FakeReader(master, regions=("A1", "A2")),
                 operator=name,
                 on_error=lambda r, f, e: seen.append((r, f, type(e).__name__)),
@@ -411,7 +411,7 @@ def test_window_is_bounded_by_workers(master):
     add_region_operator(name, counted)
     try:
         reader = _FakeReader(master, regions=tuple(f"A{i}" for i in range(8)))
-        assert len(list(stitch_plate(reader, operator=name, workers=2))) == 8
+        assert len(list(_stitch_plate(reader, operator=name, workers=2))) == 8
     finally:
         _OPERATORS.pop(name, None)
     assert peak <= 2, f"in-flight window ran to {peak}, expected <= 2"
@@ -429,7 +429,7 @@ def test_stitching_a_plane_op_fuses_every_plane_instead_of_keeping_only_z0(maste
     reader = _FakeReader(master)
     reader.metadata["n_z"] = n_z
     reader.metadata["z_levels"] = list(range(n_z))
-    out = stitch_region(reader, "A1", [0, 1, 2, 3], projector="bgsub", register=False,
+    out = stitch_region(reader, "A1", [0, 1, 2, 3], z_operator="bgsub", register=False,
                         correct_illumination=False)
     assert out.shape[2] == n_z, (
         f"a plane-op fused {out.shape[2]} of {n_z} z planes; keeping only plane 0 is the silent "
@@ -484,7 +484,7 @@ def test_solve_forwards_the_operator_s_thresholds(master, monkeypatch):
 
 
 def test_stitch_region_forwards_the_thresholds_all_the_way_down(master, monkeypatch):
-    """Panel kwargs travel stitch_plate -> stitch_region -> solve_offsets_px -> two_round_optimization."""
+    """Panel kwargs travel the region loop -> stitch_region -> solve_offsets_px -> two_round_optimization."""
     seen = _spy_two_round(monkeypatch)
     reader = _FakeReader(master, error_px={3: (6.0, -4.0)})
     stitch_region(reader, "A1", list(range(GRID * GRID)), channels=[0], blend_px=24,
@@ -512,17 +512,17 @@ class _MetaOnlyReader:
                 "frame_shape": (8, 8), "dtype": "uint16", "n_t": 1}
 
 
-def test_write_plate_forwards_operator_kwargs_to_stitch_plate(monkeypatch):
+def test_write_plate_forwards_operator_kwargs_to_the_region_loop(monkeypatch):
     import squidxplorer._output as out_mod
     import squidxplorer._stitch as st
 
     seen = {}
 
-    def _fake_stitch_plate(reader, **kw):
+    def _fake_region_loop(reader, **kw):
         seen.update(kw)
         return iter(())
 
-    monkeypatch.setattr(st, "stitch_plate", _fake_stitch_plate)
+    monkeypatch.setattr(st, "_stitch_plate", _fake_region_loop)
 
     def _fake_write_from_stream(meta, stream, out, **kw):
         fields = sum(1 for _ in stream)          # drain it: the real one consumes the stream
@@ -530,7 +530,7 @@ def test_write_plate_forwards_operator_kwargs_to_stitch_plate(monkeypatch):
                 "n_fields_written": fields, "levels": 1, "complete": True, "stopped": False}
 
     monkeypatch.setattr(out_mod, "write_from_stream", _fake_write_from_stream)
-    out_mod.write_plate(_MetaOnlyReader(), "/tmp/does-not-matter", projector="stitch",
+    out_mod.write_plate(_MetaOnlyReader(), "/tmp/does-not-matter", operator="stitch",
                         operator_kwargs={"blend_px": 64, "rel_thresh": 0.25, "register": False})
     assert seen["blend_px"] == 64
     assert seen["rel_thresh"] == 0.25
@@ -542,7 +542,7 @@ def test_write_plate_refuses_operator_kwargs_an_operator_does_not_declare():
     import squidxplorer._output as out_mod
 
     with pytest.raises(ValueError, match="declares no parameters"):
-        out_mod.write_plate(_MetaOnlyReader(), "/tmp/does-not-matter", projector="mip",
+        out_mod.write_plate(_MetaOnlyReader(), "/tmp/does-not-matter", operator="mip",
                             operator_kwargs={"blend_px": 64})
 
 
@@ -554,7 +554,7 @@ def test_write_plate_refuses_operator_kwargs_an_operator_does_not_declare():
 class _SplitChannelReader(_FakeReader):
     """Channel 0 is registrable texture; channel 1 is flat and carries no alignment signal."""
 
-    def read(self, region, fov, channel, z=0, t=0):
+    def read(self, region, fov, channel, z_level=0, time_point=0):
         self.reads += 1
         if channel == CHANNELS[1]:
             return np.full((TILE, TILE), 1000, dtype=np.uint16)   # flat: unregistrable
@@ -687,7 +687,7 @@ def test_the_placement_offsets_are_the_solved_ones(master):
 
 
 def test_the_mosaic_is_still_an_ordinary_array_for_every_existing_consumer(master):
-    """stitch_plate yields these into the viewer's worker and the OME-Zarr writer unchanged."""
+    """the region loop yields these into the viewer's worker and the OME-Zarr writer unchanged."""
     out = stitch_region(_SplitChannelReader(master), "A1", [0, 1], blend_px=24, block_px=512,
                         max_workers=2, register=False)
     assert isinstance(out, np.ndarray)
@@ -956,7 +956,7 @@ def test_auto_blend_falls_back_when_nothing_overlaps(master):
 
 
 # ---------------------------------------------------------------------------------------
-# registration reads the RAW plane, not the projector's output
+# registration reads the RAW plane, not the z operator's output
 # ---------------------------------------------------------------------------------------
 
 
@@ -983,15 +983,15 @@ class _ZStackReader(_FakeReader):
         self.metadata["z_levels"] = list(range(n_z))
         self._mid_z = n_z // 2
 
-    def read(self, region, fov, channel, z=0, t=0):
-        if z != self._mid_z:
+    def read(self, region, fov, channel, z_level=0, time_point=0):
+        if z_level != self._mid_z:
             self.reads += 1
             return np.full((TILE, TILE), self._FLOOR, dtype=np.uint16)
-        return super().read(region, fov, channel, z=z, t=t)
+        return super().read(region, fov, channel, z_level=z_level, time_point=time_point)
 
 
 def test_registration_solves_on_the_raw_middle_plane_not_the_projected_one(master):
-    """The defect this module carried: the pose graph was solved on the projector's output.
+    """The defect this module carried: the pose graph was solved on the z operator's output.
 
     ``stitch_region`` runs a z-reducer, so on a z-stack the thing registration used to see was a
     MIP -- an image ``TileFusion`` never registers. Here the MIP is constant by construction, so
@@ -1005,7 +1005,7 @@ def test_registration_solves_on_the_raw_middle_plane_not_the_projected_one(maste
     # or the assertion below is vacuous. This repo has already shipped a test that was dead its
     # whole life.
     mip = np.stack([
-        np.max(np.stack([reader.read("A1", f, CHANNELS[0], z=z) for z in range(3)]), axis=0)[None]
+        np.max(np.stack([reader.read("A1", f, CHANNELS[0], z_level=z) for z in range(3)]), axis=0)[None]
         for f in fovs
     ])
     mip_offsets = solve_offsets_px(mip, positions, (PIXEL_UM, PIXEL_UM), (TILE, TILE))
@@ -1104,7 +1104,7 @@ def test_the_flatfield_wrapper_corrects_every_plane_it_hands_back(master):
 
     maragall/stitcher corrects inside _read_tile_region -- the reader feeding the registration
     strips -- so phase correlation runs on corrected pixels. Wrapping the READER puts squidxplorer in
-    the same place, and unlike correcting the projector's OUTPUT it holds for a non-monotone
+    the same place, and unlike correcting the z operator's OUTPUT it holds for a non-monotone
     z-reducer too, because the reducer never sees uncorrected data.
     """
     from squidxplorer._flatfield import correct_flatfield
@@ -1141,7 +1141,7 @@ def test_illumination_correction_is_on_by_default_and_recorded(master):
 
 
 def test_a_supplied_profile_is_used_instead_of_estimating(master):
-    """A caller-supplied profile must be honoured verbatim — that is how stitch_plate keeps every
+    """A caller-supplied profile must be honoured verbatim — that is how the region loop keeps every
     well on ONE plate-wide gain field instead of a different one per well."""
     kw = dict(channels=[0], blend_px=24, block_px=512, max_workers=2, register=False,
               correct_distortion=False)
@@ -1273,7 +1273,8 @@ def test_the_flatfield_stage_says_what_it_is_doing_before_it_does_it(master, mon
     caplog.set_level(logging.INFO)
     from squidxplorer._stitch import estimate_region_flatfield
 
-    estimate_region_flatfield(_FakeReader(master), "A1", list(range(4)), channels=[0, 1], z=0)
+    estimate_region_flatfield(_FakeReader(master), "A1", list(range(4)), channels=[0, 1],
+                              z_level=0)
 
     assert len(log_at_entry) == 2, "the estimator should have run once per channel"
     said_first = log_at_entry[0]

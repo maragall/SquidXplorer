@@ -1,38 +1,23 @@
-"""An operator's output as a RESULT TYPE, ready to become a napari layer group."""
+"""Collect one operator's per-FOV output into the region's self-describing result."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 
-__all__ = ["OperatorResult", "RegionResultAccumulator"]
+from squidxplorer._address import Extent
 
-
-@dataclass(frozen=True)
-class OperatorResult:
-    """One operator's pixels for one region: the thing a layer GROUP is made of."""
-
-    op: str
-    region: str
-    channels: tuple[str, ...]
-    planes: tuple[np.ndarray, ...]
-    bbox_um: Optional[tuple[float, float, float, float]] = None
-
-    def plane(self, channel: str) -> np.ndarray:
-        """This result's pixels for *channel*, by name: ``(Y, X)``, or ``(Nz, Y, X)`` at full depth."""
-        try:
-            return self.planes[self.channels.index(channel)]
-        except ValueError:
-            raise KeyError(
-                f"{self.op!r} result for region {self.region!r} has no channel {channel!r}; "
-                f"it carries {list(self.channels)}"
-            ) from None
+__all__ = ["RegionResultAccumulator"]
 
 
 class RegionResultAccumulator:
-    """Collect one operator's per-FOV output and hand back the region's :class:`OperatorResult`."""
+    """Collect one operator's per-FOV output and hand back the region's
+    :class:`~squidxplorer._result.Result`.
+
+    ``op`` names the accumulator, not the result: it travels as a parameter of the delivery
+    calls, where it already is.
+    """
 
     def __init__(self, op: str, region: str, meta: Mapping, channels: Sequence[str],
                  *, region_operator: bool = False) -> None:
@@ -75,21 +60,43 @@ class RegionResultAccumulator:
             return bool(self._planes)
         return bool(self._expected) and len(self._planes) >= len(self._expected)
 
-    def result(self) -> OperatorResult:
-        """The region's result. Raises unless the region is COMPLETE."""
+    def result(self):
+        """The region's :class:`~squidxplorer._result.Result`. Raises unless the region is
+        COMPLETE and the acquisition declares a pixel size — a result that cannot say its own
+        scale is not self-describing, and inventing one is exactly the plausible-and-wrong
+        guess this codebase refuses."""
+        from squidxplorer._operations import result_kind
+        from squidxplorer._result import Result
+
         if not self.complete():
             raise ValueError(
                 f"{self.op!r} region {self.region!r} is incomplete: "
                 f"{len(self._planes)} of {len(self._expected)} FOV(s) have results; "
                 f"refusing to draw a mosaic with holes in it")
+        pixel_size_um = (self._meta or {}).get("pixel_size_um")
+        if not pixel_size_um:
+            raise ValueError(
+                f"{self.op!r} region {self.region!r}: this acquisition declares no pixel size, "
+                f"so the result cannot declare its scale and will not be drawn as a layer")
         if self._region_operator:
             stack = next(iter(self._planes.values()))
-            planes = tuple(np.asanyarray(stack[i]) for i in range(len(self.channels)))
+            planes = [np.asanyarray(stack[i]) for i in range(len(self.channels))]
         else:
-            planes = tuple(self._fuse(i) for i in range(len(self.channels)))
-        return OperatorResult(
-            op=self.op, region=self.region, channels=self.channels, planes=planes,
-            bbox_um=self._bbox(),
+            planes = [self._fuse(i) for i in range(len(self.channels))]
+        if not planes:
+            raise ValueError(
+                f"{self.op!r} region {self.region!r}: the result carries no planes to show")
+        first = planes[0]
+        # z_depth from the pixels, which is unambiguous HERE and only here: the channel axis is
+        # already split off, so a 3-D plane's leading axis can only be z. The general
+        # (C, Z, Y, X) / (C, Y, X) ambiguity _result.Result.of refuses to guess at does not
+        # arise once the channel axis is gone.
+        z_depth = int(first.shape[0]) if int(getattr(first, "ndim", 2)) >= 3 else 1
+        return Result.of(
+            Extent(region_id=self.region, bbox_um=self._bbox()), planes,
+            channels=self.channels, z_depth=z_depth,
+            pixel_size_um=float(pixel_size_um), dtype=first.dtype,
+            kind=result_kind(self.op),
         )
 
     def _fuse(self, c_idx: int) -> np.ndarray:
@@ -100,7 +107,7 @@ class RegionResultAccumulator:
 
         class _PlaneReader:
             @staticmethod
-            def read(region, fov, channel, z=0, t=0):
+            def read(region, fov, channel, z_level=0, time_point=0):
                 stack = planes.get(int(fov))
                 return None if stack is None else stack[c_idx]
 

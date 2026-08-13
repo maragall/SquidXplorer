@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from squidxplorer import available_projectors, project, project_well, operator_consumes
+from squidxplorer import available_plane_operators, project, project_well, operator_consumes
 from squidxplorer._flatfield import (
     FlatfieldProfile,
     active_profiles,
@@ -227,7 +227,7 @@ def test_flatfield_commutes_with_the_mip_on_real_10x_data(laser_af_dataset, caps
 
 
 def test_flatfield_is_registered_as_a_plane_op():
-    assert "flatfield" in available_projectors()
+    assert "flatfield" in available_plane_operators()
     assert operator_consumes("flatfield") == PLANE_OP
 
 

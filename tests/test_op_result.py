@@ -1,11 +1,12 @@
-"""OperatorResult / RegionResultAccumulator: per-FOV operator output becomes one region mosaic."""
+"""RegionResultAccumulator: per-FOV operator output becomes one region's self-describing Result."""
 
 from __future__ import annotations
 
 import numpy as np
 import pytest
 
-from squidxplorer._op_result import OperatorResult, RegionResultAccumulator
+from squidxplorer._op_result import RegionResultAccumulator
+from squidxplorer._result import Result
 
 CHANNELS = ("Fluorescence_405_nm_Ex", "Fluorescence_488_nm_Ex")
 
@@ -31,12 +32,16 @@ def test_a_plane_op_s_fovs_accumulate_into_one_region_mosaic():
     assert acc.complete()
 
     res = acc.result()
-    assert isinstance(res, OperatorResult)
-    assert res.op == "bgsub"
-    assert res.region == "A1"
+    assert isinstance(res, Result)
+    assert res.region_id == "A1"
     assert res.channels == CHANNELS
     # 2 FOVs, 8 px frames, 6 px step -> 14 px wide, 8 tall.
     assert res.plane(CHANNELS[0]).shape == (8, 14)
+    # ...and the result DECLARES what it is, so no sink has to re-derive it.
+    assert res.z_depth == 1
+    assert res.dtype == "uint16"
+    assert res.pixel_size_um == 1.0
+    assert res.kind == "intensity"
 
 
 def test_the_operator_mosaic_lands_in_THE_SAME_FRAME_as_the_raw_mosaic():
@@ -103,6 +108,16 @@ def test_an_unknown_fov_is_refused_rather_than_placed_at_the_origin():
         acc.add(99, np.zeros((2, 8, 8), np.uint16))
 
 
+def test_an_acquisition_without_a_pixel_size_is_refused_not_guessed():
+    """A result that cannot say its own scale is not self-describing."""
+    meta = _meta()
+    del meta["pixel_size_um"]
+    acc = RegionResultAccumulator("stitch", "A1", meta, CHANNELS, region_operator=True)
+    acc.add(0, np.zeros((2, 8, 8), np.uint16))
+    with pytest.raises(ValueError, match="pixel size"):
+        acc.result()
+
+
 def test_the_result_carries_the_bbox_so_napari_places_it_over_the_raw_layer():
     """Without the bbox the operator group would sit at the origin in stage space."""
     from squidxplorer._mosaic_source import mosaic_bbox_um
@@ -111,14 +126,14 @@ def test_the_result_carries_the_bbox_so_napari_places_it_over_the_raw_layer():
     acc = RegionResultAccumulator("bgsub", "A1", meta, CHANNELS)
     acc.add(0, np.zeros((2, 8, 8), np.uint16))
     acc.add(1, np.zeros((2, 8, 8), np.uint16))
-    assert acc.result().bbox_um == mosaic_bbox_um(meta, "A1")
+    assert acc.result().extent.bbox_um == mosaic_bbox_um(meta, "A1")
 
 
-def test_the_group_key_is_the_operator_so_two_operators_are_two_groups():
-    """The group key is the operator, not the region."""
-    a = RegionResultAccumulator("bgsub", "A1", _meta(), CHANNELS)
-    b = RegionResultAccumulator("decon", "A1", _meta(), CHANNELS)
-    for acc in (a, b):
-        acc.add(0, np.zeros((2, 8, 8), np.uint16))
-        acc.add(1, np.zeros((2, 8, 8), np.uint16))
-    assert a.result().op != b.result().op
+def test_the_result_carries_the_kind_its_operator_declares():
+    """``produces`` is read off the registry ONCE, here, and rides on the Result to every sink."""
+    from squidxplorer._spots import LAYER_KEY
+
+    acc = RegionResultAccumulator(LAYER_KEY, "A1", _meta(), CHANNELS)
+    acc.add(0, np.zeros((2, 8, 8), np.uint16))
+    acc.add(1, np.zeros((2, 8, 8), np.uint16))
+    assert acc.result().kind == "labels"

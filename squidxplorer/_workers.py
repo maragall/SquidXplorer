@@ -13,8 +13,7 @@ from squidxplorer import _run_scope
 from squidxplorer._engine import _default_workers
 from squidxplorer._logpane import capture_stdout_to_log, get_logger
 from squidxplorer._measure import (
-    FAILED as _MEASURE_FAILED, OK as _MEASURE_OK, PARTIAL as _MEASURE_PARTIAL,
-    STOPPED as _MEASURE_STOPPED, measure_run,
+    FAILED as _MEASURE_FAILED, STOPPED as _MEASURE_STOPPED, measure_run, verdict,
 )
 from squidxplorer._montage import _area_downsample
 from squidxplorer._napari_view import full_res_level
@@ -161,7 +160,7 @@ class _OperatorWorker(QThread):
     def run(self):
         target = _run_scope.describe_run_target(self._regions, total=self._total) or self._operator
         # capture print() for the run's duration (tilefusion reports with bare print);
-        # scoped to the run, not this thread — stitch_plate prints from pool threads
+        # scoped to the run, not this thread — the region loop prints from pool threads
         with capture_stdout_to_log(), \
                 measure_run(self._operator, target, n_targets=self._total) as _run_metrics:
             _run_metrics.note(surface="gui", save=self._save)
@@ -186,12 +185,14 @@ class _OperatorWorker(QThread):
         # say 0 of N before any work, so the bar is determinate from its first frame
         self.runProgress.emit(self._progress.report())
         try:
-            projector = self._operator
+            operator = self._operator
+            # a region operator runs one well at a time: peak memory is workers x one fused mosaic
+            workers = 1 if self._region_op else _VIEWER_WORKERS
             if self._save:
                 from squidxplorer import write_plate  # persist + project in one bounded, streaming pass
 
-                write_plate(self._reader, self._out_dir, n_fovs=self._n_fovs, workers=_VIEWER_WORKERS,
-                            projector=projector, tiff=False, on_well=self._on_well,
+                write_plate(self._reader, self._out_dir, n_fovs=self._n_fovs, workers=workers,
+                            operator=operator, tiff=False, on_well=self._on_well,
                             stop=self._stop.is_set, on_error=self._on_error, regions=self._regions,
                             operator_kwargs=self._operator_kwargs or None)
                 if self._stop.is_set():
@@ -201,21 +202,13 @@ class _OperatorWorker(QThread):
                 self.writtenReady.emit(str(Path(self._out_dir) / "plate.ome.zarr"))
             else:
                 # PREVIEW: same math as the saved run, writes nothing to disk
-                if self._region_op:
-                    # workers=1: peak memory is workers x one fused mosaic
-                    from squidxplorer import stitch_plate
+                from squidxplorer import run_plate
 
-                    stream = stitch_plate(self._reader, workers=1, operator=projector,
-                                          n_fovs=None, on_error=self._on_error,
-                                          regions=self._regions, **self._operator_kwargs)
-                else:
-                    from squidxplorer import project_plate
-
-                    # operator_kwargs on the preview too: both branches must run the same arguments
-                    stream = project_plate(self._reader, workers=_VIEWER_WORKERS, projector=projector,
-                                           n_fovs=self._n_fovs, on_error=self._on_error,
-                                           regions=self._regions,
-                                           operator_kwargs=self._operator_kwargs or None)
+                # operator_kwargs on the preview too: both branches must run the same arguments
+                stream = run_plate(self._reader, operator=operator, workers=workers,
+                                   n_fovs=self._n_fovs, on_error=self._on_error,
+                                   regions=self._regions,
+                                   operator_kwargs=self._operator_kwargs or None)
                 try:
                     for region, fov, image in stream:
                         if self._stop.is_set():
@@ -230,14 +223,8 @@ class _OperatorWorker(QThread):
                     _run_metrics.finish(_MEASURE_STOPPED, "stopped by the window")
                     return
                 self.streamEnded.emit()
-            # name the outcome: landed==0 or any skipped well is PARTIAL
-            if self.landed == 0 and self._total:
-                _run_metrics.finish(_MEASURE_PARTIAL,
-                                    f"produced nothing — all {self._total} target(s) skipped")
-            elif self.skipped:
-                _run_metrics.finish(_MEASURE_PARTIAL, f"{self.skipped} well(s) skipped")
-            else:
-                _run_metrics.finish(_MEASURE_OK)
+            # stopped=False: the stop event already returned above, with its own sentence
+            _run_metrics.finish(*verdict(self.landed, self._total, self.skipped, False))
             self.finished_ok.emit()
         except Exception as e:
             # catch so the QThread ends via `failed`, not an unhandled thread exception
@@ -257,14 +244,14 @@ class _MinervaWorker(QThread):
     failed = Signal(str)
     finished_ok = Signal()
 
-    def __init__(self, reader, selection, out_dir, projector: str, t: int = 0, launch: bool = True,
+    def __init__(self, reader, selection, out_dir, z_operator: str, time_point: int = 0, launch: bool = True,
                  luts=None):
         super().__init__()
         self._reader = reader
         self._selection = list(selection)
         self._out_dir = out_dir
-        self._projector = projector
-        self._t = t
+        self._z_operator = z_operator
+        self._t = time_point
         self._launch = launch
         # snapshotted by the caller on the GUI thread; this thread must not touch napari layers
         self._luts = dict(luts) if luts else None
@@ -289,7 +276,7 @@ class _MinervaWorker(QThread):
                 pairs.extend(
                     _minerva.export_selection(
                         self._reader, [(region, f) for f in fovs], self._out_dir,
-                        t=self._t, projector=self._projector, luts=self._luts,
+                        time_point=self._t, z_operator=self._z_operator, luts=self._luts,
                     )
                 )
                 on_progress(i + 1, len(grouped))
@@ -355,13 +342,13 @@ class _MosaicWorker(QThread):
     problem = Signal(str)
     finished_count = Signal(int)
 
-    def __init__(self, reader, meta, region, channels, parent=None, t=0):
+    def __init__(self, reader, meta, region, channels, parent=None, time_point=0):
         super().__init__(parent)
         self._reader, self._meta = reader, meta
         self._region = region
         self._channels = list(channels)
         #: which timepoint this mosaic is of
-        self._t = int(t)
+        self._t = int(time_point)
         self._stop = threading.Event()
 
     def stop(self):
@@ -386,7 +373,7 @@ class _MosaicWorker(QThread):
                 # a lazy multiscale pyramid of (z, y, x) levels; only the visible (level, z)
                 # is ever materialised
                 res = fuse_region_pyramid(self._reader, self._meta, self._region, ch,
-                                          t=self._t)
+                                          time_point=self._t)
             except Exception as exc:                # noqa: BLE001 - reported, never swallowed
                 self.problem.emit(f"{self._region}/{ch}: {type(exc).__name__}: {exc}")
                 continue
@@ -469,10 +456,10 @@ class _SpotWorker(QThread):
         self._stop.set()
 
     def run(self):
-        from squidxplorer._spots import SpotDetectionCancelled, detect_spots, preferred_segmenter
+        from squidxplorer._spots import SpotDetectionCancelled, detect_spots
 
         where = f"{self._region}/{self._channel}"
-        algorithm = preferred_segmenter()
+        algorithm, segment = _nuclei_algorithm()
         # the progress denominator is whatever the running algorithm reports
         reported_total = [0]
 
@@ -486,7 +473,7 @@ class _SpotWorker(QThread):
             log.info("%s: detecting nuclei with %s on a %s MIP", where, algorithm, plane.shape)
 
             res = detect_spots(
-                plane, self._params, algorithm=algorithm,
+                plane, self._params, segment=segment,
                 on_stage=_stage,
                 should_stop=self._stop.is_set,
             )
@@ -507,6 +494,20 @@ class _SpotWorker(QThread):
         self.ready.emit(self._region, self._channel, res.labels, res.centroids,
                         self._bbox_um, res.count)
         self.finished_count.emit(self._region, self._channel, res.count)
+
+
+def _nuclei_algorithm():
+    """``(name, segment)`` the detect-nuclei button runs: Cellpose when installed, else the
+    Otsu-watershed."""
+    from squidxplorer.projection import missing_requirements
+
+    if not missing_requirements(("cellpose",)):
+        from squidxplorer._cellpose import OPERATOR_NAME, cellpose_nuclei
+
+        return OPERATOR_NAME, cellpose_nuclei
+    from squidxplorer._spots import LAYER_KEY, skimage_watershed
+
+    return LAYER_KEY, skimage_watershed
 
 
 def _spot_stages():
@@ -595,7 +596,7 @@ class _VideoWorker(QThread):
     cancelled = Signal()
 
     def __init__(self, reader, meta, region, out_path, *, axis, fps,
-                 channels=None, windows=None, rgb_by_channel=None, z=0, t=0, parent=None):
+                 channels=None, windows=None, rgb_by_channel=None, z_level=0, time_point=0, parent=None):
         super().__init__(parent)
         self._reader, self._meta, self._region = reader, meta, region
         self._out_path = str(out_path)
@@ -603,7 +604,7 @@ class _VideoWorker(QThread):
         self._channels = list(channels) if channels is not None else None
         self._windows = list(windows) if windows else None
         self._rgb_by_channel = dict(rgb_by_channel or {})
-        self._z, self._t = int(z), int(t)
+        self._z, self._t = int(z_level), int(time_point)
         self._stop = threading.Event()
 
     def stop(self):
@@ -618,7 +619,7 @@ class _VideoWorker(QThread):
                 self._reader, self._meta, self._region, self._out_path,
                 axis=self._axis, fps=self._fps, channels=self._channels,
                 windows=self._windows, rgb_by_channel=self._rgb_by_channel,
-                z=self._z, t=self._t,
+                z_level=self._z, time_point=self._t,
                 on_frame=lambda d, total: self.progress.emit(int(d), int(total)),
                 should_stop=self._stop.is_set,
             )
@@ -695,7 +696,7 @@ class _PreviewWorker(QThread):
     failed = Signal(str)                         # a preview that could not finish names why
 
     def __init__(self, reader, meta, fov_index: dict, order: list, mosaic: bool = True,
-                 cache=_CACHE_AUTO, t: int = 0):
+                 cache=_CACHE_AUTO, time_point: int = 0):
         super().__init__()
         self._reader, self._meta = reader, meta
         self._fov_index, self._order = fov_index, order
@@ -703,7 +704,7 @@ class _PreviewWorker(QThread):
         self._dtype = np.dtype(meta["dtype"])
         self._mosaic = bool(mosaic)
         #: which timepoint this preview is of
-        self._t = max(0, int(t))
+        self._t = max(0, int(time_point))
         self._stop = threading.Event()
         # persisted plate cells; for_reader returns None (logging why) when caching is unavailable
         from squidxplorer._platecache import PlateCellCache
@@ -715,7 +716,7 @@ class _PreviewWorker(QThread):
         if (self._cache is not None
                 and getattr(self._cache, "time_point", self._t) != self._t):
             raise ValueError(
-                f"_PreviewWorker(t={self._t}) was handed a cache for timepoint "
+                f"_PreviewWorker(time_point={self._t}) was handed a cache for timepoint "
                 f"{self._cache.time_point}: its cells would be published under the wrong frame.")
         self._pending: dict = {}      # region -> the cell being accumulated for the cache
         self.cache_hits = 0           # regions served from the cache
@@ -822,7 +823,8 @@ class _PreviewWorker(QThread):
                     return None
                 h, w = (_CELL, _CELL) if box is None else (box[2], box[3])
                 fit = _fit_cell if box is None else (lambda a: _fit_box(a, h, w))
-                return region, box, [fit(self._reader.read(region, fov, ch, z_mid, t=self._t)
+                return region, box, [fit(self._reader.read(region, fov, ch, z_mid,
+                                                            time_point=self._t)
                                          .astype(np.float32)) for ch in self._channels]
 
             # ex.map submits every item before the first result; the poll in load cancels the work

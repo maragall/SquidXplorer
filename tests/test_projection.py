@@ -170,11 +170,11 @@ def _two_timepoint_reader(tmp_path):
 def test_project_well_t_selects_one_timepoint(tmp_path):
     reader, t0, t1 = _two_timepoint_reader(tmp_path)
 
-    out = project_well(reader, "A1", 0, t=1)
+    out = project_well(reader, "A1", 0, time_point=1)
     assert out.shape == (1, 1, 1, 4, 4)
     np.testing.assert_array_equal(out[0, 0, 0], np.max(np.stack(list(t1.values())), axis=0))
 
-    out0 = project_well(reader, "A1", 0, t=0)
+    out0 = project_well(reader, "A1", 0, time_point=0)
     np.testing.assert_array_equal(out0[0, 0, 0], np.max(np.stack(list(t0.values())), axis=0))
 
 
@@ -183,13 +183,13 @@ def test_project_well_t_reads_only_that_timepoint(tmp_path):
     seen = []
     real_read = type(reader).read
 
-    def spy(self, region, fov, channel, z, t=0):
-        seen.append(t)
-        return real_read(self, region, fov, channel, z, t)
+    def spy(self, region, fov, channel, z_level, time_point=0):
+        seen.append(time_point)
+        return real_read(self, region, fov, channel, z_level, time_point)
 
     type(reader).read = spy
     try:
-        project_well(reader, "A1", 0, t=1)
+        project_well(reader, "A1", 0, time_point=1)
     finally:
         type(reader).read = real_read
     assert set(seen) == {1}
@@ -200,7 +200,7 @@ def test_project_well_t_none_keeps_every_timepoint(tmp_path):
     reader, _, _ = _two_timepoint_reader(tmp_path)
     assert project_well(reader, "A1", 0).shape == (2, 1, 1, 4, 4)
     np.testing.assert_array_equal(
-        project_well(reader, "A1", 0), project_well(reader, "A1", 0, t=None)
+        project_well(reader, "A1", 0), project_well(reader, "A1", 0, time_point=None)
     )
 
 
@@ -208,7 +208,7 @@ def test_project_well_t_none_keeps_every_timepoint(tmp_path):
 def test_project_well_t_out_of_range_raises_named(tmp_path, bad):
     reader, _, _ = _two_timepoint_reader(tmp_path)
     with pytest.raises(ValueError, match="out of range"):
-        project_well(reader, "A1", 0, t=bad)
+        project_well(reader, "A1", 0, time_point=bad)
 
 
 def test_project_requires_acquisition_yaml(tmp_path):
@@ -280,7 +280,7 @@ def test_project_reference_picks_sharpest_plane():
     out = project_reference(iter([flat, dim, sharp]))
     assert np.array_equal(out, sharp)
     import squidxplorer
-    assert "reference" in squidxplorer.available_projectors()
+    assert "reference" in squidxplorer.available_plane_operators()
 
 
 CH_A = "Fluorescence_405_nm_-_Penta"
