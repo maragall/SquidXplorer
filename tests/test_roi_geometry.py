@@ -124,12 +124,13 @@ def test_a_stitched_fov_subset_is_not_stretched_over_the_whole_well():
     acc.add(0, stack)
     result = acc.result()
 
-    scale, translate = scale_translate_from_bbox_um(result.bbox_um, result.planes[0].shape)
+    scale, translate = scale_translate_from_bbox_um(result.extent.bbox_um,
+                                                    result.plane("c0").shape)
     assert scale == pytest.approx((PX_1536, PX_1536), rel=0, abs=1e-12), (
         f"a two-field stitch was placed at {scale} um/px; the acquisition is {PX_1536}")
     assert translate == (STAGE_Y0_UM, STAGE_X0_UM)
     whole = mosaic_bbox_um(meta, "A1")
-    assert result.bbox_um[3] < whole[3], (
+    assert result.extent.bbox_um[3] < whole[3], (
         "two of four fields must not claim the whole well's footprint")
 
 
@@ -143,7 +144,7 @@ def test_a_per_fov_operator_still_uses_the_preview_footprint():
     acc = RegionResultAccumulator("bgsub", "A1", meta, ["c0"])
     for fov in meta["fovs_per_region"]["A1"]:
         acc.add(fov, np.zeros((1, FRAME, FRAME), np.uint16))
-    assert acc.result().bbox_um == mosaic_bbox_um(meta, "A1")
+    assert acc.result().extent.bbox_um == mosaic_bbox_um(meta, "A1")
 
 
 def _bboxes():

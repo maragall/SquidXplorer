@@ -90,7 +90,7 @@ def _worker(meta: dict, operator: str) -> _OperatorWorker:
 
 
 def _deliver(worker, meta, image):
-    """One region's run, from the engine's 5-D yield to the ``OperatorResult`` the display gets."""
+    """One region's run, from the engine's 5-D yield to the ``Result`` the display gets."""
     got: list = []
     worker.resultReady.connect(lambda region, fov, planes: got.append((region, fov, planes)))
     worker._on_well(REGION, 0, image)
@@ -100,12 +100,6 @@ def _deliver(worker, meta, image):
                                   region_operator=worker._region_op)
     acc.add(int(fov), np.asarray(planes))
     return acc.result()
-
-
-def _z_depth(result) -> int:
-    """``_viewer._as_result``'s rule, verbatim."""
-    first = result.planes[0]
-    return int(first.shape[0]) if int(getattr(first, "ndim", 2)) >= 3 else 1
 
 
 # =============================================================================================
@@ -118,8 +112,8 @@ def test_a_stitched_region_reaches_the_layer_with_EVERY_acquired_plane():
     h, w = _mosaic_hw(meta)
     result = _deliver(_worker(meta, "stitch"), meta, _stitched_5d(h, w))
 
-    assert _z_depth(result) == N_Z, (
-        f"the stitched mosaic reached the display with z_depth {_z_depth(result)}; the engine "
+    assert result.z_depth == N_Z, (
+        f"the stitched mosaic reached the display with z_depth {result.z_depth}; the engine "
         f"fused {N_Z} planes")
     for c, channel in enumerate(CHANNELS):
         vol = np.asarray(result.plane(channel))

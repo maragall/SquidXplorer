@@ -3649,66 +3649,7 @@ class PlateWindow(QMainWindow):
                 regions.add(str(here))
         return regions
 
-    def _as_result(self, op_result):
-        """An ``OperatorResult`` as a SELF-DESCRIBING :class:`squidxplorer._result.Result`.
-
-        This is that type's first consumer that RENDERS one, and it is what lets a window draw
-        what the result declares -- its channels, its z depth -- instead of re-deriving both from
-        the acquisition metadata and hoping the two agree.
-
-        The pixels travel as the per-channel tuple the accumulator already fused, NOT restacked
-        into one array: ``Result.plane`` looks a channel up by NAME and then indexes axis 0, and a
-        sequence of per-channel planes is channel-major on axis 0 exactly as an array would be.
-        Restacking would copy a whole region mosaic to say something the tuple already says.
-
-        The extent is ``Extent(region_id=...)``: "all of it" on every other dimension, which is
-        what a whole-region operator run covers. The mosaic's own stage footprint is deliberately
-        NOT put in ``Extent.bbox_um`` -- that field means "the ROI a request was narrowed to", and
-        a second meaning for it is how the address model starts to drift. Placement is derived by
-        each surface from ``mosaic_bbox_um``, the one placement rule that placed raw.
-
-        THE RESULT KIND IS READ HERE, ONCE. ``produces`` is the operator's own declaration
-        (``add_operator(..., produces="labels")``), and this is the single place it is looked up
-        on the display side; from here it rides on the ``Result`` to every sink, so no sink has to
-        take a possibly-scoped layer key apart to ask the registry, and no sink can disagree with
-        another about what an operator's pixels mean. An operator the engine does not know (there
-        is one: the pseudo-key ``"computed"``, set by the reopened-plate path) falls back to
-        intensity, which is what those pixels are.
-
-        Returns None, having said why in the readout, when the acquisition cannot declare a pixel
-        size: a result that cannot say its own scale is not self-describing, and inventing one is
-        exactly the plausible-and-wrong guess this codebase refuses.
-        """
-        from squidxplorer._result import Result
-
-        planes = list(op_result.planes)
-        if not planes:
-            self._readout.setText(f"{op_result.op}: the result carries no planes to show")
-            return None
-        pixel_size_um = (self._meta or {}).get("pixel_size_um")
-        if not pixel_size_um:
-            self._readout.setText(
-                f"{op_result.op}: this acquisition declares no pixel size, so the result cannot "
-                f"declare its scale and will not be drawn as a layer")
-            return None
-        first = planes[0]
-        # z_depth from the pixels, which is unambiguous HERE and only here: OperatorResult has
-        # already split the channel axis off, so a 3-D plane's leading axis can only be z. The
-        # general (C, Z, Y, X) / (C, Y, X) ambiguity _result.Result.of refuses to guess at does
-        # not arise once the channel axis is gone.
-        z_depth = int(first.shape[0]) if int(getattr(first, "ndim", 2)) >= 3 else 1
-        try:
-            return Result.of(
-                Extent(region_id=op_result.region), planes,
-                channels=op_result.channels, z_depth=z_depth,
-                pixel_size_um=float(pixel_size_um), dtype=first.dtype,
-                kind=result_kind(op_result.op),
-            )
-        except ValueError as exc:
-            self._readout.setText(f"result not shown as a layer: {exc}")
-            return None
-
-    def _deliver_operator_result(self, op: str, op_result) -> None:
+    def _deliver_operator_result(self, op: str, result) -> None:
         """THE COMPLETION PATH: one region's finished result, to the surfaces that asked for it.
 
         Julio, 2026-07-29: "the layers such as 'raw', 'flatfield', 'stitched', in the window that I
@@ -3718,14 +3659,12 @@ class PlateWindow(QMainWindow):
         ``None`` since the decentralization. So the run happened, the pixels were written, and the
         window that asked for them gained nothing.
 
-        One declaration, several sinks. The ``Result`` is built once and handed to every open
-        window, so no sink re-derives what the result is. ``_add_result_layers`` -- the branch that
-        painted the plate's own pane -- was deleted on 2026-08-06 along with the pane it needed;
-        the windows are the sinks, and they always were.
+        One declaration, several sinks. The ``Result`` is built once -- by the accumulator, which
+        is the only place that knows what it fused -- and handed to every open window, so no sink
+        re-derives what the result is. ``_add_result_layers`` -- the branch that painted the
+        plate's own pane -- was deleted on 2026-08-06 along with the pane it needed; the windows
+        are the sinks, and they always were.
         """
-        result = self._as_result(op_result)
-        if result is None:
-            return                              # _as_result has already said why
         # FILE IT IN THE CROSS-WINDOW RESULT CACHE, whose docstring has promised exactly this
         # since it was written and which had no production call site at all: "two windows over the
         # same node running the same chain at the same version hit the SAME entry: results

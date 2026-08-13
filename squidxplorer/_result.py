@@ -121,9 +121,10 @@ class Result:
     ``eq=False`` is deliberate: the plate never asks whether two cells agree, only what each one
     is. (It also sidesteps a generated ``__eq__`` raising on a numpy array field.)
 
-    ``data`` is channel-major on axis 0 (``(C, ...)``), matching
-    :class:`squidxplorer._op_result.OperatorResult`, and may be ``None`` for a declaration read back
-    before its pixels are paged in.
+    ``data`` is channel-major on axis 0 (``(C, ...)``) -- a sequence of per-channel planes
+    qualifies, which is how :class:`squidxplorer._op_result.RegionResultAccumulator` hands its fused
+    planes over without restacking them -- and may be ``None`` for a declaration read back before
+    its pixels are paged in.
     """
 
     extent: Extent
