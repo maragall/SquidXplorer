@@ -25,6 +25,7 @@ GUI_MODULES = frozenset({
     "_brick_view",       # the in-window 3D renderer; owns a QThread reading bricks off the UI
                           # thread. The Qt-free half (geometry, stride, budget policy) is `_bricks`.
     "_gallery_window",   # Gallery View's window; its producer `_gallery` is Qt-free on purpose
+    "_ingest",           # the acquisition-open pipeline, cut out of `_viewer` (2026-08-13)
     "_layer_tree",       # the grouped layer tree (a QTreeView over napari's item model)
     "_logpanel",         # the log PANEL (the Qt widget). `_logpane`, no 'l', is the Qt-free bus.
     "_napari_pane",
@@ -57,7 +58,7 @@ NAPARI_EXCEPTIONS = frozenset({"_layer_tree", "_region_nav"})
 #: The modules lifted out of ``_viewer.py``, and what each may lift out of the others. `_viewer` is
 #: absent from every value on purpose: that absence is the property under test.
 CUT_OUT_OF_VIEWER = frozenset({
-    "_operations", "_plate_overview", "_qt_tabs", "_qtstyle", "_workers",
+    "_ingest", "_operations", "_plate_overview", "_qt_tabs", "_qtstyle", "_run", "_workers",
 })
 
 

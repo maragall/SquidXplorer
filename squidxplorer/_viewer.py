@@ -59,7 +59,7 @@ from squidxplorer._logpane import get_logger
 
 log = get_logger("viewer")
 
-from squidxplorer import _measure, _qtstyle, _run_scope
+from squidxplorer import _ingest, _measure, _qtstyle, _run_scope
 from squidxplorer.contract import field_path
 from squidxplorer._engine import available_plane_operators
 from squidxplorer._layers import OperationStack
@@ -2369,43 +2369,18 @@ class PlateWindow(QMainWindow):
     # _processed_plate still names the older save. Re-registering on every transition is what
     # keeps the inset showing the same run the tiles came from.
 
+    # The loupe-source bookkeeping lives in `_ingest`; these forward so callers are unchanged.
     def _release_loupe_sources(self):
-        """Drop every source AND join the read thread that serves them.
-
-        The one call every "the plate is being replaced" path must make. Assigning
-        ``self._loupe_sources = {}`` (which _open_computed did) only forgets the sources: the
-        _LoupeWorker QThread lives on the OVERVIEW, so the old overview walked off with a running
-        thread and its ~35 MB plane cache on every plate open — confirmed still isRunning() after
-        the overview was replaced. Only PlateOverview.shutdown() stops and joins it.
-
-        It goes through ``shutdown()`` rather than ``set_loupe_source(None)`` because the overview
-        owns TWO threads and the loupe worker is only one of them: this method's own sentence
-        above ("the one call every 'the plate is being replaced' path must make") was true of the
-        loupe and false of the tile fetcher, which outlived two of the three replacement paths."""
-        if self._overview is not None:
-            self._overview.shutdown()
-        self._loupe_sources = {}
+        _ingest.release_loupe_sources(self)
 
     def _set_loupe_source(self, layer_key, source):
-        self._loupe_sources[layer_key] = source
-        self._update_loupe_source()
+        _ingest.set_loupe_source(self, layer_key, source)
 
     def _drop_loupe_source(self, layer_key):
-        self._loupe_sources.pop(layer_key, None)
-        self._update_loupe_source()
+        _ingest.drop_loupe_source(self, layer_key)
 
     def _update_loupe_source(self):
-        """Point the plate at the source for whatever layer is on screen right now."""
-        if self._overview is None:
-            return
-        active = getattr(self._overview, "_active", "raw")
-        source = self._loupe_sources.get(active)
-        if source is self._overview._loupe_src:
-            return                                   # unchanged: don't churn the worker thread
-        colors = None
-        if self._meta and self._meta.get("channels"):
-            colors = np.stack([_hex_to_rgb01(c["display_color"]) for c in self._meta["channels"]])
-        self._overview.set_loupe_source(source, colors)
+        _ingest.update_loupe_source(self)
 
     def _enable_operators(self, flag: bool):
         for a in self._op_actions.values():
@@ -2437,161 +2412,9 @@ class PlateWindow(QMainWindow):
             e.acceptProposedAction()
             self.ingest(urls[0].toLocalFile())
 
-    # -- open an acquisition (no processing yet — that's the Process menu) --
     def ingest(self, path: str):
-        from squidxplorer import open_reader
-
-        p, is_plate = resolve_plate_root(path)
-        if is_plate:
-            self._readout.setText("this is already a written plate — drop a raw Squid acquisition")
-            return
-        # stop any in-flight run/preview/export and clear prior state before opening a new
-        # acquisition. _stop_minerva matters as much as the other two: a Minerva worker left
-        # running holds the OLD reader and would keep exporting (and launching) against an
-        # acquisition the window no longer shows.
-        self._stop_worker()
-        self._stop_preview()
-        self._stop_minerva()
-        self._reader = self._meta = None
-        self._fov_index = {}
-        self._selected_regions = []   # wells picked on the plate (IMA-221); scopes an operator run
-        self._current_well = None
-        self._current_fov = 0
-        self._enable_operators(False)
-        if self._overview is not None:
-            self._release_loupe_sources()   # BOTH read threads, before dropping their owner
-            self._overview.setParent(None)
-            self._overview.deleteLater()
-            self._overview = None
-        self._readout.setText("scanning acquisition …")
-        QApplication.processEvents()
-        try:
-            reader = open_reader(str(p))
-            meta = reader.metadata
-        except Exception as e:   # not a Squid acquisition / unreadable -> report, don't crash the app
-            self._readout.setText(f"not a readable Squid acquisition: {e}")
-            self._drop.show()
-            return
-        # Resolve the layout format ONCE: an explicit override wins, then the declared field, then
-        # inference from the well ids (IMA-219 — two real acquisitions carry no format at all).
-        # Never fatal: an un-inferable plate keeps the declared value and falls through the guard.
-        # Resolve the sample holder ONCE (IMA-214). build_plate handles wells AND slides: a slide
-        # carrier is a Plate whose cells are the freeform region ids, so a glass-slide/tissue
-        # acquisition reaches this widget by the same path a 384wp does. It also reconciles a
-        # declared format against the MEASURED stage pitch, so a mis-declared plate cannot lay out
-        # at the wrong scale.
-        try:
-            plate = build_plate(meta, override=self._plate_format_override)
-        except (PlateShapeError, PlateBuildError) as e:
-            self._readout.setText(f"cannot lay out this acquisition: {e}")
-            self._drop.show()
-            return
-        self._plate = plate
-        self._plate_format = fmt = plate.format_name
-        self._reader, self._meta = reader, meta
-        self._acq_name = Path(p).name
-        self._acq_path = Path(p)
-        self._processed_plate = None
-        self._viewer_manager.set_dataset(reader, meta)   # every spawned window shares this reader
-        rows, cols, wells, order = plate.viewer_grid()
-        for idx, region in enumerate(order):
-            self._fov_index[region] = {"idx": idx, "well_id": region, "rc": plate.cell_index(region)}
-
-        self._order = order                          # well order = the detail's FOV-slider order
-        # A freeform holder places its cells by GEOMETRY (IMA-253): the plate hands over one
-        # rectangle per region, in grid units, and the overview draws exactly those. A well plate
-        # returns None here and keeps the uniform grid it has always had.
-        cl = plate.cell_layout() if hasattr(plate, "cell_layout") else None
-        layout = ({plate.cell_index(cid): rect for cid, rect in cl.items()} if cl else None)
-        self._overview = PlateOverview(rows, cols, wells, layout=layout)
-        # Carrier art behind the cells (IMA-220). Hand over the PLATE, not its name: `plate` is what
-        # build_plate RESOLVED (measured pitch beat the 2x2's mis-declared "384 well plate"), so the
-        # background can only ever be drawn at the same scale the grid is laid out at.
-        self._overview.set_carrier(plate)
-        # DEEP ZOOM: arm the tile overlay for this acquisition. Fail-quiet by contract — an
-        # acquisition with no usable stage positions keeps the montage and nothing else changes.
-        if self._overview.set_tile_source(reader, meta):
-            g = self._overview._ladder.geometry
-            log.info("deep zoom armed: %d rungs, %.3f-%.1f um/px, %d tiles at fit",
-                     len(g), g.levels[0].scale_um_per_px, g.levels[-1].scale_um_per_px,
-                     g.worst_case_tiles)
-        else:
-            log.info("deep zoom not armed (no usable stage positions) — montage only")
-        self._selected_regions = []                  # a new acquisition starts with nothing picked
-        self._overview.hovered.connect(self._on_hover)
-        self._overview.wellActivated.connect(self.activate_well)
-        self._overview.selectionChanged.connect(self._on_selection_changed)
-        self._overview.marqueeSelected.connect(self._on_marquee_selected)
-        # The loupe's source is chosen by which layer the plate SHOWS, so it follows the plate
-        # rather than being re-pointed by hand at each of the six places the layer moves.
-        self._overview.activeLayerChanged.connect(lambda _k: self._update_loupe_source())
-        self._plate_mode = "raw"                     # a freshly-opened plate shows raw previews
-        self._plate_title.setText(f"{self._acq_name}   ·   raw")   # bottom-left plate-pane title
-        self._op_stack.reset()                       # fresh layer stack (base only)
-        self._active_op_key = None
-        if getattr(self, "_raw_btn", None):
-            self._raw_btn.hide()                     # raw view on open -> nothing to return from
-        self._refresh_layers_tab()
-        self._drop.hide()
-        self._left_l.addWidget(self._overview, 1)   # fills the pane and self-fits — no scrollbars
-        self._declare_channel_axis(meta["channels"], meta["dtype"])
-
-        # Hand the plate's region order to the SINGLE OWNER. Announcing it is what puts the red
-        # ROI frame on region 0 — one move, not several calls that could each be forgotten on some
-        # path.
-        #
-        # Cleared first so the announce always happens: re-opening an acquisition whose region ids
-        # match the previous one would otherwise be a no-op move and every surface reading the
-        # cursor would keep pointing at the OLD plate's region.
-        self._cursor.set_order([])
-        self._cursor.set_order(order)
-
-        self._enable_operators(True)
-
-        # The loupe works from the moment the folder opens — the raw layer's real pixels are the
-        # acquisition's own TIFFs, the same planes the preview below is about to downsample. No
-        # operator run is required to look closely at a well.
-        self._loupe_sources = {"raw": _RawLoupeSource(
-            reader, meta, lambda w: _fov_of_well(w, meta.get("fovs_per_region")))}
-        self._update_loupe_source()
-
-        # The mosaic geometry is known the moment the acquisition opens — it is pure arithmetic on
-        # coordinates.csv — so hand it to the plate NOW rather than waiting for an operator run
-        # (IMA-249: it was only ever set from run_operator, which is why the plate looked like a
-        # grid of lone frames until something was run). The preview below composites into exactly
-        # these boxes.
-        self._overview.set_mosaic_boxes(_mosaic_boxes(meta))
-
-        # Size the timepoint bar to what was just ingested. set_count hides it at n_t == 1 and
-        # clamps the position, so re-ingesting a SHORTER acquisition cannot leave the bar pointing
-        # past the end. It does not fire the callback: an ingest is not a user gesture.
-        self._time_point_bar.set_count(int(meta.get("n_t", 1) or 1))
-        # set_count CLAMPS the position, so read it back rather than assuming it survived: a
-        # re-ingest onto a shorter acquisition moves the bar, and the loupe must move with it.
-        self._overview.set_time_point(self.time_point)
-
-        # fast RAW preview: fill the plate with downsampled thumbnails immediately (grey dots),
-        # in the SAME row-major order the operator will later process them in.
-        self._start_preview(reader, meta, order)
-        # top-left = STATUS (what's happening / what's shown); the plate name is the pane title.
-        # "live" is retired from user-facing copy: this is POST-ACQUISITION review, and calling
-        # a loaded plate "live" reads as a running scope. The phrasing is operator/stitcher
-        # iteration.
-        # Multi-FOV policy (IMA-187): an operator run processes EVERY FOV and composites them into
-        # the well's cell by stage coordinate. The raw preview above is still one FOV per well (it
-        # reads a single plane per well precisely to stay fast), so say which one you're looking at.
-        multi = sum(1 for r in order if len(meta["fovs_per_region"][r]) > 1)
-        note = (f" · {multi} multi-FOV region(s), previewing as mosaics" if multi else "")
-        # NOT "live". This is a POST-ACQUISITION tool: nothing here is streaming off a scope --
-        # the acquisition is finished and on disk, and calling it live invited exactly the wrong
-        # mental model of what the operators below are doing. What the line has to say is what is
-        # loaded and how to open it -- including the region slider, which is new and otherwise
-        # undiscoverable.
-        self._readout.setText(
-            # No region slider on the root any more (2b8fbc5 moved it into each spawned window),
-            # so naming it here sent users looking for a control that is not on screen.
-            f"{len(self._fov_index)} wells loaded · double-click a well, or Shift-drag to open "
-            f"several{note}")
+        """Open a raw Squid acquisition folder. The pipeline lives in `_ingest.ingest`."""
+        _ingest.ingest(self, path)
 
     # -- the current region: ONE value, three views ------------------------------------------
     #
@@ -3347,37 +3170,14 @@ class PlateWindow(QMainWindow):
         self._readout.setText(f"the raw preview could not finish: {message}")
 
     def _start_preview(self, reader, meta, order):
-        """Start the raw preview over *order*, fully wired. THE only place a preview is built.
+        """Start the raw preview over *order* (`_ingest.start_preview` is the one builder).
 
-        Extracted because there were three byte-identical five-line copies of this (first ingest,
-        the tab re-scope, and the return-to-raw resume), and the progress wiring below had to land
-        on all three or the bar would appear on some entry paths and not others — the "wired on one
-        of N call sites" defect that made the stdout capture look like a partial integration in the
-        first place. One constructor, one set of connections, no third chance to disagree.
-
-        It is also the ONE place the plate's timepoint reaches the pixels. Every entry path —
-        the first ingest, the tab re-scope, and `_return_to_raw`, which is what a timepoint change
-        calls — must preview the frame the bar is showing, and reading `self.time_point` here
-        rather than at three call sites makes that true by construction rather than on whichever
-        paths somebody remembered. The worker carries the same t into its cell cache, so a
-        revisited timepoint is a cache HIT and not a re-read (`_platecache.PlateCellCache`).
+        This forwarder is the ONE place the plate's timepoint reaches the pixels. Every entry
+        path — the first ingest, the tab re-scope, and `_return_to_raw`, which is what a
+        timepoint change calls — must preview the frame the bar is showing, and reading
+        `self.time_point` here rather than at three call sites makes that true by construction.
         """
-        self._preview = _PreviewWorker(reader, meta, self._fov_index, order,
-                                       time_point=self.time_point)
-        self._preview_order = list(order)
-        self._preview.tileReady.connect(self._on_preview_tile)
-        self._preview.streamEnded.connect(lambda: self._recomposite("raw"))
-        self._preview.failed.connect(self._on_preview_failed)
-        # The preview reports on the SAME channel an operator run does, so the one bar covers it
-        # ("even if it's preview"). Published straight through: the plate window is only a relay
-        # here, because the preview has no status line of its own to feed.
-        self._preview.runProgress.connect(self._publish_progress)
-        # QThread.finished, not streamEnded: at streamEnded the thread is still running, so
-        # _clear_progress_if_idle would see it and decline. This also covers the failed and the
-        # stopped preview, which never reach streamEnded at all.
-        self._preview.finished.connect(self._clear_progress_if_idle)
-        self._preview.start()
-        return self._preview
+        return _ingest.start_preview(self, reader, meta, order, time_point=self.time_point)
 
     def _on_tile(self, ri, ci, well_id, tile, box=None):
         """A field landed. ``box`` is None for the single-tile producers (_ComputedPlateWorker emits
@@ -4051,8 +3851,7 @@ class PlateWindow(QMainWindow):
         self._worker = None
 
     def _stop_preview(self):
-        self._retire(self._preview)
-        self._preview = None
+        _ingest.stop_preview(self)
 
     def _stop_minerva(self):
         self._retire(self._minerva)
