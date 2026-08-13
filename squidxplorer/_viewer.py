@@ -81,6 +81,7 @@ from squidxplorer._qtstyle import hline as _hline
 from squidxplorer._qtstyle import operator_card as _operator_card
 from squidxplorer._time_point import TimePointBar
 from squidxplorer._region_nav import RegionCursor
+from squidxplorer._run import OperatorRun
 
 # Plate overview and geometry live in `_plate_overview`; re-exported under their
 # historical names so callers and tests reaching through `_viewer` are unchanged.
@@ -175,31 +176,11 @@ _RIGHT_COL_SIZES = [215, 165]
 
 class PlateWindow(QMainWindow):
     #: In-flight operator results, one accumulator per REGION being accumulated, or None.
-    #: A CLASS default rather than an __init__ assignment so ``_on_result`` can use plain
-    #: attribute access: a bare ``getattr(self, ..., None)`` on a QObject whose __init__ has
+    #: The latest run's identity and books (:class:`squidxplorer._run.OperatorRun`), or None before
+    #: the first run. A CLASS default rather than an __init__ assignment so the run slots can use
+    #: plain attribute access: a bare ``getattr(self, ..., None)`` on a QObject whose __init__ has
     #: not run raises out of Qt's own attribute machinery instead of returning the default.
-    #:
-    #: Keyed by region rather than a single slot because there is no longer ONE surface showing
-    #: ONE region. Every open window shows a region of its own, so the set of regions somebody is
-    #: looking at is as large as the set of open windows -- and a single slot thrashed between
-    #: them, which means no region ever completed and no layer was ever drawn. The bound is the
-    #: number of open windows, which is the honest bound; see ``_result_regions``.
-    _result_accs = None
-    #: The window that asked for the in-flight run (a ``RegionViewer``), the bare action label to
-    #: report to it, and the reason the run failed if it did. The completion callback, held as
-    #: state rather than captured in a lambda for the same reason ``_run_label`` is: the same three
-    #: facts are read by ``_on_run_drained`` and by nothing else, and one source is how they stay
-    #: in agreement.
-    _run_requester = None
-    _run_op_action = None
-    _run_error = None
-    #: The most recent :class:`~squidxplorer._progress.ProgressReport` of the in-flight run, or None
-    #: between runs. Held for the same reason as the three above: read back by the status line.
-    _run_units = None
-    #: When the user last asked for an operator run, on the perf_counter clock. The other end of
-    #: FIRST PAINT, whose stop is in ``_on_tile``: the wait being measured is the user's, so it
-    #: starts at the gesture and not at the moment a worker thread happens to be constructed.
-    _run_t0 = None
+    _run = None
 
     def __init__(self, initial_path: Optional[str] = None):
         super().__init__()
@@ -330,8 +311,6 @@ class PlateWindow(QMainWindow):
         self._gallery = None          # the ONE open GalleryWindow, or None (see _open_gallery_view)
         self._readout_base = ""
         self._tabs_muted = False      # suppress _on_tab_changed during bulk teardown (ingest)
-        self._run_label = ""          # the in-flight run's operator label, and where it is going —
-        self._run_dest = ""           # one source for the status line
         self._pending_resync = False  # a tab switch was deferred because a run was live (IMA-205 bugs)
         self._runs_settled = 0        # monotonic: bumped once a run's TERMINAL cascade has run — the
         #                               tiles, the streamEnded recomposite AND _on_run_drained. It is
@@ -1219,9 +1198,9 @@ class PlateWindow(QMainWindow):
         It owns pane 1's status line, and it forwards the same immutable report to the window that
         ASKED for the run — the region window, which had no progress affordance at all.
         """
-        self._run_units = report
-        self._run_readout(f"● {report.sentence()}{self._run_dest}")
-        self._tell_requester(self._run_requester, "operator_progress", report)
+        run = self._run
+        self._run_readout(f"● {report.sentence()}{run.dest}")
+        self._tell_requester(run.requester, "operator_progress", report)
         # ...and to the ONE bar next to the memory bar, which is where Julio asked to see a run
         # WHEREVER it was started from ("in bulk or in a specific window"). The requester above is
         # told only when the run came from a region window; this covers both, and the preview.
@@ -1390,7 +1369,7 @@ class PlateWindow(QMainWindow):
         preview's exit is not the run's drain, and treating it as one closed the run's books early:
         observed on 2026-08-03, 5 runs in 200, as ``_close_requester_pair`` running while the
         operator worker's own ``runProgress`` and ``failed`` were still sitting in the queue. The
-        window that asked was then unsubscribed (``_run_requester = None``) before a single unit
+        window that asked was then unsubscribed (the run's requester cleared) before a single unit
         report reached it, so its bar's ONLY frame was the drain's final "2 of 2", and a failed run
         was reported as "produced nothing" instead of naming its cause. ``operator_busy`` cannot
         catch this: the run's thread has already exited, so it is honestly not busy — what has not
@@ -1414,24 +1393,20 @@ class PlateWindow(QMainWindow):
             # stopped run is exactly the case that would have gone quiet. A run that landed nothing
             # is reported as a failure however politely the engine returned.
             # A region whose FOVs were only PARTLY read never reached `acc.complete()`, so its
-            # result was still sitting in `_result_accs` with nothing left running to finish it.
+            # result was still sitting in the run's books with nothing left running to finish it.
             # Resolved here, before the books are closed, so the two lines below cannot report a
-            # run as done when it produced no layer. See `_settle_stranded_results`.
+            # run as done when it produced no layer. See `OperatorRun.settle_stranded`.
             stranded = self._settle_stranded_results()
-            action = getattr(self, "_run_action", None)
-            if action is not None:
-                self._run_action = None
-                elapsed = time.monotonic() - getattr(self, "_run_began", time.monotonic())
+            run = self._run
+            if run is not None and run.action is not None:
+                action, run.action = run.action, None
+                elapsed = time.monotonic() - run.began
                 landed = getattr(self._worker, "landed", None)
-                if landed == 0:
-                    self.log.failed(action, f"produced nothing after {elapsed:.1f} s",
-                                    address=self._run_address)
-                elif stranded:
-                    self.log.failed(action, f"{stranded} region(s) landed no layer — some of "
-                                            f"their fields could not be read",
-                                    address=self._run_address)
+                outcome, why = run.close(landed, stranded, elapsed)
+                if outcome == _measure.OK:
+                    self.log.done(action, elapsed, address=run.address)
                 else:
-                    self.log.done(action, elapsed, address=self._run_address)
+                    self.log.failed(action, why, address=run.address)
                 self._close_requester_pair(landed, elapsed)
         # A genuine drain: every worker has exited AND (finished being FIFO-queued after this
         # worker's tileReady/streamEnded) their terminal slots have already run on this thread.
@@ -1454,10 +1429,11 @@ class PlateWindow(QMainWindow):
         A run that landed nothing is reported as a FAILURE however politely the engine returned,
         the same rule the status line and the console line above already follow.
         """
-        requester, self._run_requester = self._run_requester, None
-        action = self._run_op_action or "the operator"
-        reason, self._run_error = self._run_error, None
-        self._run_op_action = None
+        run = self._run
+        requester, run.requester = run.requester, None
+        action = run.label or "the operator"
+        reason, run.error = run.error, None
+        run.label = None
         if requester is None:
             return
         # THE RUN'S FINAL COUNT, read from the worker rather than waited for. The worker's last
@@ -3042,10 +3018,9 @@ class PlateWindow(QMainWindow):
 
         """
         # The user asked for a run HERE. Everything below it — scope resolution, the disk estimate,
-        # the plate statuses, worker construction — is time they spend waiting, so the clock starts
-        # before all of it rather than at ``worker.start()``. A refused run leaves this set and
-        # harmless: nothing records a measurement unless a worker actually ran.
-        self._run_t0 = time.perf_counter()
+        # the plate statuses, worker construction — is time they spend waiting, so the first-paint
+        # clock starts before all of it rather than at ``worker.start()``.
+        t0 = time.perf_counter()
         if self._reader is None or self._overview is None:
             return
         if _run_scope.operator_busy(self._worker, self._retired):
@@ -3157,9 +3132,9 @@ class PlateWindow(QMainWindow):
         # whenever the live state the rule reads is not what the user pictures, which is the
         # entire failure mode -- and the one the deleted per-panel scope combo made worse by
         # showing a THIRD, stale answer.
-        self._resolved_target = _run_scope.describe_run_target(regions, total=len(self._order))
-        if self._resolved_target:
-            self._readout.setText(self._resolved_target)
+        resolved_target = _run_scope.describe_run_target(regions, total=len(self._order))
+        if resolved_target:
+            self._readout.setText(resolved_target)
         out_dir = est_gb = None
         if save:
             # Ask WHERE to persist: output can be hundreds of GB, so let the user aim it at a roomy
@@ -3247,9 +3222,6 @@ class PlateWindow(QMainWindow):
         # place that decides the two are the same thing today.
         self._overview.reset_layer(layer_key)
         dest = f" → {out_dir.name}" if save else " (preview — not saved)"
-        # This run's identity, read back by _on_progress. Held as state rather than captured in a
-        # lambda so the status line and the log read the same two facts.
-        self._run_label, self._run_dest = label, dest
         self._worker.tileReady.connect(self._on_tile)
         self._worker.resultReady.connect(self._on_result)
         self._worker.progress.connect(self._on_progress)
@@ -3302,33 +3274,27 @@ class PlateWindow(QMainWindow):
         # rather than invent a sentinel region_id the plural case names its count and carries the
         # view id alone. Task 2, where a cached result carries its OWN extent, is where the set
         # belongs: the run's answer is one extent per cell, not one extent for the run.
-        self._run_action = f"{_action_label(key, operator_kwargs)} · {scope}"
-        # `next(iter(...))`, NOT `regions[0]`. `regions` has three shapes and one of them is the
-        # mapping `{region: [fov, ...]}` an ROI window sends (see `projection.scope_wells`), where
-        # integer indexing is a KeyError on the key `0`. It surfaced as the whole run refusing with
-        # `could not start Stitch (register + fuse): 0` -- a bare `KeyError(0)` whose str() is the
-        # key, so the sentence named the exception and said nothing about the cause.
+        # THE RUN'S BOOKS, in one object. The requester is genuinely held (it was once dropped on
+        # the floor, so ``operator_started`` / ``operator_progress`` / ``operator_done`` /
+        # ``operator_failed`` on the asking window were never called); it is cleared in
+        # ``_on_run_drained``, which fires on ok / failed / STOPPED alike.
         #
-        # `len()` and iteration are the operations that mean the same thing for both shapes; the
-        # subscript is the only one that does not, which is why it is the one that broke.
-        self._run_address = (Extent(region_id=next(iter(regions)))
-                             if regions is not None and len(regions) == 1 else None)
-        self._run_began = time.monotonic()
-        # Is this run only PART of each well? A mapping means explicit fields (see `_on_tile`).
-        self._run_is_partial = isinstance(regions, dict)
-        # THE REQUESTER IS NOW ACTUALLY HELD. ``requester=`` has been in this signature, and in its
-        # docstring, since the 2026-07-29 fix — and was dropped on the floor: nothing assigned
-        # ``_run_requester``, so ``operator_started`` / ``operator_progress`` / ``operator_done`` /
-        # ``operator_failed`` on the asking window were never called, and every result reached every
-        # window with ``visible=False`` because ``win is requester`` could never be true. The
-        # region window's silence during a run started there is that missing line, not a missing
-        # feature. Cleared in ``_on_run_drained``, which fires on ok / failed / STOPPED alike.
-        self._run_requester = requester
-        self._run_op_action = label
-        self._run_error = None
-        self._run_units = None
+        # The address is `next(iter(...))`, NOT `regions[0]`. `regions` has three shapes and one
+        # of them is the mapping `{region: [fov, ...]}` an ROI window sends (see
+        # `projection.scope_wells`), where integer indexing is a KeyError on the key `0`. `len()`
+        # and iteration are the operations that mean the same thing for both shapes.
+        self._run = OperatorRun(
+            key=key, layer_key=layer_key, label=label,
+            action=f"{_action_label(key, operator_kwargs)} · {scope}",
+            dest=dest,
+            address=(Extent(region_id=next(iter(regions)))
+                     if regions is not None and len(regions) == 1 else None),
+            requester=requester,
+            # Is this run only PART of each well? A mapping means explicit fields (see `_on_tile`).
+            is_partial=isinstance(regions, dict),
+            t0=t0)
         self._tell_requester(requester, "operator_started", label)
-        self.log.started(self._run_action, address=self._run_address)
+        self.log.started(self._run.action, address=self._run.address)
         self._run_readout(f"● {label} · {scope}{dest} …")
         self._worker.start()
 
@@ -3432,7 +3398,7 @@ class PlateWindow(QMainWindow):
         # `projection.scope_wells`), which is precisely the statement "this is part of a well".
         # The window that asked still gets the layer -- `deliver_result` places it at its own
         # bbox_um inside the region, which is where it belongs.
-        if getattr(self, "_run_is_partial", False) and self._worker is not None \
+        if self._run is not None and self._run.is_partial and self._worker is not None \
                 and not getattr(self._worker, "IS_PREVIEW", False):
             log.debug("plate keeps %s's whole-region thumbnail: this run covers part of it",
                       well_id)
@@ -3444,10 +3410,10 @@ class PlateWindow(QMainWindow):
         # worker, and neither is the wait being measured. The recorder keeps the first report and
         # drops the rest, so this needs no "have I already done this" flag of its own.
         w = self._worker
-        if self._run_t0 is not None and w is not None and not getattr(w, "IS_PREVIEW", False):
+        if self._run is not None and w is not None and not getattr(w, "IS_PREVIEW", False):
             report = getattr(w, "report_first_paint", None)
             if report is not None:
-                report(time.perf_counter() - self._run_t0)
+                report(time.perf_counter() - self._run.t0)
         self._overview.set_status(ri, ci, "done")           # blue
         src = self._loupe_sources.get(layer)                 # this well is now on disk -> loupe-able
         if isinstance(src, _ZarrLoupeSource):
@@ -3479,13 +3445,12 @@ class PlateWindow(QMainWindow):
         showing, which is ``_result_regions``.
         """
         op = self._active_op_key
-        if not op:
+        run = self._run
+        if not op or run is None:
             return
         if str(region) not in self._result_regions():
             return                              # nobody is looking at it -- see the docstring
-        accs = self._result_accs
-        if accs is None:
-            accs = self._result_accs = {}
+        accs = run.accs
         acc = accs.get(str(region))
         if acc is None or acc.op != op:
             from squidxplorer import is_region_operator
@@ -3521,54 +3486,22 @@ class PlateWindow(QMainWindow):
         self._deliver_operator_result(op, result)
 
     def _settle_stranded_results(self) -> int:
-        """A run has ended: resolve every region whose result was still being accumulated.
-
-        Returns the number of regions that ended with NO layer, so the caller can report the run
-        honestly. Always leaves ``_result_accs`` empty.
-
-        THE MEASURED DEFECT (2026-08-06), on Julio's own 10x acquisition and reported by him as
-        "the controls now brings plate view, but doesn't open the operator tab". FOVs 17 and 19 of
-        ``manual0`` are corrupt (``TiffFileError: suspicious number of tags``). Per-field fault
-        isolation skipped them, 25 of 27 FOVs landed, and ``_on_result``'s ``if not
-        acc.complete(): return`` left the accumulator sitting in ``_result_accs`` for the rest of
-        the process. Nothing ever flushed it, so **no layer was ever built** -- while the plate
-        printed "✓ Maximum Intensity Projection · 1 well" and the window that asked was told
-        "finished in 4.6 s". A run that produced no pixels, announced twice as a success. ``⚙
-        controls`` then opened no tab because ``RegionViewer._window_operators()`` was honestly
-        empty: the chip was the symptom, this was the cause.
-
-        A partial region is still REFUSED -- half a mosaic drawn as a layer reads as something the
-        operator did, and :meth:`squidxplorer._op_result.RegionResultAccumulator.result` owns that rule.
-        Its sentence is reused verbatim rather than re-worded here, so there is one wording of the
-        refusal. What changes is that the refusal is now said out loud and the run is reported as a
-        failure instead of as done.
-        """
-        accs, self._result_accs = dict(self._result_accs or {}), {}
-        stranded: list[str] = []
-        for region, acc in accs.items():
-            try:
-                # A complete accumulator here would be one `_on_result` never got to flush; it is
-                # delivered rather than discarded. Today it cannot happen, and costing one call to
-                # make the drain unable to strand a FINISHED result is the cheap half of this.
-                result = acc.result()
-            except ValueError as exc:            # incomplete: the accumulator's own sentence
-                stranded.append(f"{acc.op} · {region}: {exc}")
-                continue
-            self._deliver_operator_result(acc.op, result)
+        """Settle the run's books at the drain: :meth:`squidxplorer._run.OperatorRun.settle_stranded`
+        owns the logic and the story; this forwards, says the refusals out loud, and logs them."""
+        run = self._run
+        if run is None:
+            return 0
+        stranded = run.settle_stranded(self._deliver_operator_result)
         for line in stranded:
             log.warning("%s", line)
         if stranded:
             self._run_readout("  ".join(stranded))
-            # So `_close_requester_pair` tells the window that ASKED that its run failed. Without
-            # this the window's bar closed on `operator_done` over a run with nothing to show.
-            if not self._run_error:
-                self._run_error = "  ".join(stranded)
         return len(stranded)
 
     def _result_regions(self) -> set:
         """Every region a surface is SHOWING right now: one entry per open window.
 
-        This is the memory bound on ``_result_accs`` and on the layers themselves. Holding
+        This is the memory bound on the run's accumulators and on the layers themselves. Holding
         full-resolution mosaics for every well of a plate run would be gigabytes of layers nobody
         can look at, so a result for a region no surface is showing is dropped rather than
         accumulated -- the same rule the raw path follows, for the same reason. The honest bound is
@@ -3646,7 +3579,7 @@ class PlateWindow(QMainWindow):
         mgr = getattr(self, "_viewer_manager", None)
         if mgr is None:
             return 0
-        requester = self._run_requester
+        requester = self._run.requester if self._run is not None else None
         added = 0
         for win in mgr.windows:
             deliver = getattr(win, "deliver_result", None)
@@ -3669,8 +3602,10 @@ class PlateWindow(QMainWindow):
     def _on_failed(self, msg):
         # Remember WHY, for the requester's ``operator_failed`` line. ``_on_run_drained`` fires on
         # QThread.finished and cannot see the exception; without this the asking window would be
-        # told "produced nothing" for a run that named its own cause here.
-        self._run_error = str(msg)
+        # told "produced nothing" for a run that named its own cause here. The reopened-plate
+        # worker shares this slot and has no run to file the reason under.
+        if self._run is not None:
+            self._run.error = str(msg)
         if self._overview is not None:
             for rc, state in list(self._overview._status.items()):
                 if state == "processing":
