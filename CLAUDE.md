@@ -36,6 +36,26 @@ On-disk / Acquisition contract keys are untouched: `n_t`, `n_z`, `z_levels`, `dz
   the loupe-source bookkeeping — as functions over the window's own state (one bookkeeping).
   `PlateWindow` forwards; its `_start_preview` forwarder stays the ONE place the timepoint bar
   reaches the pixels. `_viewer.py`: 4676 -> 4344 lines.
+- **One identity module, one writer of the plate's shown layer**. `_operations.py` owns the
+  operator identity model — the cards, the layer-key vocabulary (`operator_layer_key` /
+  `operator_name` / `result_kind`) and `OperationStack` (`_layers.py` is deleted into it, along
+  with `remove` / `remove_suffix`, product-dead since the exploration tabs went).
+  `PlateWindow._apply_layers` is the ONLY caller of `PlateOverview.set_active_layer`: every path
+  that changes what the plate shows writes the stack and calls it. `_return_to_raw` was the live
+  drift — it put the overview on raw while the stack still claimed the operator layer, so the
+  Layers tab showed a transform ON over a raw plate; it now disables the transforms through the
+  stack. Deliberately NOT unified into one plate+window registry: a window's identity store is
+  napari's own Layers list read through `MosaicLayers` (derived, never cached — see the layer-model
+  section), a window legitimately carries identities the plate never ran (an ROI child re-uses its
+  parent's groups), and the plate's refusal of a region-operator layer is already declaration-
+  derived (`is_region_operator`) at the one seam (`_follow_window_layer`).
+- **The reader contract is importable on its own**: `squidxplorer/contract/reader.py` holds
+  `SquidAcquisitionReader` (typing-only module; `reader.py` re-exports it, `squidxplorer.__init__`
+  unchanged), so Squid can `from squidxplorer.contract.reader import SquidAcquisitionReader`
+  across the repo boundary without touching the readers. The rest of the Squid seam waits on named
+  triggers: when core-service (#578) merges, the `job_completed` SSE listener and a live reader
+  land behind this same contract; when schema v2 (#593) lands, declarative wells replace the
+  `parse_well_id` heuristic.
 
 ## The operator contract
 
