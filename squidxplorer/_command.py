@@ -424,7 +424,7 @@ class EngineExecutor:
         ``data["outcome"]`` carries the verdict: ``"ok"``, ``"partial"`` or ``"stopped"``.
         """
         from squidxplorer import run_plate, runnable_operators, write_plate
-        from squidxplorer._measure import OK, PARTIAL, STOPPED, measure_run
+        from squidxplorer._measure import measure_run, verdict
 
         meta = self._meta()
         if meta is None:
@@ -505,16 +505,11 @@ class EngineExecutor:
                         self.on_well(_region, _fov, _image)
                 data = {"n_fields": landed}
             # `landed` counts FIELDS; `n_targets` counts WELLS -- never put one over the other.
-            owed = int((data.get("manifest") or {}).get("n_fields") or 0)
+            outcome, detail = verdict(landed, n_targets, len(set(skipped)), stopped)
             if stopped:
+                owed = int((data.get("manifest") or {}).get("n_fields") or 0)
                 got = f"{landed} of {owed} field(s)" if owed else f"{landed} field(s)"
-                outcome, detail = STOPPED, f"stopped after {got} across {n_targets} target well(s)"
-            elif landed == 0 and n_targets:
-                outcome, detail = PARTIAL, f"produced nothing — all {n_targets} target(s) skipped"
-            elif skipped:
-                outcome, detail = PARTIAL, f"{len(set(skipped))} well(s) skipped"
-            else:
-                outcome, detail = OK, ""
+                detail = f"stopped after {got} across {n_targets} target well(s)"
             run.finish(outcome, detail)
             metrics = run
         data["n_landed"] = landed

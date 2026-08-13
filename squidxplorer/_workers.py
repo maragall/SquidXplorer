@@ -13,8 +13,7 @@ from squidxplorer import _run_scope
 from squidxplorer._engine import _default_workers
 from squidxplorer._logpane import capture_stdout_to_log, get_logger
 from squidxplorer._measure import (
-    FAILED as _MEASURE_FAILED, OK as _MEASURE_OK, PARTIAL as _MEASURE_PARTIAL,
-    STOPPED as _MEASURE_STOPPED, measure_run,
+    FAILED as _MEASURE_FAILED, STOPPED as _MEASURE_STOPPED, measure_run, verdict,
 )
 from squidxplorer._montage import _area_downsample
 from squidxplorer._napari_view import full_res_level
@@ -224,14 +223,8 @@ class _OperatorWorker(QThread):
                     _run_metrics.finish(_MEASURE_STOPPED, "stopped by the window")
                     return
                 self.streamEnded.emit()
-            # name the outcome: landed==0 or any skipped well is PARTIAL
-            if self.landed == 0 and self._total:
-                _run_metrics.finish(_MEASURE_PARTIAL,
-                                    f"produced nothing — all {self._total} target(s) skipped")
-            elif self.skipped:
-                _run_metrics.finish(_MEASURE_PARTIAL, f"{self.skipped} well(s) skipped")
-            else:
-                _run_metrics.finish(_MEASURE_OK)
+            # stopped=False: the stop event already returned above, with its own sentence
+            _run_metrics.finish(*verdict(self.landed, self._total, self.skipped, False))
             self.finished_ok.emit()
         except Exception as e:
             # catch so the QThread ends via `failed`, not an unhandled thread exception
