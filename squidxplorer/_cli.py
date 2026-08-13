@@ -34,8 +34,6 @@ def operator_defaults(operator: str) -> dict:
     """``{name: default}`` an operator declares it can be run with; ``{}`` when it declares none."""
     from squidxplorer import operator_params
 
-    # Asked, not looked up: a chain ('bgsub+spot') is not a table key and declares
-    # namespaced params.
     try:
         return {p.name: p.default for p in operator_params(operator)}
     except (KeyError, TypeError, ValueError):
@@ -147,16 +145,15 @@ class ProcessParameters(BaseModel, use_attribute_docstrings=True):
         runnable = runnable_operators()
         if v in runnable:
             return v
-        # Not a registered name; may still be an operator CHAIN ('bgsub+mip'), so let the
-        # engine resolve it exactly as `EngineExecutor.do_run_operator` does.
+        # Not a registered name: resolve it so a chain expression is refused with the
+        # engine's own explanation.
         from squidxplorer._engine import _resolve_operator
 
         try:
             _resolve_operator(v)
         except (KeyError, TypeError):
             raise ValueError(
-                f"unknown operator {v!r}; this application can run: {runnable}, or a chain of "
-                "those joined with '+' (e.g. 'bgsub+mip')") from None
+                f"unknown operator {v!r}; this application can run: {runnable}") from None
         return v
 
     @model_validator(mode="after")

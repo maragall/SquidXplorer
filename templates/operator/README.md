@@ -219,34 +219,11 @@ dangerous direction; over-declaring only greys out a row.
 
 ---
 
-## 2.6 Composition: your operator chains with the shipped ones, for free
+## 2.6 Composition happens in Python
 
-Your operator is composable the moment it is registered. A chain is written wherever a name is,
-separated by `+`, with parameters in parentheses:
-
-```python
-run_plate(reader, operator="flatfield + my_operator(smooth_sigma=2.0) + mip")
-write_plate(reader, out_dir, operator="my_operator+mip")
-stitch_region(reader, "B2", fovs, z_operator="my_operator+mip")
-```
-
-That string is exactly what `RecipeChain.label()` prints, so a console line or a pasted recipe
-script is a runnable expression. The composed operator's four declarations are **derived from its
-parts** — `consumes` is the union, `produces` is the last step's, `requires` is the union, and
-`params` are namespaced `my_operator.smooth_sigma` — so you declare nothing extra.
-
-What your `consumes` buys you, and what it costs:
-
-| chain | composes? |
-|---|---|
-| plane-op → plane-op | yes, `Nz` survives both |
-| plane-op → z-reducer | yes, the reducer consumes what the plane-ops produced (lazily — the stack is never resident) |
-| **z-reducer → anything** | **refused by name.** After a reducer there is one plane and no stack. A z-reducer is the LAST step or the only one |
-| **`produces="labels"` → anything** | **refused by name.** The next step would do arithmetic on object ids |
-| a z-SELECTING operator (`select_index`) inside a chain | **refused by name.** Its z is solved on raw planes outside the operator, so a chain around it would never touch the planes it picks |
-
-Refusals name both operators and say what to do instead; nothing is ever silently reordered. See
-`squidxplorer/_compose.py`.
+There is no chain syntax: to combine steps, wrap them in one callable and register the result as
+its own operator (`plane_op` around a function that applies your steps in order, then
+`add_operator`) — a few lines, declared like any other entry.
 
 ---
 

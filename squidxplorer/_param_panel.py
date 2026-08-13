@@ -48,21 +48,6 @@ def widget_kind(default: Any) -> Optional[str]:
     return WIDGET_KINDS.get(type(default))
 
 
-def param_step(name: str) -> tuple[Optional[str], str]:
-    """Split a possibly namespaced parameter name: ``"spot.min_area_px"`` -> ``("spot", …)``."""
-    step, dot, parameter = str(name).partition(".")
-    return (step, parameter) if dot else (None, str(name))
-
-
-def group_params(params: Sequence) -> list[tuple[Optional[str], list]]:
-    """``[(step_or_None, [Param, ...]), ...]`` — a chain's parameters grouped by step, in chain order."""
-    groups: dict[Optional[str], list] = {}
-    for param in params:
-        step, _ = param_step(param.name)
-        groups.setdefault(step, []).append(param)
-    return list(groups.items())
-
-
 def unsupported_params(params: Sequence) -> list[tuple[str, str]]:
     """``[(param_name, type_name), ...]`` for every declared parameter this panel cannot draw."""
     return [(p.name, type(p.default).__name__)
@@ -123,11 +108,8 @@ class GenericOperatorPanel(_Panel):
                 f"{self.key!r} declares no parameters: its behaviour is fixed at registration, so "
                 "there is nothing to set. The run below is the operator at what it ships with.",
                 _SUB))
-        for step, group in group_params(params):
-            if step is not None:
-                self.v.addWidget(_head(step.upper()))
-            for param in group:
-                self._add_param(param, step)
+        for param in params:
+            self._add_param(param)
 
         # -- run ---------------------------------------------------------------------------
         self.v.addWidget(_head("PREVIEW"))
@@ -172,30 +154,11 @@ class GenericOperatorPanel(_Panel):
         self.v.addStretch(1)
         _apply_qss(self)
 
-        # Buildable and launchable are two questions: show the form, grey the buttons with the reason.
-        why = self._launch_refusal()
-        if why:
-            self.run_btn.setEnabled(False)
-            if self.save_btn is not None:
-                self.save_btn.setEnabled(False)
-            self.say(why)
-
-    def _launch_refusal(self) -> Optional[str]:
-        """Why this window cannot RUN what this panel shows, or ``None``."""
-        from squidxplorer._operations import runnable_operators
-
-        if self.key in runnable_operators():
-            return None
-        return (f"the parameters of '{self.key}' are shown above, but this window runs operators "
-                f"by registry key and '{self.key}' is not one — a chain expression is run from the "
-                f"CLI (--operator '{self.key}' --param …). Runnable here: "
-                f"{', '.join(runnable_operators())}.")
-
     # -- building ------------------------------------------------------------------------
-    def _add_param(self, param, step: Optional[str]) -> None:
+    def _add_param(self, param) -> None:
         """One :class:`Param` -> one labelled widget, with its ``blurb`` as the tooltip."""
         kind = widget_kind(param.default)
-        _step, leaf = param_step(param.name)
+        leaf = param.name
         widget = _build_widget(kind, param.default)
         if widget is None:                 # unreachable: panel_refusal catches it first
             return

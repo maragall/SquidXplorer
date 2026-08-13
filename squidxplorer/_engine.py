@@ -9,8 +9,6 @@ from typing import TYPE_CHECKING, Any, Callable, Iterable, Iterator, Optional, S
 
 import numpy as np
 
-from squidxplorer._compose import CHAIN_CHARS, compose_operator, is_chain_expression
-from squidxplorer._recipe import CHAIN_SEPARATOR, RecipeChain
 from squidxplorer.projection import (
     INTENSITY,
     PLANE_OP,
@@ -34,6 +32,10 @@ if TYPE_CHECKING:  # avoid import cost / cycle at runtime
     from squidxplorer.reader import SquidReader
 
 OperatorFn = Callable[[Iterable[np.ndarray]], np.ndarray]
+
+# '+()' are expression punctuation in a recipe label ('spot(min_area_px=80)'), so a registered
+# name may carry none of them.
+_CHAIN_CHARS = "+()"
 
 
 @dataclass(frozen=True)
@@ -140,14 +142,13 @@ def _declare(name: str, fn, *, consumes, produces, params, requires, region: boo
     kind = "region operator" if region else "operator"
     if not name:
         raise ValueError(f"{kind} name must be a non-empty string")
-    reserved = sorted(set(name) & set(CHAIN_CHARS))
+    reserved = sorted(set(name) & set(_CHAIN_CHARS))
     if reserved:
         raise ValueError(
-            f"{kind} name {name!r} contains {reserved[0]!r}, which is chain punctuation: "
-            f"'{CHAIN_CHARS}' spell a COMPOSITION ('flatfield + decon + mip', "
-            "see squidxplorer._compose). A name carrying one would read as an expression everywhere a "
-            "chain is written down — in a console line, a CLI flag, a pasted recipe script — so it "
-            "is refused here rather than left to be ambiguous there.")
+            f"{kind} name {name!r} contains {reserved[0]!r}: '{_CHAIN_CHARS}' are expression "
+            "punctuation in a recipe label ('spot(min_area_px=80)'), so a name carrying one "
+            "would not round-trip through RecipeChain.parse — it is refused here rather than "
+            "left to be ambiguous everywhere a recipe is written down.")
     if not callable(fn):
         raise ValueError(f"{kind} for {name!r} is not callable: {fn!r}")
     if name in _OPERATORS:
@@ -248,28 +249,23 @@ def bind_operator(name: str, operator_kwargs: Optional[dict] = None) -> Operator
 
 
 def _resolve_operator(name) -> Operator:
-    """Look up an operator by name OR by chain expression, failing loud on an unknown key."""
-    if isinstance(name, RecipeChain):
-        return compose_operator(name, _resolve_operator)
-    if isinstance(name, (list, tuple)):
-        spelled = f" {CHAIN_SEPARATOR} ".join(str(part) for part in name)
-        raise TypeError(
-            f"an operator is named by one string, got {type(name).__name__} {name!r}. A chain is "
-            f"written as a string too: operator={spelled!r}. See squidxplorer._compose.")
+    """Look up an operator by name, failing loud on an unknown key."""
     if not isinstance(name, str):
         raise TypeError(
-            f"an operator is named by a string or a RecipeChain, got {type(name).__name__}: "
-            f"{name!r}.")
+            f"an operator is named by one string, got {type(name).__name__}: {name!r}.")
     operator = _OPERATORS.get(name)
     if operator is not None:
         return operator
-    if is_chain_expression(name):
-        return compose_operator(name, _resolve_operator)
+    if any(char in name for char in _CHAIN_CHARS):
+        raise ValueError(
+            f"{name!r} is a chain expression, and operator chaining was removed: an operator is "
+            "ONE registered name. Compose in Python instead — wrap the steps in one callable and "
+            "register it (squidxplorer.projection.plane_op + squidxplorer.add_operator, a few "
+            "lines).")
     raise KeyError(
         f"unknown operator {name!r}; available: {runnable_operators()}. "
         "Add new modes with squidxplorer.add_operator(name, fn) — or "
-        "squidxplorer.add_region_operator(name, fn) for one that fuses a whole well — or chain "
-        "registered ones with '+' (e.g. 'flatfield+decon+mip')."
+        "squidxplorer.add_region_operator(name, fn) for one that fuses a whole well."
     )
 
 

@@ -583,7 +583,7 @@ def test_the_stitch_defaults_are_read_off_stitch_region_not_mirrored_by_hand():
 # =======================================================================================
 # THE GENERIC PANEL: a declared Param becomes a widget
 # =======================================================================================
-# `_engine.Operator.params` is read by bind/CLI/_recipe/_compose but was not read by the GUI,
+# `_engine.Operator.params` is read by bind/CLI/_recipe but was not read by the GUI,
 # so `spot`/`cellpose` declared four parameters each and none were reachable from a panel.
 # These tests are over `squidxplorer._param_panel`, whose policy half is Qt-free.
 
@@ -591,9 +591,7 @@ from squidxplorer._engine import Param  # noqa: E402
 from squidxplorer._param_panel import (  # noqa: E402
     WIDGET_KINDS,
     GenericOperatorPanel,
-    group_params,
     panel_refusal,
-    param_step,
     unsupported_params,
     widget_kind,
 )
@@ -627,34 +625,11 @@ def test_a_default_this_panel_cannot_draw_is_named_rather_than_guessed():
     assert bad == [("mask", "NoneType")]
 
 
-# -- chains -----------------------------------------------------------------------------
-
-def test_a_chain_s_namespaced_parameters_are_split_the_way_compose_joins_them():
-    """``_compose`` namespaces ``<step>.<param>``; splitting differently here would route a
-    value to a step that never asked for it."""
-    assert param_step("spot.min_area_px") == ("spot", "min_area_px")
-    assert param_step("min_area_px") == (None, "min_area_px")
-
-
-def test_a_chain_is_grouped_by_step_in_chain_order_not_refused():
-    """``operator_params()`` returns the parts' params namespaced; the panel groups them one
-    group per step, in the order the expression is written."""
-    from squidxplorer._engine import operator_params
-
-    params = operator_params("bgsub + spot")
-    assert [p.name for p in params] == ["spot.sigma_px", "spot.min_area_px",
-                                        "spot.min_distance_px", "spot.split_touching"]
-    groups = group_params(params)
-    assert [step for step, _ in groups] == ["spot"]
-    assert [p.name for p in groups[0][1]] == [p.name for p in params]
-
-
-def test_a_bare_operator_s_parameters_are_one_unnamed_group():
-    groups = group_params((Param("sigma_px", 2.0), Param("min_area_px", 30)))
-    assert [step for step, _ in groups] == [None]
-
-
 # -- the refusal ------------------------------------------------------------------------
+
+def test_a_chain_expression_key_is_refused_naming_the_removal():
+    why = panel_refusal("bgsub + spot")
+    assert why is not None and "chaining was removed" in why
 
 def test_a_parameterised_operator_is_not_refused():
     assert panel_refusal("spot") is None
@@ -788,22 +763,3 @@ def test_an_operator_with_no_parameters_still_builds_and_says_so(qapp):
     assert p.kwargs() == {}
 
 
-def test_a_chain_panel_shows_the_form_and_greys_the_run_with_a_reason(qapp):
-    """A chain's params are readable, but ``run_operator`` gates on ``runnable_operators()``,
-    which has never held an expression — so the form is shown and the button says why it is off."""
-    host = _Host()
-    p = GenericOperatorPanel(host, "bgsub + spot")
-    assert sorted(p.widgets) == ["spot.min_area_px", "spot.min_distance_px",
-                                 "spot.sigma_px", "spot.split_touching"]
-    assert not p.run_btn.isEnabled()
-    assert host.said and "chain" in host.said[-1]
-
-
-def test_a_chain_panel_keeps_the_namespaced_names_bind_expects(qapp):
-    from squidxplorer import bind_operator
-
-    p = GenericOperatorPanel(_Host(), "bgsub + spot")
-    p.widgets["spot.min_area_px"].setValue(400)
-    kwargs = p.kwargs()
-    assert kwargs["spot.min_area_px"] == 400
-    bind_operator("bgsub + spot", kwargs)        # raises if a namespaced name is wrong

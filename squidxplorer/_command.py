@@ -432,7 +432,7 @@ class EngineExecutor:
                            "nothing is open — run open_acquisition first")
         runnable = runnable_operators()
         if cmd.operator not in runnable:
-            # Not a registered name, but it may still be an operator chain ('bgsub+mip').
+            # Resolve for the refusal: a chain expression gets the engine's own explanation.
             from squidxplorer._engine import _resolve_operator
 
             try:

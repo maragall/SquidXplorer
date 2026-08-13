@@ -455,17 +455,12 @@ def test_the_template_states_how_a_declared_param_becomes_a_widget():
         assert fact in readme, f"templates/operator/README.md does not state: {fact!r}"
 
 
-def test_the_template_states_how_a_contributed_operator_composes():
-    """The README states how a contributed operator composes, with the rule that decides it."""
+def test_the_template_states_that_composition_happens_in_python():
+    """No chain syntax exists; the README says where composing DOES happen."""
     readme = (_TEMPLATE / "README.md").read_text()
 
-    for fact in (
-        "operator=\"flatfield + my_operator(smooth_sigma=2.0) + mip\"",   # the expression
-        "plane-op → z-reducer",                                      # what composes
-        "z-reducer → anything",                                      # what does not
-        "squidxplorer/_compose.py",                                           # where to read the rule
-    ):
-        assert fact in readme, f"templates/operator/README.md does not state: {fact}"
+    assert "Composition happens in Python" in readme
+    assert "no chain syntax" in readme
 
 
 def test_the_template_package_imports_and_registers_in_a_clean_interpreter():
