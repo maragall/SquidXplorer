@@ -68,6 +68,7 @@ from qtpy.QtCore import Qt, QRectF, QThread, QTimer, Signal
 from qtpy.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap, QRegion
 from qtpy.QtWidgets import QApplication, QWidget
 
+from squidmip import _bitdepth
 from squidmip import _qtstyle
 from squidmip._budget import cache_budget
 from squidmip._logpane import get_logger
@@ -1423,7 +1424,10 @@ class PlateOverview(QWidget):
                     return float(lo), float(hi)
             except Exception:
                 pass                # no histogram yet (nothing streamed): fall through to full range
-        return 0.0, 65535.0
+        # The DATASET's full range, not the container's. On a 12-bit acquisition a hardcoded
+        # 65535 renders every pre-histogram thumbnail at a sixteenth of its brightness, i.e.
+        # near-black, until enough tiles have streamed to build a window.
+        return _bitdepth.range_for(getattr(self, "_dtype", None))
 
     # -- loupe wiring --
     def set_loupe_source(self, source, colors=None):

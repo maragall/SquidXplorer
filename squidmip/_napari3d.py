@@ -23,6 +23,7 @@ from typing import Any, Optional, Sequence
 
 import numpy as np
 
+from squidmip import _bitdepth
 from squidmip._logpane import get_logger
 
 log = get_logger("napari3d")
@@ -77,7 +78,45 @@ def _native_stack(reader: Any, meta: dict, region: str, fov: int, channel: str) 
         if plane.ndim != 2:
             plane = plane.reshape(plane.shape[-2:])
         planes.append(plane)
-    return np.stack(planes, axis=0) if len(planes) > 1 else planes[0][None, ...]
+    stack = np.stack(planes, axis=0) if len(planes) > 1 else planes[0][None, ...]
+    # Native, unstrided, un-averaged camera planes -- the best evidence for the slider ceiling
+    # anywhere in this module, and it costs one pass over an array already in memory.
+    _bitdepth.depth().observe_array(stack)
+    return stack
+
+
+def _seed_range(layer: Any, dtype: Any, clim: Optional[tuple]) -> None:
+    """Give a popout layer the dataset's contrast slider travel, not its own data's extent.
+
+    These viewers build layers OUTSIDE `MosaicLayers`, so nothing else sets this for them. Left
+    alone, napari sizes ``contrast_limits_range`` from whatever array it was handed -- for
+    `open_native_3d_volume` that is a single BRICK, so the slider stops at the brightest pixel of
+    one tile and the user cannot open the window past it. That is the clipped slider this change
+    exists to remove, and it is worst exactly here.
+    """
+    try:
+        lo_r, hi_r = _bitdepth.range_for(dtype)
+        lo_w, hi_w = (float(clim[0]), float(clim[1])) if clim is not None else (lo_r, hi_r)
+        layer.contrast_limits_range = (min(lo_r, lo_w), max(hi_r, hi_w))
+    except Exception:                               # noqa: BLE001 - cosmetic; the layer is fine
+        pass
+
+
+def widen_contrast_range(viewer: Any, lo: float, hi: float) -> int:
+    """Open every image layer's slider in a POPOUT viewer to at least ``(lo, hi)``. Never narrows.
+
+    The popouts have no `MosaicLayers`, hence no `programmatic()` and no user-gesture taps to
+    confuse -- so this is the plain walk that `MosaicLayers.widen_contrast_range` cannot be.
+    """
+    from squidmip._napari_view import MosaicLayers
+
+    moved = 0
+    for layer in list(getattr(viewer, "layers", []) or []):
+        if getattr(layer, "rgb", False):
+            continue
+        if MosaicLayers._widen_range(layer, float(lo), float(hi)):
+            moved += 1
+    return moved
 
 
 def _auto_clim(stack: np.ndarray) -> Optional[tuple]:
@@ -474,7 +513,7 @@ def open_native_3d(
             clim = _auto_clim(stack)
         if clim is not None:
             kwargs["contrast_limits"] = tuple(clim)
-        viewer.add_image(stack, **kwargs)
+        _seed_range(viewer.add_image(stack, **kwargs), getattr(stack, "dtype", None), clim)
         if first_shape is None:
             first_shape = tuple(stack.shape)
 
@@ -571,6 +610,10 @@ def open_native_3d_volume(
             if clim is not None:
                 kwargs["contrast_limits"] = tuple(clim)
             layer = viewer.add_image(vol[:, b.r0:b.r1, b.c0:b.c1], **kwargs)
+            # The DTYPE of the whole volume, and the channel's ONE window -- not this brick's.
+            # Every brick of a channel must end up with the same slider or they step against each
+            # other, which is the same reason `clim` is computed once above the brick loop.
+            _seed_range(layer, getattr(vol, "dtype", None), clim)
             if not single:
                 pin_max_compositing(viewer, layer)
     if len(bricks) > 1:

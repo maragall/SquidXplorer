@@ -272,6 +272,24 @@ def _cold_result_cache():
 
 
 @pytest.fixture(autouse=True)
+def _cold_dataset_depth():
+    """Every test starts on an UNMEASURED contrast ceiling (``squidmip._bitdepth``).
+
+    The ceiling is process-wide for the same reason ``_LUT_CLIPBOARD`` is -- one app, one open
+    acquisition -- and in production ``ViewerManager.set_dataset`` is what clears it. A test that
+    fuses a 12-bit fixture leaves the module saying 4095, and the next test to assert a contrast
+    window of 9000 (``test_view_settings``) would then see it clamped by a dataset it never
+    loaded. Cleared on the way out too, so the failing test is the one that measured, not the one
+    after it.
+    """
+    from squidmip import _bitdepth
+
+    _bitdepth.new_dataset(None)
+    yield
+    _bitdepth.new_dataset(None)
+
+
+@pytest.fixture(autouse=True)
 def _restore_operator_registries():
     import importlib
 
@@ -768,6 +786,18 @@ def _stub_pane_classes():
         except Exception:                        # noqa: BLE001 - unplaceable: report it as such
             return scale, translate
 
+    def _first_stub_level(data):
+        """Level 0 of whatever `add_mosaic` was handed -- multiscale list, MultiScaleData, or array.
+
+        The dtype question is asked of LEVEL 0 for the same reason production asks it there: every
+        rung of a fused pyramid shares one dtype, but only level 0 is guaranteed to exist.
+        """
+        try:
+            return data[0] if isinstance(data, (list, tuple)) or hasattr(data, "__len__") and not (
+                hasattr(data, "dtype")) else data
+        except Exception:                        # noqa: BLE001 - unindexable: it IS the level
+            return data
+
     class StubLayer:
         """A napari image layer as RegionViewer reads it back."""
 
@@ -775,6 +805,14 @@ def _stub_pane_classes():
             self.data = _as_napari_data(data, kw.get("multiscale"))
             self.scale, self.translate = _as_napari_placement(data, kw)
             self.contrast_limits = None
+            #: The slider's TRAVEL, which is not its value. `MosaicLayers.add_mosaic` sets this on
+            #: every real layer and `_widen_range` reads it back; a stub without it made both a
+            #: silent no-op, because `_widen_range` treats a layer with no range as "not an
+            #: intensity layer" and returns False. So the stub reported that widening had reached
+            #: nothing, which is indistinguishable from the production code not widening at all.
+            from squidmip import _bitdepth
+            self.contrast_limits_range = _bitdepth.range_for(
+                getattr(_first_stub_level(self.data), "dtype", None))
             self.colormap = kw.get("colormap")
             #: A result delivered to a window that did not ask for the run arrives DARK. That is
             #: a property of `deliver_result`, so the stub has to carry it or no test can see it.
@@ -959,6 +997,25 @@ def _stub_pane_classes():
 
         def find(self, op, channel):
             return self._layers.get((op, channel))
+
+        def widen_contrast_range(self, lo, hi):
+            """`MosaicLayers.widen_contrast_range` -- open every slider, never narrow one.
+
+            Called by `RegionViewer._on_depth_changed` when a later region proves the dataset
+            holds bigger numbers than the region this window opened on. Without it here the
+            handler's own ``except Exception`` would swallow the AttributeError and every test
+            would agree that already-open windows do not widen.
+            """
+            moved = 0
+            for layer in self._layers.values():
+                r = getattr(layer, "contrast_limits_range", None)
+                if r is None:
+                    continue
+                new = (min(float(r[0]), float(lo)), max(float(r[1]), float(hi)))
+                if new != (float(r[0]), float(r[1])):
+                    layer.contrast_limits_range = new
+                    moved += 1
+            return moved
 
     class StubDims:
         """napari `Dims`, only the parts a window's autofocus drives."""

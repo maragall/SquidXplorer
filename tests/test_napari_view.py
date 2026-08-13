@@ -391,6 +391,115 @@ def test_a_degenerate_window_is_not_widened(layers):
     assert list(lyr.contrast_limits) != [500.0, 501.0]
 
 
+# ------------------------------------------- the slider's TRAVEL (contrast_limits_range)
+
+
+@pytest.fixture
+def twelve_bit():
+    """A dataset measured at 3437 -- the 14-bit set's region C3, which alone reads as 12-bit."""
+    from squidmip import _bitdepth
+
+    _bitdepth.new_dataset(np.uint16)
+    _bitdepth.depth().observe(3437.0)
+    return _bitdepth.depth()
+
+
+def test_a_mosaic_layer_opens_on_the_DATASETS_range_not_the_seeded_window(layers, twelve_bit):
+    """The seed says where to look; the range says how far the user may drag. Different jobs."""
+    lyr = layers.add_mosaic("raw", "488", _img(), contrast_limits=(500.0, 900.0))
+
+    assert list(lyr.contrast_limits) == [500.0, 900.0]
+    assert list(lyr.contrast_limits_range) == [0.0, 4095.0]
+
+
+def test_a_layer_with_NO_seed_still_gets_the_datasets_range(layers, twelve_bit):
+    """The bug this change removes: the range used to be set only when a window was seeded, so a
+    blank or degenerate channel was left pinned to whatever extent napari inferred by itself."""
+    lyr = layers.add_mosaic("raw", "488", _img())
+
+    assert list(lyr.contrast_limits_range) == [0.0, 4095.0]
+
+
+def test_a_degenerate_seed_still_gets_the_datasets_range(layers, twelve_bit):
+    """`hi <= lo` is dropped as a WINDOW on purpose; that must not also drop the RANGE."""
+    lyr = layers.add_mosaic("raw", "488", _img(), contrast_limits=(500.0, 500.0))
+
+    assert list(lyr.contrast_limits_range) == [0.0, 4095.0]
+
+
+def test_a_window_wider_than_the_measured_depth_is_never_clamped_away(layers, twelve_bit):
+    """A range narrower than the window on screen would let napari clip the window itself."""
+    lyr = layers.add_mosaic("raw", "488", _img(), contrast_limits=(0.0, 50000.0))
+
+    assert list(lyr.contrast_limits) == [0.0, 50000.0]
+    assert lyr.contrast_limits_range[1] >= 50000.0
+
+
+def test_widening_the_range_does_not_move_a_single_contrast_limit(layers, twelve_bit):
+    """The anti-flash assertion: opening the slider's travel changes no pixel on the canvas."""
+    lyr = layers.add_mosaic("raw", "488", _img(), contrast_limits=(100.0, 3000.0))
+
+    assert layers.widen_contrast_range(0.0, 16383.0) == 1
+
+    assert list(lyr.contrast_limits) == [100.0, 3000.0]
+    assert list(lyr.contrast_limits_range) == [0.0, 16383.0]
+
+
+def test_widening_NEVER_narrows(layers, twelve_bit):
+    """A narrower range does not merely restyle the slider -- napari clips the window into it."""
+    lyr = layers.add_mosaic("raw", "488", _img(), contrast_limits=(100.0, 3000.0))
+    layers.widen_contrast_range(0.0, 16383.0)
+
+    assert layers.widen_contrast_range(0.0, 4095.0) == 0
+    assert list(lyr.contrast_limits_range) == [0.0, 16383.0]
+
+
+def test_widening_the_range_is_not_reported_as_a_USER_gesture(layers, twelve_bit):
+    """napari re-emits contrast_limits when the RANGE moves, even though the value does not.
+
+    An echo that reaches the user-contrast tap latches the plate to manual and kills per-region
+    contrast, which is what `programmatic()` exists to prevent.
+    """
+    layers.add_mosaic("raw", "488", _img(), contrast_limits=(100.0, 3000.0))
+    seen = []
+    layers.on_user_contrast(lambda *a: seen.append(a))
+
+    layers.widen_contrast_range(0.0, 16383.0)
+
+    assert seen == []
+
+
+def test_widening_skips_the_layers_that_have_no_contrast_at_all(layers, twelve_bit):
+    """Labels have no contrast_limits_range; a walk over the layer list must not care."""
+    layers.add_mosaic("raw", "488", _img(), contrast_limits=(100.0, 3000.0))
+    layers.add_labels("nuclei", "488", np.zeros((32, 32), dtype=np.uint32))
+
+    assert layers.widen_contrast_range(0.0, 16383.0) == 1        # the image only
+
+
+def test_a_float_result_layer_keeps_its_own_range(layers, twelve_bit):
+    """The gate is the LAYER's dtype. A float operator result has no bit depth to apply one to."""
+    lyr = layers.add_mosaic("flatfield", "488",
+                            np.zeros((32, 32), dtype=np.float32), contrast_limits=(0.0, 1.0))
+
+    assert list(lyr.contrast_limits_range) == [0.0, 1.0]
+
+
+def test_a_region_change_re_widens_the_slider_without_moving_the_window(layers, twelve_bit):
+    """The `_reuse_layer` path: C3 replaced by E7, which holds numbers C3's slider cannot reach."""
+    from squidmip import _bitdepth
+
+    lyr = layers.add_mosaic("raw", "488", _img(), contrast_limits=(100.0, 3000.0))
+    assert list(lyr.contrast_limits_range) == [0.0, 4095.0]
+
+    _bitdepth.depth().observe(16380.0)                       # E7 is read
+    same = layers.add_mosaic("raw", "488", _img(seed=1))     # same identity -> reuse
+
+    assert same is lyr
+    assert list(lyr.contrast_limits) == [100.0, 3000.0]      # the user's window is untouched
+    assert list(lyr.contrast_limits_range) == [0.0, 16383.0]
+
+
 # ------------------------------------------------------- placement from stage µm
 
 

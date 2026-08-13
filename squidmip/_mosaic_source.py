@@ -39,6 +39,7 @@ from typing import Any, Optional, Sequence
 
 import numpy as np
 
+from squidmip import _bitdepth
 from squidmip._budget import cache_budget
 from squidmip._logpane import get_logger
 
@@ -196,6 +197,11 @@ def fuse_region_mosaic(
         frame = np.asarray(frame)
         if frame.ndim != 2:
             frame = frame.reshape(frame.shape[-2:])
+        # The contrast slider's ceiling, measured HERE because this is full-resolution camera
+        # data. Anything downstream is strided (`sub`, below) or averaged, and a maximum taken
+        # from a decimated plane UNDER-states the real one -- which snaps the ceiling too low and
+        # clips. ~0.06 ms on a 2048x2048 frame against a 2.6 ms decode.
+        _bitdepth.depth().observe_array(frame)
         sub = frame[::step, ::step]
         r0, c0 = row // step, col // step
         r1, c1 = min(r0 + sub.shape[0], out_h), min(c0 + sub.shape[1], out_w)
@@ -538,6 +544,11 @@ def _fuse_levels(reader: Any, meta: dict, region: str, channel: str, z: int, t: 
         frame = np.asarray(frame)
         if frame.ndim != 2:
             frame = frame.reshape(frame.shape[-2:])
+        # See `fuse_region_mosaic`: the ceiling is measured on the FULL-RESOLUTION frame, before
+        # any `frame[::step, ::step]` below has a chance to hide the brightest pixel. This is the
+        # observation that covers every region the app displays, and it lands on the worker
+        # thread BEFORE `ready` is emitted -- so a region's layer is built already knowing it.
+        _bitdepth.depth().observe_array(frame)
         row, col = offsets[fov]
         for px, h, w, st, _dt in plans:
             step = int(st)

@@ -70,6 +70,7 @@ if "PySide6" in sys.modules or "PySide2" in sys.modules:
 from squidmip._region_viewer import (  # noqa: E402
     _GLOBAL,
     _INHERIT,
+    _RAW_OP,
     _SETTING_BASELINE,
     ViewDefaults,
     ViewerManager,
@@ -706,6 +707,70 @@ def test_a_second_window_reuses_the_first_windows_result_without_recomputing(qap
         assert layers[ch].data is result.plane(ch), (
             f"{ch}: the second window was handed different pixels, so something recomputed")
         assert int(np.asarray(layers[ch].data)[0, 0]) == 700 + i
+
+
+def test_loading_a_NEW_dataset_forgets_the_last_ones_look(manager):
+    """A contrast window is a statement in the PREVIOUS acquisition's counts.
+
+    Carry (11, 111) from a 12-bit set onto one that is 12-bit shifted into 16 and every channel
+    renders black; carry it the other way and everything saturates. Same for channel_visibility,
+    which is keyed by channel NAME -- names differ between acquisitions, so what survives is dead
+    weight at best and a channel that opens dark at worst.
+    """
+    from squidmip._region_viewer import _LUT_CLIPBOARD
+
+    manager.defaults.set("luts", _LUT_A)
+    manager.defaults.set("channel_visibility", {CH_IN_YAML: False})
+    _LUT_CLIPBOARD.update(_LUT_B)
+    manager.defaults.set("tenengrad_focus", True)
+
+    manager.set_dataset(manager._reader, manager._meta)
+
+    assert manager.defaults.get("luts") == {}
+    assert manager.defaults.get("channel_visibility") == {}
+    assert _LUT_CLIPBOARD == {}
+    # HOW you look survives; WHAT you looked at does not.
+    assert manager.defaults.get("tenengrad_focus") is True
+
+
+def test_a_new_dataset_also_forgets_the_last_ones_contrast_ceiling(manager):
+    """`set_dataset` is the one function that means "a new acquisition arrived"."""
+    from squidmip import _bitdepth
+
+    _bitdepth.depth().observe(3437.0)
+    assert _bitdepth.range_for(np.uint16) == (0.0, 4095.0)
+
+    manager.set_dataset(manager._reader, manager._meta)
+
+    assert _bitdepth.depth().observed is None
+    assert _bitdepth.range_for(np.uint16) == (0.0, 65535.0)
+
+
+def test_a_ceiling_rise_reaches_a_window_that_is_ALREADY_open(qapp, manager):
+    """THE test. The 14-bit set reads 3437 at C3 and 16380 at E7 -- one acquisition, one channel.
+
+    A window opened on the dim region has layers whose slider stops at 4095. When the bright
+    region is read the ceiling rises, and those already-built layers must be able to reach the
+    new pixels -- without their windows moving, because widening cannot clip.
+    """
+    from squidmip import _bitdepth
+
+    _bitdepth.depth().observe(3437.0)
+    win = manager.open([REGIONS[0]])
+    _loaded(qapp, win)
+
+    layer = win._pane.mosaic.find(_RAW_OP, CH_IN_YAML)
+    assert layer is not None
+    assert tuple(layer.contrast_limits_range) == (0.0, 4095.0)
+    layer.contrast_limits = (100.0, 3000.0)     # the window the user is looking through
+
+    _bitdepth.depth().observe(16380.0)          # E7 is fused
+    for _ in range(5):
+        qapp.processEvents()                    # the rise is queued to the GUI thread
+
+    assert tuple(layer.contrast_limits_range) == (0.0, 16383.0)
+    # Widening cannot clip, so nothing on screen changed -- only how far the slider now travels.
+    assert tuple(layer.contrast_limits) == (100.0, 3000.0)
 
 
 def test_a_window_opened_on_a_DIFFERENT_region_gains_nothing(qapp, manager):

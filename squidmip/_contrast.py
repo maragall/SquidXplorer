@@ -146,6 +146,13 @@ def sample_plane(levels: Any) -> Optional[np.ndarray]:
     The z is :func:`opening_z`, which is also the z the viewer is parked on, so this sample is the
     plane the user is actually shown and its fuse is the fuse the display needs anyway.
 
+    RIGHT FOR A WINDOW, WRONG FOR A CEILING. The coarsest level is mean-downsampled, so its
+    maximum is an UNDER-estimate of level 0's -- a hot pixel at stride ``s`` is attenuated by up
+    to ``1/s**2``. That is harmless for a 99.9th-percentile window and fatal for
+    ``contrast_limits_range``, where an under-estimate snaps the slider below real data and clips
+    it. :mod:`squidmip._bitdepth` therefore measures the ceiling from full-resolution frames in
+    :mod:`squidmip._mosaic_source` and never from here. Do not wire this function to it.
+
     Accepts a level list (multiscale) or a single array, and returns None if nothing usable is
     there -- a caller must not have to sniff which shape it was handed.
     """

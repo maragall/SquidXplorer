@@ -442,6 +442,10 @@ class PlateWindow(QMainWindow):
         from squidmip._region_viewer import ViewerManager
         self._viewer_manager = ViewerManager(parent=self)
         self._viewer_manager.tabbed_views = self._want_tabbed_views
+        #: The plate's OWN 3D popout (`_open_native_3d`), held so a later contrast-ceiling rise
+        #: can reach it. Windows track theirs as `RegionViewer._native3d`.
+        self._plate_native3d = None
+        self._viewer_manager.depthChanged.connect(self._on_depth_changed)
         # Operator controls appear AT EACH LEVEL (the deck; Julio 2026-07-23: "I don't see operator
         # controls like the powerpoint specified at each level"). Every window's "Operators for this
         # window" dropdown is the SAME registry + run_operator (the CLI engine), scoped to that view,
@@ -1190,11 +1194,31 @@ class PlateWindow(QMainWindow):
         try:
             from squidmip._napari3d import open_native_3d
 
-            open_native_3d(self._reader, self._meta, region)
+            # HELD, not fire-and-forget. A later region can raise the dataset's contrast ceiling
+            # (the 14-bit set reads 3437 at C3 and 16380 at E7), and a popout nobody kept a ref to
+            # cannot be told -- it would sit on a slider that stops short of its own pixels.
+            self._plate_native3d = open_native_3d(self._reader, self._meta, region)
             log.info("opened native napari 3D popout for region %s", region)
         except Exception as exc:                     # noqa: BLE001 - NAMED, to the log and readout
             log.error("native 3D view failed for region %s: %s", region, exc)
             self._readout.setText(f"3D native view failed: {exc}")
+
+    def _on_depth_changed(self, lo: float, hi: float) -> None:
+        """The dataset's contrast ceiling rose. Widen the plate's own 3D popout, if it has one.
+
+        The plate itself needs nothing: its thumbnails are a Qt composite that asks
+        `_pct_window` for a range every time it paints, so it picks the new ceiling up on the
+        next repaint without being told.
+        """
+        popout = getattr(self, "_plate_native3d", None)
+        if popout is None or not hasattr(popout, "layers"):
+            return
+        try:
+            from squidmip._napari3d import widen_contrast_range
+
+            widen_contrast_range(popout, float(lo), float(hi))
+        except Exception:                            # noqa: BLE001 - the popout may be closed
+            pass
 
     # -- operator UIs live as tabs in the band's right column: the Operators home tab, one tab
     # -- per operator you open, and any result a panel publishes. ---------------------------------

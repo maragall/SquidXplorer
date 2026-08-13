@@ -546,6 +546,14 @@ class BrickedVolume:
             self._say(f"3D: brick {key[1][0]},{key[1][1]} could not be added: {exc}")
             return
         pin_max_compositing(self._viewer, layer)
+        # BEFORE `adopt`, deliberately. napari sized this layer's contrast_limits_range from ONE
+        # brick, so a brick cut from a dim corner carries a range narrower than the channel's
+        # window. `adopt` then copies its siblings' contrast_limits onto it, and a write outside
+        # the range is clamped -- the dim brick would render on a window nobody chose. Widening
+        # to the dataset's depth first means there is nothing left for adopt to be clamped by.
+        from squidmip._napari3d import _seed_range
+
+        _seed_range(layer, getattr(arr, "dtype", None), clim)
         self._mosaic.adopt(self._op, channel, layer)
         self._layers[key] = layer
         self._steps[key] = max(1, int(round(scale[1] / self._scale[1])))

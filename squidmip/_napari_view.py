@@ -89,6 +89,7 @@ from typing import Any, Iterable, Optional, Sequence
 
 import numpy as np
 
+from squidmip import _bitdepth
 from squidmip._logpane import get_logger
 
 log = get_logger("napari")
@@ -707,6 +708,58 @@ class MosaicLayers:
         return out
 
     @staticmethod
+    def _widen_range(layer: Any, lo: float, hi: float) -> bool:
+        """Open ``layer``'s contrast slider to at least ``(lo, hi)``. NEVER narrows. Moved?
+
+        ONE copy of the rule, because there are two callers with the same requirement and
+        opposite reasons. ``_set_identity_prop`` widens so an inherited window is not clamped
+        away by a range napari sized from one brick's dim corner; ``widen_contrast_range`` widens
+        because a later region proved the dataset holds bigger numbers than the first one did.
+        Both must be incapable of narrowing: a narrower range does not merely restyle the slider,
+        napari clips ``contrast_limits`` into it and can reset the window outright.
+
+        Returns False for anything with no range to widen -- Labels, Points, Shapes -- so callers
+        can walk a whole layer list without sniffing types.
+        """
+        try:
+            r0, r1 = (float(v) for v in layer.contrast_limits_range)
+        except Exception:                        # noqa: BLE001 - not an intensity layer
+            return False
+        new = (min(r0, float(lo)), max(r1, float(hi)))
+        if new == (r0, r1):
+            return False
+        try:
+            layer.contrast_limits_range = new
+        except Exception:                        # noqa: BLE001 - one odd surface is skipped
+            return False
+        return True
+
+    def widen_contrast_range(self, lo: float, hi: float) -> int:
+        """Open every image layer's contrast slider to at least ``(lo, hi)``. Returns how many moved.
+
+        Called when `_bitdepth` raises the dataset ceiling -- the C3-then-E7 case, where the
+        first region read looked 12-bit and a later one proved 14. Layers already on screen were
+        built against the old ceiling and would otherwise keep a slider that cannot reach their
+        own brightest pixels.
+
+        WRAPPED IN ``programmatic()``. napari re-emits ``events.contrast_limits`` when the RANGE
+        changes even though the window value does not move (it re-assigns the clipped tuple), and
+        an echo that reaches ``_connect_user_contrast`` reads as the user having dragged the
+        slider -- which latches the plate to manual and kills per-region contrast.
+
+        RGB layers are skipped: napari ignores contrast on them, and writing a range would be a
+        no-op that looks like coverage.
+        """
+        moved = 0
+        with self.programmatic():
+            for layer in list(getattr(self._model, "layers", []) or []):
+                if getattr(layer, "rgb", False):
+                    continue
+                if self._widen_range(layer, lo, hi):
+                    moved += 1
+        return moved
+
+    @staticmethod
     def _set_identity_prop(layer: Any, prop: str, value: Any) -> bool:
         """Write one identity property onto one layer. Returns whether it moved.
 
@@ -726,9 +779,7 @@ class MosaicLayers:
             pass
         if prop == "contrast_limits":
             try:
-                lo, hi = float(value[0]), float(value[1])
-                r0, r1 = (float(v) for v in layer.contrast_limits_range)
-                layer.contrast_limits_range = (min(r0, lo), max(r1, hi))
+                MosaicLayers._widen_range(layer, float(value[0]), float(value[1]))
             except Exception:                    # noqa: BLE001 - no range to widen; write anyway
                 pass
         try:
@@ -1096,19 +1147,25 @@ class MosaicLayers:
             layer = self._model.add_image(data, **kwargs)
             self._park_new_axes(ndim_before)
 
-            # The slider must span the DTYPE, not the window we seeded. napari sizes
+            # The slider must span the DATA's range, not the window we seeded. napari sizes
             # contrast_limits_range from the data it sampled, so a tight seed leaves the user
             # unable to open the window back up past it -- the control silently bounds them to
             # our choice. The stitcher sets this immediately after every add for the same reason.
+            #
+            # `range_for`, not `dtype_range`: MONO12 and MONO16 share the uint16 container, so
+            # the dtype answers 65535 for both and a 12-bit acquisition gets a slider whose
+            # useful travel is the bottom sixteenth. `_bitdepth` measures which it actually is.
+            #
+            # UNCONDITIONAL. This used to require `"contrast_limits" in kwargs`, which meant a
+            # layer whose seed was degenerate (a blank channel, `hi <= lo` at the guard above) or
+            # absent got NO range at all and was left pinned to whatever extent napari inferred
+            # from its own sample -- exactly the clipped slider this change exists to remove.
             try:
-                from squidmip._contrast import dtype_range
-
                 dt = getattr(_first_level(data, bool(multiscale)), "dtype", None)
-                if dt is not None and "contrast_limits" in kwargs:
-                    lo_r, hi_r = dtype_range(dt)
-                    lo_w, hi_w = kwargs["contrast_limits"]
-                    # Never narrower than what is displayed, or napari clamps the window itself.
-                    layer.contrast_limits_range = (min(lo_r, lo_w), max(hi_r, hi_w))
+                lo_r, hi_r = _bitdepth.range_for(dt)
+                lo_w, hi_w = kwargs.get("contrast_limits", (lo_r, hi_r))
+                # Never narrower than what is displayed, or napari clamps the window itself.
+                layer.contrast_limits_range = (min(lo_r, float(lo_w)), max(hi_r, float(hi_w)))
             except Exception:               # noqa: BLE001 - cosmetic; the layer is already good
                 pass
 
@@ -1223,7 +1280,12 @@ class MosaicLayers:
         What is deliberately NOT touched: contrast_limits, colormap, gamma, opacity, blending.
         Those are the user's, and a region change is not a reason to reset them -- that is the
         whole point of one contrast value per channel. What IS updated: the data, the placement
-        (each region sits at its own stage coordinates) and the z scale.
+        (each region sits at its own stage coordinates) and the z scale, and the contrast
+        RANGE -- the slider's travel, not its value. The new region may be brighter than the one
+        this layer was built for (C3 at 3437 replaced by E7 at 16380 in the 14-bit set), and a
+        slider still bounded by the old region's ceiling cannot reach the new pixels. Widening
+        only ever opens it further, and the layer's own current window is passed as the floor so
+        this cannot move the value the method exists to preserve.
 
         Placement goes through `_place`, the ONE placement rule -- not a second copy of the
         arithmetic, which is exactly the two-owner defect `_place` exists to prevent.
@@ -1237,6 +1299,13 @@ class MosaicLayers:
             # back at full ndim) and let `_present_z_axis` re-decide after the new data lands.
             self._restore_layer_z(layer)
             layer.data = data
+            try:
+                dt = getattr(_first_level(data, bool(multiscale)), "dtype", None)
+                lo_r, hi_r = _bitdepth.range_for(dt)
+                lo_w, hi_w = (float(v) for v in layer.contrast_limits)
+                self._widen_range(layer, min(lo_r, lo_w), max(hi_r, hi_w))
+            except Exception:                    # noqa: BLE001 - cosmetic; the data already landed
+                pass
             if visible is not None:
                 layer.visible = bool(visible)
             if bbox_um is not None:
