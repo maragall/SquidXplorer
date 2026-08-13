@@ -356,7 +356,10 @@ def test_build_plate_contradicts_a_lying_yaml_on_a_12_well_plate_too():
     assert p.declared_format == "24 well plate"
     assert p.pitch_x_um == pytest.approx(26000.0)
     assert (p.rows, p.cols) == (3, 4)
-    msg = str(rec[0].message)
+    # The MATCHED warning, not rec[0]: a GC-collected ResourceWarning from an earlier test can
+    # land first in the block, and this assertion is about the contradiction's wording, not order.
+    msg = next(str(w.message) for w in rec
+               if "contradicts the stage coordinates" in str(w.message))
     assert "12 well plate" in msg and "24 well plate" in msg
 
 

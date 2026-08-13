@@ -1299,20 +1299,6 @@ def test_open_computed_names_a_well_that_cannot_read_its_own_image_id(
 
 
 
-def test_operation_stack_remove_and_remove_suffix():
-    from squidxplorer._layers import OperationStack
-    st = OperationStack()
-    st.add("mip@exp:a", "MIP · a")
-    st.add("mip@exp:b", "MIP · b")
-    st.add("mip", "MIP")
-    assert st.remove_suffix("@exp:a") == ["mip@exp:a"]
-    keys = {ly.key for ly in st.layers()}
-    assert keys == {"raw", "mip@exp:b", "mip"}
-    assert st.remove("raw") is False                    # the base layer is never removable
-    assert st.remove("mip") is True
-    assert st.remove("mip") is False
-
-
 def test_second_ingest_resets_state(qapp, squid_dataset, tmp_path):
     root, _ = squid_dataset
     win = V.PlateWindow(None)
@@ -4186,12 +4172,15 @@ class _ResultManager:
 
 def _result_win(op="bgsub", region="A1", channels=("405", "488")):
     from squidxplorer._region_nav import RegionCursor
+    from squidxplorer._run import OperatorRun
 
     win = _plate_window_shell()
     win._cursor = RegionCursor()
     win._cursor.set_order([region])
     win._cursor.activate(region)
     win._active_op_key = op
+    win._run = OperatorRun(key=op, layer_key=op, label=op, action=None, dest="",
+                           address=None, requester=None, is_partial=False, t0=0.0)
     win._readout = type("R", (), {"setText": lambda self, t: setattr(self, "t", t),
                                   "text": lambda self: getattr(self, "t", "")})()
     # A finished result is filed in _recipe.RESULTS so a window opened later can reuse it instead of recomputing, keyed by which acquisition — so the shell has to carry a reader like every other attribute here.
@@ -4232,16 +4221,16 @@ def test_a_run_that_ends_with_a_half_read_region_SAYS_SO_instead_of_stranding_it
     """A region that never completes (e.g. unreadable TIFFs) used to sit forgotten in _result_accs forever: the run reported success and opened no operator tab. It must now be settled and named as incomplete, not stranded silently."""
     win = _result_win("mip")
     V.PlateWindow._on_result(win, "A1", 0, np.zeros((2, 8, 8), "uint16"))   # 1 of 2 FOVs
-    assert win._result_accs, "the accumulator should be holding the half region"
+    assert win._run.accs, "the accumulator should be holding the half region"
 
     stranded = V.PlateWindow._settle_stranded_results(win)
 
     assert stranded == 1
-    assert win._result_accs == {}, "the stranded accumulator was not resolved"
+    assert win._run.accs == {}, "the stranded accumulator was not resolved"
     assert win._view.mosaic.calls == [], "half a region must still not be drawn"
     said = win._readout.text()
     assert "A1" in said and "1 of 2" in said, f"the run did not say what happened: {said!r}"
-    assert win._run_error, "the window that ASKED would still have been told the run finished"
+    assert win._run.error, "the window that ASKED would still have been told the run finished"
 
 
 def test_settling_a_run_with_every_region_complete_is_a_no_op(qapp):
@@ -4252,7 +4241,7 @@ def test_settling_a_run_with_every_region_complete_is_a_no_op(qapp):
 
     assert V.PlateWindow._settle_stranded_results(win) == 0
     assert win._readout.text() == ""
-    assert not win._run_error
+    assert not win._run.error
 
 
 def test_the_operator_layer_lands_in_the_raw_mosaic_s_frame(qapp):

@@ -157,9 +157,6 @@ KNOWN_NAME_BRANCHES = {
         "PRECONDITION expressed as a name because the registry could not carry the profile as a "
         "parameter; _flatfield.set_profile is a module-level global behind a lock for the same "
         "reason.",
-    ("squidxplorer/_benchmark.py", "flatfield"):
-        "_prepare installs the same profile outside the timed window. Its own docstring says why: "
-        "'it is selected by name, so it cannot take a profile argument'.",
 }
 
 

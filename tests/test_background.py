@@ -17,7 +17,7 @@ from squidxplorer._background import (
     restore,
     subtract_background,
 )
-from squidxplorer._layers import OperationStack
+from squidxplorer._operations import OperationStack
 from squidxplorer.projection import PLANE_OP
 from squidxplorer.reader import open_reader
 
@@ -273,8 +273,8 @@ def test_a_missing_bgsub_fails_loud_and_never_silently_falls_back_to_rolling_bal
 
 
 def test_a_bgsub_layer_can_be_toggled_off_to_return_to_raw():
-    """The plate falls back to the raw base the moment the layer is disabled or removed — no
-    re-read, no undo stack, no inverse transform."""
+    """The plate falls back to the raw base the moment the layer is disabled — no re-read,
+    no undo stack, no inverse transform."""
     stack = OperationStack()
     stack.add("bgsub@tab1", "background subtraction")
     assert stack.top_enabled().key == "bgsub@tab1"
@@ -284,8 +284,6 @@ def test_a_bgsub_layer_can_be_toggled_off_to_return_to_raw():
 
     stack.toggle("bgsub@tab1", True)
     assert stack.top_enabled().key == "bgsub@tab1"
-    assert stack.remove("bgsub@tab1")
-    assert stack.top_enabled().key == "raw"
 
 
 def test_the_reader_is_read_only_so_the_source_tiffs_survive_a_run(squid_dataset):

@@ -22,7 +22,7 @@ from qtpy.QtCore import (  # QThread/Signal: kept for tests that build a stub wo
 from qtpy.QtGui import QColor, QPalette
 from qtpy.QtWidgets import (
     QAction, QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel,
-    QMainWindow, QPlainTextEdit, QPushButton, QScrollArea, QSpinBox,
+    QMainWindow, QPushButton, QScrollArea, QSpinBox,
     QSplitter, QStyleFactory, QTabBar, QVBoxLayout, QWidget,
 )
 
@@ -59,10 +59,9 @@ from squidxplorer._logpane import get_logger
 
 log = get_logger("viewer")
 
-from squidxplorer import _measure, _qtstyle, _run_scope
+from squidxplorer import _ingest, _measure, _qtstyle, _run_scope
 from squidxplorer.contract import field_path
 from squidxplorer._engine import available_plane_operators
-from squidxplorer._layers import OperationStack
 from squidxplorer._minerva import MINERVA_HOME_ENV as _MINERVA_HOME_ENV
 from squidxplorer._minerva import NEEDS_INTERNET_NOTE as _MINERVA_INTERNET_NOTE
 from squidxplorer._minerva import MINERVA_URL as _MINERVA_URL
@@ -80,8 +79,8 @@ from squidxplorer._qtstyle import dark_palette as _dark_palette
 from squidxplorer._qtstyle import hline as _hline
 from squidxplorer._qtstyle import operator_card as _operator_card
 from squidxplorer._time_point import TimePointBar
-from squidxplorer._terminal import _CmdEdit, _ProcTerminal, _Terminal  # noqa: F401 (re-export)
 from squidxplorer._region_nav import RegionCursor
+from squidxplorer._run import OperatorRun
 
 # Plate overview and geometry live in `_plate_overview`; re-exported under their
 # historical names so callers and tests reaching through `_viewer` are unchanged.
@@ -108,8 +107,9 @@ from squidxplorer._workers import (  # noqa: F401 (re-exports)
 
 # The operator registry lives in `_operations`; re-exported for this module's call sites.
 from squidxplorer._operations import (  # noqa: F401 (re-exports)
-    _OPERATIONS, _OPERATIONS_BY_KEY, _SAVE_OPERATOR, _TO_BE_ADDED, Operation, _action_label,
-    operator_label, operator_layer_key, operator_name, result_kind, runnable_operators,
+    _OPERATIONS, _OPERATIONS_BY_KEY, _SAVE_OPERATOR, _TO_BE_ADDED, Operation, OperationStack,
+    _action_label, operator_label, operator_layer_key, operator_name, result_kind,
+    runnable_operators,
 )
 
 # Chrome (colours, stylesheets, palette) is defined once in `_qtstyle` and aliased here.
@@ -134,7 +134,6 @@ _CARD_QSS = _qtstyle.CARD_QSS
 _BTN_QSS = _qtstyle.BTN_QSS
 _COMBO_QSS = _qtstyle.COMBO_QSS
 _CHECK_QSS = _qtstyle.CHECK_QSS
-_TERM_QSS = _qtstyle.TERM_QSS
 _MENU_QSS = _qtstyle.MENU_QSS
 _ANSI_RE = _qtstyle.ANSI_RE
 
@@ -176,32 +175,11 @@ _RIGHT_COL_SIZES = [215, 165]
 
 
 class PlateWindow(QMainWindow):
-    #: In-flight operator results, one accumulator per REGION being accumulated, or None.
-    #: A CLASS default rather than an __init__ assignment so ``_on_result`` can use plain
-    #: attribute access: a bare ``getattr(self, ..., None)`` on a QObject whose __init__ has
+    #: The latest run's identity and books (:class:`squidxplorer._run.OperatorRun`), or None before
+    #: the first run. A CLASS default rather than an __init__ assignment so the run slots can use
+    #: plain attribute access: a bare ``getattr(self, ..., None)`` on a QObject whose __init__ has
     #: not run raises out of Qt's own attribute machinery instead of returning the default.
-    #:
-    #: Keyed by region rather than a single slot because there is no longer ONE surface showing
-    #: ONE region. Every open window shows a region of its own, so the set of regions somebody is
-    #: looking at is as large as the set of open windows -- and a single slot thrashed between
-    #: them, which means no region ever completed and no layer was ever drawn. The bound is the
-    #: number of open windows, which is the honest bound; see ``_result_regions``.
-    _result_accs = None
-    #: The window that asked for the in-flight run (a ``RegionViewer``), the bare action label to
-    #: report to it, and the reason the run failed if it did. The completion callback, held as
-    #: state rather than captured in a lambda for the same reason ``_run_label`` is: the same three
-    #: facts are read by ``_on_run_drained`` and by nothing else, and one source is how they stay
-    #: in agreement.
-    _run_requester = None
-    _run_op_action = None
-    _run_error = None
-    #: The most recent :class:`~squidxplorer._progress.ProgressReport` of the in-flight run, or None
-    #: between runs. Held for the same reason as the three above: read back by the status line.
-    _run_units = None
-    #: When the user last asked for an operator run, on the perf_counter clock. The other end of
-    #: FIRST PAINT, whose stop is in ``_on_tile``: the wait being measured is the user's, so it
-    #: starts at the gesture and not at the moment a worker thread happens to be constructed.
-    _run_t0 = None
+    _run = None
 
     def __init__(self, initial_path: Optional[str] = None):
         super().__init__()
@@ -332,8 +310,6 @@ class PlateWindow(QMainWindow):
         self._gallery = None          # the ONE open GalleryWindow, or None (see _open_gallery_view)
         self._readout_base = ""
         self._tabs_muted = False      # suppress _on_tab_changed during bulk teardown (ingest)
-        self._run_label = ""          # the in-flight run's operator label, and where it is going —
-        self._run_dest = ""           # one source for the status line
         self._pending_resync = False  # a tab switch was deferred because a run was live (IMA-205 bugs)
         self._runs_settled = 0        # monotonic: bumped once a run's TERMINAL cascade has run — the
         #                               tiles, the streamEnded recomposite AND _on_run_drained. It is
@@ -1000,7 +976,7 @@ class PlateWindow(QMainWindow):
         """Open (or focus) a UI as a tab. Built lazily, once. *tabs* is the bar it belongs in;
         there is one bar (the band's right column) and it is the default.
         If the UI is currently detached (see _detach_tab), focus its floating window instead —
-        never rebuild: for the CLI that would mean a second live shell."""
+        never rebuild, so a widget's live state survives."""
         tabs = self._left_tabs if tabs is None else tabs
         win = self._floating.get(key)
         if win is not None:
@@ -1178,8 +1154,8 @@ class PlateWindow(QMainWindow):
             self._dispose_tab_widget(w)
 
     def _redock(self, key: str):
-        """Re-dock button: return the floated widget to the tab bar — the SAME object, so a live
-        CLI keeps its shell and history (close-and-reopen would kill both)."""
+        """Re-dock button: return the floated widget to the tab bar — the SAME object, so its
+        live state survives (close-and-reopen would kill it)."""
         win = self._floating.pop(key, None)
         if win is None:
             return
@@ -1221,9 +1197,9 @@ class PlateWindow(QMainWindow):
         It owns pane 1's status line, and it forwards the same immutable report to the window that
         ASKED for the run — the region window, which had no progress affordance at all.
         """
-        self._run_units = report
-        self._run_readout(f"● {report.sentence()}{self._run_dest}")
-        self._tell_requester(self._run_requester, "operator_progress", report)
+        run = self._run
+        self._run_readout(f"● {report.sentence()}{run.dest}")
+        self._tell_requester(run.requester, "operator_progress", report)
         # ...and to the ONE bar next to the memory bar, which is where Julio asked to see a run
         # WHEREVER it was started from ("in bulk or in a specific window"). The requester above is
         # told only when the run came from a region window; this covers both, and the preview.
@@ -1350,7 +1326,7 @@ class PlateWindow(QMainWindow):
         if not force:
             return                   # a plain tab selection: the plate is already plate-wide
         self._overview.set_all_status("empty")
-        self._overview.set_active_layer(self._active_op_key or "raw")
+        self._apply_layers()
 
     def _request_resync(self):
         """Remember that the plate needs to catch up once the run drains.
@@ -1392,7 +1368,7 @@ class PlateWindow(QMainWindow):
         preview's exit is not the run's drain, and treating it as one closed the run's books early:
         observed on 2026-08-03, 5 runs in 200, as ``_close_requester_pair`` running while the
         operator worker's own ``runProgress`` and ``failed`` were still sitting in the queue. The
-        window that asked was then unsubscribed (``_run_requester = None``) before a single unit
+        window that asked was then unsubscribed (the run's requester cleared) before a single unit
         report reached it, so its bar's ONLY frame was the drain's final "2 of 2", and a failed run
         was reported as "produced nothing" instead of naming its cause. ``operator_busy`` cannot
         catch this: the run's thread has already exited, so it is honestly not busy — what has not
@@ -1416,24 +1392,20 @@ class PlateWindow(QMainWindow):
             # stopped run is exactly the case that would have gone quiet. A run that landed nothing
             # is reported as a failure however politely the engine returned.
             # A region whose FOVs were only PARTLY read never reached `acc.complete()`, so its
-            # result was still sitting in `_result_accs` with nothing left running to finish it.
+            # result was still sitting in the run's books with nothing left running to finish it.
             # Resolved here, before the books are closed, so the two lines below cannot report a
-            # run as done when it produced no layer. See `_settle_stranded_results`.
+            # run as done when it produced no layer. See `OperatorRun.settle_stranded`.
             stranded = self._settle_stranded_results()
-            action = getattr(self, "_run_action", None)
-            if action is not None:
-                self._run_action = None
-                elapsed = time.monotonic() - getattr(self, "_run_began", time.monotonic())
+            run = self._run
+            if run is not None and run.action is not None:
+                action, run.action = run.action, None
+                elapsed = time.monotonic() - run.began
                 landed = getattr(self._worker, "landed", None)
-                if landed == 0:
-                    self.log.failed(action, f"produced nothing after {elapsed:.1f} s",
-                                    address=self._run_address)
-                elif stranded:
-                    self.log.failed(action, f"{stranded} region(s) landed no layer — some of "
-                                            f"their fields could not be read",
-                                    address=self._run_address)
+                outcome, why = run.close(landed, stranded, elapsed)
+                if outcome == _measure.OK:
+                    self.log.done(action, elapsed, address=run.address)
                 else:
-                    self.log.done(action, elapsed, address=self._run_address)
+                    self.log.failed(action, why, address=run.address)
                 self._close_requester_pair(landed, elapsed)
         # A genuine drain: every worker has exited AND (finished being FIFO-queued after this
         # worker's tileReady/streamEnded) their terminal slots have already run on this thread.
@@ -1456,10 +1428,11 @@ class PlateWindow(QMainWindow):
         A run that landed nothing is reported as a FAILURE however politely the engine returned,
         the same rule the status line and the console line above already follow.
         """
-        requester, self._run_requester = self._run_requester, None
-        action = self._run_op_action or "the operator"
-        reason, self._run_error = self._run_error, None
-        self._run_op_action = None
+        run = self._run
+        requester, run.requester = run.requester, None
+        action = run.label or "the operator"
+        reason, run.error = run.error, None
+        run.label = None
         if requester is None:
             return
         # THE RUN'S FINAL COUNT, read from the worker rather than waited for. The worker's last
@@ -2374,6 +2347,12 @@ class PlateWindow(QMainWindow):
     def _apply_layers(self):
         """Show the topmost enabled layer on the plate; keep the title in sync.
 
+        THE ONE WRITER of the plate's shown layer: every path that changes it — a run start, a
+        toggle, a reorder, return-to-raw, opening a computed plate, the post-run resync — writes
+        the stack and calls this. Four sites used to call ``set_active_layer`` directly, each
+        recomputing the answer the stack already holds, and the direct writes are how the Layers
+        tab and the plate came to disagree.
+
         ``top_enabled()`` cannot be None now that raw is undisableable, but this used to no-op on
         None and leave the plate showing a layer the tab said was OFF. Fall back to raw explicitly
         instead of silently doing nothing: the plate must never render something no enabled layer
@@ -2395,101 +2374,18 @@ class PlateWindow(QMainWindow):
     # _processed_plate still names the older save. Re-registering on every transition is what
     # keeps the inset showing the same run the tiles came from.
 
+    # The loupe-source bookkeeping lives in `_ingest`; these forward so callers are unchanged.
     def _release_loupe_sources(self):
-        """Drop every source AND join the read thread that serves them.
-
-        The one call every "the plate is being replaced" path must make. Assigning
-        ``self._loupe_sources = {}`` (which _open_computed did) only forgets the sources: the
-        _LoupeWorker QThread lives on the OVERVIEW, so the old overview walked off with a running
-        thread and its ~35 MB plane cache on every plate open — confirmed still isRunning() after
-        the overview was replaced. Only PlateOverview.shutdown() stops and joins it.
-
-        It goes through ``shutdown()`` rather than ``set_loupe_source(None)`` because the overview
-        owns TWO threads and the loupe worker is only one of them: this method's own sentence
-        above ("the one call every 'the plate is being replaced' path must make") was true of the
-        loupe and false of the tile fetcher, which outlived two of the three replacement paths."""
-        if self._overview is not None:
-            self._overview.shutdown()
-        self._loupe_sources = {}
+        _ingest.release_loupe_sources(self)
 
     def _set_loupe_source(self, layer_key, source):
-        self._loupe_sources[layer_key] = source
-        self._update_loupe_source()
+        _ingest.set_loupe_source(self, layer_key, source)
 
     def _drop_loupe_source(self, layer_key):
-        self._loupe_sources.pop(layer_key, None)
-        self._update_loupe_source()
+        _ingest.drop_loupe_source(self, layer_key)
 
     def _update_loupe_source(self):
-        """Point the plate at the source for whatever layer is on screen right now."""
-        if self._overview is None:
-            return
-        active = getattr(self._overview, "_active", "raw")
-        source = self._loupe_sources.get(active)
-        if source is self._overview._loupe_src:
-            return                                   # unchanged: don't churn the worker thread
-        colors = None
-        if self._meta and self._meta.get("channels"):
-            colors = np.stack([_hex_to_rgb01(c["display_color"]) for c in self._meta["channels"]])
-        self._overview.set_loupe_source(source, colors)
-
-    def _build_cli_tab(self) -> QWidget:
-        """A LIVE, interactive shell in the pane: run the `squidxplorer` batch CLI (IMA-186) right here.
-        Pre-seeded with the how-to (MIP every well; `--tiff` -> FIJI-openable TIFFs). `squidxplorer` is
-        aliased to this app's interpreter so it runs regardless of PATH/conda. Falls back to a static
-        command preview where a PTY isn't available (e.g. Windows)."""
-        # Input must be a RAW acquisition folder; if the current path is a computed .hcs plate (or
-        # none), show a placeholder rather than a wrong path.
-        p = str(self._acq_path) if self._acq_path else ""
-        acq = p if (p and ".hcs" not in p and not p.endswith(".ome.zarr")) else "<your acquisition folder>"
-        py = sys.executable
-        win = sys.platform == "win32"
-        banner = [
-            "==========================================================",
-            "  Process a whole plate from the command line",
-            "==========================================================",
-            "",
-            "  Same MIP as the buttons, on every well. Copy a line and press Enter.",
-            "",
-            "  - Flatten every well + save FIJI-openable TIFFs:",
-            f'      python -m squidxplorer "{acq}" --tiff',
-            "",
-            "  - Try just the first 8 wells first (quick, little disk):",
-            f'      python -m squidxplorer "{acq}" --limit 8 --tiff',
-            "",
-            "  - Choose where to save:",
-            f'      python -m squidxplorer "{acq}" --limit 8 --tiff --output-folder ~/Downloads',
-            "",
-            "  - All options:   python -m squidxplorer --help",
-            "",
-        ]
-        # The terminals put the venv's Scripts/bin on PATH, so the `squidxplorer` console script resolves
-        # directly — no alias needed (doskey is unreliable in a piped cmd.exe anyway).
-        setup: list = []
-        cwd = str(self._acq_path.parent) if self._acq_path else str(Path.home())
-        if not win:                              # Unix: a real PTY terminal
-            try:
-                t = _Terminal(cwd, banner, setup_cmds=setup)
-                if t._fd is not None:
-                    return t
-            except Exception:
-                pass
-        try:                                     # Windows (+ Unix fallback): a QProcess shell
-            t = _ProcTerminal(cwd, banner, setup)
-            if t.running():
-                return t
-        except Exception:
-            pass
-        term = QPlainTextEdit(); term.setReadOnly(True)   # last resort: static, copy-paste preview
-        term.setStyleSheet(_TERM_QSS)
-        term.setPlainText(
-            "Process a whole plate from the command line\n"
-            "──────────────────────────────\n"
-            "Open a terminal, then paste (no conda needed — this is the app's own Python):\n\n"
-            f'    "{py}" -m squidxplorer "{acq}" --limit 8 --tiff --output-folder ~/Downloads\n\n'
-            "This flattens the first 8 wells (MIP) and saves TIFFs you can open in FIJI.\n"
-            "Drop --limit 8 to do the whole plate. Add --help to see all options.\n")
-        return term
+        _ingest.update_loupe_source(self)
 
     def _enable_operators(self, flag: bool):
         for a in self._op_actions.values():
@@ -2521,161 +2417,9 @@ class PlateWindow(QMainWindow):
             e.acceptProposedAction()
             self.ingest(urls[0].toLocalFile())
 
-    # -- open an acquisition (no processing yet — that's the Process menu) --
     def ingest(self, path: str):
-        from squidxplorer import open_reader
-
-        p, is_plate = resolve_plate_root(path)
-        if is_plate:
-            self._readout.setText("this is already a written plate — drop a raw Squid acquisition")
-            return
-        # stop any in-flight run/preview/export and clear prior state before opening a new
-        # acquisition. _stop_minerva matters as much as the other two: a Minerva worker left
-        # running holds the OLD reader and would keep exporting (and launching) against an
-        # acquisition the window no longer shows.
-        self._stop_worker()
-        self._stop_preview()
-        self._stop_minerva()
-        self._reader = self._meta = None
-        self._fov_index = {}
-        self._selected_regions = []   # wells picked on the plate (IMA-221); scopes an operator run
-        self._current_well = None
-        self._current_fov = 0
-        self._enable_operators(False)
-        if self._overview is not None:
-            self._release_loupe_sources()   # BOTH read threads, before dropping their owner
-            self._overview.setParent(None)
-            self._overview.deleteLater()
-            self._overview = None
-        self._readout.setText("scanning acquisition …")
-        QApplication.processEvents()
-        try:
-            reader = open_reader(str(p))
-            meta = reader.metadata
-        except Exception as e:   # not a Squid acquisition / unreadable -> report, don't crash the app
-            self._readout.setText(f"not a readable Squid acquisition: {e}")
-            self._drop.show()
-            return
-        # Resolve the layout format ONCE: an explicit override wins, then the declared field, then
-        # inference from the well ids (IMA-219 — two real acquisitions carry no format at all).
-        # Never fatal: an un-inferable plate keeps the declared value and falls through the guard.
-        # Resolve the sample holder ONCE (IMA-214). build_plate handles wells AND slides: a slide
-        # carrier is a Plate whose cells are the freeform region ids, so a glass-slide/tissue
-        # acquisition reaches this widget by the same path a 384wp does. It also reconciles a
-        # declared format against the MEASURED stage pitch, so a mis-declared plate cannot lay out
-        # at the wrong scale.
-        try:
-            plate = build_plate(meta, override=self._plate_format_override)
-        except (PlateShapeError, PlateBuildError) as e:
-            self._readout.setText(f"cannot lay out this acquisition: {e}")
-            self._drop.show()
-            return
-        self._plate = plate
-        self._plate_format = fmt = plate.format_name
-        self._reader, self._meta = reader, meta
-        self._acq_name = Path(p).name
-        self._acq_path = Path(p)
-        self._processed_plate = None
-        self._viewer_manager.set_dataset(reader, meta)   # every spawned window shares this reader
-        rows, cols, wells, order = plate.viewer_grid()
-        for idx, region in enumerate(order):
-            self._fov_index[region] = {"idx": idx, "well_id": region, "rc": plate.cell_index(region)}
-
-        self._order = order                          # well order = the detail's FOV-slider order
-        # A freeform holder places its cells by GEOMETRY (IMA-253): the plate hands over one
-        # rectangle per region, in grid units, and the overview draws exactly those. A well plate
-        # returns None here and keeps the uniform grid it has always had.
-        cl = plate.cell_layout() if hasattr(plate, "cell_layout") else None
-        layout = ({plate.cell_index(cid): rect for cid, rect in cl.items()} if cl else None)
-        self._overview = PlateOverview(rows, cols, wells, layout=layout)
-        # Carrier art behind the cells (IMA-220). Hand over the PLATE, not its name: `plate` is what
-        # build_plate RESOLVED (measured pitch beat the 2x2's mis-declared "384 well plate"), so the
-        # background can only ever be drawn at the same scale the grid is laid out at.
-        self._overview.set_carrier(plate)
-        # DEEP ZOOM: arm the tile overlay for this acquisition. Fail-quiet by contract — an
-        # acquisition with no usable stage positions keeps the montage and nothing else changes.
-        if self._overview.set_tile_source(reader, meta):
-            g = self._overview._ladder.geometry
-            log.info("deep zoom armed: %d rungs, %.3f-%.1f um/px, %d tiles at fit",
-                     len(g), g.levels[0].scale_um_per_px, g.levels[-1].scale_um_per_px,
-                     g.worst_case_tiles)
-        else:
-            log.info("deep zoom not armed (no usable stage positions) — montage only")
-        self._selected_regions = []                  # a new acquisition starts with nothing picked
-        self._overview.hovered.connect(self._on_hover)
-        self._overview.wellActivated.connect(self.activate_well)
-        self._overview.selectionChanged.connect(self._on_selection_changed)
-        self._overview.marqueeSelected.connect(self._on_marquee_selected)
-        # The loupe's source is chosen by which layer the plate SHOWS, so it follows the plate
-        # rather than being re-pointed by hand at each of the six places the layer moves.
-        self._overview.activeLayerChanged.connect(lambda _k: self._update_loupe_source())
-        self._plate_mode = "raw"                     # a freshly-opened plate shows raw previews
-        self._plate_title.setText(f"{self._acq_name}   ·   raw")   # bottom-left plate-pane title
-        self._op_stack.reset()                       # fresh layer stack (base only)
-        self._active_op_key = None
-        if getattr(self, "_raw_btn", None):
-            self._raw_btn.hide()                     # raw view on open -> nothing to return from
-        self._refresh_layers_tab()
-        self._drop.hide()
-        self._left_l.addWidget(self._overview, 1)   # fills the pane and self-fits — no scrollbars
-        self._declare_channel_axis(meta["channels"], meta["dtype"])
-
-        # Hand the plate's region order to the SINGLE OWNER. Announcing it is what puts the red
-        # ROI frame on region 0 — one move, not several calls that could each be forgotten on some
-        # path.
-        #
-        # Cleared first so the announce always happens: re-opening an acquisition whose region ids
-        # match the previous one would otherwise be a no-op move and every surface reading the
-        # cursor would keep pointing at the OLD plate's region.
-        self._cursor.set_order([])
-        self._cursor.set_order(order)
-
-        self._enable_operators(True)
-
-        # The loupe works from the moment the folder opens — the raw layer's real pixels are the
-        # acquisition's own TIFFs, the same planes the preview below is about to downsample. No
-        # operator run is required to look closely at a well.
-        self._loupe_sources = {"raw": _RawLoupeSource(
-            reader, meta, lambda w: _fov_of_well(w, meta.get("fovs_per_region")))}
-        self._update_loupe_source()
-
-        # The mosaic geometry is known the moment the acquisition opens — it is pure arithmetic on
-        # coordinates.csv — so hand it to the plate NOW rather than waiting for an operator run
-        # (IMA-249: it was only ever set from run_operator, which is why the plate looked like a
-        # grid of lone frames until something was run). The preview below composites into exactly
-        # these boxes.
-        self._overview.set_mosaic_boxes(_mosaic_boxes(meta))
-
-        # Size the timepoint bar to what was just ingested. set_count hides it at n_t == 1 and
-        # clamps the position, so re-ingesting a SHORTER acquisition cannot leave the bar pointing
-        # past the end. It does not fire the callback: an ingest is not a user gesture.
-        self._time_point_bar.set_count(int(meta.get("n_t", 1) or 1))
-        # set_count CLAMPS the position, so read it back rather than assuming it survived: a
-        # re-ingest onto a shorter acquisition moves the bar, and the loupe must move with it.
-        self._overview.set_time_point(self.time_point)
-
-        # fast RAW preview: fill the plate with downsampled thumbnails immediately (grey dots),
-        # in the SAME row-major order the operator will later process them in.
-        self._start_preview(reader, meta, order)
-        # top-left = STATUS (what's happening / what's shown); the plate name is the pane title.
-        # "live" is retired from user-facing copy: this is POST-ACQUISITION review, and calling
-        # a loaded plate "live" reads as a running scope. The phrasing is operator/stitcher
-        # iteration.
-        # Multi-FOV policy (IMA-187): an operator run processes EVERY FOV and composites them into
-        # the well's cell by stage coordinate. The raw preview above is still one FOV per well (it
-        # reads a single plane per well precisely to stay fast), so say which one you're looking at.
-        multi = sum(1 for r in order if len(meta["fovs_per_region"][r]) > 1)
-        note = (f" · {multi} multi-FOV region(s), previewing as mosaics" if multi else "")
-        # NOT "live". This is a POST-ACQUISITION tool: nothing here is streaming off a scope --
-        # the acquisition is finished and on disk, and calling it live invited exactly the wrong
-        # mental model of what the operators below are doing. What the line has to say is what is
-        # loaded and how to open it -- including the region slider, which is new and otherwise
-        # undiscoverable.
-        self._readout.setText(
-            # No region slider on the root any more (2b8fbc5 moved it into each spawned window),
-            # so naming it here sent users looking for a control that is not on screen.
-            f"{len(self._fov_index)} wells loaded · double-click a well, or Shift-drag to open "
-            f"several{note}")
+        """Open a raw Squid acquisition folder. The pipeline lives in `_ingest.ingest`."""
+        _ingest.ingest(self, path)
 
     # -- the current region: ONE value, three views ------------------------------------------
     #
@@ -2876,9 +2620,13 @@ class PlateWindow(QMainWindow):
         self._active_op_key = None
         if getattr(self, "_raw_btn", None):
             self._raw_btn.hide()                             # nothing to return from now
-        self._plate_mode = "raw"
-        self._plate_title.setText(f"{self._acq_name}   ·   raw")
-        self._overview.set_active_layer("raw")
+        # Showing raw IS "every transform off" under the stack's one rule (topmost enabled
+        # renders). Setting the overview to raw directly left the stack claiming a transform the
+        # plate was not showing, and the next toggle snapped the plate back onto it.
+        for ly in self._op_stack.layers():
+            if ly.key != "raw":
+                self._op_stack.toggle(ly.key, False)
+        self._apply_layers()
         # The raw preview is itself a MOSAIC now (IMA-253), so returning to it restores the
         # acquisition's own boxes rather than clearing them — clearing them broke both the paint
         # (a mosaic redrawn as if it filled its cell) and the double-click FOV hit-test.
@@ -3016,10 +2764,8 @@ class PlateWindow(QMainWindow):
         self._active_op_key = "computed"
         if getattr(self, "_raw_btn", None):
             self._raw_btn.hide()                      # a computed plate has no raw to return to
-        self._plate_mode = "computed MIP"
-        self._plate_title.setText(f"{self._acq_name}   ·   computed MIP")
         self._op_stack.reset(); self._op_stack.add("computed", "computed MIP")
-        self._overview.set_active_layer("computed")
+        self._apply_layers()
         self._refresh_layers_tab()
         self._drop.hide()
         self._left_l.addWidget(self._overview, 1)
@@ -3102,10 +2848,9 @@ class PlateWindow(QMainWindow):
 
         """
         # The user asked for a run HERE. Everything below it — scope resolution, the disk estimate,
-        # the plate statuses, worker construction — is time they spend waiting, so the clock starts
-        # before all of it rather than at ``worker.start()``. A refused run leaves this set and
-        # harmless: nothing records a measurement unless a worker actually ran.
-        self._run_t0 = time.perf_counter()
+        # the plate statuses, worker construction — is time they spend waiting, so the first-paint
+        # clock starts before all of it rather than at ``worker.start()``.
+        t0 = time.perf_counter()
         if self._reader is None or self._overview is None:
             return
         if _run_scope.operator_busy(self._worker, self._retired):
@@ -3217,9 +2962,9 @@ class PlateWindow(QMainWindow):
         # whenever the live state the rule reads is not what the user pictures, which is the
         # entire failure mode -- and the one the deleted per-panel scope combo made worse by
         # showing a THIRD, stale answer.
-        self._resolved_target = _run_scope.describe_run_target(regions, total=len(self._order))
-        if self._resolved_target:
-            self._readout.setText(self._resolved_target)
+        resolved_target = _run_scope.describe_run_target(regions, total=len(self._order))
+        if resolved_target:
+            self._readout.setText(resolved_target)
         out_dir = est_gb = None
         if save:
             # Ask WHERE to persist: output can be hundreds of GB, so let the user aim it at a roomy
@@ -3264,8 +3009,6 @@ class PlateWindow(QMainWindow):
                 self._overview.set_status(*self._fov_index[r]["rc"], "processing")
         else:
             self._overview.set_all_status("processing")      # amber across the plate
-        self._plate_mode = label                             # plate now shows this operator's result
-        self._plate_title.setText(f"{self._acq_name}   ·   {label}")
         layer_key = operator_layer_key(key, None)
         self._active_op_key = layer_key                      # tiles stream into this layer
         # NOTE: _raw_btn is a hidden ORPHAN (never added to a layout since the central pane was
@@ -3273,7 +3016,7 @@ class PlateWindow(QMainWindow):
         # window pops up. That I don't get." Return-to-raw is handled by the layer stack / plate mode
         # now, so we no longer surface this stray button.
         self._op_stack.add(layer_key, label)                 # push the operator layer onto the stack
-        self._overview.set_active_layer(layer_key)           # show it
+        self._apply_layers()                                 # show it: topmost enabled renders
         # Loupe source for this run. A SAVED run gets a zarr source whose written-well set grows
         # as wells land (so the loupe works mid-run on what's finished); a PREVIEW writes nothing,
         # so the layer gets no source and the gesture reports that rather than magnifying the
@@ -3307,9 +3050,6 @@ class PlateWindow(QMainWindow):
         # place that decides the two are the same thing today.
         self._overview.reset_layer(layer_key)
         dest = f" → {out_dir.name}" if save else " (preview — not saved)"
-        # This run's identity, read back by _on_progress. Held as state rather than captured in a
-        # lambda so the status line and the log read the same two facts.
-        self._run_label, self._run_dest = label, dest
         self._worker.tileReady.connect(self._on_tile)
         self._worker.resultReady.connect(self._on_result)
         self._worker.progress.connect(self._on_progress)
@@ -3362,33 +3102,27 @@ class PlateWindow(QMainWindow):
         # rather than invent a sentinel region_id the plural case names its count and carries the
         # view id alone. Task 2, where a cached result carries its OWN extent, is where the set
         # belongs: the run's answer is one extent per cell, not one extent for the run.
-        self._run_action = f"{_action_label(key, operator_kwargs)} · {scope}"
-        # `next(iter(...))`, NOT `regions[0]`. `regions` has three shapes and one of them is the
-        # mapping `{region: [fov, ...]}` an ROI window sends (see `projection.scope_wells`), where
-        # integer indexing is a KeyError on the key `0`. It surfaced as the whole run refusing with
-        # `could not start Stitch (register + fuse): 0` -- a bare `KeyError(0)` whose str() is the
-        # key, so the sentence named the exception and said nothing about the cause.
+        # THE RUN'S BOOKS, in one object. The requester is genuinely held (it was once dropped on
+        # the floor, so ``operator_started`` / ``operator_progress`` / ``operator_done`` /
+        # ``operator_failed`` on the asking window were never called); it is cleared in
+        # ``_on_run_drained``, which fires on ok / failed / STOPPED alike.
         #
-        # `len()` and iteration are the operations that mean the same thing for both shapes; the
-        # subscript is the only one that does not, which is why it is the one that broke.
-        self._run_address = (Extent(region_id=next(iter(regions)))
-                             if regions is not None and len(regions) == 1 else None)
-        self._run_began = time.monotonic()
-        # Is this run only PART of each well? A mapping means explicit fields (see `_on_tile`).
-        self._run_is_partial = isinstance(regions, dict)
-        # THE REQUESTER IS NOW ACTUALLY HELD. ``requester=`` has been in this signature, and in its
-        # docstring, since the 2026-07-29 fix — and was dropped on the floor: nothing assigned
-        # ``_run_requester``, so ``operator_started`` / ``operator_progress`` / ``operator_done`` /
-        # ``operator_failed`` on the asking window were never called, and every result reached every
-        # window with ``visible=False`` because ``win is requester`` could never be true. The
-        # region window's silence during a run started there is that missing line, not a missing
-        # feature. Cleared in ``_on_run_drained``, which fires on ok / failed / STOPPED alike.
-        self._run_requester = requester
-        self._run_op_action = label
-        self._run_error = None
-        self._run_units = None
+        # The address is `next(iter(...))`, NOT `regions[0]`. `regions` has three shapes and one
+        # of them is the mapping `{region: [fov, ...]}` an ROI window sends (see
+        # `projection.scope_wells`), where integer indexing is a KeyError on the key `0`. `len()`
+        # and iteration are the operations that mean the same thing for both shapes.
+        self._run = OperatorRun(
+            key=key, layer_key=layer_key, label=label,
+            action=f"{_action_label(key, operator_kwargs)} · {scope}",
+            dest=dest,
+            address=(Extent(region_id=next(iter(regions)))
+                     if regions is not None and len(regions) == 1 else None),
+            requester=requester,
+            # Is this run only PART of each well? A mapping means explicit fields (see `_on_tile`).
+            is_partial=isinstance(regions, dict),
+            t0=t0)
         self._tell_requester(requester, "operator_started", label)
-        self.log.started(self._run_action, address=self._run_address)
+        self.log.started(self._run.action, address=self._run.address)
         self._run_readout(f"● {label} · {scope}{dest} …")
         self._worker.start()
 
@@ -3441,37 +3175,14 @@ class PlateWindow(QMainWindow):
         self._readout.setText(f"the raw preview could not finish: {message}")
 
     def _start_preview(self, reader, meta, order):
-        """Start the raw preview over *order*, fully wired. THE only place a preview is built.
+        """Start the raw preview over *order* (`_ingest.start_preview` is the one builder).
 
-        Extracted because there were three byte-identical five-line copies of this (first ingest,
-        the tab re-scope, and the return-to-raw resume), and the progress wiring below had to land
-        on all three or the bar would appear on some entry paths and not others — the "wired on one
-        of N call sites" defect that made the stdout capture look like a partial integration in the
-        first place. One constructor, one set of connections, no third chance to disagree.
-
-        It is also the ONE place the plate's timepoint reaches the pixels. Every entry path —
-        the first ingest, the tab re-scope, and `_return_to_raw`, which is what a timepoint change
-        calls — must preview the frame the bar is showing, and reading `self.time_point` here
-        rather than at three call sites makes that true by construction rather than on whichever
-        paths somebody remembered. The worker carries the same t into its cell cache, so a
-        revisited timepoint is a cache HIT and not a re-read (`_platecache.PlateCellCache`).
+        This forwarder is the ONE place the plate's timepoint reaches the pixels. Every entry
+        path — the first ingest, the tab re-scope, and `_return_to_raw`, which is what a
+        timepoint change calls — must preview the frame the bar is showing, and reading
+        `self.time_point` here rather than at three call sites makes that true by construction.
         """
-        self._preview = _PreviewWorker(reader, meta, self._fov_index, order,
-                                       time_point=self.time_point)
-        self._preview_order = list(order)
-        self._preview.tileReady.connect(self._on_preview_tile)
-        self._preview.streamEnded.connect(lambda: self._recomposite("raw"))
-        self._preview.failed.connect(self._on_preview_failed)
-        # The preview reports on the SAME channel an operator run does, so the one bar covers it
-        # ("even if it's preview"). Published straight through: the plate window is only a relay
-        # here, because the preview has no status line of its own to feed.
-        self._preview.runProgress.connect(self._publish_progress)
-        # QThread.finished, not streamEnded: at streamEnded the thread is still running, so
-        # _clear_progress_if_idle would see it and decline. This also covers the failed and the
-        # stopped preview, which never reach streamEnded at all.
-        self._preview.finished.connect(self._clear_progress_if_idle)
-        self._preview.start()
-        return self._preview
+        return _ingest.start_preview(self, reader, meta, order, time_point=self.time_point)
 
     def _on_tile(self, ri, ci, well_id, tile, box=None):
         """A field landed. ``box`` is None for the single-tile producers (_ComputedPlateWorker emits
@@ -3492,7 +3203,7 @@ class PlateWindow(QMainWindow):
         # `projection.scope_wells`), which is precisely the statement "this is part of a well".
         # The window that asked still gets the layer -- `deliver_result` places it at its own
         # bbox_um inside the region, which is where it belongs.
-        if getattr(self, "_run_is_partial", False) and self._worker is not None \
+        if self._run is not None and self._run.is_partial and self._worker is not None \
                 and not getattr(self._worker, "IS_PREVIEW", False):
             log.debug("plate keeps %s's whole-region thumbnail: this run covers part of it",
                       well_id)
@@ -3504,10 +3215,10 @@ class PlateWindow(QMainWindow):
         # worker, and neither is the wait being measured. The recorder keeps the first report and
         # drops the rest, so this needs no "have I already done this" flag of its own.
         w = self._worker
-        if self._run_t0 is not None and w is not None and not getattr(w, "IS_PREVIEW", False):
+        if self._run is not None and w is not None and not getattr(w, "IS_PREVIEW", False):
             report = getattr(w, "report_first_paint", None)
             if report is not None:
-                report(time.perf_counter() - self._run_t0)
+                report(time.perf_counter() - self._run.t0)
         self._overview.set_status(ri, ci, "done")           # blue
         src = self._loupe_sources.get(layer)                 # this well is now on disk -> loupe-able
         if isinstance(src, _ZarrLoupeSource):
@@ -3539,13 +3250,12 @@ class PlateWindow(QMainWindow):
         showing, which is ``_result_regions``.
         """
         op = self._active_op_key
-        if not op:
+        run = self._run
+        if not op or run is None:
             return
         if str(region) not in self._result_regions():
             return                              # nobody is looking at it -- see the docstring
-        accs = self._result_accs
-        if accs is None:
-            accs = self._result_accs = {}
+        accs = run.accs
         acc = accs.get(str(region))
         if acc is None or acc.op != op:
             from squidxplorer import is_region_operator
@@ -3581,54 +3291,22 @@ class PlateWindow(QMainWindow):
         self._deliver_operator_result(op, result)
 
     def _settle_stranded_results(self) -> int:
-        """A run has ended: resolve every region whose result was still being accumulated.
-
-        Returns the number of regions that ended with NO layer, so the caller can report the run
-        honestly. Always leaves ``_result_accs`` empty.
-
-        THE MEASURED DEFECT (2026-08-06), on Julio's own 10x acquisition and reported by him as
-        "the controls now brings plate view, but doesn't open the operator tab". FOVs 17 and 19 of
-        ``manual0`` are corrupt (``TiffFileError: suspicious number of tags``). Per-field fault
-        isolation skipped them, 25 of 27 FOVs landed, and ``_on_result``'s ``if not
-        acc.complete(): return`` left the accumulator sitting in ``_result_accs`` for the rest of
-        the process. Nothing ever flushed it, so **no layer was ever built** -- while the plate
-        printed "✓ Maximum Intensity Projection · 1 well" and the window that asked was told
-        "finished in 4.6 s". A run that produced no pixels, announced twice as a success. ``⚙
-        controls`` then opened no tab because ``RegionViewer._window_operators()`` was honestly
-        empty: the chip was the symptom, this was the cause.
-
-        A partial region is still REFUSED -- half a mosaic drawn as a layer reads as something the
-        operator did, and :meth:`squidxplorer._op_result.RegionResultAccumulator.result` owns that rule.
-        Its sentence is reused verbatim rather than re-worded here, so there is one wording of the
-        refusal. What changes is that the refusal is now said out loud and the run is reported as a
-        failure instead of as done.
-        """
-        accs, self._result_accs = dict(self._result_accs or {}), {}
-        stranded: list[str] = []
-        for region, acc in accs.items():
-            try:
-                # A complete accumulator here would be one `_on_result` never got to flush; it is
-                # delivered rather than discarded. Today it cannot happen, and costing one call to
-                # make the drain unable to strand a FINISHED result is the cheap half of this.
-                result = acc.result()
-            except ValueError as exc:            # incomplete: the accumulator's own sentence
-                stranded.append(f"{acc.op} · {region}: {exc}")
-                continue
-            self._deliver_operator_result(acc.op, result)
+        """Settle the run's books at the drain: :meth:`squidxplorer._run.OperatorRun.settle_stranded`
+        owns the logic and the story; this forwards, says the refusals out loud, and logs them."""
+        run = self._run
+        if run is None:
+            return 0
+        stranded = run.settle_stranded(self._deliver_operator_result)
         for line in stranded:
             log.warning("%s", line)
         if stranded:
             self._run_readout("  ".join(stranded))
-            # So `_close_requester_pair` tells the window that ASKED that its run failed. Without
-            # this the window's bar closed on `operator_done` over a run with nothing to show.
-            if not self._run_error:
-                self._run_error = "  ".join(stranded)
         return len(stranded)
 
     def _result_regions(self) -> set:
         """Every region a surface is SHOWING right now: one entry per open window.
 
-        This is the memory bound on ``_result_accs`` and on the layers themselves. Holding
+        This is the memory bound on the run's accumulators and on the layers themselves. Holding
         full-resolution mosaics for every well of a plate run would be gigabytes of layers nobody
         can look at, so a result for a region no surface is showing is dropped rather than
         accumulated -- the same rule the raw path follows, for the same reason. The honest bound is
@@ -3706,7 +3384,7 @@ class PlateWindow(QMainWindow):
         mgr = getattr(self, "_viewer_manager", None)
         if mgr is None:
             return 0
-        requester = self._run_requester
+        requester = self._run.requester if self._run is not None else None
         added = 0
         for win in mgr.windows:
             deliver = getattr(win, "deliver_result", None)
@@ -3729,8 +3407,10 @@ class PlateWindow(QMainWindow):
     def _on_failed(self, msg):
         # Remember WHY, for the requester's ``operator_failed`` line. ``_on_run_drained`` fires on
         # QThread.finished and cannot see the exception; without this the asking window would be
-        # told "produced nothing" for a run that named its own cause here.
-        self._run_error = str(msg)
+        # told "produced nothing" for a run that named its own cause here. The reopened-plate
+        # worker shares this slot and has no run to file the reason under.
+        if self._run is not None:
+            self._run.error = str(msg)
         if self._overview is not None:
             for rc, state in list(self._overview._status.items()):
                 if state == "processing":
@@ -4176,8 +3856,7 @@ class PlateWindow(QMainWindow):
         self._worker = None
 
     def _stop_preview(self):
-        self._retire(self._preview)
-        self._preview = None
+        _ingest.stop_preview(self)
 
     def _stop_minerva(self):
         self._retire(self._minerva)
@@ -4239,8 +3918,10 @@ class PlateWindow(QMainWindow):
                 return
         super().showEvent(e)
 
-    #: The preference behind the close-all confirmation. True (the default) = ask.
-    WARN_CLOSE_ALL = "warn_close_all"
+    #: Session flag behind the close-all confirmation. True (the default) = ask. Class-level on
+    #: purpose: "don't show me this again" is about the application, not one window. It does not
+    #: reach disk (_prefs went with the 2026-08-13 kill list), so the dialog returns next launch.
+    _warn_close_all = True
 
     def _open_view_count(self) -> int:
         """How many region windows are open right now. 0 when there is no manager."""
@@ -4263,23 +3944,17 @@ class PlateWindow(QMainWindow):
         then refused by a process with no plate to find. But closing several windows is not
         undoable either, and a window may be mid-run.
 
-        The checkbox is honoured only when it actually PERSISTS (`_prefs.set` returns whether it
-        landed). A "don't show me this again" that silently fails to save is worse than none: the
-        user stops expecting the dialog and it comes back next session.
-
         Never shown when there is nothing to confirm (no open views) or under the test harness,
         where a modal dialog would hang the suite with no one to dismiss it.
         """
         from qtpy.QtWidgets import QApplication, QCheckBox, QMessageBox
-
-        from squidxplorer import _prefs
 
         if n <= 0:
             return True
         app = QApplication.instance()
         if app is not None and app.property("_squidxplorer_test"):
             return True
-        if not bool(_prefs.get(self.WARN_CLOSE_ALL, True)):
+        if not PlateWindow._warn_close_all:
             return True
 
         box = QMessageBox(self)
@@ -4295,10 +3970,8 @@ class PlateWindow(QMainWindow):
         box.setCheckBox(never)
         if box.exec() != QMessageBox.Close:
             return False
-        if never.isChecked() and not _prefs.set(self.WARN_CLOSE_ALL, False):
-            self._readout.setText(
-                "could not save 'don't show me this again' — see the log; it applies to this "
-                "session only.")
+        if never.isChecked():
+            PlateWindow._warn_close_all = False
         return True
 
     def closeEvent(self, e):

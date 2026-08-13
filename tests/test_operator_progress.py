@@ -213,7 +213,7 @@ def test_the_plate_stops_talking_to_a_requester_once_its_run_has_drained(qapp, p
     """One run, one pair; a stale requester would leak the NEXT run's progress into it."""
     first = _Requester()
     _run_to_completion(qapp, plate, first)
-    assert plate._run_requester is None
+    assert plate._run.requester is None
     n = len(first.reports)
 
     second = _Requester()
@@ -240,13 +240,16 @@ def test_only_the_window_that_ASKED_gets_the_result_visible(qapp, plate):
     class _Mgr:
         windows = [asked, other]
 
-    plate._run_requester = asked
+    from squidxplorer._run import OperatorRun
+
+    plate._run = OperatorRun(key="mip", layer_key="mip", label="mip", action=None, dest="",
+                             address=None, requester=asked, is_partial=False, t0=0.0)
     plate._viewer_manager, saved = _Mgr(), plate._viewer_manager
     try:
         added = plate._deliver_to_views("mip", object())
     finally:
         plate._viewer_manager = saved
-        plate._run_requester = None
+        plate._run = None
 
     assert added == 2, added
     assert seen == {"asked": True, "other": False}, seen
