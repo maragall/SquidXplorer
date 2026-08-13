@@ -111,9 +111,8 @@ def ingest(win, path: str) -> None:
     # The loupe's source is chosen by which layer the plate SHOWS, so it follows the plate
     # rather than being re-pointed by hand at each of the six places the layer moves.
     win._overview.activeLayerChanged.connect(lambda _k: win._update_loupe_source())
-    win._plate_mode = "raw"                     # a freshly-opened plate shows raw previews
-    win._plate_title.setText(f"{win._acq_name}   ·   raw")   # bottom-left plate-pane title
-    win._op_stack.reset()                       # fresh layer stack (base only)
+    win._op_stack.reset()                       # fresh layer stack (base only) -> raw previews
+    win._apply_layers()                         # sets _plate_mode and the plate-pane title
     win._active_op_key = None
     if getattr(win, "_raw_btn", None):
         win._raw_btn.hide()                     # raw view on open -> nothing to return from

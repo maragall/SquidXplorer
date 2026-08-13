@@ -1326,7 +1326,7 @@ class PlateWindow(QMainWindow):
         if not force:
             return                   # a plain tab selection: the plate is already plate-wide
         self._overview.set_all_status("empty")
-        self._overview.set_active_layer(self._active_op_key or "raw")
+        self._apply_layers()
 
     def _request_resync(self):
         """Remember that the plate needs to catch up once the run drains.
@@ -2347,6 +2347,12 @@ class PlateWindow(QMainWindow):
     def _apply_layers(self):
         """Show the topmost enabled layer on the plate; keep the title in sync.
 
+        THE ONE WRITER of the plate's shown layer: every path that changes it — a run start, a
+        toggle, a reorder, return-to-raw, opening a computed plate, the post-run resync — writes
+        the stack and calls this. Four sites used to call ``set_active_layer`` directly, each
+        recomputing the answer the stack already holds, and the direct writes are how the Layers
+        tab and the plate came to disagree.
+
         ``top_enabled()`` cannot be None now that raw is undisableable, but this used to no-op on
         None and leave the plate showing a layer the tab said was OFF. Fall back to raw explicitly
         instead of silently doing nothing: the plate must never render something no enabled layer
@@ -2614,9 +2620,13 @@ class PlateWindow(QMainWindow):
         self._active_op_key = None
         if getattr(self, "_raw_btn", None):
             self._raw_btn.hide()                             # nothing to return from now
-        self._plate_mode = "raw"
-        self._plate_title.setText(f"{self._acq_name}   ·   raw")
-        self._overview.set_active_layer("raw")
+        # Showing raw IS "every transform off" under the stack's one rule (topmost enabled
+        # renders). Setting the overview to raw directly left the stack claiming a transform the
+        # plate was not showing, and the next toggle snapped the plate back onto it.
+        for ly in self._op_stack.layers():
+            if ly.key != "raw":
+                self._op_stack.toggle(ly.key, False)
+        self._apply_layers()
         # The raw preview is itself a MOSAIC now (IMA-253), so returning to it restores the
         # acquisition's own boxes rather than clearing them — clearing them broke both the paint
         # (a mosaic redrawn as if it filled its cell) and the double-click FOV hit-test.
@@ -2754,10 +2764,8 @@ class PlateWindow(QMainWindow):
         self._active_op_key = "computed"
         if getattr(self, "_raw_btn", None):
             self._raw_btn.hide()                      # a computed plate has no raw to return to
-        self._plate_mode = "computed MIP"
-        self._plate_title.setText(f"{self._acq_name}   ·   computed MIP")
         self._op_stack.reset(); self._op_stack.add("computed", "computed MIP")
-        self._overview.set_active_layer("computed")
+        self._apply_layers()
         self._refresh_layers_tab()
         self._drop.hide()
         self._left_l.addWidget(self._overview, 1)
@@ -3001,8 +3009,6 @@ class PlateWindow(QMainWindow):
                 self._overview.set_status(*self._fov_index[r]["rc"], "processing")
         else:
             self._overview.set_all_status("processing")      # amber across the plate
-        self._plate_mode = label                             # plate now shows this operator's result
-        self._plate_title.setText(f"{self._acq_name}   ·   {label}")
         layer_key = operator_layer_key(key, None)
         self._active_op_key = layer_key                      # tiles stream into this layer
         # NOTE: _raw_btn is a hidden ORPHAN (never added to a layout since the central pane was
@@ -3010,7 +3016,7 @@ class PlateWindow(QMainWindow):
         # window pops up. That I don't get." Return-to-raw is handled by the layer stack / plate mode
         # now, so we no longer surface this stray button.
         self._op_stack.add(layer_key, label)                 # push the operator layer onto the stack
-        self._overview.set_active_layer(layer_key)           # show it
+        self._apply_layers()                                 # show it: topmost enabled renders
         # Loupe source for this run. A SAVED run gets a zarr source whose written-well set grows
         # as wells land (so the loupe works mid-run on what's finished); a PREVIEW writes nothing,
         # so the layer gets no source and the gesture reports that rather than magnifying the
