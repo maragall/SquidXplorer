@@ -42,14 +42,11 @@ def operator_defaults(operator: str) -> dict:
 
 def _operator_catalogue() -> str:
     """The ``--help`` line for ``--param``: every operator with the parameters it declares."""
-    from squidxplorer import is_region_operator, operator_params, runnable_operators
+    from squidxplorer import operator_params, runnable_operators
 
     entries = []
     for name in runnable_operators():
         declared = ", ".join(f"{p.name}={p.default!r}" for p in operator_params(name))
-        # A region operator's remaining kwargs go straight to `stitch_region`.
-        if is_region_operator(name):
-            declared = ", ".join(filter(None, (declared, "**stitcher kwargs")))
         entries.append(f"{name}({declared})")
     return "; ".join(entries)
 

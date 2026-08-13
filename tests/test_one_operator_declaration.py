@@ -214,8 +214,9 @@ def test_its_params_become_widgets_seeded_at_the_declared_defaults(declared_oper
 
 
 def test_a_region_operator_that_declares_params_gets_a_panel_too(declared_operators, qapp):
-    """`stitch` still has no generic panel because it declares no params — a fact about `stitch`,
-    not about region operators."""
+    """A region operator's declared params draw exactly like a plane-op's; `stitch` declares
+    its knobs now, so any refusal it gets is about availability, never about params."""
+    from squidxplorer import operator_available
     from squidxplorer._param_panel import GenericOperatorPanel, panel_refusal
     from tests.test_op_panels import _Host
 
@@ -225,8 +226,8 @@ def test_a_region_operator_that_declares_params_gets_a_panel_too(declared_operat
     assert sorted(panel.widgets) == ["fill"]
     assert panel.kwargs() == {"fill": REGION_DEFAULT_FILL}
 
-    why = panel_refusal("stitch")
-    assert why and "declares no params" in why
+    ok, why = operator_available("stitch")
+    assert panel_refusal("stitch") == (None if ok else why)
 
 
 def test_the_gui_run_path_dispatches_it_to_the_right_engine_loop(declared_operators, reader):
