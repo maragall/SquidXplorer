@@ -16,6 +16,7 @@ from squidxplorer import (
     project_well,
     operator_available,
     operator_consumes,
+    operator_extra,
     operator_params,
     operator_produces,
     operator_requires,
@@ -651,3 +652,50 @@ def test_a_parameterised_operator_reaches_the_pixels_through_write_plate(squid_d
     halved = _write(tmp_path / "halved", operator_kwargs={"divisor": 2})
     assert np.array_equal(halved, plain // 2), (
         "operator_kwargs did not reach the operator through write_plate")
+
+
+# 9. extra=: the install-time half of requires=
+
+def _optional_dependency_groups() -> dict:
+    import tomllib
+
+    with open(_REPO / "pyproject.toml", "rb") as f:
+        return tomllib.load(f)["project"]["optional-dependencies"]
+
+
+def test_an_operator_needing_a_non_core_package_declares_its_extra():
+    """requires= names the runtime refusal; extra= must name where the install gets the package."""
+    import importlib.metadata as md
+    import re
+    import tomllib
+
+    def norm(dist: str) -> str:
+        return re.sub(r"[-_.]+", "-", dist).lower()
+
+    with open(_REPO / "pyproject.toml", "rb") as f:
+        deps = tomllib.load(f)["project"]["dependencies"]
+    core = {norm(re.match(r"[A-Za-z0-9_.-]+", d).group()) for d in deps}
+    owners = md.packages_distributions()
+    for name in runnable_operators():
+        for module in operator_requires(name):
+            top = module.split(".")[0]
+            if {norm(d) for d in owners.get(top, ())} & core:
+                continue
+            assert operator_extra(name) is not None, (
+                f"operator {name!r} requires {module!r}, which no [project.dependencies] entry "
+                f"installs, yet declares no extra= — the installer menu cannot offer it")
+
+
+def test_every_declared_extra_names_a_real_optional_dependency_group():
+    groups = set(_optional_dependency_groups())
+    for name in runnable_operators():
+        extra = operator_extra(name)
+        if extra is not None:
+            assert extra in groups, (
+                f"operator {name!r} declares extra={extra!r}, which is not an "
+                f"[project.optional-dependencies] group (they are {sorted(groups)})")
+
+
+def test_an_empty_extra_is_refused_at_registration():
+    with pytest.raises(ValueError, match="extra"):
+        add_operator("_decl_test_empty_extra", lambda planes: next(iter(planes)), extra="")

@@ -368,15 +368,15 @@ class EngineExecutor:
 
     def do_list_operators(self, cmd: ListOperators) -> CommandResult:
         from squidxplorer import (is_region_operator, operator_available, operator_consumes,
-                              operator_params, operator_produces, operator_requires,
-                              runnable_operators)
+                              operator_extra, operator_params, operator_produces,
+                              operator_requires, runnable_operators)
 
         names = runnable_operators()
 
-        def _row(name, kind, consumes, produces, params, requires, available):
+        def _row(name, kind, consumes, produces, params, requires, extra, available):
             ok, why = available
             return {"name": name, "kind": kind, "consumes": consumes, "produces": produces,
-                    "params": params, "requires": list(requires),
+                    "params": params, "requires": list(requires), "extra": extra,
                     "available": ok, "unavailable_reason": why}
 
         def _kind(name):
@@ -386,7 +386,7 @@ class EngineExecutor:
 
         rows = [_row(n, _kind(n), sorted(operator_consumes(n)), operator_produces(n),
                      {p.name: p.default for p in operator_params(n)},
-                     operator_requires(n), operator_available(n))
+                     operator_requires(n), operator_extra(n), operator_available(n))
                 for n in names]
         blocked = [r["name"] for r in rows if not r["available"]]
         detail = f" ({len(blocked)} unavailable: {', '.join(blocked)})" if blocked else ""
