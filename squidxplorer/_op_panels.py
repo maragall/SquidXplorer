@@ -34,31 +34,34 @@ from qtpy.QtWidgets import (
 )
 
 from squidxplorer import _qtstyle
-from squidxplorer._stitch import _BLEND_PX
+from squidxplorer._stitch import _ABS_THRESH, _BLEND_PX, _REL_THRESH
 
 
-def _stitch_default(name: str):
-    """One default, read off ``stitch_region``'s own signature rather than mirrored here."""
-    from inspect import signature
+def _stitch_declared() -> dict:
+    """The ``stitch`` registration's own declared defaults — never mirrored here."""
+    from squidxplorer._engine import operator_params
 
-    from squidxplorer._stitch import stitch_region
-
-    return signature(stitch_region).parameters[name].default
+    return {p.name: p.default for p in operator_params("stitch")}
 
 
-# The panel's starting position mirrors stitch_region's own defaults. blend_px is the one
-# deliberate divergence: stitch_region's default is None ("measure the real overlap"), and
-# the panel starts at the fixed fallback with an "Auto" box beside it.
+_DECLARED = _stitch_declared()
+
+# The panel's starting position mirrors the stitch declaration. The divergences are the knobs
+# the declaration deliberately does not carry (see _stitch._STITCH_PARAMS): blend_px
+# (stitch_region's default is None, "measure the real overlap", and the panel starts at the
+# fixed fallback with an "Auto" box beside it), channels (None = all of them; a subset is
+# panel state), correct_distortion (None = on wherever registration ran) and the two outlier
+# thresholds, stated by _stitch's own constants.
 STITCH_DEFAULTS = {
-    "register": _stitch_default("register"),
-    "registration_channel": _stitch_default("registration_channel"),
-    "channels": _stitch_default("channels"),
+    "register": _DECLARED["register"],
+    "registration_channel": _DECLARED["registration_channel"],
+    "channels": None,
     "blend_px": _BLEND_PX,
-    "outlier_rel_pct": int(round(_stitch_default("rel_thresh") * 100)),
-    "outlier_abs_px": int(round(_stitch_default("abs_thresh"))),
+    "outlier_rel_pct": int(round(_REL_THRESH * 100)),
+    "outlier_abs_px": int(round(_ABS_THRESH)),
     "auto_blend": False,
     "correct_distortion": True,  # ON by default (Julio, 2026-08-03)
-    "registration_t": _stitch_default("registration_t"),
+    "registration_t": _DECLARED["registration_t"],
 }
 
 
@@ -227,9 +230,9 @@ class StitcherPanel(_Panel):
 
         for name in sorted(available_plane_operators()):
             self.z_operator_combo.addItem(name)
-        # mip stays the default even on a z-stack: RegionViewer switches to keepz only when
+        # The declared default even on a z-stack: RegionViewer switches to keepz only when
         # the window is actually in 3D mode, so a 2D canvas never gets a volume it can't show.
-        self.z_operator_combo.setCurrentText("mip")
+        self.z_operator_combo.setCurrentText(_DECLARED["z_operator"])
         self.z_operator_combo.setToolTip(
             "What each FOV's z-stack becomes before registration.\n\n"
             "A z-REDUCER (mip, reference) collapses it to one plane, so the well fuses to one "

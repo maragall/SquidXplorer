@@ -18,6 +18,7 @@ from squidxplorer.projection import cast_like
 from squidxplorer._engine import (
     _NOT_A_WELL_FAULT,
     MissingOperatorDependency,
+    Param,
     _default_workers,
     _resolve_operator,
     add_region_operator,
@@ -687,7 +688,39 @@ def _coordinate_region(reader, region, fovs, **kwargs):
 
 RegionOperator = Callable[..., np.ndarray]
 
-add_region_operator("stitch", stitch_region, requires=("tilefusion",))
+#: The scalar knobs `stitch` DECLARES, so `--param`, recipes and generated panels describe it
+#: like every other operator. Defaults restate `stitch_region`'s own, with None spelled
+#: concretely where None means a fixed value (registration_channel None = index 0,
+#: correct_illumination None = on). Knobs whose None default is measured from the data
+#: (blend_px, registration_z, correct_distortion) or that cannot change the pixels (block_px,
+#: max_workers) stay keyword arguments. rel_thresh/abs_thresh stay kwargs too, undeclared for
+#: a measured reason: tilefusion's two_round_optimization clamps rel_thresh <= 1.0 to its own
+#: factor 3.0 and floors the cutoff at _BLUNDER_FLOOR_PX (150 px), so neither knob can change
+#: the solve until a link is >150 px wrong — a declaration the build-failing probe test
+#: (a declared parameter must be able to change the pixels) could never vouch for.
+_STITCH_PARAMS = (
+    Param("z_operator", "mip",
+          "what each FOV's z-stack becomes before fusion; a z-reducer collapses it to one "
+          "plane, a plane-op keeps every plane"),
+    Param("register", True,
+          "solve per-tile offsets from the overlaps; off = stage-coordinate placement"),
+    Param("registration_channel", 0,
+          "the channel the pose graph is solved on, by index or name; every channel is then "
+          "fused with that one solution"),
+    Param("registration_t", _REG_T, "the timepoint the pose graph is solved on"),
+    Param("correct_illumination", True,
+          "flat-field the tiles on the read path, before registration and fusion"),
+)
+
+
+def _stitch_factory(**params):
+    """The registered object: called with the declared parameters, returns the region operator."""
+    def stitch(reader, region, fovs, **kwargs):
+        return stitch_region(reader, region, fovs, **{**params, **kwargs})
+    return stitch
+
+
+add_region_operator("stitch", _stitch_factory, params=_STITCH_PARAMS, requires=("tilefusion",))
 add_region_operator("coordinate", _coordinate_region, requires=("tilefusion",))
 
 
@@ -751,8 +784,11 @@ def _stitch_plate(
 
     # ONE illumination profile for the whole plate, resolved before any well starts, so
     # every well is corrected by the same gain field.
-    if _accepts_kwarg(op, "flatfield") \
-            and operator_kwargs.get("correct_illumination", True) is not False \
+    # correct_illumination is DECLARED, so it may sit in `bound` rather than the loose kwargs;
+    # either spelling of "off" must skip the plate-wide estimate.
+    wants_illumination = ({**bound, **operator_kwargs}.get("correct_illumination", True)
+                          is not False)
+    if _accepts_kwarg(op, "flatfield") and wants_illumination \
             and operator_kwargs.get("flatfield") is None and wells:
         spread = [(r, f) for r, fs in wells.items() for f in fs]
         rng = np.random.default_rng(_FF_SEED)

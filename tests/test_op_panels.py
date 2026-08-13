@@ -39,7 +39,7 @@ def test_defaults_reproduce_the_pipeline_exactly():
     assert kw["abs_thresh"] == pytest.approx(_ABS_THRESH)
     assert kw["register"] is True
     assert kw["channels"] is None                 # all channels
-    assert kw["registration_channel"] is None     # = the first, stitch_region's own rule
+    assert kw["registration_channel"] == 0        # the first — None spelled concretely
 
 
 def test_the_outlier_percentage_becomes_a_fraction():
@@ -564,20 +564,36 @@ def test_the_timepoint_spin_is_hidden_on_a_single_timepoint_acquisition(qapp):
     assert p.reg_t_spin.maximum() == 0
 
 
-def test_the_stitch_defaults_are_read_off_stitch_region_not_mirrored_by_hand():
-    """Read off ``stitch_region``'s own signature, not a declaration: ``stitch`` is a region
-    operator and ``add_region_operator`` carries no ``params=`` for this dict to read instead."""
+def test_the_stitch_defaults_are_read_off_the_declaration_not_mirrored_by_hand():
+    """The panel's starting position IS the ``stitch`` registration's ``params=``; the two
+    outlier thresholds are undeclared (see ``_stitch._STITCH_PARAMS``) and come from
+    ``_stitch``'s own constants."""
+    from squidxplorer._engine import operator_params
+    from squidxplorer._stitch import _ABS_THRESH, _REL_THRESH
+
+    declared = {p.name: p.default for p in operator_params("stitch")}
+    assert STITCH_DEFAULTS["register"] == declared["register"]
+    assert STITCH_DEFAULTS["registration_channel"] == declared["registration_channel"]
+    assert STITCH_DEFAULTS["registration_t"] == declared["registration_t"]
+    assert STITCH_DEFAULTS["outlier_rel_pct"] == int(round(_REL_THRESH * 100))
+    assert STITCH_DEFAULTS["outlier_abs_px"] == int(round(_ABS_THRESH))
+
+
+def test_the_declaration_states_stitch_region_s_own_defaults():
+    """A declared default drifting from the signature would make the registered run and a
+    direct ``stitch_region`` call two different pipelines. A None signature default states its
+    fixed meaning concretely instead (registration_channel None = index 0,
+    correct_illumination None = on) and is exempt here."""
     from inspect import signature
 
-    from squidxplorer._op_panels import _stitch_default
+    from squidxplorer._engine import operator_params
     from squidxplorer._stitch import stitch_region
 
     sig = signature(stitch_region).parameters
-    assert STITCH_DEFAULTS["register"] == sig["register"].default
-    assert STITCH_DEFAULTS["outlier_rel_pct"] == int(round(sig["rel_thresh"].default * 100))
-    assert STITCH_DEFAULTS["outlier_abs_px"] == int(round(sig["abs_thresh"].default))
-    assert STITCH_DEFAULTS["registration_t"] == sig["registration_t"].default
-    assert _stitch_default("register") is sig["register"].default
+    for p in operator_params("stitch"):
+        want = sig[p.name].default
+        if want is not None:
+            assert p.default == want, f"{p.name}: declared {p.default!r}, signature {want!r}"
 
 
 # =======================================================================================
@@ -642,9 +658,8 @@ def test_a_parameterised_operator_is_not_refused():
 
 
 def test_a_region_operator_that_declares_no_params_is_refused_for_that_reason():
-    """``stitch`` declares no ``params=``, so there is nothing for a form to show; its
-    controls live in StitcherPanel."""
-    why = panel_refusal("stitch")
+    """``coordinate`` declares no ``params=``, so there is nothing for a form to show."""
+    why = panel_refusal("coordinate")
     assert why and "declares no params" in why and "StitcherPanel" in why
 
 

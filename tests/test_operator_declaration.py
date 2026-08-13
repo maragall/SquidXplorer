@@ -12,12 +12,14 @@ import squidxplorer
 from squidxplorer import (
     available_plane_operators,
     available_region_operators,
+    is_region_operator,
     project_well,
     operator_available,
     operator_consumes,
     operator_params,
     operator_produces,
     operator_requires,
+    runnable_operators,
 )
 from squidxplorer._engine import Param, _resolve_operator, add_operator, bind_operator
 from squidxplorer._spots import LAYER_KEY as SPOT_KEY
@@ -298,17 +300,75 @@ def test_cellpose_refuses_the_parameters_it_does_not_declare_instead_of_ignoring
 
 
 #: A probe value per declared parameter name — different from the default, chosen so the blob
-#: fixture below must answer differently. A parameter with no probe here fails the build: an
-#: untestable declaration is a control nobody can vouch for.
+#: fixture below (or the synthetic stitchable region, for a region operator) must answer
+#: differently. A parameter with no probe here fails the build: an untestable declaration is a
+#: control nobody can vouch for.
 PARAMETER_PROBES = {
     "sigma_px": 9.0,
     "min_area_px": 400,
     "min_distance_px": 40,
     "split_touching": False,
+    "z_operator": "keepz",
+    "register": False,
+    "registration_channel": 1,
+    "registration_t": 1,
+    "correct_illumination": False,
 }
 
 
-@pytest.mark.parametrize("name", [n for n in available_plane_operators() if operator_params(n)])
+# -- a synthetic acquisition a REGION operator can register and fuse ----------------------
+
+_STITCH_CHANNELS = ("405", "488")
+_STITCH_FRAME = 64
+_STITCH_STEP = 40                                 # px between FOVs -> 24 px overlap
+
+
+def _stitch_content_error(c: int, t: int, fov: int) -> tuple:
+    """The offset between where the stage SAYS a tile is and where its content is — the thing
+    registration exists to solve. Distinct per channel and per timepoint, so registering on the
+    other channel or the other frame solves a different placement."""
+    if fov == 0:
+        return (0, 0)
+    mag = (3 + 2 * t) * (1 if c == 0 else -1)
+    return (mag if fov in (2, 3) else 0, mag if fov in (1, 3) else 0)
+
+
+class _StitchProbeReader:
+    """A 2x2 grid of overlapping FOVs, each cropped from one textured scene per
+    (channel, timepoint), so neighbouring tiles agree in their overlap up to the content
+    error above. z plane 1 is plane 0 halved, keeping texture at the registration z."""
+
+    def __init__(self):
+        f, s = _STITCH_FRAME, _STITCH_STEP
+        self.metadata = {
+            "regions": ["A1"],
+            "channels": [{"name": c} for c in _STITCH_CHANNELS],
+            "n_z": 2, "z_levels": [0, 1], "n_t": 2, "dz_um": 1.0,
+            "dtype": "uint16", "frame_shape": (f, f), "pixel_size_um": 1.0,
+            "fovs_per_region": {"A1": [0, 1, 2, 3]},
+            "fov_positions_um": {("A1", i): (float(s * (i % 2)), float(s * (i // 2)))
+                                 for i in range(4)},
+        }
+        self._scenes: dict = {}
+
+    def _scene(self, c: int, t: int) -> np.ndarray:
+        key = (c, t)
+        if key not in self._scenes:
+            rng = np.random.default_rng(100 * c + t)
+            self._scenes[key] = rng.integers(100, 4000, (128, 128)).astype(np.uint16)
+        return self._scenes[key]
+
+    def read(self, region, fov, channel, z_level, time_point=0):
+        c = _STITCH_CHANNELS.index(str(channel))
+        sy = _STITCH_STEP * (int(fov) // 2)
+        sx = _STITCH_STEP * (int(fov) % 2)
+        ey, ex = _stitch_content_error(c, int(time_point), int(fov))
+        y0, x0 = 10 + sy + ey, 10 + sx + ex
+        tile = self._scene(c, int(time_point))[y0:y0 + _STITCH_FRAME, x0:x0 + _STITCH_FRAME]
+        return tile if int(z_level) == 0 else (tile // 2).astype(np.uint16)
+
+
+@pytest.mark.parametrize("name", [n for n in runnable_operators() if operator_params(n)])
 def test_every_parameter_an_operator_DECLARES_changes_its_pixels(name):
     """A declared parameter that cannot change the output is a control that does nothing."""
     import numpy as np
@@ -317,15 +377,37 @@ def test_every_parameter_an_operator_DECLARES_changes_its_pixels(name):
 
     _skip_unless_available(name)
 
-    rng = np.random.default_rng(0)
-    plane = np.zeros((256, 256), np.uint16)
-    yy, xx = np.mgrid[0:256, 0:256]
-    for cy, cx in ((60, 60), (66, 70), (170, 60), (60, 175), (180, 180), (186, 190)):
-        plane[(yy - cy) ** 2 + (xx - cx) ** 2 <= 64] = 4000        # touching and isolated blobs
-    plane = np.clip(plane + rng.integers(0, 200, plane.shape), 0, 65535).astype(np.uint16)
-    group = [plane, plane] if "z" in operator_consumes(name) else [plane]
+    if is_region_operator(name):
+        from squidxplorer import _flatfield
 
-    base = np.asarray(bind_operator(name, {})(group))
+        # A non-flat, mean-1 gain field, so correct_illumination=False shows; it is uniform
+        # per column, so registration still solves the same content errors under it.
+        gain = np.ones((_STITCH_FRAME, _STITCH_FRAME), np.float32)
+        gain[:, : _STITCH_FRAME // 2] = 0.8
+        gain[:, _STITCH_FRAME // 2:] = 1.2
+        _flatfield.set_profiles({
+            "405": _flatfield.FlatfieldProfile(gain),
+            "488": _flatfield.FlatfieldProfile(np.ones((_STITCH_FRAME,) * 2, np.float32)),
+        })
+        reader = _StitchProbeReader()
+
+        def run(kwargs):
+            # correct_distortion is a call-site kwarg, off so the probe stays deterministic
+            return np.asarray(bind_operator(name, kwargs)(
+                reader, "A1", [0, 1, 2, 3], correct_distortion=False))
+    else:
+        rng = np.random.default_rng(0)
+        plane = np.zeros((256, 256), np.uint16)
+        yy, xx = np.mgrid[0:256, 0:256]
+        for cy, cx in ((60, 60), (66, 70), (170, 60), (60, 175), (180, 180), (186, 190)):
+            plane[(yy - cy) ** 2 + (xx - cx) ** 2 <= 64] = 4000    # touching and isolated blobs
+        plane = np.clip(plane + rng.integers(0, 200, plane.shape), 0, 65535).astype(np.uint16)
+        group = [plane, plane] if "z" in operator_consumes(name) else [plane]
+
+        def run(kwargs):
+            return np.asarray(bind_operator(name, kwargs)(group))
+
+    base = run({})
     for param in operator_params(name):
         assert param.name in PARAMETER_PROBES, (
             f"{name!r} declares {param.name!r}, which PARAMETER_PROBES has no probe value for; "
@@ -334,7 +416,7 @@ def test_every_parameter_an_operator_DECLARES_changes_its_pixels(name):
         assert probe != param.default, (
             f"the probe for {param.name!r} equals its default {param.default!r}, so it cannot "
             f"show the parameter reaching the pixels")
-        got = np.asarray(bind_operator(name, {param.name: probe})(group))
+        got = run({param.name: probe})
         assert not np.array_equal(got, base), (
             f"{name!r} declares {param.name!r}, so a run at {param.name}={probe!r} must not "
             f"return the output the defaults return — it returned a byte-identical one, which "
