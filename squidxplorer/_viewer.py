@@ -175,7 +175,6 @@ _RIGHT_COL_SIZES = [215, 165]
 
 
 class PlateWindow(QMainWindow):
-    #: In-flight operator results, one accumulator per REGION being accumulated, or None.
     #: The latest run's identity and books (:class:`squidxplorer._run.OperatorRun`), or None before
     #: the first run. A CLASS default rather than an __init__ assignment so the run slots can use
     #: plain attribute access: a bare ``getattr(self, ..., None)`` on a QObject whose __init__ has

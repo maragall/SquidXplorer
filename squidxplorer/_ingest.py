@@ -188,7 +188,6 @@ def start_preview(win, reader, meta, order, *, time_point: int):
     re-read (`_platecache.PlateCellCache`).
     """
     win._preview = _PreviewWorker(reader, meta, win._fov_index, order, time_point=time_point)
-    win._preview_order = list(order)
     win._preview.tileReady.connect(win._on_preview_tile)
     win._preview.streamEnded.connect(lambda: win._recomposite("raw"))
     win._preview.failed.connect(win._on_preview_failed)
