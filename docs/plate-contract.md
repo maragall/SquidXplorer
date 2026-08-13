@@ -345,6 +345,14 @@ happen: positions are never inferred from a scan-order index map. That trades a 
 assumption, cannot express stage drift or autofocus jitter, and breaks freeform tissue
 acquisitions. `reader.py` raises instead.
 
+**Placement-source precedence, per layout.** Zarr: the OME `translation` first, the sibling
+`coordinates.csv` as the fallback above. Multipage TIFF: the per-page inline `x_mm`/`y_mm` tags
+first, then the CSV. Individual TIFFs: the CSV is the only source, and the EXECUTED one
+(`0/coordinates.csv`, positions as visited) wins over the planned one at the acquisition root.
+Squid's demotion of `coordinates.csv` upstream changes nothing here: where a translation exists it
+is already preferred, and the TIFF layouts carry no translation, so for them the CSV is their only
+measurement, not a deprecated choice.
+
 ### `omero` falls back to auto-contrast
 
 `omero.channels` carries the label, hex colour and display window per channel. A legal NGFF image

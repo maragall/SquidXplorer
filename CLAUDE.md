@@ -92,6 +92,20 @@ Python (`plane_op` around the steps + `add_operator`, a few lines). `_declare` s
 `+()` in a registered name — `RecipeChain.parse` must round-trip a recipe label — and
 `_recipe.py` is untouched: the result cache and LUT clipboard ride on `RecipeChain`.
 
+**One result type** (2026-08-13). `OperatorResult` is deleted:
+`_op_result.RegionResultAccumulator.result()` builds the self-describing `_result.Result` itself —
+`Extent` carries region + bbox_um, `Substance` carries channels/z_depth/dtype/pixel_size_um/kind
+(`result_kind` is read there, once), `data` is the per-channel plane list — and `op` travels as a
+parameter of the delivery calls, where it already was. `_viewer._as_result` went with it; the
+accumulator's refusals (channel mismatch, unknown FOV, incomplete region, and now the missing
+pixel size) are unchanged in meaning.
+
+**One verdict** (2026-08-13). `_measure.verdict(landed, owed, skipped, stopped)` is the single
+OK/PARTIAL/STOPPED computation, called by `_command.do_run_operator` and
+`_workers._OperatorWorker`. `landed`'s unit stays the caller's (fields there, wells here) and only
+zero is read; `owed`/`skipped` count target wells; `stopped` comes from the manifest or the stop
+event, never from `complete`; a stopped run's detail stays the caller's own sentence.
+
 **GUI panels ARE generated from `params`** (2026-08-05). `squidxplorer/_param_panel.py` builds one
 widget per declared `Param`, choosing it from the TYPE OF THE DEFAULT — `bool` a check box, `int`
 a spin, `float` a decimal spin, `str` a text field, the `blurb` its tooltip. Any other type is
@@ -102,10 +116,20 @@ appears with no edit here). `_viewer._activate_operator` opens that panel or sta
 used to be a silent no-op for any key the card table did not know.
 
 The bespoke panels stay: `StitcherPanel` and `DeconQCPanel` do things a parameter form cannot.
-`STITCH_DEFAULTS` is still read off `stitch_region`'s own signature (`_op_panels._stitch_default`)
-rather than off a declaration. `add_region_operator` now ACCEPTS `params=` — it is the same record
-as every other operator — and `stitch` declares none, because its ~10 knobs reach `stitch_region`
-as `**kwargs` and moving them to `Param` records is a separate change with its own evidence.
+
+**Stitch joined the declaration system** (2026-08-13). The registration is a factory declaring
+`z_operator`, `register`, `registration_channel`, `registration_t` and `correct_illumination` as
+`Param` records, so `--param`, recipes and the probe test describe stitch like every other
+operator; `STITCH_DEFAULTS` and the `StitcherPanel` read the declaration, not
+`inspect.signature`, and None-defaulted signature knobs state their fixed meaning concretely
+(`registration_channel` None = index 0, `correct_illumination` None = on). Still kwargs, each for
+a reason: `blend_px` / `registration_z` / `correct_distortion` (their None is measured from the
+data), `block_px` / `max_workers` (cannot change the pixels), and `rel_thresh` / `abs_thresh` —
+tilefusion clamps `rel_thresh <= 1.0` to its own factor 3.0 and floors the rejection cutoff at
+150 px (`_BLUNDER_FLOOR_PX`), so neither knob can change a solve short of a >150 px blunder, and
+the probe test below could never vouch for declaring them. The probe covers stitch through a
+synthetic 2x2 region (`tests/test_operator_declaration.py::_StitchProbeReader`) whose content
+errors registration measurably solves, skipping by `requires` where tilefusion is absent.
 
 Measured while building it: `_workers._OperatorWorker`'s PREVIEW branch called `project_plate`
 without `operator_kwargs` while the save branch passed them, so a panel value reached the console
@@ -236,8 +260,8 @@ declaring `consumes={"fov"}`, and `RegionResultAccumulator.add` accepts it. The 
 `image[0, :, 0]` for everything: on the real 10x set `stitch_plate` yielded `(1, 1, 10, 2084, 7711)`
 and the display got `(1, 2084, 7711)`, so a stitched mosaic declared `z_depth 1` and 3D correctly
 refused a volume that no longer existed. The whole display side was already written for depth
-(`_as_result`'s `z_depth`, `deliver_result`'s `z_scale_um`, `_volume_source`'s `ndim >= 3`); one
-index contradicted all three. The per-FOV path still delivers ONE plane — keeping its depth means
+(the accumulated `Result`'s `z_depth`, `deliver_result`'s `z_scale_um`, `_volume_source`'s
+`ndim >= 3`); one index contradicted all three. The per-FOV path still delivers ONE plane — keeping its depth means
 `Nz` re-fusions over ~9.4 GB of accumulated tiles for one 27-FOV well — and `_z_dropped_note` says
 which plane of how many rather than letting a limitation read as a result.
 
