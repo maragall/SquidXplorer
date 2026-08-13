@@ -159,16 +159,16 @@ gui = [
 #     nothing is lost, but do not be surprised by the twine error if that ever changes.
 #   * `pip install .[stitch]` needs git on PATH and network access to github.com.
 #
-# UNPINNED, said plainly: neither direct reference names a tag or commit, so both track their
-# default branch. That is what the code has always assumed -- squidxplorer calls tilefusion private
-# helpers (`_edges_from_pairwise_metrics`, `_check_connectivity`), which is a tighter coupling
-# than a version range can express anyway. Pin them to a SHA the first time an upstream change
-# breaks a build; do not pre-emptively pin to a tag that does not exist.
+# PINNED TO SHAs (2026-08-13, installer milestone): an installer that resolves whatever the
+# default branch holds that day cannot promise two users the same install. squidxplorer calls
+# tilefusion private helpers (`_edges_from_pairwise_metrics`, `_check_connectivity`), which is a
+# tighter coupling than a version range can express anyway. Bump the SHA deliberately, with the
+# suite green against it.
 stitch = [
     # squidxplorer/_stitch.py (7 import sites) + squidxplorer/_flatfield.py (3). Registration,
     # optimization, fusion, distortion and BaSiC flat-fielding are all tilefusion's, called in
     # TileFusion.run()'s own order on in-memory arrays.
-    "tilefusion @ git+https://github.com/maragall/stitcher",
+    "tilefusion @ git+https://github.com/maragall/stitcher@28d9cfc66482c9e5931768bf15707e011bf47dbc",
 ]
 decon = [
     # squidxplorer/_decon.py -> `import petakit` (PetaKit5D's Richardson-Lucy port). Declared on the
@@ -191,7 +191,7 @@ decon = [
     # `cupy-cuda12x` into an optional `gpu` extra. Deliberately NOT worked around here -- pinning or
     # patching another package's requirements from this file is how a dependency graph becomes two
     # sources of truth. Raised as an action item; see AI-docs SquidXplorer/action-items.
-    "petakit @ git+https://github.com/maragall/deconvolution",
+    "petakit @ git+https://github.com/maragall/deconvolution@64de19bca7133e9107d182ba4aff10e2ca856888",
 ]
 segment = [
     # squidxplorer/_cellpose.py and squidxplorer/_spots.py -> `from cellpose import models`.
