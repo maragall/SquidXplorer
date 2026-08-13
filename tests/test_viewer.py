@@ -1299,20 +1299,6 @@ def test_open_computed_names_a_well_that_cannot_read_its_own_image_id(
 
 
 
-def test_operation_stack_remove_and_remove_suffix():
-    from squidxplorer._layers import OperationStack
-    st = OperationStack()
-    st.add("mip@exp:a", "MIP · a")
-    st.add("mip@exp:b", "MIP · b")
-    st.add("mip", "MIP")
-    assert st.remove_suffix("@exp:a") == ["mip@exp:a"]
-    keys = {ly.key for ly in st.layers()}
-    assert keys == {"raw", "mip@exp:b", "mip"}
-    assert st.remove("raw") is False                    # the base layer is never removable
-    assert st.remove("mip") is True
-    assert st.remove("mip") is False
-
-
 def test_second_ingest_resets_state(qapp, squid_dataset, tmp_path):
     root, _ = squid_dataset
     win = V.PlateWindow(None)

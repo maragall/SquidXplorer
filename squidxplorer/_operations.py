@@ -1,5 +1,6 @@
-"""The operator card registry: which post-processing operators exist, what they are called,
-and where their results are filed. A card is presentation, the engine is capability. No Qt."""
+"""The operator identity model: which post-processing operators exist, what they are called,
+where their results are filed, and the plate's ordered layer stack over those identities.
+A card is presentation, the engine is capability. No Qt."""
 
 from __future__ import annotations
 
@@ -96,3 +97,58 @@ def _action_label(key: str, operator_kwargs: Optional[dict] = None) -> str:
     from squidxplorer._recipe import Recipe
 
     return Recipe.operator(str(key), **(operator_kwargs or {})).label()
+
+
+@dataclass
+class Layer:
+    key: str          # stable id ("raw", "mip", "reference", ...)
+    label: str
+    enabled: bool = True
+
+
+class OperationStack:
+    """The plate's ordered, toggleable layer stack: the topmost ENABLED layer is what the plate
+    renders. Base 'raw' is the floor — never disabled, never moved, never removed."""
+
+    def __init__(self) -> None:
+        self._layers: list[Layer] = [Layer("raw", "raw", True)]
+
+    def add(self, key: str, label: str) -> None:
+        """Add (or re-add) an operation layer on top, enabled. Re-adding moves it to the top."""
+        self._layers = [ly for ly in self._layers if ly.key != key]
+        self._layers.append(Layer(key, label, True))
+
+    def toggle(self, key: str, enabled: bool) -> bool:
+        """Enable/disable a layer; the base ('raw') can never be disabled."""
+        if key == "raw":
+            return True
+        for ly in self._layers:
+            if ly.key == key:
+                ly.enabled = enabled
+                return ly.enabled
+        return False
+
+    def move(self, key: str, delta: int) -> None:
+        """Reorder a layer by +/- steps; the base ('raw') never moves off the bottom."""
+        if key == "raw":
+            return
+        idx = next((i for i, ly in enumerate(self._layers) if ly.key == key), None)
+        if idx is None:
+            return
+        floor = 1 if self._layers and self._layers[0].key == "raw" else 0
+        new = max(floor, min(len(self._layers) - 1, idx + delta))
+        if new != idx:
+            self._layers.insert(new, self._layers.pop(idx))
+
+    def top_enabled(self) -> Optional[Layer]:
+        """The topmost enabled layer (what the plate renders), or None if all are off."""
+        for ly in reversed(self._layers):
+            if ly.enabled:
+                return ly
+        return None
+
+    def layers(self) -> list[Layer]:
+        return list(self._layers)
+
+    def reset(self) -> None:
+        self._layers = [Layer("raw", "raw", True)]
