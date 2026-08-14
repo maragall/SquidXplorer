@@ -191,6 +191,17 @@ REQUIRED_LAYER_ATTRS: tuple[str, ...] = ("metadata", "visible", "contrast_limits
                                          "translate", "name", "events")
 REQUIRED_LAYERLIST_ATTRS: tuple[str, ...] = ("link_layers", "unlink_layers")
 
+#: PRIVATE attributes we read off a ``ViewerModel``. ``_canvas_size`` is how big napari believes
+#: its canvas is, in ``(height, width)``, and it is what napari's own ``reset_view`` measures
+#: against -- so :meth:`MosaicLayers.frame_bbox_um` reads the SAME number rather than asking Qt for
+#: the widget size, which would be a second answer to "how big is the canvas" that agrees with
+#: napari only until one of them is stale. It also exists on a Qt-free ``ViewerModel``, which is
+#: what makes framing testable with no GL at all.
+#:
+#: Checked here rather than trusted: it carries no ``__all__`` promise, and a napari upgrade that
+#: renames it must fail with a sentence, not silently frame every camera against ``(800, 600)``.
+REQUIRED_MODEL_PRIVATE_ATTRS: tuple[str, ...] = ("_canvas_size",)
+
 
 class NapariBindingError(RuntimeError):
     """A napari symbol this module depends on has moved, been renamed, or been removed."""
@@ -228,6 +239,20 @@ def verify_napari_bindings(modules: Optional[dict] = None) -> None:
             continue
         if not hasattr(mod, attr):
             missing.append(f"{dotted}.{attr} (PRIVATE)")
+
+    # Private ATTRIBUTES of a ViewerModel, checked on a real instance because that is the only
+    # place they exist. Constructing one is cheap and Qt-free -- and it is the same object
+    # `MosaicLayers` is about to wrap, so if this passes, `frame_bbox_um` can read what it needs.
+    for attr in REQUIRED_MODEL_PRIVATE_ATTRS:
+        try:
+            components = (modules["napari.components"] if modules and "napari.components" in modules
+                          else importlib.import_module("napari.components"))
+            probe = components.ViewerModel()
+        except Exception as exc:  # pragma: no cover - reported, not swallowed
+            missing.append(f"napari.components.ViewerModel (PRIVATE probe failed: {exc!r})")
+            break
+        if not hasattr(probe, attr):
+            missing.append(f"napari.components.ViewerModel.{attr} (PRIVATE)")
 
     if missing:
         raise NapariBindingError(
@@ -298,6 +323,58 @@ def scale_translate_from_bbox_um(
     scale = ((y1 - y0) / h, (x1 - x0) / w)
     translate = (y0, x0)
     return scale, translate
+
+
+#: Fraction of the canvas left blank around a framed box. This is napari's OWN default
+#: (``ViewerModel.reset_view(margin=0.05)``), taken from there rather than chosen, so that a box
+#: framed by :func:`camera_for_bbox_um` and a view reset by napari leave the same gap. A second
+#: margin convention would make "reset" and "frame this" disagree by a few percent forever.
+FRAME_MARGIN = 0.05
+
+
+def camera_for_bbox_um(
+    bbox_um: Sequence[float],
+    canvas_size_hw: Sequence[float],
+    *,
+    margin: float = FRAME_MARGIN,
+) -> tuple[tuple[float, float], float]:
+    """``((centre_y, centre_x), zoom)`` that puts *bbox_um* on a canvas of *canvas_size_hw*.
+
+    THE SAME ARITHMETIC NAPARI APPLIES TO THE WHOLE SCENE, applied to a box the scene does not
+    describe. ``ViewerModel._get_2d_camera_zoom`` is ``(1 - margin) * min(canvas / extent)`` and
+    ``_calculate_view_center`` is the midpoint; napari 0.8 exposes no public API that takes an
+    extent, so the formula is written once HERE and every camera framing in this app calls it.
+    Deriving it a second time somewhere else is how "fit the region" and "fit this field" end up
+    disagreeing about what fitting means.
+
+    ``bbox_um`` is ``(x0, y0, x1, y1)`` -- X FIRST, the spelling every world box in this app uses
+    (see :func:`scale_translate_from_bbox_um`). ``canvas_size_hw`` is ``(height, width)``, which is
+    napari's own order for both ``ViewerModel._canvas_size`` and ``VispyCanvas.size`` (whose
+    docstring says so, and whose getter reverses vispy's ``(w, h)`` to produce it).
+
+    THOSE TWO ORDERS DIFFER, AND READING ONE AS THE OTHER DOES NOT RAISE. It frames the box
+    against the wrong canvas edge, which on a square canvas is invisible and on any other looks
+    like somebody just preferred a different zoom. ``_brick_view._frame_camera`` did exactly that
+    -- ``cw, ch = ...canvas.size`` on a property that returns ``(height, width)``, then
+    ``min(cw / w_um, ch / h_um)`` -- until this function existed to be called instead.
+
+    Raises rather than guessing on a degenerate box, a non-positive canvas, or a margin outside
+    ``[0, 1)``: a camera pointed at a number nobody measured shows somewhere else with no error.
+    """
+    x0, y0, x1, y1 = (float(v) for v in bbox_um)
+    if not (x1 > x0 and y1 > y0):
+        raise ValueError(f"bbox_um must satisfy x1 > x0 and y1 > y0, got {tuple(bbox_um)!r}")
+    h_px, w_px = (float(v) for v in canvas_size_hw)
+    if h_px <= 0 or w_px <= 0:
+        raise ValueError(f"canvas_size_hw must be positive (height, width), "
+                         f"got {tuple(canvas_size_hw)!r}")
+    if not 0 <= float(margin) < 1:
+        raise ValueError(f"margin must be in [0, 1), got {margin!r}")
+
+    # Height against height, width against width. The `min` is what makes the WHOLE box fit: the
+    # tighter axis decides, and the looser one gets the spare canvas.
+    zoom = (1.0 - float(margin)) * min(h_px / (y1 - y0), w_px / (x1 - x0))
+    return ((y0 + y1) / 2.0, (x0 + x1) / 2.0), zoom
 
 
 def placement_for(ndim: int, bbox_um: Sequence[float], shape: Sequence[int],
@@ -1273,6 +1350,50 @@ class MosaicLayers:
         except Exception as exc:                 # noqa: BLE001 - a camera move, never fatal
             log.warning("could not fit the view to the new layers: %s: %s",
                         type(exc).__name__, exc)
+
+    def frame_bbox_um(self, bbox_um: Sequence[float], *,
+                      margin: float = FRAME_MARGIN) -> Optional[str]:
+        """Point the camera at ONE stage-micrometre box. OUR write, never a user gesture.
+
+        :meth:`reset_view` frames everything on screen; this frames a box the layers do not
+        describe -- one FOV of a mosaic that is entirely resident. That is what makes stepping
+        through a region's fields free: no read, no layer, only the camera.
+
+        Returns ``None`` when the camera moved, or a SENTENCE naming why it did not -- never a
+        silent no-op. A control whose entire job is to move the picture, and which does nothing
+        without saying so, is the dead-control failure ``AxisPlayback.play`` is written against.
+
+        Inside :meth:`programmatic` for the same reason ``reset_view`` and ``add_mosaic``'s first
+        reset are: the plate is a SINK of this window's napari, and a camera move of ours must not
+        be read back as the user having done something.
+
+        2-D ONLY, by refusal. In 3-D the visible extent depends on ``camera.angles``, and napari
+        solves that with ``_calculate_bounding_box``; copying that here would be a second rule for
+        a mode this serves no purpose in. ``camera.angles`` is likewise never touched --
+        ``reset_view`` resets them because it IS a reset, but a per-step framing that spun a
+        user's rotation back would be taking something that belongs to them.
+        """
+        model = self._model
+        try:
+            if int(getattr(model.dims, "ndisplay", 2)) != 2:
+                return ("the camera can only be framed on a box in 2D; switch back from 3D to "
+                        "step through fields.")
+            canvas = getattr(model, "_canvas_size", None)
+            if canvas is None:
+                # A named failure, not a guessed (800, 600): framing every camera against a canvas
+                # napari no longer reports would be wrong by the aspect ratio, silently.
+                raise NapariBindingError(
+                    "napari.components.ViewerModel._canvas_size is gone, so this app cannot tell "
+                    "how big the canvas is and cannot frame a box on it.")
+            centre, zoom = camera_for_bbox_um(bbox_um, canvas, margin=margin)
+            with self.programmatic():
+                model.camera.center = centre     # napari front-fills a 2-tuple to (0, y, x)
+                model.camera.zoom = zoom
+            return None
+        except NapariBindingError:
+            raise
+        except Exception as exc:                 # noqa: BLE001 - named to the caller, never fatal
+            return f"could not frame the view ({type(exc).__name__}: {exc})."
 
     def _reuse_layer(self, layer: Any, data: Any, *, bbox_um, z_scale_um, multiscale, visible):
         """Point an EXISTING layer at new pixels, keeping everything the user owns.

@@ -60,6 +60,25 @@ GUI_MODULES = frozenset({
     #                      canvas. The Qt-free half of bricking is `_bricks` (geometry, stride and
     #                      budget policy) and it stays below this boundary so the decisions that
     #                      cannot be probed without a GL context are still testable headless.
+    "_loupe",            # the LOUPE ENGINE: magnification arithmetic, the pixel sources, the
+    #                      coalescing worker, and the inset painting the plate and the napari
+    #                      canvas share. Qt-facing for one reason only — `_LoupeWorker` is a
+    #                      QThread and the painter takes a QPainter — and it earns its place on
+    #                      this side because the alternative is a SECOND loupe: it was extracted
+    #                      from `_plate_overview` precisely so the canvas loupe could not become
+    #                      one. See its docstring, and the IMA-242 note it carries, for what the
+    #                      last private copy of `composite` and `_pct_window` cost.
+    "_napari_loupe",     # the canvas loupe's GESTURE and its floating inset widget: shift-click
+    #                      to raise, wheel to magnify, an overlay parented to the vispy canvas.
+    #                      Everything it does with PIXELS is `_loupe`'s, which is the split that
+    #                      keeps it from becoming a second loupe.
+    "_fov_nav",          # the FOV axis: napari's dims slider walking a region's fields with the
+    #                      CAMERA. Qt-facing for exactly the reason `_region_nav` is — it IS
+    #                      napari's QtDims, its play button and its AnimationThread, with the axis
+    #                      passed in. What it drives is NOT here: where a FOV is lives in
+    #                      `_mosaic_source.mosaic_fov_bboxes_um` and what framing one means lives
+    #                      in `_napari_view.camera_for_bbox_um`, both Qt-free and both pinned
+    #                      headless. This module holds the control and nothing else.
     "_gallery_window",   # Gallery View's WINDOW: the grid of QLabels, its worker, its controls.
     #                      Its producer is `_gallery`, which is Qt-free and stays on the other side
     #                      of this boundary — that split is the point, not an accident: the scope,

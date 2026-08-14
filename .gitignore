@@ -6,3 +6,8 @@ __pycache__/
 .gstack/
 .claude/worktrees/
 tools/.chunk_results/
+
+# Local virtualenvs. `Setup-Windows.ps1` makes one per checkout; a repo-local `.venv/`
+# is hundreds of MB and must never be swept in by `git add -A`.
+.venv/
+venv/

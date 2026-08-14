@@ -20,6 +20,11 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from squidmip._mosaic_source import (
+    fov_at_point,
+    fovs_overlapping_bbox,
+    mosaic_fov_bboxes_um,
+)
 from squidmip._napari3d import region_origin_um, roi_window_px
 from squidmip._napari_view import scale_translate_from_bbox_um
 from squidmip._placement import Placement, PlacedArray, fov_offsets_px, mosaic_extent_px
@@ -281,3 +286,137 @@ def test_the_preview_extent_and_the_offsets_agree_on_where_the_last_field_ends()
     assert h == max(r for r, _ in offsets.values()) + FRAME
     assert w == max(c for _, c in offsets.values()) + FRAME
     assert min(offsets.values()) == (0, 0), "the top-left field anchors the mosaic at (0, 0)"
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════════
+# 7. Where is FOV n, in the space the WINDOW's mosaic is placed in.
+#
+# Section 4 above asks the same question of the PLATE (`_tilesource.fov_bboxes_um` ->
+# `plate_ladder`), and gets a different answer -- half a frame away. Both are right for their own
+# surface and the last test here pins the gap, so that neither is ever "fixed" into the other by
+# somebody who found one of them and not the other.
+# ══════════════════════════════════════════════════════════════════════════════════════════
+
+#: Float-association slack. The implementation computes ``(x0 + col*p) + fw*p`` while these tests
+#: compute ``x0 + (col + fw)*p``; against a five-figure stage coordinate those differ in the last
+#: ULP (~2e-11 um here). 1e-6 um is a picometre -- far below anything a stage can mean and far
+#: above the noise -- so this is slack for the ARITHMETIC, never tolerance for a geometry error.
+#: Every assertion that is genuinely exact in this file stays exact.
+UM_EPS = 1e-6
+
+
+def test_a_fov_box_is_where_the_mosaic_actually_places_that_fov():
+    """The box must be the region origin plus that field's own offset, and exactly one frame wide.
+
+    This is the box a camera gets pointed at and a loupe crops from, so it is asserted against the
+    two things that built it -- ``fov_offsets_px`` and the region origin -- rather than against a
+    remembered literal.
+    """
+    meta = _subset_meta()
+    boxes = mosaic_fov_bboxes_um(meta, "A1")
+    offsets = fov_offsets_px(meta["fov_positions_um"], "A1", [0, 1, 2, 3], PX_1536)
+    x0 = min(p[0] for p in meta["fov_positions_um"].values())
+    y0 = min(p[1] for p in meta["fov_positions_um"].values())
+    for fov, (row, col) in offsets.items():
+        assert boxes[fov] == pytest.approx(
+            (x0 + col * PX_1536, y0 + row * PX_1536,
+             x0 + (col + FRAME) * PX_1536, y0 + (row + FRAME) * PX_1536), abs=UM_EPS)
+        # Every field is one frame, whatever the stage did. A box that is not is a box that would
+        # frame the camera on a field-and-a-bit.
+        assert boxes[fov][2] - boxes[fov][0] == pytest.approx(FRAME * PX_1536, abs=UM_EPS)
+        assert boxes[fov][3] - boxes[fov][1] == pytest.approx(FRAME * PX_1536, abs=UM_EPS)
+
+
+def test_the_fov_boxes_tile_exactly_the_mosaic_they_sit_on():
+    """Their union must be ``mosaic_bbox_um`` — the box the layer itself is placed by.
+
+    A union that is larger means a field hangs off the mosaic and a camera framed on it shows a
+    margin of nothing; smaller means the mosaic carries pixels no field claims.
+    """
+    from squidmip._mosaic_source import mosaic_bbox_um
+
+    meta = _subset_meta()
+    boxes = mosaic_fov_bboxes_um(meta, "A1")
+    xs = [v for b in boxes.values() for v in (b[0], b[2])]
+    ys = [v for b in boxes.values() for v in (b[1], b[3])]
+    assert (min(xs), min(ys), max(xs), max(ys)) == pytest.approx(
+        mosaic_bbox_um(meta, "A1"), abs=UM_EPS)
+
+
+def test_the_centre_of_every_fov_box_reports_that_fov():
+    """The round-trip that makes the whole thing falsifiable by eye.
+
+    ``fov_at_point`` is what the canvas readout prints under the cursor. If a box's own centre does
+    not report that box's field, then the rectangles a user sees are not over the pixels they name
+    — which is precisely the failure mode that half-frame convention mismatch produces, and it is
+    invisible without this assertion.
+    """
+    meta = _subset_meta()
+    boxes = mosaic_fov_bboxes_um(meta, "A1")
+    got = {fov: fov_at_point(meta, "A1", (b[0] + b[2]) / 2, (b[1] + b[3]) / 2)
+           for fov, b in boxes.items()}
+    assert got == {fov: fov for fov in boxes}
+
+
+def test_fovs_overlapping_bbox_still_answers_from_these_boxes():
+    """The refactor that gave the two callers one body must not have moved either answer."""
+    meta = _subset_meta()
+    boxes = mosaic_fov_bboxes_um(meta, "A1")
+    xs = [v for b in boxes.values() for v in (b[0], b[2])]
+    ys = [v for b in boxes.values() for v in (b[1], b[3])]
+    assert fovs_overlapping_bbox(meta, "A1", (min(xs), min(ys), max(xs), max(ys))) == [0, 1, 2, 3]
+    x0, y0, _x1, _y1 = boxes[0]
+    assert fovs_overlapping_bbox(meta, "A1", (x0 + 1.0, y0 + 1.0, x0 + 11.0, y0 + 11.0)) == [0]
+    assert fovs_overlapping_bbox(meta, "A1", None) is None
+    assert fovs_overlapping_bbox(meta, "ZZ99", (0.0, 0.0, 1.0, 1.0)) is None
+
+
+def test_a_region_without_stage_positions_refuses_by_name_instead_of_returning_nothing():
+    """Drawing every FOV has no honest fallback, so the reason must arrive as a sentence.
+
+    ``fovs_overlapping_bbox`` may answer ``None`` because it can fall back to the whole region.
+    A caller drawing sixteen rectangles cannot: fifteen of them look exactly as convincing as
+    sixteen, so a silent short answer is a picture of a region with a hole in it.
+    """
+    meta = _subset_meta()
+    assert fovs_overlapping_bbox(dict(meta, fov_positions_um={}), "A1", (0, 0, 1, 1)) is None
+    with pytest.raises(ValueError, match="no stage positions"):
+        mosaic_fov_bboxes_um(dict(meta, fov_positions_um={}), "A1")
+    with pytest.raises(ValueError, match="no pixel size"):
+        mosaic_fov_bboxes_um(dict(meta, pixel_size_um=None), "A1")
+    with pytest.raises(ValueError, match="no FOVs"):
+        mosaic_fov_bboxes_um(meta, "ZZ99")
+
+
+def test_the_mosaic_and_the_plate_place_a_fov_half_a_frame_apart():
+    """The two conventions differ by half a frame, and that is PINNED, not fixed.
+
+    ``_tilesource.fov_bboxes_um`` treats a recorded stage position as the frame's CENTRE (which is
+    what ``_output.field_origin_um`` writes into the NGFF translation); the mosaic path treats it
+    as the frame's TOP-LEFT. Each is right for the surface it places -- the plate's deep-zoom
+    ladder against a window's fused mosaic -- and nothing else in the code says so.
+
+    The gap is half a frame PLUS A SUB-PIXEL SNAP, and the second half is not slop to be tuned
+    away: ``fov_offsets_px`` rounds every field's offset to whole pixels (a mosaic is pasted at
+    integer pixels; it cannot be otherwise), while ``_tilesource`` places against the raw float
+    position. Here the step is 1072.797 px, so fields 1-3 carry up to half a pixel of snap and
+    field 0 -- the anchor, offset (0, 0) -- carries none. Both halves are asserted separately, so
+    a change to either the convention or the rounding rule fails this and has to be argued for
+    rather than discovered later as shear in a picture that still looks entirely plausible.
+    """
+    meta = _subset_meta()
+    mosaic = mosaic_fov_bboxes_um(meta, "A1")
+    plate = fov_bboxes_um(meta["fov_positions_um"], (FRAME, FRAME), PX_1536)
+    half = FRAME * PX_1536 / 2.0
+
+    # The anchor field is snapped to nobody, so there the offset is exactly half a frame.
+    assert plate[("A1", 0)] == pytest.approx(tuple(v - half for v in mosaic[0]), abs=UM_EPS)
+
+    # Every other field: half a frame, to within the pixel the mosaic had to snap to.
+    for fov, box in mosaic.items():
+        assert plate[("A1", fov)] == pytest.approx(
+            tuple(v - half for v in box), abs=PX_1536 / 2 + UM_EPS)
+
+    # And the two conventions really are apart -- if this ever passes at zero, they have been
+    # collapsed into one and section 4 above is now measuring something else.
+    assert plate[("A1", 0)][0] != pytest.approx(mosaic[0][0], abs=PX_1536)

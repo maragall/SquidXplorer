@@ -455,6 +455,11 @@ class PlateWindow(QMainWindow):
         self._viewer_manager.operator_specs = [
             (op.key, op.label) for op in _OPERATIONS if op.runnable]
         self._viewer_manager.run_operator = self.run_operator
+        # THE CANVAS LOUPE'S PIXEL SOURCE, handed down like run_operator. A CLOSURE over self, not
+        # `self._loupe_sources.get`: `_release_loupe_sources` REBINDS that dict on every plate
+        # open, and a bound method captured here would keep answering from the dead one — which
+        # would show the previous acquisition's pixels in the new one's inset.
+        self._viewer_manager.loupe_source_for = lambda op: self._loupe_sources.get(op or "raw")
         # The plate wash shows ONLY the view you CLICK (Julio), coloured by that view's own hue so
         # different view threads are told apart. Not all views at once — that clutters the plate.
         # viewFocused fires on open/raise; windowsChanged clears it when the focused view closes.
