@@ -17,8 +17,9 @@ def _load(name):
     return mod
 
 
-menu = _load("menu")
 bootstrap = _load("bootstrap")
+sys.modules["bootstrap"] = bootstrap    # menu.py does `from bootstrap import ...`
+menu = _load("menu")
 
 
 def _probe_ok():
@@ -73,10 +74,50 @@ def test_a_failed_cuda_probe_shades_decon_with_the_probe_reason():
 
 
 def test_the_probe_names_the_missing_driver(monkeypatch):
-    monkeypatch.setattr(menu.shutil, "which", lambda name: None)
+    monkeypatch.setattr(bootstrap.shutil, "which", lambda name: None)
     ok, why = menu.cuda12_available()
     assert not ok
     assert "nvidia-smi" in why
+
+
+# click-path defaults: double-clicked with no flags, every argument resolves itself
+
+def test_the_default_source_is_the_wheel_beside_the_program(tmp_path):
+    assert bootstrap.default_source(tmp_path) is None
+    (tmp_path / "squidxplorer-0.1.0-py3-none-any.whl").touch()
+    assert bootstrap.default_source(tmp_path).name == "squidxplorer-0.1.0-py3-none-any.whl"
+
+
+def test_the_default_env_lives_under_the_users_app_data():
+    env = bootstrap.default_env()
+    assert "squidxplorer" in str(env).lower()
+    assert str(env).startswith(str(Path.home()))
+
+
+def test_default_extras_gate_decon_on_the_probe():
+    assert bootstrap.default_extras(probe=lambda: (True, ""))[0] == ["gui", "stitch", "decon"]
+    extras, note = bootstrap.default_extras(probe=lambda: (False, "no CUDA 12 here"))
+    assert extras == ["gui", "stitch"], "a desktop install must always carry the gui extra"
+    assert "no CUDA 12 here" in note
+
+
+def test_without_a_wheel_or_source_the_refusal_says_so(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(bootstrap, "default_source", lambda beside=None: None)
+    rc = bootstrap.main(["--env", str(tmp_path / "env"), "--dry-run"])
+    assert rc == 2
+    assert "--source" in capsys.readouterr().err
+
+
+def test_defaulted_flags_still_dry_run_the_uv_commands(tmp_path, capsys, monkeypatch):
+    wheel = tmp_path / "squidxplorer-0.1.0-py3-none-any.whl"
+    wheel.touch()
+    monkeypatch.setattr(bootstrap, "program_dir", lambda: tmp_path)
+    monkeypatch.setattr(bootstrap, "default_extras", lambda: (["stitch"], ""))
+    monkeypatch.setattr(bootstrap.shutil, "which", lambda name: "/opt/uv/uv")
+    rc = bootstrap.main(["--env", str(tmp_path / "env"), "--dry-run"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "squidxplorer[stitch] @ " in out and wheel.name not in out.splitlines()[0]
 
 
 # the bootstrapper
@@ -86,7 +127,7 @@ def test_dry_run_emits_the_uv_commands_for_the_chosen_extras(tmp_path, capsys, m
     rc = bootstrap.main(["--extras", "stitch,decon", "--source", "dist/squidxplorer.whl",
                          "--env", str(tmp_path / "env"), "--dry-run"])
     assert rc == 0
-    lines = capsys.readouterr().out.splitlines()
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("/opt/uv/uv")]
     assert lines[0] == f"/opt/uv/uv venv {tmp_path / 'env'}"
     assert lines[1].startswith("/opt/uv/uv pip install --python ")
     assert "squidxplorer[decon,stitch] @ dist/squidxplorer.whl" in lines[1]

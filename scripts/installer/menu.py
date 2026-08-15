@@ -8,11 +8,10 @@ table; ``--print`` renders them for a terminal. Stdlib only, Qt-free.
 from __future__ import annotations
 
 import argparse
-import re
-import shutil
-import subprocess
 from dataclasses import dataclass
 from typing import Callable, Optional
+
+from bootstrap import cuda12_available
 
 Probe = Callable[[], tuple[bool, str]]
 
@@ -34,24 +33,6 @@ class ExtraRow:
     checked: bool
     enabled: bool = True
     reason: str = ""
-
-
-def cuda12_available() -> tuple[bool, str]:
-    """``(ok, reason_if_not)`` — can this machine run a cupy-cuda12x payload right now?"""
-    smi = shutil.which("nvidia-smi")
-    if smi is None:
-        return False, "nvidia-smi not on PATH: no NVIDIA driver visible (petakit needs CUDA 12)"
-    try:
-        out = subprocess.run([smi], capture_output=True, text=True, timeout=10).stdout
-    except (OSError, subprocess.SubprocessError) as exc:
-        return False, f"nvidia-smi failed: {exc}"
-    version = re.search(r"CUDA Version:\s*(\d+)\.(\d+)", out)
-    if version is None:
-        return False, "nvidia-smi reported no CUDA version: driver too old for CUDA 12"
-    if int(version.group(1)) < 12:
-        return False, (f"driver speaks CUDA {version.group(1)}.{version.group(2)}, "
-                       "petakit needs 12")
-    return True, ""
 
 
 def build_menu(probe: Probe = cuda12_available) -> tuple[ExtraRow, ...]:
