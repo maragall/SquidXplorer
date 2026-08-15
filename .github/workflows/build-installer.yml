@@ -1,0 +1,47 @@
+name: Build Windows Installer
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build the squidxplorer wheel
+        run: uv build --wheel --out-dir dist
+
+      - name: Freeze the bootstrapper
+        run: uvx pyinstaller --onefile --console --name SquidXplorer-Setup scripts\installer\bootstrap.py
+
+      - name: Smoke test (dry-run prints the uv commands)
+        shell: pwsh
+        run: |
+          $wheel = (Get-ChildItem dist\squidxplorer-*.whl).FullName
+          dist\SquidXplorer-Setup.exe --source $wheel --env envtest --extras stitch --dry-run
+
+      # A frozen exe cannot pip-install into itself, so the env is uv-managed:
+      # the artifact ships the setup exe, the wheel it installs, and uv itself.
+      - name: Stage artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory staged | Out-Null
+          Copy-Item dist\SquidXplorer-Setup.exe staged\
+          Copy-Item dist\squidxplorer-*.whl staged\
+          Copy-Item (Get-Command uv).Source staged\uv.exe
+          Copy-Item scripts\installer\README.md staged\
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: squidxplorer-windows-installer
+          path: staged/
