@@ -592,6 +592,31 @@ The rules:
   typing. Verified identical counts offscreen vs cocoa (2867 passed both ways, 2026-08-15).
   `QT_QPA_PLATFORM=cocoa pytest …` still gets real windows for a visual debug.
 
+## Architecture-improvement runs: worktrees, AI-docs, live workspaces
+
+The review → cards → apply flow ran 2026-08-14 (seven candidates, five applied same-day); these
+are the rules it proved:
+
+- **Implementation agents work in git worktrees**, one branch per independent card, so the tree
+  Julio is typing in stays free. Cards that share files go to ONE agent sequentially — parallel
+  worktrees over `_viewer.py`/`_region_viewer.py` would only have manufactured merge conflicts.
+- **The review and its design docs go to AI-docs, committed AND pushed**, filed by semaphore
+  state (`to-do/` for unimplemented designs, `done/` once approved and merged). The dashboard
+  reads that repo every ~15 min; an unpushed doc is invisible to the team.
+- **Other sessions work this repo concurrently, and a worktree may branch from THEIR lineage,
+  not from main.** Measured on that run: the agent worktrees branched from `merge-installer`'s
+  head, 17 commits ahead of main, so merging the refactor branches necessarily published another
+  session's in-flight work with them. Before merging: find where the base lineage lives
+  (`git branch --contains`, `git merge-base --is-ancestor`), never merge into or commit onto a
+  branch checked out in another live worktree, and when a merge would carry someone else's
+  unfinished work along, ask rather than proceed — that day it was wanted; the day it is not,
+  it overwrites a live workspace's story.
+- **Applied architecture work merges to main automatically** (Julio, 2026-08-15) — no separate
+  go-ahead per branch. The gate is verification, not permission: each branch's full suite green
+  solo, then ONE combined full-suite run on the merged result before calling it done (the
+  combination is what no branch tested). The live-workspace rule above still bounds this: an
+  automatic merge never gets to publish another session's unfinished lineage unasked.
+
 ## Agent skills
 
 ### Issue tracker
