@@ -16,7 +16,6 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-import tensorstore as ts
 
 # Montage cell size (downsampled well thumbnail, px).
 _DEFAULT_CELL_PX = 128
@@ -29,10 +28,12 @@ from squidxplorer.contract.store import ome_attrs as _read_group_ome
 from squidxplorer.contract.store import resolve_plate_dir as _resolve_plate_dir
 
 
-def _read_open_store(array_dir: Path) -> ts.TensorStore:
-    return ts.open(
-        {"driver": "zarr3", "kvstore": {"driver": "file", "path": str(array_dir)}}, open=True
-    ).result()
+def _read_open_store(array_dir: Path):
+    """Through the shared handle pool — the montage was the last bare ``ts.open`` on the read
+    path (its own opener, its own handle, evicted by nobody)."""
+    from squidxplorer._tsctx import HANDLES
+
+    return HANDLES.get(str(array_dir), open_only=True)
 
 
 class _PlateLayout:
