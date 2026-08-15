@@ -114,8 +114,6 @@ def ingest(win, path: str) -> None:
     win._op_stack.reset()                       # fresh layer stack (base only) -> raw previews
     win._apply_layers()                         # sets _plate_mode and the plate-pane title
     win._active_op_key = None
-    if getattr(win, "_raw_btn", None):
-        win._raw_btn.hide()                     # raw view on open -> nothing to return from
     win._refresh_layers_tab()
     win._drop.hide()
     win._left_l.addWidget(win._overview, 1)   # fills the pane and self-fits — no scrollbars

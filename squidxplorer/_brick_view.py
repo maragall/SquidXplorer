@@ -48,11 +48,6 @@ class _BrickLoader(QThread):
             self._pending = list(jobs)[-_QUEUE_MAX:]
         self._wake.set()
 
-    def drop_all(self) -> None:
-        with self._lock:
-            self._pending = []
-        self._wake.set()
-
     def stop(self) -> None:
         self._stop.set()
         self._wake.set()
@@ -426,7 +421,3 @@ class BrickedVolume:
                      "resident", self._t_settled * 1000, len(self._layers), self._step,
                      self.resident_bytes / 1e6)
 
-    def timings(self) -> dict:
-        return {"first_pixels_s": self._t_first, "resolved_s": self._t_settled,
-                "step": self._step, "layers": len(self._layers),
-                "resident_bytes": self.resident_bytes, "bricks_planned": len(self._bricks)}

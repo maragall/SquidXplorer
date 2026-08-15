@@ -1818,12 +1818,6 @@ class ViewerManager(QObject):
         """The window id of the active view (its plate hue reads brighter), or None."""
         return self._focused_id
 
-    def clear_focus(self) -> None:
-        """Clear the plate wash when no view is selected."""
-        self._focused_id = None
-        self._selected_ids = []
-        self.viewFocused.emit([])
-
     @property
     def selected_ids(self) -> "list[int]":
         """Window ids selected in the navigator; the plate washes each in its own hue."""

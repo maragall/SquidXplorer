@@ -83,5 +83,7 @@ def test_the_plate_follows_contrast_and_cannot_set_it(plate):
     ov = plate._overview
     assert callable(getattr(ov, "follow_channel_window", None))
     assert callable(getattr(ov, "set_channel_visible", None))
-    assert callable(getattr(plate, "_on_detail_contrast", None))
+    # The ndviewer-era sink is GONE — the ABSENCE is pinned (a callable(...) assert is what let
+    # a dead method read as a feature; same rule as `not hasattr(win, "_mosaic_pane")`).
+    assert not hasattr(plate, "_on_detail_contrast")
     assert ov.findChildren(QAbstractButton) == []

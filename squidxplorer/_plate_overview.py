@@ -194,9 +194,6 @@ class _RunningContrast:
         """
         self._followed[ch] = (float(lo), float(max(hi, lo + 1)))
 
-    def clear_followed(self, ch: int):
-        self._followed.pop(ch, None)
-
     def is_followed(self, ch: int) -> bool:
         return ch in self._followed
 
@@ -645,10 +642,6 @@ class _TileFetcher(QThread):
                     self._pending.append(d)
             del self._pending[:-_TILE_QUEUE_MAX]     # drop the stalest, keep the cap honest
         self._wake.set()
-
-    def drop_all(self) -> None:
-        with self._lock:
-            self._pending.clear()
 
     def stop(self) -> None:
         self._stop.set()
@@ -1419,17 +1412,6 @@ class PlateOverview(QWidget):
             self.set_active_layer("raw")
         else:
             self.update()
-
-    def status_snapshot(self) -> dict:
-        """Copy of the per-well status map, so a tab's dots can follow its own run."""
-        return dict(self._status)
-
-    def set_status_map(self, status: dict):
-        """Restore a snapshot. Foreign keys are ignored, same as ``set_status``."""
-        for rc, state in status.items():
-            if rc in self._status:
-                self._status[rc] = state
-        self.update()
 
     def select(self, ri: int, ci: int):
         """Move the red box to a well (driven by the ndviewer FOV slider)."""
