@@ -1182,12 +1182,22 @@ class RegionViewer(QMainWindow):
         try:
             from squidxplorer._viewer import _SpotWorker
             from squidxplorer._spots import SpotParams
+            from squidxplorer._workers import nuclei_operator
         except Exception as exc:                          # noqa: BLE001
             self._say(f"nuclei detection unavailable: {exc}")
             return
         region = self._cursor.region if self._cursor is not None else (
             self._regions[0] if self._regions else "")
-        action = f"nuclei(cellpose, {channel})"
+        # The registry picks the algorithm (cellpose when its requires are importable, else the
+        # watershed), and the SAME name labels the action, sources the panel's values and runs —
+        # the label used to say cellpose whichever ran, and the params were hardcoded defaults.
+        algo_name, segment = nuclei_operator()
+        from squidxplorer._engine import operator_params
+
+        declared = {p.name for p in operator_params(algo_name)}
+        panel = self._plate_operator_kwargs(algo_name)
+        params = SpotParams(**{k: v for k, v in panel.items() if k in declared})
+        action = f"nuclei({algo_name}, {channel})"
         where = self.address()
         began = time.monotonic()
         data = layer.data
@@ -1202,9 +1212,11 @@ class RegionViewer(QMainWindow):
                 if cropped is not None:
                     data = cropped[0]
                     self._say("detecting on the ROI only — the box you drew, not the whole well.")
-        w = _SpotWorker(region, channel, data, None, None, SpotParams(), parent=self)
+        w = _SpotWorker(region, channel, data, None, None, params, parent=self,
+                        algorithm=(algo_name, segment))
         self.log.started(action, address=where)
-        self._echo(f"detecting nuclei (Cellpose) on the {channel} MIP — first run downloads weights…")
+        weights = " — first run downloads weights…" if algo_name == "cellpose" else "…"
+        self._echo(f"detecting nuclei ({algo_name}) on the {channel} MIP{weights}")
         _launch_worker(
             self, w, slot="_spot_worker",
             # `problem` keeps its subscriber ORDER: the console's failed line, then the echo.

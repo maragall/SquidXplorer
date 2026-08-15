@@ -228,7 +228,7 @@ def _stand_in_segmenter(monkeypatch, boxes=((2, 22), (60, 80))):
         return SP.result_from_labels(lab)
 
     name = "stand-in"
-    monkeypatch.setattr(W, "_nuclei_algorithm", lambda: (name, _fn))
+    monkeypatch.setattr(W, "nuclei_operator", lambda: (name, _fn))
     return name
 
 
@@ -271,3 +271,22 @@ def test_a_2d_napari_pyramid_is_counted_at_LEVEL_ZERO_not_the_coarsest_level(qap
     labels = rec["ready"][0][2]
     assert labels.shape == full.shape, (
         f"segmented a downsampled pyramid level: {labels.shape} against level 0 {full.shape}")
+
+
+def test_the_callers_params_and_algorithm_REACH_the_run(qapp):
+    """The button used to hardcode ``SpotParams()`` and let the worker re-choose the algorithm,
+    so a panel value reached the console line and not the pixels, and the label could name an
+    algorithm that did not run. The caller's ``(name, segment)`` and params are authoritative."""
+    from squidxplorer import _spots as SP
+    from squidxplorer._spots import SpotParams
+
+    seen = {}
+
+    def _fn(plane, params, *, on_stage=None, should_stop=None):
+        seen["params"] = params
+        return SP.result_from_labels(np.zeros(np.asarray(plane).shape, dtype=np.int32))
+
+    p = SpotParams(min_distance_px=99)
+    w = V._SpotWorker("manual0", "405", _plane(), None, None, p, algorithm=("stand-in", _fn))
+    _run(w)
+    assert seen["params"] is p, "the params the caller built did not reach the segmentation"

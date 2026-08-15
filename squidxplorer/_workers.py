@@ -420,12 +420,16 @@ class _SpotWorker(QThread):
     cancelled = Signal()
     finished_count = Signal(str, str, int)     # (region, channel, count)
 
-    def __init__(self, region, channel, data, z_index, bbox_um, params=None, parent=None):
+    def __init__(self, region, channel, data, z_index, bbox_um, params=None, parent=None,
+                 algorithm=None):
         super().__init__(parent)
         self._region, self._channel = region, channel
         self._data, self._z = data, z_index
         self._bbox_um = bbox_um
         self._params = params
+        # (name, segment) — resolved by the CALLER off the registry so the button's label, its
+        # params and the run agree on which algorithm this is; None falls back here.
+        self._algorithm = algorithm
         self._stop = threading.Event()
 
     def stop(self):
@@ -435,7 +439,7 @@ class _SpotWorker(QThread):
         from squidxplorer._spots import SpotDetectionCancelled, detect_spots
 
         where = f"{self._region}/{self._channel}"
-        algorithm, segment = _nuclei_algorithm()
+        algorithm, segment = self._algorithm or nuclei_operator()
         # the progress denominator is whatever the running algorithm reports
         reported_total = [0]
 
@@ -472,12 +476,18 @@ class _SpotWorker(QThread):
         self.finished_count.emit(self._region, self._channel, res.count)
 
 
-def _nuclei_algorithm():
-    """``(name, segment)`` the detect-nuclei button runs: Cellpose when installed, else the
-    Otsu-watershed."""
-    from squidxplorer.projection import missing_requirements
+def nuclei_operator():
+    """``(name, segment)`` the detect-nuclei button runs: ``cellpose`` when the REGISTRY says it
+    is available, else ``spot`` (the Otsu-watershed).
 
-    if not missing_requirements(("cellpose",)):
+    The choice reads ``operator_available`` — the record's own ``requires`` declaration, the
+    same one every other run surface selects on — never a private dependency probe. The names
+    are the registered operator names, so the button's label, the console line and the panel
+    whose values reach the run all agree on which algorithm this is.
+    """
+    from squidxplorer._engine import operator_available
+
+    if operator_available("cellpose")[0]:
         from squidxplorer._cellpose import OPERATOR_NAME, cellpose_nuclei
 
         return OPERATOR_NAME, cellpose_nuclei
