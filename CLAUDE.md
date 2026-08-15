@@ -510,6 +510,21 @@ neutralised / hidden / disabled / raised / no outcome. Its region window uses a 
 vispy's painting is production code. `--self-test` bolts a dead chip onto each window and requires
 the gate to name it.
 
+## Running the test suite: one full graphical run at a time
+
+The suite drives real Qt widgets and real napari `ViewerModel`s, so a full run is RAM-heavy.
+Several agents (or an agent and Julio) often work this repo concurrently in worktrees, and N
+simultaneous full-suite runs can exhaust the host's memory — which then fails tests for reasons
+that are the MACHINE's, not the code's (the same trap as ADR-0001's wall-clock gates).
+
+The rules:
+
+- **One full `python -m pytest tests/ -q` on this machine at a time.** While working, run the
+  focused test files for the code being touched; save the full suite for one run at the end.
+- A run that showed memory pressure (MemoryError, killed workers, wildly slow collection) is not
+  an authoritative result. Rerun it solo and say that happened; never report it as a plain pass
+  or failure.
+
 ## Agent skills
 
 ### Issue tracker
