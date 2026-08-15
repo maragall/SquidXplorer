@@ -584,9 +584,11 @@ def test_the_window_does_not_block_the_ui_thread_to_supersede_a_load(
     that `_MosaicWorker` polls between channels, so waiting blocks the GUI thread up to a 2s cap."""
     import inspect
 
-    from squidxplorer._region_viewer import RegionViewer
+    # The body moved to `_mosaic_playback.load_mosaic` (2026-08-14); inspect THE BODY, not the
+    # RegionViewer delegate, or this guard becomes a test that cannot fail.
+    from squidxplorer import _mosaic_playback
 
-    src = inspect.getsource(RegionViewer._load_mosaic)
+    src = inspect.getsource(_mosaic_playback.load_mosaic)
     assert ".wait(" not in src, (
-        "_load_mosaic blocks the GUI thread waiting for the load it is superseding")
-    assert "_retire_worker" in src, "the superseded worker is not held anywhere; Qt will abort"
+        "load_mosaic blocks the GUI thread waiting for the load it is superseding")
+    assert "retire_worker" in src, "the superseded worker is not held anywhere; Qt will abort"

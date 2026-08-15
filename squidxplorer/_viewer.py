@@ -3081,7 +3081,7 @@ class PlateWindow(QMainWindow):
 
     def _plate_copy_luts(self):
         """Copy the plate's per-channel contrast into the shared LUT clipboard (window <-> plate)."""
-        from squidxplorer._region_viewer import _LUT_CLIPBOARD
+        from squidxplorer._lut_clipboard import CLIPBOARD as _LUT_CLIPBOARD
         ov = self._overview
         names = self._plate_channels()
         wins = ov.channel_windows() if ov is not None else []
@@ -3118,7 +3118,7 @@ class PlateWindow(QMainWindow):
         never-go-black floor still refuses the last lit channel -- pasting from a window with
         everything switched off must not empty the navigator.
         """
-        from squidxplorer._region_viewer import _LUT_CLIPBOARD
+        from squidxplorer._lut_clipboard import CLIPBOARD as _LUT_CLIPBOARD
         ov = self._overview
         if not _LUT_CLIPBOARD:
             self._readout.setText("no copied LUTs yet — copy from a window or the plate first.")
