@@ -57,6 +57,64 @@ On-disk / Acquisition contract keys are untouched: `n_t`, `n_z`, `z_levels`, `dz
   land behind this same contract; when schema v2 (#593) lands, declarative wells replace the
   `parse_well_id` heuristic.
 
+## Run-contract and read-path deepening (2026-08-15, branch arch-cards)
+
+The second review pass's remaining cards (plan:
+`AI-docs/SquidXplorer/in-progress/2026-08-15-run-contract-and-read-path-deepening-plan.md`).
+
+**One kwargs contract on BOTH engine arms.** The record grew `accepts=` (the explicit
+passthrough: kwargs the callable takes that cannot be Params — `_STITCH_PARAMS`' own comment
+records the measured reasons) and `inner_param=` (the declared param naming the INNER operator
+that shapes the output; stitch's and coordinate's is `z_operator`).
+`_engine.split_operator_kwargs` is THE validator both loops call — an unknown key is refused BY
+NAME before any directory exists (`write_plate` used to skip validation entirely on the region
+arm) — and `_engine.operator_output(name, kwargs)` answers the writer's depth and pyramid kind
+off the record (the literal `"z_operator"`/`"mip"` reconstruction in `write_plate` is gone;
+minerva forwards `z_operator` only when the record takes it). `coordinate` declares
+`z_operator`/`correct_illumination` and REFUSES the registration family. `run_plate`'s `n_fovs`
+default is `N_FOVS_LOOP_DEFAULT` (each loop's own default) and the region arm refuses an
+explicit crop, naming `regions={region: [fov, ...]}` — it was silently discarded.
+`write_from_stream` resolves its scope through `scope_wells` like both engine loops (it was the
+one left out: an ROI save owed every FOV of a mapped region and marked its own store
+incomplete); a region operator owes ONE anchor field per region.
+
+**The reader's identity is DECLARED: `source_id`** joined `contract.reader` — what every cache
+key and staleness token builds from, promoted from the private `_path` five modules reached
+into. The Zarr reader's is the acquisition ROOT (its `_path` is the STORE, so `plate_token`
+statted sidecars that never exist there). `reader.parse_coordinates_csv` is the PURE half of
+the coordinates parse; `_assemble_metadata` is the one 13-key Acquisition assembly (it was
+copied four times); `_warn_recorded_mismatch` the one recorded-vs-observed cross-check.
+
+**ONE walk of an NGFF store: `contract.store`** (`ome_attrs` v0.4+v0.5, `resolve_plate_dir`,
+`level_paths`) — reader/_tilesource/_montage/_mosaic_source fold their four private copies onto
+it (only reader's could read `.zattrs`), and `_tilesource.plate_layout_from_store` now EXISTS
+under the exact name docs/plate-contract.md promises. Stitch's z picks stay `n//2` ON PURPOSE:
+registration and the shared flatfield .npy are parity-bound to maragall/stitcher
+(tests/test_integration.py pins the geometry); only display-side picks use `opening_z`.
+
+**The pane seam has ONE headless adapter: `_napari_pane.model_pane_class()`** (real Qt-free
+`ViewerModel` + real `MosaicLayers`) — conftest, GATE 3 and the walkthrough all take it from
+there. `StubMosaic`/`StubLayer` are DELETED; tests cross the interface production crosses
+(napari's list-typed contrast_limits, Colormap objects, layer identity for reuse, events for
+history, configured — not replaced — dims). `RegionViewer._napari_viewer` is one branch:
+`pane._viewer` IS `mosaic.model` on every real pane.
+
+**`_pixels.read_pixels` is the world-µm pixel address**: `PixelRequest(bbox_um, out_px
+ceiling, channel, time_point)` with the ladder pick INSIDE, composed by `_paste_field` over any
+`TileSource` — no new placement rule, and the two adapters are pinned pixel-identical
+(`tests/test_pixels.py`). `PixelRequest` names its frame (the ladder's corner convention).
+Consumer migrations (loupe, gallery, fusers) are staged in the AI-docs plan, one measured pass
+each. The montage's bare `ts.open` — the last raw tensorstore opener on the read path — rides
+`_tsctx.HANDLES` now.
+
+**The nuclei button reads the registry**: `_workers.nuclei_operator()` picks
+cellpose-vs-watershed off `operator_available`, and the caller resolves it ONCE so the label,
+the console line, the panel whose values reach the run and the run name the same algorithm
+(`SpotParams()` was hardcoded — the panel's values never reached the pixels). The LUT record
+travels WHOLE on paste (clim through `MosaicLayers.set_contrast`, `on` through
+`set_channel_visible`; the plate copies rgb+on out through its own `channel_rgb`/
+`channel_visible` readers).
+
 ## The operator contract
 
 `templates/operator/README.md` is the contract, and it is the public one: a complete, installable
