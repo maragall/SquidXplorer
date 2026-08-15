@@ -15,7 +15,6 @@ from typing import TYPE_CHECKING, Callable, Iterator, Optional, Sequence
 import numpy as np
 
 from squidxplorer.projection import cast_like
-from squidxplorer._contrast import opening_z
 from squidxplorer._engine import (
     _NOT_A_WELL_FAULT,
     MissingOperatorDependency,
@@ -148,7 +147,9 @@ def estimate_region_flatfield(
     if channels is None:
         channels = list(range(len(all_channels)))
     if z_level is None:
-        z_level = opening_z(int(meta["n_z"]))   # the z the app SHOWS (rendering contract)
+        # n//2, NOT _contrast.opening_z: this feeds the SHARED flatfield .npy, and parity with
+        # maragall/stitcher (which samples nz//2) must keep the two products byte-identical.
+        z_level = int(meta["n_z"]) // 2
 
     fovs = list(fovs)
     n = min(int(max_tiles), len(fovs))
@@ -488,7 +489,9 @@ def stitch_region(
     reg_c_global = _resolve_registration_channel(meta, registration_channel)
 
     if registration_z is None:
-        registration_z = opening_z(int(meta["n_z"]))   # match the plane on screen
+        # n//2, NOT _contrast.opening_z: registration parity with maragall/stitcher is pinned
+        # by tests/test_integration.py's geometry match on real z-stacks.
+        registration_z = int(meta["n_z"]) // 2
     registration_z = int(registration_z)
     if not 0 <= registration_z < int(meta["n_z"]):
         raise ValueError(
@@ -820,7 +823,7 @@ def _stitch_plate(
         try:
             from squidxplorer._flatfield import FlatfieldProfile, estimate_profile
 
-            z = opening_z(int(meta["n_z"]))
+            z = int(meta["n_z"]) // 2       # parity with maragall/stitcher's shared .npy
             names = [c["name"] for c in meta["channels"]]
             path = _flatfield_npy_path(reader)
             selected = _selected_profiles(names)
