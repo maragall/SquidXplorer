@@ -1762,6 +1762,34 @@ def test_loupe_decimation_bounds_the_sample_count_by_powers_of_two():
         assert px // V.loupe_decimation(px) <= V._LOUPE_MAX_CROP
 
 
+def test_the_loupe_window_memo_evicts_instead_of_growing_for_the_source_lifetime(monkeypatch):
+    """The per-source (well, t) contrast memo was a plain dict with NO eviction — it grew for
+    the life of the source. It is now a budgeted LRU: the bound holds, the newest entries
+    survive, the oldest are evicted, and a hit is still a memo (no recompute)."""
+    from squidxplorer import _plate_overview as PO
+
+    class _Src(PO._LoupeSource):
+        def __init__(self):
+            self.coarse_reads = 0
+
+        def coarse(self, well_id, time_point=0):
+            self.coarse_reads += 1
+            return np.full((1, 4, 4), 7, dtype=np.uint16)
+
+    monkeypatch.setattr(PO, "_AUX_CACHE_BYTES", 5 * PO._WINDOW_PAIR_NBYTES)  # room for 5 memos
+    src = _Src()
+    for i in range(40):
+        assert src.window(f"A{i}", 0) is not None
+    cache = src.__dict__["_win_cache"]
+    assert cache.nbytes <= cache.capacity_bytes
+    assert len(cache) <= 5                                   # bounded, where the dict held 40
+    assert cache.get(("A39", 0)) is not None                 # newest survives
+    assert cache.get(("A0", 0)) is None                      # oldest evicted, not kept forever
+    reads = src.coarse_reads
+    assert src.window("A39", 0) == src.window("A39", 0)
+    assert src.coarse_reads == reads                         # a hit is still a memo
+
+
 def test_loupe_um_per_screen_px_refuses_to_guess():
     assert V.loupe_um_per_screen_px(0.325, 1.0) == pytest.approx(0.325)
     assert V.loupe_um_per_screen_px(0.325, 0.5) == pytest.approx(0.65)

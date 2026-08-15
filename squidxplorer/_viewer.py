@@ -85,7 +85,7 @@ from squidxplorer._run import OperatorRun
 # Plate overview and geometry live in `_plate_overview`; re-exported under their
 # historical names so callers and tests reaching through `_viewer` are unchanged.
 from squidxplorer._plate_overview import (  # noqa: F401 (re-exports)
-    _CELL, _CLICK_SLOP, _COLH, _HDR, _LOUPE_CACHE, _LOUPE_HOLD_MS, _LOUPE_MAG, _LOUPE_MAX_CROP,
+    _CELL, _CLICK_SLOP, _COLH, _HDR, _LOUPE_HOLD_MS, _LOUPE_MAG, _LOUPE_MAX_CROP,
     _LOUPE_PX, _LOUPE_SLOP, _LOUPE_WIN_LOCK, _PAD, _PCT, _PUSH_PX, _TILE_CACHE_BYTES,
     _TILE_QUEUE_MAX, _VIEW_WASH, _FRAME_MIN_GRID, _SEL_FRAME,
     PlateOverview, _LoupeSource, _LoupeWorker, _RawLoupeSource, _RunningContrast, _TileFetcher,

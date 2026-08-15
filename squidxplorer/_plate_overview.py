@@ -15,6 +15,7 @@ from qtpy.QtWidgets import QWidget
 from squidxplorer import _qtstyle
 from squidxplorer._budget import cache_budget
 from squidxplorer._logpane import get_logger
+from squidxplorer._mosaic_source import MemoryBoundedLRUCache
 from squidxplorer._montage import _area_downsample, composite
 from squidxplorer._plate import display_well_id
 from squidxplorer._tiling import TileDescriptor
@@ -65,6 +66,25 @@ def selection_frame_pen_px(cell_disp: float) -> float:
 
 # A quarter of the cache budget: the deep-zoom tile cache is one of several consumers.
 _TILE_CACHE_BYTES = max(64 << 20, cache_budget() // 4)
+
+# The same quarter-share discipline for this file's other consumers — the loupe's crop and
+# coarse-plane caches, the contrast-window memo and the tile QImage cache. Each is an
+# independent LRU bounded at this cap; the cap is a ceiling, not a reservation.
+_AUX_CACHE_BYTES = max(64 << 20, cache_budget() // 4)
+
+#: Nominal bytes of one per-channel (lo, hi) contrast pair, for sizing window-memo entries.
+_WINDOW_PAIR_NBYTES = 16
+
+
+class _SizedValue:
+    """Adapts a value without an ``nbytes`` (a QImage, a list of contrast pairs) to the
+    byte-bounded LRU, which sizes every entry — on put and on eviction — by ``value.nbytes``."""
+
+    __slots__ = ("value", "nbytes")
+
+    def __init__(self, value, nbytes: int):
+        self.value = value
+        self.nbytes = int(nbytes)
 
 _CLICK_SLOP = 3   # px of travel below which a Shift-drag counts as a click
 
@@ -254,7 +274,6 @@ _LOUPE_PX = 240
 _LOUPE_MAG = 8.0
 _LOUPE_HOLD_MS = 350
 _LOUPE_SLOP = 3
-_LOUPE_CACHE = 8
 _LOUPE_MAX_CROP = 2 * _LOUPE_PX   # a source can run out of pyramid levels, so cap the read too
 
 
@@ -336,7 +355,7 @@ def _fmt_um(v: float) -> str:
     return f"{v:g} µm" if v >= 1 else f"{v * 1000:g} nm"
 
 
-_LOUPE_WIN_LOCK = threading.Lock()   # guards the per-source window memo (worker thread writes)
+_LOUPE_WIN_LOCK = threading.Lock()   # guards lazy creation of the per-source window memo
 
 
 class _LoupeSource:
@@ -367,14 +386,15 @@ class _LoupeSource:
         """Per-channel contrast window for a well, computed here (worker thread) and memoised."""
         key = (well_id, int(time_point))
         with _LOUPE_WIN_LOCK:
-            cache = self.__dict__.setdefault("_win_cache", {})
-            hit = cache.get(key)
+            cache = self.__dict__.get("_win_cache")
+            if cache is None:
+                cache = self.__dict__["_win_cache"] = MemoryBoundedLRUCache(_AUX_CACHE_BYTES)
+        hit = cache.get(key)
         if hit is not None:
-            return hit
+            return hit.value
         coarse = self.coarse(well_id, time_point)
         win = [_pct_window(coarse[c]) for c in range(coarse.shape[0])]
-        with _LOUPE_WIN_LOCK:
-            cache[key] = win
+        cache.put(key, _SizedValue(win, _WINDOW_PAIR_NBYTES * len(win)))
         return win
 
 
@@ -393,7 +413,7 @@ class _RawLoupeSource(_LoupeSource):
         self._lock = threading.RLock()
         self._cache_key = None
         self._cache = None
-        self._coarse: dict[tuple, np.ndarray] = {}
+        self._coarse = MemoryBoundedLRUCache(_AUX_CACHE_BYTES)
 
     def available(self, well_id) -> tuple[bool, str]:
         if well_id in self._meta["regions"]:
@@ -427,11 +447,12 @@ class _RawLoupeSource(_LoupeSource):
     def coarse(self, well_id, time_point: int = 0):
         # First field, not the one under the cursor: the window is per well, not per FOV.
         key = (well_id, int(time_point))
-        if key not in self._coarse:
+        hit = self._coarse.get(key)
+        if hit is None:
             p = self._planes(well_id, time_point)
-            self._coarse[key] = np.stack(
-                [_area_downsample(p[c], _CELL, _CELL) for c in range(p.shape[0])])
-        return self._coarse[key]
+            hit = np.stack([_area_downsample(p[c], _CELL, _CELL) for c in range(p.shape[0])])
+            self._coarse.put(key, hit)
+        return hit
 
 
 class _ZarrLoupeSource(_LoupeSource):
@@ -449,9 +470,9 @@ class _ZarrLoupeSource(_LoupeSource):
         self.well_px = int(well_px)
         self.pixel_size_um = pixel_size_um
         self._written = written
-        self._coarse: dict[tuple, np.ndarray] = {}
-        # Guards _coarse and the _levels/n_levels publish below: two loupe workers can be alive
-        # at once (see _detach) and must not race that publish.
+        self._coarse = MemoryBoundedLRUCache(_AUX_CACHE_BYTES)   # internally locked
+        # Guards the _levels/n_levels publish below: two loupe workers can be alive at once
+        # (see _detach) and must not race that publish.
         self._lock = threading.RLock()
 
     def mark_written(self, well_id):
@@ -495,16 +516,19 @@ class _ZarrLoupeSource(_LoupeSource):
 
     def coarse(self, well_id, time_point: int = 0):
         key = (well_id, int(time_point))
-        with self._lock:
-            hit = self._coarse.get(key)
+        hit = self._coarse.get(key)
         if hit is not None:
             return hit
-        # Read outside the lock: it is a whole coarse plane, and only the dict must not race.
+        # Read outside the cache's lock: it is a whole coarse plane, and only the store must
+        # not race.
         arr = self._open(well_id, self.n_levels - 1)
         t_idx = max(0, min(int(time_point), arr.shape[0] - 1))
         plane = np.asarray(arr[t_idx, :, 0].read().result())
-        with self._lock:
-            return self._coarse.setdefault(key, plane)
+        prior = self._coarse.get(key)     # setdefault semantics: a racing worker's plane wins
+        if prior is not None:
+            return prior
+        self._coarse.put(key, plane)
+        return plane
 
 
 _DETACHED: "set" = set()
@@ -548,8 +572,7 @@ class _LoupeWorker(QThread):
         self._cv = threading.Condition()
         self._pending = None
         self._stop = False
-        self._cache: dict[tuple, np.ndarray] = {}
-        self._order: list[tuple] = []
+        self._cache = MemoryBoundedLRUCache(_AUX_CACHE_BYTES)
 
     def request(self, gen, well_id, level, y0, x0, h, w, time_point: int = 0, fov=None):
         with self._cv:
@@ -561,19 +584,6 @@ class _LoupeWorker(QThread):
         with self._cv:
             self._stop = True
             self._cv.notify()
-
-    def _cached(self, key):
-        hit = self._cache.get(key)
-        if hit is not None:
-            self._order.remove(key)
-            self._order.append(key)
-        return hit
-
-    def _store(self, key, val):
-        self._cache[key] = val
-        self._order.append(key)
-        while len(self._order) > _LOUPE_CACHE:
-            self._cache.pop(self._order.pop(0), None)
 
     def run(self):
         while True:
@@ -588,11 +598,11 @@ class _LoupeWorker(QThread):
             # different frame or field at the same rectangle.
             key = (well_id, fov, level, y0, x0, h, w, time_point)
             try:
-                crop = self._cached(key)
+                crop = self._cache.get(key)
                 if crop is None:
                     crop = self._source.read_crop(well_id, level, y0, x0, h, w, time_point,
                                                   fov=fov)
-                    self._store(key, crop)
+                    self._cache.put(key, crop)
                 try:
                     win = self._source.window(well_id, time_point)
                 except Exception:
@@ -899,17 +909,17 @@ class PlateOverview(QWidget):
 
     def _tile_qimage(self, desc, arr):
         """One cached tile as an 8-bit greyscale QImage, windowed by the plate's own contrast."""
-        cache = self.__dict__.setdefault("_tile_qimages", {})
+        cache = self.__dict__.get("_tile_qimages")
+        if cache is None:
+            cache = self.__dict__["_tile_qimages"] = MemoryBoundedLRUCache(_AUX_CACHE_BYTES)
         hit = cache.get(desc)
         if hit is not None:
-            return hit
+            return hit.value
         lo, hi = self._tile_window()
         a = np.clip((arr.astype(np.float32) - lo) * (255.0 / max(hi - lo, 1e-6)), 0, 255)
         a = np.ascontiguousarray(a.astype(np.uint8))
         img = QImage(a.data, a.shape[1], a.shape[0], a.shape[1], QImage.Format_Grayscale8).copy()
-        if len(cache) > 256:
-            cache.clear()                # bounded; the pixel cache underneath is the real one
-        cache[desc] = img
+        cache.put(desc, _SizedValue(img, img.sizeInBytes()))
         return img
 
     def _tile_window(self) -> tuple:
