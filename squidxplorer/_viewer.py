@@ -2481,7 +2481,9 @@ class PlateWindow(QMainWindow):
                 # it to the whole plate would be hours of compute nobody asked for.
                 self._readout.setText(problem)
                 return
-            from_selection = (regions is not None and scope_value == _run_scope.SCOPE_SELECTION)
+            # the one scope this pane runs is SCOPE_SELECTION (the hidden selector widget that
+            # once offered alternatives is gone), so a successful resolution IS a selection scope
+            from_selection = regions is not None
         if regions is not None:
             # A MAPPING SURVIVES AS A MAPPING. `regions` has three shapes (see
             # `projection.scope_wells`) and `{region: [fov, ...]}` -- the FOV subset an ROI window

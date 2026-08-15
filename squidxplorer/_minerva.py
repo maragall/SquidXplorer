@@ -297,10 +297,27 @@ def export_selection(
     stem_prefix = _safe(Path(getattr(reader, "_path", "acquisition")).name)
 
     # workers=1: peak memory is workers x one fused mosaic, and fusion is internally parallel.
+    # z_operator is forwarded only when the RECORD takes it (declared or accepted) — the one
+    # kwargs contract; an operator that cannot honour a non-default choice refuses by name here
+    # rather than silently exporting under a label it ignored.
+    from squidxplorer._engine import operator_accepts, operator_params
+
+    takes_z = ("z_operator" in {p.name for p in operator_params(operator)}
+               or "z_operator" in operator_accepts(operator))
+    op_kwargs = dict(operator_kwargs)
+    # export_selection's OWN signature default — comparing against it detects "the caller chose",
+    # never a branch on an operator's name.
+    z_default = export_selection.__kwdefaults__["z_operator"]
+    if takes_z:
+        op_kwargs.setdefault("z_operator", z_operator)
+    elif z_operator != z_default:
+        raise ValueError(
+            f"operator {operator!r} takes no z_operator, so the export cannot honour "
+            f"z_operator={z_operator!r}; it would run the operator's own z handling and "
+            "label the file with a choice that never happened.")
     written: dict[str, tuple[Path, Path]] = {}
     stream = _stitch_plate(
-        reader, regions=grouped, workers=1, operator=operator,
-        z_operator=z_operator, **operator_kwargs,
+        reader, regions=grouped, workers=1, operator=operator, **op_kwargs,
     )
     for region, _anchor_fov, image in stream:
         # Stream: fuse one region, write it, drop it.

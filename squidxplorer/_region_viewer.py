@@ -1215,7 +1215,11 @@ class RegionViewer(QMainWindow):
         w = _SpotWorker(region, channel, data, None, None, params, parent=self,
                         algorithm=(algo_name, segment))
         self.log.started(action, address=where)
-        weights = " — first run downloads weights…" if algo_name == "cellpose" else "…"
+        # Off the DECLARATION, not the name: an algorithm with requires= is the deep-learning
+        # kind whose first run fetches weights; the built-in watershed declares none.
+        from squidxplorer._engine import operator_requires
+
+        weights = " — first run downloads weights…" if operator_requires(algo_name) else "…"
         self._echo(f"detecting nuclei ({algo_name}) on the {channel} MIP{weights}")
         _launch_worker(
             self, w, slot="_spot_worker",
