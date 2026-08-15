@@ -1210,6 +1210,20 @@ class PlateOverview(QWidget):
         self._refresh()
         return True
 
+    def channel_rgb(self, ch: int):
+        """The (r, g, b) this channel is composited with, or None — the reader beside
+        :meth:`set_channel_color`, so the LUT clipboard can carry the plate's colour out."""
+        if self._colors is None or not (0 <= ch < len(self._colors)):
+            return None
+        return tuple(float(v) for v in self._colors[ch])
+
+    def channel_visible(self, ch: int):
+        """Whether this channel is in the composite, or None — the reader beside
+        :meth:`set_channel_visible`."""
+        if self._mask is None or not (0 <= ch < len(self._mask)):
+            return None
+        return bool(self._mask[ch])
+
     def set_channel_visible(self, ch: int, on: bool):
         """Toggle a channel in/out of the plate composite. Recomposites from the retained store.
 

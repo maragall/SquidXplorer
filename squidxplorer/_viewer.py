@@ -3071,7 +3071,11 @@ class PlateWindow(QMainWindow):
         for i, name in enumerate(names):
             if i < len(wins) and wins[i] is not None:
                 lo, hi = float(wins[i][0]), float(wins[i][1])
-                _LUT_CLIPBOARD[name] = {"clim": (lo, hi), "cmap": None}
+                # The FULL record, in the shape the plate can express: colour as rgb (the
+                # plate's spelling — it has no colormaps), visibility as on. It used to copy
+                # clim alone, so a plate→window paste carried contrast and nothing else.
+                _LUT_CLIPBOARD[name] = {"clim": (lo, hi), "cmap": None,
+                                        "rgb": ov.channel_rgb(i), "on": ov.channel_visible(i)}
         self._readout.setText(f"copied plate LUTs for {len(_LUT_CLIPBOARD)} channel(s).")
 
     def _plate_paste_luts(self):

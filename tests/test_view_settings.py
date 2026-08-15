@@ -595,3 +595,25 @@ def test_a_window_opened_on_a_DIFFERENT_region_gains_nothing(qapp, manager):
     _loaded(qapp, other)
     assert all(other._pane.mosaic.find("mip", ch) is None for ch in channels)
     assert other._result_region is None
+
+
+def test_a_pasted_lut_carries_CHANNEL_VISIBILITY_not_just_contrast(qapp, manager):
+    """The record has four keys and the paste used to apply two: a window with a channel switched
+    OFF pasted its LUTs and the target kept the channel lit — a silent partial paste."""
+    from squidxplorer import _region_viewer as RV
+
+    RV._LUT_CLIPBOARD.clear()
+    one = manager.open([REGIONS[0]])
+    two = manager.open([REGIONS[1]])
+    _loaded(qapp, one)
+    _loaded(qapp, two)
+
+    one._pane.mosaic.set_channel_visible(CH_IN_YAML, False)
+    assert two._pane.mosaic.channel_visible(CH_IN_YAML) is not False
+
+    one._copy_luts()
+    two._paste_luts()
+
+    assert two._pane.mosaic.channel_visible(CH_IN_YAML) is False, (
+        "the copied window had this channel switched OFF; the paste dropped that")
+    RV._LUT_CLIPBOARD.clear()

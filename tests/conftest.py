@@ -627,6 +627,16 @@ def _stub_pane_classes():
             self._layers[(op, channel)] = layer
             return layer
 
+        def set_contrast(self, channel, lo, hi):
+            """Mirror of ``MosaicLayers.set_contrast``: one write per channel, every holder follows."""
+            wrote = False
+            for (_op, ch), layer in self._layers.items():
+                if ch == channel:
+                    layer.contrast_limits = (float(lo), float(hi))
+                    wrote = True
+            if not wrote:
+                raise KeyError(f"no layer for channel {channel!r}")
+
         def match_contrast_to(self, op):
             """The "Match raw contrast" action: *op*'s window onto the channel's other layers."""
             matched = 0
