@@ -569,11 +569,12 @@ class ReaderTileSource:
         return plane
 
     def _read(self, region, fov, channel: str, z_level: int, time_point: int):
-        """One plane from the reader, tolerating readers whose ``read`` has no ``t``."""
-        try:
-            return self.reader.read(region, int(fov), str(channel), int(z_level), time_point=int(time_point))
-        except TypeError:
-            return self.reader.read(region, int(fov), str(channel), int(z_level))
+        """One plane from the reader. ``time_point`` is part of the contract's ``read`` — the
+        old TypeError retry existed for readers without it, of which there are none, so its
+        only live effect was to swallow a genuine TypeError from INSIDE a decode and silently
+        re-read frame 0."""
+        return self.reader.read(region, int(fov), str(channel), int(z_level),
+                                time_point=int(time_point))
 
 
 def region_bbox_um(ladder: PlateLadder, region: str) -> Optional[tuple]:

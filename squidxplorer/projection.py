@@ -159,8 +159,12 @@ def plane_op(fn: Callable[[np.ndarray], np.ndarray]) -> Callable[[Iterable[np.nd
 # for_channel(acquisition_path, channel_name) -> operator: an attribute on the callable that
 # lets project_well specialise an operator once per channel (e.g. a per-channel PSF).
 def acquisition_path(reader) -> Optional[str]:
-    """The acquisition folder a reader reads, or ``None`` for a reader that does not say."""
-    path = getattr(reader, "_path", None)
+    """The acquisition folder a reader reads, or ``None`` for a reader that does not say.
+
+    ``source_id`` is the contract's identity member; ``_path`` survives as the fallback for
+    doubles and readers written before it was declared.
+    """
+    path = getattr(reader, "source_id", None) or getattr(reader, "_path", None)
     return None if path is None else str(path)
 
 

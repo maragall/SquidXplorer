@@ -294,7 +294,8 @@ def export_selection(
 
     out_dir = Path(out_dir) if out_dir is not None else default_out_dir(reader)
     out_dir.mkdir(parents=True, exist_ok=True)
-    stem_prefix = _safe(Path(getattr(reader, "_path", "acquisition")).name)
+    stem_prefix = _safe(Path(getattr(reader, "source_id", None)
+                             or getattr(reader, "_path", "acquisition")).name)
 
     # workers=1: peak memory is workers x one fused mosaic, and fusion is internally parallel.
     # z_operator is forwarded only when the RECORD takes it (declared or accepted) — the one

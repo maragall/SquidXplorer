@@ -319,12 +319,18 @@ def source_token(reader: Any) -> str:
 
 
 def _source_token(reader: Any) -> str:
-    """Stable identity of the acquisition a reader reads, for cache keys."""
-    path = getattr(reader, "_path", None)
+    """Stable identity of the acquisition a reader reads, for cache keys.
+
+    ``source_id`` is the contract's identity member (for the Zarr reader it is the acquisition
+    ROOT, so the staleness token stats sidecars that exist); ``_path`` is the fallback for
+    doubles written before it was declared.
+    """
+    path = getattr(reader, "source_id", None) or getattr(reader, "_path", None)
     if path is None:
         raise ValueError(
-            f"{type(reader).__name__} exposes no '_path', so its cache entries cannot be told "
-            "apart from another acquisition's. Refusing to risk serving the wrong pixels."
+            f"{type(reader).__name__} exposes neither 'source_id' nor '_path', so its cache "
+            "entries cannot be told apart from another acquisition's. Refusing to risk serving "
+            "the wrong pixels."
         )
     return str(path)
 

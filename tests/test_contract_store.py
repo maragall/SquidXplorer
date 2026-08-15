@@ -48,3 +48,31 @@ def test_the_contract_names_the_walk_the_DOC_promises():
     from squidxplorer._tilesource import plate_layout_from_store
 
     assert callable(plate_layout_from_store)
+
+
+def test_the_readers_identity_is_DECLARED_and_the_zarr_readers_is_the_acquisition_root(tmp_path):
+    """`source_id` is the contract's identity member. The Zarr reader's is the acquisition
+    ROOT (where the sidecars live) — its `_path` is the STORE, and keying the staleness token
+    on the store statted acquisition.yaml/coordinates.csv files that never exist there."""
+    from squidxplorer.contract.reader import SquidAcquisitionReader
+    from squidxplorer.reader import SquidZarrReader
+
+    assert hasattr(SquidAcquisitionReader, "source_id")
+
+    store = tmp_path / "acq" / "plate.zarr"
+    store.mkdir(parents=True)
+    r = SquidZarrReader(store)
+    assert r.source_id == str(tmp_path / "acq")
+    assert r._path == store, "the store path is still the store path; only the IDENTITY moved"
+
+
+def test_parse_coordinates_csv_is_pure_text_in_positions_out():
+    from squidxplorer.reader import parse_coordinates_csv
+
+    text = "region,x (mm),y (mm)\nA1,1.0,2.0\nA1,2.0,2.0\nA1,2.0,2.0\n"
+    positions, mismatched = parse_coordinates_csv(text, {"A1": [0, 1]})
+    assert positions == {("A1", 0): (1000.0, 2000.0), ("A1", 1): (2000.0, 2000.0)}
+    assert mismatched == {}
+
+    _positions, mismatched = parse_coordinates_csv(text, {"A1": [0, 1, 2]})
+    assert mismatched == {"A1": (2, 3)}, "the per-region cross-check went missing"

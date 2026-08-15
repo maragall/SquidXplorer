@@ -547,3 +547,40 @@ def build_volume_scene(mosaic, op="raw", channels=("488", "561"), bricks=3):
             vol._add_layer((ch, (0, b)), ch, _scene_stack(10 + ch_i * 10 + b, (4, 8, 8)),
                            (1.5, 0.75, 0.75), (0.0, 0.0, float(b) * 6.0))
     return vol
+
+
+class FakeReader:
+    """THE canonical reader double: the full contract (source_id included), no disk.
+
+    16 test files carry ~26 hand-rolled reader stubs, each re-deriving `_path`/`metadata`/
+    `read` — and three of them fork the contract (a `z_level=0` default `read` does not have).
+    New tests take this one; existing stubs migrate as they are touched.
+    """
+
+    def __init__(self, metadata: dict, planes=None, source_id: str = "/fake/acq"):
+        self._metadata = dict(metadata)
+        self._planes = planes or {}
+        self._source_id = str(source_id)
+        self.reads: list = []                    # every (region, fov, channel, z, t), in order
+
+    @property
+    def metadata(self):
+        return self._metadata
+
+    @property
+    def source_id(self) -> str:
+        return self._source_id
+
+    def read(self, region, fov, channel, z_level, time_point=0):
+        key = (str(region), int(fov), str(channel), int(z_level), int(time_point))
+        self.reads.append(key)
+        planes = self._planes
+        if callable(planes):
+            return planes(*key)
+        if key in planes:
+            return planes[key]
+        raise KeyError(f"FakeReader holds no plane {key}; it has {sorted(planes)[:4]}…")
+
+    def plane_ref(self, region, fov, channel, z_level, time_point=0):
+        return (self._source_id, str(region), int(fov), str(channel), int(z_level),
+                int(time_point))

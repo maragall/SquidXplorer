@@ -33,7 +33,8 @@ from tests.writer_fixtures import WRITERS
 
 READER_CLASSES = (SquidReader, SquidMultiPageTiffReader, SquidOMEReader, SquidZarrReader)
 
-PROTOCOL_MEMBERS = ("metadata", "read", "plane_ref")
+# source_id joined 2026-08-15: the identity caches key on, promoted from private `_path`.
+PROTOCOL_MEMBERS = ("metadata", "read", "plane_ref", "source_id")
 
 
 def declared_members() -> set:
@@ -126,6 +127,10 @@ def test_a_foreign_class_satisfies_it_without_inheriting_anything():
 
         def plane_ref(self, region, fov, channel, z_level, time_point=0) -> tuple:
             return ("A1_0_0_ch.tiff", 0)
+
+        @property
+        def source_id(self) -> str:
+            return "/live/acq"
 
     assert isinstance(LiveAcquisitionReader(), SquidAcquisitionReader)
     for cls in READER_CLASSES:

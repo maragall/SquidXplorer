@@ -180,7 +180,7 @@ def _flatfield_npy_path(reader):
     """Where maragall/stitcher keeps this acquisition's profile, or ``None`` if unknowable."""
     from pathlib import Path
 
-    root = getattr(reader, "_path", None)
+    root = getattr(reader, "source_id", None) or getattr(reader, "_path", None)
     if root is None:
         return None
     root = Path(root)

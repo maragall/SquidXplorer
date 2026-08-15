@@ -199,14 +199,55 @@ def _positions_from_fov_column(reader, fovs_per_region: dict, fov_col, x_col, y_
     return positions
 
 
+def _warn_recorded_mismatch(acq: dict, *, n_z: int, z_source: str,
+                            n_t=None) -> None:
+    """The recorded-vs-observed cross-check, ONCE: what is on disk is ground truth.
+
+    Three adapters carried private copies of this warning; the wording drifted while the rule
+    did not. ``n_t=None`` skips the timepoint check for stores that have no folder axis.
+    """
+    if acq.get("n_z_declared") is not None and acq["n_z_declared"] != n_z:
+        warnings.warn(
+            f"Recorded Nz ({acq['n_z_declared']}) != {z_source} ({n_z}); "
+            "using the observed value."
+        )
+    if n_t is not None and acq.get("n_t_declared") is not None and acq["n_t_declared"] != n_t:
+        warnings.warn(
+            f"Recorded Nt ({acq['n_t_declared']}) != timepoint folders found ({n_t}); "
+            "using the folder-derived value."
+        )
+
+
+def _assemble_metadata(*, regions, fovs_per_region, fov_positions_um, channels, n_z, z_levels,
+                       dz_um, pixel_size_um, wellplate_format, frame_shape, dtype, n_t):
+    """THE one ``Acquisition`` assembly all four adapters share.
+
+    The 13-key block used to be copied four times; a key added to three of them and forgotten
+    in the fourth would have shipped as a per-format metadata hole. Keyword-only so every
+    adapter states every key.
+    """
+    return Acquisition(**{
+        "regions": regions,
+        "fovs_per_region": fovs_per_region,
+        "fov_positions_um": fov_positions_um,
+        "channels": channels,
+        "n_z": n_z,
+        "z_levels": z_levels,
+        "dz_um": dz_um,
+        "pixel_size_um": pixel_size_um,
+        "wellplate_format": wellplate_format,
+        "frame_shape": frame_shape,
+        "dtype": dtype,
+        "n_t": n_t,
+    })
+
+
 def _parse_fov_positions_um(root, fovs_per_region: dict) -> tuple:
     """Parse ``coordinates.csv`` into ``({(region, fov): (x_um, y_um)}, mismatched)``, in micrometres.
 
     Positions are de-duplicated per region, then cross-checked against the filename-derived
     FOV count; regions that fail land in ``mismatched`` instead of the positions dict.
     """
-    import csv
-
     path, source = _coords_path(root)
     if path is None:
         return {}, {}
@@ -219,29 +260,42 @@ def _parse_fov_positions_um(root, fovs_per_region: dict) -> tuple:
             "without one is usually hand-built."
         )
 
-    with path.open(newline="") as fh:
-        reader = csv.DictReader(fh)
-        x_col, y_col = _coord_columns(reader.fieldnames)
-        fov_col = _fov_column(reader.fieldnames)
-        if fov_col is not None:
-            return _positions_from_fov_column(reader, fovs_per_region, fov_col, x_col, y_col), {}
-        ordered: dict[str, list] = {}
-        seen: dict[str, set] = {}
-        for line_no, row in enumerate(reader, start=2):
-            region = (row.get("region") or "").strip()
-            if not region or region not in fovs_per_region:
-                continue
-            pair = _parse_mm_pair(
-                (row.get(x_col) or "").strip(), (row.get(y_col) or "").strip(), region, line_no
-            )
-            if pair is None:
-                continue
-            x, y = pair
-            key = (round(x, 6), round(y, 6))   # tolerate float-repr drift when de-duplicating
-            if key in seen.setdefault(region, set()):
-                continue                    # same position repeated (one row per z / per t)
-            seen[region].add(key)
-            ordered.setdefault(region, []).append((x * _MM_TO_UM, y * _MM_TO_UM))
+    return parse_coordinates_csv(path.read_text(), fovs_per_region)
+
+
+def parse_coordinates_csv(text: str, fovs_per_region: dict) -> tuple:
+    """PURE half of the coordinates parse: CSV text in, positions out. No filesystem.
+
+    ``({(region, fov): (x_um, y_um)}, mismatched)`` — exactly
+    :func:`_parse_fov_positions_um`'s contract, minus finding the file. Extracted so the
+    string→dict transform is testable as strings (the suite used to write 35 real
+    ``coordinates.csv`` files to disk to test it).
+    """
+    import csv
+    import io
+
+    reader = csv.DictReader(io.StringIO(text))
+    x_col, y_col = _coord_columns(reader.fieldnames)
+    fov_col = _fov_column(reader.fieldnames)
+    if fov_col is not None:
+        return _positions_from_fov_column(reader, fovs_per_region, fov_col, x_col, y_col), {}
+    ordered: dict[str, list] = {}
+    seen: dict[str, set] = {}
+    for line_no, row in enumerate(reader, start=2):
+        region = (row.get("region") or "").strip()
+        if not region or region not in fovs_per_region:
+            continue
+        pair = _parse_mm_pair(
+            (row.get(x_col) or "").strip(), (row.get(y_col) or "").strip(), region, line_no
+        )
+        if pair is None:
+            continue
+        x, y = pair
+        key = (round(x, 6), round(y, 6))   # tolerate float-repr drift when de-duplicating
+        if key in seen.setdefault(region, set()):
+            continue                    # same position repeated (one row per z / per t)
+        seen[region].add(key)
+        ordered.setdefault(region, []).append((x * _MM_TO_UM, y * _MM_TO_UM))
 
     positions: dict = {}
     mismatched: dict = {}
@@ -455,6 +509,12 @@ class SquidReader:
         self._scanned = _scanned
 
     # -- timepoints -------------------------------------------------------
+
+    @property
+    def source_id(self) -> str:
+        """The acquisition folder this reader reads (the contract's identity member)."""
+        return str(self._path)
+
     def _discover_time_folders(self) -> list[Path]:
         if self._time_folders is None:
             self._time_folders = _time_folders(self._path)
@@ -528,16 +588,7 @@ class SquidReader:
 
         # Filenames + timepoint folders are ground truth; the recorded Nz/Nt are cross-checks.
         acq = load_acquisition_metadata(self._path)
-        if acq["n_z_declared"] is not None and acq["n_z_declared"] != n_z:
-            warnings.warn(
-                f"Recorded Nz ({acq['n_z_declared']}) != distinct z levels in filenames "
-                f"({n_z}); using the filename-derived value."
-            )
-        if acq["n_t_declared"] is not None and acq["n_t_declared"] != n_t:
-            warnings.warn(
-                f"Recorded Nt ({acq['n_t_declared']}) != timepoint folders found ({n_t}); "
-                "using the folder-derived value."
-            )
+        _warn_recorded_mismatch(acq, n_z=n_z, z_source="distinct z levels in filenames", n_t=n_t)
 
         # Frame shape/dtype come from a real frame; ``min`` keeps the sampled plane reproducible.
         sample_key = min(index)
@@ -545,20 +596,20 @@ class SquidReader:
         sample = _validate_plane(tifffile.imread(sample_path), sample_path)
 
         fovs_per_region = {r: sorted(fovs[r]) for r in regions}
-        self._meta = Acquisition(**{
-            "regions": regions,
-            "fovs_per_region": fovs_per_region,
-            "fov_positions_um": _fov_positions_um_or_empty(self._path, fovs_per_region),
-            "channels": resolve_channels(sorted(channels), load_channel_yaml(self._path)),
-            "n_z": n_z,
-            "z_levels": z_sorted,
-            "dz_um": acq["dz_um"],
-            "pixel_size_um": acq["pixel_size_um"],
-            "wellplate_format": acq["wellplate_format"],
-            "frame_shape": tuple(sample.shape),
-            "dtype": sample.dtype,
-            "n_t": n_t,
-        })
+        self._meta = _assemble_metadata(
+            regions=regions,
+            fovs_per_region=fovs_per_region,
+            fov_positions_um=_fov_positions_um_or_empty(self._path, fovs_per_region),
+            channels=resolve_channels(sorted(channels), load_channel_yaml(self._path)),
+            n_z=n_z,
+            z_levels=z_sorted,
+            dz_um=acq["dz_um"],
+            pixel_size_um=acq["pixel_size_um"],
+            wellplate_format=acq["wellplate_format"],
+            frame_shape=tuple(sample.shape),
+            dtype=sample.dtype,
+            n_t=n_t,
+        )
         return self._meta
 
     # -- read -------------------------------------------------------------
@@ -669,6 +720,12 @@ class SquidMultiPageTiffReader:
         self._handles = _TiffHandles()
 
     # -- discovery ---------------------------------------------------------
+
+    @property
+    def source_id(self) -> str:
+        """The acquisition folder this reader reads (the contract's identity member)."""
+        return str(self._path)
+
     def _discover_time_folders(self) -> list[Path]:
         if self._time_folders_cache is None:
             self._time_folders_cache = _time_folders(self._path)
@@ -742,33 +799,25 @@ class SquidMultiPageTiffReader:
         n_z, n_t = len(z_sorted), len(time_folders)
 
         acq = load_acquisition_metadata(self._path)
-        if acq["n_z_declared"] is not None and acq["n_z_declared"] != n_z:
-            warnings.warn(
-                f"Recorded Nz ({acq['n_z_declared']}) != distinct z levels in the stack pages "
-                f"({n_z}); using the page-derived value."
-            )
-        if acq["n_t_declared"] is not None and acq["n_t_declared"] != n_t:
-            warnings.warn(
-                f"Recorded Nt ({acq['n_t_declared']}) != timepoint folders found ({n_t}); "
-                "using the folder-derived value."
-            )
+        _warn_recorded_mismatch(acq, n_z=n_z, z_source="distinct z levels in the stack pages",
+                                n_t=n_t)
 
         s_region, s_fov, s_z, s_channel = next(iter(index))
         sample = self.read(s_region, s_fov, s_channel, s_z)
-        self._meta = Acquisition(**{
-            "regions": regions,
-            "fovs_per_region": fovs_per_region,
-            "fov_positions_um": self._positions_um(fovs_per_region),
-            "channels": resolve_channels(sorted(channels), load_channel_yaml(self._path)),
-            "n_z": n_z,
-            "z_levels": z_sorted,
-            "dz_um": acq["dz_um"],
-            "pixel_size_um": acq["pixel_size_um"],
-            "wellplate_format": acq["wellplate_format"],
-            "frame_shape": tuple(sample.shape),
-            "dtype": sample.dtype,
-            "n_t": n_t,
-        })
+        self._meta = _assemble_metadata(
+            regions=regions,
+            fovs_per_region=fovs_per_region,
+            fov_positions_um=self._positions_um(fovs_per_region),
+            channels=resolve_channels(sorted(channels), load_channel_yaml(self._path)),
+            n_z=n_z,
+            z_levels=z_sorted,
+            dz_um=acq["dz_um"],
+            pixel_size_um=acq["pixel_size_um"],
+            wellplate_format=acq["wellplate_format"],
+            frame_shape=tuple(sample.shape),
+            dtype=sample.dtype,
+            n_t=n_t,
+        )
         return self._meta
 
     def _positions_um(self, fovs_per_region: dict) -> dict:
@@ -826,6 +875,12 @@ class SquidOMEReader:
         self._axes: Optional[str] = None        # non-spatial axes order, e.g. "TZC"
         self._handles = _TiffHandles()
 
+
+    @property
+    def source_id(self) -> str:
+        """The acquisition folder this reader reads (the contract's identity member)."""
+        return str(self._path)
+
     def _discover(self) -> dict:
         if self._files is not None:
             return self._files
@@ -872,23 +927,22 @@ class SquidOMEReader:
         channels = resolve_channels(names, yaml_map)
 
         acq = load_acquisition_metadata(self._path)
-        if acq["n_z_declared"] is not None and acq["n_z_declared"] != n_z:
-            warnings.warn(f"Recorded Nz ({acq['n_z_declared']}) != OME Z ({n_z}); using {n_z}.")
+        _warn_recorded_mismatch(acq, n_z=n_z, z_source="OME Z")
         fovs_per_region = {r: sorted(fovs[r]) for r in regions}
-        self._meta = Acquisition(**{
-            "regions": regions,
-            "fovs_per_region": fovs_per_region,
-            "fov_positions_um": _fov_positions_um_or_empty(self._path, fovs_per_region),
-            "channels": channels,
-            "n_z": n_z,
-            "z_levels": list(range(n_z)),
-            "dz_um": acq["dz_um"],
-            "pixel_size_um": acq["pixel_size_um"],
-            "wellplate_format": acq["wellplate_format"],
-            "frame_shape": (int(dims.get("Y", sample.shape[-2])), int(dims.get("X", sample.shape[-1]))),
-            "dtype": np.dtype(sample.dtype),
-            "n_t": n_t,
-        })
+        self._meta = _assemble_metadata(
+            regions=regions,
+            fovs_per_region=fovs_per_region,
+            fov_positions_um=_fov_positions_um_or_empty(self._path, fovs_per_region),
+            channels=channels,
+            n_z=n_z,
+            z_levels=list(range(n_z)),
+            dz_um=acq["dz_um"],
+            pixel_size_um=acq["pixel_size_um"],
+            wellplate_format=acq["wellplate_format"],
+            frame_shape=(int(dims.get("Y", sample.shape[-2])), int(dims.get("X", sample.shape[-1]))),
+            dtype=np.dtype(sample.dtype),
+            n_t=n_t,
+        )
         return self._meta
 
     def _page_index(self, time_point: int, z_level: int, c: int) -> int:
@@ -1083,6 +1137,16 @@ class SquidZarrReader:
         self._meta: Optional[dict] = None
         self._contract_version = None            # set by _discover: what the store declares, or None
 
+
+    @property
+    def source_id(self) -> str:
+        """The acquisition ROOT (where acquisition.yaml / coordinates.csv live), NOT the store.
+
+        The staleness token and every cache key build from this; keyed on the store dir they
+        statted sidecars that never exist there and silently degraded.
+        """
+        return str(self._root)
+
     # -- discovery ---------------------------------------------------------
     def _discover(self) -> dict:
         if self._fields is not None:
@@ -1201,20 +1265,20 @@ class SquidZarrReader:
         n_z = ms.size(shape, "z")
         n_t = ms.size(shape, "t")
 
-        self._meta = Acquisition(**{
-            "regions": regions,
-            "fovs_per_region": fovs_per_region,
-            "fov_positions_um": self._positions_um(fields, fovs_per_region),
-            "channels": self._channels(ms, ms.size(shape, "c")),
-            "n_z": n_z,
-            "z_levels": list(range(n_z)),
-            "dz_um": ms.dz_um,
-            "pixel_size_um": ms.pixel_size_um,
-            "wellplate_format": self._wellplate_format(regions),
-            "frame_shape": (ms.size(shape, "y", shape[-2]), ms.size(shape, "x", shape[-1])),
-            "dtype": dtype,
-            "n_t": n_t,
-        })
+        self._meta = _assemble_metadata(
+            regions=regions,
+            fovs_per_region=fovs_per_region,
+            fov_positions_um=self._positions_um(fields, fovs_per_region),
+            channels=self._channels(ms, ms.size(shape, "c")),
+            n_z=n_z,
+            z_levels=list(range(n_z)),
+            dz_um=ms.dz_um,
+            pixel_size_um=ms.pixel_size_um,
+            wellplate_format=self._wellplate_format(regions),
+            frame_shape=(ms.size(shape, "y", shape[-2]), ms.size(shape, "x", shape[-1])),
+            dtype=dtype,
+            n_t=n_t,
+        )
         return self._meta
 
     def _positions_um(self, fields: dict, fovs_per_region: dict) -> dict:
