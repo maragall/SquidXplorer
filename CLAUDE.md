@@ -20,12 +20,49 @@ Dated docs under docs/ may still say "projector"; this file and the code do not.
 
 On-disk / Acquisition contract keys are untouched: `n_t`, `n_z`, `z_levels`, `dz_um`.
 
+## Architecture v2: kill list, OperatorRun, ingest extraction (2026-08-13)
+
+- **Kill list**: `_benchmark`, `_bench_stitchers`, `_oracle`, `_odon_bench`, `_prefs` and
+  `_terminal` are deleted with their tests and the tools harnesses that imported them
+  (`tools/benchmark.py`, `tools/odon_benchmark.py`, `tools/stitch_demo.py`), plus
+  `_viewer._build_cli_tab`, which had no caller left. The close-all "don't show me this again"
+  checkbox stays but is a session flag (`PlateWindow._warn_close_all`) — no prefs file.
+- **`_run.OperatorRun`** (Qt-free) owns a run's identity and books: key/layer key, requester,
+  first-paint clock, address, per-region accumulators, error, `settle_stranded` and the closing
+  verdict in `_measure`'s outcome words. Created by `run_operator`, closed by the drain slot;
+  `PlateWindow` keeps the signal wiring and the `_runs_settled` counter. `_run_label`,
+  `_run_units` and `_resolved_target` were write-only fields and are gone.
+- **`_ingest.py`** owns the acquisition-open pipeline — `ingest`, the raw-preview lifecycle and
+  the loupe-source bookkeeping — as functions over the window's own state (one bookkeeping).
+  `PlateWindow` forwards; its `_start_preview` forwarder stays the ONE place the timepoint bar
+  reaches the pixels. `_viewer.py`: 4676 -> 4344 lines.
+- **One identity module, one writer of the plate's shown layer**. `_operations.py` owns the
+  operator identity model — the cards, the layer-key vocabulary (`operator_layer_key` /
+  `operator_name` / `result_kind`) and `OperationStack` (`_layers.py` is deleted into it, along
+  with `remove` / `remove_suffix`, product-dead since the exploration tabs went).
+  `PlateWindow._apply_layers` is the ONLY caller of `PlateOverview.set_active_layer`: every path
+  that changes what the plate shows writes the stack and calls it. `_return_to_raw` was the live
+  drift — it put the overview on raw while the stack still claimed the operator layer, so the
+  Layers tab showed a transform ON over a raw plate; it now disables the transforms through the
+  stack. Deliberately NOT unified into one plate+window registry: a window's identity store is
+  napari's own Layers list read through `MosaicLayers` (derived, never cached — see the layer-model
+  section), a window legitimately carries identities the plate never ran (an ROI child re-uses its
+  parent's groups), and the plate's refusal of a region-operator layer is already declaration-
+  derived (`is_region_operator`) at the one seam (`_follow_window_layer`).
+- **The reader contract is importable on its own**: `squidxplorer/contract/reader.py` holds
+  `SquidAcquisitionReader` (typing-only module; `reader.py` re-exports it, `squidxplorer.__init__`
+  unchanged), so Squid can `from squidxplorer.contract.reader import SquidAcquisitionReader`
+  across the repo boundary without touching the readers. The rest of the Squid seam waits on named
+  triggers: when core-service (#578) merges, the `job_completed` SSE listener and a live reader
+  land behind this same contract; when schema v2 (#593) lands, declarative wells replace the
+  `parse_well_id` heuristic.
+
 ## The operator contract
 
 `templates/operator/README.md` is the contract, and it is the public one: a complete, installable
 example package a contributor copies. Read it before adding an operator anywhere.
 
-Four declarations on the registry record, and nothing generic branches on an operator's NAME
+Five declarations on the registry record, and nothing generic branches on an operator's NAME
 (`tests/test_operator_declaration.py` fails the build if anything does):
 
 | declaration | decides |
@@ -34,6 +71,20 @@ Four declarations on the registry record, and nothing generic branches on an ope
 | `produces` | what the pixels MEAN — the napari layer type, **and how the OME-Zarr writer coarsens a pyramid level** |
 | `params` | what one entry can be RUN with (`params=` makes the registered object a factory) |
 | `requires` | the modules it needs — **listed either way, run refused BY NAME when missing** |
+| `extra` | the install payload — the `[project.optional-dependencies]` group that makes it runnable; `None` means core |
+
+**`extra=` and the installer** (2026-08-13). `operator_extra(name)` sits beside the other
+queries, `do_list_operators` rows carry it, and the declaration test enforces both directions: an
+operator requiring a non-core package must declare an extra, and a declared extra must name a
+real group (so `flatfield`, which requires tilefusion, is `extra="stitch"` like
+`stitch`/`coordinate`; `decon`/`decon3d` are `"decon"`, `cellpose` is `"segment"`).
+`scripts/installer/` (stdlib, Qt-free, tests in `tests/test_installer_menu.py`) is built on it:
+`menu.py` generates the install checkbox menu FROM the registry — defaults core/stitch/decon
+checked, segment unchecked, and a failed `cuda12_available()` probe shades decon with the probe's
+own reason (today: every Mac) — and `bootstrap.py` drives uv into the private env (`--dry-run`
+prints the exact commands; a missing uv is a refusal carrying the install hint). tilefusion and
+petakit are pinned to commit SHAs in pyproject so two installs resolve the same bits; the Windows
+exe is built elsewhere (`scripts/installer/README.md`).
 
 **ONE table** (`_engine._OPERATORS`, 2026-08-05). `add_operator` and `add_region_operator` are two
 registrars over one record, sharing one validator (`_engine._declare`); `add_region_operator`
@@ -101,10 +152,20 @@ accumulator's refusals (channel mismatch, unknown FOV, incomplete region, and no
 pixel size) are unchanged in meaning.
 
 **One verdict** (2026-08-13). `_measure.verdict(landed, owed, skipped, stopped)` is the single
-OK/PARTIAL/STOPPED computation, called by `_command.do_run_operator` and
-`_workers._OperatorWorker`. `landed`'s unit stays the caller's (fields there, wells here) and only
-zero is read; `owed`/`skipped` count target wells; `stopped` comes from the manifest or the stop
+OK/PARTIAL/STOPPED computation. `landed` counts FIELDS and only zero is read;
+`owed`/`skipped` count target wells; `stopped` comes from the manifest or the stop
 event, never from `complete`; a stopped run's detail stays the caller's own sentence.
+
+**One dispatch** (2026-08-14). `_dispatch.run_operator_once` is the single save-vs-preview
+control flow, and the only caller of `verdict` for a run: it owns the `write_plate` /
+`run_plate` branch, builds `operator_kwargs` ONCE from one `parameters` argument used by BOTH
+branches (the twice-fixed preview-forgot-`operator_kwargs` drift is now unwritable), counts
+landed fields and skipped regions, and reads `stopped` off the manifest or a stop poll —
+including one final poll after either branch, so a stop requested in the run's tail is a
+stopped run on every surface. `_workers._OperatorWorker._run_body` (Qt signals, "stopped by
+the window") and `_command.do_run_operator` (console sentences, the result dict) are thin
+adapters over it. Not in `_measure` (the cost ledger owns no engine knowledge) and not in
+`_run` (GUI books the headless executor must not import).
 
 **GUI panels ARE generated from `params`** (2026-08-05). `squidxplorer/_param_panel.py` builds one
 widget per declared `Param`, choosing it from the TYPE OF THE DEFAULT — `bool` a check box, `int`
@@ -493,11 +554,12 @@ That fault was invisible because the layer above absorbed it, which is the more 
 
 **A run may not end holding a result it never delivered.** `_viewer._on_result` refuses to draw a
 region until every FOV is in (half a mosaic reads as something the operator did), and it did that
-by returning with the accumulator still in `_result_accs` — where nothing ever looked again.
-`PlateWindow._settle_stranded_results`, called from `_on_run_drained`, now resolves every leftover:
-it delivers a complete one and NAMES an incomplete one in the accumulator's own words ("23 of 27
-FOV(s) have results"), sets `_run_error` so `_close_requester_pair` reports `operator_failed`, and
-logs it. Before that, the two corrupt-looking reads above cost the whole region its layer while the
+by returning with the accumulator still in the run's books — where nothing ever looked again.
+`OperatorRun.settle_stranded`, forwarded by `PlateWindow._settle_stranded_results` from
+`_on_run_drained`, now resolves every leftover: it delivers a complete one and NAMES an incomplete
+one in the accumulator's own words ("23 of 27 FOV(s) have results"), sets the run's `error` so
+`_close_requester_pair` reports `operator_failed`, and logs it. Before that, the two
+corrupt-looking reads above cost the whole region its layer while the
 plate printed "✓ Maximum Intensity Projection · 1 well" and the window that asked was told
 "finished in 4.6 s" — and `⚙ controls` then opened no tab, because `_window_operators()` was
 honestly empty. `_workers._OperatorWorker._on_error` also logs the skipped field and its cause; it

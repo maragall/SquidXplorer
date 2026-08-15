@@ -327,5 +327,6 @@ def decon3d_op(
     return _decon3d
 
 
-add_operator("decon", decon_op(), requires=("petakit",))
-add_operator("decon3d", decon3d_op(), consumes=frozenset({"z"}), requires=("petakit",))
+add_operator("decon", decon_op(), requires=("petakit",), extra="decon")
+add_operator("decon3d", decon3d_op(), consumes=frozenset({"z"}), requires=("petakit",),
+             extra="decon")

@@ -243,4 +243,4 @@ _ACTIVE_OP = plane_op(_correct_with_active)
 _ACTIVE_OP.corrects_illumination = True
 # The acquisition path is unused: a gain field is measured, never derived from metadata.
 _ACTIVE_OP.for_channel = lambda path, channel: flatfield_op(_profile_for(str(channel)))
-add_operator(LAYER_KEY, _ACTIVE_OP, requires=("tilefusion",))
+add_operator(LAYER_KEY, _ACTIVE_OP, requires=("tilefusion",), extra="stitch")

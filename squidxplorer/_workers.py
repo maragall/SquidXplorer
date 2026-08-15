@@ -10,10 +10,11 @@ import numpy as np
 from qtpy.QtCore import QThread, Signal
 
 from squidxplorer import _run_scope
+from squidxplorer._dispatch import run_operator_once
 from squidxplorer._engine import _default_workers
 from squidxplorer._logpane import capture_stdout_to_log, get_logger
 from squidxplorer._measure import (
-    FAILED as _MEASURE_FAILED, STOPPED as _MEASURE_STOPPED, measure_run, verdict,
+    FAILED as _MEASURE_FAILED, STOPPED as _MEASURE_STOPPED, measure_run,
 )
 from squidxplorer._montage import _area_downsample
 from squidxplorer._napari_view import full_res_level
@@ -185,46 +186,21 @@ class _OperatorWorker(QThread):
         # say 0 of N before any work, so the bar is determinate from its first frame
         self.runProgress.emit(self._progress.report())
         try:
-            operator = self._operator
-            # a region operator runs one well at a time: peak memory is workers x one fused mosaic
-            workers = 1 if self._region_op else _VIEWER_WORKERS
+            # the ONE save-vs-preview dispatch; this worker only adds Qt signals around it
+            result = run_operator_once(
+                self._reader, operator=self._operator, save=self._save, owed=self._total,
+                out_dir=self._out_dir, regions=self._regions, n_fovs=self._n_fovs,
+                # a region operator runs one well at a time: peak memory is workers x one fused mosaic
+                workers=1 if self._region_op else _VIEWER_WORKERS,
+                parameters=self._operator_kwargs, tiff=False,
+                on_well=self._on_well, on_error=self._on_error, stop=self._stop.is_set)
+            if result.stopped:
+                _run_metrics.finish(_MEASURE_STOPPED, "stopped by the window")
+                return  # window closing / re-opening; drop out cleanly (no final/written emit)
+            self.streamEnded.emit()
             if self._save:
-                from squidxplorer import write_plate  # persist + project in one bounded, streaming pass
-
-                write_plate(self._reader, self._out_dir, n_fovs=self._n_fovs, workers=workers,
-                            operator=operator, tiff=False, on_well=self._on_well,
-                            stop=self._stop.is_set, on_error=self._on_error, regions=self._regions,
-                            operator_kwargs=self._operator_kwargs or None)
-                if self._stop.is_set():
-                    _run_metrics.finish(_MEASURE_STOPPED, "stopped by the window")
-                    return  # window closing / re-opening; drop out cleanly (no final/written emit)
-                self.streamEnded.emit()
                 self.writtenReady.emit(str(Path(self._out_dir) / "plate.ome.zarr"))
-            else:
-                # PREVIEW: same math as the saved run, writes nothing to disk
-                from squidxplorer import run_plate
-
-                # operator_kwargs on the preview too: both branches must run the same arguments
-                stream = run_plate(self._reader, operator=operator, workers=workers,
-                                   n_fovs=self._n_fovs, on_error=self._on_error,
-                                   regions=self._regions,
-                                   operator_kwargs=self._operator_kwargs or None)
-                try:
-                    for region, fov, image in stream:
-                        if self._stop.is_set():
-                            _run_metrics.finish(_MEASURE_STOPPED, "stopped by the window")
-                            return
-                        self._on_well(region, fov, image)
-                finally:
-                    close = getattr(stream, "close", None)
-                    if callable(close):
-                        close()
-                if self._stop.is_set():
-                    _run_metrics.finish(_MEASURE_STOPPED, "stopped by the window")
-                    return
-                self.streamEnded.emit()
-            # stopped=False: the stop event already returned above, with its own sentence
-            _run_metrics.finish(*verdict(self.landed, self._total, self.skipped, False))
+            _run_metrics.finish(result.outcome, result.detail)
             self.finished_ok.emit()
         except Exception as e:
             # catch so the QThread ends via `failed`, not an unhandled thread exception

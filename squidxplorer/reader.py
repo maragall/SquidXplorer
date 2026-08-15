@@ -14,7 +14,7 @@ import re
 import threading
 import warnings
 from pathlib import Path
-from typing import Optional, Protocol, runtime_checkable
+from typing import Optional
 
 import numpy as np
 import tifffile
@@ -22,21 +22,7 @@ import tifffile
 from squidxplorer._acquisition import Acquisition, load_acquisition_metadata
 from squidxplorer._channels import excitation_nm, fallback_color, load_channel_yaml, resolve_channels
 from squidxplorer.contract import check_plate_contract
-
-
-@runtime_checkable
-class SquidAcquisitionReader(Protocol):
-    """Structural Protocol satisfied by every reader :func:`open_reader` can return."""
-
-    @property
-    def metadata(self) -> dict:  # pragma: no cover - protocol declaration
-        ...
-
-    def read(self, region, fov, channel, z_level, time_point=0):  # pragma: no cover - protocol declaration
-        ...
-
-    def plane_ref(self, region, fov, channel, z_level, time_point=0) -> tuple:  # pragma: no cover - protocol
-        ...
+from squidxplorer.contract.reader import SquidAcquisitionReader  # noqa: F401 (re-export)
 
 # region has no underscore; fov and z are ints; channel is the remainder (may contain _ and -).
 _STEM_RE = re.compile(r"^(?P<region>[^_]+)_(?P<fov>\d+)_(?P<z>\d+)_(?P<channel>.+)$")

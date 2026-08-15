@@ -368,15 +368,15 @@ class EngineExecutor:
 
     def do_list_operators(self, cmd: ListOperators) -> CommandResult:
         from squidxplorer import (is_region_operator, operator_available, operator_consumes,
-                              operator_params, operator_produces, operator_requires,
-                              runnable_operators)
+                              operator_extra, operator_params, operator_produces,
+                              operator_requires, runnable_operators)
 
         names = runnable_operators()
 
-        def _row(name, kind, consumes, produces, params, requires, available):
+        def _row(name, kind, consumes, produces, params, requires, extra, available):
             ok, why = available
             return {"name": name, "kind": kind, "consumes": consumes, "produces": produces,
-                    "params": params, "requires": list(requires),
+                    "params": params, "requires": list(requires), "extra": extra,
                     "available": ok, "unavailable_reason": why}
 
         def _kind(name):
@@ -386,7 +386,7 @@ class EngineExecutor:
 
         rows = [_row(n, _kind(n), sorted(operator_consumes(n)), operator_produces(n),
                      {p.name: p.default for p in operator_params(n)},
-                     operator_requires(n), operator_available(n))
+                     operator_requires(n), operator_extra(n), operator_available(n))
                 for n in names]
         blocked = [r["name"] for r in rows if not r["available"]]
         detail = f" ({len(blocked)} unavailable: {', '.join(blocked)})" if blocked else ""
@@ -423,8 +423,9 @@ class EngineExecutor:
 
         ``data["outcome"]`` carries the verdict: ``"ok"``, ``"partial"`` or ``"stopped"``.
         """
-        from squidxplorer import run_plate, runnable_operators, write_plate
-        from squidxplorer._measure import measure_run, verdict
+        from squidxplorer import runnable_operators
+        from squidxplorer._dispatch import run_operator_once
+        from squidxplorer._measure import measure_run
 
         meta = self._meta()
         if meta is None:
@@ -467,54 +468,34 @@ class EngineExecutor:
 
             out_dir = Path(cmd.output_folder).expanduser() / f"{Path(self._path).name}.hcs"
 
-        skipped: list[str] = []
-
         def on_error(region, fov, exc):
-            skipped.append(str(region))
             logger.warning("SKIP well %s (fov %s): %s: %s", region, fov, type(exc).__name__, exc)
 
-        stopped = False
         with measure_run(cmd.operator, target or "no target", n_targets=n_targets) as run:
             run.note(surface=self.surface, save=cmd.save, acquisition=self._path)
+            # the ONE save-vs-preview dispatch; this executor only words the result
+            result = run_operator_once(
+                self.reader, operator=cmd.operator, save=cmd.save, owed=n_targets,
+                out_dir=out_dir, regions=regions, n_fovs=cmd.n_fovs, workers=cmd.workers,
+                parameters=cmd.parameters, tiff=cmd.tiff,
+                on_well=self.on_well, on_error=on_error, stop=self.stop)
+            landed = result.landed
             if cmd.save:
-                manifest = write_plate(self.reader, out_dir, operator=cmd.operator,
-                                       n_fovs=cmd.n_fovs, workers=cmd.workers, tiff=cmd.tiff,
-                                       on_error=on_error, regions=regions,
-                                       operator_kwargs=cmd.parameters or None,
-                                       on_well=self.on_well, stop=self.stop)
-                landed = int(manifest.get("n_fields_written") or 0)
-                # Read off `stopped`, not `complete`: a skipped-well run is PARTIAL, not CANCELLED.
-                stopped = bool(manifest.get("stopped"))
                 data = {"manifest": {k: (str(v) if hasattr(v, "__fspath__") else v)
-                                     for k, v in manifest.items()}}
+                                     for k, v in result.manifest.items()}}
             else:
-                # `operator_kwargs` on the preview too, exactly as the save branch passes them.
-                stream = run_plate(self.reader, operator=cmd.operator, workers=cmd.workers,
-                                   n_fovs=cmd.n_fovs, on_error=on_error, regions=regions,
-                                   operator_kwargs=cmd.parameters or None)
-                landed = 0
-                for _region, _fov, _image in stream:
-                    if self.stop is not None and self.stop():
-                        stopped = True   # same cancel contract as the save path, one loop up
-                        close = getattr(stream, "close", None)
-                        if callable(close):
-                            close()      # shut the engine's pool down NOW, not at GC
-                        break
-                    landed += 1          # PREVIEW headless: computed, counted, nothing retained
-                    if self.on_well is not None:
-                        self.on_well(_region, _fov, _image)
-                data = {"n_fields": landed}
-            # `landed` counts FIELDS; `n_targets` counts WELLS -- never put one over the other.
-            outcome, detail = verdict(landed, n_targets, len(set(skipped)), stopped)
-            if stopped:
-                owed = int((data.get("manifest") or {}).get("n_fields") or 0)
+                data = {"n_fields": landed}   # PREVIEW headless: computed, counted, nothing retained
+            outcome, detail = result.outcome, result.detail
+            if result.stopped:
+                # `landed` counts FIELDS; `n_targets` counts WELLS -- never put one over the other.
+                owed = int((result.manifest or {}).get("n_fields") or 0)
                 got = f"{landed} of {owed} field(s)" if owed else f"{landed} field(s)"
                 detail = f"stopped after {got} across {n_targets} target well(s)"
             run.finish(outcome, detail)
             metrics = run
         data["n_landed"] = landed
         self.last_metrics = metrics.metrics
-        data["skipped"] = sorted(set(skipped))
+        data["skipped"] = sorted(result.skipped_regions)
         data["metrics"] = metrics.metrics.as_dict() if metrics.metrics else None
         data["regions"] = regions
         data["target"] = target
