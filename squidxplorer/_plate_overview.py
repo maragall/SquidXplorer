@@ -405,8 +405,10 @@ class _RawLoupeSource(_LoupeSource):
         self.n_levels = 1
         self.pixel_size_um = meta.get("pixel_size_um")
         self._channels = [c["name"] for c in meta["channels"]]
+        from squidxplorer._contrast import opening_z
+
         zs = meta["z_levels"]
-        self._z = zs[len(zs) // 2]
+        self._z = zs[opening_z(len(zs))]   # the z the app SHOWS (rendering contract)
         self._lock = threading.RLock()
         self._cache_key = None
         self._cache = None

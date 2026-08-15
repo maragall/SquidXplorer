@@ -640,7 +640,9 @@ def _full_res_plane(data, z_index):
     # a (z, y, x) stack is indexed at the z on screen; more leading axes is refused below
     if ndim == 3:
         n_z = int(data.shape[0])
-        z = n_z // 2 if z_index is None else int(z_index)
+        from squidxplorer._contrast import opening_z
+
+        z = opening_z(n_z) if z_index is None else int(z_index)
         data = data[min(max(z, 0), n_z - 1)]
 
     plane = np.asarray(data)

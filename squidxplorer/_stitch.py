@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Callable, Iterator, Optional, Sequence
 import numpy as np
 
 from squidxplorer.projection import cast_like
+from squidxplorer._contrast import opening_z
 from squidxplorer._engine import (
     _NOT_A_WELL_FAULT,
     MissingOperatorDependency,
@@ -147,7 +148,7 @@ def estimate_region_flatfield(
     if channels is None:
         channels = list(range(len(all_channels)))
     if z_level is None:
-        z_level = int(meta["n_z"]) // 2
+        z_level = opening_z(int(meta["n_z"]))   # the z the app SHOWS (rendering contract)
 
     fovs = list(fovs)
     n = min(int(max_tiles), len(fovs))
@@ -487,7 +488,7 @@ def stitch_region(
     reg_c_global = _resolve_registration_channel(meta, registration_channel)
 
     if registration_z is None:
-        registration_z = int(meta["n_z"]) // 2
+        registration_z = opening_z(int(meta["n_z"]))   # match the plane on screen
     registration_z = int(registration_z)
     if not 0 <= registration_z < int(meta["n_z"]):
         raise ValueError(
@@ -819,7 +820,7 @@ def _stitch_plate(
         try:
             from squidxplorer._flatfield import FlatfieldProfile, estimate_profile
 
-            z = int(meta["n_z"]) // 2
+            z = opening_z(int(meta["n_z"]))
             names = [c["name"] for c in meta["channels"]]
             path = _flatfield_npy_path(reader)
             selected = _selected_profiles(names)

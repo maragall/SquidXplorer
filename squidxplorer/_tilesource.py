@@ -266,8 +266,9 @@ def _paste_field(dst: np.ndarray, dst_bbox_um: tuple, scale_um_per_px: float,
     return True
 
 
-def _read_ome(group_dir: Path) -> dict:
-    return json.loads((group_dir / "zarr.json").read_text()).get("attributes", {}).get("ome", {})
+# THE one store walk (contract.store): v0.4/v0.5-normalising attrs and plate-dir resolution.
+from squidxplorer.contract.store import ome_attrs as _read_ome
+from squidxplorer.contract.store import resolve_plate_dir as _resolve_plate_dir
 
 
 class ZarrPyramidSource:
@@ -277,7 +278,7 @@ class ZarrPyramidSource:
                  min_yx: int = _PYRAMID_MIN_YX, max_levels: int = _PYRAMID_MAX_LEVELS) -> None:
         self.plate_dir = _resolve_plate_dir(plate_path)
         self._stores: dict = {}
-        layout = _read_plate_layout(self.plate_dir)
+        layout = plate_layout_from_store(self.plate_dir)
         self.channels: list[str] = layout["channels"]
         self._field_dirs: dict = layout["field_dirs"]
         meta = {
@@ -327,16 +328,7 @@ class ZarrPyramidSource:
         return np.dtype(self._store(first, 0).dtype.numpy_dtype)
 
 
-def _resolve_plate_dir(plate_path) -> Path:
-    p = Path(plate_path)
-    if (p / "zarr.json").exists() and "plate" in _read_ome(p):
-        return p
-    if (p / "plate.ome.zarr").is_dir():
-        return p / "plate.ome.zarr"
-    raise ValueError(f"{plate_path!s} is not an OME-NGFF HCS plate (no plate group metadata).")
-
-
-def _read_plate_layout(plate_dir: Path) -> dict:
+def plate_layout_from_store(plate_dir: Path) -> dict:
     """Walk the plate's NGFF metadata into ``{centres_um, pixel_size_um, frame_shape, ...}``."""
     plate = _read_ome(plate_dir).get("plate")
     if not plate:

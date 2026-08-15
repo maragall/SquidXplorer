@@ -6,7 +6,6 @@ frames at their stage-position offsets.
 
 from __future__ import annotations
 
-import json
 import threading
 from collections import OrderedDict
 from pathlib import Path
@@ -21,19 +20,8 @@ from squidxplorer._logpane import get_logger
 _log = get_logger("mosaic")
 
 
-def level_paths(group: Path) -> list[Path]:
-    """Every resolution level of an OME-NGFF image group, highest resolution first."""
-    group = Path(group)
-    doc = json.loads((group / "zarr.json").read_text())
-    attrs = doc.get("attributes", {})
-    ome = attrs.get("ome", attrs)
-    multiscales = ome.get("multiscales") or []
-    if not multiscales:
-        raise ValueError(f"{group}: no 'multiscales' metadata; not an OME-NGFF image group.")
-    datasets = multiscales[0].get("datasets") or []
-    if not datasets:
-        raise ValueError(f"{group}: multiscales carries no 'datasets' (no resolution levels).")
-    return [group / str(d["path"]) for d in datasets]
+# THE one store walk (contract.store); the name stays because callers import it from here.
+from squidxplorer.contract.store import level_paths  # noqa: F401
 
 
 def open_pyramid(group, *, time_point: int = 0, c: int = 0, z_level: int = 0) -> list:

@@ -963,17 +963,10 @@ def _is_zarr_group(path: Path) -> bool:
 
 
 def _group_attrs(path: Path) -> dict:
-    """The OME metadata payload of a zarr group, normalising the v0.4 / v0.5 difference."""
-    path = Path(path)
-    v2 = path / _ZARR_V2_ATTRS
-    if v2.exists():
-        return json.loads(v2.read_text() or "{}")
-    v3 = path / _ZARR_V3_META
-    if v3.exists():
-        attrs = json.loads(v3.read_text() or "{}").get("attributes") or {}
-        ome = attrs.get("ome")
-        return ome if isinstance(ome, dict) else attrs
-    return {}
+    """The OME metadata payload of a zarr group — ``contract.store.ome_attrs``, THE one walk."""
+    from squidxplorer.contract.store import ome_attrs
+
+    return ome_attrs(path)
 
 
 def _open_zarr_array(path: Path):
