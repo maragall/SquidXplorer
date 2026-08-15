@@ -1300,3 +1300,62 @@ def test_the_affine_fallback_refuses_to_guess_from_too_few_pairs():
     solved = np.zeros((4, 2), dtype=np.float64)
     placed = _place_unconstrained_tiles(solved, edges, metrics, positions, (1.0, 1.0))
     assert np.allclose(placed, 0.0)
+
+
+# ================================================================================ the one kwargs
+# contract on the region arm (2026-08-15): declared params bind, `accepts` passes through, and
+# anything else is a NAMED refusal — the same invariant Operator.with_params always held on the
+# plane arm.
+
+
+def test_the_region_arm_refuses_an_unknown_parameter_BY_NAME():
+    """`**operator_kwargs` used to splat past Operator.bind, so a typo ran at the defaults."""
+    from squidxplorer import run_plate
+
+    stream = run_plate(None, operator="stitch", operator_kwargs={"bogus": 1})
+    with pytest.raises(ValueError, match="has no parameter 'bogus'"):
+        next(iter(stream))
+
+
+def test_a_region_operator_refuses_an_n_fovs_crop_and_names_the_mapping():
+    """`n_fovs` used to be silently DISCARDED on the region arm (`n_fovs=None` hardcoded)."""
+    from squidxplorer import run_plate
+
+    with pytest.raises(ValueError, match=r"regions=\{region: \[fov, \.\.\.\]\}"):
+        run_plate(None, operator="stitch", n_fovs=2)
+
+
+def test_write_plate_refuses_a_typoed_stitch_knob_BEFORE_any_directory_exists(tmp_path):
+    """The region arm used to skip pre-flight validation, so the refusal came after the plate
+    skeleton and the incomplete marker were already on disk."""
+    from squidxplorer import write_plate
+
+    class _Reader:
+        metadata = {"regions": [], "fovs_per_region": {}, "channels": [], "n_z": 1}
+
+    out = tmp_path / "out"
+    with pytest.raises(ValueError, match="has no parameter 'bogus'"):
+        write_plate(_Reader(), out, operator="stitch", operator_kwargs={"bogus": 1})
+    assert not out.exists(), "the refusal came after the writer had already made directories"
+
+
+def test_coordinate_refuses_the_registration_family_by_name():
+    """`coordinate` IS registration-off; a registration knob is a contradiction, not a no-op.
+    It used to be swallowed: `kwargs["register"] = False` silently overrode a caller's True."""
+    from squidxplorer._engine import split_operator_kwargs
+
+    for knob in ("register", "registration_channel", "registration_t"):
+        with pytest.raises(ValueError, match=f"has no parameter '{knob}'"):
+            split_operator_kwargs("coordinate", {knob: 1})
+
+
+def test_the_writer_asks_the_RECORD_for_output_depth_and_kind():
+    """`write_plate` used to reconstruct stitch's declaration from the literal string
+    "z_operator" and a hardcoded "mip" — a third-party region operator got a mip-shaped
+    pyramid. The record answers now, off `inner_param` and the declared default."""
+    from squidxplorer._engine import operator_output
+
+    assert operator_output("mip") == (True, "intensity")
+    assert operator_output("stitch") == (True, "intensity")          # declared default: mip
+    assert operator_output("stitch", {"z_operator": "keepz"}) == (False, "intensity")
+    assert operator_output("coordinate") == (True, "intensity")

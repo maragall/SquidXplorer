@@ -64,6 +64,16 @@ class Operator:
     requires: tuple[str, ...] = ()
     #: The pyproject optional-dependency group that installs those modules; ``None`` means core.
     extra: Optional[str] = None
+    #: Keyword arguments the CALLABLE takes beyond the declared params — the region loop passes
+    #: them through verbatim, and anything outside declared ∪ accepts is refused BY NAME. This is
+    #: the explicit passthrough declaration: it exists so a knob that cannot be a Param (a
+    #: measured-from-the-data None default, an injected object) is still part of the record
+    #: instead of an unvalidated splat.
+    accepts: tuple[str, ...] = ()
+    #: The declared param naming an INNER operator whose own declarations shape this operator's
+    #: OUTPUT (stitch's ``z_operator``). :func:`operator_output` reads it; the writer asks that
+    #: query instead of reconstructing the declaration from a parameter name.
+    inner_param: Optional[str] = None
 
     def available(self) -> tuple[bool, str]:
         """``(ok, reason_if_not)`` — are this operator's declared packages importable right now?"""
@@ -134,14 +144,24 @@ def add_operator(name: str, operator: OperatorFn, *, consumes=None, produces=Non
 
 
 def add_region_operator(name: str, operator, *, produces=None, params: Sequence[Param] = (),
-                        requires=(), extra: Optional[str] = None) -> None:
-    """Add a named REGION operator — one that eats a whole well's FOVs — to the same table."""
+                        requires=(), extra: Optional[str] = None,
+                        accepts: Sequence[str] = (),
+                        inner_param: Optional[str] = None) -> None:
+    """Add a named REGION operator — one that eats a whole well's FOVs — to the same table.
+
+    ``accepts`` names the extra keyword arguments the callable takes beyond ``params`` (the
+    region loop passes them through; anything else is refused by name). ``inner_param`` names
+    the declared param holding an INNER operator whose declarations shape the output —
+    :func:`operator_output` resolves it, so the writer never reconstructs it.
+    """
     _declare(name, operator, consumes=REGION_OP, produces=produces, params=params,
-             requires=requires, extra=extra, region=True)
+             requires=requires, extra=extra, region=True, accepts=accepts,
+             inner_param=inner_param)
 
 
 def _declare(name: str, fn, *, consumes, produces, params, requires, extra,
-             region: bool) -> None:
+             region: bool, accepts: Sequence[str] = (),
+             inner_param: Optional[str] = None) -> None:
     """Validate ONE operator and file it in :data:`_OPERATORS`. The only writer of that table."""
     kind = "region operator" if region else "operator"
     if not name:
@@ -175,6 +195,22 @@ def _declare(name: str, fn, *, consumes, produces, params, requires, extra,
         raise ValueError(
             f"{kind} {name!r}: extra must be None (core) or the non-empty name of a "
             f"[project.optional-dependencies] group; got {extra!r}")
+    accepted = tuple(accepts)
+    for a in accepted:
+        if not isinstance(a, str) or not a:
+            raise ValueError(
+                f"{kind} {name!r}: accepts must name keyword arguments as non-empty strings; "
+                f"got {a!r}")
+    overlap = sorted(set(accepted) & set(names))
+    if overlap:
+        raise ValueError(
+            f"{kind} {name!r} lists {overlap[0]!r} in both params and accepts; a knob is "
+            "either DECLARED (a Param, described and probed) or passed through, never both.")
+    if inner_param is not None and inner_param not in names:
+        raise ValueError(
+            f"{kind} {name!r}: inner_param {inner_param!r} must name one of its own declared "
+            f"params ({sorted(names)}); the output query resolves the inner operator off the "
+            "declared default, so an undeclared name would leave it nothing to read.")
 
     factory: Optional[Callable[..., OperatorFn]] = None
     if declared:
@@ -196,6 +232,7 @@ def _declare(name: str, fn, *, consumes, produces, params, requires, extra,
     _OPERATORS[name] = Operator(
         name, fn, axes, normalise_produces(produces),
         declared, factory, normalise_requires(requires), extra,
+        accepted, inner_param,
     )
 
 
@@ -256,6 +293,49 @@ def operator_params(name: str) -> tuple[Param, ...]:
     return _resolve_operator(name).params
 
 
+def operator_accepts(name: str) -> tuple[str, ...]:
+    """Extra keyword arguments the operator's callable takes beyond its declared params."""
+    return _resolve_operator(name).accepts
+
+
+def split_operator_kwargs(name: str, operator_kwargs: Optional[dict] = None
+                          ) -> tuple[dict, dict]:
+    """``(declared, passthrough)`` for one run's kwargs — refusing anything else BY NAME.
+
+    THE one validator for both engine arms: declared keys bind through the factory, keys the
+    record ``accepts`` pass through to the callable, and an unknown key raises here — before a
+    directory is made, on the region arm exactly as :meth:`Operator.with_params` always did on
+    the plane arm.
+    """
+    op = _resolve_operator(name)
+    kwargs = dict(operator_kwargs or {})
+    declared_names = {p.name for p in op.params}
+    declared = {k: kwargs.pop(k) for k in list(kwargs) if k in declared_names}
+    unknown = sorted(set(kwargs) - set(op.accepts))
+    if unknown:
+        raise ValueError(
+            f"operator {name!r} has no parameter {unknown[0]!r}; it declares "
+            f"{sorted(declared_names)}"
+            + (f" and accepts {sorted(op.accepts)} as keyword arguments." if op.accepts
+               else "."))
+    return declared, kwargs
+
+
+def operator_output(name: str, operator_kwargs: Optional[dict] = None) -> tuple[bool, str]:
+    """``(collapses_z, produces)`` for what a run of *name* with *operator_kwargs* EMITS.
+
+    An operator with ``inner_param`` defers to the inner operator that param names — resolved
+    from the run's kwargs, defaulting to the DECLARED default, so the writer's depth and
+    pyramid reducer come off the record instead of a writer-side reconstruction.
+    """
+    op = _resolve_operator(name)
+    if op.inner_param is not None:
+        default = next(p.default for p in op.params if p.name == op.inner_param)
+        inner = _resolve_operator((operator_kwargs or {}).get(op.inner_param, default))
+        return "z" in inner.consumes, inner.produces
+    return "z" in op.consumes, op.produces
+
+
 def bind_operator(name: str, operator_kwargs: Optional[dict] = None) -> OperatorFn:
     """Resolve *name* and apply *operator_kwargs*, raising on an unknown name or parameter."""
     return _resolve_operator(name).bind(operator_kwargs)
@@ -282,12 +362,26 @@ def _resolve_operator(name) -> Operator:
     )
 
 
+class _LoopDefault:
+    """Sentinel type for :data:`N_FOVS_LOOP_DEFAULT` — repr'd for signatures and refusals."""
+
+    def __repr__(self) -> str:  # pragma: no cover - cosmetic
+        return "N_FOVS_LOOP_DEFAULT"
+
+
+#: ``run_plate``'s ``n_fovs`` default: "the loop's own default" — 1 for the per-FOV loop (its
+#: historical preview default), every FOV for the region loop. A sentinel, because the two
+#: loops' honest defaults differ and a shared literal was silently DISCARDED on the region arm
+#: (``run_plate(operator="stitch", n_fovs=1)`` ran every FOV with no refusal).
+N_FOVS_LOOP_DEFAULT = _LoopDefault()
+
+
 def run_plate(
     reader: "SquidReader",
     *,
     operator: str = "mip",
     regions=None,
-    n_fovs: Optional[int] = 1,
+    n_fovs=N_FOVS_LOOP_DEFAULT,
     workers: int | None = None,
     on_error=None,
     operator_kwargs: Optional[dict] = None,
@@ -296,15 +390,25 @@ def run_plate(
 
     Dispatches off the operator's ``consumes``: ``{"fov"}`` runs the region loop (one fused
     result per well, every FOV, one well in flight unless *workers* says otherwise), anything
-    else the per-FOV loop.
+    else the per-FOV loop. ``n_fovs`` defaults to the LOOP's own default (1 per-FOV; every FOV
+    for a region operator); an explicit int is the per-FOV loop's knob and is REFUSED on the
+    region arm — a FOV subset of a region is spelled ``regions={region: [fov, ...]}``.
     """
     if is_region_operator(operator):
         from squidxplorer._stitch import _stitch_plate
 
+        if n_fovs is not N_FOVS_LOOP_DEFAULT and n_fovs is not None:
+            raise ValueError(
+                f"a region operator fuses whole wells: n_fovs={n_fovs!r} would silently crop "
+                f"each well to its first {n_fovs} FOV(s) in row-major order, which is not a "
+                "thing anyone draws. Select FOVs with regions={region: [fov, ...]} — the one "
+                "spelling of a FOV subset — or pass n_fovs=None for every FOV.")
         return _stitch_plate(reader, n_fovs=None, workers=1 if workers is None else workers,
                              operator=operator, on_error=on_error, regions=regions,
                              **(operator_kwargs or {}))
-    return _project_plate(reader, n_fovs=n_fovs, workers=workers, operator=operator,
+    return _project_plate(reader,
+                          n_fovs=1 if n_fovs is N_FOVS_LOOP_DEFAULT else n_fovs,
+                          workers=workers, operator=operator,
                           on_error=on_error, regions=regions, operator_kwargs=operator_kwargs)
 
 

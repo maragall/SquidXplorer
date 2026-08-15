@@ -18,6 +18,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Optional
 
+from squidxplorer._engine import N_FOVS_LOOP_DEFAULT
+
 
 @dataclass(frozen=True)
 class DispatchResult:
@@ -37,7 +39,8 @@ class DispatchResult:
 
 
 def run_operator_once(reader, *, operator: str, save: bool, owed: int, out_dir=None,
-                      regions=None, n_fovs=1, workers=None, parameters: Optional[dict] = None,
+                      regions=None, n_fovs=N_FOVS_LOOP_DEFAULT, workers=None,
+                      parameters: Optional[dict] = None,
                       tiff: bool = False, on_well: Optional[Callable] = None,
                       on_error: Optional[Callable] = None,
                       stop: Optional[Callable[[], bool]] = None) -> DispatchResult:

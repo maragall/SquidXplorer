@@ -81,16 +81,49 @@ def test_n_fovs_does_not_apply_to_an_explicit_field_list():
     assert scope_wells(meta, 1, ["A1"]) == {"A1": [0]}
 
 
-def test_BOTH_engines_call_the_one_resolver():
-    """A private copy of the resolution in either engine goes red here."""
+def test_ALL_THREE_consumers_call_the_one_resolver():
+    """A private copy of the resolution in either engine OR THE WRITER goes red here.
+
+    The writer is in this list because it was the one left out: ``write_from_stream`` re-derived
+    its scope with ``select_fovs`` and hand-rolled the regions subset, so a mapped (ROI) run owed
+    every FOV of the region and marked its own store incomplete.
+    """
     import inspect
 
-    from squidxplorer import _engine, _stitch
+    from squidxplorer import _engine, _output, _stitch
 
-    for module in (_engine, _stitch):
+    for module, spelling in ((_engine, "scope_wells(meta, n_fovs, regions)"),
+                             (_stitch, "scope_wells(meta, n_fovs, regions)"),
+                             (_output, "scope_wells(metadata, n_fovs, regions)")):
         src = inspect.getsource(module)
-        assert "scope_wells(meta, n_fovs, regions)" in src, (
+        assert spelling in src, (
             f"{module.__name__} no longer resolves its scope through the shared resolver")
+
+
+# ------------------------------------------------- link 3: the writer owes what the stream yields
+
+
+def test_an_ROI_save_is_COMPLETE_when_every_mapped_field_lands(tmp_path):
+    """``write_from_stream`` with a ``{region: [fov, ...]}`` mapping owes exactly those fields.
+
+    It used to scope with ``select_fovs`` + a hand-rolled subset that read only the mapping's
+    KEYS, so an ROI save owed every FOV of the region, kept its ``.squidxplorer-incomplete``
+    marker, and advertised field dirs that were never written.
+    """
+    import numpy as np
+
+    from squidxplorer._output import is_incomplete, write_from_stream
+
+    meta = _meta(2)
+    meta.update({"channels": [{"name": "405", "display_color": "#8000FF"}], "dtype": "uint16"})
+    img = np.zeros((1, 1, 1, 64, 64), dtype=np.uint16)
+    manifest = write_from_stream(meta, iter([("A1", 1, img), ("A1", 2, img)]), tmp_path,
+                                 n_fovs=None, regions={"A1": [1, 2]}, tiff=False)
+
+    assert manifest["n_fields"] == 2, "the writer owed fields the mapped stream will never yield"
+    assert manifest["n_fields_written"] == 2
+    assert manifest["complete"] is True
+    assert not is_incomplete(tmp_path / "plate.ome.zarr")
 
 
 # ------------------------------------------------------------- link 3: the whole chain, measured
