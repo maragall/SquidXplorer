@@ -26,6 +26,8 @@ GUI_MODULES = frozenset({
                           # thread. The Qt-free half (geometry, stride, budget policy) is `_bricks`.
     "_gallery_window",   # Gallery View's window; its producer `_gallery` is Qt-free on purpose
     "_ingest",           # the acquisition-open pipeline, cut out of `_viewer` (2026-08-13)
+    "_minerva_panel",    # the Minerva tab UI + its runs, cut out of `_viewer` (2026-08-14)
+    "_worker_lifecycle", # the worker launch/stop seam: wires Signals, starts QThreads (2026-08-14)
     "_layer_tree",       # the grouped layer tree (a QTreeView over napari's item model)
     "_logpanel",         # the log PANEL (the Qt widget). `_logpane`, no 'l', is the Qt-free bus.
     "_napari_pane",

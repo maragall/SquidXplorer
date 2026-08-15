@@ -37,6 +37,7 @@ from squidxplorer._time_point import TimePointBar
 from squidxplorer._address import Address, Extent
 from squidxplorer._logpane import ViewLog, get_logger
 from squidxplorer._fontscale import rescale_fonts, window_screen
+from squidxplorer._worker_lifecycle import launch as _launch_worker
 
 log = get_logger("regionviewer")
 
@@ -54,11 +55,13 @@ except Exception:                                        # pragma: no cover
     except ImportError:
         _sip = None
 
-_LUT_CLIPBOARD: "dict[str, dict]" = {}
+# THE LUT clipboard lives in `_lut_clipboard` now; this name is the SAME dict object, kept
+# because tests (and history) reach it as `_region_viewer._LUT_CLIPBOARD`.
+from squidxplorer._lut_clipboard import CLIPBOARD as _LUT_CLIPBOARD  # noqa: E402
+from squidxplorer import _lut_clipboard, _mosaic_playback, _roi_tools, _volume_view
 
-_ROI_COLORS: "tuple[str, ...]" = (
-    "#58a6ff", "#f778ba", "#3fb950", "#f0883e", "#a371f7", "#e3b341", "#39c5cf", "#ff7b72",
-)
+# The ROI edge-colour cycle is defined once, in `_roi_tools`; historical alias.
+from squidxplorer._roi_tools import ROI_COLORS as _ROI_COLORS  # noqa: E402,F401
 
 
 @dataclass(frozen=True)
@@ -242,26 +245,8 @@ _REGION_LOAD_DEBOUNCE_MS = 140
 
 _RAW_OP = "raw"
 
-from squidxplorer._napari_view import (                            # noqa: E402  (kept beside its use)
-    _DEFAULT_MAX_3D_TEXTURE,
-    full_res_level,
-)
-
-
-def _brick_budget_bytes() -> int:
-    """How much a bricked 3D view may hold resident."""
-    try:
-        from squidxplorer._budget import cache_budget
-
-        return int(cache_budget())
-    except Exception:                                    # noqa: BLE001 - a floor beats no render
-        return 512 << 20
-
-
-def _started(vol):
-    """``open()`` the volume and hand it back, so ``_replace_native3d`` still takes one callable."""
-    vol.open()
-    return vol
+# `full_res_level` / `_DEFAULT_MAX_3D_TEXTURE` moved out with their only users: the 3D cluster
+# (`_volume_view`) and the ROI cluster (`_roi_tools`) import them at their own use sites.
 
 
 class RegionViewer(QMainWindow):
@@ -916,16 +901,16 @@ class RegionViewer(QMainWindow):
         w = _VideoWorker(self._reader, self._meta, region, path, axis=axis, fps=DEFAULT_FPS,
                          channels=channels, windows=windows, rgb_by_channel=rgb,
                          z_level=self._z_slider_index(), time_point=self.time_point, parent=self)
-        w.progress.connect(lambda d, total: self._show_progress(
-            int(100 * d / max(1, total)), f"movie: frame {d} of {total}"))
-        w.done.connect(self._on_movie_done)
-        w.problem.connect(self._on_movie_failed)
-        w.cancelled.connect(self._on_movie_cancelled)
-        w.finished.connect(lambda: self._forget_video_worker(w))
-        self._video_worker = w
         self._show_progress(0, f"movie: 0 of {n} frames")
         self._say(f"exporting {n} {axis}-axis frames of {region} to {path}…")
-        w.start()
+        _launch_worker(
+            self, w, slot="_video_worker",
+            on_done=self._on_movie_done,
+            on_problem=self._on_movie_failed,
+            on_progress=lambda d, total: self._show_progress(
+                int(100 * d / max(1, total)), f"movie: frame {d} of {total}"),
+            on_finished=lambda: self._forget_video_worker(w),
+            signals={"cancelled": self._on_movie_cancelled})
 
     def _z_slider_index(self) -> int:
         """Which z plane this window is showing, or 0 when it has no z slider."""
@@ -1218,18 +1203,20 @@ class RegionViewer(QMainWindow):
                     data = cropped[0]
                     self._say("detecting on the ROI only — the box you drew, not the whole well.")
         w = _SpotWorker(region, channel, data, None, None, SpotParams(), parent=self)
-        w.ready.connect(self._on_nuclei_ready)
-        w.problem.connect(lambda m, a=action, d=where: self.log.failed(a, str(m), address=d))
-        w.problem.connect(self._echo)
-        w.finished_count.connect(
-            lambda r, c, n, a=action, d=where, t0=began: (
-                self.log.done(f"{a}: {n} nuclei", time.monotonic() - t0, address=d),
-                self._echo(f"{n} nuclei detected on {c}."),
-            ))
-        self._spot_worker = w
         self.log.started(action, address=where)
         self._echo(f"detecting nuclei (Cellpose) on the {channel} MIP — first run downloads weights…")
-        w.start()
+        _launch_worker(
+            self, w, slot="_spot_worker",
+            # `problem` keeps its subscriber ORDER: the console's failed line, then the echo.
+            on_problem=[lambda m, a=action, d=where: self.log.failed(a, str(m), address=d),
+                        self._echo],
+            signals={
+                "ready": self._on_nuclei_ready,
+                "finished_count": lambda r, c, n, a=action, d=where, t0=began: (
+                    self.log.done(f"{a}: {n} nuclei", time.monotonic() - t0, address=d),
+                    self._echo(f"{n} nuclei detected on {c}."),
+                ),
+            })
 
     def _on_nuclei_ready(self, region, channel, labels, centroids, bbox_um, count):
         """Lay the label mask over the mosaic as a napari Labels layer, aligned to the raw channel."""
@@ -1303,12 +1290,11 @@ class RegionViewer(QMainWindow):
         from squidxplorer._viewer import _FocusWorker
 
         w = _FocusWorker(self._reader, self._meta, region, int(fov), chan, parent=self)
-        w.ready.connect(lambda z_i, note: self._on_reference_plane(int(z_i), note))
-        if hasattr(w, "problem"):
-            w.problem.connect(self._say)
-        self._focus_worker = w
         self._say("finding the sharpest z (Tenengrad autofocus)…")
-        w.start()
+        _launch_worker(
+            self, w, slot="_focus_worker",
+            on_problem=self._say,
+            signals={"ready": lambda z_i, note: self._on_reference_plane(int(z_i), note)})
 
     def _on_reference_plane(self, z_index: int, note: str) -> None:
         """The sharpest plane is known. MOVE THIS WINDOW'S z SLIDER to it, or say why not."""
@@ -1329,266 +1315,51 @@ class RegionViewer(QMainWindow):
         except Exception as exc:                         # noqa: BLE001 - named, never silent
             self._say(f"could not move the z-slider: {exc}")
 
+    # -- the ROI cluster lives in `_roi_tools` (clamp-at-draw, acquisition-pixel costing and the
+    # -- child windows move intact); thin delegates because tests and the ROI chips actuate these
+    # -- by name on the window. -------------------------------------------------------------------
     def _view_roi_2d(self) -> None:
-        """Open the SELECTED ROI as a child 2D window; with no ROI picked, just show the mosaic in 2D."""
-        self.set_render_mode("2d")
-        bbox, _region = self._selected_roi()
-        if bbox is None:
-            self._set_ndisplay(2)
-            return
-        self._open_roi_children()
+        _roi_tools.view_roi_2d(self)
 
     @staticmethod
     def _sync_roi_width(viewer, layer, screen_px: float = 3.0) -> None:
-        """Keep the ROI border a ~constant on-screen thickness as the camera zooms."""
-        try:
-            zoom = float(getattr(viewer.camera, "zoom", 1.0)) or 1.0
-            w = max(1e-6, float(screen_px) / zoom)
-            layer.edge_width = w
-            layer.current_edge_width = w
-        except Exception:                                # noqa: BLE001 - width is cosmetic
-            pass
+        _roi_tools.sync_roi_width(viewer, layer, screen_px)
 
     def _roi_shapes_layer(self, create: bool = False):
-        """This window's ROI Shapes layer (creating it, zoom-reactive, on first use if asked)."""
-        v = self._napari_viewer()
-        if v is None:
-            return None, None
-        layer = self._roi_layer
-        if layer is None or layer not in list(v.layers):
-            if not create:
-                return v, None
-            try:
-                layer = v.add_shapes(
-                    name="ROIs", face_color="transparent",
-                    properties={"name": np.array([], dtype=object)},
-                    text={"string": "{name}", "color": "white", "size": 9,
-                          "anchor": "upper_left"},
-                    edge_color="name", edge_color_cycle=list(_ROI_COLORS),
-                )
-                layer.current_properties = {"name": np.array(["R1"], dtype=object)}
-                layer.events.data.connect(
-                    lambda e=None, ly=layer: self._on_roi_data(ly))
-            except Exception:                            # noqa: BLE001 - fall back to a plain layer
-                layer = v.add_shapes(name="ROIs", edge_color="#58a6ff",
-                                     face_color="transparent")
-            self._roi_layer = layer
-            self._sync_roi_width(v, layer)
-            try:
-                v.camera.events.zoom.connect(
-                    lambda e=None, vv=v, ly=layer: self._sync_roi_width(vv, ly))
-            except Exception:                            # noqa: BLE001
-                pass
-        return v, layer
+        return _roi_tools.roi_shapes_layer(self, create)
 
     def _on_roi_data(self, layer) -> None:
-        """After a shape is added/removed: name the NEXT ROI R{n+1}, and SAY WHAT THE LAST ONE COSTS."""
-        try:
-            n = len(getattr(layer, "data", []) or [])
-            layer.current_properties = {"name": np.array([f"R{n + 1}"], dtype=object)}
-        except Exception:                                # noqa: BLE001 - labelling is cosmetic
-            pass
-        try:
-            self._clamp_last_roi(layer)
-        except Exception:                                # noqa: BLE001 - never break ROI drawing
-            pass
-        try:
-            self._say(self._roi_cost_line(layer))
-        except Exception:                                # noqa: BLE001 - the readout is advisory
-            pass
+        _roi_tools.on_roi_data(self, layer)
 
     def _live_texture_limit(self) -> int:
-        """The GPU's real GL_MAX_3D_TEXTURE_SIZE, or the documented Apple floor; never a literal here."""
-        try:
-            return int(self._pane._live_max_3d_texture())
-        except Exception:                                # noqa: BLE001
-            return int(_DEFAULT_MAX_3D_TEXTURE)
+        return _roi_tools.live_texture_limit(self)
 
     def _clamp_last_roi(self, layer) -> None:
-        """Hold the just-drawn ROI to what one GL texture can render, in place."""
-        from squidxplorer import _bricks
-
-        if getattr(self, "_clamping", False):
-            return
-        rects = list(getattr(layer, "data", []) or [])
-        px = float((self._meta or {}).get("pixel_size_um") or 0.0)
-        if not rects or px <= 0:
-            return
-        arr = np.asarray(rects[-1])
-        if arr.ndim != 2 or arr.shape[0] < 4:
-            return
-        ys, xs = arr[:, -2].astype(float), arr[:, -1].astype(float)
-        limit = self._live_texture_limit()
-        (nx0, ny0, nx1, ny1), clamped = _bricks.clamp_bbox_um(
-            (xs.min(), ys.min(), xs.max(), ys.max()), px, limit)
-        if not clamped:
-            return
-        new = np.array(arr, dtype=float)
-        new[:, -1] = np.where(xs > xs.min(), nx1, nx0)
-        new[:, -2] = np.where(ys > ys.min(), ny1, ny0)
-        rects[-1] = new
-        self._clamping = True
-        try:
-            layer.data = rects
-        finally:
-            self._clamping = False
-        span = limit * px
-        self._say(f"ROI held to the 3D ceiling: {limit} x {limit} px ({span:.0f} x {span:.0f} um) "
-                  f"at the acquisition's own {px:g} um/px — the largest volume this GPU renders "
-                  f"from one texture, and 3D reads those voxels from the reader, not from the "
-                  f"decimated mosaic you are drawing on.")
+        """Hold the just-drawn ROI to the live 3D ceiling. See `_roi_tools.clamp_last_roi`."""
+        _roi_tools.clamp_last_roi(self, layer)
 
     def _roi_cost_line(self, layer) -> str:
-        """"R3: 4096 x 3072 px (3080 x 2310 um) — 12 bricks on this GPU." Empty when unknowable."""
-        from squidxplorer import _bricks
-
-        rects = list(getattr(layer, "data", []) or [])
-        if not rects:
-            return ""
-        arr = np.asarray(rects[-1])
-        ys, xs = arr[:, -2], arr[:, -1]
-        px = float((self._meta or {}).get("pixel_size_um") or 0.0)
-        if px <= 0:
-            return ""
-        h_um, w_um = float(ys.max() - ys.min()), float(xs.max() - xs.min())
-        h, w = int(round(h_um / px)), int(round(w_um / px))
-        if h <= 0 or w <= 0:
-            return ""
-        limit = _DEFAULT_MAX_3D_TEXTURE
-        try:
-            limit = int(self._pane._live_max_3d_texture())
-        except Exception:                                # noqa: BLE001 - the Apple value is the floor
-            pass
-        nz = len(list((self._meta or {}).get("z_levels") or [0]))
-        single = _bricks.fits_single_texture(h, w, nz, limit)
-        edge = limit if single else _bricks.DEFAULT_BRICK_EDGE
-        n = len(_bricks.plan(h, w, limit=limit, edge=edge))
-        how = ("fits ONE texture" if single
-               else f"{n} bricks (over the {limit} px texture limit — bricked, not refused)")
-        return f"R{len(rects)}: {h} x {w} px ({h_um:.0f} x {w_um:.0f} um), {nz} z — 3D: {how}."
+        return _roi_tools.roi_cost_line(self, layer)
 
     def _new_roi(self) -> None:
-        """Start drawing an ROI rectangle inside the mosaic (deck: boxes inside the well view)."""
-        v, layer = self._roi_shapes_layer(create=True)
-        if v is None or layer is None:
-            self._say("ROI needs the napari viewer, which isn't available here.")
-            return
-        try:
-            v.layers.selection.active = layer
-            layer.mode = "add_rectangle"
-            self._say("Draw an ROI rectangle, then '→ window' to open it as a child window.")
-        except Exception as exc:                         # noqa: BLE001
-            self._say(f"could not start an ROI: {exc}")
+        _roi_tools.new_roi(self)
 
     def _select_rois(self) -> None:
-        """Enter select mode so an ROI can be clicked and deleted."""
-        v, layer = self._roi_shapes_layer(create=False)
-        if v is None or layer is None:
-            self._say("draw an ROI first with '▭ new'.")
-            return
-        try:
-            v.layers.selection.active = layer
-            layer.mode = "select"
-            self._say("Select mode: click an ROI, then press Delete/Backspace to remove it.")
-        except Exception as exc:                         # noqa: BLE001
-            self._say(f"could not enter select mode: {exc}")
+        _roi_tools.select_rois(self)
 
     def _clear_rois(self) -> None:
-        """Remove every ROI in this window."""
-        v, layer = self._roi_shapes_layer(create=False)
-        if v is None or layer is None or not list(getattr(layer, "data", []) or []):
-            self._say("no ROIs to clear.")
-            return
-        try:
-            layer.data = []
-            self._say("cleared all ROIs.")
-        except Exception as exc:                         # noqa: BLE001
-            self._say(f"could not clear ROIs: {exc}")
+        _roi_tools.clear_rois(self)
 
     def _region_for_roi(self, bbox) -> Optional[str]:
-        """The region the ROI box's centroid sits in (stage um), so an ROI child opens on that region."""
-        cur = self._cursor.region if self._cursor is not None else (
-            self._regions[0] if self._regions else None)
-        if bbox is None:
-            return cur
-        cx, cy = (bbox[0] + bbox[2]) / 2.0, (bbox[1] + bbox[3]) / 2.0
-        try:
-            from squidxplorer._mosaic_source import mosaic_bbox_um
-            for r in self._regions:
-                rb = mosaic_bbox_um(self._meta, r)
-                if rb is not None and rb[0] <= cx <= rb[2] and rb[1] <= cy <= rb[3]:
-                    return r
-        except Exception:                                # noqa: BLE001 - fall back to current region
-            pass
-        return cur
+        return _roi_tools.region_for_roi(self, bbox)
 
     def _open_roi_children(self) -> None:
-        """Open the SELECTED ROI(s) as child window(s), each scoped to the single region it sits in."""
-        v = self._napari_viewer()
-        layer = self._roi_layer
-        rects = list(getattr(layer, "data", []) or []) if layer is not None else []
-        if v is None or layer is None or layer not in list(v.layers) or not rects:
-            self._say("no ROI to open — draw one with '▭ new' first.")
-            return
-        if self._manager is None:
-            self._say(f"{len(rects)} ROI(s) drawn, but this window has no manager to open children.")
-            return
-        sel = sorted(int(i) for i in (getattr(layer, "selected_data", None) or set()))
-        idxs = sel if sel else [len(rects) - 1]
-        opened = 0
-        for i in idxs:
-            if i < 0 or i >= len(rects):
-                continue
-            bbox = None
-            try:
-                arr = np.asarray(rects[i])
-                ys, xs = arr[:, -2], arr[:, -1]
-                bbox = (float(xs.min()), float(ys.min()), float(xs.max()), float(ys.max()))
-            except Exception:                            # noqa: BLE001 - a shapeless ROI still opens
-                pass
-            region = self._region_for_roi(bbox)
-            if region is None:
-                continue
-            child = self._manager.open_child(
-                [region], roi_bbox=bbox, parent_id=self.window_id)
-            if child is not None:
-                opened += 1
-        self._say(f"opened {opened} ROI child window(s) on the selected ROI"
-                  + ("s" if opened != 1 else "") + ".")
+        _roi_tools.open_roi_children(self)
 
+    # -- the LUT gestures live in `_lut_clipboard` (one clipboard, one home); thin delegates
+    # -- because tests and the chips actuate these by name on the window. -------------------------
     def _per_channel_luts(self) -> "dict[str, dict]":
-        out: "dict[str, dict]" = {}
-        pane = self._pane
-        mosaic = getattr(pane, "mosaic", None) if pane is not None else None
-        if mosaic is None:
-            return out
-        for c in (self._meta or {}).get("channels", []):
-            name = c["name"]
-            layer = mosaic.find(_RAW_OP, name)
-            if layer is None:
-                continue
-            lut: dict = {}
-            try:
-                lut["clim"] = tuple(layer.contrast_limits)
-            except Exception:                            # noqa: BLE001
-                lut["clim"] = None
-            try:
-                cmap = layer.colormap
-                lut["cmap"] = getattr(cmap, "name", cmap)
-            except Exception:                            # noqa: BLE001
-                lut["cmap"] = None
-            try:
-                from squidxplorer._napari_view import colormap_hue_rgb
-                lut["rgb"] = colormap_hue_rgb(layer)
-            except Exception:                            # noqa: BLE001
-                lut["rgb"] = None
-            try:
-                on = mosaic.channel_visible(name)
-                lut["on"] = None if on is None else bool(on)
-            except Exception:                            # noqa: BLE001
-                lut["on"] = None
-            out[name] = lut
-        return out
+        return _lut_clipboard.per_channel_luts(self)
 
     def current_settings(self) -> "dict[str, Any]":
         """This window's global-default settings AS THEY ARE ON SCREEN right now."""
@@ -1600,24 +1371,7 @@ class RegionViewer(QMainWindow):
 
     def _apply_luts(self, luts: "Optional[dict]") -> Optional[int]:
         """Put per-channel contrast + colormap on this window's layers. ``None`` = no mosaic here."""
-        pane = self._pane
-        mosaic = getattr(pane, "mosaic", None) if pane is not None else None
-        if mosaic is None:
-            return None
-        applied = 0
-        for ch, lut in (luts or {}).items():
-            layer = mosaic.find(_RAW_OP, ch)
-            if layer is None:
-                continue
-            try:
-                if lut.get("clim") is not None:
-                    layer.contrast_limits = tuple(lut["clim"])
-                if lut.get("cmap") is not None:
-                    layer.colormap = lut["cmap"]
-                applied += 1
-            except Exception:                            # noqa: BLE001 - a missing channel is skipped
-                pass
-        return applied
+        return _lut_clipboard.apply_luts(self, luts)
 
     def _apply_channel_visibility(self, visibility: "Optional[dict]") -> None:
         """Show/hide channels per the setting; an empty setting means no opinion and touches nothing."""
@@ -1666,39 +1420,14 @@ class RegionViewer(QMainWindow):
         self._refresh_divergence()
 
     def _copy_luts(self) -> None:
-        caught = self._per_channel_luts()
-        if not caught:
-            self._say("no channels on screen to copy LUTs from.")
-            return
-        _LUT_CLIPBOARD.clear()
-        _LUT_CLIPBOARD.update(caught)
-        self._say(f"copied LUTs for {len(caught)} channel(s) — paste them into another window.")
+        _lut_clipboard.copy_luts(self)
 
     def _match_raw_contrast(self) -> None:
-        """Put the RAW layer's contrast window on every operator layer of the same channel."""
-        pane = self._pane
-        mosaic = getattr(pane, "mosaic", None) if pane is not None else None
-        if mosaic is None:
-            self._say("no mosaic here to match contrast on.")
-            return
-        matched = mosaic.match_contrast_to(_RAW_OP)
-        if not matched:
-            self._say("nothing to match — this window has no operator layers over the raw mosaic "
-                      "yet. Run an operator on this view first.")
-            return
-        self._say(f"matched {matched} operator layer(s) to the raw contrast window.")
+        """Raw's contrast onto every operator layer. See `_lut_clipboard.match_raw_contrast`."""
+        _lut_clipboard.match_raw_contrast(self)
 
     def _paste_luts(self) -> None:
-        if not _LUT_CLIPBOARD:
-            self._say("no copied LUTs yet — use '⧉ Copy LUTs' in another window first.")
-            return
-        applied = self._apply_luts(_LUT_CLIPBOARD)
-        if applied is None:
-            self._say("no mosaic here to paste LUTs onto.")
-            return
-        self.settings.set("luts", self._per_channel_luts())
-        self._refresh_divergence()
-        self._say(f"pasted LUTs onto {applied} channel(s).")
+        _lut_clipboard.paste_luts(self)
 
     @property
     def time_point(self) -> int:
@@ -1729,452 +1458,76 @@ class RegionViewer(QMainWindow):
         self._pending_region = region
         self._load_timer.start(_REGION_LOAD_DEBOUNCE_MS)
 
+    # -- the mosaic load/playback pipeline lives in `_mosaic_playback` (generation dropping and
+    # -- the frame gate move intact — docs/rendering-contract.md); thin delegates because tests
+    # -- drive _load_mosaic / _on_plane / _on_done by name, and _on_plane unbound over a duck. ----
     def _load_mosaic(self, region: Optional[str]) -> None:
-        """Fuse one region's FOVs into this window's napari pane, one layer per channel."""
-        pane = self._pane
-        if pane is None or not getattr(pane, "ok", False):
-            return
-        if self._reader is None or self._meta is None or not region:
-            return
-        from squidxplorer._viewer import _MosaicWorker
-
-        self._load_gen = int(getattr(self, "_load_gen", 0)) + 1
-        gen = self._load_gen
-        prior = self._worker
-        if prior is not None and prior.isRunning():
-            prior.stop()
-            self._retire_worker(prior)
-
-        if self._result_region is not None and self._result_region != str(region):
-            self._drop_result_layers(f"this window moved from {self._result_region} to {region}")
-        if self._shown_region != str(region):
-            pane.mosaic.remove_op(_RAW_OP)
-        channels = [c["name"] for c in self._meta["channels"]]
-        w = _MosaicWorker(self._reader, self._meta, region, channels, parent=self,
-                          time_point=self.time_point)
-        w.ready.connect(lambda r, ch, levels, bbox, win:
-                        self._on_plane(r, ch, levels, bbox, win, gen=gen))
-        w.problem.connect(self._say)
-        w.finished_count.connect(lambda n: self._on_done(region, n, gen=gen))
-        w.finished.connect(lambda: self._worker_ended(w))
-        self._worker = w
-        w.start()
+        """Fuse one region's FOVs into this pane. See `_mosaic_playback.load_mosaic`."""
+        _mosaic_playback.load_mosaic(self, region)
 
     def _worker_ended(self, worker) -> None:
-        """A load's thread has ended. Drop every reference to it, ours and Qt's."""
-        if self._worker is worker:
-            self._worker = None
-        self._forget_worker(worker)
-        try:
-            worker.deleteLater()
-        except RuntimeError:
-            pass
+        _mosaic_playback.worker_ended(self, worker)
 
     def _retire_worker(self, worker) -> None:
-        """Let a superseded worker die on its own time, without dropping it on the floor."""
-        retired = getattr(self, "_retired_workers", None)
-        if retired is None:
-            retired = self._retired_workers = []
-        retired.append(worker)
+        _mosaic_playback.retire_worker(self, worker)
 
     def _forget_worker(self, worker) -> None:
-        retired = getattr(self, "_retired_workers", None)
-        if retired is not None and worker in retired:
-            retired.remove(worker)
+        _mosaic_playback.forget_worker(self, worker)
 
     def _is_current_load(self, gen: int) -> bool:
-        """Whether *gen* is the load this window is still waiting for."""
-        return int(gen) == int(getattr(self, "_load_gen", 0))
+        return _mosaic_playback.is_current_load(self, gen)
 
     def _on_plane(self, region: str, channel: str, levels, bbox_um, window=None,
                   gen: Optional[int] = None) -> None:
-        pane = self._pane
-        if pane is None or not getattr(pane, "ok", False):
-            return
-        if gen is not None and not self._is_current_load(gen):
-            return
-        if self._cursor is not None and self._cursor.region != region:
-            return
-        from squidxplorer._napari_pane import _colormap_for
-
-        add_levels, add_bbox = levels, bbox_um
-        add_window = window
-        if self._roi_bbox is not None and bbox_um is not None:
-            cropped = _crop_levels_to_bbox(levels, bbox_um, self._roi_bbox)
-            if cropped is not None:
-                add_levels, add_bbox = cropped
-                add_window = None
-            else:
-                self._say("ROI does not overlap this region — showing the whole region.")
-
-        pane.mosaic.add_mosaic(
-            _RAW_OP, channel, add_levels,
-            contrast_limits=add_window,
-            colormap=_colormap_for(channel),
-            multiscale=True,
-            bbox_um=add_bbox,
-            z_scale_um=(self._meta or {}).get("dz_um"),
-        )
-        if self.open_clock is not None:
-            self.open_clock.first_layer()
+        _mosaic_playback.on_plane(self, region, channel, levels, bbox_um, window, gen=gen)
 
     def _on_done(self, region: str, n: int, gen: Optional[int] = None) -> None:
-        pane = self._pane
-        if pane is None or not getattr(pane, "ok", False):
-            return
-        if gen is not None and not self._is_current_load(gen):
-            return
-        if n == 0:
-            pane.say(f"{region}: no mosaic could be built (see the message above).")
-            try:
-                pane.mosaic.remove_op(_RAW_OP)
-            except Exception:                        # noqa: BLE001 - already gone is fine
-                pass
-            self._shown_region = None
-            if self.open_clock is not None:
-                self.open_clock.finish(_measure.FAILED, f"{region}: no mosaic could be built")
-            self._frame_done()
-            return
-        pane.say("")
-        first_look = self._shown_region != str(region)
-        try:
-            if self._result_region is None:
-                pane.mosaic.show_op(_RAW_OP)
-            if first_look:
-                pane.mosaic.model.reset_view()
-        except Exception:                            # noqa: BLE001 - view framing is cosmetic
-            pass
-        self._shown_region = str(region)
-        self._apply_settings_once()
-        if self.open_clock is not None:
-            self.open_clock.finish()
-        self._frame_done()
+        _mosaic_playback.on_done(self, region, n, gen=gen)
 
     def _frame_done(self) -> None:
-        """Open the playback gate: this mosaic is on screen, the next frame may be requested."""
-        if self._slider is not None:
-            self._slider.frame_done()
-        bar = getattr(self, "_time_point_bar", None)
-        if bar is not None:
-            bar.frame_done()
+        _mosaic_playback.frame_done(self)
 
     def _selected_roi(self) -> "tuple":
-        """(bbox, region) of the ROI selected in this window's Shapes layer, else (None, None)."""
-        layer = self._roi_layer
-        v = self._napari_viewer()
-        if layer is None or v is None or layer not in list(v.layers):
-            return None, None
-        rects = list(getattr(layer, "data", []) or [])
-        sel = sorted(int(i) for i in (getattr(layer, "selected_data", None) or set()))
-        if not sel or sel[0] >= len(rects):
-            return None, None
-        try:
-            arr = np.asarray(rects[sel[0]])
-            ys, xs = arr[:, -2], arr[:, -1]
-            bbox = (float(xs.min()), float(ys.min()), float(xs.max()), float(ys.max()))
-        except Exception:                                # noqa: BLE001
-            return None, None
-        return bbox, self._region_for_roi(bbox)
+        """(bbox, region) of the selected ROI, else (None, None). See `_roi_tools.selected_roi`."""
+        return _roi_tools.selected_roi(self)
 
     def _roi_center_fov(self, region: str, bbox: Optional[tuple] = None) -> Optional[int]:
-        """The FOV nearest the ROI box's centre (stage um); None everywhere means the region centre."""
-        bbox = bbox if bbox is not None else self._roi_bbox
-        if bbox is None:
-            return None
-        x0, y0, x1, y1 = bbox
-        cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
-        positions = (self._meta or {}).get("fov_positions_um") or {}
-        fovs = ((self._meta or {}).get("fovs_per_region") or {}).get(region) or []
-        best, best_d = None, None
-        for f in fovs:
-            p = positions.get((region, int(f)))
-            if p is None:
-                continue
-            d = (p[0] - cx) ** 2 + (p[1] - cy) ** 2
-            if best_d is None or d < best_d:
-                best, best_d = int(f), d
-        return best
+        return _roi_tools.roi_center_fov(self, region, bbox)
 
+    # -- the 3D/volume cluster lives in `_volume_view`. The close-before-read invariant is
+    # -- STRUCTURAL there: open_3d closes the old volume and dispatches into the scene-reading
+    # -- paths through module-internal calls. Thin delegates because tests borrow these unbound
+    # -- onto duck shells (test_stitch_in_3d) and call them by name. ------------------------------
     def _replace_native3d(self, open_it) -> None:
-        """ONE 3D popout per window: close the one this window already has, then open the new one."""
-        self._close_native3d()
-        self._native3d = open_it()
+        """ONE 3D popout per window. See `_volume_view.replace_native3d`."""
+        _volume_view.replace_native3d(self, open_it)
 
     def _close_native3d(self) -> None:
-        """Take this window's 3D view down, and put the 2D scene back. Idempotent."""
-        old, self._native3d = self._native3d, None
-        if old is None:
-            return
-        close = getattr(old, "close", None)
-        if callable(close):
-            try:
-                close()
-            except Exception:                        # noqa: BLE001 - already-closed / no Qt window
-                pass
+        """Take this window's 3D view down; idempotent. See `_volume_view.close_native3d`."""
+        _volume_view.close_native3d(self)
 
     def _open_3d(self) -> None:
-        """3D = THIS view at NATIVE resolution, read STRAIGHT FROM THE READER (gallery-view recipe)."""
-        self.set_render_mode("3d")
-        region = self._cursor.region if self._cursor is not None else (
-            self._regions[0] if self._regions else None)
-        if region is None or self._reader is None or self._meta is None:
-            self._say("no region to render in 3D.")
-            return
-        roi_bbox = self._roi_bbox
-        if roi_bbox is None:
-            sel_bbox, sel_region = self._selected_roi()
-            if sel_bbox is not None and sel_region is not None:
-                roi_bbox, region = sel_bbox, sel_region
-        self._close_native3d()
-        if roi_bbox is not None:
-            self._open_roi_3d(region, roi_bbox)
-            return
-
-        fov = self._roi_center_fov(region, roi_bbox)
-        from squidxplorer._napari3d import open_native_3d
-
-        contrast_by, colormap_by = self._on_screen_luts(_RAW_OP)
-        try:
-            self._replace_native3d(lambda: open_native_3d(
-                self._reader, self._meta, region, fov=fov,
-                contrast_by_channel=contrast_by or None,
-                colormap_by_channel=colormap_by or None,
-            ))
-        except Exception as exc:                     # noqa: BLE001 - named to the window, never silent
-            self._say(f"3D could not open: {exc}")
+        """3D of THIS view, closed-then-read structurally. See `_volume_view.open_3d`."""
+        _volume_view.open_3d(self)
 
     def _on_screen_luts(self, op: str) -> "tuple[dict, dict]":
-        """``(contrast_by_channel, colormap_by_channel)`` as *op*'s layers are showing them."""
-        mosaic = getattr(self._pane, "mosaic", None) if self._pane is not None else None
-        contrast_by: dict = {}
-        colormap_by: dict = {}
-        if mosaic is None:
-            return contrast_by, colormap_by
-        for c in (self._meta or {}).get("channels", []):
-            name = c["name"]
-            layer = mosaic.find(str(op), name)
-            if layer is None:
-                continue
-            try:
-                contrast_by[name] = tuple(layer.contrast_limits)
-            except Exception:                        # noqa: BLE001
-                pass
-            try:
-                cmap = layer.colormap
-                colormap_by[name] = getattr(cmap, "name", cmap)
-            except Exception:                        # noqa: BLE001
-                pass
-        return contrast_by, colormap_by
+        return _volume_view.on_screen_luts(self, op)
 
     def _open_roi_3d(self, region: str, roi_bbox: tuple) -> None:
-        """3D of an ROI, BRICKED and IN THIS WINDOW. Any ROI renders; none is refused."""
-        names = [c["name"] for c in (self._meta or {}).get("channels", [])]
-        if not names:
-            self._say("this acquisition declares no channels to render in 3D.")
-            return
-        mosaic = getattr(self._pane, "mosaic", None) if self._pane is not None else None
-        if mosaic is None or getattr(mosaic, "model", None) is None:
-            self._say("3D needs this window's napari canvas, which isn't available here.")
-            return
-        from squidxplorer import _bricks
-        from squidxplorer._brick_view import BrickedVolume
-        from squidxplorer._napari3d import region_origin_um, roi_window_px, z_step_um
-
-        window = roi_window_px(self._meta or {}, region, roi_bbox)
-        origin = region_origin_um(self._meta or {}, region)
-        if window is None or origin is None:
-            self._say("ROI 3D: this ROI does not land on any FOV of this region.")
-            return
-        nz = len(list((self._meta or {}).get("z_levels") or [0]))
-        if nz < 2:
-            self._say("3D needs a z-stack; this acquisition has a single z plane.")
-            return
-        px = float((self._meta or {}).get("pixel_size_um") or 1.0)
-        dz = z_step_um(self._meta or {}, px, where=f"3D ROI {region}")
-        max_tex = _DEFAULT_MAX_3D_TEXTURE
-        try:
-            max_tex = int(self._pane._live_max_3d_texture())
-        except Exception:                                # noqa: BLE001 - the Apple value is the floor
-            pass
-        read, source, src_pitch = self._volume_source(window)
-        if source is None:
-            return
-        contrast_by, colormap_by = self._on_screen_luts(source)
-        r0, r1, c0, c1 = window
-        roi_origin = (0.0, float(origin[1]) + r0 * px, float(origin[0]) + c0 * px)
-        budget = _brick_budget_bytes()
-        try:
-            self._replace_native3d(lambda: _started(BrickedVolume(
-                mosaic, self._reader, self._meta, region, window,
-                channels=names, scale=(dz, px, px), origin_um=roi_origin,
-                limit=max_tex, budget_bytes=budget,
-                op=source,
-                contrast_by=contrast_by or None, colormap_by=colormap_by or None,
-                say=self._say, parent=self, read=read,
-            )))
-        except Exception as exc:                         # noqa: BLE001 - named to the window
-            self._say(f"ROI 3D could not open: {exc}")
-            return
-        try:
-            self._pane.on_camera_settled(self._refresh_bricks)
-        except Exception:                                # noqa: BLE001 - static bricks still render
-            pass
-        vol = self._native3d
-        n = getattr(vol, "brick_count", 0)
-        if src_pitch is None:
-            voxels = (f"Voxels at {px:.3f} um/px, the acquisition's own — read straight from the "
-                      f"reader.")
-        else:
-            spy, spx = src_pitch
-            coarser = ("" if max(spy, spx) <= px * 1.001 else
-                       f" — COARSER than the acquisition's {px:.3f} um/px, because a displayed "
-                       f"operator layer is the fused preview at its own decimation")
-            voxels = (f"Voxels at {spy:.3f} x {spx:.3f} um/px, read off the '{source}' "
-                      f"layer{coarser}.")
-        self._say(f"3D in-window: '{source}', {(r1 - r0)}x{(c1 - c0)} px ROI, {nz} z, "
-                  f"{len(names)} channel(s), {n} texture{'' if n == 1 else 's'}. {voxels} "
-                  f"{_bricks.ceiling_line(max_tex, px, measured=True)}")
+        _volume_view.open_roi_3d(self, region, roi_bbox)
 
     def _volume_source(self, window: tuple):
-        """WHICH volume 3D renders: the operator layer this window is SHOWING, or raw."""
-        mosaic = getattr(self._pane, "mosaic", None) if self._pane is not None else None
-        if mosaic is None:
-            return None, _RAW_OP, None
-        try:
-            op = mosaic.visible_op()
-        except Exception:                                # noqa: BLE001 - fall back to raw
-            return None, _RAW_OP, None
-        if not op or op == _RAW_OP:
-            return None, _RAW_OP, None
-        try:
-            if mosaic._reduces_z(op):
-                self._say(f"3D: '{op}' reduces z to a single plane, so it has no volume to render. "
-                          f"Show raw (or a z-preserving operator) and click 3D again.")
-                return None, None, None
-        except Exception:                                # noqa: BLE001 - undeclared: try to render
-            pass
-        px = float((self._meta or {}).get("pixel_size_um") or 1.0)
-        origin = None
-        try:
-            from squidxplorer._napari3d import region_origin_um
-
-            origin = region_origin_um(self._meta or {}, self.current_region())
-        except Exception:                                # noqa: BLE001
-            pass
-        if origin is None:
-            self._say(f"3D: '{op}' cannot be placed — this region has no stage positions.")
-            return None, None, None
-        srcs: dict = {}
-        for ch in mosaic.channels(op):
-            layer = mosaic.find(op, ch)
-            data = full_res_level(getattr(layer, "data", None) if layer is not None else None)
-            if data is None or getattr(data, "ndim", 0) < 3 or int(data.shape[0]) < 2:
-                continue
-            try:
-                tr = tuple(float(v) for v in layer.translate[-2:])
-                sc = tuple(float(v) for v in layer.scale[-2:])
-            except Exception:                            # noqa: BLE001 - unplaceable layer
-                continue
-            if sc[0] <= 0 or sc[1] <= 0:
-                continue
-            srcs[ch] = (data, tr, sc)
-        if not srcs:
-            self._say(f"3D: '{op}' is on screen but carries no z depth here, so there is no volume "
-                      f"to render.")
-            return None, None, None
-        ox_um, oy_um = float(origin[0]), float(origin[1])
-        pitch = tuple(next(iter(srcs.values()))[2])
-
-        def _read(brick, channel, step, should_stop):
-            """One brick out of the OPERATOR's on-screen volume, same contract as the raw reader."""
-            got = srcs.get(channel)
-            if got is None or (should_stop is not None and should_stop()):
-                return None
-            src, (ty, tx), (sy, sx) = got
-            y0 = int(round((oy_um + brick.r0 * px - ty) / sy))
-            y1 = int(round((oy_um + brick.r1 * px - ty) / sy))
-            x0 = int(round((ox_um + brick.c0 * px - tx) / sx))
-            x1 = int(round((ox_um + brick.c1 * px - tx) / sx))
-            y0, x0 = max(0, y0), max(0, x0)
-            y1, x1 = min(int(src.shape[-2]), y1), min(int(src.shape[-1]), x1)
-            if y1 <= y0 or x1 <= x0:
-                return None
-            sub = np.asarray(src[:, y0:y1, x0:x1])
-            s = max(1, int(step))
-            return np.ascontiguousarray(sub[:, ::s, ::s]) if s > 1 else sub
-
-        return _read, op, pitch
+        """WHICH volume 3D renders. See `_volume_view.volume_source`."""
+        return _volume_view.volume_source(self, window)
 
     def _refresh_bricks(self) -> None:
-        """The camera stopped: re-decide stride and visible set. No-op unless 3D bricks are up."""
-        vol = self._native3d
-        refresh = getattr(vol, "refresh", None)
-        if not callable(refresh):
-            return
-        try:
-            refresh()
-        except Exception as exc:                         # noqa: BLE001 - named, never silent
-            self._say(f"3D: could not follow the camera ({exc}).")
+        _volume_view.refresh_bricks(self)
 
     def _displayed_pitch_um(self, layer, *, what: str):
-        """MICROMETRES PER PIXEL of the pixels a layer is actually showing, as ``(y, x)``."""
-        scale = getattr(layer, "scale", None)
-        try:
-            py, px = (float(v) for v in tuple(scale)[-2:])
-        except (TypeError, ValueError, IndexError):
-            self._say(f"3D refused: {what} carries no napari scale, so the micrometres per "
-                      f"displayed pixel are unknown. The acquisition's pixel_size_um is NOT that "
-                      f"number — the mosaic on screen is fused at its own decimation — so "
-                      f"there is nothing honest to render this volume at.")
-            return None
-        if not (py > 0 and px > 0):
-            self._say(f"3D refused: {what} is placed at a scale of ({py}, {px}) um/px, which is "
-                      f"not a pitch. A volume cannot be given a physical size from it.")
-            return None
-        return (py, px)
+        return _volume_view.displayed_pitch_um(self, layer, what=what)
 
     def _render_roi_volume(self, mosaic, contrast_by: dict, colormap_by: dict) -> None:
-        """Render the ROI subarray in 3D from the 2D layer's own pixels; only tests reach this path."""
-        volumes: dict = {}
-        pitch = None
-        for c in (self._meta or {}).get("channels", []):
-            name = c["name"]
-            layer = mosaic.find(_RAW_OP, name)
-            if layer is None:
-                continue
-            if pitch is None:
-                pitch = self._displayed_pitch_um(layer, what=f"the raw '{name}' mosaic layer")
-                if pitch is None:
-                    return
-            level0 = full_res_level(layer.data)
-            if getattr(level0, "ndim", 0) < 3 or int(level0.shape[0]) < 2:
-                self._say("3D needs a z-stack; this ROI has a single z plane.")
-                return
-            volumes[name] = level0
-        if not volumes:
-            self._say("no channel on screen to render in 3D.")
-            return
-        py_um, px_um = pitch
-        max_tex = 2048
-        try:
-            max_tex = int(self._pane._live_max_3d_texture())
-        except Exception:                                # noqa: BLE001 - Apple default is the floor
-            pass
-        from squidxplorer._napari3d import open_native_3d_volume, z_step_um
-
-        dz = z_step_um(self._meta or {}, py_um, where="3D ROI volume")
-
-        try:
-            self._replace_native3d(lambda: open_native_3d_volume(
-                {n: np.asarray(v) for n, v in volumes.items()},
-                scale=(dz, py_um, px_um),
-                title=f"3D ROI — {self._view_label(self._regions)}",
-                contrast_by_channel=contrast_by or None,
-                colormap_by_channel=colormap_by or None,
-                max_texture=max_tex,
-            ))
-        except Exception as exc:                         # noqa: BLE001 - named to the window
-            self._say(f"ROI 3D could not open: {exc}")
+        _volume_view.render_roi_volume(self, mosaic, contrast_by, colormap_by)
 
     def current_region(self) -> str:
         """The region this window is showing right now (it can hold several and step with its slider)."""

@@ -59,13 +59,9 @@ from squidxplorer._logpane import get_logger
 
 log = get_logger("viewer")
 
-from squidxplorer import _ingest, _measure, _qtstyle, _run_scope
+from squidxplorer import _gallery_launch, _ingest, _measure, _qtstyle, _run_scope
 from squidxplorer.contract import field_path
 from squidxplorer._engine import available_plane_operators
-from squidxplorer._minerva import MINERVA_HOME_ENV as _MINERVA_HOME_ENV
-from squidxplorer._minerva import NEEDS_INTERNET_NOTE as _MINERVA_INTERNET_NOTE
-from squidxplorer._minerva import MINERVA_URL as _MINERVA_URL
-from squidxplorer._gallery import GalleryScope as _GalleryScope
 from squidxplorer._montage import _hex_to_rgb01
 from squidxplorer._output import incomplete_reason, parse_well_id
 from squidxplorer._activity import ActivityLog
@@ -96,6 +92,11 @@ from squidxplorer._plate_overview import (  # noqa: F401 (re-exports)
     resolve_plate_root, selection_frame_pen_px, well_at,
 )
 from squidxplorer._plate import _row_letter  # noqa: F401 (re-export)
+
+# The worker-launch seam (and the signal introspection the retire seam shares with it).
+from squidxplorer._worker_lifecycle import launch as _launch_worker, stop_slot as _stop_slot
+from squidxplorer._tab_manager import TabManager as _TabManager
+from squidxplorer._worker_lifecycle import signal_names as _signal_names  # noqa: F401 (re-export)
 
 # QThread workers live in `_workers`; re-exported so monkeypatched spies keep working.
 from squidxplorer._workers import (  # noqa: F401 (re-exports)
@@ -146,20 +147,6 @@ def _scale_qss_fonts(qss: str, scale: float) -> str:
     return scale_qss_fonts(qss, scale)
 
     return _QSS_FONT_PX_RE.sub(_sub, qss)
-
-
-def _signal_names(cls) -> tuple:
-    """Every Signal declared on *cls* or its bases, excluding QThread's own finished/started."""
-    from qtpy.QtCore import Signal as _sig
-    seen, out = set(), []
-    for klass in cls.__mro__:
-        for name, value in vars(klass).items():
-            if name in seen or name in ("finished", "started"):
-                continue
-            if isinstance(value, _sig) or type(value).__name__ in ("Signal", "unbound_signal"):
-                seen.add(name)
-                out.append(name)
-    return tuple(out)
 
 
 #: Band under the plate: default height at the design size, and the hard ceiling the
@@ -304,8 +291,14 @@ class PlateWindow(QMainWindow):
         self._active_op_key = None    # operator whose tiles are streaming into its layer right now
         self._layers_tab = None       # the Layers tab widget, once opened
         self._order = []              # well order = the detail's FOV-slider order
-        self._op_tabs = {}            # key -> operator-UI widget currently open as a tab in _left_tabs
-        self._floating = {}           # key -> _FloatWindow holding that operator's UI detached
+        # The tab/float MECHANISM lives in `_tab_manager.TabManager`; this window keeps the
+        # POLICY (what may float, what disposal means, where the log lives) and aliases the
+        # registries as the SAME dict objects, because tests and closeEvent index them directly.
+        self._tabman = _TabManager(default_tabs=lambda: self._left_tabs,
+                                   fixed_tabs=self._FIXED_TABS,
+                                   dispose=self._dispose_tab_widget)
+        self._op_tabs = self._tabman.op_tabs      # key -> operator-UI widget open as a tab
+        self._floating = self._tabman.floating    # key -> _FloatWindow holding a detached UI
                                       # (a key lives in exactly ONE of the two dicts, never both)
         self._gallery = None          # the ONE open GalleryWindow, or None (see _open_gallery_view)
         self._readout_base = ""
@@ -882,93 +875,18 @@ class PlateWindow(QMainWindow):
         v.addWidget(scroll, 1)
         return pane
 
+    # -- the Gallery View and the native-3D popout are LAUNCHED from here, not implemented here:
+    # -- `_gallery_launch` owns both (thin delegates, because tests and the control wiring reach
+    # -- these by name on the window). -------------------------------------------------------------
     def gallery_scope(self):
-        """The scope a gallery would open on RIGHT NOW: the plate selection, else the whole thing.
-
-        The selection plumbing is the one that already exists — ``selected_region_fovs()``, which is
-        fed by ``PlateOverview.selected_wells()`` through ``_on_selection_changed`` and by the
-        shift-drag marquee. A gallery therefore inherits the marquee, Cmd/Ctrl-A, and shift-click
-        refinement for free, and there is no second selection mechanism to keep in step. The pairs
-        it returns are ``(region, fov)``, which is exactly the ``{region: [fov, ...]}`` mapping
-        ``run_plate(regions=...)`` takes — so a cropped well stays cropped all the way through.
-
-        Returns ``None`` (never an empty gallery) when no acquisition is open.
-        """
-        if self._meta is None:
-            return None
-        sel = self.selected_region_fovs()
-        if sel:
-            return _GalleryScope.from_region_fovs(self._meta, sel, time_point=self.time_point)
-        return _GalleryScope.whole(self._meta, time_point=self.time_point)
+        """The scope a gallery would open on right now. See `_gallery_launch.gallery_scope`."""
+        return _gallery_launch.gallery_scope(self)
 
     def _open_gallery_view(self):
-        """Tile the selected Regions side by side, one row each, one column per channel.
-
-        The port of hongquanli/gallery-view's Region view ("Add Region view: stitched per-region
-        MIPs", #7), adapted rather than imported for the same reason ``_napari3d`` adapts its 3-D
-        recipe: gallery-view pins napari <0.6 and we run 0.6.6. See :mod:`squidxplorer._gallery` for
-        which of its decisions were taken and which two were diverged from.
-
-        SUBSET-NATIVE, and that is the whole design rather than an option on it: the scope is
-        :meth:`gallery_scope`, i.e. the plate selection when there is one and the whole acquisition
-        when there is not. One code path, two scopes.
-
-        ONE gallery at a time. A second click RESCOPES and raises the open one instead of stacking
-        a second window on the first, because "gallery of the current selection" is a question with
-        one answer, and two galleries side by side is what the gallery itself is for.
-        """
-        scope = self.gallery_scope()
-        if scope is None:
-            self._readout.setText("Open an acquisition before opening the Gallery View.")
-            return
-        if scope.is_empty():
-            self._readout.setText(
-                "Gallery View: this acquisition has no regions with FOVs to tile.")
-            return
-
-        from squidxplorer._gallery_window import GalleryWindow
-
-        title = self._acq_name or "acquisition"
-        win = getattr(self, "_gallery", None)
-        if win is not None and win.isVisible():
-            win.rescope(scope, title=title)
-        else:
-            win = GalleryWindow(self._reader, self._meta, scope, title=title, parent=None)
-            self._gallery = win
-            win.resize(min(1400, 220 + 180 * max(1, len(scope.channels))), 900)
-            win.show()
-        win.raise_()
-        win.activateWindow()
-        msg = f"Gallery View: {scope.describe(self._meta)}"
-        self._readout.setText(msg)
-        self.log.info("%s", msg)
+        _gallery_launch.open_gallery_view(self)
 
     def _open_native_3d(self):
-        """Popout napari 3D on the current region's centre FOV at native resolution (gallery-view
-        recipe). Fails to the LOG by name, never silently.
-
-        It carries NO contrast or colormap. It used to harvest both off ``self._mosaic_pane``'s
-        layers, which have never existed: the pane was pinned to None on 2026-07-23 and the harvest
-        could only ever produce two empty dicts. ``open_native_3d`` defaults both to None and
-        resolves the acquisition's own ``display_color`` and an autoscale, which is what this call
-        has actually been doing all along. A window's on-screen LUTs reach 3D through
-        ``RegionViewer``, which has the layers.
-        """
-        if self._reader is None or self._meta is None:
-            self._readout.setText("No acquisition open — drop one before opening the 3D view.")
-            return
-        region = getattr(self, "_mosaic_region", None) or self._cursor.region
-        if region is None:
-            self._readout.setText("No region is open to render in 3D.")
-            return
-        try:
-            from squidxplorer._napari3d import open_native_3d
-
-            open_native_3d(self._reader, self._meta, region)
-            log.info("opened native napari 3D popout for region %s", region)
-        except Exception as exc:                     # noqa: BLE001 - NAMED, to the log and readout
-            log.error("native 3D view failed for region %s: %s", region, exc)
-            self._readout.setText(f"3D native view failed: {exc}")
+        _gallery_launch.open_native_3d(self)
 
     # -- operator UIs live as tabs in the band's right column: the Operators home tab, one tab
     # -- per operator you open, and any result a panel publishes. ---------------------------------
@@ -977,18 +895,7 @@ class PlateWindow(QMainWindow):
         there is one bar (the band's right column) and it is the default.
         If the UI is currently detached (see _detach_tab), focus its floating window instead —
         never rebuild, so a widget's live state survives."""
-        tabs = self._left_tabs if tabs is None else tabs
-        win = self._floating.get(key)
-        if win is not None:
-            win.raise_()
-            win.activateWindow()
-            return
-        w = self._op_tabs.get(key)
-        if w is None:
-            w = builder()
-            self._op_tabs[key] = w
-            tabs.addTab(w, title)
-        tabs.setCurrentWidget(w)
+        self._tabman.open_tab(key, title, builder, tabs=tabs)
 
     #: How many tabs at the head of the process console are FIXED: [0] Operators. It cannot close
     #: and cannot detach, so the indices above it never move and a plain `index < _FIXED_TABS` is a
@@ -1062,25 +969,15 @@ class PlateWindow(QMainWindow):
         if panel.collapsed:
             panel.set_collapsed(False)          # a floated console that shows only its header is a
                                                 # window with nothing in it
-        key = self._LOG_FLOAT_KEY
-        win = _FloatWindow("Log", panel,
-                           on_close=lambda *_: self._redock_log(),
-                           on_redock=lambda *_: self._redock_log())
-        win._home_tabs = None                   # it has no tab bar to go home to; _redock_log knows
-        self._floating[key] = win
-        win.show()
-        return win
+        # Through the ONE float mechanism. dispose_on_close=False is the log's whole policy:
+        # closing the window RE-DOCKS, because the panel is a live sink on the process-wide root
+        # logger and disposing it would lose the console for good.
+        return self._tabman.float_out(self._LOG_FLOAT_KEY, "Log", panel,
+                                      restore=self._return_log_home, dispose_on_close=False)
 
-    def _redock_log(self):
-        """Put the console back in `_right_col`, under the operators. Idempotent."""
-        win = self._floating.pop(self._LOG_FLOAT_KEY, None)
-        if win is None:
-            return
-        panel = win.take_content()              # the SAME widget: the log's scrollback survives
-        win.close()
-        win.deleteLater()
-        if panel is None:
-            return
+    def _return_log_home(self, panel):
+        """Put the console back in `_right_col`, under the operators — the SAME widget, so the
+        log's scrollback survives. The log's `restore` for `TabManager.float_out`."""
         col = getattr(self, "_right_col", None)
         if col is None:                         # no layout to return to (never in a built window)
             return
@@ -1088,20 +985,17 @@ class PlateWindow(QMainWindow):
         panel.setVisible(True)
         col.setSizes(list(_RIGHT_COL_SIZES))    # the same split it opened at, not a second guess
 
+    def _redock_log(self):
+        """Re-dock the floated console. Idempotent; routes through the one float mechanism."""
+        self._tabman.redock(self._LOG_FLOAT_KEY)
+
     def _close_op_tab(self, index: int, tabs=None):
-        tabs = self._left_tabs if tabs is None else tabs
-        if index < self._FIXED_TABS and tabs is self._left_tabs:   # the Operators home tab
-            return
-        w = tabs.widget(index)
-        tabs.removeTab(index)
-        self._dispose_tab_widget(w)
+        self._tabman.close_tab(index, tabs=tabs)
 
     def _dispose_tab_widget(self, w):
         """The ONE teardown path for an operator UI — tab close, float close, and app exit all
         route here so they can't drift: registry pop, stale-ref clear, shell kill, delete."""
-        for k, v in list(self._op_tabs.items()):
-            if v is w:
-                del self._op_tabs[k]
+        self._tabman.forget(w)
         if w is self._layers_tab:                          # drop the stale ref so refresh no-ops
             self._layers_tab = None
             self._layers_box = None
@@ -1109,70 +1003,22 @@ class PlateWindow(QMainWindow):
             w.shutdown()
         w.deleteLater()
 
-    # -- drag a tab out -> free-floating window (IMA-209); Re-dock returns it ---------------------
+    # -- drag a tab out -> free-floating window (IMA-209); Re-dock returns it. The mechanism is
+    # -- `_tab_manager.TabManager` (one float mechanism for tabs AND the log); these delegates
+    # -- stay because the offscreen tests drive them directly. ------------------------------------
     def _detach_tab(self, index: int, tabs=None):
-        """Detach the tab at `index` of `tabs` into a _FloatWindow. ALL detach logic lives here (the
-        drag in _DetachTabBar is a thin, deferred caller) so the offscreen tests drive it directly.
-        Returns the new window, or None when the tab can't detach (home tab / unregistered).
+        """Detach the tab at `index` of `tabs` into a _FloatWindow. Returns the new window, or
+        None when the tab can't detach (home tab / unregistered). *tabs* defaults to the one bar,
+        so IMA-209's callers and tests are unchanged.
 
-        *tabs* is the bar the tab is in and defaults to the one there is, so IMA-209's callers
-        and tests are unchanged."""
-        tabs = self._left_tabs if tabs is None else tabs
-        if index < self._FIXED_TABS and tabs is self._left_tabs:
-            return None                      # the Operators home tab is fixed: it never detaches
-        if index < 0:
-            return None
-        w = tabs.widget(index)
-        key = next((k for k, v in self._op_tabs.items() if v is w), None)
-        if key is None:
-            return None
-        title = tabs.tabText(index)
-        tabs.removeTab(index)
-        del self._op_tabs[key]
-        # _layers_tab is deliberately NOT cleared: the widget lives on in the float and
-        # _refresh_layers_tab writes into it directly, so a floating Layers keeps updating.
-        # `*_` is load-bearing: on_redock is connected to QPushButton.clicked, which passes
-        # `checked=False` and would land on a bare `lambda k=key:` AS k — so the Re-dock button
-        # called _redock(False), found no such key in _floating, and returned silently. The button
-        # had been dead since IMA-209 because every test called _redock(key) directly instead of
-        # clicking it. Swallow the signal's argument and keep the key bound.
-        win = _FloatWindow(title, w,
-                           on_close=lambda *_, k=key: self._on_float_closed(k),
-                           on_redock=lambda *_, k=key: self._redock(k))
-        win._home_tabs = tabs        # re-dock returns it to the bar it was dragged out of
-        self._floating[key] = win
-        win.show()
-        return win
-
-    def _on_float_closed(self, key: str):
-        """User closed the floating window: same fate as closing the tab."""
-        win = self._floating.pop(key, None)
-        if win is None:
-            return
-        w = win.take_content()
-        if w is not None:
-            self._dispose_tab_widget(w)
+        _layers_tab is deliberately NOT cleared: the widget lives on in the float and
+        _refresh_layers_tab writes into it directly, so a floating Layers keeps updating."""
+        return self._tabman.detach(index, tabs=tabs)
 
     def _redock(self, key: str):
-        """Re-dock button: return the floated widget to the tab bar — the SAME object, so its
+        """Re-dock button: return the floated widget to its home — the SAME object, so its
         live state survives (close-and-reopen would kill it)."""
-        win = self._floating.pop(key, None)
-        if win is None:
-            return
-        title = win._tab_title
-        # `is None`, never `or`: an EMPTY QTabWidget is falsy in PyQt, so `_home_tabs or _left_tabs`
-        # sent every re-dock from a just-emptied bar to the wrong place.
-        tabs = getattr(win, "_home_tabs", None)
-        if tabs is None:
-            tabs = self._left_tabs                           # back to the bar it came from
-        w = win.take_content()                             # empties the window: its close is plain
-        win.close()
-        win.deleteLater()
-        if w is None:
-            return
-        self._op_tabs[key] = w
-        tabs.addTab(w, title)
-        tabs.setCurrentWidget(w)
+        self._tabman.redock(key)
 
     def _on_progress(self, done: int, total: int):
         """A run advanced by a WELL. Feeds the log panel's activity header.
@@ -1794,11 +1640,10 @@ class PlateWindow(QMainWindow):
                     prof_lbl.setText(str(msg))
                     est_btn.setEnabled(True)
 
-                w.done.connect(_ok)
-                w.problem.connect(_bad)
-                w.stage.connect(lambda s: prof_lbl.setText(str(s)))
-                self._flatfield_worker = w            # keep a ref so it is not GC'd mid-run
-                w.start()
+                # Registered on its slot (so it is not GC'd mid-run AND teardown can see it),
+                # wired and started through the one launch seam.
+                _launch_worker(self, w, slot="_flatfield_worker", on_done=_ok, on_problem=_bad,
+                               signals={"stage": lambda s: prof_lbl.setText(str(s))})
 
             est_btn.clicked.connect(estimate_from_plate)
             v.addWidget(est_btn)
@@ -1931,193 +1776,36 @@ class PlateWindow(QMainWindow):
             b.setEnabled(self._reader is not None)
         return w
 
+    # -- Minerva is its own product (`_minerva_panel.MinervaPanel`): the tab UI, the selection
+    # -- reading and both runs live there. The window keeps thin delegates because tests,
+    # -- tools/gates.py and tools/walkthrough.py actuate these BY NAME here, and it keeps the
+    # -- worker slots (`_minerva` / `_minerva_render`) because thread lifetime is the window's
+    # -- (_retire / _join_retired / closeEvent). --------------------------------------------------
+    def _minerva_ui(self):
+        """The one :class:`MinervaPanel` of this window, built lazily, dependencies named."""
+        panel = getattr(self, "_minerva_panel", None)
+        if panel is None:
+            from squidxplorer._minerva_panel import MinervaPanel
+            panel = self._minerva_panel = MinervaPanel(
+                self,
+                reader=lambda: self._reader,
+                meta=lambda: self._meta,
+                time_point=lambda: self.time_point,
+                current_well=lambda: self._current_well,
+                say=lambda text: self._readout.setText(text),
+                selected_region_fovs=self.selected_region_fovs,
+                on_screen_luts=self.on_screen_luts,
+                tab_shell=self._op_tab_shell,
+            )
+        return panel
+
     def _build_minerva_tab(self) -> QWidget:
-        """Minerva Author hand-off (IMA-228): export the SELECTION, then open Author on it.
-
-        Scope comes from :meth:`minerva_selection` — the plate's selected wells (all of their
-        FOVs, or the fields a Shift+Alt box picked inside a mosaic), else the well open in the
-        detail viewer, which means every FOV of it.
-
-        ONE FILE PAIR PER REGION, not per FOV. This docstring said "one file pair per FOV
-        (Minerva opens one 2D image at a time and SquidXplorer has no stitcher)" long after both
-        halves of that stopped being true: there IS a stitcher (the region-operator seam
-        ``export_selection`` fuses through), and a region's FOVs become ONE mosaic because
-        Minerva lays out exactly one image (``"Layout": {"Grid": [["i0"]]}``, hardcoded) and
-        opens only ``series[0]``. A FOV subset is that mosaic CROPPED, still one file.
-
-        The timepoint is the one the window is showing — ``run_minerva_export`` reads
-        ``self.time_point`` — so there is no control for it here and none is missing.
-        """
-        op = _OPERATIONS_BY_KEY["minerva"]
-        w, v = self._op_tab_shell(
-            op.label,
-            "Writes an OME-TIFF plus a Minerva story for every selected region, at the timepoint "
-            "the plate is showing, then starts Minerva Author. Zoom into a well and Shift+Alt-drag "
-            "a box to export only the fields inside it - the mosaic is cropped to them. Author’s "
-            "editor cannot be pointed at a file, so pick the .story.json below in its “Select "
-            "File” dialog - the colours and contrast are already applied. To skip that step "
-            "entirely, render a viewer instead (button below the paths).",
-        )
-        state = {"dir": None, "pairs": []}
-
-        dir_lbl = QLabel("(defaults to a minerva_export folder in your home directory)")
-        dir_lbl.setWordWrap(True)
-        dir_lbl.setStyleSheet("color:#8b98ad;font-size:12px;")
-
-        # Projection mode — the salesperson tool (squid2minerva convert.py) offers --mip/--z, so
-        # hardcoding one here would be a capability regression. Driven by the operator registry.
-        row = QHBoxLayout(); row.setSpacing(6)
-        row.addWidget(QLabel("Projection"))
-        proj = QComboBox(); proj.setStyleSheet(_COMBO_QSS)
-        proj.addItems(available_plane_operators())
-        proj.setCurrentText("mip")
-        row.addWidget(proj); row.addStretch(1)
-
-        # "channels need to be set to specific colors" - the colours ON SCREEN, which the export's
-        # own defaults (acquisition display_color + 1/99.9 percentiles) do not know about. Checked
-        # by default because matching what you are looking at is the request; harmless with no view
-        # open, because on_screen_luts() returns None there and the defaults apply unchanged.
-        luts_cb = QCheckBox("Match the LUTs of the focused view window")
-        luts_cb.setStyleSheet(_CHECK_QSS)
-        luts_cb.setChecked(True)
-        luts_cb.setToolTip(
-            "Use the contrast and colour you have on screen in the focused view window instead of "
-            "the acquisition's channel colours and an automatic 1/99.9 percentile stretch.\n\n"
-            "With no view window open there is nothing on screen to match and the automatic "
-            "values are used. A channel that is not in that window keeps the automatic values "
-            "too, and so does a channel showing a multi-stop colormap (viridis, turbo): Minerva "
-            "stores one colour per channel and cannot hold a gradient.")
-
-        launch_cb = QCheckBox("Open Minerva Author after exporting")
-        launch_cb.setStyleSheet(_CHECK_QSS)
-        launch_cb.setChecked(True)
-
-        path_lbl = QLabel("")
-        path_lbl.setWordWrap(True)
-        path_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        path_lbl.setStyleSheet("color:#8b98ad;font-size:11px;")
-        copy_btn = QPushButton("Copy story path"); copy_btn.setStyleSheet(_BTN_QSS); copy_btn.hide()
-        reveal_btn = QPushButton("Show in folder"); reveal_btn.setStyleSheet(_BTN_QSS); reveal_btn.hide()
-        # THE ZERO-CLICK DESTINATION. A separate button and not a replacement for the Author
-        # launch: Author is the EDITOR (waypoints, story text, masks) and needs its Select File
-        # click because its server has no route, flag or URL that opens a file; render.py is the
-        # VIEWER and needs none. Julio said "viewer". Both are offered; neither is assumed.
-        render_btn = QPushButton("Render a Minerva viewer (no file picking)")
-        render_btn.setStyleSheet(_BTN_QSS); render_btn.hide()
-        render_btn.setToolTip(
-            "Runs Minerva's own render.py on what you just exported and opens the finished "
-            "exhibit. No Select File step.\n\n"
-            "It is a viewer, not an editor: no waypoints, story text or masks.\n"
-            "It writes a JPEG pyramid, so it is lossy; the OME-TIFF is untouched.\n"
-            "Measured on this machine: about 2 s for a 2048x2048 4-channel crop and about "
-            "132 s for a whole 11535x9635 4-channel region, plus about 13 s once per session "
-            "while Minerva's renderer loads.\n"
-            + _MINERVA_INTERNET_NOTE)
-
-        def pick():
-            d = QFileDialog.getExistingDirectory(self, "Save the Minerva export to folder")
-            if not d:
-                return
-            state["dir"] = d
-            dir_lbl.setText(d)
-
-        def on_exported(pairs):
-            state["pairs"] = pairs
-            if not pairs:
-                # An export that wrote NOTHING must not leave the previous one's paths on screen
-                # with live Copy / Show in folder / Render buttons under them. `state["pairs"]` was
-                # already emptied above, so the buttons had quietly become no-ops while still
-                # naming files — a control that looks armed and does nothing.
-                path_lbl.setText("")
-                copy_btn.hide(); reveal_btn.hide(); render_btn.hide()
-                return
-            path_lbl.setText("\n".join(str(story) for _, story in pairs))
-            copy_btn.show(); reveal_btn.show(); render_btn.show()
-
-        def do_render():
-            if state["pairs"]:
-                self.run_minerva_render(state["pairs"])
-
-        def do_copy():
-            if state["pairs"]:
-                QApplication.clipboard().setText("\n".join(str(s) for _, s in state["pairs"]))
-                self._readout.setText("story path copied")
-
-        def do_reveal():
-            if state["pairs"]:
-                from squidxplorer._minerva import reveal
-                reveal(state["pairs"][0][1])
-
-        pick_btn = QPushButton("Choose output folder…"); pick_btn.setStyleSheet(_BTN_QSS)
-        pick_btn.clicked.connect(pick)
-        # Named for the UNIT that lands: one fused mosaic per selected region, cropped to the
-        # fields you boxed. "Export the selected FOVs" promised N files and wrote one per region.
-        run = QPushButton("Export the selection (one mosaic per region)")
-        run.setStyleSheet(_BTN_QSS)
-        run.clicked.connect(lambda: self.run_minerva_export(
-            out_dir=state["dir"], z_operator=proj.currentText(),
-            launch=launch_cb.isChecked(), on_exported=on_exported,
-            luts=self.on_screen_luts() if luts_cb.isChecked() else None,
-        ))
-        copy_btn.clicked.connect(do_copy)
-        reveal_btn.clicked.connect(do_reveal)
-        render_btn.clicked.connect(do_render)
-
-        net_lbl = QLabel(_MINERVA_INTERNET_NOTE)
-        net_lbl.setWordWrap(True)
-        net_lbl.setStyleSheet("color:#8b98ad;font-size:11px;")
-
-        v.addWidget(pick_btn); v.addWidget(dir_lbl)
-        v.addLayout(row); v.addWidget(luts_cb); v.addWidget(launch_cb); v.addWidget(run)
-        v.addWidget(_hline()); v.addWidget(path_lbl); v.addWidget(copy_btn); v.addWidget(reveal_btn)
-        v.addWidget(render_btn); v.addWidget(net_lbl)
-        v.addStretch(1)
-        run.setEnabled(self._reader is not None)
-        return w
+        """The Minerva tab. See `_minerva_panel.MinervaPanel.build_tab`."""
+        return self._minerva_ui().build_tab()
 
     def minerva_selection(self) -> list:
-        """The ``[(region, fov), ...]`` the user actually selected — never a silent stand-in.
-
-        The requirement is "open minerva-author with the selected region(s)", so this reads the
-        selection instead of inventing one. Exactly two sources, in order:
-
-        1. :meth:`selected_region_fovs` — **this window's** selection. ``PlateOverview`` is
-           display-only: it maps grid cells to well ids and emits them, and ``PlateWindow`` is
-           where they land (``_on_selection_changed`` -> ``_selected_regions``) because
-           expanding a well to its FOVs needs ``fovs_per_region``, which only this side has.
-           So we call our own method directly. The previous version probed the overview too and
-           fell back to ``PlateOverview.selected_wells()``; the overview never had a
-           ``selected_region_fovs`` and the fallback was what made the export appear to work at
-           all — a duck-typed chain standing in for reading the selection from its owner.
-        2. The region open in the detail viewer (``_current_well``): every FOV of it.
-
-        Note the unit. The pairs are ``(region, fov)`` but the export groups them BY REGION and
-        fuses each into one mosaic — a region is a mosaic containing an array of FOVs, never a
-        FOV. Selecting a whole region yields all its FOVs here and one fused mosaic downstream.
-
-        A region the user boxed only PART of yields only those FOVs, and downstream that is the
-        same one mosaic CROPPED to them. Nothing here decides that: ``selected_region_fovs``
-        reads the plate's own FOV subsets, and this method's job is only to fall back to the
-        detail viewer's well when the plate has no selection at all.
-
-        Nothing selected returns ``[]`` — the caller says so rather than exporting fov 0 of 36
-        and calling it "the selected well".
-        """
-        fovs_per_region = (self._meta or {}).get("fovs_per_region", {}) or {}
-
-        def expand(regions) -> list:
-            out = []
-            for region in regions:
-                out.extend((str(region), int(f)) for f in fovs_per_region.get(str(region), []))
-            return out
-
-        sel = [(str(r), int(f)) for r, f in self.selected_region_fovs()
-               if int(f) in fovs_per_region.get(str(r), [])]
-        if sel:
-            return sel
-        if self._current_well:
-            return expand([self._current_well])
-        return []
+        """The ``[(region, fov), ...]`` the user selected. See `MinervaPanel.selection`."""
+        return self._minerva_ui().selection()
 
     def on_screen_luts(self) -> "Optional[dict]":
         """The per-channel LUTs of the view window the user is looking at, or ``None``.
@@ -2158,134 +1846,15 @@ class PlateWindow(QMainWindow):
 
     def run_minerva_export(self, out_dir=None, z_operator: str = "mip", launch: bool = True,
                            on_exported=None, time_point=None, selection=None, luts=None):
-        """Export the user's selection for Minerva Author and (optionally) open it.
-
-        Runs off the GUI thread: projecting a well is real I/O plus compute, and starting
-        Minerva Author polls a port for up to 90 s. Tests call this directly with launch=False.
-        *selection* overrides :meth:`minerva_selection` (tests and future callers). *luts* is
-        passed straight through to ``export_selection``: ``None`` means the percentile defaults,
-        exactly as before this parameter existed. Deciding whether to match the screen belongs to
-        the caller (the Minerva tab's checkbox calls :meth:`on_screen_luts`), not here - so this
-        method has no opinion and stays trivially testable in both states.
-
-        *t* is ``None`` by default, meaning THE TIMEPOINT THE WINDOW IS SHOWING. It used to
-        default to the literal ``0`` and both GUI call sites took the default, so a
-        multi-timepoint acquisition exported frame 0 whatever the timepoint bar said — the pixels
-        on screen and the pixels in the OME-TIFF were different images, and nothing said so. An
-        explicit *t* still wins, which is what keeps the CLI and the tests able to name one.
-        """
-        if self._reader is None or self._meta is None:
-            self._readout.setText("open an acquisition first")
-            return
-        time_point = self.time_point if time_point is None else int(time_point)
-        if self._minerva is not None and self._minerva.isRunning():
-            self._readout.setText("already exporting — let the current export finish first")
-            return
-
-        sel = list(selection) if selection is not None else self.minerva_selection()
-        if not sel:
-            self._readout.setText(
-                "nothing selected — pick the well or FOVs to export "
-                "(double-click a well on the plate), then export again")
-            return
-
-        # The export unit is a REGION (one fused mosaic each), so count regions, not FOVs.
-        regions = list(dict.fromkeys(r for r, _ in sel))
-        # ...but a region can now be CROPPED to some of its fields, and that changes the file that
-        # lands. Say how many are cropped rather than letting "3 mosaics" mean either thing.
-        per = (self._meta.get("fovs_per_region") or {})
-        cropped = [r for r in regions
-                   if 0 < len({f for rr, f in sel if rr == r}) < len(per.get(r) or [])]
-        what = (f"{len(regions)} mosaic{'s' if len(regions) != 1 else ''} "
-                f"({', '.join(regions)}, {len(sel)} FOVs"
-                + (f", {len(cropped)} cropped" if cropped else "") + ")")
-        n_t = self._meta.get("n_t", 1) or 1
-        t_note = f" (t={time_point} of {n_t})" if n_t > 1 else ""
-        self._minerva = w = _MinervaWorker(
-            self._reader, sel, out_dir, z_operator, time_point=time_point, launch=launch, luts=luts)
-
-        def on_launched(ok):
-            if ok:
-                # The URL is named and not just implied. Exactly ONE tab is opened now (Minerva
-                # Author opens its own on a cold start, so we no longer open a second), and the
-                # one way that leaves the user with none is Author's webbrowser call failing to
-                # find a browser - in which case it returns False, the server serves anyway, and
-                # this line is the address to paste.
-                self._readout.setText(
-                    f"✓ Minerva Author open at {_MINERVA_URL} - pick a .story.json "
-                    f"({what}{t_note} exported)")
-            else:
-                self._readout.setText(
-                    f"✓ exported {what}{t_note} — Minerva Author not found "
-                    f"(set ${_MINERVA_HOME_ENV} to an explorer checkout)")
-
-        def on_exported_readout(pairs):
-            # Report what LANDED, not what was asked for: a stop mid-export writes fewer.
-            if not pairs:
-                self._readout.setText("nothing exported")
-                return
-            done = regions[: len(pairs)]
-            note = "" if len(pairs) == len(regions) else f" of {len(regions)} (stopped)"
-            # The SUCCESS line says a mosaic was cropped, not just the in-flight one. This is the
-            # line that stays on screen and the only one a user reads after the export, and a crop
-            # that reads identically to a whole region is the same silent difference the filename
-            # suffix (`_2fov`) exists to prevent on disk.
-            crop = [r for r in cropped if r in done]
-            crop_note = (f", {len(crop)} cropped to the FOVs you boxed" if crop else "")
-            self._readout.setText(
-                f"✓ exported {len(pairs)} mosaic{'s' if len(pairs) != 1 else ''}{note} from "
-                f"{', '.join(done)}{t_note}{crop_note} → {Path(pairs[0][0]).parent}")
-
-        w.progress.connect(
-            lambda d, n: self._readout.setText(f"● Minerva export · {d}/{n} mosaics"))
-        if on_exported is not None:
-            w.exported.connect(on_exported)
-        w.exported.connect(on_exported_readout)
-        w.launched.connect(on_launched)
-        w.failed.connect(lambda m: self._readout.setText(f"Minerva export failed: {m}"))
-        self._readout.setText(f"● Minerva export · {what}{t_note} …")
-        w.start()
+        """Export the selection for Minerva Author. See `MinervaPanel.run_export`."""
+        return self._minerva_ui().run_export(
+            out_dir=out_dir, z_operator=z_operator, launch=launch, on_exported=on_exported,
+            time_point=time_point, selection=selection, luts=luts)
 
     def run_minerva_render(self, pairs, threads=None, open_when_done: bool = True):
-        """Render exported ``(ome, story)`` pairs into Minerva exhibits and open the first one.
-
-        The zero-click destination. ``run_minerva_export`` hands the user to Minerva Author, which
-        cannot be pointed at a file and so still needs its "Select File" click; this hands them a
-        finished, already-coloured Minerva VIEWER instead. Both exist because they are different
-        programs: Author edits, ``render.py`` renders. See
-        :func:`squidxplorer._minerva.render_exhibit` for the costs, which are real and measured.
-
-        Runs off the GUI thread. A render is minutes, not seconds.
-        """
-        if not pairs:
-            self._readout.setText("export something first - there is nothing to render")
-            return
-        if getattr(self, "_minerva_render", None) is not None and self._minerva_render.isRunning():
-            self._readout.setText("already rendering - let the current render finish first")
-            return
-        n = len(pairs)
-        self._minerva_render = w = _MinervaRenderWorker(pairs, threads=threads)
-
-        def on_rendered(indexes):
-            if not indexes:
-                return                       # `failed` says why; an empty success is not a message
-            note = "" if len(indexes) == n else f" of {n}"
-            if open_when_done:
-                from squidxplorer._minerva import open_exhibit
-                open_exhibit(indexes[0])
-            self._readout.setText(
-                f"✓ rendered {len(indexes)} Minerva viewer{'s' if len(indexes) != 1 else ''}{note} "
-                f"→ {Path(indexes[0]).parent}. {_MINERVA_INTERNET_NOTE}")
-
-        w.progress.connect(
-            lambda d, tot: self._readout.setText(f"● Minerva render · {d}/{tot} exhibits"))
-        w.rendered.connect(on_rendered)
-        # Named in the status line, because render.py runs as a script under a FOREIGN venv: its
-        # failure is an exit code plus stderr, and if we do not print it nothing does.
-        w.failed.connect(lambda m: self._readout.setText(f"Minerva render failed: {m}"))
-        self._readout.setText(
-            f"● Minerva render · {n} exhibit{'s' if n != 1 else ''} - this takes minutes …")
-        w.start()
+        """Render exported pairs into Minerva exhibits. See `MinervaPanel.run_render`."""
+        return self._minerva_ui().run_render(pairs, threads=threads,
+                                             open_when_done=open_when_done)
 
     def _build_layers_tab(self) -> QWidget:
         """The Layers tab: the OperationStack as a list of toggleable, reorderable layers. The topmost
@@ -2795,18 +2364,18 @@ class PlateWindow(QMainWindow):
             str(zroot), path_of=well_paths.get, fov_of=well_fovs.get,
             levels=levels, well_px=_well_px, pixel_size_um=px_um, written=None))
         coarse_lvl = levels[-1]                                   # coarsest -> tiny thumbnail
-        self._worker = _ComputedPlateWorker(str(zroot), worker_wells, coarse_lvl,
-                                           np.uint16, self.time_point)
-        self._worker.tileReady.connect(self._on_tile)
-        self._worker.streamEnded.connect(lambda: self._recomposite("computed"))
-        self._worker.progress.connect(
-            lambda i, n: self._readout.setText(f"loading computed plate — {i}/{n} wells"))
-        self._worker.failed.connect(self._on_failed)
-        self._worker.finished_ok.connect(
-            lambda: self._readout.setText(
-                f"✓ computed MIP · {len(self._order)} wells (read-only){fov_warn}"))
+        w = _ComputedPlateWorker(str(zroot), worker_wells, coarse_lvl,
+                                 np.uint16, self.time_point)
         self._readout.setText(f"loading computed plate · {len(self._order)} wells …")
-        self._worker.start()
+        _launch_worker(
+            self, w, slot="_worker",
+            on_done=lambda: self._readout.setText(
+                f"✓ computed MIP · {len(self._order)} wells (read-only){fov_warn}"),
+            on_problem=self._on_failed,
+            on_progress=lambda i, n: self._readout.setText(
+                f"loading computed plate — {i}/{n} wells"),
+            signals={"tileReady": self._on_tile,
+                     "streamEnded": lambda: self._recomposite("computed")})
 
     # -- run a post-processing operator over the whole plate (persists a navigable OME-Zarr plate) --
     def _busy(self) -> bool:
@@ -2895,19 +2464,19 @@ class PlateWindow(QMainWindow):
                     return
                 chan = self._meta["channels"][0]["name"]
                 w = _FlatfieldWorker(self._reader, self._meta, chan, parent=self)
-                w.stage.connect(self._readout.setText)
-                w.problem.connect(lambda m: self._readout.setText(f"flat-field estimate failed: {m}"))
 
                 def _profile_ready(profile, k=key, regs=regions, sv=save, op=out_parent, c=chan):
                     _ff.set_profile(profile, channel=c)
                     self._readout.setText("flat-field: profile ready — running.")
                     self.run_operator(k, out_parent=op, regions=regs, save=sv)
 
-                w.done.connect(_profile_ready)
-                self._ff_est_worker = w
                 self._readout.setText(f"flat-field: estimating an illumination profile from {chan} "
                                       "(tilefusion BaSiC)…")
-                w.start()
+                _launch_worker(
+                    self, w, slot="_ff_est_worker", on_done=_profile_ready,
+                    on_problem=lambda m: self._readout.setText(
+                        f"flat-field estimate failed: {m}"),
+                    signals={"stage": self._readout.setText})
                 return
         label = operator_label(key)
         # Scope the run. An explicit `regions` list still wins (the preview spinner builds one, and
@@ -3039,10 +2608,10 @@ class PlateWindow(QMainWindow):
         # the whole feature not rendering. The overview then adopts the worker's boxes so a
         # double-click on a mosaic cell resolves the FOV under the cursor instead of always 0.
         run_order = self._order if regions is None else regions
-        self._worker = _OperatorWorker(key, self._reader, self._meta, self._fov_index,
-                                       str(out_dir) if out_dir else "", regions=regions, save=save,
-                                       n_fovs=None, operator_kwargs=operator_kwargs)
-        self._overview.set_mosaic_boxes(self._worker.mosaic_boxes)
+        worker = _OperatorWorker(key, self._reader, self._meta, self._fov_index,
+                                 str(out_dir) if out_dir else "", regions=regions, save=save,
+                                 n_fovs=None, operator_kwargs=operator_kwargs)
+        self._overview.set_mosaic_boxes(worker.mosaic_boxes)
         # A re-run must not composite on top of the LAST run's pixels: with a mosaic, a run that
         # lands fewer FOVs would otherwise leave the previous run's fields standing in the same
         # cell, blended into the new ones. Drop this layer's store before the first tile arrives.
@@ -3050,20 +2619,11 @@ class PlateWindow(QMainWindow):
         # place that decides the two are the same thing today.
         self._overview.reset_layer(layer_key)
         dest = f" → {out_dir.name}" if save else " (preview — not saved)"
-        self._worker.tileReady.connect(self._on_tile)
-        self._worker.resultReady.connect(self._on_result)
-        self._worker.progress.connect(self._on_progress)
-        self._worker.runProgress.connect(self._on_unit_progress)
-        self._worker.streamEnded.connect(lambda k=layer_key: self._recomposite(k))
-        self._worker.writtenReady.connect(self._on_written)
-        self._worker.wellFailed.connect(                     # a skipped well -> red x, run continues
-            lambda ri, ci: self._overview.set_status(ri, ci, "failed") if self._overview else None)
-        self._worker.failed.connect(self._on_failed)
         # IMA-226: report what the plate ACTUALLY got. A run where every well raised (flat-field
         # with no profile is the routine case) still reaches finished_ok — the per-well on_error
         # path is what keeps one bad file from aborting a plate — and used to print "✓" over an
         # empty plate. Landed==0 is a failure however politely the engine returned.
-        def _done_msg(w=self._worker):
+        def _done_msg(w=worker):
             if w.landed == 0:
                 self._run_readout(
                     f"⚠ {label} · {scope} produced nothing — all {w.skipped or self._worker._total} "
@@ -3076,19 +2636,6 @@ class PlateWindow(QMainWindow):
                 self._run_readout(
                     f"✓ {label} · {scope}{dest}" + ("  (re-openable OME-Zarr)" if save else ""))
 
-        self._worker.finished_ok.connect(_done_msg)
-        # Whether the plate this run is writing ended up whole is NOT tracked here. `write_plate`
-        # settles it on the store itself (`_output.INCOMPLETE_MARKER`, kept unless every field
-        # this run owed landed) as the last act of the write, which is the only place that knows
-        # the answer -- a GUI flag set from `finished_ok` cannot see a well the engine skipped, and
-        # cannot be set at all by a process that was killed. See `_open_computed`.
-        # QThread.finished (not finished_ok): it fires for a FAILED or STOPPED run too, and a tab
-        # switch deferred during any of those still has to be delivered. _retire only disconnects
-        # the worker's own signals, so this survives a stop.
-        # Connected bare, so the slot is entered with ``worker=None`` — "the RUN's own thread
-        # exited", which is the one drain allowed to close the run's books. Only ``_retire`` names
-        # the thread, because only there can it be the superseded raw preview.
-        self._worker.finished.connect(self._on_run_drained)
         # Announce the run to the activity registry the log panel's header reads. Keyed
         # "operator-run" (re-entrant by key: a new run replaces the old entry rather than stacking).
         # Ended in _on_run_drained, which fires on ok/failed/stopped alike — so the header cannot be
@@ -3124,7 +2671,34 @@ class PlateWindow(QMainWindow):
         self._tell_requester(requester, "operator_started", label)
         self.log.started(self._run.action, address=self._run.address)
         self._run_readout(f"● {label} · {scope}{dest} …")
-        self._worker.start()
+        # Whether the plate this run is writing ended up whole is NOT tracked here. `write_plate`
+        # settles it on the store itself (`_output.INCOMPLETE_MARKER`, kept unless every field
+        # this run owed landed) as the last act of the write, which is the only place that knows
+        # the answer -- a GUI flag set from `finished_ok` cannot see a well the engine skipped, and
+        # cannot be set at all by a process that was killed. See `_open_computed`.
+        #
+        # ``on_finished`` is QThread.finished (not finished_ok): it fires for a FAILED or STOPPED
+        # run too, and a tab switch deferred during any of those still has to be delivered.
+        # _retire only disconnects the worker's own signals, so this survives a stop. Connected
+        # bare, so the slot is entered with ``worker=None`` — "the RUN's own thread exited",
+        # which is the one drain allowed to close the run's books. Only ``_retire`` names the
+        # thread, because only there can it be the superseded raw preview.
+        _launch_worker(
+            self, worker, slot="_worker",
+            on_done=_done_msg,                               # finished_ok
+            on_problem=self._on_failed,                      # whole-run failure, not a well skip
+            on_progress=self._on_progress,
+            on_finished=self._on_run_drained,
+            signals={
+                "tileReady": self._on_tile,
+                "resultReady": self._on_result,
+                "runProgress": self._on_unit_progress,
+                "streamEnded": lambda k=layer_key: self._recomposite(k),
+                "writtenReady": self._on_written,
+                # a skipped well -> red x, run continues
+                "wellFailed": lambda ri, ci: (self._overview.set_status(ri, ci, "failed")
+                                              if self._overview else None),
+            })
 
     def _check_disk(self, out_dir, regions: Optional[list] = None) -> tuple[bool, float, str]:
         """Estimate the persisted plate size and refuse if it won't fit (with headroom). Returns
@@ -3507,7 +3081,7 @@ class PlateWindow(QMainWindow):
 
     def _plate_copy_luts(self):
         """Copy the plate's per-channel contrast into the shared LUT clipboard (window <-> plate)."""
-        from squidxplorer._region_viewer import _LUT_CLIPBOARD
+        from squidxplorer._lut_clipboard import CLIPBOARD as _LUT_CLIPBOARD
         ov = self._overview
         names = self._plate_channels()
         wins = ov.channel_windows() if ov is not None else []
@@ -3544,7 +3118,7 @@ class PlateWindow(QMainWindow):
         never-go-black floor still refuses the last lit channel -- pasting from a window with
         everything switched off must not empty the navigator.
         """
-        from squidxplorer._region_viewer import _LUT_CLIPBOARD
+        from squidxplorer._lut_clipboard import CLIPBOARD as _LUT_CLIPBOARD
         ov = self._overview
         if not _LUT_CLIPBOARD:
             self._readout.setText("no copied LUTs yet — copy from a window or the plate first.")
@@ -3844,29 +3418,26 @@ class PlateWindow(QMainWindow):
         ``_ff_est_worker`` (the auto-estimate a `flatfield` run does for you) — both parented to
         this window and both absent from `closeEvent`. A BaSiC solve is seconds-to-minutes
         (`_FlatfieldWorker`'s own docstring), so closing the plate during one destroyed a running,
-        parented QThread: SIGABRT. They can go through `_retire` now only because
-        `_FlatfieldWorker` grew a `stop()`; `_retire` calls it.
+        parented QThread: SIGABRT. Both now START through ``_worker_lifecycle.launch`` (which is
+        what registers them on these slots) and STOP through the same ``stop_slot`` every other
+        named worker uses — nothing about them is special any more.
         """
-        for slot in ("_flatfield_worker", "_ff_est_worker"):
-            self._retire(getattr(self, slot, None))
-            setattr(self, slot, None)
+        _stop_slot(self, "_flatfield_worker")
+        _stop_slot(self, "_ff_est_worker")
 
     def _stop_worker(self):
-        self._retire(self._worker)
-        self._worker = None
+        _stop_slot(self, "_worker")
 
     def _stop_preview(self):
         _ingest.stop_preview(self)
 
     def _stop_minerva(self):
-        self._retire(self._minerva)
-        self._minerva = None
+        _stop_slot(self, "_minerva")
         # The render worker is retired here too and not on its own line: it is the same feature and
         # it is the LONGER of the two (a measured 132 s for one real region against an at-most 90 s
         # port poll), so a close that abandons the launch wait but not the render would still hold
         # the window for two minutes. Its stop() terminates the child render.py process.
-        self._retire(getattr(self, "_minerva_render", None))
-        self._minerva_render = None
+        _stop_slot(self, "_minerva_render")
 
     def _join_retired(self, msec: int = 3000) -> None:
         """WAIT for every deferred worker, at the one moment deferring is not allowed: teardown.
