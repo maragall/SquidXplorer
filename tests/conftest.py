@@ -12,6 +12,12 @@ import numpy as np
 import pytest
 import tifffile
 
+# The suite renders OFFSCREEN by default: real widget tests on the native platform open actual
+# windows, and macOS yanks focus to each one — the person at the keyboard loses their typing
+# focus for the length of the run. setdefault, not assignment, so a visual debug can still ask
+# for real windows with QT_QPA_PLATFORM=cocoa (or xcb). Must be set before QApplication exists.
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
 #: The process's QApplication, pinned for the whole session so no fixture teardown can free it.
 _QT_APP = None
 

@@ -586,6 +586,11 @@ The rules:
 - A run that showed memory pressure (MemoryError, killed workers, wildly slow collection) is not
   an authoritative result. Rerun it solo and say that happened; never report it as a plain pass
   or failure.
+- **The suite renders offscreen by default** (`tests/conftest.py` sets
+  `QT_QPA_PLATFORM=offscreen` via setdefault): on the native platform every real widget test
+  opens actual windows and macOS yanks focus to each one, stealing the keyboard from whoever is
+  typing. Verified identical counts offscreen vs cocoa (2867 passed both ways, 2026-08-15).
+  `QT_QPA_PLATFORM=cocoa pytest …` still gets real windows for a visual debug.
 
 ## Agent skills
 
