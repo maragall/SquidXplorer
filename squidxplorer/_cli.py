@@ -155,19 +155,19 @@ class ProcessParameters(BaseModel, use_attribute_docstrings=True):
 
     @model_validator(mode="after")
     def _known_parameters(self):
-        """Refuse a --param the chosen operator does not declare, before the reader is opened."""
+        """Refuse a --param the operator neither declares nor accepts, before the reader opens."""
+        from squidxplorer._engine import operator_accepts
+
         pairs = dict(_parse_param(p) for p in self.param)
+        if not pairs:
+            return self
         declared = operator_defaults(self.operator)
-        if declared:
-            unknown = [k for k in pairs if k not in declared]
-            if unknown:
-                raise ValueError(
-                    f"{self.operator!r} does not take {', '.join(unknown)}; it takes: "
-                    f"{', '.join(declared) or 'no parameters'}")
-        elif pairs and self.operator not in _region_operator_names():
+        takes = set(declared) | set(operator_accepts(self.operator))
+        unknown = [k for k in pairs if k not in takes]
+        if unknown:
             raise ValueError(
-                f"{self.operator!r} declares no parameters, so it cannot be given "
-                f"{', '.join(pairs)}")
+                f"{self.operator!r} does not take {', '.join(unknown)}; it takes: "
+                f"{', '.join(sorted(takes)) or 'no parameters'}")
         return self
 
     def parameters(self) -> dict:
@@ -271,6 +271,15 @@ def run(params: ProcessParameters, *, stop=None) -> dict:
     # n_fovs=0 on the CLI means "every FOV"; only warn when FOVs are actually discarded.
     fpr = reader.metadata["fovs_per_region"]
     n_fovs = None if params.n_fovs == 0 else params.n_fovs
+    from squidxplorer._engine import is_region_operator
+    if is_region_operator(params.operator):
+        # The region loop fuses whole wells and REFUSES an n_fovs crop; the CLI cannot tell
+        # this flag's default from an explicit --n-fovs, so it resolves to every FOV and says
+        # so instead of forwarding a value the engine would refuse.
+        if n_fovs is not None:
+            logger.warning("'%s' fuses every FOV of each well; --n-fovs %d is the per-FOV "
+                           "loop's knob and is ignored here.", params.operator, n_fovs)
+        n_fovs = None
     multi = sum(1 for r in fpr if len(fpr[r]) > 1)
     if multi and n_fovs is not None:
         logger.warning("%d well(s) have >1 FOV — projecting %d per well; pass --n-fovs 0 to "

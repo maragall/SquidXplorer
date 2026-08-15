@@ -658,9 +658,19 @@ def test_a_parameterised_operator_is_not_refused():
 
 
 def test_a_region_operator_that_declares_no_params_is_refused_for_that_reason():
-    """``coordinate`` declares no ``params=``, so there is nothing for a form to show."""
-    why = panel_refusal("coordinate")
-    assert why and "declares no params" in why and "StitcherPanel" in why
+    """A param-less region operator has nothing for a form to show — the refusal names that.
+
+    ``coordinate`` used to be the example; it now DECLARES z_operator/correct_illumination and
+    gets a generated panel like every declaring operator, so the refusal is pinned on a bare
+    runtime registration instead (the registry snapshot fixture restores the table)."""
+    from squidxplorer import add_region_operator
+
+    add_region_operator("bare_region_op_for_panels", lambda reader, region, fovs: None)
+    why = panel_refusal("bare_region_op_for_panels")
+    assert why and "declares no params" in why
+
+    assert panel_refusal("coordinate") is None, (
+        "coordinate declares params now; a generated panel must serve it, not a refusal")
 
 
 def test_a_key_that_is_not_an_operator_is_refused_by_name():

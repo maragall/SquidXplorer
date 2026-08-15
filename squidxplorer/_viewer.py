@@ -818,17 +818,6 @@ class PlateWindow(QMainWindow):
         self._readout.setStyleSheet("color:#8b98ad;font-size:12px;")
         self.statusBar().addWidget(self._readout, 1)
 
-        # Hidden orphans (referenced elsewhere; not shown — no header/footer).
-        self._scope_run = QComboBox()
-        self._scope_run.addItems(list(_run_scope.RUN_SCOPES))
-        self._scope_run.hide()
-        self._raw_btn = QPushButton("Return to raw view")
-        self._raw_btn.clicked.connect(self._return_to_raw)
-        self._raw_btn.hide()
-        self._native3d_btn = QPushButton("3D native (napari)…")
-        self._native3d_btn.clicked.connect(self._open_native_3d)
-        self._native3d_btn.hide()
-
         pane = QWidget()
         pane.setStyleSheet(f"background:{_BG};")
         v = QVBoxLayout(pane)
@@ -2055,9 +2044,9 @@ class PlateWindow(QMainWindow):
     def _bind_window_contrast(self, win):
         """Make the plate a SINK of ONE window's napari pane (contrast, eye icons, colormap).
 
-        No new contrast model, and no second sink: this reuses ``_on_detail_contrast``, which
-        already lands in the plate's FOLLOW path via ``follow_channel_window`` rather than its
-        manual latch. That distinction is the one that matters — treating an owner's autoscale as
+        No new contrast model, and no second sink: everything lands in the plate's FOLLOW path
+        via ``PlateOverview.follow_channel_window`` rather than its manual latch. That
+        distinction is the one that matters — treating an owner's autoscale as
         a user gesture is what latched every channel MANUAL on open, killed the plate's running
         auto-contrast from the first frame, and left SCOPE_PER_REGION painting every well under
         one global window while the amber "wells NOT comparable" badge lied over the top.
@@ -2187,8 +2176,6 @@ class PlateWindow(QMainWindow):
             return
         self._stop_worker()
         self._active_op_key = None
-        if getattr(self, "_raw_btn", None):
-            self._raw_btn.hide()                             # nothing to return from now
         # Showing raw IS "every transform off" under the stack's one rule (topmost enabled
         # renders). Setting the overview to raw directly left the stack claiming a transform the
         # plate was not showing, and the next toggle snapped the plate back onto it.
@@ -2331,8 +2318,6 @@ class PlateWindow(QMainWindow):
         self._overview.activeLayerChanged.connect(lambda _k: self._update_loupe_source())
         self._overview.set_time_point(self.time_point)
         self._active_op_key = "computed"
-        if getattr(self, "_raw_btn", None):
-            self._raw_btn.hide()                      # a computed plate has no raw to return to
         self._op_stack.reset(); self._op_stack.add("computed", "computed MIP")
         self._apply_layers()
         self._refresh_layers_tab()
@@ -2486,11 +2471,8 @@ class PlateWindow(QMainWindow):
         # that existed before the selector, so nothing silently changes under an existing user.
         from_selection = False
         if regions is None:
-            scope_value = (self._scope_run.currentText()
-                           if getattr(self, "_scope_run", None) is not None
-                           else _run_scope.SCOPE_SELECTION)
             regions, problem = _run_scope.resolve_run_scope(
-                scope_value,
+                _run_scope.SCOPE_SELECTION,
                 selection=self._selected_regions,
                 current_region=self._current_well,
             )
@@ -2499,7 +2481,9 @@ class PlateWindow(QMainWindow):
                 # it to the whole plate would be hours of compute nobody asked for.
                 self._readout.setText(problem)
                 return
-            from_selection = (regions is not None and scope_value == _run_scope.SCOPE_SELECTION)
+            # the one scope this pane runs is SCOPE_SELECTION (the hidden selector widget that
+            # once offered alternatives is gone), so a successful resolution IS a selection scope
+            from_selection = regions is not None
         if regions is not None:
             # A MAPPING SURVIVES AS A MAPPING. `regions` has three shapes (see
             # `projection.scope_wells`) and `{region: [fov, ...]}` -- the FOV subset an ROI window
@@ -2580,10 +2564,7 @@ class PlateWindow(QMainWindow):
             self._overview.set_all_status("processing")      # amber across the plate
         layer_key = operator_layer_key(key, None)
         self._active_op_key = layer_key                      # tiles stream into this layer
-        # NOTE: _raw_btn is a hidden ORPHAN (never added to a layout since the central pane was
-        # removed), so .show() made it POP UP AS A FLOATING WINDOW — Julio: "a 'return to raw view'
-        # window pops up. That I don't get." Return-to-raw is handled by the layer stack / plate mode
-        # now, so we no longer surface this stray button.
+        # Return-to-raw is handled by the layer stack / plate mode, never by a dedicated button.
         self._op_stack.add(layer_key, label)                 # push the operator layer onto the stack
         self._apply_layers()                                 # show it: topmost enabled renders
         # Loupe source for this run. A SAVED run gets a zarr source whose written-well set grows
@@ -3092,7 +3073,11 @@ class PlateWindow(QMainWindow):
         for i, name in enumerate(names):
             if i < len(wins) and wins[i] is not None:
                 lo, hi = float(wins[i][0]), float(wins[i][1])
-                _LUT_CLIPBOARD[name] = {"clim": (lo, hi), "cmap": None}
+                # The FULL record, in the shape the plate can express: colour as rgb (the
+                # plate's spelling — it has no colormaps), visibility as on. It used to copy
+                # clim alone, so a plate→window paste carried contrast and nothing else.
+                _LUT_CLIPBOARD[name] = {"clim": (lo, hi), "cmap": None,
+                                        "rgb": ov.channel_rgb(i), "on": ov.channel_visible(i)}
         self._readout.setText(f"copied plate LUTs for {len(_LUT_CLIPBOARD)} channel(s).")
 
     def _plate_paste_luts(self):
@@ -3173,11 +3158,6 @@ class PlateWindow(QMainWindow):
             + (f" — {', '.join(skipped)} has no signal in that window, so its contrast was left "
                f"alone rather than pasted as a one-count window." if skipped else "."))
 
-    def _highlight_view_regions(self, regions):
-        """A view was clicked/opened — move the plate's blue wash onto its regions."""
-        if self._overview is not None:
-            self._overview.highlight_regions(regions)
-
     def _refresh_view_hues(self):
         """Wash the plate for the SELECTED views in the navigator, each in its own hue (Linux
         multi-select). The active (first) view reads brighter. Empty selection -> no wash (Julio:
@@ -3192,39 +3172,6 @@ class PlateWindow(QMainWindow):
             if v is not None:
                 entries.append((v.regions, _view_hue(v.window_id, focused=(v.window_id == focused))))
         self._overview.set_view_hues(entries)
-
-    def available_views(self) -> list:
-        """Every View an operator could target, UNIFIED (Spencer's operate-on-views UI binds here).
-
-        A View is just a named region-set (see ``_region_viewer.View``), so "run on the selection",
-        "run on this window", and "decon the whole plate" stop being three code paths and become one:
-        run on a View's regions. "Copy the whole plate" and "select all regions" are Views too — the
-        whole-plate View below IS the copy. Order: whole plate, current selection (if any), then each
-        open window / ROI child. The plate's existing status highlight (amber -> done) lights a View's
-        wells as the run processes them, which is the "processed wells highlight on the plate" ask."""
-        from squidxplorer._region_viewer import View
-
-        views: list = []
-        if getattr(self, "_order", None):
-            views.append(View(id="plate", name="Whole plate",
-                              regions=tuple(self._order), kind="plate"))
-        sel = list(getattr(self, "_selected_regions", None) or [])
-        if sel:
-            ordered = tuple(r for r in self._order if r in set(sel)) or tuple(sel)
-            views.append(View(id="selection", name=f"Selection ({len(ordered)})",
-                              regions=ordered, kind="selection"))
-        views.extend(self._viewer_manager.views())
-        return views
-
-    def run_on_view(self, key: str, view) -> None:
-        """Run operator ``key`` on a View's regions — the operate-on-views ENGINE hook (Julio's lane;
-        the selector UI is Spencer's). Reuses ``run_operator`` unchanged, so the plate's amber->done
-        status lights exactly this View's wells as they process."""
-        regions = list(getattr(view, "regions", None) or [])
-        if not regions:
-            self._readout.setText("this view has no regions to run on.")
-            return
-        self.run_operator(key, regions=regions)
 
     def _print_open_views_target(self, action: str) -> "Optional[list]":
         """Say WHICH windows an "Open views" run is aimed at, and return what it resolved to.
@@ -3347,30 +3294,6 @@ class PlateWindow(QMainWindow):
         win = self._viewer_manager.open([well_id])
         if win is None:
             self._readout.setText("Open an acquisition before opening a view.")
-
-    def _on_detail_contrast(self, ch: int, lo: float, hi: float):
-        """The CENTRAL ARRAY VIEWER re-windowed channel *ch*. Make the plate show that window.
-
-        This is the whole of the cross-repo sync (IMA-261), and it is deliberately one-way:
-        ndviewer_light owns contrast, the plate follows. `(lo, hi)` are the numbers ndv handed its
-        own canvas — not a re-derivation from a slider position, not a percentile recomputed here
-        — so "the plate and the viewer show the same window" is true by construction rather than
-        by two rules being kept in step.
-
-        It lands in the plate's FOLLOW path, NOT in its manual latch. ndv autoscales by itself —
-        at open, and again whenever the displayed data changes — so treating each broadcast as a
-        user gesture latched every channel MANUAL before anyone had touched anything: the plate's
-        running auto-contrast was dead from the first frame, and SCOPE_PER_REGION painted every
-        well under ndv's one global window while the plate still drew the amber "wells NOT
-        comparable" badge over the top. A sink records what the owner resolved; only the user sets
-        policy. `_RunningContrast.resolve` is still the single precedence rule.
-        """
-        if self._overview is None:
-            return
-        n_ch = len(self._overview._labels)
-        if not (0 <= ch < n_ch):
-            return          # ndv drew a channel the plate does not have (RGB mode, or a re-ingest)
-        self._overview.follow_channel_window(ch, float(lo), float(hi))
 
     # NO reference-plane chain here. `_focus_reference_plane`, `_on_focus_problem`,
     # `_on_reference_plane` and `_set_z_index` were removed on 2026-07-29: the only entry

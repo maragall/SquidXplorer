@@ -28,18 +28,13 @@ from .conftest import shutdown_plate_window  # noqa: E402
 from .test_viewer import _drain_until, qapp  # noqa: E402,F401  (fixtures)
 
 
-class _FakeDims:
-    """napari's ``Dims`` shape, only the parts the window drives."""
-
-    def __init__(self, nsteps):
-        self.nsteps = tuple(nsteps)
-        self.ndim = len(self.nsteps)
-        self.current_step = tuple(0 for _ in self.nsteps)
-
-    def set_current_step(self, axis, step):
-        cur = list(self.current_step)
-        cur[int(axis)] = int(step)
-        self.current_step = tuple(cur)
+def _shape_dims(viewer, nsteps):
+    """Shape the REAL ``ViewerModel.dims`` to *nsteps* — the pane's model is real now, and its
+    ``dims`` attribute is frozen, so the shape is CONFIGURED rather than replaced."""
+    viewer.dims.ndim = len(nsteps)
+    viewer.dims.range = tuple((0, max(0, n - 1), 1) for n in nsteps)
+    viewer.dims.current_step = tuple(0 for _ in nsteps)
+    return viewer.dims
 
 
 def _open_window(win, regions):
@@ -96,7 +91,7 @@ def test_moving_a_windows_region_slider_reloads_that_windows_mosaic(
     assert _drain_until(qapp, lambda: bool(loads), timeout=10), (
         "the window's mosaic was never reloaded for the region the slider moved to")
     assert loads == [regions[1]], f"the wrong region was loaded: {loads}"
-    assert _drain_until(qapp, lambda: bool(pane.mosaic.added), timeout=30), (
+    assert _drain_until(qapp, lambda: bool(len(pane._viewer.layers)), timeout=30), (
         "no layer reached the window's viewer")
     shutdown_plate_window(qapp, win)
 
@@ -156,7 +151,7 @@ def test_focus_moves_the_windows_own_z_slider(qapp, napari_pane_stub, squid_data
     win = V.PlateWindow(None)
     win.ingest(str(root))
     w = _open_window(win, ["B3"])
-    w._napari_viewer().dims = _FakeDims((10, 512, 512))
+    _shape_dims(w._napari_viewer(), (10, 512, 512))
 
     w._on_reference_plane(4, "")
 
@@ -173,7 +168,7 @@ def test_focus_reports_when_no_z_slider_could_be_moved(qapp, napari_pane_stub,
     win = V.PlateWindow(None)
     win.ingest(str(root))
     w = _open_window(win, ["B3"])
-    w._napari_viewer().dims = _FakeDims((512, 512))     # (y, x): no z axis to move
+    _shape_dims(w._napari_viewer(), (512, 512))     # (y, x): no z axis to move
 
     w._on_reference_plane(4, "")
 
@@ -190,7 +185,7 @@ def test_a_single_plane_stack_is_also_no_z_slider(qapp, napari_pane_stub,
     win = V.PlateWindow(None)
     win.ingest(str(root))
     w = _open_window(win, ["B3"])
-    w._napari_viewer().dims = _FakeDims((1, 512, 512))
+    _shape_dims(w._napari_viewer(), (1, 512, 512))
 
     w._on_reference_plane(4, "")
 
@@ -206,7 +201,7 @@ def test_the_answer_is_clamped_to_the_stack_this_window_is_showing(
     win = V.PlateWindow(None)
     win.ingest(str(root))
     w = _open_window(win, ["B3"])
-    w._napari_viewer().dims = _FakeDims((5, 512, 512))
+    _shape_dims(w._napari_viewer(), (5, 512, 512))
 
     w._on_reference_plane(99, "")
 

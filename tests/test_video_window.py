@@ -142,7 +142,7 @@ def test_a_hidden_channel_is_left_out_of_the_movie(
         qapp, napari_pane_stub, five_d_root, spy_worker, save_dialog):
     """Out of the view is out of the movie: the window passes the VISIBLE channels."""
     win, w = _open_window(qapp, five_d_root)
-    _drain_until(qapp, lambda: len(w._pane.mosaic._layers) >= 2, timeout=20)
+    _drain_until(qapp, lambda: len(w._pane._viewer.layers) >= 2, timeout=20)
     names = [c["name"] for c in w._meta["channels"]]
     assert len(names) == 2
 
@@ -174,7 +174,7 @@ def test_the_click_handler_does_not_read_or_encode_on_the_ui_thread(
     from squidxplorer._video import record_region
 
     win, w = _open_window(qapp, five_d_root)
-    _drain_until(qapp, lambda: bool(w._pane.mosaic._layers), timeout=20)
+    _drain_until(qapp, lambda: bool(len(w._pane._viewer.layers)), timeout=20)
 
     t0 = time.perf_counter()
     record_region(w._reader, w._meta, w.current_region(), tmp_path / "reference.mp4",
@@ -200,7 +200,7 @@ def test_the_export_never_reads_a_plane_on_the_qt_thread(
     from .test_gallery import _RecordingReader
 
     win, w = _open_window(qapp, five_d_root)
-    _drain_until(qapp, lambda: bool(w._pane.mosaic._layers), timeout=20)
+    _drain_until(qapp, lambda: bool(len(w._pane._viewer.layers)), timeout=20)
     recording = _RecordingReader(w._reader)
     w._reader = recording
     before = recording.reads
@@ -224,7 +224,7 @@ def test_the_window_writes_a_real_movie_whose_frames_differ(
         qapp, napari_pane_stub, five_d_root, save_dialog, tmp_path):
     """The whole chain, no stub in the recording path: chip -> _VideoWorker -> .mp4 -> decode."""
     win, w = _open_window(qapp, five_d_root)
-    _drain_until(qapp, lambda: bool(w._pane.mosaic._layers), timeout=20)
+    _drain_until(qapp, lambda: bool(len(w._pane._viewer.layers)), timeout=20)
     out = Path(save_dialog["path"])
 
     w._record_movie()

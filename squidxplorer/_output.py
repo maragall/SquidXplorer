@@ -11,6 +11,7 @@ from typing import Iterable, Iterator, Optional
 import numpy as np
 import tifffile
 
+from squidxplorer._engine import N_FOVS_LOOP_DEFAULT as _N_FOVS_LOOP_DEFAULT
 from squidxplorer._engine import _default_workers, run_plate
 from squidxplorer._volume import release as release_pages
 from squidxplorer._zarr_store import create_array, write_group
@@ -20,8 +21,7 @@ from squidxplorer.projection import (
     LABELS,
     RESULT_KINDS,
     cast_like,
-    resolve_n_fovs,
-    select_fovs,
+    scope_wells,
 )
 
 _NGFF_VERSION = "0.5"
@@ -67,8 +67,13 @@ def plate_pyramid_factor(frame_shape, **kw) -> float:
 
 def estimate_write_bytes(metadata: dict, *, n_fovs: Optional[int] = 1, regions=None,
                          tiff: bool = False, n_z: int = 1,
-                         region_operator: bool = False) -> int:
-    """Bytes :func:`write_from_stream` will need for this acquisition (uncompressed estimate)."""
+                         region_operator: bool = False, wells=None) -> int:
+    """Bytes :func:`write_from_stream` will need for this acquisition (uncompressed estimate).
+
+    ``wells`` is the ALREADY-RESOLVED ``{region: [fov, ...]}`` scope when the caller has one
+    (``write_from_stream`` always does) — the estimate then counts exactly the scoped fields
+    instead of re-deriving them from ``n_fovs``/``regions``.
+    """
     frame_shape = metadata.get("frame_shape")
     channels = metadata.get("channels") or []
     if not frame_shape or not channels:
@@ -77,12 +82,18 @@ def estimate_write_bytes(metadata: dict, *, n_fovs: Optional[int] = 1, regions=N
     itemsize = np.dtype(metadata.get("dtype", "uint16")).itemsize
     fovs_per_region = metadata.get("fovs_per_region") or {}
 
-    scoped = list(fovs_per_region) if regions is None else [r for r in regions if r in fovs_per_region]
+    if wells is not None:
+        scoped = [r for r in wells if r in fovs_per_region]
+    else:
+        scoped = (list(fovs_per_region) if regions is None
+                  else [r for r in regions if r in fovs_per_region])
     if region_operator:
         # A region operator emits one fused mosaic per region, not one frame per FOV.
         px_per_field = _region_mosaic_pixels(metadata, scoped, (ny, nx))
     else:
-        if n_fovs is None:
+        if wells is not None:
+            n_fields = sum(len(f) for f in wells.values())
+        elif n_fovs is None:
             n_fields = sum(len(fovs_per_region[r]) for r in scoped)
         else:                               # select_fovs takes at most n_fovs per region
             n_fields = sum(min(int(n_fovs), len(fovs_per_region[r])) for r in scoped)
@@ -633,10 +644,22 @@ def write_from_stream(
     plate_dir = out_dir / "plate.ome.zarr"
     tiff_root = out_dir / "tiff"
 
+    # THE resolver both engine loops use — never a second derivation of the run's scope. A
+    # {region: [fov, ...]} mapping (an ROI run) therefore counts exactly the fields the stream
+    # will yield: the writer used to owe EVERY FOV of a mapped region and mark its own store
+    # incomplete after a run that did exactly what was asked.
+    wells = scope_wells(metadata, n_fovs, regions)
+    if region_operator:
+        # A region operator owes ONE fused result per region, published under the ANCHOR fov
+        # (fovs[0]) the region loop yields it as.
+        wells = {r: f[:1] for r, f in wells.items() if f}
+    # field_count is a single plate-level scalar: the most fields any scoped well carries.
+    field_count = max((len(f) for f in wells.values()), default=0)
+
     if check_disk:
         need = estimate_write_bytes(metadata, n_fovs=n_fovs, regions=regions, tiff=tiff,
-                                    region_operator=region_operator, n_z=n_z)
-        scope = "this plate write" if regions is None else f"this {len(list(regions))}-well write"
+                                    region_operator=region_operator, n_z=n_z, wells=wells)
+        scope = "this plate write" if regions is None else f"this {len(wells)}-well write"
         check_disk_space(out_dir, need, headroom=disk_headroom, min_free_bytes=min_free_bytes,
                          what=scope)
 
@@ -644,13 +667,6 @@ def write_from_stream(
     # so the writer pool must not re-widen the memory window behind the region stream.
     if region_operator and int(n_z) > 1:
         write_workers = 1
-
-    wells = select_fovs(metadata, n_fovs=n_fovs)  # {region: [fov, ...]}, deterministic
-    # field_count is a single plate-level scalar; n_fovs=None must resolve to a concrete number.
-    field_count = resolve_n_fovs(metadata, n_fovs)
-    if regions is not None:   # subset: write only these wells (keep the requested order)
-        keep = list(dict.fromkeys(regions))
-        wells = {r: wells[r] for r in keep if r in wells}
 
     # Full plate/row/well group metadata is written up front; the contract stamp rides on the
     # plate group once.
@@ -766,7 +782,7 @@ def write_plate(
     reader,
     out_dir,
     *,
-    n_fovs: Optional[int] = 1,
+    n_fovs=_N_FOVS_LOOP_DEFAULT,
     workers: Optional[int] = None,
     operator: str = "mip",
     tiff: bool = False,
@@ -782,25 +798,32 @@ def write_plate(
     operator_kwargs: Optional[dict] = None,
 ) -> dict:
     """Project a plate and write the canonical OME-zarr + individual TIFFs; returns the manifest."""
-    from squidxplorer._engine import is_region_operator
+    from squidxplorer._engine import (bind_operator, is_region_operator,
+                                      operator_output, split_operator_kwargs)
 
     metadata = reader.metadata
     region_operator = is_region_operator(operator)
-    if not region_operator and operator_kwargs:
-        from squidxplorer._engine import bind_operator
-
-        bind_operator(operator, operator_kwargs)   # refuse BEFORE any directory is made
-    # Result depth and pixel meaning come off the INNER operator's own declarations, so the disk
-    # estimate and the pyramid reducer cannot disagree with what is then written.
-    from squidxplorer._engine import operator_consumes, operator_produces
-
-    inner = (operator_kwargs or {}).get("z_operator", "mip") if region_operator else operator
-    n_z_out = 1 if "z" in operator_consumes(inner) else int(metadata.get("n_z", 1) or 1)
-    produces_out = operator_produces(inner)
+    if operator_kwargs:
+        # Refuse an unknown parameter BEFORE any directory is made — on BOTH arms. The region
+        # arm used to skip this, so a typo'd stitch knob was caught only after the plate
+        # skeleton and the incomplete marker were on disk.
+        if region_operator:
+            split_operator_kwargs(operator, operator_kwargs)
+        else:
+            bind_operator(operator, operator_kwargs)
+    # Result depth and pixel meaning come off the record's OWN output query (inner_param for a
+    # region operator, its own declarations otherwise), so the disk estimate and the pyramid
+    # reducer cannot disagree with what is then written — and the writer never reconstructs a
+    # declaration from a parameter name.
+    collapses_z, produces_out = operator_output(operator, operator_kwargs)
+    n_z_out = 1 if collapses_z else int(metadata.get("n_z", 1) or 1)
 
     stream = run_plate(reader, operator=operator, n_fovs=n_fovs, workers=workers,
                        on_error=on_error, regions=regions, operator_kwargs=operator_kwargs)
-    return write_from_stream(metadata, stream, out_dir, n_fovs=n_fovs, tiff=tiff, on_well=on_well,
+    n_fovs_concrete = ((None if region_operator else 1)
+                       if n_fovs is _N_FOVS_LOOP_DEFAULT else n_fovs)
+    return write_from_stream(metadata, stream, out_dir, n_fovs=n_fovs_concrete, tiff=tiff,
+                             on_well=on_well,
                              write_workers=write_workers, stop=stop, regions=regions,
                              check_disk=check_disk, disk_headroom=disk_headroom,
                              min_free_bytes=min_free_bytes, roi_table=roi_table,

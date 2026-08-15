@@ -147,6 +147,8 @@ def estimate_region_flatfield(
     if channels is None:
         channels = list(range(len(all_channels)))
     if z_level is None:
+        # n//2, NOT _contrast.opening_z: this feeds the SHARED flatfield .npy, and parity with
+        # maragall/stitcher (which samples nz//2) must keep the two products byte-identical.
         z_level = int(meta["n_z"]) // 2
 
     fovs = list(fovs)
@@ -179,7 +181,7 @@ def _flatfield_npy_path(reader):
     """Where maragall/stitcher keeps this acquisition's profile, or ``None`` if unknowable."""
     from pathlib import Path
 
-    root = getattr(reader, "_path", None)
+    root = getattr(reader, "source_id", None) or getattr(reader, "_path", None)
     if root is None:
         return None
     root = Path(root)
@@ -487,6 +489,8 @@ def stitch_region(
     reg_c_global = _resolve_registration_channel(meta, registration_channel)
 
     if registration_z is None:
+        # n//2, NOT _contrast.opening_z: registration parity with maragall/stitcher is pinned
+        # by tests/test_integration.py's geometry match on real z-stacks.
         registration_z = int(meta["n_z"]) // 2
     registration_z = int(registration_z)
     if not 0 <= registration_z < int(meta["n_z"]):
@@ -680,12 +684,6 @@ def stitch_region(
     return PlacedArray(out, placement)
 
 
-def _coordinate_region(reader, region, fovs, **kwargs):
-    """Coordinate placement: :func:`stitch_region` with registration disabled (the control)."""
-    kwargs["register"] = False
-    return stitch_region(reader, region, fovs, **kwargs)
-
-
 RegionOperator = Callable[..., np.ndarray]
 
 #: The scalar knobs `stitch` DECLARES, so `--param`, recipes and generated panels describe it
@@ -720,9 +718,33 @@ def _stitch_factory(**params):
     return stitch
 
 
+#: The keyword arguments `stitch_region` takes BEYOND the declared params — the record's
+#: explicit passthrough, so the loop refuses an unknown key by name instead of splatting it.
+#: (The comment above _STITCH_PARAMS records why these are not Params.)
+_STITCH_ACCEPTS = ("channels", "blend_px", "correct_distortion", "flatfield", "use_darkfield",
+                   "registration_z", "block_px", "max_workers", "rel_thresh", "abs_thresh",
+                   "geometry", "timer")
+
+
+def _coordinate_factory(**params):
+    """Coordinate placement: :func:`stitch_region` with registration disabled (the control)."""
+    def coordinate(reader, region, fovs, **kwargs):
+        return stitch_region(reader, region, fovs, register=False, **{**params, **kwargs})
+    return coordinate
+
+
+#: `coordinate` declares the stitch knobs that survive with registration off; the registration
+#: family (register itself, registration_channel/_t/_z) is neither declared nor accepted, so
+#: passing one is a NAMED refusal instead of a silently ignored number.
+_COORDINATE_PARAMS = tuple(p for p in _STITCH_PARAMS
+                           if p.name in ("z_operator", "correct_illumination"))
+_COORDINATE_ACCEPTS = tuple(a for a in _STITCH_ACCEPTS if a != "registration_z")
+
 add_region_operator("stitch", _stitch_factory, params=_STITCH_PARAMS, requires=("tilefusion",),
-                    extra="stitch")
-add_region_operator("coordinate", _coordinate_region, requires=("tilefusion",), extra="stitch")
+                    extra="stitch", accepts=_STITCH_ACCEPTS, inner_param="z_operator")
+add_region_operator("coordinate", _coordinate_factory, params=_COORDINATE_PARAMS,
+                    requires=("tilefusion",), extra="stitch",
+                    accepts=_COORDINATE_ACCEPTS, inner_param="z_operator")
 
 
 def _accepts_kwarg(fn, name: str) -> bool:
@@ -768,9 +790,11 @@ def _stitch_plate(
         raise ValueError(f"workers must be >= 1, got {workers}")
     n_workers = workers if workers is not None else _default_workers()
 
-    # Declared parameters are bound; everything else passes through to the call.
-    declared = {p.name for p in _resolve_operator(operator).params}
-    bound = {k: operator_kwargs.pop(k) for k in list(operator_kwargs) if k in declared}
+    # ONE validator for both engine arms: declared parameters bind through the factory, keys
+    # the record `accepts` pass through to the callable, anything else is refused BY NAME.
+    from squidxplorer._engine import split_operator_kwargs
+
+    bound, operator_kwargs = split_operator_kwargs(operator, operator_kwargs)
     op = _resolve_region_operator(operator, bound)
     ok, why = operator_available(operator)
     if not ok:
@@ -799,7 +823,7 @@ def _stitch_plate(
         try:
             from squidxplorer._flatfield import FlatfieldProfile, estimate_profile
 
-            z = int(meta["n_z"]) // 2
+            z = int(meta["n_z"]) // 2       # parity with maragall/stitcher's shared .npy
             names = [c["name"] for c in meta["channels"]]
             path = _flatfield_npy_path(reader)
             selected = _selected_profiles(names)

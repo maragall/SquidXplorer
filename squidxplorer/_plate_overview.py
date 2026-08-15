@@ -194,9 +194,6 @@ class _RunningContrast:
         """
         self._followed[ch] = (float(lo), float(max(hi, lo + 1)))
 
-    def clear_followed(self, ch: int):
-        self._followed.pop(ch, None)
-
     def is_followed(self, ch: int) -> bool:
         return ch in self._followed
 
@@ -409,6 +406,9 @@ class _RawLoupeSource(_LoupeSource):
         self.pixel_size_um = meta.get("pixel_size_um")
         self._channels = [c["name"] for c in meta["channels"]]
         zs = meta["z_levels"]
+        # n//2, NOT _contrast.opening_z: the loupe magnifies the PLATE, and the plate's raw
+        # preview (_PreviewWorker) samples zs[n//2] — the loupe must show the same plane as
+        # the pixels under it, not the plane a WINDOW would open on.
         self._z = zs[len(zs) // 2]
         self._lock = threading.RLock()
         self._cache_key = None
@@ -645,10 +645,6 @@ class _TileFetcher(QThread):
                     self._pending.append(d)
             del self._pending[:-_TILE_QUEUE_MAX]     # drop the stalest, keep the cap honest
         self._wake.set()
-
-    def drop_all(self) -> None:
-        with self._lock:
-            self._pending.clear()
 
     def stop(self) -> None:
         self._stop.set()
@@ -1217,6 +1213,20 @@ class PlateOverview(QWidget):
         self._refresh()
         return True
 
+    def channel_rgb(self, ch: int):
+        """The (r, g, b) this channel is composited with, or None — the reader beside
+        :meth:`set_channel_color`, so the LUT clipboard can carry the plate's colour out."""
+        if self._colors is None or not (0 <= ch < len(self._colors)):
+            return None
+        return tuple(float(v) for v in self._colors[ch])
+
+    def channel_visible(self, ch: int):
+        """Whether this channel is in the composite, or None — the reader beside
+        :meth:`set_channel_visible`."""
+        if self._mask is None or not (0 <= ch < len(self._mask)):
+            return None
+        return bool(self._mask[ch])
+
     def set_channel_visible(self, ch: int, on: bool):
         """Toggle a channel in/out of the plate composite. Recomposites from the retained store.
 
@@ -1419,17 +1429,6 @@ class PlateOverview(QWidget):
             self.set_active_layer("raw")
         else:
             self.update()
-
-    def status_snapshot(self) -> dict:
-        """Copy of the per-well status map, so a tab's dots can follow its own run."""
-        return dict(self._status)
-
-    def set_status_map(self, status: dict):
-        """Restore a snapshot. Foreign keys are ignored, same as ``set_status``."""
-        for rc, state in status.items():
-            if rc in self._status:
-                self._status[rc] = state
-        self.update()
 
     def select(self, ri: int, ci: int):
         """Move the red box to a well (driven by the ndviewer FOV slider)."""

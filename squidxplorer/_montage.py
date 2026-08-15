@@ -16,7 +16,6 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-import tensorstore as ts
 
 # Montage cell size (downsampled well thumbnail, px).
 _DEFAULT_CELL_PX = 128
@@ -24,29 +23,17 @@ _DEFAULT_CELL_PX = 128
 _DEFAULT_PERCENTILES = (1.0, 99.8)
 
 
-def _read_group_ome(group_dir: Path) -> dict:
-    """Return the ``attributes.ome`` dict of a zarr v3 group, or {} if absent."""
-    doc = json.loads((group_dir / "zarr.json").read_text())
-    return doc.get("attributes", {}).get("ome", {})
+# THE one store walk (contract.store): v0.4/v0.5-normalising attrs and plate-dir resolution.
+from squidxplorer.contract.store import ome_attrs as _read_group_ome
+from squidxplorer.contract.store import resolve_plate_dir as _resolve_plate_dir
 
 
-def _resolve_plate_dir(plate_path) -> Path:
-    """Accept either the ``plate.ome.zarr`` itself or the dir ``write_plate`` wrote it into."""
-    p = Path(plate_path)
-    if (p / "zarr.json").exists() and "plate" in _read_group_ome(p):
-        return p
-    if (p / "plate.ome.zarr").is_dir():
-        return p / "plate.ome.zarr"
-    raise ValueError(
-        f"{plate_path!s} is not an OME-NGFF HCS plate (no plate.ome.zarr / plate group metadata). "
-        "Point build_montage at write_plate's output directory or its plate.ome.zarr."
-    )
+def _read_open_store(array_dir: Path):
+    """Through the shared handle pool — the montage was the last bare ``ts.open`` on the read
+    path (its own opener, its own handle, evicted by nobody)."""
+    from squidxplorer._tsctx import HANDLES
 
-
-def _read_open_store(array_dir: Path) -> ts.TensorStore:
-    return ts.open(
-        {"driver": "zarr3", "kvstore": {"driver": "file", "path": str(array_dir)}}, open=True
-    ).result()
+    return HANDLES.get(str(array_dir), open_only=True)
 
 
 class _PlateLayout:

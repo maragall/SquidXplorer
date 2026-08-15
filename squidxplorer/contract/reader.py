@@ -24,6 +24,18 @@ class SquidAcquisitionReader(Protocol):
     def metadata(self) -> dict:  # pragma: no cover - protocol declaration
         ...
 
+    @property
+    def source_id(self) -> str:  # pragma: no cover - protocol declaration
+        """Stable identity of the acquisition READ — the directory whose sidecars date it.
+
+        This is what cache keys and staleness tokens are built from. It was a de-facto
+        contract member for years, spelled ``reader._path`` and reached by five modules as
+        private state — with a different meaning per reader (the Zarr reader's ``_path`` is
+        the STORE, while its sidecars live at the acquisition root, so the staleness token
+        statted files that never exist). Declared, it means ONE thing.
+        """
+        ...
+
     def read(self, region, fov, channel, z_level, time_point=0):  # pragma: no cover - protocol declaration
         ...
 

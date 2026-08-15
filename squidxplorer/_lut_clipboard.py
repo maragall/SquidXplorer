@@ -64,7 +64,15 @@ def per_channel_luts(win) -> "dict[str, dict]":
 
 
 def apply_luts(win, luts: "Optional[dict]") -> Optional[int]:
-    """Put per-channel contrast + colormap on this window's layers. ``None`` = no mosaic here."""
+    """Put the FULL record — contrast, colormap AND channel on/off — on this window's layers.
+
+    ``None`` = no mosaic here. The record's four keys all travel: ``clim`` through
+    ``MosaicLayers.set_contrast`` (the identity model's own linked write, so peers and the
+    mirror follow), ``cmap`` on the layer (the identity mirror fans it out by event), ``on``
+    through ``set_channel_visible``. It used to apply clim+cmap only, so a window→window paste
+    silently dropped which channels were lit. ``rgb`` is the PLATE's colour spelling and has no
+    window-side inverse; a colour travels to a window as ``cmap`` or not at all.
+    """
     pane = win._pane
     mosaic = getattr(pane, "mosaic", None) if pane is not None else None
     if mosaic is None:
@@ -76,12 +84,18 @@ def apply_luts(win, luts: "Optional[dict]") -> Optional[int]:
             continue
         try:
             if lut.get("clim") is not None:
-                layer.contrast_limits = tuple(lut["clim"])
+                lo, hi = lut["clim"]
+                mosaic.set_contrast(ch, float(lo), float(hi))
             if lut.get("cmap") is not None:
                 layer.colormap = lut["cmap"]
             applied += 1
         except Exception:                            # noqa: BLE001 - a missing channel is skipped
-            pass
+            continue
+        if lut.get("on") is not None:
+            try:
+                mosaic.set_channel_visible(ch, bool(lut["on"]))
+            except Exception:                        # noqa: BLE001 - visibility is best-effort
+                pass
     return applied
 
 

@@ -41,7 +41,7 @@ def _window_with_layers(qapp, napari_pane_stub, root):  # noqa: F811
     w = win._viewer_manager.open(list(win._order))
     assert w is not None, "no window was opened"
     pane = napari_pane_stub[-1]
-    assert _drain_until(qapp, lambda: bool(pane.mosaic.added), timeout=30), (
+    assert _drain_until(qapp, lambda: bool(len(pane._viewer.layers)), timeout=30), (
         "no mosaic ever reached the window's viewer")
     return win, w, pane
 
@@ -119,12 +119,27 @@ class TestTheVolumeIsPushedAtThePitchItsPixelsHave:
         self, qapp, napari_pane_stub, squid_dataset, monkeypatch  # noqa: F811
     ):
         import squidxplorer._napari3d as napari3d
+        from squidxplorer import _volume_view
 
         root, _ = squid_dataset
         win, w, pane = _window_with_layers(qapp, napari_pane_stub, root)
-        for layer in _raw_layers(win, pane):
-            layer.scale = None                           # a layer napari never placed
+        channel = win._meta["channels"][0]["name"]
 
+        # A REAL napari layer cannot lose its scale (napari coerces None to ones), so the
+        # unplaced-layer case is driven at the seam that resolves it: the pitch resolver must
+        # refuse BY NAME and answer None…
+        class _Unplaced:
+            scale = None
+
+        assert _volume_view.displayed_pitch_um(w, _Unplaced(), what=channel) is None
+        said = " ".join(pane.said)
+        assert "refused" in said.lower(), f"the refusal was silent: {pane.said}"
+        assert channel in said, f"the refusal did not name what is missing: {pane.said}"
+
+        # …and a render whose pitch resolver refuses must push NOTHING, never redescribe the
+        # pixels at pixel_size_um.
+        monkeypatch.setattr(_volume_view, "displayed_pitch_um",
+                            lambda _win, _layer, *, what: None)
         pushes = []
         monkeypatch.setattr(
             napari3d, "open_native_3d_volume",
@@ -135,10 +150,6 @@ class TestTheVolumeIsPushedAtThePitchItsPixelsHave:
         assert not pushes, (
             f"a volume was pushed with scale {pushes[-1].get('scale')} for pixels whose pitch is "
             f"unknown — the only number available is pixel_size_um and it is the wrong one")
-        said = " ".join(pane.said)
-        channel = win._meta["channels"][0]["name"]
-        assert "refused" in said.lower(), f"the refusal was silent: {pane.said}"
-        assert channel in said, f"the refusal did not name what is missing: {pane.said}"
         shutdown_plate_window(qapp, win)
 
 

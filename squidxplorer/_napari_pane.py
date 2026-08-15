@@ -419,6 +419,39 @@ def gl_available(env: Optional[dict] = None) -> tuple[bool, str]:
     return True, ""
 
 
+def model_pane_class():
+    """The ONE test adapter at the pane seam: a pane whose napari CANVAS is absent but whose
+    model (``napari.components.ViewerModel``, Qt-free) and ``MosaicLayers`` are real.
+
+    Everything downstream of the pane is production code; what a ModelPane cannot prove is only
+    that a layer was PAINTED. conftest's ``napari_pane_stub``, GATE 3 and the walkthrough all
+    take it from here — two adapters (the vispy ``MosaicPane``, this) make the seam real, and a
+    hand-synced reimplementation of ``MosaicLayers`` is exactly the drift this replaces
+    (``StubLayer``'s last lie let four sites drift with the suite green; see CLAUDE.md).
+    """
+    from qtpy.QtWidgets import QWidget
+
+    from napari.components import ViewerModel
+
+    from squidxplorer._napari_view import MosaicLayers
+
+    class ModelPane(QWidget):
+        ok = True
+
+        def __init__(self):
+            super().__init__()
+            self._viewer = ViewerModel()
+            self.mosaic = MosaicLayers(self._viewer)
+            self.detect_channel = None
+            self.detect_button = None
+            self.said = []
+
+        def say(self, text):
+            self.said.append(text)
+
+    return ModelPane
+
+
 def make_pane(readout: Optional[Callable[[str], None]] = None, *, show_docks: bool = True):
     """Build pane 2, the napari mosaic.
 

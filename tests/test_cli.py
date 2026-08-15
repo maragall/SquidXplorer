@@ -54,7 +54,7 @@ def test_param_is_refused_against_the_operators_own_declaration(squid_dataset):
     root, _ = squid_dataset
     with pytest.raises(ValueError, match="does not take bogus"):
         ProcessParameters(input_folder=str(root), operator="spot", param=["bogus=1"])
-    with pytest.raises(ValueError, match="'mip' declares no parameters"):
+    with pytest.raises(ValueError, match="'mip' does not take min_area_px"):
         ProcessParameters(input_folder=str(root), operator="mip", param=["min_area_px=80"])
 
 

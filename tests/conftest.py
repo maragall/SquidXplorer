@@ -469,210 +469,14 @@ def sim_1536wp():
 # Headless RegionViewer support: `napari_pane_stub` replaces the one seam that needs a GL context
 # (make_pane) with a recording stand-in; everything downstream is production code.
 def _stub_pane_classes():
-    """Build the stub classes lazily: conftest must import without the [gui] extra."""
-    from qtpy.QtWidgets import QWidget
+    """The headless pane class: squidxplorer's OWN ModelPane — a real Qt-free ``ViewerModel``
+    with a real ``MosaicLayers`` over it. The hand-synced StubMosaic/StubLayer reimplementation
+    is deleted: it had to mirror every MosaicLayers change by hand, and its last drift let four
+    sites go wrong with the suite green. Tests now cross the same interface production crosses.
+    """
+    from squidxplorer._napari_pane import model_pane_class
 
-    def _as_napari_data(data, multiscale):
-        """What napari would hand BACK for *data* — a multiscale add returns MultiScaleData."""
-        if not multiscale or not isinstance(data, (list, tuple)):
-            return data
-        try:
-            from napari.layers._multiscale_data import MultiScaleData
-
-            return MultiScaleData(data)
-        except Exception:                    # noqa: BLE001 - napari is a [gui] extra
-            return data
-
-    def _as_napari_placement(data, kw):
-        """``(scale, translate)`` napari would report — derived from bbox_um, not the caller's."""
-        scale, translate = kw.get("scale"), kw.get("translate")
-        bbox = kw.get("bbox_um")
-        if scale is not None or bbox is None:
-            return scale, translate
-        try:
-            from squidxplorer._napari_view import placement_for
-
-            level0 = data[0] if isinstance(data, (list, tuple)) else data
-            return placement_for(int(level0.ndim), bbox, level0.shape[-2:], kw.get("z_scale_um"))
-        except Exception:                        # noqa: BLE001 - unplaceable: report it as such
-            return scale, translate
-
-    class StubLayer:
-        """A napari image layer as RegionViewer reads it back."""
-
-        def __init__(self, data, kw):
-            self.data = _as_napari_data(data, kw.get("multiscale"))
-            self.scale, self.translate = _as_napari_placement(data, kw)
-            self.contrast_limits = None
-            self.colormap = kw.get("colormap")
-            # A result delivered to a window that did not ask for the run arrives DARK.
-            self.visible = bool(kw.get("visible", True))
-
-    class StubMosaic:
-        """The `MosaicPane.mosaic` surface RegionViewer drives, recording what it was handed."""
-
-        def __init__(self):
-            self.model = None                 # napari Viewer; None -> `_napari_viewer` uses _viewer
-            self.added = []                   # (op, channel, levels, kwargs) per add_mosaic
-            self.contrast_subscribers = []     # what _bind_window_contrast subscribed
-            self.visibility_subscribers = []
-            self.colormap_subscribers = []
-            self.op_subscribers = []           # which PROCESSING LAYER this window is showing
-            self.removed = []
-            self.shown = []
-            self._layers = {}
-
-        def ops(self):
-            """The processing layers this pane holds, in insertion order — `MosaicLayers.ops`."""
-            seen = []
-            for op, _channel in self._layers:
-                if op not in seen:
-                    seen.append(op)
-            return seen
-
-        def channels(self, op):
-            """`MosaicLayers.channels` — the channels of ONE processing layer, in insertion order."""
-            out = []
-            for layer_op, channel in self._layers:
-                if layer_op == op and channel not in out:
-                    out.append(channel)
-            return out
-
-        def visible_op(self):
-            """WHICH processing layer is on screen — `MosaicLayers.visible_op`."""
-            for (op, _channel), layer in self._layers.items():
-                if getattr(layer, "visible", True):
-                    return op
-            return None
-
-        @staticmethod
-        def _reduces_z(op):
-            """The DECLARATION, exactly as `MosaicLayers._reduces_z` reads it — never the name."""
-            from squidxplorer._engine import Z_REDUCER, operator_consumes
-            from squidxplorer._operations import operator_name
-
-            try:
-                return operator_consumes(operator_name(str(op))) == Z_REDUCER
-            except Exception:                        # noqa: BLE001 - not a registered operator
-                return False
-
-        def set_channel_visible(self, channel, visible):
-            """Show/hide one channel across the VISIBLE processing layer only."""
-            current = self.visible_op()
-            if current is None:
-                return
-            for (op, ch), layer in self._layers.items():
-                if op == current and ch == channel:
-                    layer.visible = bool(visible)
-
-        def channel_visible(self, channel):
-            peers = [ly for (_op, ch), ly in self._layers.items() if ch == channel]
-            if not peers:
-                return None
-            return any(bool(getattr(p, "visible", False)) for p in peers)
-
-        def channel_rgb(self, channel):
-            for (_op, ch), layer in self._layers.items():
-                if ch == channel:
-                    return getattr(layer, "colormap", None)
-            return None
-
-        def layers_for(self, op, channel):
-            layer = self._layers.get((op, channel))
-            return [layer] if layer is not None else []
-
-        def remove_op(self, op):
-            self.removed.append(op)
-            for key in [k for k in self._layers if k[0] == op]:
-                del self._layers[key]
-
-        # The three sinks the plate subscribes to when it starts following a window.
-        def on_user_contrast(self, cb):
-            self.contrast_subscribers.append(cb)
-
-        def on_user_visibility(self, cb):
-            self.visibility_subscribers.append(cb)
-
-        def on_user_colormap(self, cb):
-            self.colormap_subscribers.append(cb)
-
-        def on_user_op(self, cb):
-            self.op_subscribers.append(cb)
-
-        def gesture_op(self, op, on):
-            """Pretend the user ticked a PROCESSING LAYER in this window's layer tree."""
-            for cb in list(self.op_subscribers):
-                cb(op, on)
-
-        def gesture_contrast(self, channel, lo, hi):
-            """Pretend the user dragged contrast in napari."""
-            for cb in list(self.contrast_subscribers):
-                cb(channel, lo, hi)
-
-        def gesture_visibility(self, channel, on):
-            """Pretend the user clicked an eye icon."""
-            for cb in list(self.visibility_subscribers):
-                cb(channel, on)
-
-        def add_mosaic(self, op, channel, levels, **kw):
-            self.added.append((op, channel, levels, kw))
-            layer = StubLayer(levels, kw)
-            self._layers[(op, channel)] = layer
-            return layer
-
-        def add_result(self, kind, op, channel, data, **kw):
-            """The sink `RegionViewer.deliver_result` actually calls for an OPERATOR result."""
-            self.added.append((op, channel, data, dict(kw, kind=kind)))
-            layer = StubLayer(data, kw)
-            self._layers[(op, channel)] = layer
-            return layer
-
-        def match_contrast_to(self, op):
-            """The "Match raw contrast" action: *op*'s window onto the channel's other layers."""
-            matched = 0
-            for (layer_op, channel), layer in list(self._layers.items()):
-                source = self._layers.get((op, channel))
-                if source is None or layer_op == op:
-                    continue
-                layer.contrast_limits = source.contrast_limits
-                matched += 1
-            return matched
-
-        def show_op(self, op):
-            self.shown.append(op)
-
-        def find(self, op, channel):
-            return self._layers.get((op, channel))
-
-    class StubDims:
-        """napari `Dims`, only the parts a window's autofocus drives."""
-
-        def __init__(self, nsteps=(2, 8, 8)):
-            self.nsteps = tuple(nsteps)
-            self.ndim = len(self.nsteps)
-            self.ndisplay = 2
-            self.current_step = tuple(0 for _ in self.nsteps)
-
-    class StubViewer:
-        def __init__(self):
-            self.dims = StubDims()
-            self.layers = []
-
-    class StubPane(QWidget):
-        ok = True
-
-        def __init__(self):
-            super().__init__()
-            self.mosaic = StubMosaic()
-            self._viewer = StubViewer()
-            self.detect_channel = None
-            self.detect_button = None
-            self.said = []
-
-        def say(self, text):
-            self.said.append(text)
-
-    return StubPane
+    return model_pane_class()
 
 
 def shutdown_plate_window(app, win):
@@ -743,3 +547,40 @@ def build_volume_scene(mosaic, op="raw", channels=("488", "561"), bricks=3):
             vol._add_layer((ch, (0, b)), ch, _scene_stack(10 + ch_i * 10 + b, (4, 8, 8)),
                            (1.5, 0.75, 0.75), (0.0, 0.0, float(b) * 6.0))
     return vol
+
+
+class FakeReader:
+    """THE canonical reader double: the full contract (source_id included), no disk.
+
+    16 test files carry ~26 hand-rolled reader stubs, each re-deriving `_path`/`metadata`/
+    `read` — and three of them fork the contract (a `z_level=0` default `read` does not have).
+    New tests take this one; existing stubs migrate as they are touched.
+    """
+
+    def __init__(self, metadata: dict, planes=None, source_id: str = "/fake/acq"):
+        self._metadata = dict(metadata)
+        self._planes = planes or {}
+        self._source_id = str(source_id)
+        self.reads: list = []                    # every (region, fov, channel, z, t), in order
+
+    @property
+    def metadata(self):
+        return self._metadata
+
+    @property
+    def source_id(self) -> str:
+        return self._source_id
+
+    def read(self, region, fov, channel, z_level, time_point=0):
+        key = (str(region), int(fov), str(channel), int(z_level), int(time_point))
+        self.reads.append(key)
+        planes = self._planes
+        if callable(planes):
+            return planes(*key)
+        if key in planes:
+            return planes[key]
+        raise KeyError(f"FakeReader holds no plane {key}; it has {sorted(planes)[:4]}…")
+
+    def plane_ref(self, region, fov, channel, z_level, time_point=0):
+        return (self._source_id, str(region), int(fov), str(channel), int(z_level),
+                int(time_point))

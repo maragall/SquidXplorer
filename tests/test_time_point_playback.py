@@ -194,18 +194,42 @@ def test_a_stalled_playback_says_so_instead_of_looking_pressed(make_bar, qapp):
 
 
 def _added_values(pane, channel):
-    """Every distinct pixel value this pane has been handed for *channel*, in arrival order."""
-    out = []
-    for op, ch, levels, _kw in pane.mosaic.added:
-        if ch != channel:
-            continue
-        try:
-            value = int(np.asarray(levels[0][0]).max())
-        except Exception:                            # noqa: BLE001 - not a raw mosaic level
-            continue
-        if not out or out[-1] != value:
-            out.append(value)
-    return out
+    """Every distinct pixel value painted for *channel*, in arrival order.
+
+    The stub's ``added`` recording list is gone; this is the same history rebuilt as an
+    OBSERVER of the real model — layer insertions and in-place data replacements (the reuse
+    path) both fire napari events, and that is what a "frame changed" IS now.
+    """
+    from squidxplorer._napari_view import key_of, pyramid_levels
+
+    histories = getattr(pane, "_test_value_history", None)
+    if histories is None:
+        histories = pane._test_value_history = {}
+    if channel not in histories:
+        rec = histories[channel] = []
+
+        def _grab(layer):
+            k = key_of(layer)
+            if k is None or k.channel != channel:
+                return
+            try:
+                levels = pyramid_levels(layer.data)
+                level0 = levels[0] if levels else layer.data
+                value = int(np.asarray(level0[0]).max())
+            except Exception:                        # noqa: BLE001 - not a raw mosaic level
+                return
+            if not rec or rec[-1] != value:
+                rec.append(value)
+
+        def _hook(layer):
+            layer.events.data.connect(lambda e, ly=layer: _grab(ly))
+            _grab(layer)
+
+        viewer = pane._viewer
+        for ly in list(viewer.layers):
+            _hook(ly)
+        viewer.layers.events.inserted.connect(lambda e: _hook(e.value))
+    return list(histories[channel])
 
 
 def test_playing_a_window_renders_a_DIFFERENT_frame_per_timepoint(
@@ -317,12 +341,14 @@ def test_a_reload_reuses_the_layers_instead_of_destroying_them(
         win = mgr.open([TIME_SERIES_REGION])
         pane = napari_pane_stub[0]
         assert _pump(qapp, lambda: bool(_added_values(pane, channel)))
-        pane.mosaic.removed.clear()
+        # The IDENTITY pin, straight off the real model: reuse means the very same layer object.
+        before_layer = pane.mosaic.find(_RAW_OP, channel)
+        assert before_layer is not None
 
         win._time_point_bar.set_time_point_from_user(1)
         assert _pump(qapp, lambda: _added_values(pane, channel)[-1]
                      == time_series_pixel_value(1, 0, 0), seconds=10.0)
-        assert _RAW_OP not in pane.mosaic.removed, (
+        assert pane.mosaic.find(_RAW_OP, channel) is before_layer, (
             "the reload destroyed the raw layers; every frame now pays a full rebuild")
     finally:
         mgr._mem_timer.stop()
@@ -420,7 +446,7 @@ def test_a_region_change_never_hands_napari_a_layer_of_another_shape(
     try:
         win = mgr.open([TIME_SERIES_REGION])
         pane = napari_pane_stub[0]
-        assert _pump(qapp, lambda: bool(pane.mosaic.added)), "the window never loaded"
+        assert _pump(qapp, lambda: bool(len(pane._viewer.layers))), "the window never loaded"
         pane.mosaic = _real_mosaic()                 # REAL napari from here on
 
         V._MosaicWorker = _shape_worker_class(_SHAPE_WALK)
@@ -464,7 +490,7 @@ def test_a_timepoint_change_keeps_the_very_same_layer_object(
     try:
         win = mgr.open([TIME_SERIES_REGION])
         pane = napari_pane_stub[0]
-        assert _pump(qapp, lambda: bool(pane.mosaic.added))
+        assert _pump(qapp, lambda: bool(len(pane._viewer.layers)))
         pane.mosaic = _real_mosaic()
 
         same_shape = {TIME_SERIES_REGION: [np.zeros((2, 32, 32), np.uint16)]}
@@ -498,10 +524,10 @@ def test_a_load_that_produces_nothing_DOES_drop_the_stale_layers(
     try:
         win = mgr.open([TIME_SERIES_REGION])
         pane = napari_pane_stub[0]
-        assert _pump(qapp, lambda: bool(pane.mosaic.added))
-        pane.mosaic.removed.clear()
+        assert _pump(qapp, lambda: bool(len(pane._viewer.layers)))
+        assert pane.mosaic.find(_RAW_OP, TIME_SERIES_CHANNELS[0]) is not None
         win._on_done(TIME_SERIES_REGION, 0, gen=win._load_gen)
-        assert _RAW_OP in pane.mosaic.removed, (
+        assert pane.mosaic.find(_RAW_OP, TIME_SERIES_CHANNELS[0]) is None, (
             "a load that built nothing left the previous timepoint's pixels on screen")
     finally:
         mgr._mem_timer.stop()
@@ -511,17 +537,10 @@ def test_a_load_that_produces_nothing_DOES_drop_the_stale_layers(
 
 
 def test_the_camera_is_not_re_framed_on_every_frame(
-    multi_time_point_dataset, napari_pane_stub, qapp
+    multi_time_point_dataset, napari_pane_stub, qapp, monkeypatch
 ):
     """Framing follows the REGION, not the timepoint: re-framing on every frame drags the user's zoom back to fit."""
     from squidxplorer._region_viewer import ViewerManager
-
-    class _Camera:
-        def __init__(self):
-            self.frames = 0
-
-        def reset_view(self):
-            self.frames += 1
 
     root, _planes = multi_time_point_dataset
     reader = open_reader(root)
@@ -530,18 +549,24 @@ def test_the_camera_is_not_re_framed_on_every_frame(
     try:
         win = mgr.open([TIME_SERIES_REGION])
         pane = napari_pane_stub[0]
-        camera = pane.mosaic.model = _Camera()
+        # Count reset_view on the REAL ViewerModel (its fields are frozen; its methods are not
+        # — patch the class, this test owns the process while it runs).
+        frames = []
+        real_reset = type(pane._viewer).reset_view
+        monkeypatch.setattr(type(pane._viewer), "reset_view",
+                            lambda self, *a, **k: (frames.append(1),
+                                                   real_reset(self, *a, **k))[1])
         assert _pump(qapp, lambda: bool(_added_values(pane, channel)))
 
         win._on_done(TIME_SERIES_REGION, 2, gen=win._load_gen)      # first framing of this region
-        assert camera.frames >= 1, "the region was never framed at all"
-        was = camera.frames
+        assert len(frames) >= 1, "the region was never framed at all"
+        was = len(frames)
         for time_point in (1, 2):
             win._time_point_bar.set_time_point_from_user(time_point)
             assert _pump(qapp, lambda: _added_values(pane, channel)[-1]
                          == time_series_pixel_value(time_point, 0, 0), seconds=10.0)
-        assert camera.frames == was, (
-            f"the camera was re-framed {camera.frames - was} times while only the timepoint moved")
+        assert len(frames) == was, (
+            f"the camera was re-framed {len(frames) - was} times while only the timepoint moved")
     finally:
         mgr._mem_timer.stop()
         mgr.close_all()
