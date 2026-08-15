@@ -127,27 +127,9 @@ def open_window(path, size=(1600, 900)):
 
 def open_view(win, region):
     """Open a real ``RegionViewer`` on *region*, with the GL canvas swapped for a ViewerModel pane."""
-    from qtpy.QtWidgets import QWidget
-
-    from napari.components import ViewerModel
-
     import squidxplorer._napari_pane as napari_pane
-    from squidxplorer._napari_view import MosaicLayers
 
-    class ModelPane(QWidget):
-        ok = True
-
-        def __init__(self):
-            super().__init__()
-            self._viewer = ViewerModel()
-            self.mosaic = MosaicLayers(self._viewer)
-            self.detect_channel = None
-            self.detect_button = None
-            self.said = []
-
-        def say(self, text):
-            self.said.append(text)
-
+    ModelPane = napari_pane.model_pane_class()   # THE shared headless adapter — one copy, its home
     napari_pane.make_pane = lambda *a, **k: (ModelPane(), "napari", "")
     view = win._viewer_manager.open([region])
     _app().processEvents()

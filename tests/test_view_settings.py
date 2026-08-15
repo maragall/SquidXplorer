@@ -169,7 +169,8 @@ def _layer_clims(win):
     for ch in (CH_IN_YAML, CH_NOT_IN_YAML):
         layer = mosaic.find("raw", ch)
         if layer is not None:
-            out[ch] = layer.contrast_limits
+            # napari reports contrast_limits as a LIST; the value is the assertion, not the type
+            out[ch] = tuple(layer.contrast_limits) if layer.contrast_limits is not None else None
     return out
 
 
@@ -488,7 +489,8 @@ def test_copy_paste_luts_is_the_only_contrast_path_between_two_open_windows(qapp
 
     assert _layer_clims(two) == {CH_IN_YAML: (33.0, 333.0), CH_NOT_IN_YAML: (44.0, 444.0)}
     for ch in (CH_IN_YAML, CH_NOT_IN_YAML):
-        assert two._pane.mosaic.find("raw", ch).colormap == "magenta", (
+        cmap = two._pane.mosaic.find("raw", ch).colormap
+        assert getattr(cmap, "name", cmap) == "magenta", (
             f"{ch}: the colormap did not travel, and no other mechanism carries it at all")
     RV._LUT_CLIPBOARD.clear()
 

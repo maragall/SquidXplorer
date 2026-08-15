@@ -1015,35 +1015,13 @@ def sweep_controls(root, kind: str, app, watched=None, recorder=None, settle=Non
     return rows
 
 
-class _ModelPane:
-    """A region-window pane whose napari canvas is absent but whose model (ViewerModel, Qt-free)
-    is real, so MosaicLayers runs headless. Does not prove a layer was PAINTED, only that it
-    exists in the model with the right scale/contrast/visibility."""
-
-
 def _model_pane_class():
-    from qtpy.QtWidgets import QWidget
+    """THE shared headless pane adapter, from its production home (``_napari_pane``): a real
+    Qt-free ``ViewerModel`` + real ``MosaicLayers``. Does not prove a layer was PAINTED, only
+    that it exists in the model with the right scale/contrast/visibility."""
+    from squidxplorer._napari_pane import model_pane_class
 
-    from napari.components import ViewerModel
-
-    from squidxplorer._napari_view import MosaicLayers
-
-    class ModelPane(QWidget):
-        __doc__ = _ModelPane.__doc__
-        ok = True
-
-        def __init__(self):
-            super().__init__()
-            self._viewer = ViewerModel()
-            self.mosaic = MosaicLayers(self._viewer)
-            self.detect_channel = None
-            self.detect_button = None
-            self.said = []
-
-        def say(self, text):
-            self.said.append(text)
-
-    return ModelPane
+    return model_pane_class()
 
 
 def _watch_window_stacking(monkey, seen):

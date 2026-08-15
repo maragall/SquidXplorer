@@ -1259,13 +1259,17 @@ class RegionViewer(QMainWindow):
             self._say(f"could not lay the nuclei mask: {exc}")
 
     def _napari_viewer(self):
-        """The live napari ``Viewer`` behind this window's pane, or None if unavailable."""
+        """The live napari viewer (or headless ``ViewerModel``) behind this window's pane.
+
+        One branch: the pane's ``_viewer`` IS ``mosaic.model`` on every real pane (the mosaic is
+        constructed over that very viewer), so the old model-then-``_viewer`` two-step answered
+        the same object twice — the second step existed only for a deleted test stub whose
+        ``model`` was None.
+        """
         pane = self._pane
         if pane is None or not getattr(pane, "ok", False):
             return None
-        mosaic = getattr(pane, "mosaic", None)
-        v = getattr(mosaic, "model", None) if mosaic is not None else None
-        return v if v is not None else getattr(pane, "_viewer", None)
+        return getattr(pane, "_viewer", None)
 
     def _set_ndisplay(self, n: int) -> None:
         v = self._napari_viewer()

@@ -140,10 +140,15 @@ def test_loading_another_mosaic_in_an_open_window_is_not_another_open(qapp, mana
     recording each as an open would make the log claim windows the user never opened."""
     win = manager.open([REGIONS[0], REGIONS[1]])
     _loaded(qapp, win)
-    before = len(win._pane.mosaic.added)
+    # The reload lands as in-place data replacement (the reuse path) or an insertion; both fire
+    # events on the REAL model, which is the observable now that the stub's add-log is gone.
+    landed = []
+    for ly in list(win._pane._viewer.layers):
+        ly.events.data.connect(lambda e: landed.append(1))
+    win._pane._viewer.layers.events.inserted.connect(lambda e: landed.append(1))
 
     win._load_mosaic(win.current_region())
-    assert _drain_until(qapp, lambda: len(win._pane.mosaic.added) > before, timeout=30), (
+    assert _drain_until(qapp, lambda: bool(landed), timeout=30), (
         "the second load never landed, so this test proved nothing")
 
     assert len(_opens()) == 1

@@ -36,9 +36,22 @@ def _open_window(win, regions):
 
 
 def _wait_for_layers(qapp, pane, timeout=30):
-    assert _drain_until(qapp, lambda: bool(pane.mosaic.added), timeout=timeout), (
+    """``(op, channel, levels, layer)`` per identity, read back off the REAL model — the stub's
+    recording list is gone; what the model holds is the assertion surface now."""
+    from squidxplorer._napari_view import pyramid_levels
+
+    assert _drain_until(qapp, lambda: bool(len(pane._viewer.layers)), timeout=timeout), (
         "no mosaic ever reached the window's viewer")
-    return pane.mosaic.added
+    mosaic = pane.mosaic
+    added = []
+    for op in mosaic.ops():
+        for ch in mosaic.channels(op):
+            layer = mosaic.find(op, ch)
+            if layer is None:
+                continue
+            levels = pyramid_levels(layer.data)
+            added.append((op, ch, levels if levels is not None else layer.data, layer))
+    return added
 
 
 class TestRawPushCarriesVoxelSize:
@@ -54,9 +67,12 @@ class TestRawPushCarriesVoxelSize:
         added = _wait_for_layers(qapp, napari_pane_stub[-1])
 
         meta = win._meta
-        for op, channel, _levels, kw in added:
-            assert kw.get("z_scale_um") == meta["dz_um"], (
-                f"{op}/{channel} was added with z_scale_um={kw.get('z_scale_um')!r}")
+        for op, channel, levels, layer in added:
+            level0 = levels[0] if isinstance(levels, (list, tuple)) else levels
+            if level0.ndim < 3:
+                continue                     # a flat layer has no z pitch to declare
+            assert float(layer.scale[0]) == meta["dz_um"], (
+                f"{op}/{channel} was placed with z pitch {layer.scale[0]!r}")
         assert meta["dz_um"] is not None and meta["dz_um"] > 0
         assert meta["pixel_size_um"] is not None and meta["pixel_size_um"] > 0
         shutdown_plate_window(qapp, win)
@@ -108,7 +124,7 @@ class TestRawPushCarriesVoxelSize:
 
         n_z = win._meta["n_z"]
         assert n_z > 1, "fixture needs a real z-stack or this asserts nothing"
-        for op, channel, levels, _kw in added:
+        for op, channel, levels, _layer in added:
             level0 = levels[0] if isinstance(levels, (list, tuple)) else levels
             assert level0.ndim == 3, f"{op}/{channel} is not a (z, y, x) volume: {level0.shape}"
             assert level0.shape[0] == n_z, (
@@ -127,7 +143,7 @@ class TestRawPushCarriesVoxelSize:
         pane = napari_pane_stub[-1]
         added = _wait_for_layers(qapp, pane)
 
-        levels_by_channel = {ch: lv for _op, ch, lv, _kw in added}
+        levels_by_channel = {ch: lv for _op, ch, lv, _layer in added}
         assert any(isinstance(lv, (list, tuple)) and len(lv) > 1
                    for lv in levels_by_channel.values()), (
             "the fixture produced a single-rung pyramid, so this asserts nothing")
