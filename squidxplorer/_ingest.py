@@ -186,20 +186,25 @@ def start_preview(win, reader, meta, order, *, time_point: int):
     carries the same t into its cell cache, so a revisited timepoint is a cache HIT and not a
     re-read (`_platecache.PlateCellCache`).
     """
-    win._preview = _PreviewWorker(reader, meta, win._fov_index, order, time_point=time_point)
-    win._preview.tileReady.connect(win._on_preview_tile)
-    win._preview.streamEnded.connect(lambda: win._recomposite("raw"))
-    win._preview.failed.connect(win._on_preview_failed)
-    # The preview reports on the SAME channel an operator run does, so the one bar covers it
-    # ("even if it's preview"). Published straight through: the plate window is only a relay
-    # here, because the preview has no status line of its own to feed.
-    win._preview.runProgress.connect(win._publish_progress)
-    # QThread.finished, not streamEnded: at streamEnded the thread is still running, so
-    # _clear_progress_if_idle would see it and decline. This also covers the failed and the
-    # stopped preview, which never reach streamEnded at all.
-    win._preview.finished.connect(win._clear_progress_if_idle)
-    win._preview.start()
-    return win._preview
+    from squidxplorer._worker_lifecycle import launch
+
+    # `runProgress`: the preview reports on the SAME channel an operator run does, so the one bar
+    # covers it ("even if it's preview"). Published straight through: the plate window is only a
+    # relay here, because the preview has no status line of its own to feed.
+    #
+    # `on_finished` is QThread.finished, not streamEnded: at streamEnded the thread is still
+    # running, so _clear_progress_if_idle would see it and decline. This also covers the failed
+    # and the stopped preview, which never reach streamEnded at all.
+    return launch(
+        win, _PreviewWorker(reader, meta, win._fov_index, order, time_point=time_point),
+        slot="_preview",
+        on_problem=win._on_preview_failed,
+        on_finished=win._clear_progress_if_idle,
+        signals={
+            "tileReady": win._on_preview_tile,
+            "streamEnded": lambda: win._recomposite("raw"),
+            "runProgress": win._publish_progress,
+        })
 
 
 def stop_preview(win) -> None:

@@ -37,6 +37,7 @@ from squidxplorer._time_point import TimePointBar
 from squidxplorer._address import Address, Extent
 from squidxplorer._logpane import ViewLog, get_logger
 from squidxplorer._fontscale import rescale_fonts, window_screen
+from squidxplorer._worker_lifecycle import launch as _launch_worker
 
 log = get_logger("regionviewer")
 
@@ -916,16 +917,16 @@ class RegionViewer(QMainWindow):
         w = _VideoWorker(self._reader, self._meta, region, path, axis=axis, fps=DEFAULT_FPS,
                          channels=channels, windows=windows, rgb_by_channel=rgb,
                          z_level=self._z_slider_index(), time_point=self.time_point, parent=self)
-        w.progress.connect(lambda d, total: self._show_progress(
-            int(100 * d / max(1, total)), f"movie: frame {d} of {total}"))
-        w.done.connect(self._on_movie_done)
-        w.problem.connect(self._on_movie_failed)
-        w.cancelled.connect(self._on_movie_cancelled)
-        w.finished.connect(lambda: self._forget_video_worker(w))
-        self._video_worker = w
         self._show_progress(0, f"movie: 0 of {n} frames")
         self._say(f"exporting {n} {axis}-axis frames of {region} to {path}…")
-        w.start()
+        _launch_worker(
+            self, w, slot="_video_worker",
+            on_done=self._on_movie_done,
+            on_problem=self._on_movie_failed,
+            on_progress=lambda d, total: self._show_progress(
+                int(100 * d / max(1, total)), f"movie: frame {d} of {total}"),
+            on_finished=lambda: self._forget_video_worker(w),
+            signals={"cancelled": self._on_movie_cancelled})
 
     def _z_slider_index(self) -> int:
         """Which z plane this window is showing, or 0 when it has no z slider."""
@@ -1218,18 +1219,20 @@ class RegionViewer(QMainWindow):
                     data = cropped[0]
                     self._say("detecting on the ROI only — the box you drew, not the whole well.")
         w = _SpotWorker(region, channel, data, None, None, SpotParams(), parent=self)
-        w.ready.connect(self._on_nuclei_ready)
-        w.problem.connect(lambda m, a=action, d=where: self.log.failed(a, str(m), address=d))
-        w.problem.connect(self._echo)
-        w.finished_count.connect(
-            lambda r, c, n, a=action, d=where, t0=began: (
-                self.log.done(f"{a}: {n} nuclei", time.monotonic() - t0, address=d),
-                self._echo(f"{n} nuclei detected on {c}."),
-            ))
-        self._spot_worker = w
         self.log.started(action, address=where)
         self._echo(f"detecting nuclei (Cellpose) on the {channel} MIP — first run downloads weights…")
-        w.start()
+        _launch_worker(
+            self, w, slot="_spot_worker",
+            # `problem` keeps its subscriber ORDER: the console's failed line, then the echo.
+            on_problem=[lambda m, a=action, d=where: self.log.failed(a, str(m), address=d),
+                        self._echo],
+            signals={
+                "ready": self._on_nuclei_ready,
+                "finished_count": lambda r, c, n, a=action, d=where, t0=began: (
+                    self.log.done(f"{a}: {n} nuclei", time.monotonic() - t0, address=d),
+                    self._echo(f"{n} nuclei detected on {c}."),
+                ),
+            })
 
     def _on_nuclei_ready(self, region, channel, labels, centroids, bbox_um, count):
         """Lay the label mask over the mosaic as a napari Labels layer, aligned to the raw channel."""
@@ -1303,12 +1306,11 @@ class RegionViewer(QMainWindow):
         from squidxplorer._viewer import _FocusWorker
 
         w = _FocusWorker(self._reader, self._meta, region, int(fov), chan, parent=self)
-        w.ready.connect(lambda z_i, note: self._on_reference_plane(int(z_i), note))
-        if hasattr(w, "problem"):
-            w.problem.connect(self._say)
-        self._focus_worker = w
         self._say("finding the sharpest z (Tenengrad autofocus)…")
-        w.start()
+        _launch_worker(
+            self, w, slot="_focus_worker",
+            on_problem=self._say,
+            signals={"ready": lambda z_i, note: self._on_reference_plane(int(z_i), note)})
 
     def _on_reference_plane(self, z_index: int, note: str) -> None:
         """The sharpest plane is known. MOVE THIS WINDOW'S z SLIDER to it, or say why not."""
@@ -1752,13 +1754,15 @@ class RegionViewer(QMainWindow):
         channels = [c["name"] for c in self._meta["channels"]]
         w = _MosaicWorker(self._reader, self._meta, region, channels, parent=self,
                           time_point=self.time_point)
-        w.ready.connect(lambda r, ch, levels, bbox, win:
-                        self._on_plane(r, ch, levels, bbox, win, gen=gen))
-        w.problem.connect(self._say)
-        w.finished_count.connect(lambda n: self._on_done(region, n, gen=gen))
-        w.finished.connect(lambda: self._worker_ended(w))
-        self._worker = w
-        w.start()
+        _launch_worker(
+            self, w, slot="_worker",
+            on_problem=self._say,
+            on_finished=lambda: self._worker_ended(w),
+            signals={
+                "ready": lambda r, ch, levels, bbox, win:
+                    self._on_plane(r, ch, levels, bbox, win, gen=gen),
+                "finished_count": lambda n: self._on_done(region, n, gen=gen),
+            })
 
     def _worker_ended(self, worker) -> None:
         """A load's thread has ended. Drop every reference to it, ours and Qt's."""

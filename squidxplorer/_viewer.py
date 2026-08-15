@@ -97,6 +97,10 @@ from squidxplorer._plate_overview import (  # noqa: F401 (re-exports)
 )
 from squidxplorer._plate import _row_letter  # noqa: F401 (re-export)
 
+# The worker-launch seam (and the signal introspection the retire seam shares with it).
+from squidxplorer._worker_lifecycle import launch as _launch_worker, stop_slot as _stop_slot
+from squidxplorer._worker_lifecycle import signal_names as _signal_names  # noqa: F401 (re-export)
+
 # QThread workers live in `_workers`; re-exported so monkeypatched spies keep working.
 from squidxplorer._workers import (  # noqa: F401 (re-exports)
     _CACHE_AUTO, _MIN_PREVIEW_BOX_PX, _VIEWER_WORKERS,
@@ -146,20 +150,6 @@ def _scale_qss_fonts(qss: str, scale: float) -> str:
     return scale_qss_fonts(qss, scale)
 
     return _QSS_FONT_PX_RE.sub(_sub, qss)
-
-
-def _signal_names(cls) -> tuple:
-    """Every Signal declared on *cls* or its bases, excluding QThread's own finished/started."""
-    from qtpy.QtCore import Signal as _sig
-    seen, out = set(), []
-    for klass in cls.__mro__:
-        for name, value in vars(klass).items():
-            if name in seen or name in ("finished", "started"):
-                continue
-            if isinstance(value, _sig) or type(value).__name__ in ("Signal", "unbound_signal"):
-                seen.add(name)
-                out.append(name)
-    return tuple(out)
 
 
 #: Band under the plate: default height at the design size, and the hard ceiling the
@@ -1794,11 +1784,10 @@ class PlateWindow(QMainWindow):
                     prof_lbl.setText(str(msg))
                     est_btn.setEnabled(True)
 
-                w.done.connect(_ok)
-                w.problem.connect(_bad)
-                w.stage.connect(lambda s: prof_lbl.setText(str(s)))
-                self._flatfield_worker = w            # keep a ref so it is not GC'd mid-run
-                w.start()
+                # Registered on its slot (so it is not GC'd mid-run AND teardown can see it),
+                # wired and started through the one launch seam.
+                _launch_worker(self, w, slot="_flatfield_worker", on_done=_ok, on_problem=_bad,
+                               signals={"stage": lambda s: prof_lbl.setText(str(s))})
 
             est_btn.clicked.connect(estimate_from_plate)
             v.addWidget(est_btn)
@@ -2201,7 +2190,7 @@ class PlateWindow(QMainWindow):
                 + (f", {len(cropped)} cropped" if cropped else "") + ")")
         n_t = self._meta.get("n_t", 1) or 1
         t_note = f" (t={time_point} of {n_t})" if n_t > 1 else ""
-        self._minerva = w = _MinervaWorker(
+        w = _MinervaWorker(
             self._reader, sel, out_dir, z_operator, time_point=time_point, launch=launch, luts=luts)
 
         def on_launched(ok):
@@ -2236,15 +2225,17 @@ class PlateWindow(QMainWindow):
                 f"✓ exported {len(pairs)} mosaic{'s' if len(pairs) != 1 else ''}{note} from "
                 f"{', '.join(done)}{t_note}{crop_note} → {Path(pairs[0][0]).parent}")
 
-        w.progress.connect(
-            lambda d, n: self._readout.setText(f"● Minerva export · {d}/{n} mosaics"))
-        if on_exported is not None:
-            w.exported.connect(on_exported)
-        w.exported.connect(on_exported_readout)
-        w.launched.connect(on_launched)
-        w.failed.connect(lambda m: self._readout.setText(f"Minerva export failed: {m}"))
         self._readout.setText(f"● Minerva export · {what}{t_note} …")
-        w.start()
+        # `exported` keeps its subscriber ORDER: an explicit on_exported first, the readout second.
+        _launch_worker(
+            self, w, slot="_minerva",
+            on_progress=lambda d, n: self._readout.setText(f"● Minerva export · {d}/{n} mosaics"),
+            on_problem=lambda m: self._readout.setText(f"Minerva export failed: {m}"),
+            signals={
+                "exported": ([on_exported, on_exported_readout] if on_exported is not None
+                             else on_exported_readout),
+                "launched": on_launched,
+            })
 
     def run_minerva_render(self, pairs, threads=None, open_when_done: bool = True):
         """Render exported ``(ome, story)`` pairs into Minerva exhibits and open the first one.
@@ -2264,7 +2255,7 @@ class PlateWindow(QMainWindow):
             self._readout.setText("already rendering - let the current render finish first")
             return
         n = len(pairs)
-        self._minerva_render = w = _MinervaRenderWorker(pairs, threads=threads)
+        w = _MinervaRenderWorker(pairs, threads=threads)
 
         def on_rendered(indexes):
             if not indexes:
@@ -2277,15 +2268,17 @@ class PlateWindow(QMainWindow):
                 f"✓ rendered {len(indexes)} Minerva viewer{'s' if len(indexes) != 1 else ''}{note} "
                 f"→ {Path(indexes[0]).parent}. {_MINERVA_INTERNET_NOTE}")
 
-        w.progress.connect(
-            lambda d, tot: self._readout.setText(f"● Minerva render · {d}/{tot} exhibits"))
-        w.rendered.connect(on_rendered)
-        # Named in the status line, because render.py runs as a script under a FOREIGN venv: its
-        # failure is an exit code plus stderr, and if we do not print it nothing does.
-        w.failed.connect(lambda m: self._readout.setText(f"Minerva render failed: {m}"))
         self._readout.setText(
             f"● Minerva render · {n} exhibit{'s' if n != 1 else ''} - this takes minutes …")
-        w.start()
+        # The failure is NAMED in the status line, because render.py runs as a script under a
+        # FOREIGN venv: its failure is an exit code plus stderr, and if we do not print it
+        # nothing does.
+        _launch_worker(
+            self, w, slot="_minerva_render",
+            on_progress=lambda d, tot: self._readout.setText(
+                f"● Minerva render · {d}/{tot} exhibits"),
+            on_problem=lambda m: self._readout.setText(f"Minerva render failed: {m}"),
+            signals={"rendered": on_rendered})
 
     def _build_layers_tab(self) -> QWidget:
         """The Layers tab: the OperationStack as a list of toggleable, reorderable layers. The topmost
@@ -2795,18 +2788,18 @@ class PlateWindow(QMainWindow):
             str(zroot), path_of=well_paths.get, fov_of=well_fovs.get,
             levels=levels, well_px=_well_px, pixel_size_um=px_um, written=None))
         coarse_lvl = levels[-1]                                   # coarsest -> tiny thumbnail
-        self._worker = _ComputedPlateWorker(str(zroot), worker_wells, coarse_lvl,
-                                           np.uint16, self.time_point)
-        self._worker.tileReady.connect(self._on_tile)
-        self._worker.streamEnded.connect(lambda: self._recomposite("computed"))
-        self._worker.progress.connect(
-            lambda i, n: self._readout.setText(f"loading computed plate — {i}/{n} wells"))
-        self._worker.failed.connect(self._on_failed)
-        self._worker.finished_ok.connect(
-            lambda: self._readout.setText(
-                f"✓ computed MIP · {len(self._order)} wells (read-only){fov_warn}"))
+        w = _ComputedPlateWorker(str(zroot), worker_wells, coarse_lvl,
+                                 np.uint16, self.time_point)
         self._readout.setText(f"loading computed plate · {len(self._order)} wells …")
-        self._worker.start()
+        _launch_worker(
+            self, w, slot="_worker",
+            on_done=lambda: self._readout.setText(
+                f"✓ computed MIP · {len(self._order)} wells (read-only){fov_warn}"),
+            on_problem=self._on_failed,
+            on_progress=lambda i, n: self._readout.setText(
+                f"loading computed plate — {i}/{n} wells"),
+            signals={"tileReady": self._on_tile,
+                     "streamEnded": lambda: self._recomposite("computed")})
 
     # -- run a post-processing operator over the whole plate (persists a navigable OME-Zarr plate) --
     def _busy(self) -> bool:
@@ -2895,19 +2888,19 @@ class PlateWindow(QMainWindow):
                     return
                 chan = self._meta["channels"][0]["name"]
                 w = _FlatfieldWorker(self._reader, self._meta, chan, parent=self)
-                w.stage.connect(self._readout.setText)
-                w.problem.connect(lambda m: self._readout.setText(f"flat-field estimate failed: {m}"))
 
                 def _profile_ready(profile, k=key, regs=regions, sv=save, op=out_parent, c=chan):
                     _ff.set_profile(profile, channel=c)
                     self._readout.setText("flat-field: profile ready — running.")
                     self.run_operator(k, out_parent=op, regions=regs, save=sv)
 
-                w.done.connect(_profile_ready)
-                self._ff_est_worker = w
                 self._readout.setText(f"flat-field: estimating an illumination profile from {chan} "
                                       "(tilefusion BaSiC)…")
-                w.start()
+                _launch_worker(
+                    self, w, slot="_ff_est_worker", on_done=_profile_ready,
+                    on_problem=lambda m: self._readout.setText(
+                        f"flat-field estimate failed: {m}"),
+                    signals={"stage": self._readout.setText})
                 return
         label = operator_label(key)
         # Scope the run. An explicit `regions` list still wins (the preview spinner builds one, and
@@ -3039,10 +3032,10 @@ class PlateWindow(QMainWindow):
         # the whole feature not rendering. The overview then adopts the worker's boxes so a
         # double-click on a mosaic cell resolves the FOV under the cursor instead of always 0.
         run_order = self._order if regions is None else regions
-        self._worker = _OperatorWorker(key, self._reader, self._meta, self._fov_index,
-                                       str(out_dir) if out_dir else "", regions=regions, save=save,
-                                       n_fovs=None, operator_kwargs=operator_kwargs)
-        self._overview.set_mosaic_boxes(self._worker.mosaic_boxes)
+        worker = _OperatorWorker(key, self._reader, self._meta, self._fov_index,
+                                 str(out_dir) if out_dir else "", regions=regions, save=save,
+                                 n_fovs=None, operator_kwargs=operator_kwargs)
+        self._overview.set_mosaic_boxes(worker.mosaic_boxes)
         # A re-run must not composite on top of the LAST run's pixels: with a mosaic, a run that
         # lands fewer FOVs would otherwise leave the previous run's fields standing in the same
         # cell, blended into the new ones. Drop this layer's store before the first tile arrives.
@@ -3050,20 +3043,11 @@ class PlateWindow(QMainWindow):
         # place that decides the two are the same thing today.
         self._overview.reset_layer(layer_key)
         dest = f" → {out_dir.name}" if save else " (preview — not saved)"
-        self._worker.tileReady.connect(self._on_tile)
-        self._worker.resultReady.connect(self._on_result)
-        self._worker.progress.connect(self._on_progress)
-        self._worker.runProgress.connect(self._on_unit_progress)
-        self._worker.streamEnded.connect(lambda k=layer_key: self._recomposite(k))
-        self._worker.writtenReady.connect(self._on_written)
-        self._worker.wellFailed.connect(                     # a skipped well -> red x, run continues
-            lambda ri, ci: self._overview.set_status(ri, ci, "failed") if self._overview else None)
-        self._worker.failed.connect(self._on_failed)
         # IMA-226: report what the plate ACTUALLY got. A run where every well raised (flat-field
         # with no profile is the routine case) still reaches finished_ok — the per-well on_error
         # path is what keeps one bad file from aborting a plate — and used to print "✓" over an
         # empty plate. Landed==0 is a failure however politely the engine returned.
-        def _done_msg(w=self._worker):
+        def _done_msg(w=worker):
             if w.landed == 0:
                 self._run_readout(
                     f"⚠ {label} · {scope} produced nothing — all {w.skipped or self._worker._total} "
@@ -3076,19 +3060,6 @@ class PlateWindow(QMainWindow):
                 self._run_readout(
                     f"✓ {label} · {scope}{dest}" + ("  (re-openable OME-Zarr)" if save else ""))
 
-        self._worker.finished_ok.connect(_done_msg)
-        # Whether the plate this run is writing ended up whole is NOT tracked here. `write_plate`
-        # settles it on the store itself (`_output.INCOMPLETE_MARKER`, kept unless every field
-        # this run owed landed) as the last act of the write, which is the only place that knows
-        # the answer -- a GUI flag set from `finished_ok` cannot see a well the engine skipped, and
-        # cannot be set at all by a process that was killed. See `_open_computed`.
-        # QThread.finished (not finished_ok): it fires for a FAILED or STOPPED run too, and a tab
-        # switch deferred during any of those still has to be delivered. _retire only disconnects
-        # the worker's own signals, so this survives a stop.
-        # Connected bare, so the slot is entered with ``worker=None`` — "the RUN's own thread
-        # exited", which is the one drain allowed to close the run's books. Only ``_retire`` names
-        # the thread, because only there can it be the superseded raw preview.
-        self._worker.finished.connect(self._on_run_drained)
         # Announce the run to the activity registry the log panel's header reads. Keyed
         # "operator-run" (re-entrant by key: a new run replaces the old entry rather than stacking).
         # Ended in _on_run_drained, which fires on ok/failed/stopped alike — so the header cannot be
@@ -3124,7 +3095,34 @@ class PlateWindow(QMainWindow):
         self._tell_requester(requester, "operator_started", label)
         self.log.started(self._run.action, address=self._run.address)
         self._run_readout(f"● {label} · {scope}{dest} …")
-        self._worker.start()
+        # Whether the plate this run is writing ended up whole is NOT tracked here. `write_plate`
+        # settles it on the store itself (`_output.INCOMPLETE_MARKER`, kept unless every field
+        # this run owed landed) as the last act of the write, which is the only place that knows
+        # the answer -- a GUI flag set from `finished_ok` cannot see a well the engine skipped, and
+        # cannot be set at all by a process that was killed. See `_open_computed`.
+        #
+        # ``on_finished`` is QThread.finished (not finished_ok): it fires for a FAILED or STOPPED
+        # run too, and a tab switch deferred during any of those still has to be delivered.
+        # _retire only disconnects the worker's own signals, so this survives a stop. Connected
+        # bare, so the slot is entered with ``worker=None`` — "the RUN's own thread exited",
+        # which is the one drain allowed to close the run's books. Only ``_retire`` names the
+        # thread, because only there can it be the superseded raw preview.
+        _launch_worker(
+            self, worker, slot="_worker",
+            on_done=_done_msg,                               # finished_ok
+            on_problem=self._on_failed,                      # whole-run failure, not a well skip
+            on_progress=self._on_progress,
+            on_finished=self._on_run_drained,
+            signals={
+                "tileReady": self._on_tile,
+                "resultReady": self._on_result,
+                "runProgress": self._on_unit_progress,
+                "streamEnded": lambda k=layer_key: self._recomposite(k),
+                "writtenReady": self._on_written,
+                # a skipped well -> red x, run continues
+                "wellFailed": lambda ri, ci: (self._overview.set_status(ri, ci, "failed")
+                                              if self._overview else None),
+            })
 
     def _check_disk(self, out_dir, regions: Optional[list] = None) -> tuple[bool, float, str]:
         """Estimate the persisted plate size and refuse if it won't fit (with headroom). Returns
@@ -3844,29 +3842,26 @@ class PlateWindow(QMainWindow):
         ``_ff_est_worker`` (the auto-estimate a `flatfield` run does for you) — both parented to
         this window and both absent from `closeEvent`. A BaSiC solve is seconds-to-minutes
         (`_FlatfieldWorker`'s own docstring), so closing the plate during one destroyed a running,
-        parented QThread: SIGABRT. They can go through `_retire` now only because
-        `_FlatfieldWorker` grew a `stop()`; `_retire` calls it.
+        parented QThread: SIGABRT. Both now START through ``_worker_lifecycle.launch`` (which is
+        what registers them on these slots) and STOP through the same ``stop_slot`` every other
+        named worker uses — nothing about them is special any more.
         """
-        for slot in ("_flatfield_worker", "_ff_est_worker"):
-            self._retire(getattr(self, slot, None))
-            setattr(self, slot, None)
+        _stop_slot(self, "_flatfield_worker")
+        _stop_slot(self, "_ff_est_worker")
 
     def _stop_worker(self):
-        self._retire(self._worker)
-        self._worker = None
+        _stop_slot(self, "_worker")
 
     def _stop_preview(self):
         _ingest.stop_preview(self)
 
     def _stop_minerva(self):
-        self._retire(self._minerva)
-        self._minerva = None
+        _stop_slot(self, "_minerva")
         # The render worker is retired here too and not on its own line: it is the same feature and
         # it is the LONGER of the two (a measured 132 s for one real region against an at-most 90 s
         # port poll), so a close that abandons the launch wait but not the render would still hold
         # the window for two minutes. Its stop() terminates the child render.py process.
-        self._retire(getattr(self, "_minerva_render", None))
-        self._minerva_render = None
+        _stop_slot(self, "_minerva_render")
 
     def _join_retired(self, msec: int = 3000) -> None:
         """WAIT for every deferred worker, at the one moment deferring is not allowed: teardown.
