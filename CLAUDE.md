@@ -152,10 +152,20 @@ accumulator's refusals (channel mismatch, unknown FOV, incomplete region, and no
 pixel size) are unchanged in meaning.
 
 **One verdict** (2026-08-13). `_measure.verdict(landed, owed, skipped, stopped)` is the single
-OK/PARTIAL/STOPPED computation, called by `_command.do_run_operator` and
-`_workers._OperatorWorker`. `landed`'s unit stays the caller's (fields there, wells here) and only
-zero is read; `owed`/`skipped` count target wells; `stopped` comes from the manifest or the stop
+OK/PARTIAL/STOPPED computation. `landed` counts FIELDS and only zero is read;
+`owed`/`skipped` count target wells; `stopped` comes from the manifest or the stop
 event, never from `complete`; a stopped run's detail stays the caller's own sentence.
+
+**One dispatch** (2026-08-14). `_dispatch.run_operator_once` is the single save-vs-preview
+control flow, and the only caller of `verdict` for a run: it owns the `write_plate` /
+`run_plate` branch, builds `operator_kwargs` ONCE from one `parameters` argument used by BOTH
+branches (the twice-fixed preview-forgot-`operator_kwargs` drift is now unwritable), counts
+landed fields and skipped regions, and reads `stopped` off the manifest or a stop poll —
+including one final poll after either branch, so a stop requested in the run's tail is a
+stopped run on every surface. `_workers._OperatorWorker._run_body` (Qt signals, "stopped by
+the window") and `_command.do_run_operator` (console sentences, the result dict) are thin
+adapters over it. Not in `_measure` (the cost ledger owns no engine knowledge) and not in
+`_run` (GUI books the headless executor must not import).
 
 **GUI panels ARE generated from `params`** (2026-08-05). `squidxplorer/_param_panel.py` builds one
 widget per declared `Param`, choosing it from the TYPE OF THE DEFAULT — `bool` a check box, `int`
