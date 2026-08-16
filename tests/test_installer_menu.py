@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 from pathlib import Path
 
@@ -154,3 +155,57 @@ def test_without_uv_the_refusal_carries_the_install_hint(tmp_path, capsys, monke
     err = capsys.readouterr().err
     assert "uv not found" in err
     assert "astral.sh" in err
+
+
+# launchers: what a finished install leaves behind, per platform
+
+
+def test_the_macos_app_wraps_the_envs_viewer(tmp_path):
+    env = tmp_path / "env"
+    made = bootstrap._macos_app(env, apps_dir=tmp_path / "Applications")
+    app = tmp_path / "Applications" / "SquidXplorer.app"
+    assert made == f"app created: {app}"
+    runner = app / "Contents" / "MacOS" / "SquidXplorer"
+    assert str(env / "bin" / "squidxplorer-view") in runner.read_text()
+    if os.name == "posix":
+        assert runner.stat().st_mode & 0o111, "the bundle's executable must be executable"
+    plist = (app / "Contents" / "Info.plist").read_text()
+    assert "SquidXplorer" in plist and "com.cephla.squidxplorer" in plist
+
+
+def test_a_macos_app_rerun_repoints_at_the_env(tmp_path):
+    env = tmp_path / "env"
+    assert bootstrap._macos_app(env, apps_dir=tmp_path / "Applications")
+    assert bootstrap._macos_app(env, apps_dir=tmp_path / "Applications"), \
+        "a rerun over the existing bundle must not fail"
+
+
+def test_the_linux_menu_entry_points_at_the_envs_viewer(tmp_path):
+    env = tmp_path / "env"
+    made = bootstrap._linux_desktop_entry(env, apps_dir=tmp_path / "applications")
+    entry = tmp_path / "applications" / "squidxplorer.desktop"
+    assert made == f"menu entry created: {entry}"
+    text = entry.read_text()
+    assert f"Exec={env / 'bin' / 'squidxplorer-view'}" in text
+    assert "Terminal=false" in text
+    assert "[Desktop Entry]" in text
+    if os.name == "posix":
+        assert entry.stat().st_mode & 0o111
+
+
+def test_a_failed_launcher_is_said_and_never_fatal(tmp_path, capsys):
+    blocker = tmp_path / "not-a-dir"
+    blocker.touch()
+    made = bootstrap._linux_desktop_entry(tmp_path / "env", apps_dir=blocker / "applications")
+    assert made is None
+    assert "squidxplorer-view" in capsys.readouterr().err, \
+        "the failure must name the viewer to launch directly"
+
+
+def test_create_launcher_dispatches_on_the_platform(monkeypatch):
+    monkeypatch.setattr(bootstrap, "_macos_app", lambda env: f"mac:{env}")
+    monkeypatch.setattr(bootstrap, "_linux_desktop_entry", lambda env: f"linux:{env}")
+    monkeypatch.setattr(bootstrap, "_windows_shortcut", lambda env: f"win:{env}")
+    assert bootstrap.create_launcher(Path("e"), platform="darwin") == "mac:e"
+    assert bootstrap.create_launcher(Path("e"), platform="linux") == "linux:e"
+    assert bootstrap.create_launcher(Path("e"), platform="win32") == "win:e"

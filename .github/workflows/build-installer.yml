@@ -1,4 +1,4 @@
-name: Build Windows Installer
+name: Build Installers
 
 on:
   push:
@@ -7,7 +7,20 @@ on:
 
 jobs:
   build:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: squidxplorer-windows-installer
+          - os: macos-latest # arm64 (Apple Silicon)
+            artifact: squidxplorer-macos-arm64-installer
+          # ubuntu-22.04, not -latest: PyInstaller links the build machine's glibc, and a
+          # binary frozen on 22.04 (glibc 2.35) runs on every later distro; one frozen on
+          # 24.04 refuses to start on 22.04, which real lab machines still run.
+          - os: ubuntu-22.04
+            artifact: squidxplorer-linux-x86_64-installer
+    runs-on: ${{ matrix.os }}
 
     steps:
       - uses: actions/checkout@v4
@@ -21,17 +34,29 @@ jobs:
         run: uv build --wheel --out-dir dist
 
       - name: Freeze the bootstrapper
-        run: uvx pyinstaller --onefile --console --name SquidXplorer-Setup scripts\installer\bootstrap.py
+        run: uvx pyinstaller --onefile --console --name SquidXplorer-Setup scripts/installer/bootstrap.py
 
       - name: Smoke test (dry-run prints the uv commands)
-        shell: pwsh
+        shell: bash
         run: |
-          $wheel = (Get-ChildItem dist\squidxplorer-*.whl).FullName
-          dist\SquidXplorer-Setup.exe --source $wheel --env envtest --extras stitch --dry-run
+          wheel=$(ls dist/squidxplorer-*.whl)
+          dist/SquidXplorer-Setup* --source "$wheel" --env envtest --extras stitch --dry-run
+
+      # Not just a dry-run: the frozen binary performs a real core install into a scratch
+      # env, and the env's own interpreter must import the result. This is the step that
+      # catches a bootstrapper that prints the right commands and installs nothing.
+      - name: Real install (core) and import check
+        shell: bash
+        run: |
+          wheel=$(ls dist/squidxplorer-*.whl)
+          dist/SquidXplorer-Setup* --source "$wheel" --env envtest --extras ""
+          if [ "$RUNNER_OS" = "Windows" ]; then py=envtest/Scripts/python.exe; else py=envtest/bin/python; fi
+          "$py" -c "import squidxplorer; print('import ok:', len(squidxplorer.runnable_operators()), 'operators registered')"
 
       # A frozen exe cannot pip-install into itself, so the env is uv-managed:
-      # the artifact ships the setup exe, the wheel it installs, and uv itself.
-      - name: Stage artifact
+      # the artifact ships the setup binary, the wheel it installs, and uv itself.
+      - name: Stage artifact (Windows)
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory staged | Out-Null
@@ -40,8 +65,21 @@ jobs:
           Copy-Item (Get-Command uv).Source staged\uv.exe
           Copy-Item scripts\installer\README.md staged\
 
+      # Tarred on purpose: the artifact zip drops the executable bit, a tar keeps it,
+      # and both macOS Archive Utility and every Linux file manager extract a .tar.gz.
+      - name: Stage artifact (macOS/Linux, tarred to keep the executable bits)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          mkdir stage-tree staged
+          cp dist/SquidXplorer-Setup stage-tree/
+          cp dist/squidxplorer-*.whl stage-tree/
+          cp "$(command -v uv)" stage-tree/uv
+          cp scripts/installer/README.md stage-tree/
+          tar czf "staged/${{ matrix.artifact }}.tar.gz" -C stage-tree .
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: squidxplorer-windows-installer
+          name: ${{ matrix.artifact }}
           path: staged/

@@ -141,8 +141,19 @@ real group (so `flatfield`, which requires tilefusion, is `extra="stitch"` like
 checked, segment unchecked, and a failed `cuda12_available()` probe shades decon with the probe's
 own reason (today: every Mac) — and `bootstrap.py` drives uv into the private env (`--dry-run`
 prints the exact commands; a missing uv is a refusal carrying the install hint). tilefusion and
-petakit are pinned to commit SHAs in pyproject so two installs resolve the same bits; the Windows
-exe is built elsewhere (`scripts/installer/README.md`).
+petakit are pinned to commit SHAs in pyproject so two installs resolve the same bits.
+
+**One-click on all three platforms** (2026-08-16). `build-installer.yml` freezes the same
+`bootstrap.py` on windows-latest, macos-latest (arm64) and ubuntu-22.04 (oldest supported glibc
+on purpose), and every job does a REAL core install into a scratch env and imports the result —
+a dry-run cannot catch a bootstrapper that prints the right commands and installs nothing. The
+unix artifacts are tar.gz inside the artifact zip because the zip drops the executable bit. A
+finished install leaves a double-clickable launcher via `bootstrap.create_launcher`, one per
+platform: a Windows desktop shortcut, a `~/Applications/SquidXplorer.app` bundle (built locally,
+so unlike the downloaded setup binary it carries no Gatekeeper quarantine flag), an XDG
+`squidxplorer.desktop` menu entry. A launcher failure is said and never fatal. What is NOT done:
+the setup binaries are unsigned — macOS first launch is right-click → Open
+(`scripts/installer/README.md` is the user-facing story and ships inside each artifact).
 
 **ONE table** (`_engine._OPERATORS`, 2026-08-05). `add_operator` and `add_region_operator` are two
 registrars over one record, sharing one validator (`_engine._declare`); `add_region_operator`

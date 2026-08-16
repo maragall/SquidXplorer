@@ -7,6 +7,9 @@ on PATH or beside this program, never downloaded here.
 Double-clicked with no arguments, every flag has a default: the wheel beside the exe,
 an env under the user's local app data, and the default extras with decon gated by the
 CUDA-12 probe. Flags override everything, so the scripted path is unchanged.
+
+A finished install leaves a double-clickable launcher, per platform: a desktop shortcut
+on Windows, a ~/Applications app bundle on macOS, an XDG menu entry on Linux.
 """
 
 from __future__ import annotations
@@ -110,10 +113,8 @@ def commands(uv: str, extras: Sequence[str], source: str, env_dir: Path) -> list
     return cmds
 
 
-def create_shortcut(env_dir: Path) -> bool:
-    """A desktop shortcut to the viewer, Windows only; a failure is said, never fatal."""
-    if sys.platform != "win32":
-        return False
+def _windows_shortcut(env_dir: Path) -> Optional[str]:
+    """A desktop shortcut to the viewer; a failure is said, never fatal."""
     target = env_dir / "Scripts" / "squidxplorer-view.exe"
     script = ("$ws = New-Object -ComObject WScript.Shell; "
               "$s = $ws.CreateShortcut(\"$([Environment]::GetFolderPath('Desktop'))"
@@ -122,10 +123,76 @@ def create_shortcut(env_dir: Path) -> bool:
     try:
         subprocess.run(["powershell", "-NoProfile", "-Command", script],
                        check=True, capture_output=True, timeout=30)
-        return True
+        return "desktop shortcut created: SquidXplorer"
     except (OSError, subprocess.SubprocessError) as exc:
         print(f"no desktop shortcut ({exc}); launch {target} directly", file=sys.stderr)
-        return False
+        return None
+
+
+_INFO_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+ "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleName</key><string>SquidXplorer</string>
+  <key>CFBundleIdentifier</key><string>com.cephla.squidxplorer</string>
+  <key>CFBundleExecutable</key><string>SquidXplorer</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+</dict></plist>
+"""
+
+
+def _macos_app(env_dir: Path, apps_dir: Optional[Path] = None) -> Optional[str]:
+    """A minimal app bundle in ~/Applications wrapping the env's viewer.
+
+    Built locally on this machine, so it carries no Gatekeeper quarantine flag (only the
+    downloaded setup binary does) and a plain double-click launches it. The executable is
+    one exec line, so a rerun that upgrades the env leaves the bundle correct.
+    """
+    target = env_dir / "bin" / "squidxplorer-view"
+    app = (apps_dir or Path.home() / "Applications") / "SquidXplorer.app"
+    try:
+        macos_dir = app / "Contents" / "MacOS"
+        macos_dir.mkdir(parents=True, exist_ok=True)
+        (app / "Contents" / "Info.plist").write_text(_INFO_PLIST)
+        runner = macos_dir / "SquidXplorer"
+        runner.write_text(f'#!/bin/sh\nexec "{target}" "$@"\n')
+        runner.chmod(0o755)
+        return f"app created: {app}"
+    except OSError as exc:
+        print(f"no app bundle ({exc}); launch {target} directly", file=sys.stderr)
+        return None
+
+
+def _linux_desktop_entry(env_dir: Path, apps_dir: Optional[Path] = None) -> Optional[str]:
+    """An XDG menu entry pointing at the env's viewer; a failure is said, never fatal."""
+    target = env_dir / "bin" / "squidxplorer-view"
+    entry_dir = apps_dir or Path.home() / ".local" / "share" / "applications"
+    exec_line = f'"{target}"' if " " in str(target) else str(target)
+    text = ("[Desktop Entry]\nType=Application\nName=SquidXplorer\n"
+            "Comment=Post-acquisition HCS plate viewer\n"
+            f"Exec={exec_line}\nTerminal=false\nCategories=Science;Graphics;\n")
+    try:
+        entry_dir.mkdir(parents=True, exist_ok=True)
+        entry = entry_dir / "squidxplorer.desktop"
+        entry.write_text(text)
+        entry.chmod(0o755)
+        return f"menu entry created: {entry}"
+    except OSError as exc:
+        print(f"no menu entry ({exc}); launch {target} directly", file=sys.stderr)
+        return None
+
+
+def create_launcher(env_dir: Path, platform: str = sys.platform) -> Optional[str]:
+    """A double-clickable launcher for the installed viewer, per platform.
+
+    Returns the sentence describing what was made, or None after a said failure —
+    the install itself has already succeeded either way.
+    """
+    if platform == "win32":
+        return _windows_shortcut(env_dir)
+    if platform == "darwin":
+        return _macos_app(env_dir)
+    return _linux_desktop_entry(env_dir)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -171,8 +238,10 @@ def _run(args: argparse.Namespace) -> int:
         print(shlex.join(cmd))
         if not args.dry_run:
             subprocess.run(cmd, check=True)
-    if not args.dry_run and create_shortcut(env_dir):
-        print("desktop shortcut created: SquidXplorer")
+    if not args.dry_run:
+        made = create_launcher(env_dir)
+        if made:
+            print(made)
     return 0
 
 
