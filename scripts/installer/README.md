@@ -46,8 +46,11 @@ encodings of the same art). Opening an acquisition by drag:
   path as the target's argument, and the viewer opens `sys.argv[1]`.
 - **Linux**: the menu entry declares `%f`, so "Open with SquidXplorer" (or dropping the folder
   onto the entry) opens it directly.
-- **macOS**: dropping onto the `.app` is NOT wired (a shell-script bundle receives documents as
-  Apple events, which nothing here handles). Open the app, then drop the folder onto the plate.
+- **macOS**: drop the acquisition folder onto the `.app` (or its Dock icon). The bundle declares
+  `public.folder`, LaunchServices delivers the drop as an `odoc` Apple event, Qt converts it to a
+  `QFileOpenEvent`, and the viewer's file-open filter ingests it — including a drop onto the icon
+  while the app is still starting up (the filter buffers a launch document until the window
+  exists; both paths verified with a real bundle and `open -a <app> <folder>`).
 
 ## Building by hand
 
