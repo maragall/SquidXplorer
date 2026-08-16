@@ -10,7 +10,7 @@ from typing import Optional
 import numpy as np
 from qtpy.QtCore import Qt, QRectF, QThread, QTimer, Signal
 from qtpy.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap, QRegion
-from qtpy.QtWidgets import QWidget
+from qtpy.QtWidgets import QApplication, QWidget
 
 from squidxplorer import _qtstyle
 from squidxplorer._budget import cache_budget
@@ -685,6 +685,11 @@ class PlateOverview(QWidget):
     # well at a time and deliberately does not fire this, or every corrective click spawns a tab.
     marqueeSelected = Signal(list)
     activeLayerChanged = Signal(str)
+    wellNavigated = Signal(str)        # region id: a plain LEFT-CLICK, while a view window is open,
+    #                                    asking the ACTIVE view to show this region. Deliberately
+    #                                    not `wellActivated`: that is the DOUBLE-click and it OPENS
+    #                                    a window. Navigating opens nothing and, unlike every other
+    #                                    gesture on this widget, changes no selection.
 
     def __init__(self, rows, cols, wells: dict, layout: Optional[dict] = None):
         """``wells``: (row_index, col_index) -> well_id for every acquired well.
@@ -738,6 +743,12 @@ class PlateOverview(QWidget):
         # _sel is the one well the detail viewer shows (red box); _selection is the set the
         # operator picked (blue box). Never merge them: each must survive the other's gesture.
         self._selection: set = set()
+        # A THIRD concept, and it is a MODE rather than a set: while a view window is open, a plain
+        # left-click NAVIGATES that view instead of replacing _selection. The widget cannot work
+        # this out for itself — it can see the plate and not the window registry — so PlateWindow
+        # tells it, from one writer (`_refresh_plate_navigation`) so it cannot drift.
+        self._click_navigates = False
+        self._nav_well = None         # the well a pending navigation is for; see _emit_navigation
         self._view_hues: list = []
         self._marquee = None
         self._marquee_add = False
@@ -770,6 +781,16 @@ class PlateOverview(QWidget):
         self._hold.setSingleShot(True)
         self._hold.setInterval(_LOUPE_HOLD_MS)
         self._hold.timeout.connect(self._arm_loupe)
+        # NAVIGATION IS DEFERRED BY ONE DOUBLE-CLICK INTERVAL, and cancelled by the double-click
+        # that may follow it. Qt delivers press/release/dblclick, so without the wait a double-click
+        # would navigate the ACTIVE view to the well and then open a SECOND window over it —
+        # leaving the window the user was working in moved off its region, with its operator layers
+        # dropped by the reload. `_hold` is deferred for the same reason one line up; this is the
+        # same shape and is cancelled in the same places. A BOUND METHOD, never a self-capturing
+        # lambda: a pending fire must not keep this widget alive past its teardown.
+        self._nav = QTimer(self)
+        self._nav.setSingleShot(True)
+        self._nav.timeout.connect(self._emit_navigation)
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.ClickFocus)
         self.setMinimumSize(240, 200)
@@ -821,6 +842,12 @@ class PlateOverview(QWidget):
         """Stop both threads this widget owns. Idempotent; the one call a destroyer must make."""
         self.clear_tile_source()
         self.set_loupe_source(None)
+        # ...and the deferred gestures. A single-shot timer that fires into a widget its owner has
+        # already dropped is the shape `test_window_lifetime` exists for, and a navigation is the
+        # one of the two that reaches OUT of this widget when it lands.
+        self._hold.stop()
+        self._nav.stop()
+        self._nav_well = None
 
     def _on_tile_ready(self, desc, arr) -> None:
         if self._tile_cache is None:
@@ -1315,6 +1342,9 @@ class PlateOverview(QWidget):
 
     def hideEvent(self, e):
         self._full.stop()   # a plate on its way out must not repaint from a queued timer
+        self._hold.stop()   # ...nor raise a loupe over a plate that is no longer on screen
+        self._nav.stop()    # ...nor navigate a view from a well the user can no longer see
+        self._nav_well = None
         super().hideEvent(e)
 
     def reset_layer(self, layer: str):
@@ -1572,6 +1602,23 @@ class PlateOverview(QWidget):
         self._view_hues = hues
         self.update()
 
+    def set_click_navigates(self, on: bool) -> None:
+        """Whether a plain left-click NAVIGATES the open view instead of replacing the selection.
+
+        A MODE, not a copy of state. This widget can see the plate and cannot see the window
+        registry, so it has to be told whether a view exists to navigate — and it is told by
+        exactly one writer, ``PlateWindow._refresh_plate_navigation``, so the answer cannot drift
+        away from the truth it stands for. With no view open the plate keeps its original meaning
+        entirely: a plain click selects one well.
+        """
+        self._click_navigates = bool(on)
+
+    def _emit_navigation(self) -> None:
+        """Fire the deferred navigation, unless a double-click cancelled it first."""
+        well, self._nav_well = self._nav_well, None
+        if well:
+            self.wellNavigated.emit(well)
+
     def wheelEvent(self, e):
         if self._marquee is not None:
             return          # a marquee owns the drag; zooming would slide the plate under the rect
@@ -1590,9 +1637,15 @@ class PlateOverview(QWidget):
     def mousePressEvent(self, e):
         if e.button() != Qt.LeftButton:
             return
+        self._nav.stop()          # a new press supersedes any navigation still waiting to fire
+        self._nav_well = None
         # Shift owns multi-well selection: Shift-drag opens the wells you box, Shift+Alt unions,
-        # Cmd/Ctrl-click toggles one. A plain click replaces rather than toggles, which is what
-        # keeps double-click safe (Qt delivers press+release before mouseDoubleClickEvent).
+        # Cmd/Ctrl-click toggles one. A plain click ALSO acts, and what it does depends on whether
+        # a view window is open (`_click_navigates`): with none it REPLACES the selection; with one
+        # it navigates that view and leaves the selection alone. Both are idempotent, which is what
+        # keeps double-click safe (Qt delivers press+release before mouseDoubleClickEvent) —
+        # replace is idempotent, toggle is not, and navigation is deferred and then cancelled; see
+        # mouseDoubleClickEvent.
         if e.modifiers() & Qt.ShiftModifier:
             self._marquee = (e.x(), e.y(), e.x(), e.y())
             self._marquee_add = bool(e.modifiers() & Qt.AltModifier)
@@ -1706,21 +1759,39 @@ class PlateOverview(QWidget):
             self._panning = False
             self._dismiss_loupe()
             return
-        # Plain click (no modifier, no pan, no loupe): select only this well, or clear on empty.
+        # Plain click (no modifier, no pan, no loupe). A plain DRAG still pans (guarded by
+        # _panning), and a hold that raised the loupe does neither (had_loupe).
         if (self._press is not None and not self._panning and not had_loupe
                 and e.button() == Qt.LeftButton):
             hit = self._cell(e.x(), e.y())
-            new_sel = {(hit["row_index"], hit["col_index"])} if hit and hit["well_id"] else set()
-            if new_sel != self._selection:
-                self._selection = new_sel
-                self.selectionChanged.emit(self.selected_wells())
-                self.update()
+            if self._click_navigates and hit and hit["well_id"]:
+                # WITH A VIEW OPEN, A CLICK ON A WELL NAVIGATES AND SELECTS NOTHING. The blue
+                # selection is the operator's batch; moving the window you are looking at is not a
+                # change of batch, and collapsing a six-click batch to one well as a side effect of
+                # looking somewhere would be a silent, expensive surprise.
+                #
+                # A click on EMPTY SPACE still clears, and that is not an inconsistency — it is
+                # the deselect path this branch was written for ("without it a batch selection
+                # could never be dropped by clicking"). Escape clears too (keyPressEvent), and
+                # Shift/Cmd-click still edit the selection well by well. So the escape hatch
+                # survives; only the meaning of clicking ON a well changes.
+                self._nav_well = hit["well_id"]
+                self._nav.start(QApplication.doubleClickInterval())
+            else:
+                new_sel = ({(hit["row_index"], hit["col_index"])}
+                           if hit and hit["well_id"] else set())
+                if new_sel != self._selection:
+                    self._selection = new_sel
+                    self.selectionChanged.emit(self.selected_wells())
+                    self.update()
         self._press = None
         self._panning = False
         self._dismiss_loupe()
 
     def leaveEvent(self, e):
         self._hold.stop()
+        self._nav.stop()                             # ...and a navigation the user walked away from
+        self._nav_well = None
         self._dismiss_loupe()
         self._hover = None
         # Drop any in-flight marquee: if the grab is lost mid-drag, no release ever arrives.
@@ -1900,6 +1971,12 @@ class PlateOverview(QWidget):
     def mouseDoubleClickEvent(self, e):
         # Qt sends press/release/dblclick: the second press already re-armed the hold timer.
         self._hold.stop()
+        # ...and the SAME argument for navigation: the first release started a deferred navigate,
+        # and without this a double-click would move the active view off its region (dropping its
+        # operator layers on the reload) and THEN open a second window over the same well. This
+        # cancellation is the whole reason the navigation waits rather than firing on release.
+        self._nav.stop()
+        self._nav_well = None
         self._dismiss_loupe()
         c = self._cell(e.x(), e.y())
         if c and c["well_id"]:

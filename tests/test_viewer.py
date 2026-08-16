@@ -704,7 +704,14 @@ def test_plain_drag_still_pans(qapp):
 
 
 def test_double_click_selects_only_the_well_it_opens(qapp):
-    """A plain click REPLACES the selection (idempotent), so press+release+dblclick leaves exactly the opened well selected."""
+    """A plain click REPLACES the selection (idempotent), so press+release+dblclick leaves exactly the opened well selected.
+
+    That is the NO-VIEW-OPEN column, which is what a bare PlateOverview reports: with a view open
+    (`set_click_navigates`) a plain click NAVIGATES that view and touches no selection, and a click
+    on an EMPTY position clears the selection in BOTH modes — the only click-driven deselect, so
+    navigation does not take it away. tests/test_plate_navigates_views.py covers that column, and
+    pins that this one did not move.
+    """
     ov = _sel_overview()
     opened = []
     ov.wellActivated.connect(lambda wid, fov: opened.append((wid, fov)))
