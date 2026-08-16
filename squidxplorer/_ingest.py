@@ -172,6 +172,7 @@ def ingest(win, path: str) -> None:
     win._readout.setText(
         f"{len(win._fov_index)} wells loaded · double-click a well, or Shift-drag to open "
         f"several{note}")
+    win._on_plate_loaded()
 
 
 # -- the raw-preview lifecycle ------------------------------------------------------------------

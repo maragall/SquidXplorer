@@ -1834,6 +1834,14 @@ class ViewerManager(QObject):
                 window_id=win.window_id, roi_bbox=roi))
         return out
 
+    def window(self, window_id: Optional[int]) -> "Optional[RegionViewer]":
+        """The open window with this id, or None — including for None itself, so a caller holding
+        "the id I opened, if any" can ask without checking twice. An id that outlives its window
+        is exactly the kind of thing that should answer None in one place rather than four."""
+        if window_id is None:
+            return None
+        return self._windows.get(int(window_id))
+
     def view_for(self, window_id: int) -> "Optional[View]":
         for v in self.views():
             if v.window_id == int(window_id):

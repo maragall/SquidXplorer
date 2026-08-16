@@ -29,6 +29,50 @@ def window_screen(widget: Optional[QWidget]):
     return screen if screen is not None else QGuiApplication.primaryScreen()
 
 
+def default_root_width(avail_w: int, min_w: int, design_w: int) -> int:
+    """How wide the root window opens on a work area *avail_w* logical px across.
+
+    THE PLATE IS A NAVIGATOR, not a document: it picks the wells and the pixels live in the view
+    window beside it. So the root takes about a fifth of the screen and leaves the rest, which is
+    the shape people arrive with from other suites.
+
+    Bounded at both ends, and both bounds bind on real machines:
+
+      * ``min_w`` wins on a small screen. A fifth of a 1440-wide laptop is 288 px, and the band
+        under the plate does not fit in that -- the navigator is already the column every pixel
+        below the design width comes out of. So the split degrades to about 30/70 rather than
+        20/80, which is correct: you cannot make a panel narrower than its controls.
+      * ``design_w`` wins on a big screen. A fifth of a 4K work area at 100% is 768 px, which is
+        wider than the shape this layout was drawn against and would be gutters either side of the
+        plate rather than more plate. So the split becomes about 15/85, which is also correct.
+
+    Pure arithmetic, deliberately: it is exercised across six screen shapes by tests that never
+    build a window, because the offscreen platform reports one 800x600 screen and a literal there
+    would pin nothing.
+    """
+    return max(int(min_w), min(int(design_w), int(avail_w) // 5))
+
+
+def beside_rect(avail, anchor, min_w_frac: float = 1.0 / 3.0):
+    """The rect for a window filling the work area *avail* to the RIGHT of *anchor*.
+
+    Takes and returns ``QRect``. Aligned to the anchor's top and height rather than to the work
+    area's, so the two windows read as one layout instead of two that happen to be adjacent, and
+    so they stay in step if the user drags the root's height.
+
+    Floored at *min_w_frac* of the work area: a root dragged nearly full width would otherwise
+    leave a sliver, and a sliver with a napari canvas in it is worse than an overlap.
+    """
+    from qtpy.QtCore import QRect
+
+    left = anchor.right() + 1
+    width = max(avail.right() - anchor.right(), int(avail.width() * min_w_frac))
+    left = min(left, max(avail.left(), avail.right() - width + 1))
+    top = max(anchor.top(), avail.top())
+    height = min(anchor.height(), avail.height())
+    return QRect(left, top, width, height)
+
+
 def scale_qss_fonts(qss: str, scale: float) -> str:
     """Multiply every ``font-size:Npx`` in *qss* by *scale*, leaving the rest untouched."""
     def _sub(m: "re.Match[str]") -> str:
