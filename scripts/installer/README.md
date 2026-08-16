@@ -36,6 +36,20 @@ double-click or `./SquidXplorer-Setup-x86_64.AppImage`. On success **SquidXplore
 appears in the application menu. Needs glibc ≥ 2.35 (ubuntu-22.04 build machine); on a
 system without FUSE, run it with `--appimage-extract-and-run`.
 
+## What the machine needs (and does not need)
+
+Nothing preinstalled: **no Python, no git, no compiler**. The installer carries its own uv, uv
+downloads a self-contained Python 3.12 into the private env, and the SHA-pinned packages
+(tilefusion, petakit) install from plain-HTTPS GitHub tarballs. What IS required is **network
+access** to pypi.org and github.com during the install; offline labs are not supported yet.
+
+Linux only, at first LAUNCH (not install): Qt's xcb plugin needs `libxcb-cursor0`, which a
+default Ubuntu 22.04 lacks. The installer checks and prints the exact
+`sudo apt install libxcb-cursor0` line when it is missing.
+
+A rerun reuses the existing env; an env whose Python is too old (one built by a pre-2026-08-16
+installer on an old-Python machine) is detected and recreated automatically.
+
 ## The launcher, the icon, and drag-and-open
 
 A finished install leaves a double-clickable **SquidXplorer** launcher carrying the wellplate

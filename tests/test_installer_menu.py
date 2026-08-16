@@ -7,6 +7,8 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
+
 _INSTALLER = Path(__file__).resolve().parents[1] / "scripts" / "installer"
 
 
@@ -129,7 +131,7 @@ def test_dry_run_emits_the_uv_commands_for_the_chosen_extras(tmp_path, capsys, m
                          "--env", str(tmp_path / "env"), "--dry-run"])
     assert rc == 0
     lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("/opt/uv/uv")]
-    assert lines[0] == f"/opt/uv/uv venv {tmp_path / 'env'}"
+    assert lines[0] == f"/opt/uv/uv venv --python {bootstrap.ENV_PYTHON} {tmp_path / 'env'}"
     assert lines[1].startswith("/opt/uv/uv pip install --python ")
     assert "squidxplorer[decon,stitch] @ dist/squidxplorer.whl" in lines[1]
 
@@ -146,6 +148,63 @@ def test_a_rerun_reuses_the_existing_env(tmp_path):
 def test_core_only_installs_the_bare_package(tmp_path):
     cmds = bootstrap.commands("/opt/uv/uv", ["core"], "x.whl", tmp_path / "env")
     assert cmds[-1][-1] == "squidxplorer @ x.whl"
+
+
+def test_the_env_is_built_from_a_PINNED_managed_python_never_the_machines(tmp_path):
+    """The first customer install (Katana rig, 2026-08-16) died because `uv venv` built the env
+    from Ubuntu 22.04's system Python 3.10 and the wheel needs >=3.11. The pin makes uv download
+    a managed CPython, so the installer works on a machine with no (or the wrong) Python."""
+    cmds = bootstrap.commands("/opt/uv/uv", ["core"], "x.whl", tmp_path / "env")
+    venv = cmds[0]
+    assert venv[1] == "venv"
+    assert venv[2:4] == ["--python", bootstrap.ENV_PYTHON], \
+        "the venv step no longer pins its interpreter; the system python decides again"
+
+
+def _fake_env(tmp_path, version_line: str):
+    """An env whose `bin/python` answers *version_line* to the stale_env probe (posix shim)."""
+    env = tmp_path / "env"
+    py = bootstrap.env_python(env)
+    py.parent.mkdir(parents=True)
+    py.write_text(f"#!/bin/sh\necho {version_line}\n")
+    py.chmod(0o755)
+    return env
+
+
+@pytest.mark.skipif(os.name != "posix", reason="the shim interpreter is a shell script")
+def test_a_stale_old_python_env_is_named_not_reused(tmp_path):
+    """The venv step is skipped whenever the env exists, so an env built wrong once would fail
+    every future install identically — the guard names it so _run can recreate it."""
+    reason = bootstrap.stale_env(_fake_env(tmp_path, "3.10"))
+    assert reason is not None and "3.10" in reason and "3.11" in reason
+
+
+@pytest.mark.skipif(os.name != "posix", reason="the shim interpreter is a shell script")
+def test_a_current_env_is_reused(tmp_path):
+    assert bootstrap.stale_env(_fake_env(tmp_path, "3.12")) is None
+
+
+def test_an_absent_env_is_not_stale(tmp_path):
+    assert bootstrap.stale_env(tmp_path / "no-such-env") is None
+
+
+def test_no_dependency_needs_a_git_binary_on_the_customer_machine():
+    """`git+https` references make uv shell out to a `git` binary — present on every CI runner,
+    absent on a bare lab machine. The SHA pins live in archive-tarball URLs instead, which
+    GitHub serves over plain HTTPS."""
+    import pathlib
+
+    pyproject = (pathlib.Path(__file__).resolve().parents[1] / "pyproject.toml").read_text()
+    offenders = [ln for ln in pyproject.splitlines()
+                 if "@ git+" in ln and not ln.lstrip().startswith("#")]
+    assert not offenders, \
+        f"git+ dependencies reappeared ({offenders}); the frozen installer will fail on " \
+        f"machines without git"
+
+
+def test_the_linux_gui_libs_note_is_linux_only():
+    assert bootstrap._linux_gui_libs_note("darwin") is None
+    assert bootstrap._linux_gui_libs_note("win32") is None
 
 
 def test_without_uv_the_refusal_carries_the_install_hint(tmp_path, capsys, monkeypatch):
