@@ -65,15 +65,47 @@ jobs:
         shell: bash
         run: dist/SquidXplorer-Setup* --env envtest --extras stitch --dry-run
 
-      # Not just a dry-run: the frozen binary performs a real core install into a scratch
-      # env, and the env's own interpreter must import the result. This is the step that
-      # catches a bootstrapper that prints the right commands and installs nothing.
-      - name: Real install (core) and import check
+      # Not just a dry-run: the frozen binary performs a real install into a scratch env, and
+      # the env's own interpreter must import the result. This is the step that catches a
+      # bootstrapper that prints the right commands and installs nothing.
+      #
+      # gui,stitch — THE CUSTOMER DEFAULT (decon is CUDA-gated and no runner has CUDA), not
+      # core-only. Measured blind spot, 2026-08-16: a core-only install here shipped green while
+      # containing no Qt at all — `squidxplorer-view` died on `import qtpy` the moment a real
+      # machine launched it. The packs a double-click installs are the packs this must install.
+      - name: Real install (customer default packs) and import check
         shell: bash
         run: |
-          dist/SquidXplorer-Setup* --env envtest --extras ""
+          dist/SquidXplorer-Setup* --env envtest --extras gui,stitch
           if [ "$RUNNER_OS" = "Windows" ]; then py=envtest/Scripts/python.exe; else py=envtest/bin/python; fi
           "$py" -c "import squidxplorer; print('import ok:', len(squidxplorer.runnable_operators()), 'operators registered')"
+          "$py" -c "import qtpy; import tilefusion; print('gui + stitch packs import ok')"
+
+      # Registered is not runnable: `requires=` refuses by name when a package is missing, so a
+      # green import proves nothing about the pixels. Run two REAL operators through the
+      # installed env over a synthetic acquisition — mip (core) and stitch (the tilefusion pack,
+      # pinned to a SHA whose install this is the only per-platform proof of). The CLI returns a
+      # nonzero exit code on a failed or partial run, and the written plate is checked on disk.
+      - name: Run real operators through the installed env (mip + stitch)
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            py=envtest/Scripts/python.exe; cli=envtest/Scripts/squidxplorer.exe
+          else
+            py=envtest/bin/python; cli=envtest/bin/squidxplorer
+          fi
+          "$py" tools/make_5d_fixture.py fixture --regions A1,A2 --fovs 4 --nz 3 --nt 1 --size 128
+          "$cli" fixture --operator mip --output-folder out-mip
+          "$cli" fixture --operator stitch --output-folder out-stitch
+          "$py" -c "
+          from pathlib import Path
+          for out in ('out-mip', 'out-stitch'):
+              store = Path(out) / 'fixture.hcs' / 'plate.ome.zarr'
+              assert store.is_dir(), f'{store} was not written'
+              marker = store / '.squidxplorer-incomplete'
+              assert not marker.exists(), f'{out}: the store says it is incomplete'
+          print('mip + stitch wrote complete plates')
+          "
 
       - name: Package as AppImage (Linux)
         if: runner.os == 'Linux'
