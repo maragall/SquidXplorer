@@ -1773,7 +1773,7 @@ def test_the_loupe_window_memo_evicts_instead_of_growing_for_the_source_lifetime
     """The per-source (well, t) contrast memo was a plain dict with NO eviction — it grew for
     the life of the source. It is now a budgeted LRU: the bound holds, the newest entries
     survive, the oldest are evicted, and a hit is still a memo (no recompute)."""
-    from squidxplorer import _plate_overview as PO
+    from squidxplorer import _loupe as PO   # the engine moved; the memo lives in _loupe now
 
     class _Src(PO._LoupeSource):
         def __init__(self):

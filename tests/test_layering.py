@@ -29,6 +29,14 @@ GUI_MODULES = frozenset({
     "_minerva_panel",    # the Minerva tab UI + its runs, cut out of `_viewer` (2026-08-14)
     "_worker_lifecycle", # the worker launch/stop seam: wires Signals, starts QThreads (2026-08-14)
     "_layer_tree",       # the grouped layer tree (a QTreeView over napari's item model)
+    "_loupe",            # the LOUPE ENGINE: magnification arithmetic, sources, the coalescing
+                          # QThread worker and the shared inset painter. Extracted from
+                          # `_plate_overview` so the canvas loupe could not become a SECOND loupe.
+    "_napari_loupe",     # the canvas loupe's GESTURE and floating inset (an overlay on the vispy
+                          # canvas); everything about pixels is `_loupe`'s.
+    "_fov_nav",          # the FOV axis: napari's dims slider walking a region's fields with the
+                          # CAMERA. Where a FOV is lives in `_mosaic_source.mosaic_fov_bboxes_um`,
+                          # what framing one means in `_napari_view.camera_for_bbox_um` — Qt-free.
     "_logpanel",         # the log PANEL (the Qt widget). `_logpane`, no 'l', is the Qt-free bus.
     "_napari_pane",
     "_op_panels",

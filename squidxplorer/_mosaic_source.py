@@ -516,46 +516,132 @@ def mosaic_bbox_um(meta: dict, region: str) -> Optional[tuple[float, float, floa
     return (x0, y0, x0 + w * float(pixel_size), y0 + h * float(pixel_size))
 
 
+def mosaic_fov_bboxes_um(meta: dict, region: str) -> "dict[int, tuple[float, float, float, float]]":
+    """``{fov: (x0, y0, x1, y1)}`` in stage micrometres for every FOV of *region*, in acquisition
+    order.
+
+    THE PLACEMENT THAT DREW THE PIXELS, not a second derivation of it. The origin is ``min`` over
+    the region's recorded positions and each offset is
+    :func:`~squidxplorer._placement.fov_offsets_px` -- exactly what :func:`mosaic_bbox_um` above
+    uses, and therefore exactly what ``_workers._MosaicWorker`` placed this window's layer with.
+    So a box this returns lands on the pixels it names, in napari's world, with no conversion.
+
+    IT IS NOT ``_tilesource.fov_bboxes_um``, and the difference is not cosmetic. That one treats a
+    recorded position as the frame's CENTRE (as ``_output.field_origin_um`` does, for the NGFF
+    translation); everything on the mosaic path treats it as the frame's TOP-LEFT. The two are
+    half a frame apart -- measured, 195.9 um on the 40x AF-sweep set -- and half a frame of
+    UNIFORM shear renders as a perfectly plausible picture of the wrong tissue. Each convention is
+    right for its own surface (that one places the PLATE, this one places a WINDOW's mosaic), so
+    neither is a bug; picking the wrong one HERE would be. The check that catches it is free and
+    already on screen: the centre of every box this returns must satisfy ``fov_at_point`` -> that
+    same fov.
+
+    RAISES rather than returning ``None``, which is the opposite of what
+    :func:`fovs_overlapping_bbox` below does, and the asymmetry is the point. That function has an
+    honest fallback -- "the user boxed nothing, so run on the whole region" -- so a caller that
+    cannot tell "no overlap" from "no positions" still lands somewhere sensible. A caller that
+    wants to DRAW every FOV has no such fallback: fifteen boxes out of sixteen is a picture of a
+    region with a hole in it, and the fifteen look exactly as convincing as sixteen would. So the
+    reason comes back as a sentence and the caller says it out loud. ``fov_offsets_px``'s own
+    ``KeyError`` is let through unwrapped, because its message ("coordinates.csv and the image
+    filenames disagree; refusing to draw a mosaic with holes") is better than anything added here.
+    """
+    from squidxplorer._placement import fov_offsets_px
+
+    positions = meta.get("fov_positions_um") or {}
+    if not positions:
+        raise ValueError(
+            f"{region}: this acquisition records no stage positions, so its FOVs cannot be "
+            f"located -- coordinates.csv is missing or unreadable.")
+    pixel_size = meta.get("pixel_size_um")
+    if pixel_size in (None, 0):
+        raise ValueError(
+            f"{region}: this acquisition records no pixel size, so a FOV's extent in micrometres "
+            f"cannot be derived.")
+    fovs = list((meta.get("fovs_per_region") or {}).get(region) or [])
+    if not fovs:
+        raise ValueError(f"{region}: no FOVs -- is that a region of this acquisition?")
+
+    offsets = fov_offsets_px(positions, region, fovs, pixel_size)   # KeyError: let it speak
+    fh, fw = (int(v) for v in meta["frame_shape"])
+    p = float(pixel_size)
+    # The region origin, spelled exactly as `mosaic_bbox_um` spells it. Two spellings of one
+    # origin is how the boxes and the mosaic they sit on drift apart by a sub-pixel nobody
+    # notices until it is a whole frame.
+    x0 = min(float(positions[(region, f)][0]) for f in fovs)
+    y0 = min(float(positions[(region, f)][1]) for f in fovs)
+
+    out: "dict[int, tuple[float, float, float, float]]" = {}
+    for fov in fovs:
+        row, col = offsets[fov]
+        fx0, fy0 = x0 + col * p, y0 + row * p
+        out[int(fov)] = (fx0, fy0, fx0 + fw * p, fy0 + fh * p)
+    return out
+
+
 def fovs_overlapping_bbox(meta: dict, region: str,
                           bbox_um: "Optional[tuple]") -> "Optional[list[int]]":
     """The WHOLE FOVs of *region* whose footprint overlaps *bbox_um*, in acquisition order.
 
-    Returns ``None`` when the question cannot be answered or no field overlaps, so a caller
-    falls back to the whole region rather than running on a silently empty set.
-    """
-    from squidxplorer._placement import fov_offsets_px
+    ONE GEOMETRY, and it is one FUNCTION: the boxes come from :func:`mosaic_fov_bboxes_um` above,
+    which is the same placement rule that drew the pixels the user boxed. This used to build them
+    inline, and so did :func:`fov_at_point` below -- two copies of "where is FOV 7" sitting in one
+    file under a docstring warning against exactly that. A third consumer (the FOV walk) was what
+    made the cost of keeping them visible.
 
+    Returns ``None`` when the question cannot be answered or no field overlaps, so a caller
+    falls back to the whole region rather than running on a silently empty set. That is why the
+    raise from ``mosaic_fov_bboxes_um`` is caught here and nowhere else -- see its docstring for
+    why the two contracts differ.
+    """
     if bbox_um is None:
         return None
-    positions = meta.get("fov_positions_um") or {}
-    pixel_size = meta.get("pixel_size_um")
-    if not positions or pixel_size in (None, 0):
-        return None
-    fovs = list((meta.get("fovs_per_region") or {}).get(region) or [])
-    if not fovs:
-        return None
     try:
-        offsets = fov_offsets_px(positions, region, fovs, pixel_size)
-        fh, fw = (int(v) for v in meta["frame_shape"])
+        boxes = mosaic_fov_bboxes_um(meta, region)
     except (KeyError, ValueError, TypeError):
         return None
-    x0 = min(float(positions[(region, f)][0]) for f in fovs)
-    y0 = min(float(positions[(region, f)][1]) for f in fovs)
-    p = float(pixel_size)
 
     rx0, ry0, rx1, ry1 = (float(v) for v in bbox_um)
     rx0, rx1 = min(rx0, rx1), max(rx0, rx1)
     ry0, ry1 = min(ry0, ry1), max(ry0, ry1)
 
     hit = []
-    for fov in fovs:
-        row, col = offsets[fov]
-        fx0, fy0 = x0 + col * p, y0 + row * p
+    for fov, (fx0, fy0, fx1, fy1) in boxes.items():
         # Half-open on the far edge: a box that stops exactly on a seam belongs to the field it
         # is inside, not to both.
-        if fx0 < rx1 and (fx0 + fw * p) > rx0 and fy0 < ry1 and (fy0 + fh * p) > ry0:
+        if fx0 < rx1 and fx1 > rx0 and fy0 < ry1 and fy1 > ry0:
             hit.append(int(fov))
     return hit or None
+
+
+def fov_pixel_at_point(meta: dict, region: str, x_um: float,
+                       y_um: float) -> "Optional[tuple[int, float, float]]":
+    """``(fov, py, px)`` — which FOV a stage-micrometre point is in, and where inside THAT FRAME
+    it lands, in level-0 acquisition pixels. ``None`` off the mosaic.
+
+    THE SAME GEOMETRY AS :func:`fovs_overlapping_bbox`, which is why it lives here and not in the
+    loupe: the field the loupe magnifies and the field a stitch run would select must be the same
+    field. A loupe that derived "where is FOV 7" for itself would agree with itself and with
+    nothing else, and the disagreement would be invisible — both surfaces would show a sharp,
+    plausible field.
+
+    THE LAST OVERLAPPING FIELD WINS, not the first. Fields overlap at the seams, and the preview
+    fuser is later-overwrites-earlier (``fuse_region_mosaic``; CLAUDE.md, "Two producers of a
+    region's pixels"), so the field whose pixels are actually ON TOP at a seam is the last one.
+    ``_plate_overview._fov_box_at`` settled this for the plate in the same words and for the same
+    reason. Magnifying the field underneath the one the user can see is exactly the wrong-image
+    failure this whole module is careful about.
+    """
+    try:
+        boxes = mosaic_fov_bboxes_um(meta, region)
+    except (KeyError, ValueError, TypeError):
+        return None
+    pixel_size = float(meta["pixel_size_um"])
+    hit = None
+    for fov, (fx0, fy0, fx1, fy1) in boxes.items():
+        if fx0 <= x_um < fx1 and fy0 <= y_um < fy1:
+            hit = (int(fov), (y_um - fy0) / pixel_size, (x_um - fx0) / pixel_size)
+    return hit
 
 
 def fov_at_point(meta: dict, region: str, x_um: float, y_um: float) -> "Optional[int]":

@@ -328,6 +328,7 @@ class RegionViewer(QMainWindow):
         run_operator: Optional[Any] = None,
         parent_id: Optional[int] = None,
         settings: "Optional[ViewSettings]" = None,
+        fovs: bool = False,
     ) -> None:
         super().__init__(parent)
         self._reader = reader
@@ -368,6 +369,23 @@ class RegionViewer(QMainWindow):
         self._settings_applied = False
         self._roi_bbox = roi_bbox
         self._roi_layer = None
+        # A FOVs VIEW walks this region's fields with the CAMERA. It loads nothing an ordinary
+        # window would not: the mosaic is fused once and the slider only re-points the camera at
+        # one field's box, which is why a step is instant and why playback on this axis is honest.
+        # See `squidxplorer/_fov_nav.py` for why that is not a reversal of `_region_nav`'s "the
+        # navigation unit is the region".
+        self._fov_mode = bool(fovs)
+        self._fov_slider = None    # the FOV axis, built ONLY in a FOVs view; None means "no axis"
+        self._fov_layer = None     # the napari Shapes layer this window draws FOV rectangles on
+        self._fov_boxes_cache: dict = {}   # the current region's FOV boxes; see _draw_fov_boxes
+        if self._fov_mode and self._roi_bbox is not None:
+            # No precedence rule and no fallback. An ROI view is CROPPED to one box and a FOVs
+            # view walks every field of the whole region; a window that claimed to be both would
+            # have to pick one silently, and the user would be looking at the other.
+            raise ValueError(
+                "a FOVs view walks the whole region's fields and an ROI view is cropped to one "
+                "box; a window cannot be both. Open the FOVs view from the parent window rather "
+                "than from inside an ROI child.")
         self._op_action: Optional[str] = None
         self._op_address: Any = None
         self._result_region: Optional[str] = None
@@ -377,7 +395,11 @@ class RegionViewer(QMainWindow):
         # set would rename the window under the user the first time the plate navigated it
         # somewhere new, and the title is the only visible join between a log line and a window.
         self._derived_name = title or self._view_label(self._seed_regions)
-        if self._roi_bbox is not None:
+        # THE ONE PLACE A KIND PREFIXES THE LABEL. The two are mutually exclusive by the refusal
+        # above, so this is an elif and not a precedence question.
+        if self._fov_mode:
+            self._derived_name = f"FOVs · {self._derived_name}"
+        elif self._roi_bbox is not None:
             self._derived_name = f"ROI · {self._derived_name}"
         self._display_name = self._derived_name
         self._refresh_title()
@@ -470,6 +492,15 @@ class RegionViewer(QMainWindow):
         except Exception as exc:                          # noqa: BLE001 - a readout, never fatal
             log.debug("view %s could not wire the FOV readout: %s", self.window_id, exc)
 
+        # THE CANVAS LOUPE (shift-left-click). Built here because this is where the napari Viewer
+        # and the GL widget first become reachable; it costs one object until it is raised, and it
+        # builds neither its source nor its worker until then.
+        self._loupe = None
+        try:
+            self._install_canvas_loupe(pane)
+        except Exception as exc:                          # noqa: BLE001 - a magnifier, never fatal
+            log.debug("view %s could not wire the canvas loupe: %s", self.window_id, exc)
+
         try:
             ch_combo = getattr(pane, "detect_channel", None)
             if ch_combo is not None and ch_combo.count() == 0:
@@ -492,6 +523,17 @@ class RegionViewer(QMainWindow):
         self._slider.on_problem(self._say)
         self._slider.bind(self._cursor)
         lay.addWidget(self._slider)
+
+        # THE FOV AXIS, and only in a FOVs view. Built here rather than unconditionally-and-hidden
+        # (which is what the region slider and the timepoint bar do) because this one is not free:
+        # it costs a napari `Dims`, a `QtDims`, a `QTimer` and an `AnimationThread`, and window
+        # open time is a tracked complaint. `None` therefore means "this window has no FOV axis".
+        if self._fov_mode:
+            from squidxplorer._fov_nav import FovSlider
+
+            self._fov_slider = FovSlider(on_change=self._on_fov_changed)
+            self._fov_slider.on_problem(self._say)
+            lay.addWidget(self._fov_slider)
 
         self._time_point_bar = TimePointBar(on_change=self._on_time_point_changed, playback=True)
         self._time_point_bar.on_problem(self._say)
@@ -590,7 +632,14 @@ class RegionViewer(QMainWindow):
         r2.addWidget(self._chip("✕ clear", "Remove all ROIs in this window.", self._clear_rois))
         r2.addWidget(self._chip("→ window", "Open the drawn ROI(s) as child window(s) — the next "
                                 "level of the view tree.", self._open_roi_children))
+        # FOVs. The ROI chips beside it are for a box the user draws; this is for the boxes the
+        # ACQUISITION already drew. On a sparse run — the AF sweep sets are 16 fields at 7x the
+        # field pitch, so 3% of the mosaic is data — checking focus means visiting each field, and
+        # doing that by wheel-zoom is the complaint this answers.
+        self._btn_fovs = self._chip("⊞ FOVs", self._FOVS_TIP, self._open_fovs)
+        r2.addWidget(self._btn_fovs)
         r2.addStretch(1)
+        self._refresh_fovs_chip()
         vv.addLayout(r2)
         view_box.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
         h.addWidget(view_box, 0)
@@ -1420,6 +1469,225 @@ class RegionViewer(QMainWindow):
     def _roi_shapes_layer(self, create: bool = False):
         return _roi_tools.roi_shapes_layer(self, create)
 
+    #: The FOVs chip's own description, held apart from the per-region count appended to it. The
+    #: count changes whenever the plate navigates this window somewhere else, so the two are
+    #: joined at refresh time rather than the chip's tooltip being re-derived from its own text.
+    _FOVS_TIP = ("Open a child view that steps the camera through this region's FOVs one at a "
+                 "time, framed to fill the canvas — for checking focus field by field without "
+                 "zooming in and out. Press play on its FOV slider to walk them; the mosaic is "
+                 "loaded once, so stepping is instant.")
+
+    def _refresh_fovs_chip(self) -> None:
+        """Enable the FOVs chip only when there are fields to walk, and SAY WHY when there are not.
+
+        Three separate refusals, kept separate because they have different fixes -- the pattern
+        ``_refresh_record_chip`` sets. Unlike that one this must be re-run on a REGION change:
+        ``n_t`` and ``n_z`` are properties of the acquisition, but how many FOVs there are is a
+        property of the region, and the plate can navigate this window to another one.
+        """
+        btn = getattr(self, "_btn_fovs", None)
+        if btn is None:
+            return
+        if self._fov_mode:
+            btn.setEnabled(False)
+            btn.setToolTip("This view already steps through FOVs — use the slider at the bottom.")
+            return
+        if self._manager is None:
+            btn.setEnabled(False)
+            btn.setToolTip("This window has no manager, so it cannot open a child view.")
+            return
+        from squidxplorer._mosaic_source import mosaic_fov_bboxes_um
+
+        region = self.current_region()
+        try:
+            n = len(mosaic_fov_bboxes_um(self._meta or {}, region)) if region else 0
+        except (KeyError, ValueError, TypeError) as exc:
+            btn.setEnabled(False)
+            btn.setToolTip(str(exc))
+            return
+        if not n:
+            btn.setEnabled(False)
+            btn.setToolTip(f"{region} has no locatable FOVs.")
+            return
+        btn.setEnabled(True)
+        btn.setToolTip(f"{self._FOVS_TIP}\n\n{n} FOV(s) in {region}.")
+
+    def _open_fovs(self) -> None:
+        """Open a child view that walks THIS region's FOVs. One region, one child, one tab."""
+        if self._manager is None:
+            self._say("this window isn't attached to the view registry, so it cannot open a child.")
+            return
+        region = self.current_region()
+        if not region:
+            self._say("no region is showing, so there are no FOVs to walk.")
+            return
+        boxes = self._fov_boxes()          # says its own reason if it cannot answer
+        if not boxes:
+            return
+        child = self._manager.open_child([region], parent_id=self.window_id, fovs=True,
+                                         luts=self._per_channel_luts())
+        if child is None:
+            self._say("the FOV view could not be opened.")
+            return
+        self._say(f"walking {len(boxes)} FOV(s) of {region} in view {child.window_id}.")
+
+    # -- the FOV walk: every field of this region, drawn, and the camera stepped across them ----
+    #: Edge colours for the FOV rectangles. Two, because there are exactly two states a field can
+    #: be in on this surface, and naming them here is what stops "what does current look like"
+    #: being answered in two places.
+    _FOV_EDGE_IDLE = "#8b949e"
+    _FOV_EDGE_CURRENT = "#f0883e"
+
+    def _fov_boxes(self) -> "dict":
+        """``{fov: (x0, y0, x1, y1)}`` for the current region, or ``{}`` having SAID why not.
+
+        One geometry, and it is the one that placed the pixels:
+        :func:`squidxplorer._mosaic_source.mosaic_fov_bboxes_um`. It raises rather than returning
+        a short answer precisely so this can say the reason out loud -- fifteen rectangles out of
+        sixteen look exactly as convincing as sixteen, so a silent gap here is a picture of a
+        region with a hole in it.
+        """
+        from squidxplorer._mosaic_source import mosaic_fov_bboxes_um
+
+        region = self.current_region()
+        if not region:
+            return {}
+        try:
+            return mosaic_fov_bboxes_um(self._meta or {}, region)
+        except (KeyError, ValueError, TypeError) as exc:
+            self._say(f"cannot locate this region's FOVs: {exc}")
+            return {}
+
+    def _fov_shapes_layer(self, boxes: "dict"):
+        """This window's FOV Shapes layer, rebuilt from *boxes* in ONE write.
+
+        DELIBERATELY NOT ``_roi_shapes_layer``. Sharing it looks tidier and would draw a rectangle
+        that lies, in four separate ways, all of them via ``_on_roi_data``:
+
+        * ``_clamp_last_roi`` holds the LAST shape to ``GL_MAX_3D_TEXTURE_SIZE``. That ceiling is
+          2048 px on the Apple floor and a 40x frame here is 4168 px, so the last field's
+          rectangle would be silently shrunk and the user told "ROI held to the 3D ceiling" about
+          a box they never drew. That clamp is a promise about a box the USER dragged.
+        * it renames the next shape ``R{n+1}``, so opening a FOVs view would renumber the user's
+          next ROI to R17.
+        * it prints ``_roi_cost_line`` -- a brick estimate for a field nobody boxed.
+        * ``_clear_rois`` ("Remove all ROIs in this window") would wipe the fields, and
+          ``_open_roi_children``'s "the most recently drawn one" fallback would open FOV 15.
+
+        Separate layer, and every one of those sentences stays literally true of the ROI layer.
+
+        Colours are set DIRECTLY rather than through a property cycle (which is what the ROI layer
+        uses): the current-field highlight writes ``edge_color`` itself, and two colour rules on
+        one layer is how a highlight comes back wrong after an unrelated property write.
+        """
+        v = self._napari_viewer()
+        if v is None or not boxes:
+            return None, None
+        layer = self._fov_layer
+        if layer is None or layer not in list(v.layers):
+            try:
+                layer = v.add_shapes(name="FOVs", face_color="transparent",
+                                     edge_color=self._FOV_EDGE_IDLE)
+                layer.editable = False
+            except Exception as exc:                     # noqa: BLE001 - named, never fatal
+                self._say(f"could not draw the FOV boxes ({type(exc).__name__}: {exc}).")
+                return v, None
+            self._fov_layer = layer
+            try:                                         # border reacts to zoom, like the ROI one
+                v.camera.events.zoom.connect(
+                    lambda e=None, vv=v, ly=layer: self._sync_roi_width(vv, ly))
+            except Exception:                            # noqa: BLE001
+                pass
+        # ONE write for the whole region. Sixteen appends would be sixteen events, sixteen
+        # re-triangulations and (on a shared layer) sixteen clamp passes.
+        rects = [np.array([[y0, x0], [y0, x1], [y1, x1], [y1, x0]], dtype=float)
+                 for (x0, y0, x1, y1) in (boxes[f] for f in boxes)]
+        try:
+            layer.data = rects
+            layer.text = {"string": [f"fov {f}" for f in boxes],
+                          "color": self._FOV_EDGE_IDLE, "size": 8, "anchor": "upper_left"}
+        except Exception as exc:                         # noqa: BLE001 - named, never fatal
+            self._say(f"could not draw the FOV boxes ({type(exc).__name__}: {exc}).")
+            return v, None
+        self._sync_roi_width(v, layer)
+        return v, layer
+
+    def _highlight_fov(self, index: int) -> None:
+        """Make exactly one FOV rectangle read as current, by COLOUR.
+
+        Deliberately not ``edge_width``: napari's setter broadcasts a scalar across every shape,
+        and ``_sync_roi_width`` assigns exactly such a scalar on every ``camera.events.zoom``. A
+        width-based highlight would therefore survive until the first wheel click and then vanish
+        — intermittently, which is worse than never having worked.
+        """
+        layer = self._fov_layer
+        if layer is None:
+            return
+        try:
+            n = len(getattr(layer, "data", []) or [])
+            if n == 0:
+                return
+            colors = [self._FOV_EDGE_IDLE] * n
+            if 0 <= int(index) < n:
+                colors[int(index)] = self._FOV_EDGE_CURRENT
+            layer.edge_color = colors
+        except Exception:                                # noqa: BLE001 - the highlight is cosmetic
+            pass
+
+    def _draw_fov_boxes(self) -> None:
+        """Draw every FOV of the current region and size the slider to them. Once per region."""
+        slider = self._fov_slider
+        if slider is None:
+            return
+        boxes = self._fov_boxes()
+        # Held so a STEP costs no geometry at all. Rebuilt whenever the region is redrawn, which
+        # is the only thing that can invalidate it -- the boxes are a property of the region, and
+        # the region is the one thing a redraw is triggered by.
+        self._fov_boxes_cache = boxes
+        slider.set_fovs(list(boxes))
+        if not boxes:
+            return
+        self._fov_shapes_layer(boxes)
+        self._highlight_fov(slider.index)
+
+    def _on_fov_changed(self, index: int, fov: int) -> None:
+        """Point the camera at one field. NO LOAD HAPPENS HERE, and that is the whole design.
+
+        The region's mosaic is already resident and lazy, so framing a field costs a camera write
+        and napari materialises only the tiles that field covers.
+        """
+        boxes = getattr(self, "_fov_boxes_cache", None) or {}
+        box = boxes.get(int(fov))
+        if box is None:
+            box = self._fov_boxes().get(int(fov))
+        if box is None:
+            self._frame_fov_done()
+            return
+        pane = self._pane
+        if pane is not None and getattr(pane, "ok", False):
+            said = pane.mosaic.frame_bbox_um(box)
+            if said:
+                self._say(said)
+        self._highlight_fov(int(index))
+        self._frame_fov_done()
+
+    def _frame_fov_done(self) -> None:
+        """Open the FOV axis's playback gate.
+
+        THE ONE PLACE it can honestly be opened for this axis, and deliberately NOT inside
+        ``_frame_done``. That method exists because a region step and a timepoint step both wait
+        on a mosaic load, so one arrival opens both of their gates. A FOV step waits on nothing --
+        the frame IS the camera write that just happened -- and routing it through ``_frame_done``
+        would let a timepoint reload, or a RETIRED load, advance a FOV animation.
+
+        Without this the axis advances exactly one frame and then sits until the 180 s stall
+        watchdog fires: napari's ``QtDims._set_frame`` closes the gate on every step and only a
+        canvas draw reopens it, and ``AxisPlayback`` drives a ``Dims`` with no canvas behind it.
+        """
+        slider = self._fov_slider
+        if slider is not None:
+            slider.frame_done()
+
     def _on_roi_data(self, layer) -> None:
         _roi_tools.on_roi_data(self, layer)
 
@@ -1450,6 +1718,60 @@ class RegionViewer(QMainWindow):
 
     # -- the LUT gestures live in `_lut_clipboard` (one clipboard, one home); thin delegates
     # -- because tests and the chips actuate these by name on the window. -------------------------
+    def _install_canvas_loupe(self, pane) -> None:
+        """Give this window's canvas a shift-left-click magnifier.
+
+        Refuses by name rather than half-installing: a loupe with no GL widget to sit on would be
+        a gesture that swallows shift-clicks and shows nothing.
+        """
+        from squidxplorer._napari_loupe import CanvasLoupe
+
+        viewer = self._napari_viewer()
+        canvas = getattr(pane, "canvas_widget", None)
+        if viewer is None or canvas is None:
+            log.debug("view %s: no canvas widget, so no loupe", self.window_id)
+            return
+        source_for = getattr(self._manager, "loupe_source_for", None) if self._manager else None
+        if source_for is None:
+            log.debug("view %s: no loupe source registry, so no loupe", self.window_id)
+            return
+        self._loupe = CanvasLoupe(
+            viewer=viewer, canvas_widget=canvas, meta=self._meta or {},
+            source_for=source_for, mosaic=pane.mosaic,
+            region_of=self.current_region,
+            time_point_of=lambda: self.time_point,
+            look_of=self._screen_look,
+            say=self._say, parent=self)
+
+    def _screen_look(self) -> "tuple[list, Any, list, list]":
+        """WHAT IS ON SCREEN IN THIS WINDOW, as ``(names, colors, windows, mask)``.
+
+        One harvest of the three facts anything rendering "the same picture as the canvas" needs:
+        the contrast window per channel, the colour each channel is tinted with RIGHT NOW, and
+        which channels are actually visible. All three come from the methods that already own
+        them -- :meth:`_per_channel_luts`, :meth:`_visible_channels` and
+        ``_video._channel_colors`` -- so this is a harvest, not a fourth opinion.
+
+        In ``meta["channels"]`` ORDER, and covering every channel including hidden ones, because
+        that is the axis order the loupe sources return their ``(C, y, x)`` crops on. Re-indexing
+        at the consumer is how a crop ends up composited with another channel's colour.
+
+        A ``window`` of ``None`` means "this window has no opinion about that channel"; the caller
+        falls back to the source's own. That fallback direction matters: a loupe is a magnifier OF
+        THE SURFACE IT SITS ON, so the canvas outranks the source wherever the canvas has an
+        answer -- which is the rule ``_plate_overview._loupe_lut`` states for the plate.
+        """
+        from squidxplorer._video import _channel_colors
+
+        names = [c["name"] for c in (self._meta or {}).get("channels", [])]
+        luts = self._per_channel_luts()
+        visible = set(self._visible_channels())
+        rgb = {n: luts[n]["rgb"] for n in names if (luts.get(n) or {}).get("rgb") is not None}
+        colors = _channel_colors(self._meta or {}, names, rgb)
+        windows = [(luts.get(n) or {}).get("clim") for n in names]
+        mask = [n in visible for n in names]
+        return names, colors, windows, mask
+
     def _per_channel_luts(self) -> "dict[str, dict]":
         return _lut_clipboard.per_channel_luts(self)
 
@@ -1559,6 +1881,13 @@ class RegionViewer(QMainWindow):
     def _on_time_point_changed(self, time_point: int) -> None:
         """A user moved THIS window's timepoint, or playback advanced it. Reload the mosaic."""
         self._say(f"time_point {time_point + 1} of {self._time_point_bar.count}")
+        # THE LOUPE STAYS UP AND RE-READS at the new frame — the opposite of a region change, and
+        # deliberately so: the anchor is a point in THIS region, which still exists, so dismissing
+        # would throw away a valid position. The plate's `set_time_point` re-requests for exactly
+        # this reason, and the bug it fixed was an inset magnifying frame 0 forever under a moving
+        # label. The crop's LRU key carries the timepoint, so this is a real re-read.
+        if self._loupe is not None:
+            self._loupe.retarget()
         if self._time_point_bar.is_playing:
             self._load_mosaic(region=self.current_region())
             return
@@ -1578,6 +1907,17 @@ class RegionViewer(QMainWindow):
                 lambda: self._load_mosaic(self._pending_region))
         self._pending_region = region
         self._load_timer.start(_REGION_LOAD_DEBOUNCE_MS)
+        # How many FOVs a region has is a property of the REGION, so the chip's verdict goes stale
+        # the moment the plate navigates this window somewhere else. The boxes themselves are
+        # redrawn by `_on_done`, which is where the new mosaic actually lands.
+        self._refresh_fovs_chip()
+        # THE LOUPE GOES DOWN on a region change, and is NOT re-read. Its anchor is a world point,
+        # and the next region sits at its own stage coordinates, so the same point is somewhere
+        # else entirely -- or nowhere. Re-reading silently under a new region is the wrong-image
+        # failure `docs/plate-contract.md` is written against. (A TIMEPOINT change is the opposite
+        # case and is handled as such: see `_on_time_point_changed`.)
+        if self._loupe is not None:
+            self._loupe.dismiss()
 
     # -- the mosaic load/playback pipeline lives in `_mosaic_playback` (generation dropping and
     # -- the frame gate move intact — docs/rendering-contract.md); thin delegates because tests
@@ -1742,6 +2082,15 @@ class RegionViewer(QMainWindow):
         """Halt draw/refresh on windows the user is not touching."""
         if active:
             return
+        # A background tab's loupe goes down and drops its crops. The THREAD stays: it is idle and
+        # cheap, and stopping/restarting it on every tab click would pay a teardown for nothing.
+        # The crops are the part the deck's per-view memory line is about.
+        try:
+            if self._loupe is not None:
+                self._loupe.dismiss()
+                self._loupe.clear_cache()
+        except Exception:                            # noqa: BLE001 - best effort
+            pass
         for control in (self._slider, getattr(self, "_time_point_bar", None)):
             if control is None:
                 continue
@@ -1865,6 +2214,21 @@ class RegionViewer(QMainWindow):
         except Exception:                            # noqa: BLE001
             pass
         try:
+            # The FOV axis owns a napari AnimationThread exactly as the region slider does, and Qt
+            # aborts the process on a QThread destroyed while running. Closing a FOVs tab mid-walk
+            # is the ordinary way to meet that.
+            if self._fov_slider is not None:
+                self._fov_slider.shutdown()
+        except Exception:                            # noqa: BLE001
+            pass
+        try:
+            # BEFORE the pane goes: the inset is parented to the canvas the pane is about to
+            # destroy, and the loupe worker is a QThread like every other one joined above.
+            if self._loupe is not None:
+                self._loupe.shutdown()
+        except Exception:                            # noqa: BLE001
+            pass
+        try:
             vol, self._native3d = self._native3d, None
             close = getattr(vol, "close", None)
             if callable(close):
@@ -1941,6 +2305,17 @@ class ViewerManager(QObject):
         self.tabbed_views = False
         self.operator_specs: "list" = []
         self.run_operator: Optional[Any] = None
+        #: ``op -> loupe source``, set by the root ``PlateWindow``. THE PIXEL SOURCE A CANVAS
+        #: LOUPE READS, handed down the same way ``run_operator`` is rather than each window
+        #: building its own: a source caches a whole field's planes (tens of MB) and a
+        #: written-plate source is MUTATED as wells land, so a per-window copy would be both
+        #: expensive and, during a run, wrong about which wells exist. ``None`` means no loupe
+        #: (a manager built by a test).
+        #:
+        #: It is a CALLABLE and not the dict, because ``PlateWindow._release_loupe_sources``
+        #: rebinds ``_loupe_sources`` wholesale — a bound ``.get`` would keep answering from the
+        #: dead dict for the rest of the session.
+        self.loupe_source_for = None
         self.defaults = ViewDefaults()
 
         self._run_progress = None
@@ -2007,10 +2382,18 @@ class ViewerManager(QObject):
         out: "list[View]" = []
         for win in self.windows:
             roi = getattr(win, "_roi_bbox", None)
+            # An elif, not a precedence rule: `RegionViewer.__init__` refuses to build a window
+            # that is both, so at most one of these can be true.
+            if getattr(win, "_fov_mode", False):
+                kind = "fovs"
+            elif roi is not None:
+                kind = "roi"
+            else:
+                kind = "window"
             out.append(View(
                 id=f"w{win.window_id}", name=win.display_name,
                 regions=tuple(win._regions),
-                kind="roi" if roi is not None else "window",
+                kind=kind,
                 window_id=win.window_id, roi_bbox=roi))
         return out
 
@@ -2039,14 +2422,20 @@ class ViewerManager(QObject):
         return self._spawn(regions, title=title)
 
     def open_child(self, regions: Sequence[str], *, roi_bbox: Optional[tuple] = None,
-                   parent_id: Optional[int] = None, luts: Optional[dict] = None) -> Optional[RegionViewer]:
-        """Open a CHILD window from an ROI drawn in a parent window (the next level of the tree)."""
+                   parent_id: Optional[int] = None, luts: Optional[dict] = None,
+                   fovs: bool = False) -> Optional[RegionViewer]:
+        """Open a CHILD window from a parent window (the next level of the tree).
+
+        ``fovs=True`` opens a FOV WALK instead: the same regions, uncropped, with a slider that
+        steps the camera across the region's fields. It is mutually exclusive with ``roi_bbox``
+        and ``RegionViewer.__init__`` refuses the combination by name rather than picking one."""
         regions = [str(r) for r in regions if r]
         if not regions:
             return None
         base = RegionViewer._view_label(regions)
         title = f"{base}  ◂ view {parent_id}" if parent_id is not None else base
-        return self._spawn(regions, title=title, roi_bbox=roi_bbox, parent_id=parent_id, luts=luts)
+        return self._spawn(regions, title=title, roi_bbox=roi_bbox, parent_id=parent_id, luts=luts,
+                           fovs=fovs)
 
     def _baseline_for(self, parent_id: Optional[int]) -> "dict[str, Any]":
         """The settings a NEW window opens with: the global defaults, with ``_INHERIT`` reading the opener."""
@@ -2090,15 +2479,22 @@ class ViewerManager(QObject):
 
     def _spawn(self, regions: "list[str]", *, title: Optional[str] = None,
                roi_bbox: Optional[tuple] = None,
-               parent_id: Optional[int] = None, luts: Optional[dict] = None) -> Optional[RegionViewer]:
+               parent_id: Optional[int] = None, luts: Optional[dict] = None,
+               fovs: bool = False) -> Optional[RegionViewer]:
         if self._reader is None or self._meta is None:
             log.warning("open() called before a dataset was loaded; ignoring.")
             return None
         wid = self._next_id
         self._next_id += 1
         n = len(regions)
+        if fovs:
+            what = "FOVs in "
+        elif roi_bbox is not None:
+            what = "ROI in "
+        else:
+            what = ""
         clock = _measure.WindowOpen(
-            f"{'ROI in ' if roi_bbox is not None else ''}{n} region{'' if n == 1 else 's'}: "
+            f"{what}{n} region{'' if n == 1 else 's'}: "
             f"{RegionViewer._view_label(regions)}",
             n_targets=n)
         baseline = self._baseline_for(parent_id)
@@ -2108,7 +2504,7 @@ class ViewerManager(QObject):
             self._reader, self._meta, regions, window_id=wid, title=title,
             manager=self, roi_bbox=roi_bbox,
             operator_specs=self.operator_specs, run_operator=self.run_operator,
-            parent_id=parent_id, settings=ViewSettings(baseline),
+            parent_id=parent_id, settings=ViewSettings(baseline), fovs=fovs,
         )
         win.open_clock = clock
         win.closed.connect(self._on_window_closed)

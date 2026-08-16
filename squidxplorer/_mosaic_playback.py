@@ -153,7 +153,19 @@ def on_done(win, region: str, n: int, gen: Optional[int] = None) -> None:
         if win._result_region is None:
             pane.mosaic.show_op(_RAW_OP)
         if first_look:
-            pane.mosaic.model.reset_view()
+            # A FOVs VIEW'S OPENING CAMERA IS ITS CURRENT FIELD, not its region. Framing it
+            # before the mosaic landed would be undone by this very `reset_view`, and framing
+            # it on EVERY load would fight the user's pan on every timepoint step -- which is
+            # exactly why the whole branch is behind `first_look` already.
+            if getattr(win, "_fov_mode", False) and win._fov_slider is not None:
+                win._draw_fov_boxes()
+                fov = win._fov_slider.fov
+                if fov is not None:
+                    win._on_fov_changed(win._fov_slider.index, int(fov))
+                else:
+                    pane.mosaic.model.reset_view()
+            else:
+                pane.mosaic.model.reset_view()
     except Exception:                            # noqa: BLE001 - view framing is cosmetic
         pass
     win._shown_region = str(region)

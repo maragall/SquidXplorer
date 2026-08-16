@@ -6,3 +6,7 @@ __pycache__/
 .gstack/
 .claude/worktrees/
 tools/.chunk_results/
+
+# Local virtualenvs: hundreds of MB that must never be swept in by `git add -A`.
+.venv/
+venv/

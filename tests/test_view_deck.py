@@ -40,6 +40,7 @@ if "PySide6" in sys.modules or "PySide2" in sys.modules:
     )
 
 from squidxplorer import _viewer as V  # noqa: E402
+from squidxplorer._region_viewer import RegionViewer  # noqa: E402
 from squidxplorer._view_deck import ViewDeck, _SOFT_TAB_CAP  # noqa: E402
 from .conftest import shutdown_plate_window  # noqa: E402
 from .test_viewer import _drain_until, qapp  # noqa: E402,F401  (fixtures)
@@ -378,5 +379,80 @@ def test_the_deck_names_the_memory_once_there_are_many_views(qapp, napari_pane_s
         msg = deck.statusBar().currentMessage()
         assert f"{deck.count()} views open" in msg
         assert "MB" in msg, f"past the soft cap the deck says nothing about cost: {msg!r}"
+    finally:
+        shutdown_plate_window(qapp, win)
+
+
+# --- the FOV walk, as a child view ---------------------------------------------------------
+
+def test_the_fovs_chip_opens_one_child_view_over_the_current_region(qapp, napari_pane_stub,
+                                                                    squid_dataset):
+    """One chip, one child, one tab — through the same `_spawn` every other opener arrives at."""
+    root, _ = squid_dataset
+    win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=1)
+    try:
+        parent = views[0]
+        before = deck.count()
+        parent._open_fovs()
+        qapp.processEvents()
+
+        assert deck.count() == before + 1, "the FOV view must arrive as a tab, like every child"
+        child = mgr.windows[-1]
+        assert child._fov_mode is True
+        assert child.parent_id == parent.window_id, "it must nest under the view it came from"
+        assert child._roi_bbox is None, "a FOV walk is not cropped — it frames, it does not crop"
+        assert child.display_name.startswith("FOVs · ")
+        assert f"◂ view {parent.window_id}" in child.display_name
+
+        view = mgr.view_for(child.window_id)
+        assert view is not None and view.kind == "fovs"
+        assert view.roi_bbox is None
+    finally:
+        shutdown_plate_window(qapp, win)
+
+
+def test_the_fovs_chip_is_disabled_inside_a_fovs_view_and_says_why(qapp, napari_pane_stub,
+                                                                   squid_dataset):
+    """A dead-looking control must carry its reason, not just be grey."""
+    root, _ = squid_dataset
+    win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=1)
+    try:
+        views[0]._open_fovs()
+        qapp.processEvents()
+        child = mgr.windows[-1]
+        chip = child._btn_fovs
+        assert not chip.isEnabled()
+        assert "already steps through FOVs" in chip.toolTip()
+    finally:
+        shutdown_plate_window(qapp, win)
+
+
+def test_a_view_cannot_be_both_an_roi_child_and_a_fov_walk(qapp, napari_pane_stub, squid_dataset):
+    """Refused by name at construction rather than resolved by a silent precedence rule."""
+    root, _ = squid_dataset
+    win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=1)
+    try:
+        with pytest.raises(ValueError, match="cannot be both"):
+            RegionViewer(None, {}, ["A1"], window_id=99,
+                         roi_bbox=(0.0, 0.0, 1.0, 1.0), fovs=True)
+    finally:
+        shutdown_plate_window(qapp, win)
+
+
+def test_a_fovs_view_keeps_its_region_slider_and_its_time_bar(qapp, napari_pane_stub,
+                                                              squid_dataset):
+    """Hidden, not absent — so every call site stays unconditional and the plate can still
+    navigate this window to another region (`show_region`), which the walk must survive."""
+    root, _ = squid_dataset
+    win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=1)
+    try:
+        views[0]._open_fovs()
+        qapp.processEvents()
+        child = mgr.windows[-1]
+        assert child._slider is not None
+        assert child._time_point_bar is not None
+        assert child._fov_slider is not None, "a FOVs view is the one window that HAS this axis"
+        assert views[0]._fov_slider is None, (
+            "an ordinary window must not pay for an axis it cannot use")
     finally:
         shutdown_plate_window(qapp, win)
