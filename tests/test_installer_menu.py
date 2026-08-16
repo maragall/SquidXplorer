@@ -157,6 +157,63 @@ def test_without_uv_the_refusal_carries_the_install_hint(tmp_path, capsys, monke
     assert "astral.sh" in err
 
 
+# the one-file payload: the frozen binary carries its wheel and uv inside
+
+
+def test_the_bundled_payload_wheel_beats_the_one_beside_the_program(tmp_path, monkeypatch):
+    payload = tmp_path / "unpacked" / "payload"
+    payload.mkdir(parents=True)
+    (payload / "squidxplorer-0.2.0-py3-none-any.whl").touch()
+    beside = tmp_path / "beside"
+    beside.mkdir()
+    (beside / "squidxplorer-0.1.0-py3-none-any.whl").touch()
+    monkeypatch.setattr(bootstrap.sys, "_MEIPASS", str(tmp_path / "unpacked"), raising=False)
+    monkeypatch.setattr(bootstrap, "program_dir", lambda: beside)
+    assert bootstrap.default_source().name == "squidxplorer-0.2.0-py3-none-any.whl"
+
+
+def test_without_a_payload_the_wheel_beside_the_program_still_serves(tmp_path, monkeypatch):
+    (tmp_path / "squidxplorer-0.1.0-py3-none-any.whl").touch()
+    monkeypatch.setattr(bootstrap, "program_dir", lambda: tmp_path)
+    assert bootstrap.default_source().name == "squidxplorer-0.1.0-py3-none-any.whl"
+
+
+def test_find_uv_prefers_the_bundled_uv_over_path(tmp_path, monkeypatch):
+    payload = tmp_path / "unpacked" / "payload"
+    payload.mkdir(parents=True)
+    name = "uv.exe" if sys.platform == "win32" else "uv"
+    (payload / name).touch()
+    monkeypatch.setattr(bootstrap.sys, "_MEIPASS", str(tmp_path / "unpacked"), raising=False)
+    monkeypatch.setattr(bootstrap.shutil, "which", lambda n: "/opt/uv/uv")
+    found = bootstrap.find_uv()
+    assert found == str(payload / name)
+    if os.name == "posix":
+        assert os.access(found, os.X_OK), "onefile extraction may drop the mode; find_uv restores it"
+
+
+def test_find_uv_falls_back_to_path(monkeypatch):
+    monkeypatch.setattr(bootstrap.shutil, "which", lambda n: "/opt/uv/uv")
+    assert bootstrap.find_uv() == "/opt/uv/uv"
+
+
+def test_double_click_is_interactive_a_piped_run_is_not(monkeypatch):
+    class _Tty:
+        def isatty(self):
+            return True
+
+    class _Pipe:
+        def isatty(self):
+            return False
+
+    monkeypatch.setattr(bootstrap.sys, "argv", ["SquidXplorer-Setup"])
+    monkeypatch.setattr(bootstrap.sys, "stdin", _Tty())
+    assert bootstrap._interactive(None)
+    monkeypatch.setattr(bootstrap.sys, "stdin", _Pipe())
+    assert not bootstrap._interactive(None), "a CI or piped run must never block on Enter"
+    monkeypatch.setattr(bootstrap.sys, "stdin", _Tty())
+    assert not bootstrap._interactive(["--dry-run"]), "explicit argv is a scripted call"
+
+
 # launchers: what a finished install leaves behind, per platform
 
 

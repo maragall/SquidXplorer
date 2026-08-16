@@ -143,17 +143,23 @@ own reason (today: every Mac) — and `bootstrap.py` drives uv into the private 
 prints the exact commands; a missing uv is a refusal carrying the install hint). tilefusion and
 petakit are pinned to commit SHAs in pyproject so two installs resolve the same bits.
 
-**One-click on all three platforms** (2026-08-16). `build-installer.yml` freezes the same
-`bootstrap.py` on windows-latest, macos-latest (arm64) and ubuntu-22.04 (oldest supported glibc
-on purpose), and every job does a REAL core install into a scratch env and imports the result —
-a dry-run cannot catch a bootstrapper that prints the right commands and installs nothing. The
-unix artifacts are tar.gz inside the artifact zip because the zip drops the executable bit. A
-finished install leaves a double-clickable launcher via `bootstrap.create_launcher`, one per
-platform: a Windows desktop shortcut, a `~/Applications/SquidXplorer.app` bundle (built locally,
-so unlike the downloaded setup binary it carries no Gatekeeper quarantine flag), an XDG
-`squidxplorer.desktop` menu entry. A launcher failure is said and never fatal. What is NOT done:
-the setup binaries are unsigned — macOS first launch is right-click → Open
-(`scripts/installer/README.md` is the user-facing story and ships inside each artifact).
+**ONE file per platform** (2026-08-16). The installer artifact is a single file: the wheel and a
+uv binary ride INSIDE the frozen bootstrapper (PyInstaller `--add-data`, read back through
+`bootstrap.payload_dirs()` — `sys._MEIPASS/payload` first, beside-the-program and PATH as
+fallbacks). `build-installer.yml` freezes it on windows-latest (`SquidXplorer-Setup.exe`),
+macos-latest arm64 (one executable in an Info-ZIP that preserves the exec bit GitHub's artifact
+zip drops) and ubuntu-22.04 (oldest supported glibc on purpose), then packs the Linux one as
+`SquidXplorer-Setup-x86_64.AppImage` (AppDir + appimagetool; icon
+`scripts/installer/squidxplorer.png`). Every job does a REAL core install into a scratch env and
+imports the result — a dry-run cannot catch a bootstrapper that prints the right commands and
+installs nothing. A finished install leaves a double-clickable launcher via
+`bootstrap.create_launcher`, one per platform: a Windows desktop shortcut, a
+`~/Applications/SquidXplorer.app` bundle (built locally, so unlike the downloaded setup binary it
+carries no Gatekeeper quarantine flag), an XDG `squidxplorer.desktop` menu entry. A launcher
+failure is said and never fatal. `bootstrap._interactive` gates the hold-the-window-open Enter
+prompt on a real tty, so a piped or CI run never blocks. What is NOT done: the binaries are
+unsigned — macOS first launch is right-click → Open, and Linux needs one `chmod +x`
+(`scripts/installer/README.md` is the user-facing story).
 
 **ONE table** (`_engine._OPERATORS`, 2026-08-05). `add_operator` and `add_region_operator` are two
 registrars over one record, sharing one validator (`_engine._declare`); `add_region_operator`

@@ -1,11 +1,13 @@
 """Create or update SquidXplorer's private environment with uv, from chosen extras.
 
 Idempotent on purpose (the Fiji model): re-running with more extras upgrades the one
-env in place, and the app restarts with the operator there. Stdlib only; uv is located
-on PATH or beside this program, never downloaded here.
+env in place, and the app restarts with the operator there. Stdlib only; uv is never
+downloaded here — the frozen one-file binary CARRIES the squidxplorer wheel and a uv
+binary as its payload (PyInstaller --add-data, surfacing under sys._MEIPASS/payload),
+with a wheel beside the program and uv on PATH as the fallbacks.
 
-Double-clicked with no arguments, every flag has a default: the wheel beside the exe,
-an env under the user's local app data, and the default extras with decon gated by the
+Double-clicked with no arguments, every flag has a default: the payload wheel, an env
+under the user's local app data, and the default extras with decon gated by the
 CUDA-12 probe. Flags override everything, so the scripted path is unchanged.
 
 A finished install leaves a double-clickable launcher, per platform: a desktop shortcut
@@ -59,10 +61,20 @@ def program_dir() -> Path:
     return Path(__file__).resolve().parent
 
 
+def payload_dirs() -> list[Path]:
+    """Where the wheel and uv may live: the one-file payload first, then beside the program."""
+    bundled = getattr(sys, "_MEIPASS", None)
+    dirs = [Path(bundled) / "payload"] if bundled else []
+    return dirs + [program_dir()]
+
+
 def default_source(beside: Optional[Path] = None) -> Optional[Path]:
-    """The one squidxplorer wheel shipped beside the program, or None."""
-    wheels = sorted((beside or program_dir()).glob("squidxplorer-*.whl"))
-    return wheels[-1] if wheels else None
+    """The newest squidxplorer wheel from the payload or beside the program, or None."""
+    for candidate in [beside] if beside is not None else payload_dirs():
+        wheels = sorted(candidate.glob("squidxplorer-*.whl"))
+        if wheels:
+            return wheels[-1]
+    return None
 
 
 def default_env() -> Path:
@@ -87,12 +99,15 @@ def env_python(env_dir: Path) -> Path:
 
 
 def find_uv() -> Optional[str]:
-    """uv on PATH, else the uv shipped beside this program (the artifact carries one)."""
-    on_path = shutil.which("uv")
-    if on_path:
-        return on_path
-    shipped = program_dir() / ("uv.exe" if sys.platform == "win32" else "uv")
-    return str(shipped) if shipped.exists() else None
+    """The uv shipped in the payload or beside this program, else uv on PATH."""
+    name = "uv.exe" if sys.platform == "win32" else "uv"
+    for candidate in payload_dirs():
+        shipped = candidate / name
+        if shipped.exists():
+            if os.name == "posix" and not os.access(shipped, os.X_OK):
+                shipped.chmod(0o755)    # onefile extraction may drop the mode
+            return str(shipped)
+    return shutil.which("uv")
 
 
 def install_spec(source: str, extras: Sequence[str]) -> str:
@@ -195,8 +210,18 @@ def create_launcher(env_dir: Path, platform: str = sys.platform) -> Optional[str
     return _linux_desktop_entry(env_dir)
 
 
+def _interactive(argv: Optional[Sequence[str]]) -> bool:
+    """Double-clicked: no arguments and a real console — hold the window open at the end.
+
+    The tty check keeps a piped or CI run from blocking on Enter (input() would EOFError
+    there anyway, turning a green install into a crash at the last line).
+    """
+    return (argv is None and len(sys.argv) == 1
+            and sys.stdin is not None and sys.stdin.isatty())
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    interactive = argv is None and len(sys.argv) == 1
+    interactive = _interactive(argv)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--extras", default=None,
                         help="comma-separated extras, e.g. stitch,decon; '' for core only "
@@ -219,7 +244,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 def _run(args: argparse.Namespace) -> int:
     source = args.source or default_source()
     if source is None:
-        print("no squidxplorer wheel beside this program; pass --source", file=sys.stderr)
+        print("no squidxplorer wheel in the payload or beside this program; pass --source",
+              file=sys.stderr)
         return 2
     env_dir = args.env or default_env()
     if args.extras is None:

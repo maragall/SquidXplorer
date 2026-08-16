@@ -33,14 +33,30 @@ jobs:
       - name: Build the squidxplorer wheel
         run: uv build --wheel --out-dir dist
 
-      - name: Freeze the bootstrapper
-        run: uvx pyinstaller --onefile --console --name SquidXplorer-Setup scripts/installer/bootstrap.py
-
-      - name: Smoke test (dry-run prints the uv commands)
+      # The payload rides INSIDE the frozen binary (bootstrap reads it back from
+      # sys._MEIPASS/payload), so each platform's installer is ONE file.
+      - name: Stage the payload (wheel + uv)
         shell: bash
         run: |
-          wheel=$(ls dist/squidxplorer-*.whl)
-          dist/SquidXplorer-Setup* --source "$wheel" --env envtest --extras stitch --dry-run
+          mkdir payload
+          cp dist/squidxplorer-*.whl payload/
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cp "$(command -v uv)" payload/uv.exe
+          else
+            cp "$(command -v uv)" payload/uv
+          fi
+
+      - name: Freeze the one-file bootstrapper
+        shell: bash
+        run: |
+          sep=":"; [ "$RUNNER_OS" = "Windows" ] && sep=";"
+          uvx pyinstaller --onefile --console --name SquidXplorer-Setup \
+            --add-data "payload${sep}payload" scripts/installer/bootstrap.py
+
+      # No --source: the binary must find its own embedded wheel and uv.
+      - name: Smoke test (dry-run prints the uv commands)
+        shell: bash
+        run: dist/SquidXplorer-Setup* --env envtest --extras stitch --dry-run
 
       # Not just a dry-run: the frozen binary performs a real core install into a scratch
       # env, and the env's own interpreter must import the result. This is the step that
@@ -48,35 +64,53 @@ jobs:
       - name: Real install (core) and import check
         shell: bash
         run: |
-          wheel=$(ls dist/squidxplorer-*.whl)
-          dist/SquidXplorer-Setup* --source "$wheel" --env envtest --extras ""
+          dist/SquidXplorer-Setup* --env envtest --extras ""
           if [ "$RUNNER_OS" = "Windows" ]; then py=envtest/Scripts/python.exe; else py=envtest/bin/python; fi
           "$py" -c "import squidxplorer; print('import ok:', len(squidxplorer.runnable_operators()), 'operators registered')"
 
-      # A frozen exe cannot pip-install into itself, so the env is uv-managed:
-      # the artifact ships the setup binary, the wheel it installs, and uv itself.
-      - name: Stage artifact (Windows)
+      - name: Package as AppImage (Linux)
+        if: runner.os == 'Linux'
+        env:
+          ARCH: x86_64
+        run: |
+          mkdir -p AppDir
+          cp dist/SquidXplorer-Setup AppDir/
+          cp scripts/installer/squidxplorer.png AppDir/
+          printf '%s\n' '#!/bin/sh' 'exec "$(dirname "$0")/SquidXplorer-Setup" "$@"' > AppDir/AppRun
+          chmod +x AppDir/AppRun AppDir/SquidXplorer-Setup
+          printf '%s\n' '[Desktop Entry]' 'Type=Application' 'Name=SquidXplorer Setup' \
+            'Exec=SquidXplorer-Setup' 'Icon=squidxplorer' 'Terminal=true' 'Categories=Science;' \
+            > AppDir/squidxplorer-setup.desktop
+          curl -fsSL -o appimagetool \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool
+          ./appimagetool --appimage-extract-and-run AppDir SquidXplorer-Setup-x86_64.AppImage
+
+      - name: Smoke test the AppImage (dry-run)
+        if: runner.os == 'Linux'
+        run: ./SquidXplorer-Setup-x86_64.AppImage --appimage-extract-and-run --env envtest2 --extras "" --dry-run
+
+      - name: Stage artifact (Windows — the exe alone)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory staged | Out-Null
           Copy-Item dist\SquidXplorer-Setup.exe staged\
-          Copy-Item dist\squidxplorer-*.whl staged\
-          Copy-Item (Get-Command uv).Source staged\uv.exe
-          Copy-Item scripts\installer\README.md staged\
 
-      # Tarred on purpose: the artifact zip drops the executable bit, a tar keeps it,
-      # and both macOS Archive Utility and every Linux file manager extract a .tar.gz.
-      - name: Stage artifact (macOS/Linux, tarred to keep the executable bits)
-        if: runner.os != 'Windows'
-        shell: bash
+      # Info-ZIP stores the unix mode, so extracting this inner zip (Archive Utility
+      # double-click included) restores the executable bit that GitHub's own artifact
+      # zip would drop from a bare binary.
+      - name: Stage artifact (macOS — one executable, permission-preserving zip)
+        if: runner.os == 'macOS'
         run: |
-          mkdir stage-tree staged
-          cp dist/SquidXplorer-Setup stage-tree/
-          cp dist/squidxplorer-*.whl stage-tree/
-          cp "$(command -v uv)" stage-tree/uv
-          cp scripts/installer/README.md stage-tree/
-          tar czf "staged/${{ matrix.artifact }}.tar.gz" -C stage-tree .
+          mkdir staged
+          (cd dist && zip -X ../staged/SquidXplorer-Setup.zip SquidXplorer-Setup)
+
+      - name: Stage artifact (Linux — the AppImage alone)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir staged
+          mv SquidXplorer-Setup-x86_64.AppImage staged/
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
