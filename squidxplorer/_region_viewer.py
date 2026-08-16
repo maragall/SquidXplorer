@@ -34,6 +34,7 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
+from squidxplorer import _bitdepth
 from squidxplorer import _measure
 from squidxplorer._time_point import TimePointBar
 from squidxplorer._address import Address, Extent
@@ -353,6 +354,12 @@ class RegionViewer(QMainWindow):
         self._focus_worker = None
         self._video_worker = None
         self._manager = manager
+        if manager is not None:
+            # A LATER region can prove the dataset holds bigger numbers than the one this window
+            # opened on -- the 14-bit set reads 3437 at C3 and 16380 at E7. Layers already built
+            # carry a slider bounded by the old ceiling and cannot reach the new pixels, so every
+            # window listens for the rise rather than only the one that triggered it.
+            manager.depthChanged.connect(self._on_depth_changed)
         self._operator_specs = list(operator_specs or [])
         self._render_mode = "2d"
         self._run_operator = run_operator
@@ -1507,6 +1514,35 @@ class RegionViewer(QMainWindow):
     def _copy_luts(self) -> None:
         _lut_clipboard.copy_luts(self)
 
+    def _on_depth_changed(self, lo: float, hi: float) -> None:
+        """The dataset proved it holds bigger numbers: open every slider here to reach them.
+
+        Arrives on the GUI thread (``ViewerManager.depthChanged`` is emitted from the fuse worker
+        and queued), so touching layers from here is safe.
+
+        This moves the slider's TRAVEL and never its VALUE -- widening a range cannot clip, so
+        nothing on screen changes colour. The visible effect is the handle re-scaling, which is
+        the honest report that the data turned out to be bigger than the first region suggested.
+        """
+        pane = self._pane
+        mosaic = getattr(pane, "mosaic", None) if pane is not None else None
+        if mosaic is not None:
+            try:
+                mosaic.widen_contrast_range(float(lo), float(hi))
+            except Exception:                    # noqa: BLE001 - a slider bound is never fatal
+                log.exception("could not widen this window's contrast range to (%s, %s).", lo, hi)
+        # `open_native_3d*` build their layers in a napari.Viewer of their OWN, outside
+        # `MosaicLayers`, so the walk above cannot reach them. A `BrickedVolume` popout needs
+        # nothing here: its `_viewer` IS `mosaic.model`, so its bricks were in that same walk.
+        popout = getattr(self, "_native3d", None)
+        if popout is not None and hasattr(popout, "layers"):
+            try:
+                from squidxplorer._napari3d import widen_contrast_range
+
+                widen_contrast_range(popout, float(lo), float(hi))
+            except Exception:                    # noqa: BLE001 - ditto, and the popout may be gone
+                pass
+
     def _match_raw_contrast(self) -> None:
         """Raw's contrast onto every operator layer. See `_lut_clipboard.match_raw_contrast`."""
         _lut_clipboard.match_raw_contrast(self)
@@ -1873,6 +1909,11 @@ class ViewerManager(QObject):
     runProgressChanged = Signal(object)
     viewFocused = Signal(object)
     windowOpened = Signal(object)
+    # The dataset's contrast ceiling rose: every open window must widen its sliders to (lo, hi).
+    # A SIGNAL and not a direct call because `_bitdepth` observes on the fuse WORKER thread, and a
+    # queued signal to this GUI-thread object is what marshals it. The subscriber on the depth
+    # object must therefore do nothing but emit this -- see `_on_depth_rose`.
+    depthChanged = Signal(float, float)
 
     def __init__(self, reader: Any = None, meta: Optional[dict] = None,
                  parent: Optional[QObject] = None) -> None:
@@ -1909,8 +1950,43 @@ class ViewerManager(QObject):
         self._mem_timer.timeout.connect(self._poll_memory)
         self._mem_timer.start()
 
+        # A manager can be handed a reader at construction and never see `set_dataset` (the view
+        # settings suite builds one exactly that way), so the depth has to be armed from BOTH or
+        # those windows measure against whatever the previous dataset left behind.
+        self._arm_depth(meta)
+
+    def _arm_depth(self, meta: Optional[dict]) -> None:
+        """Start measuring a new acquisition's contrast ceiling and republish every rise."""
+        depth = _bitdepth.new_dataset((meta or {}).get("dtype"))
+        depth.on_change(self._on_depth_rose)
+
+    def _on_depth_rose(self, lo: float, hi: float) -> None:
+        """Called ON THE FUSE WORKER THREAD. Emit and return -- do nothing else here.
+
+        The emit is what hops to the GUI thread (Qt queues a signal across threads); touching a
+        napari layer from here would be a cross-thread write into the render path.
+        """
+        self.depthChanged.emit(float(lo), float(hi))
+
     def set_dataset(self, reader: Any, meta: dict) -> None:
+        """Point every FUTURE window at a new acquisition, and forget the last one's look.
+
+        A NEW DATASET IS A NEW LOOK. A contrast window is a statement in the previous
+        acquisition's counts: carry (11, 111) from a 12-bit set onto one that is 12-bit shifted
+        into 16 and every channel renders black; carry it the other way and everything saturates.
+        `channel_visibility` goes for the same reason -- it is keyed by channel NAME, and the
+        names differ between acquisitions, so what survives is either dead weight or an
+        accidental match that opens a channel dark. `_LUT_CLIPBOARD` is a module global shared
+        with the plate, so it outlives both the window and the dataset unless cleared here.
+
+        What deliberately STAYS: everything in `defaults` that describes HOW you look rather than
+        at WHAT -- focus mode, and the rest of `_SETTING_BASELINE`.
+        """
         self._reader, self._meta = reader, meta
+        self._arm_depth(meta)
+        self.defaults.set("luts", {})
+        self.defaults.set("channel_visibility", {})
+        _LUT_CLIPBOARD.clear()
 
     @property
     def run_progress(self):

@@ -12,6 +12,7 @@ from qtpy.QtCore import Qt, QRectF, QThread, QTimer, Signal
 from qtpy.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap, QRegion
 from qtpy.QtWidgets import QApplication, QWidget
 
+from squidxplorer import _bitdepth
 from squidxplorer import _qtstyle
 from squidxplorer._budget import cache_budget
 from squidxplorer._logpane import get_logger
@@ -955,7 +956,10 @@ class PlateOverview(QWidget):
                     return float(lo), float(hi)
             except Exception:
                 pass
-        return 0.0, 65535.0
+        # The DATASET's full range, not the container's. On a 12-bit acquisition a hardcoded
+        # 65535 renders every pre-histogram thumbnail at a sixteenth of its brightness, i.e.
+        # near-black, until enough tiles have streamed to build a window.
+        return _bitdepth.range_for(getattr(self, "_dtype", None))
 
     def set_loupe_source(self, source, colors=None):
         """Point the loupe at the data behind the active layer. ``None`` disables the gesture."""

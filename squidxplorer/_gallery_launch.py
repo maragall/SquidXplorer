@@ -99,7 +99,10 @@ def open_native_3d(win) -> None:
     try:
         from squidxplorer._napari3d import open_native_3d as _popout
 
-        _popout(win._reader, win._meta, region)
+        # HELD, not fire-and-forget. A later region can raise the dataset's contrast ceiling
+        # (the 14-bit set reads 3437 at C3 and 16380 at E7), and a popout nobody kept a ref to
+        # cannot be told -- it would sit on a slider that stops short of its own pixels.
+        win._plate_native3d = _popout(win._reader, win._meta, region)
         log.info("opened native napari 3D popout for region %s", region)
     except Exception as exc:                     # noqa: BLE001 - NAMED, to the log and readout
         log.error("native 3D view failed for region %s: %s", region, exc)

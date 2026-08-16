@@ -70,7 +70,15 @@ def opening_z(n_planes: int) -> int:
 
 
 def sample_plane(levels: Any) -> Optional[np.ndarray]:
-    """The cheapest representative plane to derive a window from: coarsest level, opening z."""
+    """The cheapest representative plane to derive a window from: coarsest level, opening z.
+
+    RIGHT FOR A WINDOW, WRONG FOR A CEILING. The coarsest level is mean-downsampled, so its
+    maximum is an UNDER-estimate of level 0's -- a hot pixel at stride ``s`` is attenuated by up
+    to ``1/s**2``. That is harmless for a 99.9th-percentile window and fatal for
+    ``contrast_limits_range``, where an under-estimate snaps the slider below real data and clips
+    it. :mod:`squidxplorer._bitdepth` therefore measures the ceiling from full-resolution frames
+    in :mod:`squidxplorer._mosaic_source` and never from here. Do not wire this function to it.
+    """
     if levels is None:
         return None
     arr = levels[-1] if isinstance(levels, (list, tuple)) else levels

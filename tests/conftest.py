@@ -141,6 +141,24 @@ def _cold_result_cache():
 
 
 @pytest.fixture(autouse=True)
+def _cold_dataset_depth():
+    """Every test starts on an UNMEASURED contrast ceiling (``squidxplorer._bitdepth``).
+
+    The ceiling is process-wide for the same reason ``_LUT_CLIPBOARD`` is -- one app, one open
+    acquisition -- and in production ``ViewerManager.set_dataset`` is what clears it. A test that
+    fuses a 12-bit fixture leaves the module saying 4095, and the next test to assert a contrast
+    window of 9000 (``test_view_settings``) would then see it clamped by a dataset it never
+    loaded. Cleared on the way out too, so the failing test is the one that measured, not the one
+    after it.
+    """
+    from squidxplorer import _bitdepth
+
+    _bitdepth.new_dataset(None)
+    yield
+    _bitdepth.new_dataset(None)
+
+
+@pytest.fixture(autouse=True)
 def _restore_operator_registries():
     import importlib
 

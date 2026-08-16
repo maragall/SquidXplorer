@@ -255,6 +255,10 @@ class PlateWindow(QMainWindow):
         from squidxplorer._region_viewer import ViewerManager
         self._viewer_manager = ViewerManager(parent=self)
         self._viewer_manager.tabbed_views = self._want_tabbed_views
+        #: The plate's OWN 3D popout (`_open_native_3d`), held so a later contrast-ceiling rise
+        #: can reach it. Windows track theirs as `RegionViewer._native3d`.
+        self._plate_native3d = None
+        self._viewer_manager.depthChanged.connect(self._on_depth_changed)
         # Operator controls appear AT EACH LEVEL (the deck; Julio 2026-07-23: "I don't see operator
         # controls like the powerpoint specified at each level"). Every window's "Operators for this
         # window" dropdown is the SAME registry + run_operator (the CLI engine), scoped to that view,
@@ -1038,6 +1042,23 @@ class PlateWindow(QMainWindow):
 
     def _open_native_3d(self):
         _gallery_launch.open_native_3d(self)
+
+    def _on_depth_changed(self, lo: float, hi: float) -> None:
+        """The dataset's contrast ceiling rose. Widen the plate's own 3D popout, if it has one.
+
+        The plate itself needs nothing: its thumbnails are a Qt composite that asks
+        `_pct_window` for a range every time it paints, so it picks the new ceiling up on the
+        next repaint without being told.
+        """
+        popout = getattr(self, "_plate_native3d", None)
+        if popout is None or not hasattr(popout, "layers"):
+            return
+        try:
+            from squidxplorer._napari3d import widen_contrast_range
+
+            widen_contrast_range(popout, float(lo), float(hi))
+        except Exception:                            # noqa: BLE001 - the popout may be closed
+            pass
 
     # -- operator UIs live as tabs in the band's right column: the Operators home tab, one tab
     # -- per operator you open, and any result a panel publishes. ---------------------------------
