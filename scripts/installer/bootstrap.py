@@ -180,6 +180,17 @@ _INFO_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
   <key>CFBundleExecutable</key><string>SquidXplorer</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleIconFile</key><string>SquidXplorer</string>
+  <!-- DRAG-ONTO-THE-APP. Declaring public.folder is what makes Finder accept a dropped
+       acquisition folder at all; LaunchServices then delivers it as an odoc Apple event, Qt's
+       Cocoa plugin turns that into a QFileOpenEvent, and squidxplorer._viewer._FileOpenFilter
+       routes it into PlateWindow.ingest — the same entry as a drop on the plate. Role Viewer +
+       rank Alternate: this app never becomes the system's default handler for folders. -->
+  <key>CFBundleDocumentTypes</key><array><dict>
+    <key>CFBundleTypeName</key><string>Squid acquisition folder</string>
+    <key>CFBundleTypeRole</key><string>Viewer</string>
+    <key>LSItemContentTypes</key><array><string>public.folder</string></array>
+    <key>LSHandlerRank</key><string>Alternate</string>
+  </dict></array>
 </dict></plist>
 """
 

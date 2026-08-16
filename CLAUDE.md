@@ -739,8 +739,12 @@ The PR's own `PLAN-plate-navigation.md` is the source design; the port decisions
 - **Icon + drag-open, installer-only** (Julio: "I want one install story"). `scripts/installer/
   make-icon.py` draws the wellplate art once (.ico + .png); the .exe freezes with `--icon`;
   launchers carry it via `_installed_icon` (copied beside the env — the one-file extraction dir
-  dies). Drag a folder onto the Windows shortcut or the Linux `%f` entry to open it; macOS is
-  documented as not wired. `Setup-Windows.ps1`/`mip-tool.bat` are DELETED: rigs update by
+  dies). Drag a folder onto ANY launcher to open it: the Windows shortcut and the Linux `%f`
+  entry pass the path as an argument; the macOS `.app` declares `public.folder` and
+  `_viewer._FileOpenFilter` catches the resulting `QFileOpenEvent` — installed BEFORE the window
+  and buffering, because a launch-with-document's event lands during the splash's event
+  processing (measured with a real bundle; a post-window filter missed it every time).
+  `Setup-Windows.ps1`/`mip-tool.bat` are DELETED: rigs update by
   re-running the installer. What is NOT done: GL-in-tabs was hand-verified on the PR's Windows
   machine (4 canvases, 20 dock/undock cycles, ~88 MB/view) and the offscreen suite cannot
   re-check it; a hand check on this Mac is owed. Commit H (drag tabs BETWEEN windows) stays

@@ -17,7 +17,7 @@ from typing import Optional
 
 import numpy as np
 from qtpy.QtCore import (  # QThread/Signal: kept for tests that build a stub worker as V.QThread
-    Qt, QThread, QTimer, Signal,  # noqa: F401 (see tests/test_viewer.py::_BlockingWorker)
+    QEvent, QObject, Qt, QThread, QTimer, Signal,  # noqa: F401 (tests/test_viewer.py::_BlockingWorker)
 )
 from qtpy.QtGui import QColor, QPalette
 from qtpy.QtWidgets import (
@@ -4056,6 +4056,54 @@ def _startup_splash(app):
         return None
 
 
+class _FileOpenFilter(QObject):
+    """Route macOS open-document events into the plate — the drag-onto-the-.app path.
+
+    Finder never passes a dropped folder as an ARGUMENT to a bundle: LaunchServices delivers it
+    as an ``odoc`` Apple event to the launched process, and Qt's Cocoa integration converts that
+    into a ``QFileOpenEvent`` on the QApplication. This filter is the half that catches it; the
+    other half is the bundle's ``CFBundleDocumentTypes`` declaring ``public.folder``
+    (``scripts/installer/bootstrap._INFO_PLIST``) — without the declaration Finder refuses the
+    drop before any event exists, and without this filter the event arrives and dies unread.
+
+    BUFFERS UNTIL A WINDOW ATTACHES, and that is measured, not defensive. A launch-with-document
+    delivers its FileOpen the first time anything spins the event loop — which is the SPLASH's
+    event processing during napari's ~20 s import, long before ``PlateWindow`` exists. Verified
+    on this machine with a real bundle and ``open -a <app> <folder>`` (the exact odoc a Finder
+    drop sends): a filter constructed after the window missed the launch document every time,
+    while a second odoc to the running app landed. So ``main`` installs this immediately after
+    the QApplication exists, and :meth:`attach` replays whatever arrived in between.
+
+    It funnels into the SAME entry as every other way in: ``PlateWindow.ingest``, exactly what
+    ``dropEvent`` calls for a folder dropped on the plate. Only the LAST buffered path replays —
+    the window shows one acquisition, and ingesting the earlier of two drops just to discard it
+    would be a slow no-op. Harmless off macOS: no other platform posts a ``FileOpen`` event.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._win: "Optional[PlateWindow]" = None
+        self._pending: "list[str]" = []
+
+    def attach(self, win: "PlateWindow") -> None:
+        """The window exists: adopt it, replay the last launch document, die with it."""
+        self.setParent(win)
+        self._win = win
+        pending, self._pending = self._pending, []
+        if pending:
+            win.ingest(pending[-1])
+
+    def eventFilter(self, obj, event):       # noqa: N802 - Qt naming
+        if event.type() == QEvent.Type.FileOpen:
+            path = event.file()
+            if path and self._win is not None:
+                self._win.ingest(path)
+            elif path:
+                self._pending.append(path)
+            return True
+        return False    # QObject's own default; spelled here so the filter is duck-testable
+
+
 def main(dataset_path: str = None):
     path = dataset_path or (sys.argv[1] if len(sys.argv) > 1 else None)
     slot = None
@@ -4078,12 +4126,21 @@ def main(dataset_path: str = None):
     # import happens inside it, so anything hung off the window itself appears only once the wait
     # is already over. A splash is the one thing that can be on screen during a blocking
     # constructor.
+    # DRAG-ONTO-THE-APP (macOS): installed BEFORE the window, buffering. A launch-with-document's
+    # FileOpen arrives the first time anything processes events — the splash below does, during
+    # napari's import — so a filter installed after PlateWindow misses it (measured; see the
+    # filter's docstring).
+    file_open_filter = _FileOpenFilter()
+    app.installEventFilter(file_open_filter)
+
     splash = _startup_splash(app)
     # THE LAUNCHER ASKS FOR THE WORKING LAYOUT: this window narrow and full height, a view window
     # over every well filling the rest. Only here — a library caller gets a bare window.
     win = PlateWindow(path, default_layout=True, tabbed_views=True)
     _install_footprint_monitor(app, win)
     win._gui_slot = slot                  # the reservation lives as long as the window
+    win._file_open_filter = file_open_filter   # held, so the filter outlives this scope
+    file_open_filter.attach(win)               # ...and replays a launch document caught above
 
     # FULL HEIGHT, DESIGN WIDTH -- not maximised. `showMaximized()` was tried first, on Spencer's
     # "start full screen and let me close it down", and Julio caught it immediately on a laptop:

@@ -33,8 +33,8 @@ An acquisition folder is the one holding the `0` folder and/or the `ome_tiff` fo
 
 Three ways in, fastest first:
 
-1. **Drag the folder onto the launcher** (the Windows shortcut and the Linux menu entry take a
-   dropped folder; on macOS, open the app and use one of the ways below).
+1. **Drag the folder onto the launcher** — the Windows desktop shortcut, the macOS app (or its
+   Dock icon), or the Linux menu entry.
 2. Open the launcher, then **drop the folder onto the plate**.
 3. Open the launcher, then **File → Open acquisition folder**.
 
