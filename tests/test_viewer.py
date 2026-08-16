@@ -704,7 +704,14 @@ def test_plain_drag_still_pans(qapp):
 
 
 def test_double_click_selects_only_the_well_it_opens(qapp):
-    """A plain click REPLACES the selection (idempotent), so press+release+dblclick leaves exactly the opened well selected."""
+    """A plain click REPLACES the selection (idempotent), so press+release+dblclick leaves exactly the opened well selected.
+
+    That is the NO-VIEW-OPEN column, which is what a bare PlateOverview reports: with a view open
+    (`set_click_navigates`) a plain click NAVIGATES that view and touches no selection, and a click
+    on an EMPTY position clears the selection in BOTH modes — the only click-driven deselect, so
+    navigation does not take it away. tests/test_plate_navigates_views.py covers that column, and
+    pins that this one did not move.
+    """
     ov = _sel_overview()
     opened = []
     ov.wellActivated.connect(lambda wid, fov: opened.append((wid, fov)))
@@ -1766,7 +1773,7 @@ def test_the_loupe_window_memo_evicts_instead_of_growing_for_the_source_lifetime
     """The per-source (well, t) contrast memo was a plain dict with NO eviction — it grew for
     the life of the source. It is now a budgeted LRU: the bound holds, the newest entries
     survive, the oldest are evicted, and a hit is still a memo (no recompute)."""
-    from squidxplorer import _plate_overview as PO
+    from squidxplorer import _loupe as PO   # the engine moved; the memo lives in _loupe now
 
     class _Src(PO._LoupeSource):
         def __init__(self):
@@ -4373,7 +4380,16 @@ def test_on_screen_luts_is_none_when_no_view_window_is_open(qapp, squid_dataset)
 
 
 def test_on_screen_luts_reaches_a_focused_window(qapp, squid_dataset):
-    """focused_id and windows are properties on ViewerManager; calling them with parentheses raised a TypeError swallowed by a broad except, so this returned None every time."""
+    """focused_id and windows are properties on ViewerManager; calling them with parentheses raised a TypeError swallowed by a broad except, so this returned None every time.
+
+    The lookup has since moved INTO the manager, as ``active_view()``, so ``on_screen_luts`` no
+    longer touches either property and that particular mistake is now unmakeable here — there is
+    one implementation of "which window is the user in" and every caller shares it. The stub keeps
+    both properties anyway: they are what the real ``active_view`` reads, so a stub that dropped
+    them would stop describing the thing it stands in for. What this test pins is unchanged and is
+    the part that matters — the focused window's LUTs reach the exporter, rather than a swallowed
+    exception quietly returning None.
+    """
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
@@ -4394,6 +4410,11 @@ def test_on_screen_luts_reaches_a_focused_window(qapp, squid_dataset):
         @property
         def windows(self):
             return [_Win()]
+
+        def active_view(self):
+            """Built from the two properties above, the way the real one is — so the stub still
+            fails if a caller reaches past it and calls those with parentheses."""
+            return next((w for w in self.windows if w.window_id == self.focused_id), None)
 
         def set_run_progress(self, report):
             """Present so teardown does not raise over the assertion."""
@@ -4705,7 +4726,12 @@ def test_there_is_no_second_incomplete_marker(qapp):
     # AST, not grep: a grep would also match the comment explaining why this guard exists, failing on its own explanation.
     import ast as _ast
 
-    tree = _ast.parse(_Path(V.__file__).read_text())
+    # encoding="utf-8" EXPLICITLY. `read_text()` uses the platform's locale encoding, which on
+    # Windows is cp1252 — and `_viewer.py` has carried a U+25CF bullet in its readout strings
+    # since long before this test, whose UTF-8 bytes include 0x8F, an undefined cp1252 slot. So
+    # this raised UnicodeDecodeError on Windows instead of asserting anything. Python source is
+    # UTF-8 by definition (PEP 3120), so the locale never had a say here.
+    tree = _ast.parse(_Path(V.__file__).read_text(encoding="utf-8"))
     literals = [n.value for n in _ast.walk(tree)
                 if isinstance(n, _ast.Constant) and n.value == "INCOMPLETE"]
     assert not literals, (

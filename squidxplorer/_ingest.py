@@ -108,6 +108,10 @@ def ingest(win, path: str) -> None:
     win._overview.wellActivated.connect(win.activate_well)
     win._overview.selectionChanged.connect(win._on_selection_changed)
     win._overview.marqueeSelected.connect(win._on_marquee_selected)
+    # THE OVERVIEW IS REBUILT ON EVERY INGEST, so a fresh one starts in select mode and has to
+    # be re-told: views opened over the previous acquisition can still be open right now.
+    win._overview.wellNavigated.connect(win._on_well_navigated)
+    win._refresh_plate_navigation()
     # The loupe's source is chosen by which layer the plate SHOWS, so it follows the plate
     # rather than being re-pointed by hand at each of the six places the layer moves.
     win._overview.activeLayerChanged.connect(lambda _k: win._update_loupe_source())
@@ -168,6 +172,7 @@ def ingest(win, path: str) -> None:
     win._readout.setText(
         f"{len(win._fov_index)} wells loaded · double-click a well, or Shift-drag to open "
         f"several{note}")
+    win._on_plate_loaded()
 
 
 # -- the raw-preview lifecycle ------------------------------------------------------------------

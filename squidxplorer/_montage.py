@@ -73,6 +73,35 @@ class _PlateLayout:
         self.channels = omero["channels"]
 
 
+#: Clip the darkest 1% / brightest 0.2% so hot pixels don't crush the window.
+_PCT = (1.0, 99.8)
+
+
+def _pct_window(a: np.ndarray, pct=_PCT) -> tuple[float, float]:
+    """EXACT percentile window over *a*. THE percentile rule — there is no second one.
+
+    Exactness is the point. ``_RunningContrast`` quantizes to a bin ~dmax/bins wide (~128 counts
+    on uint16), so a dim region spanning a few hundred counts collapses into two or three bins and
+    its window comes out garbage — precisely the region PER_REGION exists to rescue. The histogram
+    stays the live during-run approximation; this is what the final render uses.
+
+    A degenerate result (hi <= lo) is returned as-is on purpose: ``_window`` renders it black.
+    Widening it to ``(lo, lo + 1)`` is a real bug wearing a helpful face — ``+1`` is one DATA
+    unit, so ``(v - lo) / 1`` clips to 1.0 and a blank or saturated channel renders FULL WHITE and
+    reads as signal. The loupe carried a private copy that DID widen, and that is the defect
+    IMA-242 collapsed (see the note in ``_plate_overview``).
+
+    IT LIVES HERE, and not in a widget module, because it is a numpy percentile and because the
+    things that must not disagree with it are here: :func:`composite` is the one compositor and
+    :func:`_area_downsample` the one resampler. A rule reachable only by importing a QWidget
+    module is a rule the modules below the GUI boundary will copy.
+    """
+    if a.size == 0:
+        return 0.0, 0.0
+    lo, hi = np.percentile(a, pct)
+    return float(lo), float(hi)
+
+
 def _area_downsample(plane: np.ndarray, out_h: int, out_w: int) -> np.ndarray:
     """Area-average *plane* (Y, X) down to at most (out_h, out_w).
 

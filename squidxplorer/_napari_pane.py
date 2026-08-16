@@ -381,6 +381,33 @@ class MosaicPane(QWidget):
     def ok(self) -> bool:
         return self.mosaic is not None
 
+    @property
+    def canvas_widget(self):
+        """The widget the mosaic PIXELS are drawn in — vispy's GL widget. ``None`` if unreachable.
+
+        NOT :attr:`canvas`, which is napari's ``QtViewer`` and MUST NOT be reparented (see the
+        note in ``__init__``: "Do NOT reparent the canvas"). This is one level further in,
+        and the distinction matters twice over:
+
+        * its coordinate system IS the canvas coordinate system, so an overlay positioned against
+          it needs no conversion from a napari mouse event's ``pos``;
+        * napari itself parents a plain ``QWidget`` to exactly this widget (``QtWelcomeWidget``,
+          ``napari/_qt/qt_viewer.py``), so a child over the GL surface is a supported arrangement
+          rather than something we are getting away with.
+
+        ADDING A CHILD is not reparenting: nothing here calls ``setParent`` on anything napari
+        owns. Returns ``None`` — and the caller must say so — rather than falling back to the
+        QtViewer, which would put an overlay in the wrong coordinate space at the wrong size:
+        a loupe confidently in the wrong place.
+        """
+        viewer = self._viewer
+        if viewer is None:
+            return None
+        try:
+            return viewer.window._qt_viewer.canvas.native
+        except Exception:                        # noqa: BLE001 - napari moved it; answer None
+            return None
+
     def shutdown(self) -> None:
         """Tear down the napari Viewer this pane owns (GL context, QMainWindow, subscriptions).
 
@@ -445,9 +472,20 @@ def model_pane_class():
             self.detect_channel = None
             self.detect_button = None
             self.said = []
+            self.shutdowns = 0
 
         def say(self, text):
             self.said.append(text)
+
+        def shutdown(self):
+            """COUNTS, rather than no-ops. The real ``MosaicPane.shutdown`` is what closes the
+            napari Viewer and drops it from napari's instance registry, and it went uncalled for
+            long enough to leak a GL context per closed window. A pane that silently accepted the
+            call could not tell the difference between "disposed" and "never disposed" — and
+            ``RegionViewer.dispose`` wraps every teardown in ``except Exception``, so a MISSING
+            method here would be swallowed and read as success."""
+            self.shutdowns += 1
+            self._viewer = None
 
     return ModelPane
 

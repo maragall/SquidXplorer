@@ -243,11 +243,34 @@ def test_the_linux_menu_entry_points_at_the_envs_viewer(tmp_path):
     entry = tmp_path / "applications" / "squidxplorer.desktop"
     assert made == f"menu entry created: {entry}"
     text = entry.read_text()
-    assert f"Exec={env / 'bin' / 'squidxplorer-view'}" in text
+    assert f"Exec={env / 'bin' / 'squidxplorer-view'} %f" in text, \
+        "the %f is the drag-and-open half: a dropped folder must arrive as sys.argv[1]"
     assert "Terminal=false" in text
     assert "[Desktop Entry]" in text
     if os.name == "posix":
         assert entry.stat().st_mode & 0o111
+
+
+def test_the_linux_menu_entry_carries_the_installed_icon(tmp_path, monkeypatch):
+    """The icon is COPIED beside the env: a one-file build's payload dir vanishes on exit, so an
+    Icon= pointing there would lose its art on the next login."""
+    env = tmp_path / "env"
+    payload = tmp_path / "payload"
+    payload.mkdir()
+    (payload / "squidxplorer.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    monkeypatch.setattr(bootstrap, "payload_dirs", lambda: [payload])
+    bootstrap._linux_desktop_entry(env, apps_dir=tmp_path / "applications")
+    text = (tmp_path / "applications" / "squidxplorer.desktop").read_text()
+    assert f"Icon={env.parent / 'squidxplorer.png'}" in text
+    assert (env.parent / "squidxplorer.png").exists(), "the icon must outlive the payload dir"
+
+
+def test_a_missing_icon_still_makes_a_launcher(tmp_path, monkeypatch):
+    """The icon is cosmetic; an empty payload must not cost the user the launcher itself."""
+    monkeypatch.setattr(bootstrap, "payload_dirs", lambda: [tmp_path / "nowhere"])
+    made = bootstrap._linux_desktop_entry(tmp_path / "env", apps_dir=tmp_path / "applications")
+    assert made is not None
+    assert "Icon=" not in (tmp_path / "applications" / "squidxplorer.desktop").read_text()
 
 
 def test_a_failed_launcher_is_said_and_never_fatal(tmp_path, capsys):

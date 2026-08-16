@@ -347,6 +347,115 @@ def test_a_degenerate_window_is_not_widened(layers):
     assert list(lyr.contrast_limits) != [500.0, 501.0]
 
 
+# ------------------------------------------- the slider's TRAVEL (contrast_limits_range)
+
+
+@pytest.fixture
+def twelve_bit():
+    """A dataset measured at 3437 -- the 14-bit set's region C3, which alone reads as 12-bit."""
+    from squidxplorer import _bitdepth
+
+    _bitdepth.new_dataset(np.uint16)
+    _bitdepth.depth().observe(3437.0)
+    return _bitdepth.depth()
+
+
+def test_a_mosaic_layer_opens_on_the_DATASETS_range_not_the_seeded_window(layers, twelve_bit):
+    """The seed says where to look; the range says how far the user may drag. Different jobs."""
+    lyr = layers.add_mosaic("raw", "488", _img(), contrast_limits=(500.0, 900.0))
+
+    assert list(lyr.contrast_limits) == [500.0, 900.0]
+    assert list(lyr.contrast_limits_range) == [0.0, 4095.0]
+
+
+def test_a_layer_with_NO_seed_still_gets_the_datasets_range(layers, twelve_bit):
+    """The bug this change removes: the range used to be set only when a window was seeded, so a
+    blank or degenerate channel was left pinned to whatever extent napari inferred by itself."""
+    lyr = layers.add_mosaic("raw", "488", _img())
+
+    assert list(lyr.contrast_limits_range) == [0.0, 4095.0]
+
+
+def test_a_degenerate_seed_still_gets_the_datasets_range(layers, twelve_bit):
+    """`hi <= lo` is dropped as a WINDOW on purpose; that must not also drop the RANGE."""
+    lyr = layers.add_mosaic("raw", "488", _img(), contrast_limits=(500.0, 500.0))
+
+    assert list(lyr.contrast_limits_range) == [0.0, 4095.0]
+
+
+def test_a_window_wider_than_the_measured_depth_is_never_clamped_away(layers, twelve_bit):
+    """A range narrower than the window on screen would let napari clip the window itself."""
+    lyr = layers.add_mosaic("raw", "488", _img(), contrast_limits=(0.0, 50000.0))
+
+    assert list(lyr.contrast_limits) == [0.0, 50000.0]
+    assert lyr.contrast_limits_range[1] >= 50000.0
+
+
+def test_widening_the_range_does_not_move_a_single_contrast_limit(layers, twelve_bit):
+    """The anti-flash assertion: opening the slider's travel changes no pixel on the canvas."""
+    lyr = layers.add_mosaic("raw", "488", _img(), contrast_limits=(100.0, 3000.0))
+
+    assert layers.widen_contrast_range(0.0, 16383.0) == 1
+
+    assert list(lyr.contrast_limits) == [100.0, 3000.0]
+    assert list(lyr.contrast_limits_range) == [0.0, 16383.0]
+
+
+def test_widening_NEVER_narrows(layers, twelve_bit):
+    """A narrower range does not merely restyle the slider -- napari clips the window into it."""
+    lyr = layers.add_mosaic("raw", "488", _img(), contrast_limits=(100.0, 3000.0))
+    layers.widen_contrast_range(0.0, 16383.0)
+
+    assert layers.widen_contrast_range(0.0, 4095.0) == 0
+    assert list(lyr.contrast_limits_range) == [0.0, 16383.0]
+
+
+def test_widening_the_range_is_not_reported_as_a_USER_gesture(layers, twelve_bit):
+    """napari re-emits contrast_limits when the RANGE moves, even though the value does not.
+
+    An echo that reaches the user-contrast tap latches the plate to manual and kills per-region
+    contrast, which is what `programmatic()` exists to prevent.
+    """
+    layers.add_mosaic("raw", "488", _img(), contrast_limits=(100.0, 3000.0))
+    seen = []
+    layers.on_user_contrast(lambda *a: seen.append(a))
+
+    layers.widen_contrast_range(0.0, 16383.0)
+
+    assert seen == []
+
+
+def test_widening_skips_the_layers_that_have_no_contrast_at_all(layers, twelve_bit):
+    """Labels have no contrast_limits_range; a walk over the layer list must not care."""
+    layers.add_mosaic("raw", "488", _img(), contrast_limits=(100.0, 3000.0))
+    layers.add_labels("nuclei", "488", np.zeros((32, 32), dtype=np.uint32))
+
+    assert layers.widen_contrast_range(0.0, 16383.0) == 1        # the image only
+
+
+def test_a_float_result_layer_keeps_its_own_range(layers, twelve_bit):
+    """The gate is the LAYER's dtype. A float operator result has no bit depth to apply one to."""
+    lyr = layers.add_mosaic("flatfield", "488",
+                            np.zeros((32, 32), dtype=np.float32), contrast_limits=(0.0, 1.0))
+
+    assert list(lyr.contrast_limits_range) == [0.0, 1.0]
+
+
+def test_a_region_change_re_widens_the_slider_without_moving_the_window(layers, twelve_bit):
+    """The `_reuse_layer` path: C3 replaced by E7, which holds numbers C3's slider cannot reach."""
+    from squidxplorer import _bitdepth
+
+    lyr = layers.add_mosaic("raw", "488", _img(), contrast_limits=(100.0, 3000.0))
+    assert list(lyr.contrast_limits_range) == [0.0, 4095.0]
+
+    _bitdepth.depth().observe(16380.0)                       # E7 is read
+    same = layers.add_mosaic("raw", "488", _img(seed=1))     # same identity -> reuse
+
+    assert same is lyr
+    assert list(lyr.contrast_limits) == [100.0, 3000.0]      # the user's window is untouched
+    assert list(lyr.contrast_limits_range) == [0.0, 16383.0]
+
+
 # ------------------------------------------------------- placement from stage µm
 
 
@@ -1433,3 +1542,163 @@ def test_a_plain_array_and_a_nested_list_are_not_pyramids():
     assert pyramid_levels("not an image at all") is None
     with pytest.raises(ValueError, match="EMPTY multiscale"):
         pyramid_levels([])
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════════
+# Framing ONE box: the arithmetic behind stepping a camera across a region's FOVs.
+#
+# All of this is napari's own `fit_to_view` rule pointed at a box the scene does not describe.
+# The test that matters most is the LAST one: it proves we are not a second, disagreeing copy.
+# ══════════════════════════════════════════════════════════════════════════════════════════
+
+def test_camera_for_bbox_um_centres_the_box():
+    from squidxplorer._napari_view import camera_for_bbox_um
+
+    (cy, cx), _zoom = camera_for_bbox_um((1000.0, 2000.0, 1400.0, 2300.0), (600, 800))
+    assert (cy, cx) == (2150.0, 1200.0)
+
+
+def test_camera_for_bbox_um_fits_the_TIGHTER_axis():
+    """Height against height, width against width — and the tighter one decides.
+
+    This is the assertion that fails on an (h, w) / (w, h) swap, which is why the box and the
+    canvas are both deliberately non-square and of DIFFERENT aspect. A swap does not raise; it
+    frames the box against the wrong edge and reads as somebody preferring a different zoom.
+    `_brick_view._frame_camera` carried exactly that bug until this function existed.
+    """
+    from squidxplorer._napari_view import camera_for_bbox_um
+
+    # canvas 600 tall x 800 wide; box 50 um tall x 100 um wide -> width is the tighter axis.
+    _c, zoom = camera_for_bbox_um((0.0, 0.0, 100.0, 50.0), (600, 800))
+    assert zoom == pytest.approx(0.95 * min(600 / 50, 800 / 100))
+    assert zoom == pytest.approx(0.95 * 8.0), "800/100 is tighter than 600/50; the min must win"
+
+    # Same canvas, box transposed -> now height is the tighter axis. A function that read the
+    # canvas the other way round would return the SAME number for both of these.
+    _c, zoom_t = camera_for_bbox_um((0.0, 0.0, 50.0, 100.0), (600, 800))
+    assert zoom_t == pytest.approx(0.95 * min(600 / 100, 800 / 50))
+    assert zoom_t != pytest.approx(zoom)
+
+
+def test_camera_for_bbox_um_leaves_the_margin_napari_leaves():
+    from squidxplorer._napari_view import FRAME_MARGIN, camera_for_bbox_um
+
+    assert FRAME_MARGIN == 0.05, "napari's own reset_view default; a second convention drifts"
+    _c, zoom = camera_for_bbox_um((0.0, 0.0, 100.0, 100.0), (400, 400), margin=0.0)
+    assert zoom == pytest.approx(4.0), "no margin means the box touches the canvas edges"
+    _c, zoomed = camera_for_bbox_um((0.0, 0.0, 100.0, 100.0), (400, 400), margin=0.5)
+    assert zoomed == pytest.approx(2.0)
+
+
+@pytest.mark.parametrize("bbox, canvas, margin, match", [
+    ((0.0, 0.0, 0.0, 10.0), (600, 800), 0.05, "x1 > x0"),
+    ((0.0, 0.0, 10.0, 0.0), (600, 800), 0.05, "y1 > y0"),
+    ((0.0, 0.0, 10.0, 10.0), (0, 800), 0.05, "must be positive"),
+    ((0.0, 0.0, 10.0, 10.0), (600, -1), 0.05, "must be positive"),
+    ((0.0, 0.0, 10.0, 10.0), (600, 800), 1.0, r"\[0, 1\)"),
+    ((0.0, 0.0, 10.0, 10.0), (600, 800), -0.1, r"\[0, 1\)"),
+])
+def test_camera_for_bbox_um_refuses_rather_than_guessing(bbox, canvas, margin, match):
+    """A camera pointed at a number nobody measured shows somewhere else, with no error."""
+    from squidxplorer._napari_view import camera_for_bbox_um
+
+    with pytest.raises(ValueError, match=match):
+        camera_for_bbox_um(bbox, canvas, margin=margin)
+
+
+def test_framing_the_layer_s_own_box_gives_napari_s_own_camera():
+    """THE test this function exists to pass: reset_view and frame_bbox_um must agree.
+
+    If they disagree, we have written a second, subtly different answer to "what does fitting
+    mean" — which is the whole defect this codebase's one-owner rule is about, wearing a camera.
+
+    The ZOOM must be identical. The CENTRE differs by exactly half a pixel, and that is a real
+    convention difference rather than an error: napari's layer extent runs between pixel CENTRES,
+    while a ``bbox_um`` is the outer EDGE of the pixels. On the FOV boxes this is built for, that
+    is 0.05 um on a 392 um field.
+    """
+    from napari.components import ViewerModel
+
+    from squidxplorer._napari_view import MosaicLayers
+
+    model = ViewerModel()
+    layers = MosaicLayers(model)
+    bbox = (1000.0, 2000.0, 1400.0, 2300.0)          # 400 um wide, 300 um tall
+    layers.add_mosaic("raw", "c0", np.zeros((300, 400), np.uint16), contrast_limits=(0, 1),
+                      colormap="gray", multiscale=False, bbox_um=bbox)
+
+    model.reset_view()
+    ref_center, ref_zoom = tuple(model.camera.center), float(model.camera.zoom)
+
+    model.camera.center, model.camera.zoom = (0.0, 0.0, 0.0), 1.0
+    assert layers.frame_bbox_um(bbox) is None, "framing a box the layer covers must succeed"
+
+    assert float(model.camera.zoom) == pytest.approx(ref_zoom)
+    half_px_y, half_px_x = 300 / 300 / 2, 400 / 400 / 2
+    assert model.camera.center[1] == pytest.approx(ref_center[1], abs=half_px_y)
+    assert model.camera.center[2] == pytest.approx(ref_center[2], abs=half_px_x)
+
+
+def test_frame_bbox_um_is_a_programmatic_write():
+    """The plate is a SINK of a window's napari. Our camera move must not read as a user gesture."""
+    from napari.components import ViewerModel
+
+    from squidxplorer._napari_view import MosaicLayers
+
+    layers = MosaicLayers(ViewerModel())
+    seen = []
+    layers._model.camera.events.zoom.connect(lambda _e: seen.append(layers.is_programmatic))
+    assert layers.frame_bbox_um((0.0, 0.0, 100.0, 100.0)) is None
+    assert seen and all(seen), "every camera event this raised must be marked as ours"
+    assert not layers.is_programmatic, "the marker must not leak past the write"
+
+
+def test_frame_bbox_um_refuses_in_3d_by_name_instead_of_framing_something_wrong():
+    """In 3D the visible extent depends on camera.angles, which this deliberately does not model."""
+    from napari.components import ViewerModel
+
+    from squidxplorer._napari_view import MosaicLayers
+
+    model = ViewerModel()
+    model.dims.ndisplay = 3
+    layers = MosaicLayers(model)
+    said = layers.frame_bbox_um((0.0, 0.0, 100.0, 100.0))
+    assert said is not None and "2D" in said
+
+
+def test_frame_bbox_um_names_a_bad_box_rather_than_moving_the_camera():
+    from napari.components import ViewerModel
+
+    from squidxplorer._napari_view import MosaicLayers
+
+    model = ViewerModel()
+    layers = MosaicLayers(model)
+    before = tuple(model.camera.center), float(model.camera.zoom)
+    said = layers.frame_bbox_um((0.0, 0.0, 0.0, 100.0))
+    assert said is not None and "could not frame" in said
+    assert (tuple(model.camera.center), float(model.camera.zoom)) == before
+
+
+def test_a_napari_that_moved_its_canvas_size_is_named_not_guessed_around():
+    """``_canvas_size`` is private, so its loss must be a sentence — never a silent (800, 600).
+
+    Framing every camera against a canvas napari no longer reports would be wrong by the aspect
+    ratio and would look like a zoom preference, which is the failure this whole binding-guard
+    section exists to convert into a loud one.
+    """
+    from napari.components import ViewerModel
+
+    from squidxplorer._napari_view import (
+        REQUIRED_MODEL_PRIVATE_ATTRS,
+        MosaicLayers,
+        NapariBindingError,
+    )
+
+    assert "_canvas_size" in REQUIRED_MODEL_PRIVATE_ATTRS, "the guard must cover what we read"
+
+    class _Moved(ViewerModel):
+        _canvas_size = None
+
+    layers = MosaicLayers(_Moved())
+    with pytest.raises(NapariBindingError, match="_canvas_size"):
+        layers.frame_bbox_um((0.0, 0.0, 100.0, 100.0))

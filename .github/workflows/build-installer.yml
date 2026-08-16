@@ -50,7 +50,14 @@ jobs:
         shell: bash
         run: |
           sep=":"; [ "$RUNNER_OS" = "Windows" ] && sep=";"
-          uvx pyinstaller --onefile --console --name SquidXplorer-Setup \
+          # --icon only on Windows: it is the wellplate art the .exe shows in Explorer, and the
+          # SAME .ico rides in the payload so the finished install's desktop shortcut carries it
+          # (bootstrap._windows_shortcut). macOS gets its icon from the .app bundle; the AppImage
+          # from the .png below — one drawing (scripts/installer/make-icon.py), three encodings.
+          icon=""
+          [ "$RUNNER_OS" = "Windows" ] && icon="--icon scripts/installer/squidxplorer.ico"
+          cp scripts/installer/squidxplorer.ico scripts/installer/squidxplorer.png payload/
+          uvx pyinstaller --onefile --console --name SquidXplorer-Setup $icon \
             --add-data "payload${sep}payload" scripts/installer/bootstrap.py
 
       # No --source: the binary must find its own embedded wheel and uv.

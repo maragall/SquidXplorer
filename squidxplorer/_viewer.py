@@ -54,7 +54,8 @@ def _fusion_style():
 
 
 # The log panel taps the stdlib root logger, so anything logged here appears in it.
-from squidxplorer._fontscale import rescale_fonts, scale_qss_fonts, window_screen
+from squidxplorer._fontscale import (
+    beside_rect, default_root_width, rescale_fonts, scale_qss_fonts, window_screen)
 from squidxplorer._logpane import get_logger
 
 log = get_logger("viewer")
@@ -167,9 +168,44 @@ class PlateWindow(QMainWindow):
     #: plain attribute access: a bare ``getattr(self, ..., None)`` on a QObject whose __init__ has
     #: not run raises out of Qt's own attribute machinery instead of returning the default.
     _run = None
+    #: The working-layout state. CLASS defaults as well as ``__init__`` assignments, for the reason
+    #: the block above exists and ``RegionViewer`` states outright: on a QObject whose ``__init__``
+    #: has not run, even ``getattr(self, name, default)`` raises out of Qt's own attribute
+    #: machinery rather than answering. A count that answers 0 when four windows are open is the
+    #: difference between warning the user and closing four windows silently
+    #: (see ``_open_view_count``).
+    default_layout = False
+    _pending_default_view = False
+    _default_view_id = None
+    _layout_applied = False
 
-    def __init__(self, initial_path: Optional[str] = None):
+    def __init__(self, initial_path: Optional[str] = None, *, default_layout: bool = False,
+                 tabbed_views: bool = False):
+        """*default_layout*: open the WORKING LAYOUT once a plate loads — this window sized to a
+        share of the screen, and a view window over every well filling the rest.
+
+        Off by default, and the default is the product rule rather than a test convenience: THE
+        LAUNCHER asks for a layout, a library caller asks for a window. `main()` passes True;
+        `tools/gates.py`, the walkthrough and every test that builds a plate get exactly what they
+        got before.
+
+        It is not a branch on "am I under test". That would be the same behaviour keyed on the
+        wrong fact, and it would make `tests/test_no_orphan_windows.py` — whose whole premise is
+        "a headless test never calls show(), so anything visible here showed ITSELF" — describe
+        something other than what ships.
+        """
         super().__init__()
+        self.default_layout = bool(default_layout)
+        #: Held until the manager exists a few lines down. Same opt-in shape as `default_layout`
+        #: and for a sharper reason: with tabs on for every spawn, four of the PR's test files went
+        #: from passing to ABORTING, so this cannot be the default until that is understood.
+        self._want_tabbed_views = bool(tabbed_views)
+        #: A plate loaded before this window was shown; the view opens from `showEvent`. `_spawn`
+        #: shows the view it creates, so opening one from inside `__init__` would put a view on
+        #: screen before the plate that owns it.
+        self._pending_default_view = False
+        self._default_view_id: Optional[int] = None
+        self._layout_applied = False
         # PIN THE QAPPLICATION, whoever created it. A window cannot outlive its application, and
         # the application is routinely held only by a caller's local or a pytest fixture cache.
         # This is the one call every window makes, however it was constructed -- the same argument
@@ -218,6 +254,11 @@ class PlateWindow(QMainWindow):
         # shares this one stateless reader/meta — nothing reopens the dataset. See _region_viewer.
         from squidxplorer._region_viewer import ViewerManager
         self._viewer_manager = ViewerManager(parent=self)
+        self._viewer_manager.tabbed_views = self._want_tabbed_views
+        #: The plate's OWN 3D popout (`_open_native_3d`), held so a later contrast-ceiling rise
+        #: can reach it. Windows track theirs as `RegionViewer._native3d`.
+        self._plate_native3d = None
+        self._viewer_manager.depthChanged.connect(self._on_depth_changed)
         # Operator controls appear AT EACH LEVEL (the deck; Julio 2026-07-23: "I don't see operator
         # controls like the powerpoint specified at each level"). Every window's "Operators for this
         # window" dropdown is the SAME registry + run_operator (the CLI engine), scoped to that view,
@@ -227,11 +268,21 @@ class PlateWindow(QMainWindow):
         self._viewer_manager.operator_specs = [
             (op.key, op.label) for op in _OPERATIONS if op.runnable]
         self._viewer_manager.run_operator = self.run_operator
+        # THE CANVAS LOUPE'S PIXEL SOURCE, handed down like run_operator. A CLOSURE over self, not
+        # `self._loupe_sources.get`: `_release_loupe_sources` REBINDS that dict on every plate
+        # open, and a bound method captured here would keep answering from the dead one — which
+        # would show the previous acquisition's pixels in the new one's inset.
+        self._viewer_manager.loupe_source_for = lambda op: self._loupe_sources.get(op or "raw")
         # The plate wash shows ONLY the view you CLICK (Julio), coloured by that view's own hue so
         # different view threads are told apart. Not all views at once — that clutters the plate.
         # viewFocused fires on open/raise; windowsChanged clears it when the focused view closes.
         self._viewer_manager.viewFocused.connect(lambda _regions: self._refresh_view_hues())
         self._viewer_manager.windowsChanged.connect(self._refresh_view_hues)
+        # THE PLATE IS A NAVIGATOR while a view is open: the same two signals say whether one is,
+        # so the mode is set from the same funnel that already re-tints the wash and cannot drift
+        # out of step with it.
+        self._viewer_manager.viewFocused.connect(lambda _regions: self._refresh_plate_navigation())
+        self._viewer_manager.windowsChanged.connect(self._refresh_plate_navigation)
         # THE PLATE FOLLOWS THE WINDOWS' napari (Task 8.1). Julio: "there shouldn't be any controls
         # for the plate view. It just reacts to toggles and contrast adjustments in napari." With no
         # central pane left, the napari the plate must react to is the one inside each window, so
@@ -776,14 +827,134 @@ class PlateWindow(QMainWindow):
         screen = window_screen(self)
         if screen is not None:
             avail = screen.availableGeometry()
-            w = min(w, max(self.minimumWidth(), avail.width() - 40))
-            # HEIGHT GROWS, WIDTH DOES NOT. The design height is a FLOOR here, not a ceiling: the
-            # plate is the tall thing in this window and every pixel of height goes to it, so on a
-            # screen with room to spare we take it. Width stays at the design number because past
-            # it the plate does not grow, only the gutters either side of it do -- which is what
-            # opening this window maximised looked like, and why that was reverted (2026-07-31).
+            # WIDTH IS NOW A SHARE OF THE SCREEN, not the design number (2026-08-10, Spencer). The
+            # root is a NAVIGATOR beside a big view window, so it takes about a fifth and leaves
+            # the rest; `default_root_width` owns the arithmetic and both its bounds.
+            #
+            # This costs plate detail and that was measured before taking it: the cells are square
+            # and at full height the plate is WIDTH-limited, so 596 -> 420 takes a 96-well plate
+            # from 43.2 to 28.5 px/well and a 1536 from 10.8 to 7.1. The note that used to sit here
+            # -- "past it the plate does not grow, only the gutters either side of it do" -- was
+            # written when this window was 850 tall and is simply false now: 596x435 and 596x585
+            # both measure 43.2 px/well, which is what proves width is the binding constraint. The
+            # wheel still zooms with fit as the floor, which is where the detail went.
+            w = default_root_width(avail.width(), self.minimumWidth(), self._DESIGN_W)
+            # HEIGHT GROWS. The design height is a FLOOR, not a ceiling: the plate is the tall
+            # thing in this window and every pixel of height goes to it.
             h = max(self.minimumHeight(), avail.height() - 80)
         return w, h
+
+    def _on_plate_loaded(self) -> None:
+        """A RAW acquisition finished loading. The one place a per-load behaviour attaches.
+
+        Called from the tail of `_ingest.ingest`, which is provably the single common point: the
+        command line, File > Open, drag-and-drop and the `OpenAcquisition` command all funnel
+        through it, and all three of its refusals return before here — so no failed load can reach
+        this and no successful one can skip it.
+
+        NOT called from `_open_computed`. That path sets ``self._reader = None``, so
+        ``ViewerManager.open`` refuses by contract and a computed plate has no view window to make
+        a layout out of. That is a gap in the computed path rather than something this papers over.
+        """
+        if not self.default_layout:
+            return
+        self._apply_default_root_geometry()
+        # A view SHOWS itself when spawned, and `ingest` runs inside `__init__` when a path was
+        # passed on the command line — so opening one here would put a view on screen before the
+        # plate. Defer to `showEvent`, which is the one call every visible window makes.
+        if self.isVisible():
+            self._open_default_view()
+        else:
+            self._pending_default_view = True
+
+    def _apply_default_root_geometry(self) -> None:
+        """Size and place the root for the working layout — ONCE per window lifetime.
+
+        A second acquisition dropped onto a root the user has since dragged and resized must not
+        snap it back; the layout is an opening position, not a policy the window enforces.
+
+        The MOVE is the half `_default_root_size` never did. Windows cascades the first top-level,
+        so the root does not start at the left edge, and "the view fills the rest" would then run
+        off the right of the screen.
+        """
+        if self._layout_applied:
+            return
+        self._layout_applied = True
+        screen = window_screen(self)
+        if screen is None:
+            return
+        avail = screen.availableGeometry()
+        self.resize(*self._default_root_size())
+        self.move(avail.left(), avail.top())
+
+    def _open_default_view(self) -> None:
+        """Open the working view: one window over EVERY well, filling the screen beside the plate.
+
+        Over every well so the plate can navigate anywhere without opening anything. That costs
+        nothing on a big plate: a window renders ONE region at a time — `_on_region_changed` loads
+        the current one and no other — so a 1536-region window and a 2-region window pay the same
+        opening price.
+
+        THE OPERATOR SELECTION IS NOT TOUCHED. `select_all()` would have been the obvious way to
+        say "every well", and it writes `_selection` and emits `selectionChanged`: the plate would
+        believe the user had picked the whole plate, and every operator run would silently be
+        scoped to all of it. `ViewerManager.open` takes the region list directly and writes no
+        selection at all, which is why it is the door used here.
+        """
+        mgr = self._viewer_manager
+        order = list(self._order or [])
+        if not order:
+            return
+        previous = mgr.window(self._default_view_id) if self._default_view_id is not None else None
+        if previous is not None:
+            # A SECOND ACQUISITION. Every open view holds the reader it was built with, so the old
+            # default view would keep showing the PREVIOUS acquisition's pixels underneath the new
+            # plate — a wrong-data bug rather than a stale-layout one. User-opened windows are left
+            # alone: they are equally stale, but their lifetime is an open question and this
+            # feature must not settle it as a side effect.
+            previous.close()
+        self._default_view_id = None
+        win = mgr.open(order)
+        if win is None:
+            return
+        self._default_view_id = win.window_id
+        self._place_beside(win)
+
+    def _place_beside(self, win) -> None:
+        """Put *win* in the screen the plate is on, filling everything to the right of it.
+
+        AFTER the window is shown, not before: `_spawn` has already shown it, and a geometry set
+        before a window is mapped is discarded by some window managers. Being shown is also what
+        makes the frame margins below readable at all — Qt does not know them until the window
+        manager has decorated the window.
+
+        THE RECT IS THE FRAME'S, THE CALL SETS THE CLIENT'S. `setGeometry` positions the client
+        area, so handing it a rect measured from `frameGeometry` puts the title bar ABOVE the rect
+        by exactly the title bar's height. Measured on the PR machine before the correction: the
+        plate at y=0 and the view's frame at y=-29 — its title bar off the top of the screen, so
+        the window could not be dragged or even named. Subtracting the margins here is what makes
+        "fills the space beside the plate" true of the thing the user can actually see.
+        """
+        screen = window_screen(self)
+        if screen is None:
+            return
+        # PLACE THE WINDOW, WHICH MAY NOT BE THE VIEW. Once views are tabs the thing beside the
+        # plate is the DECK, and the view is a page laid out inside it — setting geometry on a page
+        # is at best ignored and at worst fights the tab widget's own layout.
+        win = getattr(win, "host", None) or win
+        try:
+            want = beside_rect(screen.availableGeometry(), self.frameGeometry())
+            frame, client = win.frameGeometry(), win.geometry()
+            left_m = client.left() - frame.left()
+            top_m = client.top() - frame.top()
+            win.setGeometry(
+                want.left() + left_m,
+                want.top() + top_m,
+                want.width() - (frame.width() - client.width()),
+                want.height() - (frame.height() - client.height()),
+            )
+        except Exception:                     # noqa: BLE001 - a layout is never worth a crash
+            pass
 
     def _ui_scale(self) -> float:
         """How much bigger the window is than the shape the type was written for."""
@@ -876,6 +1047,23 @@ class PlateWindow(QMainWindow):
 
     def _open_native_3d(self):
         _gallery_launch.open_native_3d(self)
+
+    def _on_depth_changed(self, lo: float, hi: float) -> None:
+        """The dataset's contrast ceiling rose. Widen the plate's own 3D popout, if it has one.
+
+        The plate itself needs nothing: its thumbnails are a Qt composite that asks
+        `_pct_window` for a range every time it paints, so it picks the new ceiling up on the
+        next repaint without being told.
+        """
+        popout = getattr(self, "_plate_native3d", None)
+        if popout is None or not hasattr(popout, "layers"):
+            return
+        try:
+            from squidxplorer._napari3d import widen_contrast_range
+
+            widen_contrast_range(popout, float(lo), float(hi))
+        except Exception:                            # noqa: BLE001 - the popout may be closed
+            pass
 
     # -- operator UIs live as tabs in the band's right column: the Operators home tab, one tab
     # -- per operator you open, and any result a panel publishes. ---------------------------------
@@ -1824,8 +2012,7 @@ class PlateWindow(QMainWindow):
         # genuinely not an error, but it no longer hides a call-signature mistake: the non-None
         # path is now pinned by a test.
         try:
-            wid = mgr.focused_id
-            win = next((w for w in mgr.windows if getattr(w, "window_id", None) == wid), None)
+            win = mgr.active_view()          # the one answer to "which window is the user in"
             if win is None:
                 return None
             luts = win._per_channel_luts()
@@ -2316,6 +2503,12 @@ class PlateWindow(QMainWindow):
         self._overview.hovered.connect(self._on_hover)
         self._overview.wellActivated.connect(self.activate_well)
         self._overview.activeLayerChanged.connect(lambda _k: self._update_loupe_source())
+        # NAVIGATION BELONGS HERE TOO, even though this path deliberately omits selectionChanged
+        # and marqueeSelected: a view opened over the earlier RAW plate can outlive the switch to a
+        # computed one, and it is still a window the user can steer. `show_region` refuses a region
+        # this acquisition does not have, which is what keeps a mismatch honest rather than silent.
+        self._overview.wellNavigated.connect(self._on_well_navigated)
+        self._refresh_plate_navigation()
         self._overview.set_time_point(self.time_point)
         self._active_op_key = "computed"
         self._op_stack.reset(); self._op_stack.add("computed", "computed MIP")
@@ -3158,6 +3351,50 @@ class PlateWindow(QMainWindow):
             + (f" — {', '.join(skipped)} has no signal in that window, so its contrast was left "
                f"alone rather than pasted as a one-count window." if skipped else "."))
 
+    def _on_well_navigated(self, well_id: str):
+        """Plain left-click on a well -> show that region in the ACTIVE view window.
+
+        The plate as a NAVIGATOR (Spencer, 2026-08-10: "use the wellplate view to left-click on
+        wells to change the currently displayed region"). Clicking a well the window was not opened
+        over still works — it adopts it — because a navigator you can only steer inside a selection
+        you already made is not a navigator.
+
+        Reads the ACTIVE VIEW from the registry, never `isActiveWindow()`: the plate necessarily
+        takes activation when you click it, so asking the desktop would answer "the plate" every
+        single time. `ViewerManager.active_view` is the one place that question is answered.
+
+        The blue operator selection is deliberately neither read nor written here. Moving the
+        window you are looking at is not a change to the batch an operator will run on.
+        """
+        if well_id not in self._fov_index:
+            return
+        win = self._viewer_manager.active_view()
+        if win is None:
+            # Say so rather than silently selecting: with no view open the click already had a
+            # meaning, and the widget only sends this signal when it has been told one is open.
+            self._readout.setText("Open a view first — then clicking a well moves it.")
+            return
+        if not win.show_region(well_id):
+            return                                     # show_region already named the refusal
+        try:
+            # THE RED FRAME follows what the view is showing. `set_region`, NOT `activate`:
+            # `activate` means "the user explicitly opened this region" and scopes operator runs to
+            # it (`_current_well`), which navigating is not — pinned by test_nav_wiring.
+            self._cursor.set_region(well_id)
+        except KeyError:
+            pass                                       # a plate whose order does not carry it
+        self._readout.setText(f"view {win.window_id}: {well_id}")
+
+    def _refresh_plate_navigation(self):
+        """Tell the plate whether a plain click NAVIGATES or SELECTS. THE ONE WRITER of that mode.
+
+        Driven by the same two manager signals the hue refresh uses, which together are the "the
+        window set or the focus changed" funnel: closing the last view fires `windowsChanged` and
+        the plate goes back to selecting on its own.
+        """
+        if self._overview is not None:
+            self._overview.set_click_navigates(self._viewer_manager.active_view() is not None)
+
     def _refresh_view_hues(self):
         """Wash the plate for the SELECTED views in the navigator, each in its own hue (Linux
         multi-select). The active (first) view reads brighter. Empty selection -> no wash (Julio:
@@ -3411,6 +3648,12 @@ class PlateWindow(QMainWindow):
                 QTimer.singleShot(0, self.close)   # unwind out of showEvent first, then close
                 return
         super().showEvent(e)
+        # A plate that loaded before this window was shown (the command-line path ingests inside
+        # __init__) has its view waiting here, so the plate reaches the screen first. The flag is
+        # CLEARED rather than re-read, which is what makes this once-only across re-shows.
+        if self._pending_default_view:
+            self._pending_default_view = False
+            self._open_default_view()
 
     #: Session flag behind the close-all confirmation. True (the default) = ask. Class-level on
     #: purpose: "don't show me this again" is about the application, not one window. It does not
@@ -3418,10 +3661,21 @@ class PlateWindow(QMainWindow):
     _warn_close_all = True
 
     def _open_view_count(self) -> int:
-        """How many region windows are open right now. 0 when there is no manager."""
+        """How many region windows the USER opened. 0 when there is no manager.
+
+        The auto-opened default view is deliberately not counted. It exists because the app opened
+        it, so warning "closing the plate will also close 1 open view window(s)" on the way out of
+        a session where the user opened nothing would be a confirmation about the app's own
+        furniture — the kind of dialog people learn to click through, taking the real warning with
+        it. Windows the user opened are still counted, and the default view is still closed.
+        """
         mgr = getattr(self, "_viewer_manager", None)
         try:
-            return 0 if mgr is None else len(mgr.windows)
+            if mgr is None:
+                return 0
+            default_id = self._default_view_id     # a class default, so a shell answers None
+            return sum(1 for w in mgr.windows
+                       if getattr(w, "window_id", None) != default_id)
         except Exception:                        # noqa: BLE001 - a torn-down manager: none open
             return 0
 
@@ -3481,18 +3735,36 @@ class PlateWindow(QMainWindow):
         # FIRST, before any teardown below: `_confirm_close_all` can cancel, and cancelling has to
         # leave the window exactly as it was. Every line under this point retires threads and
         # uninstalls the log bus, none of which is reversible.
+        # TWO DIFFERENT QUESTIONS, and they were briefly the same variable. What to WARN about is
+        # the views the user opened; what to CLOSE is every view there is. Once `_open_view_count`
+        # started excluding the auto-opened default view, guarding the close loop with it meant a
+        # session where the user opened nothing left that view behind — a plateless remainder still
+        # holding the single-instance flock.
         views = self._open_view_count()
         if not self._confirm_close_all(views):
             e.ignore()
             return
-        if views:
-            mgr = self._viewer_manager
-            for wid in [int(w.window_id) for w in mgr.windows]:
-                try:
-                    mgr.close(wid)               # a no-op for an id a parent already took with it
-                except Exception as exc:         # noqa: BLE001 - one view must not block the quit
-                    log.warning("view %s did not close with the plate: %s: %s",
-                                wid, type(exc).__name__, exc)
+        mgr = self._viewer_manager
+        for wid in [int(w.window_id) for w in mgr.windows]:
+            try:
+                mgr.close(wid)                   # a no-op for an id a parent already took with it
+            except Exception as exc:             # noqa: BLE001 - one view must not block the quit
+                log.warning("view %s did not close with the plate: %s: %s",
+                            wid, type(exc).__name__, exc)
+        # AND THE DECKS. A deck is a top-level too, so an empty one left standing keeps the process
+        # alive with nothing on screen — the same argument, one container out. Guarded like the
+        # window loop above: an exception out of closeEvent does not propagate, PyQt aborts the
+        # process, and a manager stand-in without decks() is not worth that.
+        try:
+            decks = list(mgr.decks())
+        except Exception:                        # noqa: BLE001 - a torn-down or stub manager
+            decks = []
+        for deck in decks:
+            try:
+                deck.close()
+            except Exception as exc:             # noqa: BLE001
+                log.warning("a view deck did not close with the plate: %s: %s",
+                            type(exc).__name__, exc)
         # NO REGION DEBOUNCE TO DISARM. A single-shot QTimer used to be armed here for 140 ms by
         # `_on_region_changed` and stopped at this point, because a pending one fires into a
         # torn-down window (measured: a segfault a window later). Both the timer and the
@@ -3807,7 +4079,9 @@ def main(dataset_path: str = None):
     # is already over. A splash is the one thing that can be on screen during a blocking
     # constructor.
     splash = _startup_splash(app)
-    win = PlateWindow(path)
+    # THE LAUNCHER ASKS FOR THE WORKING LAYOUT: this window narrow and full height, a view window
+    # over every well filling the rest. Only here — a library caller gets a bare window.
+    win = PlateWindow(path, default_layout=True, tabbed_views=True)
     _install_footprint_monitor(app, win)
     win._gui_slot = slot                  # the reservation lives as long as the window
 

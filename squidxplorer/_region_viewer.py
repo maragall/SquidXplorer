@@ -10,6 +10,7 @@ from typing import Any, Optional, Sequence
 
 import numpy as np
 from qtpy.QtCore import QObject, Qt, QTimer, Signal
+from qtpy.QtGui import QBrush, QColor
 from qtpy.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
@@ -28,10 +29,12 @@ from qtpy.QtWidgets import (
     QSizePolicy,
     QTreeWidget,
     QTreeWidgetItem,
+    QTreeWidgetItemIterator,
     QVBoxLayout,
     QWidget,
 )
 
+from squidxplorer import _bitdepth
 from squidxplorer import _measure
 from squidxplorer._time_point import TimePointBar
 from squidxplorer._address import Address, Extent
@@ -84,6 +87,43 @@ _SETTING_BASELINE = {
     "channel_visibility": _GLOBAL,
     "luts": _INHERIT,
 }
+
+
+def _where(win) -> str:
+    """Where this view lives, for the navigator's location column.
+
+    "views" when it is a tab in the deck (numbered once there is more than one), "window" when it
+    is standing on its own — which is what a detached tab becomes, and what every view was before
+    decks existed.
+    """
+    host = getattr(win, "host", None)
+    if host is None:
+        return "window"
+    try:
+        return host.short_name()
+    except Exception:                            # noqa: BLE001 - a label is never worth a crash
+        return "views"
+
+
+def _alive(widget) -> bool:
+    """Is this Qt object still there on the C++ side?
+
+    ``sip.isdeleted`` is the only reliable question — a deleted QWidget is a live PYTHON object
+    whose every attribute access raises, so ``is not None`` answers yes about a corpse. The same
+    reasoning, and the same import shape, as ``OpenViewList.refresh``'s guard further down.
+    """
+    if widget is None:
+        return False
+    if _sip is not None:                         # the module-level handle, resolved once at import
+        try:
+            return not _sip.isdeleted(widget)
+        except Exception:                        # noqa: BLE001 - not a sip object: fall through
+            pass
+    try:
+        widget.objectName()                      # PySide, or a non-sip object: ask Qt directly
+        return True
+    except RuntimeError:
+        return False
 
 
 def _copy_setting(value: Any) -> Any:
@@ -253,12 +293,25 @@ class RegionViewer(QMainWindow):
     """ONE independent napari window over a subset of regions."""
 
     closed = Signal(object)
+    regionsChanged = Signal(object)   # emits self: this window ADOPTED a region it was not opened
+    #                                   over, so anything that published its region set — the
+    #                                   navigator row, the plate's per-view wash — is now stale.
 
     _op_action: Optional[str] = None
     _op_address: Any = None
     _result_region: Optional[str] = None
     _op_progress: Any = None
     open_clock: Any = None
+    #: Has :meth:`dispose` already run? Same class-default rule as the attributes above, and here
+    #: it is load-bearing rather than defensive: ``dispose`` is reachable from ``closeEvent`` on a
+    #: window whose ``__init__`` raised partway, and a bare read of a missing attribute there
+    #: would replace the real error with an attribute error out of Qt's machinery.
+    _disposed: bool = False
+    #: The :class:`~squidxplorer._view_deck.ViewDeck` holding this view as a tab, or None when it
+    #: is a free-standing window. THE ONE ANSWER to "where does this view live" — written only by
+    #: the deck's dock/undock, read by everything that needs to act on the window a view is in.
+    #: Same class-default rule as above: it is read from slots.
+    _host = None
 
     def __init__(
         self,
@@ -275,11 +328,17 @@ class RegionViewer(QMainWindow):
         run_operator: Optional[Any] = None,
         parent_id: Optional[int] = None,
         settings: "Optional[ViewSettings]" = None,
+        fovs: bool = False,
     ) -> None:
         super().__init__(parent)
         self._reader = reader
         self._meta = meta
-        self._regions = [str(r) for r in regions]
+        #: WHAT THIS WINDOW WAS OPENED OVER. Historical and immutable — not "where it can go now",
+        #: which is the cursor's order and is read through the ``_regions`` property below. The two
+        #: were one field until the plate became a navigator: a window can now ADOPT a region it was
+        #: not opened over, and a field kept in step with the cursor by hand is the second copy that
+        #: ``_region_nav``'s "one cursor, no second copy" rule exists to forbid.
+        self._seed_regions = [str(r) for r in regions]
         self.window_id = int(window_id)
         self._worker = None
         self._load_gen = 0
@@ -296,6 +355,12 @@ class RegionViewer(QMainWindow):
         self._focus_worker = None
         self._video_worker = None
         self._manager = manager
+        if manager is not None:
+            # A LATER region can prove the dataset holds bigger numbers than the one this window
+            # opened on -- the 14-bit set reads 3437 at C3 and 16380 at E7. Layers already built
+            # carry a slider bounded by the old ceiling and cannot reach the new pixels, so every
+            # window listens for the rise rather than only the one that triggered it.
+            manager.depthChanged.connect(self._on_depth_changed)
         self._operator_specs = list(operator_specs or [])
         self._render_mode = "2d"
         self._run_operator = run_operator
@@ -304,12 +369,37 @@ class RegionViewer(QMainWindow):
         self._settings_applied = False
         self._roi_bbox = roi_bbox
         self._roi_layer = None
+        # A FOVs VIEW walks this region's fields with the CAMERA. It loads nothing an ordinary
+        # window would not: the mosaic is fused once and the slider only re-points the camera at
+        # one field's box, which is why a step is instant and why playback on this axis is honest.
+        # See `squidxplorer/_fov_nav.py` for why that is not a reversal of `_region_nav`'s "the
+        # navigation unit is the region".
+        self._fov_mode = bool(fovs)
+        self._fov_slider = None    # the FOV axis, built ONLY in a FOVs view; None means "no axis"
+        self._fov_layer = None     # the napari Shapes layer this window draws FOV rectangles on
+        self._fov_boxes_cache: dict = {}   # the current region's FOV boxes; see _draw_fov_boxes
+        if self._fov_mode and self._roi_bbox is not None:
+            # No precedence rule and no fallback. An ROI view is CROPPED to one box and a FOVs
+            # view walks every field of the whole region; a window that claimed to be both would
+            # have to pick one silently, and the user would be looking at the other.
+            raise ValueError(
+                "a FOVs view walks the whole region's fields and an ROI view is cropped to one "
+                "box; a window cannot be both. Open the FOVs view from the parent window rather "
+                "than from inside an ROI child.")
         self._op_action: Optional[str] = None
         self._op_address: Any = None
         self._result_region: Optional[str] = None
 
-        self._derived_name = title or self._view_label(self._regions)
-        if self._roi_bbox is not None:
+        # THE SEED, not the live set: this runs before ``_build`` makes the cursor, and the name a
+        # window is born with describes what it was OPENED over. Keeping it derived from the live
+        # set would rename the window under the user the first time the plate navigated it
+        # somewhere new, and the title is the only visible join between a log line and a window.
+        self._derived_name = title or self._view_label(self._seed_regions)
+        # THE ONE PLACE A KIND PREFIXES THE LABEL. The two are mutually exclusive by the refusal
+        # above, so this is an elif and not a precedence question.
+        if self._fov_mode:
+            self._derived_name = f"FOVs · {self._derived_name}"
+        elif self._roi_bbox is not None:
             self._derived_name = f"ROI · {self._derived_name}"
         self._display_name = self._derived_name
         self._refresh_title()
@@ -402,6 +492,15 @@ class RegionViewer(QMainWindow):
         except Exception as exc:                          # noqa: BLE001 - a readout, never fatal
             log.debug("view %s could not wire the FOV readout: %s", self.window_id, exc)
 
+        # THE CANVAS LOUPE (shift-left-click). Built here because this is where the napari Viewer
+        # and the GL widget first become reachable; it costs one object until it is raised, and it
+        # builds neither its source nor its worker until then.
+        self._loupe = None
+        try:
+            self._install_canvas_loupe(pane)
+        except Exception as exc:                          # noqa: BLE001 - a magnifier, never fatal
+            log.debug("view %s could not wire the canvas loupe: %s", self.window_id, exc)
+
         try:
             ch_combo = getattr(pane, "detect_channel", None)
             if ch_combo is not None and ch_combo.count() == 0:
@@ -425,6 +524,17 @@ class RegionViewer(QMainWindow):
         self._slider.bind(self._cursor)
         lay.addWidget(self._slider)
 
+        # THE FOV AXIS, and only in a FOVs view. Built here rather than unconditionally-and-hidden
+        # (which is what the region slider and the timepoint bar do) because this one is not free:
+        # it costs a napari `Dims`, a `QtDims`, a `QTimer` and an `AnimationThread`, and window
+        # open time is a tracked complaint. `None` therefore means "this window has no FOV axis".
+        if self._fov_mode:
+            from squidxplorer._fov_nav import FovSlider
+
+            self._fov_slider = FovSlider(on_change=self._on_fov_changed)
+            self._fov_slider.on_problem(self._say)
+            lay.addWidget(self._fov_slider)
+
         self._time_point_bar = TimePointBar(on_change=self._on_time_point_changed, playback=True)
         self._time_point_bar.on_problem(self._say)
         self._time_point_bar.set_count(int((self._meta or {}).get("n_t", 1) or 1))
@@ -432,8 +542,12 @@ class RegionViewer(QMainWindow):
 
         self.setCentralWidget(central)
 
-        self._cursor.set_order(self._regions)
-        if self._cursor.index is None and self._regions:
+        # SEED the cursor: this announces region 0 to the loader, so the first mosaic loads now.
+        # Reads ``_seed_regions`` and not ``_regions``, because ``_regions`` reads back OUT of the
+        # cursor — at this instant it would be answering from the empty order it is about to be
+        # given, and seeding a cursor from itself is a no-op that leaves the window blank.
+        self._cursor.set_order(self._seed_regions)
+        if self._cursor.index is None and self._seed_regions:
             self._cursor.set_index(0)
 
     _BOX_QSS = "QFrame{background:#0d1117;border:1px solid #232b3a;border-radius:5px;}"
@@ -518,7 +632,14 @@ class RegionViewer(QMainWindow):
         r2.addWidget(self._chip("✕ clear", "Remove all ROIs in this window.", self._clear_rois))
         r2.addWidget(self._chip("→ window", "Open the drawn ROI(s) as child window(s) — the next "
                                 "level of the view tree.", self._open_roi_children))
+        # FOVs. The ROI chips beside it are for a box the user draws; this is for the boxes the
+        # ACQUISITION already drew. On a sparse run — the AF sweep sets are 16 fields at 7x the
+        # field pitch, so 3% of the mosaic is data — checking focus means visiting each field, and
+        # doing that by wheel-zoom is the complaint this answers.
+        self._btn_fovs = self._chip("⊞ FOVs", self._FOVS_TIP, self._open_fovs)
+        r2.addWidget(self._btn_fovs)
         r2.addStretch(1)
+        self._refresh_fovs_chip()
         vv.addLayout(r2)
         view_box.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
         h.addWidget(view_box, 0)
@@ -1348,6 +1469,225 @@ class RegionViewer(QMainWindow):
     def _roi_shapes_layer(self, create: bool = False):
         return _roi_tools.roi_shapes_layer(self, create)
 
+    #: The FOVs chip's own description, held apart from the per-region count appended to it. The
+    #: count changes whenever the plate navigates this window somewhere else, so the two are
+    #: joined at refresh time rather than the chip's tooltip being re-derived from its own text.
+    _FOVS_TIP = ("Open a child view that steps the camera through this region's FOVs one at a "
+                 "time, framed to fill the canvas — for checking focus field by field without "
+                 "zooming in and out. Press play on its FOV slider to walk them; the mosaic is "
+                 "loaded once, so stepping is instant.")
+
+    def _refresh_fovs_chip(self) -> None:
+        """Enable the FOVs chip only when there are fields to walk, and SAY WHY when there are not.
+
+        Three separate refusals, kept separate because they have different fixes -- the pattern
+        ``_refresh_record_chip`` sets. Unlike that one this must be re-run on a REGION change:
+        ``n_t`` and ``n_z`` are properties of the acquisition, but how many FOVs there are is a
+        property of the region, and the plate can navigate this window to another one.
+        """
+        btn = getattr(self, "_btn_fovs", None)
+        if btn is None:
+            return
+        if self._fov_mode:
+            btn.setEnabled(False)
+            btn.setToolTip("This view already steps through FOVs — use the slider at the bottom.")
+            return
+        if self._manager is None:
+            btn.setEnabled(False)
+            btn.setToolTip("This window has no manager, so it cannot open a child view.")
+            return
+        from squidxplorer._mosaic_source import mosaic_fov_bboxes_um
+
+        region = self.current_region()
+        try:
+            n = len(mosaic_fov_bboxes_um(self._meta or {}, region)) if region else 0
+        except (KeyError, ValueError, TypeError) as exc:
+            btn.setEnabled(False)
+            btn.setToolTip(str(exc))
+            return
+        if not n:
+            btn.setEnabled(False)
+            btn.setToolTip(f"{region} has no locatable FOVs.")
+            return
+        btn.setEnabled(True)
+        btn.setToolTip(f"{self._FOVS_TIP}\n\n{n} FOV(s) in {region}.")
+
+    def _open_fovs(self) -> None:
+        """Open a child view that walks THIS region's FOVs. One region, one child, one tab."""
+        if self._manager is None:
+            self._say("this window isn't attached to the view registry, so it cannot open a child.")
+            return
+        region = self.current_region()
+        if not region:
+            self._say("no region is showing, so there are no FOVs to walk.")
+            return
+        boxes = self._fov_boxes()          # says its own reason if it cannot answer
+        if not boxes:
+            return
+        child = self._manager.open_child([region], parent_id=self.window_id, fovs=True,
+                                         luts=self._per_channel_luts())
+        if child is None:
+            self._say("the FOV view could not be opened.")
+            return
+        self._say(f"walking {len(boxes)} FOV(s) of {region} in view {child.window_id}.")
+
+    # -- the FOV walk: every field of this region, drawn, and the camera stepped across them ----
+    #: Edge colours for the FOV rectangles. Two, because there are exactly two states a field can
+    #: be in on this surface, and naming them here is what stops "what does current look like"
+    #: being answered in two places.
+    _FOV_EDGE_IDLE = "#8b949e"
+    _FOV_EDGE_CURRENT = "#f0883e"
+
+    def _fov_boxes(self) -> "dict":
+        """``{fov: (x0, y0, x1, y1)}`` for the current region, or ``{}`` having SAID why not.
+
+        One geometry, and it is the one that placed the pixels:
+        :func:`squidxplorer._mosaic_source.mosaic_fov_bboxes_um`. It raises rather than returning
+        a short answer precisely so this can say the reason out loud -- fifteen rectangles out of
+        sixteen look exactly as convincing as sixteen, so a silent gap here is a picture of a
+        region with a hole in it.
+        """
+        from squidxplorer._mosaic_source import mosaic_fov_bboxes_um
+
+        region = self.current_region()
+        if not region:
+            return {}
+        try:
+            return mosaic_fov_bboxes_um(self._meta or {}, region)
+        except (KeyError, ValueError, TypeError) as exc:
+            self._say(f"cannot locate this region's FOVs: {exc}")
+            return {}
+
+    def _fov_shapes_layer(self, boxes: "dict"):
+        """This window's FOV Shapes layer, rebuilt from *boxes* in ONE write.
+
+        DELIBERATELY NOT ``_roi_shapes_layer``. Sharing it looks tidier and would draw a rectangle
+        that lies, in four separate ways, all of them via ``_on_roi_data``:
+
+        * ``_clamp_last_roi`` holds the LAST shape to ``GL_MAX_3D_TEXTURE_SIZE``. That ceiling is
+          2048 px on the Apple floor and a 40x frame here is 4168 px, so the last field's
+          rectangle would be silently shrunk and the user told "ROI held to the 3D ceiling" about
+          a box they never drew. That clamp is a promise about a box the USER dragged.
+        * it renames the next shape ``R{n+1}``, so opening a FOVs view would renumber the user's
+          next ROI to R17.
+        * it prints ``_roi_cost_line`` -- a brick estimate for a field nobody boxed.
+        * ``_clear_rois`` ("Remove all ROIs in this window") would wipe the fields, and
+          ``_open_roi_children``'s "the most recently drawn one" fallback would open FOV 15.
+
+        Separate layer, and every one of those sentences stays literally true of the ROI layer.
+
+        Colours are set DIRECTLY rather than through a property cycle (which is what the ROI layer
+        uses): the current-field highlight writes ``edge_color`` itself, and two colour rules on
+        one layer is how a highlight comes back wrong after an unrelated property write.
+        """
+        v = self._napari_viewer()
+        if v is None or not boxes:
+            return None, None
+        layer = self._fov_layer
+        if layer is None or layer not in list(v.layers):
+            try:
+                layer = v.add_shapes(name="FOVs", face_color="transparent",
+                                     edge_color=self._FOV_EDGE_IDLE)
+                layer.editable = False
+            except Exception as exc:                     # noqa: BLE001 - named, never fatal
+                self._say(f"could not draw the FOV boxes ({type(exc).__name__}: {exc}).")
+                return v, None
+            self._fov_layer = layer
+            try:                                         # border reacts to zoom, like the ROI one
+                v.camera.events.zoom.connect(
+                    lambda e=None, vv=v, ly=layer: self._sync_roi_width(vv, ly))
+            except Exception:                            # noqa: BLE001
+                pass
+        # ONE write for the whole region. Sixteen appends would be sixteen events, sixteen
+        # re-triangulations and (on a shared layer) sixteen clamp passes.
+        rects = [np.array([[y0, x0], [y0, x1], [y1, x1], [y1, x0]], dtype=float)
+                 for (x0, y0, x1, y1) in (boxes[f] for f in boxes)]
+        try:
+            layer.data = rects
+            layer.text = {"string": [f"fov {f}" for f in boxes],
+                          "color": self._FOV_EDGE_IDLE, "size": 8, "anchor": "upper_left"}
+        except Exception as exc:                         # noqa: BLE001 - named, never fatal
+            self._say(f"could not draw the FOV boxes ({type(exc).__name__}: {exc}).")
+            return v, None
+        self._sync_roi_width(v, layer)
+        return v, layer
+
+    def _highlight_fov(self, index: int) -> None:
+        """Make exactly one FOV rectangle read as current, by COLOUR.
+
+        Deliberately not ``edge_width``: napari's setter broadcasts a scalar across every shape,
+        and ``_sync_roi_width`` assigns exactly such a scalar on every ``camera.events.zoom``. A
+        width-based highlight would therefore survive until the first wheel click and then vanish
+        — intermittently, which is worse than never having worked.
+        """
+        layer = self._fov_layer
+        if layer is None:
+            return
+        try:
+            n = len(getattr(layer, "data", []) or [])
+            if n == 0:
+                return
+            colors = [self._FOV_EDGE_IDLE] * n
+            if 0 <= int(index) < n:
+                colors[int(index)] = self._FOV_EDGE_CURRENT
+            layer.edge_color = colors
+        except Exception:                                # noqa: BLE001 - the highlight is cosmetic
+            pass
+
+    def _draw_fov_boxes(self) -> None:
+        """Draw every FOV of the current region and size the slider to them. Once per region."""
+        slider = self._fov_slider
+        if slider is None:
+            return
+        boxes = self._fov_boxes()
+        # Held so a STEP costs no geometry at all. Rebuilt whenever the region is redrawn, which
+        # is the only thing that can invalidate it -- the boxes are a property of the region, and
+        # the region is the one thing a redraw is triggered by.
+        self._fov_boxes_cache = boxes
+        slider.set_fovs(list(boxes))
+        if not boxes:
+            return
+        self._fov_shapes_layer(boxes)
+        self._highlight_fov(slider.index)
+
+    def _on_fov_changed(self, index: int, fov: int) -> None:
+        """Point the camera at one field. NO LOAD HAPPENS HERE, and that is the whole design.
+
+        The region's mosaic is already resident and lazy, so framing a field costs a camera write
+        and napari materialises only the tiles that field covers.
+        """
+        boxes = getattr(self, "_fov_boxes_cache", None) or {}
+        box = boxes.get(int(fov))
+        if box is None:
+            box = self._fov_boxes().get(int(fov))
+        if box is None:
+            self._frame_fov_done()
+            return
+        pane = self._pane
+        if pane is not None and getattr(pane, "ok", False):
+            said = pane.mosaic.frame_bbox_um(box)
+            if said:
+                self._say(said)
+        self._highlight_fov(int(index))
+        self._frame_fov_done()
+
+    def _frame_fov_done(self) -> None:
+        """Open the FOV axis's playback gate.
+
+        THE ONE PLACE it can honestly be opened for this axis, and deliberately NOT inside
+        ``_frame_done``. That method exists because a region step and a timepoint step both wait
+        on a mosaic load, so one arrival opens both of their gates. A FOV step waits on nothing --
+        the frame IS the camera write that just happened -- and routing it through ``_frame_done``
+        would let a timepoint reload, or a RETIRED load, advance a FOV animation.
+
+        Without this the axis advances exactly one frame and then sits until the 180 s stall
+        watchdog fires: napari's ``QtDims._set_frame`` closes the gate on every step and only a
+        canvas draw reopens it, and ``AxisPlayback`` drives a ``Dims`` with no canvas behind it.
+        """
+        slider = self._fov_slider
+        if slider is not None:
+            slider.frame_done()
+
     def _on_roi_data(self, layer) -> None:
         _roi_tools.on_roi_data(self, layer)
 
@@ -1378,6 +1718,60 @@ class RegionViewer(QMainWindow):
 
     # -- the LUT gestures live in `_lut_clipboard` (one clipboard, one home); thin delegates
     # -- because tests and the chips actuate these by name on the window. -------------------------
+    def _install_canvas_loupe(self, pane) -> None:
+        """Give this window's canvas a shift-left-click magnifier.
+
+        Refuses by name rather than half-installing: a loupe with no GL widget to sit on would be
+        a gesture that swallows shift-clicks and shows nothing.
+        """
+        from squidxplorer._napari_loupe import CanvasLoupe
+
+        viewer = self._napari_viewer()
+        canvas = getattr(pane, "canvas_widget", None)
+        if viewer is None or canvas is None:
+            log.debug("view %s: no canvas widget, so no loupe", self.window_id)
+            return
+        source_for = getattr(self._manager, "loupe_source_for", None) if self._manager else None
+        if source_for is None:
+            log.debug("view %s: no loupe source registry, so no loupe", self.window_id)
+            return
+        self._loupe = CanvasLoupe(
+            viewer=viewer, canvas_widget=canvas, meta=self._meta or {},
+            source_for=source_for, mosaic=pane.mosaic,
+            region_of=self.current_region,
+            time_point_of=lambda: self.time_point,
+            look_of=self._screen_look,
+            say=self._say, parent=self)
+
+    def _screen_look(self) -> "tuple[list, Any, list, list]":
+        """WHAT IS ON SCREEN IN THIS WINDOW, as ``(names, colors, windows, mask)``.
+
+        One harvest of the three facts anything rendering "the same picture as the canvas" needs:
+        the contrast window per channel, the colour each channel is tinted with RIGHT NOW, and
+        which channels are actually visible. All three come from the methods that already own
+        them -- :meth:`_per_channel_luts`, :meth:`_visible_channels` and
+        ``_video._channel_colors`` -- so this is a harvest, not a fourth opinion.
+
+        In ``meta["channels"]`` ORDER, and covering every channel including hidden ones, because
+        that is the axis order the loupe sources return their ``(C, y, x)`` crops on. Re-indexing
+        at the consumer is how a crop ends up composited with another channel's colour.
+
+        A ``window`` of ``None`` means "this window has no opinion about that channel"; the caller
+        falls back to the source's own. That fallback direction matters: a loupe is a magnifier OF
+        THE SURFACE IT SITS ON, so the canvas outranks the source wherever the canvas has an
+        answer -- which is the rule ``_plate_overview._loupe_lut`` states for the plate.
+        """
+        from squidxplorer._video import _channel_colors
+
+        names = [c["name"] for c in (self._meta or {}).get("channels", [])]
+        luts = self._per_channel_luts()
+        visible = set(self._visible_channels())
+        rgb = {n: luts[n]["rgb"] for n in names if (luts.get(n) or {}).get("rgb") is not None}
+        colors = _channel_colors(self._meta or {}, names, rgb)
+        windows = [(luts.get(n) or {}).get("clim") for n in names]
+        mask = [n in visible for n in names]
+        return names, colors, windows, mask
+
     def _per_channel_luts(self) -> "dict[str, dict]":
         return _lut_clipboard.per_channel_luts(self)
 
@@ -1442,6 +1836,35 @@ class RegionViewer(QMainWindow):
     def _copy_luts(self) -> None:
         _lut_clipboard.copy_luts(self)
 
+    def _on_depth_changed(self, lo: float, hi: float) -> None:
+        """The dataset proved it holds bigger numbers: open every slider here to reach them.
+
+        Arrives on the GUI thread (``ViewerManager.depthChanged`` is emitted from the fuse worker
+        and queued), so touching layers from here is safe.
+
+        This moves the slider's TRAVEL and never its VALUE -- widening a range cannot clip, so
+        nothing on screen changes colour. The visible effect is the handle re-scaling, which is
+        the honest report that the data turned out to be bigger than the first region suggested.
+        """
+        pane = self._pane
+        mosaic = getattr(pane, "mosaic", None) if pane is not None else None
+        if mosaic is not None:
+            try:
+                mosaic.widen_contrast_range(float(lo), float(hi))
+            except Exception:                    # noqa: BLE001 - a slider bound is never fatal
+                log.exception("could not widen this window's contrast range to (%s, %s).", lo, hi)
+        # `open_native_3d*` build their layers in a napari.Viewer of their OWN, outside
+        # `MosaicLayers`, so the walk above cannot reach them. A `BrickedVolume` popout needs
+        # nothing here: its `_viewer` IS `mosaic.model`, so its bricks were in that same walk.
+        popout = getattr(self, "_native3d", None)
+        if popout is not None and hasattr(popout, "layers"):
+            try:
+                from squidxplorer._napari3d import widen_contrast_range
+
+                widen_contrast_range(popout, float(lo), float(hi))
+            except Exception:                    # noqa: BLE001 - ditto, and the popout may be gone
+                pass
+
     def _match_raw_contrast(self) -> None:
         """Raw's contrast onto every operator layer. See `_lut_clipboard.match_raw_contrast`."""
         _lut_clipboard.match_raw_contrast(self)
@@ -1458,6 +1881,13 @@ class RegionViewer(QMainWindow):
     def _on_time_point_changed(self, time_point: int) -> None:
         """A user moved THIS window's timepoint, or playback advanced it. Reload the mosaic."""
         self._say(f"time_point {time_point + 1} of {self._time_point_bar.count}")
+        # THE LOUPE STAYS UP AND RE-READS at the new frame — the opposite of a region change, and
+        # deliberately so: the anchor is a point in THIS region, which still exists, so dismissing
+        # would throw away a valid position. The plate's `set_time_point` re-requests for exactly
+        # this reason, and the bug it fixed was an inset magnifying frame 0 forever under a moving
+        # label. The crop's LRU key carries the timepoint, so this is a real re-read.
+        if self._loupe is not None:
+            self._loupe.retarget()
         if self._time_point_bar.is_playing:
             self._load_mosaic(region=self.current_region())
             return
@@ -1477,6 +1907,17 @@ class RegionViewer(QMainWindow):
                 lambda: self._load_mosaic(self._pending_region))
         self._pending_region = region
         self._load_timer.start(_REGION_LOAD_DEBOUNCE_MS)
+        # How many FOVs a region has is a property of the REGION, so the chip's verdict goes stale
+        # the moment the plate navigates this window somewhere else. The boxes themselves are
+        # redrawn by `_on_done`, which is where the new mosaic actually lands.
+        self._refresh_fovs_chip()
+        # THE LOUPE GOES DOWN on a region change, and is NOT re-read. Its anchor is a world point,
+        # and the next region sits at its own stage coordinates, so the same point is somewhere
+        # else entirely -- or nowhere. Re-reading silently under a new region is the wrong-image
+        # failure `docs/plate-contract.md` is written against. (A TIMEPOINT change is the opposite
+        # case and is handled as such: see `_on_time_point_changed`.)
+        if self._loupe is not None:
+            self._loupe.dismiss()
 
     # -- the mosaic load/playback pipeline lives in `_mosaic_playback` (generation dropping and
     # -- the frame gate move intact — docs/rendering-contract.md); thin delegates because tests
@@ -1549,6 +1990,66 @@ class RegionViewer(QMainWindow):
     def _render_roi_volume(self, mosaic, contrast_by: dict, colormap_by: dict) -> None:
         _volume_view.render_roi_volume(self, mosaic, contrast_by, colormap_by)
 
+    def show_region(self, region: str) -> bool:
+        """Point this window at *region*, ADOPTING it when this window did not already hold it.
+
+        The plate is a free navigator: clicking a well outside this window's original selection is
+        a request to look there, not a mistake. Adopting is a re-scope of the ONE cursor, and
+        ``RegionCursor.set_order`` is built for exactly this — it keeps you on the region you are
+        already looking at, announcing the new order without announcing a position, so the slider
+        resizes and NO second mosaic load is triggered. The single load then comes from
+        ``set_region`` below, through the ordinary ``_on_region_changed`` path.
+
+        The rendering contract is honoured with no new code: ``_load_mosaic`` already drops the
+        previous region's operator layers and removes the raw layers before adding any, because
+        ``_shown_region`` differs. That is the "different region -> remove first" rule, and
+        navigation is now simply a new way of entering it.
+
+        Returns False, having SAID why in this window's log, when the acquisition has no such
+        region — a navigator that silently does nothing is indistinguishable from one that is
+        broken.
+        """
+        region = str(region)
+        if self._cursor is None:
+            return False
+        if self._cursor.region == region:
+            return True                      # already here: no reload, no re-announce
+        if self._cursor.position_of(region) is None:
+            known = [str(r) for r in ((self._meta or {}).get("regions") or [])]
+            if known and region not in known:
+                self._say(f"{region} is not in this acquisition.")
+                return False
+            # Grow the order IN ACQUISITION ORDER rather than by appending, so the slider still
+            # reads left-to-right across the plate however the user wandered there.
+            want = set(self._cursor.regions) | {region}
+            order = [r for r in known if r in want] or (self._cursor.regions + [region])
+            self._cursor.set_order(order)
+            self.regionsChanged.emit(self)
+        self._cursor.set_region(region)
+        return True
+
+    @property
+    def _regions(self) -> "list[str]":
+        """Every region this window can REACH — the cursor's order, never a field.
+
+        A property rather than the field it replaces, because the set is no longer fixed at
+        construction: the plate can point an open window at a region it was not opened over, which
+        re-scopes the cursor. Anything that cached the answer in a second field would go stale on
+        that re-scope, silently, and the things that read this are the ones that would show it
+        wrong — ``ViewerManager.views()`` and the ``viewFocused`` payload that paints the plate.
+        Reading THROUGH the cursor means there is nothing to keep in step.
+
+        Falls back to the seed for the window between ``__init__`` starting and the cursor being
+        built (``_build`` runs several statements later, and ``_derived_name`` is computed in
+        between), and ``getattr`` rather than a bare read for the documented reason the class
+        defaults above exist: on a QObject whose ``__init__`` has not finished, a missing attribute
+        raises out of Qt's own machinery instead of answering.
+        """
+        cursor = getattr(self, "_cursor", None)
+        if cursor is not None and cursor.regions:
+            return cursor.regions
+        return list(getattr(self, "_seed_regions", []))
+
     def current_region(self) -> str:
         """The region this window is showing right now (it can hold several and step with its slider)."""
         region = self._cursor.region if self._cursor is not None else None
@@ -1581,6 +2082,15 @@ class RegionViewer(QMainWindow):
         """Halt draw/refresh on windows the user is not touching."""
         if active:
             return
+        # A background tab's loupe goes down and drops its crops. The THREAD stays: it is idle and
+        # cheap, and stopping/restarting it on every tab click would pay a teardown for nothing.
+        # The crops are the part the deck's per-view memory line is about.
+        try:
+            if self._loupe is not None:
+                self._loupe.dismiss()
+                self._loupe.clear_cache()
+        except Exception:                            # noqa: BLE001 - best effort
+            pass
         for control in (self._slider, getattr(self, "_time_point_bar", None)):
             if control is None:
                 continue
@@ -1590,11 +2100,63 @@ class RegionViewer(QMainWindow):
             except Exception:                        # noqa: BLE001 - best effort
                 pass
 
+    @property
+    def host(self):
+        """The deck holding this view as a tab, or None when it is its own window."""
+        return self._host
+
+    def reveal(self) -> None:
+        """Bring this view to the front and make it the one on screen.
+
+        A view is either a top-level window or a tab, and "show me this one" means something
+        different in each. Answering it HERE is what lets ``ViewerManager.focus`` keep one call
+        site: a manager that had to know about decks would need the same branch at four more."""
+        target = self._host or self
+        target.showNormal()
+        target.raise_()
+        target.activateWindow()
+        if self._host is not None:
+            self._host.set_current(self)
+
+    def collapse(self) -> None:
+        """Minimise. Minimising a TAB is meaningless, so a hosted view minimises its deck — which
+        is also what the user means by "collapse all" when their views are tabs."""
+        (self._host or self).showMinimized()
+
+    def request_close(self) -> None:
+        """Close this view, whichever kind of thing it currently is.
+
+        A tab page never receives a close event, so ``close()`` on a hosted view would run
+        ``closeEvent`` and delete the widget while the deck still held it. The deck untabs first
+        and then disposes, which is why closing goes through the host when there is one."""
+        if self._host is None:
+            self.close()
+        else:
+            self._host.close_page(self)
+
+    def _is_active_view(self) -> bool:
+        """Is this the view the user is working in?
+
+        For a window that is `isActiveWindow()`. For a tab it is BOTH the deck being active and
+        this page being the current one — a background tab in a focused deck is no more "the view
+        the user is in" than a window behind another."""
+        host = self._host
+        if host is None:
+            return self.isActiveWindow()
+        return bool(host.isActiveWindow()) and host.current_page() is self
+
     def changeEvent(self, event):                    # noqa: N802 - Qt naming
         from qtpy.QtCore import QEvent
 
         if event.type() == QEvent.ActivationChange:
-            self.set_active(self.isActiveWindow())
+            active = self._is_active_view()
+            self.set_active(active)                  # halt playback in a window nobody is watching
+            # ...AND TELL THE REGISTRY WHO IS IN FRONT. Only on the way IN: deactivation is not
+            # "no view is focused", it is usually the user clicking the plate, and the plate is
+            # how you drive the focused view — clearing the focus here would mean the plate lost
+            # its target the instant you reached for it.
+            if active and self._manager is not None:
+                self._manager.note_focus(self.window_id)
         super().changeEvent(event)
 
     def resizeEvent(self, e):                        # noqa: N802 - Qt naming
@@ -1602,7 +2164,26 @@ class RegionViewer(QMainWindow):
         super().resizeEvent(e)
         rescale_fonts(self)
 
-    def closeEvent(self, event):                     # noqa: N802 - Qt naming
+    def dispose(self) -> None:
+        """Everything that must happen before this view stops existing, WHEREVER it lives.
+
+        Extracted from ``closeEvent`` because that conflates two jobs — *join my threads* and
+        *tell the registry I am gone* — and only a top-level window ever gets a close event. A
+        view that stops existing some other way (removed from a container, dropped by a caller
+        that never showed it) skipped every join and every deregistration silently.
+
+        IDEMPOTENT, and that is not decoration: a window can be disposed by its owner and then
+        still receive a ``closeEvent``, and joining a QThread twice or closing a napari Viewer
+        twice is exactly the shape that aborts the interpreter rather than raising.
+
+        Each step is wrapped separately, on purpose. These are independent teardowns and one that
+        throws must not strand the ones after it — a QThread left running past destruction aborts
+        the process ("QThread: Destroyed while thread is still running"), which is a far worse
+        outcome than the error being swallowed.
+        """
+        if self._disposed:
+            return
+        self._disposed = True
         try:
             if self._worker is not None and self._worker.isRunning():
                 self._worker.stop()
@@ -1633,6 +2214,21 @@ class RegionViewer(QMainWindow):
         except Exception:                            # noqa: BLE001
             pass
         try:
+            # The FOV axis owns a napari AnimationThread exactly as the region slider does, and Qt
+            # aborts the process on a QThread destroyed while running. Closing a FOVs tab mid-walk
+            # is the ordinary way to meet that.
+            if self._fov_slider is not None:
+                self._fov_slider.shutdown()
+        except Exception:                            # noqa: BLE001
+            pass
+        try:
+            # BEFORE the pane goes: the inset is parented to the canvas the pane is about to
+            # destroy, and the loupe worker is a QThread like every other one joined above.
+            if self._loupe is not None:
+                self._loupe.shutdown()
+        except Exception:                            # noqa: BLE001
+            pass
+        try:
             vol, self._native3d = self._native3d, None
             close = getattr(vol, "close", None)
             if callable(close):
@@ -1651,7 +2247,21 @@ class RegionViewer(QMainWindow):
                 worker.wait(2000)
             except Exception:                        # noqa: BLE001
                 pass
+        # THE NAPARI VIEWER. Nothing called this before: `MosaicPane.shutdown` had zero callers
+        # in squidxplorer/, tests/ or tools/, while its own docstring said every owner calls it
+        # before deleteLater(). deleteLater() on the Qt wrapper does NOT close the Viewer —
+        # napari keeps every Viewer in its own instance registry — so one GL context and tens of
+        # MB leaked per window CLOSED. It goes last because it tears down the surface the workers
+        # above draw into, so they are joined first.
+        try:
+            if self._pane is not None:
+                self._pane.shutdown()
+        except Exception:                            # noqa: BLE001
+            pass
         self.closed.emit(self)
+
+    def closeEvent(self, event):                     # noqa: N802 - Qt naming
+        self.dispose()
         super().closeEvent(event)
 
 
@@ -1663,6 +2273,11 @@ class ViewerManager(QObject):
     runProgressChanged = Signal(object)
     viewFocused = Signal(object)
     windowOpened = Signal(object)
+    # The dataset's contrast ceiling rose: every open window must widen its sliders to (lo, hi).
+    # A SIGNAL and not a direct call because `_bitdepth` observes on the fuse WORKER thread, and a
+    # queued signal to this GUI-thread object is what marshals it. The subscriber on the depth
+    # object must therefore do nothing but emit this -- see `_on_depth_rose`.
+    depthChanged = Signal(float, float)
 
     def __init__(self, reader: Any = None, meta: Optional[dict] = None,
                  parent: Optional[QObject] = None) -> None:
@@ -1673,8 +2288,34 @@ class ViewerManager(QObject):
         self._next_id = 1
         self._focused_id: Optional[int] = None
         self._selected_ids: "list[int]" = []
+        #: The tab decks holding views. A list rather than one, because a detached view can be
+        #: re-docked into a second deck later and phase 2 wants to drag between them; today the
+        #: app makes exactly one, lazily, through `deck()`.
+        self._decks: "list" = []
+        #: Do spawned views become TABS? One policy point, consulted only by `_spawn`, so this can
+        #: be flipped without touching a single caller.
+        #:
+        #: OFF BY DEFAULT, and that is a finding rather than caution. Turned on for every spawn it
+        #: reparents a view on every open, and the PR's suite did not survive that: measured
+        #: 2026-08-10, `test_plate_navigates_views`, `test_rename` and `test_raise_plate` went from
+        #: passing to 0xC0000005, and `test_nav_close_selected` to 0xC0000409. Those are aborts,
+        #: not failures — the same class `tests/test_window_lifetime` exists for. So the deck ships
+        #: as something a caller asks for, exercised by its own tests, and the default flips only
+        #: once those aborts are understood rather than routed around.
+        self.tabbed_views = False
         self.operator_specs: "list" = []
         self.run_operator: Optional[Any] = None
+        #: ``op -> loupe source``, set by the root ``PlateWindow``. THE PIXEL SOURCE A CANVAS
+        #: LOUPE READS, handed down the same way ``run_operator`` is rather than each window
+        #: building its own: a source caches a whole field's planes (tens of MB) and a
+        #: written-plate source is MUTATED as wells land, so a per-window copy would be both
+        #: expensive and, during a run, wrong about which wells exist. ``None`` means no loupe
+        #: (a manager built by a test).
+        #:
+        #: It is a CALLABLE and not the dict, because ``PlateWindow._release_loupe_sources``
+        #: rebinds ``_loupe_sources`` wholesale — a bound ``.get`` would keep answering from the
+        #: dead dict for the rest of the session.
+        self.loupe_source_for = None
         self.defaults = ViewDefaults()
 
         self._run_progress = None
@@ -1684,8 +2325,43 @@ class ViewerManager(QObject):
         self._mem_timer.timeout.connect(self._poll_memory)
         self._mem_timer.start()
 
+        # A manager can be handed a reader at construction and never see `set_dataset` (the view
+        # settings suite builds one exactly that way), so the depth has to be armed from BOTH or
+        # those windows measure against whatever the previous dataset left behind.
+        self._arm_depth(meta)
+
+    def _arm_depth(self, meta: Optional[dict]) -> None:
+        """Start measuring a new acquisition's contrast ceiling and republish every rise."""
+        depth = _bitdepth.new_dataset((meta or {}).get("dtype"))
+        depth.on_change(self._on_depth_rose)
+
+    def _on_depth_rose(self, lo: float, hi: float) -> None:
+        """Called ON THE FUSE WORKER THREAD. Emit and return -- do nothing else here.
+
+        The emit is what hops to the GUI thread (Qt queues a signal across threads); touching a
+        napari layer from here would be a cross-thread write into the render path.
+        """
+        self.depthChanged.emit(float(lo), float(hi))
+
     def set_dataset(self, reader: Any, meta: dict) -> None:
+        """Point every FUTURE window at a new acquisition, and forget the last one's look.
+
+        A NEW DATASET IS A NEW LOOK. A contrast window is a statement in the previous
+        acquisition's counts: carry (11, 111) from a 12-bit set onto one that is 12-bit shifted
+        into 16 and every channel renders black; carry it the other way and everything saturates.
+        `channel_visibility` goes for the same reason -- it is keyed by channel NAME, and the
+        names differ between acquisitions, so what survives is either dead weight or an
+        accidental match that opens a channel dark. `_LUT_CLIPBOARD` is a module global shared
+        with the plate, so it outlives both the window and the dataset unless cleared here.
+
+        What deliberately STAYS: everything in `defaults` that describes HOW you look rather than
+        at WHAT -- focus mode, and the rest of `_SETTING_BASELINE`.
+        """
         self._reader, self._meta = reader, meta
+        self._arm_depth(meta)
+        self.defaults.set("luts", {})
+        self.defaults.set("channel_visibility", {})
+        _LUT_CLIPBOARD.clear()
 
     @property
     def run_progress(self):
@@ -1706,12 +2382,28 @@ class ViewerManager(QObject):
         out: "list[View]" = []
         for win in self.windows:
             roi = getattr(win, "_roi_bbox", None)
+            # An elif, not a precedence rule: `RegionViewer.__init__` refuses to build a window
+            # that is both, so at most one of these can be true.
+            if getattr(win, "_fov_mode", False):
+                kind = "fovs"
+            elif roi is not None:
+                kind = "roi"
+            else:
+                kind = "window"
             out.append(View(
                 id=f"w{win.window_id}", name=win.display_name,
                 regions=tuple(win._regions),
-                kind="roi" if roi is not None else "window",
+                kind=kind,
                 window_id=win.window_id, roi_bbox=roi))
         return out
+
+    def window(self, window_id: Optional[int]) -> "Optional[RegionViewer]":
+        """The open window with this id, or None — including for None itself, so a caller holding
+        "the id I opened, if any" can ask without checking twice. An id that outlives its window
+        is exactly the kind of thing that should answer None in one place rather than four."""
+        if window_id is None:
+            return None
+        return self._windows.get(int(window_id))
 
     def view_for(self, window_id: int) -> "Optional[View]":
         for v in self.views():
@@ -1730,14 +2422,20 @@ class ViewerManager(QObject):
         return self._spawn(regions, title=title)
 
     def open_child(self, regions: Sequence[str], *, roi_bbox: Optional[tuple] = None,
-                   parent_id: Optional[int] = None, luts: Optional[dict] = None) -> Optional[RegionViewer]:
-        """Open a CHILD window from an ROI drawn in a parent window (the next level of the tree)."""
+                   parent_id: Optional[int] = None, luts: Optional[dict] = None,
+                   fovs: bool = False) -> Optional[RegionViewer]:
+        """Open a CHILD window from a parent window (the next level of the tree).
+
+        ``fovs=True`` opens a FOV WALK instead: the same regions, uncropped, with a slider that
+        steps the camera across the region's fields. It is mutually exclusive with ``roi_bbox``
+        and ``RegionViewer.__init__`` refuses the combination by name rather than picking one."""
         regions = [str(r) for r in regions if r]
         if not regions:
             return None
         base = RegionViewer._view_label(regions)
         title = f"{base}  ◂ view {parent_id}" if parent_id is not None else base
-        return self._spawn(regions, title=title, roi_bbox=roi_bbox, parent_id=parent_id, luts=luts)
+        return self._spawn(regions, title=title, roi_bbox=roi_bbox, parent_id=parent_id, luts=luts,
+                           fovs=fovs)
 
     def _baseline_for(self, parent_id: Optional[int]) -> "dict[str, Any]":
         """The settings a NEW window opens with: the global defaults, with ``_INHERIT`` reading the opener."""
@@ -1764,6 +2462,7 @@ class ViewerManager(QObject):
             return False
         if not win.set_display_name(name):
             return False
+        self.refresh_deck_titles()      # the navigator rebuilds itself; a tab bar does not
         self.windowsChanged.emit()
         return True
 
@@ -1780,15 +2479,22 @@ class ViewerManager(QObject):
 
     def _spawn(self, regions: "list[str]", *, title: Optional[str] = None,
                roi_bbox: Optional[tuple] = None,
-               parent_id: Optional[int] = None, luts: Optional[dict] = None) -> Optional[RegionViewer]:
+               parent_id: Optional[int] = None, luts: Optional[dict] = None,
+               fovs: bool = False) -> Optional[RegionViewer]:
         if self._reader is None or self._meta is None:
             log.warning("open() called before a dataset was loaded; ignoring.")
             return None
         wid = self._next_id
         self._next_id += 1
         n = len(regions)
+        if fovs:
+            what = "FOVs in "
+        elif roi_bbox is not None:
+            what = "ROI in "
+        else:
+            what = ""
         clock = _measure.WindowOpen(
-            f"{'ROI in ' if roi_bbox is not None else ''}{n} region{'' if n == 1 else 's'}: "
+            f"{what}{n} region{'' if n == 1 else 's'}: "
             f"{RegionViewer._view_label(regions)}",
             n_targets=n)
         baseline = self._baseline_for(parent_id)
@@ -1798,16 +2504,28 @@ class ViewerManager(QObject):
             self._reader, self._meta, regions, window_id=wid, title=title,
             manager=self, roi_bbox=roi_bbox,
             operator_specs=self.operator_specs, run_operator=self.run_operator,
-            parent_id=parent_id, settings=ViewSettings(baseline),
+            parent_id=parent_id, settings=ViewSettings(baseline), fovs=fovs,
         )
         win.open_clock = clock
         win.closed.connect(self._on_window_closed)
+        win.regionsChanged.connect(self._on_window_regions_changed)
         self._windows[wid] = win
         self._focused_id = wid
         self._selected_ids = [wid]
-        win.show()
-        win.raise_()
-        win.activateWindow()
+        # THE ONE POLICY POINT for "views are tabs". Every opener — the plate's Open view, a
+        # marquee, a double-click, an ROI child, the default layout — arrives here, so none of them
+        # needs to know, and turning `tabbed_views` off gives independent windows back with no
+        # other edit.
+        deck = self.deck() if self.tabbed_views else None
+        if deck is not None:
+            deck.dock_page(win)
+            deck.show()
+            deck.raise_()
+            deck.activateWindow()
+        else:
+            win.show()
+            win.raise_()
+            win.activateWindow()
         self._replay_cached_results(win)
         self.windowOpened.emit(win)
         self.windowsChanged.emit()
@@ -1849,29 +2567,134 @@ class ViewerManager(QObject):
         self._focused_id = self._selected_ids[0] if self._selected_ids else None
         self.viewFocused.emit([])
 
+    def refresh_deck_titles(self) -> None:
+        """Tab text follows a rename. The navigator gets this free by rebuilding on
+        ``windowsChanged``; a deck holds its labels in the tab bar, so it has to be told."""
+        for deck in self.decks():
+            try:
+                deck.refresh_titles()
+            except Exception:                        # noqa: BLE001 - a label is never worth a crash
+                pass
+
+    def decks(self) -> "list":
+        """Every tab deck this manager has made, live ones only."""
+        self._forget_dead_decks()
+        return list(self._decks)
+
+    def deck(self, create: bool = True):
+        """THE deck, made on first use. One policy point, so "views are tabs" is one decision.
+
+        Lazy because a session that only ever opens the plate should not build a window nobody
+        asked for, and `tests/test_no_orphan_windows` is entitled to say so.
+        """
+        live = [d for d in self._decks if _alive(d)]
+        self._decks = live
+        if live:
+            return live[0]
+        if not create:
+            return None
+        from squidxplorer._view_deck import ViewDeck
+
+        deck = ViewDeck(index=len(self._decks) + 1)
+        deck.pageActivated.connect(self.note_focus)
+        # A BOUND METHOD, NEVER A SELF-CAPTURING LAMBDA. PyQt keeps a lambda alive in a slot proxy
+        # parented to the SENDER, so `destroyed` -- which fires while the deck is being torn down --
+        # would call into this manager whether or not the manager still exists. Connected as a
+        # bound method, PyQt weak-references the receiver and drops the connection when it goes.
+        # Measured: the lambda aborted the process (0xC0000409) during fixture teardown in
+        # test_raise_plate, where the manager is parented to a fake plate that dies first. It is
+        # the same rule test_window_lifetime states for timers, and it applies to every deferred
+        # call, not only to QTimer.
+        deck.destroyed.connect(self._on_deck_destroyed)
+        self._decks.append(deck)
+        return deck
+
+    def _on_deck_destroyed(self, *_args) -> None:
+        self._forget_dead_decks()
+
+    def _forget_dead_decks(self) -> None:
+        self._decks = [d for d in self._decks if _alive(d)]
+
+    def _on_window_regions_changed(self, win: "RegionViewer") -> None:
+        """A window adopted a region. Re-publish it.
+
+        Nothing here recomputes anything: `_regions` reads through the cursor, so `views()` and the
+        `viewFocused` payload are already correct by the time this runs. What they are not is
+        ANNOUNCED — the navigator rebuilds on `windowsChanged` and the plate re-tints on
+        `viewFocused`, and neither has any way to notice a cursor moved inside a window.
+        """
+        self.windowsChanged.emit()
+        self.viewFocused.emit(list(win._regions))
+
+    def note_focus(self, window_id: int) -> None:
+        """The user activated this window THEMSELVES — its title bar, alt-tab, a click in its canvas.
+
+        The passive half of :meth:`focus`. Until this existed, ``_focused_id`` was written only by
+        the app moving focus (``_spawn``, ``focus``, ``set_selected``, ``clear_focus``), never by
+        the user moving it, so clicking a view's title bar changed nothing: the plate kept washing
+        the previously focused window, and ``PlateWindow.on_screen_luts`` — whose docstring already
+        calls ``focused_id`` "the window the user is looking at" — exported the wrong window's
+        contrast. It was a lie about the user, told by a registry that only watched itself.
+
+        RECORDS AND RE-PUBLISHES. It must never raise or activate: ``focus`` calls
+        ``activateWindow()``, which fires ``changeEvent``, which lands here — and a raise from here
+        would be an infinite ping-pong with the window manager. The unchanged-id early return is
+        the second guard on that, and it is why ``focus`` sets ``_focused_id`` BEFORE it activates.
+        """
+        wid = int(window_id)
+        win = self._windows.get(wid)
+        if win is None or self._focused_id == wid:
+            return
+        self._focused_id = wid
+        if wid not in self._selected_ids:
+            # Mirrors _spawn: the plate washes the SELECTED views, so a window the user brought
+            # forward has to be in that set or focusing it would move no hue at all.
+            self._selected_ids = [wid]
+        self.viewFocused.emit(list(win._regions))
+
+    def active_view(self) -> "Optional[RegionViewer]":
+        """The window a plate click drives: the focused one, or None when no view is open.
+
+        ONE answer to "which window is active", so the plate, the LUT export and the navigator
+        cannot disagree about it. Anything asking that question must come here rather than ask a
+        window ``isActiveWindow()`` — a window can be the active TOP-LEVEL without being the view
+        the user is working in (the plate itself takes activation on every click), and once views
+        can be tabbed there is no longer one window per view at all.
+        """
+        if self._focused_id is None:
+            return None
+        return self._windows.get(self._focused_id)
+
     def focus(self, window_id: int) -> None:
         win = self._windows.get(int(window_id))
         if win is not None:
-            self._focused_id = int(window_id)
-            win.showNormal()
-            win.raise_()
-            win.activateWindow()
+            self._focused_id = int(window_id)       # BEFORE activateWindow(); see note_focus
+            win.reveal()                            # a window raises; a tab also becomes current
             self.viewFocused.emit(list(win._regions))
 
     def raise_views(self, ids: "Sequence[int]") -> None:
-        """Bring the selected windows to the front, un-minimising each; activate the last for focus."""
+        """Bring the selected views to the FRONT (clicking a navigator row raises its window).
+        Un-minimise + raise each; the last one ends up current, which is also what gives it
+        keyboard focus. Un-minimising lifts a view collapsed by Collapse all.
+
+        DEDUPED BY HOST: five tabs in one deck are one window, and raising it five times is five
+        raises and a flicker for a result the first one already achieved."""
         wins = [self._windows.get(int(i)) for i in ids]
         wins = [w for w in wins if w is not None]
+        seen_hosts = []
         for w in wins:
+            # THE WHOLE BODY IS GUARDED, not just the reveal. This runs from a navigator
+            # selection slot, and an exception out of a Qt slot does not propagate — PyQt aborts
+            # the process (0xC0000409, measured when a `host` read outside this try met a test
+            # double that had no such attribute). Raising a window is never worth that.
             try:
-                w.showNormal()
-                w.raise_()
-            except Exception:                            # noqa: BLE001 - best effort per window
-                pass
-        if wins:
-            try:
-                wins[-1].activateWindow()
-            except Exception:                            # noqa: BLE001
+                host = w.host
+                if host is not None and any(host is h for h in seen_hosts):
+                    continue                             # this deck is already up
+                if host is not None:
+                    seen_hosts.append(host)
+                w.reveal()
+            except Exception:                            # noqa: BLE001 - best effort per view
                 pass
 
     def raise_plate(self) -> bool:
@@ -1891,17 +2714,17 @@ class ViewerManager(QObject):
     def close(self, window_id: int) -> None:
         win = self._windows.get(int(window_id))
         if win is not None:
-            win.close()
+            win.request_close()      # a window closes; a tab is untabbed and then disposed
 
     def close_all(self) -> None:
         for win in list(self._windows.values()):
-            win.close()
+            win.request_close()
 
     def collapse_all(self) -> None:
         """Minimise every open window at once; they stay in the navigator and a row click restores one."""
         for win in list(self._windows.values()):
             try:
-                win.showMinimized()
+                win.collapse()      # a window minimises; a tab minimises the deck holding it
             except Exception:                            # noqa: BLE001 - best effort per window
                 pass
         self._focused_id = None
@@ -1951,6 +2774,16 @@ class OpenViewList(QWidget):
 
         self._tree = QTreeWidget(self)
         self._tree.setHeaderHidden(True)
+        # A SECOND COLUMN SAYING WHERE THE VIEW IS. Spencer, on first use of the deck: the
+        # navigator "should now have an indication of what window a tab is in". Once a view can be
+        # a tab, this list is no longer a list of windows — two rows can name the same window, and
+        # a row can name a window that is not on the desktop at all.
+        #
+        # A COLUMN and not a suffix on the title: `test_rename` asserts `item.text(0)` matches the
+        # window title exactly, and rightly — that text IS the `[id] name` join to the log. Widening
+        # it with decoration would make the join something you have to parse back out.
+        self._tree.setColumnCount(2)
+        self._tree.header().setStretchLastSection(False)
         self._tree.setRootIsDecorated(True)
         self._tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self._tree.setFocusPolicy(Qt.StrongFocus)
@@ -2001,6 +2834,11 @@ class OpenViewList(QWidget):
         lay.addWidget(self._work_bar)
 
         manager.windowsChanged.connect(self.refresh)
+        # A FOCUS CHANGE IS NOT A SET CHANGE. Switching tabs moves which view is current without
+        # opening or closing anything, so `windowsChanged` never fires and this list would keep
+        # highlighting the row it was left on. Selection-only, so a tab switch does not rebuild a
+        # tree whose contents did not change.
+        manager.viewFocused.connect(lambda _regions: self.sync_selection())
         manager.memoryChanged.connect(self._on_memory)
         manager.runProgressChanged.connect(self._on_run_progress)
         self._on_run_progress(manager.run_progress)
@@ -2036,8 +2874,10 @@ class OpenViewList(QWidget):
             by_id = {int(w.window_id): w for w in windows}
             for win in sorted(windows, key=lambda w: int(w.window_id)):
                 wid = int(win.window_id)
-                item = QTreeWidgetItem([win.windowTitle()])
+                item = QTreeWidgetItem([win.windowTitle(), _where(win)])
                 item.setData(0, Qt.UserRole, wid)
+                item.setForeground(1, QBrush(QColor("#8b949e")))   # subordinate to the name
+                item.setTextAlignment(1, Qt.AlignRight | Qt.AlignVCenter)
                 pid = getattr(win, "parent_id", None)
                 parent_item = items.get(int(pid)) if pid is not None and int(pid) in by_id else None
                 if parent_item is not None:
@@ -2050,6 +2890,35 @@ class OpenViewList(QWidget):
             for wid, item in items.items():
                 if wid in selected:
                     item.setSelected(True)
+        finally:
+            self._syncing = False
+        self._refresh_nav_buttons()
+
+    def sync_selection(self) -> None:
+        """Follow a focus change that did NOT come from this list — a tab switch, most of all.
+
+        Switching tabs moved the focus and the plate wash but left this list highlighting whichever
+        row was selected last, so two lists in the same app disagreed about which view you were in.
+        Reported on first use of the deck and it is the right complaint: the navigator is supposed
+        to be a view of the registry, and a stale highlight makes it a second opinion.
+
+        Selection only, not a rebuild: `windowsChanged` already rebuilds this tree wholesale, and
+        a tab switch changes nothing about WHICH views exist. `_syncing` guards the programmatic
+        selection from re-entering `_on_selection_changed`, which would raise the window we are
+        merely reflecting.
+        """
+        if self._syncing or (_sip is not None and _sip.isdeleted(self)):
+            return
+        selected = set(self._manager.selected_ids)
+        self._syncing = True
+        try:
+            it = QTreeWidgetItemIterator(self._tree)
+            while it.value():
+                item = it.value()
+                wid = item.data(0, Qt.UserRole)
+                if wid is not None:
+                    item.setSelected(int(wid) in selected)
+                it += 1
         finally:
             self._syncing = False
         self._refresh_nav_buttons()

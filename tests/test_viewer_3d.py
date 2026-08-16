@@ -488,3 +488,57 @@ def test_the_volume_is_the_only_thing_holding_that_key_while_3d_is_up(mosaic):
     holders = [ly for ly in mosaic.model.layers if key_of(ly) == MosaicKey("raw", "c0")]
     assert len(holders) == 1, f"{len(holders)} layers answer to raw/c0; exactly the brick should"
     assert holders[0] is not shown, "the flat mosaic still owns the key the volume needs"
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════════
+# Framing the ROI: one camera rule, and it is napari's.
+# ══════════════════════════════════════════════════════════════════════════════════════════
+
+def test_the_bricked_volume_frames_its_roi_through_the_one_camera_rule():
+    """A tall ROI on a wide canvas must be fitted by its HEIGHT, not by its width.
+
+    ``_frame_camera`` used to read ``VispyCanvas.size`` — which returns ``(height, width)`` — as
+    ``cw, ch`` and then compute ``min(cw / w_um, ch / h_um)``, i.e. height against width. That
+    does not raise, and on a square canvas it is right by accident; on the 860 x 720 a view window
+    opens at it zoomed a tall ROI 19% too far and clipped it, looking for all the world like a
+    zoom preference. So the canvas here is deliberately non-square AND the ROI's aspect is the
+    other way round, which is the only arrangement in which the two expressions differ.
+    """
+    from squidxplorer._brick_view import BrickedVolume
+    from squidxplorer._napari_view import camera_for_bbox_um
+
+    class _Camera:
+        center = (0.0, 0.0, 0.0)
+        zoom = 1.0
+
+    class _Canvas:
+        size = (720, 860)          # napari's own order: (height, width)
+
+    class _Viewer:
+        camera = _Camera()
+
+        class window:
+            class _qt_viewer:
+                canvas = _Canvas()
+
+    vol = object.__new__(BrickedVolume)
+    vol._viewer = _Viewer()
+    vol._window = (0, 1000, 0, 500)         # 1000 rows x 500 cols
+    vol._scale = (1.0, 1.0, 1.0)            # 1 um per row / col -> a 1000 x 500 um ROI
+    vol._origin_um = (0.0, 4000.0, 9000.0)
+    vol._nz = 10
+    vol._say = lambda _text: None
+
+    vol._frame_camera()
+
+    _centre, expected = camera_for_bbox_um((9000.0, 4000.0, 9500.0, 5000.0), (720, 860),
+                                           margin=0.10)
+    assert vol._viewer.camera.zoom == pytest.approx(expected)
+    assert vol._viewer.camera.zoom == pytest.approx(0.9 * min(720 / 1000.0, 860 / 500.0))
+
+    # The bug, spelled out, so this cannot pass again by reintroducing it.
+    crossed = 0.9 * min(720 / 500.0, 860 / 1000.0)
+    assert vol._viewer.camera.zoom != pytest.approx(crossed)
+
+    # The camera still lands on the ROI's own centre, z from the volume.
+    assert vol._viewer.camera.center == pytest.approx((5.0, 4500.0, 9250.0))

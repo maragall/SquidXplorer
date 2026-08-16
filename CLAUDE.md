@@ -692,6 +692,60 @@ are the rules it proved:
   combination is what no branch tested). The live-workspace rule above still bounds this: an
   automatic merge never gets to publish another session's unfinished lineage unasked.
 
+## The plate is a NAVIGATOR, views are TABS (2026-08-16, ported from PR #12)
+
+The plate-navigator UI, re-applied commit by commit from jsschwrz's `plate-navigator` branch
+(PR #12, written against pre-rename `squidmip`; a textual merge could not cross the renames).
+The PR's own `PLAN-plate-navigation.md` is the source design; the port decisions live in
+`AI-docs/SquidXplorer/.../2026-08-16-plate-navigator-port-plan.md`.
+
+- **A plain left-click on a well NAVIGATES the active view** while one is open — the selection is
+  untouched, empty-space click still clears (the one click-driven deselect), double-click still
+  opens, and the navigate defers one `doubleClickInterval()` so the two gestures cannot collide.
+  The mode is a fact the plate is TOLD (`set_click_navigates`, one writer:
+  `PlateWindow._refresh_plate_navigation`); `RegionViewer.show_region` adopts a foreign region in
+  acquisition order through the ONE cursor. `_regions` is a read-only property over the cursor
+  (`_seed_regions` is what the window was opened over and names it); `ViewerManager.note_focus` /
+  `active_view()` make "which window is the user in" true and singular.
+- **The working layout**: `PlateWindow(default_layout=True, tabbed_views=True)`, set ONLY by
+  `main()` — the launcher asks for a layout, a library caller gets a bare window (and ~120 test
+  `ingest()` calls stay cheap). Root ~1/5 of the work area (`_fontscale.default_root_width`),
+  one lazy view over EVERY well beside it (`beside_rect`, placed by FRAME with client margins
+  subtracted — the client-rect version put the title bar off-screen). Never `select_all()`.
+- **`_view_deck.ViewDeck`**: views as tabs, one current, detach by drag; the whole `RegionViewer`
+  reparents as one object and the napari canvas is never touched. `RegionViewer.dispose()` is the
+  teardown wherever a view lives (a tab never gets a closeEvent; `request_close` goes through the
+  deck), and it finally calls `MosaicPane.shutdown()` — the leak was one GL context + tens of MB
+  per CLOSED window. `manager.tabbed_views` is the one policy point in `_spawn`. Deck `destroyed`
+  connects a BOUND METHOD, never a self-capturing lambda (measured 0xC0000409).
+- **The loupe engine lives in `_loupe.py`**, shared by the plate's press-and-hold and the canvas
+  loupe (`_napari_loupe`, shift-left-click, wheel ladder with a session-scoped factor). The
+  extraction preserved MAIN's fixes: the n//2 z pick, the memory-bounded LRU caches.
+  `_pct_window` moved to `_montage` (one percentile rule below the GUI boundary);
+  `_qthread_life.detach` is the QThread ownership rule on its own. The plate keeps only its
+  gesture half and paints through the shared `paint_loupe_inset`.
+- **The FOV walk**: `_mosaic_source.mosaic_fov_bboxes_um` is THE box geometry (top-left
+  convention, NOT `_tilesource.fov_bboxes_um`'s centre — half a frame apart, measured 195.9 um);
+  `_napari_view.camera_for_bbox_um` is napari's fit rule written once (canvas order is
+  `(height, width)`; `_brick_view`'s crossed axes were the measured bug); `frame_bbox_um` frames
+  one field, 2D-only, inside `programmatic()`. `RegionViewer(fovs=True)` refuses `roi_bbox` by
+  name and draws its own Shapes layer, never the ROI layer.
+- **Contrast sliders span the DATA's bit depth** (`_bitdepth`): measured, never declared (Squid
+  writes MONO12 into uint16 and stamps no depth), monotone rising (C3 reads 3437, E7 16380 in one
+  14-bit set), observed on FULL-RESOLUTION frames in the fusers (decimated planes under-state the
+  max), crossing threads as `ViewerManager.depthChanged`. `MosaicLayers._widen_range` is the one
+  never-narrows rule; `set_dataset` forgets the last acquisition's look (luts, visibility, LUT
+  clipboard, ceiling).
+- **Icon + drag-open, installer-only** (Julio: "I want one install story"). `scripts/installer/
+  make-icon.py` draws the wellplate art once (.ico + .png); the .exe freezes with `--icon`;
+  launchers carry it via `_installed_icon` (copied beside the env — the one-file extraction dir
+  dies). Drag a folder onto the Windows shortcut or the Linux `%f` entry to open it; macOS is
+  documented as not wired. `Setup-Windows.ps1`/`mip-tool.bat` are DELETED: rigs update by
+  re-running the installer. What is NOT done: GL-in-tabs was hand-verified on the PR's Windows
+  machine (4 canvases, 20 dock/undock cycles, ~88 MB/view) and the offscreen suite cannot
+  re-check it; a hand check on this Mac is owed. Commit H (drag tabs BETWEEN windows) stays
+  deferred, hooks in place (`dock_page`/`undock_page`, `_host`, `ViewerManager._decks`).
+
 ## Agent skills
 
 ### Issue tracker

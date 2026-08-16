@@ -180,21 +180,47 @@ class BrickedVolume:
         self.refresh(force=True)
 
     def _frame_camera(self) -> None:
-        """Point the camera at this ROI and zoom so the whole box fits the canvas."""
+        """Point the camera at this ROI and zoom so the whole box fits the canvas.
+
+        THE ZOOM COMES FROM ``_napari_view.camera_for_bbox_um``, which is napari's own
+        ``fit_to_view`` rule. This used to compute it here, and it had the axes crossed:
+
+            cw, ch = (float(v) for v in self._viewer.window._qt_viewer.canvas.size)
+            ...zoom = min(cw / w_um, ch / h_um) * 0.9
+
+        ``VispyCanvas.size`` returns ``(height, width)`` -- its own docstring says so, and its
+        getter reverses vispy's ``(w, h)`` to produce it -- so ``cw`` held the height and ``ch``
+        the width, and the ROI was fitted height-against-width. That does not raise. On a square
+        canvas it is right by accident; on the 860x720 a view window opens at, or any window the
+        user has resized, it either clips the ROI or opens further out than asked, and it reads
+        as somebody having preferred a different zoom. One rule, one place, and a test on a
+        deliberately non-square canvas.
+
+        The margin stays this view's own 0.10 rather than ``FRAME_MARGIN``: a bricked volume
+        culls bricks outside the frustum, and the wider margin is what keeps the ROI's own edge
+        bricks resident. That is a 3D loading decision, not a framing convention.
+        """
+        from squidxplorer._napari_view import camera_for_bbox_um
+
         r0, r1, c0, c1 = self._window
         _oz, oy, ox = self._origin_um
         h_um = (r1 - r0) * self._scale[1]
         w_um = (c1 - c0) * self._scale[2]
         try:
-            cw, ch = (float(v) for v in self._viewer.window._qt_viewer.canvas.size)
+            canvas_hw = tuple(float(v) for v in self._viewer.window._qt_viewer.canvas.size)
         except Exception:                               # noqa: BLE001 - no canvas: leave the camera
             return
-        if h_um <= 0 or w_um <= 0 or cw <= 0 or ch <= 0:
+        try:
+            # `camera_for_bbox_um` takes (x0, y0, x1, y1) and returns the 2D centre; the z centre
+            # is this view's own and napari needs all three in 3D, so only the zoom and the y/x
+            # centre are taken from it.
+            (cy, cx), zoom = camera_for_bbox_um(
+                (ox, oy, ox + w_um, oy + h_um), canvas_hw, margin=0.10)
+        except ValueError:                              # a degenerate ROI or canvas: leave it be
             return
         try:
-            self._viewer.camera.center = (self._nz * self._scale[0] / 2.0,
-                                          oy + h_um / 2.0, ox + w_um / 2.0)
-            self._viewer.camera.zoom = min(cw / w_um, ch / h_um) * 0.9
+            self._viewer.camera.center = (self._nz * self._scale[0] / 2.0, cy, cx)
+            self._viewer.camera.zoom = zoom
         except Exception as exc:                        # noqa: BLE001 - named; an unframed camera
             self._say(f"3D: could not frame the ROI ({exc}).")
 
@@ -386,6 +412,14 @@ class BrickedVolume:
             self._say(f"3D: brick {key[1][0]},{key[1][1]} could not be added: {exc}")
             return
         pin_max_compositing(self._viewer, layer)
+        # BEFORE `adopt`, deliberately. napari sized this layer's contrast_limits_range from ONE
+        # brick, so a brick cut from a dim corner carries a range narrower than the channel's
+        # window. `adopt` then copies its siblings' contrast_limits onto it, and a write outside
+        # the range is clamped -- the dim brick would render on a window nobody chose. Widening
+        # to the dataset's depth first means there is nothing left for adopt to be clamped by.
+        from squidxplorer._napari3d import _seed_range
+
+        _seed_range(layer, getattr(arr, "dtype", None), clim)
         self._mosaic.adopt(self._op, channel, layer)
         self._layers[key] = layer
         self._steps[key] = max(1, int(round(scale[1] / self._scale[1])))

@@ -128,17 +128,44 @@ def commands(uv: str, extras: Sequence[str], source: str, env_dir: Path) -> list
     return cmds
 
 
+def _installed_icon(env_dir: Path, name: str) -> Optional[Path]:
+    """Copy the payload's icon file *name* beside the env, returning its lasting path.
+
+    COPIED, not referenced in place: a one-file build extracts its payload to a temp dir that
+    vanishes when the installer exits, so a shortcut pointing there would lose its art on the
+    next reboot. Beside the env is the one place that lives exactly as long as the install.
+    """
+    for candidate in payload_dirs():
+        src = candidate / name
+        if src.exists():
+            try:
+                dest = env_dir.parent / name
+                shutil.copyfile(src, dest)
+                return dest
+            except OSError:
+                return None
+    return None
+
+
 def _windows_shortcut(env_dir: Path) -> Optional[str]:
-    """A desktop shortcut to the viewer; a failure is said, never fatal."""
+    """A desktop shortcut to the viewer; a failure is said, never fatal.
+
+    DRAG-AND-OPEN COMES FREE: dropping a folder onto a .lnk passes its path as an argument to
+    the target, and ``squidxplorer-view`` opens ``sys.argv[1]``. The icon is the wellplate art
+    (scripts/installer/make-icon.py), installed beside the env so it outlives the one-file
+    extraction dir.
+    """
     target = env_dir / "Scripts" / "squidxplorer-view.exe"
+    icon = _installed_icon(env_dir, "squidxplorer.ico")
+    icon_line = f"$s.IconLocation = '{icon},0'; " if icon is not None else ""
     script = ("$ws = New-Object -ComObject WScript.Shell; "
               "$s = $ws.CreateShortcut(\"$([Environment]::GetFolderPath('Desktop'))"
               "\\SquidXplorer.lnk\"); "
-              f"$s.TargetPath = '{target}'; $s.Save()")
+              f"$s.TargetPath = '{target}'; {icon_line}$s.Save()")
     try:
         subprocess.run(["powershell", "-NoProfile", "-Command", script],
                        check=True, capture_output=True, timeout=30)
-        return "desktop shortcut created: SquidXplorer"
+        return "desktop shortcut created: SquidXplorer (drop an acquisition folder onto it to open)"
     except (OSError, subprocess.SubprocessError) as exc:
         print(f"no desktop shortcut ({exc}); launch {target} directly", file=sys.stderr)
         return None
@@ -152,8 +179,34 @@ _INFO_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
   <key>CFBundleIdentifier</key><string>com.cephla.squidxplorer</string>
   <key>CFBundleExecutable</key><string>SquidXplorer</string>
   <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleIconFile</key><string>SquidXplorer</string>
 </dict></plist>
 """
+
+
+def _macos_icns(env_dir: Path, resources_dir: Path) -> bool:
+    """Write Resources/SquidXplorer.icns from the payload's png, through the ENV's Pillow.
+
+    The frozen bootstrapper carries no imaging library, but the env it just installed carries
+    Pillow (napari depends on it) — so the conversion is delegated to the interpreter that has
+    it. A miss is cosmetic: the bundle works iconless.
+    """
+    png = None
+    for candidate in payload_dirs():
+        if (candidate / "squidxplorer.png").exists():
+            png = candidate / "squidxplorer.png"
+            break
+    if png is None:
+        return False
+    code = ("import sys; from PIL import Image; "
+            "Image.open(sys.argv[1]).save(sys.argv[2], format='ICNS')")
+    try:
+        subprocess.run([str(env_python(env_dir)), "-c", code, str(png),
+                        str(resources_dir / "SquidXplorer.icns")],
+                       check=True, capture_output=True, timeout=60)
+        return True
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def _macos_app(env_dir: Path, apps_dir: Optional[Path] = None) -> Optional[str]:
@@ -168,7 +221,10 @@ def _macos_app(env_dir: Path, apps_dir: Optional[Path] = None) -> Optional[str]:
     try:
         macos_dir = app / "Contents" / "MacOS"
         macos_dir.mkdir(parents=True, exist_ok=True)
+        resources = app / "Contents" / "Resources"
+        resources.mkdir(parents=True, exist_ok=True)
         (app / "Contents" / "Info.plist").write_text(_INFO_PLIST)
+        _macos_icns(env_dir, resources)   # cosmetic; the bundle works iconless
         runner = macos_dir / "SquidXplorer"
         runner.write_text(f'#!/bin/sh\nexec "{target}" "$@"\n')
         runner.chmod(0o755)
@@ -179,13 +235,20 @@ def _macos_app(env_dir: Path, apps_dir: Optional[Path] = None) -> Optional[str]:
 
 
 def _linux_desktop_entry(env_dir: Path, apps_dir: Optional[Path] = None) -> Optional[str]:
-    """An XDG menu entry pointing at the env's viewer; a failure is said, never fatal."""
+    """An XDG menu entry pointing at the env's viewer; a failure is said, never fatal.
+
+    ``%f`` is the drag-and-open half: a folder dropped on (or opened with) the entry arrives as
+    ``sys.argv[1]``. The icon is the payload's png, installed beside the env so it outlives the
+    one-file extraction dir.
+    """
     target = env_dir / "bin" / "squidxplorer-view"
     entry_dir = apps_dir or Path.home() / ".local" / "share" / "applications"
     exec_line = f'"{target}"' if " " in str(target) else str(target)
+    icon = _installed_icon(env_dir, "squidxplorer.png")
+    icon_line = f"Icon={icon}\n" if icon is not None else ""
     text = ("[Desktop Entry]\nType=Application\nName=SquidXplorer\n"
             "Comment=Post-acquisition HCS plate viewer\n"
-            f"Exec={exec_line}\nTerminal=false\nCategories=Science;Graphics;\n")
+            f"Exec={exec_line} %f\n{icon_line}Terminal=false\nCategories=Science;Graphics;\n")
     try:
         entry_dir.mkdir(parents=True, exist_ok=True)
         entry = entry_dir / "squidxplorer.desktop"

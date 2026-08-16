@@ -42,14 +42,18 @@ Processing runs **your own tested implementations, called directly**, never a re
 Output is byte-identical to the standalone repos, pinned by `tests/test_operator_fidelity.py`.
 Results are OME-Zarr layers you toggle on and off; the raw data on disk is never touched.
 
-## Setup (Windows, one time)
+## Install (one time)
 
-- You need Python 3.10, 3.11, or 3.12. If you do not have it, install from
-  https://www.python.org/downloads/ and tick "Add python.exe to PATH".
-- Open PowerShell in the tool folder and run:
-  `powershell -ExecutionPolicy Bypass -File scripts\Setup-Windows.ps1`
-- This puts a **SquidXplorer** shortcut on your Desktop.
-- To update later: `git pull` in the folder, then open the icon again.
+ONE installer file per platform, no Python needed: download `SquidXplorer-Setup.exe` (Windows),
+`SquidXplorer-Setup.zip` (macOS arm64) or `SquidXplorer-Setup-x86_64.AppImage` (Linux) from the
+latest **build-installer** Actions run and run it. It installs into its own private environment
+and leaves a double-clickable **SquidXplorer** launcher (desktop shortcut / `~/Applications`
+app / menu entry). Details, including what is unsigned: `scripts/installer/README.md`.
+
+To update later: download and run the newer installer. It reuses the same environment.
+
+Developers working from this checkout: `pip install -e .[gui]` into your own venv and run
+`squidxplorer-view`.
 
 ## Open an acquisition
 

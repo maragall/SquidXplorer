@@ -1,69 +1,134 @@
-# MIP tool
+# SquidXplorer — quick start
 
-High throughput maximum intensity projection (MIP) for Squid well plate acquisitions. It opens a
-finished acquisition, flattens each well's z stack into one image across the whole plate, and saves a
-result you can reopen here, in napari, or in FIJI. Read only, it never changes your acquisition.
+A local viewer for finished Squid HCS acquisitions. Open a plate, explore any well in a napari
+view, and run your processing operators on exactly the wells you pick.
 
-## What it does
+**It is read only.** It never changes your acquisition and never runs the microscope.
 
-- Opens a finished Squid well plate acquisition.
-- Flattens each well's z stack into one max intensity projection (MIP), across the whole plate.
-- Saves the result as a plate you can reopen here, in napari, or in FIJI.
-- Read only. It never changes your acquisition and never runs the microscope.
+---
 
-## Setup (one time, Windows)
+## 1. Install (once)
 
-- You need Python 3.10, 3.11, or 3.12.
-- If you do not have Python, install it from https://www.python.org/downloads/ . In the installer, tick "Add python.exe to PATH".
-- Open PowerShell in the tool folder and run:
-  - `powershell -ExecutionPolicy Bypass -File scripts\Setup-Windows.ps1`
-- This puts a "MIP tool" shortcut on your Desktop.
-- To update later: go into the folder and run `git pull`, then open the icon again.
+Download the installer for your platform from the repository's latest **build-installer** run
+(GitHub → Actions → build the installer) and run it. One file per platform, no Python needed:
 
-## Open an acquisition
+| platform | file | run it |
+|---|---|---|
+| Windows | `SquidXplorer-Setup.exe` | double-click |
+| macOS (Apple Silicon) | `SquidXplorer-Setup.zip` → one executable | first launch: right-click → Open (unsigned) |
+| Linux (x86_64) | `SquidXplorer-Setup-x86_64.AppImage` | `chmod +x`, then double-click |
 
-- Double click "MIP tool". A small black console opens next to it. That is normal, it shows progress. Closing it quits the app.
-- Use the menu: File, then Open acquisition folder.
-- Pick the acquisition folder (the one holding the 0 folder and/or the ome_tiff folder).
-- It reads both Squid formats (individual TIFFs and OME-TIFF), on 384 and 1536 plates.
+The installer shows a checkbox menu of operator packs, installs into its own private
+environment, and leaves a double-clickable **SquidXplorer** launcher: a desktop shortcut on
+Windows, `~/Applications/SquidXplorer.app` on macOS, an application-menu entry on Linux.
+`scripts/installer/README.md` has the details, including what is and is not signed.
 
-## The window
+To update later: download and run the newer installer. It reuses the same environment.
 
-- Left: the buttons (run MIP, open CLI, layers).
-- Bottom left: the plate. Grey dots are empty wells, so you always see the full plate shape. Scanned wells show their image.
-- Right: the detail viewer for the well in view. It has its own controls: play and frames per second, a channel subset, and z (focus), t (time), and FOV sliders.
-- Double click a well to open it on the right. The red box marks the well in view.
+---
 
-## Run MIP
+## 2. Open an acquisition
 
-- Click "Maximum Intensity Projection".
-- Preview first (nothing saved): set "First N wells", click Preview. Good for a quick look before doing the whole plate.
-- Whole plate: choose an output folder, click "Run on the whole plate".
-- "Focus reference plane" jumps the z slider to the sharpest plane of the well in view.
-- "Return to raw view" goes back to the unprocessed plate.
+An acquisition folder is the one holding the `0` folder and/or the `ome_tiff` folder.
 
-## The result
+Three ways in, fastest first:
 
-- MIP writes a plate folder named `<acquisition name>.hcs`.
-- That folder is your result. To look at it again later, open the "MIP tool" and use File, then Open a computed MIP, and pick that .hcs folder.
-- It also opens in napari or in FIJI.
-- For plain TIFFs you can open directly in FIJI, run from the command line with `--tiff` (it adds a tiff folder next to the plate).
+1. **Drag the folder onto the launcher** (the Windows shortcut and the Linux menu entry take a
+   dropped folder; on macOS, open the app and use one of the ways below).
+2. Open the launcher, then **drop the folder onto the plate**.
+3. Open the launcher, then **File → Open acquisition folder**.
 
-## Command line (optional)
+A small console window opens alongside. That is normal — it shows progress, and it stays open if
+something goes wrong so you can read the error.
 
-- Click "Open CLI" for a terminal inside the app, or use your own PowerShell.
-- Helpful commands:
-  - MIP the whole plate and save FIJI TIFFs:
-    - `python -m squidxplorer "C:\path\to\acquisition" --tiff`
-  - Try the first 8 wells first (quick):
-    - `python -m squidxplorer "C:\path\to\acquisition" --limit 8 --tiff`
-  - Choose where to save:
-    - `python -m squidxplorer "C:\path\to\acquisition" --tiff --output-folder C:\Users\you\Downloads`
-  - See all options:
-    - `python -m squidxplorer --help`
+> The first open builds a thumbnail for every well. Opening the same acquisition again is a cache
+> read and is much faster. Thumbnails live in your own cache folder, never in the acquisition.
 
-## Good to know
+---
 
-- Wells with more than one FOV: for now it uses the first FOV per well. Full multi FOV support (for example with the stitcher) is coming soon.
-- It never writes into your acquisition folder. Results go only where you point them.
-- Memory stays low: it holds at most one well at a time, so even a 1536 plate opens fine.
+## 3. What you get: two windows
+
+| | |
+|---|---|
+| **Left, narrow** | the **plate** — every well, plus the Window navigator and bulk operators |
+| **Right, wide** | **SquidXplorer views** — a napari view of the wells, in tabs |
+
+A view over every well opens by itself, so there is something to look at immediately. The two
+windows are sized to sit side by side on your screen.
+
+---
+
+## 4. Move around by clicking the plate
+
+**Left-click a well and the current view jumps to it.** That is the main gesture — the plate is
+your navigator and the big window is where the pixels are.
+
+You can click any well, including ones outside what the view was opened over; it will follow you
+there.
+
+Other gestures on the plate:
+
+| gesture | what it does |
+|---|---|
+| **left-click a well** | show that well in the current view |
+| **click empty space** | clear the selection |
+| **Shift-drag** a box | open a new view over the wells you boxed |
+| **Shift-click** / **Ctrl-click** | add or remove one well from the selection |
+| **Select all**, then **Open view** | open one view over the whole plate |
+| **double-click** a well | open a new view over just that well |
+| **mouse wheel** | zoom the plate; drag to pan |
+
+Selecting wells and **navigating** are separate on purpose: clicking a well to look at it does
+**not** change the selection your operators will run on.
+
+---
+
+## 5. Tabs
+
+Every view you open becomes a **tab** in the views window. You work in one at a time.
+
+- **Click a tab** to switch. The plate highlights that view's wells.
+- **× on a tab** closes that view.
+- **Drag a tab out of the strip** to pull it into its own floating window.
+- The **Window navigator** on the plate lists every view and says which window each one is in.
+
+Each view holds its own napari viewer, so several open at once costs real memory. Past six views
+the views window tells you roughly how much — close the ones you are done with.
+
+---
+
+## 6. Run an operator
+
+Operators run your own tested implementations, never a reimplementation.
+
+**On one view:** pick an operator in **"Operators for this window"**, set anything you need under
+**controls**, and click **Run**. Results arrive as layers you can toggle on and off; the raw data
+on disk is untouched.
+
+**On a selection:** pick the wells on the plate, then use the operator panel under the plate to run
+across all of them.
+
+Available: maximum intensity projection (built in), deconvolution, stitch and flat-field,
+background subtraction, and nuclei detection. The ones backed by separate packages need the
+matching installer checkbox (or `pip install` extra).
+
+Tick **save** to write results to disk as well as show them.
+
+---
+
+## 7. Where results go
+
+Saved results are written as a plate folder named `<acquisition name>.hcs` next to your chosen
+output location. Reopen one later with **File → Open a computed MIP**, or in napari or FIJI —
+it is OME-Zarr, not a private format.
+
+---
+
+## If something looks wrong
+
+- **The plate says "not a readable Squid acquisition"** — you probably picked a level too high or
+  too low. Choose the folder that directly contains `0` and/or `ome_tiff`.
+- **A view is blank** — check the region slider at the bottom of the view; you may be on a well
+  that was not acquired. The status line names the region it is showing.
+- **The plate is behind everything** — it is the small window; the views window is the big one.
+- **Read the console.** It is the window that opened beside the app, and it keeps its last error.
