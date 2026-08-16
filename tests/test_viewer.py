@@ -4726,7 +4726,12 @@ def test_there_is_no_second_incomplete_marker(qapp):
     # AST, not grep: a grep would also match the comment explaining why this guard exists, failing on its own explanation.
     import ast as _ast
 
-    tree = _ast.parse(_Path(V.__file__).read_text())
+    # encoding="utf-8" EXPLICITLY. `read_text()` uses the platform's locale encoding, which on
+    # Windows is cp1252 — and `_viewer.py` has carried a U+25CF bullet in its readout strings
+    # since long before this test, whose UTF-8 bytes include 0x8F, an undefined cp1252 slot. So
+    # this raised UnicodeDecodeError on Windows instead of asserting anything. Python source is
+    # UTF-8 by definition (PEP 3120), so the locale never had a say here.
+    tree = _ast.parse(_Path(V.__file__).read_text(encoding="utf-8"))
     literals = [n.value for n in _ast.walk(tree)
                 if isinstance(n, _ast.Constant) and n.value == "INCOMPLETE"]
     assert not literals, (
