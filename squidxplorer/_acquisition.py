@@ -1,12 +1,19 @@
-"""Physical / scalar acquisition metadata from ``acquisition.yaml`` (the single format).
+"""Physical / scalar acquisition metadata from ``acquisition.yaml``, with a LEGACY fallback.
 
-The legacy flat ``acquisition parameters.json`` is not supported as a metadata source; per-FOV
-stage positions live in ``reader.load_fov_positions``.
+``acquisition.yaml`` is authoritative. When it is absent, the flat ``acquisition parameters.json``
+— what Squid wrote before the yaml existed — supplies the same five facts (2026-08-16, Julio:
+"We should be able to support old acquisitions too"; the first refusal a customer's Linux rig hit
+was an old dataset). ONE loader holds both readings, so nothing downstream ever sees two formats;
+the fallback is derived IN MEMORY — this viewer never writes into an acquisition — and it warns,
+naming the one thing the legacy file cannot say (binning; see :func:`_legacy_metadata`).
+
+Per-FOV stage positions live in ``reader.load_fov_positions`` either way.
 """
 
 from __future__ import annotations
 
 import json
+import warnings
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
@@ -15,15 +22,73 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
+#: The pre-yaml metadata file, exactly as Squid spelled it (space included).
+_LEGACY_PARAMS = "acquisition parameters.json"
+
+
+def _legacy_metadata(root: Path) -> dict:
+    """The five scalar facts, read from the legacy ``acquisition parameters.json``.
+
+    The legacy keys, from real Squid output: ``Nz``, ``Nt``, ``dz(um)`` (micrometres already,
+    unlike the yaml's ``delta_z_mm``), ``objective.magnification`` and ``sensor_pixel_size_um``.
+    Pixel size is DERIVED (sensor / magnification) because the legacy format never stored an
+    object-space pixel size — and it never recorded binning either, so on a binned acquisition
+    the derivation is wrong by the binning factor. That is warned, not silenced: a confidently
+    wrong micron figure is the failure mode this repo treats as worst, so the one thing the file
+    cannot say is said out loud instead.
+    """
+    path = root / _LEGACY_PARAMS
+    try:
+        params = json.loads(path.read_text())
+    except ValueError as exc:
+        raise ValueError(
+            f"{path} is not valid JSON ({exc}); this acquisition's metadata cannot be read."
+        ) from exc
+    if not isinstance(params, dict):
+        raise ValueError(f"{path} holds {type(params).__name__}, not the expected object.")
+
+    objective = params.get("objective") if isinstance(params.get("objective"), dict) else {}
+
+    def _positive(value) -> Optional[float]:
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return None
+        return value if value > 0 else None
+
+    sensor = _positive(params.get("sensor_pixel_size_um"))
+    magnification = _positive(objective.get("magnification"))
+    pixel = sensor / magnification if sensor and magnification else None
+
+    warnings.warn(
+        f"acquisition.yaml not found in {root}; using the legacy '{_LEGACY_PARAMS}'. "
+        "pixel_size_um is derived as sensor_pixel_size_um / magnification"
+        f" ({sensor} / {magnification})" + (
+            " — the legacy format records no binning, so on a binned acquisition this is wrong "
+            "by the binning factor." if pixel is not None else
+            ", and this file is missing one of those, so the pixel size is unknown.")
+    )
+    dz = params.get("dz(um)")
+    return {
+        "pixel_size_um": pixel,
+        "n_z_declared": params.get("Nz"),
+        "dz_um": float(dz) if dz is not None else None,
+        "n_t_declared": params.get("Nt"),
+        "wellplate_format": params.get("wellplate_format"),
+    }
+
+
 def load_acquisition_metadata(root) -> dict:
-    """Return scalar acquisition metadata from ``acquisition.yaml``; raises when it is absent."""
+    """Scalar acquisition metadata: ``acquisition.yaml``, else the legacy JSON, else a refusal."""
     root = Path(root)
     path = root / "acquisition.yaml"
     if not path.exists():
+        if (root / _LEGACY_PARAMS).exists():
+            return _legacy_metadata(root)
         raise FileNotFoundError(
-            f"acquisition.yaml not found in {root} — it is required. The legacy flat "
-            "'acquisition parameters.json' is no longer supported (convert a pre-yaml "
-            "dataset to acquisition.yaml up front)."
+            f"acquisition.yaml not found in {root}, and neither is the legacy "
+            f"'{_LEGACY_PARAMS}' — one of the two is required. If this folder is a parent or a "
+            "subfolder of the acquisition, open the acquisition folder itself."
         )
 
     rich = yaml.safe_load(path.read_text()) or {}

@@ -211,14 +211,19 @@ def test_project_well_t_out_of_range_raises_named(tmp_path, bad):
         project_well(reader, "A1", 0, time_point=bad)
 
 
-def test_project_requires_acquisition_yaml(tmp_path):
+def test_project_accepts_a_legacy_acquisition(tmp_path):
+    """Was ``test_project_requires_acquisition_yaml`` — the refusal it pinned was overridden on
+    2026-08-16 (Julio: "We should be able to support old acquisitions too"): a dataset carrying
+    only the legacy 'acquisition parameters.json' now loads through the one metadata loader's
+    fallback, with a warning, and projects like any other."""
     ch = "Fluorescence_638_nm_-_Penta"
     root = tmp_path / "no_yaml"
     for z, arr in {0: _plane(0), 1: _plane(30)}.items():
         _write_plane(root, "A1", 0, z, ch, arr)
     (root / "acquisition parameters.json").write_text('{"Nz": 2}')
-    with pytest.raises(FileNotFoundError, match="acquisition.yaml"):
-        project_well(open_reader(root), "A1", 0)
+    with pytest.warns(UserWarning, match="legacy"):
+        result = project_well(open_reader(root), "A1", 0)
+    assert result is not None
 
 
 def test_project_well_single_z(tmp_path):
