@@ -118,11 +118,49 @@ def install_spec(source: str, extras: Sequence[str]) -> str:
     return f"{name} @ {path.resolve().as_uri() if path.exists() else source}"
 
 
+#: The interpreter the private env is built with. PASSED TO ``uv venv`` EXPLICITLY, because uv
+#: otherwise builds from whatever python the MACHINE happens to have — measured failure,
+#: 2026-08-16, first customer install on the Katana rig: Ubuntu 22.04's system python is 3.10.12,
+#: the wheel requires >=3.11, and dependency resolution died on the very first run. With the pin,
+#: uv DOWNLOADS a self-contained managed CPython when the machine has none (or the wrong one), so
+#: the installer works on a machine with no Python at all — which is the one-file promise. 3.12
+#: exactly, not "newest": every wheel this app pulls (PyQt6, napari, cupy) is proven there, and a
+#: brand-new Python whose wheels lag would fail the same way 3.10 did, from the other side.
+ENV_PYTHON = "3.12"
+
+#: The floor an EXISTING env must satisfy to be reused; squidxplorer's own requires-python.
+_ENV_PYTHON_FLOOR = (3, 11)
+
+
+def stale_env(env_dir: Path) -> Optional[str]:
+    """A sentence naming why the existing env cannot be reused, or None when it can (or is absent).
+
+    The venv step is skipped whenever the env exists, so without this check an env built wrong
+    once is broken FOREVER: the Katana rig's 3.10 env would have failed every future install of
+    a fixed installer identically. Asking the env's own interpreter is the one honest probe —
+    the directory name says nothing about what built it.
+    """
+    py = env_python(env_dir)
+    if not py.exists():
+        return None
+    try:
+        out = subprocess.run(
+            [str(py), "-c", "import sys; print('%d.%d' % sys.version_info[:2])"],
+            capture_output=True, text=True, timeout=60, check=True).stdout.strip()
+        major, minor = (int(v) for v in out.split("."))
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        return f"its interpreter would not answer ({type(exc).__name__})"
+    if (major, minor) < _ENV_PYTHON_FLOOR:
+        floor = ".".join(str(v) for v in _ENV_PYTHON_FLOOR)
+        return f"its Python is {out} and squidxplorer needs >= {floor}"
+    return None
+
+
 def commands(uv: str, extras: Sequence[str], source: str, env_dir: Path) -> list[list[str]]:
     """The exact uv invocations a run would make; the venv step only when the env is missing."""
     cmds = []
     if not env_python(env_dir).exists():
-        cmds.append([uv, "venv", str(env_dir)])
+        cmds.append([uv, "venv", "--python", ENV_PYTHON, str(env_dir)])
     cmds.append([uv, "pip", "install", "--python", str(env_python(env_dir)),
                  install_spec(source, extras)])
     return cmds
@@ -284,6 +322,29 @@ def create_launcher(env_dir: Path, platform: str = sys.platform) -> Optional[str
     return _linux_desktop_entry(env_dir)
 
 
+def _linux_gui_libs_note(platform: str = sys.platform) -> Optional[str]:
+    """Name the system libraries Qt will want at FIRST LAUNCH on Linux, when they are missing.
+
+    The install itself needs none of them — PyQt6's wheel carries Qt — but Qt's xcb platform
+    plugin dlopens a handful of system libraries at startup, and ``libxcb-cursor0`` in
+    particular is absent from a default Ubuntu 22.04 (Qt >= 6.5 grew the requirement). Without
+    this note the failure is a successful install followed by a launch that dies with an
+    inscrutable "could not load the Qt xcb platform plugin". Installing them needs sudo, which
+    this installer must not assume — so it SAYS the fix instead of attempting it.
+    """
+    if not platform.startswith("linux"):
+        return None
+    import ctypes
+
+    try:
+        ctypes.CDLL("libxcb-cursor.so.0")
+        return None
+    except OSError:
+        return ("note: the viewer needs a system library that this machine is missing "
+                "(Qt's xcb plugin). Before the first launch, run:\n"
+                "    sudo apt install libxcb-cursor0")
+
+
 def _interactive(argv: Optional[Sequence[str]]) -> bool:
     """Double-clicked: no arguments and a real console — hold the window open at the end.
 
@@ -334,14 +395,37 @@ def _run(args: argparse.Namespace) -> int:
     if uv is None:
         print(UV_HINT, file=sys.stderr)
         return 2
+    if not args.dry_run:
+        reason = stale_env(env_dir)
+        if reason:
+            # The env is THIS APP'S OWN private directory, so recreating it destroys nothing of
+            # the user's — and reusing it would fail every install forever (see stale_env).
+            print(f"recreating {env_dir}: {reason}")
+            try:
+                shutil.rmtree(env_dir)
+            except OSError as exc:
+                print(f"could not remove the stale env ({exc}); close anything using it and "
+                      f"rerun, or delete {env_dir} by hand.", file=sys.stderr)
+                return 2
     for cmd in commands(uv, extras, str(source), env_dir):
         print(shlex.join(cmd))
         if not args.dry_run:
-            subprocess.run(cmd, check=True)
+            try:
+                subprocess.run(cmd, check=True)
+            except subprocess.CalledProcessError as exc:
+                # A SENTENCE, not a traceback. The first customer failure ended in an unhandled
+                # CalledProcessError and PyInstaller's "Failed to execute script" banner — the
+                # real message (uv's, printed just above) was the least visible thing on screen.
+                print(f"\ninstall failed (exit {exc.returncode}) — the message above this line "
+                      f"is uv's own account of why.", file=sys.stderr)
+                return exc.returncode or 1
     if not args.dry_run:
         made = create_launcher(env_dir)
         if made:
             print(made)
+        note = _linux_gui_libs_note()
+        if note:
+            print(note)
     return 0
 
 
