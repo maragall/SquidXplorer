@@ -445,9 +445,20 @@ def model_pane_class():
             self.detect_channel = None
             self.detect_button = None
             self.said = []
+            self.shutdowns = 0
 
         def say(self, text):
             self.said.append(text)
+
+        def shutdown(self):
+            """COUNTS, rather than no-ops. The real ``MosaicPane.shutdown`` is what closes the
+            napari Viewer and drops it from napari's instance registry, and it went uncalled for
+            long enough to leak a GL context per closed window. A pane that silently accepted the
+            call could not tell the difference between "disposed" and "never disposed" — and
+            ``RegionViewer.dispose`` wraps every teardown in ``except Exception``, so a MISSING
+            method here would be swallowed and read as success."""
+            self.shutdowns += 1
+            self._viewer = None
 
     return ModelPane
 
