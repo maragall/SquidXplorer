@@ -41,6 +41,12 @@ GUI_MODULES = frozenset({
     "_region_viewer",
     "_slide_art",
     "_time_point",       # the timepoint bar, shared by the plate and every window
+    "_view_deck",        # the TAB DECK that holds view windows as pages. Qt-facing with nothing
+    #                      underneath it to split off: it is a QMainWindow wearing a QTabWidget,
+    #                      and every line is reparenting, tab indices and window activation. What
+    #                      would have been its Qt-free half — which view is current, and what that
+    #                      means for who draws — already lives in `RegionViewer` and `ViewerManager`
+    #                      rather than being copied here.
     "_viewer",
     "_workers",          # the plate window's background threads
 })

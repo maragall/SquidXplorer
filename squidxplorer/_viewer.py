@@ -179,7 +179,8 @@ class PlateWindow(QMainWindow):
     _default_view_id = None
     _layout_applied = False
 
-    def __init__(self, initial_path: Optional[str] = None, *, default_layout: bool = False):
+    def __init__(self, initial_path: Optional[str] = None, *, default_layout: bool = False,
+                 tabbed_views: bool = False):
         """*default_layout*: open the WORKING LAYOUT once a plate loads — this window sized to a
         share of the screen, and a view window over every well filling the rest.
 
@@ -195,6 +196,10 @@ class PlateWindow(QMainWindow):
         """
         super().__init__()
         self.default_layout = bool(default_layout)
+        #: Held until the manager exists a few lines down. Same opt-in shape as `default_layout`
+        #: and for a sharper reason: with tabs on for every spawn, four of the PR's test files went
+        #: from passing to ABORTING, so this cannot be the default until that is understood.
+        self._want_tabbed_views = bool(tabbed_views)
         #: A plate loaded before this window was shown; the view opens from `showEvent`. `_spawn`
         #: shows the view it creates, so opening one from inside `__init__` would put a view on
         #: screen before the plate that owns it.
@@ -249,6 +254,7 @@ class PlateWindow(QMainWindow):
         # shares this one stateless reader/meta — nothing reopens the dataset. See _region_viewer.
         from squidxplorer._region_viewer import ViewerManager
         self._viewer_manager = ViewerManager(parent=self)
+        self._viewer_manager.tabbed_views = self._want_tabbed_views
         # Operator controls appear AT EACH LEVEL (the deck; Julio 2026-07-23: "I don't see operator
         # controls like the powerpoint specified at each level"). Every window's "Operators for this
         # window" dropdown is the SAME registry + run_operator (the CLI engine), scoped to that view,
@@ -3703,18 +3709,30 @@ class PlateWindow(QMainWindow):
         # FIRST, before any teardown below: `_confirm_close_all` can cancel, and cancelling has to
         # leave the window exactly as it was. Every line under this point retires threads and
         # uninstalls the log bus, none of which is reversible.
+        # TWO DIFFERENT QUESTIONS, and they were briefly the same variable. What to WARN about is
+        # the views the user opened; what to CLOSE is every view there is. Once `_open_view_count`
+        # started excluding the auto-opened default view, guarding the close loop with it meant a
+        # session where the user opened nothing left that view behind — a plateless remainder still
+        # holding the single-instance flock.
         views = self._open_view_count()
         if not self._confirm_close_all(views):
             e.ignore()
             return
-        if views:
-            mgr = self._viewer_manager
-            for wid in [int(w.window_id) for w in mgr.windows]:
-                try:
-                    mgr.close(wid)               # a no-op for an id a parent already took with it
-                except Exception as exc:         # noqa: BLE001 - one view must not block the quit
-                    log.warning("view %s did not close with the plate: %s: %s",
-                                wid, type(exc).__name__, exc)
+        mgr = self._viewer_manager
+        for wid in [int(w.window_id) for w in mgr.windows]:
+            try:
+                mgr.close(wid)                   # a no-op for an id a parent already took with it
+            except Exception as exc:             # noqa: BLE001 - one view must not block the quit
+                log.warning("view %s did not close with the plate: %s: %s",
+                            wid, type(exc).__name__, exc)
+        # AND THE DECKS. A deck is a top-level too, so an empty one left standing keeps the process
+        # alive with nothing on screen — the same argument, one container out.
+        for deck in mgr.decks():
+            try:
+                deck.close()
+            except Exception as exc:             # noqa: BLE001
+                log.warning("a view deck did not close with the plate: %s: %s",
+                            type(exc).__name__, exc)
         # NO REGION DEBOUNCE TO DISARM. A single-shot QTimer used to be armed here for 140 ms by
         # `_on_region_changed` and stopped at this point, because a pending one fires into a
         # torn-down window (measured: a segfault a window later). Both the timer and the
@@ -4031,7 +4049,7 @@ def main(dataset_path: str = None):
     splash = _startup_splash(app)
     # THE LAUNCHER ASKS FOR THE WORKING LAYOUT: this window narrow and full height, a view window
     # over every well filling the rest. Only here — a library caller gets a bare window.
-    win = PlateWindow(path, default_layout=True)
+    win = PlateWindow(path, default_layout=True, tabbed_views=True)
     _install_footprint_monitor(app, win)
     win._gui_slot = slot                  # the reservation lives as long as the window
 
