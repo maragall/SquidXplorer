@@ -4373,7 +4373,16 @@ def test_on_screen_luts_is_none_when_no_view_window_is_open(qapp, squid_dataset)
 
 
 def test_on_screen_luts_reaches_a_focused_window(qapp, squid_dataset):
-    """focused_id and windows are properties on ViewerManager; calling them with parentheses raised a TypeError swallowed by a broad except, so this returned None every time."""
+    """focused_id and windows are properties on ViewerManager; calling them with parentheses raised a TypeError swallowed by a broad except, so this returned None every time.
+
+    The lookup has since moved INTO the manager, as ``active_view()``, so ``on_screen_luts`` no
+    longer touches either property and that particular mistake is now unmakeable here — there is
+    one implementation of "which window is the user in" and every caller shares it. The stub keeps
+    both properties anyway: they are what the real ``active_view`` reads, so a stub that dropped
+    them would stop describing the thing it stands in for. What this test pins is unchanged and is
+    the part that matters — the focused window's LUTs reach the exporter, rather than a swallowed
+    exception quietly returning None.
+    """
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
@@ -4394,6 +4403,11 @@ def test_on_screen_luts_reaches_a_focused_window(qapp, squid_dataset):
         @property
         def windows(self):
             return [_Win()]
+
+        def active_view(self):
+            """Built from the two properties above, the way the real one is — so the stub still
+            fails if a caller reaches past it and calls those with parentheses."""
+            return next((w for w in self.windows if w.window_id == self.focused_id), None)
 
         def set_run_progress(self, report):
             """Present so teardown does not raise over the assertion."""

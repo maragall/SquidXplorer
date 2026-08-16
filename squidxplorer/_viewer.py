@@ -1824,8 +1824,7 @@ class PlateWindow(QMainWindow):
         # genuinely not an error, but it no longer hides a call-signature mistake: the non-None
         # path is now pinned by a test.
         try:
-            wid = mgr.focused_id
-            win = next((w for w in mgr.windows if getattr(w, "window_id", None) == wid), None)
+            win = mgr.active_view()          # the one answer to "which window is the user in"
             if win is None:
                 return None
             luts = win._per_channel_luts()
