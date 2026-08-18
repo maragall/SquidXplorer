@@ -199,7 +199,9 @@ class _OperatorWorker(QThread):
                 return  # window closing / re-opening; drop out cleanly (no final/written emit)
             self.streamEnded.emit()
             if self._save:
-                self.writtenReady.emit(str(Path(self._out_dir) / "plate.ome.zarr"))
+                # an acquisition-format save lands beside the source, not under out_dir
+                self.writtenReady.emit(result.out_path
+                                       or str(Path(self._out_dir) / "plate.ome.zarr"))
             _run_metrics.finish(result.outcome, result.detail)
             self.finished_ok.emit()
         except Exception as e:
@@ -330,6 +332,19 @@ class _MosaicWorker(QThread):
     def stop(self):
         self._stop.set()
 
+    def _seed_window(self, channel, levels, auto_window) -> tuple:
+        """The contrast seed: an RGB component gets the FILE's own full range (identical across
+        the three primaries, so additive blending reconstructs the file's exact color — a
+        per-channel percentile window would tint it); everything else keeps the percentiles."""
+        probe = getattr(self._reader, "is_rgb_component", None)
+        if probe is not None and probe(channel):
+            try:
+                info = np.iinfo(np.dtype(self._meta["dtype"]))
+                return (float(info.min), float(info.max))
+            except (TypeError, ValueError, KeyError):
+                pass
+        return auto_window(levels, True)
+
     def run(self):
         from squidxplorer._mosaic_source import fuse_region_pyramid, mosaic_bbox_um
         # the same contrast seeding function add_mosaic calls: one contrast rule per quantity
@@ -360,7 +375,7 @@ class _MosaicWorker(QThread):
                 continue
             levels, _step, _nz = res
             # the contrast seed decodes every FOV of the region, so it runs here, never on the UI thread
-            window = _auto_window_for(levels, True)
+            window = self._seed_window(ch, levels, _auto_window_for)
             self.ready.emit(self._region, ch, levels, bbox, window)
             n += 1
         self.finished_count.emit(n)

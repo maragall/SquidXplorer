@@ -107,3 +107,56 @@ def test_mixed_color_and_mono_channels_coexist(tmp_path):
     names = [c["name"] for c in m["channels"]]
     assert "Fluorescence_405_nm_Ex" in names and "BF_LED_matrix_full (R)" in names
     assert len(names) == 4
+
+
+def test_colormap_prefers_the_acquisitions_display_color():
+    """The RGB component channels carry pure primaries in their resolved display_color; the
+    window's colormap must read THAT, not the wavelength palette (which cannot know '(R)')."""
+    pytest.importorskip("napari")
+    from squidxplorer._napari_pane import _colormap_for
+
+    from squidxplorer._acquisition import DisplayChannel
+
+    # the REAL metadata type: DisplayChannel records, which duck-type .get but are not dicts
+    channels = [DisplayChannel(name="BF_LED_matrix_full (R)",
+                               display_name="BF LED matrix full (R)",
+                               display_color="#FF0000")]
+    cm = _colormap_for("BF_LED_matrix_full (R)", channels)
+    assert tuple(np.asarray(cm.colors)[-1][:3]) == (1.0, 0.0, 0.0)
+    # matched by display_name too: results deliver whichever spelling the layer carries
+    cm2 = _colormap_for("BF LED matrix full (R)", channels)
+    assert tuple(np.asarray(cm2.colors)[-1][:3]) == (1.0, 0.0, 0.0)
+
+
+def test_rgb_components_seed_the_files_full_range(tmp_path):
+    """All three primaries share the FILE's own range: per-channel percentiles would tint the
+    additive reconstruction and read as 'completely dark' on brightfield."""
+    root = tmp_path / "acq"
+    rgb = np.stack([_gray(1), _gray(2), _gray(3)], axis=-1)
+    _write(root / "0", "manual_0_0_BF_LED_matrix_full.bmp", rgb)
+    _sidecars(root)
+    r = open_reader(root)
+    _ = r.metadata
+    assert r.is_rgb_component("BF_LED_matrix_full (R)")
+    assert not r.is_rgb_component("BF_LED_matrix_full")     # the on-disk base is not virtual
+
+    from squidxplorer._workers import _MosaicWorker
+
+    w = _MosaicWorker.__new__(_MosaicWorker)                # _seed_window needs no QThread state
+    w._reader, w._meta = r, r.metadata
+    assert w._seed_window("BF_LED_matrix_full (G)", None, lambda *a: (9.0, 10.0)) == (0.0, 255.0)
+    assert w._seed_window("BF_LED_matrix_full", None, lambda *a: (9.0, 10.0)) == (9.0, 10.0)
+
+
+def test_colormap_without_a_resolved_color_still_uses_the_name_palette():
+    pytest.importorskip("napari")
+    from squidxplorer._channels import fallback_color
+    from squidxplorer._napari_pane import _colormap_for
+
+    cm = _colormap_for("Fluorescence_488_nm_Ex", None)
+    h = fallback_color("Fluorescence_488_nm_Ex").lstrip("#")
+    want = tuple(int(h[i:i + 2], 16) / 255.0 for i in (0, 2, 4))
+    got = tuple(float(v) for v in np.asarray(cm.colors)[-1][:3])
+    assert got == pytest.approx(want)
+    # an unrecognised channel with no resolved color stays gray, never a guess
+    assert _colormap_for("BF_LED_matrix_full (R)", None) == "gray"

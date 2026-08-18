@@ -813,6 +813,14 @@ class SquidReader:
                 return base, idx
         return channel, None
 
+    def is_rgb_component(self, channel) -> bool:
+        """Whether *channel* is one primary of a color channel's ``(Y, X, 3)`` file.
+
+        A component's faithful display window is the file's own value range shared by all three
+        primaries; per-channel percentiles would tint the reconstruction.
+        """
+        return self._split_rgb_channel(str(channel))[1] is not None
+
     # -- read -------------------------------------------------------------
     def read(self, region, fov, channel, z_level, time_point=0):
         """Return one plane as a 2D array in its native dtype. Lazy: reads exactly one file.

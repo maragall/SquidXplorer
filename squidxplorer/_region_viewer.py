@@ -1215,7 +1215,7 @@ class RegionViewer(QMainWindow):
             try:
                 mosaic.add_result(
                     result.kind, str(op), channel, plane,
-                    colormap=_colormap_for(channel),
+                    colormap=_colormap_for(channel, (self._meta or {}).get("channels")),
                     bbox_um=bbox,
                     z_scale_um=(dz if int(result.z_depth) > 1 else None),
                     visible=bool(visible),

@@ -44,7 +44,7 @@ def test_available_plane_operators_exact_list():
 
 
 def test_available_region_operators_exact_list():
-    assert s.available_region_operators() == ["coordinate", "stitch"]
+    assert s.available_region_operators() == ["coordinate", "register", "stitch"]
 
 
 def test_every_operator_resolves():
