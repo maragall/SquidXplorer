@@ -2718,14 +2718,22 @@ class PlateWindow(QMainWindow):
         if resolved_target:
             self._readout.setText(resolved_target)
         out_dir = est_gb = None
+        # A z-collapsing per-FOV save writes the acquisition's own format (one projected plane
+        # per FOV, native resolution); everything else writes the OME-Zarr plate. Decided off the
+        # declaration here so the dialog title, the folder name, the loupe source and the done
+        # message all describe the write that actually happens.
+        from squidxplorer import _acq_output
+
+        acq_format = save and _acq_output.acquisition_format_dst(self._reader, key) is not None
         if save:
             # Ask WHERE to persist: output can be hundreds of GB, so let the user aim it at a roomy
             # disk rather than silently filling the acquisition's. Tests pass out_parent.
             if out_parent is None:
-                out_parent = QFileDialog.getExistingDirectory(self, f"Save {label} plate to folder")
+                out_parent = QFileDialog.getExistingDirectory(self, f"Save {label} output to folder")
                 if not out_parent:
                     return
-            out_dir = Path(out_parent) / f"{self._acq_name}.hcs"
+            out_dir = Path(out_parent) / (f"{key}_{self._acq_name}" if acq_format
+                                          else f"{self._acq_name}.hcs")
             # Estimate the bytes THIS RUN writes: a subset writes len(regions)/n_wells of a plate.
             # Previously the guard was computed plate-wide and then skipped entirely for subsets
             # (`if not ok and regions is None`), so a 500-well subset save got no check at all.
@@ -2770,7 +2778,8 @@ class PlateWindow(QMainWindow):
         # as wells land (so the loupe works mid-run on what's finished); a PREVIEW writes nothing,
         # so the layer gets no source and the gesture reports that rather than magnifying the
         # previous run's pixels through the same reused layer key.
-        if save and out_dir is not None:
+        if save and out_dir is not None and not acq_format:
+            # An acquisition-format save writes no plate.ome.zarr: no zarr loupe source to grow.
             ny, nx = self._meta["frame_shape"]
             fovs = self._meta.get("fovs_per_region")
             self._set_loupe_source(layer_key, _ZarrLoupeSource(
@@ -2799,6 +2808,8 @@ class PlateWindow(QMainWindow):
         # place that decides the two are the same thing today.
         self._overview.reset_layer(layer_key)
         dest = f" → {out_dir.name}" if save else " (preview — not saved)"
+        reopen_note = ("  (re-openable acquisition)" if acq_format
+                       else "  (re-openable OME-Zarr)")
         # IMA-226: report what the plate ACTUALLY got. A run where every well raised (flat-field
         # with no profile is the routine case) still reaches finished_ok — the per-well on_error
         # path is what keeps one bad file from aborting a plate — and used to print "✓" over an
@@ -2811,10 +2822,10 @@ class PlateWindow(QMainWindow):
             elif w.skipped:
                 self._run_readout(
                     f"✓ {label} · {scope}{dest} — {w.skipped} well(s) skipped"
-                    + ("  (re-openable OME-Zarr)" if save else ""))
+                    + (reopen_note if save else ""))
             else:
                 self._run_readout(
-                    f"✓ {label} · {scope}{dest}" + ("  (re-openable OME-Zarr)" if save else ""))
+                    f"✓ {label} · {scope}{dest}" + (reopen_note if save else ""))
 
         # Announce the run to the activity registry the log panel's header reads. Keyed
         # "operator-run" (re-entrant by key: a new run replaces the old entry rather than stacking).

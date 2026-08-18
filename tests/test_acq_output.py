@@ -160,18 +160,26 @@ def test_an_unknown_parameter_is_refused_before_any_directory(squid_dataset, tmp
 
 # ------------------------------------------------------------------ the dispatch routing
 
-def test_saving_mip_lands_the_acquisition_format_beside_the_source(squid_dataset, tmp_path):
+def test_saving_mip_honours_the_chosen_folder(squid_dataset, tmp_path):
+    # An explicit out_dir (the GUI's chosen folder, the CLI's --out) IS the destination.
     root, arrays = squid_dataset
-    out_dir = tmp_path / "chosen.hcs"
+    out_dir = tmp_path / f"mip_{root.name}"
     result = run_operator_once(open_reader(root), operator="mip", save=True,
                                owed=len(REGIONS), out_dir=out_dir, n_fovs=None)
-    dst = root.parent / f"mip_{root.name}"
-    assert dst.is_dir(), "the save must land beside the source acquisition"
-    assert result.out_path == str(dst)
+    assert out_dir.is_dir(), "the save must land where the caller aimed it"
+    assert result.out_path == str(out_dir)
     assert result.outcome == "ok" and result.landed == len(REGIONS) * len(FOVS)
     assert not (out_dir / "plate.ome.zarr").exists()
-    out = tifffile.imread(dst / "0" / f"{REGIONS[0]}_0_0_{CHANNELS[0]}.tiff")
+    out = tifffile.imread(out_dir / "0" / f"{REGIONS[0]}_0_0_{CHANNELS[0]}.tiff")
     np.testing.assert_array_equal(out, _mip(arrays, REGIONS[0], 0, CHANNELS[0]))
+
+
+def test_saving_mip_without_a_destination_defaults_beside_the_source(squid_dataset):
+    root, _ = squid_dataset
+    result = run_operator_once(open_reader(root), operator="mip", save=True,
+                               owed=len(REGIONS), out_dir=None, n_fovs=None)
+    dst = root.parent / f"mip_{root.name}"
+    assert dst.is_dir() and result.out_path == str(dst)
 
 
 def test_saving_an_operator_that_keeps_z_still_takes_write_plate(squid_dataset, tmp_path):
@@ -182,6 +190,40 @@ def test_saving_an_operator_that_keeps_z_still_takes_write_plate(squid_dataset, 
     assert (out_dir / "plate.ome.zarr").is_dir()
     assert result.out_path == str(out_dir / "plate.ome.zarr")
     assert not (root.parent / f"keepz_{root.name}").exists()
+
+
+def test_the_window_save_toggle_lands_both_formats(qapp, squid_dataset, tmp_path):
+    """The in-window save: mip lands the acquisition format at the CHOSEN folder, stitch the
+    OME-Zarr plate — both through PlateWindow.run_operator, the toggle's real path."""
+    pytest.importorskip("tilefusion")
+    import squidxplorer._viewer as V
+
+    from .test_viewer import _drain_until
+
+    root, arrays = squid_dataset
+    win = V.PlateWindow(None)
+    win.ingest(str(root))
+    try:
+        mip_dst = tmp_path / f"mip_{root.name}"
+        win.run_operator("mip", out_parent=str(tmp_path))
+        n_files = len(REGIONS) * len(FOVS) * len(CHANNELS)
+        assert _drain_until(
+            qapp, lambda: mip_dst.is_dir()
+            and len(list((mip_dst / "0").glob("*.tiff"))) == n_files
+            and (win._worker is None or not win._worker.isRunning()))
+        out = tifffile.imread(mip_dst / "0" / f"{REGIONS[0]}_0_0_{CHANNELS[0]}.tiff")
+        np.testing.assert_array_equal(out, _mip(arrays, REGIONS[0], 0, CHANNELS[0]))
+        assert open_reader(mip_dst).metadata["n_z"] == 1
+
+        zarr_dst = tmp_path / f"{root.name}.hcs" / "plate.ome.zarr"
+        win.run_operator("stitch", out_parent=str(tmp_path),
+                         operator_kwargs={"register": False, "correct_illumination": False})
+        assert _drain_until(
+            qapp, lambda: zarr_dst.is_dir()
+            and (win._worker is None or not win._worker.isRunning()), timeout=120)
+    finally:
+        win._stop_worker()
+        win.close()
 
 
 def test_the_gate_is_declaration_driven_not_name_driven(squid_dataset):

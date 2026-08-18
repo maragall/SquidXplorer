@@ -2365,11 +2365,14 @@ def test_preview_run_gets_no_loupe_source(qapp, squid_dataset, tmp_path):
 
 
 def test_saved_run_registers_zarr_source_and_grows_written_set(qapp, squid_dataset, tmp_path):
+    # keepz: a saved OME-Zarr run. A mip save writes acquisition format now — no zarr, so no
+    # zarr loupe source (a loupe over the written acquisition is an open follow-up).
     root, _ = squid_dataset
     win = _loupe_win(qapp, root)
-    win.run_operator("mip", out_parent=str(tmp_path))
-    assert _drain_until(qapp, lambda: isinstance(win._loupe_sources.get("mip"), V._ZarrLoupeSource))
-    src = win._loupe_sources["mip"]
+    win.run_operator("keepz", out_parent=str(tmp_path))
+    assert _drain_until(qapp, lambda: isinstance(win._loupe_sources.get("keepz"),
+                                                 V._ZarrLoupeSource))
+    src = win._loupe_sources["keepz"]
     assert src.available("B2") == (False, "not written yet")   # nothing written at run start
     assert _drain_until(qapp, lambda: src.available("B2")[0])  # ...available once the well lands
     win._stop_worker(); win.close()

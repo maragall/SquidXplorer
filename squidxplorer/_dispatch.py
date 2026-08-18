@@ -76,13 +76,15 @@ def run_operator_once(reader, *, operator: str, save: bool, owed: int, out_dir=N
         from squidxplorer import _acq_output
 
         # Declaration-driven writer choice: a per-FOV, z-collapsing, intensity operator over an
-        # on-disk acquisition saves in the acquisition's own format, full resolution, beside the
-        # source; only a run owing every FOV (n_fovs=None) qualifies. Everything else keeps the
-        # OME-Zarr plate.
+        # on-disk acquisition saves in the acquisition's own format, full resolution; only a run
+        # owing every FOV (n_fovs=None) qualifies. Everything else keeps the OME-Zarr plate.
+        # An explicit out_dir (the GUI's chosen folder, the CLI's --out) is THE destination for
+        # either writer; beside-the-source is only the default.
         acq_dst = _acq_output.acquisition_format_dst(reader, operator) if n_fovs is None else None
         if acq_dst is not None:
             manifest = _acq_output.write_acquisition_planes(
-                reader, operator, acq_dst, regions=regions, operator_kwargs=operator_kwargs,
+                reader, operator, out_dir or acq_dst, regions=regions,
+                operator_kwargs=operator_kwargs,
                 workers=workers, on_well=on_well, on_error=_on_error, stop=stop)
         else:
             manifest = squidxplorer.write_plate(
