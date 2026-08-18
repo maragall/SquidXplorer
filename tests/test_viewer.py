@@ -489,6 +489,8 @@ def test_ingest_non_wellplate_region_opens_as_a_slide_carrier(qapp, tmp_path):
 
 def test_run_operator_persists_via_write_plate(qapp, squid_dataset, monkeypatch, tmp_path):
     # run_operator's SAVE path drives write_plate with the selected operator and must not also write the uncompressed per-TIFF copy (tiff=False) — that would double disk use.
+    # keepz on purpose: a z-collapsing intensity operator (mip) now saves acquisition-format
+    # beside the source (tests/test_acq_output.py); a keeps-z result still owes write_plate.
     import squidxplorer
     captured = {}
 
@@ -504,10 +506,10 @@ def test_run_operator_persists_via_write_plate(qapp, squid_dataset, monkeypatch,
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
-    win.run_operator("mip", out_parent=str(tmp_path))
+    win.run_operator("keepz", out_parent=str(tmp_path))
     _drain_until(qapp, lambda: "operator" in captured)
-    assert captured["operator"] == "mip"
-    assert captured["operator_kwargs"] is None      # a bare z-reducer takes no per-run parameters
+    assert captured["operator"] == "keepz"
+    assert captured["operator_kwargs"] is None      # a bare plane-op takes no per-run parameters
     assert captured["tiff"] is False                     # never the uncompressed TIFF duplicate
     assert captured["out_dir"].endswith(".hcs")          # persisted next to the acquisition
     win._stop_worker(); win.close()
@@ -769,13 +771,14 @@ def test_selection_expands_to_region_fov_pairs(qapp, squid_dataset):
 
 def test_run_operator_on_selection_only_processes_selected(qapp, squid_dataset,
                                                            monkeypatch, tmp_path):
-    import squidxplorer
+    # mip saves acquisition-format now, so the selection must reach THAT writer's regions=.
+    from squidxplorer import _acq_output
     captured = {}
 
-    def fake_write_plate(reader, out_dir, **kw):
+    def fake_write_acquisition_planes(reader, operator, dst, **kw):
         captured.update(regions=kw.get("regions"))
-        return {"plate": str(out_dir), "levels": 1}
-    monkeypatch.setattr(squidxplorer, "write_plate", fake_write_plate)
+        return {"path": str(dst), "n_fields_written": 1, "stopped": False}
+    monkeypatch.setattr(_acq_output, "write_acquisition_planes", fake_write_acquisition_planes)
 
     root, _ = squid_dataset                       # B2, B3
     win = V.PlateWindow(None)
@@ -1271,9 +1274,11 @@ def test_a_finished_save_run_leaves_no_incomplete_marker(qapp, squid_dataset, tm
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
-    win.run_operator("mip", out_parent=str(tmp_path), regions=["B2", "B3"], save=True)
+    # keepz: it still writes the OME-Zarr plate whose marker this asserts (mip saves acquisition-format)
+    win.run_operator("keepz", out_parent=str(tmp_path), regions=["B2", "B3"], save=True)
     assert _drain_until(qapp, lambda: not win._busy(), timeout=90)
     out = tmp_path / f"{win._acq_name}.hcs"
+    assert (out / "plate.ome.zarr").is_dir()
     assert incomplete_reason(out) is None, "a completed plate must not be flagged incomplete"
     win.close()
 
@@ -1286,7 +1291,8 @@ def test_open_computed_names_a_well_that_cannot_read_its_own_image_id(
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
-    win.run_operator("mip", out_parent=str(tmp_path), regions=["B2", "B3"], save=True)
+    # keepz: it still writes the OME-Zarr plate this test corrupts (mip saves acquisition-format)
+    win.run_operator("keepz", out_parent=str(tmp_path), regions=["B2", "B3"], save=True)
     assert _drain_until(qapp, lambda: not win._busy(), timeout=90)
     out = tmp_path / f"{win._acq_name}.hcs"
 

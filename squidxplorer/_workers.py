@@ -199,7 +199,9 @@ class _OperatorWorker(QThread):
                 return  # window closing / re-opening; drop out cleanly (no final/written emit)
             self.streamEnded.emit()
             if self._save:
-                self.writtenReady.emit(str(Path(self._out_dir) / "plate.ome.zarr"))
+                # an acquisition-format save lands beside the source, not under out_dir
+                self.writtenReady.emit(result.out_path
+                                       or str(Path(self._out_dir) / "plate.ome.zarr"))
             _run_metrics.finish(result.outcome, result.detail)
             self.finished_ok.emit()
         except Exception as e:

@@ -322,10 +322,18 @@ def run(params: ProcessParameters, *, stop=None) -> dict:
     manifest["n_wells_written"] = len(progress.wells)
 
     # Each count against its own total: fields/fields and wells/wells, never mixed.
-    line = ("%s (%d/%d fields written across %d/%d wells, %d pyramid level(s))%s" % (
-        manifest["plate"], manifest["n_fields_written"], manifest["n_fields"],
-        manifest["n_wells_written"], manifest["n_wells"], manifest["levels"],
-        f"  + TIFFs at {manifest['tiff']}" if manifest["tiff"] else ""))
+    # The manifest declares its own format: a z-collapsing intensity save lands as an
+    # acquisition beside the source, everything else as the OME-Zarr plate.
+    acq_format = manifest.get("format") == "acquisition"
+    if acq_format:
+        line = ("%s (%d/%d fields written across %d/%d wells, acquisition format)" % (
+            manifest["path"], manifest["n_fields_written"], manifest["n_fields"],
+            manifest["n_wells_written"], manifest["n_wells"]))
+    else:
+        line = ("%s (%d/%d fields written across %d/%d wells, %d pyramid level(s))%s" % (
+            manifest["plate"], manifest["n_fields_written"], manifest["n_fields"],
+            manifest["n_wells_written"], manifest["n_wells"], manifest["levels"],
+            f"  + TIFFs at {manifest['tiff']}" if manifest["tiff"] else ""))
     if outcome == "ok":
         logger.info("done: %s", line)
     else:
@@ -335,7 +343,10 @@ def run(params: ProcessParameters, *, stop=None) -> dict:
                        len(skipped), ", ".join(skipped[:15]) + (" …" if len(skipped) > 15 else ""))
 
     # Odon hand-off, deliberately AFTER the plate is fully written and recorded.
-    if params.odon:
+    if params.odon and acq_format:
+        logger.warning("--odon needs an OME-Zarr plate and this run wrote acquisition format "
+                       "(%s); skipping the Odon hand-off.", manifest["path"])
+    elif params.odon:
         from squidxplorer._odon import launch_odon, write_samplesheet
 
         samplesheet = write_samplesheet(out_dir)
