@@ -171,8 +171,10 @@ def commands(uv: str, extras: Sequence[str], source: str, env_dir: Path) -> list
     cmds = []
     if not env_python(env_dir).exists():
         cmds.append([uv, "venv", "--python", ENV_PYTHON, str(env_dir)])
+    # --reinstall-package: a rerun with a newer installer must update the app even at the same
+    # version string, so updating = run the installer again, never pip surgery in the env.
     cmds.append([uv, "pip", "install", "--python", str(env_python(env_dir)),
-                 install_spec(source, extras)])
+                 "--reinstall-package", "squidxplorer", install_spec(source, extras)])
     return cmds
 
 

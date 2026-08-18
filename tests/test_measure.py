@@ -191,7 +191,7 @@ def test_human_seconds_keeps_milliseconds_below_a_second():
 
 
 def test_human_bytes_never_prints_a_bare_number_for_unknown():
-    assert human_bytes(None) == "peak unknown"
+    assert human_bytes(None) == "unknown"   # callers add the noun; "peak peak unknown" was the doubling
     assert human_bytes(2 << 30).endswith("GiB")
 
 

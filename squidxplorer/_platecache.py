@@ -272,6 +272,12 @@ class PlateCellCache:
         regions = [str(r) for r in regions]
         if not regions:
             return False
+        # Already compacted: rewriting would os.replace a page this process may hold mmapped,
+        # which Windows refuses (WinError 5).
+        index = self._pack_index()
+        if index is not None and all(str(r) in index["at"] for r in regions):
+            self.packed = True
+            return True
         cells = []
         for region in regions:
             hit = self.get(region)
