@@ -214,6 +214,10 @@ class MosaicPane(QWidget):
 
         rl.addStretch(1)
         row.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        #: Exposed so the window can fold this strip into its collapsible operators box
+        #: (UI feedback 2026-08-17: "Move to controls window") — the detect trigger is an
+        #: operator control, and the canvas keeps the pixels.
+        self.detect_row = row
         lay.addWidget(row)
         apply_ndisplay_tooltip(btn)      # a tooltip only: this stays NAPARI's 3D button
         self.ndisplay_button = btn
@@ -502,6 +506,29 @@ def make_pane(readout: Optional[Callable[[str], None]] = None, *, show_docks: bo
     ok, why = gl_available()
     if not ok:
         return None, "unavailable", f"napari needs OpenGL, and {why}. No mosaic can be drawn here."
+
+    # napari's TOASTS GO TO THE LOGGER (UI feedback 2026-08-17: "Move to logger"): the in-canvas
+    # overlay ("Inconsistent units across layers…") covers pixels and vanishes; the log keeps it.
+    # Process-wide and idempotent; a napari that moved these settings degrades to the toasts.
+    try:
+        import logging
+
+        from squidxplorer._logpane import get_logger
+        from napari.settings import get_settings
+        from napari.utils.notifications import (
+            notification_manager, NotificationSeverity)
+
+        get_settings().application.gui_notification_level = NotificationSeverity.NONE
+
+        def _to_log(notification, _log=get_logger("napari")):
+            _log.log(logging.WARNING if str(notification.severity) in ("warning", "error")
+                     else logging.INFO, "%s", notification.message)
+
+        if _to_log.__code__ not in {getattr(cb, "__code__", None)
+                                    for cb in notification_manager.callbacks}:
+            notification_manager.callbacks.append(_to_log)
+    except Exception as exc:                     # noqa: BLE001 - napari moved it: toasts remain
+        get_logger("napari_pane").debug("could not route napari toasts to the log: %s", exc)
 
     pane = MosaicPane(show_docks=show_docks)
     if pane.ok:

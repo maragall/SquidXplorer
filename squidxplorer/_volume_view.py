@@ -193,9 +193,14 @@ def open_roi_3d(win, region: str, roi_bbox: tuple) -> None:
                    f"operator layer is the fused preview at its own decimation")
         voxels = (f"Voxels at {spy:.3f} x {spx:.3f} um/px, read off the '{source}' "
                   f"layer{coarser}.")
-    win._say(f"3D in-window: '{source}', {(r1 - r0)}x{(c1 - c0)} px ROI, {nz} z, "
-             f"{len(names)} channel(s), {n} texture{'' if n == 1 else 's'}. {voxels} "
-             f"{_bricks.ceiling_line(max_tex, px, measured=True)}")
+    # TO THE LOG, not the banner (UI feedback 2026-08-17: "Post in log"): this is a paragraph of
+    # GPU bookkeeping, and as a red banner it read as an error over a working volume.
+    from squidxplorer._logpane import get_logger
+
+    get_logger("volume").info(
+        "view %s: 3D in-window: '%s', %sx%s px ROI, %s z, %s channel(s), %s texture%s. %s %s",
+        getattr(win, "window_id", "?"), source, r1 - r0, c1 - c0, nz, len(names), n,
+        "" if n == 1 else "s", voxels, _bricks.ceiling_line(max_tex, px, measured=True))
 
 
 def volume_source(win, window: tuple):
