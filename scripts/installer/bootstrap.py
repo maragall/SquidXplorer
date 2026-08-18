@@ -123,13 +123,18 @@ def install_spec(source: str, extras: Sequence[str]) -> str:
 #: 2026-08-16, first customer install on the Katana rig: Ubuntu 22.04's system python is 3.10.12,
 #: the wheel requires >=3.11, and dependency resolution died on the very first run. With the pin,
 #: uv DOWNLOADS a self-contained managed CPython when the machine has none (or the wrong one), so
-#: the installer works on a machine with no Python at all — which is the one-file promise. 3.12
-#: exactly, not "newest": every wheel this app pulls (PyQt6, napari, cupy) is proven there, and a
-#: brand-new Python whose wheels lag would fail the same way 3.10 did, from the other side.
-ENV_PYTHON = "3.12"
-
-#: The floor an EXISTING env must satisfy to be reused; squidxplorer's own requires-python.
-_ENV_PYTHON_FLOOR = (3, 11)
+#: the installer works on a machine with no Python at all — which is the one-file promise.
+#:
+#: 3.11 EXACTLY, and the number is chosen by the WHEELS, not by newness: it is the newest Python
+#: on which every pack's whole dependency closure is wheels-only. Measured failure, 2026-08-18,
+#: second customer install (Windows CUDA rig): under 3.12 the decon pack pulled psfmodels 0.3.3,
+#: whose wheels top out at cp311 (checked on PyPI: cp311 win+linux exist, no cp312 anywhere), so
+#: uv built its C extension from source and died on "Microsoft Visual C++ 14.0 or greater is
+#: required" — on a machine that must need NO compiler. CI's runners have MSVC/gcc, which is why
+#: the install-only decon test stayed green; the wheels-only guard in the workflow now fails on
+#: any silently-compiled sdist. Raise this only when psfmodels (or its successor in petakit's
+#: dependencies) ships wheels for the newer Python.
+ENV_PYTHON = "3.11"
 
 
 def stale_env(env_dir: Path) -> Optional[str]:
@@ -139,6 +144,12 @@ def stale_env(env_dir: Path) -> Optional[str]:
     once is broken FOREVER: the Katana rig's 3.10 env would have failed every future install of
     a fixed installer identically. Asking the env's own interpreter is the one honest probe —
     the directory name says nothing about what built it.
+
+    EXACT-MINOR match with :data:`ENV_PYTHON`, not a floor. A 3.12 env (built by the one-day
+    window when that was the pin) satisfies squidxplorer's own requires-python, but adding the
+    decon pack to it later would source-build psfmodels all over again — the env's interpreter
+    decides which wheels exist, so one installer version means one interpreter, recreated on
+    mismatch rather than left as a per-machine wheel lottery.
     """
     py = env_python(env_dir)
     if not py.exists():
@@ -147,12 +158,11 @@ def stale_env(env_dir: Path) -> Optional[str]:
         out = subprocess.run(
             [str(py), "-c", "import sys; print('%d.%d' % sys.version_info[:2])"],
             capture_output=True, text=True, timeout=60, check=True).stdout.strip()
-        major, minor = (int(v) for v in out.split("."))
-    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        int(out.split(".")[0]), int(out.split(".")[1])
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError) as exc:
         return f"its interpreter would not answer ({type(exc).__name__})"
-    if (major, minor) < _ENV_PYTHON_FLOOR:
-        floor = ".".join(str(v) for v in _ENV_PYTHON_FLOOR)
-        return f"its Python is {out} and squidxplorer needs >= {floor}"
+    if out != ENV_PYTHON:
+        return f"its Python is {out} and this installer builds envs with {ENV_PYTHON}"
     return None
 
 

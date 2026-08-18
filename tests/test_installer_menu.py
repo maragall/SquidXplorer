@@ -176,12 +176,22 @@ def test_a_stale_old_python_env_is_named_not_reused(tmp_path):
     """The venv step is skipped whenever the env exists, so an env built wrong once would fail
     every future install identically — the guard names it so _run can recreate it."""
     reason = bootstrap.stale_env(_fake_env(tmp_path, "3.10"))
-    assert reason is not None and "3.10" in reason and "3.11" in reason
+    assert reason is not None and "3.10" in reason and bootstrap.ENV_PYTHON in reason
 
 
 @pytest.mark.skipif(os.name != "posix", reason="the shim interpreter is a shell script")
-def test_a_current_env_is_reused(tmp_path):
-    assert bootstrap.stale_env(_fake_env(tmp_path, "3.12")) is None
+def test_a_matching_env_is_reused(tmp_path):
+    assert bootstrap.stale_env(_fake_env(tmp_path, bootstrap.ENV_PYTHON)) is None
+
+
+@pytest.mark.skipif(os.name != "posix", reason="the shim interpreter is a shell script")
+def test_a_NEWER_python_env_is_also_recreated(tmp_path):
+    """Exact-minor match, not a floor: a 3.12 env satisfies requires-python, but psfmodels has
+    no cp312 wheel, so adding the decon pack to it later would source-build on a machine with no
+    compiler — the interpreter decides which wheels exist, so one installer means one
+    interpreter."""
+    reason = bootstrap.stale_env(_fake_env(tmp_path, "3.12"))
+    assert reason is not None and "3.12" in reason and bootstrap.ENV_PYTHON in reason
 
 
 def test_an_absent_env_is_not_stale(tmp_path):

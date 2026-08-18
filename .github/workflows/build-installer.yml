@@ -76,10 +76,21 @@ jobs:
       - name: Real install (customer default packs) and import check
         shell: bash
         run: |
-          dist/SquidXplorer-Setup* --env envtest --extras gui,stitch
+          dist/SquidXplorer-Setup* --env envtest --extras gui,stitch 2>&1 | tee install.log
           if [ "$RUNNER_OS" = "Windows" ]; then py=envtest/Scripts/python.exe; else py=envtest/bin/python; fi
           "$py" -c "import squidxplorer; print('import ok:', len(squidxplorer.runnable_operators()), 'operators registered')"
           "$py" -c "import qtpy; import tilefusion; print('gui + stitch packs import ok')"
+          # WHEELS-ONLY GUARD. Every runner carries MSVC/gcc, so a dependency that quietly
+          # compiles from source here dies on a customer machine with no compiler — measured
+          # 2026-08-18: psfmodels (no cp312 wheel) built fine in CI and killed the Windows rig's
+          # install with "Microsoft Visual C++ 14.0 or greater is required". Only our own two
+          # SHA-pinned tarballs (pure-python builds, no compiler) may be built from source.
+          compiled=$(grep "Built " install.log | grep -v -e tilefusion -e petakit || true)
+          if [ -n "$compiled" ]; then
+            echo "::error::sdist compiled on a runner; a customer machine has no compiler:"
+            echo "$compiled"
+            exit 1
+          fi
 
       # Registered is not runnable: `requires=` refuses by name when a package is missing, so a
       # green import proves nothing about the pixels. Run two REAL operators through the
@@ -116,7 +127,16 @@ jobs:
       - name: Real install of the decon pack (CUDA-rig default; install-only)
         if: runner.os != 'macOS'
         shell: bash
-        run: dist/SquidXplorer-Setup* --env envtest --extras gui,stitch,decon
+        run: |
+          dist/SquidXplorer-Setup* --env envtest --extras gui,stitch,decon 2>&1 | tee decon.log
+          # Same wheels-only guard as the main install; the decon closure (psfmodels, cupy) is
+          # exactly where it first failed.
+          compiled=$(grep "Built " decon.log | grep -v -e tilefusion -e petakit || true)
+          if [ -n "$compiled" ]; then
+            echo "::error::sdist compiled on a runner; a customer machine has no compiler:"
+            echo "$compiled"
+            exit 1
+          fi
 
       - name: Package as AppImage (Linux)
         if: runner.os == 'Linux'
