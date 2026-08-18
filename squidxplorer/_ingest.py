@@ -52,7 +52,9 @@ def ingest(win, path: str) -> None:
     win._readout.setText("scanning acquisition …")
     QApplication.processEvents()
     try:
-        reader = open_reader(str(p))
+        # pad_partial: the VIEWER explores a stopped run at its planned final state (unwritten
+        # slots read black); the engine/CLI open un-padded so their stores stay honest.
+        reader = open_reader(str(p), pad_partial=True)
         meta = reader.metadata
     except Exception as e:   # not a Squid acquisition / unreadable -> report, don't crash the app
         win._readout.setText(f"not a readable Squid acquisition: {e}")
