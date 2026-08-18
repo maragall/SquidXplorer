@@ -34,8 +34,10 @@ class DispatchResult:
     stopped: bool
     #: Regions where at least one field raised and was skipped, as strings.
     skipped_regions: frozenset
-    #: ``write_plate``'s manifest on the save branch; None on a preview.
+    #: The save branch's manifest (``write_plate``'s or the acquisition writer's); None on a preview.
     manifest: Optional[dict]
+    #: Where the save landed on disk, off the manifest; None on a preview.
+    out_path: Optional[str] = None
 
 
 def run_operator_once(reader, *, operator: str, save: bool, owed: int, out_dir=None,
@@ -71,10 +73,22 @@ def run_operator_once(reader, *, operator: str, save: bool, owed: int, out_dir=N
 
     manifest: Optional[dict] = None
     if save:
-        manifest = squidxplorer.write_plate(
-            reader, out_dir, operator=operator, n_fovs=n_fovs, workers=workers, tiff=tiff,
-            on_well=on_well, stop=stop, on_error=_on_error, regions=regions,
-            operator_kwargs=operator_kwargs)
+        from squidxplorer import _acq_output
+
+        # Declaration-driven writer choice: a per-FOV, z-collapsing, intensity operator over an
+        # on-disk acquisition saves in the acquisition's own format, full resolution, beside the
+        # source; only a run owing every FOV (n_fovs=None) qualifies. Everything else keeps the
+        # OME-Zarr plate.
+        acq_dst = _acq_output.acquisition_format_dst(reader, operator) if n_fovs is None else None
+        if acq_dst is not None:
+            manifest = _acq_output.write_acquisition_planes(
+                reader, operator, acq_dst, regions=regions, operator_kwargs=operator_kwargs,
+                workers=workers, on_well=on_well, on_error=_on_error, stop=stop)
+        else:
+            manifest = squidxplorer.write_plate(
+                reader, out_dir, operator=operator, n_fovs=n_fovs, workers=workers, tiff=tiff,
+                on_well=on_well, stop=stop, on_error=_on_error, regions=regions,
+                operator_kwargs=operator_kwargs)
         landed = int(manifest.get("n_fields_written") or 0)
         stopped = bool(manifest.get("stopped"))
     else:
@@ -98,5 +112,7 @@ def run_operator_once(reader, *, operator: str, save: bool, owed: int, out_dir=N
     if not stopped and stop is not None and stop():
         stopped = True                  # requested between the last field and here
     outcome, detail = verdict(landed, owed, len(skipped_regions), stopped)
+    out_path = (manifest or {}).get("path") or (manifest or {}).get("plate")
     return DispatchResult(outcome=outcome, detail=detail, landed=landed, stopped=stopped,
-                          skipped_regions=frozenset(skipped_regions), manifest=manifest)
+                          skipped_regions=frozenset(skipped_regions), manifest=manifest,
+                          out_path=str(out_path) if out_path else None)

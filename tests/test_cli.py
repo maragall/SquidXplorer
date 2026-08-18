@@ -292,7 +292,8 @@ def test_run_reports_every_well_as_it_lands(squid_dataset, tmp_path, caplog):
 
 def _summary_line(caplog) -> str:
     """The one line ``run()`` ends on — the ``done:`` / ``PARTIAL`` / ``STOPPED`` verdict."""
-    lines = [r.getMessage() for r in caplog.records if "pyramid level(s)" in r.getMessage()]
+    # both formats' lines carry it: "... pyramid level(s)" and "... acquisition format"
+    lines = [r.getMessage() for r in caplog.records if "fields written across" in r.getMessage()]
     assert len(lines) == 1, f"expected exactly one summary line, got {lines}"
     return lines[0]
 
