@@ -135,6 +135,10 @@ gui = [
     # not certify the newer version. Whoever first installs 0.8 should run the suite before
     # trusting it.
     "napari>=0.7,<0.9",
+    # vispy's C fast path. Without it every launch logs "No OpenGL_accelerate module loaded" and
+    # texture uploads run in pure Python — present in the Windows rig's 80 s first-paint log
+    # (2026-08-18). A compiled wheel; the CI wheels-only guard proves it ships as one.
+    "pyopengl-accelerate>=3.1.7",
     "psutil>=5.9",
     # The movie export is a window feature, so the desktop app always has its encoder. Declared
     # by reference rather than duplicated: two copies of a version range drift.

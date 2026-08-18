@@ -264,13 +264,22 @@ def _assemble_metadata(*, regions, fovs_per_region, fov_positions_um, channels, 
     })
 
 
-def _parse_fov_positions_um(root, fovs_per_region: dict) -> tuple:
+def _parse_fov_positions_um(root, fovs_per_region: dict, *, prefer_planned: bool = False) -> tuple:
     """Parse ``coordinates.csv`` into ``({(region, fov): (x_um, y_um)}, mismatched)``, in micrometres.
 
     Positions are de-duplicated per region, then cross-checked against the filename-derived
     FOV count; regions that fail land in ``mismatched`` instead of the positions dict.
+
+    ``prefer_planned`` (a PADDED stopped run): the executed ``0/coordinates.csv`` covers only the
+    FOVs written before the stop, so cross-checked against the padded grid it loses placement for
+    EVERYTHING — measured on the 452-planned/22-written color set, whose mosaic collapsed to one
+    tile. The root (planned) csv covers every planned FOV, which is exactly the grid a padded run
+    declares.
     """
-    path, source = _coords_path(root)
+    if prefer_planned and (Path(root) / _COORDS_NAME).exists():
+        path, source = Path(root) / _COORDS_NAME, COORDS_PLANNED
+    else:
+        path, source = _coords_path(root)
     if path is None:
         return {}, {}
     if source == COORDS_PLANNED:
@@ -398,10 +407,11 @@ def load_fov_positions_um(root, fovs_per_region: dict) -> dict:
     return positions
 
 
-def _fov_positions_um_or_empty(root, fovs_per_region: dict) -> dict:
+def _fov_positions_um_or_empty(root, fovs_per_region: dict, *, prefer_planned: bool = False) -> dict:
     """``load_fov_positions_um`` degraded per region: failed regions warn and lose placement only."""
     try:
-        positions, mismatched = _parse_fov_positions_um(root, fovs_per_region)
+        positions, mismatched = _parse_fov_positions_um(root, fovs_per_region,
+                                                        prefer_planned=prefer_planned)
     except ValueError as e:
         warnings.warn(
             f"{_COORDS_NAME} is unusable ({e}) — continuing WITHOUT stage positions: the "
@@ -751,7 +761,10 @@ class SquidReader:
         self._meta = _assemble_metadata(
             regions=regions,
             fovs_per_region=fovs_per_region,
-            fov_positions_um=_fov_positions_um_or_empty(self._path, fovs_per_region),
+            # A padded grid is the PLAN's grid, so its positions must come from the PLAN's csv:
+            # the executed one only covers the written FOVs and would fail the cross-check.
+            fov_positions_um=_fov_positions_um_or_empty(self._path, fovs_per_region,
+                                                        prefer_planned=bool(padded)),
             channels=resolved,
             n_z=n_z,
             z_levels=z_sorted,
