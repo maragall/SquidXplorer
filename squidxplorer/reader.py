@@ -27,6 +27,25 @@ from squidxplorer.contract.reader import SquidAcquisitionReader  # noqa: F401 (r
 # region has no underscore; fov and z are ints; channel is the remainder (may contain _ and -).
 _STEM_RE = re.compile(r"^(?P<region>[^_]+)_(?P<fov>\d+)_(?P<z>\d+)_(?P<channel>.+)$")
 _TIFF_SUFFIXES = (".tiff", ".tif")
+#: Squid's individual-image writer picks the extension by DTYPE (utils_acquisition.
+#: get_image_filepath): uint16 -> .tiff, everything else -> Acquisition.IMAGE_FORMAT — which is
+#: how the color-camera path (uint8, sometimes (Y, X, 3) RGB) lands on disk as .bmp/.png.
+_PLANE_SUFFIXES = _TIFF_SUFFIXES + (".bmp", ".png")
+#: A color plane is served as three grayscale channels tinted pure R/G/B: additive blending
+#: reconstructs the exact original color on screen, and every operator/fuser keeps receiving the
+#: 2-D planes it was written for. The suffix is the reader's own vocabulary, appended to the
+#: filename channel.
+_RGB_COMPONENTS = ((" (R)", 0, "#FF0000"), (" (G)", 1, "#00FF00"), (" (B)", 2, "#0000FF"))
+
+
+def _decode_plane_file(path: Path):
+    """Decode one plane file by its format: tifffile for TIFF, Pillow (a core dep) otherwise."""
+    if path.suffix.lower() in _TIFF_SUFFIXES:
+        return tifffile.imread(path)
+    from PIL import Image
+
+    with Image.open(path) as img:
+        return np.asarray(img)
 
 # MULTI_PAGE_TIFF stems; fov zero-padding is a deployment setting, so the width is parsed.
 _STACK_STEM_RE = re.compile(r"^(?P<region>[^_]+)_(?P<fov>\d+)_stack$")
@@ -68,12 +87,15 @@ class _TiffHandles:
             return _validate_plane(np.asarray(tif.pages[int(index)].asarray()), path)
 
 
-def _validate_plane(arr, path: Path):
-    """Guard a decoded plane: 2D grayscale, dtype uint8/uint16. Returns arr unchanged."""
-    if arr.ndim != 2:
+def _validate_plane(arr, path: Path, allow_rgb: bool = False):
+    """Guard a decoded plane: 2D grayscale (or, where the caller supports it, (Y, X, 3/4) color),
+    dtype uint8/uint16. Returns arr unchanged."""
+    is_color = arr.ndim == 3 and arr.shape[-1] in (3, 4)
+    if not (arr.ndim == 2 or (allow_rgb and is_color)):
         raise ValueError(
-            f"{path.name} is not a 2D grayscale plane (shape {arr.shape}); "
-            "color/RGB (brightfield) channels are not supported (deferred)."
+            f"{path.name} is not a 2D grayscale plane (shape {arr.shape})"
+            + ("." if allow_rgb else "; color planes are served only by the individual-image "
+               "reader, which splits them into R/G/B channels.")
         )
     if arr.dtype not in _SUPPORTED_DTYPES:
         raise ValueError(
@@ -395,7 +417,7 @@ def _classify_tiff_folder(folder: Path, entries: "Optional[list]" = None
     individual = stacks = 0
     other: list = []
     for f in entries:
-        if not f.is_file() or f.suffix.lower() not in _TIFF_SUFFIXES:
+        if not f.is_file() or f.suffix.lower() not in _PLANE_SUFFIXES:
             continue
         if _STEM_RE.match(f.stem):
             individual += 1
@@ -497,6 +519,29 @@ def _find_zarr_store(path: Path):
     )
 
 
+def _expand_rgb_channels(resolved: list, rgb_bases: "set[str]") -> list:
+    """Replace each color channel's entry with three R/G/B component entries, in place order.
+
+    The component colors are pure primaries ON PURPOSE: additively blended at equal windows they
+    reconstruct the file's exact color, so "supporting color" costs no second render path — the
+    display, the fusers and the operators all keep working on 2-D grayscale planes. The channel
+    YAML's own display_color (a single hex for the whole camera) is deliberately not used for the
+    components; one tint cannot carry three primaries.
+    """
+    out = []
+    for entry in resolved:
+        if entry["name"] not in rgb_bases:
+            out.append(entry)
+            continue
+        for suffix, _idx, color in _RGB_COMPONENTS:
+            e = dict(entry)
+            e["name"] = entry["name"] + suffix
+            e["display_name"] = str(entry.get("display_name") or entry["name"]) + suffix
+            e["display_color"] = color
+            out.append(e)
+    return out
+
+
 class SquidReader:
     """Lazy reader over a Squid individual-TIFF acquisition folder."""
 
@@ -505,6 +550,8 @@ class SquidReader:
         self._time_folders: Optional[list[Path]] = None
         self._index: Optional[dict] = None
         self._meta: Optional[dict] = None
+        #: Filename channels whose planes are (Y, X, 3) color; set by ``metadata``.
+        self._rgb_bases: set[str] = set()
         #: ``(folder, entries)`` from a listing the caller already paid for; consumed once.
         self._scanned = _scanned
 
@@ -537,7 +584,7 @@ class SquidReader:
         index: dict = {}
         skipped: list = []
         for f in entries:
-            if f.suffix.lower() not in _TIFF_SUFFIXES:
+            if f.suffix.lower() not in _PLANE_SUFFIXES:
                 continue
             m = _STEM_RE.match(f.stem)
             if m:
@@ -591,33 +638,74 @@ class SquidReader:
         _warn_recorded_mismatch(acq, n_z=n_z, z_source="distinct z levels in filenames", n_t=n_t)
 
         # Frame shape/dtype come from a real frame; ``min`` keeps the sampled plane reproducible.
-        sample_key = min(index)
-        sample_path = self._resolve_file(time_folders[0], sample_key, index[sample_key])
-        sample = _validate_plane(tifffile.imread(sample_path), sample_path)
+        # ONE sample PER CHANNEL, because color-ness is per channel: Squid's color camera writes
+        # (Y, X, 3) uint8 .bmp/.png beside mono uint16 .tiff fluorescence in one acquisition.
+        sample = None
+        rgb_bases: set[str] = set()
+        for ch in sorted(channels):
+            ch_key = min(k for k in index if k[3] == ch)
+            ch_path = self._resolve_file(time_folders[0], ch_key, index[ch_key])
+            ch_sample = _validate_plane(_decode_plane_file(ch_path), ch_path, allow_rgb=True)
+            if ch_sample.ndim == 3:
+                rgb_bases.add(ch)
+            if sample is None:
+                sample = ch_sample
+            elif ch_sample.dtype != sample.dtype:
+                raise ValueError(
+                    f"{self._path}: channels disagree about dtype ({sample.dtype} vs "
+                    f"{ch_sample.dtype} in {ch_path.name}). One acquisition, one dtype — a mixed "
+                    "set cannot be composited or windowed as one; refused rather than upcast."
+                )
+        self._rgb_bases = rgb_bases
+
+        resolved = resolve_channels(sorted(channels), load_channel_yaml(self._path))
+        if rgb_bases:
+            resolved = _expand_rgb_channels(resolved, rgb_bases)
 
         fovs_per_region = {r: sorted(fovs[r]) for r in regions}
         self._meta = _assemble_metadata(
             regions=regions,
             fovs_per_region=fovs_per_region,
             fov_positions_um=_fov_positions_um_or_empty(self._path, fovs_per_region),
-            channels=resolve_channels(sorted(channels), load_channel_yaml(self._path)),
+            channels=resolved,
             n_z=n_z,
             z_levels=z_sorted,
             dz_um=acq["dz_um"],
             pixel_size_um=acq["pixel_size_um"],
             wellplate_format=acq["wellplate_format"],
-            frame_shape=tuple(sample.shape),
+            frame_shape=tuple(sample.shape[:2]),
             dtype=sample.dtype,
             n_t=n_t,
         )
         return self._meta
 
+    def _split_rgb_channel(self, channel: str):
+        """``(file_channel, component_index)`` for a virtual R/G/B channel, else ``(channel, None)``.
+
+        Answered from the INDEX alone — never by forcing ``metadata`` — so ``read`` keeps its
+        one-file laziness. A filename channel that literally ends in the suffix wins over the
+        virtual reading, because it exists on disk and the virtual one is our own vocabulary.
+        """
+        index = self._build_index()
+        if any(k[3] == channel for k in index):
+            return channel, None
+        for suffix, idx, _color in _RGB_COMPONENTS:
+            base = channel[: -len(suffix)] if channel.endswith(suffix) else None
+            if base and any(k[3] == base for k in index):
+                return base, idx
+        return channel, None
+
     # -- read -------------------------------------------------------------
     def read(self, region, fov, channel, z_level, time_point=0):
-        """Return one plane as a 2D array in its native dtype. Lazy: reads exactly one file."""
+        """Return one plane as a 2D array in its native dtype. Lazy: reads exactly one file.
+
+        A virtual R/G/B channel of a color plane decodes its base file and returns one component
+        — still a 2-D grayscale plane, which is the reader contract every consumer holds.
+        """
+        base, component = self._split_rgb_channel(str(channel))
         index = self._build_index()
         time_folders = self._discover_time_folders()
-        key = (str(region), int(fov), int(z_level), str(channel))
+        key = (str(region), int(fov), int(z_level), base)
         if key not in index:
             raise KeyError(
                 f"No such plane region={region!r} fov={fov} channel={channel!r} z={z_level}. "
@@ -628,13 +716,21 @@ class SquidReader:
         if not 0 <= time_point < len(time_folders):
             raise IndexError(f"t={time_point} out of range (n_t={len(time_folders)}).")
         path = self._resolve_file(time_folders[time_point], key, index[key])
-        return _validate_plane(tifffile.imread(path), path)
+        arr = _validate_plane(_decode_plane_file(path), path, allow_rgb=component is not None)
+        if component is not None:
+            if arr.ndim != 3:
+                raise ValueError(
+                    f"{path.name} was expected to be a color plane (channel {channel!r}) but "
+                    f"decoded with shape {arr.shape}; the acquisition is inconsistent.")
+            arr = np.ascontiguousarray(arr[..., component])
+        return arr
 
     def plane_path(self, region, fov, channel, z_level, time_point=0) -> Path:
-        """Path to one raw plane's TIFF on disk (no decode)."""
+        """Path to one raw plane's file on disk (no decode); an R/G/B channel names its base file."""
+        base, _component = self._split_rgb_channel(str(channel))
         index = self._build_index()
         time_folders = self._discover_time_folders()
-        key = (str(region), int(fov), int(z_level), str(channel))
+        key = (str(region), int(fov), int(z_level), base)
         if key not in index:
             raise KeyError(f"No such plane region={region!r} fov={fov} channel={channel!r} z={z_level}.")
         time_point = int(time_point)
@@ -654,11 +750,11 @@ class SquidReader:
         candidate = folder / f"{region}_{fov}_{z}_{channel}{suffix}"
         if candidate.exists():
             return candidate
-        for alt in _TIFF_SUFFIXES:
+        for alt in _PLANE_SUFFIXES:
             other = folder / f"{region}_{fov}_{z}_{channel}{alt}"
             if other.exists():
                 return other
-        return candidate  # let tifffile raise a clear FileNotFoundError
+        return candidate  # let the decoder raise a clear FileNotFoundError
 
 
 def _page_json(page, path: Path, page_index: int) -> dict:
