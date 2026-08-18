@@ -74,7 +74,7 @@ def rss_bytes() -> Optional[int]:
 
 def human_bytes(n: Optional[int]) -> str:
     if n is None:
-        return "peak unknown"
+        return "unknown"    # callers add their own noun; "peak peak unknown" was this doubling
     v = float(n)
     for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
         if v < 1024.0 or unit == "TiB":

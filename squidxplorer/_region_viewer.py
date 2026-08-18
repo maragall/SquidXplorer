@@ -501,14 +501,6 @@ class RegionViewer(QMainWindow):
         except Exception as exc:                          # noqa: BLE001 - a magnifier, never fatal
             log.debug("view %s could not wire the canvas loupe: %s", self.window_id, exc)
 
-        # THE DETECT STRIP LIVES IN THE OPERATORS BOX (UI feedback 2026-08-17), not as a permanent
-        # bar over the canvas: it is an operator trigger, and it collapses with the rest of them.
-        try:
-            detect_row = getattr(pane, "detect_row", None)
-            if detect_row is not None and getattr(self, "_op_box_layout", None) is not None:
-                self._op_box_layout.addWidget(detect_row)
-        except Exception as exc:                          # noqa: BLE001 - layout, never fatal
-            log.debug("view %s could not fold the detect strip in: %s", self.window_id, exc)
         try:
             ch_combo = getattr(pane, "detect_channel", None)
             if ch_combo is not None and ch_combo.count() == 0:
@@ -709,19 +701,6 @@ class RegionViewer(QMainWindow):
                                   self._match_raw_contrast))
         sync.addStretch(1)
         ov.addLayout(sync)
-        # COLLAPSIBLE (UI feedback 2026-08-17: "Becomes collapsible widget, top right of canvas").
-        # Collapsed by default — running an operator is occasional, looking at pixels is constant —
-        # and the toggle is the one chip left standing where the box was. The pane's "Detect on"
-        # strip joins this box once the pane exists (see the wiring after make_pane), so every
-        # operator trigger lives behind the one toggle.
-        self._op_box = op_box
-        self._op_box_layout = ov
-        self._btn_operators = self._chip(
-            "⚙ operators", "Show or hide this window's operator controls — run, save, LUT "
-            "copy/paste, nuclei detection.", lambda: None, checkable=True)
-        self._btn_operators.toggled.connect(op_box.setVisible)
-        op_box.setVisible(False)
-        h.addWidget(self._btn_operators, 0)
         h.addWidget(op_box, 1)
 
         def_box, dv = self._titled_box("Defaults")

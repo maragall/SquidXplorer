@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "squidxplorer"
-version = "0.1.0"
+version = "0.2.0"
 description = "High-throughput z-stack maximum-intensity projection for Squid well-plate acquisitions"
 readme = "README.md"
 # ">=3.11", not ">=3.10", as of 2026-08-05. This was a FALSE claim and CI proved it: the `test
