@@ -332,6 +332,49 @@ def parse_coordinates_csv(text: str, fovs_per_region: dict) -> tuple:
     return positions, mismatched
 
 
+def _planned_grid(root) -> "dict[str, int]":
+    """``{region: planned_fov_count}`` from the ROOT ``coordinates.csv`` — the acquisition PLAN.
+
+    The root csv is written up front with every position the run intends to visit (the
+    per-timepoint ``0/coordinates.csv`` is the EXECUTED record and grows with the run), so it is
+    the "we know the dimensions of the final state" of the pad-partial-acquisitions design.
+    ``{}`` when there is no plan to read — padding then simply never engages.
+    """
+    import csv
+    import io
+
+    path = Path(root) / _COORDS_NAME
+    if not path.exists():
+        return {}
+    try:
+        reader = csv.DictReader(io.StringIO(path.read_text()))
+        x_col, y_col = _coord_columns(reader.fieldnames)
+        fov_col = _fov_column(reader.fieldnames)
+        counts: dict[str, int] = {}
+        seen: dict[str, set] = {}
+        for row in reader:
+            region = (row.get("region") or "").strip()
+            if not region:
+                continue
+            if fov_col is not None:
+                try:
+                    fov = int((row.get(fov_col) or "").strip())
+                except ValueError:
+                    continue
+                counts[region] = max(counts.get(region, 0), fov + 1)
+                continue
+            pair = ((row.get(x_col) or "").strip(), (row.get(y_col) or "").strip())
+            if pair in seen.setdefault(region, set()):
+                continue                     # one row per z / per t of the same position
+            seen[region].add(pair)
+            counts[region] = counts.get(region, 0) + 1
+        return counts
+    except (OSError, ValueError) as exc:
+        warnings.warn(f"{_COORDS_NAME} could not supply the acquisition plan ({exc}); "
+                      "a partial acquisition will show only the fields on disk.")
+        return {}
+
+
 def _mismatch_message(mismatched: dict) -> str:
     """The refusal text for regions whose position count disagrees with their FOV count."""
     parts = ", ".join(
@@ -428,8 +471,14 @@ def _classify_tiff_folder(folder: Path, entries: "Optional[list]" = None
     return individual, stacks, other, entries
 
 
-def open_reader(path) -> SquidAcquisitionReader:
-    """Detect the acquisition format at *path* and return a reader; unrecognised layouts raise, naming both sides."""
+def open_reader(path, *, pad_partial: bool = False) -> SquidAcquisitionReader:
+    """Detect the acquisition format at *path* and return a reader; unrecognised layouts raise, naming both sides.
+
+    ``pad_partial=True`` (the VIEWER's setting) opens a stopped-mid-run individual-image
+    acquisition at its PLANNED final state, with unwritten slots reading as zeros — see
+    ``SquidReader``. OFF by default on purpose: the engine and CLI must keep skipping missing
+    wells and marking their stores incomplete, never writing black planned fields as data.
+    """
     path = Path(path)
     if not path.is_dir():
         raise NotImplementedError(
@@ -455,7 +504,7 @@ def open_reader(path) -> SquidAcquisitionReader:
                 "stacks — split them into separate folders to read the stacks."
             )
         # Seed the reader with the listing already paid for above.
-        return SquidReader(path, _scanned=(folder, entries))
+        return SquidReader(path, _scanned=(folder, entries), pad_partial=pad_partial)
     if stacks:
         return SquidMultiPageTiffReader(path)
     raise ValueError(
@@ -545,8 +594,12 @@ def _expand_rgb_channels(resolved: list, rgb_bases: "set[str]") -> list:
 class SquidReader:
     """Lazy reader over a Squid individual-TIFF acquisition folder."""
 
-    def __init__(self, path, *, _scanned: "Optional[tuple[Path, list]]" = None) -> None:
+    def __init__(self, path, *, _scanned: "Optional[tuple[Path, list]]" = None,
+                 pad_partial: bool = False) -> None:
         self._path = Path(path)
+        #: Pad a stopped run to its planned final state (metadata grid + zeros reads). The
+        #: viewer's setting; the engine/CLI stay un-padded so their stores stay honest.
+        self._pad_partial = bool(pad_partial)
         self._time_folders: Optional[list[Path]] = None
         self._index: Optional[dict] = None
         self._meta: Optional[dict] = None
@@ -633,8 +686,40 @@ class SquidReader:
         n_z = len(z_sorted)
         n_t = len(time_folders)
 
-        # Filenames + timepoint folders are ground truth; the recorded Nz/Nt are cross-checks.
         acq = load_acquisition_metadata(self._path)
+
+        # PAD A PARTIAL ACQUISITION to its planned final state (design: "pad partial
+        # acquisitions"). Squid can be stopped mid-run, and this is a post-acquisition tool that
+        # assumes final-state input — so when the PLAN (root coordinates.csv for the FOV grid,
+        # the declared Nz/Nt for the axes) is larger than what is on disk, the metadata declares
+        # the plan and `read` serves ZEROS for any planned-but-unwritten slot. Black planes, said
+        # out loud below, never a shrunken grid that hides how much is missing.
+        planned = _planned_grid(self._path) if self._pad_partial else {}
+        padded: list[str] = []
+        for region, n_planned in planned.items():
+            have = fovs.setdefault(region, set())
+            missing = set(range(int(n_planned))) - have
+            if missing:
+                have |= missing
+                padded.append(f"{region}: {len(missing)} FOV(s)")
+        regions = sorted(fovs, key=_plate_key)
+        declared_nz = acq.get("n_z_declared") if self._pad_partial else None
+        if declared_nz and int(declared_nz) > n_z:
+            padded.append(f"z: {int(declared_nz) - n_z} plane(s)")
+            z_sorted = sorted(set(z_sorted) | set(range(int(declared_nz))))
+            n_z = len(z_sorted)
+        declared_nt = acq.get("n_t_declared") if self._pad_partial else None
+        if declared_nt and int(declared_nt) > n_t:
+            padded.append(f"t: {int(declared_nt) - n_t} timepoint(s)")
+            n_t = int(declared_nt)
+        if padded:
+            warnings.warn(
+                f"partial acquisition: padded to the planned final state ({'; '.join(padded)}). "
+                "Unwritten fields render BLACK — this is a stopped run being explored, not a "
+                "finished one.")
+
+        # Filenames + timepoint folders are ground truth; the recorded Nz/Nt are cross-checks
+        # (already reconciled above when the plan out-sizes the disk).
         _warn_recorded_mismatch(acq, n_z=n_z, z_source="distinct z levels in filenames", n_t=n_t)
 
         # Frame shape/dtype come from a real frame; ``min`` keeps the sampled plane reproducible.
@@ -679,6 +764,26 @@ class SquidReader:
         )
         return self._meta
 
+    def _padded_zeros(self, region, fov, channel, z_level, time_point):
+        """A zeros plane when the slot is inside the declared grid but has no file, else None.
+
+        ONE zeros array, shared: readers of a stopped run touch many empty slots, and the plane
+        is read-only by the reader contract.
+        """
+        if not self._pad_partial:
+            return None
+        meta = self.metadata
+        if (region not in meta["regions"]
+                or fov not in meta["fovs_per_region"].get(region, ())
+                or z_level not in meta["z_levels"]
+                or not 0 <= time_point < meta["n_t"]
+                or not any(c["name"] == channel for c in meta["channels"])):
+            return None
+        zeros = getattr(self, "_zeros_plane", None)
+        if zeros is None:
+            zeros = self._zeros_plane = np.zeros(meta["frame_shape"], dtype=meta["dtype"])
+        return zeros
+
     def _split_rgb_channel(self, channel: str):
         """``(file_channel, component_index)`` for a virtual R/G/B channel, else ``(channel, None)``.
 
@@ -706,13 +811,22 @@ class SquidReader:
         index = self._build_index()
         time_folders = self._discover_time_folders()
         key = (str(region), int(fov), int(z_level), base)
+        time_point = int(time_point)
+        if key not in index or time_point >= len(time_folders):
+            # A PADDED SLOT of a partial acquisition reads as ZEROS (max_intensity = 0): the
+            # metadata declares the planned final grid, so a slot inside it with no file is an
+            # unwritten field of a stopped run, not a caller mistake. Outside the grid it is a
+            # mistake and refuses exactly as before.
+            zeros = self._padded_zeros(str(region), int(fov), str(channel), int(z_level),
+                                       time_point)
+            if zeros is not None:
+                return zeros
         if key not in index:
             raise KeyError(
                 f"No such plane region={region!r} fov={fov} channel={channel!r} z={z_level}. "
                 f"Known regions={sorted({k[0] for k in index})}, "
                 f"channels={sorted({k[3] for k in index})}."
             )
-        time_point = int(time_point)
         if not 0 <= time_point < len(time_folders):
             raise IndexError(f"t={time_point} out of range (n_t={len(time_folders)}).")
         path = self._resolve_file(time_folders[time_point], key, index[key])

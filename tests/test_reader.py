@@ -176,11 +176,29 @@ def test_tif_suffix_fallback(squid_dataset):
     np.testing.assert_array_equal(got, arr)
 
 
-def test_nz_mismatch_warns(squid_dataset):
-    # acquisition.yaml is authoritative: declare nz=5 while filenames only have z in {0,1}
+def test_a_declared_nz_larger_than_the_files_PADS_as_a_stopped_run(squid_dataset):
+    # Was `test_nz_mismatch_warns`: a declared nz above the files used to be a mismatch warning.
+    # Under pad-partial-acquisitions it MEANS a stopped run — the declared plan wins and the
+    # missing planes read black, said out loud.
     root, _ = squid_dataset
     (root / "acquisition.yaml").write_text(
         "objective:\n  pixel_size_um: 0.325\nz_stack:\n  nz: 5\n  delta_z_mm: 0.0015\n"
+        "time_series:\n  nt: 1\n"
+    )
+    with pytest.warns(UserWarning, match="partial acquisition"):
+        m = open_reader(root, pad_partial=True).metadata
+    assert m["n_z"] == 5
+    # Un-padded (the CLI/engine default) the same dataset keeps the honest mismatch warning.
+    with pytest.warns(UserWarning, match="Nz"):
+        assert open_reader(root).metadata["n_z"] == 2
+
+
+def test_a_declared_nz_SMALLER_than_the_files_still_warns(squid_dataset):
+    # The other direction is not a stopped run — the files outnumber the plan, so one of the two
+    # is wrong and the cross-check must say so.
+    root, _ = squid_dataset
+    (root / "acquisition.yaml").write_text(
+        "objective:\n  pixel_size_um: 0.325\nz_stack:\n  nz: 1\n  delta_z_mm: 0.0015\n"
         "time_series:\n  nt: 1\n"
     )
     with pytest.warns(UserWarning, match="Nz"):
