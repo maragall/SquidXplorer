@@ -1658,6 +1658,12 @@ class PlateWindow(QMainWindow):
 
         return StitcherPanel(self)
 
+    def _build_register_tab(self) -> QWidget:
+        # The declared params plus the copy switch; the registered copy is the disk artifact.
+        from squidxplorer._param_panel import RegisterPanel
+
+        return RegisterPanel(self)
+
     def _build_decon_tab(self) -> QWidget:
         """The RL semi-convergence loop's controls (IMA-252 + IMA-decon-stitch-ui).
 

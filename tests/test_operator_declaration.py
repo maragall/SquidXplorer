@@ -389,10 +389,16 @@ def test_every_parameter_an_operator_DECLARES_changes_its_pixels(name):
         })
         reader = _StitchProbeReader()
 
+        from squidxplorer._engine import _resolve_operator
+
+        # correct_distortion is a call-site kwarg, off so the probe stays deterministic —
+        # passed only where the record accepts it (register solves, never fuses).
+        extra = ({"correct_distortion": False}
+                 if "correct_distortion" in _resolve_operator(name).accepts else {})
+
         def run(kwargs):
-            # correct_distortion is a call-site kwarg, off so the probe stays deterministic
             return np.asarray(bind_operator(name, kwargs)(
-                reader, "A1", [0, 1, 2, 3], correct_distortion=False))
+                reader, "A1", [0, 1, 2, 3], **extra))
     else:
         rng = np.random.default_rng(0)
         plane = np.zeros((256, 256), np.uint16)

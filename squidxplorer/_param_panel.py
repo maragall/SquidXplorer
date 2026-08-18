@@ -208,6 +208,46 @@ class GenericOperatorPanel(_Panel):
         self._launch(regions=None, save=True)
 
 
+class RegisterPanel(GenericOperatorPanel):
+    """``register``'s declared params plus the one control that is not a Param: the copy switch.
+
+    The copy switch cannot be a Param (it cannot change the preview's pixels, so the declaration
+    probe would rightly fail it); it rides the record's ``accepts`` passthrough instead. The
+    OME-Zarr save is hidden because this operator's disk artifact is the registered copy.
+    """
+
+    def __init__(self, host):
+        super().__init__(host, "register")
+        if self.save_btn is not None:
+            self.save_btn.setVisible(False)
+
+        self.copy_check = QCheckBox("write registered copy (stitched_<folder>)")
+        self.copy_check.setToolTip(
+            "Write stitched_<folder> beside the acquisition: image files hardlinked (a second "
+            "name for the same bytes — no duplication; copied in full where the filesystem "
+            "refuses links), sidecars copied, and coordinates.csv rewritten with the solved "
+            "positions. The source acquisition is never written.")
+        self.run_all_btn = QPushButton("Register the selected wells")
+        self.run_all_btn.setCursor(Qt.PointingHandCursor)
+        self.run_all_btn.setToolTip(
+            "Solve every selected well (the run selector's scope) with the parameters above. "
+            "With the copy box checked, each well's rows land in stitched_<folder> as it solves.")
+        self.run_all_btn.clicked.connect(self._run_selected)
+        at = self.v.indexOf(self.progress)
+        self.v.insertWidget(at, self.copy_check)
+        self.v.insertWidget(at + 1, self.run_all_btn)
+
+    def kwargs(self) -> dict:
+        kw = super().kwargs()
+        if self.copy_check.isChecked():
+            kw["copy"] = True
+        return kw
+
+    def _run_selected(self) -> None:
+        # regions=None is UNSCOPED: run_operator resolves it against the run selector.
+        self._launch(regions=None, save=False)
+
+
 def _build_widget(kind: Optional[str], default: Any):
     """The one place a widget kind becomes a widget. Returns ``None`` for an unknown kind."""
     if kind == "check":

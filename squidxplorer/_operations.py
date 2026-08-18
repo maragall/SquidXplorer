@@ -35,6 +35,11 @@ _OPERATIONS = (
               "Register every FOV of a well against its neighbours and fuse one seamless mosaic "
               "per well, instead of trusting the stage coordinates alone.",
               "_build_stitch_tab"),
+    Operation("register", "Register FOVs (no fusion)",
+              "Solve each well's per-FOV offsets from the overlaps without fusing or touching a "
+              "pixel, and optionally write stitched_<folder>: a hardlinked copy of the "
+              "acquisition whose coordinates.csv carries the registered positions.",
+              "_build_register_tab"),
     # NOT an operator: an export hand-off. Non-runnable because nobody registered "minerva".
     Operation("minerva", "Open in Minerva Author",
               "Export the selected FOVs to Minerva-ingestable OME-TIFFs and open Minerva Author on them.",

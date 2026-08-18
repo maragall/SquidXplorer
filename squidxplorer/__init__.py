@@ -70,7 +70,7 @@ from squidxplorer.reader import (
 )
 
 # Imported for their side effect: each module registers its operator(s).
-from squidxplorer import _background, _decon, _flatfield, _spots  # noqa: E402,F401  (registration side effect)
+from squidxplorer import _background, _decon, _flatfield, _register, _spots  # noqa: E402,F401  (registration side effect)
 from squidxplorer._background import BackgroundParams, bgsub_op, subtract_background
 from squidxplorer._decon import (
     OpticsParams,

@@ -270,7 +270,7 @@ def test_missing_pixel_size_refused(master):
 
 
 def test_default_operators_present():
-    assert available_region_operators() == ["coordinate", "stitch"]
+    assert available_region_operators() == ["coordinate", "register", "stitch"]
 
 
 def test_add_and_resolve_region_operator(master):
