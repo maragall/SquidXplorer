@@ -39,7 +39,9 @@ system without FUSE, run it with `--appimage-extract-and-run`.
 ## What the machine needs (and does not need)
 
 Nothing preinstalled: **no Python, no git, no compiler**. The installer carries its own uv, uv
-downloads a self-contained Python 3.12 into the private env, and the SHA-pinned packages
+downloads a self-contained Python 3.11 into the private env (3.11 exactly: the newest Python on
+which every pack's dependency closure is wheels-only — psfmodels tops out there), and the
+SHA-pinned packages
 (tilefusion, petakit) install from plain-HTTPS GitHub tarballs. What IS required is **network
 access** to pypi.org and github.com during the install; offline labs are not supported yet.
 
