@@ -501,6 +501,14 @@ class RegionViewer(QMainWindow):
         except Exception as exc:                          # noqa: BLE001 - a magnifier, never fatal
             log.debug("view %s could not wire the canvas loupe: %s", self.window_id, exc)
 
+        # THE DETECT STRIP LIVES IN THE OPERATORS BOX (UI feedback 2026-08-17), not as a permanent
+        # bar over the canvas: it is an operator trigger, and it collapses with the rest of them.
+        try:
+            detect_row = getattr(pane, "detect_row", None)
+            if detect_row is not None and getattr(self, "_op_box_layout", None) is not None:
+                self._op_box_layout.addWidget(detect_row)
+        except Exception as exc:                          # noqa: BLE001 - layout, never fatal
+            log.debug("view %s could not fold the detect strip in: %s", self.window_id, exc)
         try:
             ch_combo = getattr(pane, "detect_channel", None)
             if ch_combo is not None and ch_combo.count() == 0:
@@ -608,8 +616,8 @@ class RegionViewer(QMainWindow):
         self._btn_focus = self._chip("⌖ focus", "Jump the z-slider to the sharpest plane "
                                      "(Tenengrad autofocus) of this region's centre FOV.",
                                      self._focus_reference_plane)
-        self._btn_plate = self._chip("▣ plate", "Bring the plate window to the front — it ends up "
-                                     "buried under the views opened from it.", self._raise_plate)
+        # The "▣ plate" chip is GONE (UI feedback 2026-08-17): the working layout keeps the plate
+        # BESIDE the views, so "bring the plate forward" stopped being a job.
         self._btn_controls = self._chip(
             "⚙ controls", "Bring the plate window forward AND open the controls for the operator "
             "this window is showing, so its parameters (iterations, thresholds) are one click "
@@ -621,7 +629,6 @@ class RegionViewer(QMainWindow):
             "click again to cancel.", self._record_movie)
         r1.addWidget(self._btn_2d); r1.addWidget(self._btn_3d); r1.addWidget(self._btn_focus)
         r1.addWidget(self._btn_record)
-        r1.addWidget(self._btn_plate)
         r1.addStretch(1)
         self._refresh_record_chip()
         vv.addLayout(r1)
@@ -702,6 +709,19 @@ class RegionViewer(QMainWindow):
                                   self._match_raw_contrast))
         sync.addStretch(1)
         ov.addLayout(sync)
+        # COLLAPSIBLE (UI feedback 2026-08-17: "Becomes collapsible widget, top right of canvas").
+        # Collapsed by default — running an operator is occasional, looking at pixels is constant —
+        # and the toggle is the one chip left standing where the box was. The pane's "Detect on"
+        # strip joins this box once the pane exists (see the wiring after make_pane), so every
+        # operator trigger lives behind the one toggle.
+        self._op_box = op_box
+        self._op_box_layout = ov
+        self._btn_operators = self._chip(
+            "⚙ operators", "Show or hide this window's operator controls — run, save, LUT "
+            "copy/paste, nuclei detection.", lambda: None, checkable=True)
+        self._btn_operators.toggled.connect(op_box.setVisible)
+        op_box.setVisible(False)
+        h.addWidget(self._btn_operators, 0)
         h.addWidget(op_box, 1)
 
         def_box, dv = self._titled_box("Defaults")
@@ -801,11 +821,6 @@ class RegionViewer(QMainWindow):
         self._refresh_divergence()
         pretty = ", ".join(self._SETTING_LABELS.get(n, n) for n in names)
         self._say(f"reset {pretty} to what this window opened with.")
-
-    def _raise_plate(self) -> None:
-        """Bring the plate window back to the front. See ``ViewerManager.raise_plate``."""
-        if self._manager is None or not self._manager.raise_plate():
-            self._say("there is no plate window to raise from here.")
 
     def _plate(self):
         """The plate window, or None. The plate owns every operator panel; this window borrows."""
@@ -1496,6 +1511,27 @@ class RegionViewer(QMainWindow):
             btn.setEnabled(False)
             btn.setToolTip("This window has no manager, so it cannot open a child view.")
             return
+        # A STITCHED mosaic has no honest FOV boxes to draw (Julio, 2026-08-18: "stitched mosaic
+        # should not show fov boundaries"): registration moved the fields off the preview
+        # placement `mosaic_fov_bboxes_um` describes, so the boxes would sit beside the pixels
+        # they claim to name — the plausible-wrong-geometry failure. Declaration-derived
+        # (`is_region_operator`), never an operator-name comparison.
+        try:
+            from squidxplorer import is_region_operator
+            from squidxplorer._operations import operator_name
+
+            pane = self._pane
+            mosaic = getattr(pane, "mosaic", None) if pane is not None else None
+            shown = mosaic.visible_op() if mosaic is not None else None
+            if shown and is_region_operator(operator_name(str(shown))):
+                btn.setEnabled(False)
+                btn.setToolTip(
+                    "This window is showing a stitched mosaic: its fields are registered, so the "
+                    "preview FOV boxes would not sit on the pixels they name. Show the raw layer "
+                    "to walk FOVs.")
+                return
+        except Exception:                            # noqa: BLE001 - a chip verdict, never fatal
+            pass
         from squidxplorer._mosaic_source import mosaic_fov_bboxes_um
 
         region = self.current_region()
