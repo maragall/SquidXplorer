@@ -49,14 +49,27 @@ class SettleCoalescer:
         return self._last is not None
 
 
-def _colormap_for(channel_name: str):
-    """napari colormap for a channel, from Squid's palette; grey for an unrecognised channel."""
+def _acquisition_color(channel_name: str, channels) -> "str | None":
+    """The resolved ``display_color`` for *channel_name* in an acquisition's channel list."""
+    for entry in channels or ():
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("name")) == str(channel_name) \
+                or str(entry.get("display_name") or "") == str(channel_name):
+            return entry.get("display_color")
+    return None
+
+
+def _colormap_for(channel_name: str, channels=None):
+    """napari colormap for a channel: the acquisition's own resolved ``display_color`` first
+    (the reader's RGB component channels carry pure primaries there — the name palette cannot
+    know them), else Squid's name palette; grey for an unrecognised channel."""
     try:
         from napari.utils import Colormap
 
         from squidxplorer._channels import fallback_color
 
-        hex_color = fallback_color(channel_name)
+        hex_color = _acquisition_color(channel_name, channels) or fallback_color(channel_name)
         if not hex_color:
             return "gray"
         h = hex_color.lstrip("#")

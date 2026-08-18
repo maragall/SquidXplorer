@@ -121,7 +121,7 @@ def on_plane(win, region: str, channel: str, levels, bbox_um, window=None,
     pane.mosaic.add_mosaic(
         _RAW_OP, channel, add_levels,
         contrast_limits=add_window,
-        colormap=_colormap_for(channel),
+        colormap=_colormap_for(channel, (win._meta or {}).get("channels")),
         multiscale=True,
         bbox_um=add_bbox,
         z_scale_um=(win._meta or {}).get("dz_um"),
