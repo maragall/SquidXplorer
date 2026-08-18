@@ -50,13 +50,18 @@ class SettleCoalescer:
 
 
 def _acquisition_color(channel_name: str, channels) -> "str | None":
-    """The resolved ``display_color`` for *channel_name* in an acquisition's channel list."""
+    """The resolved ``display_color`` for *channel_name* in an acquisition's channel list.
+
+    Entries are ``DisplayChannel`` records in real metadata and plain dicts in older callers;
+    both answer ``.get``, so the discriminator is the protocol, never the type.
+    """
     for entry in channels or ():
-        if not isinstance(entry, dict):
+        get = getattr(entry, "get", None)
+        if get is None:
             continue
-        if str(entry.get("name")) == str(channel_name) \
-                or str(entry.get("display_name") or "") == str(channel_name):
-            return entry.get("display_color")
+        if str(get("name")) == str(channel_name) \
+                or str(get("display_name") or "") == str(channel_name):
+            return get("display_color")
     return None
 
 

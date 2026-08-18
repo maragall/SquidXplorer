@@ -115,13 +115,37 @@ def test_colormap_prefers_the_acquisitions_display_color():
     pytest.importorskip("napari")
     from squidxplorer._napari_pane import _colormap_for
 
-    channels = [{"name": "BF_LED_matrix_full (R)", "display_name": "BF LED matrix full (R)",
-                 "display_color": "#FF0000"}]
+    from squidxplorer._acquisition import DisplayChannel
+
+    # the REAL metadata type: DisplayChannel records, which duck-type .get but are not dicts
+    channels = [DisplayChannel(name="BF_LED_matrix_full (R)",
+                               display_name="BF LED matrix full (R)",
+                               display_color="#FF0000")]
     cm = _colormap_for("BF_LED_matrix_full (R)", channels)
     assert tuple(np.asarray(cm.colors)[-1][:3]) == (1.0, 0.0, 0.0)
     # matched by display_name too: results deliver whichever spelling the layer carries
     cm2 = _colormap_for("BF LED matrix full (R)", channels)
     assert tuple(np.asarray(cm2.colors)[-1][:3]) == (1.0, 0.0, 0.0)
+
+
+def test_rgb_components_seed_the_files_full_range(tmp_path):
+    """All three primaries share the FILE's own range: per-channel percentiles would tint the
+    additive reconstruction and read as 'completely dark' on brightfield."""
+    root = tmp_path / "acq"
+    rgb = np.stack([_gray(1), _gray(2), _gray(3)], axis=-1)
+    _write(root / "0", "manual_0_0_BF_LED_matrix_full.bmp", rgb)
+    _sidecars(root)
+    r = open_reader(root)
+    _ = r.metadata
+    assert r.is_rgb_component("BF_LED_matrix_full (R)")
+    assert not r.is_rgb_component("BF_LED_matrix_full")     # the on-disk base is not virtual
+
+    from squidxplorer._workers import _MosaicWorker
+
+    w = _MosaicWorker.__new__(_MosaicWorker)                # _seed_window needs no QThread state
+    w._reader, w._meta = r, r.metadata
+    assert w._seed_window("BF_LED_matrix_full (G)", None, lambda *a: (9.0, 10.0)) == (0.0, 255.0)
+    assert w._seed_window("BF_LED_matrix_full", None, lambda *a: (9.0, 10.0)) == (9.0, 10.0)
 
 
 def test_colormap_without_a_resolved_color_still_uses_the_name_palette():
