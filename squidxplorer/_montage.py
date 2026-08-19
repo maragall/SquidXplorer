@@ -192,22 +192,30 @@ def channel_tint01(channel) -> np.ndarray:
     return _hex_to_rgb01(channel["display_color"])
 
 
-def composite(store: np.ndarray, colors: np.ndarray, windows, mask=None) -> np.ndarray:
+def composite(store: np.ndarray, colors: np.ndarray, windows, mask=None, luts=None) -> np.ndarray:
     """Window each channel of a ``(C, H, W)`` stack and add it into one ``(H, W, 3)`` uint8 RGB.
 
     The single home of the window-multiply-sum loop. *windows* is one ``(lo, hi)`` per
-    channel; *mask* is a per-channel bool (None = every channel on).
+    channel; *mask* is a per-channel bool (None = every channel on). *luts* is one optional
+    per-channel colormap (an ``(N, 3)``-shaped sequence of stops): a channel carrying one maps
+    each windowed value THROUGH it instead of tinting — the brightfield/stain mode, where the
+    background belongs at white and additive-from-black would wash the cell out.
     """
     n_ch, h, w = store.shape
     if h == 0 or w == 0:
         return np.zeros((h, w, 3), np.uint8)
     colors = np.ascontiguousarray(colors[:n_ch], dtype=np.float32)
+    lut_arrs = [None] * n_ch
+    for ch in range(n_ch):
+        lut = luts[ch] if luts is not None and ch < len(luts) else None
+        if lut is not None:
+            lut_arrs[ch] = np.ascontiguousarray(np.asarray(lut, dtype=np.float32)[:, :3])
     out = np.empty((h, w, 3), np.uint8)
     n_bands = max(1, min(_composite_pool()._max_workers, (h * w) // _COMPOSITE_MIN_PX_PER_BAND))
     n_bands = min(n_bands, h)
     edges = [(i * h) // n_bands for i in range(n_bands)] + [h]
     rows = [slice(edges[i], edges[i + 1]) for i in range(n_bands)]
-    work = lambda r: _composite_band(store, colors, windows, mask, out, r)   # noqa: E731
+    work = lambda r: _composite_band(store, colors, windows, mask, lut_arrs, out, r)   # noqa: E731
     if n_bands == 1:
         work(rows[0])
     else:
@@ -216,13 +224,14 @@ def composite(store: np.ndarray, colors: np.ndarray, windows, mask=None) -> np.n
     return out
 
 
-def _composite_band(store, colors, windows, mask, out, rows: slice) -> None:
+def _composite_band(store, colors, windows, mask, lut_arrs, out, rows: slice) -> None:
     """Composite one horizontal band of rows into ``out[rows]``."""
     n_ch = store.shape[0]
     sub = store[:, rows]
     bh, bw = sub.shape[1], sub.shape[2]
     n = bh * bw
     gray = np.zeros((n_ch, n), np.float32)          # zero == "masked off contributes nothing"
+    rgb = np.zeros((n, 3), np.float32)
     lut_dtype = store.dtype
     for ch in range(n_ch):
         if mask is not None and not mask[ch]:
@@ -231,11 +240,16 @@ def _composite_band(store, colors, windows, mask, out, rows: slice) -> None:
         table = _window_lut(lut_dtype, lo, hi)
         plane = sub[ch]
         if table is None:
-            gray[ch] = _window(plane, lo, hi).reshape(-1)
+            norm = _window(plane, lo, hi).reshape(-1)
         else:
             # table[idx] beats np.take here: take carries a bounds-check path.
-            gray[ch] = table[plane.reshape(-1)]
-    rgb = gray.T @ colors                           # (n, 3) float32
+            norm = table[plane.reshape(-1)]
+        lut = lut_arrs[ch]
+        if lut is None:
+            gray[ch] = norm
+        else:                                       # per-pixel colormap, not a tint
+            rgb += lut[(norm * (lut.shape[0] - 1)).astype(np.intp)]
+    rgb += gray.T @ colors                          # (n, 3) float32
     np.clip(rgb, 0.0, 1.0, out=rgb)
     rgb *= 255.0
     out[rows] = rgb.reshape(bh, bw, 3).astype(np.uint8)

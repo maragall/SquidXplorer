@@ -397,6 +397,7 @@ class PlateOverview(QWidget):
         self._active = "raw"
         self._labels: list[str] = []
         self._colors = None
+        self._luts = None
         self._dtype = np.uint16
         self._store: dict[str, np.ndarray] = {}
         # A contrast window is a point transform, so it commutes with subsampling: only the
@@ -851,9 +852,15 @@ class PlateOverview(QWidget):
         """Every ``(ri, ci)`` showing a thumbnail right now, from whichever layer supplies it."""
         return set(self._tiles_by_layer.get(self._active, set())) | self.underlay_cells()
 
-    def set_channels(self, labels, colors: np.ndarray, dtype=np.uint16, pct=(1.0, 99.8)):
-        """Declare the acquisition's channels — the per-channel store/mask/contrast start here."""
+    def set_channels(self, labels, colors: np.ndarray, dtype=np.uint16, pct=(1.0, 99.8),
+                     luts=None):
+        """Declare the acquisition's channels — the per-channel store/mask/contrast start here.
+
+        ``luts`` is one optional colormap per channel (see :func:`_montage.composite`): a
+        stain channel renders through it, background at white, instead of tinting from black.
+        """
         self._labels = [str(x) for x in labels]
+        self._luts = list(luts) if luts is not None else None
         self._colors = np.asarray(colors, dtype=np.float32)
         self._dtype = np.dtype(dtype)
         self._mask = np.ones(len(self._labels), dtype=bool)     # every channel on by default (OV8)
@@ -1016,7 +1023,7 @@ class PlateOverview(QWidget):
             return
         step = max(1, int(round(_CELL / max(1.0, self._cd)))) if quick else 1
         rgb = composite(self._disp_store(layer, store, step), self._colors,
-                        self.channel_windows(), self._mask)
+                        self.channel_windows(), self._mask, luts=self._luts)
         self._final_arr[layer] = rgb          # hold the buffer: the QImage below only wraps it
         h, w, _ = rgb.shape
         self.set_final(QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888), layer)
@@ -1072,7 +1079,8 @@ class PlateOverview(QWidget):
         for c_i in range(tile.shape[0]):
             self._contrast.add(c_i, tile[c_i])
         wins = self.channel_windows()
-        cell = composite(store[:, y0:y0 + _CELL, x0:x0 + _CELL], self._colors, wins, self._mask)
+        cell = composite(store[:, y0:y0 + _CELL, x0:x0 + _CELL], self._colors, wins, self._mask,
+                         luts=self._luts)
         img = QImage(cell.data, _CELL, _CELL, 3 * _CELL, QImage.Format_RGB888)
         p = QPainter(self._canvas_for(layer))
         p.drawImage(x0, y0, img)   # drawImage copies, so `cell` may die after p.end()

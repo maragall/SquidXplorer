@@ -486,3 +486,22 @@ def test_montage_of_a_field_that_shrinks_on_ONE_axis_is_not_a_black_plate(tmp_pa
     assert np.isfinite(win["high"]), f"contrast window is low={win['low']} high={win['high']}"
     arr = np.asarray(Image.open(manifest["montage"]))
     assert int(arr.max()) > 0, f"montage rendered entirely black: max pixel {int(arr.max())}"
+
+
+def test_a_lut_channel_composites_through_its_colormap_not_a_tint():
+    """The brightfield/stain mode: a channel carrying a LUT maps each windowed value THROUGH it,
+    so background lands at the LUT's top (white) instead of additive-from-black washing out."""
+    from squidxplorer._montage import composite
+
+    t = np.linspace(0.0, 1.0, 256, dtype=np.float32)
+    lut = np.stack([t ** 0.3, t, t ** 0.6], axis=1)
+    store = np.array([[[0, 128, 255]]], dtype=np.uint8)          # (1, 1, 3): black, mid, white
+    colors = np.array([[1.0, 1.0, 1.0]], dtype=np.float32)
+    rgb = composite(store, colors, [(0, 255)], luts=[lut])
+    assert tuple(rgb[0, 0]) == (0, 0, 0)
+    assert tuple(rgb[0, 2]) == (255, 255, 255)                   # background stays WHITE
+    mid = rgb[0, 1].astype(float) / 255.0
+    assert abs(mid[0] - 0.5 ** 0.3) < 0.02 and abs(mid[2] - 0.5 ** 0.6) < 0.02
+    # without the LUT the same call is the old tint, byte-identical behavior
+    plain = composite(store, colors, [(0, 255)])
+    assert tuple(plain[0, 1]) == (128, 128, 128)
