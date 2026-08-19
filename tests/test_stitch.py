@@ -1359,3 +1359,52 @@ def test_the_writer_asks_the_RECORD_for_output_depth_and_kind():
     assert operator_output("stitch") == (True, "intensity")          # declared default: mip
     assert operator_output("stitch", {"z_operator": "keepz"}) == (False, "intensity")
     assert operator_output("coordinate") == (True, "intensity")
+
+
+def test_an_edgeless_anchor_does_not_let_the_affine_stomp_the_solved_component(master, monkeypatch):
+    """Tile 0 registering NO pairs must not mark the whole solved component unconstrained.
+
+    Measured 2026-08-19 on two real acquisitions: the anchor sat alone, and the affine fallback
+    overwrote 431 genuinely solved tiles with the smooth model. The anchor moves into the
+    largest component; only true orphans are affine-placed (or left at stage below 8 pairs).
+    """
+    import tilefusion.registration as _reg
+
+    err = {3: (6.0, -4.0)}
+    reader = _FakeReader(master, error_px=err)
+    fovs = list(range(GRID * GRID))
+    tiles = np.stack([np.stack([reader.read("A1", f, CHANNELS[0])]) for f in fovs])
+    positions = _positions_yx_um(reader.metadata, "A1", fovs)
+
+    real = _reg.register_pairs_batched
+
+    def drop_anchor_pairs(pair_bounds, *a, **kw):
+        out = real(pair_bounds, *a, **kw)
+        return {ij: v for ij, v in out.items() if 0 not in ij}
+
+    monkeypatch.setattr(_reg, "register_pairs_batched", drop_anchor_pairs)
+    offsets = solve_offsets_px(tiles, positions, (1.0, 1.0), (TILE, TILE), max_workers=2)
+
+    # The solved component {1, 2, 3} keeps its RELATIVE solve: the injected error is cancelled.
+    corrected = np.asarray(positions) + offsets
+    truth = np.array([[(i // GRID) * STEP, (i % GRID) * STEP] for i in range(4)], float)
+    resid = (corrected[1:] - corrected[1]) - (truth[1:] - truth[1])
+    assert np.abs(resid).max() < 0.5, f"solved component stomped: {resid}"
+
+
+def test_place_unconstrained_only_touches_tiles_outside_the_anchors_component():
+    from squidxplorer._stitch import _place_unconstrained_tiles
+
+    n = 12
+    positions = [(float(10 * (i // 4)), float(10 * (i % 4))) for i in range(n)]
+    # tiles 2..9 form the solved chain; 0, 1, 10, 11 are orphans
+    metrics = {(i, i + 1): (1.0, 0.0, 0.81) for i in range(2, 9)}
+    metrics[(2, 6)] = (4.0, 0.0, 0.81)          # 8th pair: enough for the affine fit
+    from tilefusion.optimization import _edges_from_pairwise_metrics
+
+    edges = _edges_from_pairwise_metrics(metrics)
+    solved = np.arange(2 * n, dtype=np.float64).reshape(n, 2)
+    out = _place_unconstrained_tiles(solved, edges, metrics, positions, (1.0, 1.0), anchor=2)
+    np.testing.assert_array_equal(out[2:10], solved[2:10])      # the component is untouched
+    for k in (0, 1, 10, 11):
+        assert not np.array_equal(out[k], solved[k]), f"orphan {k} was not placed"

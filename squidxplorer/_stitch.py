@@ -353,12 +353,26 @@ def solve_offsets_px(
         metrics_out.update(metrics)
 
     with timer.stage("optimize"):
+        from tilefusion.optimization import _check_connectivity
+
         edges = _edges_from_pairwise_metrics(metrics)
         if not edges:
             return np.zeros((n_tiles, 2), dtype=np.float64)
-        # anchor tile 0 at the origin, as TileFusion.optimize_shifts does
-        offsets = two_round_optimization(edges, n_tiles, [0], rel_thresh, abs_thresh, True)
-        return _place_unconstrained_tiles(offsets, edges, metrics, positions_yx_um, pixel_size)
+        # Anchor a tile IN THE LARGEST connected component — tile 0 when it belongs (bit-exact
+        # parity with TileFusion.optimize_shifts on every fully-connected set). Anchoring an
+        # edge-less tile 0 made the whole solved component read as "not connected to the
+        # anchor", and the affine fallback then overwrote 431 genuinely solved tiles with the
+        # smooth model (measured, 2026-08-19; TileFusion carries the same defect upstream).
+        components = _check_connectivity(edges, n_tiles)
+        largest = max(components, key=len)
+        anchor = 0 if 0 in largest else min(largest)
+        if anchor != 0:
+            _log.warning(
+                "Anchor tile 0 registered no pairs; anchoring tile %d (largest solved "
+                "component, %d tiles) instead.", anchor, len(largest))
+        offsets = two_round_optimization(edges, n_tiles, [anchor], rel_thresh, abs_thresh, True)
+        return _place_unconstrained_tiles(offsets, edges, metrics, positions_yx_um, pixel_size,
+                                          anchor=anchor)
 
 
 # Minimum registered pairs for the affine fallback (TileFusion's own _MIN_PAIRS_FOR_AFFINE).
@@ -371,13 +385,14 @@ def _place_unconstrained_tiles(
     metrics: dict,
     positions_yx_um: Sequence[tuple[float, float]],
     pixel_size: tuple[float, float],
+    anchor: int = 0,
 ) -> np.ndarray:
     """Place tiles the pose graph left unconstrained, via the global stage->image affine."""
     from tilefusion.optimization import _check_connectivity, fit_stage_to_image_transform
 
     n_tiles = len(positions_yx_um)
     components = _check_connectivity(edges, n_tiles)
-    anchor_component = next((c for c in components if 0 in c), [])
+    anchor_component = next((c for c in components if anchor in c), [])
     unconstrained = [t for t in range(n_tiles) if t not in anchor_component]
     if not unconstrained:
         return offsets  # fully connected: the solve already placed everything
@@ -396,7 +411,9 @@ def _place_unconstrained_tiles(
     M = cal["M"]
     pos = np.asarray(positions_yx_um, dtype=np.float64)
     ps = np.asarray(pixel_size, dtype=np.float64)
-    ref = pos[0]
+    # The model's zero-correction point must be the SOLVE's anchor (offset[anchor] == 0), or
+    # the affine-placed tiles land in a frame shifted by the model's prediction at the anchor.
+    ref = pos[anchor]
     offsets = np.array(offsets, dtype=np.float64, copy=True)
     for k in unconstrained:
         d = pos[k] - ref
