@@ -19,7 +19,7 @@ from squidxplorer._measure import (
 from squidxplorer._montage import _area_downsample
 from squidxplorer._napari_view import full_res_level
 from squidxplorer._operations import operator_label
-from squidxplorer._plate_overview import (
+from squidxplorer._plate_geometry import (
     _CELL, _box_union, _fit_box, _fit_cell, _mosaic_boxes, content_box,
 )
 from squidxplorer._progress import FOV_UNIT, PREVIEW_LABEL, RunProgress, unit_plan
