@@ -281,18 +281,26 @@ def _parse_fov_positions_um(root, fovs_per_region: dict, *, prefer_planned: bool
     """
     if prefer_planned and (Path(root) / _COORDS_NAME).exists():
         path, source = Path(root) / _COORDS_NAME, COORDS_PLANNED
+        # The executed file usually EXISTS here; it just cannot cover a padded grid. Saying
+        # "absent" (the warning below) would be false — this branch is a deliberate preference.
+        warnings.warn(
+            f"{_COORDS_NAME}: padded to the planned final state; placing FOVs by the PLAN's "
+            f"positions. The executed 0/{_COORDS_NAME} only covers the FOVs written before the "
+            "stop, so it cannot place the padded grid: seams may be off by whatever correction "
+            "autofocus and backlash applied."
+        )
     else:
         path, source = _coords_path(root)
+        if source == COORDS_PLANNED:
+            warnings.warn(
+                f"{_COORDS_NAME}: using PLANNED positions. The per-timepoint EXECUTED file "
+                f"(0/{_COORDS_NAME}) is absent, so FOVs are placed where the run intended to go, "
+                "not where the stage actually went: seams will be off by whatever correction "
+                "autofocus and backlash applied. Every real Squid acquisition writes the executed "
+                "file, so a dataset without one is usually hand-built."
+            )
     if path is None:
         return {}, {}
-    if source == COORDS_PLANNED:
-        warnings.warn(
-            f"{_COORDS_NAME}: using PLANNED positions. The per-timepoint EXECUTED file "
-            f"(0/{_COORDS_NAME}) is absent, so FOVs are placed where the run intended to go, not "
-            "where the stage actually went: seams will be off by whatever correction autofocus and "
-            "backlash applied. Every real Squid acquisition writes the executed file, so a dataset "
-            "without one is usually hand-built."
-        )
 
     return parse_coordinates_csv(path.read_text(), fovs_per_region)
 
@@ -385,6 +393,69 @@ def _planned_grid(root) -> "dict[str, int]":
         warnings.warn(f"{_COORDS_NAME} could not supply the acquisition plan ({exc}); "
                       "a partial acquisition will show only the fields on disk.")
         return {}
+
+
+def _pad_to_plan(fovs: dict, z_levels: list, n_t: int, *, planned: dict, acq: dict,
+                 source: str) -> tuple:
+    """Pad a stopped run's grid to the acquisition PLAN, shared by every padding reader.
+
+    ``fovs`` (``{region: set}``) grows to ``planned``'s per-region counts; z levels / n_t grow
+    to the declared Nz/Nt when larger. Returns ``(fovs, z_levels, n_t, was_padded)`` — new
+    objects, inputs untouched — and warns what was padded (*source* names the format). No plan
+    and nothing declared is a named no-op: never a guess.
+    """
+    fovs = {r: set(s) for r, s in fovs.items()}
+    padded: list[str] = []
+    for region, n_planned in planned.items():
+        have = fovs.setdefault(region, set())
+        missing = set(range(int(n_planned))) - have
+        if missing:
+            have |= missing
+            padded.append(f"{region}: {len(missing)} FOV(s)")
+    declared_nz = acq.get("n_z_declared")
+    if declared_nz and int(declared_nz) > len(z_levels):
+        padded.append(f"z: {int(declared_nz) - len(z_levels)} plane(s)")
+        z_levels = sorted(set(z_levels) | set(range(int(declared_nz))))
+    declared_nt = acq.get("n_t_declared")
+    if declared_nt and int(declared_nt) > n_t:
+        padded.append(f"t: {int(declared_nt) - n_t} timepoint(s)")
+        n_t = int(declared_nt)
+    if padded:
+        warnings.warn(
+            f"partial acquisition: padded to the planned final state ({'; '.join(padded)}). "
+            "Unwritten fields render BLACK — this is a stopped run being explored, not a "
+            "finished one.")
+    elif not planned and not declared_nz and not declared_nt:
+        _log.info(
+            "pad_partial: %s carries no acquisition plan record (no planned FOV grid, no "
+            "declared Nz/Nt); nothing to pad.", source)
+    return fovs, list(z_levels), int(n_t), bool(padded)
+
+
+class _PadPartialMixin:
+    """Zeros-plane service for a padded (stopped) run; the reader sets ``_pad_partial``."""
+
+    _pad_partial = False
+
+    def _padded_zeros(self, region, fov, channel, z_level, time_point):
+        """A zeros plane when the slot is inside the declared grid but has no data, else None.
+
+        ONE zeros array, shared: readers of a stopped run touch many empty slots, and the plane
+        is read-only by the reader contract.
+        """
+        if not self._pad_partial:
+            return None
+        meta = self.metadata
+        if (region not in meta["regions"]
+                or fov not in meta["fovs_per_region"].get(region, ())
+                or z_level not in meta["z_levels"]
+                or not 0 <= time_point < meta["n_t"]
+                or not any(c["name"] == channel for c in meta["channels"])):
+            return None
+        zeros = getattr(self, "_zeros_plane", None)
+        if zeros is None:
+            zeros = self._zeros_plane = np.zeros(meta["frame_shape"], dtype=meta["dtype"])
+        return zeros
 
 
 def _mismatch_message(mismatched: dict) -> str:
@@ -487,10 +558,13 @@ def _classify_tiff_folder(folder: Path, entries: "Optional[list]" = None
 def open_reader(path, *, pad_partial: bool = False) -> SquidAcquisitionReader:
     """Detect the acquisition format at *path* and return a reader; unrecognised layouts raise, naming both sides.
 
-    ``pad_partial=True`` (the VIEWER's setting) opens a stopped-mid-run individual-image
-    acquisition at its PLANNED final state, with unwritten slots reading as zeros — see
-    ``SquidReader``. OFF by default on purpose: the engine and CLI must keep skipping missing
-    wells and marking their stores incomplete, never writing black planned fields as data.
+    ``pad_partial=True`` (the VIEWER's setting) opens a stopped-mid-run acquisition at its
+    PLANNED final state, with unwritten slots reading as zeros — the individual-image, OME-TIFF
+    and Zarr readers all honour it against their own plan record (root coordinates.csv +
+    declared Nz/Nt; the HCS plate's declared wells for Zarr). A format with no plan record says
+    so in one log line and stays un-padded. OFF by default on purpose: the engine and CLI must
+    keep skipping missing wells and marking their stores incomplete, never writing black
+    planned fields as data.
     """
     path = Path(path)
     if not path.is_dir():
@@ -500,10 +574,10 @@ def open_reader(path, *, pad_partial: bool = False) -> SquidAcquisitionReader:
     ome = path / "ome_tiff"
     # Squid often leaves an empty ome_tiff/ placeholder; it must not shadow the TIFF readers.
     if ome.is_dir() and any(ome.rglob("*.ome.tif*")):
-        return SquidOMEReader(path)
+        return SquidOMEReader(path, pad_partial=pad_partial)
     store = _find_zarr_store(path)
     if store is not None:
-        return SquidZarrReader(store, acquisition_root=path)
+        return SquidZarrReader(store, acquisition_root=path, pad_partial=pad_partial)
 
     folder = _time_folders(path)[0]
     individual, stacks, other, entries = _classify_tiff_folder(folder)
@@ -604,7 +678,7 @@ def _expand_rgb_channels(resolved: list, rgb_bases: "set[str]") -> list:
     return out
 
 
-class SquidReader:
+class SquidReader(_PadPartialMixin):
     """Lazy reader over a Squid individual-TIFF acquisition folder."""
 
     def __init__(self, path, *, _scanned: "Optional[tuple[Path, list]]" = None,
@@ -708,30 +782,14 @@ class SquidReader:
         # assumes final-state input — so when the PLAN (root coordinates.csv for the FOV grid,
         # the declared Nz/Nt for the axes) is larger than what is on disk, the metadata declares
         # the plan and `read` serves ZEROS for any planned-but-unwritten slot. Black planes, said
-        # out loud below, never a shrunken grid that hides how much is missing.
-        planned = _planned_grid(self._path) if self._pad_partial else {}
-        padded: list[str] = []
-        for region, n_planned in planned.items():
-            have = fovs.setdefault(region, set())
-            missing = set(range(int(n_planned))) - have
-            if missing:
-                have |= missing
-                padded.append(f"{region}: {len(missing)} FOV(s)")
-        regions = sorted(fovs, key=_plate_key)
-        declared_nz = acq.get("n_z_declared") if self._pad_partial else None
-        if declared_nz and int(declared_nz) > n_z:
-            padded.append(f"z: {int(declared_nz) - n_z} plane(s)")
-            z_sorted = sorted(set(z_sorted) | set(range(int(declared_nz))))
+        # out loud, never a shrunken grid that hides how much is missing.
+        padded = False
+        if self._pad_partial:
+            fovs, z_sorted, n_t, padded = _pad_to_plan(
+                fovs, z_sorted, n_t, planned=_planned_grid(self._path), acq=acq,
+                source=f"{self._path} (individual TIFF)")
             n_z = len(z_sorted)
-        declared_nt = acq.get("n_t_declared") if self._pad_partial else None
-        if declared_nt and int(declared_nt) > n_t:
-            padded.append(f"t: {int(declared_nt) - n_t} timepoint(s)")
-            n_t = int(declared_nt)
-        if padded:
-            warnings.warn(
-                f"partial acquisition: padded to the planned final state ({'; '.join(padded)}). "
-                "Unwritten fields render BLACK — this is a stopped run being explored, not a "
-                "finished one.")
+        regions = sorted(fovs, key=_plate_key)
 
         # Filenames + timepoint folders are ground truth; the recorded Nz/Nt are cross-checks
         # (already reconciled above when the plan out-sizes the disk).
@@ -795,26 +853,6 @@ class SquidReader:
             n_t=n_t,
         )
         return self._meta
-
-    def _padded_zeros(self, region, fov, channel, z_level, time_point):
-        """A zeros plane when the slot is inside the declared grid but has no file, else None.
-
-        ONE zeros array, shared: readers of a stopped run touch many empty slots, and the plane
-        is read-only by the reader contract.
-        """
-        if not self._pad_partial:
-            return None
-        meta = self.metadata
-        if (region not in meta["regions"]
-                or fov not in meta["fovs_per_region"].get(region, ())
-                or z_level not in meta["z_levels"]
-                or not 0 <= time_point < meta["n_t"]
-                or not any(c["name"] == channel for c in meta["channels"])):
-            return None
-        zeros = getattr(self, "_zeros_plane", None)
-        if zeros is None:
-            zeros = self._zeros_plane = np.zeros(meta["frame_shape"], dtype=meta["dtype"])
-        return zeros
 
     @staticmethod
     def _log_chroma_coverage(chroma: dict, index: dict, fov_positions: dict,
@@ -1159,15 +1197,17 @@ _OME_STEM_RE = re.compile(r"^(?P<region>.+)_(?P<fov>\d+)$")
 _OME_SUFFIXES = (".ome.tiff", ".ome.tif", ".OME.TIFF", ".OME.TIF")
 
 
-class SquidOMEReader:
+class SquidOMEReader(_PadPartialMixin):
     """Lazy reader over a Squid OME-TIFF acquisition: one 5-D TZCYX stack per well-FOV."""
 
-    def __init__(self, path) -> None:
+    def __init__(self, path, *, pad_partial: bool = False) -> None:
         self._path = Path(path)
         self._ome = self._path / "ome_tiff"
+        self._pad_partial = bool(pad_partial)   # see _PadPartialMixin / SquidReader
         self._files: Optional[dict] = None      # {(region, fov): Path}
         self._meta: Optional[dict] = None
         self._axes: Optional[str] = None        # non-spatial axes order, e.g. "TZC"
+        self._file_sizes: Optional[dict] = None  # the FILE's own T/Z/C, for page math
         self._handles = _TiffHandles()
 
 
@@ -1222,15 +1262,28 @@ class SquidOMEReader:
         channels = resolve_channels(names, yaml_map)
 
         acq = load_acquisition_metadata(self._path)
+        # Page math must use the FILE's own axis sizes: a padded n_z/n_t below describes the
+        # PLAN, and raveling real reads against it would address pages that do not exist.
+        self._file_sizes = {"T": int(n_t), "Z": int(n_z), "C": int(n_c)}
+        z_levels, padded = list(range(n_z)), False
+        if self._pad_partial:
+            fovs, z_levels, n_t, padded = _pad_to_plan(
+                {r: set(v) for r, v in fovs.items()}, z_levels, n_t,
+                planned=_planned_grid(self._path), acq=acq,
+                source=f"{self._path} (OME-TIFF)")
+            regions = sorted(fovs, key=_plate_key)
+            n_z = len(z_levels)
         _warn_recorded_mismatch(acq, n_z=n_z, z_source="OME Z")
         fovs_per_region = {r: sorted(fovs[r]) for r in regions}
         self._meta = _assemble_metadata(
             regions=regions,
             fovs_per_region=fovs_per_region,
-            fov_positions_um=_fov_positions_um_or_empty(self._path, fovs_per_region),
+            # A padded grid is the PLAN's grid; its positions must come from the PLAN's csv.
+            fov_positions_um=_fov_positions_um_or_empty(self._path, fovs_per_region,
+                                                        prefer_planned=padded),
             channels=channels,
             n_z=n_z,
-            z_levels=list(range(n_z)),
+            z_levels=z_levels,
             dz_um=acq["dz_um"],
             pixel_size_um=acq["pixel_size_um"],
             wellplate_format=acq["wellplate_format"],
@@ -1241,9 +1294,13 @@ class SquidOMEReader:
         return self._meta
 
     def _page_index(self, time_point: int, z_level: int, c: int) -> int:
-        """Flat IFD page index for (t, z, c), honouring the file's non-spatial axis order."""
-        meta = self.metadata
-        sizes = {"T": meta["n_t"], "Z": meta["n_z"], "C": len(meta["channels"])}
+        """Flat IFD page index for (t, z, c), honouring the file's non-spatial axis order.
+
+        Sizes are the FILE's own (``_file_sizes``), never the metadata's: a padded acquisition
+        declares the plan's n_z/n_t, which is not how the pages on disk are laid out.
+        """
+        _ = self.metadata                        # ensures _file_sizes / _axes are set
+        sizes = self._file_sizes
         pos = {"T": time_point, "Z": z_level, "C": c}
         order = self._axes or "TZC"
         return int(np.ravel_multi_index([pos[a] for a in order], [sizes[a] for a in order]))
@@ -1253,12 +1310,24 @@ class SquidOMEReader:
         return names.index(str(channel))
 
     def read(self, region, fov, channel, z_level, time_point=0):
-        """Return one plane as a 2D native-dtype array (reads exactly one IFD page)."""
+        """Return one plane as a 2D native-dtype array (reads exactly one IFD page).
+
+        A PADDED SLOT of a partial acquisition reads as ZEROS: a missing file, or a z/t the
+        plan declares but the files never grew to. Outside the grid it refuses as before.
+        """
+        _ = self.metadata                        # sets _file_sizes (read forces it anyway below)
         files = self._discover()
         key = (str(region), int(fov))
+        z_level, time_point = int(z_level), int(time_point)
+        if (key not in files
+                or z_level >= self._file_sizes["Z"]
+                or time_point >= self._file_sizes["T"]):
+            zeros = self._padded_zeros(str(region), int(fov), str(channel), z_level, time_point)
+            if zeros is not None:
+                return zeros
         if key not in files:
             raise KeyError(f"No such well/FOV region={region!r} fov={fov}. Known: {sorted(files)[:8]}")
-        p = self._page_index(int(time_point), int(z_level), self._channel_index(channel))
+        p = self._page_index(time_point, z_level, self._channel_index(channel))
         return self._handles.page(files[key], p)
 
     def plane_ref(self, region, fov, channel, z_level, time_point=0) -> tuple:
@@ -1417,20 +1486,22 @@ class _Multiscale:
         return int(shape[i]) if i is not None and i < len(shape) else default
 
 
-class SquidZarrReader:
+class SquidZarrReader(_PadPartialMixin):
     """Lazy reader over an OME-NGFF Zarr acquisition — HCS plate or bare per-region image groups.
 
     Only resolution level 0 is served; a projection from a downsampled level would be silently wrong.
     """
 
-    def __init__(self, path, acquisition_root=None) -> None:
+    def __init__(self, path, acquisition_root=None, *, pad_partial: bool = False) -> None:
         self._path = Path(path)
         # Sidecars (acquisition.yaml, coordinates.csv) live beside the store, not inside it.
         self._root = Path(acquisition_root) if acquisition_root is not None else self._path.parent
+        self._pad_partial = bool(pad_partial)    # see _PadPartialMixin / SquidReader
         self._fields: Optional[dict] = None      # {(region, fov): Path to the image group}
         self._ms: dict = {}                      # image group Path -> _Multiscale (parsed metadata only)
         self._meta: Optional[dict] = None
         self._contract_version = None            # set by _discover: what the store declares, or None
+        self._hcs_declared: Optional[dict] = None  # {region: declared field slots}; None = non-HCS
 
 
     @property
@@ -1462,14 +1533,22 @@ class SquidZarrReader:
         return fields
 
     def _discover_hcs(self, plate: dict) -> dict:
-        """``plate.wells[].path`` -> well group -> ``well.images[].path`` -> field image groups."""
+        """``plate.wells[].path`` -> well group -> ``well.images[].path`` -> field image groups.
+
+        Also records the plate's DECLARED wells (``_hcs_declared``): a stopped run's plate
+        metadata can list wells whose groups were never written, and that listing is the
+        format's plan record for pad_partial.
+        """
         fields: dict = {}
+        declared: dict = {}
+        field_count = plate.get("field_count")
         for well in plate.get("wells") or []:
             rel = str(well.get("path", "")).strip("/")
             if not rel:
                 continue
             # Region id is row name + column name, the inverse of _output.parse_well_id.
             region = "".join(rel.split("/"))
+            declared[region] = int(field_count) if field_count else 0
             well_dir = self._path / rel
             images = (_group_attrs(well_dir).get("well") or {}).get("images") or []
             for i, image in enumerate(images):
@@ -1478,6 +1557,7 @@ class SquidZarrReader:
                     continue
                 # Non-numeric field paths fall back to their list position for the int FOV.
                 fields[(region, int(name) if name.isdigit() else i)] = well_dir / name
+        self._hcs_declared = declared
         return fields
 
     def _discover_flat(self) -> dict:
@@ -1560,13 +1640,26 @@ class SquidZarrReader:
         n_z = ms.size(shape, "z")
         n_t = ms.size(shape, "t")
 
+        z_levels = list(range(n_z))
+        if self._pad_partial:
+            try:
+                acq = load_acquisition_metadata(self._root)
+            except (FileNotFoundError, ValueError):
+                acq = {}                         # a Zarr store need not ship acquisition.yaml
+            padded_fovs, z_levels, n_t, _padded = _pad_to_plan(
+                fovs, z_levels, n_t, planned=self._zarr_plan(fovs),
+                acq=acq, source=f"{self._path} (Zarr)")
+            regions = sorted(padded_fovs, key=_plate_key)
+            fovs_per_region = {r: sorted(padded_fovs[r]) for r in regions}
+            n_z = len(z_levels)
+
         self._meta = _assemble_metadata(
             regions=regions,
             fovs_per_region=fovs_per_region,
             fov_positions_um=self._positions_um(fields, fovs_per_region),
             channels=self._channels(ms, ms.size(shape, "c")),
             n_z=n_z,
-            z_levels=list(range(n_z)),
+            z_levels=z_levels,
             dz_um=ms.dz_um,
             pixel_size_um=ms.pixel_size_um,
             wellplate_format=self._wellplate_format(regions),
@@ -1575,6 +1668,18 @@ class SquidZarrReader:
             n_t=n_t,
         )
         return self._meta
+
+    def _zarr_plan(self, present: dict) -> dict:
+        """``{region: planned_fov_count}`` from the HCS plate metadata; ``{}`` when none exists.
+
+        The plate's declared wells are the plan; each well owes ``field_count`` fields when the
+        plate declares one, else the largest field set any present well carries (a stopped run
+        writes whole fields, so the biggest well shows the intended count).
+        """
+        if self._hcs_declared is None:
+            return {}                            # non-HCS store: no plan record to read
+        observed = max((len(v) for v in present.values()), default=1)
+        return {region: (n or observed) for region, n in self._hcs_declared.items()}
 
     def _positions_um(self, fields: dict, fovs_per_region: dict) -> dict:
         """Stage positions in micrometres: dataset ``translation`` first, coordinates.csv second."""
@@ -1659,20 +1764,32 @@ class SquidZarrReader:
         return names.index(str(channel))
 
     def read(self, region, fov, channel, z_level, time_point=0):
-        """Return one plane as a 2D array in its native dtype; only the covering chunks are read."""
-        group = self._field(region, fov)
+        """Return one plane as a 2D array in its native dtype; only the covering chunks are read.
+
+        A PADDED SLOT of a partial acquisition reads as ZEROS: a well the plate declared but
+        never wrote, or a z/t the plan declares beyond the array's own axes. Outside the
+        declared grid it refuses exactly as before.
+        """
         meta = self.metadata
         z_level, time_point = int(z_level), int(time_point)
         if not 0 <= z_level < meta["n_z"]:
             raise IndexError(f"z={z_level} out of range (n_z={meta['n_z']}).")
         if not 0 <= time_point < meta["n_t"]:
             raise IndexError(f"t={time_point} out of range (n_t={meta['n_t']}).")
+        if (str(region), int(fov)) not in self._discover():
+            zeros = self._padded_zeros(str(region), int(fov), str(channel), z_level, time_point)
+            if zeros is not None:
+                return zeros
+        group = self._field(region, fov)
         arr = self._array(group)
-        idx = self._multiscale(group).index(
-            arr.shape, time_point, self._channel_index(channel), z_level, fov=int(fov)
-        )
+        ms = self._multiscale(group)
+        if z_level >= ms.size(arr.shape, "z") or time_point >= ms.size(arr.shape, "t"):
+            zeros = self._padded_zeros(str(region), int(fov), str(channel), z_level, time_point)
+            if zeros is not None:
+                return zeros
+        idx = ms.index(arr.shape, time_point, self._channel_index(channel), z_level, fov=int(fov))
         plane = np.asarray(arr[idx].read().result())
-        return _validate_plane(plane, self._multiscale(group).array_path)
+        return _validate_plane(plane, ms.array_path)
 
     def plane_ref(self, region, fov, channel, z_level, time_point=0) -> tuple:
         """``(path, 0)`` for one plane, where *path* is the field's NGFF image group."""

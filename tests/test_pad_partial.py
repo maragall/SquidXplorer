@@ -82,3 +82,72 @@ def test_a_complete_acquisition_is_untouched(squid_dataset, recwarn):
     m = open_reader(root).metadata
     assert not [w for w in recwarn if "partial acquisition" in str(w.message)]
     assert m["regions"] == ["B2", "B3"]
+
+
+# --- pad_partial reaches the OME-TIFF reader ----------------------------------------------------
+
+_OME_CH_YAML = """\
+channels:
+- name: Fluorescence 405 nm Ex
+  display_color: '#8000FF'
+"""
+
+
+def _partial_ome(tmp_path):
+    """Same plan as ``_partial`` (B2 x 2 + B3 x 1, nz=3, nt=2); on disk ONE 1x1x1 OME stack."""
+    root = tmp_path / "acq"
+    (root / "ome_tiff").mkdir(parents=True)
+    tifffile.imwrite(root / "ome_tiff" / "B2_0.ome.tiff",
+                     np.full((1, 1, 1, 8, 8), 7, np.uint16), metadata={"axes": "TZCYX"})
+    (root / "acquisition.yaml").write_text(_ACQ_YAML)
+    (root / "acquisition_channels.yaml").write_text(_OME_CH_YAML)
+    (root / "coordinates.csv").write_text(_CSV)
+    return root
+
+
+def test_a_stopped_ome_acquisition_declares_its_planned_final_state(tmp_path):
+    with pytest.warns(UserWarning, match="partial acquisition.*BLACK"):
+        m = open_reader(_partial_ome(tmp_path), pad_partial=True).metadata
+    assert m["regions"] == ["B2", "B3"]
+    assert m["fovs_per_region"] == {"B2": [0, 1], "B3": [0]}
+    assert m["n_z"] == 3 and m["n_t"] == 2
+    assert len(m["fov_positions_um"]) == 3, "every planned FOV must be placeable"
+
+
+def test_an_unwritten_ome_slot_reads_as_zeros_and_a_real_one_as_itself(tmp_path):
+    r = open_reader(_partial_ome(tmp_path), pad_partial=True)
+    with pytest.warns(UserWarning):
+        ch = r.metadata["channels"][0]["name"]
+    assert r.read("B2", 0, ch, 0).max() == 7                      # the real plane
+    for args in (("B2", 1, ch, 0), ("B3", 0, ch, 0),              # padded FOV / region
+                 ("B2", 0, ch, 2), ("B2", 0, ch, 0, 1)):          # z / t beyond the file's own
+        plane = r.read(*args)
+        assert plane.shape == (8, 8) and plane.dtype == np.uint16 and plane.max() == 0, args
+    with pytest.raises(KeyError):
+        r.read("Z9", 0, ch, 0)                                    # outside the plan: refused
+
+
+def test_an_unpadded_ome_open_keeps_refusing_missing_slots(tmp_path):
+    root = _partial_ome(tmp_path)
+    r = open_reader(root)
+    with pytest.warns(UserWarning):                               # recorded-vs-observed Nz/Nt
+        ch = r.metadata["channels"][0]["name"]
+    with pytest.raises(KeyError):
+        r.read("B3", 0, ch, 0)
+
+
+# --- the padded open SAYS it prefers the plan; it never claims the executed file is absent ------
+
+
+def test_the_padded_open_names_the_plan_preference_not_an_absent_file(tmp_path):
+    """The executed 0/coordinates.csv EXISTS on a stopped run; it just cannot place a padded
+    grid. The warning must say the preference is deliberate, not call the file absent."""
+    root = _partial(tmp_path)
+    (root / "0" / "coordinates.csv").write_text("region,x (mm),y (mm)\nB2,1.0,1.0\n")
+    with pytest.warns(UserWarning) as record:
+        open_reader(root, pad_partial=True).metadata
+    about_positions = [str(w.message) for w in record
+                       if "coordinates.csv" in str(w.message) and "position" in str(w.message)]
+    assert about_positions, "the padded open must say where its positions come from"
+    assert all("PLAN's positions" in t for t in about_positions)
+    assert not any("is absent" in t for t in about_positions)
