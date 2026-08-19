@@ -231,8 +231,7 @@ class DatasetDepth:
             self._callbacks.append(callback)
 
 
-#: The one open acquisition. Same lifetime and the same "one app, one dataset" assumption as
-#: `_region_viewer._LUT_CLIPBOARD`, and cleared in the same function (`ViewerManager.set_dataset`).
+#: The one open acquisition ("one app, one dataset"), re-armed in `ViewerManager.set_dataset`.
 _current = DatasetDepth(None)
 
 

@@ -261,7 +261,7 @@ def test_changing_a_setting_in_one_window_does_not_change_another(qapp, manager)
     _loaded(qapp, one)
     _loaded(qapp, two)
 
-    one._focus_default_chk.setChecked(True)
+    one.settings.set("tenengrad_focus", True)   # the Defaults box is shelved; the STORE remains
     for ch, lut in _LUT_B.items():
         one._pane.mosaic.find("raw", ch).contrast_limits = lut["clim"]
     one.settings.set("luts", one._per_channel_luts())
@@ -275,69 +275,16 @@ def test_changing_a_setting_in_one_window_does_not_change_another(qapp, manager)
     assert manager.defaults.luts == _LUT_A
 
 
-def test_a_diverged_window_says_so_in_the_window_and_reset_clears_it(qapp, manager):
+def test_the_defaults_box_is_shelved_and_auto_focus_still_applies_once(qapp, manager):
+    """2026-08-19: the Defaults group (auto focus checkbox, make default, diverged, reset) is
+    SHELVED — absence pinned per the repo convention. The STORE behaviour it fronted survives:
+    `_apply_settings_once` still runs exactly once per window."""
     one = manager.open([REGIONS[0]])
-    _loaded(qapp, one)
-
-    assert one.settings.diverged == ()
-    assert one._diverged_label.text() == "at the defaults"
-    assert one._reset_btn.isEnabled() is False, (
-        "reset offers itself with nothing to reset")
-
-    one._focus_default_chk.setChecked(True)
-
-    assert one.settings.diverged == ("tenengrad_focus",)
-    assert one.settings.is_diverged("tenengrad_focus") is True
-    assert "diverged" in one._diverged_label.text()
-    assert "auto focus" in one._diverged_label.text(), (
-        "the marker has to name WHICH setting diverged, or it cannot be acted on")
-    assert one._reset_btn.isEnabled() is True
-
-    one._reset_settings()
-
-    assert one.settings.diverged == ()
-    assert one.settings.get("tenengrad_focus") is False
-    assert one._focus_default_chk.isChecked() is False, (
-        "the control still shows the overridden value after a reset")
-    assert one._diverged_label.text() == "at the defaults"
-    assert one._reset_btn.isEnabled() is False
-
-
-def test_every_control_in_the_defaults_box_reaches_the_shared_console(qapp, manager, caplog):
-    """A quiet control next to a loud one reads as a control that did nothing, so all three of
-    the settings-box controls must speak in the console."""
-    import logging
-
-    one = manager.open([REGIONS[0]])
-    _loaded(qapp, one)
-
-    def _console_lines(fn) -> list[str]:
-        caplog.clear()
-        with caplog.at_level(logging.INFO, logger=one.log.logger.name):
-            fn()
-        return [r.getMessage() for r in caplog.records]
-
-    ticked = _console_lines(lambda: one._focus_default_chk.setChecked(True))
-    assert any("auto focus" in m for m in ticked), (
-        "ticking auto focus said nothing in the console; the other two controls in its box do")
-
-    reset = _console_lines(one._reset_settings)
-    assert any("auto focus" in m for m in reset), (
-        "reset stopped naming what it put back")
-
-    one._focus_default_chk.setChecked(True)
-    made = _console_lines(one._make_default)
-    assert made, "make default said nothing in the console"
-
-
-def test_the_auto_focus_tooltip_describes_the_once_per_window_behaviour(qapp, manager):
-    """The tooltip used to promise a refocus on every region change, which the code does not do."""
-    one = manager.open([REGIONS[0]])
-    tip = one._focus_default_chk.toolTip()
-
-    assert "once" in tip.lower(), "the tooltip does not say the jump happens once"
-    assert "whenever this window loads a region" not in tip, (
-        "the tooltip still promises a per-region refocus")
+    assert not hasattr(one, "_focus_default_chk"), "the Defaults box is back"
+    assert not hasattr(one, "_diverged_label"), "the diverged label is back"
+    assert not hasattr(one, "_reset_btn"), "the reset button is back"
+    assert not hasattr(one, "_make_default_btn"), "the make-default button is back"
+    assert not hasattr(manager, "make_default"), "make_default lost its button and its callers"
 
     _loaded(qapp, one)
     assert one._settings_applied is True
@@ -349,23 +296,6 @@ def test_the_auto_focus_tooltip_describes_the_once_per_window_behaviour(qapp, ma
         "_apply_settings_once ran a second time; the tooltip's 'once' is now the wrong description")
 
 
-def test_resetting_contrast_puts_the_layers_back(qapp, manager):
-    """Reset is not just a flag: the pixels on screen have to go back too."""
-    manager.defaults.set("luts", _LUT_A)
-    one = manager.open([REGIONS[0]])
-    _loaded(qapp, one)
-
-    for ch, lut in _LUT_B.items():
-        one._pane.mosaic.find("raw", ch).contrast_limits = lut["clim"]
-    one.settings.set("luts", one._per_channel_luts())
-    assert one.settings.is_diverged("luts")
-
-    one._reset_settings()
-
-    assert _layer_clims(one) == {CH_IN_YAML: (11.0, 111.0), CH_NOT_IN_YAML: (22.0, 222.0)}
-    assert one.settings.diverged == ()
-
-
 def test_changing_the_default_does_not_retroactively_change_a_diverged_window(qapp, manager):
     """The case where a retroactive write would destroy work the user did by hand."""
     manager.defaults.set("luts", _LUT_A)
@@ -375,7 +305,7 @@ def test_changing_the_default_does_not_retroactively_change_a_diverged_window(qa
     for ch, lut in _LUT_B.items():
         one._pane.mosaic.find("raw", ch).contrast_limits = lut["clim"]
     one.settings.set("luts", one._per_channel_luts())
-    one._focus_default_chk.setChecked(True)
+    one.settings.set("tenengrad_focus", True)
     assert set(one.settings.diverged) == {"luts", "tenengrad_focus"}
 
     later = {CH_IN_YAML: {"clim": (900.0, 999.0), "cmap": "red"}}
@@ -394,106 +324,6 @@ def test_changing_the_default_does_not_retroactively_change_a_diverged_window(qa
     nxt = manager.open([REGIONS[1]])
     assert nxt.settings.get("luts") == later
     assert nxt.settings.get("tenengrad_focus") is True
-
-
-def test_make_default_is_the_only_outward_push_and_leaves_open_windows_alone(qapp, manager):
-    """The affordance that replaces propagation: an explicit act, aimed at future windows."""
-    manager.defaults.set("luts", _LUT_A)
-    one = manager.open([REGIONS[0]])
-    two = manager.open([REGIONS[1]])
-    _loaded(qapp, one)
-    _loaded(qapp, two)
-
-    for ch, lut in _LUT_B.items():
-        one._pane.mosaic.find("raw", ch).contrast_limits = lut["clim"]
-    one.settings.set("luts", one._per_channel_luts())
-    one._focus_default_chk.setChecked(True)
-
-    one._make_default()
-
-    assert manager.defaults.tenengrad_focus is True
-    assert manager.defaults.luts[CH_IN_YAML]["clim"] == (33.0, 333.0)
-    assert one.settings.diverged == (), (
-        "the window that IS the default still claims to diverge from it")
-
-    # Window two, already open, is deliberately untouched.
-    assert two.settings.get("tenengrad_focus") is False
-    assert two.settings.get("luts") == _LUT_A
-    assert _layer_clims(two) == {CH_IN_YAML: (11.0, 111.0), CH_NOT_IN_YAML: (22.0, 222.0)}
-
-    three = manager.open([REGIONS[0]])
-    assert three.settings.get("tenengrad_focus") is True
-    assert three.settings.get("luts")[CH_IN_YAML]["clim"] == (33.0, 333.0)
-
-
-def test_make_default_on_a_closed_window_refuses_rather_than_appearing_to_work(qapp, manager):
-    one = manager.open([REGIONS[0]])
-    wid = one.window_id
-    one.close()
-    for _ in range(10):
-        qapp.processEvents()
-    assert manager.make_default(wid) is False
-
-
-def test_pasting_luts_marks_the_window_diverged(qapp, manager):
-    """A paste IS the user changing contrast here, so the window has to admit it moved."""
-    from squidxplorer import _region_viewer as RV
-
-    manager.defaults.set("luts", _LUT_A)
-    one = manager.open([REGIONS[0]])
-    two = manager.open([REGIONS[1]])
-    _loaded(qapp, one)
-    _loaded(qapp, two)
-
-    for ch, lut in _LUT_B.items():
-        one._pane.mosaic.find("raw", ch).contrast_limits = lut["clim"]
-    one._copy_luts()
-    two._paste_luts()
-
-    assert two.settings.is_diverged("luts") is True
-    assert "contrast" in two._diverged_label.text()
-    assert _layer_clims(two) == {CH_IN_YAML: (33.0, 333.0), CH_NOT_IN_YAML: (44.0, 444.0)}
-    assert one.settings.diverged == (), "the copy diverged the window it copied FROM"
-    RV._LUT_CLIPBOARD.clear()
-
-
-def test_copy_paste_luts_is_the_only_contrast_path_between_two_open_windows(qapp, manager):
-    """Pins that copy/paste is the only contrast path between two already-open windows: napari's
-    `link_layers` cannot cross windows, `_baseline_for` only fires at open, and `make_default`
-    only affects future windows. The copy is also the only carrier of the colormap."""
-    from squidxplorer import _region_viewer as RV
-
-    RV._LUT_CLIPBOARD.clear()
-    one = manager.open([REGIONS[0]])
-    two = manager.open([REGIONS[1]])
-    _loaded(qapp, one)
-    _loaded(qapp, two)
-
-    before_clims = dict(_layer_clims(two))
-    before_cmaps = {ch: two._pane.mosaic.find("raw", ch).colormap
-                    for ch in (CH_IN_YAML, CH_NOT_IN_YAML)}
-
-    for ch, lut in _LUT_B.items():
-        layer = one._pane.mosaic.find("raw", ch)
-        layer.contrast_limits = lut["clim"]
-        layer.colormap = "magenta"
-    assert before_cmaps[CH_IN_YAML] != "magenta", "the fixture already used the colour under test"
-
-    assert _layer_clims(two) == before_clims, (
-        "window one's contrast reached an already-open window two on its own; if that is now real "
-        "then this test, not the chips, is what is wrong")
-    assert manager.make_default(one.window_id) is True
-    assert _layer_clims(two) == before_clims, "make_default reached back into an open window"
-
-    one._copy_luts()
-    two._paste_luts()
-
-    assert _layer_clims(two) == {CH_IN_YAML: (33.0, 333.0), CH_NOT_IN_YAML: (44.0, 444.0)}
-    for ch in (CH_IN_YAML, CH_NOT_IN_YAML):
-        cmap = two._pane.mosaic.find("raw", ch).colormap
-        assert getattr(cmap, "name", cmap) == "magenta", (
-            f"{ch}: the colormap did not travel, and no other mechanism carries it at all")
-    RV._LUT_CLIPBOARD.clear()
 
 
 def test_match_raw_contrast_is_wired_to_this_window_s_mosaic_and_leaves_it_at_defaults(
@@ -594,18 +424,14 @@ def test_loading_a_NEW_dataset_forgets_the_last_ones_look(manager):
     which is keyed by channel NAME -- names differ between acquisitions, so what survives is dead
     weight at best and a channel that opens dark at worst.
     """
-    from squidxplorer._region_viewer import _LUT_CLIPBOARD
-
     manager.defaults.set("luts", _LUT_A)
     manager.defaults.set("channel_visibility", {CH_IN_YAML: False})
-    _LUT_CLIPBOARD.update(_LUT_B)
     manager.defaults.set("tenengrad_focus", True)
 
     manager.set_dataset(manager._reader, manager._meta)
 
     assert manager.defaults.get("luts") == {}
     assert manager.defaults.get("channel_visibility") == {}
-    assert _LUT_CLIPBOARD == {}
     # HOW you look survives; WHAT you looked at does not.
     assert manager.defaults.get("tenengrad_focus") is True
 
@@ -664,12 +490,15 @@ def test_a_window_opened_on_a_DIFFERENT_region_gains_nothing(qapp, manager):
     assert other._result_region is None
 
 
-def test_a_pasted_lut_carries_CHANNEL_VISIBILITY_not_just_contrast(qapp, manager):
-    """The record has four keys and the paste used to apply two: a window with a channel switched
-    OFF pasted its LUTs and the target kept the channel lit — a silent partial paste."""
-    from squidxplorer import _region_viewer as RV
+def test_applying_a_lut_record_carries_CHANNEL_VISIBILITY_not_just_contrast(qapp, manager):
+    """The record has four keys and `apply_luts` puts three on the layers (`rgb` is the plate's
+    spelling). The copy/paste clipboard is SHELVED (2026-08-19); `_apply_luts` is the surviving
+    consumer — it is how a child window inherits its parent's look — so the rule is pinned there."""
+    import squidxplorer._lut_clipboard as LC
 
-    RV._LUT_CLIPBOARD.clear()
+    assert not hasattr(LC, "CLIPBOARD"), "the LUT clipboard is back"
+    assert not hasattr(LC, "copy_luts") and not hasattr(LC, "paste_luts")
+
     one = manager.open([REGIONS[0]])
     two = manager.open([REGIONS[1]])
     _loaded(qapp, one)
@@ -678,9 +507,9 @@ def test_a_pasted_lut_carries_CHANNEL_VISIBILITY_not_just_contrast(qapp, manager
     one._pane.mosaic.set_channel_visible(CH_IN_YAML, False)
     assert two._pane.mosaic.channel_visible(CH_IN_YAML) is not False
 
-    one._copy_luts()
-    two._paste_luts()
+    assert not hasattr(one, "_copy_luts") and not hasattr(two, "_paste_luts"), (
+        "the window-side clipboard gestures are back")
+    two._apply_luts(one._per_channel_luts())
 
     assert two._pane.mosaic.channel_visible(CH_IN_YAML) is False, (
-        "the copied window had this channel switched OFF; the paste dropped that")
-    RV._LUT_CLIPBOARD.clear()
+        "the source window had this channel switched OFF; applying its record dropped that")

@@ -159,15 +159,18 @@ def test_the_card_never_demands_its_unelided_width_from_the_layout(card):
     assert card.minimumSizeHint().width() <= 300
 
 
-def test_the_cards_in_the_process_pane_all_elide(qapp, monkeypatch):
+def test_the_cards_in_the_operator_dock_all_elide(qapp, monkeypatch):
+    """The cards live in the views window's dock since 2026-08-19; still the plate's launcher."""
     from squidxplorer._operations import _OPERATIONS
     from squidxplorer._viewer import PlateWindow
 
     win = PlateWindow(None)
     try:
+        pane = win._build_operator_cards()      # what _install_operator_dock hands each dock
         cards = win._op_cards
         # "galleryview" is not an operator key; it's a View-menu action now.
         assert set(cards) == {op.key for op in _OPERATIONS}
+        assert pane._op_cards is cards
         for key, c in cards.items():
             assert hasattr(c, "_retext"), f"the {key!r} card is a plain QPushButton again"
             assert c.toolTip(), f"the {key!r} card lost the full text its elision hides"

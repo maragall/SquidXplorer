@@ -23,7 +23,7 @@ from qtpy.QtGui import QColor, QPalette
 from qtpy.QtWidgets import (
     QAction, QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel,
     QMainWindow, QPushButton, QScrollArea, QSpinBox,
-    QSplitter, QStyleFactory, QTabBar, QVBoxLayout, QWidget,
+    QSplitter, QStyleFactory, QVBoxLayout, QWidget,
 )
 
 #: The one Fusion QStyle for this process. setStyle() does not take ownership, so a
@@ -120,6 +120,17 @@ _GRID, _RED, _MUTED, _ACCENT = _qtstyle.GRID, _qtstyle.RED, _qtstyle.MUTED, _qts
 _SEL_FILL = _qtstyle.SEL_FILL
 
 
+def _widget_alive(w) -> bool:
+    """Is this Qt widget still a live C++ object? (sip may have deleted it under us.)"""
+    if w is None:
+        return False
+    try:
+        from qtpy import sip as _sip
+        return not _sip.isdeleted(w)
+    except Exception:                                    # noqa: BLE001 - no sip: assume alive
+        return True
+
+
 def _view_hue(view_id: int, *, focused: bool = False) -> QColor:
     """A stable, distinct hue per open view, so the plate colour-codes wells per window."""
     h = (0.13 + 0.61803398875 * int(view_id)) % 1.0     # golden-ratio walk spreads hues
@@ -154,6 +165,43 @@ def _scale_qss_fonts(qss: str, scale: float) -> str:
 #: operator cards' size hint cannot argue with. The plate keeps stretch factor 1.
 _BAND_DEFAULT_PX = 365
 _BAND_MAX_PX = 520
+
+
+class _LogReadout:
+    """The plate's one reply channel — a LOG LINE, not a widget (2026-08-19).
+
+    Julio: "log messages that show around the GUI and not in the log" is the complaint. The
+    status strip is gone; every ``setText`` that painted it lands in the console instead, so
+    the ~60 call sites (and the tools/tests that read ``.text()``) keep their one-line call.
+    Refusal-shaped sentences go out at WARNING, status at INFO; a repeat of the current text
+    is dropped so idempotent writers do not spam the console.
+    """
+
+    #: A message carrying one of these reads as a refusal or a failure.
+    _WARN_MARKS = (
+        "fail", "could not", "cannot", "error", "not an .hcs", "no plate",
+        "already processing", "empty selection", "open an acquisition", "open a view",
+        "pick wells first", "not in the current region order", "nowhere to put",
+        "no region is open", "no acquisition open", "stranded",
+    )
+
+    def __init__(self, logger) -> None:
+        self._log = logger
+        self._text = ""
+
+    def setText(self, text) -> None:                     # noqa: N802 - keeps the QLabel spelling
+        text = str(text or "")
+        if text == self._text:
+            return
+        self._text = text
+        if not text:
+            return
+        low = text.lower()
+        level = logging.WARNING if any(m in low for m in self._WARN_MARKS) else logging.INFO
+        self._log.log(level, "%s", text)
+
+    def text(self) -> str:
+        return self._text
 
 #: Operator-over-Log split inside the band's right column (starting position).
 _RIGHT_COL_SIZES = [215, 165]
@@ -242,6 +290,10 @@ class PlateWindow(QMainWindow):
         # it logs carries that id and, where it has one, an address.
         self.view_id = 0
         self.log = ViewLog(log, self.view_id)
+        # THE REPLY CHANNEL. A log-backed shim, not a widget: the red status strip is gone
+        # (2026-08-19, Julio's mock) and its messages go to the one console. Built BEFORE any
+        # subscriber that may speak (the cursor's on_problem below fires on the first bad region).
+        self._readout = _LogReadout(get_logger("status"))
         self._activity = ActivityLog()
         from squidxplorer._gui_commands import install_command_bus
         self.commands = install_command_bus(self)
@@ -283,6 +335,13 @@ class PlateWindow(QMainWindow):
         # out of step with it.
         self._viewer_manager.viewFocused.connect(lambda _regions: self._refresh_plate_navigation())
         self._viewer_manager.windowsChanged.connect(self._refresh_plate_navigation)
+        # THE OPERATOR CARDS LIVE IN THE VIEWS WINDOW (2026-08-19): the manager installs the
+        # collapsible dock once per deck / free window it constructs; the cards it holds call
+        # this window's `_activate_operator`, so the panels still open here.
+        self._op_cards = {}
+        self._op_docks = []
+        self._ops_enabled = False
+        self._viewer_manager.operator_dock_installer = self._install_operator_dock
         # THE PLATE FOLLOWS THE WINDOWS' napari (Task 8.1). Julio: "there shouldn't be any controls
         # for the plate view. It just reacts to toggles and contrast adjustments in napari." With no
         # central pane left, the napari the plate must react to is the one inside each window, so
@@ -334,7 +393,6 @@ class PlateWindow(QMainWindow):
         #                               assignment so every existing call site still reads.
         self._current_fov = 0         # the FOV of that region on screen (IMA-250: autofocus ranks IT)
         self._acq_path = None         # the opened acquisition dir (persist writes next to it)
-        self._processed_plate = None  # path of the written plate.ome.zarr once an operator persists it
         self._plate_mode = "raw"      # what the plate view is showing — shown in the plate-pane title
         self._plate_format = None     # the format the plate is laid out with (declared or inferred)
         self._plate_format_override = None   # manual override; also read from SQUIDXPLORER_WELLPLATE_FORMAT
@@ -352,7 +410,6 @@ class PlateWindow(QMainWindow):
         self._floating = self._tabman.floating    # key -> _FloatWindow holding a detached UI
                                       # (a key lives in exactly ONE of the two dicts, never both)
         self._gallery = None          # the ONE open GalleryWindow, or None (see _open_gallery_view)
-        self._readout_base = ""
         self._tabs_muted = False      # suppress _on_tab_changed during bulk teardown (ingest)
         self._pending_resync = False  # a tab switch was deferred because a run was live (IMA-205 bugs)
         self._runs_settled = 0        # monotonic: bumped once a run's TERMINAL cascade has run — the
@@ -378,8 +435,11 @@ class PlateWindow(QMainWindow):
         # The one thing that was still routed into it, the deconvolution QC composite, goes to
         # `_left_tabs` (see `publish_qc_result`), which is on screen.
 
-        # the band's right column: the process console (build the home tab first — it owns
-        self._left_tabs = _DetachTabs(self._detach_tab)
+        # the band's right column: OPERATOR TABS ONLY (2026-08-19). The Operators home tab —
+        # the card launcher — moved into the VIEWS window as a collapsible right-edge dock
+        # (`_operator_dock`); this bar holds just the panels a card or menu action opens, and it
+        # HIDES ITSELF while empty so the log owns the whole band (see _sync_left_tabs_visible).
+        self._left_tabs = _DetachTabs(self._detach_tab, first_detachable=0)
         # Dark the tab widget's own canvas (the strip behind/beside the tabs rendered white in macOS
         # light mode). Scope a Fusion style + dark palette to THIS widget subtree only — NOT the app,
         # which would bleed into the embedded ndviewer and hide its per-channel colour swatches.
@@ -400,8 +460,11 @@ class PlateWindow(QMainWindow):
         self._left_tabs.setTabsClosable(True)
         self._left_tabs.tabCloseRequested.connect(self._close_op_tab)
         self._left_tabs.currentChanged.connect(self._on_tab_changed)
-        self._left_tabs.addTab(self._build_process_pane(), "Operators")
-        self._left_tabs.tabBar().setTabButton(0, QTabBar.RightSide, None)  # home tab isn't closable
+        # EMPTY AND HIDDEN until an operator panel opens. `currentChanged` fires on the first
+        # insert and the last removal, so visibility rides the same signal the tab logic already
+        # uses — no home tab, no fixed indices (`_FIXED_TABS = 0`).
+        self._left_tabs.currentChanged.connect(lambda _i: self._sync_left_tabs_visible())
+        self._left_tabs.setVisible(False)
 
         # THE ONE GLOBAL CONSOLE, STACKED UNDER THE OPERATORS RATHER THAN BEHIND THEM.
         #
@@ -508,27 +571,21 @@ class PlateWindow(QMainWindow):
         self._left_l.setSpacing(0)
         self._left_l.addWidget(plate_title_bar)
 
-        # SELECTION BAR (the deck's "Selection" label): shows which wells operators will run on
-        # ("run on selected wells"), and a Select all button. Operators default to this selection.
-        sel_bar = QWidget()
-        sel_bar.setStyleSheet("background:#0b0e14;border-bottom:1px solid #232b3a;")
-        _sb = QHBoxLayout(sel_bar)
-        _sb.setContentsMargins(12, 5, 12, 5)
-        _sb.setSpacing(8)
+        # NO SELECTION BAR (2026-08-19, Julio's mock: "move rest, top row"). The selection caption
+        # lives in the STATUS BAR at the bottom; Select all is a View-menu action (and the plate's
+        # own Cmd/Ctrl-A, `PlateOverview.keyPressEvent`); the LUT copy/paste pair is SHELVED
+        # outright — Julio: "Shelf the LUT logic completely. That's just adding complexity to the
+        # code for no reason." The automatic window → plate contrast tap (`_bind_window_contrast`)
+        # is live sync, not the clipboard, and stays.
         _sel_cap = QLabel("Selection:")
         _sel_cap.setStyleSheet("color:#8b98ad;font-size:12px;border:none;")
         self._selection_label = QLabel("none — click wells, or Select all")
         self._selection_label.setStyleSheet("color:#c9d1d9;font-size:12px;border:none;")
-        self._select_all_btn = QPushButton("Select all")
-        self._select_all_btn.setCursor(Qt.PointingHandCursor)
-        self._select_all_btn.setStyleSheet(
-            "QPushButton{background:#161b22;color:#c9d1d9;border:1px solid #30363d;"
-            "border-radius:4px;padding:3px 10px;font-size:12px;}"
-            "QPushButton:hover{background:#21262d;}")
-        self._select_all_btn.clicked.connect(self._select_all_wells)
+        self.statusBar().addWidget(_sel_cap)
+        self.statusBar().addWidget(self._selection_label, 1)
         # OPEN the current selection as ONE window (for a shift-/Cmd-CLICK selection, which unlike a
-        # shift-DRAG has no release gesture to open on). Julio: "how do I open a new window with them
-        # after selecting them with the shift click?"
+        # shift-DRAG has no release gesture to open on). In the plate TITLE BAR: the top row keeps
+        # the acquisition name, the layer combo and this one button.
         self._open_sel_btn = QPushButton("Open view")
         self._open_sel_btn.setCursor(Qt.PointingHandCursor)
         self._open_sel_btn.setStyleSheet(
@@ -536,43 +593,7 @@ class PlateWindow(QMainWindow):
             "border-radius:4px;padding:3px 10px;font-size:12px;}"
             "QPushButton:hover{background:#388bfd;}")
         self._open_sel_btn.clicked.connect(self._open_selected_view)
-        # Copy/paste LUTs TO THE PLATE (Julio: "we have to be able to copy and paste luts to the
-        # plate"). Shares the one _LUT_CLIPBOARD windows use, so a window's contrast pastes onto the
-        # plate and vice versa — the plate is a View with controls like any window.
-        #
-        # NOT a duplicate of the automatic window->plate tap in `_bind_window_contrast`, and the
-        # difference is authority, not numbers. That tap lands in `follow_channel_window` ->
-        # `_RunningContrast.set_followed`, which `resolve` OUTRANKS with the per-region scope and
-        # drops entirely when the user picks SCOPE_PER_REGION. This paste lands in
-        # `set_channel_window` -> `set_manual`, the user latch, which wins over everything
-        # including per-region scope. The tap is "show me what that window resolved"; this is
-        # "pin the plate here". Also the ONLY way OUT of the plate: the tap is one-directional.
-        _lut_qss = ("QPushButton{background:#161b22;color:#c9d1d9;border:1px solid #30363d;"
-                    "border-radius:4px;padding:3px 10px;font-size:12px;}"
-                    "QPushButton:hover{background:#21262d;}")
-        self._plate_copy_lut_btn = QPushButton("⧉ LUTs")
-        self._plate_copy_lut_btn.setToolTip(
-            "PLATE → clipboard: the plate's per-channel contrast. Paste it into a window with "
-            "that window's '⤓ Paste LUTs' — the clipboard is shared. This is the only way out "
-            "of the plate; the automatic sync only runs window → plate.")
-        self._plate_copy_lut_btn.setCursor(Qt.PointingHandCursor)
-        self._plate_copy_lut_btn.setStyleSheet(_lut_qss)
-        self._plate_copy_lut_btn.clicked.connect(self._plate_copy_luts)
-        self._plate_paste_lut_btn = QPushButton("⤓ LUTs")
-        self._plate_paste_lut_btn.setToolTip(
-            "clipboard → PLATE: apply the copied contrast. This LATCHES each channel manual, so "
-            "it survives per-region scope and the wells still streaming in cannot stomp it — "
-            "unlike the automatic window → plate sync, which the plate is free to outrank.")
-        self._plate_paste_lut_btn.setCursor(Qt.PointingHandCursor)
-        self._plate_paste_lut_btn.setStyleSheet(_lut_qss)
-        self._plate_paste_lut_btn.clicked.connect(self._plate_paste_luts)
-        _sb.addWidget(_sel_cap)
-        _sb.addWidget(self._selection_label, 1)
-        _sb.addWidget(self._plate_copy_lut_btn)
-        _sb.addWidget(self._plate_paste_lut_btn)
-        _sb.addWidget(self._select_all_btn)
-        _sb.addWidget(self._open_sel_btn)
-        self._left_l.addWidget(sel_bar)
+        _tb.addWidget(self._open_sel_btn)
 
         self._left_l.addWidget(self._drop, 1)    # the plate overview replaces this on ingest
 
@@ -610,71 +631,32 @@ class PlateWindow(QMainWindow):
         # operators in `_right_col` — Julio: "the logger on the bottom of the GUI". This replaces
         # the locked 3-pane grid that Spencer asked us to dismantle.
 
-        # THE V2 DECK (2026-08-03 drawing, ...-main-window-layout-v2-plate-dominant.png): the PLATE
-        # on top, full width, dominant; a BAND under it holding [Window Navigator | Operator over
-        # Log]. Spencer: the plate view should take roughly half the window's real estate, and at
-        # the bottom of the window it was losing prominence to text-heavy panels. Measured before
-        # this change, offscreen: the plate was 32.8% of a 596x850 window and 35.6% of 1280x900.
-        from squidxplorer._region_viewer import OpenViewList
-        self._open_views = OpenViewList(self._viewer_manager, self)
+        # NO WINDOW NAVIGATOR (2026-08-19, Julio's mock). The v2 band held
+        # [Window Navigator | Operators over Log]; the ViewDeck's tabs superseded the navigator's
+        # list, its Close buttons live on the tabs and in View > Close All Views, and the LOG takes
+        # the whole band. The memory + run-progress bars the navigator carried were the one part
+        # with a job left, so they survive as `StatusRow` (Qt widgets + ViewerManager wiring, no
+        # tree) and are adopted by the log panel exactly as before.
+        from squidxplorer._region_viewer import StatusRow
+        self._status_row = StatusRow(self._viewer_manager, self)
+        self._log_panel.adopt_status_row(*self._status_row.widgets())
 
-        # THE STATUS BLOCK LEAVES THE NAVIGATOR AND GOES INTO THE LOG. Julio, verbatim: "the status
-        # bar and memory bar should be moved to inside the logger so that we save space." The v2
-        # drawing has no "Status bars" box at all. Those bars are internals of `OpenViewList`: the
-        # memory caption + bar, and the run-progress caption + bar it grew for "where the memory bar
-        # is, there should also be a loading bar" — so the move is a reparent, NOT a rebuild: the
-        # navigator keeps driving them off ViewerManager's signals and the log panel just shows
-        # them. See `OpenViewList.take_status_row` and `LogPanel.adopt_status_row`.
-        #
-        # NOT MOVED, and named so the omission is a decision rather than an oversight: the
-        # QMainWindow `statusBar()` carrying `self._readout`. It is the guidance line ("2 wells
-        # loaded · double-click a well…"), it is asserted by ~25 tests as the window's one reply
-        # channel, and neither panel of the drawing shows it. It stays where it is.
-        self._log_panel.adopt_status_row(*self._open_views.take_status_row())
-
-        # THE RIGHT COLUMN IS A VERTICAL SPLIT: Operator on top, Log beneath (Julio's 2026-08-03
-        # drawing). Both visible at once, which is the whole request; the tab bar that made them
-        # alternate now carries only the Operators home tab and the user's detachable operator tabs.
-        #
-        # A SPLITTER, not a fixed 50/50 layout, for two reasons. The plate is held at about half the
-        # window (see _BAND_DEFAULT_PX) and a handle is how the user takes some of that back. And
-        # it is the drag affordance `_sync_top_row_height` existed to AVOID needing: that method
-        # grew the strip while the Log TAB was in front and shrank it afterwards, inferring intent
-        # from a tab selection. There is no tab selection now, and an automatic height swap would
-        # fight a user who has just dragged the boundary where they want it. It is deleted, not
-        # adapted.
-        #
-        # setChildrenCollapsible(False) IS THE INVARIANT IN CODE: a splitter will happily let you
-        # drag a child to zero, and a console dragged to zero is a console you have lost — exactly
-        # what `_FIXED_TABS` was protecting when the log was a tab. The pressure valve is the
-        # panel's own collapse toggle (`▸ Log`), which drops it to its header and hands the space
-        # to the operators without ever taking the console off screen.
+        # THE RIGHT COLUMN IS A VERTICAL SPLIT: operator TABS on top (hidden while empty, which is
+        # most of the time now that the cards live in the views window), the Log beneath — so with
+        # no operator tab open the console owns the whole band, which is the mock's bottom-40%%
+        # logger. setChildrenCollapsible(False) IS THE INVARIANT IN CODE: a console dragged to zero
+        # is a console you have lost; the pressure valve is the panel's own collapse toggle.
         right_col = QSplitter(Qt.Vertical)
         right_col.setStyleSheet("QSplitter{background:#0b0e14;}"
                                 "QSplitter::handle{background:#232b3a;height:1px;}")
         right_col.setHandleWidth(6)
         right_col.setChildrenCollapsible(False)
-        right_col.addWidget(self._left_tabs)    # Operator, on top
+        right_col.addWidget(self._left_tabs)    # operator tabs, on top (hidden while empty)
         right_col.addWidget(self._log_panel)    # Log, beneath
         right_col.setStretchFactor(0, 3)
         right_col.setStretchFactor(1, 2)
         right_col.setSizes(list(_RIGHT_COL_SIZES))
         self._right_col = right_col
-
-        band = QSplitter(Qt.Horizontal)
-        band.setStyleSheet("QSplitter{background:#0b0e14;}"
-                           "QSplitter::handle{background:#232b3a;width:1px;}")
-        band.addWidget(self._open_views)        # band left: the Window Navigator
-        band.addWidget(right_col)               # band right: Operators over the one global console
-        # 280/280 -> 230/360. The navigator's contents are a tree of short window titles plus two
-        # buttons; the operator cards are the widget actually starved of width, and _qtstyle.py
-        # records that every blurb elides in the ~300 px it gets. Splitter sizes are hints, so this
-        # is a default and not a constraint — and the navigator's two side-by-side buttons set a
-        # minimum width that wins over this ratio at the 596 px design size (measured: 313/277).
-        band.setSizes([230, 360])
-        band.setHandleWidth(6)
-        band.setMinimumHeight(150)
-        self._band = band
 
         # THE CAP GOES ON A PLAIN HOST, NOT ON THE SPLITTER, AND THAT IS A BUG FIX.
         #
@@ -693,7 +675,7 @@ class PlateWindow(QMainWindow):
         _th = QVBoxLayout(band_host)
         _th.setContentsMargins(0, 0, 0, 0)
         _th.setSpacing(0)
-        _th.addWidget(band)
+        _th.addWidget(right_col)
         band_host.setMaximumHeight(_BAND_MAX_PX)
         band_host.setMinimumHeight(150)
         self._band_host = band_host
@@ -723,7 +705,7 @@ class PlateWindow(QMainWindow):
                            "QSplitter::handle{background:#232b3a;height:1px;}")
         body.setHandleWidth(6)
         body.addWidget(plate_host)              # index 0: THE PLATE, on top, full width, dominant
-        body.addWidget(band_host)               # index 1: navigator | operator over log
+        body.addWidget(band_host)               # index 1: operator tabs over the log
         # A CONSOLE YOU CAN DRAG TO NOTHING IS A CONSOLE YOU HAVE LOST — the same invariant
         # `_right_col` buys, one level up: the band must not be draggable to zero either, or the
         # navigator and the operators go with it.
@@ -739,7 +721,6 @@ class PlateWindow(QMainWindow):
 
         rv.addWidget(body, 1)                   # plate over band, in the drawing's order
         rv.addWidget(self._time_point_bar, 0)   # hidden unless n_t > 1
-        self._split = band
         self.setCentralWidget(root)
 
         # LOCK THE WHOLE ROOT DARK so macOS LIGHT theme cannot whiten the framing (Julio: "make
@@ -791,6 +772,19 @@ class PlateWindow(QMainWindow):
         self._log_float_act = QAction("Log in a &New Window", self)
         self._log_float_act.triggered.connect(self._float_log)
         view_menu.addAction(self._log_float_act)
+        view_menu.addSeparator()
+        # SELECT ALL left the top bar (2026-08-19 mock): the menu action and the plate's own
+        # Cmd/Ctrl-A (`PlateOverview.keyPressEvent`) are the two ways in. No shortcut ON the
+        # action — the plate widget already owns the key, and a window-level grab would shadow it
+        # for no gain.
+        self._select_all_act = QAction("Select &All Wells", self)
+        self._select_all_act.triggered.connect(self._select_all_wells)
+        view_menu.addAction(self._select_all_act)
+        # CLOSE ALL VIEWS survives the Window navigator's deletion as a menu action: the deck's
+        # per-tab close buttons cover one view, this covers the set.
+        self._close_views_act = QAction("Close All Vie&ws", self)
+        self._close_views_act.triggered.connect(self._close_all_views)
+        view_menu.addAction(self._close_views_act)
         view_menu.addSeparator()
         # Gallery View lives HERE, not in the Operators stack: it does not transform pixels and
         # writes nothing, so it is not a runnable operator and has no card. It IS gated on an
@@ -974,21 +968,21 @@ class PlateWindow(QMainWindow):
         super().resizeEvent(e)
         self._rescale_fonts()
 
-    # -- the Operators panel (band, upper right): a scrollable list of operator blocks -------------
-    def _build_process_pane(self) -> QWidget:
-        """The Operators panel: JUST a scrollable list of operator blocks — no header, no footer
-        (Julio, 2026-07-23). Each block opens that operator; operators apply to the plate SELECTION
-        (Cmd/Ctrl-A picks the whole plate). Minerva is here as the deck's terminal operator; Gallery
-        View is NOT (it arranges windows, see the View menu). Status moved to the window status bar;
-        the old 'run on' scope combo and the raw/3D/MIP footer buttons are kept as hidden orphans so
-        their many callers still resolve — they migrate onto the operator tabs and the windows in
-        the operator phase."""
-        # Status line — tests and many methods read self._readout; it now lives in the status bar,
-        # not as a pane header. Created here because _build_process_pane runs during __init__.
-        self._readout = QLabel("Drop a Squid acquisition, then pick an operator.")
-        self._readout.setStyleSheet("color:#8b98ad;font-size:12px;")
-        self.statusBar().addWidget(self._readout, 1)
+    # -- the Operators cards: a scrollable launcher, living in the VIEWS window's dock ------------
+    def _build_operator_cards(self) -> QWidget:
+        """The Operators card launcher: a scrollable list of operator blocks — no header, no
+        footer (Julio, 2026-07-23). Each block opens that operator's panel AS A TAB IN THE PLATE
+        WINDOW (`_activate_operator` is unchanged); operators apply to the plate SELECTION
+        (Cmd/Ctrl-A picks the whole plate). Since 2026-08-19 the launcher lives in the VIEWS
+        window as a collapsible right-edge dock (`_operator_dock`), built here because the cards
+        are the PLATE's capability list; only the pixels moved. Julio earlier rejected a
+        collapsible operators chip in the window's centre-top toolbar; this right-edge dock is
+        the explicitly requested different thing.
 
+        Minerva is a card as the deck's terminal operator; Gallery View is NOT (it arranges
+        windows, see the View menu — 2026-08-02, "I guess I don't understand how this can be
+        treated as an operator in bulk").
+        """
         pane = QWidget()
         pane.setStyleSheet(f"background:{_BG};")
         v = QVBoxLayout(pane)
@@ -999,26 +993,19 @@ class PlateWindow(QMainWindow):
         sv = QVBoxLayout(stack)
         sv.setContentsMargins(0, 0, 0, 0)
         sv.setSpacing(8)
+        # `_op_cards` is rebuilt per dock; with several hosts the LATEST build is the one tests
+        # and `_activate_operator` reach by name, and `_enable_operators` walks `_op_docks` so
+        # every host's cards gate together.
         self._op_cards = {}
-        # TERMINAL operator on TOP of the stack (Julio, 2026-07-23: "I need minerva author and the
-        # gallery view to be on the top of the stack"): Minerva Author, then the processing
-        # operators in registry order, minus minerva (already placed).
-        #
-        # GALLERY VIEW IS NOT HERE ANY MORE (Julio, 2026-08-02: "I guess I don't understand how
-        # this can be treated as an operator in bulk"). He is right, and it was a category error:
-        # an operator in this codebase is something the engine runs over regions to produce derived
-        # data, declared by a `consumes` frozenset -- and "arrange the open windows in a grid" eats
-        # no axis and produces no pixels. It was never in `_OPERATIONS`, but it sat in this stack
-        # with the same card, the same styling and the same `_enable_operators` gate, which is what
-        # made it read as one. It is a WINDOW-MANAGEMENT command, so it is a View-menu action now.
+        # TERMINAL operator on TOP of the stack (Julio, 2026-07-23): Minerva Author, then the
+        # processing operators in registry order, minus minerva (already placed).
         _minerva = [op for op in _OPERATIONS if op.key == "minerva"]
         ordered = _minerva + [op for op in _OPERATIONS if op.key != "minerva"]
         for op in ordered:
             # ELIDED, not shortened: the blurb is where the registry says what the operator
-            # actually does, and this pane is ~300 px wide, so the plain QPushButton was cutting
-            # every description off mid-word at the card's edge. See _qtstyle.operator_card.
+            # actually does, and this pane is ~300 px wide. See _qtstyle.operator_card.
             card = _operator_card(op.label, op.blurb)
-            card.setEnabled(False)                         # enabled once an acquisition loads
+            card.setEnabled(self._ops_enabled)             # enabled once an acquisition loads
             card.setCursor(Qt.PointingHandCursor)
             card.setStyleSheet(_CARD_QSS)
             card.setMinimumHeight(54)
@@ -1033,7 +1020,25 @@ class PlateWindow(QMainWindow):
         scroll.setStyleSheet("QScrollArea{border:none;background:transparent;}")
         scroll.setWidget(stack)
         v.addWidget(scroll, 1)
+        pane._op_cards = self._op_cards
         return pane
+
+    def _install_operator_dock(self, host) -> "Optional[QWidget]":
+        """Put the collapsible Operators dock on *host* (a ViewDeck or a free RegionViewer).
+
+        Called by `ViewerManager` ONCE at deck/window construction — never per region — through
+        `operator_dock_installer`. Collapsed by default to a thin titled grip on the right edge.
+        """
+        from squidxplorer._operator_dock import OperatorDock
+
+        try:
+            dock = OperatorDock(host, cards=self._build_operator_cards())
+        except Exception as exc:                         # noqa: BLE001 - a dock is never worth a crash
+            log.warning("could not build the operator dock: %s: %s", type(exc).__name__, exc)
+            return None
+        self._op_docks = [d for d in getattr(self, "_op_docks", []) if _widget_alive(d)]
+        self._op_docks.append(dock)
+        return dock
 
     # -- the Gallery View and the native-3D popout are LAUNCHED from here, not implemented here:
     # -- `_gallery_launch` owns both (thin delegates, because tests and the control wiring reach
@@ -1074,12 +1079,17 @@ class PlateWindow(QMainWindow):
         never rebuild, so a widget's live state survives."""
         self._tabman.open_tab(key, title, builder, tabs=tabs)
 
-    #: How many tabs at the head of the process console are FIXED: [0] Operators. It cannot close
-    #: and cannot detach, so the indices above it never move and a plain `index < _FIXED_TABS` is a
-    #: sound test. It was 2 while the Log was tab [1]; the Log is now a sibling panel in
-    #: `_right_col` and is protected by being always on screen instead of by this counter. Note
-    #: `_DetachTabBar(first_detachable=1)` already agreed with 1.
-    _FIXED_TABS = 1
+    #: How many tabs at the head of the process console are FIXED. 0 since 2026-08-19: the
+    #: Operators home tab moved to the views window's dock, so every tab here is an operator
+    #: panel the user opened and every one may close and detach. (It was 2 while the Log was tab
+    #: [1], then 1 while the cards were tab [0].)
+    _FIXED_TABS = 0
+
+    def _sync_left_tabs_visible(self) -> None:
+        """The operator-tab bar exists only while it holds a tab; the log owns the band otherwise."""
+        tabs = getattr(self, "_left_tabs", None)
+        if tabs is not None:
+            tabs.setVisible(tabs.count() > 0)
 
     #: Registry key for the floated log in `_floating`. Not an entry in `_op_tabs`: the log is not
     #: an operator UI and must never be routed through `_dispose_tab_widget`, which deletes.
@@ -1221,7 +1231,9 @@ class PlateWindow(QMainWindow):
         ASKED for the run — the region window, which had no progress affordance at all.
         """
         run = self._run
-        self._run_readout(f"● {report.sentence()}{run.dest}")
+        # NOT written to the readout: the readout is a LOG LINE now (2026-08-19), and a line per
+        # FOV is spam — the same sentence is already live on the work bar in the log panel
+        # (`_publish_progress` below) and in the activity header.
         self._tell_requester(run.requester, "operator_progress", report)
         # ...and to the ONE bar next to the memory bar, which is where Julio asked to see a run
         # WHEREVER it was started from ("in bulk or in a specific window"). The requester above is
@@ -1231,9 +1243,9 @@ class PlateWindow(QMainWindow):
     def _publish_progress(self, report) -> None:
         """Hand a ``ProgressReport`` (or None for idle) to the window navigator's work bar.
 
-        Routed through the ViewerManager rather than reaching into ``self._open_views`` because the
-        manager is the thing that outlives the navigator widget: the panel can be closed and rebuilt,
-        and a producer must not have to know whether it currently exists.
+        Routed through the ViewerManager because the manager is the thing that outlives any
+        widget showing the bar (today: `StatusRow`, adopted by the log panel): a producer must
+        not have to know whether one currently exists.
         """
         mgr = getattr(self, "_viewer_manager", None)
         if mgr is not None:
@@ -2139,8 +2151,16 @@ class PlateWindow(QMainWindow):
         _ingest.update_loupe_source(self)
 
     def _enable_operators(self, flag: bool):
+        self._ops_enabled = bool(flag)             # a dock built LATER reads this at card build
         for a in self._op_actions.values():
             a.setEnabled(flag)
+        for dock in getattr(self, "_op_docks", []):
+            if not _widget_alive(dock):
+                continue
+            try:
+                dock.set_cards_enabled(flag)
+            except Exception:                      # noqa: BLE001 - a dead dock is not worth a crash
+                pass
         for c in getattr(self, "_op_cards", {}).values():
             c.setEnabled(flag)
         menu = getattr(self, "_declared_menu", None)
@@ -2288,10 +2308,9 @@ class PlateWindow(QMainWindow):
         # nothing on screen having changed. Every fix made it a longer rule with more exceptions,
         # which is the shape of a model that is wrong rather than incomplete.
         #
-        # An explicit copy/paste has none of it: it names its source, it happens when asked, and it
-        # is already the model the windows use between themselves through the same `_LUT_CLIPBOARD`
-        # (`Copy LUTs` / `Paste LUTs`, and the plate's own pair). See `_plate_paste_luts`, which is
-        # now the ONE place the plate's look changes.
+        # The copy/paste pair that replaced it was itself SHELVED on 2026-08-19 (Julio: "Shelf the
+        # LUT logic completely") — the plate's look now changes only with the acquisition's own
+        # channel declarations and the layer picks below.
         #
         # What is deliberately KEPT is `on_user_op` below: which processing LAYER the plate draws
         # is a different quantity from how it is windowed, it has exactly one honest answer at a
@@ -2476,7 +2495,6 @@ class PlateWindow(QMainWindow):
         self._stop_preview()
         self._release_loupe_sources()             # a new plate: no source (and no thread) survives
         self._acq_name, self._acq_path = base.name, base
-        self._processed_plate = str(zroot)
         self._reader = None                       # a computed plate has no raw reader
         self._meta = {"channels": channels, "z_levels": [0], "n_z": 1, "n_t": 1,
                       "pixel_size_um": px_um,
@@ -2938,8 +2956,11 @@ class PlateWindow(QMainWindow):
         return True, est / gb, ""
 
     def _on_written(self, plate_path: str):
-        """The operator finished persisting: remember the written plate (re-openable artifact)."""
-        self._processed_plate = plate_path
+        """The operator finished persisting: SAY where. Nothing stores the path — the
+        `_processed_plate` attribute was write-only (2026-08-19 zarr inventory: four writers,
+        zero readers in the app, the tests and the tools) and is deleted; the store itself is
+        re-openable through File > Open a computed MIP."""
+        self._readout.setText(f"persisted plate: {plate_path}")
 
     def _on_preview_tile(self, ri, ci, well_id, tile, box=None):
         """One preview FIELD landed. ``box`` slots it into the region's mosaic (IMA-253); ``None``
@@ -3176,10 +3197,8 @@ class PlateWindow(QMainWindow):
         return added
 
     def _run_readout(self, text: str):
-        """Set the run's status line. Kept as its own method because every run-status caller goes
-        through it; it used to re-append a sticky push-failure suffix, and the only producer of one
-        was the array-viewer feed that no window has had since ndviewer_light was removed."""
-        self._readout_base = text
+        """Say a run-status sentence. One funnel for every run-status caller; the readout is a
+        log-backed shim since 2026-08-19, so this is a log line."""
         self._readout.setText(text)
 
     def _on_failed(self, msg):
@@ -3272,6 +3291,16 @@ class PlateWindow(QMainWindow):
         if self._overview is not None:
             self._overview.select_all()
 
+    def _close_all_views(self):
+        """Close every open view (the navigator's old "Close all", now a View-menu action)."""
+        mgr = getattr(self, "_viewer_manager", None)
+        if mgr is None:
+            return
+        if not mgr.windows:
+            self._readout.setText("No view is open, so there is nothing to close.")
+            return
+        mgr.close_all()
+
     def _open_selected_view(self):
         """Open ONE window over the wells picked on the plate. This is the "open" gesture for a
         shift-/Cmd-CLICK selection, which (unlike a shift-DRAG) has no release to open on."""
@@ -3285,103 +3314,12 @@ class PlateWindow(QMainWindow):
     def _plate_channels(self) -> list:
         return [c["name"] for c in (self._meta or {}).get("channels", [])]
 
-    def _plate_copy_luts(self):
-        """Copy the plate's per-channel contrast into the shared LUT clipboard (window <-> plate)."""
-        from squidxplorer._lut_clipboard import CLIPBOARD as _LUT_CLIPBOARD
-        ov = self._overview
-        names = self._plate_channels()
-        wins = ov.channel_windows() if ov is not None else []
-        if not names or not wins:
-            self._readout.setText("no plate channels to copy LUTs from.")
-            return
-        _LUT_CLIPBOARD.clear()
-        for i, name in enumerate(names):
-            if i < len(wins) and wins[i] is not None:
-                lo, hi = float(wins[i][0]), float(wins[i][1])
-                # The FULL record, in the shape the plate can express: colour as rgb (the
-                # plate's spelling — it has no colormaps), visibility as on. It used to copy
-                # clim alone, so a plate→window paste carried contrast and nothing else.
-                _LUT_CLIPBOARD[name] = {"clim": (lo, hi), "cmap": None,
-                                        "rgb": ov.channel_rgb(i), "on": ov.channel_visible(i)}
-        self._readout.setText(f"copied plate LUTs for {len(_LUT_CLIPBOARD)} channel(s).")
-
-    def _plate_paste_luts(self):
-        """Apply the shared LUT clipboard to the plate: contrast, colour, AND channel on/off.
-
-        THIS IS THE ONLY WAY THE PLATE'S LOOK CHANGES (2026-08-06). Julio: *"whichever lookup table
-        we have for the window, we copy it and it reflects on the plate, with whichever channels
-        were turned on on the window. And the plate image shouldn't change unless we paste a LUT.
-        That's the pragmatic fix to this annoying contrast sync logic."*
-
-        The live subscriptions this replaced are described in ``_bind_window_contrast``. The short
-        version: the plate followed whichever window the user last gestured in, per channel, for
-        three quantities at once, and "last gestured in" is not a thing a user tracks. With several
-        windows open, the plate's look was decided by a history nobody could see, and the only way
-        to find out what it would do was to do it.
-
-        A copy/paste pair has none of that. It is explicit, it names its source, it happens when
-        asked, and it is the model the windows already use between themselves through the same
-        ``_LUT_CLIPBOARD``. What was a rule with exceptions becomes a gesture with a result.
-
-        VISIBILITY TRAVELS WITH THE WINDOW, not as a separate step: ``lut["on"]`` is what the
-        source window had lit. Written through ``set_channel_visible``, so the plate's
-        never-go-black floor still refuses the last lit channel -- pasting from a window with
-        everything switched off must not empty the navigator.
-        """
-        from squidxplorer._lut_clipboard import CLIPBOARD as _LUT_CLIPBOARD
-        ov = self._overview
-        if not _LUT_CLIPBOARD:
-            self._readout.setText("no copied LUTs yet — copy from a window or the plate first.")
-            return
-        if ov is None:
-            return
-        applied = channels = 0
-        skipped: list = []
-        for i, name in enumerate(self._plate_channels()):
-            lut = _LUT_CLIPBOARD.get(name)
-            if not lut:
-                continue
-            if lut.get("clim") is not None:
-                lo, hi = float(lut["clim"][0]), float(lut["clim"][1])
-                # A DEGENERATE WINDOW IS NOT PASTED. Julio, 2026-08-06: *"when I copy luts, my
-                # thumbnails saturate the yellow channel."*
-                #
-                # `_contrast.auto_contrast` returns hi <= lo for a BLANK channel, deliberately --
-                # `add_mosaic` states the rule in full: "A degenerate window is passed through, NOT
-                # widened, because widening it to (lo, lo+1) renders a blank channel as full white,
-                # i.e. as signal." The plate's `_RunningContrast.set_manual` does exactly that
-                # widening (`max(hi, lo + 1)`), because a running histogram must never divide by
-                # zero. Both are right on their own side of the seam; what was missing is that a
-                # channel with no signal in the WINDOW must not be latched onto the plate at all.
-                # On the 10x set 561 is the empty channel -- its thumbnail is black in the window --
-                # so a paste handed the plate a one-count window and every tile went full yellow.
-                #
-                # Skipped and SAID, not silently widened: the user asked for a paste and one
-                # channel did not take it.
-                if hi <= lo:
-                    skipped.append(name)
-                    continue
-                try:
-                    ov.set_channel_window(i, lo, hi)
-                    applied += 1
-                except Exception:                        # noqa: BLE001 - one bad channel is skipped
-                    pass
-            if lut.get("rgb") is not None:
-                try:
-                    ov.set_channel_color(i, lut["rgb"])
-                except Exception:                        # noqa: BLE001
-                    pass
-            if lut.get("on") is not None:
-                try:
-                    ov.set_channel_visible(i, bool(lut["on"]))
-                    channels += 1
-                except Exception:                        # noqa: BLE001
-                    pass
-        self._readout.setText(
-            f"pasted LUTs onto {applied} plate channel(s)"
-            + (f", and {channels} channel on/off state(s)" if channels else "")
-            + (f" — {', '.join(skipped)} has no signal in that window, so its contrast was left "
-               f"alone rather than pasted as a one-count window." if skipped else "."))
+    # THE LUT COPY/PASTE PAIR IS SHELVED (2026-08-19). Julio: "Shelf the LUT logic completely.
+    # That's just adding complexity to the code for no reason." `_plate_copy_luts`,
+    # `_plate_paste_luts`, the window-side pair and the shared `_lut_clipboard.CLIPBOARD` are
+    # deleted. What SURVIVES is everything that is not the clipboard: the automatic window -> plate
+    # contrast tap (`_bind_window_contrast` / `follow_channel_window`), `MosaicLayers`' identity
+    # and contrast model, a window's "Match layers to raw", and the stain `display_lut` path.
 
     def _on_well_navigated(self, well_id: str):
         """Plain left-click on a well -> show that region in the ACTIVE view window.
@@ -3478,8 +3416,8 @@ class PlateWindow(QMainWindow):
         and wrong for the print: an operator UI that cannot name which windows it is about to run
         on makes the user infer it. This is what ``_run_scope.describe_view_target`` reads.
 
-        ``_open_view_targets`` and not ``_open_views``, which is already taken by the navigator
-        WIDGET (``self._open_views = OpenViewList(...)``). Same three words, two different things,
+        ``_open_view_targets`` and not ``_open_views``, which was the (now deleted) navigator
+        WIDGET's attribute. Same three words, two different things,
         and the shorter name belongs to the one that shipped first.
         """
         mgr = getattr(self, "_viewer_manager", None)

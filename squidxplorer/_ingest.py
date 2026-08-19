@@ -79,7 +79,6 @@ def ingest(win, path: str) -> None:
     win._reader, win._meta = reader, meta
     win._acq_name = Path(p).name
     win._acq_path = Path(p)
-    win._processed_plate = None
     win._viewer_manager.set_dataset(reader, meta)   # every spawned window shares this reader
     rows, cols, wells, order = plate.viewer_grid()
     for idx, region in enumerate(order):

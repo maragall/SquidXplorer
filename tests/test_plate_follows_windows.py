@@ -89,13 +89,6 @@ def _channels(win) -> list:
     return [c["name"] for c in win._meta["channels"]]
 
 
-def _copy(luts: dict) -> None:
-    """Put a window's LUT snapshot on the shared clipboard, as `Copy LUTs` does."""
-    from squidxplorer._region_viewer import _LUT_CLIPBOARD
-    _LUT_CLIPBOARD.clear()
-    _LUT_CLIPBOARD.update(luts)
-
-
 def _spawn(win, window_id: int = 1, resolved=None) -> _FakeWindow:
     """A window opens: the manager announces it exactly as ``_spawn`` does."""
     child = _FakeWindow(window_id, resolved)
@@ -137,50 +130,23 @@ def test_a_gesture_in_a_window_leaves_the_plate_alone(qapp, squid_dataset):
         win.close()
 
 
-def test_pasting_a_windows_luts_is_what_moves_the_plate(qapp, squid_dataset):
+def test_the_lut_copy_paste_pair_is_shelved_and_nothing_else_moves_the_plates_look(
+        qapp, squid_dataset):
+    """2026-08-19, Julio: "Shelf the LUT logic completely." The plate's copy/paste pair, the
+    window pair and the shared clipboard are DELETED — absence pinned with `not hasattr`, the
+    repo's convention — and a window gesture still leaves the plate alone (the test above), so
+    the plate's look now changes only with the acquisition's own declarations and the layer
+    picks."""
+    import squidxplorer._lut_clipboard as LC
+    import squidxplorer._region_viewer as RV
+
     win = _open_plate(squid_dataset)
     try:
-        child = _spawn(win)
-        ch_name = _channels(win)[0]
-        child.mosaic.user_drags_contrast(ch_name, 11.0, 222.0)
-
-        _copy({ch_name: {"clim": (11.0, 222.0), "cmap": None, "rgb": None, "on": True}})
-        win._plate_paste_luts()
-
-        assert win._overview._contrast.window(0) == (11.0, 222.0), (
-            "pasting the window's LUTs did not put its contrast on the plate")
-    finally:
-        win.close()
-
-
-def test_a_paste_carries_the_channels_the_window_had_lit(qapp, squid_dataset):
-    """Visibility travels WITH the LUT."""
-    win = _open_plate(squid_dataset)
-    try:
-        child = _spawn(win)
-        names = _channels(win)
-        _copy({names[0]: {"clim": None, "cmap": None, "rgb": None, "on": False},
-               names[1]: {"clim": None, "cmap": None, "rgb": None, "on": True}})
-        win._plate_paste_luts()
-
-        assert not win._overview._mask[0], (
-            "the paste did not carry the window's channel on/off state to the plate")
-        assert win._overview._mask[1], "the paste turned off a channel the window had lit"
-    finally:
-        win.close()
-
-
-def test_a_paste_can_never_black_the_plate_out(qapp, squid_dataset):
-    """The never-go-black floor still wins over a paste."""
-    win = _open_plate(squid_dataset)
-    try:
-        child = _spawn(win)
-        _copy({n: {"clim": None, "cmap": None, "rgb": None, "on": False}
-               for n in _channels(win)})
-        win._plate_paste_luts()
-
-        assert any(bool(v) for v in win._overview._mask), (
-            "pasting an all-off window emptied the plate")
+        assert not hasattr(win, "_plate_copy_luts"), "the plate copy handler is back"
+        assert not hasattr(win, "_plate_paste_luts"), "the plate paste handler is back"
+        assert not hasattr(win, "_plate_copy_lut_btn") and not hasattr(win, "_plate_paste_lut_btn")
+        assert not hasattr(LC, "CLIPBOARD"), "the shared LUT clipboard is back"
+        assert not hasattr(RV, "_LUT_CLIPBOARD"), "the clipboard alias is back"
     finally:
         win.close()
 

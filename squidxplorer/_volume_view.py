@@ -64,7 +64,7 @@ def close_native3d(win) -> None:
             pass
 
 
-def open_3d(win) -> None:
+def open_3d(win, scene_from=None) -> None:
     """3D = THIS view at NATIVE resolution, read STRAIGHT FROM THE READER (gallery-view recipe).
 
     Closes any volume already up BEFORE the scene is read — while one is up, ``MosaicLayers``
@@ -72,6 +72,10 @@ def open_3d(win) -> None:
     (measured: 1 of 9 bricks yielded voxels, contrast ``(0.0, 1.0)`` against ``(120, 900)`` on
     screen). The reading paths below are module-internal on purpose: they cannot be reached
     without passing this close.
+
+    ``scene_from``: harvest the LUTs from THAT window's scene instead of *win*'s. The 3D-in-a-
+    new-tab flow (2026-08-19) renders in a freshly spawned view whose layers do not exist yet;
+    the look the user set lives in the 2D window that asked.
     """
     win.set_render_mode("3d")
     region = win._cursor.region if win._cursor is not None else (
@@ -86,13 +90,13 @@ def open_3d(win) -> None:
             roi_bbox, region = sel_bbox, sel_region
     close_native3d(win)
     if roi_bbox is not None:
-        open_roi_3d(win, region, roi_bbox)
+        open_roi_3d(win, region, roi_bbox, scene_from=scene_from)
         return
 
     fov = win._roi_center_fov(region, roi_bbox)
     from squidxplorer._napari3d import open_native_3d
 
-    contrast_by, colormap_by = on_screen_luts(win, _RAW_OP)
+    contrast_by, colormap_by = on_screen_luts(scene_from or win, _RAW_OP)
     try:
         replace_native3d(win, lambda: open_native_3d(
             win._reader, win._meta, region, fov=fov,
@@ -127,7 +131,7 @@ def on_screen_luts(win, op: str) -> "tuple[dict, dict]":
     return contrast_by, colormap_by
 
 
-def open_roi_3d(win, region: str, roi_bbox: tuple) -> None:
+def open_roi_3d(win, region: str, roi_bbox: tuple, scene_from=None) -> None:
     """3D of an ROI, BRICKED and IN THIS WINDOW. Any ROI renders; none is refused."""
     names = [c["name"] for c in (win._meta or {}).get("channels", [])]
     if not names:
@@ -161,7 +165,7 @@ def open_roi_3d(win, region: str, roi_bbox: tuple) -> None:
     read, source, src_pitch = volume_source(win, window)
     if source is None:
         return
-    contrast_by, colormap_by = on_screen_luts(win, source)
+    contrast_by, colormap_by = on_screen_luts(scene_from or win, source)
     r0, r1, c0, c1 = window
     roi_origin = (0.0, float(origin[1]) + r0 * px, float(origin[0]) + c0 * px)
     budget = _brick_budget_bytes()
