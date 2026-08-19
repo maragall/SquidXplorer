@@ -761,6 +761,19 @@ class MosaicLayers:
         """
         key = MosaicKey(str(op), str(channel))
         existing = self.find(key.op, key.channel)
+        # napari cannot change a layer's multiscale-ness after construction: reusing a
+        # single-scale layer with a levels LIST leaves napari reading `list.shape`. A
+        # mismatched layer is REPLACED, carrying its look into the new layer's kwargs.
+        if existing is not None and bool(getattr(existing, "multiscale", False)) != bool(multiscale):
+            if visible is None:
+                visible = bool(existing.visible)
+            if contrast_limits is None:
+                try:
+                    contrast_limits = tuple(existing.contrast_limits)
+                except Exception:                # noqa: BLE001 - the seed below covers it
+                    pass
+            self.remove_op_channel(key.op, key.channel)
+            existing = None
         if existing is not None:
             # Reuse the layer: destroying it is slow and strands every subscriber bound to
             # it, and reuse keeps the user's contrast/colormap/visibility across regions.
