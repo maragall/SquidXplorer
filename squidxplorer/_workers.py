@@ -335,13 +335,30 @@ class _MosaicWorker(QThread):
     def _seed_window(self, channel, levels, auto_window) -> tuple:
         """The contrast seed: an RGB component gets the FILE's own full range (identical across
         the three primaries, so additive blending reconstructs the file's exact color — a
-        per-channel percentile window would tint it); everything else keeps the percentiles."""
+        per-channel percentile window would tint it); a stain-LUT channel gets [0, white] where
+        white is the LUT fit's own percentile (the LUT's t is transmittance — a stretched
+        percentile window crushes dense tissue toward black); everything else keeps the
+        percentiles."""
         probe = getattr(self._reader, "is_rgb_component", None)
         if probe is not None and probe(channel):
             try:
                 info = np.iinfo(np.dtype(self._meta["dtype"]))
                 return (float(info.min), float(info.max))
             except (TypeError, ValueError, KeyError):
+                pass
+        entry = next((c for c in self._meta["channels"]
+                      if c.get("name") == channel or c.get("display_name") == channel), None)
+        if entry is not None and entry.get("display_lut"):
+            from squidxplorer._contrast import sample_plane
+            from squidxplorer._stain import STAIN_WHITE_PERCENTILE
+
+            try:
+                plane = sample_plane(levels)
+                white = None if plane is None else float(
+                    np.percentile(plane, STAIN_WHITE_PERCENTILE))
+                if white and white > 0:
+                    return (0.0, white)
+            except Exception:               # noqa: BLE001 - seeding is cosmetic, never fatal
                 pass
         return auto_window(levels, True)
 
