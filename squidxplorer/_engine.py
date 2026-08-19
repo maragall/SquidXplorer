@@ -259,6 +259,20 @@ def available_region_operators() -> list[str]:
     return sorted(n for n, op in _OPERATORS.items() if "fov" in op.consumes)
 
 
+def operator_saves_copy(name) -> bool:
+    """Whether *name*'s SAVE artifact is a registered copy of the acquisition, not a plate.
+
+    Declared, never name-matched: a region operator accepting ``copy`` writes its copy itself
+    when the run passes ``copy=True`` (register's ``stitched_<folder>``), so a save routes
+    through the engine with that flag instead of the OME-Zarr plate writer.
+    """
+    try:
+        op = _resolve_operator(name)
+    except (KeyError, TypeError, ValueError):
+        return False
+    return "fov" in op.consumes and "copy" in op.accepts
+
+
 def operator_available(name: str) -> tuple[bool, str]:
     """``(ok, reason_if_not)`` — can this operator actually run right now?"""
     try:

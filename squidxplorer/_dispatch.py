@@ -66,6 +66,21 @@ def run_operator_once(reader, *, operator: str, save: bool, owed: int, out_dir=N
     operator_kwargs = dict(parameters or {}) or None
     skipped_regions: set = set()
 
+    # An operator whose save artifact is a registered COPY of the acquisition (declared via
+    # operator_saves_copy) saves by running the engine with copy=True — the operator writes
+    # the copy itself; there is no plate to write, so the HCS layout is never demanded.
+    from squidxplorer._engine import operator_saves_copy
+
+    copy_out = None
+    if save and operator_saves_copy(operator):
+        operator_kwargs = {**(operator_kwargs or {}), "copy": True}
+        save = False
+        src = getattr(reader, "source_id", None)
+        if src:
+            from squidxplorer._register import registered_copy_root
+
+            copy_out = str(registered_copy_root(src))
+
     def _on_error(region, fov, exc):
         skipped_regions.add(str(region))
         if on_error is not None:
@@ -114,7 +129,7 @@ def run_operator_once(reader, *, operator: str, save: bool, owed: int, out_dir=N
     if not stopped and stop is not None and stop():
         stopped = True                  # requested between the last field and here
     outcome, detail = verdict(landed, owed, len(skipped_regions), stopped)
-    out_path = (manifest or {}).get("path") or (manifest or {}).get("plate")
+    out_path = (manifest or {}).get("path") or (manifest or {}).get("plate") or copy_out
     return DispatchResult(outcome=outcome, detail=detail, landed=landed, stopped=stopped,
                           skipped_regions=frozenset(skipped_regions), manifest=manifest,
                           out_path=str(out_path) if out_path else None)
