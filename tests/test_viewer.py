@@ -2504,49 +2504,10 @@ def test_loupe_geometry_maps_cursor_to_the_right_well_and_crop(qapp, squid_datas
     ov.set_loupe_source(None)
     win.close()
 
-def test_minerva_is_a_registered_operation():
-    op = V._OPERATIONS_BY_KEY["minerva"]
-    assert op.build_tab == "_build_minerva_tab"
-    assert hasattr(V.PlateWindow, op.build_tab)
 
 
-def test_minerva_tab_builds_and_lists_z_operators(qapp, squid_dataset):
-    """The z-operator choice must be real — squid2minerva's convert.py offers --mip/--z, so hardcoding here would be a capability regression."""
-    from qtpy.QtWidgets import QComboBox
-    from squidxplorer import available_plane_operators
-
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    win._open_op_tab("minerva", "Minerva", win._build_minerva_tab)
-    tab = win._op_tabs["minerva"]
-
-    combos = tab.findChildren(QComboBox)
-    assert combos, "no z-operator selector in the Minerva tab"
-    listed = [combos[0].itemText(i) for i in range(combos[0].count())]
-    assert listed == available_plane_operators()
-    assert combos[0].currentText() == "mip"
-    win.close()
 
 
-@_needs("tilefusion")
-def test_run_minerva_export_writes_one_fused_mosaic_for_the_selected_region(
-        qapp, squid_dataset, tmp_path):
-    """Two bugs pinned in order found: the GUI building a 1-element selection pinned to fov 0, then the fix producing N files per region — Minerva Author renders only series[0], so N files silently drops N-1 of them."""
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    win.activate_well("B2", 0)                                       # the user's selection
-    win.run_minerva_export(out_dir=str(tmp_path), launch=False)      # launch=False: no server, no browser
-    assert _drain_until(qapp, lambda: "✓ exported" in win._readout.text())
-    names = sorted(p.name for p in tmp_path.glob("*.ome.tiff"))
-    assert len(names) == 1, f"one mosaic per region, got {names}"
-    assert "B2" in names[0]
-    assert "fov" not in names[0], "a per-FOV filename means the per-FOV model came back"
-    assert len(list(tmp_path.glob("*.story.json"))) == 1
-    assert "1 mosaic" in win._readout.text()                         # honest unit + count
-    assert "B2" in win._readout.text()
-    win._stop_minerva(); win.close()
 
 
 #: How many widget px a FOV box needs before a drag inside it is a DRAG rather than a Shift-click toggle — the gesture is only available zoomed in.
@@ -2600,9 +2561,8 @@ def test_a_shift_alt_box_inside_a_mosaic_selects_fovs_not_the_whole_well(
 
     assert ov.selected_wells() == [region]
     assert ov.fov_subsets() == {region: [fovs[0]]}
-    assert win.selected_region_fovs() == [(region, fovs[0])]
-    assert win.minerva_selection() == [(region, fovs[0])], (
-        "the export still expands the well to every FOV — the box never reached it")
+    assert win.selected_region_fovs() == [(region, fovs[0])], (
+        "the selection payload still expands the well to every FOV — the box never reached it")
     assert f"1/{len(fovs)} FOVs" in win._selection_label.text(), (
         "a cropped well reads exactly like a whole one in the Selection bar")
 
@@ -2610,7 +2570,7 @@ def test_a_shift_alt_box_inside_a_mosaic_selects_fovs_not_the_whole_well(
     x2, y2, w2, h2 = ov._block_rect(r, c, *ov._boxes[(region, fovs[-1])])
     _drag_px(qapp, ov, x2 + w2 * 0.2, y2 + h2 * 0.2, x2 + w2 * 0.8, y2 + h2 * 0.8, mods)
     assert ov.fov_subsets() == {}, "a box over every field is the whole region, not a subset"
-    assert win.minerva_selection() == [(region, f) for f in fovs]
+    assert win.selected_region_fovs() == [(region, f) for f in fovs]
 
     # ZOOMED OUT, the same gesture is the whole-well union it has always been.
     ov.clear_selection()
@@ -2622,51 +2582,10 @@ def test_a_shift_alt_box_inside_a_mosaic_selects_fovs_not_the_whole_well(
           ax + (c + 1) * cd - 2, ay + (r + 1) * cd - 2, mods)
     assert ov.selected_wells() == [region]
     assert ov.fov_subsets() == {}
-    assert win.minerva_selection() == [(region, f) for f in fovs]
+    assert win.selected_region_fovs() == [(region, f) for f in fovs]
     win.close()
 
 
-@_needs("tilefusion")
-def test_a_boxed_fov_subset_exports_a_smaller_mosaic_than_the_whole_region(
-        qapp, squid_dataset, tmp_path):
-    """The gesture->selection->export chain, end to end: a boxed FOV subset lands as one cropped mosaic."""
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    ov = win._overview
-    ov.resize(700, 560)
-    ov.show()
-    qapp.processEvents()
-
-    region = "B2"
-    fovs = win._meta["fovs_per_region"][region]
-    r, c = _zoom_onto(ov, qapp, region)
-    x, y, w, h = ov._block_rect(r, c, *ov._boxes[(region, fovs[0])])
-    _drag_px(qapp, ov, x + w * 0.2, y + h * 0.2, x + w * 0.8, y + h * 0.8,
-          Qt.ShiftModifier | Qt.AltModifier)
-    assert ov.fov_subsets() == {region: [fovs[0]]}
-
-    win.run_minerva_export(out_dir=str(tmp_path / "crop"), launch=False)
-    assert _drain_until(qapp, lambda: "✓ exported" in win._readout.text())
-    crop, = list((tmp_path / "crop").glob("*.ome.tiff"))
-    assert "1fov" in crop.name, f"the filename does not say it is a crop: {crop.name}"
-    assert "cropped" in win._readout.text(), "the readout does not say the mosaic was cropped"
-
-    ov.clear_selection()
-    ov._selection = {(r, c)}
-    win._on_selection_changed(ov.selected_wells())
-    assert win.minerva_selection() == [(region, f) for f in fovs]
-    win._stop_minerva()
-    win.run_minerva_export(out_dir=str(tmp_path / "whole"), launch=False)
-    assert _drain_until(qapp, lambda: str(tmp_path / "whole") in win._readout.text())
-    whole, = list((tmp_path / "whole").glob("*.ome.tiff"))
-
-    import tifffile
-    crop_px, whole_px = tifffile.imread(str(crop)), tifffile.imread(str(whole))
-    assert crop_px.shape[0] == whole_px.shape[0], "the crop lost a channel"
-    assert crop_px.shape[-1] < whole_px.shape[-1], (
-        f"the boxed subset was not cropped: {crop_px.shape} vs {whole_px.shape}")
-    win._stop_minerva(); win.close()
 
 
 def test_a_user_drag_of_the_timepoint_bar_does_not_raise(qapp,
@@ -2687,88 +2606,14 @@ def test_a_user_drag_of_the_timepoint_bar_does_not_raise(qapp,
     win.close()
 
 
-@_needs("tilefusion")
-def test_the_exported_timepoint_is_the_one_the_plate_is_showing(
-        qapp, multi_time_point_dataset, tmp_path, monkeypatch):
-    """run_minerva_export defaulted t=0 and both GUI call sites took the default, so multi-timepoint exports always wrote frame 0."""
-    root, _ = multi_time_point_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    region = win._meta["regions"][0]
-    win.activate_well(region, 0)                     # the user's selection; without one the export is a message, not an export
-    assert win.minerva_selection(), "the fixture region never became a selection"
-
-    seen = []
-    real = V._MinervaWorker
-
-    class Spy(real):
-        def __init__(self, reader, selection, out_dir, z_operator, time_point=0, **kw):
-            seen.append(time_point)
-            super().__init__(reader, selection, out_dir, z_operator, time_point=time_point, **kw)
-
-    monkeypatch.setattr(V, "_MinervaWorker", Spy)
-
-    for t in (1, 2):
-        win._time_point_bar.set_time_point_from_user(t)
-        qapp.processEvents()
-        out = tmp_path / f"t{t}"
-        win.run_minerva_export(out_dir=str(out), launch=False)
-        assert _drain_until(qapp, lambda o=out: str(o) in win._readout.text()), \
-            win._readout.text()
-        win._stop_minerva()
-        written = [p.name for p in out.glob("*.ome.tiff")]
-        assert written and f"_t{t}_" in written[0], f"t={t} wrote {written}"
-
-    assert seen == [1, 2], f"the window's timepoint never reached the worker: {seen}"
-
-    import tifffile
-    px1 = tifffile.imread(str(next((tmp_path / "t1").glob("*.ome.tiff"))))
-    px2 = tifffile.imread(str(next((tmp_path / "t2").glob("*.ome.tiff"))))
-    assert not np.array_equal(px1, px2), (
-        "two timepoints exported identical pixels — the slider is not reaching the export")
-    win.close()
 
 
-def test_run_minerva_export_with_nothing_selected_says_so(qapp, squid_dataset, tmp_path):
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    win._current_well = None            # nothing selected and nothing open in the detail viewer
-    assert win.minerva_selection() == []
-    win.run_minerva_export(out_dir=str(tmp_path), launch=False)
-    assert "nothing selected" in win._readout.text()
-    qapp.processEvents()
-    assert not list(tmp_path.glob("*.ome.tiff"))
-    assert win._minerva is None
-    win.close()
 
 
-def test_minerva_selection_reads_the_window_not_the_overview(qapp, squid_dataset):
-    """PlateOverview is display-only; the old minerva_selection duck-typed through the overview and reached the right answer only by accident via selected_wells."""
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    win.activate_well("B2", 0)                       # detail well: the last-resort source
-
-    # Decoys on the display-only widget. Reading either would be reading the wrong owner.
-    win._overview.selected_wells = lambda: ["B3"]
-    win._overview.selected_region_fovs = lambda: {"B3": [1]}
-    assert win.minerva_selection() == [("B2", 0), ("B2", 1)], "read the overview, not the window"
-
-    # The real owner. Setting it is what must move the export scope.
-    win._selected_regions = ["B3"]
-    assert win.minerva_selection() == [("B3", 0), ("B3", 1)]
-    win._selected_regions = ["B3", "B2"]
-    assert win.minerva_selection() == [("B3", 0), ("B3", 1), ("B2", 0), ("B2", 1)]
-
-    # A selection naming things the acquisition does not have is dropped, never exported.
-    win._selected_regions = ["ZZ"]
-    assert win.minerva_selection() == [("B2", 0), ("B2", 1)]   # falls back to the detail well
-    win.close()
 
 
-def test_a_real_plate_gesture_is_what_minerva_exports(qapp, squid_dataset):
-    """End to end through real gestures: since the marquee-drag/click split, a drag asks for a window and moves no export scope, while a click moves export scope and opens no window."""
+def test_a_real_plate_gesture_is_what_the_selection_payload_carries(qapp, squid_dataset):
+    """End to end through real gestures: since the marquee-drag/click split, a drag asks for a window and moves no selection scope, while a click moves selection scope and opens no window."""
     from qtpy.QtCore import QEvent, QPoint
     from qtpy.QtGui import QMouseEvent
 
@@ -2804,7 +2649,7 @@ def test_a_real_plate_gesture_is_what_minerva_exports(qapp, squid_dataset):
     assert asked == [[target]], f"the Shift-drag did not open a window over {target}: {asked}"
     assert ov.selected_wells() == [], "the Shift-drag left a batch selection behind"
 
-    # 2. THE PLAIN CLICK: the selection gesture, and the one an export scopes to.
+    # 2. THE PLAIN CLICK: the selection gesture, and the one a run scopes to.
     asked.clear()
     send(QEvent.MouseButtonPress, cx, cy, Qt.LeftButton, Qt.NoModifier)
     send(QEvent.MouseButtonRelease, cx, cy, Qt.NoButton, Qt.NoModifier)
@@ -2814,99 +2659,47 @@ def test_a_real_plate_gesture_is_what_minerva_exports(qapp, squid_dataset):
     assert asked == [], "a plain click opened a window; only the drag and double-click do that"
     expected = [(target, f) for f in win._meta["fovs_per_region"][target]]
     assert win.selected_region_fovs() == expected             # IMA-221's payload
-    assert win.minerva_selection() == expected                # ...is what IMA-228 exports
 
     other = ov._by_rc[sorted(ov._by_rc)[-1]]
     win.activate_well(other, 0)                               # a DIFFERENT well is the current one
     assert win._current_well == other, "the current well never actually changed"
-    assert win.minerva_selection() == expected, (
-        "minerva_selection fell through to the current well and ignored the plate selection")
+    assert win.selected_region_fovs() == expected, (
+        "the payload fell through to the current well and ignored the plate selection")
 
     ov.clear_selection()
     qapp.processEvents()
-    assert win.minerva_selection() == [(other, f) for f in win._meta["fovs_per_region"][other]]
+    assert win.selected_region_fovs() == []                   # no selection means an empty payload
     win.close()
 
 
-def test_ingest_stops_a_running_minerva_export(qapp, squid_dataset, tmp_path):
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    win.activate_well("B2", 0)
-    win.run_minerva_export(out_dir=str(tmp_path), launch=False)
-    worker = win._minerva
-    assert worker is not None
-
-    win.ingest(str(root))                       # open an acquisition again, mid-export
-    assert win._minerva is None                 # ...the export is retired, not orphaned
-    assert worker.wait(10000)
-    win._stop_worker(); win._stop_preview(); win.close()
 
 
-def test_run_minerva_export_refuses_a_second_concurrent_run(qapp, squid_dataset, tmp_path):
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-
-    class _Busy:
-        def isRunning(self):
-            return True
-
-    win._minerva = _Busy()
-    win.run_minerva_export(out_dir=str(tmp_path), launch=False)
-    assert "already exporting" in win._readout.text()
-    assert not list(tmp_path.glob("*.ome.tiff"))
-    win._minerva = None
-    win.close()
 
 
-def test_run_minerva_export_without_an_acquisition_is_a_message_not_a_crash(qapp):
-    win = V.PlateWindow(None)
-    win.run_minerva_export(launch=False)
-    assert "open an acquisition" in win._readout.text()
-    win.close()
 
 
-def test_minerva_export_failure_surfaces_in_the_readout(qapp, squid_dataset, monkeypatch, tmp_path):
-    from squidxplorer import _minerva
-
-    def boom(*a, **k):
-        raise ValueError("no objective pixel size")
-
-    monkeypatch.setattr(_minerva, "export_selection", boom)
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    win.activate_well("B2", 0)
-    win.run_minerva_export(out_dir=str(tmp_path), launch=False)
-    assert _drain_until(qapp, lambda: "failed" in win._readout.text())
-    assert "no objective pixel size" in win._readout.text()
-    win._stop_minerva(); win.close()
 
 
-@_needs("tilefusion")
-def test_minerva_reports_when_author_is_not_installed(qapp, squid_dataset, monkeypatch, tmp_path):
-    from squidxplorer import _minerva
 
-    monkeypatch.setattr(_minerva, "is_running", lambda timeout=1.0: False)
-    monkeypatch.setattr(_minerva, "minerva_home", lambda: None)
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    win.activate_well("B2", 0)
-    win.run_minerva_export(out_dir=str(tmp_path), launch=True)
-    assert _drain_until(qapp, lambda: "not found" in win._readout.text())
-    assert "✓ exported" in win._readout.text()          # the files are still good
-    assert list(tmp_path.glob("*.ome.tiff"))
-    win._stop_minerva(); win.close()
+
+class _IdleSignalWorker(V.QThread):
+    """A never-started worker with declared signals, for the _retire discovery tests."""
+    progress = Signal(int, int)
+    exported = Signal(object)
+    launched = Signal(bool)
+    failed = Signal(str)
+    finished_ok = Signal()
+
+    def stop(self):
+        pass
 
 
 def test_signal_names_discovers_every_worker_signal():
     """_retire used to disconnect a hardcoded name list, so a worker declaring a new signal stayed connected through teardown."""
-    names = set(V._signal_names(V._MinervaWorker))
+    names = set(V._signal_names(_IdleSignalWorker))
     assert {"progress", "exported", "launched", "failed", "finished_ok"} <= names
     assert "finished" not in names and "started" not in names   # QThread's own — never torn down
-    # the pre-existing worker keeps full coverage too
+    # the production worker keeps full coverage too
     assert {"tileReady", "resultReady", "streamEnded", "writtenReady", "wellFailed"} <= set(
         V._signal_names(V._OperatorWorker))
 
@@ -2916,12 +2709,12 @@ def test_retire_disconnects_every_declared_signal(qapp, squid_dataset, tmp_path)
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
-    worker = V._MinervaWorker(win._reader, [("B2", 0)], str(tmp_path), "mip", time_point=0, launch=False)
+    worker = _IdleSignalWorker()
 
     payload = {"progress": (1, 1), "exported": ([],), "launched": (False,), "failed": ("x",),
                "finished_ok": ()}
     seen = []
-    names = [n for n in V._signal_names(V._MinervaWorker) if n in payload]
+    names = [n for n in V._signal_names(_IdleSignalWorker) if n in payload]
     assert set(names) == set(payload), "a declared worker signal is not covered here"
     for name in names:
         getattr(worker, name).connect(lambda *a, _n=name: seen.append(_n))
@@ -2935,20 +2728,6 @@ def test_retire_disconnects_every_declared_signal(qapp, squid_dataset, tmp_path)
     win._stop_worker(); win._stop_preview(); win.close()
 
 
-def test_closing_mid_export_disconnects_the_worker(qapp, squid_dataset, tmp_path):
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    win.activate_well("B2", 0)
-    win.run_minerva_export(out_dir=str(tmp_path), launch=False)
-    worker = win._minerva
-    win.close()
-
-    seen = []
-    worker.exported.connect(lambda p: seen.append(p))   # reconnect: proves the old ones are gone
-    worker.wait(5000)
-    qapp.processEvents()
-    assert win._minerva is None
 
 
 
@@ -3289,16 +3068,14 @@ def test_flatfield_streams_live_once_a_profile_is_installed(qapp, squid_dataset)
 
 
 def test_run_operator_refuses_a_non_operator_by_name(qapp, squid_dataset):
-    """minerva is a card, not an operator — handing it to the engine used to die with a raw KeyError in the status line."""
+    """A key the engine never registered used to die with a raw KeyError in the status line."""
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
-    win.run_operator("minerva", regions=["B3"], save=False)
+    win.run_operator("no_such_op", regions=["B3"], save=False)
     assert win._worker is None, "a non-operator started a run"
     assert "not a runnable operator" in win._readout.text()
     assert "KeyError" not in win._readout.text(), "raw engine exception leaked into the UI"
-    win.run_operator("no_such_op", regions=["B3"], save=False)
-    assert win._worker is None and "not a runnable operator" in win._readout.text()
     win.close()
 
 
@@ -3929,7 +3706,6 @@ def test_a_cards_runnability_is_the_engines_answer_and_cannot_go_stale():
     """Operation.runnable is now a property over runnable_operators(), not a hand-written bool that could drift."""
     from squidxplorer import add_operator, plane_op
 
-    assert V._OPERATIONS_BY_KEY["minerva"].runnable is False   # nobody registered it
     assert V._OPERATIONS_BY_KEY["mip"].runnable is True
 
     card = V.Operation("card_only_key", "Card only", "no engine entry", "_build_mip_tab")
@@ -4340,128 +4116,16 @@ def test_no_open_window_means_the_result_slot_still_stands(qapp):
 
 
 
-def test_the_minerva_export_hands_the_on_screen_luts_to_the_exporter(
-        qapp, squid_dataset, tmp_path, monkeypatch):
-    """Asserted at what export_selection is called with, not at the widget — a checkbox wired to nothing looks identical from the widget alone."""
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    seen = {}
-
-    def spy(reader, selection, out_dir, **kw):
-        seen.update(kw)
-        return []
-
-    monkeypatch.setattr("squidxplorer._minerva.export_selection", spy)
-    luts = {"ch": {"clim": (3.0, 4.0), "rgb": (9, 9, 9)}}
-
-    win.run_minerva_export(out_dir=str(tmp_path), launch=False, selection=[("B2", 0)], luts=luts)
-    win._minerva.wait(20000)
-    qapp.processEvents()
-
-    assert seen.get("luts") == luts, "the LUTs stopped somewhere between the tab and the export"
-    win.close()
 
 
-def test_the_minerva_export_defaults_to_no_luts_so_the_plate_path_is_unchanged(
-        qapp, squid_dataset, tmp_path, monkeypatch):
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    seen = {}
-    monkeypatch.setattr("squidxplorer._minerva.export_selection",
-                        lambda reader, selection, out_dir, **kw: (seen.update(kw), [])[1])
-
-    win.run_minerva_export(out_dir=str(tmp_path), launch=False, selection=[("B2", 0)])
-    win._minerva.wait(20000)
-    qapp.processEvents()
-
-    assert seen.get("luts", "missing") is None
-    win.close()
 
 
-def test_on_screen_luts_is_none_when_no_view_window_is_open(qapp, squid_dataset):
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    assert win.on_screen_luts() is None
-    win.close()
 
 
-def test_on_screen_luts_reaches_a_focused_window(qapp, squid_dataset):
-    """focused_id and windows are properties on ViewerManager; calling them with parentheses raised a TypeError swallowed by a broad except, so this returned None every time.
-
-    The lookup has since moved INTO the manager, as ``active_view()``, so ``on_screen_luts`` no
-    longer touches either property and that particular mistake is now unmakeable here — there is
-    one implementation of "which window is the user in" and every caller shares it. The stub keeps
-    both properties anyway: they are what the real ``active_view`` reads, so a stub that dropped
-    them would stop describing the thing it stands in for. What this test pins is unchanged and is
-    the part that matters — the focused window's LUTs reach the exporter, rather than a swallowed
-    exception quietly returning None.
-    """
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-
-    expected = {"Fluorescence_488_nm_Ex": {"clim": (12.0, 340.0), "rgb": (0, 255, 0)}}
-
-    class _Win:
-        window_id = 7
-
-        def _per_channel_luts(self):
-            return expected
-
-    class _Mgr:
-        @property
-        def focused_id(self):
-            return 7
-
-        @property
-        def windows(self):
-            return [_Win()]
-
-        def active_view(self):
-            """Built from the two properties above, the way the real one is — so the stub still
-            fails if a caller reaches past it and calls those with parentheses."""
-            return next((w for w in self.windows if w.window_id == self.focused_id), None)
-
-        def set_run_progress(self, report):
-            """Present so teardown does not raise over the assertion."""
-
-    win._viewer_manager = _Mgr()
-    assert win.on_screen_luts() == expected, "the focused window's LUTs never reached the exporter"
-    win.close()
 
 
-def test_the_render_destination_refuses_an_empty_export_instead_of_starting_a_worker(
-        qapp, squid_dataset):
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    win.run_minerva_render([])
-    assert win._minerva_render is None
-    assert "nothing to render" in win._readout.text()
-    win.close()
 
 
-def test_a_render_worker_is_retired_with_the_export_worker(
-        qapp, squid_dataset, tmp_path):
-    """closeEvent joins these threads; a render left connected measured a 132s hold on close for one region."""
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    win._minerva_render = w = V._MinervaRenderWorker(
-        [(tmp_path / "a.ome.tiff", tmp_path / "a.json")])
-    seen = []
-    w.failed.connect(lambda m: seen.append(m))
-
-    win._stop_minerva()
-
-    assert win._minerva_render is None
-    w.failed.emit("x")
-    qapp.processEvents()
-    assert seen == [], "the render worker survived _stop_minerva still connected"
-    win.close()
 
 
 # These tests measure the cell INTERIOR, not the whole widget, since a wash repaints the thumbnail itself while a frame lands on the boundary and leaves it byte for byte alone; sized at plate scale since a 2-well fixture gives no intuition for 1536 selected cells at once.

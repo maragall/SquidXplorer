@@ -830,7 +830,7 @@ def test_the_on_by_default_does_not_break_coordinate_placement(master, monkeypat
     """The default is "on wherever it can run", not a plain True, and this is the reason.
 
     Distortion correction is registration-only and stitch_region RAISES on the combination. The
-    `coordinate` control operator, Minerva's fusion and the A/B benchmarks all pass
+    `coordinate` control operator and the A/B benchmarks all pass
     ``register=False`` and say nothing about distortion, so a plain ``True`` default would have
     made every one of them raise on a combination none of them asked for.
 

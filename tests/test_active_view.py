@@ -7,9 +7,9 @@ every activation — it used the signal to halt playback in a window nobody was 
 the registry nothing.
 
 So clicking a view's title bar changed nothing the app believed. The plate kept washing whichever
-window was focused last time the app decided, and ``PlateWindow.on_screen_luts``, whose own
-docstring calls ``focused_id`` "the window the user is looking at", exported the contrast of a
-window the user had left. It was a lie about the user, told by a registry that only watched itself.
+window was focused last time the app decided, and anything reading ``focused_id`` as "the window
+the user is looking at" read the contrast of a window the user had left. It was a lie about the
+user, told by a registry that only watched itself.
 
 That matters now because the plate is becoming a navigator: "click a well to move the active view"
 is only meaningful if "the active view" is the window the user actually last worked in.

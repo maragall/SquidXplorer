@@ -83,8 +83,8 @@ def test_opening_a_written_plate_is_refused_with_the_windows_own_sentence(win, t
 
 
 def test_an_unknown_operator_is_refused_by_name(open_win):
-    r = open_win.commands.execute(RunOperator(operator="minerva"))
-    assert r.refusal == UNKNOWN_OPERATOR and "minerva" in r.message
+    r = open_win.commands.execute(RunOperator(operator="not_an_operator"))
+    assert r.refusal == UNKNOWN_OPERATOR and "not_an_operator" in r.message
 
 
 def test_running_with_nothing_open_is_refused(win):
