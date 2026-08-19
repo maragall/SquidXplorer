@@ -987,7 +987,7 @@ class RegionViewer(QMainWindow):
         if not str(path).lower().endswith(".mp4"):
             path = f"{path}.mp4"
 
-        from squidxplorer._viewer import _VideoWorker
+        from squidxplorer._workers import _VideoWorker
 
         n = axis_length(self._meta, axis)
         w = _VideoWorker(self._reader, self._meta, region, path, axis=axis, fps=DEFAULT_FPS,
@@ -1335,7 +1335,7 @@ class RegionViewer(QMainWindow):
             self._say("show a region in this view first, then detect nuclei.")
             return
         try:
-            from squidxplorer._viewer import _SpotWorker
+            from squidxplorer._workers import _SpotWorker
             from squidxplorer._spots import SpotParams
             from squidxplorer._workers import nuclei_operator
         except Exception as exc:                          # noqa: BLE001
@@ -1462,7 +1462,7 @@ class RegionViewer(QMainWindow):
             fovs = (self._meta.get("fovs_per_region") or {}).get(region) or [0]
             fov = int(fovs[0])
         chan = self._meta["channels"][0]["name"]
-        from squidxplorer._viewer import _FocusWorker
+        from squidxplorer._workers import _FocusWorker
 
         w = _FocusWorker(self._reader, self._meta, region, int(fov), chan, parent=self)
         self._say("finding the sharpest z (Tenengrad autofocus)…")
@@ -1608,7 +1608,10 @@ class RegionViewer(QMainWindow):
         if not region:
             return {}
         try:
-            return mosaic_fov_bboxes_um(self._meta or {}, region)
+            # The crossing is NAMED: the walk's geometry is TopLeftBoxUm, the drawing code
+            # takes plain corner tuples.
+            return {f: b.bbox()
+                    for f, b in mosaic_fov_bboxes_um(self._meta or {}, region).items()}
         except (KeyError, ValueError, TypeError) as exc:
             self._say(f"cannot locate this region's FOVs: {exc}")
             return {}

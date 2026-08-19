@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import threading
-from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -18,6 +17,9 @@ from squidxplorer._budget import cache_budget
 from squidxplorer._logpane import get_logger
 from squidxplorer._mosaic_source import MemoryBoundedLRUCache
 from squidxplorer._montage import _PCT, _area_downsample, _pct_window, composite  # noqa: F401
+from squidxplorer._plate_geometry import (  # noqa: F401 (re-exports: the geometry moved, the spellings did not)
+    _CELL, _box_union, _fit_box, _fit_cell, _mosaic_boxes, content_box, resolve_plate_root,
+)
 from squidxplorer._qthread_life import _DETACHED, detach as _detach  # noqa: F401
 from squidxplorer._loupe import (  # noqa: F401 (re-exports: the engine moved, the spellings did not)
     loupe_inset_rect,
@@ -52,7 +54,6 @@ _BG = _qtstyle.BG
 _GRID, _RED, _MUTED, _ACCENT = _qtstyle.GRID, _qtstyle.RED, _qtstyle.MUTED, _qtstyle.ACCENT
 _STATUS = _qtstyle.STATUS
 
-_CELL = 88
 _PUSH_PX = 512
 _HDR, _COLH = 46, 30
 _PAD = 16
@@ -137,44 +138,6 @@ def cells_in_rect(rows, cols, by_rc, x0: float, y0: float, x1: float, y1: float,
     return [(ri, ci) for ri in range(r0, r1 + 1) for ci in range(c0, c1 + 1) if (ri, ci) in by_rc]
 
 
-def _fit_cell(a: np.ndarray) -> np.ndarray:
-    """Resize a 2D plane to exactly (_CELL, _CELL) for the montage tile."""
-    if a.shape == (_CELL, _CELL):
-        return a
-    if a.shape[0] >= _CELL and a.shape[1] >= _CELL:
-        return _area_downsample(a, _CELL, _CELL)
-    yi = (np.arange(_CELL) * a.shape[0]) // _CELL
-    xi = (np.arange(_CELL) * a.shape[1]) // _CELL
-    return a[yi][:, xi].astype(np.float32)
-
-
-def _fit_box(a: np.ndarray, h: int, w: int) -> np.ndarray:
-    """Resize a 2D plane to exactly (h, w), the arbitrary-target sibling of :func:`_fit_cell`."""
-    h, w = max(1, int(h)), max(1, int(w))
-    if a.shape == (h, w):
-        return a
-    if a.shape[0] >= h and a.shape[1] >= w:
-        return _area_downsample(a, h, w)
-    yi = (np.arange(h) * a.shape[0]) // h
-    xi = (np.arange(w) * a.shape[1]) // w
-    return a[yi][:, xi].astype(np.float32)
-def _box_union(a, b):
-    """Union of two ``(top, left, h, w)`` boxes; ``a`` may be None (nothing accumulated yet)."""
-    if a is None:
-        return tuple(int(v) for v in b)
-    top = min(a[0], b[0])
-    left = min(a[1], b[1])
-    bottom = max(a[0] + a[2], b[0] + b[2])
-    right = max(a[1] + a[3], b[1] + b[3])
-    return (int(top), int(left), int(bottom - top), int(right - left))
-
-
-def resolve_plate_root(path) -> tuple[Path, bool]:
-    """(path, is_plate): is_plate True when *path* already holds an OME-zarr plate."""
-    p = Path(path)
-    if (p / "plate.ome.zarr").is_dir() or (p.name.endswith(".zarr") and (p / "zarr.json").exists()):
-        return p, True
-    return p, False
 class _RunningContrast:
     """Per-channel global contrast that updates as wells stream in (histogram over tiles so far).
 
@@ -1938,45 +1901,8 @@ class PlateOverview(QWidget):
                           um_per_screen_px=um_px, font=_plate_font)
 
 
-def _mosaic_boxes(meta: dict) -> dict:
-    """``{(region, fov): (top, left, h, w)}`` — every FOV's box inside its _CELL thumbnail.
-
-    Pure geometry, delegated to :mod:`squidxplorer._placement`. Returns ``{}`` when the
-    acquisition has no stage positions or no pixel size, the signal to keep the single-tile
-    path. Placement failures for one region are contained to that region.
-    """
-    from squidxplorer._placement import cell_boxes, fov_offsets_px
-
-    positions = meta.get("fov_positions_um") or {}
-    if not positions or meta.get("pixel_size_um") in (None, 0):
-        return {}
-    frame_shape = meta["frame_shape"]
-    out: dict = {}
-    for region in meta["regions"]:
-        fovs = meta["fovs_per_region"][region]
-        if len(fovs) < 2:
-            continue
-        try:
-            offsets = fov_offsets_px(positions, region, fovs, meta.get("pixel_size_um"))
-            for fov, box in cell_boxes(offsets, frame_shape, _CELL).items():
-                out[(region, fov)] = box
-        except (KeyError, ValueError):
-            continue
-    return out
-
-
-def content_box(shape, h: int = _CELL, w: int = _CELL) -> tuple[int, int, int, int]:
-    """``(top, left, height, width)``: where a *shape*-shaped plane lands in an ``h`` x ``w`` box.
-
-    Applies ``_placement.cell_boxes``' rule (``s = min(box/mh, box/mw)``, then centre) to the
-    whole mosaic rather than to its individual FOVs, so a fused mosaic and the raw mosaic of the
-    same region land in the same place, at the same size, in the same cell.
-    """
-    h, w = max(1, int(h)), max(1, int(w))
-    mh, mw = max(1, int(shape[0])), max(1, int(shape[1]))
-    s = min(h / mh, w / mw)
-    ih = max(1, min(h, int(round(mh * s))))
-    iw = max(1, min(w, int(round(mw * s))))
-    return (h - ih) // 2, (w - iw) // 2, ih, iw
+# `_mosaic_boxes` and `content_box` live in `_plate_geometry` with the rest of the cell
+# geometry; they are re-imported at the top of this module for the painting code and the
+# importers that still spell them through the widget.
 
 

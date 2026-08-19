@@ -99,13 +99,9 @@ from squidxplorer._worker_lifecycle import launch as _launch_worker, stop_slot a
 from squidxplorer._tab_manager import TabManager as _TabManager
 from squidxplorer._worker_lifecycle import signal_names as _signal_names  # noqa: F401 (re-export)
 
-# QThread workers live in `_workers`; re-exported so monkeypatched spies keep working.
-from squidxplorer._workers import (  # noqa: F401 (re-exports)
-    _CACHE_AUTO, _MIN_PREVIEW_BOX_PX, _VIEWER_WORKERS,
-    _ComputedPlateWorker, _FlatfieldWorker, _FocusWorker,
-    _MosaicWorker, _OperatorWorker, _PreviewWorker, _SpotWorker, _VideoWorker, _full_res_mip,
-    _full_res_plane, _spot_stages,
-)
+# QThread workers live in `_workers`; only the ones THIS module launches are imported. The
+# monkeypatch seam for every worker another module launches is `_workers.<Name>` itself.
+from squidxplorer._workers import _ComputedPlateWorker, _FlatfieldWorker, _OperatorWorker
 
 # The operator registry lives in `_operations`; re-exported for this module's call sites.
 from squidxplorer._operations import (  # noqa: F401 (re-exports)

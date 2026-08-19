@@ -10,7 +10,7 @@ pytest.importorskip("qtpy")
 from qtpy.QtCore import QCoreApplication                       # noqa: E402
 from qtpy.QtWidgets import QApplication                        # noqa: E402
 
-import squidxplorer._viewer as V                                    # noqa: E402
+import squidxplorer._workers as W                                   # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -53,33 +53,33 @@ def _run(worker, timeout_ms=60000):
 
 def test_a_plain_2d_plane_is_counted_as_is():
     img = _plane()
-    got = V._full_res_plane(img, None)
+    got = W._full_res_plane(img, None)
     assert np.array_equal(got, img)
     assert got.shape == img.shape and got.dtype == img.dtype
 
 
 def test_a_z_stack_is_counted_at_the_z_napari_is_SHOWING():
     stack = np.stack([np.full((8, 8), i, dtype=np.uint16) for i in range(5)])
-    assert V._full_res_plane(stack, 3)[0, 0] == 3
-    assert V._full_res_plane(stack, 0)[0, 0] == 0
+    assert W._full_res_plane(stack, 3)[0, 0] == 3
+    assert W._full_res_plane(stack, 0)[0, 0] == 0
 
 
 def test_no_z_index_falls_back_to_the_middle_plane_not_plane_zero():
     stack = np.stack([np.full((8, 8), i, dtype=np.uint16) for i in range(5)])
-    assert V._full_res_plane(stack, None)[0, 0] == 2
+    assert W._full_res_plane(stack, None)[0, 0] == 2
 
 
 def test_an_out_of_range_z_clamps_instead_of_raising_IndexError():
     stack = np.stack([np.full((8, 8), i, dtype=np.uint16) for i in range(5)])
-    assert V._full_res_plane(stack, 99)[0, 0] == 4
-    assert V._full_res_plane(stack, -7)[0, 0] == 0
+    assert W._full_res_plane(stack, 99)[0, 0] == 4
+    assert W._full_res_plane(stack, -7)[0, 0] == 0
 
 
 def test_a_MULTISCALE_pyramid_is_counted_at_LEVEL_ZERO_not_a_downsampled_level():
     """Counting a downsampled level would merge touching nuclei and under-report."""
     full = _plane()
     levels = [full, full[::2, ::2], full[::4, ::4]]
-    got = V._full_res_plane(levels, None)
+    got = W._full_res_plane(levels, None)
 
     assert got.shape == full.shape, "a downsampled pyramid level was counted"
     assert np.array_equal(got, full)
@@ -87,26 +87,26 @@ def test_a_MULTISCALE_pyramid_is_counted_at_LEVEL_ZERO_not_a_downsampled_level()
 
 def test_a_multiscale_z_stack_takes_level_zero_AND_the_shown_z():
     lv0 = np.stack([np.full((8, 8), i, dtype=np.uint16) for i in range(5)])
-    got = V._full_res_plane([lv0, lv0[:, ::2, ::2]], 3)
+    got = W._full_res_plane([lv0, lv0[:, ::2, ::2]], 3)
     assert got.shape == (8, 8)
     assert got[0, 0] == 3
 
 
 def test_an_empty_pyramid_says_so_instead_of_raising_IndexError():
     with pytest.raises(ValueError, match="EMPTY multiscale"):
-        V._full_res_plane([], None)
+        W._full_res_plane([], None)
 
 
 def test_something_that_is_neither_names_what_it_got():
     with pytest.raises(ValueError, match=r"neither a pyramid level list"):
-        V._full_res_plane(np.zeros((2, 3, 4, 5), dtype=np.uint16), None)
+        W._full_res_plane(np.zeros((2, 3, 4, 5), dtype=np.uint16), None)
 
 
 # ---------------------------------------------------------------- the worker's signals
 
 
 def test_a_successful_run_emits_the_result_and_the_count(qapp):
-    w = V._SpotWorker("B3", "405", _plane(), None, (0.0, 0.0, 128.0, 128.0))
+    w = W._SpotWorker("B3", "405", _plane(), None, (0.0, 0.0, 128.0, 128.0))
     rec = _run(w)
 
     assert rec["problem"] == [], rec["problem"]
@@ -123,14 +123,14 @@ def test_a_successful_run_emits_the_result_and_the_count(qapp):
 
 
 def test_the_count_in_ready_and_in_finished_count_are_the_same_number(qapp):
-    w = V._SpotWorker("B3", "405", _plane(n=3), None, None)
+    w = W._SpotWorker("B3", "405", _plane(n=3), None, None)
     rec = _run(w)
     assert rec["ready"][0][5] == rec["done"][0][2]
 
 
 def test_progress_counts_stages_and_ends_at_the_total(qapp):
     """progress(done, total) must reach total, with one denominator for the whole run."""
-    w = V._SpotWorker("B3", "405", _plane(), None, None)
+    w = W._SpotWorker("B3", "405", _plane(), None, None)
     rec = _run(w)
 
     assert rec["progress"], "no progress was ever emitted"
@@ -142,7 +142,7 @@ def test_progress_counts_stages_and_ends_at_the_total(qapp):
 
 def test_the_stage_TEXT_goes_out_on_its_own_signal_because_progress_has_no_text_channel(qapp):
     """Asserts the channel, not the labels: stage text rides its own signal, one per tick."""
-    w = V._SpotWorker("B3", "405", _plane(), None, None)
+    w = W._SpotWorker("B3", "405", _plane(), None, None)
     rec = _run(w)
 
     assert "QString" not in w.progress.signal, (
@@ -156,7 +156,7 @@ def test_the_stage_TEXT_goes_out_on_its_own_signal_because_progress_has_no_text_
 
 
 def test_a_cancelled_run_emits_cancelled_and_NO_result(qapp):
-    w = V._SpotWorker("B3", "405", _plane(), None, None)
+    w = W._SpotWorker("B3", "405", _plane(), None, None)
     w.stop()                                          # cancel before it starts
     rec = _run(w)
 
@@ -167,7 +167,7 @@ def test_a_cancelled_run_emits_cancelled_and_NO_result(qapp):
 
 
 def test_a_failure_is_reported_BY_NAME_and_never_swallowed(qapp):
-    w = V._SpotWorker("B3", "405", "not an image at all", None, None)
+    w = W._SpotWorker("B3", "405", "not an image at all", None, None)
     rec = _run(w)
 
     assert len(rec["problem"]) == 1
@@ -180,7 +180,7 @@ def test_a_failure_is_reported_BY_NAME_and_never_swallowed(qapp):
 
 def test_a_blank_region_reports_zero_rather_than_failing(qapp):
     """Zero nuclei is an answer, not an error."""
-    w = V._SpotWorker("B3", "405", np.zeros((64, 64), dtype=np.uint16), None, None)
+    w = W._SpotWorker("B3", "405", np.zeros((64, 64), dtype=np.uint16), None, None)
     rec = _run(w)
 
     assert rec["problem"] == []
@@ -189,13 +189,13 @@ def test_a_blank_region_reports_zero_rather_than_failing(qapp):
 
 
 def test_the_worker_declares_a_stop_so_teardown_can_retire_it(qapp):
-    assert callable(V._SpotWorker.stop)
+    assert callable(W._SpotWorker.stop)
 
 
 def test_the_stage_denominator_is_not_a_second_copy_of_the_stage_list():
     from squidxplorer._spots import STAGES
 
-    assert V._spot_stages() is STAGES
+    assert W._spot_stages() is STAGES
 
 
 # ------------------------------------------------- what napari actually hands back
@@ -217,7 +217,6 @@ def _pyramid_layer(levels):
 def _stand_in_segmenter(monkeypatch, boxes=((2, 22), (60, 80))):
     """Replace the worker's algorithm choice with one that stamps known object ids."""
     from squidxplorer import _spots as SP
-    from squidxplorer import _workers as W
 
     def _fn(plane, params, *, on_stage=None, should_stop=None):
         if on_stage is not None:
@@ -241,7 +240,7 @@ def test_a_napari_pyramids_own_data_reaches_the_viewer_as_a_labels_layer(qapp, m
         "napari handed the pyramid back as a list; this test no longer covers the container "
         f"production actually sees ({type(layer.data).__name__})")
 
-    w = V._SpotWorker("manual0", "405", layer.data, None, (0.0, 0.0, 128.0, 128.0))
+    w = W._SpotWorker("manual0", "405", layer.data, None, (0.0, 0.0, 128.0, 128.0))
     rec = _run(w)
 
     assert rec["problem"] == [], rec["problem"]
@@ -264,7 +263,7 @@ def test_a_2d_napari_pyramid_is_counted_at_LEVEL_ZERO_not_the_coarsest_level(qap
     full = _plane()                                         # (128, 128)
     mosaic, layer = _pyramid_layer([full, full[::2, ::2], full[::4, ::4]])
 
-    w = V._SpotWorker("manual0", "405", layer.data, None, None)
+    w = W._SpotWorker("manual0", "405", layer.data, None, None)
     rec = _run(w)
 
     assert rec["problem"] == [], rec["problem"]
@@ -287,6 +286,6 @@ def test_the_callers_params_and_algorithm_REACH_the_run(qapp):
         return SP.result_from_labels(np.zeros(np.asarray(plane).shape, dtype=np.int32))
 
     p = SpotParams(min_distance_px=99)
-    w = V._SpotWorker("manual0", "405", _plane(), None, None, p, algorithm=("stand-in", _fn))
+    w = W._SpotWorker("manual0", "405", _plane(), None, None, p, algorithm=("stand-in", _fn))
     _run(w)
     assert seen["params"] is p, "the params the caller built did not reach the segmentation"

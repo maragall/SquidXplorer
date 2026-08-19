@@ -118,7 +118,8 @@ def test_the_dead_reference_plane_chain_is_not_on_the_plate_window(qapp,
 
 def test_the_focus_worker_itself_survives_because_the_windows_use_it(qapp,
                                                                     squid_dataset):
-    assert hasattr(V, "_FocusWorker")
+    from squidxplorer import _workers as W
+    assert hasattr(W, "_FocusWorker")
     from squidxplorer._region_viewer import RegionViewer
 
     assert hasattr(RegionViewer, "_focus_reference_plane")

@@ -115,6 +115,7 @@ if "PySide6" in sys.modules or "PySide2" in sys.modules:      # pragma: no cover
     )
 
 import squidxplorer._viewer as V  # noqa: E402
+import squidxplorer._workers as W  # noqa: E402
 
 from .conftest import FOVS, REGIONS  # noqa: E402
 from .test_viewer import _drain_until, qapp  # noqa: E402,F401  (fixture)
@@ -425,7 +426,7 @@ def _preview_meta() -> dict:
 
 def _preview_worker(tmp_path, cache=None, **kw):
     (tmp_path / "acq").mkdir(exist_ok=True)
-    return V._PreviewWorker(_PrintingReader(tmp_path / "acq", **kw), _preview_meta(),
+    return W._PreviewWorker(_PrintingReader(tmp_path / "acq", **kw), _preview_meta(),
                             {"A1": {"rc": (0, 0)}, "A2": {"rc": (0, 1)}}, ["A1", "A2"],
                             cache=cache)
 

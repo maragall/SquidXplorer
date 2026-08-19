@@ -312,6 +312,23 @@ def test_a_clamped_box_fits_one_texture_of_the_VOXELS_THE_READER_HANDS_BACK():
             f"promised was at most {limit} x {limit}")
 
 
+def test_the_clamp_and_the_ceiling_take_the_ACQUISITION_pitch_by_type():
+    """The unit is a TYPE now: an AcqPitchUm answers identically to the bare float it wraps, and
+    the displayed pitch (a fused layer's own decimation) is refused by name rather than passing
+    a 2x box under a one-texture promise."""
+    from squidxplorer._conventions import AcqPitchUm, DisplayPitchUm
+
+    box = (100.0, 200.0, 5100.0, 9200.0)
+    assert _bricks.clamp_bbox_um(box, AcqPitchUm(0.752), 2048) == \
+        _bricks.clamp_bbox_um(box, 0.752, 2048)
+    with pytest.raises(TypeError, match="ACQUISITION pitch is required"):
+        _bricks.clamp_bbox_um(box, DisplayPitchUm(1.504), 2048)
+    assert _bricks.ceiling_line(2048, AcqPitchUm(0.752), measured=True) == \
+        _bricks.ceiling_line(2048, 0.752, measured=True)
+    with pytest.raises(TypeError, match="ACQUISITION pitch is required"):
+        _bricks.ceiling_line(2048, DisplayPitchUm(1.504), measured=True)
+
+
 def test_the_ceiling_scales_with_the_gpu_and_says_where_it_came_from():
     """2048 is the Apple figure; a desktop NVIDIA reporting 16384 must raise the stated ceiling."""
     apple = _bricks.ceiling_line(2048, 0.752, measured=True)

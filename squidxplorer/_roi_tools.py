@@ -124,8 +124,10 @@ def clamp_last_roi(win, layer) -> None:
         return
     ys, xs = arr[:, -2].astype(float), arr[:, -1].astype(float)
     limit = live_texture_limit(win)
+    from squidxplorer._conventions import AcqPitchUm
+
     (nx0, ny0, nx1, ny1), clamped = _bricks.clamp_bbox_um(
-        (xs.min(), ys.min(), xs.max(), ys.max()), px, limit)
+        (xs.min(), ys.min(), xs.max(), ys.max()), AcqPitchUm(px), limit)
     if not clamped:
         return
     new = np.array(arr, dtype=float)

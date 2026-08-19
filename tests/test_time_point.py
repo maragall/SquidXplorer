@@ -158,7 +158,7 @@ def test_the_region_mosaic_fuses_the_timepoint_it_is_asked_for(multi_time_point_
 def test_a_region_window_fuses_the_timepoint_its_own_bar_shows(
     multi_time_point_dataset, napari_pane_stub, qapp
 ):
-    from squidxplorer import _viewer as V
+    from squidxplorer import _workers as W
     from squidxplorer._region_viewer import ViewerManager
 
     root, _planes = multi_time_point_dataset
@@ -171,7 +171,7 @@ def test_a_region_window_fuses_the_timepoint_its_own_bar_shows(
             "the window must offer every timepoint or there is nothing to select")
 
         seen = []
-        real_worker = V._MosaicWorker
+        real_worker = W._MosaicWorker
 
         class _Recording(real_worker):
             def __init__(self, *a, **kw):
@@ -181,12 +181,12 @@ def test_a_region_window_fuses_the_timepoint_its_own_bar_shows(
             def start(self):
                 pass
 
-        V._MosaicWorker = _Recording
+        W._MosaicWorker = _Recording
         try:
             win._time_point_bar.set_time_point(1)
             win._load_mosaic(TIME_SERIES_REGION)
         finally:
-            V._MosaicWorker = real_worker
+            W._MosaicWorker = real_worker
         assert seen and seen[-1] == 1, (
             f"the window's mosaic worker was built with t={seen}, not the bar's timepoint 1")
     finally:

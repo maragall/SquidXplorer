@@ -18,7 +18,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import numpy as np                                            # noqa: E402
 from qtpy.QtWidgets import QApplication                       # noqa: E402
 
-import squidxplorer._viewer as V                                  # noqa: E402
+import squidxplorer._workers as W                                 # noqa: E402
 from squidxplorer import _platecache                              # noqa: E402
 from squidxplorer.reader import open_reader                       # noqa: E402
 
@@ -28,7 +28,7 @@ STEPS = (("t=0 (cold)", 0), ("t=1 (new)", 1), ("t=0 (revisit)", 0))
 
 def one_pass(reader, meta, idx, order, t, takes_t):
     """One preview pass at *t*. Returns (seconds, hits, reads, {region: cell signature})."""
-    worker = V._PreviewWorker(reader, meta, idx, order, **({"t": t} if takes_t else {}))
+    worker = W._PreviewWorker(reader, meta, idx, order, **({"t": t} if takes_t else {}))
     cells: dict = {}
 
     def on_tile(_ri, _ci, region, tile, box=None):
@@ -55,7 +55,7 @@ def main() -> int:
         print("set SQUIDXPLORER_CACHE_DIR to a disposable directory first (see the docstring)")
         return 2
     repeats = int(os.environ.get("REPEATS", "5"))
-    takes_t = "t" in inspect.signature(V._PreviewWorker.__init__).parameters
+    takes_t = "t" in inspect.signature(W._PreviewWorker.__init__).parameters
 
     QApplication.instance() or QApplication([])
     reader = open_reader(fixture)

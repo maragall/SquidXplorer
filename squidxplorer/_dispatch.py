@@ -11,6 +11,11 @@ What stays with the caller, on purpose: Qt signals and the stop-event plumbing (
 console sentences and the result dict (the executor), and a stopped run's detail —
 :func:`squidxplorer._measure.verdict` returns STOPPED with an empty detail because how a run
 was stopped is the caller's sentence to write.
+
+The engine is reached through :data:`_RUNNER` — a declared :class:`~squidxplorer._runner.Runner`
+carrying the run as a :class:`~squidxplorer._runspec.RunSpec` — not through module attributes;
+the arm bodies live in :class:`~squidxplorer._runner.InProcessRunner`, which still resolves
+``write_plate`` / ``run_plate`` through the package so the parity tests' monkeypatches hold.
 """
 
 from __future__ import annotations
@@ -19,6 +24,10 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 
 from squidxplorer._engine import N_FOVS_LOOP_DEFAULT
+from squidxplorer._runner import InProcessRunner, Runner
+
+#: THE substitution point: a second runner (process pool, remote box) replaces this object.
+_RUNNER: Runner = InProcessRunner()
 
 
 @dataclass(frozen=True)
@@ -59,9 +68,9 @@ def run_operator_once(reader, *, operator: str, save: bool, owed: int, out_dir=N
     stopped run, not a finished one. Never off ``complete``: a skipped-well run is PARTIAL,
     not CANCELLED.
     """
-    # Lazy, and through the package: the parity tests monkeypatch these on `squidxplorer`.
-    import squidxplorer
+    from squidxplorer._engine import operator_saves_copy
     from squidxplorer._measure import verdict
+    from squidxplorer._runspec import RunSpec, write_runspec
 
     operator_kwargs = dict(parameters or {}) or None
     skipped_regions: set = set()
@@ -69,8 +78,6 @@ def run_operator_once(reader, *, operator: str, save: bool, owed: int, out_dir=N
     # An operator whose save artifact is a registered COPY of the acquisition (declared via
     # operator_saves_copy) saves by running the engine with copy=True — the operator writes
     # the copy itself; there is no plate to write, so the HCS layout is never demanded.
-    from squidxplorer._engine import operator_saves_copy
-
     copy_out = None
     if save and operator_saves_copy(operator):
         operator_kwargs = {**(operator_kwargs or {}), "copy": True}
@@ -86,55 +93,26 @@ def run_operator_once(reader, *, operator: str, save: bool, owed: int, out_dir=N
         if on_error is not None:
             on_error(region, fov, exc)
 
+    # Captured AFTER the copy arm mutated the kwargs, so the spec is what actually ran.
+    spec = RunSpec.capture(reader, operator=operator, operator_kwargs=operator_kwargs,
+                           regions=regions, n_fovs=n_fovs)
+
     manifest: Optional[dict] = None
     if save:
-        from squidxplorer import _acq_output, _fused_output
-
-        # Declaration-driven writer choice, and an explicit out_dir (the GUI's chosen folder,
-        # the CLI's --out) is THE destination for every writer; beside-the-source is only the
-        # default. A per-FOV intensity operator over an on-disk acquisition saves in the
-        # acquisition's own format, full resolution (z-collapsing or z-keeping alike; only a run
-        # owing every FOV, n_fovs=None, qualifies). A region operator's fused mosaic saves in
-        # the stitcher's format (a Squid-style OME-TIFF per region, re-openable by open_reader).
-        # Everything else keeps the OME-Zarr plate.
-        acq_dst = _acq_output.acquisition_format_dst(reader, operator) if n_fovs is None else None
-        fused_dst = (_fused_output.fused_format_dst(reader, operator)
-                     if n_fovs is None or n_fovs is N_FOVS_LOOP_DEFAULT else None)
-        if acq_dst is not None:
-            manifest = _acq_output.write_acquisition_planes(
-                reader, operator, out_dir or acq_dst, regions=regions,
-                operator_kwargs=operator_kwargs,
-                workers=workers, on_well=on_well, on_error=_on_error, stop=stop)
-        elif fused_dst is not None:
-            manifest = _fused_output.write_fused_acquisition(
-                reader, operator, out_dir or fused_dst, regions=regions,
-                operator_kwargs=operator_kwargs,
-                workers=workers, on_well=on_well, on_error=_on_error, stop=stop)
-        else:
-            manifest = squidxplorer.write_plate(
-                reader, out_dir, operator=operator, n_fovs=n_fovs, workers=workers, tiff=tiff,
-                on_well=on_well, stop=stop, on_error=_on_error, regions=regions,
-                operator_kwargs=operator_kwargs)
+        manifest = _RUNNER.run_save(reader, spec, out_dir=out_dir, tiff=tiff, workers=workers,
+                                    on_well=on_well, on_error=_on_error, stop=stop)
         landed = int(manifest.get("n_fields_written") or 0)
         stopped = bool(manifest.get("stopped"))
+        # Provenance beside the save — successful or partial alike, at whatever root the
+        # writer's own manifest names. Nonfatal by construction (write_runspec warns).
+        out_root = manifest.get("path") or manifest.get("plate")
+        if out_root:
+            written = write_runspec(spec, out_root, result=manifest)
+            if written is not None:
+                manifest["runspec"] = str(written)
     else:
-        # PREVIEW: the same engine over the same arguments, writing nothing to disk.
-        stream = squidxplorer.run_plate(
-            reader, operator=operator, workers=workers, n_fovs=n_fovs, on_error=_on_error,
-            regions=regions, operator_kwargs=operator_kwargs)
-        landed, stopped = 0, False
-        try:
-            for region, fov, image in stream:
-                if stop is not None and stop():
-                    stopped = True      # deliver nothing computed after the request to stop
-                    break
-                landed += 1
-                if on_well is not None:
-                    on_well(region, fov, image)
-        finally:
-            close = getattr(stream, "close", None)
-            if callable(close):
-                close()                 # shut the engine's pool down NOW, not at GC
+        landed, stopped = _RUNNER.run_preview(reader, spec, workers=workers, on_well=on_well,
+                                              on_error=_on_error, stop=stop)
     if not stopped and stop is not None and stop():
         stopped = True                  # requested between the last field and here
     outcome, detail = verdict(landed, owed, len(skipped_regions), stopped)

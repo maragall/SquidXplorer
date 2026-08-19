@@ -22,6 +22,7 @@ if "PySide6" in sys.modules or "PySide2" in sys.modules:
     pytest.skip("PySide already loaded — Qt binding conflict", allow_module_level=True)
 
 from squidxplorer import _viewer as V  # noqa: E402
+from squidxplorer import _workers as W  # noqa: E402
 from squidxplorer._video import encoder_problem  # noqa: E402
 
 from .conftest import shutdown_plate_window  # noqa: E402
@@ -87,7 +88,7 @@ class _SpyWorker:
 @pytest.fixture
 def spy_worker(monkeypatch):
     _SpyWorker.instances = []
-    monkeypatch.setattr(V, "_VideoWorker", _SpyWorker)
+    monkeypatch.setattr(W, "_VideoWorker", _SpyWorker)
     return _SpyWorker
 
 

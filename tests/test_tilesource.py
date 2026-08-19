@@ -62,9 +62,15 @@ def test_pyramid_shapes_agrees_with_the_actual_downsample():
 
 
 def test_fov_bboxes_are_centred_micrometres():
-    """Positions are stage µm FOV *centres*; a bbox is the frame extent around one."""
-    boxes = fov_bboxes_um({("A1", 0): (1000.0, 2000.0)}, (100, 200), 0.5)
-    assert boxes[("A1", 0)] == pytest.approx((950.0, 1975.0, 1050.0, 2025.0))
+    """Positions are stage µm FOV *centres*, and the box comes back SAYING so: a CenterBoxUm,
+    which refuses to unpack as a corner tuple (the 195.9 um convention mix-up)."""
+    from squidxplorer._conventions import CenterBoxUm
+
+    box = fov_bboxes_um({("A1", 0): (1000.0, 2000.0)}, (100, 200), 0.5)[("A1", 0)]
+    assert isinstance(box, CenterBoxUm)
+    assert box.bbox() == pytest.approx((950.0, 1975.0, 1050.0, 2025.0))
+    with pytest.raises(TypeError, match="does not unpack"):
+        tuple(box)
 
 
 def test_ladder_world_span_is_micrometres_not_millimetres():
