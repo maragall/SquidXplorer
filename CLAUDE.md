@@ -822,6 +822,34 @@ have non-Minerva callers: `_lut_clipboard.per_channel_luts` (loupe, movie, setti
 `colormap_hue_rgb` and `selected_region_fovs`. Dated docs under docs/ (IMA-228 review, SCOPE,
 DESIGN) still tell its story on purpose; re-instating starts from git history, not a stub.
 
+## Chroma reconstruction and the pad-partial format matrix (2026-08-19, branch stain-chroma)
+
+- **A color-recorded-gray channel with a usable overview displays through VIRTUAL CHROMA
+  CHANNELS**, not the stain LUT: the reader expands it into the same (R)/(G)/(B) components a
+  real color file gets; (G) is the file's own plane, (R)/(B) are that plane times the overview
+  PNG's local R/G and B/G ratio windows (`_stain.ChromaSource`, bilinear upsample, ratios
+  clipped to `_RATIO_MAX`). The LUT stays the fallback when the PNG/geometry is absent. The
+  geometry convention is MEASURED, not assumed: the mosaic yaml's `top_left_mm` is (y, x) and a
+  FOV's stage position is its CENTER (verified corr 0.88 at zero offset; the corner convention
+  measured 0.01). An uncovered FOV reads its own plane with ratio 1 (neutral), counted in one
+  log line.
+- **pad_partial reaches all three formats** through `reader._pad_to_plan`/`_PadPartialMixin`:
+  individual images (the original), OME-TIFF (plan = root coordinates.csv + declared Nz/Nt),
+  Zarr HCS (plan = the plate metadata's declared wells + field_count). No plan record = a named
+  no-op, never a guess. The padded open's warning says it places by the PLAN on purpose; the
+  multipage-TIFF reader still ignores the flag (not one of the design's named formats).
+
+## Multi-acquisition sets (2026-08-19, branch acq-folder)
+
+`_acqset.py` (Qt-free): a SET is a folder that is not itself an acquisition but has >= 2
+immediate child acquisitions (acceptance = `open_reader` accepts it; written plates excluded via
+`resolve_plate_root`). Ingest opens the first member and records the set; cycling (title-bar
+prev/next, Cmd/Ctrl-Left/Right) is a RE-INGEST of the neighbour — one data model. Bulk saves:
+the "save runs: all N acquisitions" checkbox routes an unscoped SAVE through
+`_acqset.run_over_set` (`_acqset_gui.SetRunWorker`): sequential, one `run_operator_once` per
+member with the SAME parameters, per-member fault isolation, a measured tally line. ONE operator
+per run; composition stays refused. Owed: per-set disk estimate; a set-run cancel button.
+
 ## Views-window space reclaim (2026-08-19, branch views-space, Julio's live-GUI feedback)
 
 - **Everything window-scoped lives in napari's LEFT column, above the layer controls**: the
