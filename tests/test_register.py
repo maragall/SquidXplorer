@@ -174,7 +174,12 @@ def test_the_panel_carries_the_copy_switch_outside_the_params(qapp):
     host = _Host()
     panel = RegisterPanel(host)
     assert sorted(panel.widgets) == ["registration_channel", "registration_t"]
-    assert "copy" not in panel.kwargs()
+    # CHECKED by default (2026-08-19): the copy is the operator's purpose and costs hardlinks;
+    # default-off is how "Registering the wells doesn't do anything" happened.
+    assert panel.copy_check.isChecked()
+    assert panel.kwargs().get("copy") is True
+    panel.copy_check.setChecked(False)
+    assert "copy" not in panel.kwargs(), "unchecking must drop the kwarg, not send copy=False"
     assert panel.save_btn is not None and not panel.save_btn.isVisibleTo(panel)
     panel.copy_check.setChecked(True)
     panel.run_all_btn.click()

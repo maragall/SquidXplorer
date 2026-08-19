@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import logging
 import os
 from collections.abc import Sequence as _SequenceABC
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Iterable, Optional, Sequence
+from typing import Any, Optional, Sequence
 
 import numpy as np
 
@@ -45,11 +44,6 @@ def resolve_viewer(env: Optional[dict] = None) -> str:
             VIEWER_ENV, want,
         )
     return _NAPARI
-
-
-def napari_enabled(env: Optional[dict] = None) -> bool:
-    """True when the napari view is the selected viewer, which is now always."""
-    return resolve_viewer(env) == _NAPARI
 
 
 # --------------------------------------------------------------------------------------
@@ -761,6 +755,19 @@ class MosaicLayers:
         """
         key = MosaicKey(str(op), str(channel))
         existing = self.find(key.op, key.channel)
+        # napari cannot change a layer's multiscale-ness after construction: reusing a
+        # single-scale layer with a levels LIST leaves napari reading `list.shape`. A
+        # mismatched layer is REPLACED, carrying its look into the new layer's kwargs.
+        if existing is not None and bool(getattr(existing, "multiscale", False)) != bool(multiscale):
+            if visible is None:
+                visible = bool(existing.visible)
+            if contrast_limits is None:
+                try:
+                    contrast_limits = tuple(existing.contrast_limits)
+                except Exception:                # noqa: BLE001 - the seed below covers it
+                    pass
+            self.remove_op_channel(key.op, key.channel)
+            existing = None
         if existing is not None:
             # Reuse the layer: destroying it is slow and strands every subscriber bound to
             # it, and reuse keeps the user's contrast/colormap/visibility across regions.
@@ -1094,26 +1101,8 @@ class MosaicLayers:
         if len(linkable) > 1:
             self._model.layers.link_layers(linkable, ("contrast_limits",))
 
-    def match_contrast_to(self, op: str) -> int:
-        """Copy *op*'s contrast window onto every OTHER processing layer of the same channel.
-
-        Returns the number of peer layers written.
-        """
-        matched = 0
-        for channel, peers in self._by_channel.items():
-            source = self.find(op, channel)
-            if source is None:
-                continue                     # this channel has no `op` layer to match against
-            window = (float(source.contrast_limits[0]), float(source.contrast_limits[1]))
-            for ly in peers:
-                if ly is source:
-                    continue
-                try:
-                    ly.contrast_limits = window
-                except Exception:            # noqa: BLE001 - one odd layer is skipped, not fatal
-                    continue
-                matched += 1
-        return matched
+    # `match_contrast_to` (raw -> operator layers) was shelved whole with its button
+    # (Julio, 2026-08-19: "Shelf the match layers to raw").
 
     def remove_op_channel(self, op: str, channel: str) -> bool:
         """Remove an identity: every layer rendering ``(op, channel)``, not just the first."""

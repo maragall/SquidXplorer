@@ -1,12 +1,15 @@
 """The views window's OPERATOR DOCK: a collapsible right-edge dock, napari-style (2026-08-19).
 
 Julio's mock moved the plate's Operators card column INTO the views window: a vertical dock on
-the right edge, collapsed by default to a thin titled grip. It holds two things, top to bottom:
+the right edge, collapsed by default to a thin grip. It holds ONE thing: the BULK card launcher
+the plate builds (`PlateWindow._build_operator_cards`), whose cards open their panels in the
+plate window exactly as before — only the launcher moved.
 
-* the CURRENT VIEW's operator surface (`RegionViewer.operator_panel()` — the old "Operators for
-  this window" toolbar), swapped as tabs change through :meth:`OperatorDock.show_window_panel`;
-* the BULK card launcher the plate builds (`PlateWindow._build_operator_cards`), whose cards
-  open their panels in the plate window exactly as before — only the launcher moved.
+The per-window operator surface (`RegionViewer.operator_panel()`) does NOT live here any more
+(Julio, 2026-08-19: "The operators for this window row should also be on the left vertical dock.
+The bulk processing is what is solutioned on the right vertical column.") — each view docks its
+own panel into napari's LEFT column beside the 2D/3D·ROI chips, so this dock no longer swaps
+panels on tab changes.
 
 History that binds the shape: Julio previously REJECTED a collapsible "operators" chip in the
 window's centre-top toolbar (it was reverted). This right-edge dock is the explicitly requested
@@ -23,7 +26,8 @@ from typing import Optional
 from qtpy.QtCore import Qt
 from qtpy.QtGui import QPainter
 from qtpy.QtWidgets import (
-    QDockWidget, QHBoxLayout, QLabel, QPushButton, QStackedWidget, QVBoxLayout, QWidget,
+    QDockWidget, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QStackedWidget, QVBoxLayout,
+    QWidget,
 )
 
 #: The collapsed grip's width — thin enough to be a margin, wide enough to hit with a mouse.
@@ -42,18 +46,26 @@ _TOGGLE_QSS = (
 
 
 class _VerticalGrip(QPushButton):
-    """The collapsed dock: a thin vertical button reading "◂ Operators" bottom-up."""
+    """The collapsed dock: a thin vertical button reading "◂ Operators" bottom-up.
+
+    It is the dock's WHOLE content while collapsed — a full-height dark tab hugging the right
+    edge — never a title-bar button over an empty column (Julio, 2026-08-19: the title-bar
+    version left "a whole dock white column only for that button")."""
 
     def __init__(self, text: str, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self._label = text
         self.setCursor(Qt.PointingHandCursor)
         self.setFixedWidth(GRIP_PX)
-        self.setToolTip("Open the Operators panel (bulk cards + this view's operator controls).")
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        self.setToolTip("Open the bulk-processing Operators panel (the plate's operator cards; "
+                        "this view's own operator controls live in its left column).")
+        # Theme-matched, edge-shaped: the window's own background, one hairline on the left.
+        # A boxed light-gray button here reads as a stray widget, not a window edge.
         self.setStyleSheet(
-            "QPushButton{background:#161b22;color:#c9d1d9;border:1px solid #30363d;"
-            "border-radius:0px;}"
-            "QPushButton:hover{background:#21262d;}")
+            f"QPushButton{{background:{_BG};color:#8b949e;border:none;"
+            "border-left:1px solid #30363d;border-radius:0px;}"
+            "QPushButton:hover{background:#161b22;color:#c9d1d9;}")
 
     def paintEvent(self, e):                             # noqa: N802 - Qt naming
         super().paintEvent(e)
@@ -76,8 +88,17 @@ class OperatorDock(QDockWidget):
         # in a new place. Collapse is the one gesture, and it is ours, not QDockWidget's.
         self.setFeatures(QDockWidget.NoDockWidgetFeatures)
 
+        # A dark ground on the dock itself: whatever sliver Qt paints around the content must be
+        # the theme's, never the platform's white window color.
+        self.setStyleSheet(f"QDockWidget{{background:{_BG};border:none;}}")
+
         self._grip = _VerticalGrip("◂ Operators", self)
         self._grip.clicked.connect(lambda *_: self.set_collapsed(False))
+        #: A zero-height title bar for the collapsed state, so the grip is the WHOLE column —
+        #: the old arrangement (grip AS title bar, body hidden) left the dock's empty content
+        #: area painted platform-white for the full window height.
+        self._no_title = QWidget(self)
+        self._no_title.setFixedHeight(0)
 
         header = QWidget(self)
         header.setStyleSheet(f"background:{_BG};")
@@ -100,19 +121,21 @@ class OperatorDock(QDockWidget):
         bv = QVBoxLayout(body)
         bv.setContentsMargins(0, 0, 0, 0)
         bv.setSpacing(4)
-        #: The CURRENT view's operator panel, one page per live view. Pages are owned by their
-        #: views (`RegionViewer.dispose` deletes its panel); Qt drops a destroyed page from the
-        #: stack on its own.
-        self._panels = QStackedWidget(body)
-        self._panels.setVisible(False)                   # costs no pixels until a view hands one in
-        bv.addWidget(self._panels, 0)
+        # NO per-view panel stack here: the current view's operator surface lives in that view's
+        # LEFT column (see the module docstring); this dock is the bulk-processing cards only.
         self._body = body
         self._body_l = bv
         self._cards: Optional[QWidget] = None
         if cards is not None:
             self.set_cards(cards)
         bv.addStretch(0)
-        self.setWidget(self._body)
+        #: ONE content widget with two pages, so collapse never leaves an empty dock frame for
+        #: the platform to paint white: page 0 is the full-height grip, page 1 the card body.
+        self._stack = QStackedWidget(self)
+        self._stack.setStyleSheet(f"background:{_BG};")
+        self._stack.addWidget(self._grip)
+        self._stack.addWidget(self._body)
+        self.setWidget(self._stack)
 
         self._collapsed = True
         self._apply_state()
@@ -128,7 +151,7 @@ class OperatorDock(QDockWidget):
             self._body_l.removeWidget(self._cards)
             self._cards.deleteLater()
         self._cards = cards
-        self._body_l.insertWidget(1, cards, 1)
+        self._body_l.insertWidget(0, cards, 1)
 
     def set_cards_enabled(self, flag: bool) -> None:
         for card in getattr(self._cards, "_op_cards", {}).values():
@@ -136,16 +159,6 @@ class OperatorDock(QDockWidget):
                 card.setEnabled(bool(flag))
             except Exception:                            # noqa: BLE001 - a dead card is not news
                 pass
-
-    def show_window_panel(self, panel: Optional[QWidget]) -> None:
-        """Show *panel* (the current view's operator surface) above the cards."""
-        if panel is None:
-            self._panels.setVisible(False)
-            return
-        if self._panels.indexOf(panel) < 0:
-            self._panels.addWidget(panel)
-        self._panels.setCurrentWidget(panel)
-        self._panels.setVisible(True)
 
     # -- collapse ---------------------------------------------------------------------------
     @property
@@ -164,15 +177,17 @@ class OperatorDock(QDockWidget):
 
     def _apply_state(self) -> None:
         if self._collapsed:
-            self.setTitleBarWidget(self._grip)
-            self._grip.setVisible(True)
+            # The grip is the dock's WHOLE content, under a zero-height title bar — never a
+            # title-bar button over a hidden body, which left the dock's full-height content
+            # area painted in the platform's white (Julio, 2026-08-19: "a whole dock white
+            # column only for that button").
+            self.setTitleBarWidget(self._no_title)
             self._header.setVisible(False)
-            self._body.setVisible(False)
+            self._stack.setCurrentWidget(self._grip)
             self.setFixedWidth(GRIP_PX)
         else:
             self.setTitleBarWidget(self._header)
             self._header.setVisible(True)
-            self._grip.setVisible(False)
-            self._body.setVisible(True)
+            self._stack.setCurrentWidget(self._body)
             self.setMinimumWidth(OPEN_MIN_PX)            # undo the grip's fixed width
             self.setMaximumWidth(OPEN_MAX_PX)

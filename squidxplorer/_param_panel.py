@@ -222,6 +222,10 @@ class RegisterPanel(GenericOperatorPanel):
             self.save_btn.setVisible(False)
 
         self.copy_check = QCheckBox("write registered copy (stitched_<folder>)")
+        # CHECKED by default: the copy IS this operator's purpose and costs hardlinks. Unchecked
+        # was how "Registering the wells doesn't do anything" happened (Julio, 2026-08-19) — a
+        # green run whose only product was a preview layer.
+        self.copy_check.setChecked(True)
         self.copy_check.setToolTip(
             "Write stitched_<folder> beside the acquisition: image files hardlinked (a second "
             "name for the same bytes — no duplication; copied in full where the filesystem "

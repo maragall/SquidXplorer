@@ -493,3 +493,37 @@ def test_a_CACHED_well_is_not_counted_as_work_the_preview_still_has_to_do(qapp, 
     assert second.cache_hits == 2, "the fixture did not actually exercise the cache"
     assert got and got[0].total == 0, \
         f"a fully cached reopen still claimed {got[0].total} units of work to do"
+
+
+# --- a copy-saving operator's preview run says how to get the artifact (2026-08-19) ---------------
+
+def test_a_copy_saving_preview_run_names_the_artifact_it_did_not_write(region_window):
+    """Julio: "Registering the wells doesn't do anything" — a register preview succeeded, wrote
+    nothing, and nothing said how to get the stitched_ copy. The done line now names it."""
+    region_window._op_run_wrote = False
+    said = []
+    region_window._echo = said.append
+    region_window.operator_started("register")
+    region_window.operator_done("register", 2.0)
+    assert said, "the done line never reached the window"
+    line = said[-1]
+    assert "preview only" in line and "stitched_" in line and "save" in line, line
+
+
+def test_a_run_that_wrote_its_copy_gets_no_preview_hint(region_window):
+    region_window._op_run_wrote = True
+    said = []
+    region_window._echo = said.append
+    region_window.operator_started("register")
+    region_window.operator_done("register", 2.0)
+    assert said and "preview only" not in said[-1], said[-1]
+
+
+def test_an_ordinary_operator_preview_gets_no_copy_hint(region_window):
+    """The hint is declaration-driven (operator_saves_copy), never name-matched."""
+    region_window._op_run_wrote = False
+    said = []
+    region_window._echo = said.append
+    region_window.operator_started("mip")
+    region_window.operator_done("mip", 1.0)
+    assert said and "preview only" not in said[-1], said[-1]

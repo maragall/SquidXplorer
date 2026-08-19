@@ -25,15 +25,6 @@ STATUS = {
     "failed":     QColor("#ef4444"),   # red outline + x cross
 }
 
-#: ndviewer defaults to light; theme its Qt chrome dark to match.
-NDV_DARK = (
-    "QWidget{background:#0b0e14;color:#e6edf3;}"
-    "QLabel{color:#e6edf3;background:transparent;}"
-    "QSlider::groove:horizontal{background:#232b3a;height:4px;border-radius:2px;}"
-    "QSlider::handle:horizontal{background:#58a6ff;width:12px;margin:-5px 0;border-radius:6px;}"
-    "QPushButton{background:#131824;color:#e6edf3;border:1px solid #232b3a;border-radius:6px;padding:3px 8px;}"
-)
-
 #: Tab bar for a pane's own strip — never a global strip across the window.
 TABS_DARK = (
     "QTabWidget{background:#070a0f;}"
@@ -75,10 +66,6 @@ MENU_QSS = ("QMenu{background:#0d1420;color:#e6edf3;border:1px solid #232b3a;fon
             "QMenu::item{padding:7px 18px;}"
             "QMenu::item:selected{background:#1c2b44;}"
             "QMenu::item:disabled{color:#57606a;}")
-
-# Legibility floor for empty-state copy: 16 arcmin at desk distance.
-EMPTY_BODY_PX = 15
-EMPTY_HEAD_PX = 19   # heading, one step up from body
 
 #: Strip ANSI CSI/OSC escapes + stray control bytes so shell output renders clean.
 ANSI_RE = re.compile(

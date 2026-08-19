@@ -34,11 +34,6 @@ class PlateShapeError(ValueError):
     """The observed well ids fit no known Squid format (or an override names no known format)."""
 
 
-def plate_dims(wellplate_format) -> Optional[tuple[int, int]]:
-    """(rows, cols) for a Squid format string, or None when it names no standard format."""
-    name = normalize_plate_format(wellplate_format, strict=False)
-    return _DIMS.get(name) if name else None
-
 
 def normalize_plate_format(wellplate_format, strict: bool = True) -> Optional[str]:
     """Canonicalize a user/yaml format to one of ``_STANDARD_FORMATS``' names."""

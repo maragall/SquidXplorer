@@ -128,6 +128,7 @@ class BrickedVolume:
         self._steps: dict = {}           # (channel, brick.key) -> the step that layer holds
         self._epoch = 0
         self._step = 1
+        self._noted_dropped = False      # the budget note is said ONCE per open, not per settle
         self._hidden: list = []          # pane layers we hid, to restore on close
         #: (layer, identity) for every pane layer whose `(op, channel)` we took while 3D is up.
         self._surrendered: list = []
@@ -301,7 +302,10 @@ class BrickedVolume:
                      "using stride %d (%.0f MB). Zoom in for native.",
                      len(visible), self._budget / 1e6, step, budget.step,
                      budget.bytes_resident / 1e6)
-        if budget.dropped:
+        if budget.dropped and not self._noted_dropped:
+            # Once per open: every camera settle re-runs this, and the same sentence on every
+            # zoom gesture is noise over a working volume.
+            self._noted_dropped = True
             self._say(f"3D: {budget.dropped} brick(s) left out — the visible volume does not fit "
                       f"the {self._budget / 1e6:.0f} MB budget even at stride {budget.step}.")
         self._step = budget.step
@@ -312,13 +316,30 @@ class BrickedVolume:
             if bkey not in keep:
                 self._drop((ch, bkey))
 
-        jobs: list = []
+        # Hysteresis: NEVER coarsen a resident brick within one open. A brick finer than the
+        # planned stride renders at least as well, and re-reading it coarser spends a decode to
+        # show less (measured before this rule: a zoom-out re-read EVERY resident brick). The
+        # byte budget still wins: when the finer residents no longer fit beside what the camera
+        # needs, they are re-read at the planned stride.
+        needed: list = []                # (brick, channel) to read at budget.step
+        satisfied: list = []             # (brick, channel, resident step), kept as they are
         for b in budget.bricks:
             for ch in self._channels:
-                key = (ch, b.key)
-                if not force and self._steps.get(key) == budget.step:
-                    continue                            # already on screen at the right stride
-                jobs.append((self._offset_brick(b), ch, budget.step))
+                have = self._steps.get((ch, b.key))
+                if not force and have is not None and have <= budget.step:
+                    satisfied.append((b, ch, have))
+                    continue
+                needed.append((b, ch))
+        resident = sum(b.nbytes(self._nz, self._itemsize, s) for b, _ch, s in satisfied)
+        planned = sum(b.nbytes(self._nz, self._itemsize, budget.step) for b, _ch in needed)
+        if resident + planned > self._budget:
+            finer = [(b, ch) for b, ch, s in satisfied if s < budget.step]
+            if finer:
+                log.info("3D bricks: %d finer resident brick(s) no longer fit the %.0f MB budget "
+                         "beside the view; re-reading them at stride %d.",
+                         len(finer), self._budget / 1e6, budget.step)
+                needed.extend(finer)
+        jobs = [(self._offset_brick(b), ch, budget.step) for b, ch in needed]
         if not jobs:
             return
         # Reversed: the loader pops from the END, and `cull` ordered centre-first.

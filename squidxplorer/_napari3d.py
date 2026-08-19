@@ -3,7 +3,6 @@ the GL 3D texture limit, following gallery-view's recipe."""
 
 from __future__ import annotations
 
-import logging
 import threading
 from typing import Any, Optional, Sequence
 
@@ -213,6 +212,25 @@ def region_origin_um(meta: dict, region: str) -> Optional[tuple]:
     except (KeyError, TypeError, IndexError):
         return None
     return (min(xs), min(ys))
+
+
+def region_window_px(meta: dict, region: str) -> Optional[tuple]:
+    """The WHOLE region as ``(r0, r1, c0, c1)`` level-0 mosaic pixels — the no-ROI 3D window."""
+    from squidxplorer._placement import fov_offsets_px, mosaic_extent_px
+
+    positions = meta.get("fov_positions_um") or {}
+    fovs = list((meta.get("fovs_per_region") or {}).get(region) or [])
+    px = float(meta.get("pixel_size_um") or 0.0)
+    if not fovs or not positions or px <= 0:
+        return None
+    try:
+        offsets = fov_offsets_px(positions, region, fovs, px)
+        h_px, w_px = mosaic_extent_px(offsets, tuple(int(v) for v in meta["frame_shape"]))
+    except Exception:                                   # noqa: BLE001 - no geometry, no window
+        return None
+    if not h_px or not w_px:
+        return None
+    return (0, int(h_px), 0, int(w_px))
 
 
 def roi_window_px(meta: dict, region: str, roi_bbox_um: Sequence[float]) -> Optional[tuple]:

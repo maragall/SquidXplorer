@@ -6,7 +6,6 @@ this module is only the Qt surface.
 
 from __future__ import annotations
 
-import logging
 from typing import Optional
 
 from qtpy.QtCore import QObject, Qt, QTimer, Signal
@@ -70,7 +69,6 @@ class LogPanel(QWidget):
                  *, level: int = DEFAULT_LEVEL, max_lines: int = MAX_LINES,
                  start_collapsed: bool = False, parent=None) -> None:
         super().__init__(parent)
-        self._bus = bus
         self._activity = activity
         self._bridge = _LogBridge()
         self._counts = {"WARNING": 0, "ERROR": 0, "CRITICAL": 0}
@@ -182,7 +180,6 @@ class LogPanel(QWidget):
         self._status.setVisible(True)
 
     def attach_bus(self, bus: LogBus, *, level: int = DEFAULT_LEVEL) -> None:
-        self._bus = bus
         bus.subscribe(self._on_record)      # called on the LOGGING thread — hop via the bridge
 
     def attach_activity(self, activity: ActivityLog) -> None:

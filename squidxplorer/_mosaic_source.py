@@ -8,8 +8,7 @@ from __future__ import annotations
 
 import threading
 from collections import OrderedDict
-from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Any, Optional
 
 import numpy as np
 
@@ -159,76 +158,6 @@ def _planned_plane(meta: dict, region: str, max_px: int):
     step = max(1, int(np.ceil(max(full_h, full_w) / float(max_px))))
     return (int(np.ceil(full_h / step)), int(np.ceil(full_w / step)),
             float(step), np.dtype(meta.get("dtype", "uint16")))
-
-
-def fuse_region_stack(
-    reader: Any,
-    meta: dict,
-    region: str,
-    channel: str,
-    *,
-    time_point: int = 0,
-    max_px: int = _MAX_FUSED_PX,
-):
-    """A LAZY ``(z, y, x)`` mosaic stack — one fused plane materialised per visible z."""
-    import dask.array as da
-
-    nz = int(meta.get("n_z") or 1)
-
-    # Size the plane from geometry, before anything is allocated.
-    planned = _planned_plane(meta, region, max_px)
-    if planned is None:
-        return None
-    h, w, step, dtype = planned
-
-    # The budget is per plane, not for the stack: only the visible z is ever in RAM.
-    per_plane = h * w * dtype.itemsize
-    if per_plane > _PLANE_BUDGET_BYTES:
-        raise MemoryError(
-            f"{region}/{channel}: one fused plane is {per_plane / 1e9:.1f} GB "
-            f"({h}x{w} {dtype}), over the {_PLANE_BUDGET_BYTES / 1e9:.1f} GB plane budget. "
-            "Lower max_px rather than letting this page the machine."
-        )
-
-    if nz <= 1:
-        # No singleton z axis: return the plane so napari draws no one-position slider.
-        probe = fuse_region_mosaic(reader, meta, region, channel, z_level=0, time_point=time_point,
-                                   max_px=max_px)
-        if probe is None:
-            return None
-        return probe[0], probe[1], 1
-
-    # One-plane cache: the same z is sliced twice (contrast sample + napari draw) per region change.
-    _cache: dict = {"z": None, "plane": None}
-    _cache_lock = __import__("threading").Lock()
-
-    def _plane(z_level: int):
-        z_level = int(z_level)
-        with _cache_lock:
-            if _cache["z"] == z_level and _cache["plane"] is not None:
-                return _cache["plane"]
-        got = fuse_region_mosaic(reader, meta, region, channel, z_level=int(z_level), time_point=time_point, max_px=max_px)
-        if got is None:
-            out = np.zeros((h, w), dtype=dtype)
-        else:
-            arr = got[0]
-            if arr.shape != (h, w):    # a ragged z would silently misalign the stack
-                out = np.zeros((h, w), dtype=dtype)
-                out[: min(h, arr.shape[0]), : min(w, arr.shape[1])] = \
-                    arr[: min(h, arr.shape[0]), : min(w, arr.shape[1])]
-            else:
-                out = arr
-        with _cache_lock:
-            _cache["z"], _cache["plane"] = z_level, out
-        return out
-
-    from dask import delayed
-
-    blocks = [
-        da.from_delayed(delayed(_plane)(z), shape=(h, w), dtype=dtype)[None, ...]
-        for z in range(nz)
-    ]
-    return da.concatenate(blocks, axis=0), step, nz
 
 
 #: Byte bound on the fused-plane cache, shared across every region/channel/level/z.

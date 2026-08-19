@@ -326,9 +326,11 @@ def test_the_window_navigator_is_gone_and_the_operator_dock_took_its_jobs(
 
 
 def test_the_deck_carries_a_collapsible_operator_dock(qapp, napari_pane_stub, squid_dataset):
-    """The Operators cards moved INTO the views window (2026-08-19 mock): a right-edge dock,
-    collapsed by default to a thin grip, expanding to the card launcher plus the CURRENT view's
-    operator surface — and a tab switch swaps that surface to the new current view's."""
+    """The BULK-processing cards live in the views window's right-edge dock (2026-08-19),
+    collapsed by default to a thin grip. Cards ONLY: the per-view operator surface moved to
+    each view's own left column (Julio: "The operators for this window row should also be on
+    the left vertical dock. The bulk processing is what is solutioned on the right vertical
+    column."), so the dock swaps nothing on tab changes."""
     from squidxplorer._operator_dock import GRIP_PX, OperatorDock
 
     root, _ = squid_dataset
@@ -345,13 +347,39 @@ def test_the_deck_carries_a_collapsible_operator_dock(qapp, napari_pane_stub, sq
         assert set(win._op_cards) >= {"mip", "stitch"}
         dock.set_collapsed(True)
         assert dock.collapsed and dock.width() == GRIP_PX
-        # The window panel follows the current tab.
-        deck.set_current(a)
-        qapp.processEvents()
-        assert dock._panels.currentWidget() is a.operator_panel()
-        deck.set_current(b)
-        qapp.processEvents()
-        assert dock._panels.currentWidget() is b.operator_panel()
+        # NO per-view panel stack, pinned as absence: each view's panel is in its own left
+        # column and follows its tab for free.
+        assert not hasattr(dock, "_panels"), "the dock grew a per-view panel stack again"
+        assert not hasattr(dock, "show_window_panel"), "the tab-swap surface is back"
+        for v in (a, b):
+            panel = v.operator_panel()
+            p = panel.parentWidget()
+            while p is not None and p is not v and p is not dock:
+                p = p.parentWidget()
+            assert p is not dock, "a view's operator panel is parented into the bulk dock"
+    finally:
+        shutdown_plate_window(qapp, win)
+
+
+def test_the_collapsed_dock_is_a_full_height_grip_not_a_blank_column(qapp, napari_pane_stub,
+                                                                     squid_dataset):
+    """Julio (2026-08-19): the collapsed dock "makes a whole dock white column only for that
+    button." Collapsed, the grip IS the dock's whole content (full height, theme-dark) under a
+    zero-height title bar — there is no empty content area for the platform to paint white."""
+    root, _ = squid_dataset
+    win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=1)
+    try:
+        dock = deck._operator_dock
+        assert dock.collapsed
+        assert dock._stack.currentWidget() is dock._grip, "the grip is not the dock's content"
+        assert dock.titleBarWidget() is dock._no_title
+        assert dock.titleBarWidget().maximumHeight() == 0, (
+            "the collapsed dock still shows a title bar")
+        dock.set_collapsed(False)
+        assert dock._stack.currentWidget() is dock._body
+        assert dock.titleBarWidget() is dock._header
+        dock.set_collapsed(True)
+        assert dock._stack.currentWidget() is dock._grip
     finally:
         shutdown_plate_window(qapp, win)
 

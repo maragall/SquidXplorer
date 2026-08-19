@@ -65,7 +65,8 @@ def close_native3d(win) -> None:
 
 
 def open_3d(win, scene_from=None) -> None:
-    """3D = THIS view at NATIVE resolution, read STRAIGHT FROM THE READER (gallery-view recipe).
+    """3D = THIS view, read STRAIGHT FROM THE READER: an ROI's box or the WHOLE region, bricked
+    in-window at the stride the camera's zoom needs (>= 1 voxel per screen pixel).
 
     Closes any volume already up BEFORE the scene is read — while one is up, ``MosaicLayers``
     describes bricks, so a read before the close harvests contrast and sources off one brick
@@ -92,8 +93,37 @@ def open_3d(win, scene_from=None) -> None:
     if roi_bbox is not None:
         open_roi_3d(win, region, roi_bbox, scene_from=scene_from)
         return
+    open_region_3d(win, region, scene_from=scene_from)
 
-    fov = win._roi_center_fov(region, roi_bbox)
+
+def open_region_3d(win, region: str, scene_from=None) -> None:
+    """The no-ROI branch: 3D of the WHOLE region, BRICKED and IN THIS WINDOW (2026-08-19).
+
+    This used to open ONE centre FOV in a napari popout — the full-window goal ("full window
+    3D rendering w/ bricking, downsampled so the retina can't tell at that zoom") never reached
+    ``_bricks`` at all (measured: 0 ``plan`` calls on this branch). The camera-adaptive bricked
+    render already carries the cost policy: it opens at the stride the FITTED zoom needs
+    (retina-transparent, >= 1 voxel per screen pixel) and refines the visible sub-box on every
+    camera settle. The single-FOV popout stays as the fallback for a window without an
+    in-window canvas, or a single-plane acquisition.
+    """
+    from squidxplorer._napari3d import region_window_px
+
+    nz = len(list((win._meta or {}).get("z_levels") or [0]))
+    mosaic = getattr(win._pane, "mosaic", None) if win._pane is not None else None
+    window = region_window_px(win._meta or {}, region)
+    if nz >= 2 and window is not None \
+            and mosaic is not None and getattr(mosaic, "model", None) is not None:
+        n_fovs = len(list((win._meta or {}).get("fovs_per_region", {}).get(region) or []))
+        n_ch = len((win._meta or {}).get("channels", []))
+        # The cost is CONSCIOUS, never silent: reading the whole region decodes every plane of
+        # every FOV once (the plane cache removes the per-brick repeats), on the worker thread.
+        note = (f"Whole region: {n_fovs} FOV(s) x {nz} z x {n_ch} channel(s) = "
+                f"{n_fovs * nz * n_ch} plane decode(s), centre-first on the worker thread.")
+        _open_bricked(win, region, window, scene_from=scene_from, what="3D", note=note)
+        return
+
+    fov = win._roi_center_fov(region, None)
     from squidxplorer._napari3d import open_native_3d
 
     contrast_by, colormap_by = on_screen_luts(scene_from or win, _RAW_OP)
@@ -133,6 +163,18 @@ def on_screen_luts(win, op: str) -> "tuple[dict, dict]":
 
 def open_roi_3d(win, region: str, roi_bbox: tuple, scene_from=None) -> None:
     """3D of an ROI, BRICKED and IN THIS WINDOW. Any ROI renders; none is refused."""
+    from squidxplorer._napari3d import roi_window_px
+
+    window = roi_window_px(win._meta or {}, region, roi_bbox)
+    if window is None:
+        win._say("ROI 3D: this ROI does not land on any FOV of this region.")
+        return
+    _open_bricked(win, region, window, scene_from=scene_from, what="ROI 3D")
+
+
+def _open_bricked(win, region: str, window: tuple, *, scene_from=None, what: str = "ROI 3D",
+                  note: str = "") -> None:
+    """ONE bricked in-window open for both windows: a drawn ROI's and the whole region's."""
     names = [c["name"] for c in (win._meta or {}).get("channels", [])]
     if not names:
         win._say("this acquisition declares no channels to render in 3D.")
@@ -143,20 +185,19 @@ def open_roi_3d(win, region: str, roi_bbox: tuple, scene_from=None) -> None:
         return
     from squidxplorer import _bricks
     from squidxplorer._brick_view import BrickedVolume
-    from squidxplorer._napari3d import region_origin_um, roi_window_px, z_step_um
+    from squidxplorer._napari3d import region_origin_um, z_step_um
     from squidxplorer._napari_view import _DEFAULT_MAX_3D_TEXTURE
 
-    window = roi_window_px(win._meta or {}, region, roi_bbox)
     origin = region_origin_um(win._meta or {}, region)
-    if window is None or origin is None:
-        win._say("ROI 3D: this ROI does not land on any FOV of this region.")
+    if origin is None:
+        win._say(f"{what}: this region has no stage positions to place a volume with.")
         return
     nz = len(list((win._meta or {}).get("z_levels") or [0]))
     if nz < 2:
         win._say("3D needs a z-stack; this acquisition has a single z plane.")
         return
     px = float((win._meta or {}).get("pixel_size_um") or 1.0)
-    dz = z_step_um(win._meta or {}, px, where=f"3D ROI {region}")
+    dz = z_step_um(win._meta or {}, px, where=f"{what} {region}")
     max_tex = _DEFAULT_MAX_3D_TEXTURE
     try:
         max_tex = int(win._pane._live_max_3d_texture())
@@ -179,7 +220,7 @@ def open_roi_3d(win, region: str, roi_bbox: tuple, scene_from=None) -> None:
             say=win._say, parent=win, read=read,
         )))
     except Exception as exc:                         # noqa: BLE001 - named to the window
-        win._say(f"ROI 3D could not open: {exc}")
+        win._say(f"{what} could not open: {exc}")
         return
     try:
         win._pane.on_camera_settled(win._refresh_bricks)
@@ -202,9 +243,10 @@ def open_roi_3d(win, region: str, roi_bbox: tuple, scene_from=None) -> None:
     from squidxplorer._logpane import get_logger
 
     get_logger("volume").info(
-        "view %s: 3D in-window: '%s', %sx%s px ROI, %s z, %s channel(s), %s texture%s. %s %s",
-        getattr(win, "window_id", "?"), source, r1 - r0, c1 - c0, nz, len(names), n,
-        "" if n == 1 else "s", voxels, _bricks.ceiling_line(max_tex, px, measured=True))
+        "view %s: %s in-window: '%s', %sx%s px window, %s z, %s channel(s), %s texture%s. %s%s %s",
+        getattr(win, "window_id", "?"), what, source, r1 - r0, c1 - c0, nz, len(names), n,
+        "" if n == 1 else "s", (note + " ") if note else "", voxels,
+        _bricks.ceiling_line(max_tex, px, measured=True))
 
 
 def volume_source(win, window: tuple):

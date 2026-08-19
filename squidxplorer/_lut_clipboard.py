@@ -1,17 +1,22 @@
-"""The window-side LUT helpers that SURVIVED the clipboard's shelving (2026-08-19).
+"""The window-side LUT helpers, and the ULTRA-MINIMAL two-button clipboard (2026-08-19).
 
-The copy/paste clipboard (``CLIPBOARD``, ``copy_luts``, ``paste_luts``, the plate-side pair and
-every button that drove them) was deleted on Julio's instruction: "Shelf the LUT logic
-completely. That's just adding complexity to the code for no reason." What stays here is
-everything that is NOT the clipboard:
+The old clipboard chrome (the plate-side pair, per-channel pickers) was shelved on Julio's
+instruction and stays shelved; the same day he asked for the minimum back: "I do want the copy
+paste LUT. But ultra simple, minimal, two button logic." That minimum is :data:`CLIPBOARD` plus
+:func:`copy_luts` / :func:`paste_luts`, thin wrappers over the two readers/writers that never
+left:
 
 * :func:`per_channel_luts` — read a window's per-channel look off its own napari layers (the
-  loupe, the movie export, Minerva's on-screen-LUTs hop and settings snapshots all read it);
-* :func:`apply_luts` — put a stored look on a window's layers (child-window LUT inheritance);
-* :func:`match_raw_contrast` — raw -> operator layers WITHIN one window.
+  loupe, the movie export and settings snapshots all read it);
+* :func:`apply_luts` — put a stored look on a window's layers (child-window LUT inheritance,
+  and the paste).
+
+"Match layers to raw" (``match_raw_contrast`` / ``MosaicLayers.match_contrast_to``) was shelved
+whole the same day.
 
 The contrast SEAM is unchanged and stays audited as one job per side (see CLAUDE.md): these
-functions read and write A WINDOW'S OWN napari layers through its ``MosaicLayers``.
+functions read and write A WINDOW'S OWN napari layers through its ``MosaicLayers``; the plate
+hears about a paste through its own follow tap, never from here.
 """
 
 from __future__ import annotations
@@ -19,6 +24,31 @@ from __future__ import annotations
 from typing import Optional
 
 _RAW_OP = "raw"
+
+#: THE clipboard — one per process, shared by every window's copy/paste pair. A plain dict on
+#: purpose (Julio, 2026-08-19: "ultra simple, minimal, two button logic").
+CLIPBOARD: "dict[str, dict]" = {}
+
+
+def copy_luts(win) -> int:
+    """Copy this window's per-channel look into :data:`CLIPBOARD`. Returns channels copied."""
+    luts = per_channel_luts(win)
+    CLIPBOARD.clear()
+    CLIPBOARD.update(luts)
+    return len(luts)
+
+
+def paste_luts(win) -> Optional[int]:
+    """Paste :data:`CLIPBOARD` onto this window's layers. ``None`` = no mosaic here.
+
+    PLATE PARITY is the caller's half: ``RegionViewer._paste_luts`` emits ``lutsPasted`` after
+    this lands, and the plate (``PlateWindow._follow_window_luts`` ->
+    ``PlateOverview.follow_channel_window``) reads the pasted window's own layers and follows
+    each channel's window. The paste is the ONE event that moves the plate's contrast — a drag
+    still does not — so the drift Julio named ("plate contrast is different from the window
+    contrast") cannot re-open without breaking the pinned parity test.
+    """
+    return apply_luts(win, dict(CLIPBOARD))
 
 
 
@@ -95,22 +125,3 @@ def apply_luts(win, luts: "Optional[dict]") -> Optional[int]:
             except Exception:                        # noqa: BLE001 - visibility is best-effort
                 pass
     return applied
-
-
-def match_raw_contrast(win) -> None:
-    """Put the RAW layer's contrast window on every operator layer of the same channel.
-
-    Delegates to ``MosaicLayers.match_contrast_to`` — raw -> operator layers WITHIN one window,
-    which is the window side of the audited one-seam contrast model.
-    """
-    pane = win._pane
-    mosaic = getattr(pane, "mosaic", None) if pane is not None else None
-    if mosaic is None:
-        win._say("no mosaic here to match contrast on.")
-        return
-    matched = mosaic.match_contrast_to(_RAW_OP)
-    if not matched:
-        win._say("nothing to match — this window has no operator layers over the raw mosaic "
-                 "yet. Run an operator on this view first.")
-        return
-    win._say(f"matched {matched} operator layer(s) to the raw contrast window.")

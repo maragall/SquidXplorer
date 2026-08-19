@@ -9,7 +9,7 @@ from __future__ import annotations
 import queue
 import threading
 import time
-from typing import Any, Optional
+from typing import Optional
 
 import numpy as np
 from qtpy.QtCore import Qt, QThread, QTimer, Signal
@@ -128,7 +128,6 @@ class GalleryWindow(QMainWindow):
         super().__init__(parent)
         self._reader, self._meta = reader, meta
         self._scope, self._dropped = scope.capped(MAX_GALLERY_CELLS)
-        self._acq_title = title
         self._cells: "dict[tuple[str, str], GalleryCell]" = {}
         self._labels: "dict[tuple[str, str], QLabel]" = {}
         self._headers: "list[QLabel]" = []
@@ -491,7 +490,6 @@ class GalleryWindow(QMainWindow):
         """Point an OPEN gallery at a new scope. The re-open gesture, so ids and geometry survive."""
         self._scope, self._dropped = scope.capped(MAX_GALLERY_CELLS)
         if title:
-            self._acq_title = title
             self.setWindowTitle(f"{title} — Gallery View")
         n_t = int((self._meta or {}).get("n_t", 1) or 1)
         self._t.setRange(0, max(0, n_t - 1))

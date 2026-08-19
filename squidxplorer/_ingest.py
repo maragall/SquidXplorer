@@ -12,7 +12,6 @@ import numpy as np
 from qtpy.QtWidgets import QApplication
 
 from squidxplorer._logpane import get_logger
-from squidxplorer._montage import _hex_to_rgb01
 from squidxplorer._plate import PlateBuildError, build_plate
 from squidxplorer._plate_overview import (
     PlateOverview, _RawLoupeSource, _fov_of_well, _mosaic_boxes, resolve_plate_root,
@@ -25,8 +24,14 @@ log = get_logger("ingest")
 
 # -- open an acquisition (no processing yet — that's the Process menu) --------------------------
 def ingest(win, path: str) -> None:
-    from squidxplorer import open_reader
+    from squidxplorer import _acqset, open_reader
 
+    # A dropped folder OF acquisitions: record the set on the window and open its first member
+    # (or the member being cycled to). Everything below stays single-acquisition; cycling is a
+    # re-ingest of the neighbour path. The cycle UI follows the set whether or not this open
+    # succeeds, so a failed first member can still be cycled past.
+    path = _acqset.note_set(win, path)
+    win._refresh_acq_cycle()
     p, is_plate = resolve_plate_root(path)
     if is_plate:
         win._readout.setText("this is already a written plate — drop a raw Squid acquisition")

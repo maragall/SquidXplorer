@@ -13,7 +13,6 @@ from squidxplorer._plate_shape import (
     _row_index,
     infer_plate_format,
     normalize_plate_format,
-    plate_dims,
     resolve_plate_format,
     well_span,
 )
@@ -80,9 +79,6 @@ def test_normalize_and_dims():
     assert normalize_plate_format("1536 well plate") == "1536 well plate"
     assert normalize_plate_format("glass slide") == GLASS_SLIDE
     assert normalize_plate_format("nonsense", strict=False) is None
-    assert plate_dims("96") == (8, 12)
-    assert plate_dims(GLASS_SLIDE) == (1, 1)
-    assert plate_dims("4 well plate") is None      # not a Squid standard format
 
 
 def test_resolve_prefers_declared_then_infers():

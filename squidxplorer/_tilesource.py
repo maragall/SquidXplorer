@@ -282,7 +282,6 @@ class ZarrPyramidSource:
     def __init__(self, plate_path, *, tile_px: int = DEFAULT_TILE_PX,
                  min_yx: int = _PYRAMID_MIN_YX, max_levels: int = _PYRAMID_MAX_LEVELS) -> None:
         self.plate_dir = _resolve_plate_dir(plate_path)
-        self._stores: dict = {}
         layout = plate_layout_from_store(self.plate_dir)
         self.channels: list[str] = layout["channels"]
         self._field_dirs: dict = layout["field_dirs"]

@@ -345,3 +345,57 @@ def test_empty_plate_raises_clearly(tmp_path):
     _v2_group(root, {"plate": {"version": "0.4", "rows": [], "columns": [], "wells": []}})
     with pytest.raises(ValueError, match="no wells|No "):
         open_reader(root).metadata
+
+
+# --- pad_partial: a stopped Zarr acquisition opens at its declared state ------------------------
+
+
+def test_a_stopped_zarr_plate_pads_declared_wells_and_axes(tmp_path):
+    """The plate metadata's declared wells vs the wells on disk IS the Zarr plan record: a
+    declared-but-unwritten well pads to field_count zeros fields, and the sidecar's declared
+    Nz/Nt pad the axes, exactly like the individual-TIFF reader."""
+    import shutil
+
+    out = tmp_path / "out"
+    _write_v05_plate(out, regions=("B2", "B3"), fovs=(0, 1))
+    # the stop: B3's well group never landed, though the plate metadata declares it
+    shutil.rmtree(out / "plate.ome.zarr" / "B" / "3")
+    (out / "acquisition.yaml").write_text("z_stack:\n  nz: 3\ntime_series:\n  nt: 2\n")
+    with pytest.warns(UserWarning, match="partial acquisition.*BLACK"):
+        r = open_reader(out, pad_partial=True)
+        m = r.metadata
+    assert m["regions"] == ["B2", "B3"]
+    assert m["fovs_per_region"] == {"B2": [0, 1], "B3": [0, 1]}     # field_count = 2
+    assert m["n_z"] == 3 and m["n_t"] == 2
+    ch = m["channels"][0]["name"]
+    assert r.read("B2", 0, ch, 0).max() > 0                        # the real plane
+    for args in (("B3", 0, ch, 0), ("B3", 1, ch, 0),               # padded well
+                 ("B2", 0, ch, 2), ("B2", 0, ch, 0, 1)):           # padded z / timepoint
+        plane = r.read(*args)
+        assert plane.shape == m["frame_shape"] and plane.max() == 0, args
+    with pytest.raises(KeyError):
+        r.read("Z9", 0, ch, 0)                                     # outside the plan: refused
+
+
+def test_a_complete_zarr_plate_is_untouched_by_pad_partial(tmp_path, recwarn):
+    _write_v05_plate(tmp_path / "out", regions=("B2",), fovs=(0,))
+    m = open_reader(tmp_path / "out", pad_partial=True).metadata
+    assert m["fovs_per_region"] == {"B2": [0]} and m["n_z"] == 1
+    assert not any("partial acquisition" in str(w.message) for w in recwarn.list)
+
+
+def test_pad_partial_without_a_plan_record_is_a_named_no_op(tmp_path, caplog):
+    """A non-HCS store with no sidecars has no plan to pad to: the open says so in one log
+    line and the grid stays exactly what is on disk. Never a guess."""
+    import logging
+
+    root = tmp_path / "acq"
+    (root / "zarr").mkdir(parents=True)
+    _v2_group(root / "zarr" / "manual0",
+              {"multiscales": _v04_multiscales(), "omero": _omero()})
+    _zarr_v2_array(root / "zarr" / "manual0" / "0", np.zeros((1, 2, 3, 4, 4), np.uint16))
+    with caplog.at_level(logging.INFO, logger="squidxplorer.reader"):
+        m = open_reader(root, pad_partial=True).metadata
+    assert m["regions"] == ["manual0"] and m["n_z"] == 3 and m["n_t"] == 1
+    lines = [msg for msg in caplog.messages if "nothing to pad" in msg]
+    assert len(lines) == 1 and "no acquisition plan record" in lines[0]

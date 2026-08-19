@@ -10,9 +10,7 @@ from squidxplorer._spots import (
     LAYER_KEY,
     SpotParams,
     SpotResult,
-    centroid_layer_name,
     detect_spots,
-    mask_layer_name,
     spots_op,
 )
 
@@ -207,12 +205,6 @@ def test_the_plane_op_contract_refuses_a_whole_z_stack():
     img = _plane_with_disks(_FOUR)
     with pytest.raises(ValueError, match="more than one plane"):
         spots_op()([img, img])
-
-
-def test_the_layer_names_come_from_one_place_so_the_ui_and_the_result_cannot_drift():
-    assert mask_layer_name("405") != centroid_layer_name("405")
-    assert "405" in mask_layer_name("405")
-    assert "405" in centroid_layer_name("405")
 
 
 def test_the_defaults_are_valid():

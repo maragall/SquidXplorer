@@ -272,22 +272,15 @@ class Plate(ABC):
         format_name: Optional[str] = None,
         declared_format: Optional[str] = None,
         format_source: str = "declared",
-        measured_pitch_um: Optional[tuple] = None,
         placement_mode: str = DEFAULT_PLACEMENT_MODE,
-        placement_requested: Optional[str] = None,
     ):
         self.geometry = geometry
         self.format_name = format_name or geometry.name
         self.declared_format = declared_format
         #: how ``format_name`` was decided: "override" | "measured" | "declared" | "inferred".
         self.format_source = format_source
-        self.measured_pitch_um = measured_pitch_um
         #: the geometry the cells actually have: "stage" | "compact".
         self.placement_mode = normalize_placement_mode(placement_mode)
-        #: the mode the caller asked for; differs only for a freeform tissue carrier.
-        self.placement_requested = normalize_placement_mode(
-            placement_mode if placement_requested is None else placement_requested
-        )
         self._occupancy = {k: list(v) for k, v in (occupancy or {}).items()}
         unknown = [c for c in self._occupancy if not self.has_cell(c)]
         if unknown:
@@ -480,11 +473,6 @@ def decode_code(code: int) -> "tuple[int, int, int]":
     return (code // _ROW_MUL, (code // _COL_MUL) % 100, code % _ROI_MAX)
 
 
-def format_code(code: int) -> str:
-    """Human form ``"RR CC OOOO"`` (Row Column ROI)."""
-    row, col, roi = decode_code(code)
-    return f"{row:02d} {col:02d} {roi:04d}"
-
 
 def cache_scope(cell_id: str, roi_index: "Optional[int]" = None) -> str:
     """The flat-cache scope string: the integer id for a real well, else the raw region key."""
@@ -534,8 +522,7 @@ class SlideCarrier(Plate):
 
     def __init__(self, geometry, occupancy=None, cell_ids: Optional[Iterable[str]] = None,
                  placement: Optional[Mapping[str, tuple]] = None,
-                 layout: Optional[Mapping[str, tuple]] = None,
-                 stage_boxes_um: Optional[Mapping[str, tuple]] = None, **kw):
+                 layout: Optional[Mapping[str, tuple]] = None, **kw):
         """*placement*/*layout* carry the geometric assignment; both absent means positional order."""
         names = list(cell_ids) if cell_ids is not None else []
         n_slots = geometry.rows * geometry.cols
@@ -555,8 +542,6 @@ class SlideCarrier(Plate):
         self._pos = {cid: i for i, cid in enumerate(self._ids)}
         self._layout = {str(k): tuple(float(v) for v in val)
                         for k, val in (layout or {}).items()} or None
-        self.stage_boxes_um = {str(k): tuple(float(v) for v in val)
-                               for k, val in (stage_boxes_um or {}).items()}
         super().__init__(geometry, occupancy, **kw)
 
     @classmethod
@@ -596,8 +581,7 @@ class CompactPlate(Plate):
     _FILLER_PREFIX = "pad"
 
     def __init__(self, geometry, occupancy=None, placement: Optional[Mapping[str, tuple]] = None,
-                 layout: Optional[Mapping[str, tuple]] = None,
-                 stage_boxes_um: Optional[Mapping[str, tuple]] = None, **kw):
+                 layout: Optional[Mapping[str, tuple]] = None, **kw):
         n_slots = geometry.rows * geometry.cols
         slots: list[Optional[str]] = [None] * n_slots
         for cid, (r, c) in (placement or {}).items():
@@ -615,9 +599,6 @@ class CompactPlate(Plate):
         self._pos = {cid: i for i, cid in enumerate(self._ids)}
         self._layout = {str(k): tuple(float(v) for v in val)
                         for k, val in (layout or {}).items()} or None
-        #: raw stage boxes of the regions; the compact cells are not at these positions.
-        self.stage_boxes_um = {str(k): tuple(float(v) for v in val)
-                               for k, val in (stage_boxes_um or {}).items()}
         kw.setdefault("placement_mode", COMPACT)
         super().__init__(geometry, occupancy, **kw)
 
@@ -868,20 +849,20 @@ def build_plate(metadata: Mapping, override=None, images_dir=None,
             )
             return _make(measured, regions, fovs_per_region, stage_boxes, placement_mode=placement,
                          format_source="measured",
-                         declared_format=declared, measured_pitch_um=measured_pitch)
+                         declared_format=declared)
         else:
             return _make(measured, regions, fovs_per_region, stage_boxes, placement_mode=placement,
                          format_source="measured",
-                         declared_format=None, measured_pitch_um=measured_pitch)
+                         declared_format=None)
 
     if declared:
         return _make(declared, regions, fovs_per_region, stage_boxes, placement_mode=placement,
                      format_source="declared",
-                     declared_format=declared, measured_pitch_um=measured_pitch)
+                     declared_format=declared)
     if measured:
         return _make(measured, regions, fovs_per_region, stage_boxes, placement_mode=placement,
                      format_source="measured",
-                     declared_format=None, measured_pitch_um=measured_pitch)
+                     declared_format=None)
     return _make(infer_plate_format(regions), regions, fovs_per_region, stage_boxes,
                  placement_mode=placement, format_source="inferred", declared_format=None)
 
@@ -929,9 +910,8 @@ def _make(name, regions, fovs_per_region, stage_boxes=None,
         # The carrier's cells are even in both modes, so it reports the mode it actually has.
         carrier_mode = COMPACT if placement else placement_mode
         return SlideCarrier(geom, occupancy, cell_ids=list(regions), placement=placement,
-                            layout=layout, stage_boxes_um=stage_boxes,
-                            format_name=geom.name, placement_mode=carrier_mode,
-                            placement_requested=placement_mode, **kw)
+                            layout=layout, format_name=geom.name,
+                            placement_mode=carrier_mode, **kw)
 
     if placement_mode == COMPACT and regions:
         base = PlateGeometry.vendored(name)
@@ -939,8 +919,7 @@ def _make(name, regions, fovs_per_region, stage_boxes=None,
             list(regions), order_key=_compact_order_key(regions, stage_boxes))
         geom = PlateGeometry(**{**vars(base), "rows": rows, "cols": cols})
         return CompactPlate(geom, occupancy, placement=cells, layout=layout,
-                            stage_boxes_um=stage_boxes, format_name=name,
-                            placement_requested=placement_mode, **kw)
+                            format_name=name, **kw)
 
     return WellPlate(PlateGeometry.vendored(name), occupancy, format_name=name,
                      placement_mode=placement_mode, **kw)

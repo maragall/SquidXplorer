@@ -822,6 +822,69 @@ have non-Minerva callers: `_lut_clipboard.per_channel_luts` (loupe, movie, setti
 `colormap_hue_rgb` and `selected_region_fovs`. Dated docs under docs/ (IMA-228 review, SCOPE,
 DESIGN) still tell its story on purpose; re-instating starts from git history, not a stub.
 
+## Chroma reconstruction and the pad-partial format matrix (2026-08-19, branch stain-chroma)
+
+- **A color-recorded-gray channel with a usable overview displays through VIRTUAL CHROMA
+  CHANNELS**, not the stain LUT: the reader expands it into the same (R)/(G)/(B) components a
+  real color file gets; (G) is the file's own plane, (R)/(B) are that plane times the overview
+  PNG's local R/G and B/G ratio windows (`_stain.ChromaSource`, bilinear upsample, ratios
+  clipped to `_RATIO_MAX`). The LUT stays the fallback when the PNG/geometry is absent. The
+  geometry convention is MEASURED, not assumed: the mosaic yaml's `top_left_mm` is (y, x) and a
+  FOV's stage position is its CENTER (verified corr 0.88 at zero offset; the corner convention
+  measured 0.01). An uncovered FOV reads its own plane with ratio 1 (neutral), counted in one
+  log line.
+- **pad_partial reaches all three formats** through `reader._pad_to_plan`/`_PadPartialMixin`:
+  individual images (the original), OME-TIFF (plan = root coordinates.csv + declared Nz/Nt),
+  Zarr HCS (plan = the plate metadata's declared wells + field_count). No plan record = a named
+  no-op, never a guess. The padded open's warning says it places by the PLAN on purpose; the
+  multipage-TIFF reader still ignores the flag (not one of the design's named formats).
+
+## Multi-acquisition sets (2026-08-19, branch acq-folder)
+
+`_acqset.py` (Qt-free): a SET is a folder that is not itself an acquisition but has >= 2
+immediate child acquisitions (acceptance = `open_reader` accepts it; written plates excluded via
+`resolve_plate_root`). Ingest opens the first member and records the set; cycling (title-bar
+prev/next, Cmd/Ctrl-Left/Right) is a RE-INGEST of the neighbour — one data model. Bulk saves:
+the "save runs: all N acquisitions" checkbox routes an unscoped SAVE through
+`_acqset.run_over_set` (`_acqset_gui.SetRunWorker`): sequential, one `run_operator_once` per
+member with the SAME parameters, per-member fault isolation, a measured tally line. ONE operator
+per run; composition stays refused. Owed: per-set disk estimate; a set-run cancel button.
+
+## Views-window space reclaim (2026-08-19, branch views-space, Julio's live-GUI feedback)
+
+- **Everything window-scoped lives in napari's LEFT column, above the layer controls**: the
+  2D/3D·ROI chip block (`RegionViewer._build_view_controls`, chip attribute names unchanged)
+  and, directly under it, `operator_panel()` (dropdown, ⚙ controls, Run, save, Detect row).
+  `MosaicPane.dock_view_controls` is the seam (napari `add_dock_widget` + a remove/re-add hoist
+  of the other left docks); a pane that cannot dock (headless ModelPane) keeps the column in
+  the window body so tests and GATE 3 still actuate every control. `_build_top_row` is deleted
+  — the full-width top toolbar is gone and the canvas gets its height. The run/movie progress
+  bar stays in the window body (visible whatever the columns do).
+- **The right-edge `OperatorDock` holds ONLY the bulk-processing cards** (Julio: "The operators
+  for this window row should also be on the left vertical dock. The bulk processing is what is
+  solutioned on the right vertical column."): `_panels`/`show_window_panel` and the
+  `pageActivated` panel swap are deleted. Collapsed, the dock is a FULL-HEIGHT dark grip (a
+  QStackedWidget page under a zero-height title bar) — the old grip-as-title-bar left the
+  dock's empty content area painted platform-white for the window's whole height.
+- **"Match layers to raw" is shelved whole**: the button, `RegionViewer._match_raw_contrast`,
+  `_lut_clipboard.match_raw_contrast` and `MosaicLayers.match_contrast_to` (the button chain
+  was its last caller). Absences pinned in tests.
+- **The LUT clipboard is back as exactly two buttons** (Julio: "ultra simple, minimal, two
+  button logic"): `_lut_clipboard.CLIPBOARD` (one plain dict) + `copy_luts`/`paste_luts` over
+  the surviving `per_channel_luts`/`apply_luts`, driven by two chips in the view-controls
+  block. **The plate follows a PASTE and only a paste**: `RegionViewer.lutsPasted` →
+  `PlateWindow._follow_window_luts` → `follow_channel_window` (contrast only, never the manual
+  latch, colours untouched so a stain-LUT plate look survives). A drag still leaves the plate
+  alone — both 2026-08-06 ("the plate image shouldn't change unless we paste a LUT") and the
+  paste-parity requirement hold; `test_a_lut_paste_reaches_the_plate_and_the_two_agree` pins
+  the parity.
+- **A copy-saving operator's preview run names its artifact**: `RegisterPanel.copy_check`
+  defaults CHECKED (the copy is the operator's purpose; default-off was "Registering the wells
+  doesn't do anything"), `operator_done` appends "preview only — tick save to write
+  stitched_<acq>" for an `operator_saves_copy` run that wrote nothing (`_op_run_wrote`,
+  recorded at launch), and the window save box's tooltip names stitched_<acq> instead of
+  implying an OME-Zarr when a copy-saving operator is selected.
+
 ## Agent skills
 
 ### Issue tracker

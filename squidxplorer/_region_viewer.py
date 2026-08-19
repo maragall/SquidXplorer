@@ -268,6 +268,10 @@ class RegionViewer(QMainWindow):
     """ONE independent napari window over a subset of regions."""
 
     closed = Signal(object)
+    #: A LUT paste landed on this window's layers. The plate connects (windowOpened →
+    #: `_bind_window_contrast`) and follows the pasted windows — the ONE event that moves the
+    #: plate's contrast (Julio: "the plate image shouldn't change unless we paste a LUT").
+    lutsPasted = Signal(object)
     regionsChanged = Signal(object)   # emits self: this window ADOPTED a region it was not opened
     #                                   over, so anything that published its region set — the
     #                                   navigator row, the plate's per-view wash — is now stale.
@@ -488,7 +492,30 @@ class RegionViewer(QMainWindow):
         except Exception:                                # noqa: BLE001 - detection stays optional
             pass
 
-        lay.addWidget(self._build_top_row(), 0)
+        # EVERYTHING WINDOW-SCOPED lives in napari's LEFT column, above the layer controls (UI
+        # feedback 2026-08-19: "free up the viewer space to the top" — no full-width top dock;
+        # "the operators for this window row should also be on the left vertical dock"): the
+        # 2D/3D·ROI chip block on top, this view's operator panel under it. The right-edge dock
+        # keeps ONLY the bulk-processing cards. A pane that cannot dock (headless ModelPane, a
+        # napari without dock areas) keeps the column in the window body so every control stays
+        # actuatable.
+        left_col = QWidget()
+        lv = QVBoxLayout(left_col)
+        lv.setContentsMargins(0, 0, 0, 0)
+        lv.setSpacing(4)
+        lv.addWidget(self._build_view_controls(), 0)
+        lv.addWidget(self.operator_panel(), 0)
+        dock_controls = getattr(pane, "dock_view_controls", None)
+        if not (callable(dock_controls) and dock_controls(left_col)):
+            lay.addWidget(left_col, 0)
+        # The RUN/MOVIE PROGRESS BAR stays in the window body: a run's progress must be visible
+        # while the operator dock is collapsed to its grip. Hidden, it costs zero height.
+        self._op_progress = QProgressBar()
+        self._op_progress.setTextVisible(True)
+        self._op_progress.setFixedHeight(16)
+        self._op_progress.setStyleSheet(self._PROGRESS_QSS)
+        self._op_progress.hide()
+        lay.addWidget(self._op_progress, 0)
         lay.addWidget(pane, 1)
 
         self._cursor = RegionCursor()
@@ -563,16 +590,16 @@ class RegionViewer(QMainWindow):
         b.clicked.connect(lambda _=False: slot())
         return b
 
-    def _build_top_row(self) -> QWidget:
-        """[ 2D / 3D + ROI ]   [ Operators for this window ] — the deck's per-window header."""
-        row = QWidget(self)
-        row.setStyleSheet("background:#0b0e14;")
-        h = QHBoxLayout(row)
-        h.setContentsMargins(6, 6, 6, 2)
-        h.setSpacing(6)
+    def _build_view_controls(self) -> QWidget:
+        """The "2D / 3D · ROI" chip block: a compact wrapped column, NOT a full-width toolbar.
 
+        `_build` docks it at the TOP of napari's left column, above the layer controls
+        (`MosaicPane.dock_view_controls`), so the canvas gains the height the old horizontal
+        top dock spent (UI feedback 2026-08-19: "Should be on the left column, where the
+        controls are"). Chip attributes (`_btn_2d`, `_btn_3d`, `_btn_focus`, `_btn_record`,
+        `_btn_fovs`) are pinned by tests and GATE 3; only the parenting and row wrapping moved.
+        """
         view_box, vv = self._titled_box("2D / 3D · ROI")
-        r1 = QHBoxLayout(); r1.setSpacing(4)
         self._btn_2d = self._chip("2D", "View the SELECTED ROI in 2D (opens it as a child window); "
                                   "with no ROI picked, just shows the mosaic in 2D.", self._view_roi_2d)
         self._btn_3d = self._chip("3D", "Open this view in 3D at NATIVE resolution (the region if it "
@@ -591,49 +618,58 @@ class RegionViewer(QMainWindow):
             "⏺ movie", "Export what this window is showing as an .mp4, sweeping the acquisition's "
             "time axis (or its z axis when there is no time series). Runs off the UI thread; "
             "click again to cancel.", self._record_movie)
+        r1 = QHBoxLayout(); r1.setSpacing(4)
         r1.addWidget(self._btn_2d); r1.addWidget(self._btn_3d); r1.addWidget(self._btn_focus)
-        r1.addWidget(self._btn_record)
         r1.addStretch(1)
-        self._refresh_record_chip()
         vv.addLayout(r1)
         r2 = QHBoxLayout(); r2.setSpacing(4)
-        r2.addWidget(self._chip("▭ new", "Draw an ROI rectangle inside the mosaic.", self._new_roi))
-        r2.addWidget(self._chip("⊙ select", "Select ROIs: click one, then press Delete to remove it.",
+        r2.addWidget(self._btn_record)
+        r2.addStretch(1)
+        self._refresh_record_chip()
+        vv.addLayout(r2)
+        r3 = QHBoxLayout(); r3.setSpacing(4)
+        r3.addWidget(self._chip("▭ new", "Draw an ROI rectangle inside the mosaic.", self._new_roi))
+        r3.addWidget(self._chip("⊙ select", "Select ROIs: click one, then press Delete to remove it.",
                                 self._select_rois))
-        r2.addWidget(self._chip("✕ clear", "Remove all ROIs in this window.", self._clear_rois))
-        r2.addWidget(self._chip("→ window", "Open the drawn ROI(s) as child window(s) — the next "
+        r3.addWidget(self._chip("✕ clear", "Remove all ROIs in this window.", self._clear_rois))
+        r3.addStretch(1)
+        vv.addLayout(r3)
+        r4 = QHBoxLayout(); r4.setSpacing(4)
+        r4.addWidget(self._chip("→ window", "Open the drawn ROI(s) as child window(s) — the next "
                                 "level of the view tree.", self._open_roi_children))
         # FOVs. The ROI chips beside it are for a box the user draws; this is for the boxes the
         # ACQUISITION already drew. On a sparse run — the AF sweep sets are 16 fields at 7x the
         # field pitch, so 3% of the mosaic is data — checking focus means visiting each field, and
         # doing that by wheel-zoom is the complaint this answers.
         self._btn_fovs = self._chip("⊞ FOVs", self._FOVS_TIP, self._open_fovs)
-        r2.addWidget(self._btn_fovs)
-        r2.addStretch(1)
+        r4.addWidget(self._btn_fovs)
+        r4.addStretch(1)
         self._refresh_fovs_chip()
-        vv.addLayout(r2)
-        view_box.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
-        h.addWidget(view_box, 0)
-
-        # THE PER-WINDOW OPERATOR SURFACE IS NOT IN THIS ROW. "Operators for this window" (the
-        # dropdown, ⚙ controls, Run, save, Match layers to raw) and the Detect row live in
-        # `operator_panel()`, shown by the views window's collapsible right-edge dock
-        # (`_operator_dock`, 2026-08-19 mock). The Defaults group (auto focus / make default /
-        # diverged / reset) is SHELVED outright — the settings STORE stays (`ViewSettings` /
-        # `ViewDefaults` still drive autofocus-on-open and child-window LUT inheritance), only its
-        # control surface is gone.
-        #
-        # The RUN/MOVIE PROGRESS BAR stays in the window body: a run's progress must be visible
-        # while the dock is collapsed to its grip.
-        self._op_progress = QProgressBar()
-        self._op_progress.setTextVisible(True)
-        self._op_progress.setFixedHeight(16)
-        self._op_progress.setStyleSheet(self._PROGRESS_QSS)
-        self._op_progress.hide()
-        h.addWidget(self._op_progress, 1)
-
-        row.setMaximumHeight(108)
-        return row
+        vv.addLayout(r4)
+        # THE LUT CLIPBOARD, back as exactly two buttons (Julio, 2026-08-19: "I do want the copy
+        # paste LUT. But ultra simple, minimal, two button logic."). No pickers, no menus; the
+        # paste reaches the PLATE through the automatic window → plate contrast tap, so the two
+        # never disagree — see `_lut_clipboard.paste_luts`.
+        r5 = QHBoxLayout(); r5.setSpacing(4)
+        self._btn_copy_luts = self._chip(
+            "⧉ copy LUTs", "Copy this window's per-channel look (contrast, colormap, which "
+            "channels are on) to the one LUT clipboard.", self._copy_luts)
+        self._btn_paste_luts = self._chip(
+            "⇩ paste LUTs", "Paste the LUT clipboard onto this window's channels. The plate "
+            "follows the same write, so plate and window contrast stay equal.", self._paste_luts)
+        r5.addWidget(self._btn_copy_luts)
+        r5.addWidget(self._btn_paste_luts)
+        r5.addStretch(1)
+        vv.addLayout(r5)
+        # THE PER-WINDOW OPERATOR SURFACE IS NOT IN THIS BLOCK. "Operators for this window" (the
+        # dropdown, ⚙ controls, Run, save) and the Detect row live in `operator_panel()`, docked
+        # DIRECTLY BELOW this block in the same left column by `_build`. The Defaults group (auto
+        # focus / make default / diverged / reset) is SHELVED outright — the settings STORE stays
+        # (`ViewSettings` / `ViewDefaults` still drive autofocus-on-open and child-window LUT
+        # inheritance), only its control surface is gone.
+        view_box.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        self._view_controls = view_box
+        return view_box
 
     _AT_DEFAULTS_QSS = "color:#8b949e;font-size:10px;border:none;"
     _PROGRESS_QSS = (
@@ -647,12 +683,13 @@ class RegionViewer(QMainWindow):
     _op_panel = None
 
     def operator_panel(self) -> QWidget:
-        """THIS WINDOW's operator surface, built lazily, LIVING IN THE VIEWS WINDOW'S DOCK.
+        """THIS WINDOW's operator surface, LIVING IN THIS WINDOW'S OWN LEFT COLUMN.
 
-        The old "Operators for this window" toolbar (dropdown, ⚙ controls, Run, save,
-        Match layers to raw) plus the pane's Detect row, moved out of the window body into the
-        collapsible right-edge dock (2026-08-19 mock). One panel per view; the dock swaps them as
-        tabs change (`OperatorDock.show_window_panel`), and `dispose` deletes it with the view.
+        The old "Operators for this window" toolbar (dropdown, ⚙ controls, Run, save) plus the
+        pane's Detect row. It sat in the right-edge dock for one day; Julio (2026-08-19): "The
+        operators for this window row should also be on the left vertical dock. The bulk
+        processing is what is solutioned on the right vertical column." `_build` docks it under
+        the 2D/3D·ROI chips, one panel per view, and `dispose` deletes it with the view.
         """
         panel = self._op_panel
         if panel is not None and _alive(panel):
@@ -682,8 +719,7 @@ class RegionViewer(QMainWindow):
         opr.addWidget(self._chip("Run", "Run the selected operator on THIS view's regions.",
                                  self._run_view_operator))
         self._save_chk = QCheckBox("save")
-        self._save_chk.setToolTip("Off = preview only (nothing written to disk). On = persist the "
-                                  "operator result as an OME-Zarr.")
+        self._save_chk.setToolTip(self._SAVE_TIP_PLATE)   # re-derived per operator; see below
         self._save_chk.setStyleSheet("QCheckBox{color:#c9d1d9;font-size:11px;}")
         opr.addWidget(self._save_chk)
         ov.addLayout(opr)
@@ -692,16 +728,8 @@ class RegionViewer(QMainWindow):
         self._controls_note.setWordWrap(True)
         ov.addWidget(self._controls_note)
         self._op_combo.currentIndexChanged.connect(lambda _i: self._refresh_controls_note())
-        sync = QHBoxLayout(); sync.setSpacing(4)
-        # NO Copy/Paste LUTs here: the clipboard was shelved with the plate's pair (2026-08-19).
-        sync.addWidget(self._chip("≡ Match layers to raw",
-                                  "THIS WINDOW's operator layers ← THIS WINDOW's raw: put raw's "
-                                  "contrast window on every operator layer of the same channel, "
-                                  "so flipping between raw and a result compares the same window. "
-                                  "Touches no other window and does not move raw.",
-                                  self._match_raw_contrast))
-        sync.addStretch(1)
-        ov.addLayout(sync)
+        # NO "Match layers to raw" and no LUT chrome here: match-to-raw is shelved whole
+        # (Julio, 2026-08-19) and the two-button LUT clipboard lives in the 2D/3D·ROI block.
         pv.addWidget(op_box)
 
         # THE DETECT ROW (UI feedback 2026-08-17 "Move to controls window", landed with this
@@ -804,10 +832,36 @@ class RegionViewer(QMainWindow):
             return
         combo = getattr(self, "_op_combo", None)
         key = combo.currentData() if combo is not None else None
+        self._refresh_save_tooltip(key)
         if not key:
             note.setText("")
             return
         note.setText(f"{self._render_mode.upper()} · {self._params_summary(str(key))}")
+
+    _SAVE_TIP_PLATE = ("Off = preview only (nothing written to disk). On = persist the "
+                       "operator result as an OME-Zarr.")
+
+    def _refresh_save_tooltip(self, key) -> None:
+        """The save box says WHAT a save writes: a copy-saving operator's artifact is
+        stitched_<folder>, not an OME-Zarr — implying the wrong artifact is how a register
+        preview read as "doesn't do anything"."""
+        chk = getattr(self, "_save_chk", None)
+        if chk is None:
+            return
+        tip = self._SAVE_TIP_PLATE
+        try:
+            from squidxplorer._engine import operator_saves_copy
+            from squidxplorer._operations import operator_name
+
+            if key and operator_saves_copy(operator_name(str(key))):
+                src = getattr(self._reader, "source_id", None)
+                acq = Path(str(src)).name if src else "<folder>"
+                tip = ("Off = preview only (nothing written to disk). On = write "
+                       f"stitched_{acq} beside the acquisition (hardlinked copy with "
+                       "registered coordinates).")
+        except Exception:                            # noqa: BLE001 - a tooltip, never a crash
+            pass
+        chk.setToolTip(tip)
 
     def _window_operators(self) -> list:
         """THE OPERATORS FOR THIS WINDOW: every processing layer it holds, raw excluded."""
@@ -1014,6 +1068,11 @@ class RegionViewer(QMainWindow):
         save = bool(self._save_chk.isChecked()) if getattr(self, "_save_chk", None) is not None else False
         kwargs = dict(self._plate_operator_kwargs(key))
         kwargs.update(self._z_kwargs_for_mode(key, kwargs))
+        # Whether THIS run leaves a disk artifact: the save box, or a copy-saving operator's own
+        # `copy` kwarg riding through from its panel. Read by `operator_done`, which must say
+        # how to GET the artifact when a copy-saving preview run left none (Julio, 2026-08-19:
+        # "Registering the wells doesn't do anything").
+        self._op_run_wrote = bool(save or (kwargs or {}).get("copy"))
         try:
             log.info("view %s running %s on %s with %s", self.window_id, key,
                      (regions if isinstance(regions, dict) else list(regions)), kwargs)
@@ -1046,12 +1105,38 @@ class RegionViewer(QMainWindow):
         bar.setFormat(report.sentence())
         bar.show()
 
+    #: Whether the run this window last asked for leaves a disk artifact; see _run_view_operator.
+    _op_run_wrote = False
+
     def operator_done(self, action: str, seconds: float) -> None:
         """Emit the console's ``done`` line, closing the started/done pair."""
         self.log.done(str(action), float(seconds), address=self._closing_address())
-        self._echo(f"{action} finished in {float(seconds):.1f} s.")
+        line = f"{action} finished in {float(seconds):.1f} s."
+        hint = self._preview_artifact_hint(str(action))
+        self._echo(f"{line} {hint}" if hint else line)
         self._op_action = self._op_address = None
         self._hide_progress()
+
+    def _preview_artifact_hint(self, action: str) -> str:
+        """One line naming the artifact a COPY-SAVING operator's PREVIEW run did not write.
+
+        Measured complaint (Julio, 2026-08-19): register ran with save unchecked, the preview
+        layer landed, no stitched_ copy appeared, and nothing said how to get one. Empty for a
+        run that wrote (save box or a ``copy=True`` kwarg) and for every other operator.
+        """
+        if self._op_run_wrote:
+            return ""
+        try:
+            from squidxplorer._engine import operator_saves_copy
+
+            if not operator_saves_copy(action):
+                return ""
+            src = getattr(self._reader, "source_id", None)
+            acq = Path(str(src)).name if src else "<folder>"
+            return (f"{action}: preview only — tick save to write stitched_{acq} "
+                    "(hardlinked copy with registered coordinates).")
+        except Exception:                            # noqa: BLE001 - a hint, never a crash
+            return ""
 
     def operator_failed(self, action: str, reason: str) -> None:
         """The failure outcome: an action that starts and then says nothing looks like one still running."""
@@ -1821,9 +1906,27 @@ class RegionViewer(QMainWindow):
             except Exception:                    # noqa: BLE001 - ditto, and the popout may be gone
                 pass
 
-    def _match_raw_contrast(self) -> None:
-        """Raw's contrast onto every operator layer. See `_lut_clipboard.match_raw_contrast`."""
-        _lut_clipboard.match_raw_contrast(self)
+    # "Match layers to raw" is SHELVED WHOLE (Julio, 2026-08-19): the button, this window's
+    # handler, `_lut_clipboard.match_raw_contrast` and `MosaicLayers.match_contrast_to` are gone.
+
+    def _copy_luts(self) -> None:
+        """This window's per-channel look into THE clipboard. One button, no options."""
+        n = _lut_clipboard.copy_luts(self)
+        self._say(f"copied {n} channel LUT(s)." if n
+                  else "nothing to copy — this window has no channel layers yet.")
+
+    def _paste_luts(self) -> None:
+        """THE clipboard onto this window's channels. The plate follows the same write."""
+        if not _lut_clipboard.CLIPBOARD:
+            self._say("the LUT clipboard is empty — copy LUTs from a window first.")
+            return
+        applied = _lut_clipboard.paste_luts(self)
+        if applied is None:
+            self._say("no mosaic here to paste onto.")
+            return
+        self._say(f"pasted LUTs onto {applied} channel(s).")
+        if applied:
+            self.lutsPasted.emit(self)   # the plate follows the pasted windows; see the signal
 
     @property
     def time_point(self) -> int:
@@ -2176,8 +2279,8 @@ class RegionViewer(QMainWindow):
         panel = self._op_panel
         self._op_panel = None
         if panel is not None and _alive(panel):
-            # The panel lives in a dock's stack, not in this window: delete it explicitly or it
-            # outlives the view as an orphan page.
+            # The panel can live inside the pane's napari window (the docked left column), not
+            # directly in this window: delete it explicitly or it outlives the view as an orphan.
             try:
                 panel.setParent(None)
                 panel.deleteLater()
@@ -2509,7 +2612,6 @@ class ViewerManager(QObject):
         deck = self.deck() if self.tabbed_views else None
         if deck is not None:
             deck.dock_page(win)
-            self._sync_deck_dock_panel(wid)
             # A new tab must be SEEN: `show()` alone does not un-minimise, so a view opened while
             # the deck sat minimised landed in a window that stayed in the dock/taskbar — the
             # other measured shape of "tabs do not collapse / do not come back" (2026-08-19).
@@ -2521,11 +2623,9 @@ class ViewerManager(QObject):
         else:
             installer = self.operator_dock_installer
             if installer is not None and getattr(win, "_operator_dock", None) is None:
-                # A free-standing view gets the same collapsible dock as the deck.
+                # A free-standing view gets the same collapsible bulk-cards dock as the deck;
+                # its own operator panel already lives in its left column.
                 win._operator_dock = installer(win)
-                dock = win._operator_dock
-                if dock is not None:
-                    dock.show_window_panel(win.operator_panel())
             win.show()
             win.raise_()
             win.activateWindow()
@@ -2600,12 +2700,11 @@ class ViewerManager(QObject):
 
         deck = ViewDeck(index=len(self._decks) + 1)
         deck.pageActivated.connect(self.note_focus)
-        # THE OPERATOR DOCK, once per deck. `pageActivated` swaps the per-view panel as tabs
-        # change — a BOUND METHOD, for the destroyed-lambda reason documented below.
+        # THE BULK-CARDS OPERATOR DOCK, once per deck. It swaps nothing on tab changes: each
+        # view's own operator panel lives in that view's LEFT column (2026-08-19).
         installer = self.operator_dock_installer
         if installer is not None:
             deck._operator_dock = installer(deck)
-            deck.pageActivated.connect(self._sync_deck_dock_panel)
         # A BOUND METHOD, NEVER A SELF-CAPTURING LAMBDA. PyQt keeps a lambda alive in a slot proxy
         # parented to the SENDER, so `destroyed` -- which fires while the deck is being torn down --
         # would call into this manager whether or not the manager still exists. Connected as a
@@ -2660,22 +2759,6 @@ class ViewerManager(QObject):
             # forward has to be in that set or focusing it would move no hue at all.
             self._selected_ids = [wid]
         self.viewFocused.emit(list(win._regions))
-
-    def _sync_deck_dock_panel(self, window_id: int) -> None:
-        """Show the (now current) view's operator panel in its deck's dock. Bound method on
-        purpose: connected to `ViewDeck.pageActivated`, which can fire during teardown."""
-        win = self._windows.get(int(window_id))
-        if win is None:
-            return
-        host = getattr(win, "host", None)
-        dock = getattr(host, "_operator_dock", None) if host is not None else None
-        if dock is None or not _alive(dock):
-            return
-        try:
-            dock.show_window_panel(win.operator_panel())
-        except Exception as exc:                     # noqa: BLE001 - a panel is never worth a crash
-            log.warning("view %s could not publish its operator panel: %s: %s",
-                        window_id, type(exc).__name__, exc)
 
     def active_view(self) -> "Optional[RegionViewer]":
         """The window a plate click drives: the focused one, or None when no view is open.
