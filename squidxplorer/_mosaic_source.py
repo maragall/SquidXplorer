@@ -295,16 +295,26 @@ def _norm_window(idx, shape) -> "tuple[slice, slice]":
 
 
 class _WindowedLevel:
-    """A fine pyramid rung materialised BY WINDOW: a slice pastes only the FOVs it touches.
+    """A pyramid rung materialised BY WINDOW: a slice pastes only the FOVs it touches.
 
     Same paste rule as :func:`_fuse_levels` — ``frame[::step, ::step]`` at ``offset // step``,
     later FOVs overwriting earlier in the overlap — so a window is pixel-identical to the
-    whole-plane fusion it stands in for. Deep zoom reads a few files, never the region; decoded
-    frames land in the shared plane cache, so panning re-reads nothing.
+    whole-plane fusion it stands in for (tests pin it bit-exact at every stride). A slice reads
+    a few files, never the region; decoded frames land in the shared plane cache, so panning
+    re-reads nothing.
+
+    EVERY rung is served this way, coarse included (2026-08-19). The coarse rungs used to be
+    one ``delayed`` whole-region fuse each, and napari's draw blocks synchronously on the slice
+    it asks for — so on a 452-FOV region every zoom notch decoded all 452 frames to show a
+    viewport covering a dozen (measured 0.35–3.7 s per rung per channel: "stopped responding").
+
+    ``well`` (coarse rungs only) is the Squid well-image resolver: a rung at least as coarse as
+    the saved file's factor is derived WHOLE from it — one small file read, no FOV decode — and
+    cached under this rung's plane key, which any window then slices.
     """
 
     def __init__(self, reader, meta, region, channel, z_level, time_point,
-                 step, shape, dtype, cache, token):
+                 step, shape, dtype, cache, token, well=None):
         from squidxplorer._placement import fov_offsets_px
 
         self._reader, self._meta = reader, meta
@@ -315,6 +325,11 @@ class _WindowedLevel:
         self.dtype = np.dtype(dtype)
         self.ndim = 2
         self._cache, self._token = cache, token
+        self._well = well
+        # The whole-plane key _plane used before the conversion: same tuple, so a plane fused
+        # once (full-window compute, well image) is a hit for every later window of this rung.
+        self._plane_key = (token, self._region, self._channel, self._t,
+                           float(self._step), self._z)
         self._fovs = list((meta.get("fovs_per_region") or {}).get(self._region) or [])
         self._offsets = fov_offsets_px(meta["fov_positions_um"], self._region, self._fovs,
                                        meta["pixel_size_um"])
@@ -330,25 +345,84 @@ class _WindowedLevel:
         if frame.ndim != 2:
             frame = frame.reshape(frame.shape[-2:])
         _bitdepth.depth().observe_array(frame)   # same full-resolution observation _fuse_levels makes
-        self._cache.put(key, frame)
+        if self._region_fits(frame):
+            self._cache.put(key, frame)
         return frame
+
+    def _region_fits(self, arr: np.ndarray) -> bool:
+        """Whether the whole region's worth of *arr*-sized entries fits the byte budget.
+
+        Caching a working set larger than the budget is a treadmill: measured on the 452-FOV
+        set (3.6 MB frames, 465 MB budget), every full frame cached evicted 3.5 older entries
+        — including the kilobyte subframes below — so a warm pan re-decoded everything anyway.
+        """
+        return arr.nbytes * max(1, len(self._fovs)) <= self._cache.capacity_bytes
+
+    def _sub(self, fov: int) -> np.ndarray:
+        """This rung's decimated view of one frame, cached at ITS OWN size.
+
+        The step-s subframe is s*s smaller than the camera frame, so at coarse steps every
+        FOV of a 452-FOV region fits the budget together and a warm pan re-pastes without
+        decoding anything — even where the full frames cannot be cached at all.
+        """
+        if self._step == 1:
+            return self._frame(fov)
+        key = (self._token, "fovsub", self._region, int(fov), self._channel, self._z, self._t,
+               self._step)
+        hit = self._cache.get(key)
+        if hit is not None:
+            return hit
+        sub = np.ascontiguousarray(self._frame(fov)[::self._step, ::self._step])
+        if self._region_fits(sub):
+            self._cache.put(key, sub)
+        return sub
+
+    def _whole_plane(self) -> Optional[np.ndarray]:
+        """This rung's WHOLE plane when one is already in hand — cached, or well-image-derived."""
+        hit = self._cache.get(self._plane_key)
+        if hit is not None:
+            return hit
+        if self._well is None:
+            return None
+        got = self._well()
+        if got is None:
+            return None
+        plane_w, factor = got
+        if self._step < int(factor):
+            return None                          # finer than the file: fuse from the FOVs
+        from squidxplorer import _wellimage
+
+        arr = _wellimage.resample_plane(plane_w, int(factor), self._step,
+                                        self.shape[0], self.shape[1]).astype(self.dtype,
+                                                                             copy=False)
+        # An area-averaged plane UNDER-states the true ceiling, but the range only ever
+        # widens (_bitdepth): this seeds a floor until the first full-resolution decode.
+        _bitdepth.depth().observe_array(arr)
+        self._cache.put(self._plane_key, arr)
+        return arr
 
     def __getitem__(self, idx) -> np.ndarray:
         ys, xs = _norm_window(idx, self.shape)
+        whole = self._whole_plane()
+        if whole is not None:
+            return whole[ys, xs]
         out = np.zeros((ys.stop - ys.start, xs.stop - xs.start), self.dtype)
         step = self._step
         fh = -(-self._frame_hw[0] // step)       # a decimated frame's own extent
         fw = -(-self._frame_hw[1] // step)
+        touched, failed = 0, []
         for fov in self._fovs:                   # _fuse_levels' order: later overwrites earlier
             row, col = self._offsets[fov]
             r0, c0 = row // step, col // step
             if r0 >= ys.stop or c0 >= xs.stop or r0 + fh <= ys.start or c0 + fw <= xs.start:
                 continue
+            touched += 1
             try:
-                sub = self._frame(fov)[::step, ::step]
+                sub = self._sub(fov)
             except Exception as exc:             # noqa: BLE001 - a black hole, as in _fuse_levels
-                _log.warning("fine mosaic %s/%s z=%s: fov %s unreadable (%s) — a BLACK HOLE.",
-                             self._region, self._channel, self._z, fov, exc)
+                _log.warning("mosaic %s/%s z=%s step=%s: fov %s unreadable (%s) — a BLACK HOLE.",
+                             self._region, self._channel, self._z, step, fov, exc)
+                failed.append((fov, exc))
                 continue
             rr0, cc0 = max(r0, ys.start), max(c0, xs.start)
             rr1 = min(r0 + sub.shape[0], ys.stop)
@@ -357,14 +431,29 @@ class _WindowedLevel:
                 continue
             out[rr0 - ys.start:rr1 - ys.start, cc0 - xs.start:cc1 - xs.start] = \
                 sub[rr0 - r0:rr1 - r0, cc0 - c0:cc1 - c0]
+        if touched and len(failed) == touched:
+            # Every FOV under the window bad is not a picture: a black window would report a
+            # read failure as empty tissue (same refusal _fuse_levels made for a whole region).
+            why = "; ".join(f"fov {f}: {type(e).__name__}: {e}" for f, e in failed[:3])
+            raise ValueError(
+                f"{self._region}/{self._channel} z={self._z}: no FOV under this window could "
+                f"be read ({len(failed)} of {touched} failed) — {why}")
+        # A full-window compute IS the whole plane: cache it so the next pull (napari asks for
+        # the coarsest rung per thumbnail) costs a lookup even after the frames evict.
+        if (ys, xs) == (slice(0, self.shape[0]), slice(0, self.shape[1])) \
+                and out.nbytes <= self._cache.capacity_bytes:
+            self._cache.put(self._plane_key, out)
         return out
 
 
 def _fuse_levels(reader: Any, meta: dict, region: str, channel: str, z_level: int, time_point: int, plans: list):
     """Fuse ONE z into SEVERAL pyramid levels in a single pass over the FOV frames.
 
-    TIFF decode is whole-frame, so every level coarser than the one asked for is pasted from
-    the frames already in hand; nothing finer is built.
+    THE REFERENCE PASTE RULE, no longer on the interactive path: every displayed rung is a
+    :class:`_WindowedLevel` (2026-08-19), and the parity tests pin each windowed rung
+    bit-exact against this function's product at the same stride. TIFF decode is whole-frame,
+    so every level coarser than the one asked for is pasted from the frames already in hand;
+    nothing finer is built.
     """
     from squidxplorer._placement import fov_offsets_px
 
@@ -430,9 +519,10 @@ def fuse_region_pyramid(
 ):
     """A lazy multiscale pyramid over the fused region mosaic — what napari wants.
 
-    Returns ``(levels, step, nz)``; each level is fused directly from the FOV tiles at its own
-    decimation, y and x only (z is never coarsened). Returns ``None`` when geometry is
-    underivable.
+    Returns ``(levels, step, nz)``; EVERY level is a chunked windowed source
+    (:class:`_WindowedLevel`), so a viewport slice pastes only the FOVs under it, at any zoom
+    — fused at the rung's own decimation, y and x only (z is never coarsened). Returns
+    ``None`` when geometry is underivable.
 
     When Squid saved a downsampled well mosaic for this (region, channel, t)
     (``mosaic_view/wells``, see :mod:`squidxplorer._wellimage`), every rung at least as coarse
@@ -441,7 +531,6 @@ def fuse_region_pyramid(
     corrupt or multi-z well image falls back to fusing, with the reason logged.
     """
     import dask.array as da
-    from dask import delayed
 
     base = _planned_plane(meta, region, max_px)
     if base is None:
@@ -477,7 +566,7 @@ def fuse_region_pyramid(
         if level_px <= _MIN_LEVEL_PX:
             break
 
-    # Squid's saved well mosaic, resolved once and shared by every rung's delayed task.
+    # Squid's saved well mosaic, resolved once and shared by every rung's windowed source.
     _well_lock = threading.Lock()
     _well: list = []                # [] unresolved; [(plane, factor)] found; [None] absent
 
@@ -490,55 +579,29 @@ def fuse_region_pyramid(
                                                          int(time_point)))
             return _well[0]
 
-    def _plane(i: int, z_level: int):
-        """Level ``i`` at ``z``, from the cache or one decode pass that also fills coarser levels."""
-        level_px, h, w, step, dt = plans[i]
-        key = (token, region, channel, int(time_point), float(step), int(z_level))
-        hit = cache.get(key)
-        if hit is not None:
-            return hit
-
-        well = _well_source()       # None past here means fuse from the FOVs, as ever
-        if well is not None and int(step) >= int(well[1]):
-            from squidxplorer import _wellimage
-
-            plane_w, factor = well
-            arr = _wellimage.resample_plane(plane_w, factor, int(step), h, w).astype(dt, copy=False)
-            # An area-averaged plane UNDER-states the true ceiling, but the range only ever
-            # widens (_bitdepth): this seeds a floor until the first full-resolution decode.
-            _bitdepth.depth().observe_array(arr)
-            cache.put(key, arr)
-            return arr
-
-        # This level and every coarser one; nothing finer is built.
-        wanted = plans[i:]
-        outs = _fuse_levels(reader, meta, region, channel, int(z_level), int(time_point), wanted)
-        for px, ph, pw, pstep, _pdt in wanted:
-            arr = outs[px]
-            if arr.shape != (ph, pw):
-                raise ValueError(
-                    f"{region}/{channel}: z={z_level} fused to {arr.shape}, but this pyramid level is "
-                    f"{(ph, pw)}. A ragged z would misalign the stack and misregister the level."
-                )
-            cache.put((token, region, channel, int(time_point), float(pstep), int(z_level)), arr)
-        return outs[level_px]
-
-    levels = []
-    for i, (_px, h, w, _step, dt) in enumerate(plans):
+    def _rung(s: int, h: int, w: int, dt, well):
+        """One windowed dask rung: a viewport slice pastes only the FOVs under it."""
+        def one_z(z: int):
+            src = _WindowedLevel(reader, meta, region, channel, z, time_point,
+                                 s, (h, w), dt, cache, token, well=well)
+            return da.from_array(src, chunks=_FINE_CHUNK_PX, asarray=False,
+                                 meta=np.empty((0, 0), dtype=dt),
+                                 name=f"raw-win-{token}-{region}-{channel}-s{s}-z{z}")
         if nz <= 1:
-            lv = da.from_delayed(delayed(_plane)(i, 0), shape=(h, w), dtype=dt)
-        else:
-            lv = da.concatenate(
-                [da.from_delayed(delayed(_plane)(i, z), shape=(h, w), dtype=dt)[None, ...]
-                 for z in range(nz)],
-                axis=0,
-            )
-        levels.append(lv)
+            return one_z(0)
+        return da.concatenate([one_z(z)[None, ...] for z in range(nz)], axis=0)
 
-    # FINER RUNGS, ON DEMAND, down to native: chunked, so napari's deep zoom pastes only the
-    # FOVs under the viewport instead of hitting the _MAX_FUSED_PX ceiling. Budget-gated per
-    # rung because the full-materialisation consumers (the 3-D full-res swap, _full_res_mip)
-    # still take level 0 whole.
+    # EVERY planned rung is windowed (2026-08-19). They used to be one whole-region
+    # ``delayed`` fuse each, and napari's draw blocks synchronously on the slice it asks for:
+    # on a 452-FOV single-z region every zoom notch decoded all 452 frames to show a viewport
+    # covering a dozen (0.35–3.7 s per rung per channel, measured — "stopped responding").
+    # The well-image short-circuit lives on inside ``_WindowedLevel._whole_plane``.
+    levels = [_rung(int(step), h, w, dt, _well_source) for _px, h, w, step, dt in plans]
+
+    # FINER RUNGS, ON DEMAND, down to native. Budget-gated per rung because the
+    # full-materialisation consumers (the 3-D full-res swap, _full_res_mip) still take level 0
+    # whole. ``well=None`` on purpose: a fine rung's pixels stay strided camera data, never
+    # the area-averaged well image.
     native = _planned_plane(meta, region, 10 ** 9)
     fine: list = []
     if native is not None and int(step0) > 1:
@@ -550,19 +613,7 @@ def fuse_region_pyramid(
                 fine.append((s, h_s, w_s))
             s *= 2
         fine.sort()                                        # ascending step = descending resolution
-
-        def _fine_level(s: int, h_s: int, w_s: int):
-            def one_z(z: int):
-                src = _WindowedLevel(reader, meta, region, channel, z, time_point,
-                                     s, (h_s, w_s), dtype, cache, token)
-                return da.from_array(src, chunks=_FINE_CHUNK_PX, asarray=False,
-                                     meta=np.empty((0, 0), dtype=dtype),
-                                     name=f"raw-fine-{region}-{channel}-s{s}-z{z}")
-            if nz <= 1:
-                return one_z(0)
-            return da.concatenate([one_z(z)[None, ...] for z in range(nz)], axis=0)
-
-        levels = [_fine_level(s, h_s, w_s) for s, h_s, w_s in fine] + levels
+        levels = [_rung(s, h_s, w_s, dtype, None) for s, h_s, w_s in fine] + levels
 
     # One guard, shared with open_pyramid: a level that did not shrink is dropped.
     return strictly_decreasing_levels(levels), step0, nz
