@@ -184,6 +184,39 @@ def test_the_panel_carries_the_copy_switch_outside_the_params(qapp):
                                      "copy": True}
 
 
+def test_a_register_result_layer_is_served_at_the_solved_positions(monkeypatch):
+    """The register look is a paste of raw frames, so its layer is the on-demand pyramid with
+    the REGISTERED positions substituted — native under zoom, like raw. Gated on
+    operator_saves_copy: a fused stitch result is never substituted."""
+    from types import SimpleNamespace
+
+    import squidxplorer._region_viewer as RV
+    from squidxplorer._placement import Placement
+
+    captured = {}
+
+    def fake_pyr(reader, meta, region, channel, *, time_point=0, **kw):
+        captured.update(meta=meta, region=region, channel=channel, t=time_point)
+        return (["levels"], 1.0, 1)
+
+    monkeypatch.setattr("squidxplorer._mosaic_source.fuse_region_pyramid", fake_pyr)
+    placement = Placement(origin_um=(10.0, 20.0), pixel_size_um=2.0, z_step_um=None,
+                          shape=(4, 4), tile_shape=(2, 2), fovs=(0, 1),
+                          offsets_px=((0.0, 0.0), (1.0, -1.0)),
+                          origins_px=((0.0, 0.0), (3.0, 5.0)),
+                          reg_channel="405", reg_t=0)
+    fake = SimpleNamespace(_reader=object(), window_id="t",
+                           _meta={"n_z": 1, "fov_positions_um": {("A1", 0): (0.0, 0.0)}})
+    out = RV.RegionViewer._registered_pyramid(fake, "register", placement, "A1", "405")
+    assert out == ["levels"]
+    pos = captured["meta"]["fov_positions_um"]
+    assert pos[("A1", 0)] == (20.0, 10.0)                        # origin + zero offset
+    assert pos[("A1", 1)] == (20.0 + 5 * 2.0, 10.0 + 3 * 2.0)    # origin + origin_px * pitch
+    assert RV.RegionViewer._registered_pyramid(fake, "stitch", placement, "A1", "405") is None
+    fake._meta = {"n_z": 3, "fov_positions_um": {}}              # a z-stack keeps the paste
+    assert RV.RegionViewer._registered_pyramid(fake, "register", placement, "A1", "405") is None
+
+
 def test_a_save_of_register_is_the_registered_copy_never_a_plate(tmp_path):
     """The generic save toggle: a copy-saving operator (declared, operator_saves_copy) routes
     through the engine with copy=True — write_plate's HCS layout is never demanded, so a

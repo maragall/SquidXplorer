@@ -1206,19 +1206,30 @@ class RegionViewer(QMainWindow):
                 plane = plane[0]
             placement = getattr(plane, "placement", None)
             bbox = region_bbox = (placement.bbox_um if placement is not None else preview_bbox)
+            # A copy-saving operator's look is a PASTE at solved positions, so it can be served
+            # like raw: the on-demand pyramid with the registered positions substituted — full
+            # native resolution under zoom. A FUSED result (stitch) is never substituted: its
+            # pixels are the result.
+            data, multiscale = plane, None
+            if placement is not None and getattr(placement, "fovs", None):
+                pyr = self._registered_pyramid(str(op), placement, region, channel)
+                if pyr is not None:
+                    data, multiscale = pyr, True
             if self._roi_bbox is not None and region_bbox is not None:
-                cropped = _crop_levels_to_bbox([plane], region_bbox, self._roi_bbox)
+                cropped = _crop_levels_to_bbox(
+                    data if multiscale else [data], region_bbox, self._roi_bbox)
                 if cropped is None:
                     continue
                 levels, bbox = cropped
-                plane = levels[0]
+                data = levels if multiscale else levels[0]
             try:
                 mosaic.add_result(
-                    result.kind, str(op), channel, plane,
+                    result.kind, str(op), channel, data,
                     colormap=_colormap_for(channel, (self._meta or {}).get("channels")),
                     bbox_um=bbox,
                     z_scale_um=(dz if int(result.z_depth) > 1 else None),
                     visible=bool(visible),
+                    multiscale=multiscale,
                 )
             except Exception as exc:             # noqa: BLE001 - named, never a missing layer
                 self._say(f"{op}: the {channel} layer could not be added: {exc}")
@@ -1235,6 +1246,38 @@ class RegionViewer(QMainWindow):
                 if callable(fit):
                     fit()
         return added
+
+    def _registered_pyramid(self, op: str, placement, region, channel):
+        """Fine-to-native pyramid at *placement*'s solved positions, or None to keep the paste.
+
+        Only for a copy-saving operator (operator_saves_copy — its look IS a paste of raw
+        frames, so re-serving them at the registered positions is the same pixels at full
+        depth of zoom) over a single-z acquisition; anything else keeps the delivered array.
+        """
+        from squidxplorer._engine import operator_saves_copy
+        from squidxplorer._mosaic_source import fuse_region_pyramid
+
+        if (self._reader is None or self._meta is None
+                or int(self._meta.get("n_z") or 1) != 1
+                or not operator_saves_copy(str(op))):
+            return None
+        try:
+            meta2 = dict(self._meta)
+            pos = dict(meta2.get("fov_positions_um") or {})
+            pitch = float(placement.pixel_size_um)
+            for f, (oy, ox) in zip(placement.fovs, placement.origins_px):
+                pos[(str(region), int(f))] = (
+                    placement.origin_um[1] + float(ox) * pitch,
+                    placement.origin_um[0] + float(oy) * pitch,
+                )
+            meta2["fov_positions_um"] = pos
+            res = fuse_region_pyramid(self._reader, meta2, str(region), str(channel),
+                                      time_point=int(placement.reg_t or 0))
+        except Exception as exc:                 # noqa: BLE001 - the paste is a fine fallback
+            log.warning("[%s] %s: registered pyramid not built (%s) — keeping the paste.",
+                        self.window_id, op, exc)
+            return None
+        return res[0] if res else None
 
     def _drop_result_layers(self, why: str) -> None:
         """Drop every operator layer in this window, keeping ``raw``."""
