@@ -750,6 +750,36 @@ The PR's own `PLAN-plate-navigation.md` is the source design; the port decisions
   re-check it; a hand check on this Mac is owed. Commit H (drag tabs BETWEEN windows) stays
   deferred, hooks in place (`dock_page`/`undock_page`, `_host`, `ViewerManager._decks`).
 
+## Squid's downsampled well mosaics are read, and written back when absent (2026-08-19)
+
+`squidxplorer/_wellimage.py` reads what Squid's SAVE_DOWNSAMPLED_WELL_IMAGES writes:
+`<t>/mosaic_view/wells/<well_id>_<N>um.tiff`, a (C, Y, X) TIFF per well at the integer plate
+factor `max(1, round(target_um / pixel_size_um))` (target 2 µm on every rig: 10x -> 3, 20x -> 6,
+40x -> 12), origin = the well's min tile top-left, the SAME origin `fov_offsets_px` uses, so
+the file lands on the fused mosaic with no conversion (positions are centres there and top-lefts
+here; the half-frame shift cancels in the differences).
+
+- **The factor is derived from the FILE'S OWN SIZE** against `mosaic_extent_px`, never from the
+  objective table; a size fitting no integer factor, a corrupt file, or a missing channel reads
+  as ABSENT with a named log line and the ordinary FOV fusion takes over. Measured parity on a
+  smooth set: bit-identical to the area-mean of the fused native mosaic; a uniform 4-count
+  sampling offset (mean vs stride) against the strided rung, no spatial misplacement.
+- **`fuse_region_pyramid`'s rungs at step >= factor come from the well image** (nearest map on
+  the shared origin, `_wellimage.resample_plane`), so first paint is one small file read: 24-well
+  1024 px set, coarse-rung materialisation 2.3 ms vs 8.5 ms warm. Finer rungs fuse as ever.
+- **`_PreviewWorker` seeds plate cells from the well images** after the cell cache and before
+  the FOV walk (same 24-well set: 0.13 s vs 0.56 s cold, 0.056 s vs 0.45 s warm), publishing the
+  cells to the cache; and after a finished preview it BACKFILLS an absent `mosaic_view/wells`
+  through the vendored downsampler (`downsample_plane`, from Squid `mosaic_utils.downsample_tile`)
+  so the acquisition afterwards looks microscope-produced. The backfill is best-effort (a
+  read-only mount is logged, never fatal), atomic per file, and the ONE exception to "SquidXplorer
+  never writes into your data": Julio's design doc asked for exactly this write.
+- **A well image is ONE z** (the widget keeps the last plane blitted), so `n_z > 1` never serves
+  one; the backfill writes z = n_z - 1, what Squid's canvas would hold.
+- `SQUIDXPLORER_WELL_IMAGES=0` turns the feature off; tests/conftest.py sets that default for
+  the suite so preview tests keep their pinned read counts, and tests/test_wellimage.py is the
+  coverage that turns it on.
+
 ## Agent skills
 
 ### Issue tracker
