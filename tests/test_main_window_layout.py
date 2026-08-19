@@ -74,8 +74,7 @@ def test_the_plate_spans_the_full_width(shown):
     win = shown
     plate_host = win._body.widget(0)
     assert plate_host.width() == win.centralWidget().width(), "the plate is no longer full width"
-    assert win._band.indexOf(plate_host) == -1, "the plate got pulled into the band"
-    assert win._right_col.indexOf(plate_host) == -1
+    assert win._right_col.indexOf(plate_host) == -1, "the plate got pulled into the band"
     assert _h(plate_host) > 0, "the band ate the whole window"
 
 
@@ -95,22 +94,30 @@ def test_the_plate_keeps_the_growth_when_the_window_grows(qapp, monkeypatch):
 
 # --- three panels on screen at once, no tab switch ----------------------------------------------
 
-def test_navigator_operator_and_log_are_all_on_screen_at_once(shown):
-    """All three have real pixels simultaneously; a tabbed log would be 0 px tall."""
+def test_the_log_owns_the_band_and_the_navigator_is_gone(shown):
+    """2026-08-19 (Julio's mock): the Window navigator is DELETED — its list was superseded by
+    the deck's tabs — and the operator-tab bar hides while empty, so the LOG has the whole band.
+    Absence is pinned with `not hasattr`, this repo's convention for deleted features."""
     win = shown
-    for name, w in (("navigator", win._open_views), ("operator", win._left_tabs),
-                    ("log", win._log_panel)):
-        assert w.isVisible(), f"the {name} is not on screen"
-        assert _h(w) > 100, f"the {name} has no usable height ({_h(w)} px)"
+    assert not hasattr(win, "_open_views"), "the plate rebuilt a Window navigator"
+    assert not hasattr(win, "_band"), "the horizontal band splitter survived its left child"
 
-    # neither is a tab of the other, and the order is the drawing's
+    assert win._log_panel.isVisible(), "the log is not on screen"
+    assert _h(win._log_panel) > 100, f"the log has no usable height ({_h(win._log_panel)} px)"
+    # The operator-tab bar exists but costs no pixels until an operator panel opens.
+    assert win._left_tabs.count() == 0
+    assert not win._left_tabs.isVisible(), "an empty operator-tab bar is taking the log's space"
     assert win._left_tabs.indexOf(win._log_panel) == -1
-    assert win._band.indexOf(win._open_views) == 0, "the navigator is not on the left of the band"
-    assert win._band.indexOf(win._right_col) == 1
-    assert win._right_col.indexOf(win._left_tabs) == 0, "Operator is not above Log"
+    assert win._right_col.indexOf(win._left_tabs) == 0, "Operator tabs are not above the Log"
     assert win._right_col.indexOf(win._log_panel) == 1
-    assert win._log_panel.geometry().top() > win._left_tabs.geometry().top()
-    assert win._open_views.geometry().right() <= win._right_col.geometry().left()
+
+    # Opening an operator panel shows the bar; closing it hands the band back to the log.
+    from qtpy.QtWidgets import QLabel
+    win._open_op_tab("probe", "Probe", lambda: QLabel("probe"))
+    assert win._left_tabs.isVisible() and win._left_tabs.count() == 1
+    win._close_op_tab(0)
+    assert win._left_tabs.count() == 0
+    assert not win._left_tabs.isVisible(), "the bar kept the band after its last tab closed"
 
 
 def test_neither_the_console_nor_the_band_can_be_dragged_to_nothing(shown):
@@ -132,20 +139,18 @@ def test_the_band_cap_is_enforced_on_a_plain_host_not_on_the_splitter(shown):
 # --- the status bars moved into the log ---------------------------------------------------------
 
 def test_the_memory_and_progress_indicators_are_inside_the_log_panel(shown):
-    """The status bars live inside the logger; the navigator keeps its own pixels."""
+    """The status bars live inside the logger, driven by `StatusRow` — what survived the
+    navigator's deletion (its tree went with the widget; these two bars still have a job)."""
     win = shown
-    nav, log = win._open_views, win._log_panel
-
-    assert win._band.indexOf(nav) == 0 and nav.isVisible() and _h(nav) > 100
+    row, log = win._status_row, win._log_panel
 
     for name in ("_mem_label", "_mem_bar", "_work_label", "_work_bar"):
-        w = getattr(nav, name)
+        w = getattr(row, name)
         assert _is_inside(w, log), f"{name} is not inside the log panel"
-        assert not _is_inside(w, nav), f"{name} is still in the navigator's own subtree"
 
-    # One of each, still driven by the navigator's handlers: the move was a reparent, not a rebuild.
-    nav._on_memory(0.42)
-    assert nav._mem_bar.value() == 42, "the adopted memory bar stopped following the poller"
+    # Still driven by the manager's signals through StatusRow's own handlers.
+    row._on_memory(0.42)
+    assert row._mem_bar.value() == 42, "the adopted memory bar stopped following the poller"
 
 
 def test_the_adopted_status_strip_survives_collapsing_the_log(shown, qapp):
@@ -154,15 +159,15 @@ def test_the_adopted_status_strip_survives_collapsing_the_log(shown, qapp):
     win._log_panel.set_collapsed(True)
     qapp.processEvents()
     assert win._log_panel._status.isVisible(), "the status strip went with the log body"
-    assert win._open_views._mem_bar.isVisible()
+    assert win._status_row._mem_bar.isVisible()
     win._log_panel.set_collapsed(False)
 
 
 def test_the_progress_bar_is_still_absent_while_nothing_runs(shown):
     """Absent means nothing is running; the rule has to survive the move."""
     win = shown
-    assert win._open_views._work_bar.isHidden()
-    assert win._open_views._work_label.isHidden()
+    assert win._status_row._work_bar.isHidden()
+    assert win._status_row._work_label.isHidden()
 
 
 # --- the metadata label -------------------------------------------------------------------------
@@ -223,8 +228,8 @@ def test_detaching_and_redocking_preserves_the_console_and_its_scrollback(shown,
     qapp.processEvents()
     assert fl.content() is panel, "the float does not hold the panel itself"
     assert win._right_col.indexOf(panel) == -1, "the panel is in two places at once"
-    assert win._left_tabs.isVisible(), "the operator pane went with it"
-    assert _is_inside(win._open_views._mem_bar, panel), "the memory bar was left behind"
+    assert not win._left_tabs.isVisible(), "an EMPTY operator-tab bar showed itself on the float"
+    assert _is_inside(win._status_row._mem_bar, panel), "the memory bar was left behind"
 
     win._redock_log()
     qapp.processEvents()
@@ -232,7 +237,7 @@ def test_detaching_and_redocking_preserves_the_console_and_its_scrollback(shown,
     assert win._right_col.indexOf(panel) == 1, "the console did not come back under the operators"
     assert panel.isVisible() and _h(panel) > 50, "it came back with no height"
     assert panel.text() == before, "the scrollback was rebuilt rather than returned"
-    assert _is_inside(win._open_views._mem_bar, panel), "the memory bar did not come back"
+    assert _is_inside(win._status_row._mem_bar, panel), "the memory bar did not come back"
 
 
 def test_closing_the_float_gives_the_console_back_rather_than_deleting_it(shown, qapp):

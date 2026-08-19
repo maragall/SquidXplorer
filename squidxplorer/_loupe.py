@@ -335,8 +335,8 @@ class _LoupeSource:
 
     Availability is per (source, WELL) — never per layer key. A layer key cannot express what
     is actually on disk: ``OperationStack.add`` dedupes by key, so a saved run and a later
-    unsaved preview collapse into one "mip" layer while ``_processed_plate`` still points at
-    the older save. Ask the source about the specific well instead."""
+    unsaved preview collapse into one "mip" layer whatever an older save held. Ask the source
+    about the specific well instead."""
 
     n_levels = 1
     well_px = 1

@@ -301,63 +301,58 @@ def test_every_tab_carries_its_own_close_button(qapp, napari_pane_stub, squid_da
         shutdown_plate_window(qapp, win)
 
 
-def test_the_navigator_says_which_window_each_view_is_in(qapp, napari_pane_stub, squid_dataset):
-    """Spencer, on first use: the navigator "should now have an indication of what window a tab is
-    in."
+def test_the_window_navigator_is_gone_and_the_operator_dock_took_its_jobs(
+        qapp, napari_pane_stub, squid_dataset):
+    """2026-08-19: the ViewDeck's tabs superseded the navigator list. The ABSENCE is pinned the
+    way this repo pins deleted features (`not hasattr`, never `is None`), and the two jobs that
+    survived are checked where they landed: close-all in the View menu, the operator surface in
+    the deck's collapsible right-edge dock."""
+    import squidxplorer._region_viewer as RV
 
-    Once a view can be a tab this list stops being a list of windows: two rows can name the same
-    window, and a detached row names one that is on the desktop on its own. The location goes in a
-    SECOND COLUMN because `test_rename` asserts column 0 is the window title exactly — that text is
-    the `[id] name` join to the log and must stay parseable."""
-    from squidxplorer._region_viewer import OpenViewList
-
+    assert not hasattr(RV, "OpenViewList"), "the navigator widget is back"
     root, _ = squid_dataset
     win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=2)
-    nav = OpenViewList(mgr)
     try:
-        rows = {}
-        for i in range(nav._tree.topLevelItemCount()):
-            item = nav._tree.topLevelItem(i)
-            rows[int(item.data(0, 0x0100))] = item      # Qt.UserRole
-        assert all(rows[v.window_id].text(1) == "views" for v in views), (
-            "a tabbed view does not say which window it is in")
-        deck.undock_page(views[0])
+        assert not hasattr(win, "_open_views"), "the plate still builds a navigator"
+        assert not hasattr(mgr, "raise_views"), "a navigator-only method survived its widget"
+        assert not hasattr(mgr, "collapse_all"), "a navigator-only method survived its widget"
+        # Close-all stayed reachable: the View-menu action closes every view.
+        assert win._close_views_act is not None
+        win._close_all_views()
         qapp.processEvents()
-        nav.refresh()
-        for i in range(nav._tree.topLevelItemCount()):
-            item = nav._tree.topLevelItem(i)
-            if int(item.data(0, 0x0100)) == views[0].window_id:
-                assert item.text(1) == "window", "a detached view still claims to be a tab"
+        assert mgr.windows == [], "View > Close All Views left views open"
     finally:
-        views[0].close()
-        nav.deleteLater()
         shutdown_plate_window(qapp, win)
 
 
-def test_switching_tabs_moves_the_navigator_highlight(qapp, napari_pane_stub, squid_dataset):
-    """Spotted on first use: the deck showed one view while the navigator highlighted another.
-
-    A tab switch changes WHICH view is current without changing which views exist, so
-    `windowsChanged` never fires and the list kept its previous highlight — two lists in one app
-    disagreeing about where the user is. It follows the focus now, selection only: rebuilding a
-    tree whose contents did not change would also drop the user's multi-selection."""
-    from squidxplorer._region_viewer import OpenViewList
+def test_the_deck_carries_a_collapsible_operator_dock(qapp, napari_pane_stub, squid_dataset):
+    """The Operators cards moved INTO the views window (2026-08-19 mock): a right-edge dock,
+    collapsed by default to a thin grip, expanding to the card launcher plus the CURRENT view's
+    operator surface — and a tab switch swaps that surface to the new current view's."""
+    from squidxplorer._operator_dock import GRIP_PX, OperatorDock
 
     root, _ = squid_dataset
     win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=2)
-    nav = OpenViewList(mgr)
     a, b = views
     try:
+        dock = deck._operator_dock
+        assert isinstance(dock, OperatorDock)
+        assert dock.collapsed, "the dock must open COLLAPSED — a grip, not a panel"
+        assert dock.width() == GRIP_PX
+        dock.set_collapsed(False)
+        assert not dock.collapsed and dock.minimumWidth() > GRIP_PX
+        # The cards are the PLATE's launcher: same registry keys, calling _activate_operator.
+        assert set(win._op_cards) >= {"mip", "stitch"}
+        dock.set_collapsed(True)
+        assert dock.collapsed and dock.width() == GRIP_PX
+        # The window panel follows the current tab.
         deck.set_current(a)
         qapp.processEvents()
-        selected = {int(i.data(0, 0x0100)) for i in nav._tree.selectedItems()}
-        assert selected == {a.window_id}, f"navigator highlights {selected}, deck shows {a.window_id}"
+        assert dock._panels.currentWidget() is a.operator_panel()
         deck.set_current(b)
         qapp.processEvents()
-        selected = {int(i.data(0, 0x0100)) for i in nav._tree.selectedItems()}
-        assert selected == {b.window_id}, "the highlight did not follow the tab switch"
+        assert dock._panels.currentWidget() is b.operator_panel()
     finally:
-        nav.deleteLater()
         shutdown_plate_window(qapp, win)
 
 

@@ -1,30 +1,25 @@
-"""The ONE LUT clipboard, and the window-side LUT gestures that use it.
+"""The window-side LUT helpers that SURVIVED the clipboard's shelving (2026-08-19).
 
-Extracted from ``_region_viewer`` (2026-08-14). The clipboard was a module global there that
-``_viewer``'s plate-side pair (``_plate_copy_luts`` / ``_plate_paste_luts``) lazily imported —
-one of the ``_viewer`` <-> ``_region_viewer`` import strands. It now has a home of its own and
-both sides import it from here.
+The copy/paste clipboard (``CLIPBOARD``, ``copy_luts``, ``paste_luts``, the plate-side pair and
+every button that drove them) was deleted on Julio's instruction: "Shelf the LUT logic
+completely. That's just adding complexity to the code for no reason." What stays here is
+everything that is NOT the clipboard:
 
-The contrast SEAM is unchanged and stays audited as one job per side (see CLAUDE.md): the
-functions here read and write A WINDOW'S OWN napari layers through its ``MosaicLayers``; the
-plate side never touches a layer and goes through ``PlateOverview``. They share this one dict
-and no code path.
+* :func:`per_channel_luts` — read a window's per-channel look off its own napari layers (the
+  loupe, the movie export, Minerva's on-screen-LUTs hop and settings snapshots all read it);
+* :func:`apply_luts` — put a stored look on a window's layers (child-window LUT inheritance);
+* :func:`match_raw_contrast` — raw -> operator layers WITHIN one window.
 
-Functions over the window (the ``_ingest`` precedent): ``RegionViewer`` keeps thin delegates
-because tests actuate ``_per_channel_luts`` / ``_copy_luts`` / ``_paste_luts`` /
-``_match_raw_contrast`` by name on the window, and ``_region_viewer._LUT_CLIPBOARD`` stays as
-an alias of :data:`CLIPBOARD` (the SAME dict object) for the tests that import it there.
+The contrast SEAM is unchanged and stays audited as one job per side (see CLAUDE.md): these
+functions read and write A WINDOW'S OWN napari layers through its ``MosaicLayers``.
 """
 
 from __future__ import annotations
 
 from typing import Optional
 
-#: channel name -> {"clim": (lo, hi)|None, "cmap": name|None, "rgb": (r,g,b)|None, "on": bool|None}
-#: One clipboard for the whole application: window -> window, window -> plate, plate -> window.
-CLIPBOARD: "dict[str, dict]" = {}
-
 _RAW_OP = "raw"
+
 
 
 def per_channel_luts(win) -> "dict[str, dict]":
@@ -100,29 +95,6 @@ def apply_luts(win, luts: "Optional[dict]") -> Optional[int]:
             except Exception:                        # noqa: BLE001 - visibility is best-effort
                 pass
     return applied
-
-
-def copy_luts(win) -> None:
-    caught = per_channel_luts(win)
-    if not caught:
-        win._say("no channels on screen to copy LUTs from.")
-        return
-    CLIPBOARD.clear()
-    CLIPBOARD.update(caught)
-    win._say(f"copied LUTs for {len(caught)} channel(s) — paste them into another window.")
-
-
-def paste_luts(win) -> None:
-    if not CLIPBOARD:
-        win._say("no copied LUTs yet — use '⧉ Copy LUTs' in another window first.")
-        return
-    applied = apply_luts(win, CLIPBOARD)
-    if applied is None:
-        win._say("no mosaic here to paste LUTs onto.")
-        return
-    win.settings.set("luts", per_channel_luts(win))
-    win._refresh_divergence()
-    win._say(f"pasted LUTs onto {applied} channel(s).")
 
 
 def match_raw_contrast(win) -> None:

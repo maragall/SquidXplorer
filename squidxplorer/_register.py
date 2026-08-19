@@ -54,6 +54,17 @@ def registered_copy_root(src) -> Path:
     return src.parent / f"stitched_{src.name}"
 
 
+def link_or_copy(src, dst):
+    """A second directory entry for *src*'s bytes at *dst*; a real copy where the filesystem
+    refuses (cross-volume, exFAT, SMB). Returns the refusal (``OSError``) or ``None`` (linked)."""
+    try:
+        os.link(src, dst)
+        return None
+    except OSError as exc:
+        shutil.copy2(src, dst)
+        return exc
+
+
 def ensure_registered_copy(src) -> tuple[Path, int, int]:
     """The copy, created if absent: images hardlinked (copy fallback), sidecars real copies.
 
@@ -82,14 +93,13 @@ def ensure_registered_copy(src) -> tuple[Path, int, int]:
                     shutil.copy2(s, d)
                     copied += 1
                     continue
-                try:
-                    os.link(s, d)
+                refusal = link_or_copy(s, d)
+                if refusal is None:
                     linked += 1
-                except OSError as exc:        # cross-volume, exFAT, SMB: a real copy instead
-                    shutil.copy2(s, d)
+                else:
                     copied += 1
                     if first_refusal is None:
-                        first_refusal = exc
+                        first_refusal = refusal
         os.rename(tmp, dst)
     if first_refusal is not None:
         _log.info("registered copy: this filesystem refuses hardlinks (%s); image files were "

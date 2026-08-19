@@ -118,29 +118,14 @@ def test_windows_share_gl_contexts():
     )
 
 
-# "Close selected views" is covered by tests/test_nav_close_selected.py, which clicks the button
-# through a real ViewerManager rather than reading source, and supersedes the weaker pair that
-# used to live here.
+# The Window navigator (OpenViewList) was DELETED on 2026-08-19: the ViewDeck's tabs superseded
+# its list, View > Close All Views carries close-all, and StatusRow carries the memory/run bars.
+# tests/test_view_deck.py pins the absence and the surviving jobs; the keyboard-focus and
+# raise-on-show tests that lived here died with the widget they described.
 
 
-def test_the_navigator_tree_can_take_keyboard_focus():
-    """Arrow keys were never the missing piece: focus was. A QTreeWidget moves its current row
-    on up/down for free once it has focus."""
-    import inspect
+def test_the_window_navigator_stays_deleted():
+    import squidxplorer._region_viewer as RV
 
-    from squidxplorer._region_viewer import OpenViewList
-
-    src = inspect.getsource(OpenViewList.__init__)
-    assert "setFocusPolicy" in src, "the navigator tree cannot take keyboard focus"
-    assert hasattr(OpenViewList, "showEvent"), "nothing ever hands the tree focus"
-
-
-def test_opening_the_navigator_does_not_reorder_the_users_windows():
-    """setCurrentItem selects, and selecting raises; unguarded, merely showing the panel
-    reshuffles every open window in front of the user."""
-    import inspect
-
-    from squidxplorer._region_viewer import OpenViewList
-
-    src = inspect.getsource(OpenViewList.showEvent)
-    assert "_syncing" in src, "showEvent selects without the guard, so it raises windows"
+    assert not hasattr(RV, "OpenViewList"), (
+        "the Window navigator widget is back; the deck's tabs are its replacement (2026-08-19)")
