@@ -24,8 +24,14 @@ log = get_logger("ingest")
 
 # -- open an acquisition (no processing yet — that's the Process menu) --------------------------
 def ingest(win, path: str) -> None:
-    from squidxplorer import open_reader
+    from squidxplorer import _acqset, open_reader
 
+    # A dropped folder OF acquisitions: record the set on the window and open its first member
+    # (or the member being cycled to). Everything below stays single-acquisition; cycling is a
+    # re-ingest of the neighbour path. The cycle UI follows the set whether or not this open
+    # succeeds, so a failed first member can still be cycled past.
+    path = _acqset.note_set(win, path)
+    win._refresh_acq_cycle()
     p, is_plate = resolve_plate_root(path)
     if is_plate:
         win._readout.setText("this is already a written plate — drop a raw Squid acquisition")
