@@ -22,7 +22,7 @@ from qtpy.QtGui import QColor, QFont, QGuiApplication, QPalette  # noqa: E402
 from qtpy.QtWidgets import QApplication, QComboBox  # noqa: E402
 
 from squidxplorer import _plate_overview as PO  # noqa: E402
-from squidxplorer import _qtstyle, _slide_art  # noqa: E402
+from squidxplorer import _qtstyle  # noqa: E402
 from squidxplorer._fontscale import window_screen  # noqa: E402
 from squidxplorer._region_viewer import RegionViewer  # noqa: E402
 
@@ -82,7 +82,7 @@ def test_the_operator_dropdown_ink_does_not_come_from_a_light_palette(qapp):
     assert resolved.lightness() > 128, "the ink must be light against the combo's dark ground"
 
 
-@pytest.mark.parametrize("module", [PO, _slide_art])
+@pytest.mark.parametrize("module", [PO])
 def test_no_painted_label_is_measured_in_points(module):
     """A QFont point size resolves against the paint device's per-screen DPI, so it is the one
     size that changes apparent size between a laptop panel and an external monitor."""

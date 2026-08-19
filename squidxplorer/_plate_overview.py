@@ -445,7 +445,6 @@ class PlateOverview(QWidget):
         self._tile_level = None
         self._carrier = None
         self._carrier_slide = False
-        self._slides = None
         self._tile_rgn = None
         self._loupe_src = None
         self._loupe_worker = None
@@ -1522,7 +1521,6 @@ class PlateOverview(QWidget):
             self._carrier_slide = isinstance(plate, SlideCarrier)
         except Exception:
             self._carrier_slide = False
-        self._slides = None
         self.update()
 
     def _cell_rect(self, ri: int, ci: int) -> tuple:
@@ -1864,17 +1862,6 @@ class PlateOverview(QWidget):
         if self._carrier is None:
             return
         cd = self._cd
-        ax, ay = self._ox + _HDR, self._oy + _COLH
-        if self._slides is not None:
-            # Real glass slides at true size, side by side; the slides ARE the holder.
-            from squidxplorer._slide_art import paint_slides
-            slide_rects_px = [(ax + s[0] * cd, ay + s[1] * cd, s[2] * cd, s[3] * cd)
-                              for s in self._slides]
-            paint_slides(p, slide_rects_px)
-            if cd < 6.0:
-                return
-            self._paint_carrier_cells(p, tiled)
-            return
         # The holder body: the union of every cell rectangle, padded by the implied margin.
         rects = [self._cell_rect(r, c) for r in range(self._nr) for c in range(self._nc)]
         if not rects:
