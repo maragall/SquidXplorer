@@ -348,10 +348,9 @@ def test_the_window_save_toggle_lands_both_formats(qapp, squid_dataset, tmp_path
         np.testing.assert_array_equal(out, _mip(arrays, REGIONS[0], 0, CHANNELS[0]))
         assert open_reader(mip_dst).metadata["n_z"] == 1
 
-        # The GUI still NAMES the folder ".hcs" (its acq_format gate does not know the fused
-        # writer yet); an explicit out_dir IS the destination, and the write inside it is the
-        # stitcher's OME-TIFF acquisition, re-openable.
-        fused_dst = tmp_path / f"{root.name}.hcs"
+        # The GUI's acq_format gate knows the fused writer: a stitch save names
+        # <operator>_<acq> and writes the stitcher's OME-TIFF acquisition, re-openable.
+        fused_dst = tmp_path / f"stitch_{root.name}"
         win.run_operator("stitch", out_parent=str(tmp_path),
                          operator_kwargs={"register": False, "correct_illumination": False})
         assert _drain_until(

@@ -2722,10 +2722,14 @@ class PlateWindow(QMainWindow):
         # per FOV, native resolution); everything else writes the OME-Zarr plate. Decided off the
         # declaration here so the dialog title, the folder name, the loupe source and the done
         # message all describe the write that actually happens.
-        from squidxplorer import _acq_output
+        from squidxplorer import _acq_output, _fused_output
         from squidxplorer._engine import operator_saves_copy
 
         acq_format = save and _acq_output.acquisition_format_dst(self._reader, key) is not None
+        # A fused region save (stitch/coordinate) writes the stitcher-format OME-TIFF
+        # acquisition, so it names, notes and loupes like the acquisition-format saves.
+        acq_format = acq_format or (
+            save and _fused_output.fused_format_dst(self._reader, key) is not None)
         # A copy-saving operator (register) writes hardlinks beside its source by design: no
         # destination to ask for, no disk-size guard to run.
         saves_copy = save and operator_saves_copy(key)
