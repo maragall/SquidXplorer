@@ -25,7 +25,6 @@ from squidxplorer.projection import (
     project_reference,
     project_well,
     requirement_refusal,
-    select_fovs,
 )
 
 if TYPE_CHECKING:  # avoid import cost / cycle at runtime

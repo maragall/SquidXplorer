@@ -291,7 +291,6 @@ def write_acquisition_planes(reader, operator: str, dst, *, regions=None,
     a finished acquisition. Returns a summary dict sharing ``write_from_stream``'s counting keys
     (``n_fields`` owed, ``n_fields_written``, ``complete``, ``stopped``).
     """
-    from squidxplorer import run_plate
     from squidxplorer.projection import scope_wells
 
     _refuse_by_declaration(operator)

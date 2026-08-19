@@ -6,8 +6,7 @@ Commands are serialisable pydantic models dispatched by :class:`CommandBus` to a
 
 from __future__ import annotations
 
-import logging
-from typing import Any, ClassVar, Literal, Optional, Union
+from typing import ClassVar, Literal, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 

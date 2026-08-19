@@ -8,8 +8,7 @@ from __future__ import annotations
 
 import threading
 from collections import OrderedDict
-from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Any, Optional
 
 import numpy as np
 

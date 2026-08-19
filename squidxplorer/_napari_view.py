@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import logging
 import os
 from collections.abc import Sequence as _SequenceABC
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Iterable, Optional, Sequence
+from typing import Any, Optional, Sequence
 
 import numpy as np
 

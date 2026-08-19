@@ -12,7 +12,6 @@ import numpy as np
 from qtpy.QtWidgets import QApplication
 
 from squidxplorer._logpane import get_logger
-from squidxplorer._montage import _hex_to_rgb01
 from squidxplorer._plate import PlateBuildError, build_plate
 from squidxplorer._plate_overview import (
     PlateOverview, _RawLoupeSource, _fov_of_well, _mosaic_boxes, resolve_plate_root,

@@ -9,7 +9,7 @@ from __future__ import annotations
 import queue
 import threading
 import time
-from typing import Any, Optional
+from typing import Optional
 
 import numpy as np
 from qtpy.QtCore import Qt, QThread, QTimer, Signal

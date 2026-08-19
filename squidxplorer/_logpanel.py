@@ -6,7 +6,6 @@ this module is only the Qt surface.
 
 from __future__ import annotations
 
-import logging
 from typing import Optional
 
 from qtpy.QtCore import QObject, Qt, QTimer, Signal

@@ -3,7 +3,7 @@ machinery reused to walk it (and, via ``AxisPlayback``, the time axis too)."""
 
 from __future__ import annotations
 
-from typing import Any, Callable, Optional, Sequence
+from typing import Callable, Optional, Sequence
 
 
 class RegionCursor:

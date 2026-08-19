@@ -9,7 +9,6 @@ import contextlib
 import os
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from collections.abc import Mapping
 from typing import TYPE_CHECKING, Callable, Iterator, Optional, Sequence
 
 import numpy as np
@@ -29,12 +28,8 @@ from squidxplorer._placement import PlacedArray, Placement
 from squidxplorer._volume import allocate, release
 from squidxplorer.projection import (
     LABELS,
-    missing_requirements,
-    normalise_requires,
     project_well,
-    requirement_refusal,
     scope_wells,
-    select_fovs,
 )
 
 _log = get_logger("stitch")
