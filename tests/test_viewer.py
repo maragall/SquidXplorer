@@ -837,10 +837,17 @@ def test_detach_moves_widget_to_float_and_registry(qapp):
     win.close()
 
 
-def test_detach_home_tab_refused(qapp):
+def test_the_tab_bar_opens_empty_and_every_tab_may_detach(qapp):
+    """No home tab since 2026-08-19: the cards live in the views window's dock, so the bar holds
+    only user-opened operator panels — hidden while empty, every tab closable and detachable."""
     win = V.PlateWindow(None)
-    assert win._detach_tab(0) is None                        # 'Process wells' never detaches
-    assert win._left_tabs.count() >= 1 and win._left_tabs.widget(0) is not None
+    assert win._left_tabs.count() == 0
+    assert win._left_tabs.isHidden()            # isHidden, not isVisible: the window is unshown
+    assert win._FIXED_TABS == 0
+    w = _open_stub_tab(win)
+    assert not win._left_tabs.isHidden()
+    fl = win._detach_tab(win._left_tabs.indexOf(w))
+    assert fl is not None, "the first tab refused to detach; the home-tab guard is back"
     win.close()
 
 
@@ -1152,13 +1159,17 @@ def test_operator_tab_opened_twice_is_one_tab(qapp, squid_dataset):
 
 
 
-def test_home_tab_is_never_closable(qapp, squid_dataset):
+def test_closing_the_last_tab_hides_the_bar(qapp, squid_dataset):
+    """The home tab is gone (the cards are in the views window's dock); the bar hides itself
+    once its last operator panel closes, so the log owns the band again."""
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
-    n = win._left_tabs.count()
-    win._close_op_tab(0)
-    assert win._left_tabs.count() == n
+    w = _open_stub_tab(win)
+    assert not win._left_tabs.isHidden()
+    win._close_op_tab(win._left_tabs.indexOf(w))
+    assert win._left_tabs.count() == 0
+    assert win._left_tabs.isHidden()
     win.close()
 
 
@@ -2956,14 +2967,14 @@ def test_closing_mid_export_disconnects_the_worker(qapp, squid_dataset, tmp_path
 
 
 
-def test_the_operators_home_tab_never_detaches(qapp, squid_dataset):
-    """The home-tab guard is a property of the bar (index 0), not of _detach_tab in general."""
+def test_the_tab_bar_has_no_fixed_head(qapp, squid_dataset):
+    """The Operators home tab moved to the views window's dock (2026-08-19), so the bar's
+    detachable range starts at 0 — there is no fixed index left to protect."""
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
-    assert win._detach_tab(0) is None                   # 'Operators' — never detaches
-    assert win._left_tabs.count() >= 1
-    assert win._left_tabs.tabBar()._first_detachable == 1
+    assert win._left_tabs.tabBar()._first_detachable == 0
+    assert win._left_tabs.count() == 0, "something opened a tab during ingest"
     win.close()
 
 

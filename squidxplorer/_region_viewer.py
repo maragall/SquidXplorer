@@ -1931,7 +1931,9 @@ class RegionViewer(QMainWindow):
         its LUTs) are read from THIS window, whose scene is the one on screen. With no manager
         (a library caller, tests borrowing the method) it renders in-window as before.
         """
-        if self._manager is None:
+        # getattr, not a bare read: tests borrow this method unbound onto a duck shell (the
+        # `_volume_view` module docstring records the convention).
+        if getattr(self, "_manager", None) is None:
             _volume_view.open_3d(self)
             return
         region = self.current_region()
