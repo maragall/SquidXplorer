@@ -18,8 +18,8 @@ tests read ``win._load_gen`` by name, and ``tests/test_viewer.py`` drives ``_on_
 over a duck shell, both of which a controller object holding the state would break.
 ``RegionViewer`` keeps thin delegates for the same reason.
 
-The ``_MosaicWorker`` NAME is resolved through ``squidxplorer._viewer`` at call time: that
-module attribute is the seam tests monkeypatch with stand-ins.
+The ``_MosaicWorker`` NAME is resolved through ``squidxplorer._workers`` at call time: that
+module attribute — the module that owns the class — is the seam tests monkeypatch with stand-ins.
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ def load_mosaic(win, region: Optional[str]) -> None:
         return
     if win._reader is None or win._meta is None or not region:
         return
-    from squidxplorer._viewer import _MosaicWorker
+    from squidxplorer._workers import _MosaicWorker
 
     win._load_gen = int(getattr(win, "_load_gen", 0)) + 1
     gen = win._load_gen

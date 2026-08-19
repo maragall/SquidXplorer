@@ -10,9 +10,9 @@ and ``tools/walkthrough.py`` actuate ``run_minerva_export`` / ``minerva_selectio
   window, whose ``_retire`` / ``_join_retired`` / ``closeEvent`` seams are what keep a running
   QThread from being destroyed with the process; tests also read ``win._minerva`` directly;
 * **the worker names** — this module resolves ``_MinervaWorker`` / ``_MinervaRenderWorker``
-  through ``squidxplorer._viewer`` AT CALL TIME, because that module attribute is the seam
-  tests monkeypatch with spies. Importing the classes here would silently stop the spies
-  intercepting while the tests kept passing.
+  through ``squidxplorer._workers`` AT CALL TIME, because that module attribute — the module
+  that owns the classes — is the seam tests monkeypatch with spies. Importing the classes here
+  would silently stop the spies intercepting while the tests kept passing.
 
 Everything else the panel needs arrives as a named constructor dependency (live getters where
 the window's state is mutable — the reader is replaced on every ingest), so what this product
@@ -37,9 +37,9 @@ from squidxplorer._worker_lifecycle import launch as _launch_worker
 
 
 def _workers():
-    """The Minerva worker classes, read off ``_viewer`` at call time — the monkeypatch seam."""
-    from squidxplorer import _viewer as V
-    return V._MinervaWorker, V._MinervaRenderWorker
+    """The Minerva worker classes, read off ``_workers`` at call time — the monkeypatch seam."""
+    from squidxplorer import _workers as W
+    return W._MinervaWorker, W._MinervaRenderWorker
 
 
 class MinervaPanel:

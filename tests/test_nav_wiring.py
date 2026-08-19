@@ -23,6 +23,7 @@ if "PySide6" in sys.modules or "PySide2" in sys.modules:
     )
 
 from squidxplorer import _viewer as V  # noqa: E402
+from squidxplorer import _workers as W  # noqa: E402
 
 from .conftest import shutdown_plate_window  # noqa: E402
 from .test_viewer import _drain_until, qapp  # noqa: E402,F401  (fixtures)
@@ -220,7 +221,7 @@ def test_focus_never_reports_a_plane_when_nothing_could_be_read(qapp,
         def read(self, *a, **k):
             raise OSError("disk gone")
 
-    w = V._FocusWorker(_Unreadable(), win._meta, "B3", 0,
+    w = W._FocusWorker(_Unreadable(), win._meta, "B3", 0,
                        win._meta["channels"][0]["name"])
     got = []
     w.problem.connect(got.append)
