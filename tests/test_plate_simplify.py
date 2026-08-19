@@ -116,7 +116,8 @@ def test_3d_opens_in_a_new_tab_and_the_2d_view_stays(qapp, napari_pane_stub, squ
     win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=1)
     v = views[0]
     try:
-        # The native volume popout needs real GL; the tab flow around it is what is under test.
+        # The no-ROI branch bricks the WHOLE region in the child's own canvas (2026-08-19);
+        # the single-FOV popout is only the fallback for a window without one.
         opened = []
         import squidxplorer._napari3d as N3D
         monkeypatch.setattr(N3D, "open_native_3d",
@@ -129,7 +130,11 @@ def test_3d_opens_in_a_new_tab_and_the_2d_view_stays(qapp, napari_pane_stub, squ
         assert child is not v, "the 3D tab is not the current page"
         assert child.parent_id == v.window_id
         assert child.display_name.startswith("3D ·")
-        assert opened, "the new tab never opened its volume"
+        from squidxplorer._brick_view import BrickedVolume
+
+        assert isinstance(child._native3d, BrickedVolume), \
+            "the new tab never opened its in-window volume"
+        assert not opened, "3D fell back to the single-FOV popout despite an in-window canvas"
         assert v._render_mode == "2d", "the 2D view was flipped to 3D under the user"
         assert child._render_mode == "3d"
     finally:
