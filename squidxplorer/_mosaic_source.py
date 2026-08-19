@@ -504,6 +504,12 @@ def fuse_region_pyramid(
     Returns ``(levels, step, nz)``; each level is fused directly from the FOV tiles at its own
     decimation, y and x only (z is never coarsened). Returns ``None`` when geometry is
     underivable.
+
+    When Squid saved a downsampled well mosaic for this (region, channel, t)
+    (``mosaic_view/wells``, see :mod:`squidxplorer._wellimage`), every rung at least as coarse
+    as that file's own factor is derived from IT instead of fused from FOV decodes: first
+    paint then costs one small file read. Finer rungs are fused exactly as before; an absent,
+    corrupt or multi-z well image falls back to fusing, with the reason logged.
     """
     import dask.array as da
     from dask import delayed
@@ -542,6 +548,19 @@ def fuse_region_pyramid(
         if level_px <= _MIN_LEVEL_PX:
             break
 
+    # Squid's saved well mosaic, resolved once and shared by every rung's delayed task.
+    _well_lock = threading.Lock()
+    _well: list = []                # [] unresolved; [(plane, factor)] found; [None] absent
+
+    def _well_source():
+        with _well_lock:
+            if not _well:
+                from squidxplorer import _wellimage
+
+                _well.append(_wellimage.downsampled_well(reader, meta, region, channel,
+                                                         int(time_point)))
+            return _well[0]
+
     def _plane(i: int, z_level: int):
         """Level ``i`` at ``z``, from the cache or one decode pass that also fills coarser levels."""
         level_px, h, w, step, dt = plans[i]
@@ -549,6 +568,18 @@ def fuse_region_pyramid(
         hit = cache.get(key)
         if hit is not None:
             return hit
+
+        well = _well_source()       # None past here means fuse from the FOVs, as ever
+        if well is not None and int(step) >= int(well[1]):
+            from squidxplorer import _wellimage
+
+            plane_w, factor = well
+            arr = _wellimage.resample_plane(plane_w, factor, int(step), h, w).astype(dt, copy=False)
+            # An area-averaged plane UNDER-states the true ceiling, but the range only ever
+            # widens (_bitdepth): this seeds a floor until the first full-resolution decode.
+            _bitdepth.depth().observe_array(arr)
+            cache.put(key, arr)
+            return arr
 
         # This level and every coarser one; nothing finer is built.
         wanted = plans[i:]

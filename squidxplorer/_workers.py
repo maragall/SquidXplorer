@@ -724,6 +724,7 @@ class _PreviewWorker(QThread):
         self._pending: dict = {}      # region -> the cell being accumulated for the cache
         self.cache_hits = 0           # regions served from the cache
         self.cache_reads = 0          # regions actually read from the acquisition
+        self.well_image_hits = 0      # regions served from Squid's saved mosaic_view/wells
         # indeterminate until run() knows the plan; built here so an early progress_report never raises
         self._progress = RunProgress(PREVIEW_LABEL, None, FOV_UNIT)
 
@@ -775,6 +776,65 @@ class _PreviewWorker(QThread):
                  self._t, self.cache_hits, len(by_region), self._cache)
         return remaining
 
+    def _seed_from_well_images(self, plan: list) -> list:
+        """Serve whole regions from Squid's saved ``mosaic_view/wells`` mosaics.
+
+        One small file read per well instead of its FOV walk; returns the plan entries a
+        well image could not serve (absent, corrupt, multi-z, or missing a channel; the
+        reasons are logged by ``_wellimage``). Served cells are published to the cell cache
+        so the next open replays them without touching the files at all.
+        """
+        from squidxplorer import _wellimage
+
+        by_region: dict = {}
+        for item in plan:
+            by_region.setdefault(item[0], []).append(item)
+        remaining: list = []
+        for region, items in by_region.items():
+            stack = None if self._stop.is_set() else _wellimage.load_well_stack(
+                self._reader, self._meta, region, self._t)
+            planes = None
+            if stack is not None:
+                planes = [stack.channel_plane(ch) for ch in self._channels]
+                if any(p is None for p in planes):
+                    planes = None      # a channel the file lacks: this well takes the FOV walk
+            if planes is None:
+                remaining.extend(items)
+                continue
+            box = content_box(planes[0].shape, _CELL, _CELL)
+            _top, _left, bh, bw = box
+            tile = np.stack([_fit_box(p.astype(np.float32), bh, bw)
+                             for p in planes]).astype(self._dtype)
+            ri, ci = self._fov_index[region]["rc"]
+            self.tileReady.emit(ri, ci, region, tile, box)
+            if self._cache is not None:
+                self._cache.put(region, tile, box)
+            self.well_image_hits += 1
+        if self.well_image_hits:
+            log.info("plate preview at t=%d: %d well(s) seeded from mosaic_view/wells, "
+                     "skipping their FOV walk.", self._t, self.well_image_hits)
+        return remaining
+
+    def _backfill_well_images(self) -> None:
+        """Leave the acquisition as a mosaic_view-saving Squid would have (best-effort).
+
+        Runs after the preview has fully painted, still on this worker thread; a failure
+        (read-only mount, anything) is logged and never fails the preview.
+        """
+        from squidxplorer import _wellimage
+
+        try:
+            if not _wellimage.enabled():
+                return
+            root = _wellimage.acquisition_root(self._reader)
+            if root is None or _wellimage.has_well_images(root, self._t):
+                return
+            _wellimage.write_well_images(self._reader, self._meta, time_point=self._t,
+                                         should_stop=self._stop.is_set)
+        except Exception as exc:        # noqa: BLE001 - a backfill must not fail a preview
+            log.warning("well-image backfill failed (%s: %s); the preview is unaffected.",
+                        type(exc).__name__, exc)
+
     def _remember(self, region: str, box, tile: np.ndarray, expected: int) -> None:
         """Accumulate one FOV into the region's cell, and publish the cell once it is whole."""
         if self._cache is None:
@@ -811,7 +871,7 @@ class _PreviewWorker(QThread):
             from concurrent.futures import ThreadPoolExecutor
             zs = self._meta["z_levels"]
             z_mid = zs[len(zs) // 2]      # a mid-stack plane is a fair single-plane preview
-            plan = self._replay_cached(self._plan())
+            plan = self._seed_from_well_images(self._replay_cached(self._plan()))
             # the denominator is the plan that survived the cache: what is left IS the work
             self._progress = RunProgress(PREVIEW_LABEL, len(plan), FOV_UNIT)
             # say 0 of N before the first read
@@ -848,6 +908,8 @@ class _PreviewWorker(QThread):
                 # compact the finished generation AFTER streamEnded; a partial pass never gets here
                 if self._cache is not None and not self._cache.packed:
                     self._cache.pack(self._order)
+                # after everything painted: make the acquisition mosaic_view-complete
+                self._backfill_well_images()
         except Exception as exc:
             # best-effort is not silent: finalise the tiles that landed, then name the failure
             if not self._stop.is_set():
