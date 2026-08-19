@@ -527,7 +527,8 @@ def run_all():
         fovs = m["fovs_per_region"][region]
         pos = {k[1]: v for k, v in m["fov_positions_um"].items() if k[0] == region}
         recs = fov_roi_records_um(fovs, pos, m["frame_shape"], m["pixel_size_um"])
-        boxes = fov_bboxes_um(m["fov_positions_um"], m["frame_shape"], m["pixel_size_um"])
+        boxes = {k: b.bbox() for k, b in fov_bboxes_um(
+            m["fov_positions_um"], m["frame_shape"], m["pixel_size_um"]).items()}
         worst, n = 0.0, 0
         for f, r in zip(fovs, recs):
             box = boxes.get((region, f))
