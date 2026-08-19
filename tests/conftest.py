@@ -18,6 +18,12 @@ import tifffile
 # for real windows with QT_QPA_PLATFORM=cocoa (or xcb). Must be set before QApplication exists.
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+# Well-image reading/backfill (_wellimage) is OFF for the suite by default: the backfill writes
+# mosaic_view/wells INTO the acquisition after every finished plate preview, which would shift
+# read counts and plate-cache tokens under tests that pin them. setdefault, so
+# tests/test_wellimage.py (the feature's own coverage) can turn it back on per test.
+os.environ.setdefault("SQUIDXPLORER_WELL_IMAGES", "0")
+
 #: The process's QApplication, pinned for the whole session so no fixture teardown can free it.
 _QT_APP = None
 
