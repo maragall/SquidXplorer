@@ -1,14 +1,22 @@
-"""Save a z-collapsing per-FOV run in the acquisition's OWN format, full resolution.
+"""Save a per-FOV intensity run in the acquisition's OWN format, full resolution.
 
-One projected plane per FOV, bit-exact, written as ``{region}_{fov}_0_{channel}.{ext}`` under
-``<operator>_<acquisition-folder>`` beside the source: the folder a user finds without knowing
-NGFF. Sidecars are copied (never image files) and the copied z count is rewritten to 1 so the
-output round-trips through ``open_reader``. Everything else keeps the OME-Zarr writer.
+One plane file per (FOV, channel, z), bit-exact, under ``<operator>_<acquisition-folder>``
+beside the source: the folder a user finds without knowing NGFF. The operator's ``consumes``
+declaration decides the depth: a z-reducer writes ``{region}_{fov}_0_{channel}.{ext}`` and the
+copied z count is rewritten to 1; a plane-op (decon-shaped) keeps every acquired z under its
+own index and the metadata untouched. Sidecars are copied (never image files) so the output
+round-trips through ``open_reader``. Everything else keeps the OME-Zarr writer.
+
+A z-SELECTING reducer (the callable carries ``select_index`` — ``reference``) picks an EXISTING
+plane per (t, FOV) without touching a pixel, so when the source stores one file per plane its
+save is HARDLINKS of the chosen files renamed to z index 0: zero pixel bytes written, per-file
+copy where the filesystem refuses (``_register.link_or_copy``).
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 from pathlib import Path
@@ -22,6 +30,8 @@ from squidxplorer._acquisition import _LEGACY_PARAMS
 from squidxplorer._engine import (bind_operator, is_region_operator, operator_consumes,
                                   operator_produces)
 
+_log = logging.getLogger(__name__)
+
 _TIFF_SUFFIXES = (".tiff", ".tif")
 
 #: Squid's own extension rule (utils_acquisition.get_image_filepath): uint16 -> .tiff, else .bmp.
@@ -31,12 +41,12 @@ _DTYPE_SUFFIX = {np.dtype(np.uint16): ".tiff", np.dtype(np.uint8): ".bmp"}
 def acquisition_format_dst(reader, operator: str) -> Optional[Path]:
     """``<operator>_<folder>`` beside the source when this save writes acquisition format, else None.
 
-    Declaration-driven: a per-FOV, z-collapsing, intensity-producing operator over a reader whose
-    ``source_id`` is an on-disk directory. Anything else keeps the OME-Zarr path.
+    Declaration-driven: a per-FOV, intensity-producing operator (z-collapsing or z-keeping alike)
+    over a reader whose ``source_id`` is an on-disk directory. Anything else keeps the OME-Zarr
+    path (a region operator's fused save is ``_fused_output``'s).
     """
     try:
-        if (is_region_operator(operator) or "z" not in operator_consumes(operator)
-                or operator_produces(operator) != "intensity"):
+        if is_region_operator(operator) or operator_produces(operator) != "intensity":
             return None
     except (KeyError, TypeError, ValueError):
         return None
@@ -47,18 +57,12 @@ def acquisition_format_dst(reader, operator: str) -> Optional[Path]:
 
 
 def _refuse_by_declaration(operator: str) -> None:
-    """Refuse by name any operator whose output is not one projected intensity plane per FOV."""
+    """Refuse by name any operator whose output is not intensity planes per FOV."""
     if is_region_operator(operator):
         raise ValueError(
             f"operator {operator!r} consumes a whole well's FOVs; acquisition-format output is "
-            "one projected plane per FOV and has no place for a fused region. Save it as an "
-            "OME-Zarr plate instead (write_plate).")
-    if "z" not in operator_consumes(operator):
-        raise ValueError(
-            f"operator {operator!r} keeps z (consumes="
-            f"{sorted(operator_consumes(operator))}); this writer only knows one projected "
-            "z-plane per FOV, so a full-depth result must go to the OME-Zarr writer "
-            "(write_plate).")
+            "per-FOV planes and has no place for a fused region. Save it in the stitcher's "
+            "format instead (_fused_output.write_fused_acquisition).")
     if operator_produces(operator) != "intensity":
         raise ValueError(
             f"operator {operator!r} produces {operator_produces(operator)!r} pixels; the "
@@ -151,10 +155,137 @@ def _write_plane(path: Path, plane: np.ndarray) -> None:
     Image.fromarray(plane).save(path)
 
 
+def _per_plane_files(reader, meta) -> bool:
+    """True when every (channel, z) of one FOV lives in its OWN file — the hardlink precondition.
+
+    A multi-page stack or an RGB base file maps several planes onto one path; linking such a
+    file under a single-plane name lies about its content, so those sources take the pixel path.
+    """
+    plane_path = getattr(reader, "plane_path", None)
+    if not callable(plane_path):
+        return False
+    channels = [c["name"] for c in meta["channels"]]
+    z_levels = list(meta["z_levels"])
+    region = meta["regions"][0]
+    fov = meta["fovs_per_region"][region][0]
+    try:
+        paths = {str(plane_path(region, fov, c, z, 0)) for c in channels for z in z_levels}
+    except (KeyError, IndexError, ValueError, OSError):
+        return False
+    return len(paths) == len(channels) * len(z_levels)
+
+
+def _link_selected_planes(reader, select_index, wells, channels, z_levels, time_names, tmp,
+                          on_well, on_error, stop) -> tuple[int, bool]:
+    """Hardlink each FOV's chosen z plane under z index 0; returns ``(n_written, stopped)``.
+
+    ``select_index`` is the operator's OWN focus rule (``project_reference.select_index`` is
+    :func:`squidxplorer.projection.select_reference_z`) — the one shared implementation, solved
+    once per (t, FOV) on ``channels[0]`` exactly as ``project_well`` does, then every channel
+    links that same z. No pixel is rewritten; the linked files ARE the source's bytes.
+    """
+    from squidxplorer._register import link_or_copy
+
+    reference = channels[0]     # project_well's own default focus channel (reference_channel None)
+    n_written = linked = copied = 0
+    first_refusal = None
+    for region, fovs in wells.items():
+        for fov in fovs:
+            if stop is not None and stop():
+                return n_written, True
+            try:
+                image = None
+                if on_well is not None:
+                    y, x = reader.metadata["frame_shape"]
+                    image = np.empty((len(time_names), len(channels), 1, int(y), int(x)),
+                                     dtype=np.dtype(reader.metadata["dtype"]))
+                for t, tname in enumerate(time_names):
+                    planes = (reader.read(region, fov, reference, z, t) for z in z_levels)
+                    z_star = z_levels[select_index(planes)]
+                    for c_i, channel in enumerate(channels):
+                        src_file = Path(reader.plane_path(region, fov, channel, z_star, t))
+                        refusal = link_or_copy(
+                            src_file, tmp / tname / f"{region}_{fov}_0_{channel}{src_file.suffix}")
+                        if refusal is None:
+                            linked += 1
+                        else:
+                            copied += 1
+                            if first_refusal is None:
+                                first_refusal = refusal
+                        if image is not None:
+                            image[t, c_i, 0] = reader.read(region, fov, channel, z_star, t)
+            except Exception as exc:      # per-well fault isolation, like the engine loop's
+                on_error(region, fov, exc)
+                continue
+            n_written += 1
+            if on_well is not None:
+                on_well(region, fov, image)
+    if first_refusal is not None:
+        _log.info("acquisition-format save: this filesystem refuses hardlinks (%s); %d plane "
+                  "file(s) were copied in full.", first_refusal, copied)
+    _log.info("acquisition-format save: %d plane file(s) hardlinked, %d copied.", linked, copied)
+    return n_written, False
+
+
+def _stream_planes(reader, operator, channels, z_levels, z_labels, n_t, time_names, tmp, *,
+                   regions, operator_kwargs, workers, on_well, on_error, stop) -> tuple[int, bool]:
+    """Run the engine and write each streamed FOV's planes; returns ``(n_written, stopped)``.
+
+    ``z_labels`` carries the output's z filename indices — ``[0]`` for a z-reducer, the source's
+    own ``z_levels`` for a plane-op — and the streamed depth must match it exactly.
+    """
+    from squidxplorer import run_plate
+
+    suffixes: dict = {}
+    n_written = 0
+    stopped = False
+    stream = run_plate(reader, operator=operator, regions=regions, n_fovs=None, workers=workers,
+                       on_error=on_error, operator_kwargs=operator_kwargs)
+    try:
+        for region, fov, image in stream:
+            if stop is not None and stop():
+                stopped = True
+                break
+            arr = np.asarray(image)
+            if arr.ndim != 5 or arr.shape[2] != len(z_labels):
+                raise ValueError(
+                    f"operator {operator!r} streamed shape {arr.shape}; its declaration owes "
+                    f"(n_t, n_channels, {len(z_labels)}, y, x) and anything else cannot be "
+                    "written as one plane per (fov, channel, z, t).")
+            if arr.shape[0] != n_t or arr.shape[1] != len(channels):
+                raise ValueError(
+                    f"operator {operator!r} streamed {arr.shape[0]} timepoint(s) x "
+                    f"{arr.shape[1]} channel(s) where the acquisition has {n_t} x "
+                    f"{len(channels)}; refusing to guess which is which.")
+            for t, tname in enumerate(time_names):
+                for c_i, channel in enumerate(channels):
+                    for z_i, z_label in enumerate(z_labels):
+                        plane = np.ascontiguousarray(arr[t, c_i, z_i])
+                        if channel not in suffixes:
+                            suffixes[channel] = _channel_suffix(reader, region, fov, channel,
+                                                                z_levels, plane)
+                        _write_plane(
+                            tmp / tname / f"{region}_{fov}_{z_label}_{channel}{suffixes[channel]}",
+                            plane)
+            n_written += 1
+            if on_well is not None:
+                on_well(region, fov, image)
+    finally:
+        close = getattr(stream, "close", None)
+        if callable(close):
+            close()
+    return n_written, stopped
+
+
 def write_acquisition_planes(reader, operator: str, dst, *, regions=None,
                              operator_kwargs: Optional[dict] = None, workers=None,
                              on_well=None, on_error=None, stop=None) -> dict:
     """Run *operator* over every FOV and write the results as a Squid acquisition at *dst*.
+
+    The operator's ``consumes`` decides the depth: a z-reducer writes one plane per FOV under z
+    index 0 and rewrites the copied z count to 1; a plane-op writes every acquired z under its
+    own index and leaves the metadata alone. A z-SELECTING reducer over per-plane source files
+    hardlinks the chosen planes instead of writing pixels.
 
     Built under a ``.partial`` name and renamed whole, so a killed or stopped run never reads as
     a finished acquisition. Returns a summary dict sharing ``write_from_stream``'s counting keys
@@ -164,7 +295,9 @@ def write_acquisition_planes(reader, operator: str, dst, *, regions=None,
     from squidxplorer.projection import scope_wells
 
     _refuse_by_declaration(operator)
-    bind_operator(operator, operator_kwargs)   # refuse an unknown parameter before any directory
+    # Refuse an unknown parameter before any directory; the bound callable also carries the
+    # z-selecting declaration (select_index) the hardlink path dispatches on.
+    fn = bind_operator(operator, operator_kwargs)
     src = Path(reader.source_id)
     if not src.is_dir():
         raise ValueError(
@@ -181,13 +314,19 @@ def write_acquisition_planes(reader, operator: str, dst, *, regions=None,
                            key=int)
     time_names = src_time_dirs if len(src_time_dirs) == n_t else [str(i) for i in range(n_t)]
 
+    # The declaration decides the depth: a z-reducer collapses to one plane at z index 0, a
+    # plane-op keeps every acquired plane under its own z label.
+    collapses = "z" in operator_consumes(operator)
+    z_labels = [0] if collapses else list(z_levels)
+
     dst = Path(dst)
     tmp = dst.with_name(dst.name + ".partial")
     if tmp.exists():
         shutil.rmtree(tmp)
     tmp.mkdir(parents=True)
     _copy_sidecars(src, tmp, src_time_dirs)
-    _rewrite_z_count(tmp)
+    if collapses:
+        _rewrite_z_count(tmp)
     for name in time_names:
         (tmp / name).mkdir(exist_ok=True)
 
@@ -198,42 +337,18 @@ def write_acquisition_planes(reader, operator: str, dst, *, regions=None,
         if on_error is not None:
             on_error(region, fov, exc)
 
-    suffixes: dict = {}
-    n_written = 0
-    stopped = False
-    stream = run_plate(reader, operator=operator, regions=regions, n_fovs=None, workers=workers,
-                       on_error=_on_error, operator_kwargs=operator_kwargs)
-    try:
-        for region, fov, image in stream:
-            if stop is not None and stop():
-                stopped = True
-                break
-            arr = np.asarray(image)
-            if arr.ndim != 5 or arr.shape[2] != 1:
-                raise ValueError(
-                    f"operator {operator!r} streamed shape {arr.shape}; a z-collapsing per-FOV "
-                    "result is (n_t, n_channels, 1, y, x) and anything else cannot be written "
-                    "as one plane per (fov, channel, t).")
-            if arr.shape[0] != n_t or arr.shape[1] != len(channels):
-                raise ValueError(
-                    f"operator {operator!r} streamed {arr.shape[0]} timepoint(s) x "
-                    f"{arr.shape[1]} channel(s) where the acquisition has {n_t} x "
-                    f"{len(channels)}; refusing to guess which is which.")
-            for t, tname in enumerate(time_names):
-                for c_i, channel in enumerate(channels):
-                    plane = np.ascontiguousarray(arr[t, c_i, 0])
-                    if channel not in suffixes:
-                        suffixes[channel] = _channel_suffix(reader, region, fov, channel,
-                                                            z_levels, plane)
-                    _write_plane(tmp / tname / f"{region}_{fov}_0_{channel}{suffixes[channel]}",
-                                 plane)
-            n_written += 1
-            if on_well is not None:
-                on_well(region, fov, image)
-    finally:
-        close = getattr(stream, "close", None)
-        if callable(close):
-            close()
+    select_index = getattr(fn, "select_index", None)
+    if select_index is not None and _per_plane_files(reader, meta):
+        # The operator PICKS an existing plane (select_index is the declaration): its save is
+        # hardlinks of the chosen source files — zero pixel bytes written or re-encoded.
+        n_written, stopped = _link_selected_planes(
+            reader, select_index, wells, channels, z_levels, time_names, tmp,
+            on_well, _on_error, stop)
+    else:
+        n_written, stopped = _stream_planes(
+            reader, operator, channels, z_levels, z_labels, n_t, time_names, tmp,
+            regions=regions, operator_kwargs=operator_kwargs, workers=workers,
+            on_well=on_well, on_error=_on_error, stop=stop)
     if not stopped and stop is not None and stop():
         stopped = True
 

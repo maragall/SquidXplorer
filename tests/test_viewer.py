@@ -489,8 +489,8 @@ def test_ingest_non_wellplate_region_opens_as_a_slide_carrier(qapp, tmp_path):
 
 def test_run_operator_persists_via_write_plate(qapp, squid_dataset, monkeypatch, tmp_path):
     # run_operator's SAVE path drives write_plate with the selected operator and must not also write the uncompressed per-TIFF copy (tiff=False) — that would double disk use.
-    # keepz on purpose: a z-collapsing intensity operator (mip) now saves acquisition-format
-    # beside the source (tests/test_acq_output.py); a keeps-z result still owes write_plate.
+    # spot on purpose: every per-FOV INTENSITY operator now saves acquisition-format beside the
+    # source (tests/test_acq_output.py); a labels producer still owes write_plate.
     import squidxplorer
     captured = {}
 
@@ -506,10 +506,10 @@ def test_run_operator_persists_via_write_plate(qapp, squid_dataset, monkeypatch,
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
-    win.run_operator("keepz", out_parent=str(tmp_path))
+    win.run_operator("spot", out_parent=str(tmp_path))
     _drain_until(qapp, lambda: "operator" in captured)
-    assert captured["operator"] == "keepz"
-    assert captured["operator_kwargs"] is None      # a bare plane-op takes no per-run parameters
+    assert captured["operator"] == "spot"
+    assert captured["operator_kwargs"] is None      # no panel values were passed for this run
     assert captured["tiff"] is False                     # never the uncompressed TIFF duplicate
     assert captured["out_dir"].endswith(".hcs")          # persisted next to the acquisition
     win._stop_worker(); win.close()
@@ -1274,8 +1274,9 @@ def test_a_finished_save_run_leaves_no_incomplete_marker(qapp, squid_dataset, tm
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
-    # keepz: it still writes the OME-Zarr plate whose marker this asserts (mip saves acquisition-format)
-    win.run_operator("keepz", out_parent=str(tmp_path), regions=["B2", "B3"], save=True)
+    # spot (labels): it still writes the OME-Zarr plate whose marker this asserts (per-FOV
+    # intensity operators save acquisition-format now)
+    win.run_operator("spot", out_parent=str(tmp_path), regions=["B2", "B3"], save=True)
     assert _drain_until(qapp, lambda: not win._busy(), timeout=90)
     out = tmp_path / f"{win._acq_name}.hcs"
     assert (out / "plate.ome.zarr").is_dir()
@@ -1291,8 +1292,9 @@ def test_open_computed_names_a_well_that_cannot_read_its_own_image_id(
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
-    # keepz: it still writes the OME-Zarr plate this test corrupts (mip saves acquisition-format)
-    win.run_operator("keepz", out_parent=str(tmp_path), regions=["B2", "B3"], save=True)
+    # spot (labels): it still writes the OME-Zarr plate this test corrupts (per-FOV intensity
+    # operators save acquisition-format now)
+    win.run_operator("spot", out_parent=str(tmp_path), regions=["B2", "B3"], save=True)
     assert _drain_until(qapp, lambda: not win._busy(), timeout=90)
     out = tmp_path / f"{win._acq_name}.hcs"
 
@@ -2365,14 +2367,15 @@ def test_preview_run_gets_no_loupe_source(qapp, squid_dataset, tmp_path):
 
 
 def test_saved_run_registers_zarr_source_and_grows_written_set(qapp, squid_dataset, tmp_path):
-    # keepz: a saved OME-Zarr run. A mip save writes acquisition format now — no zarr, so no
-    # zarr loupe source (a loupe over the written acquisition is an open follow-up).
+    # spot (labels): a saved OME-Zarr run. A per-FOV intensity save writes acquisition format
+    # now — no zarr, so no zarr loupe source (a loupe over the written acquisition is an open
+    # follow-up).
     root, _ = squid_dataset
     win = _loupe_win(qapp, root)
-    win.run_operator("keepz", out_parent=str(tmp_path))
-    assert _drain_until(qapp, lambda: isinstance(win._loupe_sources.get("keepz"),
+    win.run_operator("spot", out_parent=str(tmp_path))
+    assert _drain_until(qapp, lambda: isinstance(win._loupe_sources.get("spot"),
                                                  V._ZarrLoupeSource))
-    src = win._loupe_sources["keepz"]
+    src = win._loupe_sources["spot"]
     assert src.available("B2") == (False, "not written yet")   # nothing written at run start
     assert _drain_until(qapp, lambda: src.available("B2")[0])  # ...available once the well lands
     win._stop_worker(); win.close()
@@ -3162,22 +3165,26 @@ def test_panel_kwargs_reach_the_region_loop_on_the_PREVIEW_path(qapp, squid_data
     win._stop_worker(); win.close()
 
 
-def test_panel_kwargs_reach_write_plate_on_the_SAVE_path(qapp, squid_dataset,
-                                                        monkeypatch, tmp_path):
-    import squidxplorer
+def test_panel_kwargs_reach_the_fused_writer_on_the_SAVE_path(qapp, squid_dataset,
+                                                              monkeypatch, tmp_path):
+    # A stitch SAVE routes to the fused acquisition writer (the stitcher's OME-TIFF format);
+    # the panel's kwargs must reach it exactly as they reach the preview's engine call.
+    from squidxplorer import _fused_output
     seen = {}
 
-    def fake_write_plate(reader, out_dir, **kw):
-        seen.update(kw)
-        return {"plate": str(out_dir), "levels": 1}
+    def fake_write_fused(reader, operator, dst, **kw):
+        seen.update(kw, operator=operator, dst=str(dst))
+        return {"path": str(dst), "n_fields": 1, "n_fields_written": 1,
+                "complete": True, "stopped": False, "skipped_regions": []}
 
-    monkeypatch.setattr(squidxplorer, "write_plate", fake_write_plate)
+    monkeypatch.setattr(_fused_output, "write_fused_acquisition", fake_write_fused)
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
     win.run_operator("stitch", out_parent=str(tmp_path), regions=["B2"], save=True,
                      operator_kwargs={"blend_px": 3, "register": False})
     _drain_until(qapp, lambda: "operator_kwargs" in seen)
+    assert seen["operator"] == "stitch"
     assert seen["operator_kwargs"]["blend_px"] == 3
     assert seen["operator_kwargs"]["register"] is False
     win._stop_worker(); win.close()

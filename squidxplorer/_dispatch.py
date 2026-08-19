@@ -88,17 +88,26 @@ def run_operator_once(reader, *, operator: str, save: bool, owed: int, out_dir=N
 
     manifest: Optional[dict] = None
     if save:
-        from squidxplorer import _acq_output
+        from squidxplorer import _acq_output, _fused_output
 
-        # Declaration-driven writer choice: a per-FOV, z-collapsing, intensity operator over an
-        # on-disk acquisition saves in the acquisition's own format, full resolution; only a run
-        # owing every FOV (n_fovs=None) qualifies. Everything else keeps the OME-Zarr plate.
-        # An explicit out_dir (the GUI's chosen folder, the CLI's --out) is THE destination for
-        # either writer; beside-the-source is only the default.
+        # Declaration-driven writer choice, and an explicit out_dir (the GUI's chosen folder,
+        # the CLI's --out) is THE destination for every writer; beside-the-source is only the
+        # default. A per-FOV intensity operator over an on-disk acquisition saves in the
+        # acquisition's own format, full resolution (z-collapsing or z-keeping alike; only a run
+        # owing every FOV, n_fovs=None, qualifies). A region operator's fused mosaic saves in
+        # the stitcher's format (a Squid-style OME-TIFF per region, re-openable by open_reader).
+        # Everything else keeps the OME-Zarr plate.
         acq_dst = _acq_output.acquisition_format_dst(reader, operator) if n_fovs is None else None
+        fused_dst = (_fused_output.fused_format_dst(reader, operator)
+                     if n_fovs is None or n_fovs is N_FOVS_LOOP_DEFAULT else None)
         if acq_dst is not None:
             manifest = _acq_output.write_acquisition_planes(
                 reader, operator, out_dir or acq_dst, regions=regions,
+                operator_kwargs=operator_kwargs,
+                workers=workers, on_well=on_well, on_error=_on_error, stop=stop)
+        elif fused_dst is not None:
+            manifest = _fused_output.write_fused_acquisition(
+                reader, operator, out_dir or fused_dst, regions=regions,
                 operator_kwargs=operator_kwargs,
                 workers=workers, on_well=on_well, on_error=_on_error, stop=stop)
         else:
