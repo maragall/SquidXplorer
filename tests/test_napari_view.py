@@ -1291,15 +1291,22 @@ def test_switching_operator_is_reported_by_the_op_tap_and_not_by_the_channel_tap
 
 def test_our_own_writes_are_never_reported_as_a_user_picking_a_layer(layers):
     """A result delivered to a window that did NOT ask arrives ``visible=False``; reporting
-    that as a gesture would turn the plate's layer off behind the user."""
+    that as a gesture would turn the plate's layer off behind the user.
+
+    A re-add arriving LIT is different: raw really goes dark (one lit operator per channel,
+    first and second delivery alike) and the plate must be told, exactly as on a first lit
+    arrival, so THAT darkening is the one report allowed here."""
     seen = []
     layers.add_mosaic("raw", "488", _img())
     layers.on_user_op(lambda op, on: seen.append((op, on)))
 
     layers.add_mosaic("mip", "488", _img(1), visible=False)
+    assert seen == [], f"a dark delivery was reported as a user gesture: {seen}"
+
     layers.add_mosaic("mip", "488", _img(2), visible=True)      # a re-add, still ours
 
-    assert seen == [], f"a programmatic write was reported as a user gesture: {seen}"
+    assert seen == [("raw", False)], (
+        f"a LIT re-add must report exactly raw going dark, the fact the plate needs: {seen}")
 
 
 # --- one hex per channel, or an honest None --------------------------------------------------
@@ -1773,3 +1780,157 @@ def test_hiding_a_channel_of_a_VOLUME_moves_selection_to_a_visible_brick(layers)
         "selection is parked on a hidden brick")
     k = key_of(active)
     assert k is not None and k.channel == "561"
+
+
+# --------------------- raw after a z-reduced result (customer bug, 2026-08-19)
+#
+# Julio, live GUI, single-plane BF acquisition with a stain LUT: run mip (preview) in a region
+# window, then toggle raw back on. The recovery invariants are pinned for BOTH raw shapes the
+# fusers produce (n_z == 1 -> flat (y, x) levels; n_z > 1 -> (z, y, x) levels), plus the two
+# measured drifts in the same machinery: the restore forgot the plane the user was on, and a
+# REUSED result layer skipped the one-lit-operator rule.
+
+
+def _raw_pyramid(nz: int, seed: int = 0):
+    """Two levels, shaped as fuse_region_pyramid ships them: flat when nz == 1."""
+    rng = np.random.default_rng(seed)
+    if nz <= 1:
+        return [rng.integers(10, 200, (32, 32), dtype=np.uint8),
+                rng.integers(10, 200, (16, 16), dtype=np.uint8)]
+    return [rng.integers(10, 200, (nz, 32, 32), dtype=np.uint8),
+            rng.integers(10, 200, (nz, 16, 16), dtype=np.uint8)]
+
+
+def _deliver_mip(layers, seed: int = 9):
+    """A mip preview as deliver_result hands it over: one 2-D plane, arriving lit."""
+    return layers.add_result(
+        "intensity", "mip", "BF",
+        np.random.default_rng(seed).integers(10, 200, (32, 32), dtype=np.uint8),
+        bbox_um=(0.0, 0.0, 32.0, 32.0), visible=True)
+
+
+def _step_in_range(dims) -> bool:
+    for axis in range(int(dims.ndim)):
+        lo, hi, pitch = (float(v) for v in tuple(dims.range[axis])[:3])
+        n = int(round((hi - lo) / pitch)) + 1 if pitch > 0 else 1
+        if not 0 <= int(dims.current_step[axis]) < max(1, n):
+            return False
+    return True
+
+
+def test_raw_comes_back_after_a_mip_result_on_a_single_z_acquisition(layers):
+    """n_z == 1: 'collapsing z' on an already-flat stack must leave raw fully recoverable."""
+    from squidxplorer._napari_view import _Z_STASH
+
+    raw = layers.add_mosaic("raw", "BF", _raw_pyramid(1), multiscale=True,
+                            bbox_um=(0.0, 0.0, 32.0, 32.0))
+    _deliver_mip(layers)
+    assert raw.visible is False, "the lit result must darken raw (one operator per channel)"
+
+    raw.visible = True                                   # napari's eye / the tree checkbox
+
+    assert raw.visible is True
+    assert layers.visible_op() == "raw"
+    assert layers.find("mip", "BF").visible is False
+    assert _Z_STASH not in (raw.metadata or {})
+    assert bool(raw.multiscale) is True, "raw lost its pyramid on the way back"
+    assert int(layers.model.dims.ndim) == 2
+    assert _step_in_range(layers.model.dims)
+    assert int(np.asarray(raw.thumbnail).max()) > 0, "raw is 'visible' but renders nothing"
+
+
+def test_raw_z_stack_is_restored_after_a_mip_result(layers):
+    """n_z > 1: the stack is stashed while the 2-D result is up and comes back whole."""
+    from squidxplorer._napari_view import _Z_STASH
+
+    raw = layers.add_mosaic("raw", "BF", _raw_pyramid(4), multiscale=True,
+                            bbox_um=(0.0, 0.0, 32.0, 32.0), z_scale_um=1.5)
+    _deliver_mip(layers)
+    assert raw.visible is False
+    assert _Z_STASH in (raw.metadata or {}), "the z stack was not stashed for the flat result"
+    assert int(raw.ndim) == 2
+    assert int(layers.model.dims.ndim) == 2, "the z axis must drop while the flat result shows"
+
+    raw.visible = True
+
+    assert raw.visible is True
+    assert layers.find("mip", "BF").visible is False
+    assert _Z_STASH not in (raw.metadata or {})
+    assert bool(raw.multiscale) is True and int(raw.ndim) == 3
+    assert int(layers.model.dims.ndim) == 3, "the z axis did not come back with the stack"
+    assert _step_in_range(layers.model.dims)
+    assert int(np.asarray(raw.thumbnail).max()) > 0, "raw is 'visible' but renders nothing"
+
+
+def test_toggling_raw_back_returns_to_the_plane_the_user_was_on(layers):
+    """`_present_z_axis` promises the collapse keeps the user's plane; the restore must too."""
+    raw = layers.add_mosaic("raw", "BF", _raw_pyramid(4), multiscale=True,
+                            bbox_um=(0.0, 0.0, 32.0, 32.0), z_scale_um=1.5)
+    dims = layers.model.dims
+    dims.current_step = (2,) + tuple(dims.current_step)[1:]
+
+    _deliver_mip(layers)
+    # The flat raw stand-in IS the plane the user was on (coarsest level, plane 2).
+    coarsest = _raw_pyramid(4)[-1]
+    assert np.array_equal(np.asarray(raw.data), coarsest[2]), (
+        "the collapsed raw does not show the plane the user was on")
+
+    raw.visible = True
+
+    assert int(dims.current_step[int(dims.ndim) - 3]) == 2, (
+        "the z slider jumped off the plane the user was on when the stack came back")
+
+
+def test_a_redelivered_result_still_darkens_raw(layers):
+    """A re-run REUSES the result layer; arriving lit is the same gesture both times."""
+    raw = layers.add_mosaic("raw", "BF", _raw_pyramid(1), multiscale=True,
+                            bbox_um=(0.0, 0.0, 32.0, 32.0))
+    _deliver_mip(layers)
+    raw.visible = True                                   # the user goes back to raw
+    assert layers.find("mip", "BF").visible is False
+
+    _deliver_mip(layers, seed=10)                        # the user runs mip again
+
+    assert layers.find("mip", "BF").visible is True
+    assert raw.visible is False, (
+        "raw · BF and mip · BF are both lit after a re-run, so the channel sums twice")
+
+
+def test_a_raw_reload_with_no_opinion_leaves_the_lit_operator_alone(layers):
+    """visible=None on a reuse means 'do not touch what is lit' — the timepoint-step contract."""
+    raw = layers.add_mosaic("raw", "BF", _raw_pyramid(1), multiscale=True,
+                            bbox_um=(0.0, 0.0, 32.0, 32.0))
+    _deliver_mip(layers)
+
+    layers.add_mosaic("raw", "BF", _raw_pyramid(1, seed=3), multiscale=True,
+                      bbox_um=(0.0, 0.0, 32.0, 32.0), visible=None)
+
+    assert raw.visible is False, "a frame reload relit raw over the operator the user chose"
+    assert layers.find("mip", "BF").visible is True
+
+
+def test_a_timepoint_reload_does_not_relight_raw_over_a_lit_result(layers):
+    """The playback caller (`_mosaic_playback.on_plane`) reloads raw with NO visibility opinion."""
+    from types import SimpleNamespace
+
+    from squidxplorer import _mosaic_playback
+
+    raw = layers.add_mosaic("raw", "BF", _raw_pyramid(1), multiscale=True,
+                            bbox_um=(0.0, 0.0, 32.0, 32.0))
+    _deliver_mip(layers)
+    assert raw.visible is False and layers.find("mip", "BF").visible is True
+
+    win = SimpleNamespace(
+        _pane=SimpleNamespace(ok=True, mosaic=layers, say=lambda *_: None),
+        _meta={"channels": [{"name": "BF"}], "dz_um": None},
+        _roi_bbox=None,
+        _cursor=SimpleNamespace(region="A1"),
+        open_clock=None,
+        _load_gen=0,
+        _say=lambda *_: None,
+    )
+    _mosaic_playback.on_plane(win, "A1", "BF", _raw_pyramid(1, seed=4),
+                              (0.0, 0.0, 32.0, 32.0), None)
+
+    assert raw.visible is False, "a timepoint step relit raw over the operator the user chose"
+    assert layers.find("mip", "BF").visible is True
