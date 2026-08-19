@@ -162,6 +162,25 @@ def test_the_panel_carries_the_copy_switch_outside_the_params(qapp):
                                      "copy": True}
 
 
+def test_a_save_of_register_is_the_registered_copy_never_a_plate(tmp_path):
+    """The generic save toggle: a copy-saving operator (declared, operator_saves_copy) routes
+    through the engine with copy=True — write_plate's HCS layout is never demanded, so a
+    'manual' region saves fine."""
+    from squidxplorer._dispatch import run_operator_once
+    from squidxplorer._engine import operator_saves_copy
+
+    assert operator_saves_copy("register")
+    assert not operator_saves_copy("stitch") and not operator_saves_copy("mip")
+
+    reader = _probe_reader()
+    src = _acq(tmp_path)
+    reader.source_id = str(src)
+    result = run_operator_once(reader, operator="register", save=True, owed=1, n_fovs=None)
+    dst = registered_copy_root(src)
+    assert result.outcome == "ok" and result.out_path == str(dst)
+    assert dst.is_dir() and not list(tmp_path.rglob("plate.ome.zarr"))
+
+
 def test_register_runs_through_the_engine_without_a_flatfield_estimate(tmp_path, caplog):
     # The callable declares its keywords explicitly, so the region loop's flatfield probe says
     # no and a register run never buys a plate-wide BaSiC estimate.

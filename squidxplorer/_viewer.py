@@ -2723,9 +2723,13 @@ class PlateWindow(QMainWindow):
         # declaration here so the dialog title, the folder name, the loupe source and the done
         # message all describe the write that actually happens.
         from squidxplorer import _acq_output
+        from squidxplorer._engine import operator_saves_copy
 
         acq_format = save and _acq_output.acquisition_format_dst(self._reader, key) is not None
-        if save:
+        # A copy-saving operator (register) writes hardlinks beside its source by design: no
+        # destination to ask for, no disk-size guard to run.
+        saves_copy = save and operator_saves_copy(key)
+        if save and not saves_copy:
             # Ask WHERE to persist: output can be hundreds of GB, so let the user aim it at a roomy
             # disk rather than silently filling the acquisition's. Tests pass out_parent.
             if out_parent is None:
@@ -2807,8 +2811,13 @@ class PlateWindow(QMainWindow):
         # Keyed by the LAYER rather than the bare operator key: `operator_layer_key` is the one
         # place that decides the two are the same thing today.
         self._overview.reset_layer(layer_key)
-        dest = f" → {out_dir.name}" if save else " (preview — not saved)"
-        reopen_note = ("  (re-openable acquisition)" if acq_format
+        if saves_copy:
+            dest = f" → stitched_{self._acq_name}"
+        elif save:
+            dest = f" → {out_dir.name}"
+        else:
+            dest = " (preview — not saved)"
+        reopen_note = ("  (re-openable acquisition)" if (acq_format or saves_copy)
                        else "  (re-openable OME-Zarr)")
         # IMA-226: report what the plate ACTUALLY got. A run where every well raised (flat-field
         # with no profile is the routine case) still reaches finished_ok — the per-well on_error
