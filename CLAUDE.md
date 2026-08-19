@@ -866,6 +866,16 @@ DESIGN) still tell its story on purpose; re-instating starts from git history, n
   no-op, never a guess. The padded open's warning says it places by the PLAN on purpose; the
   multipage-TIFF reader still ignores the flag (not one of the design's named formats).
 
+## Second dead-code pass (Julio, 2026-08-19: "Less is more")
+
+Deleted whole, each grep-proven caller-free: `_odon.py` + the `--odon` CLI arm ("we never use
+that"), `_pixels.py` (the staged pixel-address abstraction; its consumer migrations never
+happened — reinstate from git history if they do), `build_montage` + the static HTML montage
+half of `_montage.py` (the compositor/percentile/downsample half is LIVE — the plate renders
+through it), `ViewerManager.rename` and `_TO_BE_ADDED`. Kept on purpose: the
+`ViewSettings.reset/adopt/diverged` trio — it is the settings-inheritance tests' own
+infrastructure, not a corpse.
+
 ## Multi-acquisition sets (2026-08-19, branch acq-folder)
 
 `_acqset.py` (Qt-free): a SET is a folder that is not itself an acquisition but has >= 2

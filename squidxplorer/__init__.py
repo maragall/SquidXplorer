@@ -31,7 +31,6 @@ from squidxplorer._engine import (
     run_plate,
     runnable_operators,
 )
-from squidxplorer._montage import build_montage
 from squidxplorer._output import write_plate
 from squidxplorer._plugins import (
     GROUP as OPERATOR_PLUGIN_GROUP,
@@ -125,7 +124,6 @@ __all__ = [
     "OperatorPluginError",
     "OPERATOR_PLUGIN_GROUP",
     "write_plate",
-    "build_montage",
     # region operators (inter-FOV)
     "stitch_region",
     "solve_offsets_px",
