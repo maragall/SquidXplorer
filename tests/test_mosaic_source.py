@@ -460,6 +460,28 @@ def test_the_coarsest_rung_repull_is_a_plane_cache_hit_even_after_the_frames_evi
         "the cache")
 
 
+def test_a_warm_pan_at_a_coarse_rung_re_reads_nothing_even_when_full_frames_cannot_be_cached():
+    """A rung's decimated subframes are cached at their own size, so a revisited window costs
+    zero decodes even where the region's FULL frames outsize the whole byte budget (the real
+    452-FOV case: 1.6 GB of frames against a 465 MB budget)."""
+    from squidxplorer._mosaic_source import fuse_region_pyramid
+
+    reader = _StepReader(frame=(256, 256))
+    # 300 kB: the 16 x 128 kB full frames can never fit; the step-4 subframes (8 kB each) do.
+    levels, step0, _nz = fuse_region_pyramid(reader, _pyr_meta(nz=1), "A1", "488",
+                                             max_px=1024, cache_bytes=300_000)
+    assert step0 == 4
+    coarse = levels[2]
+
+    np.asarray(coarse[0:64, 0:100])
+    first = len(reader.reads)
+    assert first > 0
+
+    np.asarray(coarse[0:64, 0:100])
+    assert len(reader.reads) == first, (
+        "a revisited coarse-rung window re-decoded FOVs; the rung's own subframes must serve it")
+
+
 def test_every_rung_is_pixel_identical_to_the_reference_fusion():
     """Every windowed rung — fine strides and converted coarse rungs alike — materialises
     bit-exact to :func:`_fuse_levels` at the same stride: one paste rule, two mechanisms."""

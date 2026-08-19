@@ -416,8 +416,37 @@ class _WindowedLevel:
         if frame.ndim != 2:
             frame = frame.reshape(frame.shape[-2:])
         _bitdepth.depth().observe_array(frame)   # same full-resolution observation _fuse_levels makes
-        self._cache.put(key, frame)
+        if self._region_fits(frame):
+            self._cache.put(key, frame)
         return frame
+
+    def _region_fits(self, arr: np.ndarray) -> bool:
+        """Whether the whole region's worth of *arr*-sized entries fits the byte budget.
+
+        Caching a working set larger than the budget is a treadmill: measured on the 452-FOV
+        set (3.6 MB frames, 465 MB budget), every full frame cached evicted 3.5 older entries
+        — including the kilobyte subframes below — so a warm pan re-decoded everything anyway.
+        """
+        return arr.nbytes * max(1, len(self._fovs)) <= self._cache.capacity_bytes
+
+    def _sub(self, fov: int) -> np.ndarray:
+        """This rung's decimated view of one frame, cached at ITS OWN size.
+
+        The step-s subframe is s*s smaller than the camera frame, so at coarse steps every
+        FOV of a 452-FOV region fits the budget together and a warm pan re-pastes without
+        decoding anything — even where the full frames cannot be cached at all.
+        """
+        if self._step == 1:
+            return self._frame(fov)
+        key = (self._token, "fovsub", self._region, int(fov), self._channel, self._z, self._t,
+               self._step)
+        hit = self._cache.get(key)
+        if hit is not None:
+            return hit
+        sub = np.ascontiguousarray(self._frame(fov)[::self._step, ::self._step])
+        if self._region_fits(sub):
+            self._cache.put(key, sub)
+        return sub
 
     def _whole_plane(self) -> Optional[np.ndarray]:
         """This rung's WHOLE plane when one is already in hand — cached, or well-image-derived."""
@@ -460,7 +489,7 @@ class _WindowedLevel:
                 continue
             touched += 1
             try:
-                sub = self._frame(fov)[::step, ::step]
+                sub = self._sub(fov)
             except Exception as exc:             # noqa: BLE001 - a black hole, as in _fuse_levels
                 _log.warning("mosaic %s/%s z=%s step=%s: fov %s unreadable (%s) — a BLACK HOLE.",
                              self._region, self._channel, self._z, step, fov, exc)
