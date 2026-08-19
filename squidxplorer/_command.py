@@ -6,7 +6,7 @@ Commands are serialisable pydantic models dispatched by :class:`CommandBus` to a
 
 from __future__ import annotations
 
-from typing import ClassVar, Literal, Optional, Union
+from typing import ClassVar, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -217,9 +217,6 @@ class Metrics(Command):
 #: kind -> model. The registry a serialised command is parsed against.
 COMMANDS: dict = {c.kind: c for c in (OpenAcquisition, ListOperators, Describe, RunOperator,
                                       StopRun, Metrics)}
-
-AnyCommand = Union[OpenAcquisition, ListOperators, Describe, RunOperator, StopRun, Metrics]
-
 
 def parse_command(payload) -> Command:
     """Build a command from a dict (or pass one straight through). Raises ``KeyError``/``ValueError``."""
