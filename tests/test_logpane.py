@@ -230,14 +230,14 @@ def test_the_RAW_PREVIEW_captures_print_into_the_log(tmp_path):
     pytest.importorskip("qtpy")
     from qtpy.QtWidgets import QApplication
 
-    import squidxplorer._viewer as V
+    import squidxplorer._workers as W
 
     QApplication.instance() or QApplication([])
     (tmp_path / "acq").mkdir()
     meta = {"channels": [{"name": "c0"}], "dtype": "uint16", "z_levels": [0, 1, 2],
             "regions": ["A1"], "fovs_per_region": {"A1": [0]}, "frame_shape": (8, 8),
             "pixel_size_um": 1.0, "fov_positions_um": {}}
-    worker = V._PreviewWorker(_PrintingReader(tmp_path / "acq"), meta,
+    worker = W._PreviewWorker(_PrintingReader(tmp_path / "acq"), meta,
                               {"A1": {"rc": (0, 0)}}, ["A1"], cache=None)
 
     seen = _run_worker_capturing(worker)
@@ -250,14 +250,14 @@ def test_the_capture_is_handed_BACK_after_a_preview_too(tmp_path):
     pytest.importorskip("qtpy")
     from qtpy.QtWidgets import QApplication
 
-    import squidxplorer._viewer as V
+    import squidxplorer._workers as W
 
     QApplication.instance() or QApplication([])
     (tmp_path / "acq").mkdir()
     meta = {"channels": [{"name": "c0"}], "dtype": "uint16", "z_levels": [0],
             "regions": ["A1"], "fovs_per_region": {"A1": [0]}, "frame_shape": (8, 8),
             "pixel_size_um": 1.0, "fov_positions_um": {}}
-    worker = V._PreviewWorker(_PrintingReader(tmp_path / "acq"), meta,
+    worker = W._PreviewWorker(_PrintingReader(tmp_path / "acq"), meta,
                               {"A1": {"rc": (0, 0)}}, ["A1"], cache=None)
     before = sys.stdout
     worker.run()

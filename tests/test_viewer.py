@@ -29,6 +29,7 @@ from qtpy.QtWidgets import (  # noqa: E402
 )
 
 from squidxplorer import _viewer as V  # noqa: E402
+from squidxplorer import _workers as W  # noqa: E402
 from squidxplorer._napari_view import MosaicLayers as _MosaicLayers  # noqa: E402
 
 from .conftest import CH_IN_YAML  # noqa: E402
@@ -1133,7 +1134,7 @@ def test_a_preview_that_cannot_read_names_the_failure_instead_of_freezing_the_pl
     meta = {"channels": [{"name": "c0"}], "dtype": "uint16", "z_levels": [0, 1, 2],
             "fovs_per_region": {"A1": [0]}, "frame_shape": (4, 4),
             "fov_positions_um": {}, "pixel_size_um": 1.0}
-    w = V._PreviewWorker(_BoomReader(), meta, {"A1": {"rc": (0, 0)}}, ["A1"])
+    w = W._PreviewWorker(_BoomReader(), meta, {"A1": {"rc": (0, 0)}}, ["A1"])
     failures, ended = [], []
     w.failed.connect(failures.append)
     w.streamEnded.connect(lambda: ended.append(True))
@@ -3415,14 +3416,14 @@ def test_ima253_preview_plan_reads_every_fov_of_a_region_but_only_one_of_a_singl
 
     meta = open_reader(str(real_dataset)).metadata
     idx = {r: {"rc": (i, 0), "idx": i} for i, r in enumerate(meta["regions"])}
-    plan = V._PreviewWorker(None, meta, idx, list(meta["regions"]))._plan()
+    plan = W._PreviewWorker(None, meta, idx, list(meta["regions"]))._plan()
     assert len(plan) == 55, f"the preview reads {len(plan)} planes/channel, not 55"
     assert all(box is not None for _r, _f, box in plan)
 
     root, _ = squid_dataset                       # 2 FOVs/region, but specks apart on this fixture
     m2 = open_reader(str(root)).metadata
     idx2 = {r: {"rc": (i, 0), "idx": i} for i, r in enumerate(m2["regions"])}
-    plan2 = V._PreviewWorker(None, m2, idx2, list(m2["regions"]))._plan()
+    plan2 = W._PreviewWorker(None, m2, idx2, list(m2["regions"]))._plan()
     assert all(box is None for _r, _f, box in plan2), \
         "sub-_MIN_PREVIEW_BOX_PX fields are specks: reading one plane each is cost with no picture"
 
@@ -3573,7 +3574,7 @@ def _pyr_meta(nz=4, n=16, frame=(256, 256), px=1.0):
 def test_the_mosaic_worker_emits_a_pyramid_not_a_single_resolution_stack(qapp):
     meta = _pyr_meta()
     got, problems = [], []
-    w = V._MosaicWorker(_PyrReader(), meta, "A1", ["488", "561"])
+    w = W._MosaicWorker(_PyrReader(), meta, "A1", ["488", "561"])
     w.ready.connect(lambda r, ch, data, bbox, win: got.append((ch, data)))
     w.problem.connect(problems.append)         # or a failure reads as a silent empty list
     w.run()                                    # synchronous; no thread, no event loop
@@ -3594,7 +3595,7 @@ def test_the_mosaic_worker_derives_the_contrast_seed_ITSELF(qapp):
 
     meta = _pyr_meta()
     got, problems = [], []
-    w = V._MosaicWorker(_PyrReader(), meta, "A1", ["488", "561"])
+    w = W._MosaicWorker(_PyrReader(), meta, "A1", ["488", "561"])
     w.ready.connect(lambda r, ch, data, bbox, win: got.append((ch, data, win)))
     w.problem.connect(problems.append)
     w.run()
@@ -3622,7 +3623,7 @@ def test_the_mosaic_worker_reads_exactly_the_coarsest_level_at_one_z(qapp):
     n_fovs, n_channels, nz = len(meta["fovs_per_region"]["A1"]), 2, meta["n_z"]
     problems = []
     MS._PLANE_CACHE.clear()
-    w = V._MosaicWorker(_Counting(), meta, "A1", ["488", "561"])
+    w = W._MosaicWorker(_Counting(), meta, "A1", ["488", "561"])
     w.ready.connect(lambda *a: None)
     w.problem.connect(problems.append)
     w.run()
@@ -4365,7 +4366,7 @@ def _expected_levels():
 
 def test_the_raw_preview_downsamples_every_channel_on_its_own(qapp, tmp_path):
     meta = _downsample_meta()
-    worker = V._PreviewWorker(_PerChannelReader(tmp_path), meta,
+    worker = W._PreviewWorker(_PerChannelReader(tmp_path), meta,
                               {"A1": {"rc": (0, 0), "well_id": "A1", "idx": 0}}, ["A1"], cache=None)
     got = []
     worker.tileReady.connect(lambda *a: got.append(a))

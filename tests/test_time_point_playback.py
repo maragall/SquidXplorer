@@ -436,20 +436,20 @@ def test_a_region_change_never_hands_napari_a_layer_of_another_shape(
     multi_time_point_dataset, napari_pane_stub, qapp
 ):
     """Walk four region shapes through the REAL `MosaicLayers`. None of them may raise."""
-    from squidxplorer import _viewer as V
+    from squidxplorer import _workers as W
     from squidxplorer._region_viewer import ViewerManager
 
     root, _planes = multi_time_point_dataset
     reader = open_reader(root)
     mgr = ViewerManager(reader, reader.metadata)
-    real_worker = V._MosaicWorker
+    real_worker = W._MosaicWorker
     try:
         win = mgr.open([TIME_SERIES_REGION])
         pane = napari_pane_stub[0]
         assert _pump(qapp, lambda: bool(len(pane._viewer.layers))), "the window never loaded"
         pane.mosaic = _real_mosaic()                 # REAL napari from here on
 
-        V._MosaicWorker = _shape_worker_class(_SHAPE_WALK)
+        W._MosaicWorker = _shape_worker_class(_SHAPE_WALK)
         failures = _catch_layer_failures(win)
         regions = list(_SHAPE_WALK)
         win._cursor.set_order(regions)
@@ -468,7 +468,7 @@ def test_a_region_change_never_hands_napari_a_layer_of_another_shape(
                 f"{region}: the layer kept the previous region's shape")
             previous = region
     finally:
-        V._MosaicWorker = real_worker
+        W._MosaicWorker = real_worker
         mgr._mem_timer.stop()
         mgr.close_all()
         for _ in range(20):
@@ -480,13 +480,13 @@ def test_a_timepoint_change_keeps_the_very_same_layer_object(
 ):
     """The same region at another timepoint must REUSE the layer OBJECT, not rebuild it (contrast,
     visibility and colormap all subscribe to the layer object and break if it is destroyed)."""
-    from squidxplorer import _viewer as V
+    from squidxplorer import _workers as W
     from squidxplorer._region_viewer import ViewerManager
 
     root, _planes = multi_time_point_dataset
     reader = open_reader(root)
     mgr = ViewerManager(reader, reader.metadata)
-    real_worker = V._MosaicWorker
+    real_worker = W._MosaicWorker
     try:
         win = mgr.open([TIME_SERIES_REGION])
         pane = napari_pane_stub[0]
@@ -494,7 +494,7 @@ def test_a_timepoint_change_keeps_the_very_same_layer_object(
         pane.mosaic = _real_mosaic()
 
         same_shape = {TIME_SERIES_REGION: [np.zeros((2, 32, 32), np.uint16)]}
-        V._MosaicWorker = _shape_worker_class(same_shape)
+        W._MosaicWorker = _shape_worker_class(same_shape)
         win._load_mosaic(TIME_SERIES_REGION)
         first = pane.mosaic.find("raw", TIME_SERIES_CHANNELS[0])
         assert first is not None
@@ -505,7 +505,7 @@ def test_a_timepoint_change_keeps_the_very_same_layer_object(
             assert pane.mosaic.find("raw", TIME_SERIES_CHANNELS[0]) is first, (
                 f"timepoint {time_point} destroyed and rebuilt the layer instead of reusing it")
     finally:
-        V._MosaicWorker = real_worker
+        W._MosaicWorker = real_worker
         mgr._mem_timer.stop()
         mgr.close_all()
         for _ in range(20):
