@@ -5,8 +5,10 @@ channel was RGB live. A channel listed there whose files are 2-D on disk was col
 gray (``MULTIPOINT_BF_SAVING_OPTION`` = RGB2GRAY / Green Channel Only). The recorded chroma
 survives only in the colored mosaic PNG, so the stain's absorbance vector is measured from it
 once (Beer-Lambert, OD ratios to green) and becomes the channel's display LUT:
-``t -> (t^kR, t, t^kB)``. A colormap, never synthesized pixels: the files are untouched and
-the look is exactly the single-stain physics.
+``t -> (t^kR(od), t, t^kB(od))``, with (k_R, k_B) fit per green-OD quantile bin so the hue can
+follow density (Masson's trichrome: dense collagen is blue where light cytoplasm is red; one
+global vector reads as H&E). A colormap, never synthesized pixels: the files are untouched and
+the look is exactly the stain physics the PNG recorded.
 """
 
 from __future__ import annotations
@@ -24,6 +26,10 @@ _MIN_STAINED_PX = 5_000
 #: Green optical density above which a pixel counts as stained (background is ~0).
 _OD_FLOOR = 0.08
 _LUT_N = 256
+#: Quantile bins over green OD (quantile, not linear: density histograms are heavy-tailed).
+_N_OD_BINS = 16
+#: A bin below this count is dropped; its median is noise, not a hue.
+_MIN_BIN_PX = 200
 
 
 def _norm(name: str) -> str:
@@ -49,8 +55,41 @@ def _mosaic_rgb_pngs(root: Path) -> list[tuple[str, Path]]:
     return out
 
 
+def _smooth3(v) -> np.ndarray:
+    """3-tap moving average with edge replication; kills hue banding between bins."""
+    v = np.asarray(v, dtype=np.float64)
+    if v.size < 3:
+        return v
+    p = np.concatenate([v[:1], v, v[-1:]])
+    return (p[:-2] + p[1:-1] + p[2:]) / 3.0
+
+
+def _binned_stain_ks(od_g, ratio_r, ratio_b) -> tuple:
+    """``(bin_center_od, k_R, k_B)`` arrays: median OD ratios per green-OD quantile bin."""
+    edges = np.unique(np.quantile(od_g, np.linspace(0.0, 1.0, _N_OD_BINS + 1)))
+    idx = np.clip(np.searchsorted(edges, od_g, side="right") - 1, 0, max(len(edges) - 2, 0))
+    centers, k_r, k_b = [], [], []
+    for b in range(max(len(edges) - 1, 0)):
+        sel = idx == b
+        if int(sel.sum()) < _MIN_BIN_PX:
+            continue
+        centers.append(float(np.median(od_g[sel])))
+        k_r.append(float(np.median(ratio_r[sel])))
+        k_b.append(float(np.median(ratio_b[sel])))
+    if not centers:                             # too sparse to bin: the global fit is the answer
+        centers = [float(np.median(od_g))]
+        k_r = [float(np.median(ratio_r))]
+        k_b = [float(np.median(ratio_b))]
+    return np.asarray(centers), _smooth3(k_r), _smooth3(k_b)
+
+
 def stain_lut(png_path: Path) -> Optional[tuple]:
-    """A 256-stop RGB LUT from the overview's measured stain vector, or None when unfittable."""
+    """A 256-stop RGB LUT from the overview's measured stain vector, or None when unfittable.
+
+    Each stop's hue takes the (k_R, k_B) of its own density: the stop's OD is ``-ln(t)``,
+    interpolated between bin centers and clamped at the ends. Constant-ratio data (one stain)
+    reduces to the old global fit; density-varying data (trichrome) keeps its hue curve.
+    """
     from PIL import Image
 
     png = np.asarray(Image.open(png_path)).astype(np.float64)
@@ -63,10 +102,14 @@ def stain_lut(png_path: Path) -> Optional[tuple]:
     mask = od[..., 1] > _OD_FLOOR
     if int(mask.sum()) < _MIN_STAINED_PX:
         return None
-    k_r = float(np.median(od[..., 0][mask] / od[..., 1][mask]))
-    k_b = float(np.median(od[..., 2][mask] / od[..., 1][mask]))
+    od_g = od[..., 1][mask]
+    centers, k_r, k_b = _binned_stain_ks(
+        od_g, od[..., 0][mask] / od_g, od[..., 2][mask] / od_g)
     t = np.linspace(0.0, 1.0, _LUT_N)
-    lut = np.stack([t ** k_r, t, t ** k_b], axis=1)
+    od_t = -np.log(np.clip(t, 1e-3, None))
+    kr_t = np.maximum(np.interp(od_t, centers, k_r), 1e-6)   # k floor keeps t=0 black
+    kb_t = np.maximum(np.interp(od_t, centers, k_b), 1e-6)
+    lut = np.stack([t ** kr_t, t, t ** kb_t], axis=1)        # t=1 is exactly (1, 1, 1)
     return tuple(tuple(float(v) for v in row) for row in lut)
 
 
