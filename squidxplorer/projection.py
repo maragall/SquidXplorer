@@ -404,9 +404,3 @@ def scope_wells(metadata: dict, n_fovs: Optional[int], regions) -> "dict[str, li
     return {r: wells[r] for r in keep if r in wells}
 
 
-def resolve_n_fovs(metadata: dict, n_fovs: Optional[int]) -> int:
-    """Concrete FOV-per-well count for callers that need an int, resolving ``None`` to the max."""
-    if n_fovs is not None:
-        return int(n_fovs)
-    per_region = metadata["fovs_per_region"]
-    return max((len(per_region[r]) for r in metadata["regions"]), default=0)

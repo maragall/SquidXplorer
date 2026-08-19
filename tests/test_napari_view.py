@@ -18,7 +18,6 @@ from squidxplorer._napari_view import (
     NapariBindingError,
     REQUIRED_NAPARI_BINDINGS,
     key_of,
-    napari_enabled,
     resolve_viewer,
     scale_translate_from_bbox_um,
     verify_napari_bindings,
@@ -44,7 +43,6 @@ def _img(seed=0, shape=(32, 32)):
 def test_napari_is_the_default_viewer_now_that_the_gate_passed():
     assert resolve_viewer({}) == "napari"
     assert resolve_viewer({"SQUIDXPLORER_VIEWER": ""}) == "napari"
-    assert napari_enabled({}) is True
 
 
 def test_a_retired_ndviewer_name_still_builds_napari_and_says_so(caplog):
@@ -57,7 +55,6 @@ def test_a_retired_ndviewer_name_still_builds_napari_and_says_so(caplog):
             caplog.clear()
             assert resolve_viewer({"SQUIDXPLORER_VIEWER": spelling}) == "napari", spelling
         assert "deleted" in caplog.text, f"{spelling!r} was retired in silence"
-    assert napari_enabled({"SQUIDXPLORER_VIEWER": "ndv"}) is True
 
 
 def test_a_typo_does_not_silently_cost_you_the_viewer():

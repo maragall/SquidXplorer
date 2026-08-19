@@ -480,11 +480,6 @@ def decode_code(code: int) -> "tuple[int, int, int]":
     return (code // _ROW_MUL, (code // _COL_MUL) % 100, code % _ROI_MAX)
 
 
-def format_code(code: int) -> str:
-    """Human form ``"RR CC OOOO"`` (Row Column ROI)."""
-    row, col, roi = decode_code(code)
-    return f"{row:02d} {col:02d} {roi:04d}"
-
 
 def cache_scope(cell_id: str, roi_index: "Optional[int]" = None) -> str:
     """The flat-cache scope string: the integer id for a real well, else the raw region key."""

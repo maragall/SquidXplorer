@@ -46,11 +46,6 @@ def resolve_viewer(env: Optional[dict] = None) -> str:
     return _NAPARI
 
 
-def napari_enabled(env: Optional[dict] = None) -> bool:
-    """True when the napari view is the selected viewer, which is now always."""
-    return resolve_viewer(env) == _NAPARI
-
-
 # --------------------------------------------------------------------------------------
 # Binding assertions: a napari upgrade that moves a symbol fails loudly at construction.
 # --------------------------------------------------------------------------------------
