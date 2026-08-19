@@ -6,7 +6,7 @@ completely. That's just adding complexity to the code for no reason." What stays
 everything that is NOT the clipboard:
 
 * :func:`per_channel_luts` — read a window's per-channel look off its own napari layers (the
-  loupe, the movie export, Minerva's on-screen-LUTs hop and settings snapshots all read it);
+  loupe, the movie export and settings snapshots all read it);
 * :func:`apply_luts` — put a stored look on a window's layers (child-window LUT inheritance);
 * :func:`match_raw_contrast` — raw -> operator layers WITHIN one window.
 
