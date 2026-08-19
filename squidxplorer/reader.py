@@ -10,6 +10,7 @@ from __future__ import annotations
 import bisect
 import contextlib
 import json
+import logging
 import re
 import threading
 import warnings
@@ -23,6 +24,8 @@ from squidxplorer._acquisition import Acquisition, load_acquisition_metadata
 from squidxplorer._channels import excitation_nm, fallback_color, load_channel_yaml, resolve_channels
 from squidxplorer.contract import check_plate_contract
 from squidxplorer.contract.reader import SquidAcquisitionReader  # noqa: F401 (re-export)
+
+_log = logging.getLogger(__name__)
 
 # region has no underscore; fov and z are ints; channel is the remainder (may contain _ and -).
 _STEM_RE = re.compile(r"^(?P<region>[^_]+)_(?P<fov>\d+)_(?P<z>\d+)_(?P<channel>.+)$")
@@ -615,6 +618,8 @@ class SquidReader:
         self._meta: Optional[dict] = None
         #: Filename channels whose planes are (Y, X, 3) color; set by ``metadata``.
         self._rgb_bases: set[str] = set()
+        #: {file_channel: ChromaSource} for color-recorded-gray channels; set by ``metadata``.
+        self._chroma: Optional[dict] = None
         #: ``(folder, entries)`` from a listing the caller already paid for; consumed once.
         self._scanned = _scanned
 
@@ -754,22 +759,31 @@ class SquidReader:
         self._rgb_bases = rgb_bases
 
         resolved = resolve_channels(sorted(channels), load_channel_yaml(self._path))
-        if rgb_bases:
-            resolved = _expand_rgb_channels(resolved, rgb_bases)
-        # A channel the mosaic_view yaml calls RGB whose files are 2-D was color recorded gray;
-        # it gets the stain colormap measured from the overview PNG (a look, never new pixels).
-        from squidxplorer._stain import attach_stain_luts
-
-        attach_stain_luts(self._path, resolved, rgb_bases)
-
         fovs_per_region = {r: sorted(fovs[r]) for r in regions}
+        # A padded grid is the PLAN's grid, so its positions must come from the PLAN's csv:
+        # the executed one only covers the written FOVs and would fail the cross-check.
+        fov_positions = _fov_positions_um_or_empty(self._path, fovs_per_region,
+                                                   prefer_planned=bool(padded))
+        # A channel the mosaic_view yaml calls RGB whose files are 2-D was color recorded gray.
+        # With the overview PNG's geometry + stage positions it expands into virtual (R)/(G)/(B)
+        # chroma components (real local color, see _stain.ChromaSource); without them it gets
+        # the stain colormap measured from the PNG (a look, never new pixels).
+        from squidxplorer._stain import attach_stain_luts, chroma_sources
+
+        chroma = (chroma_sources(self._path, resolved, rgb_bases)
+                  if fov_positions and acq.get("pixel_size_um") else {})
+        self._chroma = chroma
+        if rgb_bases or chroma:
+            resolved = _expand_rgb_channels(resolved, rgb_bases | set(chroma))
+        attach_stain_luts(self._path, resolved, rgb_bases | set(chroma))
+        if chroma:
+            self._log_chroma_coverage(chroma, index, fov_positions,
+                                      tuple(sample.shape[:2]), float(acq["pixel_size_um"]))
+
         self._meta = _assemble_metadata(
             regions=regions,
             fovs_per_region=fovs_per_region,
-            # A padded grid is the PLAN's grid, so its positions must come from the PLAN's csv:
-            # the executed one only covers the written FOVs and would fail the cross-check.
-            fov_positions_um=_fov_positions_um_or_empty(self._path, fovs_per_region,
-                                                        prefer_planned=bool(padded)),
+            fov_positions_um=fov_positions,
             channels=resolved,
             n_z=n_z,
             z_levels=z_sorted,
@@ -801,6 +815,26 @@ class SquidReader:
         if zeros is None:
             zeros = self._zeros_plane = np.zeros(meta["frame_shape"], dtype=meta["dtype"])
         return zeros
+
+    @staticmethod
+    def _log_chroma_coverage(chroma: dict, index: dict, fov_positions: dict,
+                             frame_shape: tuple, pixel_size_um: float) -> None:
+        """ONE log line per chroma source naming how many written FOVs it cannot color.
+
+        Counted over the FOVs with FILES (the index), never padded slots — a padded slot reads
+        zeros and needs no chroma. Uncovered FOVs render neutral gray, not wrong color.
+        """
+        real = {(r, f) for (r, f, _z, _c) in index}
+        centers = {k: fov_positions[k] for k in real if k in fov_positions}
+        unplaced = len(real) - len(centers)
+        for name, src in chroma.items():
+            outside, partial, _n = src.coverage(centers, frame_shape, pixel_size_um)
+            lacking = outside + unplaced
+            if lacking or partial:
+                _log.info(
+                    "chroma for channel %s (overview %s): %d of %d FOV(s) lack coverage and "
+                    "render neutral gray%s.", name, src.png_path.name, lacking, len(real),
+                    f"; {partial} partially covered" if partial else "")
 
     def _split_rgb_channel(self, channel: str):
         """``(file_channel, component_index)`` for a virtual R/G/B channel, else ``(channel, None)``.
@@ -858,12 +892,37 @@ class SquidReader:
         path = self._resolve_file(time_folders[time_point], key, index[key])
         arr = _validate_plane(_decode_plane_file(path), path, allow_rgb=component is not None)
         if component is not None:
-            if arr.ndim != 3:
-                raise ValueError(
-                    f"{path.name} was expected to be a color plane (channel {channel!r}) but "
-                    f"decoded with shape {arr.shape}; the acquisition is inconsistent.")
-            arr = np.ascontiguousarray(arr[..., component])
+            if arr.ndim == 3:
+                arr = np.ascontiguousarray(arr[..., component])
+            else:
+                # A 2-D file behind a component is a color-recorded-gray channel: its chroma
+                # comes back from the overview PNG (or it is an inconsistent acquisition).
+                arr = self._chroma_component(arr, str(region), int(fov), component,
+                                             str(channel), path)
         return arr
+
+    def _chroma_component(self, plane, region: str, fov: int, component: int, channel: str,
+                          path: Path):
+        """One virtual chroma component of a color-recorded-gray plane.
+
+        (G) is the file's own pixels untouched; (R)/(B) scale them by the overview PNG's local
+        ratio over this FOV (neutral 1.0 where the PNG does not cover it — counted once in the
+        coverage log). Forces ``metadata`` (positions + chroma sources live there); the plain
+        read paths stay lazy.
+        """
+        meta = self.metadata
+        src = (self._chroma or {}).get(self._split_rgb_channel(channel)[0])
+        if src is None:
+            raise ValueError(
+                f"{path.name} was expected to be a color plane (channel {channel!r}) but "
+                f"decoded with shape {plane.shape}; the acquisition is inconsistent.")
+        if component == 1:
+            return plane
+        pos = meta["fov_positions_um"].get((region, fov))
+        if pos is None:
+            return plane                # unplaced FOV: neutral chroma, said in the coverage log
+        return src.component_plane(plane, component, region, fov, float(pos[0]), float(pos[1]),
+                                   float(meta["pixel_size_um"]))
 
     def plane_path(self, region, fov, channel, z_level, time_point=0) -> Path:
         """Path to one raw plane's file on disk (no decode); an R/G/B channel names its base file."""

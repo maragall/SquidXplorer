@@ -210,3 +210,157 @@ def test_colormap_without_a_resolved_color_still_uses_the_name_palette():
     assert got == pytest.approx(want)
     # an unrecognised channel with no resolved color stays gray, never a guess
     assert _colormap_for("BF_LED_matrix_full (R)", None) == "gray"
+
+
+# --- Virtual chroma components (color-recorded-gray + overview geometry) -----------------------
+
+_ACQ_YAML_2UM = """\
+objective:
+  pixel_size_um: 2.0
+z_stack:
+  nz: 1
+time_series:
+  nt: 1
+"""
+
+
+def _chroma_sidecar(root, png, top_left_mm_yx, resolution_um=2.0):
+    """A mosaic_view overview WITH geometry: what makes chroma expansion possible."""
+    mv = root / "0" / "mosaic_view"
+    mv.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(png).save(mv / "mosaic_2um_x.png")
+    h, w = png.shape[:2]
+    y0, x0 = top_left_mm_yx
+    res_mm = resolution_um / 1000.0
+    (mv / "mosaic_2um.yaml").write_text(
+        f"resolution_um: {resolution_um}\n"
+        "full:\n"
+        f"  top_left_mm:\n  - {y0}\n  - {x0}\n"
+        f"  extents_mm:\n  - {y0}\n  - {y0 + h * res_mm}\n  - {x0}\n  - {x0 + w * res_mm}\n"
+        "rgb_channel_names:\n- 20x BF LED matrix full\n"
+        "rgb_view_files:\n- mosaic_2um_x.png\n")
+
+
+def _chroma_acq(tmp_path, fov_centers_mm, planes=None):
+    """A gray acquisition at 2 um/px (1:1 with the overview) with stage positions."""
+    root = tmp_path / "acq"
+    lines = ["region,x (mm),y (mm),z (mm)"]
+    for fov, (x_mm, y_mm) in enumerate(fov_centers_mm):
+        plane = _gray(fov) if planes is None else planes[fov]
+        _write(root / "0", f"manual_{fov}_0_BF_LED_matrix_full.bmp", plane)
+        lines.append(f"manual,{x_mm},{y_mm},")
+    (root / "coordinates.csv").write_text("\n".join(lines) + "\n")
+    (root / "0" / "coordinates.csv").write_text("\n".join(lines) + "\n")
+    (root / "acquisition.yaml").write_text(_ACQ_YAML_2UM)
+    (root / "acquisition_channels.yaml").write_text(_CH_YAML)
+    return root
+
+
+def _flat_png(shape, r, g, b):
+    png = np.zeros(shape + (3,), dtype=np.uint8)
+    png[..., 0], png[..., 1], png[..., 2] = r, g, b
+    return png
+
+
+def test_chroma_components_reconstruct_the_overviews_known_ratios(tmp_path):
+    """With geometry + positions, a color-recorded-gray channel expands into (R)/(G)/(B):
+    (G) is the file's own plane, (R)/(B) scale it by the PNG's local R/G and B/G ratios."""
+    plane = np.full((16, 16), 80, dtype=np.uint8)
+    # PNG 40x60 at 2 um from (0, 0) mm; FOV window is 16x16 at rows 10..26, cols 20..36.
+    png = _flat_png((40, 60), r=150, g=100, b=50)                # ratios 1.5 and 0.5
+    root = _chroma_acq(tmp_path, [(0.056, 0.036)], planes=[plane])
+    _chroma_sidecar(root, png, top_left_mm_yx=(0.0, 0.0))
+    r = open_reader(root)
+    names = [c["name"] for c in r.metadata["channels"]]
+    assert names == [f"BF_LED_matrix_full ({x})" for x in "RGB"]
+    assert np.array_equal(r.read("manual", 0, names[1], 0), plane)          # G untouched
+    assert np.array_equal(r.read("manual", 0, names[0], 0),
+                          np.full((16, 16), 120, dtype=np.uint8))           # 80 * 1.5
+    assert np.array_equal(r.read("manual", 0, names[2], 0),
+                          np.full((16, 16), 40, dtype=np.uint8))            # 80 * 0.5
+    assert r.is_rgb_component(names[0]) and not r.is_rgb_component("BF_LED_matrix_full")
+
+
+def test_chroma_is_neutral_outside_coverage_and_logged_once(tmp_path, caplog):
+    """A FOV the PNG does not cover reads neutral gray (ratio 1.0) — R equals the file's own
+    plane — and the shortfall is said in ONE log line naming how many FOVs lack chroma."""
+    import logging
+
+    plane = np.full((16, 16), 80, dtype=np.uint8)
+    png = _flat_png((40, 60), r=150, g=100, b=50)
+    # FOV 0 inside the PNG, FOV 1 a long way outside it.
+    root = _chroma_acq(tmp_path, [(0.056, 0.036), (9.0, 9.0)], planes=[plane, plane])
+    _chroma_sidecar(root, png, top_left_mm_yx=(0.0, 0.0))
+    r = open_reader(root)
+    with caplog.at_level(logging.INFO, logger="squidxplorer.reader"):
+        _ = r.metadata
+    assert np.array_equal(r.read("manual", 1, "BF_LED_matrix_full (R)", 0), plane)
+    assert np.array_equal(r.read("manual", 0, "BF_LED_matrix_full (R)", 0),
+                          np.full((16, 16), 120, dtype=np.uint8))
+    lines = [m for m in caplog.messages if "lack coverage" in m]
+    assert len(lines) == 1 and "1 of 2 FOV(s)" in lines[0]
+
+
+def test_chroma_partial_coverage_is_neutral_only_where_uncovered(tmp_path):
+    """A window half off the PNG keeps real chroma on the covered half, neutral on the rest."""
+    plane = np.full((16, 16), 80, dtype=np.uint8)
+    png = _flat_png((40, 60), r=150, g=100, b=50)
+    # Center at col 4 of the PNG: cols -4..12, so the left half of the window is off the PNG.
+    root = _chroma_acq(tmp_path, [(0.008, 0.036)], planes=[plane])
+    _chroma_sidecar(root, png, top_left_mm_yx=(0.0, 0.0))
+    r = open_reader(root)
+    out = r.read("manual", 0, "BF_LED_matrix_full (R)", 0)
+    assert np.array_equal(out[:, -4:], np.full((16, 4), 120, dtype=np.uint8))   # covered edge
+    assert np.array_equal(out[:, :2], plane[:, :2])                             # off the PNG
+
+
+def test_a_chroma_active_channel_takes_no_stain_lut(tmp_path):
+    """Where chroma expansion is active the components carry real color; a display LUT on top
+    would double-tint, so none is attached. (The LUT stays the geometry-less fallback.)"""
+    t = np.tile(np.linspace(0.2, 1.0, 60), (40, 1))
+    png = np.stack([255 * t ** 0.3, 255 * t, 255 * t ** 0.6], axis=-1).astype(np.uint8)
+    root = _chroma_acq(tmp_path, [(0.056, 0.036)])
+    _chroma_sidecar(root, png, top_left_mm_yx=(0.0, 0.0))
+    chs = open_reader(root).metadata["channels"]
+    assert [c["name"] for c in chs] == [f"BF_LED_matrix_full ({x})" for x in "RGB"]
+    assert all(c.get("display_lut") is None for c in chs)
+
+
+def test_chroma_needs_geometry_else_the_lut_fallback_stands(tmp_path):
+    """The same overview WITHOUT resolution_um/top_left_mm cannot place a FOV: no expansion,
+    and the stain LUT is attached exactly as before."""
+    root = _chroma_acq(tmp_path, [(0.056, 0.036)])
+    _mosaic_sidecar(root)                        # geometry-less yaml, fittable stain PNG
+    chs = open_reader(root).metadata["channels"]
+    assert [c["name"] for c in chs] == ["BF_LED_matrix_full"]
+    assert chs[0].get("display_lut") is not None
+
+
+def test_a_stain_lut_channel_seeds_the_zero_to_white_window(tmp_path):
+    """Fix 2: a channel displayed through the stain LUT windows [0, white] — white being the
+    LUT fit's own percentile — because the LUT's t is transmittance; the percentile auto-window
+    would crush dense tissue toward black."""
+    root = tmp_path / "acq"
+    _write(root / "0", "manual_0_0_BF_LED_matrix_full.bmp", _gray(7))
+    _sidecars(root)
+    _mosaic_sidecar(root)
+    r = open_reader(root)
+    meta = r.metadata
+    assert meta["channels"][0].get("display_lut") is not None
+
+    from squidxplorer._stain import STAIN_WHITE_PERCENTILE
+    from squidxplorer._workers import _MosaicWorker
+
+    w = _MosaicWorker.__new__(_MosaicWorker)
+    w._reader, w._meta = r, meta
+    plane = _gray(7).astype(np.uint16) * 3
+    lo, hi = w._seed_window("BF_LED_matrix_full", [plane], lambda *a: (9.0, 10.0))
+    assert lo == 0.0 and hi == pytest.approx(float(np.percentile(plane, STAIN_WHITE_PERCENTILE)))
+    # a LUT-less channel keeps the percentile auto-window
+    root2 = tmp_path / "acq2"
+    _write(root2 / "0", "manual_0_0_BF_LED_matrix_full.bmp", _gray(7))
+    _sidecars(root2)
+    r2 = open_reader(root2)
+    w2 = _MosaicWorker.__new__(_MosaicWorker)
+    w2._reader, w2._meta = r2, r2.metadata
+    assert w2._seed_window("BF_LED_matrix_full", [plane], lambda *a: (9.0, 10.0)) == (9.0, 10.0)
