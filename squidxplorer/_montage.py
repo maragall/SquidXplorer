@@ -248,7 +248,11 @@ def _composite_band(store, colors, windows, mask, lut_arrs, out, rows: slice) ->
         if lut is None:
             gray[ch] = norm
         else:                                       # per-pixel colormap, not a tint
-            rgb += lut[(norm * (lut.shape[0] - 1)).astype(np.intp)]
+            # nan_to_num + clip: a degenerate window (lo == hi) yields NaN norms, and a NaN
+            # cast to intp is an out-of-range index.
+            idx = np.clip(np.nan_to_num(norm) * (lut.shape[0] - 1),
+                          0, lut.shape[0] - 1).astype(np.intp)
+            rgb += lut[idx]
     rgb += gray.T @ colors                          # (n, 3) float32
     np.clip(rgb, 0.0, 1.0, out=rgb)
     rgb *= 255.0
