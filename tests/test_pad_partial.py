@@ -64,6 +64,21 @@ def test_an_unwritten_slot_reads_as_zeros_and_a_real_one_as_itself(tmp_path):
         assert plane.shape == (8, 8) and plane.dtype == np.uint16 and plane.max() == 0, args
 
 
+def test_the_reader_declares_what_padding_invented(tmp_path):
+    """``padded_slots`` names the invented slots — what the well-image backfill stamps."""
+    root = _partial(tmp_path)
+    r = open_reader(root, pad_partial=True)
+    with pytest.warns(UserWarning):
+        slots = r.padded_slots
+    assert dict(slots.fovs) == {"B2": frozenset({1}), "B3": frozenset({0})}
+    assert slots.z_levels == frozenset({1, 2})
+    assert slots.time_points == frozenset({1})
+    assert bool(slots), "a padded open must read as padded"
+
+    unpadded = open_reader(root)
+    assert not unpadded.padded_slots, "an unpadded open invents nothing"
+
+
 def test_outside_the_plan_still_refuses(tmp_path):
     r = open_reader(_partial(tmp_path), pad_partial=True)
     with pytest.warns(UserWarning):

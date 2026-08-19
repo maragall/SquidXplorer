@@ -15,7 +15,7 @@ import re
 import threading
 import warnings
 from pathlib import Path
-from typing import Optional
+from typing import NamedTuple, Optional
 
 import numpy as np
 import tifffile
@@ -395,30 +395,56 @@ def _planned_grid(root) -> "dict[str, int]":
         return {}
 
 
+class PaddedSlots(NamedTuple):
+    """What padding INVENTED: the planned-but-unwritten slots a padded reader serves as zeros.
+
+    Falsy when nothing was padded (an unpadded or complete open), so ``bool(padded)`` keeps
+    meaning "was anything padded". The well-image backfill stamps these into the files it
+    writes so a later open can tell a pad-derived black mosaic from Squid's own.
+    """
+
+    fovs: dict            # {region: frozenset(fov ids with no data on disk)}
+    z_levels: frozenset   # z indexes added to reach the declared Nz
+    time_points: frozenset  # t indexes added to reach the declared Nt
+
+    def __bool__(self) -> bool:
+        return bool(self.fovs or self.z_levels or self.time_points)
+
+
+NOTHING_PADDED = PaddedSlots({}, frozenset(), frozenset())
+
+
 def _pad_to_plan(fovs: dict, z_levels: list, n_t: int, *, planned: dict, acq: dict,
                  source: str) -> tuple:
     """Pad a stopped run's grid to the acquisition PLAN, shared by every padding reader.
 
     ``fovs`` (``{region: set}``) grows to ``planned``'s per-region counts; z levels / n_t grow
-    to the declared Nz/Nt when larger. Returns ``(fovs, z_levels, n_t, was_padded)`` — new
-    objects, inputs untouched — and warns what was padded (*source* names the format). No plan
-    and nothing declared is a named no-op: never a guess.
+    to the declared Nz/Nt when larger. Returns ``(fovs, z_levels, n_t, padded)`` — new objects,
+    inputs untouched, ``padded`` the :class:`PaddedSlots` record of what was invented — and
+    warns what was padded (*source* names the format). No plan and nothing declared is a named
+    no-op: never a guess.
     """
     fovs = {r: set(s) for r, s in fovs.items()}
     padded: list[str] = []
+    missing_fovs: dict = {}
     for region, n_planned in planned.items():
         have = fovs.setdefault(region, set())
         missing = set(range(int(n_planned))) - have
         if missing:
             have |= missing
+            missing_fovs[str(region)] = frozenset(missing)
             padded.append(f"{region}: {len(missing)} FOV(s)")
+    added_z: frozenset = frozenset()
     declared_nz = acq.get("n_z_declared")
     if declared_nz and int(declared_nz) > len(z_levels):
         padded.append(f"z: {int(declared_nz) - len(z_levels)} plane(s)")
+        added_z = frozenset(range(int(declared_nz))) - set(z_levels)
         z_levels = sorted(set(z_levels) | set(range(int(declared_nz))))
+    added_t: frozenset = frozenset()
     declared_nt = acq.get("n_t_declared")
     if declared_nt and int(declared_nt) > n_t:
         padded.append(f"t: {int(declared_nt) - n_t} timepoint(s)")
+        added_t = frozenset(range(int(n_t), int(declared_nt)))
         n_t = int(declared_nt)
     if padded:
         warnings.warn(
@@ -429,13 +455,20 @@ def _pad_to_plan(fovs: dict, z_levels: list, n_t: int, *, planned: dict, acq: di
         _log.info(
             "pad_partial: %s carries no acquisition plan record (no planned FOV grid, no "
             "declared Nz/Nt); nothing to pad.", source)
-    return fovs, list(z_levels), int(n_t), bool(padded)
+    return fovs, list(z_levels), int(n_t), PaddedSlots(missing_fovs, added_z, added_t)
 
 
 class _PadPartialMixin:
     """Zeros-plane service for a padded (stopped) run; the reader sets ``_pad_partial``."""
 
     _pad_partial = False
+    _padded_slots = NOTHING_PADDED
+
+    @property
+    def padded_slots(self) -> PaddedSlots:
+        """The slots padding invented for this open; empty when nothing was padded."""
+        _ = self.metadata            # the pad record is written by the metadata build
+        return self._padded_slots
 
     def _padded_zeros(self, region, fov, channel, z_level, time_point):
         """A zeros plane when the slot is inside the declared grid but has no data, else None.
@@ -789,6 +822,7 @@ class SquidReader(_PadPartialMixin):
             fovs, z_sorted, n_t, padded = _pad_to_plan(
                 fovs, z_sorted, n_t, planned=_planned_grid(self._path), acq=acq,
                 source=f"{self._path} (individual TIFF)")
+            self._padded_slots = padded
             n_z = len(z_sorted)
         regions = sorted(fovs, key=_plate_key)
 
@@ -1276,6 +1310,7 @@ class SquidOMEReader(_PadPartialMixin):
                 {r: set(v) for r, v in fovs.items()}, z_levels, n_t,
                 planned=_planned_grid(self._path), acq=acq,
                 source=f"{self._path} (OME-TIFF)")
+            self._padded_slots = padded
             regions = sorted(fovs, key=_plate_key)
             n_z = len(z_levels)
         _warn_recorded_mismatch(acq, n_z=n_z, z_source="OME Z")
@@ -1651,9 +1686,10 @@ class SquidZarrReader(_PadPartialMixin):
                 acq = load_acquisition_metadata(self._root)
             except (FileNotFoundError, ValueError):
                 acq = {}                         # a Zarr store need not ship acquisition.yaml
-            padded_fovs, z_levels, n_t, _padded = _pad_to_plan(
+            padded_fovs, z_levels, n_t, padded = _pad_to_plan(
                 fovs, z_levels, n_t, planned=self._zarr_plan(fovs),
                 acq=acq, source=f"{self._path} (Zarr)")
+            self._padded_slots = padded
             regions = sorted(padded_fovs, key=_plate_key)
             fovs_per_region = {r: sorted(padded_fovs[r]) for r in regions}
             n_z = len(z_levels)
