@@ -15,6 +15,8 @@ import numpy as np
 
 from squidxplorer._budget import cache_budget
 
+from squidxplorer._conventions import CenterBoxUm, acq_um
+
 from squidxplorer._montage import _area_downsample
 from squidxplorer._mosaic_source import MemoryBoundedLRUCache
 from squidxplorer._output import _PYRAMID_MAX_LEVELS, _PYRAMID_MIN_YX, pyramid_shapes
@@ -34,17 +36,22 @@ _MAX_PLATE_LEVELS = 12
 _MM_PITCH_RATIO = 100.0
 
 
-def fov_bboxes_um(positions_um: Mapping[tuple, tuple], frame_shape, pixel_size_um) -> dict:
-    """``{(region, fov): (x0, y0, x1, y1)}`` in stage µm, from FOV **centre** positions."""
-    p = float(pixel_size_um)
+def fov_bboxes_um(positions_um: Mapping[tuple, tuple], frame_shape,
+                  pixel_size_um) -> "dict[tuple, CenterBoxUm]":
+    """``{(region, fov): CenterBoxUm}`` in stage µm, from FOV **centre** positions.
+
+    Typed :class:`~squidxplorer._conventions.CenterBoxUm` on purpose: the mosaic path's
+    ``mosaic_fov_bboxes_um`` places the SAME position as the frame's top-left, half a frame
+    (measured 195.9 um) away, and a centre box consumed as a corner box renders as a perfectly
+    plausible picture of the wrong tissue. Drawing code unwraps by name: ``.bbox()``.
+    """
+    p = acq_um(pixel_size_um)                 # the plate ladder counts level-0 acquisition pixels
     if not p > 0:
         raise ValueError(f"pixel_size_um must be > 0 to size an FOV in µm, got {pixel_size_um!r}")
     h, w = int(frame_shape[0]), int(frame_shape[1])
-    half_w, half_h = w * p / 2.0, h * p / 2.0
     out = {}
     for key, (x, y) in positions_um.items():
-        x, y = float(x), float(y)
-        out[key] = (x - half_w, y - half_h, x + half_w, y + half_h)
+        out[key] = CenterBoxUm(cx=float(x), cy=float(y), w=w * p, h=h * p)
     return out
 
 
@@ -151,7 +158,8 @@ def plate_ladder(metadata: Mapping, *, tile_px: int = DEFAULT_TILE_PX,
         raise ValueError(f"tile_px must be >= 1, got {tile_px}")
 
     p = float(pixel_size_um)
-    boxes = fov_bboxes_um(positions, frame_shape, p)
+    # Unwrapped BY NAME at this seam: the ladder stores plain tuples (`cell_bbox_um`'s contract).
+    boxes = {k: b.bbox() for k, b in fov_bboxes_um(positions, frame_shape, p).items()}
     fov_extent_um = max(int(frame_shape[0]), int(frame_shape[1])) * p
     _check_micrometres(boxes, fov_extent_um)
 

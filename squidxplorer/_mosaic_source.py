@@ -15,6 +15,7 @@ import numpy as np
 
 from squidxplorer import _bitdepth
 from squidxplorer._budget import cache_budget
+from squidxplorer._conventions import TopLeftBoxUm
 from squidxplorer._logpane import get_logger
 
 # Carries no Qt, so a fuser can report unreadable FOVs in a headless run.
@@ -662,9 +663,10 @@ def mosaic_bbox_um(meta: dict, region: str) -> Optional[tuple[float, float, floa
     return (x0, y0, x0 + w * float(pixel_size), y0 + h * float(pixel_size))
 
 
-def mosaic_fov_bboxes_um(meta: dict, region: str) -> "dict[int, tuple[float, float, float, float]]":
-    """``{fov: (x0, y0, x1, y1)}`` in stage micrometres for every FOV of *region*, in acquisition
-    order.
+def mosaic_fov_bboxes_um(meta: dict, region: str) -> "dict[int, TopLeftBoxUm]":
+    """``{fov: TopLeftBoxUm}`` in stage micrometres for every FOV of *region*, in acquisition
+    order. Typed :class:`~squidxplorer._conventions.TopLeftBoxUm` because the OTHER convention
+    below is 195.9 um away; the box unpacks as its own ``(x0, y0, x1, y1)``, or ``.bbox()``.
 
     THE PLACEMENT THAT DREW THE PIXELS, not a second derivation of it. The origin is ``min`` over
     the region's recorded positions and each offset is
@@ -717,11 +719,11 @@ def mosaic_fov_bboxes_um(meta: dict, region: str) -> "dict[int, tuple[float, flo
     x0 = min(float(positions[(region, f)][0]) for f in fovs)
     y0 = min(float(positions[(region, f)][1]) for f in fovs)
 
-    out: "dict[int, tuple[float, float, float, float]]" = {}
+    out: "dict[int, TopLeftBoxUm]" = {}
     for fov in fovs:
         row, col = offsets[fov]
         fx0, fy0 = x0 + col * p, y0 + row * p
-        out[int(fov)] = (fx0, fy0, fx0 + fw * p, fy0 + fh * p)
+        out[int(fov)] = TopLeftBoxUm(fx0, fy0, fx0 + fw * p, fy0 + fh * p)
     return out
 
 
@@ -752,7 +754,7 @@ def fovs_overlapping_bbox(meta: dict, region: str,
     ry0, ry1 = min(ry0, ry1), max(ry0, ry1)
 
     hit = []
-    for fov, (fx0, fy0, fx1, fy1) in boxes.items():
+    for fov, (fx0, fy0, fx1, fy1) in boxes.items():   # TopLeftBoxUm unpacks as its own bbox
         # Half-open on the far edge: a box that stops exactly on a seam belongs to the field it
         # is inside, not to both.
         if fx0 < rx1 and fx1 > rx0 and fy0 < ry1 and fy1 > ry0:
