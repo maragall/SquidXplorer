@@ -125,6 +125,8 @@ def on_plane(win, region: str, channel: str, levels, bbox_um, window=None,
         multiscale=True,
         bbox_um=add_bbox,
         z_scale_um=(win._meta or {}).get("dz_um"),
+        # No visibility opinion: a frame reload must not relight raw over a lit operator layer.
+        visible=None,
     )
     if win.open_clock is not None:
         win.open_clock.first_layer()
