@@ -23,7 +23,7 @@ from qtpy.QtGui import QColor, QPalette
 from qtpy.QtWidgets import (
     QAction, QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel,
     QMainWindow, QPushButton, QScrollArea, QSpinBox,
-    QSplitter, QStyleFactory, QTabBar, QVBoxLayout, QWidget,
+    QSplitter, QStyleFactory, QVBoxLayout, QWidget,
 )
 
 #: The one Fusion QStyle for this process. setStyle() does not take ownership, so a

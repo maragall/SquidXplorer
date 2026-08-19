@@ -750,6 +750,39 @@ The PR's own `PLAN-plate-navigation.md` is the source design; the port decisions
   re-check it; a hand check on this Mac is owed. Commit H (drag tabs BETWEEN windows) stays
   deferred, hooks in place (`dock_page`/`undock_page`, `_host`, `ViewerManager._decks`).
 
+## Plate/views simplification (2026-08-19, branch plate-simplify, Julio's annotated mocks)
+
+- **The Window navigator is DELETED** (`OpenViewList`): the deck's tabs superseded its list.
+  What survived, where: close-all in View > Close All Views (`PlateWindow._close_all_views`),
+  the memory/run bars as `_region_viewer.StatusRow` (still adopted by the log panel),
+  `ViewerManager.rename` (repaints the deck tab text). `raise_views`/`collapse_all`/
+  `make_default` died with their only callers; the GUI has no rename affordance left (owed).
+- **The readout strip is a LOG LINE**: `PlateWindow._readout` is `_LogReadout`, a shim whose
+  `setText` logs (INFO status, WARNING for refusal-shaped text, consecutive duplicates dropped)
+  and whose `text()` still answers for tools/gates and `_gui_commands`. The per-FOV run tick no
+  longer writes it — the same sentence is live on the log panel's work bar. The status bar
+  carries the Selection caption instead.
+- **The Operators cards live in the VIEWS window**: `_operator_dock.OperatorDock`, a right-edge
+  dock collapsed by default to a vertical grip, installed ONCE per deck / free window by
+  `ViewerManager` through `operator_dock_installer` (set by the plate). It holds the plate-built
+  card launcher (`_build_operator_cards`; cards still open tabs in the PLATE's `_left_tabs`,
+  which hides itself while empty so the LOG owns the band) AND the current view's
+  `RegionViewer.operator_panel()` — the old "Operators for this window" toolbar plus the pane's
+  Detect row — swapped on `pageActivated`. Julio earlier rejected a centre-top operators chip;
+  the right-edge dock is the explicitly requested different thing.
+- **LUT copy/paste is SHELVED completely** (Julio: "adding complexity for no reason"): the plate
+  pair, the window chips and `_lut_clipboard.CLIPBOARD` are gone. What survives is not the
+  clipboard: `per_channel_luts`/`apply_luts`/`match_raw_contrast`, the automatic window → plate
+  contrast tap, and the stain `display_lut` path. The Defaults group (auto focus / make default /
+  diverged / reset) is shelved too; the `ViewSettings`/`ViewDefaults` STORE stays (autofocus-on-
+  open, child-window LUT inheritance).
+- **3D opens in a NEW deck tab** (`RegionViewer._open_3d` spawns a child via `open_child`,
+  `_volume_view.open_3d(child, scene_from=parent)` harvests LUTs from the 2D scene); the 2D tab
+  is untouched. `reveal()` only `showNormal()`s a MINIMISED target (it used to de-maximise the
+  deck), and `_spawn` un-minimises a deck before docking a new tab into it.
+- Kept on purpose (zarr inventory): the stitch writer, `_open_computed`, `_ZarrLoupeSource`,
+  `resolve_plate_root`, `incomplete_reason`. Deleted: the write-only `_processed_plate`.
+
 ## Agent skills
 
 ### Issue tracker
