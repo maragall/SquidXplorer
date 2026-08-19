@@ -393,7 +393,6 @@ class PlateWindow(QMainWindow):
         #                               assignment so every existing call site still reads.
         self._current_fov = 0         # the FOV of that region on screen (IMA-250: autofocus ranks IT)
         self._acq_path = None         # the opened acquisition dir (persist writes next to it)
-        self._processed_plate = None  # path of the written plate.ome.zarr once an operator persists it
         self._plate_mode = "raw"      # what the plate view is showing — shown in the plate-pane title
         self._plate_format = None     # the format the plate is laid out with (declared or inferred)
         self._plate_format_override = None   # manual override; also read from SQUIDXPLORER_WELLPLATE_FORMAT
@@ -2496,7 +2495,6 @@ class PlateWindow(QMainWindow):
         self._stop_preview()
         self._release_loupe_sources()             # a new plate: no source (and no thread) survives
         self._acq_name, self._acq_path = base.name, base
-        self._processed_plate = str(zroot)
         self._reader = None                       # a computed plate has no raw reader
         self._meta = {"channels": channels, "z_levels": [0], "n_z": 1, "n_t": 1,
                       "pixel_size_um": px_um,
@@ -2954,8 +2952,11 @@ class PlateWindow(QMainWindow):
         return True, est / gb, ""
 
     def _on_written(self, plate_path: str):
-        """The operator finished persisting: remember the written plate (re-openable artifact)."""
-        self._processed_plate = plate_path
+        """The operator finished persisting: SAY where. Nothing stores the path — the
+        `_processed_plate` attribute was write-only (2026-08-19 zarr inventory: four writers,
+        zero readers in the app, the tests and the tools) and is deleted; the store itself is
+        re-openable through File > Open a computed MIP."""
+        self._readout.setText(f"persisted plate: {plate_path}")
 
     def _on_preview_tile(self, ri, ci, well_id, tile, box=None):
         """One preview FIELD landed. ``box`` slots it into the region's mosaic (IMA-253); ``None``

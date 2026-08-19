@@ -152,11 +152,10 @@ def test_the_log_panel_is_stacked_under_the_operators_and_can_never_be_lost(win)
 
     assert win._left_tabs.indexOf(panel) == -1, "the log is back in the tab bar"
     assert win._right_col.indexOf(panel) >= 0, "the log is not in the right column at all"
-    assert win._right_col.indexOf(win._left_tabs) == 0, "Operators is not above the log"
-    assert win._FIXED_TABS == 1, "only the Operators home tab is fixed now"
+    assert win._right_col.indexOf(win._left_tabs) == 0, "Operator tabs are not above the log"
+    assert win._FIXED_TABS == 0, "no fixed tab since the cards moved to the views window's dock"
 
-    assert win._close_op_tab(0) is None and win._left_tabs.count() >= 1
-    assert win._detach_tab(0) is None, "the Operators home tab detached"
+    assert win._left_tabs.count() == 0, "a tab opened before anything was asked for"
 
     panel.set_collapsed(True)
     win.show_log()
