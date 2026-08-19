@@ -3287,6 +3287,16 @@ class PlateWindow(QMainWindow):
         self._overview.set_channels([c.get("display_name") or c["name"] for c in channels],
                                     colors, dtype,
                                     luts=luts if any(l is not None for l in luts) else None)
+        # RGB components share the FILE's full range, identical across the triplet — the same
+        # rule the window's seed uses (_workers._seed_window): per-channel percentile windows
+        # distort the hue additive blending exists to reconstruct. Latched manual so the
+        # streaming wells' histograms can never stomp it.
+        probe = getattr(self._reader, "is_rgb_component", None)
+        if probe is not None and np.dtype(dtype).kind in "ui":
+            hi = float(np.iinfo(np.dtype(dtype)).max)
+            for i, c in enumerate(channels):
+                if probe(c["name"]):
+                    self._overview.set_channel_window(i, 0.0, hi)
         # NO STRIP UNDER THE PLATE. Julio: "Take out the window below plate view, it's
         # unnecessary." It had already lost its controls (napari owns visibility and contrast),
         # which left a row of labels restating what napari's own layer list shows two panes away.
