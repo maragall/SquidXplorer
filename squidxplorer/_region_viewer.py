@@ -85,8 +85,7 @@ def _alive(widget) -> bool:
     """Is this Qt object still there on the C++ side?
 
     ``sip.isdeleted`` is the only reliable question — a deleted QWidget is a live PYTHON object
-    whose every attribute access raises, so ``is not None`` answers yes about a corpse. The same
-    reasoning, and the same import shape, as ``OpenViewList.refresh``'s guard further down.
+    whose every attribute access raises, so ``is not None`` answers yes about a corpse.
     """
     if widget is None:
         return False
