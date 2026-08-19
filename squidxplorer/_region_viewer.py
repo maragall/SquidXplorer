@@ -544,6 +544,17 @@ class RegionViewer(QMainWindow):
 
         self.setCentralWidget(central)
 
+        # Derived display color must be labeled: said once per open, pinned on the raw group tooltip.
+        try:
+            from squidxplorer._channels import color_note
+
+            note = color_note((self._meta or {}).get("channels"))
+            if note:
+                pane.mosaic.set_color_note(_RAW_OP, note)
+                self._say(note)
+        except Exception as exc:                          # noqa: BLE001 - a label, never fatal
+            log.debug("view %s could not state color provenance: %s", self.window_id, exc)
+
         # SEED the cursor: this announces region 0 to the loader, so the first mosaic loads now.
         # Reads ``_seed_regions`` and not ``_regions``, because ``_regions`` reads back OUT of the
         # cursor — at this instant it would be answering from the empty order it is about to be
@@ -2555,17 +2566,6 @@ class ViewerManager(QObject):
                 value = live[name]
             out[name] = value
         return out
-
-    def rename(self, window_id: int, name: "Optional[str]") -> bool:
-        """Give window *window_id* a new display label; False when the id is unknown or the name blank."""
-        win = self._windows.get(int(window_id))
-        if win is None:
-            return False
-        if not win.set_display_name(name):
-            return False
-        self.refresh_deck_titles()      # the navigator rebuilds itself; a tab bar does not
-        self.windowsChanged.emit()
-        return True
 
     def _spawn(self, regions: "list[str]", *, title: Optional[str] = None,
                roi_bbox: Optional[tuple] = None,

@@ -61,9 +61,6 @@ _OPERATIONS_BY_KEY = {op.key: op for op in _OPERATIONS}
 # The operator a "save this to disk" button runs. Named, never spelled positionally.
 _SAVE_OPERATOR = "mip"
 
-# Roadmap cards shown under "TO BE ADDED", as (label, blurb).
-_TO_BE_ADDED: list = []
-
 
 def operator_layer_key(op_key: str, tab_key: Optional[str]) -> str:
     """Layer id an operator's results are filed under: bare key, or "<op>@<tab_key>" when scoped."""

@@ -169,7 +169,7 @@ class ViewDeck(QMainWindow):
         return True
 
     def refresh_titles(self) -> None:
-        """Follow a rename. ``ViewerManager.rename`` changes a window's title and emits
+        """Refresh every tab's text from its page's current title (a title change emits
         ``windowsChanged``; without this the tab keeps the old text and the ``[id] name`` join
         between a log line and a view goes stale on this surface only."""
         for i in range(self._tabs.count()):

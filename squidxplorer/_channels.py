@@ -142,3 +142,31 @@ def resolve_channels(filename_channels, yaml_map: dict) -> list[dict]:
             }
         )
     return resolved
+
+
+# -- color provenance (DisplayChannel.color_source) ----------------------------------------------
+# The vocabulary is written where it is stamped: reader._expand_rgb_channels ("file"),
+# _stain.attach_stain_luts ("estimated"); "reconstructed" is reserved for the overview-chroma
+# expansion. Most derived first, so the least trustworthy source leads the sentence.
+_COLOR_SOURCE_ORDER = ("estimated", "reconstructed", "file")
+_COLOR_SOURCE_NOTES = {
+    "estimated": "estimated colormap (density fit from the acquisition's overview)",
+    "reconstructed": "reconstructed from the acquisition's own overview",
+    "file": "file color (the plane's own RGB components)",
+}
+
+
+def color_sources(channels) -> list[str]:
+    """The distinct ``color_source`` words of *channels*, most derived first; ``[]`` when all
+    channels show their own yaml color. An unknown word passes through rather than vanishing."""
+    found = {c.get("color_source") for c in (channels or [])} - {None}
+    ordered = [s for s in _COLOR_SOURCE_ORDER if s in found]
+    return ordered + sorted(found - set(_COLOR_SOURCE_ORDER))
+
+
+def color_note(channels) -> str | None:
+    """One sentence naming where the display color came from, or ``None`` for plain channels."""
+    sources = color_sources(channels)
+    if not sources:
+        return None
+    return "color: " + "; ".join(_COLOR_SOURCE_NOTES.get(s, s) for s in sources)

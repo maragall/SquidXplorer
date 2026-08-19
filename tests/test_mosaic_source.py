@@ -212,22 +212,6 @@ class _StepReader(_Reader):
         return np.full(self.frame, z_level + 1, dtype=np.uint16)
 
 
-@pytest.fixture
-def _record_fuse_calls(monkeypatch):
-    """Record which pyramid levels each fuse pass actually produced, by their ``max_px``."""
-    from squidxplorer import _mosaic_source as ms
-
-    calls: list = []
-    real = ms._fuse_levels
-
-    def spy(reader, meta, region, channel, z, t, plans):
-        calls.append([p[0] for p in plans])
-        return real(reader, meta, region, channel, z, t, plans)
-
-    monkeypatch.setattr(ms, "_fuse_levels", spy)
-    return calls
-
-
 def _pyr_meta(nz=6, frame=(256, 256), px=1.0, n=16):
     """16 FOVs in a row (256x4096 px) — wide enough that a pyramid has somewhere to go."""
     positions = {("A1", i): (i * frame[1] * px, 0.0) for i in range(n)}
@@ -308,25 +292,48 @@ def test_every_pyramid_level_is_lazy():
     assert reader.reads == [], "building the pyramid must read NOTHING"
 
 
-def test_a_coarse_level_is_fused_directly_and_never_materialises_level_zero(_record_fuse_calls):
-    """Coarsening over the lazy level-0 graph would force the full plane to be pasted just to
-    throw most of it away; fusing the level directly from the FOV tiles strides on read instead."""
+def test_a_viewport_window_at_a_COARSE_rung_reads_only_the_fovs_under_it():
+    """THE customer freeze (452-FOV set, 2026-08-19): a coarse rung used to be one whole-region
+    delayed fuse, so napari's synchronous draw decoded EVERY FOV per zoom notch. Every rung is
+    windowed now: a viewport slice decodes only the FOVs under it, at any zoom."""
     from squidxplorer._mosaic_source import fuse_region_pyramid
 
-    meta = _pyr_meta()
-    levels, _step, _nz = fuse_region_pyramid(_Reader(), meta, "A1", "488")
-    assert len(levels) >= 3
+    reader = _StepReader(frame=(256, 256))
+    levels, step0, _nz = fuse_region_pyramid(reader, _pyr_meta(nz=1), "A1", "488", max_px=1024)
+    assert step0 == 4
+    coarse = levels[2]                       # the step-4 rung, above the fine strides 1 and 2
+    assert coarse.shape == (64, 1024)
 
-    _record_fuse_calls.clear()
-    coarse = np.asarray(levels[2][1])
+    n_before = len(reader.reads)
+    win = np.asarray(coarse[0:64, 0:100])    # 100 cols at step 4 sit on FOVs 0 and 1 alone
+    touched = {f for (_r, f, _c, _z, _t) in reader.reads[n_before:]}
+    assert touched == {0, 1}, (
+        f"a coarse-rung window over FOVs 0-1 decoded {sorted(touched)}; before the fix this "
+        f"was every FOV of the region")
+    assert win.shape == (64, 100) and (win == 1).all()
 
-    assert _record_fuse_calls, "computing a level must fuse something"
-    produced = [px for plan in _record_fuse_calls for px in plan]
-    level0_px = max(levels[0].shape[-2:])
-    assert max(produced) < level0_px, (
-        f"the fuse produced a level at max_px={max(produced)}, i.e. level 0 resolution "
-        f"({level0_px} px) — level 0 was materialised to build a coarse level")
-    assert coarse.shape == levels[2].shape[1:]
+
+def test_a_coarse_rung_window_at_a_deeper_z_reads_one_z_one_chunks_fovs(monkeypatch):
+    """nz > 1: the z-stacked coarse rung stays windowed per plane. The z concatenate blocks
+    dask's exact-window fusion (true of the fine rungs since they shipped), so the honest
+    grain here is the CHUNK: a window reads one z, and only the FOVs under the chunks it
+    touches — never the region."""
+    from squidxplorer import _mosaic_source as ms
+
+    monkeypatch.setattr(ms, "_FINE_CHUNK_PX", 256)   # several chunks per rung at test scale
+    reader = _StepReader(frame=(256, 256))
+    levels, step0, nz = ms.fuse_region_pyramid(reader, _pyr_meta(nz=6), "A1", "488",
+                                               max_px=1024)
+    assert step0 == 4 and nz == 6
+    coarse = levels[2]
+    assert coarse.shape == (6, 64, 1024)
+
+    n_before = len(reader.reads)
+    win = np.asarray(coarse[2, 0:64, 0:100])         # inside the first 256-col chunk: FOVs 0-3
+    hit = {(f, z) for (_r, f, _c, z, _t) in reader.reads[n_before:]}
+    assert hit == {(f, 2) for f in range(4)}, (
+        f"a one-chunk window at z=2 must read that chunk's FOVs at that z; read {sorted(hit)}")
+    assert win.shape == (64, 100) and (win == 3).all()   # z=2 reads as 3 in _StepReader
 
 
 def test_fusing_a_level_also_yields_the_coarser_levels_from_the_same_decode():
@@ -349,18 +356,83 @@ def test_fusing_a_level_also_yields_the_coarser_levels_from_the_same_decode():
         "read them for the visible level")
 
 
-def test_a_level_finer_than_the_one_requested_is_never_produced(_record_fuse_calls):
-    """Yielding the COARSER levels is free; yielding finer ones would defeat the whole point."""
+def test_the_coarsest_level_costs_one_decode_per_fov_and_nothing_finer():
+    """Materialising the coarsest rung (the contrast seed, napari's thumbnail pull) must cost
+    exactly one decode per FOV — a finer plane built on the side would be invisible work."""
     from squidxplorer._mosaic_source import fuse_region_pyramid
 
-    levels, _step, _nz = fuse_region_pyramid(_Reader(frame=(256, 256)), _pyr_meta(), "A1", "488")
-    _record_fuse_calls.clear()
+    reader = _StepReader(frame=(256, 256))
+    levels, _step, _nz = fuse_region_pyramid(reader, _pyr_meta(), "A1", "488")
     np.asarray(levels[-1][0])
 
-    produced = [px for plan in _record_fuse_calls for px in plan]
-    coarsest_px = max(levels[-1].shape[-2:])
-    assert max(produced) <= max(coarsest_px, 128), (
-        f"asking for the coarsest level produced a finer one (max_px={max(produced)})")
+    assert len(reader.reads) == 16, (
+        f"the coarsest level of a 16-FOV region cost {len(reader.reads)} decode(s); "
+        "one per FOV is the whole bill")
+
+
+def test_the_coarsest_rung_repull_is_a_plane_cache_hit_even_after_the_frames_evict():
+    """napari pulls the coarsest rung per thumbnail; a full-window compute caches the WHOLE
+    plane, so the re-pull is a lookup even once the decoded frames have been evicted."""
+    from squidxplorer._mosaic_source import fuse_region_pyramid
+
+    reader = _StepReader(frame=(256, 256))
+    # 300 kB holds ~2 of the 128 kB frames and every tiny coarse plane: frames churn, planes stay.
+    levels, _step, _nz = fuse_region_pyramid(reader, _pyr_meta(nz=1), "A1", "488",
+                                             cache_bytes=300_000)
+    np.asarray(levels[-1])
+    first = len(reader.reads)
+    assert first == 16
+
+    np.asarray(levels[-1])
+    assert len(reader.reads) == first, (
+        "re-pulling the coarsest rung re-decoded FOVs; the whole plane must be served from "
+        "the cache")
+
+
+def test_a_warm_pan_at_a_coarse_rung_re_reads_nothing_even_when_full_frames_cannot_be_cached():
+    """A rung's decimated subframes are cached at their own size, so a revisited window costs
+    zero decodes even where the region's FULL frames outsize the whole byte budget (the real
+    452-FOV case: 1.6 GB of frames against a 465 MB budget)."""
+    from squidxplorer._mosaic_source import fuse_region_pyramid
+
+    reader = _StepReader(frame=(256, 256))
+    # 300 kB: the 16 x 128 kB full frames can never fit; the step-4 subframes (8 kB each) do.
+    levels, step0, _nz = fuse_region_pyramid(reader, _pyr_meta(nz=1), "A1", "488",
+                                             max_px=1024, cache_bytes=300_000)
+    assert step0 == 4
+    coarse = levels[2]
+
+    np.asarray(coarse[0:64, 0:100])
+    first = len(reader.reads)
+    assert first > 0
+
+    np.asarray(coarse[0:64, 0:100])
+    assert len(reader.reads) == first, (
+        "a revisited coarse-rung window re-decoded FOVs; the rung's own subframes must serve it")
+
+
+def test_every_rung_is_pixel_identical_to_the_reference_fusion():
+    """Every windowed rung — fine strides and converted coarse rungs alike — materialises
+    bit-exact to :func:`_fuse_levels` at the same stride: one paste rule, two mechanisms."""
+    from squidxplorer import _mosaic_source as ms
+
+    values = {i: (i + 1) * 37 for i in range(16)}
+    meta = _pyr_meta(nz=2)
+    reader = _Reader(frame=(256, 256), values=values)
+    levels, _step, _nz = ms.fuse_region_pyramid(reader, meta, "A1", "488", max_px=1024,
+                                                cache_bytes=64 * 2 ** 20)
+    assert len(levels) >= 4, "this fixture must produce fine AND coarse rungs"
+
+    full_w = 4096
+    for k, lv in enumerate(levels):
+        h, w = (int(v) for v in lv.shape[-2:])
+        stride = int(round(full_w / w))
+        for z in (0, 1):
+            honest = ms._fuse_levels(reader, meta, "A1", "488", z, 0,
+                                     [(stride, h, w, stride, lv.dtype)])[stride]
+            got = np.asarray(lv[z])
+            assert np.array_equal(got, honest), (
+                f"rung {k} (stride {stride}, z={z}) diverged from the reference fusion")
 
 
 def test_a_region_whose_every_fov_is_unreadable_is_an_error_not_a_blank_mosaic():
@@ -400,9 +472,9 @@ def test_the_cache_is_bounded_in_bytes_and_evicts_rather_than_growing():
 
     assert isinstance(PYRAMID_CACHE_BYTES, int) and PYRAMID_CACHE_BYTES > 0
 
-    reader = _StepReader()
+    reader = _StepReader(frame=(256, 256))   # real-sized frames, so the byte bound has teeth
     meta = _pyr_meta(nz=6)
-    # budget holds roughly one level-0 plane, so a second z must push the first out
+    # budget holds roughly one z's decoded frames, so a second z must push the first out
     levels, _step, _nz = fuse_region_pyramid(reader, meta, "A1", "488",
                                              cache_bytes=int(2.2 * 256 * 4096))
 

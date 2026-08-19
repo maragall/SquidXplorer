@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 from collections import OrderedDict
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -25,6 +26,33 @@ _log = logging.getLogger(__name__)
 #: The white point percentile shared by the LUT fit and the display seed window. The LUT's t is
 #: transmittance, so white IS this percentile of the data and the faithful window is [0, white].
 STAIN_WHITE_PERCENTILE = 99
+
+#: Set to 1/true/yes/on to disable derived color: gray channels then stay gray, yaml color only.
+NO_RECONSTRUCTED_COLOR_ENV = "SQUIDXPLORER_NO_RECONSTRUCTED_COLOR"
+
+#: The View menu's live override; ``None`` defers to the environment variable.
+_reconstruct_override: Optional[bool] = None
+
+
+def reconstruction_enabled() -> bool:
+    """Whether derived color (chroma reconstruction / the estimated stain LUT) may attach.
+
+    THE one switch both attach paths consult, so the reader stays deterministic per flag: a
+    metadata build under one value expands and colors the same way everywhere.
+    """
+    if _reconstruct_override is not None:
+        return _reconstruct_override
+    return os.environ.get(NO_RECONSTRUCTED_COLOR_ENV, "").strip().lower() not in {
+        "1", "true", "yes", "on"}
+
+
+def set_reconstruction(on: Optional[bool]) -> None:
+    """Override the flag for subsequent metadata builds (``None`` returns to the env var).
+
+    Callers re-ingest to apply: a cached ``reader.metadata`` was built under the old value.
+    """
+    global _reconstruct_override
+    _reconstruct_override = None if on is None else bool(on)
 
 #: Minimum stained pixels for a trustworthy absorbance fit; below it, stay gray.
 _MIN_STAINED_PX = 5_000
@@ -134,6 +162,11 @@ def attach_stain_luts(root, channels: list, rgb_bases: set) -> None:
     pairs = _mosaic_rgb_pngs(Path(root))
     if not pairs:
         return
+    if not reconstruction_enabled():
+        _log.info(
+            "reconstructed color is OFF (%s or View > Reconstructed Color): color-recorded-gray "
+            "channels stay gray with their yaml color.", NO_RECONSTRUCTED_COLOR_ENV)
+        return
     for entry in channels:
         if entry.get("name") in rgb_bases or entry.get("display_lut"):
             continue
@@ -144,6 +177,7 @@ def attach_stain_luts(root, channels: list, rgb_bases: set) -> None:
             if lut is None:
                 continue
             entry["display_lut"] = lut
+            entry["color_source"] = "estimated"   # a density fit, never the file's own color
             _log.info(
                 "channel %s was RGB live but its files are grayscale (Squid's "
                 "MULTIPOINT_BF_SAVING_OPTION); displaying through the stain colormap measured "
@@ -341,6 +375,10 @@ def chroma_sources(root, channels: list, rgb_bases: set) -> dict:
     the reader and must then be in ``attach_stain_luts``'s skip set — the components carry real
     color, so the LUT stays the fallback for overviews without geometry.
     """
+    if not reconstruction_enabled():
+        _log.info("derived color is OFF (%s / the View menu); gray channels stay gray.",
+                  NO_RECONSTRUCTED_COLOR_ENV)
+        return {}
     pairs = _mosaic_rgb_pngs(Path(root))
     out: dict = {}
     for entry in channels:
