@@ -236,6 +236,7 @@ class RegisterPanel(GenericOperatorPanel):
         at = self.v.indexOf(self.progress)
         self.v.insertWidget(at, self.copy_check)
         self.v.insertWidget(at + 1, self.run_all_btn)
+        _apply_qss(self)                # the base styled its own widgets before these existed
 
     def kwargs(self) -> dict:
         kw = super().kwargs()

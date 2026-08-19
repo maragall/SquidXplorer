@@ -240,6 +240,9 @@ _MAX_PREVIEW_LEVELS = 12
 #: Below this the level is smaller than a thumbnail and buys nothing.
 _MIN_LEVEL_PX = 128
 
+#: Chunk edge of the on-demand fine rungs: what one deep-zoom slice materialises.
+_FINE_CHUNK_PX = 2048
+
 
 class MemoryBoundedLRUCache:
     """Thread-safe LRU cache bounded by BYTES, not by entry count.
@@ -343,6 +346,89 @@ def _source_token(reader: Any) -> str:
 
 def _level_max_px(max_px: int, k: int) -> int:
     return max(_MIN_LEVEL_PX, int(max_px) >> k)
+
+
+def _norm_window(idx, shape) -> "tuple[slice, slice]":
+    """Normalise a 2-D index to unit-step ``(rows, cols)`` slices over *shape*."""
+    if not isinstance(idx, tuple):
+        idx = (idx,)
+    idx = idx + (slice(None),) * (2 - len(idx))
+    out = []
+    for s, n in zip(idx, shape):
+        if isinstance(s, slice):
+            if s.step not in (None, 1):
+                raise ValueError(f"a fine mosaic level slices at unit step only, got {s!r}")
+            out.append(slice(*s.indices(int(n))[:2]))
+        else:
+            i = int(s)
+            out.append(slice(i, i + 1))
+    return out[0], out[1]
+
+
+class _WindowedLevel:
+    """A fine pyramid rung materialised BY WINDOW: a slice pastes only the FOVs it touches.
+
+    Same paste rule as :func:`_fuse_levels` — ``frame[::step, ::step]`` at ``offset // step``,
+    later FOVs overwriting earlier in the overlap — so a window is pixel-identical to the
+    whole-plane fusion it stands in for. Deep zoom reads a few files, never the region; decoded
+    frames land in the shared plane cache, so panning re-reads nothing.
+    """
+
+    def __init__(self, reader, meta, region, channel, z_level, time_point,
+                 step, shape, dtype, cache, token):
+        from squidxplorer._placement import fov_offsets_px
+
+        self._reader, self._meta = reader, meta
+        self._region, self._channel = str(region), str(channel)
+        self._z, self._t = int(z_level), int(time_point)
+        self._step = int(step)
+        self.shape = tuple(int(v) for v in shape)
+        self.dtype = np.dtype(dtype)
+        self.ndim = 2
+        self._cache, self._token = cache, token
+        self._fovs = list((meta.get("fovs_per_region") or {}).get(self._region) or [])
+        self._offsets = fov_offsets_px(meta["fov_positions_um"], self._region, self._fovs,
+                                       meta["pixel_size_um"])
+        self._frame_hw = tuple(int(v) for v in meta["frame_shape"])
+
+    def _frame(self, fov: int) -> np.ndarray:
+        key = (self._token, "fovplane", self._region, int(fov), self._channel, self._z, self._t)
+        hit = self._cache.get(key)
+        if hit is not None:
+            return hit
+        frame = np.asarray(self._reader.read(self._region, int(fov), self._channel,
+                                             self._z, self._t))
+        if frame.ndim != 2:
+            frame = frame.reshape(frame.shape[-2:])
+        _bitdepth.depth().observe_array(frame)   # same full-resolution observation _fuse_levels makes
+        self._cache.put(key, frame)
+        return frame
+
+    def __getitem__(self, idx) -> np.ndarray:
+        ys, xs = _norm_window(idx, self.shape)
+        out = np.zeros((ys.stop - ys.start, xs.stop - xs.start), self.dtype)
+        step = self._step
+        fh = -(-self._frame_hw[0] // step)       # a decimated frame's own extent
+        fw = -(-self._frame_hw[1] // step)
+        for fov in self._fovs:                   # _fuse_levels' order: later overwrites earlier
+            row, col = self._offsets[fov]
+            r0, c0 = row // step, col // step
+            if r0 >= ys.stop or c0 >= xs.stop or r0 + fh <= ys.start or c0 + fw <= xs.start:
+                continue
+            try:
+                sub = self._frame(fov)[::step, ::step]
+            except Exception as exc:             # noqa: BLE001 - a black hole, as in _fuse_levels
+                _log.warning("fine mosaic %s/%s z=%s: fov %s unreadable (%s) — a BLACK HOLE.",
+                             self._region, self._channel, self._z, fov, exc)
+                continue
+            rr0, cc0 = max(r0, ys.start), max(c0, xs.start)
+            rr1 = min(r0 + sub.shape[0], ys.stop)
+            cc1 = min(c0 + sub.shape[1], xs.stop)
+            if rr1 <= rr0 or cc1 <= cc0:
+                continue
+            out[rr0 - ys.start:rr1 - ys.start, cc0 - xs.start:cc1 - xs.start] = \
+                sub[rr0 - r0:rr1 - r0, cc0 - c0:cc1 - c0]
+        return out
 
 
 def _fuse_levels(reader: Any, meta: dict, region: str, channel: str, z_level: int, time_point: int, plans: list):
@@ -488,6 +574,35 @@ def fuse_region_pyramid(
                 axis=0,
             )
         levels.append(lv)
+
+    # FINER RUNGS, ON DEMAND, down to native: chunked, so napari's deep zoom pastes only the
+    # FOVs under the viewport instead of hitting the _MAX_FUSED_PX ceiling. Budget-gated per
+    # rung because the full-materialisation consumers (the 3-D full-res swap, _full_res_mip)
+    # still take level 0 whole.
+    native = _planned_plane(meta, region, 10 ** 9)
+    fine: list = []
+    if native is not None and int(step0) > 1:
+        nh, nw, _s1, _dt = native
+        s = 1
+        while s < int(step0):
+            h_s, w_s = int(np.ceil(nh / s)), int(np.ceil(nw / s))
+            if h_s * w_s * dtype.itemsize * max(1, nz) <= _PLANE_BUDGET_BYTES:
+                fine.append((s, h_s, w_s))
+            s *= 2
+        fine.sort()                                        # ascending step = descending resolution
+
+        def _fine_level(s: int, h_s: int, w_s: int):
+            def one_z(z: int):
+                src = _WindowedLevel(reader, meta, region, channel, z, time_point,
+                                     s, (h_s, w_s), dtype, cache, token)
+                return da.from_array(src, chunks=_FINE_CHUNK_PX, asarray=False,
+                                     meta=np.empty((0, 0), dtype=dtype),
+                                     name=f"raw-fine-{region}-{channel}-s{s}-z{z}")
+            if nz <= 1:
+                return one_z(0)
+            return da.concatenate([one_z(z)[None, ...] for z in range(nz)], axis=0)
+
+        levels = [_fine_level(s, h_s, w_s) for s, h_s, w_s in fine] + levels
 
     # One guard, shared with open_pyramid: a level that did not shrink is dropped.
     return strictly_decreasing_levels(levels), step0, nz
