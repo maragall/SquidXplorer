@@ -191,3 +191,58 @@ def test_the_operator_panel_adopts_the_panes_detect_row(qapp, napari_pane_stub, 
         assert v._btn_controls is not None
     finally:
         shutdown_plate_window(qapp, win)
+
+
+# --- reconstructed color is a View-menu switch ----------------------------------------------------
+
+def _color_recorded_gray_acq(tmp_path):
+    """A gray-recorded color acquisition: 2-D BMP planes plus the mosaic sidecar calling it RGB."""
+    import numpy as np
+    from PIL import Image
+
+    root = tmp_path / "acq_gray_rgb"
+    mv = root / "0" / "mosaic_view"
+    mv.mkdir(parents=True)
+    rng = np.random.default_rng(7)
+    Image.fromarray(rng.integers(0, 255, (16, 16), dtype=np.uint8)).save(
+        root / "0" / "manual_0_0_BF_LED_matrix_full.bmp")
+    (root / "acquisition.yaml").write_text(
+        "objective:\n  pixel_size_um: 0.418\nz_stack:\n  nz: 1\ntime_series:\n  nt: 1\n")
+    (root / "acquisition_channels.yaml").write_text(
+        "channels:\n- name: BF LED matrix full\n  display_color: '#FFFFFF'\n")
+    t = np.tile(np.linspace(0.2, 1.0, 200), (120, 1))
+    png = np.stack([255 * t ** 0.3, 255 * t, 255 * t ** 0.6], axis=-1).astype(np.uint8)
+    Image.fromarray(png).save(mv / "mosaic_2um_x.png")
+    (mv / "mosaic_2um.yaml").write_text(
+        "rgb_channel_names:\n- 20x BF LED matrix full\nrgb_view_files:\n- mosaic_2um_x.png\n")
+    return root
+
+
+def test_reconstructed_color_menu_action_round_trips(qapp, tmp_path):
+    """View > Reconstructed Color re-ingests under the flipped flag: off is honest gray (no
+    stain LUT, yaml color), on brings the estimated LUT and its label back."""
+    from squidxplorer import _stain
+
+    root = _color_recorded_gray_acq(tmp_path)
+    win = V.PlateWindow(None)
+    try:
+        win.ingest(str(root))
+        assert win._recon_color_act.isChecked(), "reconstruction must default ON"
+        assert win._meta["channels"][0].get("display_lut") is not None
+        assert "color: estimated" in win._readout.text(), (
+            "the ingest status line never named the derived color")
+
+        win._recon_color_act.trigger()           # off: falls all the way to gray
+        chs = win._meta["channels"]
+        assert len(chs) == 1 and chs[0].get("display_lut") is None
+        assert chs[0].get("color_source") is None
+        assert chs[0]["display_color"] == "#FFFFFF"
+        assert "color:" not in win._readout.text()
+        assert not _stain.reconstruction_enabled()
+
+        win._recon_color_act.trigger()           # back on: the LUT and its label return
+        assert win._meta["channels"][0].get("display_lut") is not None
+        assert "color: estimated" in win._readout.text()
+    finally:
+        _stain.set_reconstruction(None)
+        shutdown_plate_window(qapp, win)
