@@ -153,8 +153,10 @@ def _rewrite_csv(path: Path, region: str, positions_um: dict) -> int:
         if fov not in positions_um:
             continue
         x_um, y_um = positions_um[fov]
-        row[xi] = f"{x_um * _MM_PER_UM:.6f}"
-        row[yi] = f"{y_um * _MM_PER_UM:.6f}"
+        # Shortest round-trip repr, never rounded: a rounded copy of an unmoved stage point
+        # reads as a 0.1 nm neighbour of its unrewritten siblings and poisons pitch derivations.
+        row[xi] = repr(float(x_um * _MM_PER_UM))
+        row[yi] = repr(float(y_um * _MM_PER_UM))
         changed += 1
     if not changed:
         return 0
@@ -192,8 +194,26 @@ def register_region(reader, region, fovs, *, registration_channel=0, registratio
 
     tiles = np.stack([np.asarray(reader.read(region, f, all_channels[reg_c], reg_z, reg_t))
                       for f in fovs])[:, None]
-    offsets = solve_offsets_px(tiles, positions, pixel_size, tile_shape,
+    # A tile with no pixels is not a measurement: a PADDED slot of a stopped run reads as
+    # zeros, and solving it hands the affine fallback hundreds of phantoms whose "registered
+    # positions" are model outputs. Solve and rewrite the content-bearing FOVs only; blanks
+    # keep their recorded positions.
+    has_pixels = [bool(tiles[i].any()) for i in range(len(fovs))]
+    measured = [i for i, ok in enumerate(has_pixels) if ok]
+    if not measured:
+        raise ValueError(
+            f"region {region!r}: every registration tile is blank at z={reg_z}, t={reg_t} "
+            f"(channel {all_channels[reg_c]}); there is nothing to register.")
+    offsets = np.zeros((len(fovs), 2), dtype=np.float64)
+    if len(measured) > 1:
+        sub = solve_offsets_px(tiles[measured], [positions[i] for i in measured],
+                               pixel_size, tile_shape,
                                registration_channel=0, timer=timer or _NullTimer())
+        offsets[measured] = sub
+    if len(measured) < len(fovs):
+        _log.info("register: region %s — %d of %d FOV(s) carry pixels; the %d blank (padded) "
+                  "FOV(s) keep their recorded positions.",
+                  region, len(measured), len(fovs), len(fovs) - len(measured))
     del tiles
 
     registered = [(y + float(o[0]) * pixel_size[0], x + float(o[1]) * pixel_size[1])
@@ -207,7 +227,7 @@ def register_region(reader, region, fovs, *, registration_channel=0, registratio
                 f"({src!r}) is not a directory.")
         dst, linked, copied = ensure_registered_copy(Path(str(src)))
         rows = write_registered_rows(
-            dst, region, {f: (x, y) for f, (y, x) in zip(fovs, registered)})
+            dst, region, {fovs[i]: (registered[i][1], registered[i][0]) for i in measured})
         _log.info("register: %s — %d row(s) of region %s now carry the registered positions%s.",
                   dst.name, rows, region,
                   f" ({linked} file(s) hardlinked, {copied} copied)" if linked or copied else "")

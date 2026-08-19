@@ -75,8 +75,8 @@ def test_registered_rows_land_in_every_csv_and_only_for_the_region(tmp_path):
     assert n == 8                                              # 4 rows in each of the two csvs
     for path in (dst / "coordinates.csv", dst / "0" / "coordinates.csv"):
         rows = list(csv.reader(path.open()))
-        assert rows[1][3:5] == ["1.000000", "2.000000"]        # µm -> mm at 6 decimals
-        assert rows[4][3:5] == ["4.000000", "8.000000"]
+        assert rows[1][3:5] == ["1.0", "2.0"]        # µm -> mm, shortest round-trip repr
+        assert rows[4][3:5] == ["4.0", "8.0"]
         assert rows[5] == ["B2", "0", "0", "9.000000", "9.000000"]   # untouched
 
 
@@ -99,9 +99,9 @@ def test_the_row_order_schema_still_maps_fovs(tmp_path):
     n = write_registered_rows(root, "A1", {0: (5.0, 6.0), 1: (7.0, 8.0)})
     assert n == 3
     rows = list(csv.reader((root / "coordinates.csv").open()))
-    assert rows[1][1:] == ["0.005000", "0.006000"]
-    assert rows[2][1:] == ["0.005000", "0.006000"]
-    assert rows[3][1:] == ["0.007000", "0.008000"]
+    assert rows[1][1:] == ["0.005", "0.006"]
+    assert rows[2][1:] == ["0.005", "0.006"]
+    assert rows[3][1:] == ["0.007", "0.008"]
 
 
 def _probe_reader():
@@ -137,6 +137,28 @@ def test_register_solves_and_the_copy_carries_the_solution(tmp_path):
         meta["fov_positions_um"][("A1", f)][0] + p.offsets_px[f][1] for f in range(4)))
 
 
+def test_blank_padded_fovs_keep_their_recorded_positions(tmp_path):
+    """A padded slot reads as zeros, and zeros are not a measurement: the solve skips them and
+    the copy's rows for them stay byte-untouched — no affine phantoms in the planned csv."""
+    reader = _probe_reader()
+    src = _acq(tmp_path)
+    reader.source_id = str(src)
+    real_read = reader.read
+
+    def read(region, fov, channel, z_level, time_point=0):
+        if int(fov) == 3:
+            return np.zeros((64, 64), np.uint16)
+        return real_read(region, fov, channel, z_level, time_point)
+
+    reader.read = read
+    result = register_region(reader, "A1", [0, 1, 2, 3], copy=True)
+    p = result.placement
+    assert p.offsets_px[3] == (0.0, 0.0)
+    assert any(abs(dy) > 0.5 or abs(dx) > 0.5 for dy, dx in p.offsets_px[:3])
+    rows = list(csv.reader((registered_copy_root(src) / "0" / "coordinates.csv").open()))
+    assert rows[4] == ["A1", "3", "0", "0.000040", "0.000040"]   # fov 3: untouched
+
+
 def test_copy_without_an_on_disk_source_is_refused_by_name():
     reader = _probe_reader()
     with pytest.raises(ValueError, match="source"):
@@ -160,6 +182,39 @@ def test_the_panel_carries_the_copy_switch_outside_the_params(qapp):
     assert key == "register" and kw["save"] is False and kw["regions"] is None
     assert kw["operator_kwargs"] == {"registration_channel": 0, "registration_t": 0,
                                      "copy": True}
+
+
+def test_a_register_result_layer_is_served_at_the_solved_positions(monkeypatch):
+    """The register look is a paste of raw frames, so its layer is the on-demand pyramid with
+    the REGISTERED positions substituted — native under zoom, like raw. Gated on
+    operator_saves_copy: a fused stitch result is never substituted."""
+    from types import SimpleNamespace
+
+    import squidxplorer._region_viewer as RV
+    from squidxplorer._placement import Placement
+
+    captured = {}
+
+    def fake_pyr(reader, meta, region, channel, *, time_point=0, **kw):
+        captured.update(meta=meta, region=region, channel=channel, t=time_point)
+        return (["levels"], 1.0, 1)
+
+    monkeypatch.setattr("squidxplorer._mosaic_source.fuse_region_pyramid", fake_pyr)
+    placement = Placement(origin_um=(10.0, 20.0), pixel_size_um=2.0, z_step_um=None,
+                          shape=(4, 4), tile_shape=(2, 2), fovs=(0, 1),
+                          offsets_px=((0.0, 0.0), (1.0, -1.0)),
+                          origins_px=((0.0, 0.0), (3.0, 5.0)),
+                          reg_channel="405", reg_t=0)
+    fake = SimpleNamespace(_reader=object(), window_id="t",
+                           _meta={"n_z": 1, "fov_positions_um": {("A1", 0): (0.0, 0.0)}})
+    out = RV.RegionViewer._registered_pyramid(fake, "register", placement, "A1", "405")
+    assert out == ["levels"]
+    pos = captured["meta"]["fov_positions_um"]
+    assert pos[("A1", 0)] == (20.0, 10.0)                        # origin + zero offset
+    assert pos[("A1", 1)] == (20.0 + 5 * 2.0, 10.0 + 3 * 2.0)    # origin + origin_px * pitch
+    assert RV.RegionViewer._registered_pyramid(fake, "stitch", placement, "A1", "405") is None
+    fake._meta = {"n_z": 3, "fov_positions_um": {}}              # a z-stack keeps the paste
+    assert RV.RegionViewer._registered_pyramid(fake, "register", placement, "A1", "405") is None
 
 
 def test_a_save_of_register_is_the_registered_copy_never_a_plate(tmp_path):
