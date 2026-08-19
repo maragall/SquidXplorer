@@ -779,6 +779,33 @@ here; the half-frame shift cancels in the differences).
 - `SQUIDXPLORER_WELL_IMAGES=0` turns the feature off; tests/conftest.py sets that default for
   the suite so preview tests keep their pinned read counts, and tests/test_wellimage.py is the
   coverage that turns it on.
+## Every raw-preview rung is WINDOWED (2026-08-19, branch windowed-rungs)
+
+Julio, live, the 452-FOV single-z set: "Zooming-in causes my viewer to stop responding." The
+coarse rungs of `fuse_region_pyramid` were one whole-region `delayed` fuse each, and napari's
+draw blocks synchronously on the slice it asks for — every zoom notch decoded all 452 frames to
+show a viewport covering a dozen (0.35–3.7 s per rung per channel, measured).
+
+- **Every rung rides `_WindowedLevel`** (coarse and fine, one paste rule): a viewport slice
+  decodes only the FOVs under it — 25/64/187 reads at a 1000 px window on that set, bit-exact
+  to `_fuse_levels` at every stride (pinned on the real data and in
+  `tests/test_mosaic_source.py`). `_fuse_levels` survives as the reference the parity tests pin
+  windows against; the nested `_plane` and its one-pass multi-level fill are gone.
+- **Kept, each verified**: the well-image short-circuit (now `_WindowedLevel._whole_plane`,
+  whole plane cached under the old plane key), the all-FOVs-unreadable refusal (per WINDOW
+  now), one `_bitdepth` observation per decoded frame, z stacked per plane. A full-window
+  compute caches the whole plane, so napari's coarsest thumbnail re-pull stays a ~1 ms hit.
+- **The cache holds only what FITS as a set** (`_region_fits`): 452 × 3.6 MB frames against
+  the 465 MB budget flooded out every smaller entry, so a warm slice re-decoded its FOVs.
+  `_sub` caches the rung's own step-s subframes (s² smaller — the whole region fits at coarse
+  steps); full frames are cached only when the region's worth fits. Warm coarse slices: 0
+  reads. The trade: stride-1 pans on an over-budget set re-decode the viewport's few FOVs.
+- The z concatenate blocks dask's exact-window fusion for nz > 1 (true of the fine rungs since
+  they shipped): the honest grain there is the 2048 px CHUNK, one z — pinned, not fixed.
+- No whole-plane rungs were kept: the coarsest is a single chunk (one Python call), and the
+  off-thread contrast seed measured 0.41–0.69 s against 0.36 s before — same order, while every
+  on-thread coarse slice dropped from 452 decodes to the viewport's own.
+
 ## Plate/views simplification (2026-08-19, branch plate-simplify, Julio's annotated mocks)
 
 - **The Window navigator is DELETED** (`OpenViewList`): the deck's tabs superseded its list.
