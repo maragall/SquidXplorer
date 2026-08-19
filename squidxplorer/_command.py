@@ -334,7 +334,6 @@ class EngineExecutor:
         #: each one. ``on_well`` runs on a writer thread and must be thread-safe.
         self.on_well = on_well
         self.stop = stop
-        self.last_metrics = None
 
     # -- state -------------------------------------------------------------------------
     @property
@@ -490,7 +489,6 @@ class EngineExecutor:
             run.finish(outcome, detail)
             metrics = run
         data["n_landed"] = landed
-        self.last_metrics = metrics.metrics
         data["skipped"] = sorted(result.skipped_regions)
         data["metrics"] = metrics.metrics.as_dict() if metrics.metrics else None
         data["regions"] = regions

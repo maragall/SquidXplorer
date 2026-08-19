@@ -79,7 +79,6 @@ class _FloatWindow(QWidget):
 
     def __init__(self, title, content, on_close, on_redock):
         super().__init__()
-        self._tab_title = title            # verbatim, for re-dock (never parsed back out)
         self.setWindowTitle(f"{title} — SquidXplorer")
         self._content = content
         self._on_close = on_close
