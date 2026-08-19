@@ -41,7 +41,6 @@ OK = "ok"
 PARTIAL = "partial"
 FAILED = "failed"
 STOPPED = "stopped"
-OUTCOMES = (OK, PARTIAL, FAILED, STOPPED)
 
 
 def verdict(landed: int, owed: int, skipped: int, stopped: bool) -> "tuple[str, str]":
@@ -182,9 +181,6 @@ class MetricsLog:
 
     def clear(self) -> None:
         self._runs.clear()
-
-    def for_operator(self, operator: str) -> list:
-        return [m for m in self._runs if m.operator == operator]
 
     def last(self) -> Optional[RunMetrics]:
         return self._runs[-1] if self._runs else None

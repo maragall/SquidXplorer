@@ -182,8 +182,8 @@ class _RunningContrast:
     latches manual and the next well to land can no longer stomp the window they just set.
     """
 
-    def __init__(self, n_ch: int, dmax: float, pct=(1.0, 99.8), bins=512):
-        self._bins, self._dmax, self._pct = bins, max(1.0, float(dmax)), pct
+    def __init__(self, n_ch: int, dmax: float, bins=512):
+        self._bins, self._dmax = bins, max(1.0, float(dmax))
         self._hist = [np.zeros(bins, dtype=np.int64) for _ in range(n_ch)]
         self._manual: dict[int, tuple[float, float]] = {}
         # The window the owning viewer resolved and is rendering with; not the same as _manual.
@@ -445,7 +445,6 @@ class PlateOverview(QWidget):
         self._tile_level = None
         self._carrier = None
         self._carrier_slide = False
-        self._slides = None
         self._tile_rgn = None
         self._loupe_src = None
         self._loupe_worker = None
@@ -852,8 +851,7 @@ class PlateOverview(QWidget):
         """Every ``(ri, ci)`` showing a thumbnail right now, from whichever layer supplies it."""
         return set(self._tiles_by_layer.get(self._active, set())) | self.underlay_cells()
 
-    def set_channels(self, labels, colors: np.ndarray, dtype=np.uint16, pct=(1.0, 99.8),
-                     luts=None):
+    def set_channels(self, labels, colors: np.ndarray, dtype=np.uint16, luts=None):
         """Declare the acquisition's channels — the per-channel store/mask/contrast start here.
 
         ``luts`` is one optional colormap per channel (see :func:`_montage.composite`): a
@@ -865,7 +863,7 @@ class PlateOverview(QWidget):
         self._dtype = np.dtype(dtype)
         self._mask = np.ones(len(self._labels), dtype=bool)     # every channel on by default (OV8)
         dmax = float(np.iinfo(self._dtype).max) if self._dtype.kind in "ui" else 1.0
-        self._contrast = _RunningContrast(len(self._labels), dmax, pct=pct)
+        self._contrast = _RunningContrast(len(self._labels), dmax)
         self._store.clear()
 
     def _store_for(self, layer: str) -> Optional[np.ndarray]:
@@ -1522,7 +1520,6 @@ class PlateOverview(QWidget):
             self._carrier_slide = isinstance(plate, SlideCarrier)
         except Exception:
             self._carrier_slide = False
-        self._slides = None
         self.update()
 
     def _cell_rect(self, ri: int, ci: int) -> tuple:
@@ -1864,17 +1861,6 @@ class PlateOverview(QWidget):
         if self._carrier is None:
             return
         cd = self._cd
-        ax, ay = self._ox + _HDR, self._oy + _COLH
-        if self._slides is not None:
-            # Real glass slides at true size, side by side; the slides ARE the holder.
-            from squidxplorer._slide_art import paint_slides
-            slide_rects_px = [(ax + s[0] * cd, ay + s[1] * cd, s[2] * cd, s[3] * cd)
-                              for s in self._slides]
-            paint_slides(p, slide_rects_px)
-            if cd < 6.0:
-                return
-            self._paint_carrier_cells(p, tiled)
-            return
         # The holder body: the union of every cell rectangle, padded by the implied margin.
         rects = [self._cell_rect(r, c) for r in range(self._nr) for c in range(self._nc)]
         if not rects:

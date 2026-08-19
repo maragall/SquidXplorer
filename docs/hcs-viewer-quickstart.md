@@ -50,7 +50,7 @@ something goes wrong so you can read the error.
 
 | | |
 |---|---|
-| **Left, narrow** | the **plate** — every well, plus the Window navigator and bulk operators |
+| **Left, narrow** | the **plate** — every well, plus the log panel and bulk operators |
 | **Right, wide** | **SquidXplorer views** — a napari view of the wells, in tabs |
 
 A view over every well opens by itself, so there is something to look at immediately. The two
@@ -90,7 +90,6 @@ Every view you open becomes a **tab** in the views window. You work in one at a 
 - **Click a tab** to switch. The plate highlights that view's wells.
 - **× on a tab** closes that view.
 - **Drag a tab out of the strip** to pull it into its own floating window.
-- The **Window navigator** on the plate lists every view and says which window each one is in.
 
 Each view holds its own napari viewer, so several open at once costs real memory. Past six views
 the views window tells you roughly how much — close the ones you are done with.

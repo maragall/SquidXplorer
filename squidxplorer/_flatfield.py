@@ -77,13 +77,6 @@ class FlatfieldProfile:
         names = [str(n) for n in names]
         return {n: cls.from_npy(path, channel=i) for i, n in enumerate(names)}
 
-    def to_npy(self, path) -> None:
-        """Write this profile in the stitcher's format."""
-        from tilefusion.flatfield import save_flatfield
-
-        save_flatfield(Path(path), self.flatfield[None, ...],
-                       None if self.darkfield is None else self.darkfield[None, ...])
-
 
 def estimate_profile(planes, *, use_darkfield: bool = False) -> FlatfieldProfile:
     """Estimate a profile from ``(n_tiles, Y, X)`` tiles with the stitcher's BaSiC estimator.
@@ -139,7 +132,6 @@ def flatfield_op(profile: FlatfieldProfile) -> Callable[[Iterable[np.ndarray]], 
 # ``corrects_illumination = True`` on a callable means: these pixels come out flat-fielded.
 # ``_stitch.stitch_region`` reads it to refuse a double apply (the correction is not idempotent).
 # An attribute on the callable, like ``consumes``, never a name comparison.
-CORRECTS_ILLUMINATION = "corrects_illumination"
 
 
 # The active profiles, one per channel. ``_stitch._selected_profiles`` reads this too; the

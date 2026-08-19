@@ -3,7 +3,6 @@ pretrained model."""
 
 from __future__ import annotations
 
-import logging
 
 import numpy as np
 

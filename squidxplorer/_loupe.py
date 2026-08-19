@@ -33,7 +33,6 @@ window on the GUI thread meant a paint-driven slot decoding a whole TIFF plane.
 
 from __future__ import annotations
 
-import os
 import threading
 from typing import Optional
 

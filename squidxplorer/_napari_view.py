@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import logging
 import os
 from collections.abc import Sequence as _SequenceABC
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Iterable, Optional, Sequence
+from typing import Any, Optional, Sequence
 
 import numpy as np
 
@@ -45,11 +44,6 @@ def resolve_viewer(env: Optional[dict] = None) -> str:
             VIEWER_ENV, want,
         )
     return _NAPARI
-
-
-def napari_enabled(env: Optional[dict] = None) -> bool:
-    """True when the napari view is the selected viewer, which is now always."""
-    return resolve_viewer(env) == _NAPARI
 
 
 # --------------------------------------------------------------------------------------

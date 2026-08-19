@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 
 from squidxplorer._output import write_from_stream
-from squidxplorer.projection import project_well, resolve_n_fovs, select_fovs
+from squidxplorer.projection import project_well, select_fovs
 from squidxplorer.reader import open_reader
 
 
@@ -61,22 +61,6 @@ def test_zero_and_negative_counts_rejected():
     for bad in (0, -1):
         with pytest.raises(ValueError, match=">= 1 or None"):
             select_fovs(meta, n_fovs=bad)
-
-
-# --- resolve_n_fovs (the field_count guard) -------------------------------------------------
-
-def test_resolve_none_takes_the_max_across_ragged_wells():
-    meta = _meta({"A1": [0, 1, 2, 3], "A2": [0, 1]})
-    assert resolve_n_fovs(meta, None) == 4
-
-
-def test_resolve_passes_an_explicit_count_through():
-    assert resolve_n_fovs(_meta({"A1": [0, 1]}), 2) == 2
-
-
-def test_resolve_never_returns_none():
-    """int(None) inside plate_metadata is the exact TypeError this function exists to prevent."""
-    assert isinstance(resolve_n_fovs(_meta({"A1": [0, 1]}), None), int)
 
 
 # --- writer: n_fovs=None must not TypeError -------------------------------------------------

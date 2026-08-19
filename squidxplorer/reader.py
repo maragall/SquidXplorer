@@ -613,8 +613,6 @@ class SquidReader:
         self._time_folders: Optional[list[Path]] = None
         self._index: Optional[dict] = None
         self._meta: Optional[dict] = None
-        #: Filename channels whose planes are (Y, X, 3) color; set by ``metadata``.
-        self._rgb_bases: set[str] = set()
         #: ``(folder, entries)`` from a listing the caller already paid for; consumed once.
         self._scanned = _scanned
 
@@ -751,8 +749,6 @@ class SquidReader:
                     f"{ch_sample.dtype} in {ch_path.name}). One acquisition, one dtype — a mixed "
                     "set cannot be composited or windowed as one; refused rather than upcast."
                 )
-        self._rgb_bases = rgb_bases
-
         resolved = resolve_channels(sorted(channels), load_channel_yaml(self._path))
         if rgb_bases:
             resolved = _expand_rgb_channels(resolved, rgb_bases)

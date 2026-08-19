@@ -3,7 +3,6 @@ the GL 3D texture limit, following gallery-view's recipe."""
 
 from __future__ import annotations
 
-import logging
 import threading
 from typing import Any, Optional, Sequence
 

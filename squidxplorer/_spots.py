@@ -16,16 +16,6 @@ LAYER_KEY: str = "spot"
 LAYER_LABEL: str = "spot detection (nuclei)"
 
 
-def mask_layer_name(channel: str) -> str:
-    """napari layer label for the ``Labels`` mask derived from *channel*. ONE spelling."""
-    return f"{channel} · nuclei mask"
-
-
-def centroid_layer_name(channel: str) -> str:
-    """napari layer label for the ``Points`` centroids derived from *channel*. ONE spelling."""
-    return f"{channel} · nuclei centroids"
-
-
 @dataclass(frozen=True)
 class SpotParams:
     """The four knobs, all in pixels. Defaults are tuned for a 10x nucleus (~15-25 px)."""

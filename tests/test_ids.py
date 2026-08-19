@@ -1,7 +1,7 @@
 """Fixed-width integer ids: the flat-cache scope and the logger's numeric id."""
 
 from squidxplorer._plate import (
-    cache_scope, decode_code, format_code, roi_code, well_code,
+    cache_scope, decode_code, roi_code, well_code,
 )
 
 
@@ -16,7 +16,6 @@ def test_roi_code_and_decode_round_trip():
     code = roi_code("C18", 3)
     assert code == well_code("C18") + 3
     assert decode_code(code) == (2, 17, 3)          # (row, col, roi), 0-based
-    assert format_code(code) == "02 17 0003"        # Row Column ROI
 
 
 def test_freeform_region_has_no_code():

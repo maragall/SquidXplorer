@@ -184,12 +184,6 @@ class ProcessParameters(BaseModel, use_attribute_docstrings=True):
         return names
 
 
-def _region_operator_names() -> set:
-    from squidxplorer import available_region_operators
-
-    return set(available_region_operators())
-
-
 def _resolve_regions(params: ProcessParameters, reader) -> Optional[list[str]]:
     """The explicit ``regions`` list for the command, or None for the whole plate.
 

@@ -47,7 +47,6 @@ GUI_MODULES = frozenset({
     "_region_nav",
     "_region_viewer",
     "_operator_dock",    # the collapsible right-edge operator dock: pure widget reparenting
-    "_slide_art",
     "_time_point",       # the timepoint bar, shared by the plate and every window
     "_view_deck",        # the TAB DECK that holds view windows as pages. Qt-facing with nothing
     #                      underneath it to split off: it is a QMainWindow wearing a QTabWidget,

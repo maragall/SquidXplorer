@@ -7,8 +7,6 @@ The vocabulary, result type, refusal codes and scope resolution live in
 
 from __future__ import annotations
 
-import logging
-from typing import Optional
 
 from squidxplorer import _run_scope
 # The operator vocabulary comes from the Qt-free registry, never from the window.
