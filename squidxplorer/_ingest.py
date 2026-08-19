@@ -256,5 +256,7 @@ def update_loupe_source(win) -> None:
         return                                   # unchanged: don't churn the worker thread
     colors = None
     if win._meta and win._meta.get("channels"):
-        colors = np.stack([_hex_to_rgb01(c["display_color"]) for c in win._meta["channels"]])
+        from squidxplorer._montage import channel_tint01
+
+        colors = np.stack([channel_tint01(c) for c in win._meta["channels"]])
     win._overview.set_loupe_source(source, colors)

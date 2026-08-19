@@ -183,6 +183,15 @@ def _hex_to_rgb01(hex_color: str) -> np.ndarray:
     return np.array([int(h[i : i + 2], 16) for i in (0, 2, 4)], dtype=np.float32) / 255.0
 
 
+def channel_tint01(channel) -> np.ndarray:
+    """A channel's composite tint in [0, 1]: the measured stain LUT's mid stop when one exists
+    (a color channel recorded gray — see ``_stain``), else its resolved ``display_color``."""
+    lut = channel.get("display_lut") if hasattr(channel, "get") else None
+    if lut:
+        return np.asarray(lut[len(lut) // 2][:3], dtype=np.float32)
+    return _hex_to_rgb01(channel["display_color"])
+
+
 def composite(store: np.ndarray, colors: np.ndarray, windows, mask=None) -> np.ndarray:
     """Window each channel of a ``(C, H, W)`` stack and add it into one ``(H, W, 3)`` uint8 RGB.
 

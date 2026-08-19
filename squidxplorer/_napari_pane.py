@@ -49,8 +49,8 @@ class SettleCoalescer:
         return self._last is not None
 
 
-def _acquisition_color(channel_name: str, channels) -> "str | None":
-    """The resolved ``display_color`` for *channel_name* in an acquisition's channel list.
+def _channel_entry(channel_name: str, channels):
+    """The channel record for *channel_name* (matched by name or display_name), or None.
 
     Entries are ``DisplayChannel`` records in real metadata and plain dicts in older callers;
     both answer ``.get``, so the discriminator is the protocol, never the type.
@@ -61,19 +61,31 @@ def _acquisition_color(channel_name: str, channels) -> "str | None":
             continue
         if str(get("name")) == str(channel_name) \
                 or str(get("display_name") or "") == str(channel_name):
-            return get("display_color")
+            return entry
     return None
 
 
+def _acquisition_color(channel_name: str, channels) -> "str | None":
+    """The resolved ``display_color`` for *channel_name* in an acquisition's channel list."""
+    entry = _channel_entry(channel_name, channels)
+    return entry.get("display_color") if entry is not None else None
+
+
 def _colormap_for(channel_name: str, channels=None):
-    """napari colormap for a channel: the acquisition's own resolved ``display_color`` first
-    (the reader's RGB component channels carry pure primaries there — the name palette cannot
-    know them), else Squid's name palette; grey for an unrecognised channel."""
+    """napari colormap for a channel: the measured stain LUT first (a color channel recorded
+    gray — see ``_stain``), then the acquisition's own resolved ``display_color`` (the reader's
+    RGB component channels carry pure primaries there — the name palette cannot know them),
+    else Squid's name palette; grey for an unrecognised channel."""
     try:
         from napari.utils import Colormap
 
         from squidxplorer._channels import fallback_color
 
+        entry = _channel_entry(channel_name, channels)
+        lut = entry.get("display_lut") if entry is not None else None
+        if lut:
+            return Colormap([[*row[:3], 1.0] for row in lut],
+                            name=f"squid-stain-{channel_name}")
         hex_color = _acquisition_color(channel_name, channels) or fallback_color(channel_name)
         if not hex_color:
             return "gray"

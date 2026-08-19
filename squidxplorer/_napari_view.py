@@ -286,6 +286,24 @@ def colormap_hue_rgb(layer: Any) -> "Optional[tuple[int, int, int]]":
         return None
 
 
+def colormap_mid_rgb(layer: Any) -> "Optional[tuple[int, int, int]]":
+    """The 8-bit RGB of a colormap's MIDDLE stop — the representative tint of a map that does
+    not reduce to black-to-hue (a measured stain LUT is white-topped, so its hue lives mid-curve).
+    """
+    cm = getattr(layer, "colormap", None)
+    colors = getattr(cm, "colors", None)
+    if colors is None:
+        return None
+    try:
+        table = np.asarray(colors, dtype=float)
+        if table.ndim != 2 or table.shape[0] < 1 or table.shape[1] < 3:
+            return None
+        mid = table[table.shape[0] // 2, :3]
+        return tuple(int(round(min(1.0, max(0.0, float(v))) * 255.0)) for v in mid)
+    except Exception:                       # noqa: BLE001 - unknown colormap shape; say nothing
+        return None
+
+
 class MosaicLayers:
     """The two-level hierarchy over a napari ``ViewerModel``."""
 

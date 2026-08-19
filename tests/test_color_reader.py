@@ -148,6 +148,56 @@ def test_rgb_components_seed_the_files_full_range(tmp_path):
     assert w._seed_window("BF_LED_matrix_full", None, lambda *a: (9.0, 10.0)) == (9.0, 10.0)
 
 
+def _mosaic_sidecar(root, k_r=0.3, k_b=0.6):
+    """Squid's colored overview: a PNG with a known stain + the yaml calling the channel RGB."""
+    mv = root / "0" / "mosaic_view"
+    mv.mkdir(parents=True, exist_ok=True)
+    t = np.tile(np.linspace(0.2, 1.0, 200), (120, 1))
+    png = np.stack([255 * t ** k_r, 255 * t, 255 * t ** k_b], axis=-1).astype(np.uint8)
+    Image.fromarray(png).save(mv / "mosaic_2um_x.png")
+    (mv / "mosaic_2um.yaml").write_text(
+        "rgb_channel_names:\n- 20x BF LED matrix full\nrgb_view_files:\n- mosaic_2um_x.png\n")
+
+
+def test_a_color_channel_recorded_gray_is_detected_and_gets_the_stain_lut(tmp_path):
+    """The mosaic yaml says the channel was RGB live; its files are 2-D: the display gets the
+    stain colormap measured from the overview PNG. Detection is automatic, pixels untouched."""
+    root = tmp_path / "acq"
+    _write(root / "0", "manual_0_0_BF_LED_matrix_full.bmp", _gray(7))
+    _sidecars(root)
+    _mosaic_sidecar(root)
+    from squidxplorer._napari_pane import _colormap_for
+
+    chs = open_reader(root).metadata["channels"]
+    lut = chs[0].get("display_lut")
+    assert lut is not None and len(lut) == 256
+    assert lut[-1] == (1.0, 1.0, 1.0)                       # background stays white
+    assert abs(lut[128][0] - 0.5 ** 0.3) < 0.05             # the measured k_R reaches the LUT
+    assert abs(lut[128][2] - 0.5 ** 0.6) < 0.05
+    pytest.importorskip("napari")
+    cm = _colormap_for(chs[0]["name"], chs)
+    assert len(np.asarray(cm.colors)) == 256
+
+
+def test_without_an_overview_the_gray_channel_stays_gray(tmp_path):
+    root = tmp_path / "acq"
+    _write(root / "0", "manual_0_0_BF_LED_matrix_full.bmp", _gray(7))
+    _sidecars(root)
+    chs = open_reader(root).metadata["channels"]
+    assert chs[0].get("display_lut") is None
+
+
+def test_a_real_rgb_acquisition_expands_and_takes_no_stain_lut(tmp_path):
+    root = tmp_path / "acq"
+    rgb = np.stack([_gray(1), _gray(2), _gray(3)], axis=-1)
+    _write(root / "0", "manual_0_0_BF_LED_matrix_full.bmp", rgb)
+    _sidecars(root)
+    _mosaic_sidecar(root)
+    chs = open_reader(root).metadata["channels"]
+    assert [c["name"] for c in chs] == [f"BF_LED_matrix_full ({x})" for x in "RGB"]
+    assert all(c.get("display_lut") is None for c in chs)   # true primaries need no model
+
+
 def test_colormap_without_a_resolved_color_still_uses_the_name_palette():
     pytest.importorskip("napari")
     from squidxplorer._channels import fallback_color

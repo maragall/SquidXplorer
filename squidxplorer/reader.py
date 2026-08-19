@@ -756,6 +756,11 @@ class SquidReader:
         resolved = resolve_channels(sorted(channels), load_channel_yaml(self._path))
         if rgb_bases:
             resolved = _expand_rgb_channels(resolved, rgb_bases)
+        # A channel the mosaic_view yaml calls RGB whose files are 2-D was color recorded gray;
+        # it gets the stain colormap measured from the overview PNG (a look, never new pixels).
+        from squidxplorer._stain import attach_stain_luts
+
+        attach_stain_luts(self._path, resolved, rgb_bases)
 
         fovs_per_region = {r: sorted(fovs[r]) for r in regions}
         self._meta = _assemble_metadata(

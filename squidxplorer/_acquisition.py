@@ -147,6 +147,9 @@ class DisplayChannel(BaseModel):
     excitation_nm: Optional[float] = None
     """Excitation wavelength (nm); ``None`` for a broadband channel, never a substitute."""
 
+    display_lut: Optional[tuple] = None
+    """Measured stain colormap stops for a color channel recorded gray (see ``_stain``)."""
+
     # Mapping shim: `c["name"]` is written at many call sites; keep it working.
     def __getitem__(self, key: str):
         if key not in _CHANNEL_FIELDSET:

@@ -63,7 +63,7 @@ log = get_logger("viewer")
 from squidxplorer import _gallery_launch, _ingest, _measure, _qtstyle, _run_scope
 from squidxplorer.contract import field_path
 from squidxplorer._engine import available_plane_operators
-from squidxplorer._montage import _hex_to_rgb01
+from squidxplorer._montage import _hex_to_rgb01, channel_tint01
 from squidxplorer._output import incomplete_reason, parse_well_id
 from squidxplorer._activity import ActivityLog
 from squidxplorer._address import Extent
@@ -3197,7 +3197,7 @@ class PlateWindow(QMainWindow):
         """
         if self._overview is None:
             return
-        colors = np.stack([_hex_to_rgb01(c["display_color"]) for c in channels])
+        colors = np.stack([channel_tint01(c) for c in channels])
         self._overview.set_channels([c.get("display_name") or c["name"] for c in channels],
                                     colors, dtype)
         # NO STRIP UNDER THE PLATE. Julio: "Take out the window below plate view, it's
