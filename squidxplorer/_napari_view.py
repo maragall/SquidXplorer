@@ -326,6 +326,8 @@ class MosaicLayers:
         # (op, channel, property) triples currently being mirrored, keyed rather than a
         # single flag so a mirror running inside another identity's mirror is not swallowed.
         self._mirroring: set = set()
+        # Re-entrancy guard for the selection-follows-visibility rule.
+        self._selection_following = False
         try:
             model.dims.events.ndisplay.connect(self._reslice_hidden_layers)
         except Exception:                        # noqa: BLE001 - a stub model with no dims events
@@ -1051,6 +1053,9 @@ class MosaicLayers:
         # LAST, and the order is load-bearing: a subscriber hears "mip came on" before
         # "raw went off", which is the order the gesture actually happened in.
         self._connect_exclusive_op(channel, layer)
+        # After the mirror on purpose: when a representative goes dark, its siblings are
+        # already dark by the time this decides where the selection can honestly go.
+        self._connect_selection_follow(layer)
         # Link contrast across processing layers of this channel. link_layers connects
         # events only; it does not equalise values at link time (deliberate).
         linkable = self._link_set(channel)
@@ -1250,6 +1255,54 @@ class MosaicLayers:
             self._present_z_axis()
 
         layer.events.visible.connect(_fire)
+
+    def _connect_selection_follow(self, layer: Any) -> None:
+        """Wire one layer into the selection-follows-visibility rule (ticket #8).
+
+        napari's layer-controls panel shows the SELECTED layer and napari never moves the
+        selection on a visibility flip, so unticking a layer left its controls up over a
+        picture it is no longer part of.
+        """
+        def _fire(event=None, _ly=layer) -> None:
+            self._follow_selection_off(_ly)
+
+        try:
+            layer.events.visible.connect(_fire)
+        except Exception:                        # noqa: BLE001 - a stub layer with no emitter
+            pass
+
+    def _follow_selection_off(self, layer: Any) -> None:
+        """A hidden layer may not keep the selection: move it to the topmost VISIBLE layer of
+        the same op, else any visible layer. With nothing visible the selection stays put —
+        there is nowhere honest to move it."""
+        if self._selection_following:
+            return                               # our own selection write echoing back
+        if bool(getattr(layer, "visible", False)):
+            return                               # only a flip to OFF vacates the selection
+        try:
+            selection = self._model.layers.selection
+        except Exception:                        # noqa: BLE001 - a model without a selection
+            return
+        if layer not in selection:
+            return
+        candidates = [ly for ly in reversed(list(self._model.layers))
+                      if bool(getattr(ly, "visible", False))]
+        if not candidates:
+            return
+        key = key_of(layer)
+        target = None
+        if key is not None:
+            target = next((ly for ly in candidates
+                           if (k := key_of(ly)) is not None and k.op == key.op), None)
+        if target is None:
+            target = next((ly for ly in candidates if key_of(ly) is not None), candidates[0])
+        self._selection_following = True
+        try:
+            selection.active = target
+        except Exception as exc:                 # noqa: BLE001 - selection is a convenience
+            log.warning("could not move the layer selection off a hidden layer: %s", exc)
+        finally:
+            self._selection_following = False
 
     def on_user_op(self, callback) -> None:
         """Subscribe to the processing layer the user showed or hid. ``callback(op, visible)``."""
