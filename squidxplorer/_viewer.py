@@ -3207,8 +3207,10 @@ class PlateWindow(QMainWindow):
         if self._overview is None:
             return
         colors = np.stack([channel_tint01(c) for c in channels])
+        luts = [c.get("display_lut") for c in channels]
         self._overview.set_channels([c.get("display_name") or c["name"] for c in channels],
-                                    colors, dtype)
+                                    colors, dtype,
+                                    luts=luts if any(l is not None for l in luts) else None)
         # NO STRIP UNDER THE PLATE. Julio: "Take out the window below plate view, it's
         # unnecessary." It had already lost its controls (napari owns visibility and contrast),
         # which left a row of labels restating what napari's own layer list shows two panes away.

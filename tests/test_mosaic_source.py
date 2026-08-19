@@ -308,6 +308,38 @@ def _pyr_meta(nz=6, frame=(256, 256), px=1.0, n=16):
     return meta
 
 
+def test_deep_zoom_gets_native_pixels_on_demand():
+    """Fine rungs below the cap go down to NATIVE, and a window materialises only the chunk
+    under it — a slice reads the FOVs of that chunk, never the region. The fix for 'raw stays
+    pixelated past _MAX_FUSED_PX'."""
+    from squidxplorer._mosaic_source import fuse_region_pyramid
+
+    reader = _StepReader(frame=(256, 256))    # frames as big as the meta declares: no holes
+    meta = _pyr_meta(nz=1)
+    levels, step0, _nz = fuse_region_pyramid(reader, meta, "A1", "488", max_px=1024)
+    assert step0 == 4
+    assert levels[0].shape == (256, 4096), "native resolution must lead the pyramid"
+    assert levels[1].shape == (128, 2048)
+
+    n_before = len(reader.reads)
+    win = np.asarray(levels[0][0:100, 0:100])
+    touched = {f for (_r, f, _c, _z, _t) in reader.reads[n_before:]}
+    # dask pushes the exact window into the getter, so only the FOV under it decodes.
+    assert touched == {0}, f"a 100x100 window sits on FOV 0 alone; read {sorted(touched)}"
+    assert (win == 1).all()                       # z0 reads as 1: native pixels, no holes
+
+
+def test_fine_levels_respect_the_plane_budget(monkeypatch):
+    """A rung whose WHOLE plane would blow the budget is not offered: the 3-D full-res swap
+    and _full_res_mip still take level 0 whole."""
+    from squidxplorer import _mosaic_source as ms
+
+    monkeypatch.setattr(ms, "_PLANE_BUDGET_BYTES", 300_000)
+    levels, _step0, _nz = ms.fuse_region_pyramid(_StepReader(), _pyr_meta(nz=1), "A1", "488",
+                                                 max_px=1024)
+    assert levels[0].shape == (64, 1024), "over budget: the capped level must still lead"
+
+
 def test_the_raw_preview_returns_a_pyramid_of_strictly_decreasing_levels():
     """napari's ``multiscale=True`` contract: a LIST, highest resolution first, each level
     strictly smaller than the one above it in both displayed axes."""
