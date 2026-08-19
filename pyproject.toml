@@ -134,7 +134,11 @@ gui = [
     # so nothing here proves 0.8 works. This removes a hedge that no longer has a reason; it does
     # not certify the newer version. Whoever first installs 0.8 should run the suite before
     # trusting it.
-    "napari>=0.7,<0.9",
+    # The VERIFIED pair: the suite and every hand check run napari 0.6.6 + vispy 0.15.2. The
+    # 0.8 line died natively after open on a customer Windows machine (2026-08-18); raise this
+    # only with a full suite AND a Windows hand check on the new line.
+    "napari>=0.6.5,<0.7",
+    "vispy>=0.15.2,<0.16",
     # vispy's C fast path. Without it every launch logs "No OpenGL_accelerate module loaded" and
     # texture uploads run in pure Python — present in the Windows rig's 80 s first-paint log
     # (2026-08-18). A compiled wheel; the CI wheels-only guard proves it ships as one.
