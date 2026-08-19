@@ -544,6 +544,17 @@ class RegionViewer(QMainWindow):
 
         self.setCentralWidget(central)
 
+        # Derived display color must be labeled: said once per open, pinned on the raw group tooltip.
+        try:
+            from squidxplorer._channels import color_note
+
+            note = color_note((self._meta or {}).get("channels"))
+            if note:
+                pane.mosaic.set_color_note(_RAW_OP, note)
+                self._say(note)
+        except Exception as exc:                          # noqa: BLE001 - a label, never fatal
+            log.debug("view %s could not state color provenance: %s", self.window_id, exc)
+
         # SEED the cursor: this announces region 0 to the loader, so the first mosaic loads now.
         # Reads ``_seed_regions`` and not ``_regions``, because ``_regions`` reads back OUT of the
         # cursor — at this instant it would be answering from the empty order it is about to be

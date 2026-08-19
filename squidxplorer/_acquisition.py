@@ -150,6 +150,12 @@ class DisplayChannel(BaseModel):
     display_lut: Optional[tuple] = None
     """Measured stain colormap stops for a color channel recorded gray (see ``_stain``)."""
 
+    color_source: Optional[str] = None
+    """Provenance of a DERIVED display color: ``"file"`` (a real (Y, X, 3) plane's own
+    components), ``"reconstructed"`` (chroma recovered from the acquisition's overview) or
+    ``"estimated"`` (the stain LUT's density fit). ``None`` for an ordinary channel showing
+    its yaml color, which needs no label."""
+
     # Mapping shim: `c["name"]` is written at many call sites; keep it working.
     def __getitem__(self, key: str):
         if key not in _CHANNEL_FIELDSET:

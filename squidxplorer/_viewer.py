@@ -60,7 +60,7 @@ from squidxplorer._logpane import get_logger
 
 log = get_logger("viewer")
 
-from squidxplorer import _gallery_launch, _ingest, _measure, _qtstyle, _run_scope
+from squidxplorer import _gallery_launch, _ingest, _measure, _qtstyle, _run_scope, _stain
 from squidxplorer.contract import field_path
 from squidxplorer._engine import available_plane_operators
 from squidxplorer._montage import _hex_to_rgb01, channel_tint01
@@ -843,6 +843,15 @@ class PlateWindow(QMainWindow):
         self._gallery_act = QAction("&Gallery View…", self)
         self._gallery_act.triggered.connect(self._open_gallery_view)
         view_menu.addAction(self._gallery_act)
+        view_menu.addSeparator()
+        # Derived color is default-ON but one click to honest gray; unchecked, a gray-recorded
+        # channel keeps its yaml color and gets neither chroma channels nor a stain LUT.
+        # Connected AFTER setChecked so mirroring the current flag does not fire a re-ingest.
+        self._recon_color_act = QAction("Reconstructed &Color", self)
+        self._recon_color_act.setCheckable(True)
+        self._recon_color_act.setChecked(_stain.reconstruction_enabled())
+        self._recon_color_act.toggled.connect(self._toggle_reconstructed_color)
+        view_menu.addAction(self._recon_color_act)
 
         self.setAcceptDrops(True)
         if initial_path:
@@ -3398,6 +3407,16 @@ class PlateWindow(QMainWindow):
     def _select_all_wells(self):
         if self._overview is not None:
             self._overview.select_all()
+
+    def _toggle_reconstructed_color(self, checked: bool):
+        """Flip the one derived-color flag and re-ingest, so the reader rebuilds under it."""
+        _stain.set_reconstruction(bool(checked))
+        state = "on" if checked else "off (gray channels keep their yaml color)"
+        if self._acq_path is not None:
+            self.ingest(str(self._acq_path))
+        else:
+            self._readout.setText(
+                f"reconstructed color {state}; applies to the next acquisition opened")
 
     def _close_all_views(self):
         """Close every open view (the navigator's old "Close all", now a View-menu action)."""

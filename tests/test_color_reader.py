@@ -222,6 +222,92 @@ def test_a_real_rgb_acquisition_expands_and_takes_no_stain_lut(tmp_path):
     assert all(c.get("display_lut") is None for c in chs)   # true primaries need no model
 
 
+def test_rgb_components_declare_file_color_provenance(tmp_path):
+    """Case 1 of the color cascade: real (Y, X, 3) components are the file's own color."""
+    root = tmp_path / "acq"
+    _write(root / "0", "manual_0_0_BF_LED_matrix_full.bmp",
+           np.stack([_gray(1), _gray(2), _gray(3)], axis=-1))
+    _sidecars(root)
+    chs = open_reader(root).metadata["channels"]
+    assert [c.get("color_source") for c in chs] == ["file", "file", "file"]
+
+
+def test_the_estimated_lut_declares_estimated_provenance(tmp_path):
+    """Case 3: the density-fit LUT is derived, and the entry says so."""
+    root = tmp_path / "acq"
+    _write(root / "0", "manual_0_0_BF_LED_matrix_full.bmp", _gray(7))
+    _sidecars(root)
+    _mosaic_sidecar(root)
+    chs = open_reader(root).metadata["channels"]
+    assert chs[0].get("display_lut") is not None
+    assert chs[0].get("color_source") == "estimated"
+
+
+def test_a_plain_channel_carries_no_color_source(tmp_path):
+    """Case 4: an ordinary channel shows its own yaml color, which needs no label."""
+    root = tmp_path / "acq"
+    _write(root / "0", "manual_0_0_BF_LED_matrix_full.bmp", _gray(7))
+    _sidecars(root)
+    chs = open_reader(root).metadata["channels"]
+    assert chs[0].get("color_source") is None and chs[0].get("display_lut") is None
+
+
+def test_the_env_flag_kills_reconstruction_to_honest_gray(tmp_path, monkeypatch):
+    """SQUIDXPLORER_NO_RECONSTRUCTED_COLOR=1: no stain LUT, the mono channel with its yaml
+    color. Real RGB still expands, because the file's own color is not a reconstruction."""
+    monkeypatch.setenv("SQUIDXPLORER_NO_RECONSTRUCTED_COLOR", "1")
+    root = tmp_path / "acq"
+    _write(root / "0", "manual_0_0_BF_LED_matrix_full.bmp", _gray(7))
+    _sidecars(root)
+    _mosaic_sidecar(root)
+    chs = open_reader(root).metadata["channels"]
+    assert len(chs) == 1
+    assert chs[0].get("display_lut") is None and chs[0].get("color_source") is None
+    assert chs[0]["display_color"] == "#FFFFFF"
+
+    rgb_root = tmp_path / "acq_rgb"
+    _write(rgb_root / "0", "manual_0_0_BF_LED_matrix_full.bmp",
+           np.stack([_gray(1), _gray(2), _gray(3)], axis=-1))
+    _sidecars(rgb_root)
+    rgb_chs = open_reader(rgb_root).metadata["channels"]
+    assert [c.get("color_source") for c in rgb_chs] == ["file", "file", "file"]
+
+
+def test_set_reconstruction_round_trips_the_flag(tmp_path):
+    """The live override the View menu flips; None returns to the environment's answer."""
+    from squidxplorer import _stain
+
+    root = tmp_path / "acq"
+    _write(root / "0", "manual_0_0_BF_LED_matrix_full.bmp", _gray(7))
+    _sidecars(root)
+    _mosaic_sidecar(root)
+    try:
+        _stain.set_reconstruction(False)
+        chs = open_reader(root).metadata["channels"]
+        assert chs[0].get("display_lut") is None and chs[0].get("color_source") is None
+        _stain.set_reconstruction(True)
+        chs = open_reader(root).metadata["channels"]
+        assert chs[0].get("display_lut") is not None
+        assert chs[0].get("color_source") == "estimated"
+    finally:
+        _stain.set_reconstruction(None)
+
+
+def test_color_note_names_each_provenance_once():
+    """The shared sentence the window says and the tree pins; silent for plain channels."""
+    from squidxplorer._acquisition import DisplayChannel
+    from squidxplorer._channels import color_note, color_sources
+
+    def ch(source):
+        return DisplayChannel(name="x", display_name="x", display_color="#FFFFFF",
+                              color_source=source)
+
+    assert color_note([ch(None)]) is None and color_sources([ch(None)]) == []
+    note = color_note([ch("estimated"), ch("file"), ch("file")])
+    assert note.startswith("color: ") and "estimated colormap" in note and "file color" in note
+    assert color_sources([ch("file"), ch("estimated")]) == ["estimated", "file"]
+
+
 def test_colormap_without_a_resolved_color_still_uses_the_name_palette():
     pytest.importorskip("napari")
     from squidxplorer._channels import fallback_color

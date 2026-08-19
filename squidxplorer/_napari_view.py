@@ -322,6 +322,8 @@ class MosaicLayers:
         self._mirroring: set = set()
         # Re-entrancy guard for the selection-follows-visibility rule.
         self._selection_following = False
+        # op -> one-line color-provenance note (see set_color_note below).
+        self._color_notes: dict[str, str] = {}
         try:
             model.dims.events.ndisplay.connect(self._reslice_hidden_layers)
         except Exception:                        # noqa: BLE001 - a stub model with no dims events
@@ -380,6 +382,21 @@ class MosaicLayers:
     def group(self, op: str) -> list[Any]:
         """Every channel layer belonging to one processing layer."""
         return [ly for ly in self.ours() if (k := key_of(ly)) is not None and k.op == op]
+
+    # -- color provenance: a one-line note per processing layer, shown by the layer tree ---------
+    # Presentation metadata, not layer identity: it survives the layers being rebuilt on a
+    # region change, which is exactly why it lives here and not on a layer object.
+
+    def set_color_note(self, op: str, note: Optional[str]) -> None:
+        """Pin a provenance note on *op*'s group row (``None`` clears it)."""
+        if note:
+            self._color_notes[str(op)] = str(note)
+        else:
+            self._color_notes.pop(str(op), None)
+
+    def color_note(self, op: str) -> Optional[str]:
+        """The provenance note for *op*, or ``None``."""
+        return self._color_notes.get(str(op))
 
     def channels(self, op: str) -> list[str]:
         out: list[str] = []

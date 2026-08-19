@@ -674,6 +674,7 @@ def _expand_rgb_channels(resolved: list, rgb_bases: "set[str]") -> list:
             e["name"] = entry["name"] + suffix
             e["display_name"] = str(entry.get("display_name") or entry["name"]) + suffix
             e["display_color"] = color
+            e["color_source"] = "file"       # real components of the file's own (Y, X, 3) planes
             out.append(e)
     return out
 
@@ -831,6 +832,12 @@ class SquidReader(_PadPartialMixin):
         self._chroma = chroma
         if rgb_bases or chroma:
             resolved = _expand_rgb_channels(resolved, rgb_bases | set(chroma))
+            # Provenance: a chroma component's color is RECONSTRUCTED from the overview,
+            # a real (Y, X, 3) file's is the FILE's own (stamped in _expand_rgb_channels).
+            for entry in resolved:
+                base = str(entry.get("name", "")).rsplit(" (", 1)[0]
+                if base in chroma:
+                    entry["color_source"] = "reconstructed"
         attach_stain_luts(self._path, resolved, rgb_bases | set(chroma))
         if chroma:
             self._log_chroma_coverage(chroma, index, fov_positions,
