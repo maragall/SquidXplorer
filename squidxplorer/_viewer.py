@@ -109,7 +109,7 @@ from squidxplorer._workers import (  # noqa: F401 (re-exports)
 
 # The operator registry lives in `_operations`; re-exported for this module's call sites.
 from squidxplorer._operations import (  # noqa: F401 (re-exports)
-    _OPERATIONS, _OPERATIONS_BY_KEY, _SAVE_OPERATOR, _TO_BE_ADDED, Operation, OperationStack,
+    _OPERATIONS, _OPERATIONS_BY_KEY, _SAVE_OPERATOR, Operation, OperationStack,
     _action_label, operator_label, operator_layer_key, operator_name, result_kind,
     runnable_operators,
 )

@@ -2567,17 +2567,6 @@ class ViewerManager(QObject):
             out[name] = value
         return out
 
-    def rename(self, window_id: int, name: "Optional[str]") -> bool:
-        """Give window *window_id* a new display label; False when the id is unknown or the name blank."""
-        win = self._windows.get(int(window_id))
-        if win is None:
-            return False
-        if not win.set_display_name(name):
-            return False
-        self.refresh_deck_titles()      # the navigator rebuilds itself; a tab bar does not
-        self.windowsChanged.emit()
-        return True
-
     def _spawn(self, regions: "list[str]", *, title: Optional[str] = None,
                roi_bbox: Optional[tuple] = None,
                parent_id: Optional[int] = None, luts: Optional[dict] = None,
