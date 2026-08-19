@@ -634,12 +634,15 @@ class MosaicLayers:
         except Exception as exc:                 # noqa: BLE001 - a render nicety, never fatal
             log.warning("napari 3D swap failed on %s: %s", getattr(ly, "name", "layer"), exc)
 
-    def _restore_layer_z(self, ly: Any) -> None:
-        """Give a z-collapsed layer its stack, its multiscale flag and its placement back."""
+    def _restore_layer_z(self, ly: Any) -> Optional[int]:
+        """Give a z-collapsed layer its stack, its multiscale flag and its placement back.
+
+        Returns the z index the layer was collapsed on (for :meth:`_park_z_axis`), or None.
+        """
         meta = dict(getattr(ly, "metadata", None) or {})
         stash = meta.pop(_Z_STASH, None)
         if stash is None:
-            return
+            return None
         try:
             ly.metadata = meta
             ly.multiscale = bool(stash["multiscale"])
@@ -647,8 +650,10 @@ class MosaicLayers:
             # AFTER the data: napari pads scale/translate to the new ndim with 1.0 / 0.0.
             ly.scale = stash["scale"]
             ly.translate = stash["translate"]
+            return stash.get("z_level")
         except Exception as exc:                 # noqa: BLE001 - a presentation nicety, never fatal
             log.warning("z axis restore failed on %s: %s", getattr(ly, "name", "layer"), exc)
+            return None
 
     def _collapse_layer_z(self, ly: Any, z_level: int) -> None:
         """Present a ``(z, y, x)`` layer as the single plane *z*, so it stops carrying a z axis."""
@@ -666,7 +671,8 @@ class MosaicLayers:
             scale, translate = tuple(ly.scale), tuple(ly.translate)
             meta[_Z_STASH] = {"data": list(levels) if multiscale else data,
                               "multiscale": multiscale,
-                              "scale": scale, "translate": translate}
+                              "scale": scale, "translate": translate,
+                              "z_level": int(z_level)}
             coarsest = levels[-1]
             plane = coarsest[max(0, min(int(z_level), int(coarsest.shape[0]) - 1))]
             ly.metadata = meta
@@ -707,11 +713,31 @@ class MosaicLayers:
             except Exception:                    # noqa: BLE001 - a missing step is z=0
                 z = 0
         with self.programmatic():
+            z_back: Optional[int] = None
             for ly in self.ours():
                 if collapse:
                     self._collapse_layer_z(ly, z)
                 else:
-                    self._restore_layer_z(ly)
+                    got = self._restore_layer_z(ly)
+                    if z_back is None:
+                        z_back = got
+            # napari re-creates the restored axis at step 0; put it back on the user's plane.
+            if not collapse and z_back is not None:
+                self._park_z_axis(int(z_back))
+
+    def _park_z_axis(self, z_level: int) -> None:
+        """Put the z slider on *z_level*; napari clamps a step past the axis end itself."""
+        dims = getattr(self._model, "dims", None)
+        if dims is None or int(getattr(dims, "ndim", 0) or 0) < 3:
+            return
+        try:
+            axis = int(dims.ndim) - 3
+            step = list(dims.current_step)
+            if int(step[axis]) != int(z_level):
+                step[axis] = int(z_level)
+                dims.current_step = tuple(step)
+        except Exception as exc:                 # noqa: BLE001 - presentation, never fatal
+            log.warning("could not re-park the z slider: %s: %s", type(exc).__name__, exc)
 
     def add_mosaic(
         self,
@@ -723,14 +749,15 @@ class MosaicLayers:
         colormap: Optional[Any] = None,
         multiscale: Optional[bool] = None,
         bbox_um: Optional[Sequence[float]] = None,
-        visible: bool = True,
+        visible: Optional[bool] = True,
         blending: str = "additive",
         z_scale_um: Optional[float] = None,
     ) -> Any:
         """Add (or replace) the mosaic for one processing layer / channel pair.
 
         ``contrast_limits=None`` seeds a fluorescence auto-window; napari owns contrast
-        from the moment the layer exists.
+        from the moment the layer exists. ``visible=None`` on a REUSE leaves the layer's
+        visibility alone (a frame reload must not change which operator is lit).
         """
         key = MosaicKey(str(op), str(channel))
         existing = self.find(key.op, key.channel)
@@ -739,13 +766,18 @@ class MosaicLayers:
             # it, and reuse keeps the user's contrast/colormap/visibility across regions.
             reused = self._reuse_layer(existing, data, bbox_um=bbox_um, z_scale_um=z_scale_um,
                                        multiscale=multiscale, visible=visible)
+            # Re-arriving lit is the same gesture as the first arrival (one lit op per channel);
+            # the new-layer path already darkens, and a reuse skipping it summed the channel twice.
+            if visible:
+                self._darken_other_ops(key.channel, reused)
             self._present_z_axis()
             return reused
 
         kwargs: dict[str, Any] = {
             "name": key.label(),
             "metadata": key.as_metadata(),
-            "visible": visible,
+            # None means "no opinion"; a brand-new layer has no prior state, so it arrives lit.
+            "visible": True if visible is None else bool(visible),
             # Additive, not the default 'translucent_no_depth': fluorescence channels are a
             # composite and must sum; with the default the last-added layer occludes the rest.
             "blending": blending,
@@ -817,7 +849,7 @@ class MosaicLayers:
                 pass
         # A layer that ARRIVES lit is the same gesture as one the user lights. Outside
         # programmatic() deliberately: the peer really did go dark and the plate must be told.
-        if visible:
+        if bool(getattr(layer, "visible", False)):
             self._darken_other_ops(key.channel, layer)
         self._present_z_axis()
         return layer
