@@ -314,6 +314,33 @@ def test_an_empty_clipboard_paste_is_a_refusal_not_a_noop(qapp, napari_pane_stub
         shutdown_plate_window(qapp, win)
 
 
+def test_the_plate_paste_button_applies_the_clipboard(qapp, squid_dataset):
+    """The one plate-side LUT control: paste latches the clipboard's clim per channel name."""
+    import numpy as np
+
+    import squidxplorer._viewer as V
+    from squidxplorer import _lut_clipboard
+
+    root, _ = squid_dataset
+    win = V.PlateWindow(None)
+    try:
+        win.ingest(str(root))
+        ch0 = win._meta["channels"][0]["name"]
+        _lut_clipboard.CLIPBOARD.clear()
+        win._paste_luts_onto_plate()
+        assert "empty" in win._readout.text()
+        _lut_clipboard.CLIPBOARD[ch0] = {"clim": (12.0, 345.0), "on": True}
+        win._paste_luts_onto_plate()
+        assert win._overview.channel_windows()[0] == (12.0, 345.0)
+        # a deliberate paste latches manual: streamed tiles cannot stomp it
+        win._overview._contrast.add(0, np.full((8, 8), 999, dtype=np.uint16))
+        assert win._overview.channel_windows()[0] == (12.0, 345.0)
+    finally:
+        _lut_clipboard.CLIPBOARD.clear()
+        win._stop_worker()
+        win.close()
+
+
 def test_copy_then_paste_round_trips_between_two_views(qapp, napari_pane_stub, squid_dataset):
     """Two buttons, one dict: copy in one view, paste in another, same contrast."""
     import numpy as np

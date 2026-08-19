@@ -594,6 +594,21 @@ class PlateWindow(QMainWindow):
         self._open_sel_btn.clicked.connect(self._open_selected_view)
         _tb.addWidget(self._open_sel_btn)
 
+        # THE ONE plate-side LUT control (Julio, 2026-08-19: "I like the plate side paste
+        # button"): paste the window-filled clipboard straight onto the plate. A deliberate
+        # gesture, so it latches manual and outranks the RGB-component full-range latch.
+        self._plate_paste_btn = QPushButton("⇩ paste LUTs")
+        self._plate_paste_btn.setCursor(Qt.PointingHandCursor)
+        self._plate_paste_btn.setStyleSheet(
+            "QPushButton{background:#0b0e14;color:#c9d1d9;border:1px solid #232b3a;"
+            "border-radius:4px;padding:3px 8px;font-size:12px;}"
+            "QPushButton:hover{border-color:#1f6feb;}")
+        self._plate_paste_btn.setToolTip(
+            "Paste the LUT clipboard (filled by a view's copy LUTs) onto the plate's channels: "
+            "contrast and on/off, latched so streaming wells cannot stomp it.")
+        self._plate_paste_btn.clicked.connect(self._paste_luts_onto_plate)
+        _tb.addWidget(self._plate_paste_btn)
+
         # ACQUISITION-SET CYCLING (2026-08-19). A dropped folder OF acquisitions gets a compact
         # "acquisition k of N" indicator with prev/next in this (nearly empty) title bar, plus
         # Cmd/Ctrl-Left/Right. Hidden for a single acquisition; `_refresh_acq_cycle` is the one
@@ -1102,6 +1117,36 @@ class PlateWindow(QMainWindow):
 
     # -- operator UIs live as tabs in the band's right column: the Operators home tab, one tab
     # -- per operator you open, and any result a panel publishes. ---------------------------------
+    def _paste_luts_onto_plate(self) -> None:
+        """Paste the LUT clipboard onto the plate's channels: clim + on/off, by channel name.
+
+        The one plate-side LUT control. A deliberate user gesture: ``set_channel_window``
+        latches manual, so it outranks both the running histograms and the RGB-component
+        full-range latch.
+        """
+        from squidxplorer._lut_clipboard import CLIPBOARD
+
+        if self._overview is None or self._meta is None:
+            self._readout.setText("open an acquisition first")
+            return
+        if not CLIPBOARD:
+            self._readout.setText("the LUT clipboard is empty — copy LUTs in a view first")
+            return
+        applied = 0
+        for i, c in enumerate(self._meta["channels"]):
+            lut = CLIPBOARD.get(c["name"]) or CLIPBOARD.get(c.get("display_name") or "")
+            if not lut:
+                continue
+            if lut.get("clim") is not None:
+                lo, hi = lut["clim"]
+                self._overview.set_channel_window(i, float(lo), float(hi))
+                applied += 1
+            if lut.get("on") is not None:
+                self._overview.set_channel_visible(i, bool(lut["on"]))
+        self._readout.setText(
+            f"pasted LUTs onto the plate — {applied} channel(s)" if applied
+            else "the clipboard names no channel of this acquisition — nothing pasted")
+
     def _open_op_tab(self, key: str, title: str, builder, tabs=None):
         """Open (or focus) a UI as a tab. Built lazily, once. *tabs* is the bar it belongs in;
         there is one bar (the band's right column) and it is the default.
