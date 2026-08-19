@@ -185,7 +185,13 @@ class MosaicTreeModel(QAbstractItemModel):
             if key is None:
                 if index.row() >= len(self._rows):
                     return None
-                return self._rows[index.row()][0]
+                op = self._rows[index.row()][0]
+                if role == Qt.ToolTipRole:
+                    # The group's tooltip carries the color-provenance note, so a derived
+                    # color stays labeled for as long as the layer is on screen.
+                    note = self._mosaic.color_note(op)
+                    return f"{op} · {note}" if note else op
+                return op
             return key[1]
 
         if role == Qt.CheckStateRole:

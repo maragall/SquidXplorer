@@ -11,6 +11,7 @@ from pathlib import Path
 import numpy as np
 from qtpy.QtWidgets import QApplication
 
+from squidxplorer._channels import color_sources
 from squidxplorer._logpane import get_logger
 from squidxplorer._montage import _hex_to_rgb01
 from squidxplorer._plate import PlateBuildError, build_plate
@@ -170,9 +171,12 @@ def ingest(win, path: str) -> None:
     # reads a single plane per well precisely to stay fast), so say which one you're looking at.
     multi = sum(1 for r in order if len(meta["fovs_per_region"][r]) > 1)
     note = (f" · {multi} multi-FOV region(s), previewing as mosaics" if multi else "")
+    # Derived color is said where the user looks; silence means every channel shows its own color.
+    sources = color_sources(meta.get("channels"))
+    color = (f" · color: {', '.join(sources)}" if sources else "")
     win._readout.setText(
         f"{len(win._fov_index)} wells loaded · double-click a well, or Shift-drag to open "
-        f"several{note}")
+        f"several{note}{color}")
     win._on_plate_loaded()
 
 

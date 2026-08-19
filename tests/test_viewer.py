@@ -4764,3 +4764,86 @@ def test_there_is_no_second_incomplete_marker(qapp):
     assert not literals, (
         "a bare INCOMPLETE filename is back in _viewer.py as a real string; the ONE name is "
         "`_output.INCOMPLETE_MARKER`")
+
+
+# --- color provenance reaches the view surfaces ---------------------------------------------------
+
+def _color_recorded_gray_acq(tmp_path):
+    """A gray-recorded color acquisition (2-D BMPs + the sidecar calling the channel RGB)."""
+    from PIL import Image
+
+    root = tmp_path / "acq_gray_rgb"
+    mv = root / "0" / "mosaic_view"
+    mv.mkdir(parents=True)
+    rng = np.random.default_rng(7)
+    Image.fromarray(rng.integers(0, 255, (16, 16), dtype=np.uint8)).save(
+        root / "0" / "manual_0_0_BF_LED_matrix_full.bmp")
+    (root / "acquisition.yaml").write_text(
+        "objective:\n  pixel_size_um: 0.418\nz_stack:\n  nz: 1\ntime_series:\n  nt: 1\n")
+    (root / "acquisition_channels.yaml").write_text(
+        "channels:\n- name: BF LED matrix full\n  display_color: '#FFFFFF'\n")
+    t = np.tile(np.linspace(0.2, 1.0, 200), (120, 1))
+    png = np.stack([255 * t ** 0.3, 255 * t, 255 * t ** 0.6], axis=-1).astype(np.uint8)
+    Image.fromarray(png).save(mv / "mosaic_2um_x.png")
+    (mv / "mosaic_2um.yaml").write_text(
+        "rgb_channel_names:\n- 20x BF LED matrix full\nrgb_view_files:\n- mosaic_2um_x.png\n")
+    return root
+
+
+def test_a_view_says_the_color_provenance_and_pins_it_on_the_raw_group(qapp, napari_pane_stub,
+                                                                       tmp_path):
+    """Once per open in the window's say line, persistently as the raw group's note."""
+    from squidxplorer import open_reader
+    from squidxplorer._region_viewer import RegionViewer
+
+    reader = open_reader(str(_color_recorded_gray_acq(tmp_path)), pad_partial=True)
+    meta = reader.metadata
+    v = RegionViewer(reader, meta, [], window_id=71)
+    try:
+        pane = napari_pane_stub[-1]
+        note = pane.mosaic.color_note("raw")
+        assert note is not None and "estimated colormap" in note
+        assert any("estimated colormap" in s for s in pane.said), (
+            "the provenance sentence never reached the window's say line")
+    finally:
+        v.close()
+
+
+def test_a_plain_acquisition_gets_no_provenance_note(qapp, napari_pane_stub, squid_dataset):
+    """Silence means the file's/yaml's own color; a label here would be noise."""
+    from squidxplorer import open_reader
+    from squidxplorer._region_viewer import RegionViewer
+
+    root, _ = squid_dataset
+    reader = open_reader(str(root), pad_partial=True)
+    v = RegionViewer(reader, reader.metadata, [], window_id=72)
+    try:
+        pane = napari_pane_stub[-1]
+        assert pane.mosaic.color_note("raw") is None
+        assert not any("color:" in s for s in pane.said)
+    finally:
+        v.close()
+
+
+def test_the_layer_tree_group_tooltip_carries_the_color_note(qapp):
+    """The persistent surface: the raw group row's tooltip states the provenance."""
+    from qtpy.QtCore import Qt as _Qt
+
+    from squidxplorer._layer_tree import MosaicTreeModel
+    from squidxplorer._napari_pane import model_pane_class
+
+    from .conftest import build_flat_scene
+
+    pane = model_pane_class()()
+    mosaic = build_flat_scene(pane.mosaic)
+    note = "color: estimated colormap (density fit from the acquisition's overview)"
+    mosaic.set_color_note("raw", note)
+    model = MosaicTreeModel(mosaic)
+    group = model.index(0, 0)
+    assert model.data(group, _Qt.DisplayRole) == "raw"
+    assert model.data(group, _Qt.ToolTipRole) == f"raw · {note}"
+    # A channel row's tooltip stays the channel name; the note belongs to the group.
+    child = model.index(0, 0, group)
+    assert model.data(child, _Qt.ToolTipRole) == model.data(child, _Qt.DisplayRole)
+    mosaic.set_color_note("raw", None)
+    assert model.data(group, _Qt.ToolTipRole) == "raw"
