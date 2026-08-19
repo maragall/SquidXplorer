@@ -253,7 +253,9 @@ def _composite_band(store, colors, windows, mask, lut_arrs, out, rows: slice) ->
             idx = np.clip(np.nan_to_num(norm) * (lut.shape[0] - 1),
                           0, lut.shape[0] - 1).astype(np.intp)
             rgb += lut[idx]
-    rgb += gray.T @ colors                          # (n, 3) float32
+    # einsum, NEVER a BLAS gemm: many band threads calling OpenBLAS at once exhausted its
+    # internal buffer pool on a many-core Windows machine (access violation at this line).
+    rgb += np.einsum("cn,cd->nd", gray, colors)     # (n, 3) float32
     np.clip(rgb, 0.0, 1.0, out=rgb)
     rgb *= 255.0
     out[rows] = rgb.reshape(bh, bw, 3).astype(np.uint8)
