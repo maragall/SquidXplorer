@@ -148,6 +148,30 @@ def test_rgb_components_seed_the_files_full_range(tmp_path):
     assert w._seed_window("BF_LED_matrix_full", None, lambda *a: (9.0, 10.0)) == (9.0, 10.0)
 
 
+def test_the_plate_windows_rgb_components_at_the_files_full_range(tmp_path, qapp):
+    """The plate composites additively; per-channel percentile windows distort the hue the
+    triplet exists to reconstruct (measured live: dark red/teal plate cell over a pink/blue
+    viewer). Components are latched to the file's full range, so streaming tiles cannot stomp."""
+    import squidxplorer._viewer as V
+
+    root = tmp_path / "acq"
+    rgb = np.stack([_gray(1), _gray(2), _gray(3)], axis=-1)
+    _write(root / "0", "manual_0_0_BF_LED_matrix_full.bmp", rgb)
+    (root / "coordinates.csv").write_text("region,fov,z_level,x (mm),y (mm)\nmanual,0,0,1.0,2.0\n")
+    _sidecars(root)
+    win = V.PlateWindow(None)
+    try:
+        win.ingest(str(root))
+        wins = win._overview.channel_windows()
+        assert wins == [(0.0, 255.0)] * 3, wins
+        # the latch holds against the running histogram: a streamed tile changes nothing
+        win._overview._contrast.add(0, np.full((8, 8), 40, dtype=np.uint8))
+        assert win._overview.channel_windows()[0] == (0.0, 255.0)
+    finally:
+        win._stop_worker()
+        win.close()
+
+
 def _mosaic_sidecar(root, k_r=0.3, k_b=0.6):
     """Squid's colored overview: a PNG with a known stain + the yaml calling the channel RGB."""
     mv = root / "0" / "mosaic_view"
