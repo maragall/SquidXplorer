@@ -1702,3 +1702,74 @@ def test_a_napari_that_moved_its_canvas_size_is_named_not_guessed_around():
     layers = MosaicLayers(_Moved())
     with pytest.raises(NapariBindingError, match="_canvas_size"):
         layers.frame_bbox_um((0.0, 0.0, 100.0, 100.0))
+
+
+# ------------------------------------------- selection follows visibility (ticket #8)
+# napari's layer-controls panel shows the SELECTED layer, and napari never moves selection on a
+# visibility flip — so unticking a layer left its controls up (405's colormap over an off 405).
+
+
+def test_hiding_the_selected_layer_moves_selection_to_a_visible_layer(layers):
+    l488 = layers.add_mosaic("raw", "488", _img())
+    l561 = layers.add_mosaic("raw", "561", _img(1))
+    layers.model.layers.selection.active = l488
+
+    l488.visible = False
+
+    assert layers.model.layers.selection.active is l561, (
+        "the controls panel is still showing a layer that is OFF")
+
+
+def test_selection_prefers_a_visible_layer_of_the_SAME_op(layers):
+    raw488 = layers.add_mosaic("raw", "488", _img())
+    raw561 = layers.add_mosaic("raw", "561", _img(1))
+    decon561 = layers.add_mosaic("decon", "561", _img(2), visible=False)
+    with layers.programmatic():          # craft the scene without tripping the exclusive rule
+        raw561.visible = True
+        decon561.visible = True
+    layers.model.layers.selection.active = raw488
+
+    raw488.visible = False
+
+    # decon561 is the TOPMOST visible layer, but raw561 shares the hidden layer's op.
+    assert layers.model.layers.selection.active is raw561
+
+
+def test_hiding_the_last_visible_layer_keeps_the_selection(layers):
+    l488 = layers.add_mosaic("raw", "488", _img())
+    l561 = layers.add_mosaic("raw", "561", _img(1), visible=False)
+    layers.model.layers.selection.active = l488
+
+    l488.visible = False
+
+    assert layers.model.layers.selection.active is l488, (
+        "with nothing visible there is nowhere honest to move the selection")
+    assert l561.visible is False
+
+
+def test_hiding_an_UNSELECTED_layer_leaves_the_selection_alone(layers):
+    l488 = layers.add_mosaic("raw", "488", _img())
+    l561 = layers.add_mosaic("raw", "561", _img(1))
+    layers.model.layers.selection.active = l488
+
+    l561.visible = False
+
+    assert layers.model.layers.selection.active is l488
+
+
+def test_hiding_a_channel_of_a_VOLUME_moves_selection_to_a_visible_brick(layers):
+    from .conftest import build_volume_scene
+
+    from squidxplorer._napari_view import key_of
+
+    build_volume_scene(layers, "raw", ("488", "561"), bricks=3)
+    rep = layers.find("raw", "488")
+    layers.model.layers.selection.active = rep
+
+    rep.visible = False                  # the mirror darkens every 488 brick
+
+    active = layers.model.layers.selection.active
+    assert active is not None and bool(active.visible), (
+        "selection is parked on a hidden brick")
+    k = key_of(active)
+    assert k is not None and k.channel == "561"

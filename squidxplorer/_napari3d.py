@@ -94,17 +94,20 @@ def widen_contrast_range(viewer: Any, lo: float, hi: float) -> int:
 
 
 def _auto_clim(stack: np.ndarray) -> Optional[tuple]:
-    """Contrast for a channel whose on-screen LUT was NOT carried in; never a raw full-range window."""
+    """Contrast for a channel whose on-screen LUT was NOT carried in; never a raw full-range
+    window, and never a DEGENERATE one (napari refuses lo == hi with ValueError, so a blank
+    stack must answer None — napari autoscales — or the whole layer is refused)."""
     try:
         from squidxplorer._contrast import auto_contrast
 
         win = auto_contrast(stack)
-        if win is not None:
+        if win is not None and float(win[1]) > float(win[0]):
             return (float(win[0]), float(win[1]))
     except Exception:                                   # noqa: BLE001 - fall through to percentile
         pass
     try:
-        return (float(np.percentile(stack, 1)), float(np.percentile(stack, 99.9)))
+        lo, hi = float(np.percentile(stack, 1)), float(np.percentile(stack, 99.9))
+        return (lo, hi) if hi > lo else None            # a constant stack has no window to seed
     except Exception:                                   # noqa: BLE001 - let napari autoscale
         return None
 
@@ -404,6 +407,8 @@ def open_native_3d(
             kwargs["colormap"] = cmap
         # Carry the on-screen LUT; if this channel had none, derive one (never raw full-range).
         clim = contrast_by_channel.get(ch)
+        if clim is not None and not float(clim[1]) > float(clim[0]):
+            clim = None                                 # napari refuses a degenerate window
         if clim is None:
             clim = _auto_clim(stack)
         if clim is not None:
@@ -474,6 +479,8 @@ def open_native_3d_volume(
     viewer = napari.Viewer(ndisplay=3, title=title)
     for name, vol in vols.items():
         clim = contrast_by_channel.get(name)
+        if clim is not None and not float(clim[1]) > float(clim[0]):
+            clim = None                                 # napari refuses a degenerate window
         if clim is None:
             clim = _auto_clim(vol)                      # ONE window for the whole channel, so the
         cmap = colormap_by_channel.get(name)            # bricks cannot step in brightness
