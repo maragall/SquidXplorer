@@ -597,6 +597,7 @@ def _expand_rgb_channels(resolved: list, rgb_bases: "set[str]") -> list:
             e["name"] = entry["name"] + suffix
             e["display_name"] = str(entry.get("display_name") or entry["name"]) + suffix
             e["display_color"] = color
+            e["color_source"] = "file"       # real components of the file's own (Y, X, 3) planes
             out.append(e)
     return out
 
