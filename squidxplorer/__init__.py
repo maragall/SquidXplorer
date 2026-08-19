@@ -5,6 +5,10 @@ import os as _os
 
 # Pin the Qt binding to PyQt6 (when importable) before anything imports qtpy;
 # an explicit QT_API in the environment always wins.
+# One BLAS thread: this app parallelises at the task level (band threads, dask, workers), and
+# many threads gemm'ing into OpenBLAS's fixed buffer pool crashed a many-core Windows machine.
+_os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+
 if "QT_API" not in _os.environ and _importlib_util.find_spec("PyQt6") is not None:
     _os.environ["QT_API"] = "pyqt6"
 
