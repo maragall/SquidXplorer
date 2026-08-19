@@ -364,3 +364,20 @@ def test_a_stain_lut_channel_seeds_the_zero_to_white_window(tmp_path):
     w2 = _MosaicWorker.__new__(_MosaicWorker)
     w2._reader, w2._meta = r2, r2.metadata
     assert w2._seed_window("BF_LED_matrix_full", [plane], lambda *a: (9.0, 10.0)) == (9.0, 10.0)
+
+
+def test_chroma_neutrality_and_ratios_survive_fractional_resampling(tmp_path):
+    """The ratio window is upsampled with fractional bilinear weights (real data: 2 um chroma
+    over 0.42 um pixels). float32 weights leave 1.0 as 0.99999994, so the cast must ROUND:
+    measured before the fix, a NEUTRAL (uncovered) FOV came back off by one on 9.5% of pixels."""
+    plane = np.full((16, 16), 80, dtype=np.uint8)
+    png = _flat_png((40, 60), r=150, g=100, b=50)
+    # pixel 0.5 um vs 2 um overview: an 8x8 ratio window upsamples 2x with fractional weights
+    root = _chroma_acq(tmp_path, [(0.056, 0.036), (9.0, 9.0)], planes=[plane, plane])
+    (root / "acquisition.yaml").write_text(
+        "objective:\n  pixel_size_um: 0.5\nz_stack:\n  nz: 1\ntime_series:\n  nt: 1\n")
+    _chroma_sidecar(root, png, top_left_mm_yx=(0.0, 0.0))
+    r = open_reader(root)
+    assert np.array_equal(r.read("manual", 1, "BF_LED_matrix_full (R)", 0), plane)  # neutral EXACT
+    assert np.array_equal(r.read("manual", 0, "BF_LED_matrix_full (R)", 0),
+                          np.full((16, 16), 120, dtype=np.uint8))                   # 80 * 1.5

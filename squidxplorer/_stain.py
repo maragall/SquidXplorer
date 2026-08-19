@@ -324,8 +324,11 @@ class ChromaSource:
         ratio = _upsample_bilinear(ratios[0 if component == 0 else 1], plane.shape)
         out = plane.astype(np.float32) * ratio
         if plane.dtype.kind in "iu":
+            # ROUND, never truncate: bilinear weights in float32 leave 1.0 as 0.99999994, and a
+            # truncating cast would make even a NEUTRAL ratio change pixels (measured: 9.5% of a
+            # real uncovered FOV off by one).
             info = np.iinfo(plane.dtype)
-            out = np.clip(out, info.min, info.max)
+            out = np.clip(np.rint(out), info.min, info.max)
         return out.astype(plane.dtype)
 
 
