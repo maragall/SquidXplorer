@@ -618,49 +618,46 @@ class RegionViewer(QMainWindow):
             "⏺ movie", "Export what this window is showing as an .mp4, sweeping the acquisition's "
             "time axis (or its z axis when there is no time series). Runs off the UI thread; "
             "click again to cancel.", self._record_movie)
-        r1 = QHBoxLayout(); r1.setSpacing(4)
-        r1.addWidget(self._btn_2d); r1.addWidget(self._btn_3d); r1.addWidget(self._btn_focus)
-        r1.addStretch(1)
-        vv.addLayout(r1)
-        r2 = QHBoxLayout(); r2.setSpacing(4)
-        r2.addWidget(self._btn_record)
-        r2.addStretch(1)
-        self._refresh_record_chip()
-        vv.addLayout(r2)
-        r3 = QHBoxLayout(); r3.setSpacing(4)
-        r3.addWidget(self._chip("▭ new", "Draw an ROI rectangle inside the mosaic.", self._new_roi))
-        r3.addWidget(self._chip("⊙ select", "Select ROIs: click one, then press Delete to remove it.",
-                                self._select_rois))
-        r3.addWidget(self._chip("✕ clear", "Remove all ROIs in this window.", self._clear_rois))
-        r3.addStretch(1)
-        vv.addLayout(r3)
-        r4 = QHBoxLayout(); r4.setSpacing(4)
-        r4.addWidget(self._chip("→ window", "Open the drawn ROI(s) as child window(s) — the next "
-                                "level of the view tree.", self._open_roi_children))
         # FOVs. The ROI chips beside it are for a box the user draws; this is for the boxes the
         # ACQUISITION already drew. On a sparse run — the AF sweep sets are 16 fields at 7x the
         # field pitch, so 3% of the mosaic is data — checking focus means visiting each field, and
         # doing that by wheel-zoom is the complaint this answers.
         self._btn_fovs = self._chip("⊞ FOVs", self._FOVS_TIP, self._open_fovs)
-        r4.addWidget(self._btn_fovs)
-        r4.addStretch(1)
-        self._refresh_fovs_chip()
-        vv.addLayout(r4)
         # THE LUT CLIPBOARD, back as exactly two buttons (Julio, 2026-08-19: "I do want the copy
         # paste LUT. But ultra simple, minimal, two button logic."). No pickers, no menus; the
         # paste reaches the PLATE through the automatic window → plate contrast tap, so the two
         # never disagree — see `_lut_clipboard.paste_luts`.
-        r5 = QHBoxLayout(); r5.setSpacing(4)
         self._btn_copy_luts = self._chip(
             "⧉ copy LUTs", "Copy this window's per-channel look (contrast, colormap, which "
             "channels are on) to the one LUT clipboard.", self._copy_luts)
         self._btn_paste_luts = self._chip(
             "⇩ paste LUTs", "Paste the LUT clipboard onto this window's channels. The plate "
             "follows the same write, so plate and window contrast stay equal.", self._paste_luts)
-        r5.addWidget(self._btn_copy_luts)
-        r5.addWidget(self._btn_paste_luts)
-        r5.addStretch(1)
-        vv.addLayout(r5)
+        # One 3-column grid of equal-width chips: the ragged per-row HBoxes read as "poor
+        # distribution of buttons" (Julio, live GUI 2026-08-19).
+        from qtpy.QtWidgets import QGridLayout
+
+        grid = QGridLayout(); grid.setSpacing(4)
+        chips = [
+            self._btn_2d, self._btn_3d, self._btn_focus,
+            self._btn_record,
+            self._chip("▭ new", "Draw an ROI rectangle inside the mosaic.", self._new_roi),
+            self._chip("⊙ select", "Select ROIs: click one, then press Delete to remove it.",
+                       self._select_rois),
+            self._chip("✕ clear", "Remove all ROIs in this window.", self._clear_rois),
+            self._chip("→ window", "Open the drawn ROI(s) as child window(s) — the next "
+                       "level of the view tree.", self._open_roi_children),
+            self._btn_fovs,
+            self._btn_copy_luts, self._btn_paste_luts,
+        ]
+        for i, chip in enumerate(chips):
+            chip.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            grid.addWidget(chip, i // 3, i % 3)
+        for col in range(3):
+            grid.setColumnStretch(col, 1)
+        vv.addLayout(grid)
+        self._refresh_record_chip()
+        self._refresh_fovs_chip()
         # THE PER-WINDOW OPERATOR SURFACE IS NOT IN THIS BLOCK. "Operators for this window" (the
         # dropdown, ⚙ controls, Run, save) and the Detect row live in `operator_panel()`, docked
         # DIRECTLY BELOW this block in the same left column by `_build`. The Defaults group (auto
