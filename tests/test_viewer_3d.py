@@ -411,6 +411,28 @@ def test_a_brick_that_arrives_LATE_takes_the_identity_it_is_joining(mosaic):
     assert getattr(late.colormap, "name", None) == "magenta"
 
 
+def test_a_zoom_refined_brick_replaces_the_coarser_one_under_the_same_identity(mosaic):
+    """Camera-settle refinement swaps a brick's PIXELS, never its identity: the layer object,
+    the user's contrast window and the stride book survive the stride change (2026-08-19)."""
+    from squidxplorer import _bricks
+
+    vol = build_volume_scene(mosaic, OP, ("c0",), bricks=0)
+    b = _bricks.Brick(iy=0, ix=0, r0=0, r1=8, c0=0, c1=8)
+    vol._epoch = 1
+    vol._on_brick(b, "c0", _scene_stack(5, (4, 4, 4)), 2, 1)      # stride 2 of the 8x8 window
+    layer = mosaic.find(OP, "c0")
+    assert layer is not None
+    layer.contrast_limits = (9.0, 750.0)
+
+    vol._on_brick(b, "c0", _scene_stack(6, (4, 8, 8)), 1, 1)      # the refine at native stride
+
+    assert mosaic.find(OP, "c0") is layer, "refinement rebuilt the layer instead of updating it"
+    assert tuple(layer.data.shape) == (4, 8, 8)
+    assert vol._steps[("c0", b.key)] == 1
+    assert tuple(layer.contrast_limits) == (9.0, 750.0), "the user's window was lost on refine"
+    assert tuple(layer.scale) == (1.5, 0.75, 0.75), "a stride-1 brick must carry the native pitch"
+
+
 def test_evicting_one_brick_leaves_the_identity_and_its_other_bricks_alone(mosaic):
     vol = build_volume_scene(mosaic, OP, ("c0",), bricks=3)
     doomed = mosaic.layers_for(OP, "c0")[1]
