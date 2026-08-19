@@ -2690,9 +2690,9 @@ class ViewerManager(QObject):
         The passive half of :meth:`focus`. Until this existed, ``_focused_id`` was written only by
         the app moving focus (``_spawn``, ``focus``, ``set_selected``, ``clear_focus``), never by
         the user moving it, so clicking a view's title bar changed nothing: the plate kept washing
-        the previously focused window, and ``PlateWindow.on_screen_luts`` — whose docstring already
-        calls ``focused_id`` "the window the user is looking at" — exported the wrong window's
-        contrast. It was a lie about the user, told by a registry that only watched itself.
+        the previously focused window, and anything reading "the window the user is looking at"
+        off ``focused_id`` read the wrong window. It was a lie about the user, told by a registry
+        that only watched itself.
 
         RECORDS AND RE-PUBLISHES. It must never raise or activate: ``focus`` calls
         ``activateWindow()``, which fires ``changeEvent``, which lands here — and a raise from here
