@@ -573,10 +573,9 @@ class PlateWindow(QMainWindow):
 
         # NO SELECTION BAR (2026-08-19, Julio's mock: "move rest, top row"). The selection caption
         # lives in the STATUS BAR at the bottom; Select all is a View-menu action (and the plate's
-        # own Cmd/Ctrl-A, `PlateOverview.keyPressEvent`); the LUT copy/paste pair is SHELVED
-        # outright — Julio: "Shelf the LUT logic completely. That's just adding complexity to the
-        # code for no reason." The automatic window → plate contrast tap (`_bind_window_contrast`)
-        # is live sync, not the clipboard, and stays.
+        # own Cmd/Ctrl-A, `PlateOverview.keyPressEvent`). The PLATE grows no LUT pair of its own;
+        # the window-side clipboard is two buttons in each view's left column, and the plate
+        # follows a PASTE and only a paste (`_bind_window_contrast` / `_follow_window_luts`).
         _sel_cap = QLabel("Selection:")
         _sel_cap.setStyleSheet("color:#8b98ad;font-size:12px;border:none;")
         self._selection_label = QLabel("none — click wells, or Select all")
