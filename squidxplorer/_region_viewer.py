@@ -10,26 +10,18 @@ from typing import Any, Optional, Sequence
 
 import numpy as np
 from qtpy.QtCore import QObject, Qt, QTimer, Signal
-from qtpy.QtGui import QBrush, QColor
 from qtpy.QtWidgets import (
-    QAbstractItemView,
-    QButtonGroup,
     QCheckBox,
     QComboBox,
     QFileDialog,
     QFrame,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QMainWindow,
-    QMenu,
     QProgressBar,
     QPushButton,
     QScrollArea,
     QSizePolicy,
-    QTreeWidget,
-    QTreeWidgetItem,
-    QTreeWidgetItemIterator,
     QVBoxLayout,
     QWidget,
 )
@@ -58,9 +50,9 @@ except Exception:                                        # pragma: no cover
     except ImportError:
         _sip = None
 
-# THE LUT clipboard lives in `_lut_clipboard` now; this name is the SAME dict object, kept
-# because tests (and history) reach it as `_region_viewer._LUT_CLIPBOARD`.
-from squidxplorer._lut_clipboard import CLIPBOARD as _LUT_CLIPBOARD  # noqa: E402
+# `_lut_clipboard` keeps the NON-clipboard LUT helpers (per-channel read, apply, match-to-raw);
+# the copy/paste clipboard itself was shelved on 2026-08-19 (Julio: "Shelf the LUT logic
+# completely").
 from squidxplorer import _lut_clipboard, _mosaic_playback, _roi_tools, _volume_view
 
 # The ROI edge-colour cycle is defined once, in `_roi_tools`; historical alias.
@@ -87,22 +79,6 @@ _SETTING_BASELINE = {
     "channel_visibility": _GLOBAL,
     "luts": _INHERIT,
 }
-
-
-def _where(win) -> str:
-    """Where this view lives, for the navigator's location column.
-
-    "views" when it is a tab in the deck (numbered once there is more than one), "window" when it
-    is standing on its own — which is what a detached tab becomes, and what every view was before
-    decks existed.
-    """
-    host = getattr(win, "host", None)
-    if host is None:
-        return "window"
-    try:
-        return host.short_name()
-    except Exception:                            # noqa: BLE001 - a label is never worth a crash
-        return "views"
 
 
 def _alive(widget) -> bool:
@@ -609,12 +585,9 @@ class RegionViewer(QMainWindow):
                                      "(Tenengrad autofocus) of this region's centre FOV.",
                                      self._focus_reference_plane)
         # The "▣ plate" chip is GONE (UI feedback 2026-08-17): the working layout keeps the plate
-        # BESIDE the views, so "bring the plate forward" stopped being a job.
-        self._btn_controls = self._chip(
-            "⚙ controls", "Bring the plate window forward AND open the controls for the operator "
-            "this window is showing, so its parameters (iterations, thresholds) are one click "
-            "away. Says so when the window is showing raw pixels, which have none.",
-            self._show_operator_controls)
+        # BESIDE the views, so "bring the plate forward" stopped being a job. The ⚙ controls chip
+        # is built in `operator_panel()` now — the whole per-window operator surface lives in the
+        # views window's collapsible dock (2026-08-19).
         self._btn_record = self._chip(
             "⏺ movie", "Export what this window is showing as an .mp4, sweeping the acquisition's "
             "time axis (or its z axis when there is no time series). Runs off the UI thread; "
@@ -643,6 +616,54 @@ class RegionViewer(QMainWindow):
         view_box.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
         h.addWidget(view_box, 0)
 
+        # THE PER-WINDOW OPERATOR SURFACE IS NOT IN THIS ROW. "Operators for this window" (the
+        # dropdown, ⚙ controls, Run, save, Match layers to raw) and the Detect row live in
+        # `operator_panel()`, shown by the views window's collapsible right-edge dock
+        # (`_operator_dock`, 2026-08-19 mock). The Defaults group (auto focus / make default /
+        # diverged / reset) is SHELVED outright — the settings STORE stays (`ViewSettings` /
+        # `ViewDefaults` still drive autofocus-on-open and child-window LUT inheritance), only its
+        # control surface is gone.
+        #
+        # The RUN/MOVIE PROGRESS BAR stays in the window body: a run's progress must be visible
+        # while the dock is collapsed to its grip.
+        self._op_progress = QProgressBar()
+        self._op_progress.setTextVisible(True)
+        self._op_progress.setFixedHeight(16)
+        self._op_progress.setStyleSheet(self._PROGRESS_QSS)
+        self._op_progress.hide()
+        h.addWidget(self._op_progress, 1)
+
+        row.setMaximumHeight(108)
+        return row
+
+    _AT_DEFAULTS_QSS = "color:#8b949e;font-size:10px;border:none;"
+    _PROGRESS_QSS = (
+        "QProgressBar{background:#161b22;border:1px solid #30363d;border-radius:3px;"
+        "color:#c9d1d9;font-size:10px;text-align:center;}"
+        "QProgressBar::chunk{background:#e3b341;border-radius:3px;}"
+    )
+
+    #: This window's operator surface, or None until a dock asks for it. A class default so a
+    #: half-built window answers rather than raising out of Qt's attribute machinery.
+    _op_panel = None
+
+    def operator_panel(self) -> QWidget:
+        """THIS WINDOW's operator surface, built lazily, LIVING IN THE VIEWS WINDOW'S DOCK.
+
+        The old "Operators for this window" toolbar (dropdown, ⚙ controls, Run, save,
+        Match layers to raw) plus the pane's Detect row, moved out of the window body into the
+        collapsible right-edge dock (2026-08-19 mock). One panel per view; the dock swaps them as
+        tabs change (`OperatorDock.show_window_panel`), and `dispose` deletes it with the view.
+        """
+        panel = self._op_panel
+        if panel is not None and _alive(panel):
+            return panel
+        panel = QWidget()
+        panel.setStyleSheet("background:#0b0e14;")
+        pv = QVBoxLayout(panel)
+        pv.setContentsMargins(0, 0, 0, 0)
+        pv.setSpacing(4)
+
         op_box, ov = self._titled_box("Operators for this window")
         opr = QHBoxLayout(); opr.setSpacing(4)
         self._op_combo = QComboBox()
@@ -653,12 +674,12 @@ class RegionViewer(QMainWindow):
             self._op_combo.addItem("no operators", None)
             self._op_combo.setEnabled(False)
         opr.addWidget(self._op_combo, 1)
+        self._btn_controls = self._chip(
+            "⚙ controls", "Bring the plate window forward AND open the controls for the operator "
+            "this window is showing, so its parameters (iterations, thresholds) are one click "
+            "away. Says so when the window is showing raw pixels, which have none.",
+            self._show_operator_controls)
         opr.addWidget(self._btn_controls)
-        self._controls_note = QLabel("")
-        self._controls_note.setStyleSheet("color:#8b949e;font-size:11px;border:none;")
-        self._controls_note.setWordWrap(False)
-        opr.addWidget(self._controls_note)
-        self._op_combo.currentIndexChanged.connect(lambda _i: self._refresh_controls_note())
         opr.addWidget(self._chip("Run", "Run the selected operator on THIS view's regions.",
                                  self._run_view_operator))
         self._save_chk = QCheckBox("save")
@@ -667,139 +688,34 @@ class RegionViewer(QMainWindow):
         self._save_chk.setStyleSheet("QCheckBox{color:#c9d1d9;font-size:11px;}")
         opr.addWidget(self._save_chk)
         ov.addLayout(opr)
-        self._op_progress = QProgressBar()
-        self._op_progress.setTextVisible(True)
-        self._op_progress.setFixedHeight(16)
-        self._op_progress.setStyleSheet(self._PROGRESS_QSS)
-        self._op_progress.hide()
-        ov.addWidget(self._op_progress)
+        self._controls_note = QLabel("")
+        self._controls_note.setStyleSheet("color:#8b949e;font-size:11px;border:none;")
+        self._controls_note.setWordWrap(True)
+        ov.addWidget(self._controls_note)
+        self._op_combo.currentIndexChanged.connect(lambda _i: self._refresh_controls_note())
         sync = QHBoxLayout(); sync.setSpacing(4)
-        _across = QLabel("between windows:")
-        _across.setStyleSheet(self._AT_DEFAULTS_QSS)
-        sync.addWidget(_across)
-        sync.addWidget(self._chip("⧉ Copy LUTs",
-                                  "THIS WINDOW → clipboard: its per-channel contrast + colormap. "
-                                  "The only way to move contrast to a window that is ALREADY OPEN "
-                                  "(a new window inherits, an open one does not), and the only "
-                                  "one that carries the colormap. Shared with the plate.",
-                                  self._copy_luts))
-        sync.addWidget(self._chip("⤓ Paste LUTs",
-                                  "clipboard → THIS WINDOW: apply the copied contrast + colormap "
-                                  "to this window's channels. Counts as you changing contrast "
-                                  "here, so this window will report itself diverged.",
-                                  self._paste_luts))
-        _within = QLabel("│  in this window:")
-        _within.setStyleSheet(self._AT_DEFAULTS_QSS)
-        sync.addWidget(_within)
+        # NO Copy/Paste LUTs here: the clipboard was shelved with the plate's pair (2026-08-19).
         sync.addWidget(self._chip("≡ Match layers to raw",
                                   "THIS WINDOW's operator layers ← THIS WINDOW's raw: put raw's "
                                   "contrast window on every operator layer of the same channel, "
                                   "so flipping between raw and a result compares the same window. "
-                                  "Results open on their own auto window so they are legible "
-                                  "alone; this is the deliberate opt-in to raw's. Touches no "
-                                  "other window and does not move raw.",
+                                  "Touches no other window and does not move raw.",
                                   self._match_raw_contrast))
         sync.addStretch(1)
         ov.addLayout(sync)
-        h.addWidget(op_box, 1)
+        pv.addWidget(op_box)
 
-        def_box, dv = self._titled_box("Defaults")
-        d1 = QHBoxLayout(); d1.setSpacing(4)
-        self._focus_default_chk = QCheckBox("auto focus")
-        self._focus_default_chk.setToolTip(
-            "Jump to the sharpest plane (Tenengrad) once, when this window first shows a region. "
-            "Later regions keep the z you are on. A global default; ticking it HERE changes this "
-            "window only and marks it diverged.")
-        self._focus_default_chk.setStyleSheet("QCheckBox{color:#c9d1d9;font-size:11px;}")
-        self._focus_default_chk.setChecked(bool(self.settings.get("tenengrad_focus")))
-        self._focus_default_chk.toggled.connect(self._on_focus_default_toggled)
-        d1.addWidget(self._focus_default_chk)
-        d1.addStretch(1)
-        self._make_default_btn = self._chip(
-            "make default", "Make THIS window's settings the default for windows opened from now "
-            "on. Windows already open are left exactly as they are.", self._make_default)
-        d1.addWidget(self._make_default_btn)
-        dv.addLayout(d1)
-        d2 = QHBoxLayout(); d2.setSpacing(4)
-        self._diverged_label = QLabel("")
-        self._diverged_label.setStyleSheet(self._AT_DEFAULTS_QSS)
-        d2.addWidget(self._diverged_label, 1)
-        self._reset_btn = self._chip(
-            "↺ reset", "Put every setting back to what this window opened with.",
-            self._reset_settings)
-        d2.addWidget(self._reset_btn)
-        dv.addLayout(d2)
-        def_box.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
-        h.addWidget(def_box, 0)
-        self._refresh_divergence()
+        # THE DETECT ROW (UI feedback 2026-08-17 "Move to controls window", landed with this
+        # dock): the pane BUILDS it (`_napari_pane` exposes `detect_row` for exactly this) and the
+        # operator surface SHOWS it. The wiring in `_build` is untouched — same combo, same button.
+        pane = self._pane
+        detect_row = getattr(pane, "detect_row", None) if pane is not None else None
+        if detect_row is not None:
+            pv.addWidget(detect_row)
 
-        row.setMaximumHeight(108)
-        return row
-
-    _AT_DEFAULTS_QSS = "color:#8b949e;font-size:10px;border:none;"
-    _DIVERGED_QSS = "color:#e3b341;font-size:10px;font-weight:700;border:none;"
-    _PROGRESS_QSS = (
-        "QProgressBar{background:#161b22;border:1px solid #30363d;border-radius:3px;"
-        "color:#c9d1d9;font-size:10px;text-align:center;}"
-        "QProgressBar::chunk{background:#e3b341;border-radius:3px;}"
-    )
-
-    _SETTING_LABELS = {
-        "tenengrad_focus": "auto focus",
-        "channel_visibility": "channels",
-        "luts": "contrast",
-    }
-
-    def _refresh_divergence(self) -> None:
-        """Say which settings this window has overridden, and enable reset only when something is."""
-        lab = getattr(self, "_diverged_label", None)
-        if lab is None:
-            return
-        names = self.settings.diverged
-        if names:
-            pretty = ", ".join(self._SETTING_LABELS.get(n, n) for n in names)
-            lab.setText(f"⚠ diverged: {pretty}")
-            lab.setStyleSheet(self._DIVERGED_QSS)
-        else:
-            lab.setText("at the defaults")
-            lab.setStyleSheet(self._AT_DEFAULTS_QSS)
-        lab.setToolTip(
-            "This window's settings differ from what it opened with. '↺ reset' puts them back; "
-            "'make default' pushes them to windows opened from now on."
-            if names else "This window's settings are the ones it opened with.")
-        btn = getattr(self, "_reset_btn", None)
-        if btn is not None:
-            btn.setEnabled(bool(names))
-
-    def _on_focus_default_toggled(self, on: bool) -> None:
-        """The autofocus default, changed IN THIS WINDOW. Never propagated to the others."""
-        self.settings.set("tenengrad_focus", bool(on))
-        self._refresh_divergence()
-        self._say(f"auto focus {'on' if on else 'off'} for this window.")
-
-    def _sync_settings_widgets(self) -> None:
-        """Put the controls back in step with the settings after a programmatic change."""
-        chk = getattr(self, "_focus_default_chk", None)
-        if chk is None:
-            return
-        chk.blockSignals(True)
-        try:
-            chk.setChecked(bool(self.settings.get("tenengrad_focus")))
-        finally:
-            chk.blockSignals(False)
-
-    def _reset_settings(self) -> None:
-        """Back to what this window opened with: the global defaults, or, for contrast, its parent's."""
-        names = self.settings.reset()
-        if not names:
-            self._say("this window is already showing the settings it opened with.")
-            return
-        self._apply_luts(self.settings.get("luts"))
-        self._apply_channel_visibility(self.settings.get("channel_visibility"))
-        self._sync_settings_widgets()
-        self._refresh_divergence()
-        pretty = ", ".join(self._SETTING_LABELS.get(n, n) for n in names)
-        self._say(f"reset {pretty} to what this window opened with.")
+        self._op_panel = panel
+        self._refresh_controls_note()
+        return panel
 
     def _plate(self):
         """The plate window, or None. The plate owns every operator panel; this window borrows."""
@@ -1063,17 +979,6 @@ class RegionViewer(QMainWindow):
     def _on_movie_cancelled(self) -> None:
         self._hide_progress()
         self._say("movie export cancelled.")
-
-    def _make_default(self) -> None:
-        """Make THIS window's settings the default for windows opened FROM NOW ON."""
-        if self._manager is None:
-            self._say("this window has no manager, so it cannot set the global default.")
-            return
-        if not self._manager.make_default(self.window_id):
-            self._say("this window is not in the registry, so it cannot set the global default.")
-            return
-        self._say("these are now the defaults for windows opened from now on; windows already "
-                  "open are unchanged.")
 
     def _on_cursor_position(self, _event=None) -> None:
         """Name the FOV under the cursor, on the canvas, as it crosses a seam."""
@@ -1774,8 +1679,6 @@ class RegionViewer(QMainWindow):
     def _open_roi_children(self) -> None:
         _roi_tools.open_roi_children(self)
 
-    # -- the LUT gestures live in `_lut_clipboard` (one clipboard, one home); thin delegates
-    # -- because tests and the chips actuate these by name on the window. -------------------------
     def _install_canvas_loupe(self, pane) -> None:
         """Give this window's canvas a shift-left-click magnifier.
 
@@ -1889,10 +1792,6 @@ class RegionViewer(QMainWindow):
         vis = dict(self.settings.get("channel_visibility") or {})
         vis[str(channel)] = bool(visible)
         self.settings.set("channel_visibility", vis)
-        self._refresh_divergence()
-
-    def _copy_luts(self) -> None:
-        _lut_clipboard.copy_luts(self)
 
     def _on_depth_changed(self, lo: float, hi: float) -> None:
         """The dataset proved it holds bigger numbers: open every slider here to reach them.
@@ -1926,9 +1825,6 @@ class RegionViewer(QMainWindow):
     def _match_raw_contrast(self) -> None:
         """Raw's contrast onto every operator layer. See `_lut_clipboard.match_raw_contrast`."""
         _lut_clipboard.match_raw_contrast(self)
-
-    def _paste_luts(self) -> None:
-        _lut_clipboard.paste_luts(self)
 
     @property
     def time_point(self) -> int:
@@ -2026,8 +1922,34 @@ class RegionViewer(QMainWindow):
         _volume_view.close_native3d(self)
 
     def _open_3d(self) -> None:
-        """3D of THIS view, closed-then-read structurally. See `_volume_view.open_3d`."""
-        _volume_view.open_3d(self)
+        """3D opens IN A NEW TAB (2026-08-19 mock): a sibling view over the same region carries
+        the volume, so the 2D view stays exactly as it is.
+
+        The volume machinery is untouched (`_volume_view.open_3d` runs in the CHILD): an ROI —
+        this window's own crop or a drawn rectangle — travels as the child's `roi_bbox`, so the
+        bricked render lands in the child's canvas; the scene facts 3D harvests (which layer,
+        its LUTs) are read from THIS window, whose scene is the one on screen. With no manager
+        (a library caller, tests borrowing the method) it renders in-window as before.
+        """
+        if self._manager is None:
+            _volume_view.open_3d(self)
+            return
+        region = self.current_region()
+        if not region:
+            self._say("no region to render in 3D.")
+            return
+        roi_bbox = self._roi_bbox
+        if roi_bbox is None:
+            sel_bbox, sel_region = self._selected_roi()
+            if sel_bbox is not None and sel_region is not None:
+                roi_bbox, region = sel_bbox, sel_region
+        child = self._manager.open_child([region], roi_bbox=roi_bbox, parent_id=self.window_id)
+        if child is None:
+            self._say("3D: could not open a new view for the volume; rendering here instead.")
+            _volume_view.open_3d(self)
+            return
+        child.set_display_name(f"3D · {region}")
+        _volume_view.open_3d(child, scene_from=self)
 
     def _on_screen_luts(self, op: str) -> "tuple[dict, dict]":
         return _volume_view.on_screen_luts(self, op)
@@ -2170,7 +2092,15 @@ class RegionViewer(QMainWindow):
         different in each. Answering it HERE is what lets ``ViewerManager.focus`` keep one call
         site: a manager that had to know about decks would need the same branch at four more."""
         target = self._host or self
-        target.showNormal()
+        # `showNormal()` ONLY when actually minimised. Called unconditionally it also
+        # DE-MAXIMISES a maximised deck — so every programmatic reveal (a plate navigate, a
+        # cached-result replay) yanked a full-screen views window back to its normal size, which
+        # is one shape of Julio's "tabs do not collapse sometimes" (2026-08-19; the other shape
+        # was `collapse()` racing the navigator's raise, and the navigator is gone).
+        if target.isMinimized():
+            target.showNormal()
+        else:
+            target.show()
         target.raise_()
         target.activateWindow()
         if self._host is not None:
@@ -2242,6 +2172,16 @@ class RegionViewer(QMainWindow):
         if self._disposed:
             return
         self._disposed = True
+        panel = self._op_panel
+        self._op_panel = None
+        if panel is not None and _alive(panel):
+            # The panel lives in a dock's stack, not in this window: delete it explicitly or it
+            # outlives the view as an orphan page.
+            try:
+                panel.setParent(None)
+                panel.deleteLater()
+            except Exception:                        # noqa: BLE001 - a dead panel is already gone
+                pass
         try:
             if self._worker is not None and self._worker.isRunning():
                 self._worker.stop()
@@ -2374,6 +2314,10 @@ class ViewerManager(QObject):
         #: rebinds ``_loupe_sources`` wholesale — a bound ``.get`` would keep answering from the
         #: dead dict for the rest of the session.
         self.loupe_source_for = None
+        #: Installs the collapsible Operators dock on a new deck / free window, or None (a
+        #: manager built by a test, or a library caller). Set by `PlateWindow`; consulted only
+        #: by `deck()` and `_spawn`, so the dock is wired ONCE per host, never per region.
+        self.operator_dock_installer = None
         self.defaults = ViewDefaults()
 
         self._run_progress = None
@@ -2409,8 +2353,7 @@ class ViewerManager(QObject):
         into 16 and every channel renders black; carry it the other way and everything saturates.
         `channel_visibility` goes for the same reason -- it is keyed by channel NAME, and the
         names differ between acquisitions, so what survives is either dead weight or an
-        accidental match that opens a channel dark. `_LUT_CLIPBOARD` is a module global shared
-        with the plate, so it outlives both the window and the dataset unless cleared here.
+        accidental match that opens a channel dark.
 
         What deliberately STAYS: everything in `defaults` that describes HOW you look rather than
         at WHAT -- focus mode, and the rest of `_SETTING_BASELINE`.
@@ -2419,7 +2362,6 @@ class ViewerManager(QObject):
         self._arm_depth(meta)
         self.defaults.set("luts", {})
         self.defaults.set("channel_visibility", {})
-        _LUT_CLIPBOARD.clear()
 
     @property
     def run_progress(self):
@@ -2524,17 +2466,6 @@ class ViewerManager(QObject):
         self.windowsChanged.emit()
         return True
 
-    def make_default(self, window_id: int) -> bool:
-        """Adopt one window's settings as the global defaults, for windows opened FROM NOW ON."""
-        win = self._windows.get(int(window_id))
-        if win is None:
-            return False
-        for name, value in win.current_settings().items():
-            self.defaults.set(name, value)
-        win.settings.adopt()
-        win._refresh_divergence()
-        return True
-
     def _spawn(self, regions: "list[str]", *, title: Optional[str] = None,
                roi_bbox: Optional[tuple] = None,
                parent_id: Optional[int] = None, luts: Optional[dict] = None,
@@ -2577,10 +2508,23 @@ class ViewerManager(QObject):
         deck = self.deck() if self.tabbed_views else None
         if deck is not None:
             deck.dock_page(win)
+            self._sync_deck_dock_panel(wid)
+            # A new tab must be SEEN: `show()` alone does not un-minimise, so a view opened while
+            # the deck sat minimised landed in a window that stayed in the dock/taskbar — the
+            # other measured shape of "tabs do not collapse / do not come back" (2026-08-19).
+            if deck.isMinimized():
+                deck.showNormal()
             deck.show()
             deck.raise_()
             deck.activateWindow()
         else:
+            installer = self.operator_dock_installer
+            if installer is not None and getattr(win, "_operator_dock", None) is None:
+                # A free-standing view gets the same collapsible dock as the deck.
+                win._operator_dock = installer(win)
+                dock = win._operator_dock
+                if dock is not None:
+                    dock.show_window_panel(win.operator_panel())
             win.show()
             win.raise_()
             win.activateWindow()
@@ -2655,6 +2599,12 @@ class ViewerManager(QObject):
 
         deck = ViewDeck(index=len(self._decks) + 1)
         deck.pageActivated.connect(self.note_focus)
+        # THE OPERATOR DOCK, once per deck. `pageActivated` swaps the per-view panel as tabs
+        # change — a BOUND METHOD, for the destroyed-lambda reason documented below.
+        installer = self.operator_dock_installer
+        if installer is not None:
+            deck._operator_dock = installer(deck)
+            deck.pageActivated.connect(self._sync_deck_dock_panel)
         # A BOUND METHOD, NEVER A SELF-CAPTURING LAMBDA. PyQt keeps a lambda alive in a slot proxy
         # parented to the SENDER, so `destroyed` -- which fires while the deck is being torn down --
         # would call into this manager whether or not the manager still exists. Connected as a
@@ -2710,6 +2660,22 @@ class ViewerManager(QObject):
             self._selected_ids = [wid]
         self.viewFocused.emit(list(win._regions))
 
+    def _sync_deck_dock_panel(self, window_id: int) -> None:
+        """Show the (now current) view's operator panel in its deck's dock. Bound method on
+        purpose: connected to `ViewDeck.pageActivated`, which can fire during teardown."""
+        win = self._windows.get(int(window_id))
+        if win is None:
+            return
+        host = getattr(win, "host", None)
+        dock = getattr(host, "_operator_dock", None) if host is not None else None
+        if dock is None or not _alive(dock):
+            return
+        try:
+            dock.show_window_panel(win.operator_panel())
+        except Exception as exc:                     # noqa: BLE001 - a panel is never worth a crash
+            log.warning("view %s could not publish its operator panel: %s: %s",
+                        window_id, type(exc).__name__, exc)
+
     def active_view(self) -> "Optional[RegionViewer]":
         """The window a plate click drives: the focused one, or None when no view is open.
 
@@ -2729,31 +2695,6 @@ class ViewerManager(QObject):
             self._focused_id = int(window_id)       # BEFORE activateWindow(); see note_focus
             win.reveal()                            # a window raises; a tab also becomes current
             self.viewFocused.emit(list(win._regions))
-
-    def raise_views(self, ids: "Sequence[int]") -> None:
-        """Bring the selected views to the FRONT (clicking a navigator row raises its window).
-        Un-minimise + raise each; the last one ends up current, which is also what gives it
-        keyboard focus. Un-minimising lifts a view collapsed by Collapse all.
-
-        DEDUPED BY HOST: five tabs in one deck are one window, and raising it five times is five
-        raises and a flicker for a result the first one already achieved."""
-        wins = [self._windows.get(int(i)) for i in ids]
-        wins = [w for w in wins if w is not None]
-        seen_hosts = []
-        for w in wins:
-            # THE WHOLE BODY IS GUARDED, not just the reveal. This runs from a navigator
-            # selection slot, and an exception out of a Qt slot does not propagate — PyQt aborts
-            # the process (0xC0000409, measured when a `host` read outside this try met a test
-            # double that had no such attribute). Raising a window is never worth that.
-            try:
-                host = w.host
-                if host is not None and any(host is h for h in seen_hosts):
-                    continue                             # this deck is already up
-                if host is not None:
-                    seen_hosts.append(host)
-                w.reveal()
-            except Exception:                            # noqa: BLE001 - best effort per view
-                pass
 
     def raise_plate(self) -> bool:
         """Bring the ROOT plate window to the front. Returns whether there was one to raise."""
@@ -2778,16 +2719,6 @@ class ViewerManager(QObject):
         for win in list(self._windows.values()):
             win.request_close()
 
-    def collapse_all(self) -> None:
-        """Minimise every open window at once; they stay in the navigator and a row click restores one."""
-        for win in list(self._windows.values()):
-            try:
-                win.collapse()      # a window minimises; a tab minimises the deck holding it
-            except Exception:                            # noqa: BLE001 - best effort per window
-                pass
-        self._focused_id = None
-        self.viewFocused.emit([])
-
     def _on_window_closed(self, win: "RegionViewer") -> None:
         clock = getattr(win, "open_clock", None)
         if clock is not None:
@@ -2804,84 +2735,31 @@ class ViewerManager(QObject):
             self.memoryChanged.emit(frac)
 
 
-class OpenViewList(QWidget):
-    """The "Open View list": every open window by ID, plus a live memory bar."""
+class StatusRow(QObject):
+    """The memory bar and the run-progress bar, wired to the manager — and nothing else.
 
-    def __init__(self, manager: ViewerManager, parent: Optional[QWidget] = None) -> None:
+    What survived the Window navigator's deletion (2026-08-19): `OpenViewList` carried the tree
+    of open views (superseded by the ViewDeck's tabs), the Close/Collapse buttons (View > Close
+    All Views, and the tabs' own close buttons) — and these two bars, which still have a job.
+    They are built here, wired to `ViewerManager.memoryChanged` / `runProgressChanged`, and
+    ADOPTED by the log panel (`LogPanel.adopt_status_row`) exactly as before; this QObject only
+    keeps the slots alive for the life of its parent (the plate window).
+    """
+
+    def __init__(self, manager: ViewerManager, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
-        self._manager = manager
-
-        self.setStyleSheet(
-            "QWidget{background:#0b0e14;color:#c9d1d9;}"
-            "QTreeWidget{background:#0d1117;border:1px solid #232b3a;border-radius:4px;"
-            "outline:none;}"
-            "QTreeWidget::item{padding:4px 6px;}"
-            "QTreeWidget::item:selected{background:#1f6feb;color:#ffffff;}"
-            "QPushButton{background:#161b22;color:#c9d1d9;border:1px solid #30363d;"
-            "border-radius:4px;padding:4px 10px;}"
-            "QPushButton:hover{background:#21262d;}"
-        )
-
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(8, 8, 8, 8)
-        lay.setSpacing(6)
-
-        header = QLabel("Window navigator")
-        header.setStyleSheet("color:#c9d1d9;font-size:13px;font-weight:600;border:none;")
-        lay.addWidget(header)
-
-        self._tree = QTreeWidget(self)
-        self._tree.setHeaderHidden(True)
-        # A SECOND COLUMN SAYING WHERE THE VIEW IS. Spencer, on first use of the deck: the
-        # navigator "should now have an indication of what window a tab is in". Once a view can be
-        # a tab, this list is no longer a list of windows — two rows can name the same window, and
-        # a row can name a window that is not on the desktop at all.
-        #
-        # A COLUMN and not a suffix on the title: `test_rename` asserts `item.text(0)` matches the
-        # window title exactly, and rightly — that text IS the `[id] name` join to the log. Widening
-        # it with decoration would make the join something you have to parse back out.
-        self._tree.setColumnCount(2)
-        self._tree.header().setStretchLastSection(False)
-        self._tree.setRootIsDecorated(True)
-        self._tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self._tree.setFocusPolicy(Qt.StrongFocus)
-        self._tree.itemActivated.connect(self._on_activated)
-        self._tree.itemSelectionChanged.connect(self._on_selection_changed)
-        self._tree.setContextMenuPolicy(Qt.CustomContextMenu)
-        self._tree.customContextMenuRequested.connect(self._on_context_menu)
-        self._syncing = False
-        lay.addWidget(self._tree, 1)
-
-        row = QHBoxLayout()
-        row.setSpacing(6)
-        self._close_btn = QPushButton("Close selected views")
-        self._close_btn.clicked.connect(self._close_selected)
-        self._collapse_btn = QPushButton("Collapse all")
-        self._collapse_btn.clicked.connect(self._manager.collapse_all)
-        self._close_all_btn = QPushButton("Close all")
-        self._close_all_btn.clicked.connect(self._close_all)
-        row.addWidget(self._close_btn)
-        row.addWidget(self._close_all_btn)
-        row.addWidget(self._collapse_btn)
-        row.addStretch(1)
-        lay.addLayout(row)
-        self._refresh_nav_buttons()
-
         self._mem_label = QLabel("Memory")
         self._mem_label.setStyleSheet("color:#8b949e;font-size:11px;border:none;")
-        lay.addWidget(self._mem_label)
-        self._mem_bar = QProgressBar(self)
+        self._mem_bar = QProgressBar()
         self._mem_bar.setRange(0, 100)
         self._mem_bar.setTextVisible(True)
         self._mem_bar.setFixedHeight(14)
-        lay.addWidget(self._mem_bar)
 
         self._work_label = QLabel("")
         self._work_label.setStyleSheet("color:#8b949e;font-size:11px;border:none;")
         self._work_label.setWordWrap(True)
         self._work_label.hide()
-        lay.addWidget(self._work_label)
-        self._work_bar = QProgressBar(self)
+        self._work_bar = QProgressBar()
         self._work_bar.setTextVisible(False)
         self._work_bar.setFixedHeight(14)
         self._work_bar.setStyleSheet(
@@ -2889,168 +2767,14 @@ class OpenViewList(QWidget):
             "QProgressBar::chunk{background:#1f6feb;border-radius:3px;}"
         )
         self._work_bar.hide()
-        lay.addWidget(self._work_bar)
 
-        manager.windowsChanged.connect(self.refresh)
-        # A FOCUS CHANGE IS NOT A SET CHANGE. Switching tabs moves which view is current without
-        # opening or closing anything, so `windowsChanged` never fires and this list would keep
-        # highlighting the row it was left on. Selection-only, so a tab switch does not rebuild a
-        # tree whose contents did not change.
-        manager.viewFocused.connect(lambda _regions: self.sync_selection())
         manager.memoryChanged.connect(self._on_memory)
         manager.runProgressChanged.connect(self._on_run_progress)
         self._on_run_progress(manager.run_progress)
-        self.refresh()
 
-    def take_status_row(self) -> tuple:
-        """Hand the memory bar and the run-progress bar to whoever is going to show them."""
-        lay = self.layout()
-        widgets = (self._mem_label, self._mem_bar, self._work_label, self._work_bar)
-        for w in widgets:
-            lay.removeWidget(w)
-        return widgets
-
-    def showEvent(self, e):
-        """Hand the tree keyboard focus, and give the arrows a row to start from."""
-        super().showEvent(e)
-        self._tree.setFocus()
-        if self._tree.currentItem() is None and self._tree.topLevelItemCount():
-            self._syncing = True
-            try:
-                self._tree.setCurrentItem(self._tree.topLevelItem(0))
-            finally:
-                self._syncing = False
-
-    def refresh(self) -> None:
-        if _sip is not None and _sip.isdeleted(self):
-            return
-        self._syncing = True
-        try:
-            self._tree.clear()
-            items: "dict[int, QTreeWidgetItem]" = {}
-            windows = self._manager.windows
-            by_id = {int(w.window_id): w for w in windows}
-            for win in sorted(windows, key=lambda w: int(w.window_id)):
-                wid = int(win.window_id)
-                item = QTreeWidgetItem([win.windowTitle(), _where(win)])
-                item.setData(0, Qt.UserRole, wid)
-                item.setForeground(1, QBrush(QColor("#8b949e")))   # subordinate to the name
-                item.setTextAlignment(1, Qt.AlignRight | Qt.AlignVCenter)
-                pid = getattr(win, "parent_id", None)
-                parent_item = items.get(int(pid)) if pid is not None and int(pid) in by_id else None
-                if parent_item is not None:
-                    parent_item.addChild(item)
-                else:
-                    self._tree.addTopLevelItem(item)
-                items[wid] = item
-            self._tree.expandAll()
-            selected = set(self._manager.selected_ids)
-            for wid, item in items.items():
-                if wid in selected:
-                    item.setSelected(True)
-        finally:
-            self._syncing = False
-        self._refresh_nav_buttons()
-
-    def sync_selection(self) -> None:
-        """Follow a focus change that did NOT come from this list — a tab switch, most of all.
-
-        Switching tabs moved the focus and the plate wash but left this list highlighting whichever
-        row was selected last, so two lists in the same app disagreed about which view you were in.
-        Reported on first use of the deck and it is the right complaint: the navigator is supposed
-        to be a view of the registry, and a stale highlight makes it a second opinion.
-
-        Selection only, not a rebuild: `windowsChanged` already rebuilds this tree wholesale, and
-        a tab switch changes nothing about WHICH views exist. `_syncing` guards the programmatic
-        selection from re-entering `_on_selection_changed`, which would raise the window we are
-        merely reflecting.
-        """
-        if self._syncing or (_sip is not None and _sip.isdeleted(self)):
-            return
-        selected = set(self._manager.selected_ids)
-        self._syncing = True
-        try:
-            it = QTreeWidgetItemIterator(self._tree)
-            while it.value():
-                item = it.value()
-                wid = item.data(0, Qt.UserRole)
-                if wid is not None:
-                    item.setSelected(int(wid) in selected)
-                it += 1
-        finally:
-            self._syncing = False
-        self._refresh_nav_buttons()
-
-    def _on_selection_changed(self) -> None:
-        """Row selection is the wash and the operator target set; empty selection clears the wash."""
-        if self._syncing:
-            return
-        ids = [int(i) for i in (it.data(0, Qt.UserRole) for it in self._tree.selectedItems())
-               if i is not None]
-        self._refresh_nav_buttons()
-        self._manager.set_selected(ids)
-        self._manager.raise_views(ids)
-
-    def _on_activated(self, item: QTreeWidgetItem, _column: int = 0) -> None:
-        wid = item.data(0, Qt.UserRole)
-        if wid is not None:
-            self._manager.focus(int(wid))
-
-    def _on_context_menu(self, pos) -> None:
-        item = self._tree.itemAt(pos)
-        if item is None:
-            return
-        wid = item.data(0, Qt.UserRole)
-        if wid is None:
-            return
-        menu = QMenu(self)
-        act = menu.addAction("Rename…")
-        if menu.exec(self._tree.viewport().mapToGlobal(pos)) is act:
-            self.rename_window(int(wid))
-
-    def rename_window(self, window_id: int) -> bool:
-        """Ask for a new label for *window_id* and apply it. Returns whether anything changed."""
-        win = self._manager._windows.get(int(window_id))
-        if win is None:
-            return False
-        text, ok = QInputDialog.getText(
-            self, f"Rename view [{window_id}]",
-            f"Label for view [{window_id}] (the [{window_id}] prefix stays, so log lines still "
-            f"point here):",
-            text=win.display_name)
-        if not ok:
-            return False
-        return self._manager.rename(int(window_id), text)
-
-    def _refresh_nav_buttons(self) -> None:
-        """Enable each navigator button only when it has something to act on, and SAY WHY not."""
-        n = len(self._manager.windows)
-        selected = len(self._tree.selectedItems())
-        self._close_btn.setEnabled(bool(selected))
-        self._close_btn.setToolTip(
-            "Close every view selected here (shift/ctrl-click to select several)." if selected
-            else ("No view is selected, so there is nothing to close. Click a row above first."
-                  if n else "No view is open."))
-        self._close_all_btn.setEnabled(bool(n))
-        self._close_all_btn.setToolTip(
-            f"Close all {n} open view(s), selected or not." if n
-            else "No view is open, so there is nothing to close.")
-        self._collapse_btn.setEnabled(bool(n))
-        self._collapse_btn.setToolTip(
-            "Minimise every open window (click a row to bring one back)." if n
-            else "No view is open, so there is nothing to minimise.")
-
-    def _close_all(self) -> None:
-        """Close every open view, whatever is selected."""
-        for wid in [int(w.window_id) for w in self._manager.windows]:
-            self._manager.close(wid)
-
-    def _close_selected(self) -> None:
-        """Close EVERY selected row, not just the current one."""
-        ids = [int(i) for i in (it.data(0, Qt.UserRole) for it in self._tree.selectedItems())
-               if i is not None]
-        for wid in ids:
-            self._manager.close(wid)
+    def widgets(self) -> tuple:
+        """The four widgets, in `LogPanel.adopt_status_row`'s order."""
+        return (self._mem_label, self._mem_bar, self._work_label, self._work_bar)
 
     def _on_run_progress(self, report) -> None:
         """Draw (or take down) the work bar. ``report`` is a ``ProgressReport``, or None for idle."""
