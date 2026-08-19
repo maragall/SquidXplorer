@@ -256,3 +256,14 @@ class TestTheROIClampCountsACQUISITIONPixels:
             f"this fixture cannot tell the two pitches apart ({at_displayed} still fits "
             f"{limit}), so the assertion above proves nothing about the unit")
         shutdown_plate_window(qapp, win)
+
+    def test_the_clamp_REFUSES_the_displayed_pitch_by_type(self):
+        """The unit above is now a TYPE (`_conventions`): fed the displayed pitch, the clamp
+        raises by name instead of promising one texture over a bricked 4x read."""
+        from squidxplorer._conventions import AcqPitchUm, DisplayPitchUm
+
+        box = (0.0, 0.0, 1e6, 1e6)
+        assert _bricks.clamp_bbox_um(box, AcqPitchUm(0.752), 2048) == \
+            _bricks.clamp_bbox_um(box, 0.752, 2048)
+        with pytest.raises(TypeError, match="ACQUISITION pitch is required"):
+            _bricks.clamp_bbox_um(box, DisplayPitchUm(MEASURED_FUSE_STEP * 0.752), 2048)

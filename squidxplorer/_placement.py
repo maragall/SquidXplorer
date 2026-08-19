@@ -12,6 +12,8 @@ from typing import Iterable, Mapping, Optional
 
 import numpy as np
 
+from squidxplorer._conventions import acq_um
+
 # Stage +y maps to image +row (downward).
 _Y_SIGN = 1
 
@@ -50,14 +52,18 @@ def placement_mode_label(mode) -> str:
 
 
 def _require_pixel_size(pixel_size_um: Optional[float]) -> float:
-    """Validate the um->px conversion factor, refusing None/non-positive values."""
+    """Validate the um->px conversion factor, refusing None/non-positive values.
+
+    ``acq_um``: placement is in LEVEL-0 acquisition pixels, so an ``AcqPitchUm`` unwraps here
+    and a ``DisplayPitchUm`` (a fused layer's own decimated pitch) is refused by name.
+    """
     if pixel_size_um is None:
         raise ValueError(
             "pixel_size_um is required to place FOVs by stage coordinate, but the acquisition "
             "metadata has none. Without it, micrometres cannot be converted to pixels and every "
             "FOV would be drawn at the same spot. Add objective.pixel_size_um to acquisition.yaml."
         )
-    p = float(pixel_size_um)
+    p = acq_um(pixel_size_um)
     if not p > 0:
         raise ValueError(f"pixel_size_um must be > 0, got {pixel_size_um!r}.")
     return p
