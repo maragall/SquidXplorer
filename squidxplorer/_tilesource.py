@@ -49,11 +49,16 @@ def fov_bboxes_um(positions_um: Mapping[tuple, tuple], frame_shape, pixel_size_u
 
 
 def _min_axis_pitch(values: np.ndarray) -> float:
-    """Smallest positive gap between distinct coordinates along one axis (inf if there is none)."""
+    """MEDIAN positive gap between distinct coordinates along one axis (inf if there is none).
+
+    Median, not min: a REGISTERED acquisition's FOVs each carry their own sub-µm correction, so
+    the minimum gap is legitimately tiny; a mm-leaked-into-µm dataset scales EVERY gap by 1000,
+    which the median still catches.
+    """
     u = np.unique(np.round(np.asarray(values, dtype=np.float64), 6))
     if u.size < 2:
         return float("inf")
-    return float(np.min(np.diff(u)))
+    return float(np.median(np.diff(u)))
 
 
 def _check_micrometres(bboxes: dict, frame_extent_um: float) -> None:

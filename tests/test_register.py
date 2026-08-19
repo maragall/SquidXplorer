@@ -75,8 +75,8 @@ def test_registered_rows_land_in_every_csv_and_only_for_the_region(tmp_path):
     assert n == 8                                              # 4 rows in each of the two csvs
     for path in (dst / "coordinates.csv", dst / "0" / "coordinates.csv"):
         rows = list(csv.reader(path.open()))
-        assert rows[1][3:5] == ["1.000000", "2.000000"]        # µm -> mm at 6 decimals
-        assert rows[4][3:5] == ["4.000000", "8.000000"]
+        assert rows[1][3:5] == ["1.0", "2.0"]        # µm -> mm, shortest round-trip repr
+        assert rows[4][3:5] == ["4.0", "8.0"]
         assert rows[5] == ["B2", "0", "0", "9.000000", "9.000000"]   # untouched
 
 
@@ -99,9 +99,9 @@ def test_the_row_order_schema_still_maps_fovs(tmp_path):
     n = write_registered_rows(root, "A1", {0: (5.0, 6.0), 1: (7.0, 8.0)})
     assert n == 3
     rows = list(csv.reader((root / "coordinates.csv").open()))
-    assert rows[1][1:] == ["0.005000", "0.006000"]
-    assert rows[2][1:] == ["0.005000", "0.006000"]
-    assert rows[3][1:] == ["0.007000", "0.008000"]
+    assert rows[1][1:] == ["0.005", "0.006"]
+    assert rows[2][1:] == ["0.005", "0.006"]
+    assert rows[3][1:] == ["0.007", "0.008"]
 
 
 def _probe_reader():
@@ -135,6 +135,28 @@ def test_register_solves_and_the_copy_carries_the_solution(tmp_path):
     # the paste sits at the registered origin
     assert p.bbox_um[0] == pytest.approx(min(
         meta["fov_positions_um"][("A1", f)][0] + p.offsets_px[f][1] for f in range(4)))
+
+
+def test_blank_padded_fovs_keep_their_recorded_positions(tmp_path):
+    """A padded slot reads as zeros, and zeros are not a measurement: the solve skips them and
+    the copy's rows for them stay byte-untouched — no affine phantoms in the planned csv."""
+    reader = _probe_reader()
+    src = _acq(tmp_path)
+    reader.source_id = str(src)
+    real_read = reader.read
+
+    def read(region, fov, channel, z_level, time_point=0):
+        if int(fov) == 3:
+            return np.zeros((64, 64), np.uint16)
+        return real_read(region, fov, channel, z_level, time_point)
+
+    reader.read = read
+    result = register_region(reader, "A1", [0, 1, 2, 3], copy=True)
+    p = result.placement
+    assert p.offsets_px[3] == (0.0, 0.0)
+    assert any(abs(dy) > 0.5 or abs(dx) > 0.5 for dy, dx in p.offsets_px[:3])
+    rows = list(csv.reader((registered_copy_root(src) / "0" / "coordinates.csv").open()))
+    assert rows[4] == ["A1", "3", "0", "0.000040", "0.000040"]   # fov 3: untouched
 
 
 def test_copy_without_an_on_disk_source_is_refused_by_name():
