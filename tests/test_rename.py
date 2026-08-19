@@ -3,8 +3,8 @@
 A window's identity is RegionViewer.window_id, a per-process monotonic int. The title is a
 rendering of that identity plus a mutable label, and nothing anywhere parses it. Rename safety
 is asserted at the three places a rename could plausibly break something: logging, the data
-model (ViewerManager._windows keyed by the int), and the navigator (rows carry the int under
-Qt.UserRole).
+model (ViewerManager._windows keyed by the int), and the deck's tab titles (the Window
+navigator was deleted 2026-08-19; the tabs are the surface a rename repaints now).
 
 Not pinned, and a real limitation: a rename does not survive a restart.
 """
@@ -24,11 +24,10 @@ pytest.importorskip("qtpy")
 if "PySide6" in sys.modules or "PySide2" in sys.modules:
     pytest.skip("PySide already loaded - Qt binding conflict", allow_module_level=True)
 
-from qtpy.QtCore import Qt  # noqa: E402
 from qtpy.QtWidgets import QApplication  # noqa: E402
 
 from squidxplorer._logpane import VIEW_FIELD  # noqa: E402
-from squidxplorer._region_viewer import OpenViewList, ViewerManager  # noqa: E402
+from squidxplorer._region_viewer import ViewerManager  # noqa: E402
 
 from .conftest import REGIONS  # noqa: E402
 
@@ -57,22 +56,6 @@ def manager(qapp, napari_pane_stub, squid_dataset):
             qapp.processEvents()
         gc.collect()
         qapp.processEvents()
-
-
-def _rows(nav) -> "dict[int, object]":
-    """Every navigator row, nested ones included, keyed by the window id under Qt.UserRole."""
-    out: dict = {}
-
-    def walk(item):
-        wid = item.data(0, Qt.UserRole)
-        if wid is not None:
-            out[int(wid)] = item
-        for i in range(item.childCount()):
-            walk(item.child(i))
-
-    for i in range(nav._tree.topLevelItemCount()):
-        walk(nav._tree.topLevelItem(i))
-    return out
 
 
 def test_rename_does_not_move_the_log_id(qapp, manager, caplog):
@@ -108,24 +91,27 @@ def test_rename_does_not_move_the_target(qapp, manager):
     assert after.window_id == wid
     assert after.regions == before.regions, "the rename moved the regions an operator would run on"
     assert manager._windows[wid] is win, "the registry key moved"
-    assert manager.make_default(wid) is True, "an id-keyed manager call stopped resolving"
+    assert manager.window(wid) is win, "an id-keyed manager call stopped resolving"
     assert manager.windows == [win]
 
 
-def test_rename_reaches_the_navigator_and_keeps_the_bracket(qapp, manager):
+def test_rename_reaches_the_deck_tab_and_keeps_the_bracket(qapp, manager):
+    """The navigator is gone (2026-08-19); the deck's tab text is the surface a rename repaints.
+    A tab bar holds its labels itself, so `ViewerManager.rename` must tell it explicitly."""
+    manager.tabbed_views = True
     win = manager.open([REGIONS[0]])
     wid = win.window_id
-    nav = OpenViewList(manager)
-    assert _rows(nav)[wid].text(0) == f"[{wid}] {REGIONS[0]}"
+    deck = win.host
+    assert deck is not None
+    i = deck.index_of(win)
+    assert deck._tabs.tabText(i) == f"[{wid}] {REGIONS[0]}"
 
     manager.rename(wid, "Deconvolution trial")
 
-    row = _rows(nav)[wid]
-    assert row.text(0) == f"[{wid}] Deconvolution trial", (
-        "the navigator did not repaint, or it dropped the bracket")
-    assert int(row.data(0, Qt.UserRole)) == wid, (
-        "the row's identity moved with its text; selecting it would raise the wrong window")
+    assert deck._tabs.tabText(i) == f"[{wid}] Deconvolution trial", (
+        "the deck tab did not repaint, or it dropped the bracket")
     assert win.windowTitle() == f"[{wid}] Deconvolution trial"
+    deck.close()
 
 
 def test_the_bracket_is_not_editable(qapp, manager):

@@ -322,15 +322,19 @@ def test_every_outcome_takes_the_bar_down(region_window, close):
 
 @pytest.fixture
 def navigator(qapp):
-    """Deliberately dataset-free: the bar is a pure function of the report it is handed."""
-    from squidxplorer._region_viewer import OpenViewList, ViewerManager
+    """Deliberately dataset-free: the bar is a pure function of the report it is handed.
+    `StatusRow` is what survived the Window navigator's deletion (2026-08-19) — the same bars,
+    the same manager wiring, adopted by the log panel."""
+    from squidxplorer._region_viewer import StatusRow, ViewerManager
 
     mgr = ViewerManager()
     mgr._mem_timer.stop()                       # no polling: this test is not about memory
-    panel = OpenViewList(mgr)
+    panel = StatusRow(mgr)
     try:
         yield mgr, panel
     finally:
+        for w in panel.widgets():
+            w.deleteLater()
         panel.deleteLater()
         qapp.processEvents()
 
@@ -368,23 +372,25 @@ def test_clearing_the_channel_takes_the_work_bar_down(navigator):
     assert panel._work_label.isHidden()
 
 
-def test_a_navigator_built_MID_RUN_shows_the_bar_without_waiting_for_the_next_unit(qapp):
+def test_a_status_row_built_MID_RUN_shows_the_bar_without_waiting_for_the_next_unit(qapp):
     """The manager holds the last report so a late subscriber does not wait for the next unit."""
-    from squidxplorer._region_viewer import OpenViewList, ViewerManager
+    from squidxplorer._region_viewer import StatusRow, ViewerManager
 
     mgr = ViewerManager()
     mgr._mem_timer.stop()
     mgr.set_run_progress(ProgressReport("decon", 5, 27, FOV_UNIT))
-    panel = OpenViewList(mgr)                   # built AFTER the run was already reporting
+    panel = StatusRow(mgr)                      # built AFTER the run was already reporting
     try:
         assert not panel._work_bar.isHidden()
         assert panel._work_bar.value() == 19
     finally:
+        for w in panel.widgets():
+            w.deleteLater()
         panel.deleteLater()
         qapp.processEvents()
 
 
-def test_a_plate_wide_run_reaches_the_navigator_and_is_taken_down_when_it_drains(qapp, plate):
+def test_a_plate_wide_run_reaches_the_status_row_and_is_taken_down_when_it_drains(qapp, plate):
     """A real run on a real PlateWindow with NO requester window — the bulk case."""
     seen = []
     plate._viewer_manager.runProgressChanged.connect(seen.append)
@@ -392,7 +398,7 @@ def test_a_plate_wide_run_reaches_the_navigator_and_is_taken_down_when_it_drains
     assert _drain_until(qapp, lambda: seen and seen[-1] is None, timeout=60), (
         f"the work bar was never taken down; last was {seen[-1] if seen else None!r}")
     reports = [r for r in seen if r is not None]
-    assert reports, "a plate-wide run published no progress to the navigator at all"
+    assert reports, "a plate-wide run published no progress to the status row at all"
     assert reports[-1].done == reports[-1].total == len(FOVS)
 
 
