@@ -231,9 +231,9 @@ def test_the_selection_drives_the_selected_wells_scope(open_bus, monkeypatch):
 
 
 def test_an_unknown_operator_is_refused_before_any_work_and_lists_what_can_run(open_bus):
-    r = open_bus.execute(RunOperator(operator="minerva"))
+    r = open_bus.execute(RunOperator(operator="not_an_operator"))
     assert r.refusal == UNKNOWN_OPERATOR
-    assert "mip" in r.message and "minerva" in r.message
+    assert "mip" in r.message and "not_an_operator" in r.message
 
 
 def test_running_with_nothing_open_is_refused_by_name(bus):

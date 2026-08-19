@@ -31,7 +31,6 @@ from squidxplorer._engine import (
     run_plate,
     runnable_operators,
 )
-from squidxplorer._minerva import export_selection, launch_minerva
 from squidxplorer._montage import build_montage
 from squidxplorer._output import write_plate
 from squidxplorer._plugins import (
@@ -145,9 +144,6 @@ __all__ = [
     "InMemoryMultiscale",
     "CompositePlateSource",
     "PlateCellCache",
-    # Minerva export
-    "export_selection",
-    "launch_minerva",
     # plane-ops (registered as "decon" / "bgsub" / "flatfield")
     "deconvolve",
     "deconvolve_plane",

@@ -40,10 +40,6 @@ _OPERATIONS = (
               "pixel, and optionally write stitched_<folder>: a hardlinked copy of the "
               "acquisition whose coordinates.csv carries the registered positions.",
               "_build_register_tab"),
-    # NOT an operator: an export hand-off. Non-runnable because nobody registered "minerva".
-    Operation("minerva", "Open in Minerva Author",
-              "Export the selected FOVs to Minerva-ingestable OME-TIFFs and open Minerva Author on them.",
-              "_build_minerva_tab"),
     # Plane-ops keep z at full depth, so they get _build_plane_op_tab (preview only).
     Operation("decon", "Deconvolution (Richardson-Lucy)",
               "Sharpen against a vectorial PSF computed from this acquisition's own optics (NA, "

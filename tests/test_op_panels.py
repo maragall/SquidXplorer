@@ -674,9 +674,9 @@ def test_a_region_operator_that_declares_no_params_is_refused_for_that_reason():
 
 
 def test_a_key_that_is_not_an_operator_is_refused_by_name():
-    """``minerva`` is a card, not an operator; refused with the registry's own sentence."""
-    why = panel_refusal("minerva")
-    assert why and "minerva" in why
+    """A key the registry never saw is refused with the registry's own sentence."""
+    why = panel_refusal("not_an_operator")
+    assert why and "not_an_operator" in why
 
 
 def test_an_undrawable_parameter_refuses_the_whole_panel_naming_the_parameter():

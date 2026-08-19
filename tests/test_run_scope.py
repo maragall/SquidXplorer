@@ -1,8 +1,8 @@
 """What a run is AIMED AT, with no Qt and no napari in the process.
 
 Every decision squidxplorer._run_scope makes is here: whether a run may start at all, what the
-scope selector's value resolves to against live state, the sentence that names the resolved
-target before compute is spent, and the (region, fov) expansion a Minerva export is built from.
+scope selector's value resolves to against live state, and the sentence that names the
+resolved target before compute is spent.
 The Qt widgets in _viewer only render these answers.
 """
 
@@ -77,53 +77,6 @@ def test_an_unknown_scope_is_named_not_guessed():
 def test_the_scope_list_is_the_only_catalogue_and_starts_at_the_default():
     assert E.RUN_SCOPES[0] == E.SCOPE_SELECTION
     assert set(E.RUN_SCOPES) == {E.SCOPE_SELECTION, E.SCOPE_PLATE, E.SCOPE_REGION}
-
-
-def test_subset_selection_expands_every_region_to_all_its_fovs():
-    """A region is a mosaic of FOVs — the export unit is the region, fused from every FOV of it."""
-    fovs = {"B2": [0, 1, 2], "B3": [0, 1]}
-    assert E.subset_selection(["B2", "B3"], fovs) == [
-        ("B2", 0), ("B2", 1), ("B2", 2), ("B3", 0), ("B3", 1)]
-
-
-def test_subset_selection_keeps_the_tabs_region_order():
-    fovs = {"B2": [0], "B3": [0]}
-    assert E.subset_selection(["B3", "B2"], fovs) == [("B3", 0), ("B2", 0)]
-
-
-def test_subset_selection_names_a_region_it_cannot_expand():
-    with pytest.raises(ValueError) as exc:
-        E.subset_selection(["B2", "B9"], {"B2": [0]})
-    assert "B9" in str(exc.value)
-
-
-def test_subset_selection_rejects_a_region_with_no_fovs():
-    with pytest.raises(ValueError) as exc:
-        E.subset_selection(["B2"], {"B2": []})
-    assert "B2" in str(exc.value)
-
-
-def test_subset_selection_rejects_an_empty_subset():
-    with pytest.raises(ValueError):
-        E.subset_selection([], {"B2": [0]})
-
-
-def test_subset_selection_carries_a_plate_fov_box_through():
-    """The caller owns which regions; only the plate can say which fields inside one. A region
-    absent from the boxes still expands whole, which keeps every existing caller byte-for-byte."""
-    fovs = {"B2": [0, 1, 2], "B3": [0, 1]}
-    assert E.subset_selection(["B2", "B3"], fovs, {"B2": [1, 2]}) == [
-        ("B2", 1), ("B2", 2), ("B3", 0), ("B3", 1)]
-    assert E.subset_selection(["B2", "B3"], fovs) == \
-        E.subset_selection(["B2", "B3"], fovs, {})
-
-
-def test_subset_selection_refuses_a_boxed_fov_the_acquisition_does_not_have():
-    """A field the plate offers that the metadata does not is a disagreement between two views
-    of the same acquisition."""
-    with pytest.raises(ValueError) as exc:
-        E.subset_selection(["B2"], {"B2": [0, 1]}, {"B2": [1, 9]})
-    assert "9" in str(exc.value) and "B2" in str(exc.value)
 
 
 # the resolved target set is confirmed before the run starts
