@@ -19,10 +19,10 @@ import numpy as np
 from qtpy.QtCore import (  # QThread/Signal: kept for tests that build a stub worker as V.QThread
     QEvent, QObject, Qt, QThread, QTimer, Signal,  # noqa: F401 (tests/test_viewer.py::_BlockingWorker)
 )
-from qtpy.QtGui import QColor, QPalette
+from qtpy.QtGui import QColor, QKeySequence, QPalette
 from qtpy.QtWidgets import (
     QAction, QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel,
-    QMainWindow, QPushButton, QScrollArea, QSpinBox,
+    QMainWindow, QPushButton, QScrollArea, QShortcut, QSpinBox,
     QSplitter, QStyleFactory, QVBoxLayout, QWidget,
 )
 
@@ -393,6 +393,9 @@ class PlateWindow(QMainWindow):
         #                               assignment so every existing call site still reads.
         self._current_fov = 0         # the FOV of that region on screen (IMA-250: autofocus ranks IT)
         self._acq_path = None         # the opened acquisition dir (persist writes next to it)
+        self._acq_set = None          # the dropped folder's acquisitions (>= 2), else None
+        self._acq_set_index = 0       # which member of the set is open right now
+        self._bulk = None             # the one SetRunWorker slot: a set-wide save in flight
         self._plate_mode = "raw"      # what the plate view is showing — shown in the plate-pane title
         self._plate_format = None     # the format the plate is laid out with (declared or inferred)
         self._plate_format_override = None   # manual override; also read from SQUIDXPLORER_WELLPLATE_FORMAT
@@ -594,6 +597,41 @@ class PlateWindow(QMainWindow):
             "QPushButton:hover{background:#388bfd;}")
         self._open_sel_btn.clicked.connect(self._open_selected_view)
         _tb.addWidget(self._open_sel_btn)
+
+        # ACQUISITION-SET CYCLING (2026-08-19). A dropped folder OF acquisitions gets a compact
+        # "acquisition k of N" indicator with prev/next in this (nearly empty) title bar, plus
+        # Cmd/Ctrl-Left/Right. Hidden for a single acquisition; `_refresh_acq_cycle` is the one
+        # writer. Cycling re-ingests the neighbour path: no second data model, the set is just
+        # a list of paths on the window (`_acqset.note_set`).
+        _cycle_qss = ("QPushButton{background:#0b0e14;color:#8b949e;border:1px solid #232b3a;"
+                      "border-radius:4px;padding:1px 6px;font-size:11px;}"
+                      "QPushButton:hover{background:#161b22;}")
+        self._acq_prev_btn = QPushButton("◀")
+        self._acq_next_btn = QPushButton("▶")
+        for _b, _d in ((self._acq_prev_btn, -1), (self._acq_next_btn, +1)):
+            _b.setStyleSheet(_cycle_qss)
+            _b.setCursor(Qt.PointingHandCursor)
+            _b.setToolTip("Open the previous/next acquisition of the dropped folder "
+                          "(Cmd/Ctrl-Left, Cmd/Ctrl-Right)")
+            _b.clicked.connect(lambda _=False, dd=_d: self._cycle_acq(dd))
+        self._acq_cycle_label = QLabel("")
+        self._acq_cycle_label.setStyleSheet("color:#8b98ad;font-size:11px;border:none;")
+        # THE BULK OFFER, only shown with a set: tick it and a SAVE run (plate-scoped, no
+        # window requester, no explicit subset) processes every acquisition sequentially.
+        self._bulk_all_box = QCheckBox("save runs: all acquisitions")
+        self._bulk_all_box.setStyleSheet("color:#8b98ad;font-size:11px;border:none;")
+        self._bulk_all_box.setToolTip(
+            "When checked, saving an operator runs it on EVERY acquisition in the dropped "
+            "folder, one at a time, each over its whole plate with the same parameters. "
+            "Previews and window-scoped saves stay on the current acquisition.")
+        for _w in (self._acq_prev_btn, self._acq_cycle_label, self._acq_next_btn,
+                   self._bulk_all_box):
+            _w.hide()
+            _tb.addWidget(_w)
+        _sc_prev = QShortcut(QKeySequence("Ctrl+Left"), self)
+        _sc_prev.activated.connect(lambda: self._cycle_acq(-1))
+        _sc_next = QShortcut(QKeySequence("Ctrl+Right"), self)
+        _sc_next.activated.connect(lambda: self._cycle_acq(+1))
 
         self._left_l.addWidget(self._drop, 1)    # the plate overview replaces this on ingest
 
@@ -2192,6 +2230,28 @@ class PlateWindow(QMainWindow):
         """Open a raw Squid acquisition folder. The pipeline lives in `_ingest.ingest`."""
         _ingest.ingest(self, path)
 
+    # -- acquisition-set cycling (2026-08-19): the set is recorded by `_acqset.note_set` ---------
+    def _refresh_acq_cycle(self) -> None:
+        """Sync the "k of N" controls to the loaded set: the ONE writer of their visibility."""
+        s = self._acq_set
+        widgets = (self._acq_prev_btn, self._acq_cycle_label, self._acq_next_btn,
+                   self._bulk_all_box)
+        if not s:
+            for w in widgets:
+                w.hide()
+            return
+        self._acq_cycle_label.setText(f"acquisition {self._acq_set_index + 1} of {len(s)}")
+        self._bulk_all_box.setText(f"save runs: all {len(s)} acquisitions")
+        for w in widgets:
+            w.show()
+
+    def _cycle_acq(self, delta: int) -> None:
+        """Open the neighbour acquisition of the loaded set (wraps). A no-op without a set."""
+        s = self._acq_set
+        if not s or len(s) < 2:
+            return
+        self.ingest(str(s[(self._acq_set_index + delta) % len(s)]))
+
     # -- the current region: ONE value, three views ------------------------------------------
     #
     # `_mosaic_region` and `_current_well` are properties over `self._cursor` rather than fields.
@@ -2649,6 +2709,15 @@ class PlateWindow(QMainWindow):
         if not _ok:
             self._readout.setText(_why)
             return
+        # A SET is loaded and "save runs: all acquisitions" is ticked: a plate-scoped SAVE (no
+        # explicit subset, no requesting window) runs the ONE operator over every member
+        # sequentially, off-thread, via `_acqset.run_over_set`. Previews stay single-acquisition
+        # (a preview over N plates has no honest surface) and a window-scoped or subset save
+        # keeps its single-acquisition meaning.
+        if (save and regions is None and requester is None and self._acq_set
+                and self._bulk_all_box.isChecked()):
+            self._run_bulk_over_set(key, out_parent, operator_kwargs)
+            return
         # FLAT-FIELD needs an illumination profile PER CHANNEL. With none at all, the operator
         # raises per field and the plate fills with red x's (Julio: "flatfield shows as x's"). If
         # nothing is installed, AUTO-ESTIMATE one from a spread sample of plate tiles (tilefusion
@@ -2921,6 +2990,42 @@ class PlateWindow(QMainWindow):
                 "wellFailed": lambda ri, ci: (self._overview.set_status(ri, ci, "failed")
                                               if self._overview else None),
             })
+
+    def _run_bulk_over_set(self, key: str, out_parent, operator_kwargs) -> None:
+        """SAVE *key* over every acquisition of the loaded set, one at a time, off-thread.
+
+        The worker opens its own reader per member, so cycling or re-ingesting while it runs
+        never pulls this window's reader out from under it; ingest therefore does NOT stop it
+        (the run is folder-scoped, not window-reader-scoped). Per-acquisition progress and the
+        summary go to the log ("acquisition 2 of 5: mip on … ok"); a failing member is logged
+        by name and the loop continues, the same fault isolation the per-well path has.
+        """
+        if self._bulk is not None and self._bulk.isRunning():
+            self._readout.setText("a set run is already in flight: let it finish first")
+            return
+        n = len(self._acq_set)
+        label = operator_label(key)
+        if out_parent is None:
+            out_parent = QFileDialog.getExistingDirectory(
+                self, f"Save {label} output for all {n} acquisitions to folder")
+            if not out_parent:
+                return
+        from squidxplorer._acqset_gui import SetRunWorker
+
+        worker = SetRunWorker(self._acq_set, key, operator_kwargs, out_parent, parent=self)
+        self._readout.setText(f"● {label} · all {n} acquisitions … (progress in the log)")
+        _launch_worker(self, worker, slot="_bulk",
+                       on_done=self._on_bulk_done,
+                       on_problem=lambda m: self._readout.setText(f"set run failed: {m}"))
+
+    def _on_bulk_done(self, summary: dict) -> None:
+        """The set-wide save drained: report the tally the loop measured, never the intent."""
+        whole = not (summary["failed"] or summary["partial"] or summary["stopped"])
+        self._readout.setText(
+            ("✓" if whole else "⚠") + f" set run: {summary['ok']} ok, "
+            f"{summary['partial']} partial, {summary['failed']} failed of "
+            f"{summary['total']} acquisition(s)"
+            + (" (stopped early)" if summary["stopped"] else ""))
 
     def _check_disk(self, out_dir, regions: Optional[list] = None) -> tuple[bool, float, str]:
         """Estimate the persisted plate size and refuse if it won't fit (with headroom). Returns
@@ -3745,6 +3850,7 @@ class PlateWindow(QMainWindow):
         self._stop_worker()          # stop the run cleanly; nothing on disk to clean up (no cache)
         self._stop_preview()
         self._stop_flatfield()       # BEFORE _join_retired, so its threads are in that list
+        _stop_slot(self, "_bulk")    # the set-wide save, likewise: stopped, then joined below
         self._join_retired()         # everything _retire deferred
         self._stop_minerva()         # files already written stay; only the launch poll is abandoned
         ov = getattr(self, "_overview", None)
