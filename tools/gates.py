@@ -362,7 +362,7 @@ def _recorder(called, detail=None):
 #: Entry points that must be stubbed BEFORE ``PlateWindow`` is constructed: ``ViewerManager``
 #: captures ``win.run_operator`` as a bound method at construction, so patching the class
 #: afterwards leaves already-built region windows calling the real handler.
-_EARLY_STUBS = ("run_operator", "run_minerva_export")
+_EARLY_STUBS = ("run_operator",)
 
 
 def _neutralise_early(monkey, called, detail=None):
@@ -844,7 +844,6 @@ NEUTRALISED_WHY = {
     "RegionViewer._record_movie": "writes an .mp4 and runs a multi-second encode",
     "RegionViewer._open_roi_children": "opens one child window per ROI",
     "PlateWindow.run_operator": "a multi-minute operator run over the plate",
-    "PlateWindow.run_minerva_export": "writes an export tree",
     "PlateWindow.ingest": "re-opens the acquisition under the sweep",
     "PlateWindow.close": "ends the window the sweep is walking",
     "PlateWindow._open_acquisition_dialog": "a modal file dialog",
