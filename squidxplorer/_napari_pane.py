@@ -151,6 +151,7 @@ class MosaicPane(QWidget):
         self.detect_button: Optional[QWidget] = None
         self.detect_channel: Optional[QComboBox] = None   # channel-aware cellpose picker
         self.layer_tree: Optional[QWidget] = None
+        self.view_controls_dock = None           # the window's chip block, once docked (below)
         self._button_source = None               # keeps napari's row alive; see _install_ndisplay
         self.canvas: Optional[QWidget] = None
         self.failure: Optional[str] = None
@@ -370,6 +371,53 @@ class MosaicPane(QWidget):
             qt_window.setMinimumHeight(220)
         lay.addWidget(qt_window, 1)
         self._native_window = qt_window
+
+    def dock_view_controls(self, widget: QWidget) -> bool:
+        """Dock *widget* (the window's "2D / 3D · ROI" chip block) at the TOP of napari's left
+        column, above the layer controls (UI feedback 2026-08-19: the chips belong "on the left
+        column, where the controls are", freeing the viewer's top edge).
+
+        Returns whether it docked; a False sends the caller to its own fallback (the window
+        body), so the chips are never lost. Failure is stated, never swallowed.
+        """
+        if self._viewer is None or self._native_window is None or not self.show_docks:
+            return False
+        try:
+            dock = self._viewer.window.add_dock_widget(
+                widget, name="2D / 3D · ROI", area="left")
+        except Exception as exc:                 # noqa: BLE001 - the caller has a fallback
+            self.say(f"the view controls could not be docked ({type(exc).__name__}: {exc}); "
+                     "they are in the window body instead.")
+            return False
+        try:
+            self._hoist_left_dock(dock)
+        except Exception as exc:                 # noqa: BLE001 - in-column, just not on top
+            from squidxplorer._logpane import get_logger
+
+            get_logger("napari_pane").debug(
+                "the view controls docked but could not be hoisted above the layer "
+                "controls: %s", exc)
+        self.view_controls_dock = dock
+        return True
+
+    def _hoist_left_dock(self, dock) -> None:
+        """Put *dock* FIRST in the left column by re-adding every other left dock below it.
+
+        Qt appends docks, so "insert above" is spelled remove-and-re-add. Visibility is kept per
+        dock: napari's flat layer list is hidden on purpose (`_hide_flat_layer_list`) and a
+        re-add must not resurrect it.
+        """
+        from qtpy.QtWidgets import QDockWidget
+
+        qt_window = self._native_window
+        others = [(d, d.isVisibleTo(qt_window))
+                  for d in qt_window.findChildren(QDockWidget)
+                  if d is not dock and qt_window.dockWidgetArea(d) == Qt.LeftDockWidgetArea]
+        for d, _ in others:
+            qt_window.removeDockWidget(d)
+        for d, was_visible in others:
+            qt_window.addDockWidget(Qt.LeftDockWidgetArea, d)
+            d.setVisible(was_visible)
 
     def _install_camera_settle(self) -> None:
         assert self.mosaic is not None

@@ -191,3 +191,142 @@ def test_the_operator_panel_adopts_the_panes_detect_row(qapp, napari_pane_stub, 
         assert v._btn_controls is not None
     finally:
         shutdown_plate_window(qapp, win)
+
+
+def test_the_operator_panel_docstring_names_its_home(qapp, napari_pane_stub, squid_dataset):
+    """The Detect-row adoption above holds wherever the panel lives; its home is the view's own
+    LEFT column now (Julio: "The operators for this window row should also be on the left
+    vertical dock")."""
+    root, _ = squid_dataset
+    win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=1)
+    v = views[0]
+    try:
+        panel = v.operator_panel()
+        # The panel is a descendant of the VIEW (its left column container), never of the deck's
+        # right-edge bulk dock.
+        p = panel.parentWidget()
+        while p is not None and p is not v:
+            p = p.parentWidget()
+        assert p is v, "the operator panel is not inside its own view"
+    finally:
+        shutdown_plate_window(qapp, win)
+
+
+# --- viewer space: the top toolbar is gone, the controls live in the left column ------------------
+
+def test_the_full_width_top_toolbar_is_gone_and_the_chips_live_in_the_left_column(
+        qapp, napari_pane_stub, squid_dataset):
+    """Julio (2026-08-19): the 2D/3D·ROI cluster "should be on the left column, where the
+    controls are, so that we can free up the viewer space to the top. No need to have a full
+    horizontal dock." The builder is pinned ABSENT the repo's way; the chips keep their names
+    (tests and GATE 3 find them by attribute) and stay actuatable."""
+    import squidxplorer._region_viewer as RV
+
+    assert not hasattr(RV.RegionViewer, "_build_top_row"), "the full-width top row is back"
+
+    root, _ = squid_dataset
+    win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=1)
+    v = views[0]
+    try:
+        box = v._view_controls
+        assert box is not None
+        # Every chip is inside the control block, and the block is inside the VIEW (with the
+        # headless pane the left column falls back into the window body — same ancestry).
+        for name in ("_btn_2d", "_btn_3d", "_btn_focus", "_btn_record", "_btn_fovs",
+                     "_btn_copy_luts", "_btn_paste_luts"):
+            chip = getattr(v, name)
+            p = chip.parentWidget()
+            while p is not None and p is not box:
+                p = p.parentWidget()
+            assert p is box, f"{name} left the 2D/3D·ROI block"
+        p = box.parentWidget()
+        while p is not None and p is not v:
+            p = p.parentWidget()
+        assert p is v, "the control block is not inside its own view"
+        # The progress bar stays in the window BODY: a run must stay visible regardless of the
+        # left column's state.
+        assert v._op_progress is not None and v._op_progress.isHidden()
+    finally:
+        shutdown_plate_window(qapp, win)
+
+
+# --- the two-button LUT clipboard and the paste-parity rule ---------------------------------------
+
+def test_a_lut_paste_reaches_the_plate_and_the_two_agree(qapp, napari_pane_stub, squid_dataset):
+    """Julio (2026-08-19): "Make sure that we don't have the issue where we copy luts and plate
+    contrast is different from the window contrast." The PASTE is the one event the plate
+    follows (a drag still leaves it alone — pinned in test_plate_follows_windows): after a
+    paste, each channel's plate window equals the view's own contrast_limits, through the
+    FOLLOW path (never the manual latch), and the plate's channel COLOURS are untouched so a
+    stain-LUT channel keeps its LUT rendering."""
+    import numpy as np
+
+    import squidxplorer._lut_clipboard as LC
+
+    root, _ = squid_dataset
+    win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=1)
+    v = views[0]
+    try:
+        names = [c["name"] for c in win._meta["channels"]]
+        mosaic = v._pane.mosaic
+        for ch in names:
+            if mosaic.find("raw", ch) is None:
+                mosaic.add_mosaic("raw", ch, np.full((8, 8), 500, dtype=np.uint16))
+        colors_before = [win._overview.channel_rgb(i) for i in range(len(names))]
+        LC.CLIPBOARD.clear()
+        LC.CLIPBOARD.update({ch: {"clim": (120.0, 900.0), "cmap": None, "rgb": None, "on": None}
+                             for ch in names})
+        # NO processEvents between paste and assert: the paste and the plate's follow are
+        # SYNCHRONOUS (a direct signal on one thread), and pumping events here lets the view's
+        # deferred region load clear and rebuild the very layers under test.
+        v._paste_luts()
+        for i, ch in enumerate(names):
+            assert mosaic.contrast(ch) == (120.0, 900.0), f"the paste never landed on {ch}"
+            assert win._overview._contrast.window(i) == (120.0, 900.0), (
+                f"the plate's {ch} window differs from the pasted view's")
+            assert not win._overview._contrast.is_manual(i), (
+                "a paste latched the plate manual; it must ride the FOLLOW path")
+        assert [win._overview.channel_rgb(i) for i in range(len(names))] == colors_before, (
+            "a paste moved the plate's channel colours; a stain-LUT channel would lose its "
+            "LUT rendering")
+    finally:
+        shutdown_plate_window(qapp, win)
+
+
+def test_an_empty_clipboard_paste_is_a_refusal_not_a_noop(qapp, napari_pane_stub, squid_dataset):
+    import squidxplorer._lut_clipboard as LC
+
+    root, _ = squid_dataset
+    win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=1)
+    v = views[0]
+    try:
+        LC.CLIPBOARD.clear()
+        said = []
+        v._say = said.append
+        v._paste_luts()
+        assert said and "empty" in said[-1], "an empty paste said nothing"
+    finally:
+        shutdown_plate_window(qapp, win)
+
+
+def test_copy_then_paste_round_trips_between_two_views(qapp, napari_pane_stub, squid_dataset):
+    """Two buttons, one dict: copy in one view, paste in another, same contrast."""
+    import numpy as np
+
+    root, _ = squid_dataset
+    win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=2)
+    a, b = views
+    try:
+        names = [c["name"] for c in win._meta["channels"]]
+        for v in (a, b):
+            for ch in names:
+                if v._pane.mosaic.find("raw", ch) is None:
+                    v._pane.mosaic.add_mosaic("raw", ch,
+                                              np.full((8, 8), 500, dtype=np.uint16))
+        a._pane.mosaic.set_contrast(names[0], 33.0, 333.0)
+        a._copy_luts()
+        b._paste_luts()
+        assert b._pane.mosaic.contrast(names[0]) == (33.0, 333.0), (
+            "the copied window never reached the second view")
+    finally:
+        shutdown_plate_window(qapp, win)

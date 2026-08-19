@@ -1094,26 +1094,8 @@ class MosaicLayers:
         if len(linkable) > 1:
             self._model.layers.link_layers(linkable, ("contrast_limits",))
 
-    def match_contrast_to(self, op: str) -> int:
-        """Copy *op*'s contrast window onto every OTHER processing layer of the same channel.
-
-        Returns the number of peer layers written.
-        """
-        matched = 0
-        for channel, peers in self._by_channel.items():
-            source = self.find(op, channel)
-            if source is None:
-                continue                     # this channel has no `op` layer to match against
-            window = (float(source.contrast_limits[0]), float(source.contrast_limits[1]))
-            for ly in peers:
-                if ly is source:
-                    continue
-                try:
-                    ly.contrast_limits = window
-                except Exception:            # noqa: BLE001 - one odd layer is skipped, not fatal
-                    continue
-                matched += 1
-        return matched
+    # `match_contrast_to` (raw -> operator layers) was shelved whole with its button
+    # (Julio, 2026-08-19: "Shelf the match layers to raw").
 
     def remove_op_channel(self, op: str, channel: str) -> bool:
         """Remove an identity: every layer rendering ``(op, channel)``, not just the first."""

@@ -570,10 +570,9 @@ class PlateWindow(QMainWindow):
 
         # NO SELECTION BAR (2026-08-19, Julio's mock: "move rest, top row"). The selection caption
         # lives in the STATUS BAR at the bottom; Select all is a View-menu action (and the plate's
-        # own Cmd/Ctrl-A, `PlateOverview.keyPressEvent`); the LUT copy/paste pair is SHELVED
-        # outright — Julio: "Shelf the LUT logic completely. That's just adding complexity to the
-        # code for no reason." The automatic window → plate contrast tap (`_bind_window_contrast`)
-        # is live sync, not the clipboard, and stays.
+        # own Cmd/Ctrl-A, `PlateOverview.keyPressEvent`). The PLATE grows no LUT pair of its own;
+        # the window-side clipboard is two buttons in each view's left column, and the plate
+        # follows a PASTE and only a paste (`_bind_window_contrast` / `_follow_window_luts`).
         _sel_cap = QLabel("Selection:")
         _sel_cap.setStyleSheet("color:#8b98ad;font-size:12px;border:none;")
         self._selection_label = QLabel("none — click wells, or Select all")
@@ -2201,34 +2200,32 @@ class PlateWindow(QMainWindow):
         if wid in bound:
             return          # subscribe ONCE per window: MosaicLayers keeps a list of callbacks
 
-        # THE PLATE NO LONGER FOLLOWS A WINDOW'S LOOK LIVE (2026-08-06).
+        # THE PLATE FOLLOWS A PASTE, AND ONLY A PASTE (2026-08-19).
         #
-        # Three subscriptions used to live here -- contrast, eye icons and colormap -- each per
-        # CHANNEL, each landing on the plate the instant the user moved it in any window. Plus
-        # `_adopt_window_view`, which PULLED the same three at bind time because "an event tells
-        # you about a CHANGE; the initial state is not a change".
+        # History, because this seam has flipped twice: the 2026-08-06 shelving deleted the
+        # three per-channel LIVE subscriptions (contrast, eye icons, colormap) — "last gestured
+        # in" was a history with no surface, and the plate could go dark with nothing on screen
+        # having changed. Julio then: *"the plate image shouldn't change unless we paste a
+        # LUT."* The copy/paste pair itself was shelved 2026-08-19, and the same day he asked
+        # for the minimum back: two buttons, and "make sure that we don't have the issue where
+        # we copy luts and plate contrast is different from the window contrast."
         #
-        # Julio, 2026-08-06: *"we're shelving the interactive contrast synch. What we do is that
-        # whichever lookup table we have for the window, we copy it and it reflects on the plate,
-        # with whichever channels were turned on on the window. And the plate image shouldn't
-        # change unless we paste a LUT. That's the pragmatic fix to this annoying contrast sync
-        # logic."*
-        #
-        # He is right, and the reason is in the docstring the deleted code carried: *"Many windows,
-        # one plate: whichever window the user last gestured in is the one the plate shows."* That
-        # sentence is the whole defect. "Last gestured in" is not a thing a user tracks, and with
-        # several windows open the plate's look was decided by a history with no surface anywhere
-        # -- so the plate could go dark, or take one window's window onto another's wells, with
-        # nothing on screen having changed. Every fix made it a longer rule with more exceptions,
-        # which is the shape of a model that is wrong rather than incomplete.
-        #
-        # The copy/paste pair that replaced it was itself SHELVED on 2026-08-19 (Julio: "Shelf the
-        # LUT logic completely") — the plate's look now changes only with the acquisition's own
-        # channel declarations and the layer picks below.
-        #
-        # What is deliberately KEPT is `on_user_op` below: which processing LAYER the plate draws
-        # is a different quantity from how it is windowed, it has exactly one honest answer at a
-        # time, and it is not what this feedback was about.
+        # Both sentences hold at once only if the PASTE is the one event the plate hears: a
+        # slider drag still reaches the plate NOT AT ALL (pinned by
+        # test_a_gesture_in_a_window_leaves_the_plate_alone), and after a paste the plate's
+        # channel windows equal the pasted window's, through the FOLLOW path — never the manual
+        # latch, and never a plate write from the window's side. Contrast only: a stain-LUT
+        # channel's plate look must remain the LUT rendering after a paste, so no colormap and
+        # no eye icons travel.
+        sig = getattr(win, "lutsPasted", None)
+        if sig is not None:
+            try:
+                sig.connect(self._follow_window_luts)
+            except Exception:                    # noqa: BLE001 - a stub window without the signal
+                pass
+
+        # `on_user_op` is KEPT for its own reason: which processing LAYER the plate draws is a
+        # different quantity from how it is windowed, and it has exactly one honest answer.
 
         # ...and the PROCESSING LAYER. Julio: "after I click an operator layer in our window, the
         # thumbnails don't update." The three sinks above are all per CHANNEL, so picking an
@@ -2243,6 +2240,43 @@ class PlateWindow(QMainWindow):
         if callable(sub):
             sub(_op_sink)
         bound.add(wid)
+
+    def _follow_window_luts(self, win) -> None:
+        """A view pasted LUTs: the plate takes each channel's window off that view's own layers.
+
+        The parity Julio named (plate contrast must equal the window's after a paste), through
+        the one reader (`per_channel_luts`) and the plate's FOLLOW path. Contrast only.
+        """
+        from squidxplorer._lut_clipboard import per_channel_luts
+
+        try:
+            luts = per_channel_luts(win)
+        except Exception as exc:                 # noqa: BLE001 - a dead window is not a crash
+            log.warning("the plate could not read the pasted window's LUTs: %s", exc)
+            return
+        for name, lut in (luts or {}).items():
+            clim = lut.get("clim")
+            if clim is not None:
+                self._follow_window_contrast(str(name), float(clim[0]), float(clim[1]))
+
+    def _follow_window_contrast(self, channel: str, lo: float, hi: float) -> None:
+        """The plate takes ONE channel's resolved window from a view, through the FOLLOW path.
+
+        Name-to-index happens here, once: the overview counts channels by position in the
+        acquisition's own list. `follow_channel_window`, never `set_channel_window` — following
+        must not latch the channel manual (see `_bind_window_contrast`).
+        """
+        ov = getattr(self, "_overview", None)
+        if ov is None or self._meta is None:
+            return
+        for i, entry in enumerate(self._meta.get("channels") or []):
+            get = getattr(entry, "get", None)
+            if get is None:
+                continue
+            if str(get("name")) == str(channel) \
+                    or str(get("display_name") or "") == str(channel):
+                ov.follow_channel_window(int(i), float(lo), float(hi))
+                return
 
     def _follow_window_layer(self, layer_key: str, on: bool) -> None:
         """A window showed or hid a processing layer: put the plate on the same one.

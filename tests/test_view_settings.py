@@ -326,37 +326,12 @@ def test_changing_the_default_does_not_retroactively_change_a_diverged_window(qa
     assert nxt.settings.get("tenengrad_focus") is True
 
 
-def test_match_raw_contrast_is_wired_to_this_window_s_mosaic_and_leaves_it_at_defaults(
-        qapp, manager):
-    """The chip's handler must reach this window's own layers, and writing operator layers only
-    (never raw) must not mark the window diverged."""
-    one = manager.open([REGIONS[0]])
-    _loaded(qapp, one)
-    mosaic = one._pane.mosaic
+def test_match_raw_contrast_is_shelved_off_the_window(qapp, manager):
+    """"Match layers to raw" is gone whole (Julio, 2026-08-19) — the ABSENCE is pinned, the
+    way this repo pins deleted features, so the handler cannot come back without its button."""
+    from squidxplorer._region_viewer import RegionViewer
 
-    for ch in (CH_IN_YAML, CH_NOT_IN_YAML):
-        raw = mosaic.find("raw", ch)
-        if raw is None:
-            continue
-        raw.contrast_limits = (100.0, 900.0)
-        peer = mosaic.add_mosaic("decon", ch, np.full((16, 16), 9000, dtype=np.uint16))
-        peer.contrast_limits = (1.0, 2.0)
-    diverged_before = one.settings.diverged
-
-    one._match_raw_contrast()
-
-    matched = 0
-    for ch in (CH_IN_YAML, CH_NOT_IN_YAML):
-        raw, peer = mosaic.find("raw", ch), mosaic.find("decon", ch)
-        if raw is None or peer is None:
-            continue
-        assert list(peer.contrast_limits) == list(raw.contrast_limits), ch
-        matched += 1
-    assert matched, "the window had no raw/operator pair to match, so nothing was proven"
-    assert one.settings.diverged == diverged_before, (
-        "matching operator layers to raw moved the window's recorded settings; it writes "
-        "operator layers only and raw is untouched"
-    )
+    assert not hasattr(RegionViewer, "_match_raw_contrast"), "the match handler is back"
 
 
 def test_the_autofocus_default_is_actually_read_when_a_window_loads(qapp, manager):
@@ -492,13 +467,9 @@ def test_a_window_opened_on_a_DIFFERENT_region_gains_nothing(qapp, manager):
 
 def test_applying_a_lut_record_carries_CHANNEL_VISIBILITY_not_just_contrast(qapp, manager):
     """The record has four keys and `apply_luts` puts three on the layers (`rgb` is the plate's
-    spelling). The copy/paste clipboard is SHELVED (2026-08-19); `_apply_luts` is the surviving
-    consumer — it is how a child window inherits its parent's look — so the rule is pinned there."""
-    import squidxplorer._lut_clipboard as LC
-
-    assert not hasattr(LC, "CLIPBOARD"), "the LUT clipboard is back"
-    assert not hasattr(LC, "copy_luts") and not hasattr(LC, "paste_luts")
-
+    spelling). `_apply_luts` is how a child window inherits its parent's look AND what the
+    two-button clipboard pastes through (back 2026-08-19: "ultra simple, minimal, two button
+    logic"), so the rule is pinned here for both."""
     one = manager.open([REGIONS[0]])
     two = manager.open([REGIONS[1]])
     _loaded(qapp, one)
@@ -507,8 +478,6 @@ def test_applying_a_lut_record_carries_CHANNEL_VISIBILITY_not_just_contrast(qapp
     one._pane.mosaic.set_channel_visible(CH_IN_YAML, False)
     assert two._pane.mosaic.channel_visible(CH_IN_YAML) is not False
 
-    assert not hasattr(one, "_copy_luts") and not hasattr(two, "_paste_luts"), (
-        "the window-side clipboard gestures are back")
     two._apply_luts(one._per_channel_luts())
 
     assert two._pane.mosaic.channel_visible(CH_IN_YAML) is False, (

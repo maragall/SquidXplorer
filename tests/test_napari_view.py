@@ -276,43 +276,21 @@ def test_an_operator_layer_opens_on_its_own_window_not_raw_s(layers):
     )
 
 
-def test_match_raw_contrast_puts_every_operator_peer_on_raw_s_window(layers):
-    """The explicit opt-in that turns the raw->operator flip into a real comparison, asserted
-    on the layers' actual contrast values across two channels and two operators."""
-    dim = np.full((32, 32), 300, dtype=np.uint16)
-    dim[:4] = 900
-    bright = np.full((32, 32), 6000, dtype=np.uint16)
-    bright[:4] = 30000
+def test_match_contrast_to_is_shelved_whole():
+    """"Match layers to raw" went with its button (Julio, 2026-08-19: "Shelf the match layers
+    to raw"). The ABSENCE is pinned the way this repo pins deleted features."""
+    from squidxplorer._napari_view import MosaicLayers
 
-    for ch in ("488", "561"):
-        layers.add_mosaic("raw", ch, dim)
-        layers.add_mosaic("decon", ch, bright)
-        layers.add_mosaic("stitched", ch, bright)
+    assert not hasattr(MosaicLayers, "match_contrast_to"), "match_contrast_to is back"
 
-    matched = layers.match_contrast_to("raw")
+    import squidxplorer._lut_clipboard as LC
 
-    assert matched == 4, "two operator layers on each of two channels should have been written"
-    for ch in ("488", "561"):
-        want = list(layers.find("raw", ch).contrast_limits)
-        for op in ("decon", "stitched"):
-            assert list(layers.find(op, ch).contrast_limits) == want, f"{op}/{ch}"
+    assert not hasattr(LC, "match_raw_contrast"), "the window-side match helper is back"
 
 
-def test_match_raw_contrast_skips_a_channel_the_source_op_does_not_show(layers):
-    """A channel with no raw layer is left alone, rather than matched to a wrong window."""
-    layers.add_mosaic("raw", "488", np.full((32, 32), 300, dtype=np.uint16))
-    layers.add_mosaic("decon", "488", np.full((32, 32), 6000, dtype=np.uint16))
-    only_op = layers.add_mosaic("decon", "561", np.full((32, 32), 12000, dtype=np.uint16))
-    before = list(only_op.contrast_limits)
-
-    assert layers.match_contrast_to("raw") == 1
-    assert list(only_op.contrast_limits) == before
-
-
-def test_neither_the_link_nor_the_match_carries_the_COLORMAP(layers):
-    """Contrast is shared; COLOUR is not, by either mechanism — the link is bound only to
-    ``contrast_limits`` and ``match_contrast_to`` writes only that, so the LUT copy/paste chip
-    (the app's only writer of ``layer.colormap``) is not made redundant by either."""
+def test_the_link_does_not_carry_the_COLORMAP(layers):
+    """Contrast is shared; COLOUR is not — the link is bound only to ``contrast_limits``, so
+    the LUT paste (the app's only writer of ``layer.colormap``) is not made redundant by it."""
     raw = layers.add_mosaic("raw", "488", _img(), colormap="green")
     decon = layers.add_mosaic("decon", "488", _img(1), colormap="green")
 
@@ -321,11 +299,6 @@ def test_neither_the_link_nor_the_match_carries_the_COLORMAP(layers):
 
     assert list(decon.contrast_limits) == [7.0, 900.0], "the contrast link stopped working"
     assert decon.colormap.name == "green", "the link carried the colormap; the paste is now a dupe"
-
-    layers.match_contrast_to("raw")
-    assert decon.colormap.name == "green", (
-        "match_contrast_to grew a second responsibility; it is the CONTRAST equaliser and the "
-        "chip's label promises only that")
 
 
 def test_contrast_changes_arrive_on_the_public_event(layers):
