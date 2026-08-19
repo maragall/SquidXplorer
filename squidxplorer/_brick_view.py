@@ -396,14 +396,25 @@ class BrickedVolume:
         # The seed only: once adopted, the channel owns its window. This covers the first brick
         # of a channel; the bricks are one volume and must be windowed as one.
         clim = self._contrast_by.get(channel)
-        if clim is None:
+        has_bricks = any(k[0] == channel for k in self._layers)
+        if clim is None and not has_bricks:
+            # The pane's own window seeds the FIRST brick only; later bricks take the
+            # channel's live window from `adopt`, which may have moved since.
             clim = self._mosaic.contrast(channel)
+        reseed = False
         if clim is None:
             from squidxplorer._napari3d import _auto_clim
 
-            clim = _auto_clim(arr)
+            clim = _auto_clim(arr)               # None for a blank brick, never lo == hi
             if clim is not None:
                 self._contrast_by[channel] = clim
+                # Earlier bricks of this channel were blank: they carry napari's autoscale of
+                # nothing, and `adopt` below would hand that window to THIS brick too. The
+                # first REAL window re-seeds the whole identity instead (ticket #6: a dark
+                # corner brick left a whole channel invisible in 3D).
+                reseed = has_bricks
+        if clim is not None and not float(clim[1]) > float(clim[0]):
+            clim = None                          # napari refuses a degenerate window outright
         if clim is not None:
             kwargs["contrast_limits"] = tuple(clim)
         try:
@@ -421,6 +432,13 @@ class BrickedVolume:
 
         _seed_range(layer, getattr(arr, "dtype", None), clim)
         self._mosaic.adopt(self._op, channel, layer)
+        if reseed:
+            # `adopt` just windowed this brick to its blank siblings' autoscale; the first real
+            # window wins the identity, and the mirror carries it back onto the blank bricks.
+            try:
+                layer.contrast_limits = tuple(clim)
+            except Exception:                           # noqa: BLE001 - the brick still renders
+                pass
         self._layers[key] = layer
         self._steps[key] = max(1, int(round(scale[1] / self._scale[1])))
 

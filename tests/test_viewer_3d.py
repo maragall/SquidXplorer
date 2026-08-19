@@ -428,6 +428,51 @@ def test_evicting_one_brick_leaves_the_identity_and_its_other_bricks_alone(mosai
     assert all(tuple(ly.contrast_limits) == (3.0, 33.0) for ly in survivors)
 
 
+# -- a channel whose first brick is blank must still display (UI feedback 08.17 ticket #6) ------
+
+
+def test_a_channel_whose_first_brick_is_blank_still_displays(mosaic):
+    """A blank first brick seeded a DEGENERATE window (lo == hi), napari refuses that with
+    ValueError, and the cached seed poisoned every later brick — so the whole channel rendered
+    NOTHING in 3D while its 2D layer had pixels (measured: 0 layers added for the channel)."""
+    import numpy as np
+
+    vol = build_volume_scene(mosaic, OP, ("488",), bricks=0)
+    blank = np.zeros((4, 8, 8), dtype=np.uint16)
+    signal = np.full((4, 8, 8), 3000, dtype=np.uint16)
+    signal[:, 2:6, 2:6] = 12000
+
+    vol._add_layer(("488", (0, 0)), "488", blank, (1.5, 0.75, 0.75), (0.0, 0.0, 0.0))
+    vol._add_layer(("488", (0, 1)), "488", signal, (1.5, 0.75, 0.75), (0.0, 0.0, 6.0))
+
+    rendering = mosaic.layers_for(OP, "488")
+    assert len(rendering) == 2, (
+        f"{len(rendering)} of 2 bricks made it to the canvas — a blank corner brick has taken "
+        f"the whole channel down")
+    lo, hi = (float(v) for v in mosaic.find(OP, "488").contrast_limits)
+    assert hi > lo, "the channel is windowed on a degenerate (lo == hi) window"
+    assert hi > 1.0, (
+        f"the channel's window is ({lo}, {hi}) — the blank brick's autoscale, not the signal's "
+        f"own window, so every voxel renders saturated")
+    cached = vol._contrast_by.get("488")
+    assert cached is None or float(cached[1]) > float(cached[0]), (
+        f"a degenerate seed {cached} is cached: every future brick of this channel will be "
+        f"refused by napari")
+
+
+def test_auto_clim_never_hands_napari_a_degenerate_window():
+    """napari raises ValueError on contrast_limits with lo == hi; a blank stack must yield None
+    (napari autoscales), never (0.0, 0.0)."""
+    import numpy as np
+
+    from squidxplorer._napari3d import _auto_clim
+
+    assert _auto_clim(np.zeros((4, 8, 8), dtype=np.uint16)) is None
+    assert _auto_clim(np.full((4, 8, 8), 7, dtype=np.uint16)) is None
+    real = _auto_clim(np.arange(4 * 8 * 8, dtype=np.uint16).reshape(4, 8, 8))
+    assert real is not None and real[1] > real[0]
+
+
 # -- while 3D is up, the VOLUME owns the identity; the flat mosaic surrenders it ----------------
 
 
