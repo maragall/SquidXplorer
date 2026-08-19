@@ -555,6 +555,12 @@ def model_pane_class():
             self.detect_button = None
             self.said = []
             self.shutdowns = 0
+            self._on_settle = None
+
+        def on_camera_settled(self, callback):
+            # The real pane debounces camera events into this; headless harnesses (conftest,
+            # GATE 3) fire pane._on_settle() themselves so the brick-refine chain is reachable.
+            self._on_settle = callback
 
         def say(self, text):
             self.said.append(text)
