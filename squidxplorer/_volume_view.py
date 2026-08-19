@@ -22,6 +22,8 @@ shell that holds both as plain attributes, and ``closeEvent`` clears ``_native3d
 
 from __future__ import annotations
 
+from squidxplorer import _conventions as _conv
+
 import numpy as np
 
 from squidxplorer._napari_view import full_res_level
@@ -232,7 +234,7 @@ def _open_bricked(win, region: str, window: tuple, *, scene_from=None, what: str
         voxels = (f"Voxels at {px:.3f} um/px, the acquisition's own — read straight from the "
                   f"reader.")
     else:
-        spy, spx = src_pitch
+        spy, spx = (_conv.display_um(v) for v in src_pitch)
         coarser = ("" if max(spy, spx) <= px * 1.001 else
                    f" — COARSER than the acquisition's {px:.3f} um/px, because a displayed "
                    f"operator layer is the fused preview at its own decimation")
@@ -246,7 +248,7 @@ def _open_bricked(win, region: str, window: tuple, *, scene_from=None, what: str
         "view %s: %s in-window: '%s', %sx%s px window, %s z, %s channel(s), %s texture%s. %s%s %s",
         getattr(win, "window_id", "?"), what, source, r1 - r0, c1 - c0, nz, len(names), n,
         "" if n == 1 else "s", (note + " ") if note else "", voxels,
-        _bricks.ceiling_line(max_tex, px, measured=True))
+        _bricks.ceiling_line(max_tex, _conv.AcqPitchUm(px), measured=True))
 
 
 def volume_source(win, window: tuple):
@@ -347,7 +349,7 @@ def displayed_pitch_um(win, layer, *, what: str):
         win._say(f"3D refused: {what} is placed at a scale of ({py}, {px}) um/px, which is "
                  f"not a pitch. A volume cannot be given a physical size from it.")
         return None
-    return (py, px)
+    return (_conv.DisplayPitchUm(py), _conv.DisplayPitchUm(px))
 
 
 def render_roi_volume(win, mosaic, contrast_by: dict, colormap_by: dict) -> None:
@@ -371,7 +373,7 @@ def render_roi_volume(win, mosaic, contrast_by: dict, colormap_by: dict) -> None
     if not volumes:
         win._say("no channel on screen to render in 3D.")
         return
-    py_um, px_um = pitch
+    py_um, px_um = (_conv.display_um(v) for v in pitch)
     max_tex = 2048
     try:
         max_tex = int(win._pane._live_max_3d_texture())

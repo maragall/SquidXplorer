@@ -1608,7 +1608,10 @@ class RegionViewer(QMainWindow):
         if not region:
             return {}
         try:
-            return mosaic_fov_bboxes_um(self._meta or {}, region)
+            # The crossing is NAMED: the walk's geometry is TopLeftBoxUm, the drawing code
+            # takes plain corner tuples.
+            return {f: b.bbox()
+                    for f, b in mosaic_fov_bboxes_um(self._meta or {}, region).items()}
         except (KeyError, ValueError, TypeError) as exc:
             self._say(f"cannot locate this region's FOVs: {exc}")
             return {}
