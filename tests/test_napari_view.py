@@ -1304,8 +1304,8 @@ def test_our_own_writes_are_never_reported_as_a_user_picking_a_layer(layers):
 
 # --- one hex per channel, or an honest None --------------------------------------------------
 #
-# Minerva's story groups carry a single six-digit "color" per channel with no field for a
-# gradient. colormap_hue_rgb decides which napari colormaps survive that and which cannot; the
+# A LUT snapshot carries a single rgb per channel with no field for a gradient.
+# colormap_hue_rgb decides which napari colormaps survive that and which cannot; the
 # answer must never be "approximate it".
 
 def _hue_layer(viewer_layers, cmap):
@@ -1344,7 +1344,7 @@ def test_the_colormap_this_app_builds_for_a_channel_reduces_to_its_palette_colou
 @pytest.mark.parametrize("name", ["viridis", "turbo", "inferno", "PiYG"])
 def test_a_multi_stop_colormap_refuses_rather_than_approximating(layers, name):
     """A perceptual map's last stop is the top of a ramp, not the map (viridis ends yellow and
-    is mostly not yellow); emitting it would put a colour into Minerva that is on no screen."""
+    is mostly not yellow); emitting it would put a colour into the snapshot that is on no screen."""
     from squidxplorer._napari_view import colormap_hue_rgb
     try:
         layer = _hue_layer(layers, name)

@@ -366,56 +366,6 @@ def run_all():
         assert n_after == 0, f"re-dock left {n_after} floating window(s)"
         return f"detached -> {n_float} float window, re-docked -> {n_after} float, {back} tab(s) home"
 
-    @check("IMA-228", "Minerva exports the SELECTION, not always FOV 0")
-    def _():
-        w = open_window(PLATE)
-        if not hasattr(w, "minerva_selection"):
-            w.close(); raise SkipCheck("minerva_selection() not present")
-        # Decoys on the display-only overview: minerva_selection must ignore them and read
-        # PlateWindow, the selection's real owner.
-        w._overview.selected_wells = lambda: ["B1"]
-        w._overview.selected_region_fovs = lambda: {"B1": [0]}
-        w._selected_regions = ["A1", "A2"]
-        sel = w.minerva_selection()
-        regions = sorted({r for r, _ in sel}) if sel else []
-        w.close()
-        assert sel, "empty selection payload"
-        assert regions == ["A1", "A2"], f"read the wrong selection owner: {regions}"
-        return f"{len(sel)} FOVs across {regions} (overview decoys ignored)"
-
-    @check("IMA-228", "The Minerva export is ONE FUSED MOSAIC per region, and Minerva reads it")
-    def _():
-        """Minerva opens series[0] of one image per story, so a multi-FOV selection must fuse."""
-        if free_gb() < MIN_FREE_GB + 1:
-            raise SkipCheck(f"only {free_gb():.1f} GB free; refusing to write")
-        import tifffile
-        from squidxplorer._minerva import export_selection
-        reader = read(PLATE)
-        fovs = reader.metadata["fovs_per_region"]["A1"][:4]      # a subset: the crop path
-        if len(fovs) < 4:
-            raise SkipCheck(f"precondition: well A1 of {PLATE} must have >=4 FOVs to exercise the "
-                            f"crop path; it has {len(fovs)}")
-        tmp = tempfile.mkdtemp(prefix="walkthrough_minerva_")
-        try:
-            pairs = export_selection(reader, [("A1", f) for f in fovs], tmp)
-            assert len(pairs) == 1, f"{len(fovs)} FOVs of one region gave {len(pairs)} files"
-            omes = [f for f in os.listdir(tmp) if f.endswith(".ome.tiff")]
-            assert len(omes) == 1, f"one mosaic per region, found {omes}"
-            ome, story = pairs[0]
-            with tifffile.TiffFile(str(ome)) as tf:
-                assert len(tf.series) == 1, "Minerva reads series[0] only"
-                shape = tf.series[0].shape
-                xml = tf.ome_metadata
-            # Fusion, not passthrough: the mosaic must be wider than any single FOV.
-            one = reader.read("A1", fovs[0], reader.metadata["channels"][0]["name"], 0).shape
-            assert shape[-1] > one[-1], f"mosaic {shape} is no wider than one FOV {one}"
-            assert "PhysicalSizeX" in xml, "Minerva 500s without OME-XML pixel size"
-            assert story.exists()
-            return (f"1 mosaic {shape} from {len(fovs)} FOVs of A1 "
-                    f"(one FOV is {one}), 1 series, story written")
-        finally:
-            shutil.rmtree(tmp, ignore_errors=True)
-
     # ---------- pixels: loupe, channels, contrast, carrier ---------------------------
     @check("IMA-208", "Loupe is not blank at a well CORNER (negative crop origin)")
     def _():

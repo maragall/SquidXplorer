@@ -812,6 +812,16 @@ here; the half-frame shift cancels in the differences).
 - Kept on purpose (zarr inventory): the stitch writer, `_open_computed`, `_ZarrLoupeSource`,
   `resolve_plate_root`, `incomplete_reason`. Deleted: the write-only `_processed_plate`.
 
+## Minerva shelved (Julio, 2026-08-19, clean-architecture pass)
+
+The Minerva Author export/render product is DELETED whole: `_minerva.py`, `_minerva_panel.py`,
+`_MinervaWorker`/`_MinervaRenderWorker`, the non-runnable "minerva" card, the `PlateWindow`
+delegates, `PlateWindow.on_screen_luts` (its only consumer was the Minerva tab's checkbox) and
+`_run_scope.subset_selection` (its only purpose was the export's expansion). Kept because they
+have non-Minerva callers: `_lut_clipboard.per_channel_luts` (loupe, movie, settings snapshots),
+`colormap_hue_rgb` and `selected_region_fovs`. Dated docs under docs/ (IMA-228 review, SCOPE,
+DESIGN) still tell its story on purpose; re-instating starts from git history, not a stub.
+
 ## Agent skills
 
 ### Issue tracker

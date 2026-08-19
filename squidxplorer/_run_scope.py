@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Iterable, Optional, Sequence
+from typing import Iterable, Optional
 
 __all__ = [
     "operator_busy",
@@ -14,7 +14,6 @@ __all__ = [
     "describe_run_target",
     "describe_view_target",
     "distinct_view_regions",
-    "subset_selection",
 ]
 
 
@@ -162,31 +161,3 @@ def _uniq(regions: Iterable) -> list:
     """De-duplicate keeping first-seen order."""
     return list(dict.fromkeys(str(r) for r in regions))
 
-
-def subset_selection(regions: Sequence, fovs_per_region: Optional[dict],
-                     fov_subsets: Optional[dict] = None) -> list:
-    """``[(region, fov), ...]`` for every FOV of every region in a region subset.
-
-    *fov_subsets* narrows a region to the boxed fields; a region absent from it expands to all
-    of its fields. Refuses, by name, any region it cannot expand.
-    """
-    regs = _uniq(regions)
-    if not regs:
-        raise ValueError("there are no regions to export")
-    per = fovs_per_region or {}
-    picked = fov_subsets or {}
-    out: list = []
-    for region in regs:
-        fovs = per.get(region)
-        if not fovs:
-            raise ValueError(
-                f"region {region!r} has no fields of view in this acquisition, so it cannot be "
-                "fused into a mosaic for Minerva. Nothing was exported.")
-        chosen = [int(f) for f in (picked.get(region) or fovs)]
-        unknown = [f for f in chosen if f not in set(int(x) for x in fovs)]
-        if unknown:
-            raise ValueError(
-                f"region {region!r} has no field(s) {unknown} in this acquisition. Nothing was "
-                "exported.")
-        out.extend((region, f) for f in chosen)
-    return out

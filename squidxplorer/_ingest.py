@@ -31,13 +31,10 @@ def ingest(win, path: str) -> None:
     if is_plate:
         win._readout.setText("this is already a written plate — drop a raw Squid acquisition")
         return
-    # stop any in-flight run/preview/export and clear prior state before opening a new
-    # acquisition. _stop_minerva matters as much as the other two: a Minerva worker left
-    # running holds the OLD reader and would keep exporting (and launching) against an
-    # acquisition the window no longer shows.
+    # stop any in-flight run/preview and clear prior state before opening a new acquisition:
+    # a worker left running holds the OLD reader against an acquisition the window no longer shows.
     win._stop_worker()
     win._stop_preview()
-    win._stop_minerva()
     win._reader = win._meta = None
     win._fov_index = {}
     win._selected_regions = []   # wells picked on the plate (IMA-221); scopes an operator run

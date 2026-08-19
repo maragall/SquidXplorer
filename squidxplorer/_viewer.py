@@ -102,7 +102,7 @@ from squidxplorer._worker_lifecycle import signal_names as _signal_names  # noqa
 # QThread workers live in `_workers`; re-exported so monkeypatched spies keep working.
 from squidxplorer._workers import (  # noqa: F401 (re-exports)
     _CACHE_AUTO, _MIN_PREVIEW_BOX_PX, _VIEWER_WORKERS,
-    _ComputedPlateWorker, _FlatfieldWorker, _FocusWorker, _MinervaRenderWorker, _MinervaWorker,
+    _ComputedPlateWorker, _FlatfieldWorker, _FocusWorker,
     _MosaicWorker, _OperatorWorker, _PreviewWorker, _SpotWorker, _VideoWorker, _full_res_mip,
     _full_res_plane, _spot_stages,
 )
@@ -263,8 +263,6 @@ class PlateWindow(QMainWindow):
         self.resize(1600, 950)
         self._worker = None           # the operator (MIP) run
         self._preview = None          # the raw preview fill on open
-        self._minerva = None          # the Minerva export + Author launch (IMA-228)
-        self._minerva_render = None   # the render.py exhibit render, the no-file-picking path
         self._retired = []            # workers asked to stop; kept alive until they actually finish
         self._overview = None
         self._reader = None
@@ -315,8 +313,7 @@ class PlateWindow(QMainWindow):
         # controls like the powerpoint specified at each level"). Every window's "Operators for this
         # window" dropdown is the SAME registry + run_operator (the CLI engine), scoped to that view,
         # so "select where to run stitching" = pick the view, Run. Only runnable operators appear
-        # (minerva is a terminal that stays on the root's stack; Gallery View is a View-menu
-        # window-management command and was never an operator at all).
+        # (Gallery View is a View-menu window-management command and was never an operator at all).
         self._viewer_manager.operator_specs = [
             (op.key, op.label) for op in _OPERATIONS if op.runnable]
         self._viewer_manager.run_operator = self.run_operator
@@ -431,7 +428,7 @@ class PlateWindow(QMainWindow):
         # There WAS a third pane, "exploration" (IMA-205/221/237/260): one tab per Shift-dragged FOV
         # subset, each embedding a second napari mosaic. 2b8fbc5 ("Decentralize GUI") replaced the
         # gesture that filled it — a Shift-drag opens an independent window now — and the pane was
-        # removed on 2026-08-05 along with the tab, its slider, its Minerva button and its scope.
+        # removed on 2026-08-05 along with the tab, its slider, its export button and its scope.
         # The one thing that was still routed into it, the deconvolution QC composite, goes to
         # `_left_tabs` (see `publish_qc_result`), which is on screen.
 
@@ -979,9 +976,8 @@ class PlateWindow(QMainWindow):
         collapsible operators chip in the window's centre-top toolbar; this right-edge dock is
         the explicitly requested different thing.
 
-        Minerva is a card as the deck's terminal operator; Gallery View is NOT (it arranges
-        windows, see the View menu — 2026-08-02, "I guess I don't understand how this can be
-        treated as an operator in bulk").
+        Gallery View is NOT a card (it arranges windows, see the View menu — 2026-08-02, "I
+        guess I don't understand how this can be treated as an operator in bulk").
         """
         pane = QWidget()
         pane.setStyleSheet(f"background:{_BG};")
@@ -997,11 +993,8 @@ class PlateWindow(QMainWindow):
         # and `_activate_operator` reach by name, and `_enable_operators` walks `_op_docks` so
         # every host's cards gate together.
         self._op_cards = {}
-        # TERMINAL operator on TOP of the stack (Julio, 2026-07-23): Minerva Author, then the
-        # processing operators in registry order, minus minerva (already placed).
-        _minerva = [op for op in _OPERATIONS if op.key == "minerva"]
-        ordered = _minerva + [op for op in _OPERATIONS if op.key != "minerva"]
-        for op in ordered:
+        # Processing operators in registry order (Minerva's terminal card was shelved 2026-08-19).
+        for op in _OPERATIONS:
             # ELIDED, not shortened: the blurb is where the registry says what the operator
             # actually does, and this pane is ~300 px wide. See _qtstyle.operator_card.
             card = _operator_card(op.label, op.blurb)
@@ -1302,7 +1295,7 @@ class PlateWindow(QMainWindow):
         # RAISED AttributeError ON EVERY USER DRAG of the timepoint bar — the first statement in
         # the only slot the bar calls, so nothing below it ran either: the plate never re-read at
         # the new timepoint and the exception surfaced out of Qt's slot dispatch. Caught 2026-08-05
-        # while proving the Minerva export follows the slider; the export could not follow a bar
+        # while proving an export follows the slider; the export could not follow a bar
         # that could not be moved.
         self.say(f"time_point {time_point + 1} of {self._time_point_bar.count}")
         # Tell the PLATE, which is what the loupe reads its timepoint from. This comment used to
@@ -1971,85 +1964,6 @@ class PlateWindow(QMainWindow):
             b.setEnabled(self._reader is not None)
         return w
 
-    # -- Minerva is its own product (`_minerva_panel.MinervaPanel`): the tab UI, the selection
-    # -- reading and both runs live there. The window keeps thin delegates because tests,
-    # -- tools/gates.py and tools/walkthrough.py actuate these BY NAME here, and it keeps the
-    # -- worker slots (`_minerva` / `_minerva_render`) because thread lifetime is the window's
-    # -- (_retire / _join_retired / closeEvent). --------------------------------------------------
-    def _minerva_ui(self):
-        """The one :class:`MinervaPanel` of this window, built lazily, dependencies named."""
-        panel = getattr(self, "_minerva_panel", None)
-        if panel is None:
-            from squidxplorer._minerva_panel import MinervaPanel
-            panel = self._minerva_panel = MinervaPanel(
-                self,
-                reader=lambda: self._reader,
-                meta=lambda: self._meta,
-                time_point=lambda: self.time_point,
-                current_well=lambda: self._current_well,
-                say=lambda text: self._readout.setText(text),
-                selected_region_fovs=self.selected_region_fovs,
-                on_screen_luts=self.on_screen_luts,
-                tab_shell=self._op_tab_shell,
-            )
-        return panel
-
-    def _build_minerva_tab(self) -> QWidget:
-        """The Minerva tab. See `_minerva_panel.MinervaPanel.build_tab`."""
-        return self._minerva_ui().build_tab()
-
-    def minerva_selection(self) -> list:
-        """The ``[(region, fov), ...]`` the user selected. See `MinervaPanel.selection`."""
-        return self._minerva_ui().selection()
-
-    def on_screen_luts(self) -> "Optional[dict]":
-        """The per-channel LUTs of the view window the user is looking at, or ``None``.
-
-        "Channels need to be set to specific colors" means the colours ON SCREEN, and the plate
-        does not have them: the export's own defaults are the acquisition's ``display_color`` plus
-        1/99.9 percentiles, neither of which knows that the user recoloured a layer or dragged a
-        contrast slider. A :class:`RegionViewer` does know - ``_per_channel_luts`` reads it back
-        off the napari layers - so this is the one hop from that window to the exporter.
-
-        WHICH window: the manager's focused one, which is the window whose regions the plate is
-        already highlighting (``viewFocused``) and the one the navigator shows as current. Picking
-        "the first open window" instead would silently follow a window the user is not looking at.
-
-        ``None`` when there is no view open, no focused window, or that window has no layers yet - 
-        and ``None`` is not a failure. It is the plate-level export, and the percentile defaults
-        are the right answer for it precisely because there is no screen to match.
-        """
-        mgr = getattr(self, "_viewer_manager", None)
-        if mgr is None:
-            return None
-        # focused_id and windows are PROPERTIES on ViewerManager, not methods. They were called
-        # with parentheses here, which raised TypeError on the int/list they return; the broad
-        # except below swallowed it, so this returned None every single time and the on-screen
-        # LUTs never reached Minerva. Found 2026-08-03, an hour after the feature shipped, by an
-        # agent auditing an unrelated change. The except stays, because a window mid-teardown is
-        # genuinely not an error, but it no longer hides a call-signature mistake: the non-None
-        # path is now pinned by a test.
-        try:
-            win = mgr.active_view()          # the one answer to "which window is the user in"
-            if win is None:
-                return None
-            luts = win._per_channel_luts()
-        except Exception:                     # noqa: BLE001 - a window mid-teardown is not an error
-            return None
-        return luts or None
-
-    def run_minerva_export(self, out_dir=None, z_operator: str = "mip", launch: bool = True,
-                           on_exported=None, time_point=None, selection=None, luts=None):
-        """Export the selection for Minerva Author. See `MinervaPanel.run_export`."""
-        return self._minerva_ui().run_export(
-            out_dir=out_dir, z_operator=z_operator, launch=launch, on_exported=on_exported,
-            time_point=time_point, selection=selection, luts=luts)
-
-    def run_minerva_render(self, pairs, threads=None, open_when_done: bool = True):
-        """Render exported pairs into Minerva exhibits. See `MinervaPanel.run_render`."""
-        return self._minerva_ui().run_render(pairs, threads=threads,
-                                             open_when_done=open_when_done)
-
     def _build_layers_tab(self) -> QWidget:
         """The Layers tab: the OperationStack as a list of toggleable, reorderable layers. The topmost
         enabled layer is what the plate shows. Base 'raw' plus each operator you have run."""
@@ -2631,7 +2545,7 @@ class PlateWindow(QMainWindow):
             return
         # IMA-226: gate on the ENGINE registry, not on the card table. `_OPERATIONS_BY_KEY[key]`
         # raised a bare KeyError for a registered operator with no card (`reference` then, `spot`
-        # and `decon3d` now) and let `minerva` (a card that is not an operator) through to die
+        # and `decon3d` now) and let a card that is not an operator through to die
         # inside the engine instead.
         # Refuse BY NAME here, in the readout, the same way an unknown region is refused below.
         if key not in runnable_operators():
@@ -3561,14 +3475,6 @@ class PlateWindow(QMainWindow):
     def _stop_preview(self):
         _ingest.stop_preview(self)
 
-    def _stop_minerva(self):
-        _stop_slot(self, "_minerva")
-        # The render worker is retired here too and not on its own line: it is the same feature and
-        # it is the LONGER of the two (a measured 132 s for one real region against an at-most 90 s
-        # port poll), so a close that abandons the launch wait but not the render would still hold
-        # the window for two minutes. Its stop() terminates the child render.py process.
-        _stop_slot(self, "_minerva_render")
-
     def _join_retired(self, msec: int = 3000) -> None:
         """WAIT for every deferred worker, at the one moment deferring is not allowed: teardown.
 
@@ -3746,7 +3652,6 @@ class PlateWindow(QMainWindow):
         self._stop_preview()
         self._stop_flatfield()       # BEFORE _join_retired, so its threads are in that list
         self._join_retired()         # everything _retire deferred
-        self._stop_minerva()         # files already written stay; only the launch poll is abandoned
         ov = getattr(self, "_overview", None)
         if ov is not None:
             ov.clear_tile_source()   # joins the tile fetcher; a live QThread blocks a clean exit
