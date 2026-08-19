@@ -10,6 +10,8 @@ import math
 from dataclasses import dataclass
 from typing import Iterable, Optional, Sequence
 
+from squidxplorer._conventions import acq_um
+
 #: Default brick edge in level-0 voxels: a granularity choice (eviction granule, loader unit of
 #: work), not a texture assumption — ``plan`` clamps it down to the live GL limit.
 DEFAULT_BRICK_EDGE = 1024
@@ -160,10 +162,14 @@ def clamp_bbox_um(bbox_um: Sequence[float], px_um: float, limit: int) -> tuple:
     """Shrink an ROI box to what ONE GL texture can render, keeping its top-left anchor.
 
     The anchor is the corner the drag started from, so a box that hits the ceiling stops growing.
-    Returns ``(bbox, clamped)``; *limit* is the live queried texture size.
+    Returns ``(bbox, clamped)``; *limit* is the live queried texture size. *px_um* is the
+    ACQUISITION pitch (:class:`~squidxplorer._conventions.AcqPitchUm` or a bare float; a
+    ``DisplayPitchUm`` is refused by name): the clamp counts level-0 pixels because a drawn
+    ROI's 3D reads whole FOV planes off the reader, and at the displayed pitch the same sentence
+    would promise one texture over a 16-brick, 4x read.
     """
     x0, y0, x1, y1 = (float(v) for v in bbox_um)
-    span = float(limit) * float(px_um)
+    span = float(limit) * acq_um(px_um)
     if span <= 0:
         return ((x0, y0, x1, y1), False)
     nx1 = x0 + min(x1 - x0, span) if x1 >= x0 else x0 - min(x0 - x1, span)
@@ -173,11 +179,16 @@ def clamp_bbox_um(bbox_um: Sequence[float], px_um: float, limit: int) -> tuple:
 
 
 def ceiling_line(limit: int, px_um: float, *, measured: bool) -> str:
-    """What this GPU can trace, in the user's units, said out loud."""
+    """What this GPU can trace, in the user's units, said out loud.
+
+    *px_um* is the ACQUISITION pitch (``AcqPitchUm`` or float; ``DisplayPitchUm`` refused by
+    name), the same unit :func:`clamp_bbox_um` counts in, or the two sentences disagree.
+    """
     where = "measured on this GPU" if measured else "ASSUMED — the canvas could not be asked"
-    one = float(limit) * float(px_um)
+    p = acq_um(px_um)
+    one = float(limit) * p
     return (f"3D ceiling: GL_MAX_3D_TEXTURE_SIZE = {int(limit)} px ({where}). One texture holds "
-            f"{int(limit)}x{int(limit)} px = {one:.0f}x{one:.0f} um at native {px_um:g} um/px; "
+            f"{int(limit)}x{int(limit)} px = {one:.0f}x{one:.0f} um at native {p:g} um/px; "
             f"larger ROIs are BRICKED into as many textures as they need, so the renderable size "
             f"is bounded by memory rather than by this number. A GPU reporting a larger limit "
             f"raises the single-texture size and lowers the brick count.")

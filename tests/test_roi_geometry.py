@@ -207,7 +207,9 @@ def test_a_per_fov_operator_still_uses_the_preview_footprint():
 
 def _bboxes():
     meta = _subset_meta()
-    return fov_bboxes_um(meta["fov_positions_um"], (FRAME, FRAME), PX_1536)
+    # CenterBoxUm values, crossed to plain corners BY NAME: this helper's consumers index corners.
+    boxes = fov_bboxes_um(meta["fov_positions_um"], (FRAME, FRAME), PX_1536)
+    return {k: b.bbox() for k, b in boxes.items()}
 
 
 def _overlapping(box) -> set:
@@ -404,9 +406,15 @@ def test_the_mosaic_and_the_plate_place_a_fov_half_a_frame_apart():
     a change to either the convention or the rounding rule fails this and has to be argued for
     rather than discovered later as shear in a picture that still looks entirely plausible.
     """
+    from squidxplorer._conventions import CenterBoxUm, TopLeftBoxUm
+
     meta = _subset_meta()
     mosaic = mosaic_fov_bboxes_um(meta, "A1")
-    plate = fov_bboxes_um(meta["fov_positions_um"], (FRAME, FRAME), PX_1536)
+    plate_typed = fov_bboxes_um(meta["fov_positions_um"], (FRAME, FRAME), PX_1536)
+    # Each producer now SAYS its convention by type, so crossing them below is a named act.
+    assert all(isinstance(b, TopLeftBoxUm) for b in mosaic.values())
+    assert all(isinstance(b, CenterBoxUm) for b in plate_typed.values())
+    plate = {k: b.bbox() for k, b in plate_typed.items()}
     half = FRAME * PX_1536 / 2.0
 
     # The anchor field is snapped to nobody, so there the offset is exactly half a frame.

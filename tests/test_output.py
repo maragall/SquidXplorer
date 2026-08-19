@@ -564,7 +564,7 @@ def test_roi_boxes_agree_with_tilesource_field_origin_exactly():
     recs = {r["path_in_well"]: r for r in
             fov_roi_records_um([0, 1], ROI_POS, ROI_FRAME, ROI_PX)}
     for fov in (0, 1):
-        x0, y0, x1, y1 = boxes[("B2", fov)]
+        x0, y0, x1, y1 = boxes[("B2", fov)].bbox()   # CenterBoxUm crosses to corners by name
         r = recs[str(fov)]
         assert r["x_original_um"] == pytest.approx(x0)     # same lower corner, to the float
         assert r["y_original_um"] == pytest.approx(y0)
