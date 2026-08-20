@@ -90,6 +90,21 @@ def test_help_lists_every_operators_declared_parameters():
     assert "mip()" in described                    # ...and an operator with no parameters says so
 
 
+def test_a_fused_save_reports_off_its_own_manifest(squid_dataset, tmp_path):
+    """The installer CI's exact path: a CLI stitch save lands the fused Squid OME-TIFF format,
+    whose manifest carries no 'plate'/'levels'/'tiff' keys. The report must read the keys the
+    manifest declares — this crashed with KeyError: 'plate' and turned every installer build
+    red on 2026-08-19."""
+    pytest.importorskip("tilefusion")
+    root, _ = squid_dataset
+    manifest = run(ProcessParameters(input_folder=str(root), output_folder=str(tmp_path),
+                                     operator="stitch", param=["register=False"]))
+    assert manifest["format"] == "fused-ome-tiff"
+    assert manifest["outcome"] == "ok"
+    assert manifest["n_fields_written"] == manifest["n_fields"] == 2   # one mosaic per region
+    assert exit_code(manifest) == EXIT_OK
+
+
 def test_run_writes_navigable_plate(squid_dataset, tmp_path):
     root, _ = squid_dataset                       # tiny real acquisition (B2, B3)
     params = ProcessParameters(input_folder=str(root), output_folder=str(tmp_path), tiff=False)
