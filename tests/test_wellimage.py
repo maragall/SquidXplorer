@@ -273,6 +273,104 @@ def test_a_read_only_acquisition_is_left_untouched_without_a_crash(tmp_path):
         (root / "0").chmod(0o755)
 
 
+# --- the pad-derived file lifecycle ----------------------------------------------------------
+
+
+class _PaddedReader(_SmoothReader):
+    """A ``pad_partial`` open of a stopped run: planned FOVs with no data read as zeros."""
+
+    def __init__(self, path, meta, missing: dict):
+        super().__init__(path, meta)
+        from squidxplorer.reader import PaddedSlots
+
+        self.padded_slots = PaddedSlots(
+            {str(r): frozenset(v) for r, v in missing.items()}, frozenset(), frozenset())
+
+    def read(self, region, fov, channel, z_level, time_point=0):
+        if int(fov) in self.padded_slots.fovs.get(str(region), ()):
+            self.reads += 1
+            return np.zeros(FRAME, dtype=np.uint16)
+        return super().read(region, fov, channel, z_level, time_point)
+
+
+def test_a_padded_backfill_is_stamped_and_completion_deletes_the_file(tmp_path, caplog):
+    root = _acq(tmp_path)
+    meta = _meta()
+    wells = root / "0" / "mosaic_view" / "wells"
+    partial = _PaddedReader(root, meta, {"A1": {0, 1}})
+
+    assert _wellimage.write_well_images(partial, meta, time_point=0) == 2
+    with tifffile.TiffFile(wells / "A1_2um.tiff") as tif:
+        assert tif.shaped_metadata[0]["padded_fovs"] == [0, 1], \
+            "the black FOVs must be stamped into the file"
+    with tifffile.TiffFile(wells / "B2_2um.tiff") as tif:
+        assert "padded_fovs" not in tif.shaped_metadata[0], \
+            "a well with all its data gets a clean, Squid-identical file"
+
+    # Still partial: the stamped file is accurate and keeps serving the fast path.
+    assert _wellimage.load_well_stack(partial, meta, "A1", 0) is not None
+    assert (wells / "A1_2um.tiff").exists()
+
+    # The acquisition completes; a fresh open pads nothing.
+    done = _SmoothReader(root, meta)
+    with caplog.at_level("INFO"):
+        assert _wellimage.load_well_stack(done, meta, "A1", 0) is None, \
+            "a stale pad-derived mosaic must never be served over real pixels"
+    assert not (wells / "A1_2um.tiff").exists(), "completion must delete the black pad image"
+    assert any("deleted" in r.message and "A1_2um.tiff" in r.message
+               for r in caplog.records), "the delete must be named in the log"
+
+    # The next backfill rewrites JUST that well, clean, though B2's file still exists.
+    assert _wellimage.write_well_images(done, meta, time_point=0) == 1
+    with tifffile.TiffFile(wells / "A1_2um.tiff") as tif:
+        md = tif.shaped_metadata[0]
+        arr = tif.series[0].asarray()
+    assert "padded_fovs" not in md
+    assert arr[0, :FRAME[0] // 2, :FRAME[1] // 2].min() > 0, \
+        "the rewritten file must carry real pixels where the pad was black"
+    assert _wellimage.load_well_stack(done, meta, "A1", 0) is not None
+
+
+def test_squids_own_well_image_is_never_deleted(tmp_path):
+    root = _acq(tmp_path)
+    meta = _meta()
+    path = _write_squid_well(root, meta, "A1", value=321)
+
+    # Neither a complete open nor a padded one may touch an unstamped (Squid) file.
+    assert _wellimage.load_well_stack(_SmoothReader(root, meta), meta, "A1", 0) is not None
+    partial = _PaddedReader(root, meta, {"A1": {0, 1}})
+    assert _wellimage.load_well_stack(partial, meta, "A1", 0) is not None
+    assert path.exists(), "an unstamped file is Squid's; deleting it is off the table"
+
+
+def test_a_still_missing_stamp_keeps_the_file_and_a_padded_plane_writes_none(tmp_path, caplog):
+    root = _acq(tmp_path)
+    meta = _meta()
+    wells = root / "0" / "mosaic_view" / "wells"
+
+    # Every FOV of A1 padded: no file at all — an all-black mosaic helps nobody.
+    all_black = _PaddedReader(root, meta, {"A1": set(range(GRID * GRID))})
+    with caplog.at_level("INFO"):
+        assert _wellimage.write_well_images(all_black, meta, time_point=0) == 1
+    assert not (wells / "A1_2um.tiff").exists()
+    assert (wells / "B2_2um.tiff").exists()
+
+    # A padded z plane writes nothing: there is no data at that plane.
+    from squidxplorer.reader import PaddedSlots
+
+    zonly = _SmoothReader(root, meta)
+    zonly.padded_slots = PaddedSlots({}, frozenset({0}), frozenset())
+    (wells / "B2_2um.tiff").unlink()
+    assert _wellimage.write_well_images(zonly, meta, time_point=0) == 0
+
+    # A stamped file whose FOVs are STILL missing stays: it is accurate, not stale.
+    partial = _PaddedReader(root, meta, {"B2": {3}})
+    assert _wellimage.write_well_images(partial, meta, time_point=0) == 2  # A1 clean, B2 stamped
+    _wellimage.clear_cache()
+    assert _wellimage.load_well_stack(partial, meta, "B2", 0) is not None
+    assert (wells / "B2_2um.tiff").exists()
+
+
 # --- the plate preview -----------------------------------------------------------------------
 
 
@@ -314,10 +412,10 @@ def test_the_plate_preview_backfills_an_absent_mosaic_view(qapp, tmp_path):
     root = _acq(tmp_path)
     meta = _meta()
     reader = _SmoothReader(root, meta)
-    assert not _wellimage.has_well_images(root, 0)
+    assert not _wellimage.well_image_paths(root, "A1", 0)
 
     _preview(reader, meta, ["A1", "B2"])
-    assert _wellimage.has_well_images(root, 0), \
+    assert all(_wellimage.well_image_paths(root, r, 0) for r in ("A1", "B2")), \
         "a finished preview must leave the acquisition mosaic_view-complete"
     got = _wellimage.downsampled_well(_SmoothReader(root, meta), meta, "A1", CHANNELS[0], 0)
     assert got is not None and got[1] == 2

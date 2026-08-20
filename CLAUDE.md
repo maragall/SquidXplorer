@@ -776,6 +776,15 @@ here; the half-frame shift cancels in the differences).
   never writes into your data": Julio's design doc asked for exactly this write.
 - **A well image is ONE z** (the widget keeps the last plane blitted), so `n_z > 1` never serves
   one; the backfill writes z = n_z - 1, what Squid's canvas would hold.
+- **A pad-tainted backfill is stamped, and completion deletes it** (2026-08-19). A backfill
+  through a padded reader bakes the padded FOVs in as black; the file carries a `padded_fovs`
+  stamp (`reader.padded_slots`, the `PaddedSlots` record of what `_pad_to_plan` invented). Once
+  any stamped FOV has data on disk, `load_well_stack` DELETES the file — the one file this
+  package deletes, provably ours (Squid never writes the stamp) and provably stale — and the
+  next backfill rewrites it clean. A fully padded well or a padded z/t plane writes no file;
+  the backfill skips per WELL (any-resolution existing file wins), not per timepoint, so the
+  rewrite lands while Squid's own files stay untouched. Unstamped black files predating the
+  stamp cannot be told from Squid's and are never deleted.
 - `SQUIDXPLORER_WELL_IMAGES=0` turns the feature off; tests/conftest.py sets that default for
   the suite so preview tests keep their pinned read counts, and tests/test_wellimage.py is the
   coverage that turns it on.

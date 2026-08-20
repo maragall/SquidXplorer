@@ -23,6 +23,11 @@ The reading rules here:
   here, but the half-frame shift cancels in the differences).
 - A well image is ONE z (the widget keeps the LAST plane blitted per layer), so it may only
   stand in for an acquisition with a single z level. ``n_z > 1`` reads as absent, by design.
+- A backfill through a PADDED reader (a stopped run explored at its planned state) bakes the
+  padded FOVs in as black, so the file carries a ``padded_fovs`` stamp naming them. Once any
+  stamped FOV has data on disk the file is a lie about the acquisition: ``load_well_stack``
+  DELETES it — the one file this package deletes, provably ours (Squid never writes the stamp)
+  and provably stale — and the next backfill rewrites it from the real pixels.
 
 ``SQUIDXPLORER_WELL_IMAGES=0`` turns the whole feature off (reading and backfill).
 """
@@ -181,13 +186,18 @@ def _derive_factor(meta: dict, region: str, shape_hw: tuple) -> Optional[int]:
     return f
 
 
-def _read_stack(path: Path, meta: dict) -> tuple[Optional[np.ndarray], Optional[list]]:
-    """``(array (C, H, W), channel_names_or_None)`` off one TIFF; raises on a corrupt file."""
+def _read_stack(path: Path, meta: dict) -> tuple[Optional[np.ndarray], Optional[list], list]:
+    """``(array (C, H, W), channel_names_or_None, padded_fovs_stamp)`` off one TIFF.
+
+    Raises on a corrupt file. The stamp is the backfill's record of the FOVs it wrote as
+    black through a padded reader; empty on Squid's own files.
+    """
     import tifffile
 
     with tifffile.TiffFile(str(path)) as tif:
         arr = tif.series[0].asarray()
         names = None
+        stamp: list = []
         shaped = getattr(tif, "shaped_metadata", None)
         if shaped:
             channel = shaped[0].get("Channel") or {}
@@ -196,6 +206,9 @@ def _read_stack(path: Path, meta: dict) -> tuple[Optional[np.ndarray], Optional[
                 names = [str(n) for n in got]
             elif got is not None:
                 names = [str(got)]
+            raw = shaped[0].get("padded_fovs")
+            if isinstance(raw, (list, tuple)):
+                stamp = [int(f) for f in raw]
     if arr.ndim == 2:
         arr = arr[None]
     if arr.ndim != 3:
@@ -209,7 +222,19 @@ def _read_stack(path: Path, meta: dict) -> tuple[Optional[np.ndarray], Optional[
                 f"{arr.shape[0]} plane(s) but no usable channel names "
                 f"(metadata named {names}, the acquisition has {len(meta_names)})"
             )
-    return arr, names
+    return arr, names, stamp
+
+
+def _arrived_padded_fovs(reader: Any, meta: dict, region: str, stamp: list) -> list[int]:
+    """The stamped-black FOVs that NOW have data on disk; non-empty means the file is stale.
+
+    A padded reader's ``fovs_per_region`` is the PLAN, so presence is "in the plan and not in
+    the reader's own padded set"; an unpadded reader lists only on-disk FOVs and needs no set.
+    """
+    slots = getattr(reader, "padded_slots", None)
+    still_missing = set((slots.fovs if slots else {}).get(str(region), ()))
+    have = set((meta.get("fovs_per_region") or {}).get(region) or ())
+    return sorted(int(f) for f in stamp if f in have and f not in still_missing)
 
 
 def load_well_stack(reader: Any, meta: dict, region: str,
@@ -228,7 +253,11 @@ def load_well_stack(reader: Any, meta: dict, region: str,
     if root is None:
         return None
 
-    key = (str(root), str(region), int(time_point))
+    # The reader's own padded set is part of the key: a same-session reopen after the
+    # acquisition completed must re-read the file so the stale pad-derived check runs.
+    slots = getattr(reader, "padded_slots", None)
+    key = (str(root), str(region), int(time_point),
+           frozenset((slots.fovs if slots else {}).get(str(region), ())))
     with _STACKS_LOCK:
         if key in _STACKS:
             _STACKS.move_to_end(key)
@@ -237,11 +266,26 @@ def load_well_stack(reader: Any, meta: dict, region: str,
     stack = None
     for path in well_image_paths(root, region, time_point):
         try:
-            arr, names = _read_stack(path, meta)
+            arr, names, stamp = _read_stack(path, meta)
         except Exception as exc:        # noqa: BLE001 - a bad file falls back to fusing, named
             _log.warning("well image %s is unreadable (%s: %s); falling back to fusing "
                          "this well from its FOVs.", path, type(exc).__name__, exc)
             continue
+        if stamp:
+            arrived = _arrived_padded_fovs(reader, meta, region, stamp)
+            if arrived:
+                try:
+                    path.unlink()
+                    _log.info("well image %s was backfilled from a padded (stopped) run and "
+                              "%d of its black FOV(s) now have data; deleted — this well "
+                              "fuses fresh and the next backfill rewrites the file.",
+                              path, len(arrived))
+                except OSError as exc:
+                    _log.warning("well image %s is a stale pad-derived mosaic (FOV(s) %s now "
+                                 "have data) but could not be deleted (%s); ignoring it "
+                                 "rather than serving black over real pixels.",
+                                 path, arrived, exc)
+                continue
         factor = _derive_factor(meta, region, arr.shape[-2:])
         if factor is None:
             _log.warning("well image %s is %sx%s px, which fits no integer downsample of this "
@@ -307,17 +351,6 @@ def downsample_plane(plane: np.ndarray, factor: int) -> np.ndarray:
     return out.astype(plane.dtype)
 
 
-def has_well_images(root, time_point: int = 0) -> bool:
-    """Whether this timepoint already carries any per-well mosaic file."""
-    d = wells_dir(root, time_point)
-    if d is None or not d.is_dir():
-        return False
-    try:
-        return any(_FILE_RE.match(f.name) for f in d.iterdir())
-    except OSError:
-        return False
-
-
 def write_well_images(reader: Any, meta: dict, *, time_point: int = 0,
                       z_level: Optional[int] = None,
                       should_stop: Optional[Callable[[], bool]] = None,
@@ -326,7 +359,11 @@ def write_well_images(reader: Any, meta: dict, *, time_point: int = 0,
 
     Same filenames, same (C, H, W) TIFF metadata, same integer factor and slot geometry, so
     the acquisition afterwards looks microscope-produced. The default z is the LAST level,
-    the plane Squid's widget keeps, since every z blits over the same slot. Best-effort:
+    the plane Squid's widget keeps, since every z blits over the same slot. A well that
+    already has a file — at ANY resolution, Squid's own or an earlier backfill's — is left
+    alone. A PADDED reader taints what it writes: a well whose FOVs are all padded (or a
+    padded z/t plane) gets no file, and a partially padded well's file is stamped with
+    ``padded_fovs`` so ``load_well_stack`` can delete it once the data arrives. Best-effort:
     a read-only mount or a bad region is logged and skipped, never raised. Returns the number
     of well files written. Call it off the Qt thread; every FOV of the timepoint is decoded.
     """
@@ -352,6 +389,13 @@ def write_well_images(reader: Any, meta: dict, *, time_point: int = 0,
     nz = int(meta.get("n_z") or 1)
     z = (nz - 1) if z_level is None else int(z_level)
 
+    slots = getattr(reader, "padded_slots", None)
+    if slots and (z in slots.z_levels or int(time_point) in slots.time_points):
+        _log.info("well-image backfill skipped: z=%d at t=%d is itself padded — there is no "
+                  "data at that plane to write.", z, time_point)
+        return 0
+    padded_by_region = dict(slots.fovs) if slots else {}
+
     # Squid sizes ONE slot for the whole plate: the largest well's extent, floored at a tile.
     per_region: dict[str, tuple] = {}
     slot_h = max(1, int(round(frame_h / factor)))
@@ -363,6 +407,10 @@ def write_well_images(reader: Any, meta: dict, *, time_point: int = 0,
             continue
         fovs = list((meta.get("fovs_per_region") or {}).get(region) or [])
         if not fovs:
+            continue
+        if set(fovs) <= set(padded_by_region.get(str(region), ())):
+            _log.info("well-image backfill: %s has no data at all (every FOV is padded); "
+                      "no file.", region)
             continue
         try:
             offsets = fov_offsets_px(positions, region, fovs, px)
@@ -388,12 +436,19 @@ def write_well_images(reader: Any, meta: dict, *, time_point: int = 0,
 
     import tifffile
 
+    try:
+        # A well that has ANY file — Squid's own at another resolution included — is theirs.
+        existing = {m.group("well") for f in wells.iterdir()
+                    for m in (_FILE_RE.match(f.name),) if m}
+    except OSError:
+        existing = set()
+
     written = 0
     for region, (fovs, offsets) in per_region.items():
         if should_stop is not None and should_stop():
             break
         path = wells / f"{region}_{res_tag}.tiff"
-        if path.exists():
+        if region in existing or path.exists():
             continue
         canvas = np.zeros((len(channels), slot_h, slot_w), dtype=dtype)
         tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
@@ -409,18 +464,21 @@ def write_well_images(reader: Any, meta: dict, *, time_point: int = 0,
                     c1 = min(c0 + tile.shape[1], slot_w)
                     if r1 > r0 and c1 > c0:
                         canvas[ci, r0:r1, c0:c1] = tile[: r1 - r0, : c1 - c0]
-            tifffile.imwrite(
-                tmp, canvas, photometric="minisblack",
-                metadata={
-                    "axes": "CYX",
-                    "PhysicalSizeX": float(px) * factor,
-                    "PhysicalSizeXUnit": "µm",
-                    "PhysicalSizeY": float(px) * factor,
-                    "PhysicalSizeYUnit": "µm",
-                    "Channel": {"Name": channels},
-                    "well_id": region,
-                },
-            )
+            md = {
+                "axes": "CYX",
+                "PhysicalSizeX": float(px) * factor,
+                "PhysicalSizeXUnit": "µm",
+                "PhysicalSizeY": float(px) * factor,
+                "PhysicalSizeYUnit": "µm",
+                "Channel": {"Name": channels},
+                "well_id": region,
+            }
+            missing = sorted(set(fovs) & set(padded_by_region.get(region, ())))
+            if missing:
+                # The stamp is the delete licence: load_well_stack removes this file once
+                # any of these FOVs has data on disk.
+                md["padded_fovs"] = [int(f) for f in missing]
+            tifffile.imwrite(tmp, canvas, photometric="minisblack", metadata=md)
             os.replace(tmp, path)       # atomic publish, like every other writer in this repo
             written += 1
         except Exception as exc:        # noqa: BLE001 - one bad well must not lose the rest

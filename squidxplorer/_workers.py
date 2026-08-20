@@ -741,9 +741,11 @@ class _PreviewWorker(QThread):
         try:
             if not _wellimage.enabled():
                 return
-            root = _wellimage.acquisition_root(self._reader)
-            if root is None or _wellimage.has_well_images(root, self._t):
+            if _wellimage.acquisition_root(self._reader) is None:
                 return
+            # Per-well, not per-timepoint: write_well_images leaves any well that already
+            # has a file alone, so a well whose stale pad-derived file was deleted this
+            # pass gets a fresh one while Squid's own files stay untouched.
             _wellimage.write_well_images(self._reader, self._meta, time_point=self._t,
                                          should_stop=self._stop.is_set)
         except Exception as exc:        # noqa: BLE001 - a backfill must not fail a preview
