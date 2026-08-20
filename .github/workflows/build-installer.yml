@@ -110,12 +110,17 @@ jobs:
           "$cli" fixture --operator stitch --output-folder out-stitch
           "$py" -c "
           from pathlib import Path
-          for out in ('out-mip', 'out-stitch'):
-              store = Path(out) / 'fixture.hcs' / 'plate.ome.zarr'
-              assert store.is_dir(), f'{store} was not written'
-              marker = store / '.squidxplorer-incomplete'
-              assert not marker.exists(), f'{out}: the store says it is incomplete'
-          print('mip + stitch wrote complete plates')
+          # mip lands the OME-Zarr plate; stitch lands the fused Squid OME-TIFF format
+          # (one mosaic per region; an incomplete save keeps the .partial dir name).
+          store = Path('out-mip') / 'fixture.hcs' / 'plate.ome.zarr'
+          assert store.is_dir(), f'{store} was not written'
+          marker = store / '.squidxplorer-incomplete'
+          assert not marker.exists(), 'mip: the store says it is incomplete'
+          fused = Path('out-stitch') / 'fixture.hcs'
+          assert fused.is_dir(), f'{fused} was not written (is there a .partial dir?)'
+          mosaics = sorted(p.name for p in (fused / 'ome_tiff').glob('*.ome.tiff'))
+          assert len(mosaics) == 2, f'stitch wrote {mosaics}; expected one mosaic per region'
+          print('mip wrote a complete plate; stitch wrote', ', '.join(mosaics))
           "
 
       # The CUDA-rig default is gui,stitch,DECON — a Linux or Windows machine with an NVIDIA GPU
