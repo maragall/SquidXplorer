@@ -314,12 +314,17 @@ def run(params: ProcessParameters, *, stop=None) -> dict:
 
     # Each count against its own total: fields/fields and wells/wells, never mixed.
     # The manifest declares its own format: a z-collapsing intensity save lands as an
-    # acquisition beside the source, everything else as the OME-Zarr plate.
-    acq_format = manifest.get("format") == "acquisition"
-    if acq_format:
+    # acquisition beside the source, a fused save as Squid OME-TIFF mosaics, everything
+    # else as the OME-Zarr plate.
+    fmt = manifest.get("format")
+    if fmt == "acquisition":
         line = ("%s (%d/%d fields written across %d/%d wells, acquisition format)" % (
             manifest["path"], manifest["n_fields_written"], manifest["n_fields"],
             manifest["n_wells_written"], manifest["n_wells"]))
+    elif fmt == "fused-ome-tiff":
+        # One mosaic per region: fields ARE regions here, so no second wells count.
+        line = ("%s (%d/%d region mosaic(s) written, fused Squid OME-TIFF)" % (
+            manifest["path"], manifest["n_fields_written"], manifest["n_fields"]))
     else:
         line = ("%s (%d/%d fields written across %d/%d wells, %d pyramid level(s))%s" % (
             manifest["plate"], manifest["n_fields_written"], manifest["n_fields"],
