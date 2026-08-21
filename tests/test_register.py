@@ -137,6 +137,20 @@ def test_register_solves_and_the_copy_carries_the_solution(tmp_path):
         meta["fov_positions_um"][("A1", f)][0] + p.offsets_px[f][1] for f in range(4)))
 
 
+def test_a_solve_states_its_corrections_so_a_good_stage_does_not_read_as_a_no_op(caplog):
+    """A few-um solve moves tiles by fractions of a frame — invisible in the decimated
+    preview, so the run must SAY what it corrected (measured on the 900-FOV 20x tissue:
+    median 5 px shifts under a 6x-decimated paste read as 'registration does nothing')."""
+    import logging
+
+    with caplog.at_level(logging.INFO, logger="squidxplorer._register"):
+        register_region(_probe_reader(), "A1", [0, 1, 2, 3])
+    lines = [r.getMessage() for r in caplog.records if "corrections median" in r.getMessage()]
+    assert lines, "the solve must report its correction sizes"
+    assert "um" in lines[0] and "px" in lines[0], \
+        "the sentence carries the sizes in both the stage's unit and the frame's"
+
+
 def test_blank_padded_fovs_keep_their_recorded_positions(tmp_path):
     """A padded slot reads as zeros, and zeros are not a measurement: the solve skips them and
     the copy's rows for them stay byte-untouched — no affine phantoms in the planned csv."""
