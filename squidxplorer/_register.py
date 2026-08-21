@@ -229,6 +229,18 @@ def register_region(reader, region, fovs, *, registration_channel=0, registratio
     registered = [(y + float(o[0]) * pixel_size[0], x + float(o[1]) * pixel_size[1])
                   for (y, x), o in zip(positions, offsets)]
 
+    if len(measured) > 1:
+        # SAY the corrections: a good stage solves to a few um, which moves tiles by
+        # fractions of a frame — without the numbers a working solve reads as a no-op in
+        # the decimated whole-region preview (measured on the 900-FOV 20x tissue: median
+        # 5 px on a 1900 px frame, pasted at step 6).
+        mags_um = [float(np.hypot(offsets[i][0] * pixel_size[0],
+                                  offsets[i][1] * pixel_size[1])) for i in measured]
+        _log.info("register: region %s — %d FOV(s) solved; corrections median %.2f um, "
+                  "max %.2f um (%.1f px max on a %d px frame).",
+                  region, len(measured), float(np.median(mags_um)), max(mags_um),
+                  max(float(np.hypot(*offsets[i])) for i in measured), tile_shape[0])
+
     if copy:
         src = getattr(reader, "source_id", None)
         if not src or not Path(str(src)).is_dir():
