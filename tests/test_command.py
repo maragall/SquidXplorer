@@ -147,10 +147,11 @@ def test_list_operators_answers_off_the_engine_registry_not_a_card_table(bus):
     assert "mip" in r.data["names"] and "stitch" in r.data["names"]
 
 
-def test_list_operators_reports_the_consumed_axis_so_a_caller_knows_the_output_shape(bus):
+def test_list_operators_reports_the_consumed_axis_so_a_caller_knows_the_output_shape(
+        bus, blob_operator):
     rows = {row["name"]: row for row in bus.execute(ListOperators()).data["operators"]}
     assert rows["mip"]["kind"] == "z-reducer" and rows["mip"]["consumes"] == ["z"]
-    assert rows["bgsub"]["kind"] == "plane-op" and rows["bgsub"]["consumes"] == []
+    assert rows[blob_operator]["kind"] == "plane-op" and rows[blob_operator]["consumes"] == []
     assert rows["stitch"]["kind"] == "region-operator"
 
 

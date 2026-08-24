@@ -384,6 +384,111 @@ def test_the_collapsed_dock_is_a_full_height_grip_not_a_blank_column(qapp, napar
         shutdown_plate_window(qapp, win)
 
 
+# --- a card click opens its panel IN the dock (Julio, 2026-08-24) --------------------------------
+
+def test_a_card_click_opens_the_operator_panel_in_the_dock_not_the_plate(
+        qapp, napari_pane_stub, squid_dataset):
+    """Julio: "When I click on an operator on the operator collapsible dock, the UI appears in
+    the plate window, rather than as a tab in that same collapsible dock." — a complaint. The
+    card's panel must land on ITS dock's panel page, expanded, and the plate's _left_tabs must
+    stay untouched. The widget stays in _op_tabs, so the run's parameter reader still sees it."""
+    root, _ = squid_dataset
+    win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=1)
+    try:
+        dock = deck._operator_dock
+        assert dock.collapsed
+        card = win._op_cards["stitch"]
+        assert card.isEnabled(), "an ingested plate must enable its cards"
+        card.click()
+        qapp.processEvents()
+        assert not dock.collapsed, "clicking a card must expand its dock"
+        assert dock._stack.currentWidget() is dock._panel_page
+        panel = dock.panel()
+        assert panel is not None and panel is win._op_tabs["stitch"]
+        assert win._left_tabs.indexOf(panel) == -1, "the panel still landed in the plate window"
+        assert win._left_tabs.count() == 0
+        # THE run seam: a dock-hosted panel's values still reach a launched run. (The blend
+        # width must first fit this fixture's tiny 4 px tile, or kwargs() rightly refuses.)
+        panel.blend_spin.setValue(2)
+        kwargs = win.operator_kwargs_for("stitch")
+        assert kwargs and "register" in kwargs and kwargs["blend_px"] == 2
+    finally:
+        shutdown_plate_window(qapp, win)
+
+
+def test_back_to_cards_keeps_the_panel_alive_and_a_reclick_reuses_it(
+        qapp, napari_pane_stub, squid_dataset):
+    """The "◂ operators" affordance returns to the cards WITHOUT disposing the panel — its
+    state (a decon sweep, half-typed values) must survive the round trip, exactly the reuse
+    rule tabs had."""
+    root, _ = squid_dataset
+    win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=1)
+    try:
+        dock = deck._operator_dock
+        win._op_cards["stitch"].click()
+        qapp.processEvents()
+        panel = dock.panel()
+        panel.blend_spin.setValue(77)                      # user state to survive
+        dock.back_btn.click()
+        qapp.processEvents()
+        assert dock._stack.currentWidget() is dock._body, "back did not return to the cards"
+        assert win._op_tabs["stitch"] is panel, "back-to-cards disposed the panel"
+        win._op_cards["stitch"].click()
+        qapp.processEvents()
+        assert dock.panel() is panel, "a re-click rebuilt the panel instead of reusing it"
+        assert panel.blend_spin.value() == 77, "the panel's state did not survive the round trip"
+        # Collapse/expand lands back on the panel page, not the cards.
+        dock.set_collapsed(True)
+        dock.set_collapsed(False)
+        assert dock._stack.currentWidget() is dock._panel_page
+    finally:
+        shutdown_plate_window(qapp, win)
+
+
+def test_a_menu_open_of_a_dock_hosted_panel_stays_in_the_dock(
+        qapp, napari_pane_stub, squid_dataset):
+    """ONE live panel per key: once a card homed the panel in a dock, a dock-less activation
+    (a menu, a view's ⚙ controls) must show it THERE, never grow a second panel in the plate —
+    two surfaces would disagree about the parameters of one run."""
+    root, _ = squid_dataset
+    win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=1)
+    try:
+        dock = deck._operator_dock
+        win._op_cards["mip"].click()
+        qapp.processEvents()
+        panel = dock.panel()
+        dock.back_btn.click()                              # user browsed away
+        win._activate_operator("mip")                      # menu open, no dock argument
+        qapp.processEvents()
+        assert dock.panel() is panel and dock._stack.currentWidget() is dock._panel_page
+        assert win._left_tabs.indexOf(panel) == -1, "the menu open duplicated the panel as a tab"
+    finally:
+        shutdown_plate_window(qapp, win)
+
+
+def test_a_tab_hosted_panel_moves_into_the_dock_when_its_card_is_clicked(
+        qapp, napari_pane_stub, squid_dataset):
+    """A panel opened as a plate tab BEFORE the card click (the surviving non-card route) MOVES
+    into the dock — the same widget, so nothing the user set is lost and _op_tabs still holds
+    exactly one entry for the key."""
+    root, _ = squid_dataset
+    win, mgr, deck, views = _tabbed_plate(qapp, root, n_views=1)
+    try:
+        dock = deck._operator_dock
+        win._open_op_tab("mip", "Maximum Intensity Projection",
+                         win._build_mip_tab)               # the plain tab route, directly
+        qapp.processEvents()
+        panel = win._op_tabs["mip"]
+        assert win._left_tabs.indexOf(panel) >= 0
+        win._op_cards["mip"].click()
+        qapp.processEvents()
+        assert dock.panel() is panel, "the card click built a second panel"
+        assert win._left_tabs.indexOf(panel) == -1, "the panel is still a plate tab"
+        assert win._op_tabs["mip"] is panel
+    finally:
+        shutdown_plate_window(qapp, win)
+
+
 # --- the cost, said out loud ------------------------------------------------------------------
 
 def test_the_deck_names_the_memory_once_there_are_many_views(qapp, napari_pane_stub,

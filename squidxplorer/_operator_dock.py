@@ -1,9 +1,12 @@
 """The views window's OPERATOR DOCK: a collapsible right-edge dock, napari-style (2026-08-19).
 
 Julio's mock moved the plate's Operators card column INTO the views window: a vertical dock on
-the right edge, collapsed by default to a thin grip. It holds ONE thing: the BULK card launcher
-the plate builds (`PlateWindow._build_operator_cards`), whose cards open their panels in the
-plate window exactly as before — only the launcher moved.
+the right edge, collapsed by default to a thin grip. It holds the BULK card launcher the plate
+builds (`PlateWindow._build_operator_cards`) AND, since 2026-08-24, the panel a clicked card
+opens: Julio — "When I click on an operator on the operator collapsible dock, the UI appears in
+the plate window, rather than as a tab in that same collapsible dock." A card click now shows
+that operator's panel on this dock's own panel page (one at a time, "◂ operators" goes back);
+the plate's `_left_tabs` route survives only for non-card users (menus, published QC results).
 
 The per-window operator surface (`RegionViewer.operator_panel()`) does NOT live here any more
 (Julio, 2026-08-19: "The operators for this window row should also be on the left vertical dock.
@@ -78,7 +81,7 @@ class _VerticalGrip(QPushButton):
 
 
 class OperatorDock(QDockWidget):
-    """A right-edge dock with two states: a thin grip (default) and the operator surface."""
+    """A right-edge dock: a thin grip (default), the card launcher, or one opened panel."""
 
     def __init__(self, host, *, cards: Optional[QWidget] = None) -> None:
         super().__init__("Operators", host)
@@ -129,12 +132,49 @@ class OperatorDock(QDockWidget):
         if cards is not None:
             self.set_cards(cards)
         bv.addStretch(0)
-        #: ONE content widget with two pages, so collapse never leaves an empty dock frame for
-        #: the platform to paint white: page 0 is the full-height grip, page 1 the card body.
+
+        # -- the PANEL page (Julio, 2026-08-24: "the UI appears in the plate window, rather
+        # -- than as a tab in that same collapsible dock"): a clicked card's operator panel
+        # -- opens HERE, one at a time, with a back-to-cards affordance on top. The widget is
+        # -- the plate's own (it stays in the plate's _op_tabs registry); this dock only hosts
+        # -- and reparents it, exactly the discipline the ViewDeck uses for whole views. ------
+        panel_page = QWidget(self)
+        panel_page.setStyleSheet(f"background:{_BG};")
+        pv = QVBoxLayout(panel_page)
+        pv.setContentsMargins(0, 0, 0, 0)
+        pv.setSpacing(0)
+        back_row = QWidget(panel_page)
+        back_row.setStyleSheet(f"background:{_BG};")
+        brl = QHBoxLayout(back_row)
+        brl.setContentsMargins(8, 4, 6, 4)
+        brl.setSpacing(6)
+        self.back_btn = QPushButton("◂ operators")
+        self.back_btn.setToolTip("Back to the operator cards.")
+        self.back_btn.setCursor(Qt.PointingHandCursor)
+        self.back_btn.setStyleSheet(_TOGGLE_QSS)
+        self.back_btn.clicked.connect(lambda *_: self.show_cards())
+        brl.addWidget(self.back_btn, 0)
+        self._panel_title = QLabel("")
+        self._panel_title.setStyleSheet(_HEADER_QSS)
+        brl.addWidget(self._panel_title, 1)
+        pv.addWidget(back_row, 0)
+        self._panel_l = QVBoxLayout()
+        self._panel_l.setContentsMargins(0, 0, 0, 0)
+        pv.addLayout(self._panel_l, 1)
+        self._panel_page = panel_page
+        self._panel: Optional[QWidget] = None
+        #: Which expanded page the user was on, so a collapse/expand round trip lands back
+        #: where it left (the panel, not the cards, when a panel was open).
+        self._on_panel_page = False
+
+        #: ONE content widget with three pages, so collapse never leaves an empty dock frame
+        #: for the platform to paint white: page 0 is the full-height grip, page 1 the card
+        #: body, page 2 an opened operator's panel.
         self._stack = QStackedWidget(self)
         self._stack.setStyleSheet(f"background:{_BG};")
         self._stack.addWidget(self._grip)
         self._stack.addWidget(self._body)
+        self._stack.addWidget(self._panel_page)
         self.setWidget(self._stack)
 
         self._collapsed = True
@@ -159,6 +199,47 @@ class OperatorDock(QDockWidget):
                 card.setEnabled(bool(flag))
             except Exception:                            # noqa: BLE001 - a dead card is not news
                 pass
+
+    # -- the panel page -----------------------------------------------------------------------
+    def panel(self) -> Optional[QWidget]:
+        """The operator panel this dock is currently hosting, or ``None``."""
+        return self._panel
+
+    def show_panel(self, panel: QWidget, title: str) -> None:
+        """Host *panel* on the dock's panel page and put that page on screen, expanded.
+
+        One panel at a time: a previously hosted one is released (it stays alive in the
+        plate's ``_op_tabs`` registry, which owns panel lifetime; this dock never disposes)."""
+        if self._panel is not None and self._panel is not panel:
+            self.release_panel()
+        if self._panel is None:
+            self._panel = panel
+            self._panel_l.addWidget(panel)
+            panel.setVisible(True)
+        self._panel_title.setText(str(title).upper())
+        self._on_panel_page = True
+        self.set_collapsed(False)
+        self._stack.setCurrentWidget(self._panel_page)
+
+    def show_cards(self) -> None:
+        """Back to the card launcher. The hosted panel stays alive on its hidden page — its
+        state (a decon sweep, half-typed parameters) survives the round trip."""
+        self._on_panel_page = False
+        if not self._collapsed:
+            self._stack.setCurrentWidget(self._body)
+
+    def release_panel(self) -> Optional[QWidget]:
+        """Detach and return the hosted panel without disposing it (the plate owns disposal)."""
+        panel, self._panel = self._panel, None
+        if panel is not None:
+            self._panel_l.removeWidget(panel)
+            panel.setParent(None)
+            panel.setVisible(False)
+        self._on_panel_page = False
+        if self._stack.currentWidget() is self._panel_page:
+            self._stack.setCurrentWidget(self._body if not self._collapsed else self._grip)
+        self._panel_title.setText("")
+        return panel
 
     # -- collapse ---------------------------------------------------------------------------
     @property
@@ -188,6 +269,8 @@ class OperatorDock(QDockWidget):
         else:
             self.setTitleBarWidget(self._header)
             self._header.setVisible(True)
-            self._stack.setCurrentWidget(self._body)
+            self._stack.setCurrentWidget(
+                self._panel_page if (self._panel is not None and self._on_panel_page)
+                else self._body)
             self.setMinimumWidth(OPEN_MIN_PX)            # undo the grip's fixed width
             self.setMaximumWidth(OPEN_MAX_PX)

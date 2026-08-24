@@ -27,20 +27,20 @@ def test_recipe_kinds():
 
 
 def test_chain_order_matters():
-    stitch, decon = Recipe.operator("stitch"), Recipe.operator("decon3d")
+    stitch, decon = Recipe.operator("stitch"), Recipe.operator("decon")
     assert RecipeChain.of(stitch, decon).key() != RecipeChain.of(decon, stitch).key()
 
 
 def test_chain_script_round_trips():
-    ch = RecipeChain.of(Recipe.operator("stitch"), Recipe.operator("decon3d", iters=15))
+    ch = RecipeChain.of(Recipe.operator("stitch"), Recipe.operator("decon", iters=15))
     assert RecipeChain.from_script(ch.to_script()).key() == ch.key()
 
 
 def test_a_chain_round_trips_through_its_own_label():
     for text in ("mip",
                  "flatfield + decon + mip",
-                 "spot(min_area_px=80)",
-                 "bgsub + spot(min_area_px=80, split_touching=False)",
+                 "blob(min_area_px=80)",
+                 "demo + blob(min_area_px=80, split_touching=False)",
                  "raw"):
         assert RecipeChain.parse(text).label() == text, text
     assert RecipeChain.parse("raw") == RecipeChain()
@@ -48,20 +48,20 @@ def test_a_chain_round_trips_through_its_own_label():
 
 
 def test_parse_reads_a_parameter_as_the_literal_it_is_written_as():
-    params = RecipeChain.parse("decon3d(iters=15, gpu=False, sigma=2.0)").recipes[0].params
+    params = RecipeChain.parse("decon(iters=15, gpu=False, sigma=2.0)").recipes[0].params
     assert params == {"iters": 15, "gpu": False, "sigma": 2.0}
     for value in params.values():
         assert not isinstance(value, str)
 
 
 def test_parse_reads_an_unquoted_string_back_as_a_string():
-    chain = RecipeChain.of(Recipe.operator("seg", segmenter="cellpose"))
-    assert chain.label() == "seg(segmenter=cellpose)"
+    chain = RecipeChain.of(Recipe.operator("seg", segmenter="watershed"))
+    assert chain.label() == "seg(segmenter=watershed)"
     assert RecipeChain.parse(chain.label()) == chain
 
 
 def test_a_separator_inside_an_argument_list_is_not_a_separator():
-    assert len(RecipeChain.parse("bgsub(scale=1e+5)").recipes) == 1
+    assert len(RecipeChain.parse("demo(scale=1e+5)").recipes) == 1
     assert len(RecipeChain.parse("crop(shape=(4, 4)) + mip").recipes) == 2
 
 
@@ -81,7 +81,7 @@ def test_a_malformed_chain_is_refused_naming_what_was_typed():
 
 
 def test_cache_shares_by_content_not_window():
-    ch = RecipeChain.of(Recipe.operator("decon3d"))
+    ch = RecipeChain.of(Recipe.operator("decon"))
     cache = ResultCache()
     vol = _result("B7")
     cache.put("B7", ch, vol)
@@ -91,7 +91,7 @@ def test_cache_shares_by_content_not_window():
 
 
 def test_cache_version_separates_stale_from_fresh():
-    ch = RecipeChain.of(Recipe.operator("decon3d"))
+    ch = RecipeChain.of(Recipe.operator("decon"))
     cache = ResultCache()
     old, fresh = _result("B7"), _result("B7")
     cache.put("B7", ch, old, version=0)
@@ -103,7 +103,7 @@ def test_cache_version_separates_stale_from_fresh():
 
 
 def test_cache_is_bounded_lru():
-    ch = RecipeChain.of(Recipe.operator("decon3d"))
+    ch = RecipeChain.of(Recipe.operator("decon"))
     cache = ResultCache(max_entries=2)
     cache.put("B7", ch, _result("B7"))
     cache.put("A1", ch, _result("A1"))

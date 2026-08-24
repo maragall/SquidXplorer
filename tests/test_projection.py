@@ -9,7 +9,6 @@ import pytest
 import tifffile
 
 from squidxplorer import open_reader, plane_op, project, project_well, select_fovs
-from squidxplorer.projection import project_reference, select_reference_z
 
 
 def _write_plane(folder: Path, region, fov, z, channel, arr, t=0):
@@ -308,116 +307,25 @@ def test_select_fovs_from_real_reader_metadata(squid_dataset):
     assert select_fovs(meta, n_fovs=2) == {"B2": [0, 1], "B3": [0, 1]}
 
 
-def test_project_reference_picks_sharpest_plane():
-    import numpy as np
-    from squidxplorer.projection import project_reference
-    rng = np.random.default_rng(1)
-    flat = (np.ones((48, 48)) * 800).astype(np.uint16)
-    sharp = rng.integers(0, 4000, (48, 48)).astype(np.uint16)
-    dim = (sharp.astype(np.float32) * 0.25).astype(np.uint16)
-    out = project_reference(iter([flat, dim, sharp]))
-    assert np.array_equal(out, sharp)
+def test_the_reference_operator_is_shelved_whole():
+    """Absence pin (2026-08-24): the Tenengrad z-selecting reducer is gone — the operator, its
+    projection functions, and project_well's whole select_index arm. `_tenengrad` survives:
+    the GUI's z-slider autofocus reads it."""
+    import inspect
+
     import squidxplorer
-    assert "reference" in squidxplorer.available_plane_operators()
+    from squidxplorer import projection
+
+    assert "reference" not in squidxplorer.runnable_operators()
+    for gone in ("project_reference", "select_reference_z"):
+        assert not hasattr(projection, gone), f"{gone} is back; reference was shelved"
+    params = inspect.signature(projection.project_well).parameters
+    assert "reference_channel" not in params and "picked_z" not in params
+    assert hasattr(projection, "_tenengrad"), "the autofocus's focus measure must survive"
 
 
 CH_A = "Fluorescence_405_nm_-_Penta"
 CH_B = "Fluorescence_638_nm_-_Penta"
-
-
-def _sharp(shape=(8, 8), dtype=np.uint16):
-    """A high-gradient plane: Tenengrad scores it far above a flat one."""
-    a = np.zeros(shape, dtype=dtype)
-    a[::2, :] = np.iinfo(dtype).max // 4
-    return a
-
-
-def _flat(val=3, shape=(8, 8), dtype=np.uint16):
-    return np.full(shape, val, dtype=dtype)
-
-
-def _per_channel_sharpest(root: Path, sharp_z: dict, nz=4, shape=(8, 8)):
-    """Build a 1-fov acquisition where EACH channel is sharpest at a DIFFERENT z."""
-    _write_min_yaml(root, nz=nz)
-    for channel, zc in sharp_z.items():
-        for z in range(nz):
-            _write_plane(root, "A1", 0, z, channel,
-                         _sharp(shape) if z == zc else _flat(shape=shape))
-    return root
-
-
-def test_select_reference_z_returns_position_of_sharpest():
-    assert select_reference_z([_flat(), _sharp(), _flat()]) == 1
-
-
-def test_select_reference_z_ties_keep_earliest():
-    assert select_reference_z([_sharp(), _sharp()]) == 0
-
-
-def test_select_reference_z_empty_raises():
-    with pytest.raises(ValueError, match="at least one plane"):
-        select_reference_z(iter([]))
-
-
-def test_project_reference_advertises_that_it_selects_an_index():
-    assert getattr(project_reference, "select_index", None) is select_reference_z
-    assert getattr(project, "select_index", None) is None
-
-
-def test_the_fixture_really_does_split_channels_per_channel(tmp_path):
-    root = _per_channel_sharpest(tmp_path / "split", {CH_A: 0, CH_B: 3})
-    reader = open_reader(str(root))
-    per_channel = {
-        ch: reader.metadata["z_levels"][
-            select_reference_z(reader.read("A1", 0, ch, z, 0)
-                               for z in reader.metadata["z_levels"])
-        ]
-        for ch in [c["name"] for c in reader.metadata["channels"]]
-    }
-    assert len(set(per_channel.values())) > 1, (
-        f"fixture is useless -- channels already agree: {per_channel}")
-
-
-def test_reference_projection_lands_every_channel_on_one_z(tmp_path):
-    root = _per_channel_sharpest(tmp_path / "aligned", {CH_A: 0, CH_B: 3})
-    reader = open_reader(str(root))
-    channels = [c["name"] for c in reader.metadata["channels"]]
-    picked: dict = {}
-    project_well(reader, "A1", 0, reduce=project_reference, picked_z=picked)
-    assert len({picked[(0, c)] for c in channels}) == 1, picked
-
-
-def test_reference_projection_defaults_to_the_first_channel(tmp_path):
-    root = _per_channel_sharpest(tmp_path / "first", {CH_A: 0, CH_B: 3})
-    reader = open_reader(str(root))
-    picked: dict = {}
-    project_well(reader, "A1", 0, reduce=project_reference, picked_z=picked)
-    assert picked[(0, CH_A)] == 0
-    assert picked[(0, CH_B)] == 0
-
-
-def test_reference_channel_override_moves_every_channel(tmp_path):
-    root = _per_channel_sharpest(tmp_path / "override", {CH_A: 0, CH_B: 3})
-    reader = open_reader(str(root))
-    picked: dict = {}
-    project_well(reader, "A1", 0, reduce=project_reference,
-                 reference_channel=CH_B, picked_z=picked)
-    assert picked[(0, CH_A)] == picked[(0, CH_B)] == 3
-
-
-def test_unknown_reference_channel_is_loud(tmp_path):
-    root = _per_channel_sharpest(tmp_path / "bad", {CH_A: 0, CH_B: 3})
-    reader = open_reader(str(root))
-    with pytest.raises(ValueError, match="is not a channel"):
-        project_well(reader, "A1", 0, reduce=project_reference, reference_channel="Fluorescence_999_nm_-_Penta")
-
-
-def test_a_combining_reduction_records_no_picked_z(tmp_path):
-    root = _per_channel_sharpest(tmp_path / "mip", {CH_A: 0, CH_B: 3})
-    reader = open_reader(str(root))
-    picked: dict = {}
-    project_well(reader, "A1", 0, reduce=project, picked_z=picked)
-    assert picked == {}
 
 
 def _z_stack_acq(root: Path, nz=3, channels=(CH_A, CH_B), nt=1):
@@ -461,14 +369,6 @@ def test_plane_op_sees_exactly_one_plane_per_call(tmp_path):
     assert len(seen) == 4 * 2
 
 
-def test_plane_op_records_no_picked_z(tmp_path):
-    reader = open_reader(_z_stack_acq(tmp_path / "prov", nz=2))
-    picked: dict = {}
-    project_well(reader, "A1", 0, reduce=plane_op(lambda p: p),
-                 consumes=frozenset(), picked_z=picked)
-    assert picked == {}
-
-
 def test_plane_op_preserves_dtype_and_timepoints(tmp_path):
     reader = open_reader(_z_stack_acq(tmp_path / "t", nz=2, nt=2))
     out = project_well(reader, "A1", 0, reduce=plane_op(lambda p: p), consumes=frozenset())
@@ -483,17 +383,6 @@ def test_default_consumes_is_the_z_reducer_contract(tmp_path):
     for c_i, ch in enumerate([c["name"] for c in reader.metadata["channels"]]):
         stack = [reader.read("A1", 0, ch, z, 0) for z in reader.metadata["z_levels"]]
         np.testing.assert_array_equal(out[0, c_i, 0], np.max(np.stack(stack), axis=0))
-
-
-def test_z_selecting_reduction_is_unaffected_by_the_consumes_seam(tmp_path):
-    root = _per_channel_sharpest(tmp_path / "still_aligned", {CH_A: 0, CH_B: 3})
-    reader = open_reader(str(root))
-    channels = [c["name"] for c in reader.metadata["channels"]]
-    picked: dict = {}
-    out = project_well(reader, "A1", 0, reduce=project_reference,
-                       consumes=frozenset({"z"}), picked_z=picked)
-    assert out.shape[2] == 1
-    assert len({picked[(0, c)] for c in channels}) == 1, picked
 
 
 def test_plane_op_adapter_rejects_a_multi_plane_group(tmp_path):
@@ -541,6 +430,6 @@ def test_no_module_carries_a_second_dtype_cast():
                  if "def _cast_like" in p.read_text()]
     assert not offenders, (
         f"{offenders} define a private dtype cast; there is one, `projection.cast_like`, and it "
-        "is what `_background`, `_decon`, `_flatfield`, `_stitch`, `_output` and `_tilesource` "
+        "is what `_decon`, `_flatfield`, `_stitch`, `_output` and `_tilesource` "
         "all call"
     )

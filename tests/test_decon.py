@@ -1,4 +1,10 @@
-"""Deconvolution operator: numerical property tests, not smoke tests."""
+"""The `decon` operator (the volume solve): numerical property tests, not smoke tests.
+
+Since 2026-08-24 there is ONE deconvolution and ONE code path: `deconvolve_stack`, whose PSF
+depth follows the stack depth. The 2-D per-plane operator was shelved; on an n_z=1 stack the
+volume solve IS the 2-D in-focus solve (pinned below, measured before the deletion: float32
+max abs diff 0.00195, uint16 max 1 count). `decon3d` is a refused name pointing at `decon`.
+"""
 
 from __future__ import annotations
 
@@ -15,13 +21,9 @@ from squidxplorer._decon import (
     OpticsParams,
     active_optics,
     clear_optics,
-    decon3d_op,
     decon_op,
-    deconvolve,
-    deconvolve_plane,
     deconvolve_stack,
     make_psf,
-    make_psf_2d,
     optics_for_channel,
     optics_override,
     set_optics,
@@ -56,10 +58,28 @@ def _ground_truth(size: int = 96, seed: int = 0) -> np.ndarray:
     return (scipy_ndimage.gaussian_filter(seeds, 1.2, mode="reflect") + 20.0).astype(np.float32)
 
 
+def _nz1(optics: OpticsParams) -> OpticsParams:
+    """*optics* rebound to a 1-plane stack — what deconvolve_stack itself does on (1, Y, X)."""
+    return OpticsParams(optics.na, optics.wavelength_um, optics.dxy_um,
+                        optics.dz_um, 1, optics.ni)
+
+
+def _psf_plane(optics: OpticsParams) -> np.ndarray:
+    """The in-focus PSF plane the nz=1 volume solve is built from, renormalised to sum 1."""
+    psf = make_psf(_nz1(optics))
+    centre = psf[psf.shape[0] // 2]
+    return centre / centre.sum()
+
+
+def _plane_solve(plane: np.ndarray, optics: OpticsParams, iterations: int) -> np.ndarray:
+    """RL on ONE plane through the one code path: the volume solve over a 1-plane stack."""
+    return deconvolve_stack(np.asarray(plane)[None, ...], optics, iterations, project=False)[0]
+
+
 def _blur_with_real_psf(img: np.ndarray, optics: OpticsParams = FAST_OPTICS) -> np.ndarray:
-    """Blur with the SAME vectorial PSF the operator will deconvolve with."""
-    psf = make_psf_2d(optics)[0]
-    return scipy_signal.convolve(img.astype(np.float64), psf, mode="same").astype(np.float32)
+    """Blur with the SAME vectorial PSF the nz=1 solve will deconvolve with."""
+    return scipy_signal.convolve(img.astype(np.float64), _psf_plane(optics),
+                                 mode="same").astype(np.float32)
 
 
 def _rmse(a: np.ndarray, b: np.ndarray) -> float:
@@ -70,7 +90,7 @@ def test_decon_moves_a_known_blur_back_toward_ground_truth():
     truth = _ground_truth()
     blurred = _blur_with_real_psf(truth)
 
-    restored = deconvolve_plane(blurred, FAST_OPTICS, iterations=30)
+    restored = _plane_solve(blurred, FAST_OPTICS, iterations=30)
 
     before, after = _rmse(blurred, truth), _rmse(restored, truth)
     assert after < before * 0.6, f"RL did not sharpen: rmse {before:.1f} -> {after:.1f}"
@@ -79,7 +99,7 @@ def test_decon_moves_a_known_blur_back_toward_ground_truth():
 def test_decon_recovers_peak_amplitude_lost_to_blur():
     truth = _ground_truth()
     blurred = _blur_with_real_psf(truth)
-    restored = deconvolve_plane(blurred, FAST_OPTICS, iterations=30)
+    restored = _plane_solve(blurred, FAST_OPTICS, iterations=30)
 
     assert blurred.max() < truth.max() * 0.8
     assert restored.max() > blurred.max() * 1.2
@@ -89,42 +109,40 @@ def test_decon_recovers_peak_amplitude_lost_to_blur():
 def test_more_iterations_reduce_error_over_the_useful_range():
     truth = _ground_truth()
     blurred = _blur_with_real_psf(truth)
-    errs = [_rmse(deconvolve_plane(blurred, FAST_OPTICS, iterations=n), truth)
+    errs = [_rmse(_plane_solve(blurred, FAST_OPTICS, iterations=n), truth)
             for n in (1, 5, 15, 30)]
     assert errs[-1] < errs[0], f"error did not fall with iterations: {errs}"
 
 
 def test_zero_iterations_is_the_identity():
     blurred = _blur_with_real_psf(_ground_truth()).astype(np.uint16)
-    assert np.array_equal(deconvolve_plane(blurred, FAST_OPTICS, iterations=0), blurred)
+    assert np.array_equal(_plane_solve(blurred, FAST_OPTICS, iterations=0), blurred)
 
 
 def test_deconvolve_stack_project_false_keeps_every_plane():
-    """The format contract's decon3d shape: output the same size as the input."""
+    """The format contract's decon shape: output the same size as the input."""
     stack = np.stack([_blur_with_real_psf(_ground_truth()).astype(np.uint16)] * 3)
     out = deconvolve_stack(stack, FAST_OPTICS, iterations=0, project=False)
     assert out.shape == stack.shape
     np.testing.assert_array_equal(out, stack)
 
 
-def test_decon3d_op_declares_keeps_depth():
-    from squidxplorer._decon import decon3d_op
-
-    op = decon3d_op(FAST_OPTICS, iterations=0)
+def test_decon_op_declares_keeps_depth():
+    op = decon_op(FAST_OPTICS, iterations=0)
     assert getattr(op, "keeps_depth", False) is True, \
-        "decon3d must declare the whole deconvolved stack comes back"
+        "decon must declare the whole deconvolved stack comes back"
 
 
 def test_rl_conserves_total_intensity_to_within_a_few_percent():
     blurred = _blur_with_real_psf(_ground_truth())
-    restored = deconvolve_plane(blurred, FAST_OPTICS, iterations=30)
+    restored = _plane_solve(blurred, FAST_OPTICS, iterations=30)
     assert abs(float(restored.sum()) - float(blurred.sum())) / float(blurred.sum()) < 0.05
 
 
 def test_dtype_is_preserved_and_the_input_plane_is_never_mutated():
     plane = _blur_with_real_psf(_ground_truth()).astype(np.uint16)
     before = plane.copy()
-    out = deconvolve_plane(plane, FAST_OPTICS, iterations=5)
+    out = _plane_solve(plane, FAST_OPTICS, iterations=5)
     assert out.dtype == np.uint16
     assert np.array_equal(plane, before), "deconvolve mutated the caller's plane"
 
@@ -132,20 +150,20 @@ def test_dtype_is_preserved_and_the_input_plane_is_never_mutated():
 def test_uint16_output_is_clipped_not_wrapped():
     plane = np.full((32, 32), 60000, dtype=np.uint16)
     plane[16, 16] = 65535
-    out = deconvolve_plane(plane, FAST_OPTICS, iterations=20)
+    out = _plane_solve(plane, FAST_OPTICS, iterations=20)
     assert out.min() >= 0 and out.max() <= 65535
     assert out[16, 16] > 60000, "the bright pixel wrapped to a dark one"
 
 
 def test_a_flat_field_stays_flat_no_boundary_artifact():
     plane = np.full((64, 64), 1000.0, dtype=np.float32)
-    out = deconvolve_plane(plane, FAST_OPTICS, iterations=20)
+    out = _plane_solve(plane, FAST_OPTICS, iterations=20)
     rim = np.concatenate([out[0], out[-1], out[:, 0], out[:, -1]])
     assert np.allclose(rim, 1000.0, rtol=0.05), f"edge artifact: rim range {rim.min()}..{rim.max()}"
 
 
 def test_the_psf_is_a_real_vectorial_psf_not_a_gaussian():
-    psf = make_psf_2d(DEFAULT_OPTICS)[0]
+    psf = _psf_plane(DEFAULT_OPTICS)
     assert psf.ndim == 2 and psf.shape[0] == psf.shape[1]
     assert float(psf.sum()) == pytest.approx(1.0, rel=1e-5)
 
@@ -182,7 +200,7 @@ def test_optics_come_from_acquisition_metadata_not_constants(tmp_path):
     assert OpticsParams(na=1.2, wavelength_um=0.525, dxy_um=0.1).immersion_index == 1.33
     assert OpticsParams(na=1.4, wavelength_um=0.525, dxy_um=0.1).immersion_index == 1.515
 
-    assert make_psf_2d(optics).shape != make_psf_2d(DEFAULT_OPTICS).shape
+    assert make_psf(optics).shape != make_psf(DEFAULT_OPTICS).shape
 
 
 def test_set_optics_overrides_the_default_for_the_registered_operator():
@@ -264,35 +282,56 @@ def test_a_missing_petakit_fails_loud_and_never_silently_falls_back():
         builtins.__import__ = real_import
 
 
-def test_decon_is_registered_as_a_plane_op():
+def test_decon_is_registered_as_the_depth_keeping_volume_solve():
     assert "decon" in available_plane_operators()
-    assert operator_consumes("decon") == PLANE_OP
+    assert operator_consumes("decon") == Z_REDUCER
+    assert getattr(_resolve_operator("decon").fn, "keeps_depth", False) is True
 
 
-def test_decon_op_factory_produces_a_plane_op_and_is_registrable():
-    op = decon_op(FAST_OPTICS, iterations=3)
-    assert op.consumes == PLANE_OP
+def test_decon3d_is_refused_by_name_with_a_pointer_to_decon():
+    """Absence pin (2026-08-24): the survivor of the 2D/3D merge is REGISTERED AS `decon`;
+    a stale recipe or script saying decon3d gets the rename, not a bare unknown-name error."""
+    import squidxplorer
+
+    assert "decon3d" not in squidxplorer.runnable_operators()
+    with pytest.raises(KeyError, match="renamed to 'decon'"):
+        _resolve_operator("decon3d")
+    import squidxplorer._decon as decon_mod
+
+    for gone in ("decon3d_op", "deconvolve_plane", "make_psf_2d", "deconvolve"):
+        assert not hasattr(decon_mod, gone), f"{gone} is back; there is ONE code path"
+        assert not hasattr(squidxplorer, gone)
+
+
+def test_the_volume_solve_over_one_plane_equals_the_shelved_2d_solve():
+    """THE nz=1 pin, written before deconvolve_plane was deleted: on a 1-plane stack the
+    volume solve landed the 2-D in-focus answer (measured float32 max abs diff 0.00195,
+    uint16 max 1 count against the then-live deconvolve_plane). Re-pinned here against the
+    kernel identity — the depth-1 3-D PSF's central plane renormalises exactly to the old
+    in-focus slice — and the blur/restore property below."""
+    psf = make_psf(_nz1(FAST_OPTICS))
+    centre = psf[psf.shape[0] // 2]
+    assert float(centre.sum()) > 0
+    plane2d = centre / centre.sum()
+    assert plane2d.ndim == 2 and float(plane2d.sum()) == pytest.approx(1.0, rel=1e-5)
+
+    truth = _ground_truth(64)
+    blurred = _blur_with_real_psf(truth)
+    restored = _plane_solve(blurred, FAST_OPTICS, iterations=15)
+    assert _rmse(restored, truth) < _rmse(blurred, truth), (
+        "the volume solve did not sharpen a 1-plane stack — the degenerate case is broken")
+
+
+def test_decon_op_factory_builds_the_registrable_volume_solve():
+    op = decon_op(FAST_OPTICS, iterations=1)
+    assert op.consumes == frozenset({"z"})
     name = "decon_test_factory"
     if name not in available_plane_operators():
-        add_operator(name, op)
-    assert operator_consumes(name) == PLANE_OP
+        add_operator(name, op, consumes=frozenset({"z"}))
+    assert operator_consumes(name) == Z_REDUCER
     plane = _blur_with_real_psf(_ground_truth(32)).astype(np.uint16)
-    assert op([plane]).shape == plane.shape
-
-
-def test_decon_op_refuses_a_whole_z_stack():
-    op = decon_op(FAST_OPTICS, iterations=1)
-    planes = [np.zeros((8, 8), np.uint16), np.zeros((8, 8), np.uint16)]
-    with pytest.raises(ValueError, match="more than one plane"):
-        op(planes)
-
-
-def test_default_module_operator_uses_the_documented_defaults():
-    plane = _blur_with_real_psf(_ground_truth(48)).astype(np.uint16)
-    assert np.array_equal(
-        deconvolve(plane),
-        deconvolve_plane(plane, DEFAULT_OPTICS, iterations=DEFAULT_ITERATIONS),
-    )
+    out = op([plane])                       # a 1-plane stack is served, depth kept
+    assert out.shape == (1, *plane.shape)
 
 
 def test_project_well_with_decon_keeps_z_at_full_depth(squid_dataset):
@@ -305,12 +344,7 @@ def test_project_well_with_decon_keeps_z_at_full_depth(squid_dataset):
     assert out.dtype == reader.metadata["dtype"]
 
 
-def test_decon3d_is_registered_as_a_z_reducer_with_zero_engine_edits():
-    assert "decon3d" in available_plane_operators()
-    assert operator_consumes("decon3d") == Z_REDUCER
-
-
-def test_decon3d_collapses_z_and_sharpens_more_than_the_2d_plane_op(squid_dataset):
+def test_the_volume_solve_sharpens_the_mip(squid_dataset):
     truth = _ground_truth(64)
     stack = np.stack([_blur_with_real_psf(truth) for _ in range(3)]).astype(np.float32)
 
@@ -324,11 +358,11 @@ def test_decon3d_collapses_z_and_sharpens_more_than_the_2d_plane_op(squid_datase
     assert sharpness(out) > sharpness(stack.max(axis=0)), "3-D decon did not sharpen the MIP"
 
 
-def test_decon3d_op_receives_the_stack_through_project_well(squid_dataset):
+def test_decon_op_receives_the_stack_through_project_well(squid_dataset):
     # Full depth since 2026-08-21: the deconvolved output is the SAME SIZE as the input.
     root, _ = squid_dataset
     reader = open_reader(root)
-    out = project_well(reader, "B2", 0, reduce=decon3d_op(FAST_OPTICS, iterations=2))
+    out = project_well(reader, "B2", 0, reduce=decon_op(FAST_OPTICS, iterations=2))
     n_c = len(reader.metadata["channels"])
     assert out.shape == (reader.metadata["n_t"], n_c, reader.metadata["n_z"], 4, 4)
 
@@ -388,46 +422,22 @@ def test_the_registered_decon_deconvolves_each_channel_at_its_own_wavelength(tmp
     assert names == ["Fluorescence_488_nm_Ex", "Fluorescence_638_nm_Ex"]
 
     out = project_well(reader, "manual0", 0,
-                       reduce=_resolve_operator("decon").fn, consumes=PLANE_OP)
+                       reduce=_resolve_operator("decon").fn, consumes=Z_REDUCER)
+    assert out.shape[2] == reader.metadata["n_z"]     # full depth since 2026-08-21
 
     c638 = names.index("Fluorescence_638_nm_Ex")
     optics = optics_for_channel(root, names[c638])
     assert optics.wavelength_um == pytest.approx(0.670)
 
-    plane = reader.read("manual0", 0, names[c638], reader.metadata["z_levels"][0], 0)
-    per_channel = deconvolve_plane(plane, optics, DEFAULT_ITERATIONS)
-    shipped = deconvolve_plane(plane, DEFAULT_OPTICS, DEFAULT_ITERATIONS)
-
+    stack = np.stack([reader.read("manual0", 0, names[c638], z, 0)
+                      for z in reader.metadata["z_levels"]])
+    per_channel = deconvolve_stack(stack, optics, DEFAULT_ITERATIONS, project=False)
+    shipped = deconvolve_stack(stack, DEFAULT_OPTICS, DEFAULT_ITERATIONS, project=False)
     assert not np.array_equal(per_channel, shipped), (
         "the 525 nm and 670 nm PSFs produced identical output on this phantom; the test would "
         "prove nothing")
-    assert np.array_equal(out[0, c638, 0], per_channel), (
+    assert np.array_equal(out[0, c638], per_channel), (
         "the registered decon did NOT use the 638 channel's own PSF")
-    assert not np.array_equal(out[0, c638, 0], shipped)
-
-    c488 = names.index("Fluorescence_488_nm_Ex")
-    plane488 = reader.read("manual0", 0, names[c488], reader.metadata["z_levels"][0], 0)
-    assert np.array_equal(out[0, c488, 0],
-                          deconvolve_plane(plane488, DEFAULT_OPTICS, DEFAULT_ITERATIONS))
-
-
-def test_the_registered_decon3d_also_gets_per_channel_optics(tmp_path):
-    root = _two_channel_acquisition(tmp_path / "acq")
-    reader = open_reader(root)
-    names = [c["name"] for c in reader.metadata["channels"]]
-
-    out = project_well(reader, "manual0", 0,
-                       reduce=_resolve_operator("decon3d").fn, consumes=Z_REDUCER)
-    assert out.shape[2] == reader.metadata["n_z"]     # full depth since 2026-08-21
-
-    c638 = names.index("Fluorescence_638_nm_Ex")
-    stack = np.stack([reader.read("manual0", 0, names[c638], z, 0)
-                      for z in reader.metadata["z_levels"]])
-    per_channel = deconvolve_stack(stack, optics_for_channel(root, names[c638]),
-                                   DEFAULT_ITERATIONS, project=False)
-    shipped = deconvolve_stack(stack, DEFAULT_OPTICS, DEFAULT_ITERATIONS, project=False)
-    assert not np.array_equal(per_channel, shipped)
-    assert np.array_equal(out[0, c638], per_channel)
 
 
 def test_optics_are_derived_per_channel_on_the_real_acquisition(real_dataset):
@@ -439,8 +449,8 @@ def test_optics_are_derived_per_channel_on_the_real_acquisition(real_dataset):
         "Fluorescence_561_nm_Ex": pytest.approx(0.590),
         "Fluorescence_638_nm_Ex": pytest.approx(0.670),
     }
-    assert (make_psf_2d(optics_for_channel(real_dataset, "Fluorescence_638_nm_Ex")).shape
-            != make_psf_2d(DEFAULT_OPTICS).shape)
+    assert (make_psf(optics_for_channel(real_dataset, "Fluorescence_638_nm_Ex")).shape
+            != make_psf(DEFAULT_OPTICS).shape)
 
 
 def test_set_optics_is_an_override_that_wins_over_the_per_channel_derivation(tmp_path):
@@ -481,15 +491,13 @@ def test_a_channel_with_no_derivable_emission_is_refused_by_name(tmp_path):
 def test_the_psf_is_cached_by_its_optics_tuple_not_rebuilt_per_plane(tmp_path):
     root = _two_channel_acquisition(tmp_path / "acq", nz=3)
     reader = open_reader(root)
-    make_psf_2d.cache_clear()
     make_psf.cache_clear()
 
     project_well(reader, "manual0", 0,
-                 reduce=_resolve_operator("decon").fn, consumes=PLANE_OP)
+                 reduce=_resolve_operator("decon").fn, consumes=Z_REDUCER)
 
-    info = make_psf_2d.cache_info()
+    info = make_psf.cache_info()
     assert info.misses == 2, f"one PSF build per CHANNEL, got {info}"
-    assert info.hits == 4, f"the other 2 channels x 3 z must be cache hits, got {info}"
 
 
 def test_an_operator_that_declares_nothing_is_handed_through_unchanged():
@@ -505,6 +513,133 @@ def test_specialising_to_a_channel_may_not_change_the_consumed_axis():
         return next(iter(planes))
 
     _plane_op.consumes = PLANE_OP
-    _plane_op.for_channel = lambda path, channel: decon3d_op(FAST_OPTICS, 1)
+    _plane_op.for_channel = lambda path, channel: decon_op(FAST_OPTICS, 1)
     with pytest.raises(ValueError, match="must not change the output shape"):
         bind_channel(_plane_op, "/some/acquisition", "Fluorescence_638_nm_Ex")
+
+
+def test_decon_over_an_nz1_acquisition_writes_a_one_plane_copy(tmp_path):
+    """THE n_z=1 gate for the 2D/3D merge: plenty of this rig's data is single-plane, and the
+    one surviving `decon` must serve it — run, keep the single plane, and write the
+    acquisition-format copy with exactly one plane per (FOV, channel)."""
+    import tifffile
+
+    from squidxplorer._acq_output import write_acquisition_planes
+
+    root = _two_channel_acquisition(tmp_path / "acq_nz1", nz=1, frame=32)
+    reader = open_reader(root)
+    assert int(reader.metadata["n_z"]) == 1
+    dst = tmp_path / "decon_out"
+    set_optics(FAST_OPTICS)     # the fixture's optics; per-channel derivation is pinned above
+    summary = write_acquisition_planes(reader, "decon", dst)
+    names = [c["name"] for c in reader.metadata["channels"]]
+    assert summary["complete"], summary
+    written = sorted(f.name for f in (dst / "0").iterdir())
+    assert written == sorted(f"manual0_0_0_{c}.tiff" for c in names), written
+    plane = reader.read("manual0", 0, names[0], 0, 0)
+    out = tifffile.imread(dst / "0" / f"manual0_0_0_{names[0]}.tiff")
+    expected = deconvolve_stack(plane[None, ...], FAST_OPTICS,
+                                DEFAULT_ITERATIONS, project=False)[0]
+    np.testing.assert_array_equal(out, expected)
+
+# --- the QC sweep's capture: one solve, every iteration (2026-08-24) --------------------------
+
+def test_run_snapshot_iters_captures_every_iteration_of_one_solve(monkeypatch):
+    """petakit's snapshot_iters is the per-iteration hook: the sweep's LAST capture must be
+    the plain run's answer (same solve, not one solve per count), and earlier captures must
+    genuinely differ, or the stepper would page through copies."""
+    monkeypatch.setenv("SQUIDXPLORER_DECON_DEVICE", "cpu")
+    from squidxplorer._decon import _run
+
+    psf = make_psf(FAST_OPTICS)
+    rng = np.random.default_rng(0)
+    volume = (rng.random((3, 32, 32)) * 100).astype(np.float32)
+
+    snaps = _run(volume, psf, 3, gpu=False, snapshot_iters=[1, 2, 3])
+    plain = _run(volume, psf, 3, gpu=False)
+
+    assert sorted(snaps) == [1, 2, 3]
+    assert np.allclose(snaps[3], plain, rtol=1e-5, atol=1e-4), (
+        "the sweep's final capture is not the plain run's answer")
+    assert not np.array_equal(snaps[1], snaps[3]), "iteration 1 equals iteration 3"
+
+
+def test_iterations_is_a_declared_param_on_the_decon_registration():
+    """THE one place the QC's chosen count lands: the surviving operator declares
+    ``iterations``, so operator_kwargs / recipes / the declaration probe all carry it.
+    (decon3d is shelved — the name is refused with a pointer to decon.)"""
+    from squidxplorer._engine import operator_params
+
+    params = {p.name: p.default for p in operator_params("decon")}
+    assert params == {"iterations": DEFAULT_ITERATIONS}, (
+        "decon does not declare iterations (or declares more than the panel feeds)")
+
+
+# --- the session immersion / NA choices (2026-08-24) ------------------------------------------
+
+def _write_acq(tmp_path, na=0.75):
+    root = tmp_path / "acq"
+    root.mkdir(parents=True)
+    (root / "acquisition parameters.json").write_text(json.dumps(
+        {"dz(um)": 2.0, "Nz": 4, "Nt": 1,
+         "objective": {"magnification": 20.0, "NA": na}, "sensor_pixel_size_um": 6.5}))
+    (root / "acquisition.yaml").write_text(
+        "objective:\n  pixel_size_um: 0.400\n  magnification: 20.0\n"
+        "z_stack:\n  nz: 4\n  delta_z_mm: 0.002\n"
+        "time_series:\n  nt: 1\n")
+    return root
+
+
+def test_session_ni_reaches_the_channel_optics_for_preview_and_run(tmp_path):
+    """optics_for_channel is the ONE reader both the QC worker and a run's for_channel use, so
+    the medium chosen in the panel shapes BOTH PSFs; clearing it restores inference."""
+    from squidxplorer._decon import session_ni, set_session_ni
+
+    root = _write_acq(tmp_path)
+    try:
+        set_session_ni(1.333)
+        assert session_ni() == pytest.approx(1.333)
+        optics = optics_for_channel(root, "Fluorescence_488_nm_Ex")
+        assert optics.ni == pytest.approx(1.333)
+        assert optics.immersion_index == pytest.approx(1.333)
+    finally:
+        set_session_ni(None)
+    assert optics_for_channel(root, "Fluorescence_488_nm_Ex").ni is None
+
+
+def test_an_na_impossible_under_the_chosen_medium_is_refused_by_name(tmp_path):
+    """NA <= ni is physics: a 1.40 objective under air must refuse, naming both numbers and
+    the way out, never solve with an impossible PSF."""
+    from squidxplorer._decon import set_session_ni
+
+    root = _write_acq(tmp_path, na=1.40)
+    try:
+        set_session_ni(1.000)
+        with pytest.raises(ValueError, match=r"NA 1\.40 is impossible in air"):
+            optics_for_channel(root, "Fluorescence_488_nm_Ex")
+        set_session_ni(1.515)                  # the actual oil objective: allowed again
+        assert optics_for_channel(root, "Fluorescence_488_nm_Ex").ni == pytest.approx(1.515)
+    finally:
+        set_session_ni(None)
+
+
+def test_a_session_na_override_reaches_the_optics_and_is_cleared_by_none(tmp_path):
+    from squidxplorer._decon import set_session_na
+
+    root = _write_acq(tmp_path)
+    try:
+        set_session_na(0.85)
+        assert optics_for_channel(root, "Fluorescence_488_nm_Ex").na == pytest.approx(0.85)
+    finally:
+        set_session_na(None)
+    assert optics_for_channel(root, "Fluorescence_488_nm_Ex").na == pytest.approx(0.75)
+
+
+def test_the_immersion_table_is_value_first_with_the_medium_beside_it():
+    from squidxplorer._decon import IMMERSION_MEDIA, medium_for_ni
+
+    assert IMMERSION_MEDIA[0] == (1.000, "air"), "air is the assumed default and comes first"
+    assert dict(IMMERSION_MEDIA) == {1.000: "air", 1.333: "water", 1.406: "silicone oil",
+                                     1.473: "glycerol", 1.515: "oil"}
+    assert medium_for_ni(1.515) == "oil"
+    assert medium_for_ni(1.2345) == "ni 1.234", "an off-table index is named by its value"

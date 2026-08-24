@@ -108,7 +108,7 @@ def test_the_z_loop_reads_one_plane_at_a_time(master):
     """Streaming, not stacking (~9.4 GB on the real set otherwise). Asserted on read ORDER, not
     RSS: all of plane k's reads must happen before any of plane k+1's."""
     reader = _ZReader(master)
-    stitch_region(reader, "A1", list(range(GRID * GRID)), z_operator="bgsub",
+    stitch_region(reader, "A1", list(range(GRID * GRID)), z_operator=None,
                   register=False, correct_illumination=False)
 
     runs = [z for i, z in enumerate(reader.read_z) if i == 0 or z != reader.read_z[i - 1]]
@@ -172,6 +172,23 @@ def test_the_placement_reports_one_solve_for_the_whole_stack(master):
 # Lifting that refusal makes the combination reachable, hence this guard.
 
 
+def _flatfield_test_op(profiles: dict):
+    """What the shelved `flatfield` operator declared, test-owned: a plane-op stamped
+    corrects_illumination=True with per-channel binding via for_channel."""
+    from squidxplorer.projection import plane_op
+
+    def _op_for(profile):
+        def _f(plane):
+            return correct_flatfield(plane, profile)
+        op = plane_op(_f)
+        op.corrects_illumination = True
+        return op
+
+    base = _op_for(next(iter(profiles.values())))
+    base.for_channel = lambda path, channel: _op_for(profiles[str(channel)])
+    return base
+
+
 def test_the_flatfield_correction_is_not_idempotent(master):
     """The premise of the guard, measured rather than assumed: correcting twice divides the dim
     corners by the gain field's square, it is not a no-op."""
@@ -187,32 +204,20 @@ def test_the_flatfield_correction_is_not_idempotent(master):
     assert int(np.abs(twice.astype(np.int32) - once.astype(np.int32)).max()) > 0
 
 
-def test_stitching_the_flatfield_operator_with_read_path_correction_refuses(master):
-    reader = _ZReader(master)
-    # one profile per channel: project_well specialises the operator per channel (for_channel)
-    set_profiles({c: _vignette_profile() for c in CHANNELS})
-    try:
-        with pytest.raises(ValueError, match="not idempotent"):
-            stitch_region(reader, "A1", list(range(GRID * GRID)), z_operator="flatfield",
-                          register=False)           # correct_illumination defaults to ON
-        with pytest.raises(ValueError, match="not idempotent"):
-            stitch_region(reader, "A1", list(range(GRID * GRID)), z_operator="flatfield",
-                          register=False, correct_illumination=True)
-    finally:
-        clear_profile()
-
-
-def test_the_guard_catches_an_operator_registered_under_another_name(master):
-    """Keyed on the declaration, not the string "flatfield": `flatfield_op(profile)` can be
-    registered under any name, and a `== "flatfield"` guard would miss it."""
-    from squidxplorer._flatfield import flatfield_op
-
-    name = "flatfield_under_another_name"
-    add_operator(name, flatfield_op(_vignette_profile()))
+def test_stitching_a_correcting_operator_with_read_path_correction_refuses(master):
+    """Keyed on the corrects_illumination DECLARATION, not any operator name: exactly one of
+    the read path and the operator may flat-field per pass."""
+    profile = _vignette_profile()
+    name = "ff_test_guard"
+    add_operator(name, _flatfield_test_op({c: profile for c in CHANNELS}))
     try:
         reader = _ZReader(master)
         with pytest.raises(ValueError, match="not idempotent"):
-            stitch_region(reader, "A1", list(range(GRID * GRID)), z_operator=name, register=False)
+            stitch_region(reader, "A1", list(range(GRID * GRID)), z_operator=name,
+                          register=False)           # correct_illumination defaults to ON
+        with pytest.raises(ValueError, match="not idempotent"):
+            stitch_region(reader, "A1", list(range(GRID * GRID)), z_operator=name,
+                          register=False, correct_illumination=True)
     finally:
         _OPERATORS.pop(name, None)
 
@@ -224,15 +229,16 @@ def test_each_single_correction_path_stays_available_and_corrects_exactly_once(m
     profile = _vignette_profile()
     fovs = list(range(GRID * GRID))
 
-    set_profiles({c: profile for c in CHANNELS})
+    name = "ff_test_single"
+    add_operator(name, _flatfield_test_op({c: profile for c in CHANNELS}))
     try:
-        by_operator = np.asarray(stitch_region(_ZReader(master), "A1", fovs, z_operator="flatfield",
+        by_operator = np.asarray(stitch_region(_ZReader(master), "A1", fovs, z_operator=name,
                                                register=False, correct_illumination=False))
         by_read_path = np.asarray(stitch_region(
             _ZReader(master), "A1", fovs, z_operator=_PASSTHROUGH, register=False,
             correct_illumination=True, flatfield={c: profile for c in CHANNELS}))
     finally:
-        clear_profile()
+        _OPERATORS.pop(name, None)
 
     uncorrected = np.asarray(stitch_region(_ZReader(master), "A1", fovs, z_operator=_PASSTHROUGH,
                                            register=False, correct_illumination=False))
@@ -246,14 +252,20 @@ def test_each_single_correction_path_stays_available_and_corrects_exactly_once(m
 
 
 def test_stitching_a_label_operator_refuses_rather_than_averaging_object_ids(master):
-    """Feathered blending of integer object ids produces objects that do not exist."""
-    labels = [n for n, op in _OPERATORS.items() if op.produces == "labels"]
-    assert labels, "expected at least one labels operator (spot/cellpose) to be registered"
-    reader = _ZReader(master)
-    for name in labels:
+    """Feathered blending of integer object ids produces objects that do not exist. The guard
+    reads produces=="labels" off the record — a test-registered labels op, since the built-in
+    segmenters were shelved 2026-08-24 (the labels vocabulary itself stays plugin surface)."""
+    from squidxplorer.projection import labels_op, plane_op
+
+    name = "labels_zp_test"
+    add_operator(name, labels_op(plane_op(lambda p: (p > p.mean()).astype(p.dtype))))
+    try:
+        reader = _ZReader(master)
         with pytest.raises(ValueError, match="label"):
             stitch_region(reader, "A1", list(range(GRID * GRID)), z_operator=name,
                           register=False, correct_illumination=False)
+    finally:
+        _OPERATORS.pop(name, None)
 
 
 def test_project_well_z_selects_exactly_one_acquisition_plane(master):

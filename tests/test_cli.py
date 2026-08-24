@@ -40,7 +40,7 @@ def test_input_folder_validator_rejects_missing(tmp_path):
 def test_operator_validator_accepts_region_operators(squid_dataset):
     # the CLI must not be narrower than the command layer: region operators are valid operators too.
     root, _ = squid_dataset
-    for name in ("mip", "stitch", "coordinate"):
+    for name in ("mip", "stitch", "register"):
         assert ProcessParameters(input_folder=str(root), operator=name).operator == name
 
 
@@ -50,17 +50,18 @@ def test_operator_validator_names_what_it_can_run(squid_dataset):
         ProcessParameters(input_folder=str(root), operator="nope")
 
 
-def test_param_is_refused_against_the_operators_own_declaration(squid_dataset):
+def test_param_is_refused_against_the_operators_own_declaration(squid_dataset,
+                                                                blob_operator):
     root, _ = squid_dataset
     with pytest.raises(ValueError, match="does not take bogus"):
-        ProcessParameters(input_folder=str(root), operator="spot", param=["bogus=1"])
+        ProcessParameters(input_folder=str(root), operator=blob_operator, param=["bogus=1"])
     with pytest.raises(ValueError, match="'mip' does not take min_area_px"):
         ProcessParameters(input_folder=str(root), operator="mip", param=["min_area_px=80"])
 
 
-def test_param_values_are_python_literals(squid_dataset):
+def test_param_values_are_python_literals(squid_dataset, blob_operator):
     root, _ = squid_dataset
-    p = ProcessParameters(input_folder=str(root), operator="spot",
+    p = ProcessParameters(input_folder=str(root), operator=blob_operator,
                           param=["min_area_px=80", "split_touching=False", "sigma_px=1.5"])
     assert p.parameters() == {"min_area_px": 80, "split_touching": False, "sigma_px": 1.5}
 
@@ -194,15 +195,15 @@ def test_unknown_well_is_refused_by_name_before_anything_is_written(squid_datase
     assert not list(tmp_path.glob("*.hcs"))        # no output tree was made
 
 
-def test_operator_parameters_reach_the_operator(squid_dataset, tmp_path):
+def test_operator_parameters_reach_the_operator(squid_dataset, tmp_path, blob_operator):
     # the PIXELS have to differ, not just "the flag was accepted".
     import zarr
 
     root, _ = squid_dataset
     loose = run(ProcessParameters(input_folder=str(root), output_folder=str(tmp_path / "loose"),
-                                  operator="spot", param=["min_area_px=1"]))
+                                  operator=blob_operator, param=["min_area_px=1"]))
     strict = run(ProcessParameters(input_folder=str(root), output_folder=str(tmp_path / "strict"),
-                                   operator="spot", param=["min_area_px=100000"]))
+                                   operator=blob_operator, param=["min_area_px=100000"]))
     n_loose = int(zarr.open_array(str(Path(loose["plate"]) / "B" / "2" / "0" / "0"))[:].max())
     n_strict = int(zarr.open_array(str(Path(strict["plate"]) / "B" / "2" / "0" / "0"))[:].max())
     assert n_strict == 0 < n_loose

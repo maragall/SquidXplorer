@@ -40,9 +40,11 @@ def test_the_menu_groups_operators_by_their_declared_extra():
     assert rows[0].extra == "core"
     assert "mip" in _row(rows, "core").operators
     stitch = _row(rows, "stitch")
-    assert {"stitch", "coordinate"} <= set(stitch.operators)
+    assert {"stitch", "register"} <= set(stitch.operators)
     assert "tilefusion" in stitch.requires
-    assert "cellpose" in _row(rows, "segment").operators
+    # segment (cellpose) was shelved 2026-08-24 with the spot/cellpose operators: the menu is
+    # registry-derived, so the row disappears with them rather than offering a dead install.
+    assert not [r for r in rows if r.extra == "segment"]
 
 
 def test_an_operator_registered_with_an_extra_appears_in_its_own_row():
@@ -58,11 +60,11 @@ def test_an_operator_registered_with_an_extra_appears_in_its_own_row():
         del _OPERATORS["_menu_test_op"]
 
 
-def test_defaults_match_the_plan_decon_checked_segment_unchecked():
+def test_defaults_match_the_plan_decon_checked():
     rows = menu.build_menu(probe=_probe_ok)
     for extra in ("core", "stitch", "decon"):
         assert _row(rows, extra).checked, f"{extra} should start checked"
-    assert not _row(rows, "segment").checked
+
 
 
 # the CUDA probe
@@ -141,7 +143,7 @@ def test_a_rerun_reuses_the_existing_env(tmp_path):
     py = bootstrap.env_python(env)
     py.parent.mkdir(parents=True)
     py.touch()
-    cmds = bootstrap.commands("/opt/uv/uv", ["segment"], "x.whl", env)
+    cmds = bootstrap.commands("/opt/uv/uv", ["stitch"], "x.whl", env)
     assert [c[1] for c in cmds] == ["pip"], "an existing env must not be recreated"
 
 

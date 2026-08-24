@@ -39,18 +39,17 @@ def test_every_registrar_takes_requires_by_the_same_keyword():
     """Checked by signature so a new registrar cannot quietly ship without it."""
     import inspect
 
-    from squidxplorer._spots import add_segmentation_operator
     from squidxplorer._stitch import add_region_operator
 
-    for fn in (s.add_operator, add_region_operator, add_segmentation_operator):
+    for fn in (s.add_operator, add_region_operator):
         assert "requires" in inspect.signature(fn).parameters, fn.__name__
 
 
 def test_a_bare_string_requires_is_read_as_one_module_not_eight_letters():
-    """The tuple-comma trap. ``requires="cellpose"`` must mean one module."""
-    s.add_operator("tpl_bare_string", _passthrough, requires="cellpose")
+    """The tuple-comma trap. ``requires="somepkg"`` must mean one module."""
+    s.add_operator("tpl_bare_string", _passthrough, requires="somepkg")
 
-    assert s.operator_requires("tpl_bare_string") == ("cellpose",)
+    assert s.operator_requires("tpl_bare_string") == ("somepkg",)
 
 
 def test_a_requirement_that_is_not_a_module_name_is_refused_at_registration():
@@ -205,9 +204,6 @@ def test_list_operators_reports_availability_without_filtering_the_list(unavaila
 def test_the_built_in_operators_with_heavyweight_lazy_imports_declare_them():
     """Pinned by name so it is not rediscovered on the next clean install."""
     assert s.operator_requires("decon") == ("petakit",)
-    assert s.operator_requires("decon3d") == ("petakit",)
-    assert s.operator_requires("flatfield") == ("tilefusion",)
-    assert s.operator_requires("cellpose") == ("cellpose",)
 
 
 def test_every_region_operator_declares_its_requirements():
@@ -371,7 +367,7 @@ def test_discovery_is_additive_the_built_ins_do_not_go_through_it():
     """The hardcoded imports keep working; discovery is additive."""
     declared = {name for name, _target, _dist in s.declared_operator_plugins()}
 
-    for built_in in ("mip", "reference", "decon", "bgsub", "flatfield", "spot", "cellpose"):
+    for built_in in ("mip", "decon"):
         assert built_in in s.available_plane_operators()
         assert built_in not in declared
 

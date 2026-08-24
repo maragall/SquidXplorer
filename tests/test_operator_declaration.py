@@ -23,7 +23,6 @@ from squidxplorer import (
     runnable_operators,
 )
 from squidxplorer._engine import Param, _resolve_operator, add_operator, bind_operator
-from squidxplorer._spots import LAYER_KEY as SPOT_KEY
 
 napari = pytest.importorskip("napari")
 
@@ -49,21 +48,6 @@ def mosaic():
     from squidxplorer._napari_view import MosaicLayers
 
     return MosaicLayers(ViewerModel())
-
-
-@pytest.fixture(autouse=True)
-def _flatfield_profile():
-    """Install an identity profile so ``flatfield`` can be RUN here (it refuses with none)."""
-    from squidxplorer import _flatfield
-
-    before = _flatfield.active_profiles()
-    _flatfield.set_profiles(
-        {"405": _flatfield.FlatfieldProfile(np.ones((64, 64), dtype=np.float32))})
-    yield
-    if not before:
-        _flatfield.clear_profile()
-    else:
-        _flatfield.set_profiles(before)
 
 
 def _run(name: str, plane: np.ndarray) -> np.ndarray:
@@ -119,12 +103,12 @@ def test_every_operator_delivers_the_result_kind_it_declares(name, mosaic):
             f"delivered as an Image it will be auto-windowed as if its object ids were photons")
 
 
-def test_the_conformance_fixture_can_tell_the_two_kinds_apart():
+def test_the_conformance_fixture_can_tell_the_two_kinds_apart(blob_operator):
     plane = _four_nuclei()
     assert not _is_a_label_image(_run("mip", plane))
-    assert _is_a_label_image(_run(SPOT_KEY, plane))
+    assert _is_a_label_image(_run(blob_operator, plane))
     # ...and the discriminator is not simply "is it integer": both are uint16.
-    assert _run("mip", plane).dtype == _run(SPOT_KEY, plane).dtype
+    assert _run("mip", plane).dtype == _run(blob_operator, plane).dtype
 
 
 def test_a_labels_result_is_not_handed_a_contrast_window(mosaic):
@@ -152,13 +136,9 @@ def test_a_labels_declaration_over_float_pixels_is_refused_naming_the_operator(m
 
 #: The name comparisons that exist TODAY, with the reason each survives.
 #: An entry here is a debt, not a licence: adding one requires a reason in this dict.
-KNOWN_NAME_BRANCHES = {
-    ("squidxplorer/_viewer.py", "flatfield"):
-        "run_operator auto-estimates an illumination profile before running flatfield. It is a "
-        "PRECONDITION expressed as a name because the registry could not carry the profile as a "
-        "parameter; _flatfield.set_profile is a module-level global behind a lock for the same "
-        "reason.",
-}
+#: (run_operator's `key == "flatfield"` arm was the one debt; it was deleted with the shelved
+#: flatfield operator, 2026-08-24.)
+KNOWN_NAME_BRANCHES = {}
 
 
 def _name_branches() -> list:
@@ -200,20 +180,20 @@ def test_the_known_name_branch_list_cannot_go_stale():
 
 # 3. parameters on the registry entry
 
-def test_one_entry_runs_at_a_value_the_registration_never_named():
+def test_one_entry_runs_at_a_value_the_registration_never_named(blob_operator):
     plane = _four_nuclei()
-    loose = bind_operator(SPOT_KEY)([plane])
-    strict = bind_operator(SPOT_KEY, {"min_area_px": 5000})([plane])
-    assert loose.max() == 4, f"the fixture should hold four nuclei, got {loose.max()}"
+    loose = bind_operator(blob_operator)([plane])
+    strict = bind_operator(blob_operator, {"min_area_px": 5000})([plane])
+    assert loose.max() >= 1, f"the fixture should hold objects, got {loose.max()}"
     assert strict.max() == 0, "min_area_px did not reach the segmenter"
 
 
-def test_the_default_binding_is_the_object_the_table_holds():
+def test_the_default_binding_is_the_object_the_table_holds(blob_operator):
     """Identity, not equality: no kwargs must return the exact registered callable."""
-    op = _resolve_operator(SPOT_KEY)
-    assert bind_operator(SPOT_KEY) is op.fn
-    assert bind_operator(SPOT_KEY, {}) is op.fn
-    assert bind_operator(SPOT_KEY, None) is op.fn
+    op = _resolve_operator(blob_operator)
+    assert bind_operator(blob_operator) is op.fn
+    assert bind_operator(blob_operator, {}) is op.fn
+    assert bind_operator(blob_operator, None) is op.fn
 
 
 def test_an_operator_that_declares_no_parameters_refuses_them_by_name():
@@ -222,18 +202,16 @@ def test_an_operator_that_declares_no_parameters_refuses_them_by_name():
         bind_operator("mip", {"radius_px": 3})
 
 
-def test_an_undeclared_parameter_is_refused_naming_what_is_accepted():
+def test_an_undeclared_parameter_is_refused_naming_what_is_accepted(blob_operator):
     with pytest.raises(ValueError, match="no parameter 'diameter'"):
-        bind_operator(SPOT_KEY, {"diameter": 30})
+        bind_operator(blob_operator, {"diameter": 30})
 
 
-def test_a_declared_parameter_defaults_to_the_dataclass_it_came_from():
-    from squidxplorer._spots import DEFAULT_PARAMS
-
-    defaults = _resolve_operator(SPOT_KEY).defaults()
-    assert defaults["min_area_px"] == DEFAULT_PARAMS.min_area_px
-    assert defaults["sigma_px"] == DEFAULT_PARAMS.sigma_px
-    assert set(defaults) == {"sigma_px", "min_area_px", "min_distance_px", "split_touching"}
+def test_declared_defaults_are_readable_off_the_record(blob_operator):
+    defaults = _resolve_operator(blob_operator).defaults()
+    assert defaults["min_area_px"] == 30
+    assert defaults["sigma_px"] == 2.0
+    assert set(defaults) == {"sigma_px", "min_area_px", "split_touching"}
 
 
 def test_a_registered_factory_is_called_at_its_declared_defaults():
@@ -262,39 +240,39 @@ def test_an_unknown_result_kind_is_refused_at_registration():
         add_operator("_decl_test_kind", lambda planes: next(iter(planes)), produces="lables")
 
 
-# 4. cellpose, as an operator
+# 4. the shelved operators, pinned absent
 
-def test_cellpose_is_a_peer_operator_in_the_one_registry():
-    from squidxplorer._cellpose import OPERATOR_NAME
+def test_the_shelved_operators_are_gone_whole():
+    """Absence pins (Julio, 2026-08-24): spot, cellpose, bgsub, keepz, coordinate, flatfield,
+    reference, decon3d. Reinstating starts from git history, not a stub. The labels VOCABULARY
+    (labels_op, produces="labels", the nearest-only labels pyramid reducer) deliberately stays:
+    it is plugin/template surface."""
+    import importlib.util
 
-    from squidxplorer._operations import runnable_operators
+    for name in ("spot", "cellpose", "bgsub", "keepz", "coordinate", "flatfield",
+                 "reference", "decon3d"):
+        assert name not in runnable_operators(), f"{name} is back in the registry"
+        ok, why = operator_available(name)
+        assert not ok and name in why
 
-    assert OPERATOR_NAME in available_plane_operators()
-    # ...and therefore in every surface that reads the registry rather than a hardcoded list.
-    assert OPERATOR_NAME in runnable_operators()
+    for module in ("squidxplorer._spots", "squidxplorer._cellpose", "squidxplorer._background"):
+        assert importlib.util.find_spec(module) is None, f"{module} is back on disk"
+
+    for export in ("SpotParams", "SpotResult", "detect_spots", "spots_op",
+                   "BackgroundParams", "bgsub_op", "subtract_background", "flatfield_op",
+                   "deconvolve", "deconvolve_plane", "decon3d_op"):
+        assert not hasattr(squidxplorer, export), f"squidxplorer.{export} is back"
 
 
-def test_cellpose_declares_the_same_three_things_the_generic_path_reads():
-    from squidxplorer._cellpose import OPERATOR_NAME
+def test_the_labels_vocabulary_survives_the_shelf():
+    """The engine's labels surface is contract, not a corpse: a plugin segmenter still lands."""
+    from squidxplorer import LABELS, labels_op, plane_op
+    from squidxplorer._output import _reducer_for
 
-    assert operator_consumes(OPERATOR_NAME) == frozenset(), "z must survive a segmentation"
-    assert operator_produces(OPERATOR_NAME) == "labels"
-    # One parameter, not SpotParams' four: cellpose_nuclei reads only min_distance_px.
-    assert [p.name for p in operator_params(OPERATOR_NAME)] == ["min_distance_px"]
-
-
-def test_cellpose_refuses_the_parameters_it_does_not_declare_instead_of_ignoring_them():
-    from squidxplorer._cellpose import OPERATOR_NAME
-    from squidxplorer._engine import bind_operator
-
-    for dead in ("sigma_px", "min_area_px", "split_touching"):
-        with pytest.raises(ValueError) as excinfo:
-            bind_operator(OPERATOR_NAME, {dead: 4000})
-        assert dead in str(excinfo.value) and "min_distance_px" in str(excinfo.value), (
-            f"{dead!r} must be refused by name, and the refusal must say what CAN be set; "
-            f"got {excinfo.value}"
-        )
-    bind_operator(OPERATOR_NAME, {"min_distance_px": 20})       # the declared one still binds
+    op = labels_op(plane_op(lambda plane: (plane > 0).astype(plane.dtype)))
+    assert getattr(op, "produces", None) == LABELS
+    fn, kind, _note = _reducer_for(LABELS)      # the nearest-only labels pyramid reducer
+    assert callable(fn) and kind == "nearest"
 
 
 #: A probe value per declared parameter name — different from the default, chosen so the blob
@@ -302,15 +280,12 @@ def test_cellpose_refuses_the_parameters_it_does_not_declare_instead_of_ignoring
 #: differently. A parameter with no probe here fails the build: an untestable declaration is a
 #: control nobody can vouch for.
 PARAMETER_PROBES = {
-    "sigma_px": 9.0,
-    "min_area_px": 400,
-    "min_distance_px": 40,
-    "split_touching": False,
-    "z_operator": "keepz",
+    "z_operator": None,      # keep every plane (the shelved keepz's replacement): depth changes
     "register": False,
     "registration_channel": 1,
     "registration_t": 1,
     "correct_illumination": False,
+    "iterations": 1,   # RL at 1 vs the shipped 3: semi-convergence guarantees different pixels
 }
 
 
@@ -428,24 +403,10 @@ def test_every_parameter_an_operator_DECLARES_changes_its_pixels(name):
         )
 
 
-def test_registering_cellpose_does_not_import_torch():
-    """Run in a subprocess: this pytest process has already imported cellpose elsewhere."""
-    import subprocess
-    import sys
-
-    out = subprocess.run(
-        [sys.executable, "-c",
-         "import squidxplorer, sys; "
-         "assert 'cellpose' in squidxplorer.available_plane_operators(), 'not registered'; "
-         "print('torch' in sys.modules, 'cellpose' in sys.modules)"],
-        cwd=str(_REPO), capture_output=True, text=True, timeout=300)
-    assert out.returncode == 0, out.stderr
-    assert out.stdout.strip() == "False False", out.stdout
-
-
 # 5. the persistence answer, pinned
 
-def test_a_labels_operator_is_written_to_a_plate_as_a_real_z_stack(squid_dataset):
+def test_a_labels_operator_is_written_to_a_plate_as_a_real_z_stack(squid_dataset,
+                                                                  blob_operator):
     """A segmentation is a plane-op, so z survives at full depth — and that is written per FOV."""
     import numpy as np
     import tensorstore as ts
@@ -458,7 +419,7 @@ def test_a_labels_operator_is_written_to_a_plate_as_a_real_z_stack(squid_dataset
         "this fixture has one z plane, so a plane-op's output would be Z==1 and this test could "
         "not tell a written stack from a written plane")
     out = root.parent / "labels_out"
-    manifest = write_plate(reader, str(out), operator=SPOT_KEY, n_fovs=1)
+    manifest = write_plate(reader, str(out), operator=blob_operator, n_fovs=1)
     assert manifest["complete"] and manifest["n_fields_written"] >= 1
 
     region = reader.metadata["regions"][0]
@@ -534,7 +495,7 @@ def test_a_region_window_draws_a_labels_result_as_labels():
                          "_say": lambda self, m: None})()
     win._pane = pane
 
-    added = RV.RegionViewer.deliver_result(win, "spot", _label_result("spot"), visible=True)
+    added = RV.RegionViewer.deliver_result(win, "seg", _label_result("seg"), visible=True)
     assert added == 2
     assert [c[1] for c in pane.mosaic.labels] == ["405", "488"]
     assert pane.mosaic.images == [], "a label image was drawn as an Image layer"
@@ -562,12 +523,13 @@ def test_an_intensity_result_still_goes_to_the_image_path():
 
 # 7. the declaration survives the trip
 
-def test_a_result_carries_the_kind_its_operator_declared():
+def test_a_result_carries_the_kind_its_operator_declared(blob_operator):
     from squidxplorer._operations import operator_name, result_kind
 
-    assert operator_name("spot@tab2") == "spot"
+    assert operator_name(f"{blob_operator}@tab2") == blob_operator
     assert operator_name("mip") == "mip"
-    assert result_kind("spot@tab2") == "labels", "a tab-scoped run lost its declaration"
+    assert result_kind(f"{blob_operator}@tab2") == "labels", (
+        "a tab-scoped run lost its declaration")
     assert result_kind("mip") == "intensity"
     assert result_kind("stitch") == "intensity", "a region operator has no produces column"
     assert result_kind("computed") == "intensity", "the reopened-plate pseudo-key"

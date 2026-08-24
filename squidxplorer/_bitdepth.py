@@ -251,8 +251,7 @@ def range_for(dtype: Any) -> tuple[float, float]:
     """``(lo, hi)`` for ``contrast_limits_range`` on a layer holding ``dtype``. THE call-site API.
 
     The gate is the LAYER's own dtype, not the dataset's: an operator that returns float32
-    (``_background``) or uint8 must keep its own range, or a "bit depth" is being applied to data
-    that has none.
+    or uint8 must keep its own range, or a "bit depth" is being applied to data that has none.
     """
     if dtype is None:
         return _current.range

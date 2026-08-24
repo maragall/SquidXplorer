@@ -44,7 +44,7 @@ def test_a_run_is_recorded_with_its_wall_clock(log):
 
 
 def test_the_outcome_the_block_names_is_the_one_recorded(log):
-    with measure_run("bgsub", "1 region", metrics=log) as run:
+    with measure_run("demo", "1 region", metrics=log) as run:
         run.finish(PARTIAL, "3 wells skipped")
     m = log.last()
     assert m.outcome == PARTIAL and "3 wells skipped" in m.detail

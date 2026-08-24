@@ -17,6 +17,7 @@ from squidxplorer.projection import cast_like
 from squidxplorer._engine import (
     _NOT_A_WELL_FAULT,
     MissingOperatorDependency,
+    Operator,
     Param,
     _default_workers,
     _resolve_operator,
@@ -28,6 +29,8 @@ from squidxplorer._placement import PlacedArray, Placement
 from squidxplorer._volume import allocate, release
 from squidxplorer.projection import (
     LABELS,
+    PLANE_OP,
+    plane_op,
     project_well,
     scope_wells,
 )
@@ -441,12 +444,19 @@ def _mosaic_geometry(
     return (h, w), origins
 
 
+#: What ``z_operator=None`` resolves to: the identity plane-op, so every acquired z plane is
+#: fused unchanged. A module-local record, DELIBERATELY not in the registry — "keep every
+#: plane" is a stitch-family mode, not an operator anyone runs on its own (the registered
+#: ``keepz`` was shelved 2026-08-24 for exactly that reason).
+_KEEP_EVERY_PLANE = Operator("(keep every z plane)", plane_op(lambda plane: plane), PLANE_OP)
+
+
 def stitch_region(
     reader: "SquidReader",
     region: str,
     fovs: Sequence[int],
     *,
-    z_operator: str = "mip",
+    z_operator: Optional[str] = "mip",
     register: bool = True,
     registration_channel=None,
     channels: Optional[Sequence[int]] = None,
@@ -496,7 +506,9 @@ def stitch_region(
     # blend_px=None is maragall/stitcher's "Auto": measure the overlap instead of guessing.
     if blend_px is None:
         blend_px = auto_blend_px(positions, pixel_size, tile_shape)
-    _op = _resolve_operator(z_operator)
+    # z_operator=None means KEEP EVERY PLANE: each acquired z plane is fused unchanged, no
+    # inner reducer runs. (It replaced the shelved `keepz` registry entry, 2026-08-24.)
+    _op = _KEEP_EVERY_PLANE if z_operator is None else _resolve_operator(z_operator)
 
     reg_c_global = _resolve_registration_channel(meta, registration_channel)
 
@@ -711,7 +723,8 @@ RegionOperator = Callable[..., np.ndarray]
 _STITCH_PARAMS = (
     Param("z_operator", "mip",
           "what each FOV's z-stack becomes before fusion; a z-reducer collapses it to one "
-          "plane, a plane-op keeps every plane"),
+          "plane, a plane-op keeps every plane, and None keeps every acquired plane "
+          "unchanged (no inner operator runs)"),
     Param("register", True,
           "solve per-tile offsets from the overlaps; off = stage-coordinate placement"),
     Param("registration_channel", 0,
@@ -738,25 +751,11 @@ _STITCH_ACCEPTS = ("channels", "blend_px", "correct_distortion", "flatfield", "u
                    "geometry", "timer")
 
 
-def _coordinate_factory(**params):
-    """Coordinate placement: :func:`stitch_region` with registration disabled (the control)."""
-    def coordinate(reader, region, fovs, **kwargs):
-        return stitch_region(reader, region, fovs, register=False, **{**params, **kwargs})
-    return coordinate
-
-
-#: `coordinate` declares the stitch knobs that survive with registration off; the registration
-#: family (register itself, registration_channel/_t/_z) is neither declared nor accepted, so
-#: passing one is a NAMED refusal instead of a silently ignored number.
-_COORDINATE_PARAMS = tuple(p for p in _STITCH_PARAMS
-                           if p.name in ("z_operator", "correct_illumination"))
-_COORDINATE_ACCEPTS = tuple(a for a in _STITCH_ACCEPTS if a != "registration_z")
+# (`coordinate` — stitch_region with registration disabled, the control — was shelved
+# 2026-08-24; register=False on `stitch` is the same run. Git history reinstates.)
 
 add_region_operator("stitch", _stitch_factory, params=_STITCH_PARAMS, requires=("tilefusion",),
                     extra="stitch", accepts=_STITCH_ACCEPTS, inner_param="z_operator")
-add_region_operator("coordinate", _coordinate_factory, params=_COORDINATE_PARAMS,
-                    requires=("tilefusion",), extra="stitch",
-                    accepts=_COORDINATE_ACCEPTS, inner_param="z_operator")
 
 
 def _accepts_kwarg(fn, name: str) -> bool:

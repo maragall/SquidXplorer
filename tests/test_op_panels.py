@@ -96,27 +96,25 @@ def test_the_kwargs_are_accepted_by_stitch_region_itself():
 # the stitch guard, surfaced BEFORE the run
 # ---------------------------------------------------------------------------------------
 
-def test_a_labels_operator_is_refused_with_a_sentence_naming_the_way_out():
+def test_a_labels_operator_is_refused_with_a_sentence_naming_the_way_out(blob_operator):
     """``stitch_region`` raises for a labels operator; the panel asks the same registry first
     rather than let the user discover it after a multi-minute run."""
-    why = stitch_refusal("cellpose")
+    why = stitch_refusal(blob_operator)
     assert why is not None
-    assert "cellpose" in why
+    assert blob_operator in why
     assert "label" in why.lower()
     assert "per FOV" in why or "intensity" in why    # it must say what to do instead
 
 
-def test_a_plane_op_is_no_longer_refused():
+def test_an_intensity_operator_is_not_refused(identity_operator):
     """Per-plane fusion made a plane-op stitchable; a pre-check outliving that change would be
     the engine's answer, wrong, delivered with authority."""
+    assert stitch_refusal(identity_operator) is None
     assert stitch_refusal("decon") is None
-    assert stitch_refusal("bgsub") is None
-    assert stitch_refusal("flatfield") is None
 
 
 def test_a_z_reducer_is_not_refused():
     assert stitch_refusal("mip") is None
-    assert stitch_refusal("decon3d") is None
 
 
 def test_an_unknown_operator_is_named_rather_than_crashing_the_panel():
@@ -272,17 +270,17 @@ def test_turning_registration_off_disables_the_registration_only_controls(qapp):
     assert p.rel_spin.isEnabled()
 
 
-def test_a_labels_z_operator_disables_the_run_button_and_says_why(qapp):
+def test_a_labels_z_operator_disables_the_run_button_and_says_why(qapp, blob_operator):
     host = _Host()
     p = StitcherPanel(host)
-    p.z_operator_combo.setCurrentText("cellpose")
+    p.z_operator_combo.setCurrentText(blob_operator)
     assert not p.run_btn.isEnabled()
     assert host.said and "label" in host.said[-1].lower()
     p.z_operator_combo.setCurrentText("mip")
     assert p.run_btn.isEnabled()
 
 
-def test_a_plane_op_z_operator_leaves_the_run_button_enabled(qapp):
+def test_an_intensity_z_operator_leaves_the_run_button_enabled(qapp):
     """The button follows the ENGINE, not a guard the engine outgrew."""
     host = _Host()
     p = StitcherPanel(host)
@@ -290,12 +288,31 @@ def test_a_plane_op_z_operator_leaves_the_run_button_enabled(qapp):
     assert p.run_btn.isEnabled()
 
 
-def test_the_run_handler_itself_refuses_labels_not_just_the_disabled_button(qapp):
+def test_keep_every_plane_is_offered_and_spells_z_operator_none(qapp):
+    """The shelved `keepz` identity's replacement: the combo's label maps to z_operator=None —
+    every acquired plane fused unchanged — and never reaches the registry as a name."""
+    from squidxplorer._op_panels import KEEP_EVERY_PLANE
+
+    host = _Host()
+    p = StitcherPanel(host)
+    labels = [p.z_operator_combo.itemText(i) for i in range(p.z_operator_combo.count())]
+    assert KEEP_EVERY_PLANE in labels
+    assert "keepz" not in labels
+    p.z_operator_combo.setCurrentText(KEEP_EVERY_PLANE)
+    assert p.run_btn.isEnabled(), host.said
+    p._run()
+    (key, kw), = host.calls
+    assert key == "stitch"
+    assert kw["operator_kwargs"]["z_operator"] is None
+
+
+def test_the_run_handler_itself_refuses_labels_not_just_the_disabled_button(qapp,
+                                                                            blob_operator):
     """Exercises the SECOND defence: clicking a disabled button never enters the handler, so
     the guard inside ``_run`` must refuse independently of the button's enabled state."""
     host = _Host()
     p = StitcherPanel(host)
-    p.z_operator_combo.setCurrentText("cellpose")
+    p.z_operator_combo.setCurrentText(blob_operator)
     p.run_btn.setEnabled(True)                  # simulate reaching _run some other way
     p._run()
     assert host.calls == [], "the run must not start"
@@ -644,17 +661,11 @@ def test_a_default_this_panel_cannot_draw_is_named_rather_than_guessed():
 # -- the refusal ------------------------------------------------------------------------
 
 def test_a_chain_expression_key_is_refused_naming_the_removal():
-    why = panel_refusal("bgsub + spot")
+    why = panel_refusal("demo + blob")
     assert why is not None and "chaining was removed" in why
 
-def test_a_parameterised_operator_is_not_refused():
-    assert panel_refusal("spot") is None
-    # cellpose is the [segment] extra, not installed by `.[gui,test]`; on a clean venv it
-    # correctly refuses "needs cellpose, which is not installed". Guarded rather than
-    # deleted, because when the extra IS installed this pins that requires= being satisfied
-    # still yields a panel.
-    pytest.importorskip("cellpose")
-    assert panel_refusal("cellpose") is None
+def test_a_parameterised_operator_is_not_refused(blob_operator):
+    assert panel_refusal(blob_operator) is None
 
 
 def test_a_region_operator_that_declares_no_params_is_refused_for_that_reason():
@@ -669,8 +680,8 @@ def test_a_region_operator_that_declares_no_params_is_refused_for_that_reason():
     why = panel_refusal("bare_region_op_for_panels")
     assert why and "declares no params" in why
 
-    assert panel_refusal("coordinate") is None, (
-        "coordinate declares params now; a generated panel must serve it, not a refusal")
+    assert panel_refusal("register") is None, (
+        "register declares params; a generated panel must serve it, not a refusal")
 
 
 def test_a_key_that_is_not_an_operator_is_refused_by_name():
@@ -701,39 +712,39 @@ def test_an_undrawable_parameter_refuses_the_whole_panel_naming_the_parameter():
 
 # -- the Qt half ------------------------------------------------------------------------
 
-def test_the_panel_builds_one_widget_per_declared_parameter(qapp):
+def test_the_panel_builds_one_widget_per_declared_parameter(qapp, blob_operator):
     from squidxplorer._engine import operator_params
 
-    p = GenericOperatorPanel(_Host(), "spot")
-    assert sorted(p.widgets) == sorted(param.name for param in operator_params("spot"))
-    assert len(p.widgets) == 4
+    p = GenericOperatorPanel(_Host(), blob_operator)
+    assert sorted(p.widgets) == sorted(param.name for param in operator_params(blob_operator))
+    assert len(p.widgets) == 3
 
 
-def test_each_widget_starts_at_the_declared_default(qapp):
+def test_each_widget_starts_at_the_declared_default(qapp, blob_operator):
     """An untouched panel must launch what the operator ships with — same rule
     ``STITCH_DEFAULTS`` is held to."""
     from squidxplorer._engine import operator_params
 
-    p = GenericOperatorPanel(_Host(), "spot")
-    declared = {param.name: param.default for param in operator_params("spot")}
+    p = GenericOperatorPanel(_Host(), blob_operator)
+    declared = {param.name: param.default for param in operator_params(blob_operator)}
     assert p.kwargs() == declared
 
 
-def test_the_blurb_becomes_the_tooltip(qapp):
+def test_the_blurb_becomes_the_tooltip(qapp, blob_operator):
     from squidxplorer._engine import operator_params
 
-    blurbs = {param.name: param.blurb for param in operator_params("spot")}
-    p = GenericOperatorPanel(_Host(), "spot")
+    blurbs = {param.name: param.blurb for param in operator_params(blob_operator)}
+    p = GenericOperatorPanel(_Host(), blob_operator)
     assert p.widgets, "the panel drew no widgets"
     for name, widget in p.widgets.items():
         assert blurbs[name], f"{name} declares no blurb, so the tooltip claim is untested"
         assert widget.toolTip() == blurbs[name]
 
 
-def test_a_value_read_back_keeps_the_declared_type(qapp):
+def test_a_value_read_back_keeps_the_declared_type(qapp, blob_operator):
     """A ``min_area_px`` arriving as 30.0 where 30 was declared would survive all the way to
     a comparison against an integer pixel count."""
-    p = GenericOperatorPanel(_Host(), "spot")
+    p = GenericOperatorPanel(_Host(), blob_operator)
     p.widgets["min_area_px"].setValue(400)
     kwargs = p.kwargs()
     assert kwargs["min_area_px"] == 400 and isinstance(kwargs["min_area_px"], int)
@@ -741,35 +752,38 @@ def test_a_value_read_back_keeps_the_declared_type(qapp):
     assert isinstance(kwargs["split_touching"], bool)
 
 
-def test_the_widget_s_value_travels_to_run_operator_through_operator_kwargs(qapp):
+def test_the_widget_s_value_travels_to_run_operator_through_operator_kwargs(qapp,
+                                                                            blob_operator):
     """The SAME argument StitcherPanel uses, so this is an already-tested path."""
     host = _Host()
-    p = GenericOperatorPanel(host, "spot")
+    p = GenericOperatorPanel(host, blob_operator)
     p.widgets["min_area_px"].setValue(400)
     p.widgets["split_touching"].setChecked(False)
     p.run_btn.click()
     key, kw = host.calls[0]
-    assert key == "spot"
+    assert key == blob_operator
     assert kw["operator_kwargs"]["min_area_px"] == 400
     assert kw["operator_kwargs"]["split_touching"] is False
     assert kw["save"] is False
 
 
-def test_every_kwarg_the_panel_emits_is_a_parameter_the_operator_accepts(qapp):
+def test_every_kwarg_the_panel_emits_is_a_parameter_the_operator_accepts(qapp,
+                                                                          blob_operator):
     """The panel's output must survive ``Operator.bind``, which refuses an unknown name loud."""
     from squidxplorer import bind_operator
 
     host = _Host()
-    p = GenericOperatorPanel(host, "spot")
+    p = GenericOperatorPanel(host, blob_operator)
     p.widgets["min_area_px"].setValue(80)
     p.run_btn.click()
-    bind_operator("spot", host.calls[0][1]["operator_kwargs"])   # raises if a name is wrong
+    bind_operator(blob_operator, host.calls[0][1]["operator_kwargs"])   # raises if wrong
 
 
-def test_a_plane_op_is_offered_preview_only_and_the_choice_comes_off_consumes(qapp):
-    """``spot`` keeps z at full depth, so there is no plate to save. Read off ``consumes``,
+def test_a_plane_op_is_offered_preview_only_and_the_choice_comes_off_consumes(qapp,
+                                                                               blob_operator):
+    """A plane-op keeps z at full depth, so there is no plate to save. Read off ``consumes``,
     never the name."""
-    p = GenericOperatorPanel(_Host(), "spot")
+    p = GenericOperatorPanel(_Host(), blob_operator)
     assert p._can_save is False
     assert p.save_btn is None                # not built at all, not built-and-hidden
 
@@ -786,5 +800,163 @@ def test_an_operator_with_no_parameters_still_builds_and_says_so(qapp):
     p = GenericOperatorPanel(_Host(), "mip")
     assert p.widgets == {}
     assert p.kwargs() == {}
+
+
+# =======================================================================================
+# THE QC SWEEP STEPPER + the session optics row (2026-08-24)
+# =======================================================================================
+# Julio: "When I do decon, I would like to see the turbo colormap result with the xz, yz
+# as I click iteration by iteration." The sweep captures every iteration of ONE solve; the
+# view steps them; 'use k iterations' writes k into the run's ONE iterations parameter.
+
+@pytest.fixture()
+def clean_decon_session():
+    """The panel installs session NI/NA process-wide on purpose; tests must not leak it."""
+    from squidxplorer._decon import set_session_na, set_session_ni
+
+    yield
+    set_session_ni(None)
+    set_session_na(None)
+
+
+def _sweep_into(view, ks=(1, 2, 3)):
+    """Feed *view* one distinct captured iteration per k, the way the worker's done signal does."""
+    from squidxplorer._decon_qc import qc_composite
+
+    volumes = {}
+    for k in ks:
+        volume = np.zeros((5, 20, 20), dtype=np.float32)
+        volume[2, 10, 10] = 100.0 * k               # genuinely different pixels per iteration
+        volumes[k] = volume
+        view.show_iteration(k, qc_composite(volume, (2, 10, 10)), 0.5 - 0.1 * k,
+                            "improving", "still tightening", volume=volume,
+                            centre=(2, 10, 10), delta=None if k == 1 else float(k))
+    return volumes
+
+
+def test_the_view_steps_iteration_by_iteration_without_a_re_solve(qapp, clean_decon_session):
+    pytest.importorskip("matplotlib")
+    view = DeconQCResultView("A1/0/c0")
+    volumes = _sweep_into(view)
+
+    assert "ITERATION 3 of 3" in view.caption_label.text()
+    view.prev_btn.click()
+    assert "ITERATION 2 of 3" in view.caption_label.text()
+    assert np.array_equal(view._volume, volumes[2]), (
+        "stepping back did not swap the click-resection volume with the picture")
+    view.iter_slider.setValue(1)
+    assert "ITERATION 1 of 3" in view.caption_label.text()
+    view.next_btn.click()
+    assert "ITERATION 2 of 3" in view.caption_label.text()
+    assert [k for k, _ in view.history] == [1, 2, 3], "stepping polluted the history"
+    view.close()
+
+
+def test_the_per_step_change_is_shown_beside_the_ratio(qapp, clean_decon_session):
+    """mean |Δ| vs the previous iteration is the honest 'is it still moving' number; the first
+    iteration has no previous and must not invent one."""
+    pytest.importorskip("matplotlib")
+    view = DeconQCResultView("A1/0/c0")
+    _sweep_into(view, ks=(1, 2))
+    assert "mean |Δ| vs k-1: 2" in view.caption_label.text()
+    view.prev_btn.click()
+    assert "mean |Δ|" not in view.caption_label.text(), "iteration 1 shows a delta against nothing"
+    view.close()
+
+
+def test_use_k_iterations_writes_the_displayed_count_into_the_run(qapp, clean_decon_session):
+    """THE point of the preview: the displayed k lands in the panel's run-iterations control,
+    which is what kwargs() -> operator_kwargs_for feeds every decon run. One source of truth."""
+    pytest.importorskip("matplotlib")
+    from squidxplorer._decon import DEFAULT_ITERATIONS
+
+    panel = DeconQCPanel(_Host())
+    assert panel.kwargs() == {"iterations": DEFAULT_ITERATIONS}
+    view = DeconQCResultView("A1/0/c0")
+    view.useIterations.connect(panel._adopt_iterations)
+    _sweep_into(view)
+    view.prev_btn.click()                          # judge by eye: iteration 2 looks right
+    assert "Use 2 iteration" in view.use_btn.text()
+    view.use_btn.click()
+    assert panel.run_iter_spin.value() == 2
+    assert panel.kwargs() == {"iterations": 2}
+    assert any("2 iteration" in s for s in panel.host.said)
+    view.close()
+
+
+def test_the_result_view_lives_inline_in_the_panel_never_published(qapp, clean_decon_session):
+    """The whole choose-the-iteration loop travels WITH the panel (into the operator dock);
+    publish_qc_result — the plate-tab seam — is deliberately not called any more."""
+    host = _Host()
+    panel = DeconQCPanel(host)
+    panel.run()                                    # dataset is bogus; the view exists anyway
+    try:
+        assert panel._view is not None
+        assert panel.isAncestorOf(panel._view), "the view is not inside the panel"
+        assert host.published == [], "the panel still throws the picture to another window"
+    finally:
+        panel.shutdown()
+
+
+def test_the_panel_assumes_air_and_a_pick_reaches_the_session(qapp, clean_decon_session):
+    from squidxplorer._decon import session_ni, set_session_ni
+
+    set_session_ni(None)
+    p = DeconQCPanel(_Host())
+    assert p.ni_combo.currentText() == "1.000 (air)", "value first, medium in parentheses"
+    assert session_ni() == pytest.approx(1.000), "opening the panel did not install air"
+    p.ni_combo.setCurrentIndex(1)
+    assert p.ni_combo.currentText() == "1.333 (water)"
+    assert session_ni() == pytest.approx(1.333)
+
+
+def test_a_rebuilt_panel_keeps_the_session_medium(qapp, clean_decon_session):
+    """Session-scoped means a re-opened panel shows the medium already chosen, not air again."""
+    from squidxplorer._decon import set_session_ni
+
+    set_session_ni(1.515)
+    p = DeconQCPanel(_Host())
+    assert p.ni_combo.currentText() == "1.515 (oil)"
+
+
+def test_an_impossible_na_is_flagged_by_name_in_the_panel(qapp, clean_decon_session):
+    p = DeconQCPanel(_Host())                      # air installed
+    p.na_spin.setValue(1.40)
+    assert any("impossible in air" in s for s in p.host.said), (
+        "NA 1.40 under air went unflagged")
+
+
+def test_the_worker_sweeps_a_real_stack_emitting_every_iteration(qapp, clean_decon_session,
+                                                                 squid_dataset, monkeypatch):
+    """End to end on the real fixture: iterations=2 must deliver k=1 AND k=2 (each with its
+    volume and a delta from k >= 2) and then sweep_done — off the Qt thread."""
+    pytest.importorskip("matplotlib")
+    monkeypatch.setenv("SQUIDXPLORER_DECON_DEVICE", "cpu")
+    from squidxplorer import open_reader
+    from squidxplorer._op_panels import _DeconQCWorker
+
+    root, _ = squid_dataset
+    meta = open_reader(str(root)).metadata
+    region, channel = meta["regions"][0], meta["channels"][0]["name"]
+    got, finished, failures = [], [], []
+    worker = _DeconQCWorker(str(root), region, 0, channel, 2, False, 8, 8)
+    worker.done.connect(lambda k, frame, ratio: got.append((k, frame, ratio)))
+    worker.sweep_done.connect(lambda n: finished.append(n))
+    worker.failed.connect(lambda m: failures.append(m))
+    worker.start()
+    import time
+    deadline = time.monotonic() + 60
+    while not (finished or failures) and time.monotonic() < deadline:
+        qapp.processEvents()
+        time.sleep(0.01)
+    worker.wait(5000)
+    assert not failures, f"the sweep failed: {failures}"
+    assert finished == [2]
+    assert [k for k, _, _ in got] == [1, 2]
+    for k, frame, ratio in got:
+        assert frame.volume is not None and frame.centre is not None
+        assert frame.delta is not None, "every capture carries its mean |Δ|"
+    assert not np.array_equal(got[0][1].volume, got[1][1].volume), (
+        "iteration 1 and 2 delivered the same volume")
 
 

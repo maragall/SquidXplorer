@@ -7,9 +7,7 @@ import time
 from typing import Any, Callable, Optional
 
 from qtpy.QtCore import Qt, QTimer
-from qtpy.QtWidgets import (
-    QComboBox, QLabel, QPushButton, QSizePolicy, QHBoxLayout, QVBoxLayout, QWidget,
-)
+from qtpy.QtWidgets import QLabel, QSizePolicy, QVBoxLayout, QWidget
 
 from squidxplorer._napari_view import _DEFAULT_MAX_3D_TEXTURE, MosaicLayers, resolve_viewer
 
@@ -148,8 +146,6 @@ class MosaicPane(QWidget):
         self._viewer = None
         self._native_window = None
         self.ndisplay_button: Optional[QWidget] = None
-        self.detect_button: Optional[QWidget] = None
-        self.detect_channel: Optional[QComboBox] = None   # channel-aware cellpose picker
         self.layer_tree: Optional[QWidget] = None
         self.view_controls_dock = None           # the window's chip block, once docked (below)
         self._button_source = None               # keeps napari's row alive; see _install_ndisplay
@@ -198,60 +194,25 @@ class MosaicPane(QWidget):
             lay.addWidget(msg, 1)
 
     def _install_ndisplay_button(self, lay) -> None:
-        """Build the top control row, keeping napari's own ndisplay button alive (hidden)."""
-        row = QWidget(self)
-        rl = QHBoxLayout(row)
-        rl.setContentsMargins(6, 4, 6, 4)
-        rl.setSpacing(6)
+        """Keep napari's own ndisplay button alive (hidden) and follow its 2D/3D state.
 
+        The visible control row that lived here — the Detect-nuclei channel picker and button —
+        was shelved 2026-08-24 with the spot/cellpose operators; the hidden button object stays
+        because napari's ndisplay state-sync closure holds it.
+        """
         try:
             from napari._qt.widgets.qt_viewer_buttons import QtViewerButtons
-            from napari.qt import get_current_stylesheet
 
             self._button_source = QtViewerButtons(self._viewer)
             btn = self._button_source.ndisplayButton
             # 3D is the ROI native popout, not an embedded toggle. Keep the button object
             # alive for napari's ndisplay state-sync closure, but never show it.
             btn.hide()
-            # napari's icons live in napari's stylesheet; without it the button renders empty.
-            try:
-                row.setStyleSheet(get_current_stylesheet())
-            except Exception:                    # noqa: BLE001 - cosmetic only
-                pass
+            apply_ndisplay_tooltip(btn)      # a tooltip only: this stays NAPARI's 3D button
             self.ndisplay_button = btn
         except Exception as exc:                 # noqa: BLE001 - said out loud, never swallowed
             self.say(f"napari's 2D/3D button could not be mounted ({exc}); "
                      "use the one at the bottom of napari's left column.")
-
-        # The analysis-operator trigger, built outside the try above so a napari upgrade
-        # cannot take the operator off the screen. Channel choice is the user's: the nuclei
-        # signal is not always in 405.
-        rl.addWidget(QLabel("Detect on:", row))
-        self.detect_channel = QComboBox(row)
-        self.detect_channel.setToolTip(
-            "Which channel cellpose segments. Pick the one that actually carries the signal "
-            "(a nuclear stain for nuclei); a blank channel finds nothing."
-        )
-        self.detect_channel.setMinimumWidth(150)
-        rl.addWidget(self.detect_channel)
-
-        self.detect_button = QPushButton("Detect nuclei", row)
-        self.detect_button.setToolTip(
-            "Segment the chosen channel with Cellpose, and overlay the mask and the centroids "
-            "on this canvas."
-        )
-        self.detect_button.setEnabled(False)
-        rl.addWidget(self.detect_button)
-
-        rl.addStretch(1)
-        row.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        #: Exposed so the window can fold this strip into its collapsible operators box
-        #: (UI feedback 2026-08-17: "Move to controls window") — the detect trigger is an
-        #: operator control, and the canvas keeps the pixels.
-        self.detect_row = row
-        lay.addWidget(row)
-        apply_ndisplay_tooltip(btn)      # a tooltip only: this stays NAPARI's 3D button
-        self.ndisplay_button = btn
 
         # Max-res 3D: serve the full-res volume while ndisplay == 3, restore the pyramid in
         # 2D. One owner of 2D/3D (viewer.dims.ndisplay), so the event catches every button.
@@ -590,8 +551,6 @@ def model_pane_class():
             # The QtViewer half: without it, async slices compute and never land.
             self._async_apply = attach_async_slice_apply(self._viewer)
             self.mosaic = MosaicLayers(self._viewer)
-            self.detect_channel = None
-            self.detect_button = None
             self.said = []
             self.shutdowns = 0
             self._on_settle = None

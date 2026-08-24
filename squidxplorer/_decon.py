@@ -1,7 +1,14 @@
-"""Deconvolution operators on the petakit engine with a real vectorial PSF.
+"""THE deconvolution operator (``decon``) on the petakit engine with a real vectorial PSF.
 
-``decon`` is a plane-op convolving with the in-focus PSF plane; ``decon3d`` is a
-z-reducer doing true 3-D RL. Optics are derived per channel via ``for_channel``.
+``decon`` is the volume solve: true 3-D RL over the whole z-stack, every plane kept. It is
+the ONE deconvolution since 2026-08-24 (Julio: the 2-D per-plane variant was shelved — both
+iterate per z-plane and only this one uses the complete PSF; on a 1-plane stack "3D decon
+would still use a 2D PSF, since there is no more to draw from"). ONE code path,
+:func:`deconvolve_stack`, whose PSF depth follows the stack depth — measured on n_z=1: the
+volume solve equals the old per-plane solve (float32 max abs diff 0.00195, uint16 max 1
+count, and the depth-1 3-D PSF's central plane renormalises exactly to the old in-focus
+slice). Optics are derived per channel via ``for_channel``. The old registered name
+``decon3d`` is refused BY NAME with a pointer here.
 """
 
 from __future__ import annotations
@@ -16,8 +23,8 @@ import numpy as np
 from squidxplorer import _decon_gpu
 from squidxplorer._acquisition import load_acquisition_metadata, load_objective_na
 from squidxplorer._channels import excitation_nm
-from squidxplorer._engine import add_operator
-from squidxplorer.projection import cast_like, plane_op
+from squidxplorer._engine import Param, add_operator
+from squidxplorer.projection import cast_like
 
 # RL is semi-convergent; the working point on this instrument, not a textbook default.
 DEFAULT_ITERATIONS: int = 3
@@ -139,36 +146,51 @@ def make_psf(optics: OpticsParams) -> np.ndarray:
     return np.ascontiguousarray(psf, dtype=np.float32)
 
 
-@lru_cache(maxsize=_PSF_CACHE_SIZE)
-def make_psf_2d(optics: OpticsParams) -> np.ndarray:
-    """The in-focus plane of the 3-D PSF, shaped ``(1, Y, X)`` and renormalised to sum 1."""
-    psf3 = make_psf(optics)
-    centre = psf3[psf3.shape[0] // 2]
-    total = float(centre.sum())
-    if total <= 0:
-        raise ValueError(f"the in-focus PSF plane for {optics!r} sums to {total}; cannot normalise")
-    return np.ascontiguousarray((centre / total)[None, ...], dtype=np.float32)
+def _run(volume: np.ndarray, psf: np.ndarray, iterations: int, gpu: bool,
+         snapshot_iters=None):
+    """One call into RL: device selection, optional FFT-length padding, and an all-zero result guard.
 
-
-def _run(volume: np.ndarray, psf: np.ndarray, iterations: int, gpu: bool) -> np.ndarray:
-    """One call into RL: device selection, optional FFT-length padding, and an all-zero result guard."""
+    ``snapshot_iters`` (petakit's own contract) asks ONE solve to capture the estimate after
+    each named iteration; the return is then ``{iter: volume}`` instead of one array. The
+    QC sweep steps those captures back and forth for free — never a re-solve per count.
+    """
     volume = np.ascontiguousarray(volume, dtype=np.float32)
+    snaps = sorted({int(i) for i in snapshot_iters}) if snapshot_iters else None
+    if snaps is not None:
+        iterations = max(int(iterations), snaps[-1])
     device = _decon_gpu.select_device(volume.shape, gpu=gpu, psf_shape=psf.shape)
     _decon_gpu.log_choice(volume.shape, gpu=gpu, psf_shape=psf.shape)
     if device is not None:
-        out = _decon_gpu.rl(volume, psf, iterations, device)
+        out = _decon_gpu.rl(volume, psf, iterations, device, snapshot_iters=snaps)
     else:
         petakit = _petakit()
         widths = (_decon_gpu.pad_plan(volume.shape, psf.shape)
                   if _decon_gpu.cpu_padding_enabled() else (0, 0, 0))
         padded = _decon_gpu._wrap_pad(volume, widths)
-        out = petakit.deconvolve(
-            np.ascontiguousarray(padded), psf,
-            method=METHOD, iterations=iterations, gpu=gpu,
-        )
+        if snaps is not None:
+            import inspect
+
+            if "snapshot_iters" not in inspect.signature(petakit.engine.rl).parameters:
+                raise RuntimeError(
+                    "this petakit build's engine.rl takes no snapshot_iters, so a "
+                    "per-iteration QC sweep cannot capture inside one solve. Update petakit "
+                    "(the pinned SHA in pyproject carries it); refusing to fall back to one "
+                    "full re-solve per iteration count without saying so.")
+            out = petakit.engine.rl(
+                np.ascontiguousarray(padded), psf,
+                n_iter=iterations, gpu=gpu, snapshot_iters=snaps,
+            )
+        else:
+            out = petakit.deconvolve(
+                np.ascontiguousarray(padded), psf,
+                method=METHOD, iterations=iterations, gpu=gpu,
+            )
         if any(widths):
-            out = out[tuple(slice(w, w + n) for w, n in zip(widths, volume.shape))]
-    if np.any(volume) and not np.any(out):
+            core = tuple(slice(w, w + n) for w, n in zip(widths, volume.shape))
+            out = ({k: v[core] for k, v in out.items()} if snaps is not None
+                   else out[core])
+    final = out[snaps[-1]] if snaps is not None else out
+    if np.any(volume) and not np.any(final):
         raise RuntimeError(
             "petakit returned an all-zero result for a non-empty input. That is the failure "
             f"mode method='omw' shows on this instrument's geometry; this call used "
@@ -176,26 +198,6 @@ def _run(volume: np.ndarray, psf: np.ndarray, iterations: int, gpu: bool) -> np.
             "image that would look like a successful deconvolution."
         )
     return out
-
-
-def deconvolve_plane(
-    plane: np.ndarray,
-    optics: Optional[OpticsParams] = None,
-    iterations: int = DEFAULT_ITERATIONS,
-    *,
-    gpu: bool = True,
-) -> np.ndarray:
-    """Deconvolve one plane with the real in-focus PSF for *optics*; same shape and dtype back."""
-    if plane.ndim != 2:
-        raise ValueError(f"deconvolve_plane takes ONE 2-D plane; got shape {plane.shape}")
-    if iterations < 0:
-        raise ValueError(f"iterations must be >= 0, got {iterations}")
-    if iterations == 0:
-        return np.array(plane, copy=True)
-
-    optics = optics or active_optics()
-    out = _run(plane[None, ...], make_psf_2d(optics), iterations, gpu)[0]
-    return cast_like(out, plane.dtype)
 
 
 def deconvolve_stack(
@@ -234,6 +236,78 @@ def deconvolve_stack(
 # Locked because the per-FOV loop runs the operator on a thread pool.
 _lock = threading.Lock()
 _active: Optional[OpticsParams] = None
+
+#: The standard immersion indices, value first, medium beside it (Julio, 2026-08-24: "the
+#: typical NI values"). Air is the assumed default in the panel; a user picks the real medium.
+IMMERSION_MEDIA: tuple[tuple[float, str], ...] = (
+    (1.000, "air"),
+    (1.333, "water"),
+    (1.406, "silicone oil"),
+    (1.473, "glycerol"),
+    (1.515, "oil"),
+)
+
+# Session choices from the decon panel's optics row: ONE source of truth for both the QC
+# preview solve and the real run, applied by optics_for_channel on acquisition-derived optics.
+# Session-scoped on purpose (no prefs file); locked like the optics override above.
+_session_ni: Optional[float] = None
+_session_na: Optional[float] = None
+
+
+def medium_for_ni(ni: float) -> str:
+    """The medium name for an immersion index, when it is one of the standard values."""
+    for value, medium in IMMERSION_MEDIA:
+        if abs(float(ni) - value) < 5e-3:
+            return medium
+    return f"ni {float(ni):.3f}"
+
+
+def set_session_ni(ni: Optional[float]) -> None:
+    """Install the session's immersion index (None clears it; NA-based inference resumes)."""
+    global _session_ni
+    if ni is not None and (not np.isfinite(ni) or ni < 1.0):
+        raise ValueError(f"an immersion index must be >= 1.0 (air), got {ni!r}")
+    with _lock:
+        _session_ni = None if ni is None else float(ni)
+
+
+def session_ni() -> Optional[float]:
+    with _lock:
+        return _session_ni
+
+
+def set_session_na(na: Optional[float]) -> None:
+    """Install a session NA override (None clears it; the acquisition's recorded NA resumes)."""
+    global _session_na
+    if na is not None and (not np.isfinite(na) or na <= 0):
+        raise ValueError(f"NA must be a positive finite number, got {na!r}")
+    with _lock:
+        _session_na = None if na is None else float(na)
+
+
+def session_na() -> Optional[float]:
+    with _lock:
+        return _session_na
+
+
+def apply_session_optics(optics: OpticsParams) -> OpticsParams:
+    """The session's NI / NA choices applied to acquisition-derived *optics*.
+
+    NA <= ni is physics, not preference: a lens cannot collect a cone wider than its medium
+    carries, so NA 1.40 under air is refused BY NAME rather than solved into an impossible PSF.
+    """
+    with _lock:
+        ni, na = _session_ni, _session_na
+    if ni is None and na is None:
+        return optics
+    new_na = float(na) if na is not None else optics.na
+    new_ni = float(ni) if ni is not None else optics.ni
+    if new_ni is not None and new_na > new_ni + 1e-9:
+        raise ValueError(
+            f"NA {new_na:.2f} is impossible in {medium_for_ni(new_ni)} (ni {new_ni:.3f}) — "
+            "pick the objective's actual immersion in the decon panel's optics row.")
+    return OpticsParams(new_na, optics.wavelength_um, optics.dxy_um,
+                        optics.dz_um, optics.nz, new_ni)
 
 
 def set_optics(optics: OpticsParams) -> None:
@@ -274,72 +348,62 @@ def optics_for_channel(path, channel: str) -> OpticsParams:
     """The optics for one channel of one acquisition: override, then acquisition metadata, then a refusal."""
     override = optics_override()
     if override is not None:
-        return override
+        return override                     # the full escape hatch wins whole, session edits and all
     if path is None:
         raise ValueError(
             f"cannot derive the PSF for channel {channel!r}: the operator was not told which "
             "acquisition it is reading, so the emission wavelength is unknown. Pass optics "
-            "explicitly (decon_op(optics=...)) or install an override with set_optics()."
+            "explicitly or install an override with set_optics()."
         )
     try:
-        return _acquisition_optics(str(path), str(channel))
+        optics = _acquisition_optics(str(path), str(channel))
     except Exception as exc:
         raise ValueError(
             f"cannot derive the PSF for channel {channel!r} of {path}: "
             f"{type(exc).__name__}: {exc}. Deconvolution needs this channel's EMISSION "
             "wavelength; refusing to substitute another channel's optics, which is a different "
-            "measurement and not a degraded one. Pass optics explicitly (decon_op(optics=...)) "
+            "measurement and not a degraded one. Pass optics explicitly "
             "or install an override with set_optics()."
         ) from exc
-
-
-def deconvolve(plane: np.ndarray, optics: Optional[OpticsParams] = None) -> np.ndarray:
-    """Deconvolve one plane at the module defaults. *optics* ``None`` -> :func:`active_optics`."""
-    return deconvolve_plane(plane, optics, DEFAULT_ITERATIONS)
+    # Session NI/NA (the decon panel's optics row) is applied AFTER the cached read, so the QC
+    # preview and the real run agree on the PSF's medium — one source of truth. Its NA-vs-ni
+    # refusal travels un-wrapped: it names its own way out.
+    return apply_session_optics(optics)
 
 
 def decon_op(
     optics: Optional[OpticsParams] = None,
     iterations: int = DEFAULT_ITERATIONS,
 ) -> Callable[[Iterable[np.ndarray]], np.ndarray]:
-    """Build a parameterised deconvolution plane-op, ready for ``add_operator``.
-
-    With ``optics=None`` the callable carries ``for_channel`` so optics are derived per channel.
-    """
-    def _decon(p: np.ndarray) -> np.ndarray:
-        return deconvolve_plane(p, optics, iterations)
-
-    _decon.__name__ = f"decon(rl,iterations={iterations})"
-    op = plane_op(_decon)
-    if optics is None:
-        op.for_channel = lambda path, channel: decon_op(
-            optics_for_channel(path, channel), iterations)
-    return op
-
-
-def decon3d_op(
-    optics: Optional[OpticsParams] = None,
-    iterations: int = DEFAULT_ITERATIONS,
-) -> Callable[[Iterable[np.ndarray]], np.ndarray]:
-    """Build a true 3-D deconvolution operator: z-consuming, depth-keeping.
+    """Build THE deconvolution operator: the volume solve, z-consuming, depth-keeping.
 
     The whole stack is deconvolved in one 3-D solve and EVERY plane comes back (Julio,
     2026-08-21: the output is the same size as the input — the user examines the planes).
+    The PSF's depth follows the stack's, so an n_z=1 acquisition gets the 2-D in-focus solve
+    as the volume solve's own degenerate case (measured equal; see the module docstring).
     ``keeps_depth`` on the callable is the declaration ``project_well`` and the acquisition
     writer honour.
     """
-    def _decon3d(planes: Iterable[np.ndarray]) -> np.ndarray:
+    def _decon(planes: Iterable[np.ndarray]) -> np.ndarray:
         return deconvolve_stack(planes, optics, iterations, project=False)
 
-    _decon3d.__name__ = f"decon3d(rl,iterations={iterations})"
-    _decon3d.consumes = frozenset({"z"})
-    _decon3d.keeps_depth = True
+    _decon.__name__ = f"decon(rl,iterations={iterations})"
+    _decon.consumes = frozenset({"z"})
+    _decon.keeps_depth = True
     if optics is None:
-        _decon3d.for_channel = lambda path, channel: decon3d_op(
+        _decon.for_channel = lambda path, channel: decon_op(
             optics_for_channel(path, channel), iterations)
-    return _decon3d
+    return _decon
 
 
-add_operator("decon", decon_op(), requires=("petakit",), extra="decon")
-add_operator("decon3d", decon3d_op(), consumes=frozenset({"z"}), requires=("petakit",),
-             extra="decon")
+# `iterations` is DECLARED (a Param, so the factory rebinds per run): it is THE place the QC
+# sweep's chosen count lands — DeconQCPanel.kwargs() feeds it through operator_kwargs_for into
+# every run launched while the panel is open. Before 2026-08-24 nothing could change a run's
+# iteration count at all; the QC tool existed to choose one and had nowhere to put the answer.
+_ITERATIONS_PARAM = Param(
+    "iterations", DEFAULT_ITERATIONS,
+    "Richardson-Lucy iterations. RL is semi-convergent, so pick the count by eye in the decon "
+    "panel's turbo x-z / y-z sweep; its 'use k iterations' button writes the choice here.")
+
+add_operator("decon", decon_op, consumes=frozenset({"z"}), params=(_ITERATIONS_PARAM,),
+             requires=("petakit",), extra="decon")

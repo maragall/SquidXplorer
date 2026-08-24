@@ -195,7 +195,7 @@ def test_a_per_fov_operator_still_uses_the_preview_footprint():
     from squidxplorer._op_result import RegionResultAccumulator
 
     meta = _subset_meta()
-    acc = RegionResultAccumulator("bgsub", "A1", meta, ["c0"])
+    acc = RegionResultAccumulator("demo", "A1", meta, ["c0"])
     for fov in meta["fovs_per_region"]["A1"]:
         acc.add(fov, np.zeros((1, FRAME, FRAME), np.uint16))
     assert acc.result().extent.bbox_um == mosaic_bbox_um(meta, "A1")

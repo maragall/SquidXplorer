@@ -488,10 +488,12 @@ def test_ingest_non_wellplate_region_opens_as_a_slide_carrier(qapp, tmp_path):
     win.close(); win2.close()
 
 
-def test_run_operator_persists_via_write_plate(qapp, squid_dataset, monkeypatch, tmp_path):
+def test_run_operator_persists_via_write_plate(qapp, squid_dataset, monkeypatch, tmp_path,
+                                               blob_operator):
     # run_operator's SAVE path drives write_plate with the selected operator and must not also write the uncompressed per-TIFF copy (tiff=False) — that would double disk use.
-    # spot on purpose: every per-FOV INTENSITY operator now saves acquisition-format beside the
-    # source (tests/test_acq_output.py); a labels producer still owes write_plate.
+    # a labels operator on purpose: every per-FOV INTENSITY operator now saves
+    # acquisition-format beside the source (tests/test_acq_output.py); a labels producer
+    # still owes write_plate.
     import squidxplorer
     captured = {}
 
@@ -507,9 +509,9 @@ def test_run_operator_persists_via_write_plate(qapp, squid_dataset, monkeypatch,
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
-    win.run_operator("spot", out_parent=str(tmp_path))
+    win.run_operator(blob_operator, out_parent=str(tmp_path))
     _drain_until(qapp, lambda: "operator" in captured)
-    assert captured["operator"] == "spot"
+    assert captured["operator"] == blob_operator
     assert captured["operator_kwargs"] is None      # no panel values were passed for this run
     assert captured["tiff"] is False                     # never the uncompressed TIFF duplicate
     assert captured["out_dir"].endswith(".hcs")          # persisted next to the acquisition
@@ -1280,7 +1282,8 @@ def test_open_computed_accepts_a_write_that_finished(qapp, tmp_path, monkeypatch
     win.close()
 
 
-def test_a_finished_save_run_leaves_no_incomplete_marker(qapp, squid_dataset, tmp_path):
+def test_a_finished_save_run_leaves_no_incomplete_marker(qapp, squid_dataset, tmp_path,
+                                                         blob_operator):
     from squidxplorer._output import incomplete_reason
 
     root, _ = squid_dataset
@@ -1288,7 +1291,7 @@ def test_a_finished_save_run_leaves_no_incomplete_marker(qapp, squid_dataset, tm
     win.ingest(str(root))
     # spot (labels): it still writes the OME-Zarr plate whose marker this asserts (per-FOV
     # intensity operators save acquisition-format now)
-    win.run_operator("spot", out_parent=str(tmp_path), regions=["B2", "B3"], save=True)
+    win.run_operator(blob_operator, out_parent=str(tmp_path), regions=["B2", "B3"], save=True)
     assert _drain_until(qapp, lambda: not win._busy(), timeout=90)
     out = tmp_path / f"{win._acq_name}.hcs"
     assert (out / "plate.ome.zarr").is_dir()
@@ -1297,7 +1300,7 @@ def test_a_finished_save_run_leaves_no_incomplete_marker(qapp, squid_dataset, tm
 
 
 def test_open_computed_names_a_well_that_cannot_read_its_own_image_id(
-        qapp, squid_dataset, tmp_path, monkeypatch):
+        qapp, squid_dataset, tmp_path, monkeypatch, blob_operator):
     """Falls back to well 0's image id when a well's own metadata is unreadable — must be NAMED, never silent."""
     import json
 
@@ -1306,7 +1309,7 @@ def test_open_computed_names_a_well_that_cannot_read_its_own_image_id(
     win.ingest(str(root))
     # spot (labels): it still writes the OME-Zarr plate this test corrupts (per-FOV intensity
     # operators save acquisition-format now)
-    win.run_operator("spot", out_parent=str(tmp_path), regions=["B2", "B3"], save=True)
+    win.run_operator(blob_operator, out_parent=str(tmp_path), regions=["B2", "B3"], save=True)
     assert _drain_until(qapp, lambda: not win._busy(), timeout=90)
     out = tmp_path / f"{win._acq_name}.hcs"
 
@@ -2378,16 +2381,17 @@ def test_preview_run_gets_no_loupe_source(qapp, squid_dataset, tmp_path):
     win._stop_worker(); win.close()
 
 
-def test_saved_run_registers_zarr_source_and_grows_written_set(qapp, squid_dataset, tmp_path):
+def test_saved_run_registers_zarr_source_and_grows_written_set(qapp, squid_dataset, tmp_path,
+                                                              blob_operator):
     # spot (labels): a saved OME-Zarr run. A per-FOV intensity save writes acquisition format
     # now — no zarr, so no zarr loupe source (a loupe over the written acquisition is an open
     # follow-up).
     root, _ = squid_dataset
     win = _loupe_win(qapp, root)
-    win.run_operator("spot", out_parent=str(tmp_path))
-    assert _drain_until(qapp, lambda: isinstance(win._loupe_sources.get("spot"),
+    win.run_operator(blob_operator, out_parent=str(tmp_path))
+    assert _drain_until(qapp, lambda: isinstance(win._loupe_sources.get(blob_operator),
                                                  V._ZarrLoupeSource))
-    src = win._loupe_sources["spot"]
+    src = win._loupe_sources[blob_operator]
     assert src.available("B2") == (False, "not written yet")   # nothing written at run start
     assert _drain_until(qapp, lambda: src.available("B2")[0])  # ...available once the well lands
     win._stop_worker(); win.close()
@@ -2778,43 +2782,22 @@ def test_the_redock_BUTTON_works_not_just_the_method(qapp):
 
 
 
-def test_the_plane_op_cards_build_and_are_preview_only(qapp, squid_dataset):
-    """The generic card offers Preview only, no Save; decon is the exception — its card is the RL semi-convergence QC panel, not this generic one."""
-    from squidxplorer import available_plane_operators
+def test_the_illumination_card_offers_the_loader_and_estimator_and_no_preview(qapp,
+                                                                              squid_dataset):
+    """The shelved flatfield card's successor: the profile loader/estimator STITCH rides —
+    load + estimate buttons, and NO preview/run (the standalone operator is gone)."""
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
-    for key in ("bgsub", "flatfield"):
-        assert key in available_plane_operators(), f"{key} is not registered in the engine"
-        op = V._OPERATIONS_BY_KEY[key]
-        win._open_op_tab(op.key, op.label, getattr(win, op.build_tab))
-        qapp.processEvents()
-        tab = win._op_tabs[key]
-        texts = [b.text() for b in tab.findChildren(QPushButton)]
-        assert "Preview" in texts, f"{key} card has no Preview button: {texts}"
-        # the run-tab half must be ABSENT: no destination picker, no whole-plate run
-        assert not [t for t in texts if "Choose" in t or "whole plate" in t.lower()], texts
-        assert not [c for c in tab.findChildren(QCheckBox)], f"{key} exposed a Save checkbox"
-        assert tab.findChildren(QSpinBox), f"{key} card has no 'first N wells' spinner"
-    win.close()
-
-
-def test_flatfield_card_gates_preview_on_a_profile(qapp, squid_dataset):
-    """Flat-field has no sane default (an identity field would silently do nothing), so Preview stays disabled until a profile loads."""
-    root, _ = squid_dataset
-    win = V.PlateWindow(None)
-    win.ingest(str(root))
-    prev = {}
-    for key in ("bgsub", "flatfield"):
-        op = V._OPERATIONS_BY_KEY[key]
-        win._open_op_tab(op.key, op.label, getattr(win, op.build_tab))
-        tab = win._op_tabs[key]
-        prev[key] = next(b for b in tab.findChildren(QPushButton) if b.text() == "Preview")
-    assert prev["bgsub"].isEnabled()
-    assert not prev["flatfield"].isEnabled(), "flat-field ran without an illumination profile"
-    ff = win._op_tabs["flatfield"]
-    assert [b for b in ff.findChildren(QPushButton) if "illumination profile" in b.text()], \
-        "flat-field card has no profile chooser"
+    op = V._OPERATIONS_BY_KEY["illumination"]
+    assert op.runnable is False, "the illumination card is a loader, not an operator"
+    win._open_op_tab(op.key, op.label, getattr(win, op.build_tab))
+    qapp.processEvents()
+    tab = win._op_tabs["illumination"]
+    texts = [b.text() for b in tab.findChildren(QPushButton)]
+    assert any("illumination profile" in s for s in texts), texts
+    assert any("Estimate from plate" in s for s in texts), texts
+    assert "Preview" not in texts, "the shelved flatfield preview came back"
     win.close()
 
 
@@ -2839,9 +2822,9 @@ def test_loading_a_profile_installs_one_field_per_channel_not_plane_zero(qapp, s
     npy = tmp_path / "profile.npy"
     save_flatfield(npy, np.stack(fields), None)
 
-    op = V._OPERATIONS_BY_KEY["flatfield"]
+    op = V._OPERATIONS_BY_KEY["illumination"]
     win._open_op_tab(op.key, op.label, getattr(win, op.build_tab))
-    tab = win._op_tabs["flatfield"]
+    tab = win._op_tabs["illumination"]
     button = next(b for b in tab.findChildren(QPushButton) if "illumination profile" in b.text())
     monkeypatch.setattr(V.QFileDialog, "getOpenFileName",
                         staticmethod(lambda *a, **k: (str(npy), "")))
@@ -3023,11 +3006,8 @@ def _run_live(qapp, win, key, regions=("B3",)):
 
 @pytest.mark.parametrize("key", [
     "mip",
-    "reference",
     pytest.param("stitch", marks=_needs("tilefusion")),
     pytest.param("decon", marks=_needs("petakit")),
-    "bgsub",
-    pytest.param("coordinate", marks=_needs("tilefusion")),
 ])
 def test_every_operator_streams_live_to_the_plate(qapp, squid_dataset, key):
     """reference and coordinate had no card, so run_operator raised a bare KeyError and couldn't stream live at all."""
@@ -3040,50 +3020,26 @@ def test_every_operator_streams_live_to_the_plate(qapp, squid_dataset, key):
     assert win._active_op_key == key, f"{key} streamed into layer {win._active_op_key!r}"
     assert win._readout.text().startswith("✓"), win._readout.text()
     # Checked for the per-FOV operators only: on this 4x4-frame fixture a region operator's blend weights divide by zero and the fused mosaic comes back NaN -> 0, which is the fixture's degenerate geometry, not the stream.
-    if key not in ("stitch", "coordinate"):
+    if key != "stitch":
         assert any(np.asarray(t[3]).any() for t in tiles), f"{key} streamed all-zero tiles"
     win._stop_worker(); win.close()
 
 
-def test_flatfield_streams_live_once_a_profile_is_installed(qapp, squid_dataset):
-    from squidxplorer import FlatfieldProfile
-    from squidxplorer._flatfield import set_profiles
-    import squidxplorer._flatfield as FF
-
+def test_a_shelved_operator_key_is_refused_by_name_not_run(qapp, squid_dataset):
+    """flatfield (with its auto-estimate arm), bgsub, spot, cellpose, reference, keepz and
+    coordinate are shelved (2026-08-24): running one is the registry's named refusal, and no
+    worker or estimate starts."""
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
-    ny, nx = win._meta["frame_shape"]
-
-    prev = FF.active_profiles()
-    try:
-        # run_operator intercepts flat-field with no active profile and auto-estimates one off-thread (tilefusion BaSiC) instead of failing, so a flat-field run without a profile must not start and must say what it's doing.
-        FF.clear_profile()
-        tiles = _run_live(qapp, win, "flatfield")
-        assert tiles is None, "the operator ran without an illumination profile"
-        assert win._worker is None, "an operator worker started without a profile"
-        assert "estimating an illumination profile" in win._readout.text(), \
-            f"a flat-field run with no profile said nothing: {win._readout.text()!r}"
-        est = getattr(win, "_ff_est_worker", None)
-        assert isinstance(est, V._FlatfieldWorker), "no estimate was actually started"
-        # Cut the estimate loose before waiting: done would install its profile and re-enter run_operator (a second run this test isn't about); _FlatfieldWorker has no stop(), so _retire can't be used on it.
-        for sig in (est.done, est.problem, est.stage):
-            try:
-                sig.disconnect()
-            except TypeError:
-                pass
-        assert _drain_until(qapp, lambda: not est.isRunning(), timeout=90)
-        win._ff_est_worker = None
-
-        # The operator is specialised per channel by project_well and refuses a channel it has no measured field for, so a live run needs every channel covered.
-        set_profiles({c["name"]: FlatfieldProfile(np.ones((ny, nx), np.float32))
-                      for c in win._meta["channels"]})
-        tiles = _run_live(qapp, win, "flatfield")
-        assert tiles, f"flat-field with a profile still reached no tile: {win._readout.text()!r}"
-        assert win._readout.text().startswith("✓"), win._readout.text()
-    finally:
-        FF.set_profiles(prev) if prev else FF.clear_profile()
-    win._stop_worker(); win.close()
+    for key in ("flatfield", "bgsub", "spot", "cellpose", "reference", "keepz", "coordinate"):
+        win.run_operator(key, out_parent=None)
+        assert win._worker is None, f"a worker started for shelved key {key!r}"
+        assert key in win._readout.text(), (
+            f"the refusal for {key!r} does not name it: {win._readout.text()!r}")
+    assert getattr(win, "_ff_est_worker", None) is None, (
+        "the deleted flatfield auto-estimate arm ran")
+    win.close()
 
 
 def test_run_operator_refuses_a_non_operator_by_name(qapp, squid_dataset):
@@ -3763,25 +3719,9 @@ def test_gallery_view_is_a_view_menu_command_and_not_an_operator(qapp):
 
 #: Runnable operators that deliberately have no GUI card, and why — adding one without listing it here (or giving it a card) fails the test below.
 CLI_ONLY_OPERATORS = {
-    "spot": "a LABELS overlay, not a plate result; it is driven from the spot-count controls "
-            "on the mosaic, not from a card that writes an OME-Zarr plate.",
-    "cellpose": "the same LABELS overlay as `spot`, with the model instead of the Otsu recipe. "
-                "Same reason it has no card. (It is NOT because the result cannot be written -- "
-                "that was true while _validate_image accepted Z == 1 only, and IMA-277 lifted "
-                "it.) It is "
-                "reachable from the CLI (--operator cellpose), the operator dropdown and the "
-                "Detect-nuclei button, all of which read the registry.",
-    "decon3d": "the volume-then-project variant of `decon`; the decon card's own panel is where "
-               "an iteration count gets chosen, and a second card for the same operator with a "
-               "different z contract is how a user picks the wrong one.",
-    "coordinate": "the unregistered CONTROL for `stitch` (stage coordinates, no registration). "
-                  "It exists to be the baseline a stitch is graded against in the benchmark, "
-                  "not to be offered as a thing to run.",
-    "keepz": "the IDENTITY plane-op: every z plane, no pixel changed. There is nothing to run it "
-             "FOR on its own -- projecting an acquisition to itself writes a copy of the input. "
-             "It exists so that `stitch_region(z_operator=\'keepz\')` can fuse a VOLUME instead "
-             "of one collapsed plane, and it is offered exactly there: the stitcher panel's "
-             "Z-handling combo, which is built from `available_plane_operators()`.",
+    # EMPTY since 2026-08-24: every surviving operator (mip, decon, stitch, register) has a
+    # card. spot/cellpose/decon3d/coordinate/keepz left this dict by being shelved, not by
+    # gaining cards; the dict stays so a future CLI-only operator declares its reason here.
 }
 
 
@@ -3807,15 +3747,6 @@ def test_the_cli_only_declaration_cannot_go_stale():
             f"{key!r} is declared CLI-only but now HAS a card; delete the entry.")
 
 
-def test_the_reference_plane_operator_is_reachable_from_the_gui():
-    op = V._OPERATIONS_BY_KEY["reference"]
-    assert op.runnable is True
-    assert "reference" in V.runnable_operators()
-    assert hasattr(V.PlateWindow, op.build_tab), (
-        f"the reference card names {op.build_tab!r} and PlateWindow has no such method; "
-        "clicking it would raise AttributeError out of the event loop.")
-
-
 def test_the_save_button_names_its_operator_instead_of_taking_the_first_card():
     """_OPERATIONS[0].key made the save button run whatever card happened to be first; it's now named explicitly."""
     assert V._SAVE_OPERATOR == "mip"
@@ -3825,20 +3756,22 @@ def test_the_save_button_names_its_operator_instead_of_taking_the_first_card():
 
 
 def test_a_cardless_operator_opens_a_panel_built_from_its_declaration(qapp,
-                                                                     squid_dataset):
-    """spot is a registered operator with no card; _activate_operator used to silently do nothing for it."""
+                                                                     squid_dataset,
+                                                                     blob_operator):
+    """A registered operator with no card; _activate_operator used to silently do nothing for it."""
     from squidxplorer._engine import operator_params
     from squidxplorer._param_panel import GenericOperatorPanel
 
     root, _ = squid_dataset
     win = V.PlateWindow(None)
     win.ingest(str(root))
-    assert "spot" not in V._OPERATIONS_BY_KEY, "spot has gained a card; pick another cardless one"
-    win._activate_operator("spot")
-    panel = win._op_tabs.get("spot")
+    assert blob_operator not in V._OPERATIONS_BY_KEY, (
+        "the fixture gained a card; pick another cardless exemplar")
+    win._activate_operator(blob_operator)
+    panel = win._op_tabs.get(blob_operator)
     assert panel is not None, f"no panel opened; readout said {win._readout.text()!r}"
     assert isinstance(panel, GenericOperatorPanel)
-    assert sorted(panel.widgets) == sorted(p.name for p in operator_params("spot"))
+    assert sorted(panel.widgets) == sorted(p.name for p in operator_params(blob_operator))
     win.close()
 
 
@@ -3854,7 +3787,8 @@ def test_a_key_that_has_no_panel_at_all_is_refused_by_name_never_silently(qapp,
     win.close()
 
 
-def test_the_preview_path_carries_operator_kwargs_to_the_engine(qapp, squid_dataset, monkeypatch):
+def test_the_preview_path_carries_operator_kwargs_to_the_engine(qapp, squid_dataset,
+                                                                monkeypatch, blob_operator):
     """The PREVIEW branch called the engine without operator_kwargs while the save branch passed them, so a panel's parameter value reached the console line but not the pixels."""
     import squidxplorer
     from squidxplorer.reader import open_reader
@@ -3871,7 +3805,8 @@ def test_the_preview_path_carries_operator_kwargs_to_the_engine(qapp, squid_data
     monkeypatch.setattr(squidxplorer, "run_plate", fake_run_plate)
     fov_index = {r: {"rc": (0, i), "idx": i, "well_id": r}
                  for i, r in enumerate(meta["regions"])}
-    worker = V._OperatorWorker("spot", reader, meta, fov_index, "", regions=meta["regions"][:1],
+    worker = V._OperatorWorker(blob_operator, reader, meta, fov_index, "",
+                               regions=meta["regions"][:1],
                                save=False, n_fovs=None,
                                operator_kwargs={"min_area_px": 400})
     worker.run()
@@ -3880,23 +3815,24 @@ def test_the_preview_path_carries_operator_kwargs_to_the_engine(qapp, squid_data
         f"run_plate was called with {sorted(seen)}")
 
 
-def test_every_uncarded_runnable_operator_is_offered_in_the_declaration_submenu(qapp):
+def test_every_uncarded_runnable_operator_is_offered_in_the_declaration_submenu(
+        qapp, blob_operator):
     """The submenu is built off runnable_operators(), so a plugin-added operator appears with no edit here."""
     win = V.PlateWindow(None)
     offered = {a.text() for a in win._declared_menu.actions()}
     expected = {V.operator_label(k) for k in V.runnable_operators()
                 if k not in V._OPERATIONS_BY_KEY}
     assert offered == expected
-    assert "spot" in offered and "cellpose" in offered
+    assert blob_operator in offered
     win.close()
 
 
-def test_operator_label_falls_back_to_the_key_for_a_cardless_operator():
-    # spot is a registered operator with no card; it must still name itself rather than raising a bare KeyError out of the event loop.
-    assert V.operator_label("spot") == "spot"
+def test_operator_label_falls_back_to_the_key_for_a_cardless_operator(blob_operator):
+    # A registered operator with no card must still name itself rather than raising a bare
+    # KeyError out of the event loop.
+    assert V.operator_label(blob_operator) == blob_operator
     assert V.operator_label("mip") == V._OPERATIONS_BY_KEY["mip"].label
-    # and the newly carded one now answers with its card
-    assert V.operator_label("reference") == V._OPERATIONS_BY_KEY["reference"].label
+    assert V.operator_label("decon") == V._OPERATIONS_BY_KEY["decon"].label
 
 
 
@@ -4009,7 +3945,7 @@ class _ResultManager:
         self.windows = list(views)
 
 
-def _result_win(op="bgsub", region="A1", channels=("405", "488")):
+def _result_win(op="alpha", region="A1", channels=("405", "488")):
     from squidxplorer._region_nav import RegionCursor
     from squidxplorer._run import OperatorRun
 
@@ -4041,17 +3977,17 @@ def _result_win(op="bgsub", region="A1", channels=("405", "488")):
 
 
 def test_a_plane_op_result_becomes_a_layer_group_one_layer_per_channel(qapp):
-    win = _result_win("bgsub")
+    win = _result_win("alpha")
     for fov in (0, 1):
         V.PlateWindow._on_result(win, "A1", fov, np.full((2, 8, 8), 7, "uint16"))
     mos = win._view.mosaic
-    assert mos.ops() == ["bgsub"]                    # one GROUP, keyed by the operator
-    assert [c[1] for c in mos.group("bgsub")] == ["405", "488"]   # one LAYER per channel
+    assert mos.ops() == ["alpha"]                    # one GROUP, keyed by the operator
+    assert [c[1] for c in mos.group("alpha")] == ["405", "488"]   # one LAYER per channel
 
 
 def test_the_layer_group_is_not_drawn_until_the_region_is_whole(qapp):
     """Half a region drawn as a layer reads as holes the operator put there, not as an incomplete run."""
-    win = _result_win("bgsub")
+    win = _result_win("alpha")
     V.PlateWindow._on_result(win, "A1", 0, np.zeros((2, 8, 8), "uint16"))
     assert win._view.mosaic.calls == []
 
@@ -4087,33 +4023,33 @@ def test_the_operator_layer_lands_in_the_raw_mosaic_s_frame(qapp):
     """bbox_um places the group exactly on raw's frame — without it, toggling would jump and misregistration would read as the operator's effect."""
     from squidxplorer._mosaic_source import mosaic_bbox_um
 
-    win = _result_win("bgsub")
+    win = _result_win("alpha")
     for fov in (0, 1):
         V.PlateWindow._on_result(win, "A1", fov, np.zeros((2, 8, 8), "uint16"))
-    kw = win._view.mosaic.group("bgsub")[0][3]
+    kw = win._view.mosaic.group("alpha")[0][3]
     assert kw["bbox_um"] == mosaic_bbox_um(win._meta, "A1")
 
 
 def test_two_operators_make_TWO_groups_so_both_can_be_toggled(qapp):
-    win = _result_win("bgsub")
+    win = _result_win("alpha")
     for fov in (0, 1):
         V.PlateWindow._on_result(win, "A1", fov, np.zeros((2, 8, 8), "uint16"))
     win._active_op_key = "decon"
     for fov in (0, 1):
         V.PlateWindow._on_result(win, "A1", fov, np.zeros((2, 8, 8), "uint16"))
-    assert win._view.mosaic.ops() == ["bgsub", "decon"]
+    assert win._view.mosaic.ops() == ["alpha", "decon"]
 
 
 def test_a_result_for_a_region_that_is_not_on_screen_is_dropped_not_accumulated(qapp):
     """Pane 2 shows one region; holding full-res mosaics for every well of a plate run would be gigabytes nobody can view."""
-    win = _result_win("bgsub")
+    win = _result_win("alpha")
     for fov in (0, 1):
         V.PlateWindow._on_result(win, "B7", fov, np.zeros((2, 8, 8), "uint16"))
     assert win._view.mosaic.calls == []
 
 
 def test_a_result_that_cannot_be_placed_SAYS_SO_instead_of_vanishing(qapp):
-    win = _result_win("bgsub")
+    win = _result_win("alpha")
     V.PlateWindow._on_result(win, "A1", 0, np.zeros((1, 8, 8), "uint16"))
     assert "not shown as a layer" in win._readout.text()
     assert win._view.mosaic.calls == []
@@ -4129,7 +4065,7 @@ def test_a_region_operator_s_fused_mosaic_is_added_whole_not_re_tiled(qapp):
 
 
 def test_no_open_window_means_the_result_slot_still_stands(qapp):
-    win = _result_win("bgsub")
+    win = _result_win("alpha")
     win._viewer_manager = _ResultManager()
     V.PlateWindow._on_result(win, "A1", 0, np.zeros((2, 8, 8), "uint16"))
 

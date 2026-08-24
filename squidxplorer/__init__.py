@@ -79,20 +79,17 @@ from squidxplorer.reader import (
 )
 
 # Imported for their side effect: each module registers its operator(s).
-from squidxplorer import _background, _decon, _flatfield, _register, _spots  # noqa: E402,F401  (registration side effect)
-from squidxplorer._background import BackgroundParams, bgsub_op, subtract_background
+# (Shelved 2026-08-24: _background/bgsub, _spots/spot, _cellpose, and the 2-D `decon`
+# plane-op; 'decon' is the volume solve now. Reinstating starts from git history.)
+from squidxplorer import _decon, _flatfield, _register  # noqa: E402,F401  (registration side effect)
 from squidxplorer._decon import (
     OpticsParams,
-    decon3d_op,
     decon_op,
-    deconvolve,
-    deconvolve_plane,
     deconvolve_stack,
     optics_for_channel,
     set_optics,
 )
-from squidxplorer._flatfield import FlatfieldProfile, correct_flatfield, estimate_profile, flatfield_op
-from squidxplorer._spots import SpotParams, SpotResult, detect_spots, spots_op
+from squidxplorer._flatfield import FlatfieldProfile, correct_flatfield, estimate_profile
 
 # Entry-point plugins register after the built-ins, so a name collision is refused.
 load_operator_plugins()
@@ -149,26 +146,14 @@ __all__ = [
     "InMemoryMultiscale",
     "CompositePlateSource",
     "PlateCellCache",
-    # plane-ops (registered as "decon" / "bgsub" / "flatfield")
-    "deconvolve",
-    "deconvolve_plane",
+    # the deconvolution ("decon", the volume solve) and stitch's flat-field machinery
     "deconvolve_stack",
     "decon_op",
-    "decon3d_op",
     "OpticsParams",
     "optics_for_channel",
     "set_optics",
-    "subtract_background",
-    "BackgroundParams",
-    "bgsub_op",
     "correct_flatfield",
     "estimate_profile",
     "FlatfieldProfile",
-    "flatfield_op",
-    # spot detection / nuclei counting (registered as "spots")
-    "SpotParams",
-    "SpotResult",
-    "detect_spots",
-    "spots_op",
 ]
 __version__ = "0.1.0"

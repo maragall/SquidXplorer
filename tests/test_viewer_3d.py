@@ -364,7 +364,7 @@ def test_a_volume_is_MANY_layers_under_ONE_identity(mosaic):
     assert mosaic.find(OP, CHANNELS[0]) is rendering[0]
 
 
-@pytest.mark.parametrize("op", ["raw", "decon", "bgsub"])
+@pytest.mark.parametrize("op", ["raw", "decon", "demo"])
 def test_every_brick_declares_the_operator_whose_volume_it_is(op, mosaic):
     from squidxplorer._napari_view import key_of
 

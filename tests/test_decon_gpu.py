@@ -10,7 +10,32 @@ import numpy as np
 import pytest
 
 from squidxplorer import _decon_gpu
-from squidxplorer._decon import DEFAULT_OPTICS, METHOD, make_psf, make_psf_2d
+from squidxplorer._decon import (
+    DEFAULT_OPTICS,
+    METHOD,
+    OpticsParams,
+    deconvolve_stack,
+    make_psf,
+)
+
+
+def _psf_1z(optics):
+    """The in-focus PSF plane, ``(1, Y, X)`` sum 1 — what the shelved ``make_psf_2d`` built,
+    derived exactly as the nz=1 volume solve derives it (PSF depth follows the stack depth)."""
+    import numpy as _np
+
+    psf = make_psf(OpticsParams(optics.na, optics.wavelength_um, optics.dxy_um,
+                                optics.dz_um, 1, optics.ni))
+    centre = psf[psf.shape[0] // 2]
+    return _np.ascontiguousarray((centre / centre.sum())[None, ...], dtype=_np.float32)
+
+
+def _plane_solve(plane, optics, iterations):
+    """RL on ONE plane through the one code path (the shelved ``deconvolve_plane``'s heir)."""
+    import numpy as _np
+
+    return deconvolve_stack(_np.asarray(plane)[None, ...], optics, iterations,
+                            project=False)[0]
 from squidxplorer.projection import cast_like
 
 petakit = pytest.importorskip("petakit")
@@ -53,7 +78,7 @@ def _device_or_skip():
 def test_gpu_backend_reproduces_petakit_cpu_within_tolerance(shape):
     """2-D plane and 3-D stack alike: the device result is petakit's result."""
     device = _device_or_skip()
-    psf = make_psf_2d(DEFAULT_OPTICS) if shape[0] == 1 else make_psf(DEFAULT_OPTICS)
+    psf = _psf_1z(DEFAULT_OPTICS) if shape[0] == 1 else make_psf(DEFAULT_OPTICS)
     volume = _phantom(shape)
 
     cpu = petakit.deconvolve(volume, psf, method=METHOD, iterations=ITERATIONS, gpu=False)
@@ -83,7 +108,7 @@ def _assert_quantised_agreement(gpu, cpu):
 def test_the_uint16_planes_the_two_backends_write_agree_to_the_quantisation_step():
     """The same pixels on disk, to within one count."""
     device = _device_or_skip()
-    psf = make_psf_2d(DEFAULT_OPTICS)
+    psf = _psf_1z(DEFAULT_OPTICS)
     volume = _phantom((1, SIZE, SIZE), seed=3)
 
     cpu = cast_like(petakit.deconvolve(volume, psf, method=METHOD,
@@ -93,17 +118,17 @@ def test_the_uint16_planes_the_two_backends_write_agree_to_the_quantisation_step
     _assert_quantised_agreement(gpu, cpu)
 
 
-def test_deconvolve_plane_goes_through_the_device_and_still_matches_the_cpu_path(monkeypatch):
-    """``_run``'s fork must not change ``deconvolve_plane``."""
+def test_the_plane_solve_goes_through_the_device_and_still_matches_the_cpu_path(monkeypatch):
+    """``_run``'s fork must not change the nz=1 volume solve."""
     _device_or_skip()
     from squidxplorer import _decon
 
     plane = _phantom((1, SIZE, SIZE), seed=7)[0].astype(np.uint16)
 
     monkeypatch.setenv(_decon_gpu.ENV_VAR, "cpu")
-    on_cpu = _decon.deconvolve_plane(plane, DEFAULT_OPTICS, ITERATIONS)
+    on_cpu = _plane_solve(plane, DEFAULT_OPTICS, ITERATIONS)
     monkeypatch.setenv(_decon_gpu.ENV_VAR, "auto")
-    on_gpu = _decon.deconvolve_plane(plane, DEFAULT_OPTICS, ITERATIONS)
+    on_gpu = _plane_solve(plane, DEFAULT_OPTICS, ITERATIONS)
 
     assert on_gpu.dtype == plane.dtype
     _assert_quantised_agreement(on_gpu, on_cpu)
@@ -230,7 +255,7 @@ def test_padding_leaves_the_border_pixels_alone_on_an_awkward_width(monkeypatch)
     """Pad, run, crop, and check the rim against petakit's unpadded CPU output."""
     device = _device_or_skip()
     volume = _rim_phantom((1, AWKWARD, AWKWARD))
-    psf = make_psf_2d(DEFAULT_OPTICS)
+    psf = _psf_1z(DEFAULT_OPTICS)
 
     assert any(_decon_gpu.pad_plan(volume.shape, psf.shape)), "this width must actually pad"
     reference = petakit.deconvolve(volume, psf, method=METHOD, iterations=ITERATIONS, gpu=False)
@@ -244,16 +269,16 @@ def test_padding_leaves_the_border_pixels_alone_on_an_awkward_width(monkeypatch)
 
 
 def test_end_to_end_at_the_real_camera_width_cpu_and_gpu_write_the_same_plane(monkeypatch):
-    """uint16 in, uint16 out, through ``deconvolve_plane``, at the real camera width."""
+    """uint16 in, uint16 out, through the nz=1 volume solve, at the real camera width."""
     _device_or_skip()
     from squidxplorer import _decon
 
     plane = _rim_phantom((1, AWKWARD, AWKWARD), seed=13)[0].astype(np.uint16)
     monkeypatch.setenv(_decon_gpu.ENV_VAR, "cpu")
     monkeypatch.delenv(_decon_gpu.PAD_CPU_ENV_VAR, raising=False)
-    on_cpu = _decon.deconvolve_plane(plane, DEFAULT_OPTICS, ITERATIONS)
+    on_cpu = _plane_solve(plane, DEFAULT_OPTICS, ITERATIONS)
     monkeypatch.setenv(_decon_gpu.ENV_VAR, "auto")
-    on_gpu = _decon.deconvolve_plane(plane, DEFAULT_OPTICS, ITERATIONS)
+    on_gpu = _plane_solve(plane, DEFAULT_OPTICS, ITERATIONS)
 
     assert on_gpu.shape == plane.shape and on_gpu.dtype == plane.dtype
     _assert_quantised_agreement(on_gpu, on_cpu)
@@ -283,7 +308,7 @@ def test_the_padded_result_is_not_merely_the_unpadded_one_by_accident(monkeypatc
     """Break the pad and the border assertion must fire, or that test measures nothing."""
     device = _device_or_skip()
     volume = _rim_phantom((1, AWKWARD, AWKWARD))
-    psf = make_psf_2d(DEFAULT_OPTICS)
+    psf = _psf_1z(DEFAULT_OPTICS)
     reference = petakit.deconvolve(volume, psf, method=METHOD, iterations=ITERATIONS, gpu=False)
     peak = float(np.abs(reference).max())
 
@@ -301,7 +326,7 @@ def test_restricting_lambda_to_the_true_region_is_load_bearing():
     """A lambda reduced over the padded array shifts every pixel; the restricted one must win."""
     device = _device_or_skip()
     volume = _rim_phantom((1, AWKWARD, AWKWARD), seed=5)
-    psf = make_psf_2d(DEFAULT_OPTICS)
+    psf = _psf_1z(DEFAULT_OPTICS)
     widths = _decon_gpu.pad_plan(volume.shape, psf.shape)
     core = tuple(slice(w, w + n) for w, n in zip(widths, volume.shape))
 
@@ -352,9 +377,9 @@ def test_opting_the_cpu_path_into_padding_keeps_the_extent_and_stays_below_shot_
     assert any(_decon_gpu.pad_plan((1, 514, 514), (1, 19, 19)))
     monkeypatch.setenv(_decon_gpu.ENV_VAR, "cpu")
     monkeypatch.delenv(_decon_gpu.PAD_CPU_ENV_VAR, raising=False)
-    plain = _decon.deconvolve_plane(plane, DEFAULT_OPTICS, ITERATIONS)
+    plain = _plane_solve(plane, DEFAULT_OPTICS, ITERATIONS)
     monkeypatch.setenv(_decon_gpu.PAD_CPU_ENV_VAR, "1")
-    padded = _decon.deconvolve_plane(plane, DEFAULT_OPTICS, ITERATIONS)
+    padded = _plane_solve(plane, DEFAULT_OPTICS, ITERATIONS)
 
     assert padded.shape == plane.shape
     delta = np.abs(padded.astype(np.int32) - plain.astype(np.int32))
@@ -402,8 +427,8 @@ def test_the_device_choice_is_logged_once_and_not_once_per_plane(caplog, monkeyp
     monkeypatch.setenv(_decon_gpu.ENV_VAR, "cpu")
     plane = _phantom((1, 64, 64), seed=1)[0].astype(np.uint16)
     with caplog.at_level("INFO"):
-        _decon.deconvolve_plane(plane, DEFAULT_OPTICS, 1)
-        _decon.deconvolve_plane(plane, DEFAULT_OPTICS, 1)
+        _plane_solve(plane, DEFAULT_OPTICS, 1)
+        _plane_solve(plane, DEFAULT_OPTICS, 1)
     lines = [r.message for r in caplog.records if "decon backend" in r.message]
     assert len(lines) == 1, f"expected one backend line, got {lines}"
     assert "CPU" in lines[0]

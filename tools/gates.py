@@ -1279,7 +1279,7 @@ def self_test_dead_controls(dataset=PLATE):
 
     print("=" * 100)
     print("SELF-TEST 3/3: a REGION-window chip whose handler returns at its first guard —")
-    print("               the shape of _on_detect_nuclei and of the plate's timepoint bar.")
+    print("               the shape of the plate's timepoint bar.")
     ok_v, findings_v, _ = gate_no_dead_controls(dataset, mutate_view=_mount_dead_view_button)
     for f in findings_v:
         if f.startswith("FAIL"):

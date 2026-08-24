@@ -23,14 +23,14 @@ class Operation:
         """Can the ENGINE run this key, as opposed to the card merely existing?"""
         return self.key in runnable_operators()
 
+# (Shelved 2026-08-24 with their operators: the reference, bgsub and flatfield cards. The
+# survivors are exactly the runnable set — mip, decon, stitch, register — plus one NON-operator
+# card, `illumination`: the profile loader/estimator STITCH rides, which outlived the shelved
+# flatfield operator on purpose.)
 _OPERATIONS = (
     Operation("mip", "Maximum Intensity Projection",
               "Collapse each well's z-stack to one max-intensity image; save a navigable OME-Zarr plate.",
               "_build_mip_tab"),
-    Operation("reference", "Reference plane (best focus)",
-              "Keep each well's sharpest z-plane (Tenengrad) instead of combining them; save a "
-              "navigable OME-Zarr plate.",
-              "_build_reference_tab"),
     Operation("stitch", "Stitch (register + fuse)",
               "Register every FOV of a well against its neighbours and fuse one seamless mosaic "
               "per well, instead of trusting the stage coordinates alone.",
@@ -40,21 +40,19 @@ _OPERATIONS = (
               "pixel, and optionally write stitched_<folder>: a hardlinked copy of the "
               "acquisition whose coordinates.csv carries the registered positions.",
               "_build_register_tab"),
-    # Plane-ops keep z at full depth, so they get _build_plane_op_tab (preview only).
     Operation("decon", "Deconvolution (Richardson-Lucy)",
-              "Sharpen against a vectorial PSF computed from this acquisition's own optics (NA, "
-              "emission wavelength, pixel size, z-step) -- not an assumed Gaussian. Richardson-Lucy "
-              "is semi-convergent, so the iteration count is chosen by eye against a turbo x-z / "
-              "y-z view rather than defaulted.",
+              "The volume solve: true 3-D Richardson-Lucy over each FOV's whole z-stack against "
+              "a vectorial PSF computed from this acquisition's own optics (NA, emission "
+              "wavelength, pixel size, z-step) -- not an assumed Gaussian. Every plane comes "
+              "back; an n_z=1 acquisition gets the 2-D in-focus solve as the degenerate case. "
+              "RL is semi-convergent, so the iteration count is chosen by eye against a turbo "
+              "x-z / y-z view rather than defaulted.",
               "_build_decon_tab"),
-    Operation("bgsub", "Background subtraction",
-              "Remove the smooth out-of-focus haze from every plane with a rolling ball (ImageJ's "
-              "algorithm). A LAYER: the raw is untouched on disk and one toggle away.",
-              "_build_bgsub_tab"),
-    Operation("flatfield", "Flat-field correction",
-              "Divide out the objective's illumination profile so the corners match the centre. "
-              "Needs an illumination profile (.npy) from the stitcher or estimated from the plate.",
-              "_build_flatfield_tab"),
+    Operation("illumination", "Illumination profile (for stitching)",
+              "Load a stored per-channel illumination profile (.npy) or estimate one live from "
+              "plate tiles (the stitcher's BaSiC estimator). Stitch's read path corrects tiles "
+              "with what is installed here when it covers every channel of the run.",
+              "_build_illumination_tab"),
 )
 _OPERATIONS_BY_KEY = {op.key: op for op in _OPERATIONS}
 
@@ -68,7 +66,7 @@ def operator_layer_key(op_key: str, tab_key: Optional[str]) -> str:
 
 
 def operator_name(layer_key: str) -> str:
-    """The REGISTRY name behind a layer key: ``"spot@tab2"`` -> ``"spot"``."""
+    """The REGISTRY name behind a layer key: ``"decon@tab2"`` -> ``"decon"``."""
     return str(layer_key).split("@", 1)[0]
 
 

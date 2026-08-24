@@ -426,7 +426,7 @@ def test_widening_skips_the_layers_that_have_no_contrast_at_all(layers, twelve_b
 
 def test_a_float_result_layer_keeps_its_own_range(layers, twelve_bit):
     """The gate is the LAYER's dtype. A float operator result has no bit depth to apply one to."""
-    lyr = layers.add_mosaic("flatfield", "488",
+    lyr = layers.add_mosaic("demo", "488",
                             np.zeros((32, 32), dtype=np.float32), contrast_limits=(0.0, 1.0))
 
     assert list(lyr.contrast_limits_range) == [0.0, 1.0]
@@ -842,8 +842,8 @@ def test_a_second_op_layer_added_later_still_reaches_the_sink(layers):
     seen: list = []
     layers.on_user_contrast(lambda ch, lo, hi: seen.append((ch, lo, hi)))
 
-    layers.add_mosaic("bgsub", "561", _img())          # a NEW channel, after the bind
-    layers.find("bgsub", "561").contrast_limits = (12.0, 345.0)
+    layers.add_mosaic("demo", "561", _img())           # a NEW channel, after the bind
+    layers.find("demo", "561").contrast_limits = (12.0, 345.0)
 
     assert seen == [("561", 12.0, 345.0)]
 

@@ -203,14 +203,14 @@ class TestTheVolumeSourceReportsWhichPitchItChose:
         result = Result.of(Extent(region_id=w.current_region()), planes,
                            channels=tuple(channels), z_depth=2,
                            pixel_size_um=MEASURED_FUSE_STEP * px, dtype="uint16")
-        assert w.deliver_result("bgsub", result, visible=True) == len(channels)
+        assert w.deliver_result("demo", result, visible=True) == len(channels)
         # hide raw; the operator layer is the one on top and visible
         for ch in channels:
             raw = pane.mosaic.find("raw", ch)
             if raw is not None:
                 raw.visible = False
         for ch in channels:
-            layer = pane.mosaic.find("bgsub", ch)
+            layer = pane.mosaic.find("demo", ch)
             assert layer is not None, f"the operator layer for {ch} never landed"
             layer.visible = True
             layer.scale = (dz, MEASURED_FUSE_STEP * px, MEASURED_FUSE_STEP * px)
@@ -218,8 +218,8 @@ class TestTheVolumeSourceReportsWhichPitchItChose:
 
         read, source, pitch = w._volume_source((0, 4, 0, 4))
 
-        assert source == "bgsub", (
-            f"the visible operator layer is 'bgsub' and the source said {source!r} -- this is the "
+        assert source == "demo", (
+            f"the visible operator layer is 'demo' and the source said {source!r} -- this is the "
             f"answer `visible_op()` decides, and a stub without it answered 'raw' forever")
         assert read is not None, "the operator branch produced no brick reader"
         assert tuple(pitch) == pytest.approx((MEASURED_FUSE_STEP * px, MEASURED_FUSE_STEP * px)), (

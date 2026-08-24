@@ -186,6 +186,59 @@ def _restore_operator_registries():
             registry.update(snapshot)
 
 
+# The two test-registered exemplar operators the shelved built-ins used to be for the generic
+# machinery tests (spot/cellpose/bgsub/keepz were shelved 2026-08-24). Registration leaks are
+# impossible: _restore_operator_registries above snapshots the table around every test.
+
+@pytest.fixture
+def blob_operator():
+    """A cardless, core, params-declaring LABELS plane-op — the panel/CLI/runner exemplar.
+
+    min_area_px=1 finds objects on any noisy fixture; a huge min_area_px finds none, so the
+    parameter provably changes the pixels.
+    """
+    import numpy as np
+
+    from squidxplorer import add_operator
+    from squidxplorer._engine import Param
+    from squidxplorer.projection import labels_op, plane_op
+
+    def _factory(sigma_px=2.0, min_area_px=30, split_touching=True):
+        def _blob(plane):
+            import scipy.ndimage as ndi
+
+            arr = np.asarray(plane)
+            smooth = (ndi.gaussian_filter(arr.astype("float32"), sigma_px)
+                      if sigma_px > 0 else arr.astype("float32"))
+            labels, n = ndi.label(smooth > smooth.mean())
+            if n and min_area_px > 1:
+                counts = np.bincount(labels.ravel())
+                small = np.flatnonzero(counts < min_area_px)
+                small = small[small > 0]
+                if small.size:
+                    labels[np.isin(labels, small)] = 0
+            return labels.astype(arr.dtype)
+        return labels_op(plane_op(_blob))
+
+    add_operator(
+        "blob", _factory,
+        params=(Param("sigma_px", 2.0, "Gaussian denoise radius before thresholding."),
+                Param("min_area_px", 30, "Components smaller than this many pixels are noise."),
+                Param("split_touching", True, "Kept for widget-type coverage (bool).")))
+    return "blob"
+
+
+@pytest.fixture
+def identity_operator():
+    """A core identity plane-op ('planes'): keeps every z plane, no pixel changed — what the
+    shelved `keepz` was for the acquisition-format writer tests."""
+    from squidxplorer import add_operator
+    from squidxplorer.projection import plane_op
+
+    add_operator("planes", plane_op(lambda plane: plane), consumes=frozenset())
+    return "planes"
+
+
 REGIONS = ["B2", "B3"]
 FOVS = [0, 1]
 NZ = 2

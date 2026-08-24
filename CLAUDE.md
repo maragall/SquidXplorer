@@ -771,6 +771,58 @@ fine one computes on the slicer's pool. The rules:
   `test_roi_pitch`) force each viewer's slicer sync via the per-viewer `_force_sync` knob;
   the suite otherwise runs the production (async) configuration.
 
+## Operator shelf (Julio, 2026-08-21 + 2026-08-24, branch shelf-operators)
+
+Julio's rulings, verbatim: "spot, shelf"; "cellpose, shelf"; Detect row -> "Shelve it all";
+"Shelve keepz too"; "Shelf the background substitution logic"; and the 2D/3D decon merge
+("3D decon would still use a 2D PSF, since there is no more to draw from"). The Minerva rule
+applies: deleted whole, grep-proven, reinstating starts from git history, absences pinned in
+tests (`test_operator_declaration.py::test_the_shelved_operators_are_gone_whole` and per-file
+pins). **The surviving registry is exactly `mip`, `decon`, `stitch`, `register`.**
+
+- **Shelved whole**: `_background.py` (bgsub + its exports + scikit-image core dep, whose one
+  stated consumer was rolling_ball — napari declares scikit-image itself, measured, so the
+  frozen build's `collect_all("skimage")` still resolves); `_spots.py` + `_cellpose.py` +
+  `add_segmentation_operator` + the entire Detect surface (`_SpotWorker`, `nuclei_operator`,
+  the pane's Detect row, `RegionViewer._detect_nuclei`, `_full_res_mip`) + the `segment`
+  optional-dependency group; `keepz`; `coordinate` (register=False on `stitch` is the same
+  run); `reference` with `project_reference`/`select_reference_z`, project_well's whole
+  `select_index` arm (`reference_channel`/`picked_z` params included) and `_acq_output`'s
+  hardlink writer arm (`_link_selected_planes` + `_per_plane_files`), whose last producer it
+  was — `projection._tenengrad` stays, the GUI's z-slider autofocus reads it; and the
+  `flatfield` OPERATOR (`_ACTIVE_OP`, `_correct_with_active`, `_profile_for`, `flatfield_op`,
+  its card, and `run_operator`'s auto-estimate name-branch — KNOWN_NAME_BRANCHES is empty
+  again).
+- **decon IS the volume solve.** The 2-D per-plane `decon` was deleted and `decon3d` renamed
+  onto the name: ONE code path (`deconvolve_stack`), PSF depth follows the stack depth, and the
+  n_z=1 case was PINNED before `deconvolve_plane` was deleted — the volume solve over a 1-plane
+  stack equals the 2-D in-focus solve (float32 max abs diff 0.00195, uint16 max 1 count, and
+  the depth-1 3-D PSF's central plane renormalises exactly to the old in-focus slice).
+  `deconvolve_plane`, `make_psf_2d`, `deconvolve`, `decon3d_op` are gone; `decon_op` builds the
+  volume solve; `"decon3d"` is refused BY NAME with a pointer to `decon`
+  (`_engine._resolve_operator`). The decon card (QC panel) is unchanged — it always ran the
+  3-D solve.
+- **`z_operator=None` means KEEP EVERY PLANE** — the shelved `keepz`'s one load-bearing job.
+  `stitch_region` resolves None to a module-local identity record (`_stitch._KEEP_EVERY_PLANE`,
+  deliberately NOT in the registry), `operator_output` answers `(False, "intensity")` for a
+  None inner operator, `RegionViewer._z_kwargs_for_mode` passes `{"z_operator": None}` for 3D
+  full-z stitching, and the StitcherPanel's combo offers it as `_op_panels.KEEP_EVERY_PLANE`
+  ("keep every z plane"), mapped to None before anything asks the registry. A stale recipe
+  label saying "keepz" still PARSES (RecipeChain is textual); binding it is the registry's
+  named unknown-operator refusal.
+- **Deliberately kept**: the labels VOCABULARY (`labels_op`, `produces="labels"`, `LABELS`, the
+  nearest-only labels pyramid reducer in `_output._REDUCERS`) — plugin/template surface,
+  pinned by `test_the_labels_vocabulary_survives_the_shelf`; and stitch's whole flat-field
+  MACHINERY (`FlatfieldProfile`, `estimate_profile`, `correct_flatfield`,
+  `per_channel_from_npy`, the `set_profile(s)`/`active_profiles` store, `resolve_flatfield`,
+  `_FlatfieldWorker`). The GUI loader survived the card cut as the NON-operator
+  `illumination` card (`_viewer._build_illumination_tab`): load a stored .npy or estimate
+  per channel from plate tiles; `_stitch._selected_profiles` reads what it installs.
+- Tests grew two conftest fixtures replacing the shelved exemplars: `blob_operator` (a
+  cardless, core, params-declaring labels plane-op — what `spot` was to the panel/CLI/runner
+  machinery tests) and `identity_operator` (what `keepz` was to the acquisition-format writer
+  tests). `CLI_ONLY_OPERATORS` is empty: every survivor has a card.
+
 ## Squid's downsampled well mosaics are read, and written back when absent (2026-08-19)
 
 `squidxplorer/_wellimage.py` reads what Squid's SAVE_DOWNSAMPLED_WELL_IMAGES writes:
